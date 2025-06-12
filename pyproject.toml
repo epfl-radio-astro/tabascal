@@ -1,0 +1,38 @@
+[build-system]
+# XXX: If your project needs other packages to build properly, add them to this list.
+requires = ["setuptools >= 64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tabascal"
+version = "0.0.1"
+license = {file = "LICENSE"}
+readme = "README.md"
+# dynamic = ["version", "readme"]
+authors = [
+  {name = "Chris Finlay", email = "christopher.finlay@epfl.ch"},
+]
+maintainers = [
+  {name = "Chris Finlay", email = "christopher.finlay@epfl.ch"}
+]
+description = "Trajectory based Radio Frequency Interference (RFI) subtraction and calibration using Bayesian methods for radio interferometeric data."
+
+requires-python = ">=3.9,<3.13"
+dependencies = [
+    "tabsim @ git+https://github.com/chrisfinlay/tab-sim.git", 
+    "numpyro", "optax", "frozendict", 
+]
+
+[project.optional-dependencies]
+gpu = ["jax[cuda12]"]
+
+[project.urls]
+Repository = "https://github.com/epfl-radio-astro/tabascal.git"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.scripts]
+tabascal = "tabascal.run_tabascal:main"
+tab2MS="tabascal.results_to_MS:main"
+
