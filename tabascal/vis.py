@@ -5,10 +5,10 @@ from jax import jit, vmap
 from jax.flatten_util import ravel_pytree as flatten
 from jax.tree_util import tree_map
 from jax.lax import scan, dynamic_slice
-from jax import checkpoint
+from jax import checkpoint, Array
 
 from tabsim.jax.interferometry import rfi_vis
-from tabsim.jax.coordinates import orbit
+from tabsim.jax.coordinates import kepler_orbit_many
 
 from tabascal.gp import gp_resample_otf, gp_resample_fft
 
@@ -105,6 +105,7 @@ def get_rfi_vis_full(rfi_amp, args, array_args):
     )
     # rfi_vis has shape (n_bl, n_time_fine)
     rfi_vis = averaging1(rfi_vis[:, :-1], args["n_int_samples"])
+    # rfi_vis = averaging1(rfi_vis, args["n_int_samples"])
     # rfi_vis = vmap(averaging, in_axes=(0, None))(rfi_vis, args["n_int_samples"])
     # rfi_vis has shape (n_bl, n_time)
     return rfi_vis
@@ -537,14 +538,55 @@ def eye(N, idx):
 #     return vis_rfi
 
 
-@jit
-def get_rfi_phase(times, rfi_orbit, ants_uvw, ants_xyz, freqs):
+def get_rfi_xyz(times_jd, epoch_jd, elements):
+
+    rfi_xyz = kepler_orbit_many(times_jd, epoch_jd, elements)
+
+    return rfi_xyz
+
+
+# @jit
+def get_rfi_phase(rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array):
+    """Calculate phase at each antenna for each RFI source
+
+    Parameters
+    ----------
+    rfi_xyz: Array (n_src, n_time, 3)
+        Positions of the RFI sources over time in the ECI frame in metres.
+    ants_uvw: Array (n_ant, n_time, 3)
+        UVW coordinates of the antennas in metres. Only the w-coordinate is used as this is the phase delay for a fringe-stopping interferometer.
+    ants_xyz: Array (n_ant, n_time, 3)
+        Positions of the antennas over time in the ECI frame in metres.
+    freqs: Array (n_freq,)
+        Observation frequencies in Hz.
+
+    Returns
+    -------
+    phase: Array (n_src, n_ant, n_time)
+        Phase at each antenna for each source over time.
+    """
     c = 2.99792458e8
 
-    rfi_xyz = orbit(times, *rfi_orbit)
-    distances = jnp.linalg.norm(ants_xyz[:, :, :] - rfi_xyz[:, None, :], axis=-1)
-    c_distances = distances + ants_uvw[:, :, -1]
+    distances = jnp.linalg.norm(
+        ants_xyz[None, :, :, :] - rfi_xyz[:, None, :, :], axis=-1
+    )
+    phased_dist = distances + ants_uvw[None, :, :, -1]
 
-    phases = -2.0 * jnp.pi * c_distances * freqs / c
+    phases = -2.0 * jnp.pi * phased_dist * freqs / c
 
     return phases
+
+
+@jit
+def get_rfi_phase_from_orbit(elements, array_args):
+
+    rfi_xyz = get_rfi_xyz(array_args["times_fine_jd"], array_args["epoch_jd"], elements)
+
+    rfi_phase = get_rfi_phase(
+        rfi_xyz,
+        array_args["ants_uvw"],
+        array_args["ants_xyz"],
+        array_args["freqs"],
+    )
+
+    return rfi_phase

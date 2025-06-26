@@ -144,9 +144,13 @@ def write_results_xds(vi_pred, args, file_path, overwrite=True):
                 ["sample", "src", "ant", "rfi_time"],
                 da.asarray(vi_pred["rfi_A"]),
             ),
+            # "rfi_phase": (
+            #     ["src", "ant", "time_mjd_fine"],
+            #     da.asarray(args["rfi_phase"]),
+            # ),
             "rfi_phase": (
-                ["src", "ant", "time_mjd_fine"],
-                da.asarray(args["rfi_phase"]),
+                ["sample", "src", "ant", "time_mjd_fine"],
+                da.asarray(vi_pred["rfi_phase"]),
             ),
         },
         coords={
@@ -217,8 +221,35 @@ def write_params_xds(vi_params, gp_params, ms_params, file_path, overwrite=True)
     return map_xds
 
 
+# def inv_transform(params, loc, inv_scaling):
+#     params_trans = {
+#         "rfi_r_induce_base": vmap(
+#             vmap(affine_transform_full_inv, (0, None, 0), 0), (1, None, 1), 1
+#         )(params["rfi_r_induce"], inv_scaling["L_RFI"], loc["mu_rfi_r"]),
+#         "rfi_i_induce_base": vmap(
+#             vmap(affine_transform_full_inv, (0, None, 0), 0), (1, None, 1), 1
+#         )(params["rfi_i_induce"], inv_scaling["L_RFI"], loc["mu_rfi_i"]),
+#         "g_amp_induce_base": vmap(affine_transform_full_inv, in_axes=(0, None, 0))(
+#             params["g_amp_induce"], inv_scaling["L_G_amp"], loc["mu_G_amp"]
+#         ),
+#         "g_phase_induce_base": vmap(affine_transform_full_inv, in_axes=(0, None, 0))(
+#             params["g_phase_induce"], inv_scaling["L_G_phase"], loc["mu_G_phase"]
+#         ),
+#         "ast_k_r_base": vmap(affine_transform_diag_inv, in_axes=(0, 0, 0))(
+#             params["ast_k_r"], inv_scaling["sigma_ast_k"], loc["mu_ast_k_r"]
+#         ),
+#         "ast_k_i_base": vmap(affine_transform_diag_inv, in_axes=(0, 0, 0))(
+#             params["ast_k_i"], inv_scaling["sigma_ast_k"], loc["mu_ast_k_i"]
+#         ),
+#     }
+#     return params_trans
+
+
 def inv_transform(params, loc, inv_scaling):
     params_trans = {
+        "rfi_orbit_base": vmap(affine_transform_full_inv, (0, 0, 0))(
+            params["rfi_orbit"], inv_scaling["L_rfi_orbit"], loc["mu_rfi_orbit"]
+        ),
         "rfi_r_induce_base": vmap(
             vmap(affine_transform_full_inv, (0, None, 0), 0), (1, None, 1), 1
         )(params["rfi_r_induce"], inv_scaling["L_RFI"], loc["mu_rfi_r"]),
@@ -336,7 +367,7 @@ def get_tles(config, ms_params, norad_ids, spacetrack_path, tle_offset=-1):
         raise ValueError("No spacetrack_path has been defined.")
 
     # return n_rfi, norad_ids, tles, rfi_orbit
-    return n_rfi, norad_ids, tles
+    return n_rfi, norad_ids, tles, tles_df
 
 
 def estimate_max_rfi_vis(ms_params: dict):
@@ -626,8 +657,8 @@ def calculate_true_values(
 def get_rfi_amp_estimate(ms_params, tles):
 
     rfi_xyz = get_satellite_positions(tles, np.array(mjd_to_jd(ms_params["times_mjd"])))
-    ants_xyz = get_antenna_positions(ms_params, 1)
-    ants_u = get_antenna_uvw(ms_params, 1)[:, :, 0]
+    ants_xyz = get_antenna_positions(ms_params, 1)[:-1]
+    ants_u = get_antenna_uvw(ms_params, 1)[:-1, :, 0]
 
     fringe_freqs = jnp.array(
         [
@@ -781,7 +812,10 @@ def get_prior_means(config, ms_params, estimates, true_params, n_rfi, gp_params)
 
     # Set Astronomical Prior Mean
     if config["ast"]["mean"] == 0:
-        if config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model":
+        if (
+            config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
+            or config["model"]["func"] == "kepler_orbit_fft_padded_model"
+        ):
             ast_k_prior_mean = jnp.zeros(
                 (ms_params["n_bl"], ms_params["n_time"] + 2 * gp_params["ast_pad"]),
                 dtype=complex,
@@ -972,6 +1006,12 @@ def get_antenna_positions(ms_params: dict, n_int_samples: int):
     times_mjd_fine = ms_params["times_mjd"][0] + secs_to_days(times_fine)
     # times_mjd_fine = int_sample_times(ms_params["times_mjd"], n_int_samples).compute()
 
+    dt = np.diff(times_fine)[0]
+    dt_jd = np.diff(times_mjd_fine)[0]
+
+    times_fine = np.concatenate([times_fine, times_fine[-1:] + dt])
+    times_mjd_fine = np.concatenate([times_mjd_fine, times_mjd_fine[-1:] + dt_jd])
+
     gsa = (
         Time(times_mjd_fine, format="mjd").sidereal_time("mean", "greenwich").hour * 15
     )  # Convert hours to degrees
@@ -1015,6 +1055,12 @@ def get_antenna_uvw(ms_params: dict, n_int_samples: int):
     times_fine = int_sample_times(ms_params["times"], n_int_samples).compute()
     times_mjd_fine = ms_params["times_mjd"][0] + secs_to_days(times_fine)
     # times_mjd_fine = int_sample_times(ms_params["times_mjd"], n_int_samples).compute()
+
+    dt = np.diff(times_fine)[0]
+    dt_jd = np.diff(times_mjd_fine)[0]
+
+    times_fine = np.concatenate([times_fine, times_fine[-1:] + dt])
+    times_mjd_fine = np.concatenate([times_mjd_fine, times_mjd_fine[-1:] + dt_jd])
 
     gsa = (
         Time(times_mjd_fine, format="mjd").sidereal_time("mean", "greenwich").hour * 15
@@ -1105,6 +1151,60 @@ def get_rfi_phase(ms_params: dict, norad_ids: list, tles: list, n_int_samples: i
     #     )
 
     return rfi_phase, rfi_amp_ratios, times_fine, times_mjd_fine
+
+
+def get_orbit_elements(ms_params, norad_ids, tles_df, n_int_samples):
+
+    times_fine = int_sample_times(ms_params["times"], n_int_samples).compute()
+    times_fine_jd = mjd_to_jd(ms_params["times_mjd"][0]) + secs_to_days(times_fine)
+
+    dt = np.diff(times_fine)[0]
+    dt_jd = np.diff(times_fine_jd)[0]
+
+    times_fine = np.concatenate([times_fine, times_fine[-1:] + dt])
+    times_fine_jd = np.concatenate([times_fine_jd, times_fine_jd[-1:] + dt_jd])
+
+    # semi_major = tles_df["SEMIMAJOR_AXIS"].values   # a (km)
+    # eccentricity = tles_df["ECCENTRICITY"].values   # e (unit-less)
+    # inclination = tles_df["INCLINATION"].values     # i (deg)
+    # lon_asc = tles_df["RA_OF_ASC_NODE"].values      # Ω (deg)
+    # periapsis = tles_df["ARG_OF_PERICENTER"].values # ω (deg)
+    # mean_anom = tles_df["MEAN_ANOMALY"].values      # M_0 (deg)
+
+    orbit_elements = jnp.atleast_2d(
+        tles_df[
+            [
+                "SEMIMAJOR_AXIS",
+                "ECCENTRICITY",
+                "INCLINATION",
+                "RA_OF_ASC_NODE",
+                "ARG_OF_PERICENTER",
+                "MEAN_ANOMALY",
+            ]
+        ].values
+    )
+
+    epoch_jd = jnp.atleast_1d(
+        [Time(x, format="iso").jd for x in tles_df["EPOCH"].values]
+    )
+
+    return orbit_elements, epoch_jd, times_fine_jd, times_fine
+
+
+# def get_antenna_positions(ms_params, times_fine_jd):
+
+#     gsa = (
+#         Time(times_fine_jd, format="jd").sidereal_time("mean", "greenwich").hour * 15
+#     )  # Convert hours to degrees
+#     # gsa = gmsa_from_jd(mjd_to_jd(times_mjd_fine)) % 360
+#     gh0 = (gsa - ms_params["ra"]) % 360
+
+#     ants_uvw = itrf_to_uvw(
+#         ms_params["ants_itrf"], gh0, ms_params["dec"]
+#     )  # [:,:,2] # We need the uvw-coordinates at the fine sampling rate for the RFI
+#     ants_xyz = itrf_to_xyz(ms_params["ants_itrf"], gsa)
+
+#     return ants_xyz, ants_uvw
 
 
 def run_mcmc(

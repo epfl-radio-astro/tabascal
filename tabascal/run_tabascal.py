@@ -14,7 +14,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = (
 # os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90" # GPU Memory Preallocation Factor
 
 import jax
-from jax import random
+from jax import random, vmap
 import jax.profiler
 import jax.numpy as jnp
 
@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tabsim.config import Tee, load_config
+from tabsim.jax.coordinates import kepler_orbit_fisher
 
 from tabascal.gp import (
     kernel,
@@ -31,6 +32,8 @@ from tabascal.gp import (
     find_closest_factor_greater_than,
 )
 from tabascal.models import (
+    kepler_orbit_fft_padded_model,
+    kepler_orbit_fft,
     fixed_orbit_rfi_full_fft_standard_padded_model,
     fixed_orbit_rfi_fft_standard,
     fixed_orbit_rfi_full_fft_standard_model,
@@ -65,6 +68,9 @@ from tabascal.tab_tools import (
     write_results_xds,
     write_params_xds,
     check_antenna_and_satellite_positions,
+    get_orbit_elements,
+    get_antenna_positions,
+    get_antenna_uvw,
 )
 
 from tabsim.tle import id_generator
@@ -98,17 +104,23 @@ def tabascal_subtraction(
     mem_i = 0
 
     ### Define Model
-    vis_model = fixed_orbit_rfi_full_fft_standard_padded_model
+    vis_model = kepler_orbit_fft_padded_model
+    # vis_model = fixed_orbit_rfi_full_fft_standard_padded_model
     # vis_model = fixed_orbit_rfi_full_fft_standard_model
     # vis_model = fixed_orbit_rfi_full_fft_standard_model_otf # RFI resampling is performed On-The-Fly
     # vis_model = fixed_orbit_rfi_full_fft_standard_model_otf_fft  # RFI resampling is performed On-The-Fly with FFT - Not working yet
-
-    def model(static_args, array_args, v_obs=None):
-        return fixed_orbit_rfi_fft_standard(static_args, array_args, vis_model, v_obs)
-
     model_name = vis_model.__name__
     print(f"Model : {model_name}")
     results_name = f"{model_name}{suffix}"
+
+    def model(static_args, array_args, v_obs=None):
+
+        if "fixed_orbit" in model_name:
+            return fixed_orbit_rfi_fft_standard(
+                static_args, array_args, vis_model, v_obs
+            )
+        elif "kepler_orbit" in model_name:
+            return kepler_orbit_fft(static_args, array_args, vis_model, v_obs)
 
     if config["data"]["sim_dir"] is None:
         config["data"]["sim_dir"] = os.path.abspath(sim_dir)
@@ -116,7 +128,7 @@ def tabascal_subtraction(
         sim_dir = os.path.abspath(config["data"]["sim_dir"])
         config["data"]["sim_dir"] = sim_dir
 
-    config["model"] = {"name": model_name, "func": vis_model.__name__}
+    config["model"] = {"name": model_name, "func": model_name}
 
     if sim_dir[-1] == "/":
         sim_dir = sim_dir[:-1]
@@ -164,7 +176,7 @@ def tabascal_subtraction(
         config["data"]["corr"],
         config["data"]["data_col"],
     )
-    n_rfi, norad_ids, tles = get_tles(
+    n_rfi, norad_ids, tles, tles_df = get_tles(
         config,
         ms_params,
         norad_ids,
@@ -188,17 +200,16 @@ def tabascal_subtraction(
     #######################
     n_int_samples = estimate_sampling(config, ms_params, n_rfi, norad_ids, tles)
 
-    rfi_phase, rfi_amp_ratios, times_fine, times_mjd_fine = get_rfi_phase(
-        ms_params, norad_ids, tles, n_int_samples
-    )
-
     gp_params = get_gp_params(config, ms_params)
 
     if config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_model_otf_fft":
         gp_params["n_rfi_times"] = gp_params["n_rfi_times"] - 1
         gp_params["rfi_times"] = gp_params["rfi_times"][:-1]
 
-    if config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model":
+    if (
+        config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
+        or config["model"]["func"] == "kepler_orbit_fft_padded_model"
+    ):
         n_ast_time = 2 * gp_params["ast_pad"] + ms_params["n_time"]
     else:
         n_ast_time = ms_params["n_time"]
@@ -237,14 +248,17 @@ def tabascal_subtraction(
             zarr_path, config, ms_params, gp_params, n_rfi, norad_ids
         )
     else:
-        true_params = None
+        true_params = {}
 
     # Define Prior Means based on config
     prior_means = get_prior_means(
         config, ms_params, estimates, true_params, n_rfi, gp_params
     )
 
-    if config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model":
+    if (
+        config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
+        or config["model"]["func"] == "kepler_orbit_fft_padded_model"
+    ):
         k_ast = jnp.fft.fftfreq(
             ms_params["n_time"] + 2 * gp_params["ast_pad"], ms_params["int_time"]
         )
@@ -309,8 +323,7 @@ def tabascal_subtraction(
         "gains_true": jnp.nan
         * jnp.zeros((ms_params["n_ant"], ms_params["n_time"]), dtype=complex),
         "times": ms_params["times"],
-        "times_fine": times_fine,
-        "times_mjd_fine": times_mjd_fine,
+        "freqs": ms_params["freqs"],
         "g_times": gp_params["g_times"],
         "rfi_times": gp_params["rfi_times"],
         "k_ast": k_ast,
@@ -358,12 +371,67 @@ def tabascal_subtraction(
             gp_params["g_l"],
             1e-8,
         ),
-        "rfi_phase": rfi_phase,
     }
+
+    if config["model"]["func"] == "kepler_orbit_fft_padded_model":
+
+        orbit_elements, epoch_jd, times_fine, times_fine_jd = get_orbit_elements(
+            ms_params, norad_ids, tles_df, n_int_samples
+        )
+
+        times_jd = times_fine_jd[n_int_samples // 2 :: n_int_samples]
+
+        ants_xyz = jnp.transpose(
+            get_antenna_positions(ms_params, n_int_samples), axes=(1, 0, 2)
+        )
+        ants_uvw = jnp.transpose(
+            get_antenna_uvw(ms_params, n_int_samples), axes=(1, 0, 2)
+        )
+
+        true_params.update(
+            {
+                "rfi_orbit": orbit_elements,
+            }
+        )
+
+        RIC_std = 10 * jnp.array([73, 131, 54])
+
+        args.update(
+            {
+                "mu_rfi_orbit": orbit_elements,
+                "L_rfi_orbit": vmap(kepler_orbit_fisher, in_axes=(None, 0, 0, None))(
+                    times_jd, epoch_jd, orbit_elements, RIC_std
+                ),
+                "times_fine": times_fine,
+                "times_fine_jd": times_fine_jd,
+                "epoch_jd": epoch_jd,
+                "ants_xyz": ants_xyz,
+                "ants_uvw": ants_uvw,
+                "times_mjd_fine": times_fine_jd - 2400000.5,
+            }
+        )
 
     if (
         config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_model"
         or config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
+    ):
+
+        rfi_phase, rfi_amp_ratios, times_fine, times_mjd_fine = get_rfi_phase(
+            ms_params, norad_ids, tles, n_int_samples
+        )
+
+        args.update(
+            {
+                "times_fine": times_fine,
+                "times_mjd_fine": times_mjd_fine,
+                "rfi_phase": rfi_phase,
+            }
+        )
+
+    if (
+        config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_model"
+        or config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
+        or config["model"]["func"] == "kepler_orbit_fft_padded_model"
     ):
         args.update(
             {
@@ -387,6 +455,14 @@ def tabascal_subtraction(
         "sigma_ast_k": 1.0 / args["sigma_ast_k"],
     }
 
+    if config["model"]["func"] == "kepler_orbit_fft_padded_model":
+
+        inv_scaling.update(
+            {
+                "L_rfi_orbit": vmap(jnp.linalg.inv)(args["L_rfi_orbit"]),
+            }
+        )
+
     static_args, array_args = split_args(args)
 
     ##############################################
@@ -395,6 +471,9 @@ def tabascal_subtraction(
     init_params = get_init_params(
         config, ms_params, prior_means, estimates, true_params
     )
+
+    if config["model"]["func"] == "kepler_orbit_fft_padded_model":
+        init_params.update({"rfi_orbit": args["mu_rfi_orbit"]})
 
     print()
     end_start = datetime.now()
@@ -494,6 +573,8 @@ def tabascal_subtraction(
             map_path,
             params_path,
         )
+    else:
+        rchi2 = 1e9
 
     mem_i = save_memory(mem_dir, mem_i)
 
