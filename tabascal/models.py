@@ -378,11 +378,12 @@ def kepler_orbit_fft_padded_model(params, args, array_args):
     )
 
     rfi_phase = get_rfi_phase_from_orbit(rfi_orbit, array_args)
-    array_args["rfi_phase"] = rfi_phase
+    # array_args["rfi_phase"] = rfi_phase
 
     rfi_A = rfi_r + 1.0 * rfi_i
     vis_rfi = get_rfi_vis_full(
         rfi_A,
+        rfi_phase,
         args,
         array_args,
     )
@@ -452,7 +453,7 @@ def kepler_orbit_fft(static_args, array_args, model, v_obs=None):
     )
 
     # numpyro.deterministic("times_mjd_fine", args["array_args"]["times_mjd_fine"])
-    numpyro.deterministic("rfi_phase", rfi_phase)
+    rfi_phase = numpyro.deterministic("rfi_phase", rfi_phase)
     rfi_A = numpyro.deterministic("rfi_A", rfi_A)
     rfi_vis = numpyro.deterministic("rfi_vis", vis_rfi)
     ast_vis = numpyro.deterministic("ast_vis", vis_ast)

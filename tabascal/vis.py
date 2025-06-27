@@ -87,11 +87,34 @@ def get_rfi_vis_compressed_comp(rfi_amp, rfi_kernel, a1, a2):
 #     return rfi_vis
 
 
-# def get_rfi_vis_full(rfi_amp, rfi_resample, rfi_phase, a1, a2, times, times_fine):
-@partial(jit, static_argnums=(1,))
-def get_rfi_vis_full(rfi_amp, args, array_args):
+# # def get_rfi_vis_full(rfi_amp, rfi_resample, rfi_phase, a1, a2, times, times_fine):
+# @partial(jit, static_argnums=(1,))
+# def get_rfi_vis_full(rfi_amp, args, array_args):
+#     a1, a2 = array_args["a1"], array_args["a2"]
+#     rfi_phase = array_args["rfi_phase"]
+#     # rfi_amp has shape (n_rfi, n_ant, n_time)
+#     rfi_amp_fine = vmap(lambda x, y: x @ y.T, in_axes=(0, None))(
+#         rfi_amp, array_args["resample_rfi"]
+#     )
+#     # rfi_amp_fine has shape (n_rfi, n_ant, n_time_fine)
+#     rfi_vis = jnp.sum(
+#         rfi_amp_fine[:, a1]
+#         * jnp.conjugate(rfi_amp_fine[:, a2])
+#         * jnp.exp(1.0j * (rfi_phase[:, a1] - rfi_phase[:, a2])),
+#         axis=0,
+#     )
+#     # rfi_vis has shape (n_bl, n_time_fine)
+#     rfi_vis = averaging1(rfi_vis[:, :-1], args["n_int_samples"])
+#     # rfi_vis = averaging1(rfi_vis, args["n_int_samples"])
+#     # rfi_vis = vmap(averaging, in_axes=(0, None))(rfi_vis, args["n_int_samples"])
+#     # rfi_vis has shape (n_bl, n_time)
+#     return rfi_vis
+
+
+@partial(jit, static_argnums=(2,))
+def get_rfi_vis_full(rfi_amp, rfi_phase, args, array_args):
+
     a1, a2 = array_args["a1"], array_args["a2"]
-    rfi_phase = array_args["rfi_phase"]
     # rfi_amp has shape (n_rfi, n_ant, n_time)
     rfi_amp_fine = vmap(lambda x, y: x @ y.T, in_axes=(0, None))(
         rfi_amp, array_args["resample_rfi"]
@@ -566,13 +589,14 @@ def get_rfi_phase(rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array
         Phase at each antenna for each source over time.
     """
     c = 2.99792458e8
+    lamda = freqs / c
 
     distances = jnp.linalg.norm(
         ants_xyz[None, :, :, :] - rfi_xyz[:, None, :, :], axis=-1
     )
     phased_dist = distances + ants_uvw[None, :, :, -1]
 
-    phases = -2.0 * jnp.pi * phased_dist * freqs / c
+    phases = -2.0 * jnp.pi * phased_dist / lamda
 
     return phases
 

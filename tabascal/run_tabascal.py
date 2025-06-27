@@ -375,7 +375,7 @@ def tabascal_subtraction(
 
     if config["model"]["func"] == "kepler_orbit_fft_padded_model":
 
-        orbit_elements, epoch_jd, times_fine, times_fine_jd = get_orbit_elements(
+        orbit_elements, epoch_jd, times_fine_jd, times_fine = get_orbit_elements(
             ms_params, norad_ids, tles_df, n_int_samples
         )
 
@@ -395,13 +395,16 @@ def tabascal_subtraction(
         )
 
         RIC_std = 10 * jnp.array([73, 131, 54])
+        F_orbit = vmap(kepler_orbit_fisher, in_axes=(None, 0, 0, None))(
+            times_jd, epoch_jd, orbit_elements, RIC_std
+        )
+        kepler_cov = vmap(jnp.linalg.inv)(F_orbit)
+        L_rfi_orbit = vmap(jnp.linalg.cholesky)(kepler_cov)
 
         args.update(
             {
                 "mu_rfi_orbit": orbit_elements,
-                "L_rfi_orbit": vmap(kepler_orbit_fisher, in_axes=(None, 0, 0, None))(
-                    times_jd, epoch_jd, orbit_elements, RIC_std
-                ),
+                "L_rfi_orbit": L_rfi_orbit,
                 "times_fine": times_fine,
                 "times_fine_jd": times_fine_jd,
                 "epoch_jd": epoch_jd,
