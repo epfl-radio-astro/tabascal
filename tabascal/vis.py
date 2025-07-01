@@ -588,8 +588,8 @@ def get_rfi_phase(rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array
     phase: Array (n_src, n_ant, n_time)
         Phase at each antenna for each source over time.
     """
-    c = 2.99792458e8
-    lamda = freqs / c
+    c = 299792458.0
+    lamda = c / freqs
 
     distances = jnp.linalg.norm(
         ants_xyz[None, :, :, :] - rfi_xyz[:, None, :, :], axis=-1

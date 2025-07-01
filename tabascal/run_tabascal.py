@@ -378,15 +378,13 @@ def tabascal_subtraction(
         orbit_elements, epoch_jd, times_fine_jd, times_fine = get_orbit_elements(
             ms_params, norad_ids, tles_df, n_int_samples
         )
+        from tabascal.tab_tools import get_ants_uvw_xyz
 
-        times_jd = times_fine_jd[n_int_samples // 2 :: n_int_samples]
-
-        ants_xyz = jnp.transpose(
-            get_antenna_positions(ms_params, n_int_samples), axes=(1, 0, 2)
-        )
-        ants_uvw = jnp.transpose(
-            get_antenna_uvw(ms_params, n_int_samples), axes=(1, 0, 2)
-        )
+        ants_xyz, ants_uvw = get_ants_uvw_xyz(ms_params, n_int_samples)
+        # ants have shape (n_time_fine, n_ant, 3)
+        ants_xyz = jnp.transpose(ants_xyz, axes=(1, 0, 2))
+        ants_uvw = jnp.transpose(ants_uvw, axes=(1, 0, 2))
+        # ants have shape (n_ant, n_time_fine, 3)
 
         true_params.update(
             {
@@ -394,7 +392,8 @@ def tabascal_subtraction(
             }
         )
 
-        RIC_std = 10 * jnp.array([73, 131, 54])
+        times_jd = times_fine_jd[n_int_samples // 2 :: n_int_samples]
+        RIC_std = config["rfi"]["ric_std"] * jnp.array([73, 131, 54])
         F_orbit = vmap(kepler_orbit_fisher, in_axes=(None, 0, 0, None))(
             times_jd, epoch_jd, orbit_elements, RIC_std
         )
@@ -641,7 +640,9 @@ def main():
     parser.add_argument(
         "-st", "--spacetrack", help="Path to Space-Track login details."
     )
-    parser.add_argument("-sx", "--suffix", default="", help="Image name suffix.")
+    parser.add_argument(
+        "-tsx", "--suffix", default="", help="tabascal results name suffix."
+    )
     args = parser.parse_args()
     sim_dir = args.sim_dir
     conf_path = args.config
@@ -649,6 +650,8 @@ def main():
     norad_path = args.norad_path
     if sim_dir:
         norad_path = os.path.join(sim_dir, "input_data/norad_ids.yaml")
+        norad_ids = np.atleast_1d(np.loadtxt(norad_path))
+        norad_path = norad_path if len(norad_ids) > 0 else None
 
     if norad_path:
         norad_ids = [int(x) for x in np.atleast_1d(np.loadtxt(norad_path))]

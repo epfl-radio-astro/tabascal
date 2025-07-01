@@ -405,6 +405,7 @@ def estimate_sampling(
     config: dict, ms_params: dict, n_rfi: int, norad_ids, tles: list[list[str]]
 ):
     if config["rfi"]["n_int_samples"]:
+        print("Using config defined 'n_int_samples'")
         return config["rfi"]["n_int_samples"]
 
     jd_minute = 1 / (24 * 60)
@@ -689,7 +690,8 @@ def get_rfi_amp_estimate(ms_params, tles):
     bl = jnp.argmin(jnp.max(jnp.abs(fringe_freqs), axis=0))
     # vis_obs is shape (n_time, n_bl)
     rfi_amp = jnp.sqrt(
-        jnp.max(jnp.abs(ms_params["vis_obs"][:, bl])) / jnp.max(jnp.sum(B**2, axis=0))
+        jnp.max(jnp.abs(ms_params["vis_obs"][:, bl]))
+        / jnp.max(jnp.sum(B**2, axis=0))  # Changed for EDA2 Data
     )
 
     return B * rfi_amp
@@ -840,8 +842,10 @@ def get_prior_means(config, ms_params, estimates, true_params, n_rfi, gp_params)
         ValueError("ast: mean: must be one of (est, prior, truth, truth_mean)")
 
     # Set RFI Prior Mean
-    if config["rfi"]["mean"] == 0:
-        rfi_prior_mean = jnp.zeros(
+    if isinstance(config["rfi"]["mean"], int) or isinstance(
+        config["rfi"]["mean"], float
+    ):
+        rfi_prior_mean = config["rfi"]["mean"] * jnp.ones(
             (n_rfi, ms_params["n_ant"], gp_params["n_rfi_times"]), dtype=complex
         )
     elif config["rfi"]["mean"] == "est":
@@ -1151,6 +1155,33 @@ def get_rfi_phase(ms_params: dict, norad_ids: list, tles: list, n_int_samples: i
     #     )
 
     return rfi_phase, rfi_amp_ratios, times_fine, times_mjd_fine
+
+
+def get_ants_uvw_xyz(ms_params: dict, n_int_samples: int):
+
+    # Beware of time definitions can lead to RFI and antenna position inaccuracies
+    times_fine = int_sample_times(ms_params["times"], n_int_samples).compute()
+    times_mjd_fine = ms_params["times_mjd"][0] + secs_to_days(times_fine)
+    # times_mjd_fine = int_sample_times(ms_params["times_mjd"], n_int_samples).compute()
+
+    dt = np.diff(times_fine)[0]
+    dt_jd = np.diff(times_mjd_fine)[0]
+
+    times_fine = np.concatenate([times_fine, times_fine[-1:] + dt])
+    times_mjd_fine = np.concatenate([times_mjd_fine, times_mjd_fine[-1:] + dt_jd])
+
+    gsa = (
+        Time(times_mjd_fine, format="mjd").sidereal_time("mean", "greenwich").hour * 15
+    )  # Convert hours to degrees
+    # gsa = gmsa_from_jd(mjd_to_jd(times_mjd_fine)) % 360
+    gh0 = (gsa - ms_params["ra"]) % 360
+
+    ants_uvw = itrf_to_uvw(
+        ms_params["ants_itrf"], gh0, ms_params["dec"]
+    )  # [:,:,2] # We need the uvw-coordinates at the fine sampling rate for the RFI
+    ants_xyz = itrf_to_xyz(ms_params["ants_itrf"], gsa)
+
+    return ants_xyz, ants_uvw
 
 
 def get_orbit_elements(ms_params, norad_ids, tles_df, n_int_samples):
