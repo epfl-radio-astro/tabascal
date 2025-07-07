@@ -34,6 +34,8 @@ from tabascal.gp import (
 from tabascal.models import (
     kepler_orbit_fft_padded_model,
     kepler_orbit_fft,
+    kepler_dev_orbit_fft_padded_model,
+    kepler_dev_orbit_fft,
     fixed_orbit_rfi_full_fft_standard_padded_model,
     fixed_orbit_rfi_fft_standard,
     fixed_orbit_rfi_full_fft_standard_model,
@@ -104,7 +106,8 @@ def tabascal_subtraction(
     mem_i = 0
 
     ### Define Model
-    vis_model = kepler_orbit_fft_padded_model
+    vis_model = kepler_dev_orbit_fft_padded_model
+    # vis_model = kepler_orbit_fft_padded_model
     # vis_model = fixed_orbit_rfi_full_fft_standard_padded_model
     # vis_model = fixed_orbit_rfi_full_fft_standard_model
     # vis_model = fixed_orbit_rfi_full_fft_standard_model_otf # RFI resampling is performed On-The-Fly
@@ -119,6 +122,8 @@ def tabascal_subtraction(
             return fixed_orbit_rfi_fft_standard(
                 static_args, array_args, vis_model, v_obs
             )
+        elif "kepler_dev_orbit" in model_name:
+            return kepler_dev_orbit_fft(static_args, array_args, vis_model, v_obs)
         elif "kepler_orbit" in model_name:
             return kepler_orbit_fft(static_args, array_args, vis_model, v_obs)
 
@@ -209,6 +214,7 @@ def tabascal_subtraction(
     if (
         config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
         or config["model"]["func"] == "kepler_orbit_fft_padded_model"
+        or config["model"]["func"] == "kepler_dev_orbit_fft_padded_model"
     ):
         n_ast_time = 2 * gp_params["ast_pad"] + ms_params["n_time"]
     else:
@@ -258,6 +264,7 @@ def tabascal_subtraction(
     if (
         config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
         or config["model"]["func"] == "kepler_orbit_fft_padded_model"
+        or config["model"]["func"] == "kepler_dev_orbit_fft_padded_model"
     ):
         k_ast = jnp.fft.fftfreq(
             ms_params["n_time"] + 2 * gp_params["ast_pad"], ms_params["int_time"]
@@ -303,6 +310,7 @@ def tabascal_subtraction(
         "ast_pad": gp_params["ast_pad"],
         "n_int_samples": n_int_samples,
         "n_rfi_factor": ms_params["n_time"] * n_int_samples // gp_params["n_rfi_times"],
+        "n_rfi_times": gp_params["n_rfi_times"],
         "n_time": ms_params["n_time"],
         "n_ants": ms_params["n_ant"],
         "n_rfi": n_rfi,
@@ -373,7 +381,13 @@ def tabascal_subtraction(
         ),
     }
 
-    if config["model"]["func"] == "kepler_orbit_fft_padded_model":
+    print(args["sigma_ast_k"].shape)
+    print(args["mu_ast_k_r"].shape)
+
+    if (
+        config["model"]["func"] == "kepler_orbit_fft_padded_model"
+        or config["model"]["func"] == "kepler_dev_orbit_fft_padded_model"
+    ):
 
         orbit_elements, epoch_jd, times_fine_jd, times_fine = get_orbit_elements(
             ms_params, norad_ids, tles_df, n_int_samples
@@ -400,6 +414,9 @@ def tabascal_subtraction(
         kepler_cov = vmap(jnp.linalg.inv)(F_orbit)
         L_rfi_orbit = vmap(jnp.linalg.cholesky)(kepler_cov)
 
+        orbit_dev_var = 1e8
+        orbit_dev_l = gp_params["rfi_l"]
+
         args.update(
             {
                 "mu_rfi_orbit": orbit_elements,
@@ -410,6 +427,17 @@ def tabascal_subtraction(
                 "ants_xyz": ants_xyz,
                 "ants_uvw": ants_uvw,
                 "times_mjd_fine": times_fine_jd - 2400000.5,
+                "resample_orbit": resampling_kernel(
+                    gp_params["rfi_times"],
+                    times_fine,
+                    orbit_dev_var,
+                    orbit_dev_l,
+                    1e-8,
+                ),
+                "L_orbit_dev": cholesky(
+                    gp_params["rfi_times"], orbit_dev_var, orbit_dev_l, 1e-8
+                ),
+                "mu_orbit_dev": jnp.zeros((n_rfi, args["n_rfi_times"], 3)),
             }
         )
 
@@ -434,6 +462,7 @@ def tabascal_subtraction(
         config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_model"
         or config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
         or config["model"]["func"] == "kepler_orbit_fft_padded_model"
+        or config["model"]["func"] == "kepler_dev_orbit_fft_padded_model"
     ):
         args.update(
             {
@@ -457,11 +486,15 @@ def tabascal_subtraction(
         "sigma_ast_k": 1.0 / args["sigma_ast_k"],
     }
 
-    if config["model"]["func"] == "kepler_orbit_fft_padded_model":
+    if (
+        config["model"]["func"] == "kepler_orbit_fft_padded_model"
+        or config["model"]["func"] == "kepler_dev_orbit_fft_padded_model"
+    ):
 
         inv_scaling.update(
             {
                 "L_rfi_orbit": vmap(jnp.linalg.inv)(args["L_rfi_orbit"]),
+                "L_orbit_dev": jnp.linalg.inv(args["L_orbit_dev"]),
             }
         )
 
@@ -474,8 +507,12 @@ def tabascal_subtraction(
         config, ms_params, prior_means, estimates, true_params
     )
 
-    if config["model"]["func"] == "kepler_orbit_fft_padded_model":
+    if (
+        config["model"]["func"] == "kepler_orbit_fft_padded_model"
+        or config["model"]["func"] == "kepler_dev_orbit_fft_padded_model"
+    ):
         init_params.update({"rfi_orbit": args["mu_rfi_orbit"]})
+        init_params.update({"orbit_dev": args["mu_orbit_dev"]})
 
     print()
     end_start = datetime.now()

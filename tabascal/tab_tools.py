@@ -817,6 +817,7 @@ def get_prior_means(config, ms_params, estimates, true_params, n_rfi, gp_params)
         if (
             config["model"]["func"] == "fixed_orbit_rfi_full_fft_standard_padded_model"
             or config["model"]["func"] == "kepler_orbit_fft_padded_model"
+            or config["model"]["func"] == "kepler_dev_orbit_fft_padded_model"
         ):
             ast_k_prior_mean = jnp.zeros(
                 (ms_params["n_bl"], ms_params["n_time"] + 2 * gp_params["ast_pad"]),

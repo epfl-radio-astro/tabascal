@@ -4,7 +4,7 @@ from jax.flatten_util import ravel_pytree as flatten
 from jax.tree_util import tree_map
 import numpyro
 import numpyro.distributions as dist
-from tabascal.dist import MVN, Normal
+from tabascal.dist import standard_normal
 from tabascal.vis import (
     get_ast_vis_fft,
     get_ast_vis_fft_padded,
@@ -29,6 +29,7 @@ from tabascal.vis import (
     get_gains_straight,
     rmse,
     get_rfi_phase_from_orbit,
+    get_rfi_phase_from_orbit_dev,
 )
 from tabascal.transform import affine_transform_full, affine_transform_diag
 
@@ -440,6 +441,137 @@ def kepler_orbit_fft(static_args, array_args, model, v_obs=None):
 
     params = {
         "rfi_orbit_base": rfi_orbit_base,
+        "rfi_r_induce_base": rfi_r_base,
+        "rfi_i_induce_base": rfi_i_base,
+        "g_amp_induce_base": g_amp_base,
+        "g_phase_induce_base": g_phase_base,
+        "ast_k_r_base": ast_k_r_base,
+        "ast_k_i_base": ast_k_i_base,
+    }
+
+    vis_obs, (vis_rfi, vis_ast, gains, rfi_A, rfi_phase) = model(
+        params, static_args, array_args
+    )
+
+    # numpyro.deterministic("times_mjd_fine", args["array_args"]["times_mjd_fine"])
+    rfi_phase = numpyro.deterministic("rfi_phase", rfi_phase)
+    rfi_A = numpyro.deterministic("rfi_A", rfi_A)
+    rfi_vis = numpyro.deterministic("rfi_vis", vis_rfi)
+    ast_vis = numpyro.deterministic("ast_vis", vis_ast)
+    gains = numpyro.deterministic("gains", gains)
+    vis_obs = numpyro.deterministic("vis_obs", vis_obs)
+
+    numpyro.deterministic(
+        "rmse_ast",
+        rmse(ast_vis, array_args["vis_ast_true"]) / jnp.sqrt(2),
+    )
+    numpyro.deterministic(
+        "rmse_rfi",
+        rmse(rfi_vis, array_args["vis_rfi_true"]) / jnp.sqrt(2),
+    )
+    numpyro.deterministic(
+        "rmse_gains",
+        rmse(gains, array_args["gains_true"]) / jnp.sqrt(2),
+    )
+
+    if v_obs is not None:
+        return numpyro.sample(
+            "obs",
+            dist.Normal(
+                jnp.concatenate([vis_obs.real, vis_obs.imag], axis=1),
+                array_args["noise"],
+            ),
+            obs=v_obs,
+        )
+
+
+@partial(jit, static_argnums=(1,))
+def kepler_dev_orbit_fft_padded_model(params, args, array_args):
+
+    a1 = array_args["a1"]
+    a2 = array_args["a2"]
+
+    map_0 = ((0, None, 0), 0)
+    map_1 = ((1, None, 1), 1)
+    map_2 = ((2, None, 2), 2)
+
+    rfi_orbit = vmap(affine_transform_full)(
+        params["rfi_orbit_base"], array_args["L_rfi_orbit"], array_args["mu_rfi_orbit"]
+    )
+    rfi_orbit_dev = vmap(vmap(affine_transform_full, *map_0), *map_2)(
+        params["rfi_orbit_dev_base"],
+        array_args["L_orbit_dev"],
+        array_args["mu_orbit_dev"],
+    )
+    rfi_r = vmap(vmap(affine_transform_full, *map_0), *map_1)(
+        params["rfi_r_induce_base"], array_args["L_RFI"], array_args["mu_rfi_r"]
+    )
+    rfi_i = vmap(vmap(affine_transform_full, *map_0), *map_1)(
+        params["rfi_i_induce_base"], array_args["L_RFI"], array_args["mu_rfi_i"]
+    )
+    g_amp = vmap(affine_transform_full, *map_0)(
+        params["g_amp_induce_base"], array_args["L_G_amp"], array_args["mu_G_amp"]
+    )
+    g_phase = vmap(affine_transform_full, *map_0)(
+        params["g_phase_induce_base"], array_args["L_G_phase"], array_args["mu_G_phase"]
+    )
+    ast_k_r = vmap(affine_transform_diag)(
+        params["ast_k_r_base"], array_args["sigma_ast_k"], array_args["mu_ast_k_r"]
+    )
+    ast_k_i = affine_transform_diag(
+        params["ast_k_i_base"], array_args["sigma_ast_k"], array_args["mu_ast_k_i"]
+    )
+
+    rfi_phase = get_rfi_phase_from_orbit_dev(rfi_orbit, rfi_orbit_dev, array_args)
+
+    rfi_A = rfi_r + 1.0 * rfi_i
+    vis_rfi = get_rfi_vis_full(
+        rfi_A,
+        rfi_phase,
+        args,
+        array_args,
+    )
+    vis_ast = get_ast_vis_fft_padded(ast_k_r, ast_k_i, args["ast_pad"])
+    gains = get_gains_straight(
+        g_amp, g_phase, array_args["g_times"], array_args["times"]
+    )
+
+    vis_obs = get_obs_vis_gains_all(vis_ast, vis_rfi, gains, a1, a2)
+    # vis_obs = get_obs_vis_gains_ast(vis_ast, vis_rfi, gains, a1, a2)
+
+    return vis_obs, (vis_rfi, vis_ast, gains, rfi_A, rfi_phase)
+
+
+def kepler_dev_orbit_fft(static_args, array_args, model, v_obs=None):
+
+    # (n_rfi, n_ant, n_rfi_time)
+    rfi_shape = array_args["mu_rfi_r"].shape
+    # (n_rfi, 6)
+    orbit_shape = (static_args["n_rfi"], 6)
+    # (n_rfi, n_rfi_time, 3)
+    orbit_dev_shape = (static_args["n_rfi"], static_args["n_rfi_times"], 3)
+    # (n_ant, n_g_time)
+    g_amp_shape = array_args["mu_G_amp"].shape
+    # (n_ant-1, n_g_time)
+    g_phase_shape = array_args["mu_G_phase"].shape
+    # (n_bl, n_time)
+    ast_k_shape = array_args["mu_ast_k_r"].shape
+
+    rfi_orbit_base = standard_normal("rfi_orbit_base", orbit_shape)
+    rfi_orbit_dev_base = standard_normal("orbit_dev_base", orbit_dev_shape)
+
+    rfi_r_base = standard_normal("rfi_r_induce_base", rfi_shape)
+    rfi_i_base = standard_normal("rfi_i_induce_base", rfi_shape)
+
+    g_amp_base = standard_normal("g_amp_induce_base", g_amp_shape)
+    g_phase_base = standard_normal("g_phase_induce_base", g_phase_shape)
+
+    ast_k_r_base = standard_normal("ast_k_r_base", ast_k_shape)
+    ast_k_i_base = standard_normal("ast_k_i_base", ast_k_shape)
+
+    params = {
+        "rfi_orbit_base": rfi_orbit_base,
+        "rfi_orbit_dev_base": rfi_orbit_dev_base,
         "rfi_r_induce_base": rfi_r_base,
         "rfi_i_induce_base": rfi_i_base,
         "g_amp_induce_base": g_amp_base,

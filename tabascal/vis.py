@@ -614,3 +614,22 @@ def get_rfi_phase_from_orbit(elements, array_args):
     )
 
     return rfi_phase
+
+
+@jit
+def get_rfi_phase_from_orbit_dev(elements, rfi_orbit_dev, array_args):
+
+    rfi_xyz = get_rfi_xyz(array_args["times_fine_jd"], array_args["epoch_jd"], elements)
+
+    rfi_xyz = rfi_xyz + vmap(jnp.dot, in_axes=(None, 0))(
+        array_args["resample_orbit"], rfi_orbit_dev
+    )
+
+    rfi_phase = get_rfi_phase(
+        rfi_xyz,
+        array_args["ants_uvw"],
+        array_args["ants_xyz"],
+        array_args["freqs"],
+    )
+
+    return rfi_phase
