@@ -406,6 +406,14 @@ def tabascal_subtraction(
     ### Check and Plot Model at init params
     init_params_base = inv_transform(init_params, array_args, inv_scaling)
 
+    shapes = {key: value.shape for key, value in init_params_base.items()}
+    n_params = sum([x.size for x in init_params.values()])
+    n_data = args["v_obs_ri"].size
+
+    print(f"Parameter shapes     : {shapes}")
+    print(f"Number of parameters : {n_params}")
+    print(f"Number of data points: {n_data}")
+
     key, subkey = random.split(key)
     init_pred = init_predict(
         ms_params, model, static_args, array_args, subkey, init_params_base
