@@ -525,7 +525,9 @@ def build_model(config):
             )
             obs_data_ri = jnp.stack([obs_data.real, obs_data.imag], axis=0)
             numpyro.sample(
-                "vis_obs_ri", dist.Normal(vis_obs_ri, config["noise"]), obs=obs_data_ri
+                "vis_obs_ri",
+                dist.Normal(vis_obs_ri, config["noise"]),  # type: ignore
+                obs=obs_data_ri,
             )
 
         return state
@@ -576,3 +578,99 @@ def build_model(config):
 #             )
 
 #     return model
+
+
+#######################################################
+# Class based attempt
+
+# class keplerOrbit:
+
+#     # Required
+#     input_state = []
+#     output_state = {"rfi_xyz": ("n_rfi", "n_time_fine", "space")}
+
+#     def setup(self, tab_config):
+#         self.times_jd = tab_config.times_jd
+#         RIC_std = tab_config.ric_std * jnp.array([73, 131, 54])
+
+#         self.get_orbital_elements(tab_config.norad_ids, tab_config.spacetrack_path)
+
+#         F_orbit = vmap(kepler_orbit_fisher, in_axes=(None, 0, 0, None))(
+#             self.times_jd, self.epoch_jd, self.elements, RIC_std
+#         )
+#         kepler_cov = vmap(jnp.linalg.inv)(F_orbit)
+
+#         self.L_rfi_orbit = vmap(jnp.linalg.cholesky)(kepler_cov)
+#         self.mu_rfi_orbit = self.elements
+
+#         self.init_rfi_orbit = self.mu_rfi_orbit
+#         self.init_rfi_orbit_base = vmap(jnp.linalg.solve)(
+#             self.L_rfi_orbit, self.init_rfi_orbit - self.mu_rfi_orbit
+#         )
+
+#     def build_set_params(self):
+
+#         def set_params(state):
+
+#             state["rfi_orbit_base"] = standard_normal("rfi_orbit_base", (self.n_rfi, 6))
+
+#             return state
+
+#         return set_params
+
+#     def build_forward(self):
+
+#         def forward(state):
+
+#             state["elements"] = vmap(affine_transform_full)(
+#                 state["rfi_orbit_base"], self.L_rfi_orbit, self.mu_rfi_orbit
+#             )
+#             state["rfi_xyz"] = kepler_orbit_many(
+#                 self.times_jd, self.epoch_jd, state["elements"]
+#             )
+
+#             return state
+
+#         return forward
+
+#     def build_forward_fixed(self):
+
+#         def forward_fixed(state):
+
+#             state["rfi_xyz"] = kepler_orbit_many(
+#                 self.times_jd, self.epoch_jd, self.elements
+#             )
+
+#             return state
+
+#         return forward_fixed
+
+#     def get_orbital_elements(self, norad_ids: list[int], spacetrack_path: str):
+
+#         st_login = yaml_load(spacetrack_path)
+
+#         obs_epoch_jd = float(self.times_jd.mean())
+
+#         tles_df = get_tles_by_id(
+#             st_login["username"],
+#             st_login["password"],
+#             norad_ids,
+#             obs_epoch_jd,
+#         )
+
+#         self.elements = jnp.atleast_2d(
+#             tles_df[
+#                 [
+#                     "SEMIMAJOR_AXIS",
+#                     "ECCENTRICITY",
+#                     "INCLINATION",
+#                     "RA_OF_ASC_NODE",
+#                     "ARG_OF_PERICENTER",
+#                     "MEAN_ANOMALY",
+#                 ]
+#             ].values
+#         )
+#         self.epoch_jd = jnp.atleast_1d(tles_df["EPOCH_JD"].values)  # type: ignore
+#         self.tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
+#         self.norad_ids = list(tles_df["NORAD_CAT_ID"].values)
+#         self.n_rfi = len(self.norad_ids)

@@ -1,4 +1,4 @@
-from tabascal.components import get_rfi_phase
+from tabascal.component_functions import get_rfi_phase
 from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.tab_tools import (
     read_ms,
@@ -7,6 +7,9 @@ from tabascal.tab_tools import (
     get_tles,
     pow_spec,
 )
+from tabascal.components.trajectory import fetch_orbital_elements
+
+from tabascal.components import Component
 
 import jax.numpy as jnp
 from jax import vmap
@@ -30,7 +33,8 @@ from tabsim.jax.coordinates import (
 # from tabsim.jax.interferometry import int_sample_times
 from tabsim.dask.interferometry import int_sample_times
 
-from astropy.time import Time
+import numpyro.distributions as dist
+import numpyro
 
 
 class tabConfigBuilder:
@@ -241,39 +245,18 @@ class tabConfigBuilder:
 
     def get_orbital_elements(self, norad_ids: list[int], spacetrack_path: str):
 
-        st_login = yaml_load(spacetrack_path)
-
         obs_epoch_jd = float(self.times_jd.mean())
 
-        tles_df = get_tles_by_id(
-            st_login["username"],
-            st_login["password"],
-            norad_ids,
-            obs_epoch_jd,
+        self.elements, self.epoch_jd, self.norad_ids, tles = fetch_orbital_elements(
+            spacetrack_path, obs_epoch_jd, norad_ids
         )
-
-        self.elements = jnp.atleast_2d(
-            tles_df[
-                [
-                    "SEMIMAJOR_AXIS",
-                    "ECCENTRICITY",
-                    "INCLINATION",
-                    "RA_OF_ASC_NODE",
-                    "ARG_OF_PERICENTER",
-                    "MEAN_ANOMALY",
-                ]
-            ].values
-        )
-        self.epoch_jd = jnp.atleast_1d(tles_df["EPOCH_JD"].values)
-        self.tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
-        self.norad_ids = list(tles_df["NORAD_CAT_ID"].values)
         self.n_rfi = len(self.norad_ids)
 
     def set_kepler_orbit(self, ric_std: float):
 
         RIC_std = ric_std * jnp.array([73, 131, 54])
         F_orbit = vmap(kepler_orbit_fisher, in_axes=(None, 0, 0, None))(
-            self.times_jd, self.epoch_jd, self.elements, RIC_std
+            self.times_jd, self.epoch_jd, self.elements, RIC_std  # type: ignore
         )
         kepler_cov = vmap(jnp.linalg.inv)(F_orbit)
 
@@ -293,7 +276,7 @@ class tabConfigBuilder:
             self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
         )
 
-        gh0 = (gmsa_from_jd(times_jd_coarse) - self.phase_centre["ra"]) % 360
+        gh0 = (gmsa_from_jd(times_jd_coarse) - self.phase_centre["ra"]) % 360  # type: ignore
 
         ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
 
@@ -443,3 +426,176 @@ class tabConfigBuilder:
         self.init_g_phase_base = vmap(
             vmap(jnp.linalg.solve, (None, 0), 0), (None, 1), 1
         )(self.L_g_phase, self.init_g_phase - self.mu_g_phase)
+
+
+#####################################################################################################
+
+
+class TabConfig:
+    """Configuration parameters for tabascal method"""
+
+    def __init__(self, config: dict, ms_path: str):
+
+        # self.config = config
+        self.ms_path = ms_path
+        self.spacetrack_path = config["satellites"]["spacetrack_path"]
+
+        self.read_ms_params(
+            config["data"]["freq"],
+            config["data"]["corr"],
+            config["data"]["data_col"],
+        )
+
+        self.get_orbital_elements(config["satellites"]["norad_ids"])
+
+        self.estimate_rfi_sampling(config["rfi"]["n_int_factor"])
+        self.set_rfi_args(config)
+        self.set_ast_args(config)
+
+    def read_ms_params(self, freq: float, corr: str, data_col: str):
+
+        ms_params = read_ms(self.ms_path, freq, corr, data_col)
+
+        self.phase_centre = {"ra": ms_params["ra"], "dec": ms_params["dec"]}
+        self.dish_d = ms_params["dish_d"]
+        self.ants_itrf = ms_params["ants_itrf"]
+        self.vis_obs = ms_params["vis_obs"]
+        # [
+        #     :, None, :
+        # ]  # Add the frequency channel into the data
+        self.uvw = ms_params["uvw"]
+
+        self.n_ant = ms_params["n_ant"]
+        self.n_bl = ms_params["n_bl"]
+        self.n_time = ms_params["n_time"]
+        self.n_freq = ms_params["n_freq"]
+        self.n_corr = ms_params["n_corr"]
+
+        self.int_time = ms_params["int_time"]
+        self.times = ms_params["times"]
+        self.times_jd = mjd_to_jd(ms_params["times_mjd"])
+
+        self.freqs = ms_params["freqs"]
+        self.noise = ms_params["noise"]
+        self.a1 = ms_params["a1"]
+        self.a2 = ms_params["a2"]
+
+    def estimate_rfi_sampling(self, n_int_factor: float):
+
+        jd_minute = 1 / (24 * 60)
+        times_jd_coarse = jnp.arange(
+            self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
+        )
+
+        gh0 = (gmsa_from_jd(times_jd_coarse) - self.phase_centre["ra"]) % 360  # type: ignore
+
+        ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
+
+        rfi_xyz = kepler_orbit_many(times_jd_coarse, self.epoch_jd, self.elements)
+
+        fringe_freq = vmap(
+            calculate_fringe_frequency, (None, None, 0, None, None, None)
+        )(
+            jd_to_mjd(times_jd_coarse),
+            self.freqs,
+            rfi_xyz,
+            self.ants_itrf,
+            ants_u,
+            self.phase_centre["dec"],
+        )
+        self.max_fringe_freq = jnp.max(jnp.abs(fringe_freq))
+
+        self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
+
+        sample_freq = (
+            jnp.pi
+            * self.max_fringe_freq
+            * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
+        )
+        self.n_int_samples = int(jnp.ceil(n_int_factor * self.int_time * sample_freq))
+
+        self.times_fine = int_sample_times(self.times, self.n_int_samples).compute()
+        self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
+        self.n_time_fine = len(self.times_fine)
+
+    def get_orbital_elements(self, norad_ids: list[int]):
+
+        obs_epoch_jd = float(self.times_jd.mean())
+
+        self.elements, self.epoch_jd, self.norad_ids, tles = fetch_orbital_elements(
+            self.spacetrack_path, obs_epoch_jd, norad_ids
+        )
+        self.n_rfi = len(self.norad_ids)
+
+    def set_rfi_args(self, config: dict):
+
+        self.rfi_var = config["rfi"]["var"]
+        self.rfi_l = config["rfi"]["corr_time"]
+
+    def set_ast_args(self, config: dict):
+
+        self.P0 = config["ast"]["pow_spec"]["P0"]
+        self.gamma = config["ast"]["pow_spec"]["gamma"]
+        self.fov_deg = config["ast"]["pow_spec"]["fov_deg"]
+        self.ast_pad_factor = config["ast"]["pad_factor"]
+
+
+class Model:
+
+    def __init__(self, config: TabConfig, components: list[Component]):
+
+        self.noise = config.noise
+
+        components = [comp() for comp in components]  # type: ignore
+        self.components = components
+        for comp in components:
+            comp.setup(config)
+
+        init_params = [comp.init_params_base for comp in components]
+        self.init_params = {k: v for d in init_params for k, v in d.items()}
+
+        state_params = [comp.state_outputs for comp in components]
+        self.state_params = {k: v for d in state_params for k, v in d.items()}
+
+    def build_forward(self):
+        forwards = [comp.build_forward() for comp in self.components]
+
+        def forward(state):
+
+            for forward in forwards:
+                state = forward(state)
+
+            return state
+
+        return forward
+
+    def build_prob_model(self):
+
+        set_params_functions = [comp.build_set_params() for comp in self.components]
+        forward = self.build_forward()
+        noise = self.noise
+
+        def prob_model(obs_data=None):
+
+            state = self.state_params
+
+            for set_params in set_params_functions:
+                state = set_params(state)
+
+            state = forward(state)
+            numpyro.deterministic("vis_obs", state["vis_obs"])
+
+            if obs_data is not None:
+                vis_obs_ri = jnp.stack(
+                    [state["vis_obs"].real, state["vis_obs"].imag], axis=0
+                )
+                obs_data_ri = jnp.stack([obs_data.real, obs_data.imag], axis=0)
+                numpyro.sample(
+                    "vis_obs_ri",
+                    dist.Normal(vis_obs_ri, noise),  # type: ignore
+                    obs=obs_data_ri,
+                )
+
+            return state
+
+        return prob_model

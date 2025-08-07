@@ -1,9 +1,16 @@
 from tabsim.config import load_config
 
-from tabascal.components import build_model
-from tabascal.config import tabConfigBuilder
+from tabascal.component_functions import build_model
+
 from tabascal.tab_tools import reduced_chi2
 from tabascal.opt import SVIRunResult
+
+from tabascal.config import TabConfig, Model
+from tabascal.components.trajectory import FixedOrbit
+from tabascal.components.rfi_signal import ComplexRFI
+from tabascal.components.rfi_vis import RiemannVisCalculation
+from tabascal.components.ast_vis import FourierTimeAst
+from tabascal.components.gains import UnitaryGains
 
 from numpyro.optim import optax_to_numpyro
 import optax
@@ -91,34 +98,48 @@ def tabascal_subtraction(
     ms_path: str,
 ):
 
-    model_config, init_params = tabConfigBuilder(config, ms_path).populate_model_config(
-        config
-    )
+    tab_config = TabConfig(config, ms_path)
 
-    shapes = {key: value.shape for key, value in init_params.items()}
-    n_params = sum([x.size for x in init_params.values()])
-    n_data = 2 * model_config["vis_obs"].size
+    components = [
+        FixedOrbit,
+        ComplexRFI,
+        RiemannVisCalculation,
+        FourierTimeAst,
+        UnitaryGains,
+    ]
+
+    model = Model(tab_config, components)
+
+    forward = jit(model.build_forward())
+
+    state = {**model.init_params, **model.state_params}
+
+    print(jnp.sum(forward(state)["vis_obs"]))
+
+    prob_model = model.build_prob_model()
+
+    shapes = {key: value.shape for key, value in model.init_params.items()}
+    n_params = sum([x.size for x in model.init_params.values()])
+    n_data = 2 * tab_config.vis_obs.size
 
     print(f"Parameter shapes     : {shapes}")
     print(f"Number of parameters : {n_params}")
     print(f"Number of data points: {n_data}")
 
-    model = build_model(model_config)
-
     key = random.PRNGKey(1)
     key, subkey = random.split(key)
 
     pred = Predictive(
-        model=model,
-        posterior_samples=tree_map(lambda x: x[None, :], init_params),
+        model=prob_model,
+        posterior_samples=tree_map(lambda x: x[None, :], model.init_params),
         batch_ndims=1,
     )
     # with jax.checking_leaks():
     #     init_pred = pred(subkey, obs_data=model_config["vis_obs"].T)
 
-    init_pred = pred(subkey, obs_data=model_config["vis_obs"].T)
+    init_pred = pred(subkey, obs_data=tab_config.vis_obs.T)
     rchi2 = reduced_chi2(
-        init_pred["vis_obs"][0], model_config["vis_obs"].T, model_config["noise"]
+        init_pred["vis_obs"][0], tab_config.vis_obs.T, tab_config.noise
     )
     print()
     print(f"Reduced Chi^2 @ init params : {rchi2}")
@@ -135,11 +156,11 @@ def tabascal_subtraction(
         guide_family = guides[config["opt"]["guide"]]
 
         vi_results, vi_guide = run_svi(
-            model=model,
-            obs_data=model_config["vis_obs"].T,
+            model=prob_model,
+            obs_data=tab_config.vis_obs.T,
             max_iter=config["opt"]["max_iter"],
             guide_family=guide_family,
-            init_params={k + "_auto_loc": v for k, v in init_params.items()},
+            init_params={k + "_auto_loc": v for k, v in model.init_params.items()},
             epsilon=config["opt"]["epsilon"],
             key=subkey,
             dual_run=config["opt"]["dual_run"],
@@ -147,7 +168,7 @@ def tabascal_subtraction(
 
         vi_params = vi_results.params
         vi_pred = svi_predict(
-            model=model,
+            model=prob_model,
             guide=vi_guide,
             vi_params=vi_params,
             num_samples=1,
@@ -155,7 +176,7 @@ def tabascal_subtraction(
         )
 
         rchi2 = reduced_chi2(
-            vi_pred["vis_obs"][0], model_config["vis_obs"].T, model_config["noise"]
+            vi_pred["vis_obs"][0], tab_config.vis_obs.T, tab_config.noise
         )
         print()
         print(f"Reduced Chi^2 @ opt params : {rchi2}")
