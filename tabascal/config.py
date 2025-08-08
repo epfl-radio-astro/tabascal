@@ -540,6 +540,34 @@ class TabConfig:
         self.ast_pad_factor = config["ast"]["pad_factor"]
 
 
+from typing import NamedTuple
+from jax import Array
+
+
+class TabascalState(NamedTuple):
+    rfi_xyz: Array
+    rfi_phase: Array
+    rfi_A: Array
+    gains: Array
+    vis_rfi: Array
+    vis_ast: Array
+    vis_obs: Array
+
+    @classmethod
+    def create_initial(
+        cls, n_rfi: int, n_bl: int, n_time: int, n_time_fine: int, n_ant: int
+    ):
+        return cls(
+            rfi_xyz=jnp.zeros((n_rfi, n_time_fine, 3)),
+            rfi_phase=jnp.zeros((n_rfi, n_ant, n_time_fine)),
+            rfi_A=jnp.zeros((n_rfi, n_ant, n_time_fine), dtype=complex),
+            gains=jnp.ones((n_ant, n_time), dtype=complex),
+            vis_rfi=jnp.zeros((n_bl, n_time), dtype=complex),
+            vis_ast=jnp.zeros((n_bl, n_time), dtype=complex),
+            vis_obs=jnp.zeros((n_bl, n_time), dtype=complex),
+        )
+
+
 class Model:
 
     def __init__(self, config: TabConfig, components: list[Component]):
@@ -557,38 +585,114 @@ class Model:
         state_params = [comp.state_outputs for comp in components]
         self.state_params = {k: v for d in state_params for k, v in d.items()}
 
+        self.n_rfi = config.n_rfi
+        self.n_bl = config.n_bl
+        self.n_time = config.n_time
+        self.n_time_fine = config.n_time_fine
+        self.n_ant = config.n_ant
+
+        # self.rfi_phase = components[0].rfi_phase
+        # self.resample_rfi = components[1].resample_rfi
+        # self.
+
     def build_forward(self):
         forwards = [comp.build_forward() for comp in self.components]
 
-        def forward(state):
+        # def forward(state):
 
-            for forward in forwards:
-                state = forward(state)
+        #     for forward in forwards:
+        #         state = forward(state)
+
+        #     return state
+
+        # return forward
+
+        def forward(params, state):
+
+            for sub_forward in forwards:
+                state = sub_forward(params, state)
 
             return state
 
         return forward
 
+    # def build_forward(self):
+
+    #     from tabascal.transform import affine_transform_full
+
+    #     def forward(state):
+
+    #         rfi_A_induce_base = (
+    #             state["rfi_r_induce_base"] + 1.0j * state["rfi_i_induce_base"]
+    #         )
+
+    #         rfi_A_induce = vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1)(rfi_A_induce_base, L_rfi_A, mu_rfi_A)
+
+    #         state["rfi_A"] = vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1)(
+    #             self.resample_rfi, rfi_A_induce
+    #         )
+
+    #         return state
+
+    #     return forward
+
+    # def build_prob_model(self):
+
+    #     from jax import jit
+
+    #     set_params_functions = [comp.build_set_params() for comp in self.components]
+    #     forward = jit(self.build_forward())
+    #     noise = self.noise
+
+    #     def prob_model(obs_data=None):
+
+    #         state = self.state_params
+
+    #         for set_params in set_params_functions:
+    #             state = set_params(state)
+
+    #         state = forward(state)
+    #         numpyro.deterministic("vis_obs", state["vis_obs"])
+
+    #         if obs_data is not None:
+    #             vis_obs_ri = jnp.stack(
+    #                 [state["vis_obs"].real, state["vis_obs"].imag], axis=0
+    #             )
+    #             obs_data_ri = jnp.stack([obs_data.real, obs_data.imag], axis=0)
+    #             numpyro.sample(
+    #                 "vis_obs_ri",
+    #                 dist.Normal(vis_obs_ri, noise),  # type: ignore
+    #                 obs=obs_data_ri,
+    #             )
+
+    #         return state
+
+    #     return prob_model
+
     def build_prob_model(self):
 
+        from jax import jit
+
         set_params_functions = [comp.build_set_params() for comp in self.components]
-        forward = self.build_forward()
+        forward = jit(self.build_forward())
         noise = self.noise
 
         def prob_model(obs_data=None):
 
-            state = self.state_params
+            initial_state = TabascalState.create_initial(
+                self.n_rfi, self.n_bl, self.n_time, self.n_time_fine, self.n_ant
+            )
+
+            params = {}
 
             for set_params in set_params_functions:
-                state = set_params(state)
+                params = set_params(params)
 
-            state = forward(state)
-            numpyro.deterministic("vis_obs", state["vis_obs"])
+            state = forward(params, initial_state)
+            numpyro.deterministic("vis_obs", state.vis_obs)
 
             if obs_data is not None:
-                vis_obs_ri = jnp.stack(
-                    [state["vis_obs"].real, state["vis_obs"].imag], axis=0
-                )
+                vis_obs_ri = jnp.stack([state.vis_obs.real, state.vis_obs.imag], axis=0)
                 obs_data_ri = jnp.stack([obs_data.real, obs_data.imag], axis=0)
                 numpyro.sample(
                     "vis_obs_ri",

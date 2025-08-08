@@ -51,8 +51,8 @@ ast:
   pad_factor: 0.5
 
 rfi:
-  init: est
-  # init: prior
+  # init: est
+  init: prior
   # init: truth
   mean: 0
   # mean: est

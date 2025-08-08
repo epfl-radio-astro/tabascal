@@ -42,9 +42,14 @@ class UnitaryGains(Component):
         """Return pure, JIT-compatible function"""
         # Pre-compute everything possible
 
-        def forward(state):
+        # def forward(state):
+        #     # Pure JAX operations only
+        #     state["vis_obs"] = state["vis_rfi"] + state["vis_ast"]
+        #     return state
+
+        def forward(params, state):
             # Pure JAX operations only
-            state["vis_obs"] = state["vis_rfi"] + state["vis_ast"]
+            state = state._replace(vis_obs=state.vis_rfi + state.vis_ast)
             return state
 
         return forward

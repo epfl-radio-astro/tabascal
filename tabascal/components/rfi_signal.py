@@ -71,11 +71,29 @@ class ComplexRFI(Component):
         resample_rfi = self.resample_rfi
         forward_transform = self.forward_transform
 
-        def forward(state):
+        # def forward(state):
+        #     # Pure JAX operations only
+
+        #     rfi_A_induce_base = (
+        #         state["rfi_r_induce_base"] + 1.0j * state["rfi_i_induce_base"]
+        #     )
+
+        #     rfi_A_induce = forward_transform(rfi_A_induce_base, L_rfi_A, mu_rfi_A)
+
+        #     # state["rfi_A"] = vmap(
+        #     #     vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1), (None, 2), 2
+        #     # )(resample_rfi, rfi_A_induce)
+        #     state["rfi_A"] = vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1)(
+        #         resample_rfi, rfi_A_induce
+        #     )
+
+        #     return state
+
+        def forward(params, state):
             # Pure JAX operations only
 
             rfi_A_induce_base = (
-                state["rfi_r_induce_base"] + 1.0j * state["rfi_i_induce_base"]
+                params["rfi_r_induce_base"] + 1.0j * params["rfi_i_induce_base"]
             )
 
             rfi_A_induce = forward_transform(rfi_A_induce_base, L_rfi_A, mu_rfi_A)
@@ -83,9 +101,10 @@ class ComplexRFI(Component):
             # state["rfi_A"] = vmap(
             #     vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1), (None, 2), 2
             # )(resample_rfi, rfi_A_induce)
-            state["rfi_A"] = vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1)(
+            rfi_A = vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1)(
                 resample_rfi, rfi_A_induce
             )
+            state = state._replace(rfi_A=rfi_A)
 
             return state
 

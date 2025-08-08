@@ -110,6 +110,28 @@ def get_rfi_vis_full(rfi_amp, args, array_args):
     return rfi_vis
 
 
+@partial(jit, static_argnums=(1,))
+def get_rfi_vis_full_no_extra(rfi_amp, args, array_args):
+    a1, a2 = array_args["a1"], array_args["a2"]
+    rfi_phase = array_args["rfi_phase"]
+    # rfi_amp has shape (n_rfi, n_ant, n_time)
+    rfi_amp_fine = vmap(lambda x, y: x @ y.T, in_axes=(0, None))(
+        rfi_amp, array_args["resample_rfi"]
+    )
+    # rfi_amp_fine has shape (n_rfi, n_ant, n_time_fine)
+    rfi_vis = jnp.sum(
+        rfi_amp_fine[:, a1]
+        * jnp.conjugate(rfi_amp_fine[:, a2])
+        * jnp.exp(1.0j * (rfi_phase[:, a1] - rfi_phase[:, a2])),
+        axis=0,
+    )
+    # rfi_vis has shape (n_bl, n_time_fine)
+    rfi_vis = averaging1(rfi_vis, args["n_int_samples"])
+    # rfi_vis = vmap(averaging, in_axes=(0, None))(rfi_vis, args["n_int_samples"])
+    # rfi_vis has shape (n_bl, n_time)
+    return rfi_vis
+
+
 @jit
 def get_rfi_vis_full_otf(rfi_amp, args):
     # rfi_amp has shape (n_rfi, n_ant, n_time)

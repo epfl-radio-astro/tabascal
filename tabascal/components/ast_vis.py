@@ -67,20 +67,36 @@ class FourierTimeAst(Component):
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
-        def forward(state):
+        # def forward(state):
+        #     # Pure JAX operations only
+
+        #     ast_k_base = state["ast_k_r_base"] + 1.0j * state["ast_k_i_base"]
+
+        #     ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
+
+        #     # vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, :, n_pad:-n_pad]
+        #     vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, n_pad:-n_pad]
+
+        #     state["vis_ast"] = vis_ast
+
+        #     # state = {
+        #     #     **state,
+        #     #     "vis_ast": state["vis_ast"] + vis_ast,
+        #     # }  # instead of state["vis_ast"] = state["vis_ast"] + vis_ast
+
+        #     return state
+
+        def forward(params, state):
             # Pure JAX operations only
 
-            ast_k_base = state["ast_k_r_base"] + 1.0j * state["ast_k_i_base"]
+            ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
             ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
 
             # vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, :, n_pad:-n_pad]
             vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, n_pad:-n_pad]
 
-            state = {
-                **state,
-                "vis_ast": state["vis_ast"] + vis_ast,
-            }  # instead of state["vis_ast"] = state["vis_ast"] + vis_ast
+            state = state._replace(vis_ast=vis_ast)
 
             return state
 

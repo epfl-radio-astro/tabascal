@@ -112,9 +112,24 @@ def tabascal_subtraction(
 
     forward = jit(model.build_forward())
 
-    state = {**model.init_params, **model.state_params}
+    # state = {**model.init_params, **model.state_params}
 
-    print(jnp.sum(forward(state)["vis_obs"]))
+    from tabascal.config import TabascalState
+
+    initial_state = TabascalState.create_initial(
+        tab_config.n_rfi,
+        tab_config.n_bl,
+        tab_config.n_time,
+        tab_config.n_time_fine,
+        tab_config.n_ant,
+    )
+
+    state = forward(model.init_params, initial_state)
+
+    print(state.vis_obs.shape)
+    print(state.vis_obs.dtype)
+
+    print(jnp.sum(state.vis_obs))
 
     prob_model = model.build_prob_model()
 

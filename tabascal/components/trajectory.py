@@ -141,11 +141,17 @@ class FixedOrbit(Component):
         rfi_xyz = self.rfi_xyz
         rfi_phase = self.rfi_phase
 
-        def forward(state):
-            # Pure JAX operations only
-            state["elements"] = elements
-            state["rfi_xyz"] = rfi_xyz
-            state["rfi_phase"] = rfi_phase
+        # def forward(state):
+        #     # Pure JAX operations only
+        #     state["elements"] = elements
+        #     state["rfi_xyz"] = rfi_xyz
+        #     state["rfi_phase"] = rfi_phase
+        #     return state
+
+        def forward(params, state):
+
+            state = state._replace(rfi_xyz=rfi_xyz, rfi_phase=rfi_phase)
+
             return state
 
         return forward
