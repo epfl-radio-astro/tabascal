@@ -816,7 +816,7 @@ def fixed_orbit_rfi_full_fft_standard_model(params, static_args, array_args):
     ast_k_i = vmap(affine_transform_diag, in_axes=(0, 0, 0))(
         params["ast_k_i_base"], array_args["sigma_ast_k"], array_args["mu_ast_k_i"]
     )
-    rfi_A = rfi_r + 1.0 * rfi_i
+    rfi_A = rfi_r + 1.0j * rfi_i
     vis_rfi = get_rfi_vis_full(
         rfi_A,
         static_args,
@@ -856,7 +856,7 @@ def fixed_orbit_rfi_full_fft_standard_padded_model(params, args, array_args):
     ast_k_i = vmap(affine_transform_diag, in_axes=(0, 0, 0))(
         params["ast_k_i_base"], array_args["sigma_ast_k"], array_args["mu_ast_k_i"]
     )
-    rfi_A = rfi_r + 1.0 * rfi_i
+    rfi_A = rfi_r + 1.0j * rfi_i
     vis_rfi = get_rfi_vis_full(
         rfi_A,
         args,
@@ -898,7 +898,7 @@ def fixed_orbit_rfi_full_fft_standard_model_otf(params, args):
     ast_k_i = vmap(affine_transform_diag, in_axes=(0, 0, 0))(
         params["ast_k_i_base"], args["sigma_ast_k"], args["mu_ast_k_i"]
     )
-    rfi_A = rfi_r + 1.0 * rfi_i
+    rfi_A = rfi_r + 1.0j * rfi_i
     vis_rfi = get_rfi_vis_full_otf(
         rfi_A,
         args,
@@ -938,7 +938,7 @@ def fixed_orbit_rfi_full_fft_standard_model_otf_fft(params, args, array_args):
     ast_k_i = vmap(affine_transform_diag, in_axes=(0, 0, 0))(
         params["ast_k_i_base"], array_args["sigma_ast_k"], array_args["mu_ast_k_i"]
     )
-    rfi_A = rfi_r + 1.0 * rfi_i
+    rfi_A = rfi_r + 1.0j * rfi_i
     vis_rfi = get_rfi_vis_full_otf_fft(
         rfi_A,
         args,
