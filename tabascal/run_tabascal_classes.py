@@ -156,7 +156,7 @@ def tabascal_subtraction(
 
     model = Model(tab_config, config["model"]["components"])  # type: ignore
 
-    prob_model = model.build_prob_model()
+    prob_model = model.prob_model
 
     shapes = {key: value.shape for key, value in model.init_params.items()}
     n_params = sum([x.size for x in model.init_params.values()])

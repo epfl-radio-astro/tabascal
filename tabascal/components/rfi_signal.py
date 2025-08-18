@@ -1,10 +1,13 @@
-from jax import vmap
+from jax import vmap, random
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.gp import cholesky, resampling_kernel, get_times
+from tabascal.tab_tools_new import get_observation_data_type
+
+import xarray as xr
 
 
 class ComplexRFI(Component):
@@ -34,8 +37,14 @@ class ComplexRFI(Component):
             # Do expensive setup operations once
             self._compute_gp_params()
             self._compute_prior_params()
-            self._compute_init_params()
             self._set_outputs()
+
+            if config.args["plots"]["truth"] or config.args["rfi"]["init"] == "truth":
+                self._compute_true_params(
+                    config.args["data"]["zarr_path"], config.args["data"]["data_col"]
+                )
+
+            self._compute_init_params(config.args["rfi"]["init"])
 
             # Validate dimensions
             self._validate_dimensions()
@@ -84,6 +93,7 @@ class ComplexRFI(Component):
             rfi_A = vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1)(
                 resample_rfi, rfi_A_induce
             )
+
             state = {**state, "rfi_A": rfi_A}
 
             return state
@@ -98,6 +108,8 @@ class ComplexRFI(Component):
 
         if self.gp_var is None:
             self.gp_var = jnp.max(jnp.abs(self.vis_obs))
+
+        print(f"Using RFI var : {self.gp_var:.3e} Jy")
 
         if self.gp_l is None:
             self.gp_l = 1.0
@@ -128,6 +140,71 @@ class ComplexRFI(Component):
             (self.n_rfi, self.n_ant, self.n_rfi_times), dtype=complex
         )
 
+    def _compute_true_params(self, zarr_path, data_col):
+
+        xds = xr.open_zarr(zarr_path)
+
+        data_type = get_observation_data_type(data_col)
+
+        self.true_rfi_A_induce = jnp.array(
+            [
+                vmap(jnp.interp, in_axes=(None, None, 1), out_axes=(0))(
+                    self.rfi_times,
+                    xds.time_fine.data,
+                    (
+                        xds.rfi_tle_sat_A[:, :, :, 0].data.compute()[i]
+                        if data_type["rfi"]
+                        else jnp.zeros_like(xds.rfi_tle_sat_A[0, :, :, 0].data)
+                    ),
+                )
+                for i in range(self.n_rfi)
+            ]
+        )
+
+        self.true_rfi_A_induce_base = self.inv_transform(
+            self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A
+        )
+
+    # def _estimate_params(self):
+
+    #     rfi_xyz = get_satellite_positions(tles, np.array(mjd_to_jd(ms_params["times_mjd"])))
+    #     ants_xyz = get_antenna_positions(ms_params, 1)
+    #     ants_u = get_antenna_uvw(ms_params, 1)[:, :, 0]
+
+    #     fringe_freqs = jnp.array(
+    #         [
+    #             calculate_fringe_frequency(
+    #                 ms_params["times_mjd"],
+    #                 ms_params["freqs"],
+    #                 rfi_xyz_,
+    #                 ms_params["ants_itrf"],
+    #                 ants_u,
+    #                 ms_params["dec"],
+    #             )
+    #             for rfi_xyz_ in rfi_xyz
+    #         ]
+    #     )
+
+    #     # rfi_xyz is shape (n_rfi, n_time, 3)
+    #     # ants_xyz is shape (n_time, n_ant, 3)
+    #     theta = angular_separation(
+    #         rfi_xyz,
+    #         jnp.mean(ants_xyz, axis=1, keepdims=True),
+    #         ms_params["ra"],
+    #         ms_params["dec"],
+    #     )
+    #     # theta is shape (n_rfi, n_time, n_ant)
+    #     B = airy_beam(theta, ms_params["freqs"], ms_params["dish_d"])[:, :, 0, 0]
+    #     # B is shape (n_rfi, n_time, n_ant, n_freq) -> (n_rfi, n_time)
+    #     # fringe_freqs is shape (n_time, n_bl)
+    #     bl = jnp.argmin(jnp.max(jnp.abs(fringe_freqs), axis=0))
+    #     # vis_obs is shape (n_time, n_bl)
+    #     rfi_amp = jnp.sqrt(
+    #         jnp.max(jnp.abs(ms_params["vis_obs"][:, bl])) / jnp.max(jnp.sum(B**2, axis=0))
+    #     )
+
+    #     return B * rfi_amp
+
     def forward_transform(self, base_params, L, mu):
 
         # params = vmap(
@@ -152,9 +229,21 @@ class ComplexRFI(Component):
 
         return base_params
 
-    def _compute_init_params(self):
+    def _compute_init_params(self, init_type):
 
-        self.init_rfi_A_induce = self.mu_rfi_A
+        if init_type == "prior":
+            self.init_rfi_A_induce = self.mu_rfi_A
+        elif init_type == "truth":
+            self.init_rfi_A_induce = self.true_rfi_A_induce
+        else:
+            prior_sample = random.normal(
+                random.PRNGKey(1),
+                (self.n_rfi, self.n_ant, self.n_rfi_times),
+                dtype=complex,
+            )
+            self.init_rfi_A_induce = self.forward_transform(
+                prior_sample, self.L_rfi_A, self.mu_rfi_A
+            )
 
         self.init_rfi_A_induce_base = self.inv_transform(
             self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A

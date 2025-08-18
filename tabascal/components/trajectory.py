@@ -159,10 +159,10 @@ class FixedOrbit(Component):
         gsa = gmsa_from_jd(self.times_jd_fine) % 360
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
+        self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
         self.ants_uvw = jnp.transpose(
             itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
-        self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
 
         self.rfi_phase = get_rfi_phase(
             self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs

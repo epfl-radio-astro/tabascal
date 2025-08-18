@@ -2,7 +2,7 @@ from jax import jit, vmap, Array
 import jax.numpy as jnp
 
 
-@jit
+# @jit
 def get_rfi_phase(rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array):
     """Calculate phase at each antenna for each RFI source
 
@@ -45,7 +45,7 @@ def calculate_rfi_vis_fine(rfi_A, rfi_phase, a1, a2):
     vis_rfi_fine = jnp.sum(
         rfi_A[:, a1]
         * jnp.conjugate(rfi_A[:, a2])
-        * jnp.exp(rfi_phase[:, a1] - rfi_phase[:, a2]),
+        * jnp.exp(1.0j * (rfi_phase[:, a1] - rfi_phase[:, a2])),
         axis=0,
     )
 

@@ -306,3 +306,18 @@ def save_memory(mem_dir, mem_i):
     )
 
     return mem_i
+
+
+def get_observation_data_type(data_col):
+
+    ast = ["DATA", "CAL_DATA", "AST_DATA", "AST_MODEL_DATA"]
+    rfi = ["DATA", "CAL_DATA", "RFI_DATA", "RFI_MODEL_DATA"]
+    gains = ["DATA"]
+
+    data_type = {
+        "ast": data_col in ast,
+        "rfi": data_col in rfi,
+        "gains": data_col in gains,
+    }
+
+    return data_type
