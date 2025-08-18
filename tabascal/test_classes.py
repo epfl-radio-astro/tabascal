@@ -90,31 +90,7 @@ def tabascal_subtraction(
 
     tab_config = TabConfig(config, ms_path)
 
-    components = [
-        "trajectory:FixedOrbit",
-        "rfi_signal:ComplexRFI",
-        "rfi_vis:RiemannVisCalculation",
-        "ast_vis:FourierTimeAst",
-        "gains:UnitaryGains",
-    ]
-    components = [
-        "trajectory:KeplerOrbit",
-        "trajectory:PhaseCalculationRFI",
-        "rfi_signal:ComplexRFI",
-        "rfi_vis:RiemannVisCalculation",
-        "ast_vis:FourierTimeAst",
-        "gains:UnitaryGains",
-    ]
-    components = [
-        "trajectory:FixedOrbit",
-        "trajectory:PhaseCalculationRFI",
-        "rfi_signal:ComplexRFI",
-        "rfi_vis:RiemannVisCalculation",
-        "ast_vis:FourierTimeAst",
-        "gains:UnitaryGains",
-    ]
-
-    model = Model(tab_config, components)
+    model = Model(tab_config, config["model"]["components"])
 
     prob_model = model.build_prob_model()
 

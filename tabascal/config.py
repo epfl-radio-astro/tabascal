@@ -559,6 +559,13 @@ class Model:
         state = [comp.state_outputs for comp in components]
         self.state = {k: v for d in state for k, v in d.items()}
 
+        self.state["rmse_ast"] = jnp.nan
+        self.state["rmse_rfi"] = jnp.nan
+        self.state["rmse_gains"] = jnp.nan
+
+        self.forward = self.build_forward()
+        self.prob_model = self.build_prob_model()
+
     def build_forward(self):
         forwards = [comp.build_forward() for comp in self.components]
 
@@ -587,7 +594,7 @@ class Model:
     def build_prob_model(self):
 
         set_params = self.build_set_params()
-        forward = self.build_forward()
+        forward = self.forward
 
         def prob_model(obs_data=None):
 
@@ -595,7 +602,15 @@ class Model:
             state = self.state
 
             state = forward(params, state)
+
+            numpyro.deterministic("vis_rfi", state["vis_rfi"])
+            numpyro.deterministic("vis_ast", state["vis_ast"])
+            numpyro.deterministic("gains", state["gains"])
             numpyro.deterministic("vis_obs", state["vis_obs"])
+
+            numpyro.deterministic("rmse_rfi", state["rmse_rfi"])
+            numpyro.deterministic("rmse_ast", state["rmse_ast"])
+            numpyro.deterministic("rmse_gains", state["rmse_gains"])
 
             if obs_data is not None:
                 self.likelihood(state["vis_obs"], obs_data)

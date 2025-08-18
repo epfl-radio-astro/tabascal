@@ -50,12 +50,12 @@ class FourierTimeAst(Component):
         n_bl = self.n_bl
         n_ast_k = self.n_ast_k
 
-        def set_params(state):
+        def set_params(params):
 
-            state["ast_k_r_base"] = standard_normal("ast_k_r_base", (n_bl, n_ast_k))
-            state["ast_k_i_base"] = standard_normal("ast_k_i_base", (n_bl, n_ast_k))
+            params["ast_k_r_base"] = standard_normal("ast_k_r_base", (n_bl, n_ast_k))
+            params["ast_k_i_base"] = standard_normal("ast_k_i_base", (n_bl, n_ast_k))
 
-            return state
+            return params
 
         return set_params
 

@@ -1,11 +1,12 @@
-enabled_components:
-  rfi:
-    # phase: kepler_orbit
-    phase: fixed_phase
-    signal: rfi_complex
-    vis: standard
-  ast: standard
-  gains: standard
+model:
+  components:
+    - trajectory:FixedOrbit
+    # - trajectory:KeplerOrbit
+    # - trajectory:PhaseCalculationRFI
+    - rfi_signal:ComplexRFI
+    - rfi_vis:RiemannVisCalculation
+    - ast_vis:FourierTimeAst
+    - gains:UnitaryGains
 
 plots:
   init: True
