@@ -33,9 +33,9 @@ class Component(ABC):
     def build_set_params(self) -> Callable:
         """Build parameter sampling function (optional)"""
 
-        def set_params(state: Dict) -> Dict:
+        def set_params(params: Dict) -> Dict:
 
-            return state
+            return params
 
         return set_params
 
@@ -47,3 +47,12 @@ class Component(ABC):
 
     def _set_outputs(self):
         pass
+
+
+def assert_attr_shape(obj, attr, shape):
+
+    assert hasattr(obj, attr), f"{attr} does not exist."
+    attr_shape = getattr(obj, attr).shape
+    assert (
+        attr_shape == shape
+    ), f"Expected shape {shape} for {attr} but got {attr_shape}."

@@ -1,27 +1,17 @@
 from tabsim.config import load_config
 
-from tabascal.component_functions import build_model
-
 from tabascal.tab_tools import reduced_chi2
 from tabascal.opt import SVIRunResult
 
 from tabascal.config import TabConfig, Model
-from tabascal.components.trajectory import FixedOrbit
-from tabascal.components.rfi_signal import ComplexRFI
-from tabascal.components.rfi_vis import RiemannVisCalculation
-from tabascal.components.ast_vis import FourierTimeAst
-from tabascal.components.gains import UnitaryGains
 
 from numpyro.optim import optax_to_numpyro
 import optax
 
-from jax import random, jit
-import jax
 import jax.numpy as jnp
+from jax import random
 from jax.tree_util import tree_map
-from numpyro.infer import MCMC, NUTS, Predictive, SVI, autoguide, Trace_ELBO
-
-import numpy as np
+from numpyro.infer import Predictive, SVI, autoguide, Trace_ELBO
 
 
 def run_svi(
@@ -101,35 +91,30 @@ def tabascal_subtraction(
     tab_config = TabConfig(config, ms_path)
 
     components = [
-        FixedOrbit,
-        ComplexRFI,
-        RiemannVisCalculation,
-        FourierTimeAst,
-        UnitaryGains,
+        "trajectory:FixedOrbit",
+        "rfi_signal:ComplexRFI",
+        "rfi_vis:RiemannVisCalculation",
+        "ast_vis:FourierTimeAst",
+        "gains:UnitaryGains",
+    ]
+    components = [
+        "trajectory:KeplerOrbit",
+        "trajectory:PhaseCalculationRFI",
+        "rfi_signal:ComplexRFI",
+        "rfi_vis:RiemannVisCalculation",
+        "ast_vis:FourierTimeAst",
+        "gains:UnitaryGains",
+    ]
+    components = [
+        "trajectory:FixedOrbit",
+        "trajectory:PhaseCalculationRFI",
+        "rfi_signal:ComplexRFI",
+        "rfi_vis:RiemannVisCalculation",
+        "ast_vis:FourierTimeAst",
+        "gains:UnitaryGains",
     ]
 
     model = Model(tab_config, components)
-
-    forward = jit(model.build_forward())
-
-    # state = {**model.init_params, **model.state_params}
-
-    from tabascal.config import TabascalState
-
-    initial_state = TabascalState.create_initial(
-        tab_config.n_rfi,
-        tab_config.n_bl,
-        tab_config.n_time,
-        tab_config.n_time_fine,
-        tab_config.n_ant,
-    )
-
-    state = forward(model.init_params, initial_state)
-
-    print(state.vis_obs.shape)
-    print(state.vis_obs.dtype)
-
-    print(jnp.sum(state.vis_obs))
 
     prob_model = model.build_prob_model()
 
@@ -149,17 +134,12 @@ def tabascal_subtraction(
         posterior_samples=tree_map(lambda x: x[None, :], model.init_params),
         batch_ndims=1,
     )
-    # with jax.checking_leaks():
-    #     init_pred = pred(subkey, obs_data=model_config["vis_obs"].T)
-
     init_pred = pred(subkey, obs_data=tab_config.vis_obs.T)
     rchi2 = reduced_chi2(
         init_pred["vis_obs"][0], tab_config.vis_obs.T, tab_config.noise
     )
     print()
     print(f"Reduced Chi^2 @ init params : {rchi2}")
-
-    # print(tree_map(jnp.shape, init_pred))
 
     if config["inference"]["opt"]:
         guides = {

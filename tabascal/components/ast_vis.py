@@ -1,7 +1,7 @@
-from jax import vmap, jit
+from jax import vmap
 import jax.numpy as jnp
 
-from tabascal.components import Component
+from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.tab_tools import get_ast_fringe_rate, pow_spec
 
@@ -26,13 +26,13 @@ class FourierTimeAst(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.int_time = config.int_time
-            self.P0 = config.P0
-            self.gamma = config.gamma
-            self.ast_pad_factor = config.ast_pad_factor
-            self.fov_deg = config.fov_deg
             self.dish_d = config.dish_d
             self.uvw = config.uvw
             self.freqs = config.freqs
+            self.P0 = config.args["ast"]["pow_spec"]["P0"]
+            self.gamma = config.args["ast"]["pow_spec"]["gamma"]
+            self.fov_deg = config.args["ast"]["pow_spec"]["fov_deg"]
+            self.ast_pad_factor = config.args["ast"]["pad_factor"]
 
             # Do expensive setup operations once
             self._compute_gp_params()
@@ -67,25 +67,6 @@ class FourierTimeAst(Component):
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
-        # def forward(state):
-        #     # Pure JAX operations only
-
-        #     ast_k_base = state["ast_k_r_base"] + 1.0j * state["ast_k_i_base"]
-
-        #     ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
-
-        #     # vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, :, n_pad:-n_pad]
-        #     vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, n_pad:-n_pad]
-
-        #     state["vis_ast"] = vis_ast
-
-        #     # state = {
-        #     #     **state,
-        #     #     "vis_ast": state["vis_ast"] + vis_ast,
-        #     # }  # instead of state["vis_ast"] = state["vis_ast"] + vis_ast
-
-        #     return state
-
         def forward(params, state):
             # Pure JAX operations only
 
@@ -96,7 +77,7 @@ class FourierTimeAst(Component):
             # vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, :, n_pad:-n_pad]
             vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, n_pad:-n_pad]
 
-            state = state._replace(vis_ast=vis_ast)
+            state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 
             return state
 
@@ -148,7 +129,9 @@ class FourierTimeAst(Component):
     def _compute_init_params(self):
 
         self.init_ast_k = self.mu_ast_k
-        self.init_ast_k_base = (self.init_ast_k - self.mu_ast_k) / self.sigma_ast_k
+        self.init_ast_k_base = self.inv_transform(
+            self.init_ast_k, self.sigma_ast_k, self.mu_ast_k
+        )
 
         self.init_params = {
             "ast_k_r": self.init_ast_k.real,
@@ -164,14 +147,7 @@ class FourierTimeAst(Component):
 
         ast_shape = (self.n_bl, self.n_ast_k)
 
-        assert hasattr(self, "mu_ast_k")
-        assert self.mu_ast_k.shape == ast_shape
-
-        assert hasattr(self, "sigma_ast_k")
-        assert self.sigma_ast_k.shape == ast_shape
-
-        assert hasattr(self, "init_ast_k")
-        assert self.init_ast_k.shape == ast_shape
-
-        assert hasattr(self, "init_ast_k_base")
-        assert self.init_ast_k_base.shape == ast_shape
+        assert_attr_shape(self, "mu_ast_k", ast_shape)
+        assert_attr_shape(self, "sigma_ast_k", ast_shape)
+        assert_attr_shape(self, "init_ast_k", ast_shape)
+        assert_attr_shape(self, "init_ast_k_base", ast_shape)

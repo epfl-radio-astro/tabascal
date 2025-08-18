@@ -37,8 +37,8 @@ class RiemannVisCalculation(Component):
 
     def build_set_params(self):
 
-        def set_params(state):
-            return state
+        def set_params(params):
+            return params
 
         return set_params
 
@@ -52,29 +52,11 @@ class RiemannVisCalculation(Component):
         n_bl = self.n_bl
         # n_freq = self.n_freq
 
-        # def forward(state):
-        #     # Pure JAX operations only
-        #     vis_rfi_fine = calculate_rfi_vis_fine(
-        #         state["rfi_A"], state["rfi_phase"], a1, a2
-        #     )
-
-        #     # new_shape = (n_bl, n_freq, n_time, n_int)
-        #     new_shape = (n_bl, n_time, n_int)
-
-        #     # vis_rfi_fine is shape (n_bl, n_time_fine)
-        #     # vis_rfi is shape (n_bl, n_time)
-        #     vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=-1)
-        #     state["vis_rfi"] = vis_rfi
-        #     # state = {
-        #     #     **state,
-        #     #     "vis_rfi": state["vis_rfi"] + vis_rfi,
-        #     # }  # instead of state["vis_rfi"] = state["vis_rfi"] + vis_rfi
-
-        #     return state
-
         def forward(params, state):
             # Pure JAX operations only
-            vis_rfi_fine = calculate_rfi_vis_fine(state.rfi_A, state.rfi_phase, a1, a2)
+            vis_rfi_fine = calculate_rfi_vis_fine(
+                state["rfi_A"], state["rfi_phase"], a1, a2
+            )
 
             # new_shape = (n_bl, n_freq, n_time, n_int)
             new_shape = (n_bl, n_time, n_int)
@@ -82,7 +64,7 @@ class RiemannVisCalculation(Component):
             # vis_rfi_fine is shape (n_bl, n_time_fine)
             # vis_rfi is shape (n_bl, n_time)
             vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=-1)
-            state = state._replace(vis_rfi=vis_rfi)
+            state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
             return state
 
