@@ -8,7 +8,7 @@ import jax.numpy as jnp
 class UnitaryGains(Component):
 
     required_inputs = {"vis_rfi": ("n_bl", "n_time"), "vis_ast": ("n_bl", "n_time")}
-    outputs = {"gains": ("n_ant", "n_time"), "vis_obs": ("n_bl", "n_time")}
+    output_shapes = {"gains": ("n_ant", "n_time"), "vis_obs": ("n_bl", "n_time")}
 
     parameters = {}
 
@@ -18,6 +18,7 @@ class UnitaryGains(Component):
 
             self.n_ant = config.n_ant
             self.n_bl = config.n_bl
+            self.n_freq = config.n_freq
             self.n_time = config.n_time
 
             # Validate dimensions
@@ -34,8 +35,8 @@ class UnitaryGains(Component):
     def _set_outputs(self):
 
         self.state_outputs = {
-            "gains": jnp.ones((self.n_ant, self.n_time), dtype=complex),
-            "vis_obs": jnp.zeros((self.n_bl, self.n_time), dtype=complex),
+            "gains": jnp.ones((self.n_ant, self.n_freq, self.n_time), dtype=complex),
+            "vis_obs": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
 
     def build_set_params(self):

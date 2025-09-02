@@ -1,4 +1,5 @@
 tabascal.egg-info/*
 build/*
 examples/spacetrack_login.yaml
+examples/data
 **/*.pyc

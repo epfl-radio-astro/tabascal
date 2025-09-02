@@ -197,9 +197,18 @@ def tabascal_subtraction(
     # )
 
     truth = {
-        "vis_rfi": jnp.zeros((tab_config.n_bl, tab_config.n_time), dtype=complex),
-        "vis_ast": jnp.zeros((tab_config.n_bl, tab_config.n_time), dtype=complex),
-        "gains": jnp.ones((tab_config.n_ant, tab_config.n_time), dtype=complex),
+        "vis_rfi": jnp.nan
+        * jnp.zeros(
+            (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
+        ),
+        "vis_ast": jnp.nan
+        * jnp.zeros(
+            (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
+        ),
+        "gains": jnp.nan
+        * jnp.ones(
+            (tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex
+        ),
     }
 
     if config["plots"]["init"]:

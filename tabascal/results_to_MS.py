@@ -19,15 +19,38 @@ def write_results(ms_path: str, results_zarr_path: str):
     dims = ["row", "chan", "corr"]
     chunks = {k: v for k, v in xds_ms.chunks.items() if k in dims}
 
-    vis_ast = xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
-    vis_ast = xr.DataArray(da.expand_dims(vis_ast, axis=(1, 2)), dims=dims).chunk(
-        chunks
-    )
+    if xds_tab.ast_vis.data.ndim == 3:
 
-    vis_rfi = xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
-    vis_rfi = xr.DataArray(da.expand_dims(vis_rfi, axis=(1, 2)), dims=dims).chunk(
-        chunks
-    )
+        vis_ast = xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
+        vis_ast = xr.DataArray(da.expand_dims(vis_ast, axis=(1, 2)), dims=dims).chunk(
+            chunks
+        )
+
+        vis_rfi = xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
+        vis_rfi = xr.DataArray(da.expand_dims(vis_rfi, axis=(1, 2)), dims=dims).chunk(
+            chunks
+        )
+
+    elif xds_tab.ast_vis.data.ndim == 4:
+
+        n_freq = xds_tab.ast_vis.data.shape[2]
+        n_corr = 1
+
+        vis_ast = da.transpose(
+            xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0), (2, 0, 1)
+        ).reshape(-1, n_freq, n_corr)
+        vis_ast = xr.DataArray(vis_ast, dims=dims).chunk(chunks)
+
+        vis_rfi = da.transpose(
+            xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0), (2, 0, 1)
+        ).reshape(-1, n_freq, n_corr)
+        vis_rfi = xr.DataArray(vis_rfi, dims=dims).chunk(chunks)
+
+    else:
+
+        raise ValueError(
+            f"Unknown data dimensions. Expected 3 or 4 but got {xds_tab.ast_vis.data.ndim}"
+        )
 
     xds_ms = xds_ms.assign(TAB_DATA=vis_ast)
     xds_ms = xds_ms.assign(TAB_RFI_DATA=vis_rfi)

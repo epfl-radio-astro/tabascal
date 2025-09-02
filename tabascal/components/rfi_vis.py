@@ -10,7 +10,7 @@ class RiemannVisCalculation(Component):
         "rfi_phase": ("n_rfi", "n_ant", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_time_fine"),
     }
-    outputs = {"vis_rfi": ("n_bl", "n_time")}
+    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
 
@@ -22,6 +22,7 @@ class RiemannVisCalculation(Component):
             self.n_int = config.n_int_samples
             self.n_time = config.n_time
             self.n_bl = config.n_bl
+            self.n_freq = config.n_freq
 
             # Validate dimensions
             self._set_outputs()
@@ -50,7 +51,7 @@ class RiemannVisCalculation(Component):
         n_int = self.n_int
         n_time = self.n_time
         n_bl = self.n_bl
-        # n_freq = self.n_freq
+        n_freq = self.n_freq
 
         def forward(params, state):
             # Pure JAX operations only
@@ -58,8 +59,8 @@ class RiemannVisCalculation(Component):
                 state["rfi_A"], state["rfi_phase"], a1, a2
             )
 
-            # new_shape = (n_bl, n_freq, n_time, n_int)
-            new_shape = (n_bl, n_time, n_int)
+            new_shape = (n_bl, n_freq, n_time, n_int)
+            # new_shape = (n_bl, n_time, n_int)
 
             # vis_rfi_fine is shape (n_bl, n_time_fine)
             # vis_rfi is shape (n_bl, n_time)
@@ -73,5 +74,5 @@ class RiemannVisCalculation(Component):
     def _set_outputs(self):
 
         self.state_outputs = {
-            "vis_rfi": jnp.zeros((self.n_bl, self.n_time), dtype=complex),
+            "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }

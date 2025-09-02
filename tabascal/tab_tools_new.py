@@ -10,7 +10,6 @@ from numpyro.infer import Predictive, SVI, autoguide, Trace_ELBO
 from tabascal.tab_tools import reduced_chi2
 from tabascal.opt import SVIRunResult
 from tabascal.plot import plot_predictions
-from tabascal.config import TabConfig
 
 import os
 
@@ -23,6 +22,81 @@ import subprocess
 from datetime import datetime
 
 from typing import Callable
+
+from daskms import xds_from_ms, xds_from_table
+
+
+def read_ms(
+    ms_path,
+    freq: float = None,
+    chans: jax.Array = None,
+    corr: str = "xx",
+    data_col: str = "DATA",
+):
+
+    correlations = {"xx": 0, "xy": 1, "yx": 2, "yy": 3}
+    corr = correlations[corr]
+
+    xds = xds_from_ms(ms_path)[0]
+    xds_ant = xds_from_table(ms_path + "::ANTENNA")[0]
+    xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
+    xds_src = xds_from_table(ms_path + "::SOURCE")[0]
+
+    ants_itrf = jnp.array(xds_ant.POSITION.data.compute())
+
+    n_ant = ants_itrf.shape[0]
+    n_time = len(jnp.unique(xds.TIME.data.compute()))
+    n_bl = xds.DATA.data.shape[0] // n_time
+    n_freq, n_corr = xds.DATA.data.shape[1:]
+
+    freqs = jnp.array(xds_spec.CHAN_FREQ.data[0].compute())
+    int_time = xds.INTERVAL.data[0].compute()
+
+    times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
+
+    times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
+
+    if chans is None:
+        if freq:
+            chans = jnp.argmin(jnp.abs(freq - freqs))
+        else:
+            chans = jnp.arange(n_freq)
+
+    n_freq = len(chans)
+
+    data = {
+        **{
+            key: val
+            for key, val in zip(
+                ["ra", "dec"], jnp.rad2deg(xds_src.DIRECTION.data[0].compute())
+            )
+        },
+        "n_freq": n_freq,
+        "n_corr": n_corr,
+        "n_time": n_time,
+        "n_ant": n_ant,
+        "n_bl": n_bl,
+        "dish_d": xds_ant.DISH_DIAMETER.data[0].compute(),
+        "times_mjd": times_mjd,
+        "times": times,
+        "int_time": int_time,
+        "freqs": freqs[chans],
+        "ants_itrf": ants_itrf,
+        "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),
+        "vis_obs": jnp.transpose(
+            jnp.array(
+                xds[data_col]
+                .data.reshape(n_time, n_bl, n_freq, n_corr)
+                .compute()[:, :, chans, corr]
+            ),
+            (1, 2, 0),
+        ),
+        "noise": jnp.array(xds.SIGMA.data.mean().compute()),
+        "a1": jnp.array(xds.ANTENNA1.data.reshape(n_time, n_bl)[0, :].compute()),
+        "a2": jnp.array(xds.ANTENNA2.data.reshape(n_time, n_bl)[0, :].compute()),
+    }
+
+    return data
 
 
 def run_svi(
@@ -90,7 +164,7 @@ def svi_predict(
 
 
 def write_results_xds(
-    vi_pred: dict, tab_config: TabConfig, file_path: str, overwrite: bool = True
+    vi_pred: dict, tab_config, file_path: str, overwrite: bool = True
 ):
 
     # print(vi_pred.keys())
@@ -106,10 +180,10 @@ def write_results_xds(
 
     map_xds = xr.Dataset(
         data_vars={
-            "rfi_vis": (["sample", "bl", "time"], da.asarray(vi_pred["vis_rfi"])),
-            "ast_vis": (["sample", "bl", "time"], da.asarray(vi_pred["vis_ast"])),
-            "gains": (["sample", "ant", "time"], da.asarray(vi_pred["gains"])),
-            "vis_obs": (["sample", "bl", "time"], da.asarray(vi_pred["vis_obs"])),
+            "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_rfi"])),  # type: ignore
+            "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
+            "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
+            "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
             # "rfi_A": (
             #     ["sample", "src", "ant", "rfi_time"],
             #     da.asarray(vi_pred["rfi_A"]),
@@ -120,7 +194,8 @@ def write_results_xds(
             # ),
         },
         coords={
-            "time": da.asarray(tab_config.times),
+            "time": da.asarray(tab_config.times),  # type: ignore
+            "freq": da.asarray(tab_config.freqs),  # type: ignore
             # "rfi_time": da.asarray(args["rfi_times"]),
             # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
         },
@@ -135,7 +210,7 @@ def write_results_xds(
 
 
 def init_predict(
-    tab_config: TabConfig, prob_model: Callable, subkey: jax.Array, init_params: dict
+    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict
 ):
 
     pred = Predictive(
@@ -144,18 +219,14 @@ def init_predict(
         batch_ndims=1,
     )
     init_pred = pred(subkey)
-    rchi2 = reduced_chi2(
-        init_pred["vis_obs"][0], tab_config.vis_obs.T, tab_config.noise
-    )
+    rchi2 = reduced_chi2(init_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
     print()
     print(f"Reduced Chi^2 @ init params : {rchi2}")
 
     return init_pred
 
 
-def plot_init(
-    tab_config: TabConfig, init_pred: dict, truth: dict, model_name: str, plot_dir: str
-):
+def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_dir: str):
 
     start = datetime.now()
     print()
@@ -182,7 +253,7 @@ def plot_init(
 
 
 def plot_prior(
-    tab_config: TabConfig,
+    tab_config,
     prob_model: Callable,
     truth: dict,
     model_name: str,
@@ -212,7 +283,7 @@ def plot_prior(
 
 
 def run_opt(
-    tab_config: TabConfig,
+    tab_config,
     prob_model: Callable,
     truth: dict[str, jax.Array],
     model_name: str,
@@ -233,7 +304,7 @@ def run_opt(
     guide_family = guides[tab_config.args["opt"]["guide"]]
     vi_results, vi_guide = run_svi(
         prob_model=prob_model,
-        obs_data=tab_config.vis_obs.T,
+        obs_data=tab_config.vis_obs,
         max_iter=tab_config.args["opt"]["max_iter"],
         guide_family=guide_family,
         init_params={
@@ -279,7 +350,7 @@ def run_opt(
     #     print(f"RMSE RFI Vis    : {jnp.mean(vi_pred['rmse_rfi']):.5f}")
     #     print(f"RMSE AST Vis    : {jnp.mean(vi_pred['rmse_ast']):.5f}")
 
-    rchi2 = reduced_chi2(vi_pred["vis_obs"][0], tab_config.vis_obs.T, tab_config.noise)
+    rchi2 = reduced_chi2(vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
     print()
     print(f"Reduced Chi^2 @ opt params : {rchi2}")
 

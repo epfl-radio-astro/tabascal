@@ -22,7 +22,7 @@ from tabascal.components import Component, assert_attr_shape
 class PhaseCalculationRFI(Component):
 
     required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
-    outputs = {"rfi_phase": ("n_rfi", "n_ant", "n_time_fine")}
+    output_shapes = {"rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine")}
 
     parameters = {}
 
@@ -80,9 +80,10 @@ class PhaseCalculationRFI(Component):
 
         def forward(params, state):
             # Pure JAX operations only
-            rfi_phase = get_rfi_phase(state["rfi_xyz"], ants_uvw, ants_xyz, freqs)[
-                :, :, 0, :
-            ]
+            rfi_phase = get_rfi_phase(state["rfi_xyz"], ants_uvw, ants_xyz, freqs)
+            # [
+            #     :, :, 0, :
+            # ]
             state = {**state, "rfi_phase": rfi_phase}
 
             return state
@@ -93,9 +94,9 @@ class PhaseCalculationRFI(Component):
 class FixedOrbit(Component):
 
     required_inputs = {}  # No inputs needed
-    outputs = {
+    outputs_shapes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
-        "rfi_phase": ("n_rfi", "n_ant", "n_time_fine"),
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
     }
 
     # Add parameter specifications
@@ -108,12 +109,14 @@ class FixedOrbit(Component):
             self.elements = config.elements
             self.epoch_jd = config.epoch_jd
             self.n_rfi = config.n_rfi
-            self.times_jd_fine = config.times_jd_fine
+            self.n_ant = config.n_ant
+            self.n_freq = config.n_freq
+            self.n_time_fine = config.n_time_fine
+
             self.ants_itrf = config.ants_itrf
             self.phase_centre = config.phase_centre
             self.freqs = config.freqs
-            self.n_ant = config.n_ant
-            self.n_time_fine = config.n_time_fine
+            self.times_jd_fine = config.times_jd_fine
 
             # Do expensive setup operations once
             self._compute_rfi_phase()
@@ -166,7 +169,7 @@ class FixedOrbit(Component):
 
         self.rfi_phase = get_rfi_phase(
             self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs
-        )[:, :, 0, :]
+        )  # [:, :, 0, :]
 
     def _set_outputs(self):
 
@@ -179,13 +182,15 @@ class FixedOrbit(Component):
         """Ensure all setup operations completed successfully"""
 
         assert_attr_shape(self, "rfi_xyz", (self.n_rfi, self.n_time_fine, 3))
-        assert_attr_shape(self, "rfi_phase", (self.n_rfi, self.n_ant, self.n_time_fine))
+        assert_attr_shape(
+            self, "rfi_phase", (self.n_rfi, self.n_ant, self.n_freq, self.n_time_fine)
+        )
 
 
 class KeplerOrbit(Component):
 
     required_inputs = {}  # No inputs needed
-    outputs = {
+    output_shapes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
         "elements": ("n_rfi", 6),  # Also output elements for downstream use
     }

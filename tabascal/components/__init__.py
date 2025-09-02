@@ -9,12 +9,11 @@ class Component(ABC):
 
     # Class attributes defining component interface
     required_inputs: Dict[str, tuple] = {}
-    outputs: Dict[str, tuple] = {}
-    state_outputs: Dict[str, Array] = {}
+    parameter_shapes: Dict[str, tuple] = {}
+    output_shapes: Dict[str, tuple] = {}
+    outputs: Dict[str, Array] = {}
     init_params: Dict[str, Array] = {}
     init_params_base: Dict[str, Array] = {}
-
-    # parameters: Dict[str, tuple] = {}
 
     @abstractmethod
     def setup(self, config: Any) -> None:
@@ -25,7 +24,7 @@ class Component(ABC):
     def build_forward(self) -> Callable:
         """Build the forward computation function"""
 
-        def forward(state: Dict) -> Dict:
+        def forward(params: Dict, state: Dict) -> Dict:
             return state
 
         return forward

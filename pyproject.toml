@@ -34,5 +34,6 @@ where = ["."]
 
 [project.scripts]
 tabascal = "tabascal.run_tabascal:main"
+tab-new = "tabascal.run_tabascal_classes:main"
 tab2MS="tabascal.results_to_MS:main"
 
