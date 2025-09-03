@@ -363,7 +363,9 @@ def run_opt(
     )
     print(os.path.split(map_path)[1])
     subprocess.run(
-        f"tab2MS -m {ms_path} -z {map_path}", shell=True, executable="/bin/bash"
+        f"tab2MS -m {ms_path} -z {map_path} -d {tab_config.args['data']['data_col']}",
+        shell=True,
+        executable="/bin/bash",
     )
 
     return vi_params, rchi2
