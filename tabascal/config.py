@@ -477,7 +477,7 @@ class TabConfig:
 
         self.int_time = ms_params["int_time"]
         self.times = ms_params["times"]
-        self.times_jd = mjd_to_jd(ms_params["times_mjd"])
+        self.times_jd = mjd_to_jd(ms_params["times_mjd"] / (24 * 3600))
 
         self.freqs = ms_params["freqs"]
         self.noise = ms_params["noise"]
