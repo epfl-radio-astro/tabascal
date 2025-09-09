@@ -162,7 +162,7 @@ def tabascal_subtraction(
     n_params = sum([x.size for x in model.init_params.values()])
     n_data = 2 * tab_config.vis_obs.size
 
-    print(f"Using {tab_config.n_int_samples} samples per time step for RFI prediction.")
+    print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
     print()
     print(f"Number of Antennas   : {tab_config.n_ant: 4}")
     print(f"Number of Time Steps : {tab_config.n_time: 4}")

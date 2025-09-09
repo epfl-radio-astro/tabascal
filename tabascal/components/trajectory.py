@@ -113,9 +113,25 @@ class FixedOrbit(Component):
             self.n_freq = config.n_freq
             self.n_time_fine = config.n_time_fine
 
+            self.n_int_time = config.n_int_time
+            self.n_int_freq = config.args["rfi"]["freq_int_samples"]
+
             self.ants_itrf = config.ants_itrf
             self.phase_centre = config.phase_centre
             self.freqs = config.freqs
+            self.times = config.times
+
+            from tabascal.fft_gp import domain_ss
+
+            xs = [self.freqs, self.times]
+            ss_factors = [self.n_int_freq, self.n_int_time]
+            pad_factors = [
+                config.args["rfi"]["freq_pad_factor"],
+                config.args["rfi"]["time_pad_factor"],
+            ]
+            self.freqs_fine, self.times_fine = domain_ss(xs, ss_factors, pad_factors)
+            self.n_freq_fine = len(self.freqs_fine)
+
             self.times_jd_fine = config.times_jd_fine
 
             # Do expensive setup operations once
@@ -168,7 +184,7 @@ class FixedOrbit(Component):
         )
 
         self.rfi_phase = get_rfi_phase(
-            self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs
+            self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
         )  # [:, :, 0, :]
 
     def _set_outputs(self):
@@ -183,7 +199,9 @@ class FixedOrbit(Component):
 
         assert_attr_shape(self, "rfi_xyz", (self.n_rfi, self.n_time_fine, 3))
         assert_attr_shape(
-            self, "rfi_phase", (self.n_rfi, self.n_ant, self.n_freq, self.n_time_fine)
+            self,
+            "rfi_phase",
+            (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine),
         )
 
 
