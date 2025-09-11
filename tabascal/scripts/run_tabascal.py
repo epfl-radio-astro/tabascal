@@ -23,58 +23,21 @@ import jax.numpy as jnp
 import numpy as np
 
 from tabsim.config import Tee, load_config
-
-# from tabascal.gp import (
-#     kernel,
-#     resampling_kernel,
-#     cholesky,
-#     find_closest_factor_greater_than,
-# )
-# from tabascal.models import (
-#     fixed_orbit_rfi_full_fft_standard_padded_model,
-#     fixed_orbit_rfi_fft_standard,
-#     fixed_orbit_rfi_full_fft_standard_model,
-#     fixed_orbit_rfi_full_fft_standard_model_otf,
-#     fixed_orbit_rfi_full_fft_standard_model_otf_fft,
-# )
-
-# from tabascal.tab_tools import (
-#     split_args,
-#     read_ms,
-#     get_ast_fringe_rate,
-#     get_tles,
-#     estimate_sampling,
-#     get_rfi_phase,
-#     get_gp_params,
-#     calculate_estimates,
-#     get_truth_conditional,
-#     calculate_true_values,
-#     get_prior_means,
-#     pow_spec_sqrt,
-#     pow_spec,
-#     save_memory,
-#     inv_transform,
-#     get_init_params,
-#     init_predict,
-#     plot_init,
-#     plot_truth,
-#     plot_prior,
-#     run_mcmc,
-#     run_opt,
-#     run_fisher,
-#     write_results_xds,
-#     write_params_xds,
-#     check_antenna_and_satellite_positions,
-# )
-
-from tabascal.tab_tools_new import save_memory
-
 from tabsim.tle import id_generator
 
-from typing import Optional
 
-
+from tabascal.tab_tools import (
+    save_memory,
+    write_results_xds,
+    init_predict,
+    plot_init,
+    plot_prior,
+    run_opt,
+)
 from tabascal.config import TabConfig, Model
+
+
+from typing import Optional
 
 
 def tabascal_subtraction(
@@ -177,14 +140,6 @@ def tabascal_subtraction(
     print(f"{end_start}")
 
     mem_i = save_memory(mem_dir, mem_i)
-
-    from tabascal.tab_tools_new import (
-        write_results_xds,
-        init_predict,
-        plot_init,
-        plot_prior,
-        run_opt,
-    )
 
     key, subkey = random.split(key)
     init_pred = init_predict(tab_config, prob_model, subkey, model.init_params)

@@ -5,7 +5,7 @@ from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.gp import cholesky, resampling_kernel, get_times
-from tabascal.tab_tools_new import get_observation_data_type
+from tabascal.tab_tools import get_observation_data_type
 from tabascal.fft_gp import latent_init, latent_predict, get_latent
 
 import xarray as xr

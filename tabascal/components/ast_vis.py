@@ -3,8 +3,11 @@ import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
-from tabascal.tab_tools import get_ast_fringe_rate, pow_spec
-from tabascal.tab_tools_new import get_observation_data_type
+from tabascal.tab_tools import (
+    get_ast_fringe_rate,
+    pow_spec,
+    get_observation_data_type,
+)
 from tabascal.fft_gp import latent_init, latent_predict, get_latent, pow_spec_nd
 
 import xarray as xr
