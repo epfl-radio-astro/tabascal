@@ -5,7 +5,7 @@ from jax.tree_util import tree_map
 import numpyro
 import numpyro.distributions as dist
 from tabascal.dist import MVN, Normal
-from tabascal.vis import (
+from tabascal.deprecated.vis import (
     get_ast_vis_fft,
     get_ast_vis_fft_padded,
     get_ast_vis,

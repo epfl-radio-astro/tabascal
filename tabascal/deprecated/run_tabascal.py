@@ -30,7 +30,7 @@ from tabascal.gp import (
     cholesky,
     find_closest_factor_greater_than,
 )
-from tabascal.models import (
+from tabascal.deprecated.models import (
     fixed_orbit_rfi_full_fft_standard_padded_model,
     fixed_orbit_rfi_fft_standard,
     fixed_orbit_rfi_full_fft_standard_model,
