@@ -135,8 +135,8 @@ class TabConfig:
 
         obs_epoch_jd = float(self.times_jd.mean())
 
-        self.elements, self.epoch_jd, self.norad_ids, tles = fetch_orbital_elements(
-            self.spacetrack_path, obs_epoch_jd, norad_ids
+        self.elements, self.epoch_jd, self.norad_ids, self.tles = (
+            fetch_orbital_elements(self.spacetrack_path, obs_epoch_jd, norad_ids)
         )
         self.n_rfi = len(self.norad_ids)
 
@@ -214,14 +214,13 @@ class Model:
 
             state = forward(params, state)
 
+            numpyro.deterministic("rfi_phase", state["rfi_phase"])
+            numpyro.deterministic("rfi_A", state["rfi_A"])
+
             numpyro.deterministic("vis_rfi", state["vis_rfi"])
             numpyro.deterministic("vis_ast", state["vis_ast"])
             numpyro.deterministic("gains", state["gains"])
             numpyro.deterministic("vis_obs", state["vis_obs"])
-
-            numpyro.deterministic("rmse_rfi", state["rmse_rfi"])
-            numpyro.deterministic("rmse_ast", state["rmse_ast"])
-            numpyro.deterministic("rmse_gains", state["rmse_gains"])
 
             if obs_data is not None:
                 self.likelihood(state["vis_obs"], obs_data)

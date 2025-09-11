@@ -197,11 +197,21 @@ def plot_predictions(
     save_dir: str = "plots/",
 ):
 
+    rmse_ast = jnp.sqrt(
+        jnp.mean(jnp.abs(pred["vis_ast"] - truth["vis_ast"]) ** 2, axis=(0, 1))
+    )
+    rmse_rfi = jnp.sqrt(
+        jnp.mean(jnp.abs(pred["vis_rfi"] - truth["vis_rfi"]) ** 2, axis=(0, 1))
+    )
+    rmse_gains = jnp.sqrt(
+        jnp.mean(jnp.abs(pred["gains"] - truth["gains"]) ** 2, axis=(0, 1))
+    )
+
     plot_complex_real_imag(
         times=times,
-        param=pred["vis_ast"][:, 0],
-        true=truth["vis_ast"][:, 0],
-        rmse=pred["rmse_ast"],
+        param=pred["vis_ast"],
+        true=truth["vis_ast"],
+        rmse=rmse_ast,
         name="Ast. Vis.",
         save_name=f"{model_name}_{type}_ast_vis",
         max_plots=max_plots,
@@ -210,9 +220,9 @@ def plot_predictions(
 
     plot_complex_amp_phase(
         times=times,
-        param=pred["vis_rfi"][:, 0],
-        true=truth["vis_rfi"][:, 0],
-        rmse=pred["rmse_rfi"],
+        param=pred["vis_rfi"],
+        true=truth["vis_rfi"],
+        rmse=rmse_rfi,
         name="RFI Vis.",
         save_name=f"{model_name}_{type}_rfi_vis",
         diff=False,  # True,
@@ -222,9 +232,9 @@ def plot_predictions(
 
     plot_complex_amp_phase(
         times=times,
-        param=pred["gains"][:, 0],
-        true=truth["gains"][:, 0],
-        rmse=pred["rmse_gains"],
+        param=pred["gains"],
+        true=truth["gains"],
+        rmse=rmse_gains,
         name="Gains",
         save_name=f"{model_name}_{type}_gains",
         diff=False,

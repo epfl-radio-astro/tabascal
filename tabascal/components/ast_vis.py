@@ -539,6 +539,32 @@ class FourierTimeFreqAst(Component):
             self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
         )
 
+    def _compute_true_params(self, zarr_path, data_col):
+
+        xds = xr.open_zarr(zarr_path)
+
+        data_type = get_observation_data_type(data_col)
+
+        vis_ast = jnp.transpose(
+            (
+                xds.vis_ast.data[:, :, :].compute()
+                if data_type["ast"]
+                else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
+            ),
+            (1, 2, 0),
+        )
+
+        vis_ast_padded = vmap(
+            vmap(jnp.pad, in_axes=(0, None, None), out_axes=(0)),
+            in_axes=(1, None, None),
+            out_axes=(1),
+        )(vis_ast, self.n_pad, "linear_ramp")
+        self.true_ast_k = jnp.fft.fft(vis_ast_padded, axis=2)
+
+        self.true_ast_k_base = self.inv_transform(
+            self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
+        )
+
     def _compute_prior_params(self):
 
         sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.P0, k0, self.gamma))

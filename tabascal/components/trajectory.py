@@ -1,7 +1,7 @@
-from tabsim.config import yaml_load
-from tabsim.tle import get_tles_by_id
+from tabsim.config import yaml_load  # type: ignore
+from tabsim.tle import get_tles_by_id  # type: ignore
 
-from tabsim.jax.coordinates import (
+from tabsim.jax.coordinates import (  # type: ignore
     itrf_to_uvw,
     itrf_to_xyz,
     kepler_orbit_many,
@@ -66,8 +66,8 @@ class PhaseCalculationRFI(Component):
 
     def build_set_params(self):
 
-        def set_params(state):
-            return state
+        def set_params(params):
+            return params
 
         return set_params
 
@@ -106,6 +106,7 @@ class FixedOrbit(Component):
         """All validation and error-prone operations here"""
         try:
             # Store only what's needed for forward computation
+            self.tles = config.tles
             self.elements = config.elements
             self.epoch_jd = config.epoch_jd
             self.n_rfi = config.n_rfi
@@ -171,11 +172,23 @@ class FixedOrbit(Component):
 
     def _compute_rfi_phase(self):
 
-        self.rfi_xyz = kepler_orbit_many(
-            self.times_jd_fine, self.epoch_jd, self.elements
-        )
+        from astropy.time import Time
+        from tabsim.tle import get_satellite_positions  # type: ignore
 
-        gsa = gmsa_from_jd(self.times_jd_fine) % 360
+        self.rfi_xyz = jnp.asarray(
+            get_satellite_positions(self.tles, list(self.times_jd_fine))
+        )
+        gsa = (
+            Time(self.times_jd_fine, format="jd")
+            .sidereal_time("mean", "greenwich")
+            .hour
+            * 15
+        )  # type: ignore
+
+        # self.rfi_xyz = kepler_orbit_many(
+        #     self.times_jd_fine, self.epoch_jd, self.elements
+        # )
+        # gsa = gmsa_from_jd(self.times_jd_fine) % 360
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
         self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
@@ -185,13 +198,13 @@ class FixedOrbit(Component):
 
         self.rfi_phase = get_rfi_phase(
             self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
-        )  # [:, :, 0, :]
+        )
 
     def _set_outputs(self):
 
         self.state_outputs = {
-            "rfi_xyz": jnp.zeros((self.n_rfi, self.n_time_fine, 3)),
-            "rfi_phase": jnp.zeros((self.n_rfi, self.n_ant, self.n_time_fine)),
+            "rfi_xyz": self.rfi_xyz,
+            "rfi_phase": self.rfi_phase,
         }
 
     def _validate_dimensions(self):
