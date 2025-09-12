@@ -22,12 +22,39 @@ import subprocess
 
 from datetime import datetime
 
-from typing import Callable
+from typing import Callable, Optional
 
 from daskms import xds_from_ms, xds_from_table
 
+from numpyro.infer import log_likelihood
+from numpyro.infer.util import log_density
 
-# @jit
+
+def nlog_like(prob_model, params, obs_data):
+
+    nlog_l = -log_likelihood(prob_model, params, obs_data=obs_data, batch_ndims=0)[
+        "obs"
+    ].mean()
+
+    return nlog_l
+
+
+def nlog_post(prob_model, params, obs_data):
+
+    nlog_p = (
+        -log_density(
+            prob_model,
+            model_args=(obs_data,),
+            model_kwargs={},
+            params=params,
+        )[0]
+        / obs_data.size
+        / 2
+    )
+
+    return nlog_p
+
+
 def reduced_chi2(pred, true, noise):
 
     complex_types = [
@@ -76,8 +103,8 @@ def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
 
 def read_ms(
     ms_path,
-    freq: float = None,
-    chans: jax.Array = None,
+    freq: Optional[float] = None,
+    chans: Optional[jax.Array] = None,
     corr: str = "xx",
     data_col: str = "DATA",
 ):
@@ -101,6 +128,11 @@ def read_ms(
     int_time = xds.INTERVAL.data[0].compute()
 
     times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
+    # times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()) / (
+    #     24 * 3600
+    # # )
+    # from astropy.time import Time
+    # print(Time(times_mjd[0], format="mjd").isot)
 
     times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
 
@@ -419,7 +451,7 @@ def run_opt(
     return vi_params, rchi2
 
 
-def save_memory(mem_dir, mem_i):
+def save_memory(mem_dir: str, mem_i: int):
 
     mem_i += 1
     jax.profiler.save_device_memory_profile(
@@ -429,7 +461,7 @@ def save_memory(mem_dir, mem_i):
     return mem_i
 
 
-def get_observation_data_type(data_col):
+def get_observation_data_type(data_col: str):
 
     ast = ["DATA", "CAL_DATA", "AST_DATA", "AST_MODEL_DATA"]
     rfi = ["DATA", "CAL_DATA", "RFI_DATA", "RFI_MODEL_DATA"]

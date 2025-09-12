@@ -98,9 +98,6 @@ class ComplexRFI(Component):
             rfi_A = vmap(vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1), (None, 2), 2)(
                 resample_rfi, rfi_A_induce
             )
-            # rfi_A = vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1)(
-            #     resample_rfi, rfi_A_induce
-            # )
             state = {**state, "rfi_A": rfi_A}
 
             return state
@@ -208,9 +205,6 @@ class ComplexRFI(Component):
             (2, None, 2),
             2,
         )(base_params, L, mu)
-        # params = vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1)(
-        #     base_params, L, mu
-        # )
 
         return params
 
@@ -219,9 +213,6 @@ class ComplexRFI(Component):
         base_params = vmap(
             vmap(vmap(jnp.linalg.solve, (None, 0), 0), (None, 1), 1), (None, 2), 2
         )(L, params - mu)
-        # base_params = vmap(vmap(jnp.linalg.solve, (None, 0), 0), (None, 1), 1)(
-        #     L, params - mu
-        # )
 
         return base_params
 
@@ -310,15 +301,19 @@ class FourierGPRFI(Component):
             self.time_pad_factor = config.args["rfi"]["time_pad_factor"]
             self.freq_pad_factor = config.args["rfi"]["freq_pad_factor"]
 
+            self.xs = [self.freqs, self.times]
+            self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
+            self.ss_factors = [self.n_int_freq, self.n_int_time]
+
             # Do expensive setup operations once
             self._compute_gp_params()
             self._compute_prior_params()
             self._set_outputs()
 
-            # if config.args["plots"]["truth"] or config.args["rfi"]["init"] == "truth":
-            #     self._compute_true_params(
-            #         config.args["data"]["zarr_path"], config.args["data"]["data_col"]
-            #     )
+            if config.args["plots"]["truth"] or config.args["rfi"]["init"] == "truth":
+                self._compute_true_params(
+                    config.args["data"]["zarr_path"], config.args["data"]["data_col"]
+                )
 
             # if config.args["rfi"]["init"] == "est":
             #     self._estimate_params(config.fringe_freqs)
@@ -391,9 +386,9 @@ class FourierGPRFI(Component):
         #     self.gp_l = 1.0
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_init(
-            [self.freqs, self.times],
-            [self.freq_pad_factor, self.time_pad_factor],
-            [self.n_int_freq, self.n_int_time],
+            self.xs,
+            self.pad_factors,
+            self.ss_factors,
             self.p0,
             self.k0s,
             self.gammas,
@@ -401,7 +396,7 @@ class FourierGPRFI(Component):
         )
 
         xs = [self.freqs, self.times]
-        dxs = tuple([float(jnp.diff(x[:2])[0]) for x in xs])
+        dxs = tuple([float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in xs])
 
         print("\nRFI specs")
         print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
@@ -439,15 +434,57 @@ class FourierGPRFI(Component):
 
         return base_params
 
+    def _compute_true_params(self, zarr_path, data_col):
+
+        xds = xr.open_zarr(zarr_path)
+
+        data_type = get_observation_data_type(data_col)
+
+        rfi_A = jnp.transpose(
+            vmap(
+                vmap(vmap(jnp.interp, (None, None, 0), 0), (None, None, 2), 2),
+                (None, None, 3),
+                3,
+            )(
+                self.times,
+                xds.time_fine.data,
+                xds.rfi_tle_sat_A.data.compute(),
+            ),
+            (0, 2, 3, 1),
+        )
+
+        get_latent_pred = lambda Z: get_latent(
+            Z,
+            self.xs,
+            self.pad_factors,
+            self.p0,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
+        )
+
+        # self.true_rfi_k_A = vmap(vmap(get_latent_pred, (0,), 0), (1,), 1)(rfi_A)
+
+        self.true_rfi_k_A = jnp.array(
+            [
+                [get_latent_pred(rfi_A[i, j]) for j in range(self.n_ant)]
+                for i in range(self.n_rfi)
+            ]
+        )
+
+        self.true_rfi_k_A_base = self.inv_transform(
+            self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k
+        )
+
     def _compute_init_params(self, init_type):
 
         if init_type == "prior":
             print("Using prior mean for rfi_k")
             # self.init_rfi_A_induce = jnp.ones_like(self.mu_rfi_A)
             self.init_rfi_k = self.mu_rfi_k
-        # elif init_type == "truth":
-        #     print("Using truth for rfi_A")
-        #     self.init_rfi_A_induce = self.true_rfi_A_induce
+        elif init_type == "truth":
+            print("Using truth for rfi_A")
+            self.init_rfi_k = self.true_rfi_k_A
         else:
             print("Drawing sample from prior for rfi_k")
             prior_sample = random.normal(

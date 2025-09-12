@@ -44,7 +44,7 @@ class TabConfig:
 
         self.get_orbital_elements(config["satellites"]["norad_ids"])
 
-        self.estimate_rfi_sampling(config["rfi"]["n_int_factor"])
+        self.estimate_rfi_sampling(config["rfi"]["time_int_factor"])
 
         self.args = config
 
@@ -56,9 +56,6 @@ class TabConfig:
         self.dish_d = ms_params["dish_d"]
         self.ants_itrf = ms_params["ants_itrf"]
         self.vis_obs = ms_params["vis_obs"]
-        # [
-        #     :, None, :
-        # ]  # Add the frequency channel into the data
         self.uvw = ms_params["uvw"]
 
         self.n_ant = ms_params["n_ant"]
@@ -69,7 +66,7 @@ class TabConfig:
 
         self.int_time = ms_params["int_time"]
         self.times = ms_params["times"]
-        self.times_jd = mjd_to_jd(ms_params["times_mjd"] / (24 * 3600))
+        self.times_jd = mjd_to_jd(ms_params["times_mjd"])
 
         self.freqs = ms_params["freqs"]
         self.noise = ms_params["noise"]

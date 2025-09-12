@@ -11,6 +11,7 @@ from tabsim.jax.coordinates import (  # type: ignore
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase
+from tabascal.fft_gp import domain_ss
 
 import jax.numpy as jnp
 from jax import vmap
@@ -121,8 +122,6 @@ class FixedOrbit(Component):
             self.phase_centre = config.phase_centre
             self.freqs = config.freqs
             self.times = config.times
-
-            from tabascal.fft_gp import domain_ss
 
             xs = [self.freqs, self.times]
             ss_factors = [self.n_int_freq, self.n_int_time]

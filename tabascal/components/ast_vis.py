@@ -37,7 +37,7 @@ class FourierTimeAst(Component):
             self.dish_d = config.dish_d
             self.uvw = config.uvw
             self.freqs = config.freqs
-            self.P0 = config.args["ast"]["pow_spec"]["P0"]
+            self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
             self.fov_deg = config.args["ast"]["pow_spec"]["fov_deg"]
             self.ast_pad_factor = config.args["ast"]["pad_factor"]
@@ -150,7 +150,7 @@ class FourierTimeAst(Component):
 
     def _compute_prior_params(self):
 
-        sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.P0, k0, self.gamma))
+        sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.p0, k0, self.gamma))
 
         self.sigma_ast_k = vmap(vmap(sqrt_Pk, (0), (0)), (1), (1))(self.ast_fr)
         self.mu_ast_k = jnp.zeros((self.n_bl, self.n_freq, self.n_ast_k), dtype=complex)
@@ -237,7 +237,7 @@ class FourierTimeConstFreqAst(Component):
             self.dish_d = config.dish_d
             self.uvw = config.uvw
             self.freqs = config.freqs
-            self.P0 = config.args["ast"]["pow_spec"]["P0"]
+            self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
             self.fov_deg = config.args["ast"]["pow_spec"]["fov_deg"]
             self.ast_pad_factor = config.args["ast"]["pad_factor"]
@@ -345,7 +345,7 @@ class FourierTimeConstFreqAst(Component):
 
     def _compute_prior_params(self):
 
-        sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.P0, k0, self.gamma))
+        sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.p0, k0, self.gamma))
 
         self.sigma_ast_k = vmap(vmap(sqrt_Pk, (0), (0)), (1), (1))(self.ast_fr)
         self.mu_ast_k = jnp.zeros((self.n_bl, self.n_freq, self.n_ast_k), dtype=complex)
@@ -432,7 +432,7 @@ class FourierTimeFreqAst(Component):
             self.dish_d = config.dish_d
             self.uvw = config.uvw
             self.freqs = config.freqs
-            self.P0 = config.args["ast"]["pow_spec"]["P0"]
+            self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
             self.fov_deg = config.args["ast"]["pow_spec"]["fov_deg"]
             self.ast_pad_factor = config.args["ast"]["pad_factor"]
@@ -516,31 +516,31 @@ class FourierTimeFreqAst(Component):
             self.uvw[:, :, :2], self.freqs, eff_dish_d
         )
 
-    def _compute_true_params(self, zarr_path, data_col):
+    # def _compute_true_params(self, zarr_path, data_col):
 
-        xds = xr.open_zarr(zarr_path)
+    #     xds = xr.open_zarr(zarr_path)
 
-        data_type = get_observation_data_type(data_col)
+    #     data_type = get_observation_data_type(data_col)
 
-        vis_ast = jnp.transpose(
-            (
-                xds.vis_ast.data[:, :, :].compute()
-                if data_type["ast"]
-                else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
-            ),
-            (1, 2, 0),
-        )
+    #     vis_ast = jnp.transpose(
+    #         (
+    #             xds.vis_ast.data[:, :, :].compute()
+    #             if data_type["ast"]
+    #             else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
+    #         ),
+    #         (1, 2, 0),
+    #     )
 
-        vis_ast_padded = vmap(
-            vmap(jnp.pad, in_axes=(0, None, None), out_axes=(0)),
-            in_axes=(1, None, None),
-            out_axes=(1),
-        )(vis_ast, self.n_pad, "linear_ramp")
-        self.true_ast_k = jnp.fft.fft2(vis_ast_padded, axes=(1, 2))
+    #     vis_ast_padded = vmap(
+    #         vmap(jnp.pad, in_axes=(0, None, None), out_axes=(0)),
+    #         in_axes=(1, None, None),
+    #         out_axes=(1),
+    #     )(vis_ast, self.n_pad, "linear_ramp")
+    #     self.true_ast_k = jnp.fft.fft2(vis_ast_padded, axes=(1, 2))
 
-        self.true_ast_k_base = self.inv_transform(
-            self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
-        )
+    #     self.true_ast_k_base = self.inv_transform(
+    #         self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
+    #     )
 
     def _compute_true_params(self, zarr_path, data_col):
 
@@ -570,7 +570,7 @@ class FourierTimeFreqAst(Component):
 
     def _compute_prior_params(self):
 
-        sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.P0, k0, self.gamma))
+        sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.p0, k0, self.gamma))
 
         self.sigma_ast_k = vmap(vmap(sqrt_Pk, (0), (0)), (1), (1))(self.ast_fr)
         if self.n_freq > 1:
@@ -682,14 +682,18 @@ class FourierTimeFreqGPAst(Component):
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]
 
+            self.xs = [self.freqs, self.times]
+            self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
+            self.ss_factors = [1, 1]
+
             # Do expensive setup operations once
             self._compute_gp_params()
             self._compute_prior_params()
 
-            # if config.args["plots"]["truth"] or config.args["ast"]["init"] == "truth":
-            #     self._compute_true_params(
-            #         config.args["data"]["zarr_path"], config.args["data"]["data_col"]
-            #     )
+            if config.args["plots"]["truth"] or config.args["ast"]["init"] == "truth":
+                self._compute_true_params(
+                    config.args["data"]["zarr_path"], config.args["data"]["data_col"]
+                )
 
             self._compute_init_params(config.args["ast"]["init"])
             self._set_outputs()
@@ -749,7 +753,9 @@ class FourierTimeFreqGPAst(Component):
     def _compute_gp_params(self):
 
         if self.fov_deg:
-            eff_dish_d = 1.22 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+            eff_dish_d = float(
+                1.22 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+            )
         else:
             eff_dish_d = self.dish_d
 
@@ -761,17 +767,19 @@ class FourierTimeFreqGPAst(Component):
         )
 
         self.k0_time = self.ast_fr
-
-        xs = [self.freqs, self.times]
-        pad_factors = [self.freq_pad_factor, self.time_pad_factor]
-        ss_factors = [1, 1]
-        k0s = [self.k0_freq, self.k0_time.max()]
+        self.k0s = [self.k0_freq, self.k0_time.max()]
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_init(
-            xs, pad_factors, ss_factors, self.p0, k0s, self.gammas, self.pk_cutoff
+            self.xs,
+            self.pad_factors,
+            self.ss_factors,
+            self.p0,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
         )
 
-        dxs = tuple([float(jnp.diff(x[:2])[0]) for x in xs])
+        dxs = tuple([float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in self.xs])
 
         print("\nAST specs")
         print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
@@ -787,48 +795,44 @@ class FourierTimeFreqGPAst(Component):
 
         self.sigma_ast_k = vmap(sigma, (0), 0)(self.k0_time)
 
-    # def _compute_true_params(self, zarr_path, data_col):
+    def _compute_true_params(self, zarr_path, data_col):
 
-    #     xds = xr.open_zarr(zarr_path)
+        xds = xr.open_zarr(zarr_path)
 
-    #     data_type = get_observation_data_type(data_col)
+        data_type = get_observation_data_type(data_col)
 
-    #     vis_ast = jnp.transpose(
-    #         (
-    #             xds.vis_ast.data[:, :, :].compute()
-    #             if data_type["ast"]
-    #             else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
-    #         ),
-    #         (1, 2, 0),
-    #     )
+        vis_ast = jnp.transpose(
+            (
+                xds.vis_ast.data[:, :, :].compute()
+                if data_type["ast"]
+                else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
+            ),
+            (1, 2, 0),
+        )
 
-    #     vis_ast_padded = vmap(
-    #         vmap(jnp.pad, in_axes=(0, None, None), out_axes=(0)),
-    #         in_axes=(1, None, None),
-    #         out_axes=(1),
-    #     )(vis_ast, self.n_pad, "linear_ramp")
-    #     self.true_ast_k = jnp.fft.fft2(vis_ast_padded, axes=(1, 2))
+        get_latent_pred = lambda Z: get_latent(
+            Z,
+            self.xs,
+            self.pad_factors,
+            self.p0,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
+        )
 
-    #     self.true_ast_k_base = self.inv_transform(
-    #         self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
-    #     )
+        # self.true_ast_k = vmap(get_latent_pred, (0,), 0)(vis_ast)
+
+        self.true_ast_k = jnp.array([get_latent_pred(vis) for vis in vis_ast])
+
+        self.true_ast_k_base = self.inv_transform(
+            self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
+        )
 
     def _compute_prior_params(self):
 
-        # if self.n_freq > 1:
-        #     self.sigma_ast_k = self.sigma_ast_k.at[:, 1:, :].set(
-        #         self.sigma_ast_k[:, 1:, :] * 1e-6
-        #     )
         self.mu_ast_k = jnp.zeros(
             (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex
         )
-
-        import matplotlib.pyplot as plt
-        from matplotlib.colors import LogNorm
-
-        plt.imshow(self.sigma_ast_k[0], aspect="auto", norm=LogNorm())
-        plt.colorbar()
-        plt.savefig("Pk.png", format="png", dpi=300)
 
     def _set_outputs(self):
 
@@ -852,8 +856,8 @@ class FourierTimeFreqGPAst(Component):
 
         if init_type == "prior":
             self.init_ast_k = self.mu_ast_k
-        # elif init_type == "truth":
-        #     self.init_ast_k = self.true_ast_k
+        elif init_type == "truth":
+            self.init_ast_k = self.true_ast_k
         else:
             prior_sample = random.normal(
                 random.PRNGKey(1),

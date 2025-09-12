@@ -21,14 +21,18 @@ def supersample_domain_specs(
         The sizes and resolutions of the supersampled domain.
     """
 
-    factors = jnp.atleast_1d(ss_factors).astype(int)
+    factors = jnp.atleast_1d(jnp.array(ss_factors)).astype(int)
     assert isinstance(xs, list | tuple)
     assert factors.ndim == 1
     assert jnp.all(jnp.array([x.ndim == 1 for x in xs]))
     assert len(xs) == len(factors)
 
     n_ss = [len(x) * factor for x, factor in zip(xs, factors)]
-    dx_ss = [jnp.diff(x[:2])[0] / factor for x, factor in zip(xs, factors)]
+    # dx_ss = [jnp.diff(x[:2])[0] / factor for x, factor in zip(xs, factors)]
+    dx_ss = [
+        float(jnp.diff(x[:2])[0]) / factor if len(x) > 1 else 1 / factor
+        for x, factor in zip(xs, factors)
+    ]
 
     return n_ss, dx_ss
 
@@ -146,13 +150,13 @@ def pad_domain_specs(
         The properties of the padded domain (sizes, pads, resolutions).
     """
 
-    factors = jnp.atleast_1d(pad_factors)
+    factors = jnp.atleast_1d(jnp.array(pad_factors))
     assert jnp.all(factors > 1)
     assert len(xs) == len(factors)
 
     ns = [len(x) for x in xs]
     n_pads = [int(n * (factor - 1) / 2) for n, factor in zip(ns, factors)]
-    dxs = [jnp.diff(x[:2])[0] for x in xs]
+    dxs = [float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in xs]
 
     return ns, n_pads, dxs
 
@@ -225,25 +229,31 @@ def pad(z: Array, pad_factors: list[float]) -> Array:
         The padded signal.
     """
 
-    factors = jnp.atleast_1d(pad_factors)
+    factors = jnp.atleast_1d(jnp.array(pad_factors))
     ndim = z.ndim
     assert len(factors) == ndim
     assert jnp.all(factors > 1)
 
     ns = z.shape
 
-    pads = [2 * (int(ns[i] * (factors[i] - 1) / 2),) for i in range(ndim)]
+    pads = tuple([2 * (int(ns[i] * (factors[i] - 1) / 2),) for i in range(ndim)])
 
-    end_values = [
-        2
-        * (
-            0.5
-            * (jnp.mean(jnp.take(z, 0, axis=i)) + jnp.mean(jnp.take(z, -1, axis=i))),
-        )
-        for i in range(z.ndim)
-    ]
+    edge_value = lambda i: 0.5 * (
+        jnp.mean(jnp.take(z, 0, axis=i)) + jnp.mean(jnp.take(z, -1, axis=i))
+    )
 
-    z_padded = jnp.pad(z, pads, mode="linear_ramp", end_values=end_values)
+    end_values = tuple(
+        [
+            (
+                2 * (complex(edge_value(i)))
+                if jnp.iscomplex(edge_value(i))
+                else float(edge_value(i))
+            )
+            for i in range(z.ndim)
+        ]
+    )
+
+    z_padded = jnp.pad(z, pad_width=pads, mode="linear_ramp", end_values=end_values)
 
     return z_padded
 
@@ -277,7 +287,9 @@ def pk_cut(pk: Array, cutoff: float) -> tuple[list[slice], list[tuple[int, int]]
     idxs = [slice(idx[i].min(), idx[i].max() + 1) for i in range(pk.ndim)]
 
     # Define the pads to get back to the original size defined by pk
-    pads = [(idx[i].min(), pk.shape[i] - idx[i].max() - 1) for i in range(pk.ndim)]
+    pads = [
+        (int(idx[i].min()), int(pk.shape[i] - idx[i].max() - 1)) for i in range(pk.ndim)
+    ]
 
     return idxs, pads
 
@@ -357,7 +369,7 @@ def supersample_fourier(Y: Array, factors: list[int]) -> Array:
 
     # Calculate zero-padding widths to achieve an integer supersampling
     ns = Y.shape
-    pads = [2 * (n * (factor - 1) // 2,) for n, factor in zip(ns, factors)]
+    pads = tuple([2 * (n * (factor - 1) // 2,) for n, factor in zip(ns, factors)])
 
     # Zero pad Fourier array to supersampled size
     Y_ss = jnp.fft.fftshift(jnp.pad(Y, pads, constant_values=0))
@@ -391,10 +403,12 @@ def domain_ss(
     # Get the properties of the padded domain
     ns, n_pads, dxs = pad_domain_specs(xs, pad_factors)
 
+    ns_padded = [n + 2 * n_pad for n, n_pad in zip(ns, n_pads)]
+
     # Calculate the slices to extract the unpadded, supersampled array
     idxs_pad_ss = [
-        slice(n * f - int(f / 2), -n * f - int(f / 2))
-        for n, f in zip(n_pads, ss_factors)
+        slice(n * f - int(f / 2), N * f - n * f - int(f / 2))
+        for N, n, f in zip(ns_padded, n_pads, ss_factors)
     ]
 
     # Calculate the padded, supersampled domain
@@ -615,9 +629,17 @@ def latent_init(
 
     ns, n_pads, dxs = pad_domain_specs(xs, pad_factors)
 
+    # idxs_pad_ss = [
+    #     slice(n * f - int(f / 2), -n * f - int(f / 2))
+    #     for n, f in zip(n_pads, ss_factors)
+    # ]
+
+    ns_padded = [n + 2 * n_pad for n, n_pad in zip(ns, n_pads)]
+
+    # Calculate the slices to extract the unpadded, supersampled array
     idxs_pad_ss = [
-        slice(n * f - int(f / 2), -n * f - int(f / 2))
-        for n, f in zip(n_pads, ss_factors)
+        slice(n * f - int(f / 2), N * f - n * f - int(f / 2))
+        for N, n, f in zip(ns_padded, n_pads, ss_factors)
     ]
 
     return latent_pk, latent_ks, pads, idxs_pad_ss

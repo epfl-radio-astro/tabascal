@@ -33,6 +33,8 @@ from tabascal.tab_tools import (
     plot_init,
     plot_prior,
     run_opt,
+    nlog_like,
+    nlog_post,
 )
 from tabascal.config import TabConfig, Model
 
@@ -52,7 +54,7 @@ def tabascal_subtraction(
     if suffix:
         suffix = "_" + suffix
 
-    run_id = id_generator()
+    run_id = datetime.now().strftime("%m-%d-%YT%H:%M:%S")
 
     log_path = f"log_tab_{run_id}.txt"
     log = open(log_path, "w")
@@ -132,6 +134,7 @@ def tabascal_subtraction(
     print()
     print(f"Parameter shapes     : {shapes}")
     print(f"Number of parameters : {n_params}")
+    print(f"Data shape           : {tab_config.vis_obs.shape}")
     print(f"Number of data points: {n_data}")
 
     print()
@@ -151,20 +154,34 @@ def tabascal_subtraction(
     #     init_params_path,
     # )
 
+    nlog_l = nlog_like(prob_model, model.init_params, tab_config.vis_obs)
+    nlog_p = nlog_post(prob_model, model.init_params, tab_config.vis_obs)
+
+    print(f"log_l : {nlog_l:.3e}")
+    print(f"log_p : {nlog_p:.3e}")
+
+    init_state = model.forward(model.init_params, model.state)
+
     truth = {
-        "vis_rfi": jnp.nan
-        * jnp.zeros(
-            (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
-        ),
-        "vis_ast": jnp.nan
-        * jnp.zeros(
-            (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
-        ),
-        "gains": jnp.nan
-        * jnp.ones(
-            (tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex
-        ),
+        "vis_rfi": init_state["vis_rfi"],
+        "vis_ast": init_state["vis_ast"],
+        "gains": init_state["gains"],
     }
+
+    # truth = {
+    #     "vis_rfi": jnp.nan
+    #     * jnp.zeros(
+    #         (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
+    #     ),
+    #     "vis_ast": jnp.nan
+    #     * jnp.zeros(
+    #         (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
+    #     ),
+    #     "gains": jnp.nan
+    #     * jnp.ones(
+    #         (tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex
+    #     ),
+    # }
 
     if config["plots"]["init"]:
         plot_init(tab_config, init_pred, truth, model_name, plot_dir)
@@ -237,6 +254,16 @@ def tabascal_subtraction(
             map_path,
             params_path,
         )
+
+        opt_params = {
+            key.removesuffix("_auto_loc"): value for key, value in vi_params.items()
+        }
+
+        nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs)
+        nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs)
+
+        print(f"log_l : {nlog_l:.3e}")
+        print(f"log_p : {nlog_p:.3e}")
 
     mem_i = save_memory(mem_dir, mem_i)
 

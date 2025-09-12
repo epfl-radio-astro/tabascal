@@ -109,7 +109,8 @@ def plot_complex_real_imag(
     max_plots: int = 10,
     save_dir: str = "plots/",
 ):
-    n_params = min(param.shape[2], max_plots)
+
+    n_params = min(param.shape[1], max_plots)
     # idx = np.random.permutation(param.shape[1])
     # print(param.shape, true.shape)
     # param = param[:, idx]
@@ -149,7 +150,7 @@ def plot_complex_amp_phase(
     max_plots: int = 10,
     save_dir: str = "plots/",
 ):
-    n_params = min(param.shape[2], max_plots)
+    n_params = min(param.shape[1], max_plots)
     # idx = np.random.permutation(param.shape[1])
     # print(param.shape, true.shape)
     # param = param[:, idx]
@@ -209,8 +210,8 @@ def plot_predictions(
 
     plot_complex_real_imag(
         times=times,
-        param=pred["vis_ast"],
-        true=truth["vis_ast"],
+        param=pred["vis_ast"][:, :, 0],
+        true=truth["vis_ast"][:, 0],
         rmse=rmse_ast,
         name="Ast. Vis.",
         save_name=f"{model_name}_{type}_ast_vis",
@@ -220,8 +221,8 @@ def plot_predictions(
 
     plot_complex_amp_phase(
         times=times,
-        param=pred["vis_rfi"],
-        true=truth["vis_rfi"],
+        param=pred["vis_rfi"][:, :, 0],
+        true=truth["vis_rfi"][:, 0],
         rmse=rmse_rfi,
         name="RFI Vis.",
         save_name=f"{model_name}_{type}_rfi_vis",
@@ -232,8 +233,8 @@ def plot_predictions(
 
     plot_complex_amp_phase(
         times=times,
-        param=pred["gains"],
-        true=truth["gains"],
+        param=pred["gains"][:, :, 0],
+        true=truth["gains"][:, 0],
         rmse=rmse_gains,
         name="Gains",
         save_name=f"{model_name}_{type}_gains",

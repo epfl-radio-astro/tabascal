@@ -135,13 +135,10 @@ class RiemannVisTimeFreqCalculation(Component):
             vis_rfi_fine = calculate_rfi_vis_fine(
                 state["rfi_A"], state["rfi_phase"], a1, a2
             )
-
+            # vis_rfi_fine is shape (n_bl, n_freq_fine, n_time_fine)
             new_shape = (n_bl, n_freq, n_int_freq, n_time, n_int_time)
-            # new_shape = (n_bl, n_time, n_int)
-
-            # vis_rfi_fine is shape (n_bl, n_time_fine)
-            # vis_rfi is shape (n_bl, n_time)
             vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=(-3, -1))
+            # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
             return state
