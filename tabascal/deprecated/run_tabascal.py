@@ -38,7 +38,7 @@ from tabascal.deprecated.models import (
     fixed_orbit_rfi_full_fft_standard_model_otf_fft,
 )
 
-from tabascal.tab_tools import (
+from tabascal.deprecated.tab_tools import (
     split_args,
     read_ms,
     get_ast_fringe_rate,
