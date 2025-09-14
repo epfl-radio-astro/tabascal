@@ -40,7 +40,7 @@ class FourierTimeAst(Component):
             self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
             self.fov_deg = config.args["ast"]["pow_spec"]["fov_deg"]
-            self.ast_pad_factor = config.args["ast"]["pad_factor"]
+            self.ast_pad_factor = config.args["ast"]["time_pad_factor"]
 
             # Do expensive setup operations once
             self._compute_gp_params()
@@ -240,7 +240,7 @@ class FourierTimeConstFreqAst(Component):
             self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
             self.fov_deg = config.args["ast"]["pow_spec"]["fov_deg"]
-            self.ast_pad_factor = config.args["ast"]["pad_factor"]
+            self.ast_pad_factor = config.args["ast"]["time_pad_factor"]
 
             # Do expensive setup operations once
             self._compute_gp_params()
@@ -435,7 +435,7 @@ class FourierTimeFreqAst(Component):
             self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
             self.fov_deg = config.args["ast"]["pow_spec"]["fov_deg"]
-            self.ast_pad_factor = config.args["ast"]["pad_factor"]
+            self.ast_pad_factor = config.args["ast"]["time_pad_factor"]
 
             # Do expensive setup operations once
             self._compute_gp_params()
@@ -578,13 +578,6 @@ class FourierTimeFreqAst(Component):
                 self.sigma_ast_k[:, 1:, :] * 1e-6
             )
         self.mu_ast_k = jnp.zeros((self.n_bl, self.n_freq, self.n_ast_k), dtype=complex)
-
-        import matplotlib.pyplot as plt
-        from matplotlib.colors import LogNorm
-
-        plt.imshow(self.sigma_ast_k[0], aspect="auto", norm=LogNorm())
-        plt.colorbar()
-        plt.savefig("Pk.png", format="png", dpi=300)
 
     def _set_outputs(self):
 
