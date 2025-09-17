@@ -28,3 +28,10 @@ def Normal(name: str, mu: Array, sigma: Array):
         ),
     )
     return rv
+
+
+def standard_normal(name: str, shape: tuple):
+
+    rv = numpyro.sample(name, dist.Normal(jnp.zeros(shape), jnp.ones(shape)))
+
+    return rv

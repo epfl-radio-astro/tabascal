@@ -5,7 +5,7 @@ from jax.tree_util import tree_map
 import numpyro
 import numpyro.distributions as dist
 from tabascal.dist import MVN, Normal
-from tabascal.vis import (
+from tabascal.deprecated.vis import (
     get_ast_vis_fft,
     get_ast_vis_fft_padded,
     get_ast_vis,
@@ -867,8 +867,10 @@ def fixed_orbit_rfi_full_fft_standard_padded_model(params, args, array_args):
         g_amp, g_phase, array_args["g_times"], array_args["times"]
     )
 
-    vis_obs = get_obs_vis_gains_all(vis_ast, vis_rfi, gains, a1, a2)
+    # vis_obs = get_obs_vis_gains_all(vis_ast, vis_rfi, gains, a1, a2)
     # vis_obs = get_obs_vis_gains_ast(vis_ast, vis_rfi, gains, a1, a2)
+
+    vis_obs = vis_ast + vis_rfi
 
     return vis_obs, (vis_rfi, vis_ast, gains, rfi_A)
 

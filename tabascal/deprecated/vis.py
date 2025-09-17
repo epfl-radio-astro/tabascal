@@ -110,6 +110,28 @@ def get_rfi_vis_full(rfi_amp, args, array_args):
     return rfi_vis
 
 
+@partial(jit, static_argnums=(1,))
+def get_rfi_vis_full_no_extra(rfi_amp, args, array_args):
+    a1, a2 = array_args["a1"], array_args["a2"]
+    rfi_phase = array_args["rfi_phase"]
+    # rfi_amp has shape (n_rfi, n_ant, n_time)
+    rfi_amp_fine = vmap(lambda x, y: x @ y.T, in_axes=(0, None))(
+        rfi_amp, array_args["resample_rfi"]
+    )
+    # rfi_amp_fine has shape (n_rfi, n_ant, n_time_fine)
+    rfi_vis = jnp.sum(
+        rfi_amp_fine[:, a1]
+        * jnp.conjugate(rfi_amp_fine[:, a2])
+        * jnp.exp(1.0j * (rfi_phase[:, a1] - rfi_phase[:, a2])),
+        axis=0,
+    )
+    # rfi_vis has shape (n_bl, n_time_fine)
+    rfi_vis = averaging1(rfi_vis, args["n_int_samples"])
+    # rfi_vis = vmap(averaging, in_axes=(0, None))(rfi_vis, args["n_int_samples"])
+    # rfi_vis has shape (n_bl, n_time)
+    return rfi_vis
+
+
 @jit
 def get_rfi_vis_full_otf(rfi_amp, args):
     # rfi_amp has shape (n_rfi, n_ant, n_time)
@@ -548,3 +570,37 @@ def get_rfi_phase(times, rfi_orbit, ants_uvw, ants_xyz, freqs):
     phases = -2.0 * jnp.pi * c_distances * freqs / c
 
     return phases
+
+
+@jit
+def get_rfi_phase_from_orbit(elements, array_args):
+
+    rfi_xyz = get_rfi_xyz(array_args["times_fine_jd"], array_args["epoch_jd"], elements)
+
+    rfi_phase = get_rfi_phase(
+        rfi_xyz,
+        array_args["ants_uvw"],
+        array_args["ants_xyz"],
+        array_args["freqs"],
+    )
+
+    return rfi_phase
+
+
+@jit
+def get_rfi_phase_from_orbit_dev(elements, rfi_orbit_dev, array_args):
+
+    rfi_xyz = get_rfi_xyz(array_args["times_fine_jd"], array_args["epoch_jd"], elements)
+
+    rfi_xyz = rfi_xyz + vmap(jnp.dot, in_axes=(None, 0))(
+        array_args["resample_orbit"], rfi_orbit_dev
+    )
+
+    rfi_phase = get_rfi_phase(
+        rfi_xyz,
+        array_args["ants_uvw"],
+        array_args["ants_xyz"],
+        array_args["freqs"],
+    )
+
+    return rfi_phase

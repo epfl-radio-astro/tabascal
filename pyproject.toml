@@ -33,6 +33,7 @@ Repository = "https://github.com/epfl-radio-astro/tabascal.git"
 where = ["."]
 
 [project.scripts]
-tabascal = "tabascal.run_tabascal:main"
-tab2MS="tabascal.results_to_MS:main"
+old-tab = "tabascal.deprecated.run_tabascal:main"
+tabascal = "tabascal.scripts.run_tabascal:main"
+tab2MS="tabascal.scripts.results_to_MS:main"
 

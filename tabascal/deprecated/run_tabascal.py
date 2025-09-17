@@ -30,7 +30,7 @@ from tabascal.gp import (
     cholesky,
     find_closest_factor_greater_than,
 )
-from tabascal.models import (
+from tabascal.deprecated.models import (
     fixed_orbit_rfi_full_fft_standard_padded_model,
     fixed_orbit_rfi_fft_standard,
     fixed_orbit_rfi_full_fft_standard_model,
@@ -38,7 +38,7 @@ from tabascal.models import (
     fixed_orbit_rfi_full_fft_standard_model_otf_fft,
 )
 
-from tabascal.tab_tools import (
+from tabascal.deprecated.tab_tools import (
     split_args,
     read_ms,
     get_ast_fringe_rate,
@@ -405,6 +405,14 @@ def tabascal_subtraction(
 
     ### Check and Plot Model at init params
     init_params_base = inv_transform(init_params, array_args, inv_scaling)
+
+    shapes = {key: value.shape for key, value in init_params_base.items()}
+    n_params = sum([x.size for x in init_params.values()])
+    n_data = args["v_obs_ri"].size
+
+    print(f"Parameter shapes     : {shapes}")
+    print(f"Number of parameters : {n_params}")
+    print(f"Number of data points: {n_data}")
 
     key, subkey = random.split(key)
     init_pred = init_predict(

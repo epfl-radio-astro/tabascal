@@ -1,21 +1,18 @@
 from numpyro.infer import Predictive, SVI, Trace_ELBO, autoguide
-import numpyro
-import jax
-import jax.numpy as jnp
-
-from jax.flatten_util import ravel_pytree
-from functools import partial
 from numpyro.infer import log_likelihood
 from numpyro.infer.util import log_density
 from numpyro.optim import optax_to_numpyro
 
-import optax
-from optax.second_order import hessian_diag
-
+import jax
+import jax.numpy as jnp
 from jax import jvp, vjp, jit, vmap, random
 from jax.tree_util import tree_map
 from jax.flatten_util import ravel_pytree as flatten
 from jax.scipy.sparse.linalg import cg
+
+import optax
+from optax.second_order import hessian_diag
+
 from functools import partial
 
 
@@ -47,10 +44,10 @@ def fisher_vp(f, w, v):
 @partial(jit, static_argnums=(0,))
 def fisher_diag(nll, params):
     """Calculate the diagonal of the Fisher information matrix. Taken from Optax second_order.py (hessian_diag)."""
-    params_flat, unflatten = ravel_pytree(params)
+    params_flat, unflatten = flatten(params)
     N = len(params_flat)
     vs = jnp.eye(N)
-    comp = lambda v: jnp.vdot(v, ravel_pytree(fisher_vp(nll, params, unflatten(v)))[0])
+    comp = lambda v: jnp.vdot(v, flatten(fisher_vp(nll, params, unflatten(v)))[0])
     return jax.vmap(comp)(vs)
 
 
