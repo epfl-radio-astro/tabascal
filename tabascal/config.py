@@ -1,4 +1,6 @@
-from tabascal.tab_tools import read_ms
+from tabascal.imports import import_components
+from tabascal.components.likelihood import gaussian
+from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements
 
 import jax.numpy as jnp
@@ -41,12 +43,21 @@ class TabConfig:
             config["data"]["corr"],
             config["data"]["data_col"],
         )
+        self.set_noise(config["data"]["noise"])
+        config = fix_padding(
+            config, self.n_freq
+        )  # Bad solution, should be fixed in fft_gp. Issue when using a single frequency channel.
 
         self.get_orbital_elements(config["satellites"]["norad_ids"])
 
         self.estimate_rfi_sampling(config["rfi"]["time_int_factor"])
 
         self.args = config
+
+    def set_noise(self, noise):
+
+        if noise:
+            self.noise = noise
 
     def read_ms_params(self, freq: float, corr: str, data_col: str):
 
@@ -122,10 +133,6 @@ class TabConfig:
             fetch_orbital_elements(self.spacetrack_path, obs_epoch_jd, norad_ids)
         )
         self.n_rfi = len(self.norad_ids)
-
-
-from tabascal.imports import import_components
-from tabascal.components.likelihood import gaussian
 
 
 class Model:

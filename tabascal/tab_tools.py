@@ -101,6 +101,21 @@ def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
     return Pk
 
 
+def fix_padding(config: dict, n_freq):
+
+    try:
+        if (
+            config["rfi"]["freq_pad_factor"] < 3
+            and n_freq == 1
+            and config["rfi"]["freq_int_samples"] > 1
+        ):
+            config["rfi"]["freq_pad_factor"] = 3
+    except:
+        print("freq_pad_factor is not defined")
+
+    return config
+
+
 def read_ms(
     ms_path,
     freq: Optional[float] = None,
@@ -110,7 +125,7 @@ def read_ms(
 ):
 
     correlations = {"xx": 0, "xy": 1, "yx": 2, "yy": 3}
-    corr = correlations[corr]
+    corr_idx = correlations[corr]
 
     xds = xds_from_ms(ms_path)[0]
     xds_ant = xds_from_table(ms_path + "::ANTENNA")[0]
@@ -128,11 +143,15 @@ def read_ms(
     int_time = xds.INTERVAL.data[0].compute()
 
     times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
+    if times_mjd[1] - times_mjd[0] > 0.5:
+        times_mjd = times_mjd / (24 * 3600)
+
     # times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()) / (
     #     24 * 3600
-    # # )
-    # from astropy.time import Time
-    # print(Time(times_mjd[0], format="mjd").isot)
+    # )
+    from astropy.time import Time
+
+    print(Time(times_mjd[0], format="mjd").isot)
 
     times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
 
@@ -167,7 +186,7 @@ def read_ms(
             jnp.array(
                 xds[data_col]
                 .data.reshape(n_time, n_bl, n_freq, n_corr)
-                .compute()[:, :, chans, corr]
+                .compute()[:, :, chans, corr_idx]
             ),
             (1, 2, 0),
         ),
@@ -438,10 +457,7 @@ def run_opt(
     plt.savefig(os.path.join(plot_dir, f"{model_name}_opt_loss.pdf"), format="pdf")
 
     print()
-    print(
-        "Copying tabascal results to MS file in 'TAB_DATA' and 'TAB_RFI_DATA' columns"
-    )
-    print(os.path.split(map_path)[1])
+    print(f"Copying tabascal results to MS file from {map_path}")
     subprocess.run(
         f"tab2MS -m {ms_path} -z {map_path} -d {tab_config.args['data']['data_col']}",
         shell=True,

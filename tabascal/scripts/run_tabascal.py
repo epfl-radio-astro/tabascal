@@ -162,26 +162,26 @@ def tabascal_subtraction(
 
     init_state = model.forward(model.init_params, model.state)
 
-    truth = {
-        "vis_rfi": init_state["vis_rfi"],
-        "vis_ast": init_state["vis_ast"],
-        "gains": init_state["gains"],
-    }
-
     # truth = {
-    #     "vis_rfi": jnp.nan
-    #     * jnp.zeros(
-    #         (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
-    #     ),
-    #     "vis_ast": jnp.nan
-    #     * jnp.zeros(
-    #         (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
-    #     ),
-    #     "gains": jnp.nan
-    #     * jnp.ones(
-    #         (tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex
-    #     ),
+    #     "vis_rfi": init_state["vis_rfi"],
+    #     "vis_ast": init_state["vis_ast"],
+    #     "gains": init_state["gains"],
     # }
+
+    truth = {
+        "vis_rfi": jnp.nan
+        * jnp.zeros(
+            (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
+        ),
+        "vis_ast": jnp.nan
+        * jnp.zeros(
+            (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
+        ),
+        "gains": jnp.nan
+        * jnp.ones(
+            (tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex
+        ),
+    }
 
     if config["plots"]["init"]:
         plot_init(tab_config, init_pred, truth, model_name, plot_dir)
