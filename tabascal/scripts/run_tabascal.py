@@ -23,7 +23,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from tabsim.config import Tee, load_config
-from tabsim.tle import id_generator
 
 
 from tabascal.tab_tools import (
