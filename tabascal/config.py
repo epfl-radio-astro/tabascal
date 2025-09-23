@@ -109,6 +109,8 @@ class TabConfig:
         )
 
         self.fringe_freqs = jnp.max(fringe_freq, axis=1)
+        # bl_fr = np.abs(self.fringe_freqs)
+        # print(bl_fr.max() * bl_fr.size / jnp.sum(bl_fr))
 
         self.max_fringe_freq = jnp.max(jnp.abs(fringe_freq))
 
@@ -120,6 +122,7 @@ class TabConfig:
             * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
         )
         self.n_int_time = int(jnp.ceil(n_int_factor * self.int_time * sample_freq))
+        self.n_int_time = max(1, self.n_int_time)
 
         self.times_fine = int_sample_times(self.times, self.n_int_time).compute()
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
@@ -159,6 +162,9 @@ class Model:
 
         state = [comp.state_outputs for comp in components]
         self.state = {k: v for d in state for k, v in d.items()}
+
+        self.state["vis_ast"] = jnp.zeros_like(self.state["vis_obs"])
+        self.state["vis_rfi"] = jnp.zeros_like(self.state["vis_obs"])
 
         self.state["rmse_ast"] = jnp.array([jnp.nan])
         self.state["rmse_rfi"] = jnp.array([jnp.nan])
