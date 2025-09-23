@@ -242,16 +242,15 @@ def pad(z: Array, pad_factors: list[float]) -> Array:
         jnp.mean(jnp.take(z, 0, axis=i)) + jnp.mean(jnp.take(z, -1, axis=i))
     )
 
-    end_values = tuple(
-        [
-            (
-                2 * (complex(edge_value(i)))
-                if jnp.iscomplex(edge_value(i))
-                else float(edge_value(i))
-            )
-            for i in range(z.ndim)
-        ]
-    )
+    end_values = []
+    for i in range(z.ndim):
+        edge = edge_value(i)
+        if jnp.iscomplexobj(edge):
+            end_values.append(complex(edge))
+        else:
+            end_values.append(float(edge))
+
+    end_values = tuple(end_values)
 
     z_padded = jnp.pad(z, pad_width=pads, mode="linear_ramp", end_values=end_values)
 
