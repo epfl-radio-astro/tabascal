@@ -24,6 +24,9 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = ["jax[cuda12]"]
+ipy = ["ipython", "ipykernel"]
+test = ["pytest"]
+docs = ["sphinx", "sphinx-rtd-theme"]
 
 [project.urls]
 Repository = "https://github.com/epfl-radio-astro/tabascal.git"
