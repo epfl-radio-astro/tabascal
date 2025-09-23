@@ -453,8 +453,21 @@ def run_opt(
     print()
     print(f"Reduced Chi^2 @ opt params : {rchi2}")
 
-    plt.semilogy(vi_results.losses)
-    plt.savefig(os.path.join(plot_dir, f"{model_name}_opt_loss.pdf"), format="pdf")
+    plt.close()
+    fig, ax = plt.subplots(1, 1, figsize=(10, 7))
+    ax.plot(vi_results.losses)
+    ax.set_ylabel("Loss")
+    ax.set_xlabel("Iteration")
+    if vi_results.losses.min() < 0:
+        ax.set_yscale("symlog")
+    else:
+        ax.set_yscale("log")
+    plt.savefig(
+        os.path.join(plot_dir, f"{model_name}_opt_loss.pdf"),
+        format="pdf",
+        bbox_inches="tight",
+    )
+    plt.close()
 
     print()
     print(f"Copying tabascal results to MS file from {map_path}")
