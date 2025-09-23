@@ -240,7 +240,7 @@ def tabascal_subtraction(
 
     ### Run Optimization
     key, *subkeys = random.split(key, 3)
-    if config["inference"]["opt"]:
+    if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
         vi_params, rchi2 = run_opt(
             tab_config,
             prob_model,
@@ -263,6 +263,15 @@ def tabascal_subtraction(
 
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")
+    else:
+        print(f"Copying tabascal initial values to MS file from {init_pred_path}")
+        import subprocess
+
+        subprocess.run(
+            f"tab2MS -m {ms_path} -z {init_pred_path} -d {tab_config.args['data']['data_col']}",
+            shell=True,
+            executable="/bin/bash",
+        )
 
     mem_i = save_memory(mem_dir, mem_i)
 
@@ -334,6 +343,8 @@ def main():
     norad_path = args.norad_path
     if sim_dir:
         norad_path = os.path.join(sim_dir, "input_data/norad_ids.yaml")
+    else:
+        sim_dir = os.path.split(args.ms_path)[0]
 
     if norad_path:
         norad_ids = [int(x) for x in np.atleast_1d(np.loadtxt(norad_path))]
