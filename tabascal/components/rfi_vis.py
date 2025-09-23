@@ -29,7 +29,7 @@ class RiemannVisCalculation(Component):
             # self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"RiemannVisCalculation setup failed: {e}")
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     # def _validate_dimensions(self):
     #     """Ensure all setup operations completed successfully"""
@@ -105,7 +105,7 @@ class RiemannVisTimeFreqCalculation(Component):
             # self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"RiemannVisCalculation setup failed: {e}")
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     # def _validate_dimensions(self):
     #     """Ensure all setup operations completed successfully"""
@@ -124,6 +124,8 @@ class RiemannVisTimeFreqCalculation(Component):
         # Pre-compute everything possible
         a1 = self.a1
         a2 = self.a2
+        # a1 = self.a2
+        # a2 = self.a1
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_time = self.n_time
@@ -140,6 +142,7 @@ class RiemannVisTimeFreqCalculation(Component):
             vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=(-3, -1))
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
+            # state = {**state, "vis_rfi": state["vis_rfi"] + jnp.conjugate(vis_rfi)}
 
             return state
 

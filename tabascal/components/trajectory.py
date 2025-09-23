@@ -44,7 +44,7 @@ class PhaseCalculationRFI(Component):
             self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"PhaseCalculation setup failed: {e}")
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def _compute_ant_pos(self):
 
@@ -82,9 +82,6 @@ class PhaseCalculationRFI(Component):
         def forward(params, state):
             # Pure JAX operations only
             rfi_phase = get_rfi_phase(state["rfi_xyz"], ants_uvw, ants_xyz, freqs)
-            # [
-            #     :, :, 0, :
-            # ]
             state = {**state, "rfi_phase": rfi_phase}
 
             return state
@@ -142,7 +139,7 @@ class FixedOrbit(Component):
             self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"FixedOrbit setup failed: {e}")
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def build_set_params(self):
 
@@ -251,7 +248,7 @@ class KeplerOrbit(Component):
             self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"KeplerOrbit setup failed: {e}")
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def build_set_params(self):
         n_rfi = self.n_rfi

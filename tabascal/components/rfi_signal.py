@@ -56,7 +56,7 @@ class RealRFI(Component):
             self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"ComplexRFI setup failed: {e}")
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def build_set_params(self):
         n_rfi = self.n_rfi
@@ -274,7 +274,7 @@ class ComplexRFI(Component):
             self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"ComplexRFI setup failed: {e}")
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def build_set_params(self):
         n_rfi = self.n_rfi
@@ -541,7 +541,7 @@ class FourierGPRFI(Component):
             self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"ComplexRFI setup failed: {e}")
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def build_set_params(self):
         n_rfi = self.n_rfi
@@ -612,6 +612,16 @@ class FourierGPRFI(Component):
             self.pk_cutoff,
         )
 
+        self.get_latent_pred = lambda Z: get_latent(
+            Z,
+            self.xs,
+            self.pad_factors,
+            self.p0,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
+        )
+
         xs = [self.freqs, self.times]
         dxs = tuple([float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in xs])
 
@@ -670,21 +680,11 @@ class FourierGPRFI(Component):
             (0, 2, 3, 1),
         )
 
-        get_latent_pred = lambda Z: get_latent(
-            Z,
-            self.xs,
-            self.pad_factors,
-            self.p0,
-            self.k0s,
-            self.gammas,
-            self.pk_cutoff,
-        )
-
         # self.true_rfi_k_A = vmap(vmap(get_latent_pred, (0,), 0), (1,), 1)(rfi_A)
 
         self.true_rfi_k_A = jnp.array(
             [
-                [get_latent_pred(rfi_A[i, j]) for j in range(self.n_ant)]
+                [self.get_latent_pred(rfi_A[i, j]) for j in range(self.n_ant)]
                 for i in range(self.n_rfi)
             ]
         )
@@ -697,11 +697,19 @@ class FourierGPRFI(Component):
 
         if init_type == "prior":
             print("Using prior mean for rfi_k")
-            # self.init_rfi_A_induce = jnp.ones_like(self.mu_rfi_A)
             self.init_rfi_k = self.mu_rfi_k
         elif init_type == "truth":
             print("Using truth for rfi_A")
             self.init_rfi_k = self.true_rfi_k_A
+        elif init_type == "ones":
+            print("Using ones for rfi_k")
+            ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
+            self.init_rfi_k = jnp.array(
+                [
+                    [self.get_latent_pred(ones) for _ in range(self.n_ant)]
+                    for _ in range(self.n_rfi)
+                ]
+            )
         else:
             print("Drawing sample from prior for rfi_k")
             prior_sample = random.normal(
