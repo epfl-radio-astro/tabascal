@@ -3,12 +3,20 @@ Welcome to tabscal documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents
+   :caption: General
 
    usage
    output
-..    config
-..    components
+   components
+   concepts
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer
+
+   installation
+   api
+
 
 Indices and tables
 ==================
