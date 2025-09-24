@@ -1,0 +1,87 @@
+##################
+# Data parameters
+##################
+data:
+  sim_dir: null           # Optional - Can be provided when running tabascal   
+  ms_path: null           # Optional - Can be provided when running tabascal 
+  freq: null              # Optional - Defaults to channel 0
+  data_col: DATA          # Optional - Defaults to 'DATA'
+  corr: xx                # Optional - Defaults to 'xx' polarization, i.e. correlation 0
+  noise: null             # Optional - Defaults to reading from the MS file
+######################
+# Plotting parameters
+######################
+plots:
+  init: true              # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the initial parameter estimate
+  truth: true             # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the true parameter estimate
+  prior: true             # Optional - Plot the prior distribution over the astronomical and RFI visibilities as well as the gains
+  prior_samples: 100      # Optional - Number of prior samples to use when plotting the prior
+#######################
+# Inference parameters
+#######################
+inference:
+  opt: true               # Optional - Whether to run the optimization to find optimal (MAP) parameters
+  fisher: false           # Optional - Whether to run the Fisher covariance prediction at the optimal (MAP) location found
+  mcmc: false             # Optional - Whether to run MCMC to sample the posterior distribution
+##########################
+# Optimization parameters
+##########################
+opt:
+  epsilon: 1e-2           # Optional - Step size in the optimization run
+  max_iter: 500           # Optional - Maximum number of iterations to run the optimization for
+  guide: map              # Optional - The type of optimization to run. Currently only 'map' is possible
+  dual_run: true          # Optional - Whether to continue optimzation for a second run using a step size 10x smaller
+################################################
+# Fisher-based covariance prediction parameters
+################################################
+fisher:
+  max_cg_iter: 10000     # Optional - Maximum number of conjugate gradient steps to use when when estimating the Fisher-based covariance estimate
+  n_samples: 1           # Optional - Number of samples to use for the Fisher-based covariance estimate 
+###################################################
+# Astronomical prior and initialization parameters
+####################################################
+ast:
+  init: est             # Optional - The initialization method for the astronomical visibility parameters. Options are 'est', 'prior', 'truth', 'truth_mean'
+  mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'prior', 'truth', 'truth_mean'
+  pow_spec:
+    P0: null            # Optional - Power spectrum value at k=0 for the astronomical visibility parameters prior standard deviation 
+    gamma: 1.0          # Optional - Exponential of the power law section of the power spectrum for astronomical visibility parameters
+    k0: 1e-3            # Optional - Position of the knee of the power spectrum
+##########################################
+# RFI prior and initialization parameters
+##########################################
+rfi:
+  init: est             # Optional - The initialization method for the RFI signal parameters. Options are 'est', 'prior', 'truth'
+  mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'truth'
+  corr_time: 24         # Optional - Correlation time of the RFI signal in seconds
+  var: null             # Optional - Variance of the RFI signal in Jy. When null an estimate is made based on the data
+  n_int_factor: 1       # Optional - Factor to increase the number of integration samples over the predicted value
+  n_int_samples: null   # Optional - Specify the number of integration samples to use
+############################
+# Satellite path parameters
+############################
+satellites:
+  norad_ids_path: null  # Optional - Path to text file containing NORAD IDs of astellits to include. File should have one NORAD ID per line
+  norad_ids: []         # Optional - NORAD IDs of satellites to include
+  spacetrack_path: null # Required if any TLE satellites are included - Path to the Space-Track login config file
+  tle_dir: null         # Optional - Path of the directory where TLEs will be saved for future runs
+  tle_offset: 0         # Optional - Time offset (in days) for the TLE that is used in tabascal. Specifically for testing 
+  sat_ids: []           # Optional - Satellite IDs of satellites with circular trajectories to include
+  ole_path: null        # Optional - Path to the csv '.ole' file containing circular trajectory-based satellite orbit parameters
+###########################################
+# Gain prior and initialization parameters
+###########################################
+gains:
+  init: prior           # Optional - The initialization method for the gain parameters. Options are 'prior', 'truth'
+  amp_mean: 1.0         # Optional - Mean of the prior distribution over the gain amplitudes. Options are 'truth' or a value like 1.0
+  phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radiands. Options are 'truth' or a value like 0.0
+  amp_std: 1.0          # Optional - Standard deviation of the prior distribution over the gain amplitudes as a percentage
+  phase_std: 1.0        # Optional - Standard deviation of the prior distribution over the gain phases in degrees
+  corr_time: 180        # Optional - Correlation time of the gains in minutes
+# ###################
+# # Model parameters
+# ###################
+# model:
+#   func: fixed_orbit_rfi_full_fft_standard_model
+#   name: fixed_orbit_rfi
+  
