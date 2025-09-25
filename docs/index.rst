@@ -7,6 +7,7 @@ Welcome to tabscal documentation
 
    usage
    output
+   config
    components
    concepts
 
