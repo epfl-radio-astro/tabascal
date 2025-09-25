@@ -2,7 +2,7 @@
 
 ## Installation
 
-TABASCAL interacts with Measurement Sets and therefore deoends on `python-casacore`. As such, on Mac OS we highly recommend using conda environments to install `python-casacore` first. 
+TABASCAL interacts with Measurement Sets and therefore depends on `python-casacore`. As such, on Mac OS we highly recommend using conda environments to install `python-casacore` first. 
 
 ### Create conda environment with `python-casacore` installed
 
@@ -56,7 +56,7 @@ Assuming you have cloned the repository, navigate to the `tabascal/examples` dir
 
 ``` 
 tabascal/
-    ├──examples/
+    ├── examples/
 |       └── ex_spacetrack_login.yaml    # Space-Track login details template
 |       └── sim_target_8A.yaml          # Simulation configuration file
 |       └── tab_target.yaml             # TABASCAL configuration file
@@ -86,7 +86,7 @@ Total simulation time : 0:00:15.483440
 
 The path printed at the end, `data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI` is the path to the simulation directory which contains the simulated dataset and many other simulation details. The structure of this directory and its contents are described in the [tab-sim documentation](https://tab-sim.readthedocs.io/en/latest/output.html).
 
-`sim-vis` has a help prompt wich can be accessed with:
+`sim-vis` has a help prompt wich can be accessed with
 
 ```bash
 sim-vis -h
@@ -100,7 +100,18 @@ RFI subtraction (TABASCAL) runs are also defined by YAML configuration files and
 tabascal -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI -st spacetrack_login.yaml
 ```
 
-Is you have a Measurement Set you can run TABASCAL on that directly with
+The output of a successful run with TABASCAL will show lines like
+
+```text
+Copying tabascal results to MS file from data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI/results/map_pred_Custom.zarr
+Writing tabascal results to ['TAB_AST_DATA', 'TAB_RFI_DATA', 'TAB_AST_RES', 'TAB_RFI_RES', 'TAB_RES_DATA'] columns in MS file.
+Data type: 24, SORT_COLUMNSnot handled
+Data type: 24, SORT_ORDERnot handled
+```
+
+The results of the TABASCAL run are saved in a `.zarr` file and then transferred into the Measurement Set.
+
+If you have a Measurement Set from another source you can run TABASCAL on that directly with
 
 ```bash
 tabascal -c path/to/config.yaml -ms path/to/ms/file.ms -st spacetrack_login.yaml
@@ -111,4 +122,3 @@ The `tabascal` script also has a help context whcih can be accessed with
 ```bash
 tabascal -h
 ```
-
