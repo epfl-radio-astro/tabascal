@@ -2,6 +2,7 @@ from tabascal.imports import import_components
 from tabascal.components.likelihood import gaussian
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements
+from tabascal.interferometry import get_strides_and_idxs
 
 import jax.numpy as jnp
 from jax import vmap
@@ -50,7 +51,14 @@ class TabConfig:
 
         self.get_orbital_elements(config["satellites"]["norad_ids"])
 
-        self.estimate_rfi_sampling(config["rfi"]["time_int_factor"])
+        config["rfi"]["min_time_bins"] = 10
+        config["rfi"]["max_time_bins"] = 30
+
+        self.estimate_rfi_sampling(
+            config["rfi"]["time_int_factor"],
+            config["rfi"]["min_time_bins"],
+            config["rfi"]["max_time_bins"],
+        )
 
         self.args = config
 
@@ -84,7 +92,9 @@ class TabConfig:
         self.a1 = ms_params["a1"]
         self.a2 = ms_params["a2"]
 
-    def estimate_rfi_sampling(self, n_int_factor: float):
+    def estimate_rfi_sampling(
+        self, n_int_factor: float, min_time_bins: int, max_time_bins: int
+    ):
 
         jd_minute = 1 / (24 * 60)
         times_jd_coarse = jnp.arange(
@@ -97,6 +107,7 @@ class TabConfig:
 
         rfi_xyz = kepler_orbit_many(times_jd_coarse, self.epoch_jd, self.elements)
 
+        # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
         fringe_freq = vmap(
             calculate_fringe_frequency, (None, None, 0, None, None, None)
         )(
@@ -108,21 +119,42 @@ class TabConfig:
             self.phase_centre["dec"],
         )
 
-        self.fringe_freqs = jnp.max(fringe_freq, axis=1)
-        # bl_fr = np.abs(self.fringe_freqs)
-        # print(bl_fr.max() * bl_fr.size / jnp.sum(bl_fr))
+        # # self.fringe_freqs is shape (n_rfi, n_bl)
+        # self.fringe_freqs = jnp.max(jnp.abs(fringe_freq), axis=1)
 
-        self.max_fringe_freq = jnp.max(jnp.abs(fringe_freq))
+        # self.max_fringe_freq = jnp.max(jnp.abs(fringe_freq))
+
+        # self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
+
+        # sample_freq = (
+        #     jnp.pi
+        #     * self.max_fringe_freq
+        #     * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
+        # )
+        # self.n_int_time = int(jnp.ceil(n_int_factor * self.int_time * sample_freq))
+        # self.n_int_time = max(1, self.n_int_time)
 
         self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
-
-        sample_freq = (
+        sample_freq_bl = (
             jnp.pi
-            * self.max_fringe_freq
+            * jnp.max(jnp.abs(fringe_freq), axis=(0, 1))
             * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
         )
-        self.n_int_time = int(jnp.ceil(n_int_factor * self.int_time * sample_freq))
-        self.n_int_time = max(1, self.n_int_time)
+        n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(int)
+        # print(bl_fr.max() * bl_fr.size / jnp.sum(bl_fr))
+
+        self.time_sample_idxs, self.time_strides, self.n_int_time = (
+            get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
+        )
+
+        saving = (
+            np.sum(
+                [i.size / s for i, s in zip(self.time_sample_idxs, self.time_strides)]
+            )
+            / self.n_bl
+        )
+
+        print(f"New intermediate is {100*saving:.2f} % of original size")
 
         self.times_fine = int_sample_times(self.times, self.n_int_time).compute()
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
