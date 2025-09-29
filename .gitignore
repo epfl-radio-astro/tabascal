@@ -1,5 +1,6 @@
 tabascal.egg-info/*
 build/*
+docs/_build
 examples/spacetrack_login.yaml
 examples/data
 examples/test
