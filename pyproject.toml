@@ -17,7 +17,7 @@ maintainers = [
 ]
 description = "Trajectory based Radio Frequency Interference (RFI) subtraction and calibration using Bayesian methods for radio interferometeric data."
 
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.9"
 dependencies = [
     "tabsim", "numpyro", "optax", 
 ]
