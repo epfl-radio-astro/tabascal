@@ -7,17 +7,20 @@ from tabsim.jax.coordinates import (  # type: ignore
     kepler_orbit_many,
     kepler_orbit_fisher,
     gmsa_from_jd,
+    mjd_to_jd,
 )
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase
 from tabascal.fft_gp import domain_ss
+from tabascal.components import Component, assert_attr_shape
 
 import jax.numpy as jnp
-from jax import vmap
+from jax import vmap, Array
 import numpy as np
 
-from tabascal.components import Component, assert_attr_shape
+from skyfield.api import Distance, load
+from skyfield.toposlib import ITRSPosition
 
 
 class PhaseCalculationRFI(Component):
@@ -54,7 +57,9 @@ class PhaseCalculationRFI(Component):
         self.ants_uvw = jnp.transpose(
             itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
-        self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
+
+        self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
+        # self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
 
     def _validate_dimensions(self):
         """Ensure all setup operations completed successfully"""
@@ -187,7 +192,8 @@ class FixedOrbit(Component):
         # gsa = gmsa_from_jd(self.times_jd_fine) % 360
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
-        self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
+        self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
+        # self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
         self.ants_uvw = jnp.transpose(
             itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
@@ -337,6 +343,18 @@ class KeplerOrbit(Component):
         assert_attr_shape(self, "L_rfi_orbit", (self.n_rfi, 6, 6))
         assert_attr_shape(self, "init_rfi_orbit", orbit_shape)
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
+
+
+def itrs_to_gcrs_sf(pos_itrs: Array, times_jd: Array) -> Array:
+
+    ts = load.timescale()
+    t_sf = ts.ut1_jd(times_jd)
+
+    pos_gcrs = jnp.stack(
+        [ITRSPosition(Distance(m=pos)).at(t_sf).position.m.T for pos in pos_itrs]
+    )
+
+    return pos_gcrs
 
 
 def fetch_orbital_elements(spacetrack_path, obs_epoch_jd, norad_ids):
