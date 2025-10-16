@@ -51,7 +51,7 @@ class TabConfig:
 
         self.get_orbital_elements(config["satellites"]["norad_ids"])
 
-        config["rfi"]["min_time_bins"] = 10
+        config["rfi"]["min_time_bins"] = 1
         config["rfi"]["max_time_bins"] = 30
 
         self.estimate_rfi_sampling(
