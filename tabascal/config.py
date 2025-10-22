@@ -97,7 +97,7 @@ class TabConfig:
     ):
 
         jd_minute = 1 / (24 * 60)
-        times_jd_coarse = jnp.arange(
+        times_jd_coarse = np.arange(
             self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
         )
 

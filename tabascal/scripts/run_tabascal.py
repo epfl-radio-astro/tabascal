@@ -14,10 +14,13 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = (
 # os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90" # GPU Memory Preallocation Factor
 
 import jax
-from jax import random
+from jax import random, config
 import jax.profiler
 import jax.numpy as jnp
 
+config.update(
+    "jax_enable_x64", True
+)  # Not working without float64 probably due to times in JD
 # jax.config.update("jax_platform_name", "cpu")
 
 import numpy as np

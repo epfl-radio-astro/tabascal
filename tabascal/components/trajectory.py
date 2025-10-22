@@ -348,7 +348,7 @@ class KeplerOrbit(Component):
 def itrs_to_gcrs_sf(pos_itrs: Array, times_jd: Array) -> Array:
 
     ts = load.timescale()
-    t_sf = ts.ut1_jd(times_jd)
+    t_sf = ts.ut1_jd(np.array(times_jd))
 
     pos_gcrs = jnp.stack(
         [ITRSPosition(Distance(m=pos)).at(t_sf).position.m.T for pos in pos_itrs]

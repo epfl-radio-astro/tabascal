@@ -135,7 +135,7 @@ def read_ms(
     ants_itrf = jnp.array(xds_ant.POSITION.data.compute())
 
     n_ant = ants_itrf.shape[0]
-    n_time = len(jnp.unique(xds.TIME.data.compute()))
+    n_time = len(np.unique(xds.TIME.data.compute()))
     n_bl = xds.DATA.data.shape[0] // n_time
     n_freq, n_corr = xds.DATA.data.shape[1:]
 
