@@ -11,7 +11,7 @@ class Component(ABC):
     required_inputs: Dict[str, tuple] = {}
     parameter_shapes: Dict[str, tuple] = {}
     output_shapes: Dict[str, tuple] = {}
-    outputs: Dict[str, Array] = {}
+    state_outputs: Dict[str, Array] = {}
     init_params: Dict[str, Array] = {}
     init_params_base: Dict[str, Array] = {}
 

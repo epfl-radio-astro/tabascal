@@ -5,7 +5,7 @@ import optax
 
 import jax
 import jax.numpy as jnp
-from jax import random
+from jax import random, Array
 from jax.tree_util import tree_map
 
 from tabascal.opt import SVIRunResult
@@ -30,7 +30,7 @@ from numpyro.infer import log_likelihood
 from numpyro.infer.util import log_density
 
 
-def nlog_like(prob_model, params, obs_data):
+def nlog_like(prob_model: Callable, params: dict, obs_data: Array):
 
     nlog_l = -log_likelihood(prob_model, params, obs_data=obs_data, batch_ndims=0)[
         "obs"
@@ -39,7 +39,7 @@ def nlog_like(prob_model, params, obs_data):
     return nlog_l
 
 
-def nlog_post(prob_model, params, obs_data):
+def nlog_post(prob_model: Callable, params: dict, obs_data: Array):
 
     nlog_p = (
         -log_density(
@@ -55,7 +55,7 @@ def nlog_post(prob_model, params, obs_data):
     return nlog_p
 
 
-def reduced_chi2(pred, true, noise):
+def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
 
     complex_types = [
         complex,
@@ -71,7 +71,7 @@ def reduced_chi2(pred, true, noise):
     else:
         norm = true.size
 
-    rchi2 = jnp.sum((jnp.abs(pred - true) / noise) ** 2) / norm
+    rchi2 = jnp.sum((jnp.abs(pred[~flags] - true[~flags]) / noise) ** 2) / norm
 
     return rchi2
 
@@ -135,20 +135,17 @@ def read_ms(
     ants_itrf = jnp.array(xds_ant.POSITION.data.compute())  # type: ignore
 
     n_ant = ants_itrf.shape[0]
-    n_time = len(np.unique(xds.TIME.data.compute()))
-    n_bl = xds.DATA.data.shape[0] // n_time
-    n_freq, n_corr = xds.DATA.data.shape[1:]
+    n_time = len(np.unique(xds.TIME.data.compute()))  # type: ignore
+    n_bl = xds.DATA.data.shape[0] // n_time  # type: ignore
+    n_freq, n_corr = xds.DATA.data.shape[1:]  # type: ignore
 
     freqs = jnp.array(xds_spec.CHAN_FREQ.data[0].compute())  # type: ignore
     int_time = xds.INTERVAL.data[0].compute()  # type: ignore
 
-    times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())  # type: ignore
+    times_mjd = np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())  # type: ignore
     if times_mjd[1] - times_mjd[0] > 0.5:
         times_mjd = times_mjd / (24 * 3600)
 
-    # times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()) / (
-    #     24 * 3600
-    # )
     from astropy.time import Time
 
     print(Time(times_mjd[0], format="mjd").isot)
@@ -181,12 +178,20 @@ def read_ms(
         "int_time": int_time,
         "freqs": freqs[chans],
         "ants_itrf": ants_itrf,
+        "flags": jnp.transpose(
+            jnp.array(
+                xds["FLAG"]  # type: ignore
+                .data.reshape(n_time, n_bl, n_freq, n_corr)[:, :, chans, corr_idx]
+                .compute()
+            ),
+            (1, 2, 0),
+        ),
         "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),  # type: ignore
         "vis_obs": jnp.transpose(
             jnp.array(
                 xds[data_col]  # type: ignore
-                .data.reshape(n_time, n_bl, n_freq, n_corr)
-                .compute()[:, :, chans, corr_idx]
+                .data.reshape(n_time, n_bl, n_freq, n_corr)[:, :, chans, corr_idx]
+                .compute()
             ),
             (1, 2, 0),
         ),
@@ -221,6 +226,7 @@ def run_svi(
 
     # optimizer = numpyro.optim.Adam(epsilon)
     optimizer = optax_to_numpyro(optax.adabelief(epsilon))
+    # optimizer = optax_to_numpyro(optax.adamw(epsilon))
     svi = SVI(prob_model, guide, optimizer, Trace_ELBO())
     svi_results = svi.run(
         key,
@@ -318,7 +324,9 @@ def init_predict(
         batch_ndims=1,
     )
     init_pred = pred(subkey)
-    rchi2 = reduced_chi2(init_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
+    rchi2 = reduced_chi2(
+        init_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise, tab_config.flags
+    )
     print()
     print(f"Reduced Chi^2 @ init params : {rchi2}")
 
@@ -467,7 +475,9 @@ def run_opt(
     #     print(f"RMSE RFI Vis    : {jnp.mean(vi_pred['rmse_rfi']):.5f}")
     #     print(f"RMSE AST Vis    : {jnp.mean(vi_pred['rmse_ast']):.5f}")
 
-    rchi2 = reduced_chi2(vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
+    rchi2 = reduced_chi2(
+        vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise, tab_config.flags
+    )
     print()
     print(f"Reduced Chi^2 @ opt params : {rchi2}")
 

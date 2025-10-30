@@ -1,11 +1,12 @@
 from tabascal.imports import import_components
+from tabascal.components import Component
 from tabascal.components.likelihood import gaussian
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements
 from tabascal.interferometry import get_strides_and_idxs
 
 import jax.numpy as jnp
-from jax import vmap
+from jax import vmap, Array
 
 import numpy as np
 
@@ -27,7 +28,7 @@ from tabsim.dask.interferometry import int_sample_times
 import numpyro.distributions as dist
 import numpyro
 
-from typing import Callable
+from typing import Callable, Optional
 
 
 class TabConfig:
@@ -58,6 +59,7 @@ class TabConfig:
             config["rfi"]["time_int_factor"],
             config["rfi"]["min_time_bins"],
             config["rfi"]["max_time_bins"],
+            config["rfi"]["n_int_times"],
         )
 
         self.args = config
@@ -68,7 +70,6 @@ class TabConfig:
             self.noise = noise
 
     def read_ms_params(self, freq: float, corr: str, data_col: str):
-
         ms_params = read_ms(self.ms_path, freq, None, corr, data_col)
 
         self.phase_centre = {"ra": ms_params["ra"], "dec": ms_params["dec"]}
@@ -76,6 +77,7 @@ class TabConfig:
         self.ants_itrf = ms_params["ants_itrf"]
         self.vis_obs = ms_params["vis_obs"]
         self.uvw = ms_params["uvw"]
+        self.flags = ms_params["flags"]
 
         self.n_ant = ms_params["n_ant"]
         self.n_bl = ms_params["n_bl"]
@@ -93,55 +95,63 @@ class TabConfig:
         self.a2 = ms_params["a2"]
 
     def estimate_rfi_sampling(
-        self, n_int_factor: float, min_time_bins: int, max_time_bins: int
+        self,
+        n_int_factor: float,
+        min_time_bins: int,
+        max_time_bins: int,
+        n_int_times: Optional[int] = None,
     ):
 
-        jd_minute = 1 / (24 * 60)
-        times_jd_coarse = np.arange(
-            self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
-        )
+        if n_int_times is None:
 
-        gh0 = (gmsa_from_jd(times_jd_coarse) - self.phase_centre["ra"]) % 360  # type: ignore
+            jd_minute = 1 / (24 * 60)
+            times_jd_coarse = np.arange(
+                self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
+            )
 
-        ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
+            gh0 = (gmsa_from_jd(times_jd_coarse) - self.phase_centre["ra"]) % 360  # type: ignore
 
-        rfi_xyz = kepler_orbit_many(times_jd_coarse, self.epoch_jd, self.elements)
+            ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
 
-        # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
-        fringe_freq = vmap(
-            calculate_fringe_frequency, (None, None, 0, None, None, None)
-        )(
-            jd_to_mjd(times_jd_coarse),
-            jnp.max(self.freqs),
-            rfi_xyz,
-            self.ants_itrf,
-            ants_u,
-            self.phase_centre["dec"],
-        )
+            rfi_xyz = kepler_orbit_many(times_jd_coarse, self.epoch_jd, self.elements)  # type: ignore
 
-        # # self.fringe_freqs is shape (n_rfi, n_bl)
-        # self.fringe_freqs = jnp.max(jnp.abs(fringe_freq), axis=1)
+            # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
+            fringe_freq = vmap(
+                calculate_fringe_frequency, (None, None, 0, None, None, None)
+            )(
+                jd_to_mjd(times_jd_coarse),  # type: ignore
+                jnp.max(self.freqs),  # type: ignore
+                rfi_xyz,
+                self.ants_itrf,
+                ants_u,
+                self.phase_centre["dec"],
+            )
 
-        # self.max_fringe_freq = jnp.max(jnp.abs(fringe_freq))
+            # # self.fringe_freqs is shape (n_rfi, n_bl)
+            # self.fringe_freqs = jnp.max(jnp.abs(fringe_freq), axis=1)
 
-        # self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
+            # self.max_fringe_freq = jnp.max(jnp.abs(fringe_freq))
 
-        # sample_freq = (
-        #     jnp.pi
-        #     * self.max_fringe_freq
-        #     * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
-        # )
-        # self.n_int_time = int(jnp.ceil(n_int_factor * self.int_time * sample_freq))
-        # self.n_int_time = max(1, self.n_int_time)
+            # self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
 
-        self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
-        sample_freq_bl = (
-            jnp.pi
-            * jnp.max(jnp.abs(fringe_freq), axis=(0, 1))
-            * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
-        )
-        n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(int)
-        # print(bl_fr.max() * bl_fr.size / jnp.sum(bl_fr))
+            # sample_freq = (
+            #     jnp.pi
+            #     * self.max_fringe_freq
+            #     * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
+            # )
+            # self.n_int_time = int(jnp.ceil(n_int_factor * self.int_time * sample_freq))
+            # self.n_int_time = max(1, self.n_int_time)
+
+            self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
+            sample_freq_bl = (
+                jnp.pi
+                * jnp.max(jnp.abs(fringe_freq), axis=(0, 1))
+                * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
+            )
+            n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(
+                int
+            )
+            # print(bl_fr.max() * bl_fr.size / jnp.sum(bl_fr))
 
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
             get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
@@ -179,33 +189,55 @@ class Model:
         likelihood: Callable = gaussian,
     ):
 
-        self.noise = config.noise
         self.likelihood = lambda pred, obs_data: likelihood(
-            pred, obs_data, {"noise": self.noise}
+            pred, obs_data, {"noise": config.noise, "flags": config.flags}
         )
 
-        components = [C() for C in import_components(component_list)]
-        self.components = components
-        for comp in components:
-            comp.setup(config)
-
-        init_params = [comp.init_params_base for comp in components]
-        self.init_params = {k: v for d in init_params for k, v in d.items()}
-
-        state = [comp.state_outputs for comp in components]
-        self.state = {k: v for d in state for k, v in d.items()}
-
-        self.state["vis_ast"] = jnp.zeros_like(self.state["vis_obs"])
-        self.state["vis_rfi"] = jnp.zeros_like(self.state["vis_obs"])
-
-        self.state["rmse_ast"] = jnp.array([jnp.nan])
-        self.state["rmse_rfi"] = jnp.array([jnp.nan])
-        self.state["rmse_gains"] = jnp.array([jnp.nan])
-
+        self.components = self.build_components(config, component_list)
+        self.init_params = self.build_init_params()
+        self.state = self.build_state(config)
         self.forward = self.build_forward()
         self.prob_model = self.build_prob_model()
 
-    def build_forward(self):
+    def build_components(
+        self, config: TabConfig, component_list: list[str]
+    ) -> list[Component]:
+
+        components = [C() for C in import_components(component_list)]
+
+        for comp in components:
+            comp.setup(config)
+
+        return components
+
+    def build_init_params(self) -> dict[str, Array]:
+
+        init_params = [comp.init_params_base for comp in self.components]
+        init_params = {k: v for d in init_params for k, v in d.items()}
+
+        return init_params
+
+    def build_state(self, config: TabConfig) -> dict[str, Array]:
+
+        state = [comp.state_outputs for comp in self.components]
+        state = {k: v for d in state for k, v in d.items()}
+
+        state["rfi_phase"] = jnp.zeros(
+            (config.n_rfi, config.n_ant, config.n_freq, config.n_time)
+        )
+        state["rfi_A"] = jnp.zeros(
+            (config.n_rfi, config.n_ant, config.n_freq, config.n_time)
+        )
+        state["vis_rfi"] = jnp.zeros_like(state["vis_obs"])
+        state["vis_ast"] = jnp.zeros_like(state["vis_obs"])
+
+        state["rmse_ast"] = jnp.array([jnp.nan])
+        state["rmse_rfi"] = jnp.array([jnp.nan])
+        state["rmse_gains"] = jnp.array([jnp.nan])
+
+        return state
+
+    def build_forward(self) -> Callable:
         forwards = [comp.build_forward() for comp in self.components]
 
         def forward(params, state):
@@ -217,7 +249,7 @@ class Model:
 
         return forward
 
-    def build_set_params(self):
+    def build_set_params(self) -> Callable:
         set_params_functions = [comp.build_set_params() for comp in self.components]
 
         def set_params():
@@ -230,7 +262,7 @@ class Model:
 
         return set_params
 
-    def build_prob_model(self):
+    def build_prob_model(self) -> Callable:
 
         set_params = self.build_set_params()
         forward = self.forward
