@@ -679,6 +679,16 @@ class FourierTimeFreqGPAst(Component):
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
             self.ss_factors = [1, 1]
 
+            self.get_latent_pred = lambda Z: get_latent(
+                Z,
+                self.xs,
+                self.pad_factors,
+                self.p0,
+                self.k0s,
+                self.gammas,
+                self.pk_cutoff,
+            )
+
             # Do expensive setup operations once
             self._compute_gp_params()
             self._compute_prior_params()
@@ -803,19 +813,9 @@ class FourierTimeFreqGPAst(Component):
             (1, 2, 0),
         )
 
-        get_latent_pred = lambda Z: get_latent(
-            Z,
-            self.xs,
-            self.pad_factors,
-            self.p0,
-            self.k0s,
-            self.gammas,
-            self.pk_cutoff,
-        )
-
         # self.true_ast_k = vmap(get_latent_pred, (0,), 0)(vis_ast)
 
-        self.true_ast_k = jnp.array([get_latent_pred(vis) for vis in vis_ast])
+        self.true_ast_k = jnp.array([self.get_latent_pred(vis) for vis in vis_ast])
 
         self.true_ast_k_base = self.inv_transform(
             self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
@@ -851,6 +851,14 @@ class FourierTimeFreqGPAst(Component):
             self.init_ast_k = self.mu_ast_k
         elif init_type == "truth":
             self.init_ast_k = self.true_ast_k
+        elif init_type == "ones":
+            # self.init_ast_k = jnp.ones(
+            #     (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex
+            # )
+            ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
+            self.init_ast_k = jnp.stack(
+                self.n_bl * [self.get_latent_pred(ones)], axis=0
+            )
         else:
             prior_sample = random.normal(
                 random.PRNGKey(1),

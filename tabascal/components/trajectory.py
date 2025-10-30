@@ -351,7 +351,10 @@ def itrs_to_gcrs_sf(pos_itrs: Array, times_jd: Array) -> Array:
     t_sf = ts.ut1_jd(np.array(times_jd))
 
     pos_gcrs = jnp.stack(
-        [ITRSPosition(Distance(m=pos)).at(t_sf).position.m.T for pos in pos_itrs]
+        [
+            np.array(ITRSPosition(Distance(m=np.array(pos))).at(t_sf).position.m.T)
+            for pos in pos_itrs
+        ]
     )
 
     return pos_gcrs

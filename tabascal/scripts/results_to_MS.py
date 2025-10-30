@@ -55,7 +55,7 @@ def write_results(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
     vis_rfi_res = vis_obs - vis_rfi
     vis_res = vis_obs - vis_ast - vis_rfi
 
-    xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)
+    xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)  # type: ignore
     xds_ms = xds_ms.assign(TAB_RFI_DATA=vis_rfi)
     xds_ms = xds_ms.assign(TAB_AST_RES=vis_ast_res)
     xds_ms = xds_ms.assign(TAB_RFI_RES=vis_rfi_res)
@@ -70,7 +70,9 @@ def write_results(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
     ]
     col_keywords = {col: {"UNIT": "Jy"} for col in cols}
 
-    print(f"Writing tabascal results to {cols} columns in MS file.")
+    print(
+        f"Writing tabascal results to {cols} columns in MS file \n from TAB results in {results_zarr_path}"
+    )
 
     dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
 

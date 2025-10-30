@@ -532,8 +532,8 @@ class FourierGPRFI(Component):
                     config.args["data"]["zarr_path"], config.args["data"]["data_col"]
                 )
 
-            # if config.args["rfi"]["init"] == "est":
-            #     self._estimate_params(config.fringe_freqs)
+            if config.args["rfi"]["init"] == "est":
+                self._estimate_params(config.args["rfi"]["est"])
 
             self._compute_init_params(config.args["rfi"]["init"])
 
@@ -661,6 +661,28 @@ class FourierGPRFI(Component):
 
         return base_params
 
+    def _estimate_params(self, est_path: str):
+
+        import numpy as np
+
+        rfi_A = np.sqrt(np.abs(np.load(est_path)[:, :, -1]))
+
+        self.est_rfi_k_A = jnp.array(
+            [
+                [
+                    self.get_latent_pred(
+                        rfi_A[i, None] * jnp.ones((self.n_freq, self.n_time))
+                    )
+                    for _ in range(self.n_ant)
+                ]
+                for i in range(self.n_rfi)
+            ]
+        )
+
+        self.est_rfi_k_A_base = self.inv_transform(
+            self.est_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k
+        )
+
     def _compute_true_params(self, zarr_path, data_col):
 
         xds = xr.open_zarr(zarr_path)
@@ -710,6 +732,9 @@ class FourierGPRFI(Component):
                     for _ in range(self.n_rfi)
                 ]
             )
+        elif init_type == "est":
+            print("Using estimate for rfi_k")
+            self.init_rfi_k = self.est_rfi_k_A
         else:
             print("Drawing sample from prior for rfi_k")
             prior_sample = random.normal(

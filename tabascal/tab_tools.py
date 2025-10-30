@@ -127,22 +127,22 @@ def read_ms(
     correlations = {"xx": 0, "xy": 1, "yx": 2, "yy": 3}
     corr_idx = correlations[corr]
 
-    xds = xds_from_ms(ms_path)[0]
-    xds_ant = xds_from_table(ms_path + "::ANTENNA")[0]
-    xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
-    xds_src = xds_from_table(ms_path + "::SOURCE")[0]
+    xds = xds_from_ms(ms_path)[0]  # type: ignore
+    xds_ant = xds_from_table(ms_path + "::ANTENNA")[0]  # type: ignore
+    xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]  # type: ignore
+    xds_src = xds_from_table(ms_path + "::SOURCE")[0]  # type: ignore
 
-    ants_itrf = jnp.array(xds_ant.POSITION.data.compute())
+    ants_itrf = jnp.array(xds_ant.POSITION.data.compute())  # type: ignore
 
     n_ant = ants_itrf.shape[0]
     n_time = len(np.unique(xds.TIME.data.compute()))
     n_bl = xds.DATA.data.shape[0] // n_time
     n_freq, n_corr = xds.DATA.data.shape[1:]
 
-    freqs = jnp.array(xds_spec.CHAN_FREQ.data[0].compute())
-    int_time = xds.INTERVAL.data[0].compute()
+    freqs = jnp.array(xds_spec.CHAN_FREQ.data[0].compute())  # type: ignore
+    int_time = xds.INTERVAL.data[0].compute()  # type: ignore
 
-    times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
+    times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())  # type: ignore
     if times_mjd[1] - times_mjd[0] > 0.5:
         times_mjd = times_mjd / (24 * 3600)
 
@@ -167,7 +167,7 @@ def read_ms(
         **{
             key: val
             for key, val in zip(
-                ["ra", "dec"], jnp.rad2deg(xds_src.DIRECTION.data[0].compute())
+                ["ra", "dec"], jnp.rad2deg(xds_src.DIRECTION.data[0].compute())  # type: ignore
             )
         },
         "n_freq": n_freq,
@@ -175,24 +175,24 @@ def read_ms(
         "n_time": n_time,
         "n_ant": n_ant,
         "n_bl": n_bl,
-        "dish_d": xds_ant.DISH_DIAMETER.data[0].compute(),
+        "dish_d": xds_ant.DISH_DIAMETER.data[0].compute(),  # type: ignore
         "times_mjd": times_mjd,
         "times": times,
         "int_time": int_time,
         "freqs": freqs[chans],
         "ants_itrf": ants_itrf,
-        "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),
+        "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),  # type: ignore
         "vis_obs": jnp.transpose(
             jnp.array(
-                xds[data_col]
+                xds[data_col]  # type: ignore
                 .data.reshape(n_time, n_bl, n_freq, n_corr)
                 .compute()[:, :, chans, corr_idx]
             ),
             (1, 2, 0),
         ),
-        "noise": jnp.array(xds.SIGMA.data.mean().compute()),
-        "a1": jnp.array(xds.ANTENNA1.data.reshape(n_time, n_bl)[0, :].compute()),
-        "a2": jnp.array(xds.ANTENNA2.data.reshape(n_time, n_bl)[0, :].compute()),
+        "noise": jnp.array(xds.SIGMA.data.mean().compute()),  # type: ignore
+        "a1": jnp.array(xds.ANTENNA1.data.reshape(n_time, n_bl)[0, :].compute()),  # type: ignore
+        "a2": jnp.array(xds.ANTENNA2.data.reshape(n_time, n_bl)[0, :].compute()),  # type: ignore
     }
 
     return data
@@ -325,7 +325,15 @@ def init_predict(
     return init_pred
 
 
-def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_dir: str):
+def plot_init(
+    tab_config,
+    init_pred: dict,
+    ref: dict,
+    ref_noise: dict[str, float],
+    model_name: str,
+    plot_dir: str,
+    ref_label: dict[str, str],
+):
 
     start = datetime.now()
     print()
@@ -333,11 +341,13 @@ def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_di
     plot_predictions(
         times=tab_config.times,
         pred=init_pred,
-        truth=truth,
+        ref=ref,
+        ref_noise=ref_noise,
         type="init",
         model_name=model_name,
         max_plots=10,
         save_dir=plot_dir,
+        ref_label=ref_label,
     )
     # if get_truth_conditional(config):
 
@@ -354,10 +364,12 @@ def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_di
 def plot_prior(
     tab_config,
     prob_model: Callable,
-    truth: dict,
+    ref: dict,
+    ref_noise: dict[str, float],
     model_name: str,
     subkey: jax.Array,
     plot_dir: str,
+    ref_label: dict[str, str],
 ):
 
     start = datetime.now()
@@ -370,11 +382,13 @@ def plot_prior(
     plot_predictions(
         times=tab_config.times,
         pred=prior_pred,
-        truth=truth,
+        ref=ref,
+        ref_noise=ref_noise,
         type="prior",
         model_name=model_name,
         max_plots=10,
         save_dir=plot_dir,
+        ref_label=ref_label,
     )
     print()
     print(f"Prior Plot Time : {datetime.now() - start}")
@@ -384,7 +398,8 @@ def plot_prior(
 def run_opt(
     tab_config,
     prob_model: Callable,
-    truth: dict[str, jax.Array],
+    ref: dict[str, jax.Array],
+    ref_noise: dict[str, float],
     model_name: str,
     subkeys: jax.Array,
     init_params: dict,
@@ -392,6 +407,7 @@ def run_opt(
     ms_path,
     map_path,
     params_path,
+    ref_label: dict[str, str],
 ):
 
     guides = {
@@ -432,11 +448,13 @@ def run_opt(
     plot_predictions(
         tab_config.times,
         pred=vi_pred,
-        truth=truth,
+        ref=ref,
+        ref_noise=ref_noise,
         type=tab_config.args["opt"]["guide"],
         model_name=model_name,
         max_plots=10,
         save_dir=plot_dir,
+        ref_label=ref_label,
     )
     print()
     print(f"Optimize Plot Time : {datetime.now() - start}")

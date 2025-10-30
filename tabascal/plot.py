@@ -39,7 +39,18 @@ def time_units(times: NDArray) -> tuple:
 
 
 def plot_comparison(
-    ax, times, mean1, mean2, std1, std2, true1, true2, rmse, diff=False
+    ax,
+    times,
+    mean1,
+    mean2,
+    std1,
+    std2,
+    true1,
+    true2,
+    true_std,
+    rmse,
+    diff=False,
+    ref_label="Truth",
 ):
 
     times, units = time_units(times)
@@ -59,7 +70,7 @@ def plot_comparison(
                 times, -2 * std2[i], 2 * std2[i], color="tab:orange", alpha=0.3
             )
         else:
-            a[1].plot(times, true1[i], label="True")
+            a[1].errorbar(times, true1[i], true_std, label=ref_label)
             a[1].plot(times, mean1[i], label="Estimate")
             a[1].fill_between(
                 times,
@@ -75,7 +86,7 @@ def plot_comparison(
                 color="tab:orange",
                 alpha=0.3,
             )
-            a[2].plot(times, true2[i], label="True")
+            a[2].errorbar(times, true2[i], true_std, label=ref_label)
             a[2].plot(times, mean2[i], label="Estimate")
             a[2].fill_between(
                 times,
@@ -106,6 +117,8 @@ def plot_complex_real_imag(
     name: str,
     save_name: Optional[str] = None,
     diff: bool = False,
+    ref_noise: float = 0,
+    ref_label: str = "Truth",
     max_plots: int = 10,
     save_dir: str = "plots/",
 ):
@@ -127,7 +140,18 @@ def plot_complex_real_imag(
     ax[0, 2].set_title(f"{name} Imag")
 
     plot_comparison(
-        ax, times, mean_r, mean_i, std_r, std_i, true.real, true.imag, rmse, diff=diff
+        ax,
+        times,
+        mean_r,
+        mean_i,
+        std_r,
+        std_i,
+        true.real,
+        true.imag,
+        ref_noise,
+        rmse,
+        diff=diff,
+        ref_label=ref_label,
     )
 
     if save_name is not None:
@@ -147,6 +171,8 @@ def plot_complex_amp_phase(
     name: str,
     save_name: Optional[str] = None,
     diff: bool = False,
+    ref_noise: float = 0,
+    ref_label: str = "Truth",
     max_plots: int = 10,
     save_dir: str = "plots/",
 ):
@@ -175,8 +201,10 @@ def plot_complex_amp_phase(
         std_phase,
         jnp.abs(true),
         jnp.rad2deg(jnp.angle(true)),
+        ref_noise,
         rmse,
         diff=diff,
+        ref_label=ref_label,
     )
 
     if save_name is not None:
@@ -191,30 +219,34 @@ def plot_complex_amp_phase(
 def plot_predictions(
     times,
     pred,
-    truth,
+    ref,
+    ref_noise: dict[str, float] = {"vis_ast": 0, "vis_rfi": 0, "gains": 0},
     type: str = "",
     model_name: str = "",
     max_plots: int = 10,
     save_dir: str = "plots/",
+    ref_label: dict[str, str] = {"vis_ast": "", "vis_rfi": "", "gains": ""},
 ):
 
     rmse_ast = jnp.sqrt(
-        jnp.mean(jnp.abs(pred["vis_ast"] - truth["vis_ast"]) ** 2, axis=(0, 1))
+        jnp.mean(jnp.abs(pred["vis_ast"] - ref["vis_ast"]) ** 2, axis=(0, 1))
     )
     rmse_rfi = jnp.sqrt(
-        jnp.mean(jnp.abs(pred["vis_rfi"] - truth["vis_rfi"]) ** 2, axis=(0, 1))
+        jnp.mean(jnp.abs(pred["vis_rfi"] - ref["vis_rfi"]) ** 2, axis=(0, 1))
     )
     rmse_gains = jnp.sqrt(
-        jnp.mean(jnp.abs(pred["gains"] - truth["gains"]) ** 2, axis=(0, 1))
+        jnp.mean(jnp.abs(pred["gains"] - ref["gains"]) ** 2, axis=(0, 1))
     )
 
     plot_complex_real_imag(
         times=times,
         param=pred["vis_ast"][:, :, 0],
-        true=truth["vis_ast"][:, 0],
+        true=ref["vis_ast"][:, 0],
         rmse=rmse_ast,
         name="Ast. Vis.",
         save_name=f"{model_name}_{type}_ast_vis",
+        ref_noise=ref_noise["vis_ast"],
+        ref_label=ref_label["vis_ast"],
         max_plots=max_plots,
         save_dir=save_dir,
     )
@@ -222,10 +254,12 @@ def plot_predictions(
     plot_complex_amp_phase(
         times=times,
         param=pred["vis_rfi"][:, :, 0],
-        true=truth["vis_rfi"][:, 0],
+        true=ref["vis_rfi"][:, 0],
         rmse=rmse_rfi,
         name="RFI Vis.",
         save_name=f"{model_name}_{type}_rfi_vis",
+        ref_noise=ref_noise["vis_rfi"],
+        ref_label=ref_label["vis_rfi"],
         diff=False,  # True,
         max_plots=max_plots,
         save_dir=save_dir,
@@ -234,10 +268,12 @@ def plot_predictions(
     plot_complex_amp_phase(
         times=times,
         param=pred["gains"][:, :, 0],
-        true=truth["gains"][:, 0],
+        true=ref["gains"][:, 0],
         rmse=rmse_gains,
         name="Gains",
         save_name=f"{model_name}_{type}_gains",
+        ref_noise=ref_noise["gains"],
+        ref_label=ref_label["gains"],
         diff=False,
         max_plots=max_plots,
         save_dir=save_dir,

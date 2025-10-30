@@ -5,6 +5,8 @@ import os
 import sys
 import yaml
 
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Remove SoL warnings
+# export TF_CPP_MIN_LOG_LEVEL=2
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = (
     "false"  # Disable GPU Memory Preallocation
 )
@@ -48,8 +50,6 @@ def tabascal_subtraction(
     config: dict,
     sim_dir: str,
     ms_path: Optional[str] = None,
-    spacetrack_path: Optional[str] = None,
-    norad_ids: list = [],
     suffix: str = "",
 ):
 
@@ -58,7 +58,7 @@ def tabascal_subtraction(
 
     run_id = datetime.now().strftime("%m-%d-%YT%H:%M:%S")
 
-    log_path = f"log_tab_{run_id}.txt"
+    log_path = f"log_tab{suffix}_{run_id}.txt"
     log = open(log_path, "w")
     backup = sys.stdout
     sys.stdout = Tee(sys.stdout, log)
@@ -162,15 +162,7 @@ def tabascal_subtraction(
     print(f"log_l : {nlog_l:.3e}")
     print(f"log_p : {nlog_p:.3e}")
 
-    init_state = model.forward(model.init_params, model.state)
-
-    # truth = {
-    #     "vis_rfi": init_state["vis_rfi"],
-    #     "vis_ast": init_state["vis_ast"],
-    #     "gains": init_state["gains"],
-    # }
-
-    truth = {
+    ref = {
         "vis_rfi": jnp.nan
         * jnp.zeros(
             (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
@@ -184,9 +176,43 @@ def tabascal_subtraction(
             (tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex
         ),
     }
+    ref_label = {
+        "vis_rfi": "",
+        "vis_ast": "",
+        "gains": "",
+    }
+    ref_noise = {
+        "vis_rfi": 0.0,
+        "vis_ast": 0.0,
+        "gains": 0.0,
+    }
+
+    init_state = model.forward(model.init_params, model.state)
+
+    # ref["vis_rfi"] = init_state["vis_rfi"]
+    # ref_label["vis_rfi"] = "Initial"
+    # ref_noise["vis_rfi"] = tab_config.noise
+
+    # ref["vis_ast"] = init_state["vis_ast"]
+    # ref_label["vis_ast"] = "Initial"
+    # ref_noise["vis_ast"] = tab_config.noise
+
+    # ref["gains"] = init_state["gains"]
+    # ref_label["gains"] = "Initial"
+    # ref_noise["gains"] = 0.0
+
+    ref["vis_rfi"] = tab_config.vis_obs
+    ref_label["vis_rfi"] = "Vis Obs"
+    ref_noise["vis_rfi"] = tab_config.noise
+
+    ref["vis_ast"] = tab_config.vis_obs
+    ref_label["vis_ast"] = "Vis Obs"
+    ref_noise["vis_ast"] = tab_config.noise
 
     if config["plots"]["init"]:
-        plot_init(tab_config, init_pred, truth, model_name, plot_dir)
+        plot_init(
+            tab_config, init_pred, ref, ref_noise, model_name, plot_dir, ref_label
+        )
 
     ### Check and Plot Model at true parameters
     # if config["plots"]["truth"]:
@@ -214,10 +240,12 @@ def tabascal_subtraction(
         plot_prior(
             tab_config,
             prob_model,
-            truth,
+            ref,
+            ref_noise,
             model_name,
             subkey,
             plot_dir,
+            ref_label,
         )
 
     # ### Run MCMC Inference
@@ -247,14 +275,16 @@ def tabascal_subtraction(
         vi_params, rchi2 = run_opt(
             tab_config,
             prob_model,
-            truth,
+            ref,
+            ref_noise,
             model_name,
-            subkeys,
+            subkeys,  # type: ignore
             model.init_params,
             plot_dir,
             ms_path,
             map_path,
             params_path,
+            ref_label,
         )
 
         opt_params = {
@@ -278,7 +308,7 @@ def tabascal_subtraction(
 
     mem_i = save_memory(mem_dir, mem_i)
 
-    max_fisher_time = 30 * 60  # seconds
+    # max_fisher_time = 30 * 60  # seconds
 
     # ### Run Fisher Covariance Prediction
     # key, *subkeys = random.split(key, 3)
@@ -317,7 +347,7 @@ def tabascal_subtraction(
     os.remove(log_path)
     sys.stdout = backup
 
-    with open(os.path.join(plot_dir, f"tab_config_{run_id}.yaml"), "w") as fp:
+    with open(os.path.join(plot_dir, f"tab_config{suffix}_{run_id}.yaml"), "w") as fp:
         yaml.dump(config, fp)
 
 
@@ -333,9 +363,6 @@ def main():
     )
     parser.add_argument("-ms", "--ms_path", help="Path to Measurement Set.")
     parser.add_argument(
-        "-np", "--norad_path", help="Path to text file containing NORAD IDs to include."
-    )
-    parser.add_argument(
         "-st", "--spacetrack", help="Path to Space-Track login details."
     )
     parser.add_argument("-sx", "--suffix", default="", help="Image name suffix.")
@@ -343,18 +370,13 @@ def main():
     sim_dir = args.sim_dir
     conf_path = args.config
     spacetrack_path = args.spacetrack
-    norad_path = args.norad_path
-    if sim_dir:
-        norad_path = os.path.join(sim_dir, "input_data/norad_ids.yaml")
-    else:
-        sim_dir = os.path.split(args.ms_path)[0]
-
-    if norad_path:
-        norad_ids = [int(x) for x in np.atleast_1d(np.loadtxt(norad_path))]
-    else:
-        norad_ids = []
 
     config = load_config(conf_path, config_type="tab")
+
+    if not sim_dir and args.ms_path:
+        sim_dir = os.path.split(args.ms_path)[0]
+    elif not sim_dir:
+        sim_dir = config["data"]["sim_dir"]
 
     config_st_path = config["satellites"]["spacetrack_path"]
     if spacetrack_path:
@@ -364,9 +386,7 @@ def main():
         config["satellites"]["spacetrack_path"] = config_st_path
         spacetrack_path = config_st_path
 
-    tabascal_subtraction(
-        config, sim_dir, args.ms_path, spacetrack_path, norad_ids, args.suffix
-    )
+    tabascal_subtraction(config, sim_dir, args.ms_path, args.suffix)
 
 
 if __name__ == "__main__":
