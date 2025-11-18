@@ -77,7 +77,7 @@ rfi:
   # mean: truth
   # var: 100        # Jy
   corr_time: 24   # seconds
-  # n_int_samples: 128
+  n_int_time:
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   freq_int_samples: 1
