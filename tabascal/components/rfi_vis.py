@@ -204,8 +204,6 @@ class RiemannVisTimeFreqCalculationFFI(Component):
         # Pre-compute everything possible
         a1 = self.a1
         a2 = self.a2
-        # a1 = self.a2
-        # a2 = self.a1
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_time = self.n_time
@@ -216,20 +214,11 @@ class RiemannVisTimeFreqCalculationFFI(Component):
 
 
         def forward(params, state):
-            # Pure JAX operations only
-            #  vis_rfi_fine = calculate_rfi_vis_fine(
-            #      state["rfi_A"], state["rfi_phase"], a1, a2
-            #  )
-            #  # vis_rfi_fine is shape (n_bl, n_freq_fine, n_time_fine)
-            #  new_shape = (n_bl, n_freq, n_int_freq, n_time, n_int_time)
-            #  vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=(-3, -1))
-
             new_shape = (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
             rfi_amp_fine = state["rfi_A"].reshape(new_shape)
             rfi_phase = state["rfi_phase"].reshape(new_shape)
 
             vis_rfi = rfi_vis_op.bind(a1, a2, rfi_amp_fine, rfi_phase)
-
 
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 

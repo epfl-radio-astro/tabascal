@@ -192,10 +192,6 @@ ffi::Error calc_rfi_transpose_gpu_dispatch(
   const auto n_int_t = rfi_amp_fine.dimensions()[5];
   const auto n_int_f = rfi_amp_fine.dimensions()[3];
 
-  // Cooperative group size. Must be power of 2. Used to iterate over n_int and
-  // reduce result. If 32, equal to warp size on Nvidia for fast reduce
-  // operation.
-
   // For 64 antenna, 32 yields best results
   // The kernel will read n_bl indices, but only compute for n_ant values
   // Therefore a possible good choice would be n_ant / 2
