@@ -8,9 +8,11 @@ For this benchmarking we are not interested in getting the correct results but r
 sim-vis -c sim_target_ska-low.yaml -st /path/to/spacetrack_login.yaml -a N
 ```
 
+## Run tabascal on a simulation with 8 antennas
+
 All 32 satellites are included in the `tab_target.yaml` file. To set the number of satellites included in the model fit, comment out the appropriate number of NORAD IDs under the `satellites: norad_ids:` section.  
 
-## Run tabascal on a simulation with 8 antennas
+To set the number of integration samples used in the reduction on the time axis, adapt the `rfi: n_int_time:` section. 
 
 ```bash
 tabascal -c tab_target.yaml -s data/pnt_src_obs_08A_090T-0000-0890_001I_001F-1.500e+08-1.500e+08_050PAST_000GAST_000EAST_32SAT_0GRD_1.0e+00RFI/ -st /path/to/spacetrack_login.yaml
