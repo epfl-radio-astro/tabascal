@@ -8,6 +8,9 @@ For this benchmarking we are not interested in getting the correct results but r
 sim-vis -c sim_target_ska-low.yaml -st /path/to/spacetrack_login.yaml -a N
 ```
 
+The number of antennas used affects the dataset name. The naming convention is `pnt_src_obs_0NA_*`.
+
+
 ## Run tabascal on a simulation with 8 antennas
 
 All 32 satellites are included in the `tab_target.yaml` file. To set the number of satellites included in the model fit, comment out the appropriate number of NORAD IDs under the `satellites: norad_ids:` section.  
