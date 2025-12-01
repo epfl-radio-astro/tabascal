@@ -4,4 +4,5 @@ docs/_build
 examples/spacetrack_login.yaml
 examples/data
 examples/test
+examples/benchmark/data
 **/*.pyc

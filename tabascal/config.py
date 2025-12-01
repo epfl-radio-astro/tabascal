@@ -54,10 +54,11 @@ class TabConfig:
         config["rfi"]["min_time_bins"] = 1
         config["rfi"]["max_time_bins"] = 30
 
-        self.estimate_rfi_sampling(
+        self.set_rfi_sampling_times(
             config["rfi"]["time_int_factor"],
             config["rfi"]["min_time_bins"],
             config["rfi"]["max_time_bins"],
+            config["rfi"]["n_int_time"],
         )
 
         self.args = config
@@ -147,6 +148,8 @@ class TabConfig:
             get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
         )
 
+        # self.time_sample_idxs and self.time_strides are used by rfi_vis.RiemannVisTimeFreqVariable
+
         saving = (
             np.sum(
                 [i.size / s for i, s in zip(self.time_sample_idxs, self.time_strides)]
@@ -155,6 +158,19 @@ class TabConfig:
         )
 
         print(f"New intermediate is {100*saving:.2f} % of original size")
+
+    def set_rfi_sampling_times(
+        self,
+        n_int_factor: float,
+        min_time_bins: int,
+        max_time_bins: int,
+        n_int_time=None,
+    ):
+
+        if n_int_time:
+            self.n_int_time = n_int_time
+        else:
+            self.estimate_rfi_sampling(n_int_factor, min_time_bins, max_time_bins)
 
         self.times_fine = int_sample_times(self.times, self.n_int_time).compute()
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
