@@ -3,7 +3,8 @@ name: docs
 on:
   push:
     branches:
-      - main  # or whatever your default branch is
+      # - main  # or whatever your default branch is
+      - none # Disable - Assumes no branch named none exists.
 
 jobs:
   build:
@@ -15,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
