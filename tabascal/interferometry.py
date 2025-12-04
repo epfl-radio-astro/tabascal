@@ -97,6 +97,7 @@ def calculate_rfi_vis_variable(
 
     idx = [
         slice(None),  # all antennas
+        slice(None),  # all rfi sources
         slice(None),  # all frequency channels
         slice(freq_stride // 2, None, freq_stride),  # limited frequency samples
         slice(None),  # all time steps
@@ -106,11 +107,14 @@ def calculate_rfi_vis_variable(
     rfi_A = rfi_A[*idx]
     rfi_phase = rfi_phase[*idx]
 
-    vis_rfi = jnp.mean(
-        rfi_A[a1]
-        * jnp.conjugate(rfi_A[a2])
-        * jnp.exp(1.0j * (rfi_phase[a1] - rfi_phase[a2])),
-        axis=(2, 4),
+    vis_rfi = jnp.sum(
+        jnp.mean(
+            rfi_A[a1]
+            * jnp.conjugate(rfi_A[a2])
+            * jnp.exp(1.0j * (rfi_phase[a1] - rfi_phase[a2])),
+            axis=(3, 5),
+        ),
+        axis=1,
     )
 
     return vis_rfi
