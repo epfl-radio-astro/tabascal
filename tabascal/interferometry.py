@@ -65,11 +65,16 @@ def calculate_rfi_vis_fine(
     # rfi_phase is shape (n_rfi, n_ant, ...)
     # a1 and a2 are shape (n_bl,)
     # rfi_vis_fine is shape (n_bl, ...)
+
+    # Workaround for bug in jax>=0.5.3
+    rfi_A_ = jnp.swapaxes(rfi_A, 0, 1)
+    rfi_phase_ = jnp.swapaxes(rfi_phase, 0, 1)
+
     vis_rfi_fine = jnp.sum(
-        rfi_A[:, a1]
-        * jnp.conjugate(rfi_A[:, a2])
-        * jnp.exp(1.0j * (rfi_phase[:, a1] - rfi_phase[:, a2])),
-        axis=0,
+        rfi_A_[a1]
+        * jnp.conjugate(rfi_A_[a2])
+        * jnp.exp(1.0j * (rfi_phase_[a1] - rfi_phase_[a2])),
+        axis=1,
     )
 
     return vis_rfi_fine
