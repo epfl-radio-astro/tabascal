@@ -1,15 +1,15 @@
 #include <algorithm>
+#include <cassert>
+#include <complex>
 #include <cstdint>
 #include <cstdio>
-#include <complex>
-#include <cassert>
-#include <stdexcept>
 #include <cstring>
+#include <stdexcept>
 #include <unistd.h>
 
+#include "tensor.hpp"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
-#include "tensor.hpp"
 
 namespace ffi = xla::ffi;
 
@@ -91,19 +91,53 @@ void rfi_transpose_kernel(std::int64_t n_int_f, std::int64_t n_int_t,
 using rfi_amp_fine_t = ffi::Buffer<ffi::C128, 6>;
 using rfi_phase_t = ffi::Buffer<ffi::F64, 6>;
 
-ffi::Error
-calc_rfi_transpose_cpu_impl(ffi::BufferR1<ffi::S32> a1,
-                            ffi::BufferR1<ffi::S32> a2,
-                            rfi_amp_fine_t rfi_amp_fine, rfi_phase_t rfi_phase,
-                            ffi::BufferR3<ffi::C128> rfi_vis_grad,
-                            ffi::Result<rfi_amp_fine_t> rfi_amp_fine_grad,
-                            ffi::Result<rfi_phase_t> rfi_phase_grad) {
-  // rfi_amp_fine and rfi_phase shape is
-  // (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
+ffi::Error calc_rfi_transpose_cpu_impl(
+    ffi::BufferR1<ffi::S32> a1, ffi::BufferR1<ffi::S32> a1_sorter,
+    ffi::BufferR1<ffi::S32> a1_start, ffi::BufferR1<ffi::S32> a2,
+    ffi::BufferR1<ffi::S32> a2_sorter, ffi::BufferR1<ffi::S32> a2_start,
+    rfi_amp_fine_t rfi_amp_fine, rfi_phase_t rfi_phase,
+    ffi::BufferR3<ffi::C128> rfi_vis_grad,
+    ffi::Result<rfi_amp_fine_t> rfi_amp_fine_grad,
+    ffi::Result<rfi_phase_t> rfi_phase_grad) {
 
-  // if (a1.dimensions().size() != 1) {
-  //   return ffi::Error::InvalidArgument("Expected 1d a1");
-  // }
+  if (a1.dimensions()[0] != a2.dimensions()[0]) {
+    return ffi::Error::InvalidArgument(
+        "Expected a1 and a2 to have the same size");
+  }
+
+  for (int i = 0; i < 6; ++i) {
+    if (rfi_amp_fine.dimensions()[i] != rfi_phase.dimensions()[i]) {
+      return ffi::Error::InvalidArgument(
+          "Expected rfi_amp_fine and rfi_phase to have the same shape");
+    }
+  }
+
+  if (rfi_vis_grad.dimensions()[0] != a1.dimensions()[0]) {
+    return ffi::Error::InvalidArgument(
+        "Expected rfi_vis_grad and a1 to have the same number of baselines");
+  }
+
+  if (rfi_vis_grad.dimensions()[1] != rfi_amp_fine.dimensions()[2]) {
+    return ffi::Error::InvalidArgument(
+        "Expected rfi_vis_grad and rfi_amp_fine to have the same number of "
+        "frequencies");
+  }
+
+  if (rfi_vis_grad.dimensions()[2] != rfi_amp_fine.dimensions()[4]) {
+    return ffi::Error::InvalidArgument("Expected rfi_vis_grad and rfi_amp_fine "
+                                       "to have the same number of times");
+  }
+
+  for (int i = 0; i < 6; ++i) {
+    if (rfi_amp_fine.dimensions()[i] != rfi_amp_fine_grad->dimensions()[i]) {
+      return ffi::Error::InvalidArgument(
+          "Expected rfi_amp_fine and rfi_amp_fine_grad to have the same shape");
+    }
+    if (rfi_phase.dimensions()[i] != rfi_phase_grad->dimensions()[i]) {
+      return ffi::Error::InvalidArgument(
+          "Expected rfi_phase and rfi_phase_grad to have the same shape");
+    }
+  }
 
   Tensor1D<const int *> a1_tensor(a1.typed_data(), a1.dimensions()[0]);
   Tensor1D<const int *> a2_tensor(a2.typed_data(), a2.dimensions()[0]);
@@ -149,6 +183,10 @@ calc_rfi_transpose_cpu_impl(ffi::BufferR1<ffi::S32> a1,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_transpose_cpu,
                               calc_rfi_transpose_cpu_impl,
                               ffi::Ffi::Bind()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<rfi_amp_fine_t>()
