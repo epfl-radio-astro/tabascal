@@ -3,7 +3,7 @@ from jax import vmap
 
 from tabascal.interferometry import calculate_rfi_vis_fine, calculate_rfi_vis_variable
 from tabascal.components import Component
-from tabascal.components.ffi.custom_op import rfi_vis_op
+from tabascal.components.ffi.rfi_vis_op import RFIVisOp
 
 
 class RiemannVisCalculation(Component):
@@ -202,8 +202,6 @@ class RiemannVisTimeFreqCalculationFFI(Component):
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         # Pre-compute everything possible
-        a1 = self.a1
-        a2 = self.a2
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_time = self.n_time
@@ -211,14 +209,14 @@ class RiemannVisTimeFreqCalculationFFI(Component):
         n_freq = self.n_freq
         n_rfi = self.n_rfi
         n_ant = self.n_ant
-
+        op = RFIVisOp(n_ant, a1, a2)
 
         def forward(params, state):
             new_shape = (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
             rfi_amp_fine = state["rfi_A"].reshape(new_shape)
             rfi_phase = state["rfi_phase"].reshape(new_shape)
 
-            vis_rfi = rfi_vis_op.bind(a1, a2, rfi_amp_fine, rfi_phase)
+            vis_rfi = opt.eval(rfi_amp_fine, rfi_phase)
 
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
@@ -321,11 +319,13 @@ class RiemannVisTimeFreqVariable(Component):
                 self.n_int_time,
             )
 
-            # Workaround for bug in jax>=0.5.3
-            rfi_A = jnp.swapaxes(jnp.reshape(state["rfi_A"], new_shape), 0, 1)
-            rfi_phase = jnp.swapaxes(jnp.reshape(state["rfi_phase"], new_shape), 0, 1)
+            rfi_A = jnp.reshape(state["rfi_A"], new_shape)
+            rfi_phase = jnp.reshape(state["rfi_phase"], new_shape)
 
-            vis_rfi = calculate_rfi_vis_single(rfi_A, rfi_phase)
+            vis_rfi = jnp.sum(
+                vmap(calculate_rfi_vis_single)(rfi_A, rfi_phase),
+                axis=0,
+            )
 
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}

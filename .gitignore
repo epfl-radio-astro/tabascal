@@ -5,3 +5,5 @@ examples/spacetrack_login.yaml
 examples/data
 examples/test
 **/*.pyc
+*.o
+*.so

@@ -1,21 +1,21 @@
 #include <algorithm>
-#include <cstdint>
-#include <cstdio>
-#include <complex>
 #include <cassert>
-#include <stdexcept>
-#include <limits>
-#include <cstring>
-#include <unistd.h>
-#include <cuda_runtime_api.h>
-#include <cuda_runtime.h>
-#include <cuComplex.h>
+#include <complex>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cuComplex.h>
+#include <cuda_runtime.h>
+#include <cuda_runtime_api.h>
+#include <limits>
+#include <stdexcept>
+#include <unistd.h>
 
+#include "tensor.hpp"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
-#include "tensor.hpp"
 
 namespace ffi = xla::ffi;
 namespace cg = cooperative_groups;
@@ -115,7 +115,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
               //                 (val_rfi_phase_grad_1 - val_rfi_phase_grad_2) *
               //                 val_rfi_amp_1 * std::conj(val_rfi_amp_2);
 
-              auto g2 = cuDoubleComplex{val_rfi_phase_grad_1- val_rfi_phase_grad_2, 0};
+              auto g2 = cuDoubleComplex{
+                  val_rfi_phase_grad_1 - val_rfi_phase_grad_2, 0};
 
               g2 = cuCmul(g2, cuCmul(val_rfi_amp_1, cuConj(val_rfi_amp_2)));
 
@@ -133,7 +134,6 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
           rfi_grad(i_bl, i_f, i_t) = sum;
         }
-
       }
     }
   }
@@ -151,12 +151,45 @@ ffi::Error calc_rfi_jvp_gpu_dispatch(
     rfi_amp_fine_t rfi_amp_fine, rfi_amp_fine_t rfi_amp_fine_grad,
     rfi_phase_t rfi_phase, rfi_phase_t rfi_phase_grad,
     ffi::ResultBufferR3<ffi::C128> rfi_grad) {
-  // rfi_amp_fine and rfi_phase shape is
-  // (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
+  if (a1.dimensions()[0] != a2.dimensions()[0]) {
+    return ffi::Error::InvalidArgument(
+        "Expected a1 and a2 to have the same size");
+  }
 
-  // if (a1.dimensions().size() != 1) {
-  //   return ffi::Error::InvalidArgument("Expected 1d a1");
-  // }
+  for (int i = 0; i < 6; ++i) {
+    if (rfi_amp_fine.dimensions()[i] != rfi_phase.dimensions()[i]) {
+      return ffi::Error::InvalidArgument(
+          "Expected rfi_amp_fine and rfi_phase to have the same shape");
+    }
+  }
+
+  if (rfi_grad->dimensions()[0] != a1.dimensions()[0]) {
+    return ffi::Error::InvalidArgument(
+        "Expected rfi_grad and a1 to have the same number of baselines");
+  }
+
+  if (rfi_grad->dimensions()[1] != rfi_amp_fine.dimensions()[2]) {
+    return ffi::Error::InvalidArgument(
+        "Expected rfi_grad and rfi_amp_fine to have the same number of "
+        "frequencies");
+  }
+
+  if (rfi_grad->dimensions()[2] != rfi_amp_fine.dimensions()[4]) {
+    return ffi::Error::InvalidArgument(
+        "Expected rfi_grad and rfi_amp_fine to have the same number of times");
+  }
+
+  for (int i = 0; i < 6; ++i) {
+    if (rfi_amp_fine.dimensions()[i] != rfi_amp_fine_grad.dimensions()[i]) {
+      return ffi::Error::InvalidArgument(
+          "Expected rfi_amp_fine and rfi_amp_fine_grad to have the same shape");
+    }
+    if (rfi_phase.dimensions()[i] != rfi_phase_grad.dimensions()[i]) {
+      return ffi::Error::InvalidArgument(
+          "Expected rfi_phase and rfi_phase_grad to have the same shape");
+    }
+  }
+
   Tensor1D<const int *, INT_T> a1_tensor(a1.typed_data(), a1.dimensions()[0]);
   Tensor1D<const int *, INT_T> a2_tensor(a2.typed_data(), a2.dimensions()[0]);
   Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine_tensor(
@@ -207,7 +240,7 @@ ffi::Error calc_rfi_jvp_gpu_dispatch(
       rfi_phase_tensor, rfi_phase_grad_tensor, rfi_grad_tensor);
 
   const auto status = cudaGetLastError();
-  if(status != cudaSuccess) {
+  if (status != cudaSuccess) {
     return ffi::Error::Internal(std::string("GPU kernel launch error: ") +
                                 cudaGetErrorString(status));
   }
@@ -216,28 +249,34 @@ ffi::Error calc_rfi_jvp_gpu_dispatch(
 }
 
 ffi::Error calc_rfi_jvp_gpu_impl(
-    cudaStream_t stream, ffi::BufferR1<ffi::S32> a1, ffi::BufferR1<ffi::S32> a2,
-    rfi_amp_fine_t rfi_amp_fine, rfi_amp_fine_t rfi_amp_fine_grad,
-    rfi_phase_t rfi_phase, rfi_phase_t rfi_phase_grad,
-    ffi::ResultBufferR3<ffi::C128> rfi_grad) {
+    cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
+    ffi::BufferR1<ffi::S32> a1_sorter, ffi::BufferR1<ffi::S32> a1_start,
+    ffi::BufferR1<ffi::S32> a2, ffi::BufferR1<ffi::S32> a2_sorter,
+    ffi::BufferR1<ffi::S32> a2_start, rfi_amp_fine_t rfi_amp_fine,
+    rfi_amp_fine_t rfi_amp_fine_grad, rfi_phase_t rfi_phase,
+    rfi_phase_t rfi_phase_grad, ffi::ResultBufferR3<ffi::C128> rfi_grad) {
   constexpr std::int64_t max32 = std::numeric_limits<std::int32_t>::max();
   // use 32 bit indexing if possible
   if (a1.element_count() < max32 && a2.element_count() < max32 &&
       rfi_amp_fine.element_count() < max32 &&
       rfi_phase.element_count() < max32 && rfi_grad->element_count() < max32) {
-    return calc_rfi_jvp_gpu_dispatch<std::int32_t>(
-        stream, a1, a2, rfi_amp_fine, rfi_amp_fine_grad, rfi_phase,
-        rfi_phase_grad, rfi_grad);
+    return calc_rfi_jvp_gpu_dispatch<std::int32_t>(stream, a1, a2, rfi_amp_fine,
+                                                   rfi_amp_fine_grad, rfi_phase,
+                                                   rfi_phase_grad, rfi_grad);
   } else {
-    return calc_rfi_jvp_gpu_dispatch<std::int64_t>(
-        stream, a1, a2, rfi_amp_fine, rfi_amp_fine_grad, rfi_phase,
-        rfi_phase_grad, rfi_grad);
+    return calc_rfi_jvp_gpu_dispatch<std::int64_t>(stream, a1, a2, rfi_amp_fine,
+                                                   rfi_amp_fine_grad, rfi_phase,
+                                                   rfi_phase_grad, rfi_grad);
   }
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_jvp_gpu, calc_rfi_jvp_gpu_impl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<rfi_amp_fine_t>()
