@@ -209,14 +209,14 @@ class RiemannVisTimeFreqCalculationFFI(Component):
         n_freq = self.n_freq
         n_rfi = self.n_rfi
         n_ant = self.n_ant
-        op = RFIVisOp(n_ant, a1, a2)
+        op = RFIVisOp(n_ant, self.a1, self.a2)
 
         def forward(params, state):
             new_shape = (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
             rfi_amp_fine = state["rfi_A"].reshape(new_shape)
             rfi_phase = state["rfi_phase"].reshape(new_shape)
 
-            vis_rfi = opt.eval(rfi_amp_fine, rfi_phase)
+            vis_rfi = op.eval(rfi_amp_fine, rfi_phase)
 
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
