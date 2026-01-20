@@ -4,6 +4,7 @@ import shutil
 import os
 import sys
 import yaml
+from tabascal.timing import measure_runtime, print_timings, enable_timings
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = (
     "false"  # Disable GPU Memory Preallocation
@@ -44,6 +45,7 @@ from tabascal.config import TabConfig, Model
 from typing import Optional
 
 
+@measure_runtime
 def tabascal_subtraction(
     config: dict,
     sim_dir: str,
@@ -64,8 +66,6 @@ def tabascal_subtraction(
     sys.stdout = Tee(sys.stdout, log)
 
     print()
-    start_time = datetime.now()
-    print(f"Start Time : {start_time}")
 
     key, subkey = random.split(random.PRNGKey(1))
 
@@ -138,11 +138,6 @@ def tabascal_subtraction(
     print(f"Number of parameters : {n_params}")
     print(f"Data shape           : {tab_config.vis_obs.shape}")
     print(f"Number of data points: {n_data}")
-
-    print()
-    end_start = datetime.now()
-    print(f"Startup Time : {end_start - start_time}")
-    print(f"{end_start}")
 
     mem_i = save_memory(mem_dir, mem_i)
 
@@ -305,12 +300,6 @@ def tabascal_subtraction(
     #     except TimeoutException as e:
     #         print("Timed out!")
 
-    # print()
-    # end_time = datetime.now()
-    # print(f"End Time  : {end_time}")
-    # print(f"Total Time : {end_time - start_time}")
-
-    # mem_i = save_memory(mem_dir, mem_i)
 
     log.close()
     shutil.copy(log_path, plot_dir)
@@ -339,6 +328,7 @@ def main():
         "-st", "--spacetrack", help="Path to Space-Track login details."
     )
     parser.add_argument("-sx", "--suffix", default="", help="Image name suffix.")
+    parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
     args = parser.parse_args()
     sim_dir = args.sim_dir
     conf_path = args.config
@@ -364,9 +354,15 @@ def main():
         config["satellites"]["spacetrack_path"] = config_st_path
         spacetrack_path = config_st_path
 
+    if args.timings:
+        enable_timings()
+
     tabascal_subtraction(
         config, sim_dir, args.ms_path, spacetrack_path, norad_ids, args.suffix
     )
+
+    if args.timings:
+        print_timings()
 
 
 if __name__ == "__main__":
