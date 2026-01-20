@@ -10,6 +10,7 @@ from jax.tree_util import tree_map
 
 from tabascal.opt import SVIRunResult
 from tabascal.plot import plot_predictions
+from tabascal.timing import measure_runtime
 
 import os
 
@@ -116,6 +117,7 @@ def fix_padding(config: dict, n_freq):
     return config
 
 
+@measure_runtime
 def read_ms(
     ms_path,
     freq: Optional[float] = None,
@@ -198,6 +200,7 @@ def read_ms(
     return data
 
 
+@measure_runtime
 def run_svi(
     prob_model: Callable,
     obs_data: jax.Array,
@@ -247,6 +250,7 @@ def run_svi(
     return svi_results, guide
 
 
+@measure_runtime
 def svi_predict(
     prob_model: Callable,
     guide: autoguide.AutoGuide,
@@ -262,6 +266,7 @@ def svi_predict(
     return predictions
 
 
+@measure_runtime 
 def write_results_xds(
     vi_pred: dict, tab_config, file_path: str, overwrite: bool = True
 ):
@@ -308,6 +313,7 @@ def write_results_xds(
     return map_xds
 
 
+@measure_runtime
 def init_predict(
     tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict
 ):
@@ -325,6 +331,7 @@ def init_predict(
     return init_pred
 
 
+@measure_runtime
 def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_dir: str):
 
     start = datetime.now()
@@ -351,6 +358,7 @@ def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_di
     print(f"{datetime.now()}")
 
 
+@measure_runtime
 def plot_prior(
     tab_config,
     prob_model: Callable,
@@ -381,6 +389,7 @@ def plot_prior(
     print(f"{datetime.now()}")
 
 
+@measure_runtime
 def run_opt(
     tab_config,
     prob_model: Callable,

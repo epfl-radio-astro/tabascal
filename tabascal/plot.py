@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from numpy.typing import NDArray
 from typing import Optional
+from tabascal.timing import measure_runtime
 
 import jax.numpy as jnp
 
@@ -188,6 +189,7 @@ def plot_complex_amp_phase(
     plt.close(fig)
 
 
+@measure_runtime
 def plot_predictions(
     times,
     pred,
