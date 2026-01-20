@@ -66,6 +66,8 @@ def tabascal_subtraction(
     sys.stdout = Tee(sys.stdout, log)
 
     print()
+    start_time = datetime.now()
+    print(f"Start Time : {start_time}")
 
     key, subkey = random.split(random.PRNGKey(1))
 
@@ -138,6 +140,11 @@ def tabascal_subtraction(
     print(f"Number of parameters : {n_params}")
     print(f"Data shape           : {tab_config.vis_obs.shape}")
     print(f"Number of data points: {n_data}")
+
+    print()
+    end_start = datetime.now()
+    print(f"Startup Time : {end_start - start_time}")
+    print(f"{end_start}")
 
     mem_i = save_memory(mem_dir, mem_i)
 
