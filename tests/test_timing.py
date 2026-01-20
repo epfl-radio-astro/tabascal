@@ -6,7 +6,7 @@ import pytest
 from tabascal.timing import measure_runtime
 
 
-def test_block_until_ready_simple_array():
+def test_measure_runtime_array():
     """Test the decorator with a simple JAX array."""
     @measure_runtime
     def add(x, y):
@@ -19,7 +19,7 @@ def test_block_until_ready_simple_array():
     assert jnp.allclose(result, jnp.array([5, 7, 9]))
 
 
-def test_block_until_ready_list():
+def test_measure_runtime_list():
     """Test the decorator with lists of JAX arrays."""
     @measure_runtime
     def sum_list(arrays):
@@ -33,7 +33,7 @@ def test_block_until_ready_list():
     assert jnp.allclose(results[1], jnp.array([6, 8]))
 
 
-def test_block_until_ready_tuple():
+def test_measure_runtime_tuple():
     """Test the decorator with tuples of JAX arrays."""
     @measure_runtime
     def process_tuple(data):
@@ -47,7 +47,7 @@ def test_block_until_ready_tuple():
     assert jnp.allclose(result_b, jnp.array([4, 5]))
 
 
-def test_block_until_ready_dict():
+def test_measure_runtime_dict():
     """Test the decorator with dictionaries of JAX arrays."""
     @measure_runtime
     def process_dict(data):
@@ -66,7 +66,7 @@ def test_block_until_ready_dict():
     assert jnp.allclose(results['incremented'], jnp.array([5, 6, 7]))
 
 
-def test_block_until_ready_nested():
+def test_measure_runtime_nested():
     """Test the decorator with nested structures."""
     @measure_runtime
     def nested_operation(data):
@@ -87,7 +87,7 @@ def test_block_until_ready_nested():
     assert results['scalar'] == 42
 
 
-def test_block_until_ready_mixed_types():
+def test_measure_runtime_mixed_types():
     """Test the decorator with mixed types (arrays and non-arrays)."""
     @measure_runtime
     def mixed_function(arr, scalar, text):
