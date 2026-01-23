@@ -233,7 +233,6 @@ def pad_domain_k(xs: List[Array], pad_factors: List[float]) -> List[Array]:
     ]
 
 
-@measure_runtime
 def pad(z: Array, pad_factors: List[float]) -> Array:
     """
     Pad a signal with a linear ramp to join the start and end of each axis.
@@ -500,41 +499,87 @@ def pow_spec_nd(
 
 
 @measure_runtime
-def get_latent(
-    y: Array,
+def get_latent_init(
     xs: List[Array],
     pad_factors: List[float],
     p0: float,
     k0s: List[float],
     gammas: List[float],
     cutoff: float,
-) -> Array:
+) -> Tuple[List[slice], Array]:
     """
-    Calculate the unaligned latent Fourier modes given a signal.
+    Pre-compute slicing metadata for JIT-compatible latent extraction.
+
+    This function should be called once during setup. The returned
+    slicing indices can then be passed to get_latent_apply, which
+    is JIT-compatible.
 
     Parameters
     ----------
-    y : Array
-        Signal over original domain.
     xs : list[Array]
         1-D arrays of original domain.
     pad_factors : list[float]
         Padding factors for each axis.
-    p0, k0s, gammas : various
-        Power spectrum parameters.
+    p0 : float
+        Power of the k=0 mode.
+    k0s : list[float]
+        Characteristic k-modes for each dimension.
+    gammas : list[float]
+        Steepness factors for each dimension.
     cutoff : float
         Relative Fourier mode cutoff.
 
     Returns
     -------
-    Array
-        Fourier modes above the relative cutoff.
+    tuple[list[slice], Array]
+        (idxs, pk): Slicing indices and power spectrum for latent extraction.
     """
-    y_pad = pad(y, pad_factors)
     k_pad = pad_domain_k(xs, pad_factors)
     pk = pow_spec_nd(k_pad, p0, k0s, gammas)
-    
-    return fourier_cut(pk, cutoff, y_pad)
+    idxs, _ = pk_cut(pk, cutoff)
+
+    return idxs, pk
+
+
+def get_latent_apply(
+    y: Array,
+    pad_factors: List[float],
+    idxs: List[slice],
+) -> Array:
+    """
+    Extract latent Fourier modes using pre-computed slicing indices.
+
+    This function is JIT-compatible when used with indices from get_latent_init.
+
+    Parameters
+    ----------
+    y : Array
+        Signal over original domain.
+    pad_factors : list[float]
+        Padding factors for each axis.
+    idxs : list[slice]
+        Pre-computed slicing indices from get_latent_init.
+
+    Returns
+    -------
+    Array
+        Fourier modes above the relative cutoff.
+
+    Example
+    -------
+    >>> # Setup (call once, not JIT-compatible)
+    >>> idxs, pk = get_latent_init(xs, pad_factors, p0, k0s, gammas, cutoff)
+    >>>
+    >>> # Apply (can be JIT-compiled)
+    >>> @jax.jit
+    >>> def compute_latent(y):
+    >>>     return get_latent_apply(y, pad_factors, idxs)
+    >>>
+    >>> latent = compute_latent(y)
+    """
+    y_pad = pad(y, pad_factors)
+    Y = jnp.fft.fftshift(jnp.fft.fftn(y_pad, norm="forward"))
+    return Y[tuple(idxs)]
 
 
 @measure_runtime

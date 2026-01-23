@@ -1,4 +1,4 @@
-from jax import vmap, random
+from jax import vmap, random, jit
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -8,7 +8,8 @@ from tabascal.tab_tools import (
     pow_spec,
     get_observation_data_type,
 )
-from tabascal.fft_gp import latent_init, latent_predict, get_latent, pow_spec_nd
+from tabascal.fft_gp import latent_init, latent_predict, get_latent_init, get_latent_apply, pow_spec_nd
+from tabascal.timing import measure_runtime
 
 import xarray as xr
 
@@ -772,6 +773,16 @@ class FourierTimeFreqGPAst(Component):
             self.pk_cutoff,
         )
 
+        # Pre-compute slicing indices for JIT-compatible latent extraction
+        self.latent_idxs, _ = get_latent_init(
+            self.xs,
+            self.pad_factors,
+            self.p0,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
+        )
+
         dxs = tuple([float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in self.xs])
 
         print("\nAST specs")
@@ -788,6 +799,7 @@ class FourierTimeFreqGPAst(Component):
 
         self.sigma_ast_k = vmap(sigma, (0), 0)(self.k0_time)
 
+    @measure_runtime
     def _compute_true_params(self, zarr_path, data_col):
 
         xds = xr.open_zarr(zarr_path)
@@ -803,15 +815,12 @@ class FourierTimeFreqGPAst(Component):
             (1, 2, 0),
         )
 
-        get_latent_pred = lambda Z: get_latent(
+        # JIT-compiled function for efficient latent extraction
+        get_latent_pred = jit(lambda Z: get_latent_apply(
             Z,
-            self.xs,
             self.pad_factors,
-            self.p0,
-            self.k0s,
-            self.gammas,
-            self.pk_cutoff,
-        )
+            self.latent_idxs,
+        ))
 
         # self.true_ast_k = vmap(get_latent_pred, (0,), 0)(vis_ast)
 

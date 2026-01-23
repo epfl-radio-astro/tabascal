@@ -1,4 +1,4 @@
-from jax import vmap, random
+from jax import vmap, random, jit
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -6,7 +6,8 @@ from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.tab_tools import get_observation_data_type
-from tabascal.fft_gp import latent_init, latent_predict, get_latent
+from tabascal.fft_gp import latent_init, latent_predict, get_latent_init, get_latent_apply
+from tabascal.timing import measure_runtime
 
 import xarray as xr
 
@@ -592,6 +593,7 @@ class FourierGPRFI(Component):
         """Call this before using in JIT context"""
         pass
 
+    @measure_runtime
     def _compute_gp_params(self):
 
         # if self.gp_var is None:
@@ -612,8 +614,8 @@ class FourierGPRFI(Component):
             self.pk_cutoff,
         )
 
-        self.get_latent_pred = lambda Z: get_latent(
-            Z,
+        # Pre-compute slicing indices for JIT-compatible latent extraction
+        self.latent_idxs, _ = get_latent_init(
             self.xs,
             self.pad_factors,
             self.p0,
@@ -621,6 +623,13 @@ class FourierGPRFI(Component):
             self.gammas,
             self.pk_cutoff,
         )
+
+        # JIT-compiled function for efficient latent extraction
+        self.get_latent_pred = jit(lambda Z: get_latent_apply(
+            Z,
+            self.pad_factors,
+            self.latent_idxs,
+        ))
 
         xs = [self.freqs, self.times]
         dxs = tuple([float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in xs])
