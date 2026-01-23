@@ -15,9 +15,15 @@ from tabascal.timing import measure_runtime
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-def _get_dx(x: Array) -> float:
-    """Get the resolution of a regularly spaced 1-D array."""
-    return float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1.0
+def _get_dx(x: Array) -> Array:
+    """Get the resolution of a regularly spaced 1-D array.
+
+    Returns a JAX array for JIT compatibility.
+    """
+    if len(x) > 1:
+        return jnp.diff(x[:2])[0]
+    else:
+        return jnp.array(1.0)
 
 
 @measure_runtime
@@ -39,8 +45,8 @@ def supersample_domain_specs(
     tuple[list[int], list[float]]
         The sizes and resolutions of the supersampled domain.
     """
-    factors = np.atleast_1d(ss_factors).astype(int)
-    
+    factors = jnp.atleast_1d(jnp.asarray(ss_factors)).astype(int)
+
     # Validation
     if len(xs) != len(factors):
         raise ValueError(f"Length mismatch: len(xs)={len(xs)}, len(ss_factors)={len(factors)}")
@@ -113,16 +119,18 @@ def supersample(y: Array, ss_factors: List[int]) -> Array:
     ns = y.shape
     pads = [(n * (f - 1) // 2, n * (f - 1) // 2) for n, f in zip(ns, ss_factors)]
 
-    # Forward FFT
-    Y = jnp.fft.fftn(y, norm="forward")
-    
+    # Forward FFT (no normalization)
+    Y = jnp.fft.fftn(y)
+
     # Pad in shifted Fourier space, then shift back
     Y_shifted = jnp.fft.fftshift(Y)
     Y_padded = jnp.pad(Y_shifted, pads, mode="constant", constant_values=0)
     Y_ss = jnp.fft.ifftshift(Y_padded)
 
-    # Inverse FFT
-    return jnp.fft.ifftn(Y_ss, norm="forward")
+    # Inverse FFT (default normalization scales by 1/n)
+    # Scale by product of supersample factors to preserve signal amplitude
+    scale = float(np.prod(ss_factors))
+    return jnp.fft.ifftn(Y_ss) * scale
 
 
 @measure_runtime
@@ -146,7 +154,7 @@ def domain_k(xs: List[Array]) -> List[Array]:
 @measure_runtime
 def pad_domain_specs(
     xs: List[Array], pad_factors: List[float]
-) -> Tuple[List[int], List[int], List[float]]:
+) -> Tuple[List[int], List[int], List[Array]]:
     """
     Calculate properties (size, pads, resolution) of a padded domain.
 
@@ -159,17 +167,19 @@ def pad_domain_specs(
 
     Returns
     -------
-    tuple[list[int], list[int], list[float]]
+    tuple[list[int], list[int], list[Array]]
         The properties of the padded domain (sizes, pads, resolutions).
+        Note: pads and dxs are kept as JAX arrays for JIT compatibility.
     """
-    factors = np.atleast_1d(pad_factors)
-    if not np.all(factors >= 1.0):
+    factors = jnp.atleast_1d(jnp.asarray(pad_factors))
+    if not jnp.all(factors >= 1.0):
         raise ValueError("Pad factors must be >= 1.0")
     if len(xs) != len(factors):
         raise ValueError(f"Length mismatch: len(xs)={len(xs)}, len(pad_factors)={len(factors)}")
 
     ns = [len(x) for x in xs]
-    n_pads = [int(n * (f - 1) / 2) for n, f in zip(ns, factors)]
+    # Keep as JAX array to avoid concretization in JIT
+    n_pads = [jnp.floor(n * (f - 1) / 2).astype(int) for n, f in zip(ns, factors)]
     dxs = [_get_dx(x) for x in xs]
 
     return ns, n_pads, dxs
@@ -241,14 +251,14 @@ def pad(z: Array, pad_factors: List[float]) -> Array:
     Array
         The padded signal.
     """
-    factors = np.atleast_1d(pad_factors)
-    if len(factors) != z.ndim:
+    if len(pad_factors) != z.ndim:
         raise ValueError(
-            f"Length mismatch: len(pad_factors)={len(factors)}, z.ndim={z.ndim}"
+            f"Length mismatch: len(pad_factors)={len(pad_factors)}, z.ndim={z.ndim}"
         )
 
     ns = z.shape
-    pads = [(int(n * (f - 1) / 2), int(n * (f - 1) / 2)) for n, f in zip(ns, factors)]
+    # Compute padding widths as integers using Python arithmetic to keep JIT-compatible
+    pads = [(int(n * (f - 1) / 2), int(n * (f - 1) / 2)) for n, f in zip(ns, pad_factors)]
 
     # 1. Calculate the target boundary averages (tracers allowed here).
     # These define the destination values for the ramps on each axis.
@@ -306,9 +316,9 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
     # This ensures we keep modes that are significant in at least one direction
     masks = [pk > cutoff * pk.max(axis=i, keepdims=True) for i in range(pk.ndim)]
     cond = reduce(jnp.logical_and, masks)
-    
+
     idx = jnp.where(cond)
-    
+
     # Calculate bounding box slices and padding to restore size
     idxs = []
     pads = []
@@ -316,7 +326,7 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
         im_min = int(idx[i].min())
         im_max = int(idx[i].max())
         idxs.append(slice(im_min, im_max + 1))
-        pads.append((im_min, int(pk.shape[i] - im_max - 1)))
+        pads.append((im_min, pk.shape[i] - im_max - 1))
 
     return idxs, pads
 
@@ -479,8 +489,14 @@ def pow_spec_nd(
     if not (len(ks) == len(k0s) == len(gammas)):
         raise ValueError("Inputs ks, k0s, and gammas must have the same length.")
 
+    # Compute 1-D power spectra
     pks = [pow_spec(k, 1.0, k0, gamma) for k, k0, gamma in zip(ks, k0s, gammas)]
-    return p0 * reduce(jnp.outer, pks)
+
+    # Create meshgrid and compute N-D outer product
+    grids = jnp.meshgrid(*pks, indexing='ij')
+    result = p0 * reduce(jnp.multiply, grids)
+
+    return result
 
 
 @measure_runtime
