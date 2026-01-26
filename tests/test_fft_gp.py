@@ -565,3 +565,7 @@ class TestNumericalAccuracy:
 
         # Check that kept modes match
         assert jnp.allclose(Y_orig[idxs[0]], Y_cut, rtol=1e-5)
+
+        # Check that uncut has same shape as original and kept modes match
+        assert Y_uncut.shape == Y_orig.shape
+        assert jnp.allclose(Y_uncut[idxs[0]], Y_orig[idxs[0]], rtol=1e-5)
