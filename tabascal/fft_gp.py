@@ -499,7 +499,7 @@ def pow_spec_nd(
 
 
 @measure_runtime
-def get_latent_init(
+def signal_to_latent_init(
     xs: List[Array],
     pad_factors: List[float],
     p0: float,
@@ -541,7 +541,7 @@ def get_latent_init(
     return idxs, pk
 
 
-def get_latent_apply(
+def signal_to_latent(
     y: Array,
     pad_factors: List[float],
     idxs: List[slice],
@@ -549,7 +549,7 @@ def get_latent_apply(
     """
     Extract latent Fourier modes using pre-computed slicing indices.
 
-    This function is JIT-compatible when used with indices from get_latent_init.
+    This function is JIT-compatible when used with indices from signal_to_latent_init.
 
     Parameters
     ----------
@@ -568,12 +568,12 @@ def get_latent_apply(
     Example
     -------
     >>> # Setup (call once, not JIT-compatible)
-    >>> idxs, pk = get_latent_init(xs, pad_factors, p0, k0s, gammas, cutoff)
+    >>> idxs, pk = signal_to_latent_init(xs, pad_factors, p0, k0s, gammas, cutoff)
     >>>
     >>> # Apply (can be JIT-compiled)
     >>> @jax.jit
     >>> def compute_latent(y):
-    >>>     return get_latent_apply(y, pad_factors, idxs)
+    >>>     return signal_to_latent(y, pad_factors, idxs)
     >>>
     >>> latent = compute_latent(y)
     """
@@ -583,7 +583,7 @@ def get_latent_apply(
 
 
 @measure_runtime
-def latent_init(
+def latent_to_signal_init(
     xs: List[Array],
     pad_factors: List[float],
     ss_factors: List[int],
@@ -648,7 +648,7 @@ def latent_init(
     return latent_pk, latent_ks, combined_pads, idxs_pad_ss
 
 
-def latent_predict(
+def latent_to_signal(
     Y_latent: Array, pads: List[Tuple[int, int]], ss_idxs: List[slice]
 ) -> Array:
     """

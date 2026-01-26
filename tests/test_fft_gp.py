@@ -11,10 +11,10 @@ from tabascal.fft_gp import (
     domain_ss,
     fourier_cut,
     fourier_uncut,
-    get_latent_apply,
-    get_latent_init,
-    latent_init,
-    latent_predict,
+    signal_to_latent,
+    signal_to_latent_init,
+    latent_to_signal_init,
+    latent_to_signal,
     pad,
     pad_domain,
     pad_domain_k,
@@ -385,20 +385,20 @@ class TestLatentSpace:
         x = jnp.linspace(0, 10, 32)
         y = jnp.sin(2 * jnp.pi * x / 10)
 
-        # Use get_latent_init + get_latent_apply
-        idxs, pk = get_latent_init(
+        # Use signal_to_latent_init + signal_to_latent
+        idxs, pk = signal_to_latent_init(
             [x], pad_factors=[1.5], p0=1.0, k0s=[1.0], gammas=[2.0], cutoff=0.5
         )
-        Y_latent = get_latent_apply(y, [1.5], idxs)
+        Y_latent = signal_to_latent(y, [1.5], idxs)
 
         # Latent should be smaller than original (compressed) with higher cutoff
         assert Y_latent.size <= y.size
 
     def test_latent_init_returns_correct_types(self):
-        """Test that latent_init returns correct data types."""
+        """Test that latent_to_signal_init returns correct data types."""
         x = jnp.linspace(0, 10, 32)
 
-        latent_pk, latent_ks, pads, idxs_pad_ss = latent_init(
+        latent_pk, latent_ks, pads, idxs_pad_ss = latent_to_signal_init(
             [x],
             pad_factors=[1.5],
             ss_factors=[2],
@@ -416,10 +416,10 @@ class TestLatentSpace:
         assert all(isinstance(idx, slice) for idx in idxs_pad_ss)
 
     def test_latent_init_predict_roundtrip(self):
-        """Test that latent_init and latent_predict work together."""
+        """Test that latent_to_signal_init and latent_to_signal work together."""
         x = jnp.linspace(0, 10, 32)
 
-        latent_pk, latent_ks, pads, idxs_pad_ss = latent_init(
+        latent_pk, latent_ks, pads, idxs_pad_ss = latent_to_signal_init(
             [x],
             pad_factors=[1.5],
             ss_factors=[2],
@@ -433,7 +433,7 @@ class TestLatentSpace:
         Y_latent = jnp.ones_like(latent_pk, dtype=complex)
 
         # Predict should return supersampled signal
-        y_ss = latent_predict(Y_latent, pads, idxs_pad_ss)
+        y_ss = latent_to_signal(Y_latent, pads, idxs_pad_ss)
 
         # Check that output is approximately the right size
         # (original size * supersample factor)
@@ -443,8 +443,8 @@ class TestLatentSpace:
         """Test that latent operations are JIT-compatible."""
         x = jnp.linspace(0, 10, 32)
 
-        # latent_init should work (it's called once for setup)
-        latent_pk, latent_ks, pads, idxs_pad_ss = latent_init(
+        # latent_to_signal_init should work (it's called once for setup)
+        latent_pk, latent_ks, pads, idxs_pad_ss = latent_to_signal_init(
             [x],
             pad_factors=[1.5],
             ss_factors=[2],
@@ -454,22 +454,22 @@ class TestLatentSpace:
             cutoff=0.01,
         )
 
-        # latent_predict should be JIT-able
+        # latent_to_signal should be JIT-able
         @jax.jit
         def predict_jitted(Y_latent):
-            return latent_predict(Y_latent, pads, idxs_pad_ss)
+            return latent_to_signal(Y_latent, pads, idxs_pad_ss)
 
         Y_latent = jnp.ones_like(latent_pk, dtype=complex)
         y_ss = predict_jitted(Y_latent)
         assert y_ss.size > 0
 
     def test_get_latent_init_apply_jit_compatible(self):
-        """Test that get_latent_init + get_latent_apply is JIT-compatible."""
+        """Test that signal_to_latent_init + signal_to_latent is JIT-compatible."""
         x = jnp.linspace(0, 10, 32)
         y = jnp.sin(2 * jnp.pi * x / 10)
 
         # Setup phase (not JIT-compatible, called once)
-        idxs, pk = get_latent_init(
+        idxs, pk = signal_to_latent_init(
             [x],
             pad_factors=[1.5],
             p0=1.0,
@@ -481,13 +481,13 @@ class TestLatentSpace:
         # Apply phase (JIT-compatible)
         @jax.jit
         def compute_latent_jitted(y):
-            return get_latent_apply(y, [1.5], idxs)
+            return signal_to_latent(y, [1.5], idxs)
 
         Y_latent = compute_latent_jitted(y)
         assert Y_latent.size > 0
 
         # Verify it gives same result as non-JIT version
-        Y_latent_ref = get_latent_apply(y, [1.5], idxs)
+        Y_latent_ref = signal_to_latent(y, [1.5], idxs)
         assert jnp.allclose(Y_latent, Y_latent_ref)
 
 

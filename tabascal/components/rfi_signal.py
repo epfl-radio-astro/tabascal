@@ -6,7 +6,7 @@ from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.tab_tools import get_observation_data_type
-from tabascal.fft_gp import latent_init, latent_predict, get_latent_init, get_latent_apply
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
 from tabascal.timing import measure_runtime
 
 import xarray as xr
@@ -579,7 +579,7 @@ class FourierGPRFI(Component):
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
 
-            rfi_A = vmap(vmap(latent_predict, (0, None, None), 0), (1, None, None), 1)(
+            rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
                 rfi_k_A, pads, ss_idxs
             )
 
@@ -604,7 +604,7 @@ class FourierGPRFI(Component):
         # if self.gp_l is None:
         #     self.gp_l = 1.0
 
-        self.pk, self.ks, self.pads, self.ss_idxs = latent_init(
+        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             self.xs,
             self.pad_factors,
             self.ss_factors,
@@ -615,7 +615,7 @@ class FourierGPRFI(Component):
         )
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
-        self.latent_idxs, _ = get_latent_init(
+        self.latent_idxs, _ = signal_to_latent_init(
             self.xs,
             self.pad_factors,
             self.p0,
@@ -625,7 +625,7 @@ class FourierGPRFI(Component):
         )
 
         # JIT-compiled function for efficient latent extraction
-        self.get_latent_pred = jit(lambda Z: get_latent_apply(
+        self.get_latent_pred = jit(lambda Z: signal_to_latent(
             Z,
             self.pad_factors,
             self.latent_idxs,

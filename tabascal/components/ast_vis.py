@@ -8,7 +8,7 @@ from tabascal.tab_tools import (
     pow_spec,
     get_observation_data_type,
 )
-from tabascal.fft_gp import latent_init, latent_predict, get_latent_init, get_latent_apply, pow_spec_nd
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
 
 import xarray as xr
@@ -732,7 +732,7 @@ class FourierTimeFreqGPAst(Component):
 
             ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
 
-            vis_ast = vmap(latent_predict, (0, None, None), 0)(ast_k, pads, ss_idxs)
+            vis_ast = vmap(latent_to_signal, (0, None, None), 0)(ast_k, pads, ss_idxs)
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 
@@ -763,7 +763,7 @@ class FourierTimeFreqGPAst(Component):
         self.k0_time = self.ast_fr
         self.k0s = [self.k0_freq, self.k0_time.max()]
 
-        self.pk, self.ks, self.pads, self.ss_idxs = latent_init(
+        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             self.xs,
             self.pad_factors,
             self.ss_factors,
@@ -774,7 +774,7 @@ class FourierTimeFreqGPAst(Component):
         )
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
-        self.latent_idxs, _ = get_latent_init(
+        self.latent_idxs, _ = signal_to_latent_init(
             self.xs,
             self.pad_factors,
             self.p0,
@@ -816,7 +816,7 @@ class FourierTimeFreqGPAst(Component):
         )
 
         # JIT-compiled function for efficient latent extraction
-        get_latent_pred = jit(lambda Z: get_latent_apply(
+        get_latent_pred = jit(lambda Z: signal_to_latent(
             Z,
             self.pad_factors,
             self.latent_idxs,
