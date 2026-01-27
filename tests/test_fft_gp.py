@@ -380,7 +380,7 @@ class TestDomainSS:
 class TestLatentSpace:
     """Test latent space operations."""
 
-    def test_get_latent_1d(self):
+    def test_signal_to_latent_1d(self):
         """Test latent representation extraction in 1D."""
         x = jnp.linspace(0, 10, 32)
         y = jnp.sin(2 * jnp.pi * x / 10)
@@ -463,7 +463,7 @@ class TestLatentSpace:
         y_ss = predict_jitted(Y_latent)
         assert y_ss.size > 0
 
-    def test_get_latent_init_apply_jit_compatible(self):
+    def test_signal_to_latent_jit_compatible(self):
         """Test that signal_to_latent_init + signal_to_latent is JIT-compatible."""
         x = jnp.linspace(0, 10, 32)
         y = jnp.sin(2 * jnp.pi * x / 10)
