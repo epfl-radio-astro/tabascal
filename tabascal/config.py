@@ -9,8 +9,6 @@ from jax import vmap
 
 import numpy as np
 
-# from tabsim.config import JD0, yaml_load
-# from tabsim.tle import get_tles_by_id
 from tabsim.jax.coordinates import (
     secs_to_days,
     mjd_to_jd,
@@ -165,7 +163,7 @@ class TabConfig:
         obs_epoch_jd = float(self.times_jd.mean())
 
         self.elements, self.epoch_jd, self.norad_ids, self.tles = (
-            fetch_orbital_elements(self.spacetrack_path, obs_epoch_jd, norad_ids)
+            fetch_orbital_elements(obs_epoch_jd, norad_ids)
         )
         self.n_rfi = len(self.norad_ids)
 
