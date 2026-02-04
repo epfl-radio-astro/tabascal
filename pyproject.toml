@@ -39,3 +39,9 @@ old-tab = "tabascal.deprecated.run_tabascal:main"
 tabascal = "tabascal.scripts.run_tabascal:main"
 tab2MS="tabascal.scripts.results_to_MS:main"
 
+[pytest]
+log_cli = true
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "WARNING"
