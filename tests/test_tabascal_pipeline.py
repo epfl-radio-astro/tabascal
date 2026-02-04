@@ -13,6 +13,8 @@ import tabsim
 import yaml
 from huggingface_hub import snapshot_download
 
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 def compute_sha256(file_path: Path) -> str:
     """Compute the SHA256 hash of a file.
@@ -29,6 +31,7 @@ def compute_sha256(file_path: Path) -> str:
         for byte_block in iter(lambda: f.read(4096), b""):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
+
 
 
 @pytest.fixture
@@ -92,7 +95,6 @@ def provide_test_data(tmp_path: Path) -> Path:
         return tmp_path
 
 
-
 def read_and_modify_yaml(
     new_data: dict[str, Any], input_path: Path, output_path: Path
 ) -> None:
@@ -112,7 +114,38 @@ def read_and_modify_yaml(
         yaml.dump(data, f)
 
 
-def test_tabascal_pipeline(provide_test_data: Path, tmp_path: Path) -> None:
+
+@dataclass
+class PipelineTestConfig:
+    components: List[str] = field(default_factory=list)
+    chi2_ref: float = field(default_factory=float)
+
+
+test_configs = [
+    pytest.param(
+        PipelineTestConfig([
+            "trajectory:FixedOrbit",
+            "rfi_signal:ComplexRFI",
+            "rfi_vis:RiemannVisTimeFreqCalculation",
+            "ast_vis:FourierTimeFreqGPAst",
+            "gains:UnitaryGains",
+        ], 0.8549507174978265),
+        id="RiemannVisTimeFreqCalculation"
+    ),
+    pytest.param(
+        PipelineTestConfig([
+            "trajectory:FixedOrbit",
+            "rfi_signal:ComplexRFI",
+            "rfi_vis:RiemannVisTimeFreqCalculationFFI",
+            "ast_vis:FourierTimeFreqGPAst",
+            "gains:UnitaryGains",
+        ], 0.8549507174978265),
+        id="RiemannVisTimeFreqCalculationFFI"
+    )
+]
+
+@pytest.mark.parametrize("t_config", test_configs)
+def test_tabascal_pipeline(provide_test_data: Path, tmp_path: Path, t_config) -> None:
     """Test the complete Tabascal pipeline execution.
 
     This test verifies that the full Tabascal pipeline runs successfully and produces
@@ -136,14 +169,7 @@ def test_tabascal_pipeline(provide_test_data: Path, tmp_path: Path) -> None:
 
     config_mod = {
         "model": {
-            "components": [
-                "trajectory:FixedOrbit",
-                "rfi_signal:ComplexRFI",
-                "rfi_vis:RiemannVisTimeFreqCalculation",
-                "ast_vis:FourierTimeFreqGPAst",
-                "gains:UnitaryGains",
-            ]
-        }
+            "components":  t_config.components       }
     }
     read_and_modify_yaml(config_mod, config_template, config_path)
 
@@ -176,5 +202,5 @@ def test_tabascal_pipeline(provide_test_data: Path, tmp_path: Path) -> None:
     assert match, f"Could not find Reduced Chi^2 in output: {result.stdout}"
 
     value = float(match.group(1))
-    expected_value = 0.8549507174978265
+    expected_value = t_config.chi2_ref
     assert value == pytest.approx(expected_value, rel=1e-3)
