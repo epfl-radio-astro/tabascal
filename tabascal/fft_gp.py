@@ -318,7 +318,7 @@ def fourier_cut(pk: Array, cutoff: float, y: Array) -> Array:
     Y = jnp.fft.fftshift(jnp.fft.fftn(y, norm="forward"))
 
     # Slice the Fourier transform to only include the values where the pk meets the relative cutoff
-    Y_cut = Y[*idxs]
+    Y_cut = Y[tuple(idxs)]
 
     return Y_cut
 
