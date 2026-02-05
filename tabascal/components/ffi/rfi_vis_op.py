@@ -169,20 +169,18 @@ def rfi_transpose_lowering_cpu(
 ):
     _check_tab_lib()
     res = jax.ffi.ffi_lowering("calc_rfi_transpose")
-    return [
-        res(
-            ctx,
-            a1,
-            a1_sorter,
-            a1_start,
-            a2,
-            a2_sorter,
-            a2_start,
-            rfi_amp_fine,
-            rfi_phase,
-            g,
-        )
-    ]
+    return res(
+        ctx,
+        a1,
+        a1_sorter,
+        a1_start,
+        a2,
+        a2_sorter,
+        a2_start,
+        rfi_amp_fine,
+        rfi_phase,
+        g,
+    )
 
 
 mlir.register_lowering(rfi_transpose_op, rfi_transpose_lowering_cpu, platform="cpu")
@@ -193,20 +191,18 @@ def rfi_transpose_lowering_gpu(
 ):
     _check_tab_lib_gpu()
     res = jax.ffi.ffi_lowering("calc_rfi_transpose_gpu")
-    return [
-        res(
-            ctx,
-            a1,
-            a1_sorter,
-            a1_start,
-            a2,
-            a2_sorter,
-            a2_start,
-            rfi_amp_fine,
-            rfi_phase,
-            g,
-        )
-    ]
+    return res(
+        ctx,
+        a1,
+        a1_sorter,
+        a1_start,
+        a2,
+        a2_sorter,
+        a2_start,
+        rfi_amp_fine,
+        rfi_phase,
+        g,
+    )
 
 
 mlir.register_lowering(rfi_transpose_op, rfi_transpose_lowering_gpu, platform="gpu")
