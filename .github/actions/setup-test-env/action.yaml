@@ -1,0 +1,64 @@
+name: 'Setup Test Environment'
+description: 'Set up Python, caching, and install test dependencies'
+
+inputs:
+  python-version:
+    description: 'Python version to set up'
+    required: true
+  install-coverage:
+    description: 'Whether to install pytest-cov for coverage reporting'
+    required: false
+    default: 'false'
+
+outputs:
+  tabsim-version:
+    description: 'The installed tabsim version'
+    value: ${{ steps.tabsim-version.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Get tabsim version for cache key
+      id: tabsim-version
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install tabsim
+        VERSION=$(python -c "import tabsim; print(tabsim.__version__)")
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Tabsim version: $VERSION"
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ inputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ inputs.python-version }}-
+          ${{ runner.os }}-pip-
+
+    - name: Cache HuggingFace datasets
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: ${{ runner.os }}-huggingface-tabsim-${{ steps.tabsim-version.outputs.version }}-${{ hashFiles('tests/data/*.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-huggingface-tabsim-${{ steps.tabsim-version.outputs.version }}-
+          ${{ runner.os }}-huggingface-
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[test]"
+
+    - name: Install coverage dependencies
+      if: inputs.install-coverage == 'true'
+      shell: bash
+      run: |
+        pip install pytest-cov
