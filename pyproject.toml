@@ -25,7 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 gpu = ["jax[cuda12]"]
 ipy = ["ipython", "ipykernel"]
-test = ["pytest"]
+test = ["pytest", "huggingface-hub"]
 docs = ["sphinx", "sphinx-rtd-theme"]
 
 [project.urls]
