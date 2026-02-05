@@ -33,16 +33,6 @@ jobs:
         run: |
           pytest -v --tb=short --color=yes
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-py${{ matrix.python-version }}
-          path: |
-            .pytest_cache/
-            **/*.log
-          retention-days: 7
-
   coverage:
     name: Test Coverage
     runs-on: ubuntu-latest
