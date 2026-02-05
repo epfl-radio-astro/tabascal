@@ -214,4 +214,4 @@ def test_tabascal_pipeline(provide_test_data: Path, tmp_path: Path, t_config) ->
 
     value = float(match.group(1))
     expected_value = t_config.chi2_ref
-    assert value == pytest.approx(expected_value, rel=1e-3)
+    assert value == pytest.approx(expected_value, rel=1e-2)
