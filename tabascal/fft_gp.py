@@ -615,7 +615,7 @@ def latent_init(
 
     idxs, cut_pads = pk_cut(pk, cutoff)
 
-    latent_pk = pk[*idxs]
+    latent_pk = pk[tuple(idxs)]
     latent_ks = [k_pad[idx] for k_pad, idx in zip(ks_pad, idxs)]
 
     ns = (len(k) for k in ks_pad)
@@ -688,6 +688,6 @@ def latent_predict(
     y_pad_ss = jnp.fft.ifftn(jnp.fft.fftshift(Y_pad_ss), norm="forward")
 
     # Slice borders to extract supersampled, unpadded array
-    y_ss = y_pad_ss[*ss_idxs]
+    y_ss = y_pad_ss[tuple(ss_idxs)]
 
     return y_ss
