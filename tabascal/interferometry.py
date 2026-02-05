@@ -104,8 +104,8 @@ def calculate_rfi_vis_variable(
         slice(time_stride // 2, None, time_stride),  # limited time samples
     ]
 
-    rfi_A = rfi_A[*idx]
-    rfi_phase = rfi_phase[*idx]
+    rfi_A = rfi_A[tuple(idx)]
+    rfi_phase = rfi_phase[tuple(idx)]
 
     vis_rfi = jnp.sum(
         jnp.mean(
