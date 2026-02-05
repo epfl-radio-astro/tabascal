@@ -5,6 +5,7 @@ import logging
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +13,6 @@ import pytest
 import tabsim
 import yaml
 from huggingface_hub import snapshot_download
-
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 def compute_sha256(file_path: Path) -> str:
     """Compute the SHA256 hash of a file.
@@ -117,13 +115,24 @@ def read_and_modify_yaml(
 
 @dataclass
 class PipelineTestConfig:
-    components: List[str] = field(default_factory=list)
-    chi2_ref: float = field(default_factory=float)
+    """Configuration for a single pipeline test case.
+
+    Attributes:
+        sim_file_name: Name of the simulation YAML configuration file
+        components: List of component module specifications for the pipeline
+        chi2_ref: Expected reduced chi-squared value for validation
+    """
+    sim_file_name: str
+    components: list[str]
+    chi2_ref: float
+
 
 
 test_configs = [
     pytest.param(
-        PipelineTestConfig([
+        PipelineTestConfig(
+        "sim_target_8A.yaml",
+        [
             "trajectory:FixedOrbit",
             "rfi_signal:ComplexRFI",
             "rfi_vis:RiemannVisTimeFreqCalculation",
@@ -133,7 +142,9 @@ test_configs = [
         id="RiemannVisTimeFreqCalculation"
     ),
     pytest.param(
-        PipelineTestConfig([
+        PipelineTestConfig(
+        "sim_target_8A.yaml",
+        [
             "trajectory:FixedOrbit",
             "rfi_signal:ComplexRFI",
             "rfi_vis:RiemannVisTimeFreqCalculationFFI",
@@ -161,7 +172,7 @@ def test_tabascal_pipeline(provide_test_data: Path, tmp_path: Path, t_config) ->
     """
     local_dir = Path(provide_test_data)
     data_dir = Path(__file__).parent / "data"
-    input_hash = compute_sha256(data_dir / "sim_target_8A.yaml")
+    input_hash = compute_sha256(data_dir / t_config.sim_file_name)
 
     input_dir = local_dir / input_hash
     config_template = data_dir / "tab_target.yaml"
