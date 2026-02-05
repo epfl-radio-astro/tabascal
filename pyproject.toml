@@ -19,7 +19,7 @@ description = "Trajectory based Radio Frequency Interference (RFI) subtraction a
 
 requires-python = ">=3.10"
 dependencies = [
-    "tabsim", "numpyro", "optax", 
+    "tabsim", "numpyro", "optax", "jax>=0.6.0",
 ]
 
 [project.optional-dependencies]
