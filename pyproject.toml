@@ -39,7 +39,6 @@ test = ["pytest"]
 docs = ["sphinx", "sphinx-rtd-theme"]
 cuda12 = ["jax[cuda12]"]
 cuda13 = ["jax[cuda13]"]
-rocm = ["jax[rocm]"]
 
 [project.urls]
 Repository = "https://github.com/epfl-radio-astro/tabascal.git"
