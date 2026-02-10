@@ -23,7 +23,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = ["jax[cuda12]"]
 ipy = ["ipython", "ipykernel"]
 test = ["pytest"]
 docs = ["sphinx", "sphinx-rtd-theme"]
@@ -35,7 +34,6 @@ Repository = "https://github.com/epfl-radio-astro/tabascal.git"
 where = ["."]
 
 [project.scripts]
-old-tab = "tabascal.deprecated.run_tabascal:main"
 tabascal = "tabascal.scripts.run_tabascal:main"
 tab2MS="tabascal.scripts.results_to_MS:main"
 
