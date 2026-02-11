@@ -625,11 +625,11 @@ class FourierGPRFI(Component):
         )
 
         # JIT-compiled function for efficient latent extraction
-        self.get_latent_pred = jit(lambda Z: signal_to_latent(
+        self.signal_to_latent = lambda Z: signal_to_latent(
             Z,
             self.pad_factors,
             self.latent_idxs,
-        ))
+        )
 
         xs = [self.freqs, self.times]
         dxs = tuple([float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in xs])
@@ -689,14 +689,14 @@ class FourierGPRFI(Component):
             (0, 2, 3, 1),
         )
 
-        # self.true_rfi_k_A = vmap(vmap(get_latent_pred, (0,), 0), (1,), 1)(rfi_A)
+        self.true_rfi_k_A = vmap(vmap(self.signal_to_latent, (0,), 0), (1,), 1)(rfi_A)
 
-        self.true_rfi_k_A = jnp.array(
-            [
-                [self.get_latent_pred(rfi_A[i, j]) for j in range(self.n_ant)]
-                for i in range(self.n_rfi)
-            ]
-        )
+        # self.true_rfi_k_A = jnp.array(
+        #     [
+        #         [self.get_latent_pred(rfi_A[i, j]) for j in range(self.n_ant)]
+        #         for i in range(self.n_rfi)
+        #     ]
+        # )
 
         self.true_rfi_k_A_base = self.inv_transform(
             self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k
@@ -713,12 +713,13 @@ class FourierGPRFI(Component):
         elif init_type == "ones":
             print("Using ones for rfi_k")
             ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
-            self.init_rfi_k = jnp.array(
-                [
-                    [self.get_latent_pred(ones) for _ in range(self.n_ant)]
-                    for _ in range(self.n_rfi)
-                ]
-            )
+            self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
+            # self.init_rfi_k = jnp.array(
+            #     [
+            #         [self.get_latent_pred(ones) for _ in range(self.n_ant)]
+            #         for _ in range(self.n_rfi)
+            #     ]
+            # )
         else:
             print("Drawing sample from prior for rfi_k")
             prior_sample = random.normal(

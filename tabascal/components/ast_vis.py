@@ -696,7 +696,7 @@ class FourierTimeFreqGPAst(Component):
             self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"ComplexRFI setup failed: {e}")
+            raise RuntimeError(f"FourierTimeFreqGPAst setup failed: {e}")
 
     def build_set_params(self):
         n_bl = self.n_bl
@@ -815,17 +815,8 @@ class FourierTimeFreqGPAst(Component):
             (1, 2, 0),
         )
 
-        # JIT-compiled function for efficient latent extraction
-        get_latent_pred = jit(lambda Z: signal_to_latent(
-            Z,
-            self.pad_factors,
-            self.latent_idxs,
-        ))
-
-        # self.true_ast_k = vmap(get_latent_pred, (0,), 0)(vis_ast)
-
-        self.true_ast_k = jnp.array([get_latent_pred(vis) for vis in vis_ast])
-
+        self.true_ast_k = vmap(signal_to_latent, (0, None, None), 0)(vis_ast, self.pad_factors, self.latent_idxs)
+        
         self.true_ast_k_base = self.inv_transform(
             self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
         )
