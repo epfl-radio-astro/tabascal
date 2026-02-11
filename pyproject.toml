@@ -17,16 +17,28 @@ maintainers = [
 ]
 description = "Trajectory based Radio Frequency Interference (RFI) subtraction and calibration using Bayesian methods for radio interferometeric data."
 
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "tabsim", "numpyro", "optax", 
+    "astropy",
+    "dask",
+    "dask-ms",
+    "jax>=0.6.0",
+    "matplotlib",
+    "numpy",
+    "numpyro",
+    "optax",
+    "PyYAML",
+    "skyfield",
+    "tabsim",
+    "xarray",
 ]
 
 [project.optional-dependencies]
-gpu = ["jax[cuda12]"]
 ipy = ["ipython", "ipykernel"]
-test = ["pytest"]
+test = ["pytest", "huggingface-hub"]
 docs = ["sphinx", "sphinx-rtd-theme"]
+cuda12 = ["jax[cuda12]"]
+cuda13 = ["jax[cuda13]"]
 
 [project.urls]
 Repository = "https://github.com/epfl-radio-astro/tabascal.git"
@@ -35,7 +47,9 @@ Repository = "https://github.com/epfl-radio-astro/tabascal.git"
 where = ["."]
 
 [project.scripts]
-old-tab = "tabascal.deprecated.run_tabascal:main"
 tabascal = "tabascal.scripts.run_tabascal:main"
 tab2MS="tabascal.scripts.results_to_MS:main"
 
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "WARNING"

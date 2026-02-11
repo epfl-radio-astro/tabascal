@@ -1,4 +1,4 @@
-from jax import vmap, random
+from jax import vmap, random, jit
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -6,7 +6,8 @@ from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.tab_tools import get_observation_data_type
-from tabascal.fft_gp import latent_init, latent_predict, get_latent
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
+from tabascal.timing import measure_runtime
 
 import xarray as xr
 
@@ -578,7 +579,7 @@ class FourierGPRFI(Component):
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
 
-            rfi_A = vmap(vmap(latent_predict, (0, None, None), 0), (1, None, None), 1)(
+            rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
                 rfi_k_A, pads, ss_idxs
             )
 
@@ -592,6 +593,7 @@ class FourierGPRFI(Component):
         """Call this before using in JIT context"""
         pass
 
+    @measure_runtime
     def _compute_gp_params(self):
 
         # if self.gp_var is None:
@@ -602,7 +604,7 @@ class FourierGPRFI(Component):
         # if self.gp_l is None:
         #     self.gp_l = 1.0
 
-        self.pk, self.ks, self.pads, self.ss_idxs = latent_init(
+        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             self.xs,
             self.pad_factors,
             self.ss_factors,
@@ -612,14 +614,21 @@ class FourierGPRFI(Component):
             self.pk_cutoff,
         )
 
-        self.get_latent_pred = lambda Z: get_latent(
-            Z,
+        # Pre-compute slicing indices for JIT-compatible latent extraction
+        self.latent_idxs, _ = signal_to_latent_init(
             self.xs,
             self.pad_factors,
             self.p0,
             self.k0s,
             self.gammas,
             self.pk_cutoff,
+        )
+
+        # JIT-compiled function for efficient latent extraction
+        self.signal_to_latent = lambda Z: signal_to_latent(
+            Z,
+            self.pad_factors,
+            self.latent_idxs,
         )
 
         xs = [self.freqs, self.times]
@@ -680,14 +689,14 @@ class FourierGPRFI(Component):
             (0, 2, 3, 1),
         )
 
-        # self.true_rfi_k_A = vmap(vmap(get_latent_pred, (0,), 0), (1,), 1)(rfi_A)
+        self.true_rfi_k_A = vmap(vmap(self.signal_to_latent, (0,), 0), (1,), 1)(rfi_A)
 
-        self.true_rfi_k_A = jnp.array(
-            [
-                [self.get_latent_pred(rfi_A[i, j]) for j in range(self.n_ant)]
-                for i in range(self.n_rfi)
-            ]
-        )
+        # self.true_rfi_k_A = jnp.array(
+        #     [
+        #         [self.get_latent_pred(rfi_A[i, j]) for j in range(self.n_ant)]
+        #         for i in range(self.n_rfi)
+        #     ]
+        # )
 
         self.true_rfi_k_A_base = self.inv_transform(
             self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k
@@ -704,12 +713,13 @@ class FourierGPRFI(Component):
         elif init_type == "ones":
             print("Using ones for rfi_k")
             ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
-            self.init_rfi_k = jnp.array(
-                [
-                    [self.get_latent_pred(ones) for _ in range(self.n_ant)]
-                    for _ in range(self.n_rfi)
-                ]
-            )
+            self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
+            # self.init_rfi_k = jnp.array(
+            #     [
+            #         [self.get_latent_pred(ones) for _ in range(self.n_ant)]
+            #         for _ in range(self.n_rfi)
+            #     ]
+            # )
         else:
             print("Drawing sample from prior for rfi_k")
             prior_sample = random.normal(

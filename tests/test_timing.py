@@ -35,8 +35,9 @@ def test_timing_collection_enabled():
     result = add(a, b)
 
     timings = get_timings()
-    assert "add" in timings
-    assert len(timings["add"].timings) == 1
+    func_name = "test_timing_collection_enabled.<locals>.add"
+    assert func_name in timings
+    assert len(timings[func_name].timings) == 1
     assert jnp.allclose(result, jnp.array([5, 7, 9]))
 
 
@@ -72,10 +73,12 @@ def test_hierarchical_timing():
     result = parent(jnp.array([1, 2]))
 
     timings = get_timings()
-    assert "parent" in timings
-    assert "child" in timings["parent"].children
-    assert len(timings["parent"].timings) == 1
-    assert len(timings["parent"].children["child"].timings) == 2
+    parent_name = "test_hierarchical_timing.<locals>.parent"
+    child_name = "test_hierarchical_timing.<locals>.child"
+    assert parent_name in timings
+    assert child_name in timings[parent_name].children
+    assert len(timings[parent_name].timings) == 1
+    assert len(timings[parent_name].children[child_name].timings) == 2
     assert jnp.allclose(result, jnp.array([4, 8]))
 
 
@@ -113,7 +116,8 @@ def test_measure_runtime_data_structures():
     results = process_data(inputs)
     timings = get_timings()
 
-    assert "process_data" in timings
+    func_name = "test_measure_runtime_data_structures.<locals>.process_data"
+    assert func_name in timings
     assert jnp.allclose(results["list"][0], jnp.array([2, 4]))
     assert jnp.allclose(results["tuple"][0], jnp.array([11, 21]))
     assert jnp.allclose(results["dict"]["inner"], jnp.array([2, 4]))
@@ -130,6 +134,7 @@ def test_measure_runtime_mixed_types():
     result_arr, result_text = mixed_function(jnp.array([1, 2, 3]), 2, "hello")
 
     timings = get_timings()
-    assert "mixed_function" in timings
+    func_name = "test_measure_runtime_mixed_types.<locals>.mixed_function"
+    assert func_name in timings
     assert jnp.allclose(result_arr, jnp.array([2, 4, 6]))
     assert result_text == "HELLO"

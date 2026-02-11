@@ -1,0 +1,73 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - '**'
+
+jobs:
+  test:
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup test environment
+        uses: ./.github/actions/setup-test-env
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run pytest
+        run: |
+          pytest -v --tb=short --color=yes
+
+  coverage:
+    name: Test Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup test environment
+        uses: ./.github/actions/setup-test-env
+        with:
+          python-version: '3.11'
+          install-coverage: 'true'
+
+      - name: Run pytest with coverage
+        run: |
+          pytest --cov=tabascal --cov-report=xml --cov-report=html --cov-report=term -v
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          retention-days: 30
+
+      - name: Coverage summary
+        run: |
+          echo "## Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          python -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          root = tree.getroot()
+          line_rate = float(root.attrib['line-rate']) * 100
+          branch_rate = float(root.attrib['branch-rate']) * 100
+          print(f'- Line Coverage: {line_rate:.1f}%')
+          print(f'- Branch Coverage: {branch_rate:.1f}%')
+          " >> $GITHUB_STEP_SUMMARY || echo "Coverage parsing failed"

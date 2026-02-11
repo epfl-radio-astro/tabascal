@@ -489,16 +489,6 @@ def run_opt(
     return vi_params, rchi2
 
 
-def save_memory(mem_dir: str, mem_i: int):
-
-    mem_i += 1
-    jax.profiler.save_device_memory_profile(
-        os.path.join(mem_dir, f"memory_{mem_i}.prof")
-    )
-
-    return mem_i
-
-
 def get_observation_data_type(data_col: str):
 
     ast = ["DATA", "CAL_DATA", "AST_DATA", "AST_MODEL_DATA"]
