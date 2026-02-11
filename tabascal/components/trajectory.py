@@ -1,5 +1,4 @@
-from tabsim.config import yaml_load  # type: ignore
-from tabsim.tle import get_tles_by_id  # type: ignore
+from tabsim.tle import get_tles_by_id, load_spacetrack_credentials  # type: ignore
 
 from tabsim.jax.coordinates import (  # type: ignore
     itrf_to_uvw,
@@ -245,7 +244,6 @@ class KeplerOrbit(Component):
             self.ric_std = config.args["satellites"]["ric_std"]
 
             # Do expensive setup operations once
-            # self._fetch_orbital_elements()
             self._compute_prior_params()
             self._compute_init_params()
             self._set_outputs()
@@ -357,13 +355,13 @@ def itrs_to_gcrs_sf(pos_itrs: Array, times_jd: Array) -> Array:
     return pos_gcrs
 
 
-def fetch_orbital_elements(spacetrack_path, obs_epoch_jd, norad_ids):
+def fetch_orbital_elements(obs_epoch_jd, norad_ids):
 
-    st_login = yaml_load(spacetrack_path)
+    st_user, st_pass = load_spacetrack_credentials()
 
     tles_df = get_tles_by_id(
-        st_login["username"],
-        st_login["password"],
+        st_user,
+        st_pass,
         norad_ids,
         obs_epoch_jd,
     )
