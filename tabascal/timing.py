@@ -133,14 +133,14 @@ def measure_runtime(func: F) -> F:
 
         # Skip if in a JIT context
         if isinstance(jnp.array(0) + 1, jax.core.Tracer):
-            print(f"WARNING: Timing used in JIT context with function name '{func.__name__}'. Skipping timing.")
+            print(f"WARNING: Timing used in JIT context with function name '{func.__qualname__}'. Skipping timing.")
             return func(*args, **kwargs)
 
         # Synchronize inputs
         _block_until_ready(args)
         _block_until_ready(kwargs)
 
-        with _MANAGER.scope(func.__name__):
+        with _MANAGER.scope(func.__qualname__):
             result = func(*args, **kwargs)
             # Synchronize output
             _block_until_ready(result)
@@ -186,7 +186,7 @@ def print_timings():
 
     # Table configuration
     COL_WIDTHS = {
-        "name": 35,
+        "name": 50,
         "calls": 8,
         "metric": 12,
         "rel": 10,
@@ -198,7 +198,7 @@ def print_timings():
         + COL_WIDTHS["calls"]
         + COL_WIDTHS["rel"]
         + COL_WIDTHS["glob"]
-        + 5 * COL_WIDTHS["metric"]
+        + 3 * COL_WIDTHS["metric"]
         + 8
     )
 
@@ -214,8 +214,6 @@ def print_timings():
         f"{'Rel (%)':>{COL_WIDTHS['rel']}} "
         f"{'Mean':>{COL_WIDTHS['metric']}} "
         f"{'Std':>{COL_WIDTHS['metric']}} "
-        f"{'Min':>{COL_WIDTHS['metric']}} "
-        f"{'Max':>{COL_WIDTHS['metric']}}"
     )
     print(header)
     print("-" * TOTAL_WIDTH)
@@ -249,8 +247,6 @@ def print_timings():
             f"{rel_pct:>9.1f}% "
             f"{_convert_time_to_str(times.mean()):>{COL_WIDTHS['metric']}} "
             f"{_convert_time_to_str(times.std()):>{COL_WIDTHS['metric']}} "
-            f"{_convert_time_to_str(times.min()):>{COL_WIDTHS['metric']}} "
-            f"{_convert_time_to_str(times.max()):>{COL_WIDTHS['metric']}}"
         )
         print(row)
 
