@@ -30,7 +30,6 @@ from tabsim.config import Tee, load_config
 
 
 from tabascal.tab_tools import (
-    save_memory,
     write_results_xds,
     init_predict,
     plot_init,
@@ -71,7 +70,6 @@ def tabascal_subtraction(
 
     key, subkey = random.split(random.PRNGKey(1))
 
-    mem_i = 0
 
     model_name = "Custom"
     print(f"Model : {model_name}")
@@ -146,8 +144,6 @@ def tabascal_subtraction(
     print(f"Startup Time : {end_start - start_time}")
     print(f"{end_start}")
 
-    mem_i = save_memory(mem_dir, mem_i)
-
     key, subkey = random.split(key)
     init_pred = init_predict(tab_config, prob_model, subkey, model.init_params)
     write_results_xds(init_pred, tab_config, init_pred_path)
@@ -208,8 +204,6 @@ def tabascal_subtraction(
     #         true_pred_path,
     #     )
 
-    mem_i = save_memory(mem_dir, mem_i)
-
     ### Check and Plot Model at prior parameters
     key, subkey = random.split(key)
     if config["plots"]["prior"]:
@@ -240,8 +234,6 @@ def tabascal_subtraction(
     #         max_tree_depth=config["mcmc"]["max_tree_depth"],
     #         thin_factor=config["mcmc"]["thin_factor"],
     #     )
-
-    # mem_i = save_memory(mem_dir, mem_i)
 
     ### Run Optimization
     key, *subkeys = random.split(key, 3)
@@ -277,8 +269,6 @@ def tabascal_subtraction(
             shell=True,
             executable="/bin/bash",
         )
-
-    mem_i = save_memory(mem_dir, mem_i)
 
     max_fisher_time = 30 * 60  # seconds
 
