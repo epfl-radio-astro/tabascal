@@ -1,4 +1,4 @@
-from jax import vmap, random
+from jax import vmap, random, jit
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -8,7 +8,8 @@ from tabascal.tab_tools import (
     pow_spec,
     get_observation_data_type,
 )
-from tabascal.fft_gp import latent_init, latent_predict, get_latent, pow_spec_nd
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
+from tabascal.timing import measure_runtime
 
 import xarray as xr
 
@@ -695,7 +696,7 @@ class FourierTimeFreqGPAst(Component):
             self._validate_dimensions()
 
         except Exception as e:
-            raise RuntimeError(f"ComplexRFI setup failed: {e}")
+            raise RuntimeError(f"FourierTimeFreqGPAst setup failed: {e}")
 
     def build_set_params(self):
         n_bl = self.n_bl
@@ -731,7 +732,7 @@ class FourierTimeFreqGPAst(Component):
 
             ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
 
-            vis_ast = vmap(latent_predict, (0, None, None), 0)(ast_k, pads, ss_idxs)
+            vis_ast = vmap(latent_to_signal, (0, None, None), 0)(ast_k, pads, ss_idxs)
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 
@@ -762,10 +763,20 @@ class FourierTimeFreqGPAst(Component):
         self.k0_time = self.ast_fr
         self.k0s = [self.k0_freq, self.k0_time.max()]
 
-        self.pk, self.ks, self.pads, self.ss_idxs = latent_init(
+        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             self.xs,
             self.pad_factors,
             self.ss_factors,
+            self.p0,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
+        )
+
+        # Pre-compute slicing indices for JIT-compatible latent extraction
+        self.latent_idxs, _ = signal_to_latent_init(
+            self.xs,
+            self.pad_factors,
             self.p0,
             self.k0s,
             self.gammas,
@@ -788,6 +799,7 @@ class FourierTimeFreqGPAst(Component):
 
         self.sigma_ast_k = vmap(sigma, (0), 0)(self.k0_time)
 
+    @measure_runtime
     def _compute_true_params(self, zarr_path, data_col):
 
         xds = xr.open_zarr(zarr_path)
@@ -803,20 +815,8 @@ class FourierTimeFreqGPAst(Component):
             (1, 2, 0),
         )
 
-        get_latent_pred = lambda Z: get_latent(
-            Z,
-            self.xs,
-            self.pad_factors,
-            self.p0,
-            self.k0s,
-            self.gammas,
-            self.pk_cutoff,
-        )
-
-        # self.true_ast_k = vmap(get_latent_pred, (0,), 0)(vis_ast)
-
-        self.true_ast_k = jnp.array([get_latent_pred(vis) for vis in vis_ast])
-
+        self.true_ast_k = vmap(signal_to_latent, (0, None, None), 0)(vis_ast, self.pad_factors, self.latent_idxs)
+        
         self.true_ast_k_base = self.inv_transform(
             self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
         )

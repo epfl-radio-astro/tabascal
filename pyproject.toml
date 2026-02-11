@@ -19,14 +19,26 @@ description = "Trajectory based Radio Frequency Interference (RFI) subtraction a
 
 requires-python = ">=3.10"
 dependencies = [
-    "tabsim", "numpyro", "optax", "jax>=0.6.0",
+    "astropy",
+    "dask",
+    "daskms",
+    "jax>=0.6.0",
+    "matplotlib",
+    "numpy",
+    "numpyro",
+    "optax",
+    "PyYAML",
+    "skyfield",
+    "tabsim",
+    "xarray",
 ]
 
 [project.optional-dependencies]
-gpu = ["jax[cuda12]"]
 ipy = ["ipython", "ipykernel"]
 test = ["pytest", "huggingface-hub"]
 docs = ["sphinx", "sphinx-rtd-theme"]
+cuda12 = ["jax[cuda12]"]
+cuda13 = ["jax[cuda13]"]
 
 [project.urls]
 Repository = "https://github.com/epfl-radio-astro/tabascal.git"
@@ -35,7 +47,6 @@ Repository = "https://github.com/epfl-radio-astro/tabascal.git"
 where = ["."]
 
 [project.scripts]
-old-tab = "tabascal.deprecated.run_tabascal:main"
 tabascal = "tabascal.scripts.run_tabascal:main"
 tab2MS="tabascal.scripts.results_to_MS:main"
 

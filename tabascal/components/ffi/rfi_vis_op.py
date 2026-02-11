@@ -233,7 +233,6 @@ def rfi_jvp_abstract(
     # (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
     n_time = rfi_amp_fine.shape[4]
     n_freq = rfi_amp_fine.shape[2]
-    # n_bl = a1.shape[0] # unused
     return ShapedArray([a1.shape[0], n_freq, n_time], rfi_amp_fine.dtype)
 
 
