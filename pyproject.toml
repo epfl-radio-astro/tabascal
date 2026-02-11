@@ -21,7 +21,7 @@ requires-python = ">=3.10"
 dependencies = [
     "astropy",
     "dask",
-    "daskms",
+    "dask-ms",
     "jax>=0.6.0",
     "matplotlib",
     "numpy",
