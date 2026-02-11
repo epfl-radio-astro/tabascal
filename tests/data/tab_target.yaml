@@ -1,0 +1,108 @@
+model:
+  components:
+  # RFI Phase from trajectory
+    - trajectory:FixedOrbit
+    # - trajectory:KeplerOrbit
+    # - trajectory:PhaseCalculationRFI
+  # RFI signal model
+    # - rfi_signal:RealRFI
+    - rfi_signal:ComplexRFI
+    # - rfi_signal:FourierGPRFI
+  # RFI visibility calculation
+    # - rfi_vis:RiemannVisCalculation
+    - rfi_vis:RiemannVisTimeFreqCalculation
+    # - rfi_vis:RiemannVisTimeFreqVariable
+  # Astronomical signal model
+    # - ast_vis:FourierTimeAst
+    # - ast_vis:FourierTimeFreqAst
+    - ast_vis:FourierTimeFreqGPAst
+  # Antenna Gain model 
+    - gains:UnitaryGains
+
+data:
+  data_col: DATA
+  noise: 
+
+plots:
+  init: False
+  # truth: True
+  prior: False
+  # init: False
+  truth: False
+  # prior: False
+  prior_samples: 100
+
+inference:
+  mcmc: False
+  opt: True
+  # opt: False
+  fisher: False
+
+opt:
+  epsilon: 1e-3
+  max_iter: 1000
+  dual_run: True
+  guide: map
+
+fisher:
+  n_samples: 1
+  max_cg_iter: 10_000
+
+# Priors and Initialization
+ast:
+  # init: est
+  # init: prior
+  init: truth
+  mean: 0
+  # mean: est
+  # mean: truth
+  pow_spec:
+    # P0: 3e3
+    # k0: 1e-3
+    # gamma: 1.2
+    p0: 3e3
+    k0_freq: 1
+    fov_deg: 5
+    gammas: [5, 5]
+    cutoff: 1e-6
+  freq_pad_factor: 2.0
+  time_pad_factor: 2.0
+
+rfi:
+  # init: est
+  # init: prior
+  init: truth
+  mean: 0
+  # mean: est
+  # mean: truth
+  # var: 100        # Jy
+  corr_time: 24   # seconds
+  n_int_time:
+  freq_pad_factor: 2.0
+  time_pad_factor: 2.0
+  freq_int_samples: 1
+  time_int_factor: 5
+  pow_spec:
+    p0: 1e3
+    k0s: [1e0, 1e-2]
+    gammas: [5, 5]
+    cutoff: 1e-6
+
+satellites:
+  norad_ids: [20452, 38833, 45854]
+  spacetrack_path: spacetrack_login.yaml
+  # tle_offset: -2
+  tle_offset: 0
+  # n_int_samples: 3
+  ric_std: 1e2
+
+
+# True gains
+gains:
+  amp_mean: 1.0
+  phase_mean: 0.0
+  # amp_mean: truth
+  # phase_mean: truth
+  amp_std: 1.0      # %
+  phase_std: 1.0    # degrees
+  corr_time: 180    # minutes

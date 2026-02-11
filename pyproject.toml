@@ -17,12 +17,12 @@ maintainers = [
 ]
 description = "Trajectory based Radio Frequency Interference (RFI) subtraction and calibration using Bayesian methods for radio interferometeric data."
 
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "astropy",
     "dask",
     "daskms",
-    "jax",
+    "jax>=0.6.0",
     "matplotlib",
     "numpy",
     "numpyro",
@@ -35,7 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ipy = ["ipython", "ipykernel"]
-test = ["pytest"]
+test = ["pytest", "huggingface-hub"]
 docs = ["sphinx", "sphinx-rtd-theme"]
 cuda12 = ["jax[cuda12]"]
 cuda13 = ["jax[cuda13]"]
@@ -49,3 +49,7 @@ where = ["."]
 [project.scripts]
 tabascal = "tabascal.scripts.run_tabascal:main"
 tab2MS="tabascal.scripts.results_to_MS:main"
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "WARNING"
