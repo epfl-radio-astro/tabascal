@@ -26,7 +26,7 @@ config.update(
 
 import numpy as np
 
-from tabsim.config import Tee, load_config
+from tabsim.config import Tee
 
 
 from tabascal.tab_tools import (
@@ -38,7 +38,7 @@ from tabascal.tab_tools import (
     nlog_like,
     nlog_post,
 )
-from tabascal.config import TabConfig, Model
+from tabascal.config import load_config, TabConfig, Model
 
 
 from typing import Optional
@@ -238,18 +238,23 @@ def tabascal_subtraction(
     ### Run Optimization
     key, *subkeys = random.split(key, 3)
     if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
-        vi_params, rchi2 = run_opt(
+        vi_pred, losses, vi_params, rchi2 = run_opt(
             tab_config,
             prob_model,
-            truth,
-            model_name,
             subkeys,
             model.init_params,
-            plot_dir,
             ms_path,
             map_path,
             params_path,
         )
+
+        if config["plots"]["opt"]:
+            from tabascal.tab_tools import plot_opt
+            plot_opt(tab_config, vi_pred, truth, model_name, plot_dir)
+
+        if config["plots"]["losses"]:
+            from tabascal.tab_tools import plot_losses
+            plot_losses(losses, model_name, plot_dir)
 
         opt_params = {
             key.removesuffix("_auto_loc"): value for key, value in vi_params.items()
@@ -341,7 +346,7 @@ def main():
     else:
         norad_ids = []
 
-    config = load_config(conf_path, config_type="tab")
+    config = load_config(conf_path)
 
     config_st_path = config["satellites"]["spacetrack_path"]
     if spacetrack_path:

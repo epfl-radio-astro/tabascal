@@ -18,7 +18,6 @@ import xarray as xr
 import dask.array as da
 
 import numpy as np
-import matplotlib.pyplot as plt
 import subprocess
 
 from datetime import datetime
@@ -393,11 +392,8 @@ def plot_prior(
 def run_opt(
     tab_config,
     prob_model: Callable,
-    truth: dict[str, jax.Array],
-    model_name: str,
     subkeys: jax.Array,
     init_params: dict,
-    plot_dir: str,
     ms_path,
     map_path,
     params_path,
@@ -430,13 +426,41 @@ def run_opt(
         num_samples=1,
         key=subkeys[1],
     )
+    
+    write_results_xds(vi_pred, tab_config, map_path)
+    # write_params_xds(vi_params, gp_params, ms_params, params_path, overwrite=True)
+
+    # if get_truth_conditional(config):
+
+    #     # vi_pred keys are ['ast_vis', 'gains', 'rfi_vis', 'rmse_ast', 'rmse_gains', 'rmse_rfi', 'vis_obs']
+    #     print(f"RMSE Gains      : {jnp.mean(vi_pred['rmse_gains']):.5f}")
+    #     print(f"RMSE RFI Vis    : {jnp.mean(vi_pred['rmse_rfi']):.5f}")
+    #     print(f"RMSE AST Vis    : {jnp.mean(vi_pred['rmse_ast']):.5f}")
+
     print()
     print(f"Optimization Run Time : {datetime.now() - start}")
     print(f"{datetime.now()}")
     start = datetime.now()
 
-    write_results_xds(vi_pred, tab_config, map_path)
-    # write_params_xds(vi_params, gp_params, ms_params, params_path, overwrite=True)
+    rchi2 = reduced_chi2(vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
+    print()
+    print(f"Reduced Chi^2 @ opt params : {rchi2}")
+
+    print()
+    print(f"Copying tabascal results to MS file from {map_path}")
+    subprocess.run(
+        f"tab2MS -m {ms_path} -z {map_path} -d {tab_config.args['data']['data_col']}",
+        shell=True,
+        executable="/bin/bash",
+    )
+
+    return vi_pred, vi_results.losses, vi_params, rchi2
+
+
+@measure_runtime
+def plot_opt(tab_config, vi_pred, truth, model_name, plot_dir):
+
+    start = datetime.now()
 
     plot_predictions(
         tab_config.times,
@@ -447,27 +471,25 @@ def run_opt(
         max_plots=10,
         save_dir=plot_dir,
     )
+
     print()
     print(f"Optimize Plot Time : {datetime.now() - start}")
     print(f"{datetime.now()}")
 
-    # if get_truth_conditional(config):
 
-    #     # vi_pred keys are ['ast_vis', 'gains', 'rfi_vis', 'rmse_ast', 'rmse_gains', 'rmse_rfi', 'vis_obs']
-    #     print(f"RMSE Gains      : {jnp.mean(vi_pred['rmse_gains']):.5f}")
-    #     print(f"RMSE RFI Vis    : {jnp.mean(vi_pred['rmse_rfi']):.5f}")
-    #     print(f"RMSE AST Vis    : {jnp.mean(vi_pred['rmse_ast']):.5f}")
+@measure_runtime
+def plot_losses(losses, model_name, plot_dir):
 
-    rchi2 = reduced_chi2(vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
-    print()
-    print(f"Reduced Chi^2 @ opt params : {rchi2}")
+    start = datetime.now()
+
+    import matplotlib.pyplot as plt
 
     plt.close()
     fig, ax = plt.subplots(1, 1, figsize=(10, 7))
-    ax.plot(vi_results.losses)
+    ax.plot(losses)
     ax.set_ylabel("Loss")
     ax.set_xlabel("Iteration")
-    if vi_results.losses.min() < 0:
+    if losses.min() < 0:
         ax.set_yscale("symlog")
     else:
         ax.set_yscale("log")
@@ -479,14 +501,8 @@ def run_opt(
     plt.close()
 
     print()
-    print(f"Copying tabascal results to MS file from {map_path}")
-    subprocess.run(
-        f"tab2MS -m {ms_path} -z {map_path} -d {tab_config.args['data']['data_col']}",
-        shell=True,
-        executable="/bin/bash",
-    )
-
-    return vi_params, rchi2
+    print(f"Losses Plot Time : {datetime.now() - start}")
+    print(f"{datetime.now()}")
 
 
 def get_observation_data_type(data_col: str):
