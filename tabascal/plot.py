@@ -5,6 +5,7 @@ from tabascal.timing import measure_runtime
 
 import jax
 import jax.numpy as jnp
+from numpyro.infer import Predictive
 
 from datetime import datetime
 import os
@@ -350,4 +351,3 @@ def plot_losses(losses, model_name, plot_dir):
     print()
     print(f"Losses Plot Time : {datetime.now() - start}")
     print(f"{datetime.now()}")
-
