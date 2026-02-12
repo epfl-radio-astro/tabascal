@@ -15,11 +15,10 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = (
 # os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90" # GPU Memory Preallocation Factor
 
 import jax
-from jax import random, config
-import jax.profiler
+from jax import random
 import jax.numpy as jnp
 
-config.update(
+jax.config.update(
     "jax_enable_x64", True
 )  # Not working without float64 probably due to times in JD
 # jax.config.update("jax_platform_name", "cpu")
@@ -28,18 +27,14 @@ import numpy as np
 
 from tabsim.config import Tee
 
-
 from tabascal.tab_tools import (
-    write_results_xds,
     init_predict,
-    plot_init,
-    plot_prior,
     run_opt,
     nlog_like,
     nlog_post,
 )
 from tabascal.config import load_config, TabConfig, Model
-
+from tabascal.write import write_results_xds
 
 from typing import Optional
 
@@ -184,6 +179,7 @@ def tabascal_subtraction(
     }
 
     if config["plots"]["init"]:
+        from tabascal.plot import plot_init
         plot_init(tab_config, init_pred, truth, model_name, plot_dir)
 
     ### Check and Plot Model at true parameters
@@ -207,6 +203,7 @@ def tabascal_subtraction(
     ### Check and Plot Model at prior parameters
     key, subkey = random.split(key)
     if config["plots"]["prior"]:
+        from tabascal.plot import plot_prior
         plot_prior(
             tab_config,
             prob_model,
@@ -249,11 +246,11 @@ def tabascal_subtraction(
         )
 
         if config["plots"]["opt"]:
-            from tabascal.tab_tools import plot_opt
+            from tabascal.plot import plot_opt
             plot_opt(tab_config, vi_pred, truth, model_name, plot_dir)
 
         if config["plots"]["losses"]:
-            from tabascal.tab_tools import plot_losses
+            from tabascal.plot import plot_losses
             plot_losses(losses, model_name, plot_dir)
 
         opt_params = {
@@ -266,11 +263,9 @@ def tabascal_subtraction(
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")
     else:
+        from tabascal.write import write_results_ms
         print(f"Copying tabascal initial values to MS file from {init_pred_path}")
-        
-        from tabascal.write import write_results
-
-        write_results(ms_path, init_pred_path, tab_config.args["data"]["data_col"])
+        write_results_ms(ms_path, init_pred_path, tab_config.args["data"]["data_col"])
 
     max_fisher_time = 30 * 60  # seconds
 
