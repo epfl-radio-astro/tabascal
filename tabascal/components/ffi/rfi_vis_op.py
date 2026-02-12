@@ -254,8 +254,7 @@ def rfi_jvp_lowering_cpu(
 ):
     _check_tab_lib()
     res = jax.ffi.ffi_lowering("calc_rfi_jvp")
-    return [
-        res(
+    return res(
             ctx,
             a1,
             a1_sorter,
@@ -268,7 +267,6 @@ def rfi_jvp_lowering_cpu(
             rfi_phase,
             rfi_phase_grad,
         )
-    ]
 
 
 mlir.register_lowering(rfi_jvp_op, rfi_jvp_lowering_cpu, platform="cpu")
@@ -289,8 +287,7 @@ def rfi_jvp_lowering_gpu(
 ):
     _check_tab_lib_gpu()
     res = jax.ffi.ffi_lowering("calc_rfi_jvp_gpu")
-    return [
-        res(
+    return res(
             ctx,
             a1,
             a1_sorter,
@@ -303,7 +300,6 @@ def rfi_jvp_lowering_gpu(
             rfi_phase,
             rfi_phase_grad,
         )
-    ]
 
 
 mlir.register_lowering(rfi_jvp_op, rfi_jvp_lowering_gpu, platform="gpu")
@@ -360,8 +356,7 @@ def rfi_vis_lowering_cpu(
 ):
     _check_tab_lib()
     res = jax.ffi.ffi_lowering("calc_rfi")
-    return [
-        res(
+    return res(
             ctx,
             a1,
             a1_sorter,
@@ -372,7 +367,6 @@ def rfi_vis_lowering_cpu(
             rfi_amp_fine,
             rfi_phase,
         )
-    ]
 
 
 mlir.register_lowering(rfi_vis_op, rfi_vis_lowering_cpu, platform="cpu")
@@ -383,8 +377,7 @@ def rfi_vis_lowering_gpu(
 ):
     _check_tab_lib_gpu()
     res = jax.ffi.ffi_lowering("calc_rfi_gpu")
-    return [
-        res(
+    return res(
             ctx,
             a1,
             a1_sorter,
@@ -395,7 +388,6 @@ def rfi_vis_lowering_gpu(
             rfi_amp_fine,
             rfi_phase,
         )
-    ]
 
 
 mlir.register_lowering(rfi_vis_op, rfi_vis_lowering_gpu, platform="gpu")

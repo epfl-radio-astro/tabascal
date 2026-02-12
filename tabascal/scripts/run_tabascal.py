@@ -262,13 +262,10 @@ def tabascal_subtraction(
         print(f"log_p : {nlog_p:.3e}")
     else:
         print(f"Copying tabascal initial values to MS file from {init_pred_path}")
-        import subprocess
+        
+        from tabascal.write import write_results
 
-        subprocess.run(
-            f"tab2MS -m {ms_path} -z {init_pred_path} -d {tab_config.args['data']['data_col']}",
-            shell=True,
-            executable="/bin/bash",
-        )
+        write_results(ms_path, init_pred_path, tab_config.args["data"]["data_col"])
 
     max_fisher_time = 30 * 60  # seconds
 
