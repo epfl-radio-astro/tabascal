@@ -1,10 +1,13 @@
 import matplotlib.pyplot as plt
 from numpy.typing import NDArray
-from typing import Optional
+from typing import Optional, Callable
 from tabascal.timing import measure_runtime
 
+import jax
 import jax.numpy as jnp
+from numpyro.infer import Predictive
 
+from datetime import datetime
 import os
 
 
@@ -244,3 +247,107 @@ def plot_predictions(
         max_plots=max_plots,
         save_dir=save_dir,
     )
+
+
+@measure_runtime
+def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_dir: str):
+
+    start = datetime.now()
+    print()
+    print("Plotting Initial Parameters")
+    plot_predictions(
+        times=tab_config.times,
+        pred=init_pred,
+        truth=truth,
+        type="init",
+        model_name=model_name,
+        max_plots=10,
+        save_dir=plot_dir,
+    )
+    # if get_truth_conditional(config):
+
+    #     # vi_pred keys are ['ast_vis', 'gains', 'rfi_vis', 'rmse_ast', 'rmse_gains', 'rmse_rfi', 'vis_obs']
+    #     print(f"RMSE Gains      : {jnp.mean(init_pred['rmse_gains']):.5f}")
+    #     print(f"RMSE RFI Vis    : {jnp.mean(init_pred['rmse_rfi']):.5f}")
+    #     print(f"RMSE AST Vis    : {jnp.mean(init_pred['rmse_ast']):.5f}")
+
+    print()
+    print(f"Initial Plot Time : {datetime.now() - start}")
+    print(f"{datetime.now()}")
+
+
+@measure_runtime
+def plot_prior(
+    tab_config,
+    prob_model: Callable,
+    truth: dict,
+    model_name: str,
+    subkey: jax.Array,
+    plot_dir: str,
+):
+
+    start = datetime.now()
+    n_prior = tab_config.args["plots"]["prior_samples"]
+    print()
+    print(f"Plotting {n_prior:.0f} Prior Parameter Samples")
+    pred = Predictive(prob_model, num_samples=n_prior)
+    prior_pred = pred(subkey)
+    print("Prior Samples Drawn")
+    plot_predictions(
+        times=tab_config.times,
+        pred=prior_pred,
+        truth=truth,
+        type="prior",
+        model_name=model_name,
+        max_plots=10,
+        save_dir=plot_dir,
+    )
+    print()
+    print(f"Prior Plot Time : {datetime.now() - start}")
+    print(f"{datetime.now()}")
+
+
+@measure_runtime
+def plot_opt(tab_config, vi_pred, truth, model_name, plot_dir):
+
+    start = datetime.now()
+
+    plot_predictions(
+        tab_config.times,
+        pred=vi_pred,
+        truth=truth,
+        type=tab_config.args["opt"]["guide"],
+        model_name=model_name,
+        max_plots=10,
+        save_dir=plot_dir,
+    )
+
+    print()
+    print(f"Optimize Plot Time : {datetime.now() - start}")
+    print(f"{datetime.now()}")
+
+
+@measure_runtime
+def plot_losses(losses, model_name, plot_dir):
+
+    start = datetime.now()
+
+    plt.close()
+    fig, ax = plt.subplots(1, 1, figsize=(10, 7))
+    ax.plot(losses)
+    ax.set_ylabel("Loss")
+    ax.set_xlabel("Iteration")
+    if losses.min() < 0:
+        ax.set_yscale("symlog")
+    else:
+        ax.set_yscale("log")
+    plt.savefig(
+        os.path.join(plot_dir, f"{model_name}_opt_loss.pdf"),
+        format="pdf",
+        bbox_inches="tight",
+    )
+    plt.close()
+
+    print()
+    print(f"Losses Plot Time : {datetime.now() - start}")
+    print(f"{datetime.now()}")
