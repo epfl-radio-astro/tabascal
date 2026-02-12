@@ -1,3 +1,5 @@
+from tabascal.timing import measure_runtime
+
 from daskms import xds_from_ms, xds_to_table
 
 import numpy as np
@@ -6,7 +8,9 @@ import xarray as xr
 import dask.array as da
 import dask
 
-def write_results(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
+
+@measure_runtime
+def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
 
     xds_ms = xds_from_ms(ms_path)[0]
     xds_tab = xr.open_zarr(results_zarr_path)
@@ -68,3 +72,50 @@ def write_results(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
     print(f"Writing tabascal results to {cols} columns in MS file.")
 
     dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
+
+
+@measure_runtime 
+def write_results_xds(
+    vi_pred: dict, tab_config, file_path: str, overwrite: bool = True
+):
+
+    # print(vi_pred.keys())
+    # print(vi_pred["rfi_vis"].shape)
+    # print(vi_pred["rfi_vis"])
+
+    # print(da.asarray(vi_pred["ast_vis"]))
+    # print(da.asarray(vi_pred["gains"]))
+    # print(da.asarray(vi_pred["rfi_vis"]))
+    # print(da.asarray(vi_pred["vis_obs"]))
+    # print(da.asarray(vi_pred["rfi_A"]))
+    # print(da.asarray(args["rfi_phase"]))
+
+    map_xds = xr.Dataset(
+        data_vars={
+            "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_rfi"])),  # type: ignore
+            "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
+            "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
+            "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
+            # "rfi_A": (
+            #     ["sample", "src", "ant", "rfi_time"],
+            #     da.asarray(vi_pred["rfi_A"]),
+            # ),
+            # "rfi_phase": (
+            #     ["src", "ant", "time_mjd_fine"],
+            #     da.asarray(args["rfi_phase"]),
+            # ),
+        },
+        coords={
+            "time": da.asarray(tab_config.times),  # type: ignore
+            "freq": da.asarray(tab_config.freqs),  # type: ignore
+            # "rfi_time": da.asarray(args["rfi_times"]),
+            # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
+        },
+    )
+    # print(map_xds)
+
+    mode = "w" if overwrite else "w-"
+
+    map_xds.to_zarr(file_path, mode=mode)
+
+    return map_xds

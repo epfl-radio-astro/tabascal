@@ -21,13 +21,39 @@ from tabsim.jax.coordinates import (
 
 # from tabsim.jax.interferometry import int_sample_times
 from tabsim.dask.interferometry import int_sample_times
+from tabsim.config import deep_update, yaml_load
 
-import numpyro.distributions as dist
 import numpyro
 
 from typing import Callable
 
+from importlib.resources import files
+import os
 
+
+def load_config(path: str) -> dict:
+    """Load a configuration file and populate default parameters where needed.
+
+    Parameters
+    ----------
+    path : str
+        Path to the yaml config file.
+    
+    Returns
+    -------
+    dict
+        Configuration dictionary.
+    """
+    config_dir = files("tabascal.data").joinpath("config").__str__()
+    tab_base_config_path = os.path.join(config_dir, "tab_config_base.yaml")
+    base_config = yaml_load(tab_base_config_path)
+
+    try:
+        return deep_update(base_config, yaml_load(path))
+    except:
+        raise IOError("Configuration file could not be loaded from ")
+
+    
 class TabConfig:
     """Configuration parameters for tabascal method"""
 

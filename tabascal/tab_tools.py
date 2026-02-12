@@ -9,16 +9,10 @@ from jax import random
 from jax.tree_util import tree_map
 
 from tabascal.opt import SVIRunResult
-from tabascal.plot import plot_predictions
 from tabascal.timing import measure_runtime
-
-import os
-
-import xarray as xr
-import dask.array as da
+from tabascal.write import write_results_ms, write_results_xds
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 from datetime import datetime
 
@@ -265,53 +259,6 @@ def svi_predict(
     return predictions
 
 
-@measure_runtime 
-def write_results_xds(
-    vi_pred: dict, tab_config, file_path: str, overwrite: bool = True
-):
-
-    # print(vi_pred.keys())
-    # print(vi_pred["rfi_vis"].shape)
-    # print(vi_pred["rfi_vis"])
-
-    # print(da.asarray(vi_pred["ast_vis"]))
-    # print(da.asarray(vi_pred["gains"]))
-    # print(da.asarray(vi_pred["rfi_vis"]))
-    # print(da.asarray(vi_pred["vis_obs"]))
-    # print(da.asarray(vi_pred["rfi_A"]))
-    # print(da.asarray(args["rfi_phase"]))
-
-    map_xds = xr.Dataset(
-        data_vars={
-            "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_rfi"])),  # type: ignore
-            "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
-            "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
-            "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
-            # "rfi_A": (
-            #     ["sample", "src", "ant", "rfi_time"],
-            #     da.asarray(vi_pred["rfi_A"]),
-            # ),
-            # "rfi_phase": (
-            #     ["src", "ant", "time_mjd_fine"],
-            #     da.asarray(args["rfi_phase"]),
-            # ),
-        },
-        coords={
-            "time": da.asarray(tab_config.times),  # type: ignore
-            "freq": da.asarray(tab_config.freqs),  # type: ignore
-            # "rfi_time": da.asarray(args["rfi_times"]),
-            # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
-        },
-    )
-    # print(map_xds)
-
-    mode = "w" if overwrite else "w-"
-
-    map_xds.to_zarr(file_path, mode=mode)
-
-    return map_xds
-
-
 @measure_runtime
 def init_predict(
     tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict
@@ -331,72 +278,11 @@ def init_predict(
 
 
 @measure_runtime
-def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_dir: str):
-
-    start = datetime.now()
-    print()
-    print("Plotting Initial Parameters")
-    plot_predictions(
-        times=tab_config.times,
-        pred=init_pred,
-        truth=truth,
-        type="init",
-        model_name=model_name,
-        max_plots=10,
-        save_dir=plot_dir,
-    )
-    # if get_truth_conditional(config):
-
-    #     # vi_pred keys are ['ast_vis', 'gains', 'rfi_vis', 'rmse_ast', 'rmse_gains', 'rmse_rfi', 'vis_obs']
-    #     print(f"RMSE Gains      : {jnp.mean(init_pred['rmse_gains']):.5f}")
-    #     print(f"RMSE RFI Vis    : {jnp.mean(init_pred['rmse_rfi']):.5f}")
-    #     print(f"RMSE AST Vis    : {jnp.mean(init_pred['rmse_ast']):.5f}")
-
-    print()
-    print(f"Initial Plot Time : {datetime.now() - start}")
-    print(f"{datetime.now()}")
-
-
-@measure_runtime
-def plot_prior(
-    tab_config,
-    prob_model: Callable,
-    truth: dict,
-    model_name: str,
-    subkey: jax.Array,
-    plot_dir: str,
-):
-
-    start = datetime.now()
-    n_prior = tab_config.args["plots"]["prior_samples"]
-    print()
-    print(f"Plotting {n_prior:.0f} Prior Parameter Samples")
-    pred = Predictive(prob_model, num_samples=n_prior)
-    prior_pred = pred(subkey)
-    print("Prior Samples Drawn")
-    plot_predictions(
-        times=tab_config.times,
-        pred=prior_pred,
-        truth=truth,
-        type="prior",
-        model_name=model_name,
-        max_plots=10,
-        save_dir=plot_dir,
-    )
-    print()
-    print(f"Prior Plot Time : {datetime.now() - start}")
-    print(f"{datetime.now()}")
-
-
-@measure_runtime
 def run_opt(
     tab_config,
     prob_model: Callable,
-    truth: dict[str, jax.Array],
-    model_name: str,
     subkeys: jax.Array,
     init_params: dict,
-    plot_dir: str,
     ms_path,
     map_path,
     params_path,
@@ -429,26 +315,9 @@ def run_opt(
         num_samples=1,
         key=subkeys[1],
     )
-    print()
-    print(f"Optimization Run Time : {datetime.now() - start}")
-    print(f"{datetime.now()}")
-    start = datetime.now()
-
+    
     write_results_xds(vi_pred, tab_config, map_path)
     # write_params_xds(vi_params, gp_params, ms_params, params_path, overwrite=True)
-
-    plot_predictions(
-        tab_config.times,
-        pred=vi_pred,
-        truth=truth,
-        type=tab_config.args["opt"]["guide"],
-        model_name=model_name,
-        max_plots=10,
-        save_dir=plot_dir,
-    )
-    print()
-    print(f"Optimize Plot Time : {datetime.now() - start}")
-    print(f"{datetime.now()}")
 
     # if get_truth_conditional(config):
 
@@ -457,35 +326,20 @@ def run_opt(
     #     print(f"RMSE RFI Vis    : {jnp.mean(vi_pred['rmse_rfi']):.5f}")
     #     print(f"RMSE AST Vis    : {jnp.mean(vi_pred['rmse_ast']):.5f}")
 
+    print()
+    print(f"Optimization Run Time : {datetime.now() - start}")
+    print(f"{datetime.now()}")
+    start = datetime.now()
+
     rchi2 = reduced_chi2(vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
     print()
     print(f"Reduced Chi^2 @ opt params : {rchi2}")
 
-    plt.close()
-    fig, ax = plt.subplots(1, 1, figsize=(10, 7))
-    ax.plot(vi_results.losses)
-    ax.set_ylabel("Loss")
-    ax.set_xlabel("Iteration")
-    if vi_results.losses.min() < 0:
-        ax.set_yscale("symlog")
-    else:
-        ax.set_yscale("log")
-    plt.savefig(
-        os.path.join(plot_dir, f"{model_name}_opt_loss.pdf"),
-        format="pdf",
-        bbox_inches="tight",
-    )
-    plt.close()
-
     print()
     print(f"Copying tabascal results to MS file from {map_path}")
+    write_results_ms(ms_path, map_path, tab_config.args["data"]["data_col"])
 
-    from tabascal.write import write_results
-
-    write_results(ms_path, map_path, tab_config.args["data"]["data_col"])
-    
-
-    return vi_params, rchi2
+    return vi_pred, vi_results.losses, vi_params, rchi2
 
 
 def get_observation_data_type(data_col: str):
