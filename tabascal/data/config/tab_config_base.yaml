@@ -12,9 +12,11 @@ data:
 # Plotting parameters
 ######################
 plots:
-  init: true              # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the initial parameter estimate
-  truth: true             # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the true parameter estimate
-  prior: true             # Optional - Plot the prior distribution over the astronomical and RFI visibilities as well as the gains
+  init: false             # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the initial parameter estimate
+  truth: false            # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the true parameter estimate
+  prior: false            # Optional - Plot the prior distribution over the astronomical and RFI visibilities as well as the gains
+  opt: false              # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the optimised parameter estimate
+  losses: false           # Optional - Plot the loss curve over the optimisation run
   prior_samples: 100      # Optional - Number of prior samples to use when plotting the prior
 #######################
 # Inference parameters
