@@ -8,6 +8,7 @@ data:
   data_col: DATA          # Optional - Defaults to 'DATA'
   corr: xx                # Optional - Defaults to 'xx' polarization, i.e. correlation 0
   noise: null             # Optional - Defaults to reading from the MS file
+  flags: false            # Optional - Defaults to not including the flags from the MS file
 ######################
 # Plotting parameters
 ######################

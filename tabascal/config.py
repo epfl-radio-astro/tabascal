@@ -69,6 +69,7 @@ class TabConfig:
             config["data"]["data_col"],
         )
         self.set_noise(config["data"]["noise"])
+        self.set_flags(config["data"]["flags"])
         config = fix_padding(
             config, self.n_freq
         )  # Bad solution, should be fixed in fft_gp. Issue when using a single frequency channel.
@@ -90,6 +91,13 @@ class TabConfig:
 
         if noise:
             self.noise = noise
+
+    def set_flags(self, include_flags: bool):
+
+        if not include_flags:
+            self.flags = jnp.zeros_like(self.flags, dtype=bool)
+
+        print(f"\n{100*self.flags.mean():.1f} % Data Flagged (Not Included in Likelihood)\n")
 
     def read_ms_params(self, freq: float, corr: str, data_col: str):
 
