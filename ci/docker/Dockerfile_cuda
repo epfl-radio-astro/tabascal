@@ -1,0 +1,20 @@
+FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
+
+COPY . /tabascal/src/
+
+SHELL ["/bin/bash", "-c"]
+
+RUN apt update \
+  && env DEBIAN_FRONTEND=noninteractive TZ=Europe/Zurich apt-get -yqq install --no-install-recommends build-essential git wget \
+  && wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh -O miniconda.sh  \
+  && bash miniconda.sh -b -p /opt/conda
+
+ENV PATH="/opt/conda/bin:${PATH}"
+
+RUN conda init && source /opt/conda/etc/profile.d/conda.sh \
+  && conda create -n tab python=3.12 \
+  && conda activate tab \
+  && conda install python-casacore \
+  && python3 -m pip install jax[cuda12] \
+  && cd /tabascal/src && python3 -m pip install -e .[test]
+
