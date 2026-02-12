@@ -94,7 +94,8 @@ gains:
 # ###################
 # # Model parameters
 # ###################
-# model:
+model:
+  precision: single
 #   func: fixed_orbit_rfi_full_fft_standard_model
 #   name: fixed_orbit_rfi
   

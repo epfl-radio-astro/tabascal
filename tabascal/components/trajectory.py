@@ -2,7 +2,7 @@ from tabascal.tle import get_tles_by_id
 from tabascal.coordinates import itrf_to_uvw
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
-from tabascal.interferometry import get_rfi_phase
+from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
 from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
@@ -14,6 +14,7 @@ from sgp4jax._sgp4init import sgp4init
 import jax.numpy as jnp
 from jax import vmap, Array
 import numpy as np
+from numpy.typing import NDArray
 
 from skyfield.api import Distance, load
 from skyfield.toposlib import ITRSPosition
@@ -62,6 +63,11 @@ class PhaseCalculationRFI(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
+        if config.precision != "double":
+            raise ValueError(
+                f"{self.__class__.__name__} requires double precision; "
+                "set model.precision to 'double' in the config."
+            )
         try:
             self.times_jd_fine = config.times_jd_fine
             self.ants_itrf = config.ants_itrf
@@ -184,6 +190,7 @@ class FixedOrbit(Component):
             self.phase_centre = config.phase_centre
             self.freqs = config.freqs
             self.times = config.times
+            self.precision = config.precision
             self.freqs_fine = config.freqs_fine
             self.times_fine = config.times_fine
             self.times_jd_fine = config.times_jd_fine
@@ -229,28 +236,40 @@ class FixedOrbit(Component):
     @measure_runtime
     def _compute_rfi_phase(self):
 
-        self.rfi_xyz = jnp.asarray(
+        self.rfi_xyz = np.asarray(
             get_satellite_positions(self.tles, list(self.times_jd_fine))
         )
 
-        gsa = (
-            Time(self.times_jd_fine, format="jd")
-            .sidereal_time("mean", "greenwich")
-            .hour
-            * 15
-        )  # type: ignore
-
-        gh0 = (gsa - self.phase_centre["ra"]) % 360
-
         self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        
-        self.ants_uvw = jnp.transpose(
-            itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
-        )
 
-        self.rfi_phase = get_rfi_phase(
-            self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
-        )
+        if self.precision == "double":
+            gsa = (
+                Time(self.times_jd_fine, format="jd")
+                .sidereal_time("mean", "greenwich")
+                .hour
+                * 15
+            )  # type: ignore
+            gh0 = (gsa - self.phase_centre["ra"]) % 360
+
+            self.ants_uvw = jnp.transpose(
+                itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
+            )
+            self.rfi_phase = get_rfi_phase(
+                self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
+            )
+        else:
+            ts = load.timescale()
+            gsa = np.asarray(ts.ut1_jd(np.asarray(self.times_jd_fine)).gast) * 15  # GAST in degrees
+            gh0 = (gsa - self.phase_centre["ra"]) % 360
+
+            self.ants_uvw = np.transpose(
+                itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
+            )
+            self.rfi_phase = jnp.array(
+                get_rfi_phase_numpy(
+                    self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
+                )
+            )
 
     def _set_outputs(self):
 
@@ -283,6 +302,11 @@ class SGP4LEONoDragOrbit(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
+        if config.precision != "double":
+            raise ValueError(
+                f"{self.__class__.__name__} requires double precision; "
+                "set model.precision to 'double' in the config."
+            )
         try:
             # Store only what's needed for forward computation
             self.times_jd = config.times_jd
@@ -453,6 +477,11 @@ class SGP4LEOOrbit(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
+        if config.precision != "double":
+            raise ValueError(
+                f"{self.__class__.__name__} requires double precision; "
+                "set model.precision to 'double' in the config."
+            )
         try:
             # Store only what's needed for forward computation
             self.times_jd = config.times_jd
@@ -619,12 +648,12 @@ class SGP4LEOOrbit(Component):
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
 
 
-def itrs_to_gcrs_sf(pos_itrs: Array, times_jd: Array) -> Array:
+def itrs_to_gcrs_sf(pos_itrs: NDArray, times_jd: NDArray) -> NDArray:
 
     ts = load.timescale()
     t_sf = ts.ut1_jd(np.array(times_jd))
 
-    pos_gcrs = jnp.stack(
+    pos_gcrs = np.stack(
         [ITRSPosition(Distance(m=pos)).at(t_sf).position.m.T for pos in pos_itrs]
     )
 
