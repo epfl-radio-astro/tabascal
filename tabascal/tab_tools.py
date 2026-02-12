@@ -18,7 +18,6 @@ import xarray as xr
 import dask.array as da
 
 import numpy as np
-import subprocess
 
 from datetime import datetime
 
@@ -448,11 +447,10 @@ def run_opt(
 
     print()
     print(f"Copying tabascal results to MS file from {map_path}")
-    subprocess.run(
-        f"tab2MS -m {ms_path} -z {map_path} -d {tab_config.args['data']['data_col']}",
-        shell=True,
-        executable="/bin/bash",
-    )
+       
+    from tabascal.write import write_results
+
+    write_results(ms_path, map_path, tab_config.args["data"]["data_col"])
 
     return vi_pred, vi_results.losses, vi_params, rchi2
 
