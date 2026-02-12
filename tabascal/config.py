@@ -100,6 +100,7 @@ class TabConfig:
         self.ants_itrf = ms_params["ants_itrf"]
         self.vis_obs = ms_params["vis_obs"]
         self.uvw = ms_params["uvw"]
+        self.flags = ms_params["flags"]
 
         self.n_ant = ms_params["n_ant"]
         self.n_bl = ms_params["n_bl"]
@@ -205,7 +206,7 @@ class Model:
 
         self.noise = config.noise
         self.likelihood = lambda pred, obs_data: likelihood(
-            pred, obs_data, {"noise": self.noise}
+            pred, obs_data, {"noise": config.noise, "flags": config.flags}
         )
 
         components = [C() for C in import_components(component_list)]

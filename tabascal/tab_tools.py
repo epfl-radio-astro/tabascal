@@ -5,7 +5,7 @@ import optax
 
 import jax
 import jax.numpy as jnp
-from jax import random
+from jax import random, Array
 from jax.tree_util import tree_map
 
 from tabascal.opt import SVIRunResult
@@ -17,6 +17,7 @@ import numpy as np
 from datetime import datetime
 
 from typing import Callable, Optional
+from functools import reduce
 
 from daskms import xds_from_ms, xds_from_table
 
@@ -49,7 +50,7 @@ def nlog_post(prob_model, params, obs_data):
     return nlog_p
 
 
-def reduced_chi2(pred, true, noise):
+def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
 
     complex_types = [
         complex,
@@ -58,14 +59,14 @@ def reduced_chi2(pred, true, noise):
         jnp.complex64,
         jnp.complex128,
     ]
-    is_complex = jnp.any(jnp.array([true.dtype == c_type for c_type in complex_types]))
+    dtype = [true.dtype == c_type for c_type in complex_types]
+    is_complex = reduce(jnp.logical_or, dtype)
     if is_complex:
-        # print("Complex Data")
-        norm = 2 * true.size
+        norm = 2 * true[~flags].size
     else:
-        norm = true.size
+        norm = true[~flags].size
 
-    rchi2 = jnp.sum((jnp.abs(pred - true) / noise) ** 2) / norm
+    rchi2 = jnp.sum((jnp.abs(pred[~flags] - true[~flags]) / noise) ** 2) / norm
 
     return rchi2
 
@@ -180,8 +181,16 @@ def read_ms(
         "vis_obs": jnp.transpose(
             jnp.array(
                 xds[data_col]
-                .data.reshape(n_time, n_bl, n_freq, n_corr)
-                .compute()[:, :, chans, corr_idx]
+                .data.reshape(n_time, n_bl, n_freq, n_corr)[:, :, chans, corr_idx]
+                .compute()
+            ),
+            (1, 2, 0),
+        ),
+        "flags": jnp.transpose(
+            jnp.array(
+                xds["FLAG"]  # type: ignore
+                .data.reshape(n_time, n_bl, n_freq, n_corr)[:, :, chans, corr_idx]
+                .compute()
             ),
             (1, 2, 0),
         ),
@@ -270,7 +279,9 @@ def init_predict(
         batch_ndims=1,
     )
     init_pred = pred(subkey)
-    rchi2 = reduced_chi2(init_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
+    rchi2 = reduced_chi2(
+        init_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise, tab_config.flags
+    )
     print()
     print(f"Reduced Chi^2 @ init params : {rchi2}")
 
@@ -331,7 +342,9 @@ def run_opt(
     print(f"{datetime.now()}")
     start = datetime.now()
 
-    rchi2 = reduced_chi2(vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise)
+    rchi2 = reduced_chi2(
+        vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise, tab_config.flags
+    )
     print()
     print(f"Reduced Chi^2 @ opt params : {rchi2}")
 
