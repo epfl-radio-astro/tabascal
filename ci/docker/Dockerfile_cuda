@@ -15,6 +15,6 @@ RUN conda init && source /opt/conda/etc/profile.d/conda.sh \
   && conda create -n tab python=3.12 \
   && conda activate tab \
   && conda install python-casacore \
-  && python3 -m pip install jax[cuda12] \
-  && cd /tabascal/src && python3 -m pip install -e .[test]
+  && cd /tabascal/src/tabascal/components/ffi && make -j4 \
+  && cd /tabascal/src && python3 -m pip install -e .[test,cuda12]
 
