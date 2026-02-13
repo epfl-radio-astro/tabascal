@@ -19,6 +19,7 @@ test_job:
   extends: .container-runner-daint-gh200
   image: $PERSIST_IMAGE_NAME
   script:
+    - . /opt/conda/etc/profile.d/conda.sh
     - conda activate tab
     - cd /tabascal/src
     - python3 -m pytest
