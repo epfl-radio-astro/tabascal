@@ -525,7 +525,7 @@ class FourierGPRFI(Component):
 
             # Do expensive setup operations once
             self._compute_gp_params()
-            self._compute_prior_params()
+            self._compute_prior_params(config.args["rfi"]["mean"], config.vis_obs, config.args["rfi"]["est"])
             self._set_outputs()
 
             if config.args["plots"]["truth"] or config.args["rfi"]["init"] == "truth":
@@ -536,7 +536,7 @@ class FourierGPRFI(Component):
             # if config.args["rfi"]["init"] == "est":
             #     self._estimate_params(config.fringe_freqs)
 
-            self._compute_init_params(config.args["rfi"]["init"])
+            self._compute_init_params(config.args["rfi"]["init"], config.args["rfi"]["est"])
 
             # Validate dimensions
             self._validate_dimensions()
@@ -625,8 +625,8 @@ class FourierGPRFI(Component):
         )
 
         # JIT-compiled function for efficient latent extraction
-        self.signal_to_latent = lambda Z: signal_to_latent(
-            Z,
+        self.signal_to_latent = lambda rfi_A: signal_to_latent(
+            rfi_A,
             self.pad_factors,
             self.latent_idxs,
         )
@@ -651,12 +651,27 @@ class FourierGPRFI(Component):
             ),
         }
 
-    def _compute_prior_params(self):
+    def _compute_data_est(self, vis_obs):
 
-        self.mu_rfi_k = jnp.zeros(
-            (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
-            dtype=complex,
-        )
+        est_rfi_k = self.signal_to_latent(jnp.sqrt(jnp.max(jnp.abs(vis_obs), axis=0)))[None, None, :, :] * jnp.ones((self.n_rfi, self.n_ant, 1, 1)) / self.n_rfi
+
+        return est_rfi_k
+
+    def _compute_prior_params(self, prior_type, vis_obs, est_path):
+
+        if prior_type == "data":
+            print("Using data for RFI prior mean")
+            self.mu_rfi_k = self._compute_data_est(vis_obs)
+        elif prior_type == "est": 
+            print("Using provided estimate for rfi_k")
+            self.mu_rfi_k = self._read_estimate(est_path)
+        elif prior_type == "zeros":
+            print("Using zeros for RFI prior mean")
+            self.mu_rfi_k = jnp.zeros(
+                (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
+            )
+        else:
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
 
     def forward_transform(self, base_params, sigma, mu):
 
@@ -691,36 +706,38 @@ class FourierGPRFI(Component):
 
         self.true_rfi_k_A = vmap(vmap(self.signal_to_latent, (0,), 0), (1,), 1)(rfi_A)
 
-        # self.true_rfi_k_A = jnp.array(
-        #     [
-        #         [self.get_latent_pred(rfi_A[i, j]) for j in range(self.n_ant)]
-        #         for i in range(self.n_rfi)
-        #     ]
-        # )
-
         self.true_rfi_k_A_base = self.inv_transform(
             self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k
         )
 
-    def _compute_init_params(self, init_type):
+    def _read_estimate(self, est_path):
+
+        from numpy import load
+
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi]))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
+
+        return vmap(vmap(self.signal_to_latent, (0,), 0), (1,), 1)(est_rfi_A)
+
+    def _compute_init_params(self, init_type, est_path):
 
         if init_type == "prior":
             print("Using prior mean for rfi_k")
             self.init_rfi_k = self.mu_rfi_k
+        elif init_type == "est": 
+            print("Using provided estimate for rfi_k")
+            self.init_rfi_k = self._read_estimate(est_path)
         elif init_type == "truth":
             print("Using truth for rfi_A")
             self.init_rfi_k = self.true_rfi_k_A
+        elif init_type == "zeros":
+            print("Using zeros for rfi_k")
+            ones = jnp.zeros((self.n_freq, self.n_time), dtype=complex)
+            self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type == "ones":
             print("Using ones for rfi_k")
             ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
             self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
-            # self.init_rfi_k = jnp.array(
-            #     [
-            #         [self.get_latent_pred(ones) for _ in range(self.n_ant)]
-            #         for _ in range(self.n_rfi)
-            #     ]
-            # )
-        else:
+        elif init_type == "sample":
             print("Drawing sample from prior for rfi_k")
             prior_sample = random.normal(
                 random.PRNGKey(1),
@@ -730,6 +747,8 @@ class FourierGPRFI(Component):
             self.init_rfi_k = self.forward_transform(
                 prior_sample, self.sigma_rfi_k, self.mu_rfi_k
             )
+        else:
+            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
 
         self.init_rfi_k_base = self.inv_transform(
             self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k

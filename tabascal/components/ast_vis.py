@@ -682,14 +682,15 @@ class FourierTimeFreqGPAst(Component):
 
             # Do expensive setup operations once
             self._compute_gp_params()
-            self._compute_prior_params()
+            self._compute_prior_params(config.args["ast"]["mean"], config.vis_obs)
 
             if config.args["plots"]["truth"] or config.args["ast"]["init"] == "truth":
                 self._compute_true_params(
                     config.args["data"]["zarr_path"], config.args["data"]["data_col"]
                 )
 
-            self._compute_init_params(config.args["ast"]["init"])
+            # self._compute_init_params(config.args["ast"]["init"])
+            self._compute_init_params(config.args["ast"]["init"], config.vis_obs)
             self._set_outputs()
 
             # Validate dimensions
@@ -783,6 +784,8 @@ class FourierTimeFreqGPAst(Component):
             self.pk_cutoff,
         )
 
+        self.signal_to_latent = lambda vis_ast: vmap(signal_to_latent, (0, None, None), 0)(vis_ast, self.pad_factors, self.latent_idxs)
+
         dxs = tuple([float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in self.xs])
 
         print("\nAST specs")
@@ -806,7 +809,7 @@ class FourierTimeFreqGPAst(Component):
 
         data_type = get_observation_data_type(data_col)
 
-        vis_ast = jnp.transpose(
+        true_vis_ast = jnp.transpose(
             (
                 xds.vis_ast.data[:, :, :].compute()
                 if data_type["ast"]
@@ -815,17 +818,24 @@ class FourierTimeFreqGPAst(Component):
             (1, 2, 0),
         )
 
-        self.true_ast_k = vmap(signal_to_latent, (0, None, None), 0)(vis_ast, self.pad_factors, self.latent_idxs)
+        self.true_ast_k = self.signal_to_latent(true_vis_ast)
         
         self.true_ast_k_base = self.inv_transform(
             self.true_ast_k, self.sigma_ast_k, self.mu_ast_k
         )
 
-    def _compute_prior_params(self):
+    def _compute_prior_params(self, prior_type: str, vis_obs):
 
-        self.mu_ast_k = jnp.zeros(
-            (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex
-        )
+        if prior_type == "data":
+            print("Using data for AST prior mean")
+            self.mu_ast_k = self._compute_data_est(vis_obs)
+        elif prior_type == "zeros":
+            print("Using zeros for AST prior mean")
+            self.mu_ast_k = jnp.zeros(
+                (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex
+            )
+        else:
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
 
     def _set_outputs(self):
 
@@ -844,14 +854,26 @@ class FourierTimeFreqGPAst(Component):
         base_params = (params - mu) / sigma
 
         return base_params
+    
+    def _compute_data_est(self, vis_obs):
 
-    def _compute_init_params(self, init_type: str):
+        est_ast_k =  self.signal_to_latent(vis_obs)
 
-        if init_type == "prior":
+        return est_ast_k
+
+    def _compute_init_params(self, init_type: str, vis_obs):
+
+        if init_type == "data":
+            print("Using data for AST init")
+            self.init_ast_k = self._compute_data_est(vis_obs)
+        elif init_type == "prior":
+            print("Using prior mean for AST init")
             self.init_ast_k = self.mu_ast_k
         elif init_type == "truth":
+            print("Using truth for AST init")
             self.init_ast_k = self.true_ast_k
-        else:
+        elif init_type == "sample":
+            print("Using prior sample for AST init")
             prior_sample = random.normal(
                 random.PRNGKey(1),
                 (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast),
@@ -860,6 +882,8 @@ class FourierTimeFreqGPAst(Component):
             self.init_ast_k = self.forward_transform(
                 prior_sample, self.sigma_ast_k, self.mu_ast_k
             )
+        else:
+            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (data, prior, truth, sample, zeros).")
 
         self.init_ast_k_base = self.inv_transform(
             self.init_ast_k, self.sigma_ast_k, self.mu_ast_k
