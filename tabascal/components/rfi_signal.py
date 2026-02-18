@@ -1,7 +1,8 @@
-from jax import vmap, random, jit, Array
+from jax import vmap, random, Array
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
+from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.gp import cholesky, resampling_kernel, get_times
@@ -38,6 +39,7 @@ def compute_real_space_gp_params(gp_l: float, gp_var: float, times: Array, times
     gp_times = get_times(times, gp_l)
     n_gp_times = len(gp_times)
 
+    # resample op is shape (n_time_fine, n_gp_time)
     resample_op = resampling_kernel(
         gp_times,
         times_fine,
@@ -47,7 +49,6 @@ def compute_real_space_gp_params(gp_l: float, gp_var: float, times: Array, times
     )
 
     return n_gp_times, gp_times, resample_op
-
 
 
 # def estimate_rfi_A(fringe_freqs):
@@ -74,6 +75,123 @@ def compute_real_space_gp_params(gp_l: float, gp_var: float, times: Array, times
 #     return B * rfi_amp
 
 
+def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, times: Array) -> Dict:
+    """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
+
+    Parameters
+    ----------
+    rfi_config : Dict
+        RFI configuration dictionary
+
+    Returns
+    -------
+    Dict
+        Validated configuration dictionary with defaults set.
+
+    Raises
+    ------
+    ValueError
+        Raised when an invalid input is provided for one fo the configuration parameters.
+    """
+
+    extent = lambda x: float(jnp.max(x) - jnp.min(x))
+
+    r_seed = rfi_config["r_seed"]
+    gp_var = rfi_config["var"]
+    gp_freq_l = rfi_config["corr_freq"]
+    gp_time_l = rfi_config["corr_time"]
+
+    if not r_seed: # Set Default
+        rfi_config["r_seed"] = 1
+    elif isinstance(r_seed, int):
+        pass
+    else:
+        raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
+
+    if not gp_var: # Set Default
+        rfi_config["var"] = float(jnp.max(jnp.abs(vis_obs)))
+    elif isinstance(gp_var, (float, int)):
+        rfi_config["var"] = float(gp_var)
+    else:
+        raise ValueError(f"Config parameter (rfi:\n\tvar: {gp_var}) is not of type float or int.")
+    
+    if not gp_freq_l: # Set Default
+        rfi_config["corr_freq"] = extent(freqs) / 2
+    elif isinstance(gp_freq_l, (float, int)):
+        rfi_config["corr_freq"] = float(gp_freq_l)
+    else:
+        raise ValueError(f"Config parameter (rfi:\n\tcorr_freq: {gp_freq_l}) is not of type float or int.")
+    
+    if not gp_time_l: # Set Default
+        rfi_config["corr_time"] = extent(times) / 2
+    elif isinstance(gp_time_l, (float, int)):
+        rfi_config["corr_time"] = float(gp_time_l)
+    else:
+        raise ValueError(f"Config parameter (rfi:\n\tcorr_time: {gp_time_l}) is not of type float or int.")    
+
+    return rfi_config
+
+
+
+class BaseGPRFI(Component):
+
+    # The required state parameter needed in the forward model for this component to function
+    required_inputs = {}  # No inputs needed
+
+    # The additional state parameters included in the forward model from this component
+    output_shapes = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+    }
+
+    # The base parameter shapes used to produce the output parameters
+    parameter_shapes = {}
+
+    def __init__(self, tab_config: TabConfig):
+
+        # Validate config and set defaults
+        rfi_config = rfi_signal_config_validation(
+            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.times)
+
+        # Random seed used for random sampling such as initial parameters drawn from the prior
+        self.r_seed = rfi_config["r_seed"]
+
+        # Basic shape parameters 
+        self.n_rfi = tab_config.n_rfi
+        self.n_ant = tab_config.n_ant
+        self.n_freq = tab_config.n_freq
+        self.n_freq_fine = tab_config.n_freq_fine
+        self.n_time = tab_config.n_time
+        self.n_time_fine = tab_config.n_time_fine
+
+        # Domain arrays needed to calculate Gaussian process parameters
+        self.freqs = tab_config.freqs
+        self.freqs_fine = tab_config.freqs_fine
+        self.times = tab_config.times
+        self.times_fine = tab_config.times_fine
+
+        self.gp_var = rfi_config["var"]
+        self.gp_freq_l = rfi_config["corr_freq"]
+        self.gp_time_l = rfi_config["corr_time"]
+
+
+    def _set_outputs(self):
+
+        self.state_outputs = {
+            "rfi_A": jnp.zeros(
+                (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine), dtype=complex
+            ),
+        }
+
+    def _compute_gp_params(self):
+        pass
+
+    def _compute_prior_params(self):
+        pass
+
+    def _compute_init_params(self):
+        pass
+
+
 class RealRFI(Component):
 
     required_inputs = {}  # No inputs needed
@@ -86,17 +204,21 @@ class RealRFI(Component):
         "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
     }
 
-    def setup(self, config):
+    def setup(self, config: TabConfig):
         """All validation and error-prone operations here"""
         try:
             # Store only what's needed for forward computation
+            self.r_seed = 123
+
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
             self.n_freq = config.n_freq
             self.n_time_fine = config.n_time_fine
+
             self.times = config.times
             self.times_fine = config.times_fine
             self.vis_obs = config.vis_obs
+
             self.gp_var = config.args["rfi"]["var"]
             self.gp_l = config.args["rfi"]["corr_time"]
 
@@ -145,7 +267,7 @@ class RealRFI(Component):
 
             rfi_A_induce_base = params["rfi_r_induce_base"]
 
-            rfi_A_induce = self.forward_transform(rfi_A_induce_base, self.L_rfi_A, self.mu_rfi_A)
+            rfi_A_induce = self.forward_transform(rfi_A_induce_base)
 
             rfi_A = self.interp_multi(rfi_A_induce)
 
@@ -162,14 +284,14 @@ class RealRFI(Component):
     def _compute_gp_params(self):
 
         if self.gp_var is None:
-            self.gp_var = jnp.max(jnp.abs(self.vis_obs))
+            self.gp_var = float(jnp.max(jnp.abs(self.vis_obs)))
 
         print(f"Using RFI var : {self.gp_var:.3e} Jy")
 
         if self.gp_l is None:
             self.gp_l = 1.0
 
-        self.n_rfi_times, self.rfi_times, sefl.resample_rfi = compute_real_space_gp_params(gp_l, gp_var, self.times, self.times_fine)
+        self.n_rfi_times, self.rfi_times, self.resample_rfi = compute_real_space_gp_params(self.gp_l, self.gp_var, self.times, self.times_fine)
 
     def _set_outputs(self):
 
@@ -190,23 +312,21 @@ class RealRFI(Component):
 
         self.true_rfi_A_induce = read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times).real
 
-        self.true_rfi_A_induce_base = self.inv_transform(
-            self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A
-        )
+        self.true_rfi_A_induce_base = self.inv_transform(self.true_rfi_A_induce)
 
-    def forward_transform(self, base_params: Array, L: Array, mu: Array) -> Array:
+    def forward_transform(self, base_params: Array) -> Array:
 
-        affine_same_scale = lambda _base_params, _mu: affine_transform_full(_base_params, L, _mu)
+        affine_same_scale = lambda _base_params: affine_transform_full(_base_params, self.L_rfi_A, self.mu_rfi_A)
 
-        params = vmap(vmap(vmap(affine_same_scale)))(base_params, mu)
+        params = vmap(vmap(vmap(affine_same_scale)))(base_params)
 
         return params
 
-    def inv_transform(self, params: Array, L: Array, mu: Array) -> Array:
+    def inv_transform(self, params: Array) -> Array:
 
-        inv_affine_same_scale = lambda centered_params: jnp.linalg.solve(L, centred_params)
+        inv_affine_same_scale = lambda centred_params: jnp.linalg.solve(self.L_rfi_A, centred_params)
 
-        base_params = vmap(vmap(vmap(inv_affine_same_scale)))(params - mu)
+        base_params = vmap(vmap(vmap(inv_affine_same_scale)))(params - self.mu_rfi_A)
 
         return base_params
 
@@ -215,10 +335,10 @@ class RealRFI(Component):
         if init_type == "prior":
             print("Using prior mean for rfi_A")
             self.init_rfi_A_induce = self.mu_rfi_A
-        elif init_type = "zeros":
+        elif init_type == "zeros":
             print("Using for zeros for rfi_A")
             self.init_rfi_A_induce = jnp.zeros_like(self.mu_rfi_A)
-        elif init_type = "ones":
+        elif init_type == "ones":
             print("Using for ones for rfi_A")
             self.init_rfi_A_induce = jnp.ones_like(self.mu_rfi_A)
         elif init_type == "truth":
@@ -226,19 +346,15 @@ class RealRFI(Component):
             self.init_rfi_A_induce = self.true_rfi_A_induce
         elif init_type == "sample":
             print("Drawing sample from prior for rfi_A")
-            prior_sample = random.normal(
-                random.PRNGKey(1),
+            base_sample = random.normal(
+                random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times),
             )
-            self.init_rfi_A_induce = self.forward_transform(
-                prior_sample, self.L_rfi_A, self.mu_rfi_A
-            )
+            self.init_rfi_A_induce = self.forward_transform(base_sample)
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
 
-        self.init_rfi_A_induce_base = self.inv_transform(
-            self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A
-        )
+        self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce)
 
         self.init_params = {
             "rfi_r_induce": self.init_rfi_A_induce,
@@ -275,6 +391,8 @@ class ComplexRFI(Component):
         """All validation and error-prone operations here"""
         try:
             # Store only what's needed for forward computation
+            self.r_seed = 123
+
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
             self.n_freq = config.n_freq
@@ -335,7 +453,7 @@ class ComplexRFI(Component):
                 params["rfi_r_induce_base"] + 1.0j * params["rfi_i_induce_base"]
             )
 
-            rfi_A_induce = self.forward_transform(rfi_A_induce_base, self.L_rfi_A, self.mu_rfi_A)
+            rfi_A_induce = self.forward_transform(rfi_A_induce_base)
 
             rfi_A = self.interp_multi(rfi_A_induce)
 
@@ -352,14 +470,14 @@ class ComplexRFI(Component):
     def _compute_gp_params(self):
 
         if self.gp_var is None:
-            self.gp_var = jnp.max(jnp.abs(self.vis_obs))
+            self.gp_var = float(jnp.max(jnp.abs(self.vis_obs)))
 
         print(f"Using RFI var : {self.gp_var:.3e} Jy")
 
         if self.gp_l is None:
             self.gp_l = 1.0
 
-        self.n_rfi_times, self.rfi_times, sefl.resample_rfi = compute_real_space_gp_params(gp_l, gp_var, self.times, self.times_fine)
+        self.n_rfi_times, self.rfi_times, self.resample_rfi = compute_real_space_gp_params(self.gp_l, self.gp_var, self.times, self.times_fine)
 
     def _set_outputs(self):
 
@@ -380,23 +498,21 @@ class ComplexRFI(Component):
 
         self.true_rfi_A_induce = read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times)
 
-        self.true_rfi_A_induce_base = self.inv_transform(
-            self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A
-        )
+        self.true_rfi_A_induce_base = self.inv_transform(self.true_rfi_A_induce)
 
-    def forward_transform(self, base_params: Array, L: Array, mu: Array) -> Array:
+    def forward_transform(self, base_params: Array) -> Array:
 
-        affine_same_scale = lambda _base_params, _mu: affine_transform_full(_base_params, L, _mu)
+        affine_same_scale = lambda _base_params: affine_transform_full(_base_params, self.L_rfi_A, self.mu_rfi_A)
 
-        params = vmap(vmap(vmap(affine_same_scale)))(base_params, mu)
+        params = vmap(vmap(vmap(affine_same_scale)))(base_params)
 
         return params
 
-    def inv_transform(self, params: Array, L: Array, mu: Array) -> Array:
+    def inv_transform(self, params: Array) -> Array:
 
-        inv_affine_same_scale = lambda centered_params: jnp.linalg.solve(L, centred_params)
+        inv_affine_same_scale = lambda centred_params: jnp.linalg.solve(self.L_rfi_A, centred_params)
 
-        base_params = vmap(vmap(vmap(inv_affine_same_scale)))(params - mu)
+        base_params = vmap(vmap(vmap(inv_affine_same_scale)))(params - self.mu_rfi_A)
 
         return base_params
 
@@ -405,10 +521,10 @@ class ComplexRFI(Component):
         if init_type == "prior":
             print("Using prior mean for rfi_A")
             self.init_rfi_A_induce = self.mu_rfi_A
-        elif init_type = "zeros":
+        elif init_type == "zeros":
             print("Using for zeros for rfi_A")
             self.init_rfi_A_induce = jnp.zeros_like(self.mu_rfi_A)
-        elif init_type = "ones":
+        elif init_type == "ones":
             print("Using for ones for rfi_A")
             self.init_rfi_A_induce = jnp.ones_like(self.mu_rfi_A)
         elif init_type == "truth":
@@ -416,19 +532,17 @@ class ComplexRFI(Component):
             self.init_rfi_A_induce = self.true_rfi_A_induce
         elif init_type == "sample":
             print("Drawing sample from prior for rfi_A")
-            prior_sample = random.normal(
-                random.PRNGKey(1),
+            base_sample = random.normal(
+                random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times),
             )
             self.init_rfi_A_induce = self.forward_transform(
-                prior_sample, self.L_rfi_A, self.mu_rfi_A
+                base_sample
             )
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
 
-        self.init_rfi_A_induce_base = self.inv_transform(
-            self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A
-        )
+        self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce)
 
         self.init_params = {
             "rfi_r_induce": self.init_rfi_A_induce.real,
@@ -462,14 +576,16 @@ class FourierGPRFI(Component):
 
     # Add parameter specifications
     parameter_shapes = {
-        "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq_fine", "n_rfi_time"),
-        "rfi_i_induce_base": ("n_rfi", "n_ant", "n_freq_fine", "n_rfi_time"),
+        "rfi_k_r_base": ("n_rfi", "n_ant", "n_k_freq_rfi", "n_k_time_rfi"),
+        "rfi_k_i_base": ("n_rfi", "n_ant", "n_k_freq_rfi", "n_k_time_rfi"),
     }
 
     def setup(self, config):
         """All validation and error-prone operations here"""
         try:
             # Store only what's needed for forward computation
+            self.r_seed = 123
+
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
             self.n_freq = config.n_freq
@@ -517,43 +633,31 @@ class FourierGPRFI(Component):
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def build_set_params(self):
-        n_rfi = self.n_rfi
-        n_ant = self.n_ant
-        n_k_freq_rfi = self.n_k_freq_rfi
-        n_k_time_rfi = self.n_k_time_rfi
 
         def set_params(params):
 
             params["rfi_k_r_base"] = standard_normal(
-                "rfi_k_r_base", (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
+                "rfi_k_r_base", (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi)
             )
             params["rfi_k_i_base"] = standard_normal(
-                "rfi_k_i_base", (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
+                "rfi_k_i_base", (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi)
             )
 
             return params
 
         return set_params
 
-    def build_forward(self):
-        """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        sigma_rfi_k = self.sigma_rfi_k
-        mu_rfi_k = self.mu_rfi_k
-        forward_transform = self.forward_transform
-        pads = self.pads
-        ss_idxs = self.ss_idxs
+    def build_forward(self) -> Callable:
 
-        def forward(params: dict, state: dict):
-            # Pure JAX operations only
+        self.latent_forward = vmap(vmap(self.latent_to_signal))
+
+        def forward(params: Dict, state: Dict) -> Dict:
 
             rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
 
-            rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
+            rfi_k_A = self.forward_transform(rfi_k_A_base)
 
-            rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
-                rfi_k_A, pads, ss_idxs
-            )
+            rfi_A = self.latent_forward(rfi_k_A)
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -568,14 +672,6 @@ class FourierGPRFI(Component):
     @measure_runtime
     def _compute_gp_params(self):
 
-        # if self.gp_var is None:
-        #     self.gp_var = jnp.max(jnp.abs(self.vis_obs))
-
-        # print(f"Using RFI var : {self.gp_var:.3e} Jy")
-
-        # if self.gp_l is None:
-        #     self.gp_l = 1.0
-
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             self.xs,
             self.pad_factors,
@@ -584,6 +680,12 @@ class FourierGPRFI(Component):
             self.k0s,
             self.gammas,
             self.pk_cutoff,
+        )
+
+        self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
+            _rfi_k_A, 
+            self.pads, 
+            self.ss_idxs
         )
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
@@ -596,9 +698,8 @@ class FourierGPRFI(Component):
             self.pk_cutoff,
         )
 
-        # JIT-compiled function for efficient latent extraction
-        self.signal_to_latent = lambda rfi_A: signal_to_latent(
-            rfi_A,
+        self.signal_to_latent = lambda _rfi_A: signal_to_latent(
+            _rfi_A,
             self.pad_factors,
             self.latent_idxs,
         )
@@ -645,42 +746,25 @@ class FourierGPRFI(Component):
         else:
             raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
 
-    def forward_transform(self, base_params, sigma, mu):
+    def forward_transform(self, base_params: Array) -> Array:
 
-        params = sigma * base_params + mu
+        params = self.sigma_rfi_k * base_params + self.mu_rfi_k
 
         return params
 
-    def inv_transform(self, params, sigma, mu):
+    def inv_transform(self, params: Array) -> Array:
 
-        base_params = (params - mu) / sigma
+        base_params = (params - self.mu_rfi_k) / self.sigma_rfi_k
 
         return base_params
 
-    def _compute_true_params(self, zarr_path, data_col):
+    def _compute_true_params(self, sim_zarr_path: str, data_col: str):
 
-        xds = xr.open_zarr(zarr_path)
+        rfi_A = read_true_rfi_A(sim_zarr_path, data_col, self.times)
 
-        data_type = get_observation_data_type(data_col)
+        self.true_rfi_k_A = vmap(vmap(self.signal_to_latent))(rfi_A)
 
-        rfi_A = jnp.transpose(
-            vmap(
-                vmap(vmap(jnp.interp, (None, None, 0), 0), (None, None, 2), 2),
-                (None, None, 3),
-                3,
-            )(
-                self.times,
-                xds.time_fine.data,
-                xds.rfi_tle_sat_A.data.compute(),
-            ),
-            (0, 2, 3, 1),
-        )
-
-        self.true_rfi_k_A = vmap(vmap(self.signal_to_latent, (0,), 0), (1,), 1)(rfi_A)
-
-        self.true_rfi_k_A_base = self.inv_transform(
-            self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k
-        )
+        self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A)
 
     def _read_estimate(self, est_path):
 
@@ -690,7 +774,7 @@ class FourierGPRFI(Component):
 
         return vmap(vmap(self.signal_to_latent, (0,), 0), (1,), 1)(est_rfi_A)
 
-    def _compute_init_params(self, init_type, est_path):
+    def _compute_init_params(self, init_type: str, est_path: str):
 
         if init_type == "prior":
             print("Using prior mean for rfi_k")
@@ -703,28 +787,28 @@ class FourierGPRFI(Component):
             self.init_rfi_k = self.true_rfi_k_A
         elif init_type == "zeros":
             print("Using zeros for rfi_k")
-            ones = jnp.zeros((self.n_freq, self.n_time), dtype=complex)
-            self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
+            # zeros_k is shape (1, 1, n_k_freq_rfi, n_k_time_rfi)
+            zeros_k = self.signal_to_latent(jnp.zeros((self.n_freq, self.n_time), dtype=complex))[None,None,:,:]
+            # init_rfi_k is shape (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
+            self.init_rfi_k = zeros_k * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type == "ones":
             print("Using ones for rfi_k")
-            ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
-            self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
+            # ones_k is shape (1, 1, n_k_freq_rfi, n_k_time_rfi)
+            ones_k = self.signal_to_latent(jnp.ones((self.n_freq, self.n_time), dtype=complex))[None,None,:,:]
+            # init_rfi_k is shape (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
+            self.init_rfi_k = ones_k * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type == "sample":
             print("Drawing sample from prior for rfi_k")
-            prior_sample = random.normal(
-                random.PRNGKey(1),
+            base_sample = random.normal(
+                random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
-            self.init_rfi_k = self.forward_transform(
-                prior_sample, self.sigma_rfi_k, self.mu_rfi_k
-            )
+            self.init_rfi_k = self.forward_transform(base_sample)
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
 
-        self.init_rfi_k_base = self.inv_transform(
-            self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k
-        )
+        self.init_rfi_k_base = self.inv_transform(self.init_rfi_k)
 
         self.init_params = {
             "rfi_k_r": self.init_rfi_k.real,
@@ -757,14 +841,16 @@ class FourierGPRFIConstAnt(Component):
 
     # Add parameter specifications
     parameter_shapes = {
-        "rfi_r_induce_base": ("n_rfi", 1, "n_freq_fine", "n_rfi_time"),
-        "rfi_i_induce_base": ("n_rfi", 1, "n_freq_fine", "n_rfi_time"),
+        "rfi_k_r_base": ("n_rfi", 1, "n_k_freq_rfi", "n_k_time_rfi"),
+        "rfi_k_i_base": ("n_rfi", 1, "n_k_freq_rfi", "n_k_time_rfi"),
     }
 
     def setup(self, config):
         """All validation and error-prone operations here"""
         try:
             # Store only what's needed for forward computation
+            self.r_seed = 123
+
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
             self.n_freq = config.n_freq
@@ -812,18 +898,14 @@ class FourierGPRFIConstAnt(Component):
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def build_set_params(self):
-        n_rfi = self.n_rfi
-        n_ant = self.n_ant
-        n_k_freq_rfi = self.n_k_freq_rfi
-        n_k_time_rfi = self.n_k_time_rfi
 
         def set_params(params):
 
             params["rfi_k_r_base"] = standard_normal(
-                "rfi_k_r_base", (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
+                "rfi_k_r_base", (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
             )
             params["rfi_k_i_base"] = standard_normal(
-                "rfi_k_i_base", (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
+                "rfi_k_i_base", (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
             )
 
             return params
@@ -831,24 +913,17 @@ class FourierGPRFIConstAnt(Component):
         return set_params
 
     def build_forward(self):
-        """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        sigma_rfi_k = self.sigma_rfi_k
-        mu_rfi_k = self.mu_rfi_k
-        forward_transform = self.forward_transform
-        pads = self.pads
-        ss_idxs = self.ss_idxs
 
-        def forward(params: dict, state: dict):
-            # Pure JAX operations only
+        def forward(params: Dict, state: Dict) -> Dict:
 
+            # rfi_k_A_base is shape ()
             rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
 
-            rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
+            rfi_k_A = self.forward_transform(rfi_k_A_base)
 
-            rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
-                rfi_k_A, pads, ss_idxs
-            )
+            rfi_A = vmap(vmap(self.latent_to_signal))(rfi_k_A)
+
+            rfi_A = rfi_A * jnp.ones((self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine))
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -863,14 +938,6 @@ class FourierGPRFIConstAnt(Component):
     @measure_runtime
     def _compute_gp_params(self):
 
-        # if self.gp_var is None:
-        #     self.gp_var = jnp.max(jnp.abs(self.vis_obs))
-
-        # print(f"Using RFI var : {self.gp_var:.3e} Jy")
-
-        # if self.gp_l is None:
-        #     self.gp_l = 1.0
-
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             self.xs,
             self.pad_factors,
@@ -879,6 +946,12 @@ class FourierGPRFIConstAnt(Component):
             self.k0s,
             self.gammas,
             self.pk_cutoff,
+        )
+
+        self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
+            _rfi_k_A, 
+            self.pads, 
+            self.ss_idxs
         )
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
@@ -891,7 +964,6 @@ class FourierGPRFIConstAnt(Component):
             self.pk_cutoff,
         )
 
-        # JIT-compiled function for efficient latent extraction
         self.signal_to_latent = lambda rfi_A: signal_to_latent(
             rfi_A,
             self.pad_factors,
@@ -918,11 +990,17 @@ class FourierGPRFIConstAnt(Component):
             ),
         }
 
-    def _compute_data_est(self, vis_obs):
+    def _compute_data_est(self, vis_obs: Array) -> Array:
 
-        est_rfi_k = self.signal_to_latent(jnp.sqrt(jnp.max(jnp.abs(vis_obs), axis=0)))[None, None, :, :] * jnp.ones((self.n_rfi, self.n_ant, 1, 1)) / self.n_rfi
+        # est_vis_rfi is shape (n_freq, n_time)
+        # RFI antenna estimate is sqrt of average visibility amplitude on maximum baseline
+        est_rfi_A = jnp.sqrt(jnp.max(jnp.abs(vis_obs / self.n_rfi), axis=0)) 
+        # est_rfi_k_A is shape (n_k_freq_rfi, n_k_time_rfi)
+        est_rfi_k_A = self.signal_to_latent(est_rfi_A)
+        # est_rfi_k_A is now shape (n_rfi, 1, n_k_freq_rfi, n_k_time_rfi)
+        est_rfi_k_A = est_rfi_k_A[None, None, :, :] * jnp.ones((self.n_rfi, 1, 1, 1)) 
 
-        return est_rfi_k
+        return est_rfi_k_A
 
     def _compute_prior_params(self, prior_type, vis_obs, est_path):
 
@@ -935,47 +1013,33 @@ class FourierGPRFIConstAnt(Component):
         elif prior_type == "zeros":
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
-                (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
+                (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
             )
         else:
             raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
 
-    def forward_transform(self, base_params, sigma, mu):
+    def forward_transform(self, base_params: Array) -> Array:
 
-        params = sigma * base_params + mu
+        params = self.sigma_rfi_k * base_params + self.mu_rfi_k
 
         return params
 
-    def inv_transform(self, params, sigma, mu):
+    def inv_transform(self, params: Array) -> Array:
 
-        base_params = (params - mu) / sigma
+        base_params = (params - self.mu_rfi_k) / self.sigma_rfi_k
 
         return base_params
 
-    def _compute_true_params(self, zarr_path, data_col):
+    def _compute_true_params(self, sim_zarr_path: str, data_col: str):
 
-        xds = xr.open_zarr(zarr_path)
+        # true_rfi_A shape goes from (n_rfi, n_ant, n_freq, n_time) -> (n_rfi, 1, n_freq, n_time)
+        true_rfi_A = jnp.mean(read_true_rfi_A(sim_zarr_path, data_col, self.times), axis=1, keepdims=True)
 
-        data_type = get_observation_data_type(data_col)
+        # true_rfi_k_A is shape (n_rfi, 1, n_k_freq_rfi, n_k_time_rfi)
+        # Latent prediction is mapped over axes (0, 1)
+        self.true_rfi_k_A = vmap(vmap(self.signal_to_latent))(true_rfi_A)
 
-        rfi_A = jnp.transpose(
-            vmap(
-                vmap(vmap(jnp.interp, (None, None, 0), 0), (None, None, 2), 2),
-                (None, None, 3),
-                3,
-            )(
-                self.times,
-                xds.time_fine.data,
-                xds.rfi_tle_sat_A.data.compute(),
-            ),
-            (0, 2, 3, 1),
-        )
-
-        self.true_rfi_k_A = vmap(vmap(self.signal_to_latent, (0,), 0), (1,), 1)(rfi_A)
-
-        self.true_rfi_k_A_base = self.inv_transform(
-            self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k
-        )
+        self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A)
 
     def _read_estimate(self, est_path):
 
@@ -1006,20 +1070,16 @@ class FourierGPRFIConstAnt(Component):
             self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type == "sample":
             print("Drawing sample from prior for rfi_k")
-            prior_sample = random.normal(
-                random.PRNGKey(1),
+            base_sample = random.normal(
+                random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
-            self.init_rfi_k = self.forward_transform(
-                prior_sample, self.sigma_rfi_k, self.mu_rfi_k
-            )
+            self.init_rfi_k = self.forward_transform(base_sample)
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
 
-        self.init_rfi_k_base = self.inv_transform(
-            self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k
-        )
+        self.init_rfi_k_base = self.inv_transform(self.init_rfi_k)
 
         self.init_params = {
             "rfi_k_r": self.init_rfi_k.real,
@@ -1033,7 +1093,7 @@ class FourierGPRFIConstAnt(Component):
     def _validate_dimensions(self):
         """Ensure all setup operations completed successfully"""
 
-        rfi_shape = (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi)
+        rfi_shape = (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
 
         assert_attr_shape(self, "mu_rfi_k", rfi_shape)
         assert_attr_shape(
