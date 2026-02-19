@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "tensor.hpp"
+#include "util_gpu.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
 
@@ -233,7 +234,9 @@ ffi::Error calc_rfi_jvp_gpu_dispatch(
 
   dim3 block(block_size);
   auto n_warps = block.x / 32;
-  dim3 grid((n_time + n_warps - 1) / n_warps, n_bl, n_freq);
+
+  auto grid =
+      create_clamped_grid((n_time + n_warps - 1) / n_warps, n_bl, n_freq);
 
   rfi_jvp_kernel<block_size, tile_size, INT_T><<<grid, block, 0, stream>>>(
       a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_amp_fine_grad_tensor,
