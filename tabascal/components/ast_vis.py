@@ -829,7 +829,7 @@ class FourierTimeFreqGPAst(Component):
         if prior_type == "data":
             print("Using data for AST prior mean")
             self.mu_ast_k = self._compute_data_est(vis_obs)
-        elif prior_type == "zeros":
+        elif prior_type in ["zeros", 0]:
             print("Using zeros for AST prior mean")
             self.mu_ast_k = jnp.zeros(
                 (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex

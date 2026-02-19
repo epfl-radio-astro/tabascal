@@ -96,10 +96,13 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
     extent = lambda x: float(jnp.max(x) - jnp.min(x))
 
-    r_seed = rfi_config["r_seed"]
-    gp_var = rfi_config["var"]
-    gp_freq_l = rfi_config["corr_freq"]
-    gp_time_l = rfi_config["corr_time"]
+    try:
+        r_seed = rfi_config["r_seed"]
+        gp_var = rfi_config["var"]
+        gp_freq_l = rfi_config["corr_freq"]
+        gp_time_l = rfi_config["corr_time"]
+    except Exception as e:
+        raise ValueError(f"RFI signal configuration validation failed.")
 
     if not r_seed: # Set Default
         rfi_config["r_seed"] = 1
@@ -260,8 +263,7 @@ class RealRFI(Component):
         return set_params
 
     def build_forward(self) -> Callable:
-        interp = lambda _rfi_A_induce: jnp.dot(self.resample_rfi, _rfi_A_induce)
-        self.interp_multi = vmap(vmap(vmap(interp)))
+        self.interp = lambda _rfi_A_induce: jnp.einsum("ij,safj->safi", self.resample_rfi, _rfi_A_induce)
 
         def forward(params: Dict, state: Dict) -> Dict:
 
@@ -269,7 +271,7 @@ class RealRFI(Component):
 
             rfi_A_induce = self.forward_transform(rfi_A_induce_base)
 
-            rfi_A = self.interp_multi(rfi_A_induce)
+            rfi_A = self.interp(rfi_A_induce)
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -316,9 +318,9 @@ class RealRFI(Component):
 
     def forward_transform(self, base_params: Array) -> Array:
 
-        affine_same_scale = lambda _base_params: affine_transform_full(_base_params, self.L_rfi_A, self.mu_rfi_A)
+        affine_same_scale = lambda _base_params, _mu: affine_transform_full(_base_params, self.L_rfi_A, _mu)
 
-        params = vmap(vmap(vmap(affine_same_scale)))(base_params)
+        params = vmap(vmap(vmap(affine_same_scale)))(base_params, self.mu_rfi_A)
 
         return params
 
@@ -335,7 +337,7 @@ class RealRFI(Component):
         if init_type == "prior":
             print("Using prior mean for rfi_A")
             self.init_rfi_A_induce = self.mu_rfi_A
-        elif init_type == "zeros":
+        elif init_type in ["zeros", 0] :
             print("Using for zeros for rfi_A")
             self.init_rfi_A_induce = jnp.zeros_like(self.mu_rfi_A)
         elif init_type == "ones":
@@ -444,8 +446,7 @@ class ComplexRFI(Component):
         return set_params
 
     def build_forward(self) -> Callable:
-        interp = lambda _rfi_A_induce: jnp.dot(self.resample_rfi, _rfi_A_induce)
-        self.interp_multi = vmap(vmap(vmap(interp)))
+        self.interp = lambda _rfi_A_induce: jnp.einsum("ij,safj->safi", self.resample_rfi, _rfi_A_induce)
 
         def forward(params: Dict, state: Dict) -> Dict:
 
@@ -455,7 +456,7 @@ class ComplexRFI(Component):
 
             rfi_A_induce = self.forward_transform(rfi_A_induce_base)
 
-            rfi_A = self.interp_multi(rfi_A_induce)
+            rfi_A = self.interp(rfi_A_induce)
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -502,9 +503,9 @@ class ComplexRFI(Component):
 
     def forward_transform(self, base_params: Array) -> Array:
 
-        affine_same_scale = lambda _base_params: affine_transform_full(_base_params, self.L_rfi_A, self.mu_rfi_A)
+        affine_same_scale = lambda _base_params, _mu: affine_transform_full(_base_params, self.L_rfi_A, _mu)
 
-        params = vmap(vmap(vmap(affine_same_scale)))(base_params)
+        params = vmap(vmap(vmap(affine_same_scale)))(base_params, self.mu_rfi_A)
 
         return params
 
@@ -521,7 +522,7 @@ class ComplexRFI(Component):
         if init_type == "prior":
             print("Using prior mean for rfi_A")
             self.init_rfi_A_induce = self.mu_rfi_A
-        elif init_type == "zeros":
+        elif init_type in ["zeros", 0]:
             print("Using for zeros for rfi_A")
             self.init_rfi_A_induce = jnp.zeros_like(self.mu_rfi_A)
         elif init_type == "ones":
@@ -738,7 +739,7 @@ class FourierGPRFI(Component):
         elif prior_type == "est": 
             print("Using provided estimate for rfi_k")
             self.mu_rfi_k = self._read_estimate(est_path)
-        elif prior_type == "zeros":
+        elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
@@ -785,7 +786,7 @@ class FourierGPRFI(Component):
         elif init_type == "truth":
             print("Using truth for rfi_A")
             self.init_rfi_k = self.true_rfi_k_A
-        elif init_type == "zeros":
+        elif init_type in ["zeros", 0]:
             print("Using zeros for rfi_k")
             # zeros_k is shape (1, 1, n_k_freq_rfi, n_k_time_rfi)
             zeros_k = self.signal_to_latent(jnp.zeros((self.n_freq, self.n_time), dtype=complex))[None,None,:,:]
@@ -1010,7 +1011,7 @@ class FourierGPRFIConstAnt(Component):
         elif prior_type == "est": 
             print("Using provided estimate for rfi_k")
             self.mu_rfi_k = self._read_estimate(est_path)
-        elif prior_type == "zeros":
+        elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
                 (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
@@ -1045,9 +1046,9 @@ class FourierGPRFIConstAnt(Component):
 
         from numpy import load
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi]))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi]))), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
 
-        return vmap(vmap(self.signal_to_latent, (0,), 0), (1,), 1)(est_rfi_A)
+        return vmap(vmap(self.signal_to_latent))(est_rfi_A)
 
     def _compute_init_params(self, init_type, est_path):
 
@@ -1060,7 +1061,7 @@ class FourierGPRFIConstAnt(Component):
         elif init_type == "truth":
             print("Using truth for rfi_A")
             self.init_rfi_k = self.true_rfi_k_A
-        elif init_type == "zeros":
+        elif init_type in ["zeros", 0]:
             print("Using zeros for rfi_k")
             ones = jnp.zeros((self.n_freq, self.n_time), dtype=complex)
             self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))

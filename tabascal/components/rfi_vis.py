@@ -271,6 +271,18 @@ class RiemannVisTimeFreqVariable(Component):
 
     #     assert hasattr(self, "")
 
+    def _print_saving(self):
+
+        saving = (
+            np.sum(
+                [i.size / s for i, s in zip(self.time_sample_idxs, self.time_strides)]
+            )
+            / self.n_bl
+        )
+
+        print(f"New intermediate is {100*saving:.2f} % of original size")
+
+
     def build_set_params(self):
 
         def set_params(params):
