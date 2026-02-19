@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "tensor.hpp"
+#include "util_gpu.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
 
@@ -329,7 +330,8 @@ ffi::Error calc_rfi_transpose_gpu_dispatch(
   constexpr int block_size = 32;
 
   dim3 block(block_size);
-  dim3 grid(n_tf_fine, n_ant, n_rfi);
+
+  auto grid = create_clamped_grid(n_tf_fine, n_ant, n_rfi);
 
   rfi_transpose_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
       n_int_f, n_int_t, a1_tensor, a1_sorter_tensor, a1_start_tensor, a2_tensor,
