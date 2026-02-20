@@ -5,7 +5,7 @@ from tabascal.components.trajectory import fetch_orbital_elements
 from tabascal.interferometry import get_strides_and_idxs
 
 import jax.numpy as jnp
-from jax import vmap
+from jax import vmap, Array
 
 import numpy as np
 
@@ -25,13 +25,13 @@ from tabsim.config import deep_update, yaml_load
 
 import numpyro
 
-from typing import Callable
+from typing import Optional, Callable, Dict, List
 
 from importlib.resources import files
 import os
 
 
-def load_config(path: str) -> dict:
+def load_config(path: str) -> Dict:
     """Load a configuration file and populate default parameters where needed.
 
     Parameters
@@ -51,13 +51,19 @@ def load_config(path: str) -> dict:
     try:
         return deep_update(base_config, yaml_load(path))
     except:
-        raise IOError("Configuration file could not be loaded from ")
+        raise IOError(f"Configuration file could not be loaded from {path}")
 
+
+def validate_tab_config(config: Dict):
+
+    pass
+
+    
     
 class TabConfig:
     """Configuration parameters for tabascal method"""
 
-    def __init__(self, config: dict, ms_path: str):
+    def __init__(self, config: Dict, ms_path: str):
 
         # self.config = config
         self.ms_path = ms_path
@@ -79,15 +85,21 @@ class TabConfig:
         config["rfi"]["min_time_bins"] = 1
         config["rfi"]["max_time_bins"] = 30
 
+        self.n_int_time = config["rfi"]["n_int_time"]
+        self.n_int_freq = config["rfi"]["n_int_freq"]
+
         self.estimate_rfi_sampling(
             config["rfi"]["time_int_factor"],
             config["rfi"]["min_time_bins"],
             config["rfi"]["max_time_bins"],
         )
 
+        self._set_times()
+        self._set_freqs()
+
         self.args = config
 
-    def set_noise(self, noise):
+    def set_noise(self, noise: float):
 
         if noise:
             self.noise = noise
@@ -120,7 +132,9 @@ class TabConfig:
         self.times = ms_params["times"]
         self.times_jd = mjd_to_jd(ms_params["times_mjd"])
 
+        self.chan_width = ms_params["chan_width"]
         self.freqs = ms_params["freqs"]
+
         self.noise = ms_params["noise"]
         self.a1 = ms_params["a1"]
         self.a2 = ms_params["a2"]
@@ -140,17 +154,16 @@ class TabConfig:
 
         rfi_xyz = kepler_orbit_many(times_jd_coarse, self.epoch_jd, self.elements)
 
-        # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
-        fringe_freq = vmap(
-            calculate_fringe_frequency, (None, None, 0, None, None, None)
-        )(
+        calc_fringe_freq = lambda _rfi_xyz: calculate_fringe_frequency(
             jd_to_mjd(times_jd_coarse),
             jnp.max(self.freqs),
-            rfi_xyz,
+            _rfi_xyz,
             self.ants_itrf,
             ants_u,
             self.phase_centre["dec"],
         )
+        # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
+        fringe_freq = vmap(calc_fringe_freq)(rfi_xyz)
 
         # # self.fringe_freqs is shape (n_rfi, n_bl)
         # self.fringe_freqs = jnp.max(jnp.abs(fringe_freq), axis=1)
@@ -176,24 +189,23 @@ class TabConfig:
         n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(int)
         # print(bl_fr.max() * bl_fr.size / jnp.sum(bl_fr))
 
+        # time_sample_idxs and time_strides are only used in RiemannVisTimeFreqVariable
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
             get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
         )
 
-        saving = (
-            np.sum(
-                [i.size / s for i, s in zip(self.time_sample_idxs, self.time_strides)]
-            )
-            / self.n_bl
-        )
-
-        print(f"New intermediate is {100*saving:.2f} % of original size")
+    def _set_times(self):
 
         self.times_fine = int_sample_times(self.times, self.n_int_time).compute()
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
         self.n_time_fine = len(self.times_fine)
+    
+    def _set_freqs(self):
 
-    def get_orbital_elements(self, norad_ids: list[int]):
+        self.freqs_fine = int_sample_times(self.freqs, self.n_int_freq).compute()
+        self.n_freq_fine = len(self.freqs_fine)
+
+    def get_orbital_elements(self, norad_ids: List[int]):
 
         obs_epoch_jd = float(self.times_jd.mean())
 
@@ -207,20 +219,20 @@ class Model:
 
     def __init__(
         self,
-        config: TabConfig,
-        component_list: list[str],
+        tab_config: TabConfig,
+        component_list: List[str],
         likelihood: Callable = gaussian,
     ):
 
-        self.noise = config.noise
+        self.noise = tab_config.noise
         self.likelihood = lambda pred, obs_data: likelihood(
-            pred, obs_data, {"noise": config.noise, "flags": config.flags}
+            pred, obs_data, {"noise": tab_config.noise, "flags": tab_config.flags}
         )
 
         components = [C() for C in import_components(component_list)]
         self.components = components
         for comp in components:
-            comp.setup(config)
+            comp.setup(tab_config)
 
         init_params = [comp.init_params_base for comp in components]
         self.init_params = {k: v for d in init_params for k, v in d.items()}
@@ -241,7 +253,7 @@ class Model:
     def build_forward(self):
         forwards = [comp.build_forward() for comp in self.components]
 
-        def forward(params, state):
+        def forward(params: Dict, state: Dict):
 
             for sub_forward in forwards:
                 state = sub_forward(params, state)
@@ -268,7 +280,7 @@ class Model:
         set_params = self.build_set_params()
         forward = self.forward
 
-        def prob_model(obs_data=None):
+        def prob_model(obs_data: Optional[Array] = None):
 
             params = set_params()
             state = self.state

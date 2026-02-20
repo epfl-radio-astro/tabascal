@@ -662,6 +662,7 @@ class FourierTimeFreqGPAst(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
             self.int_time = config.int_time
+            self.chan_width = config.chan_width
             self.dish_d = config.dish_d
             self.uvw = config.uvw
             self.freqs = config.freqs
@@ -764,8 +765,12 @@ class FourierTimeFreqGPAst(Component):
         self.k0_time = self.ast_fr
         self.k0s = [self.k0_freq, self.k0_time.max()]
 
+        ns = [self.n_freq, self.n_time]
+        dxs = [self.chan_width, self.int_time]
+
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
-            self.xs,
+            ns,
+            dxs,
             self.pad_factors,
             self.ss_factors,
             self.p0,
@@ -776,7 +781,8 @@ class FourierTimeFreqGPAst(Component):
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
         self.latent_idxs, _ = signal_to_latent_init(
-            self.xs,
+            ns,
+            dxs,
             self.pad_factors,
             self.p0,
             self.k0s,
@@ -785,8 +791,6 @@ class FourierTimeFreqGPAst(Component):
         )
 
         self.signal_to_latent = lambda vis_ast: vmap(signal_to_latent, (0, None, None), 0)(vis_ast, self.pad_factors, self.latent_idxs)
-
-        dxs = tuple([float(jnp.diff(x[:2])[0]) if len(x) > 1 else 1 for x in self.xs])
 
         print("\nAST specs")
         print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
@@ -829,7 +833,7 @@ class FourierTimeFreqGPAst(Component):
         if prior_type == "data":
             print("Using data for AST prior mean")
             self.mu_ast_k = self._compute_data_est(vis_obs)
-        elif prior_type == "zeros":
+        elif prior_type in ["zeros", 0]:
             print("Using zeros for AST prior mean")
             self.mu_ast_k = jnp.zeros(
                 (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex

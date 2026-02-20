@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from tabascal.fft_gp import (
-    _get_dx,
     domain_k,
     domain_ss,
     fourier_cut,
@@ -40,60 +39,46 @@ def manage_timings():
     disable_timings()
     clear_timings()
 
-
-class TestDomainHelpers:
-    """Test basic domain helper functions."""
-
-    def test_get_dx_regular_spacing(self):
-        """Test resolution calculation for regularly spaced array."""
-        x = jnp.linspace(0, 10, 101)
-        dx = _get_dx(x)
-        assert jnp.isclose(dx, 0.1)
-
-    def test_get_dx_single_element(self):
-        """Test resolution defaults to 1.0 for single element."""
-        x = jnp.array([5.0])
-        dx = _get_dx(x)
-        assert dx == 1.0
-
-    def test_get_dx_two_elements(self):
-        """Test resolution calculation for two elements."""
-        x = jnp.array([0.0, 2.5])
-        dx = _get_dx(x)
-        assert jnp.isclose(dx, 2.5)
-
-
 class TestSupersample:
     """Test supersampling functions."""
 
     def test_supersample_domain_specs_1d(self):
         """Test supersampling specs for 1D domain."""
-        x = jnp.linspace(0, 10, 11)
-        n_ss, dx_ss = supersample_domain_specs([x], [2])
+        ns = [3]
+        dxs = [0.1]
+        ss_factors = [2]
+        n_ss, dx_ss = supersample_domain_specs(ns, dxs, ss_factors)
 
-        assert n_ss == [22]
-        assert jnp.isclose(dx_ss[0], 0.5)
+        assert n_ss == [6]
+        assert jnp.isclose(dx_ss[0], 0.05)
 
     def test_supersample_domain_specs_2d(self):
         """Test supersampling specs for 2D domain."""
-        x = jnp.linspace(0, 10, 11)
-        y = jnp.linspace(0, 5, 6)
-        n_ss, dx_ss = supersample_domain_specs([x, y], [2, 3])
+        ns = [1, 3]
+        dxs = [200e3, 2]
+        ss_factors = [2, 3]
+        n_ss, dx_ss = supersample_domain_specs(ns, dxs, ss_factors)
 
-        assert n_ss == [22, 18]
-        assert jnp.isclose(dx_ss[0], 0.5)
-        assert jnp.isclose(dx_ss[1], 1.0 / 3.0)
+        assert n_ss == [2, 9]
+        assert jnp.isclose(dx_ss[0], 100e3)
+        assert jnp.isclose(dx_ss[1], 2.0 / 3.0)
 
     def test_supersample_domain_specs_length_mismatch(self):
         """Test that length mismatch raises error."""
-        x = jnp.linspace(0, 10, 11)
+        ns = [1]
+        dxs = [0.1, 0.2]
+        ss_factors = [3]
         with pytest.raises(ValueError, match="Length mismatch"):
-            supersample_domain_specs([x], [2, 3])
+            supersample_domain_specs(ns, dxs, ss_factors)
 
     def test_supersample_domain_1d(self):
         """Test domain supersampling in 1D."""
         x = jnp.linspace(0, 10, 11)
-        xs_ss = supersample_domain([x], [2])
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
+        x0s = [float(x[0])]
+        ss_factors = [2]
+        xs_ss = supersample_domain(ns, dxs, x0s, ss_factors)
 
         assert len(xs_ss) == 1
         assert len(xs_ss[0]) == 22
@@ -103,7 +88,10 @@ class TestSupersample:
     def test_supersample_domain_k_1d(self):
         """Test k-domain supersampling in 1D."""
         x = jnp.linspace(0, 10, 11)
-        ks_ss = supersample_domain_k([x], [2])
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
+        ss_factors = [2]
+        ks_ss = supersample_domain_k(ns, dxs, ss_factors)
 
         assert len(ks_ss) == 1
         assert len(ks_ss[0]) == 22
@@ -148,7 +136,9 @@ class TestDomainK:
     def test_domain_k_1d(self):
         """Test k-domain calculation in 1D."""
         x = jnp.linspace(0, 10, 11)
-        ks = domain_k([x])
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
+        ks = domain_k(ns, dxs)
 
         assert len(ks) == 1
         assert len(ks[0]) == len(x)
@@ -159,7 +149,9 @@ class TestDomainK:
         """Test k-domain calculation in 2D."""
         x = jnp.linspace(0, 10, 11)
         y = jnp.linspace(0, 5, 6)
-        ks = domain_k([x, y])
+        ns = [len(_x) for _x in [x,y]]
+        dxs = [float(jnp.diff(_x)[0]) for _x in [x,y]]
+        ks = domain_k(ns, dxs)
 
         assert len(ks) == 2
         assert len(ks[0]) == len(x)
@@ -172,28 +164,32 @@ class TestPadding:
     def test_pad_domain_specs_validation(self):
         """Test that pad_domain_specs validates inputs."""
         x = jnp.linspace(0, 10, 11)
+        ns = [len(x)]
+        pad_factors = [0.5]
 
         # Test pad factors < 1.0
         with pytest.raises(ValueError, match="Pad factors must be >= 1.0"):
-            pad_domain_specs([x], [0.5])
+            pad_domain_specs(ns, pad_factors)
 
         # Test length mismatch
         with pytest.raises(ValueError, match="Length mismatch"):
-            pad_domain_specs([x], [1.5, 2.0])
+            pad_domain_specs(ns, [1.5, 2.0])
 
     def test_pad_domain_specs_1d(self):
         """Test padding specs for 1D domain."""
         x = jnp.linspace(0, 10, 11)
-        ns, n_pads, dxs = pad_domain_specs([x], [2.0])
+        ns = [len(x)]
+        n_pads = pad_domain_specs(ns, [2.0])
 
-        assert ns == [11]
         assert n_pads == [5]  # (11 * (2 - 1) / 2) = 5.5 -> 5
-        assert jnp.isclose(dxs[0], 1.0)
 
     def test_pad_domain_1d(self):
         """Test domain padding in 1D."""
         x = jnp.linspace(0, 10, 11)
-        xs_pad = pad_domain([x], [2.0])
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
+        x0s = [float(x[0])]
+        xs_pad = pad_domain(ns, dxs, x0s, [2.0])
 
         assert len(xs_pad) == 1
         expected_len = 11 + 2 * 5  # 21
@@ -202,7 +198,9 @@ class TestPadding:
     def test_pad_domain_k_1d(self):
         """Test k-domain padding in 1D."""
         x = jnp.linspace(0, 10, 11)
-        ks_pad = pad_domain_k([x], [2.0])
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
+        ks_pad = pad_domain_k(ns, dxs, [2.0])
 
         assert len(ks_pad) == 1
         expected_len = 11 + 2 * 5  # 21
@@ -360,19 +358,25 @@ class TestDomainSS:
     def test_domain_ss_1d(self):
         """Test supersampled domain in 1D."""
         x = jnp.linspace(0, 10, 11)
-        xs_ss = domain_ss([x], ss_factors=[2], pad_factors=[1.5])
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
+        x0s = [float(x[0])]
+        xs_ss = domain_ss(ns, dxs, x0s, ss_factors=[2], pad_factors=[1.5])
 
         assert len(xs_ss) == 1
         # Should have supersampled resolution
-        dx_ss = _get_dx(xs_ss[0])
-        dx_orig = _get_dx(x)
+        dx_ss = jnp.diff(xs_ss[0])[0]
+        dx_orig = jnp.diff(x)[0]
         assert jnp.isclose(dx_ss, dx_orig / 2, rtol=1e-4)
 
     def test_domain_ss_2d(self):
         """Test supersampled domain in 2D."""
         x = jnp.linspace(0, 10, 11)
         y = jnp.linspace(0, 5, 6)
-        xs_ss = domain_ss([x, y], ss_factors=[2, 3], pad_factors=[1.5, 1.5])
+        ns = [len(_x) for _x in [x, y]]
+        dxs = [float(jnp.diff(_x)[0]) for _x in [x, y]]
+        x0s = [float(_x[0]) for _x in [x, y]]
+        xs_ss = domain_ss(ns, dxs, x0s, ss_factors=[2, 3], pad_factors=[1.5, 1.5])
 
         assert len(xs_ss) == 2
 
@@ -384,10 +388,12 @@ class TestLatentSpace:
         """Test latent representation extraction in 1D."""
         x = jnp.linspace(0, 10, 32)
         y = jnp.sin(2 * jnp.pi * x / 10)
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
 
         # Use signal_to_latent_init + signal_to_latent
         idxs, pk = signal_to_latent_init(
-            [x], pad_factors=[1.5], p0=1.0, k0s=[1.0], gammas=[2.0], cutoff=0.5
+            ns, dxs, pad_factors=[1.5], p0=1.0, k0s=[1.0], gammas=[2.0], cutoff=0.5
         )
         Y_latent = signal_to_latent(y, [1.5], idxs)
 
@@ -397,9 +403,12 @@ class TestLatentSpace:
     def test_latent_init_returns_correct_types(self):
         """Test that latent_to_signal_init returns correct data types."""
         x = jnp.linspace(0, 10, 32)
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
 
         latent_pk, latent_ks, pads, idxs_pad_ss = latent_to_signal_init(
-            [x],
+            ns,
+            dxs,
             pad_factors=[1.5],
             ss_factors=[2],
             p0=1.0,
@@ -418,9 +427,12 @@ class TestLatentSpace:
     def test_latent_init_predict_roundtrip(self):
         """Test that latent_to_signal_init and latent_to_signal work together."""
         x = jnp.linspace(0, 10, 32)
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
 
         latent_pk, latent_ks, pads, idxs_pad_ss = latent_to_signal_init(
-            [x],
+            ns,
+            dxs,
             pad_factors=[1.5],
             ss_factors=[2],
             p0=1.0,
@@ -442,10 +454,13 @@ class TestLatentSpace:
     def test_latent_operations_jit_compatible(self):
         """Test that latent operations are JIT-compatible."""
         x = jnp.linspace(0, 10, 32)
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
 
         # latent_to_signal_init should work (it's called once for setup)
         latent_pk, latent_ks, pads, idxs_pad_ss = latent_to_signal_init(
-            [x],
+            ns,
+            dxs,
             pad_factors=[1.5],
             ss_factors=[2],
             p0=1.0,
@@ -467,10 +482,13 @@ class TestLatentSpace:
         """Test that signal_to_latent_init + signal_to_latent is JIT-compatible."""
         x = jnp.linspace(0, 10, 32)
         y = jnp.sin(2 * jnp.pi * x / 10)
+        ns = [len(x)]
+        dxs = [float(jnp.diff(x)[0])]
 
         # Setup phase (not JIT-compatible, called once)
         idxs, pk = signal_to_latent_init(
-            [x],
+            ns,
+            dxs,
             pad_factors=[1.5],
             p0=1.0,
             k0s=[1.0],
@@ -493,29 +511,6 @@ class TestLatentSpace:
 
 class TestJAXCompatibility:
     """Test JAX compatibility of all major functions after refactoring."""
-
-    def test_supersample_domain_specs_jit(self):
-        """Test that core computation in supersample works with JIT."""
-        # The spec functions return Python lists, so they're not directly JIT-compatible
-        # But the underlying computations should work
-        @jax.jit
-        def compute_dx(x):
-            return _get_dx(x)
-
-        x = jnp.linspace(0, 10, 11)
-        dx = compute_dx(x)
-        assert jnp.isclose(dx, 1.0)
-
-    def test_pad_domain_specs_jit(self):
-        """Test that core computation in pad works with JIT."""
-        # The spec functions return Python lists, but we can test the underlying computation
-        @jax.jit
-        def compute_dx(x):
-            return _get_dx(x)
-
-        x = jnp.linspace(0, 10, 11)
-        dx = compute_dx(x)
-        assert jnp.isclose(dx, 1.0)
 
     def test_pk_cut_jit(self):
         """Test that pk_cut can be called (even though it's not fully JIT-compatible)."""

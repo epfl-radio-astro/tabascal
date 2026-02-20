@@ -136,6 +136,7 @@ def read_ms(
     n_freq, n_corr = xds.DATA.data.shape[1:]
 
     freqs = jnp.array(xds_spec.CHAN_FREQ.data[0].compute())
+    chan_width = jnp.array(xds_spec.CHAN_WIDTH.data[0,0].compute())
     int_time = xds.INTERVAL.data[0].compute()
 
     times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
@@ -159,6 +160,15 @@ def read_ms(
 
     n_freq = len(chans)
 
+    read_data = lambda col_name: jnp.transpose(
+        jnp.array(
+            xds[col_name]
+            .data[:, chans, corr_idx].reshape(n_time, n_bl, n_freq)
+            .compute()
+        ),
+        (1, 2, 0),
+    )
+
     data = {
         **{
             key: val
@@ -176,27 +186,16 @@ def read_ms(
         "times": times,
         "int_time": int_time,
         "freqs": freqs[chans],
+        "chan_width": chan_width,
         "ants_itrf": ants_itrf,
         "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),
-        "vis_obs": jnp.transpose(
-            jnp.array(
-                xds[data_col]
-                .data.reshape(n_time, n_bl, n_freq, n_corr)[:, :, chans, corr_idx]
-                .compute()
-            ),
-            (1, 2, 0),
-        ),
-        "flags": jnp.transpose(
-            jnp.array(
-                xds["FLAG"]  # type: ignore
-                .data.reshape(n_time, n_bl, n_freq, n_corr)[:, :, chans, corr_idx]
-                .compute()
-            ),
-            (1, 2, 0),
-        ),
+        "vis_obs": read_data(data_col),
+        "flags": read_data("FLAG"),
         "noise": jnp.array(xds.SIGMA.data.mean().compute()),
         "a1": jnp.array(xds.ANTENNA1.data.reshape(n_time, n_bl)[0, :].compute()),
         "a2": jnp.array(xds.ANTENNA2.data.reshape(n_time, n_bl)[0, :].compute()),
+        "a1": jnp.array(xds.ANTENNA1.data[:n_bl].compute()),
+        "a2": jnp.array(xds.ANTENNA2.data[:n_bl].compute()),
     }
 
     return data
