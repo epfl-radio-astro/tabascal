@@ -512,20 +512,6 @@ class TestLatentSpace:
 class TestJAXCompatibility:
     """Test JAX compatibility of all major functions after refactoring."""
 
-    def test_supersample_domain_specs_jit(self):
-        """Test that core computation in supersample works with JIT."""
-
-        x = jnp.linspace(0, 10, 11)
-        dx = jnp.diff(x)[0]
-        assert jnp.isclose(dx, 1.0)
-
-    def test_pad_domain_specs_jit(self):
-        """Test that core computation in pad works with JIT."""
-
-        x = jnp.linspace(0, 10, 11)
-        dx = jnp.diff(x)[0]
-        assert jnp.isclose(dx, 1.0)
-
     def test_pk_cut_jit(self):
         """Test that pk_cut can be called (even though it's not fully JIT-compatible)."""
         # pk_cut returns Python slices which are inherently data-dependent
