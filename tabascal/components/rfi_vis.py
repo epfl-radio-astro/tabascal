@@ -135,7 +135,6 @@ class RiemannVisTimeFreqCalculation(Component):
         n_freq = self.n_freq
 
         def forward(params, state):
-            # Pure JAX operations only
             vis_rfi_fine = calculate_rfi_vis_fine(
                 state["rfi_A"], state["rfi_phase"], a1, a2
             )
@@ -274,7 +273,7 @@ class RiemannVisTimeFreqVariable(Component):
     def _print_saving(self):
 
         saving = (
-            np.sum(
+            jnp.sum(
                 [i.size / s for i, s in zip(self.time_sample_idxs, self.time_strides)]
             )
             / self.n_bl

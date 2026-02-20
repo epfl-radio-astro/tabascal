@@ -60,6 +60,8 @@ rfi:
   var: null             # Optional - Variance of the RFI signal in Jy. When null an estimate is made based on the data
   corr_time: 24         # Optional - Correlation time of the RFI signal in seconds
   corr_freq: 1e6        # Optional - Correlation bandwidth of the RFI signal in Hz
+  time_pad_factor: 2
+  freq_pad_factor: 2
   n_int_factor: 1       # Optional - Factor to increase the number of integration samples over the predicted value
   n_int_time: null      # Optional - Specify the number of integration samples to use along the time axis
   n_int_freq: 1         # Optional - Specify the number of integration samples to use along the frequency axis

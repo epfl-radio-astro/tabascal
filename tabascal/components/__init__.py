@@ -3,7 +3,6 @@ from typing import Dict, Any, Callable
 
 from jax import Array
 
-
 class Component(ABC):
     """Base class for all tabascal components"""
 
@@ -16,7 +15,7 @@ class Component(ABC):
     init_params_base: Dict[str, Array] = {}
 
     @abstractmethod
-    def setup(self, config: Any) -> None:
+    def setup(self, tab_config: Any) -> None:
         """Initialize component with configuration"""
         pass
 

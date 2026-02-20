@@ -219,20 +219,20 @@ class Model:
 
     def __init__(
         self,
-        config: TabConfig,
+        tab_config: TabConfig,
         component_list: List[str],
         likelihood: Callable = gaussian,
     ):
 
-        self.noise = config.noise
+        self.noise = tab_config.noise
         self.likelihood = lambda pred, obs_data: likelihood(
-            pred, obs_data, {"noise": config.noise, "flags": config.flags}
+            pred, obs_data, {"noise": tab_config.noise, "flags": tab_config.flags}
         )
 
         components = [C() for C in import_components(component_list)]
         self.components = components
         for comp in components:
-            comp.setup(config)
+            comp.setup(tab_config)
 
         init_params = [comp.init_params_base for comp in components]
         self.init_params = {k: v for d in init_params for k, v in d.items()}

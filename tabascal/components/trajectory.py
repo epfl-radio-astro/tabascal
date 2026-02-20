@@ -124,13 +124,15 @@ class FixedOrbit(Component):
             self.freqs = config.freqs
             self.times = config.times
 
-            xs = [self.freqs, self.times]
+            ns = [config.n_freq, config.n_time]
+            dxs = [config.chan_width, config.int_time]
+            x0s = [self.freqs[0], self.times[0]]
             ss_factors = [self.n_int_freq, self.n_int_time]
             pad_factors = [
                 config.args["rfi"]["freq_pad_factor"],
                 config.args["rfi"]["time_pad_factor"],
             ]
-            self.freqs_fine, self.times_fine = domain_ss(xs, ss_factors, pad_factors)
+            self.freqs_fine, self.times_fine = domain_ss(ns, dxs, x0s, ss_factors, pad_factors)
             self.n_freq_fine = len(self.freqs_fine)
 
             self.times_jd_fine = config.times_jd_fine
