@@ -666,23 +666,6 @@ def latent_to_signal_init(
     ns_pad = [len(k) for k in ks_pad]
     ss_pads = [(n * (f - 1) // 2, n * (f - 1) // 2) for n, f in zip(ns_pad, ss_factors)]
 
-# ############################################################
-
-#     ns_ss = [n * f for n, f in zip(ns, ss_factors)]
-#     dxs_ss = [dx / f for dx, f in zip(dxs, ss_factors)]
-
-#     dV_orig = np.prod(dxs)
-#     dV_ss = np.prod(dxs_ss)
-#     N_orig = np.prod(ns)
-#     N_ss = np.prod(ns_ss)
-    
-#     # Variance scaling: we want same variance *density*
-#     # pk defines the continuous spectrum; discretization requires:
-#     variance_scale = (dV_orig / N_orig) / (dV_ss / N_ss)
-
-
-# ############################################################
-
     # Combine cutoff padding and supersampling padding
     combined_pads = [
         (sp[0] + cp[0], sp[1] + cp[1]) for cp, sp in zip(cut_pads, ss_pads)

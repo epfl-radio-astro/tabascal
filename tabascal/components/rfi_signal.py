@@ -527,9 +527,6 @@ class FourierGPRFI(BaseGPRFI):
             super().setup(tab_config)
             self.vis_obs = tab_config.vis_obs
 
-            self.p0 = tab_config.args["rfi"]["pow_spec"]["p0"]
-            self.gammas = tab_config.args["rfi"]["pow_spec"]["gammas"]
-            self.pk_cutoff = tab_config.args["rfi"]["pow_spec"]["cutoff"]
             self.time_pad_factor = tab_config.args["rfi"]["time_pad_factor"]
             self.freq_pad_factor = tab_config.args["rfi"]["freq_pad_factor"]
 
@@ -600,6 +597,7 @@ class FourierGPRFI(BaseGPRFI):
         k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
         p0 = self.gp_var #* self.n_time * self.n_freq
         gammas = [1e2, 1e2]
+        pk_cutoff = 1e-6
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,
@@ -609,7 +607,7 @@ class FourierGPRFI(BaseGPRFI):
             p0,
             k0s,
             gammas,
-            self.pk_cutoff,
+            pk_cutoff,
         )
 
         self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
@@ -626,7 +624,7 @@ class FourierGPRFI(BaseGPRFI):
             p0,
             k0s,
             gammas,
-            self.pk_cutoff,
+            pk_cutoff,
         )
 
         self.signal_to_latent = lambda _rfi_A: signal_to_latent(
@@ -640,9 +638,11 @@ class FourierGPRFI(BaseGPRFI):
         print(f"(n_freq, n_time): ({self.n_freq}, {self.n_time})")
         print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
 
+        scale_norm = self.gp_var / jnp.sum(self.pk)
+        self.pk = scale_norm * self.pk
+
         self.n_k_freq_rfi, self.n_k_time_rfi = self.pk.shape
         self.sigma_rfi_k = jnp.sqrt(self.pk)[None, None, :, :]
-        # self.sigma_rfi_k = jnp.sqrt(self.pk / self.pk.size)[None, None, :, :]
 
     def _compute_data_est(self, vis_obs):
 
@@ -770,13 +770,8 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             super().setup(tab_config)
             self.vis_obs = tab_config.vis_obs
 
-            self.p0 = tab_config.args["rfi"]["pow_spec"]["p0"]
-            self.gammas = tab_config.args["rfi"]["pow_spec"]["gammas"]
-            self.pk_cutoff = tab_config.args["rfi"]["pow_spec"]["cutoff"]
             self.time_pad_factor = tab_config.args["rfi"]["time_pad_factor"]
             self.freq_pad_factor = tab_config.args["rfi"]["freq_pad_factor"]
-
-            
 
             # Do expensive setup operations once
             self._compute_gp_params()
@@ -841,8 +836,10 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
-        k0s = [1.0 / self.corr_freq, 1.0 / self.corr_time]
-        p0 = self.gp_var * self.n_time * self.n_freq
+        k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
+        p0 = self.gp_var
+        gammas = [1e2, 1e2]
+        pk_cutoff = 1e-6
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,
@@ -851,8 +848,8 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             [self.n_int_freq, self.n_int_time],
             p0,
             k0s,
-            self.gammas,
-            self.pk_cutoff,
+            gammas,
+            pk_cutoff,
         )
 
         self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
@@ -868,8 +865,8 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             pad_factors,
             p0,
             k0s,
-            self.gammas,
-            self.pk_cutoff,
+            gammas,
+            pk_cutoff,
         )
 
         self.signal_to_latent = lambda rfi_A: signal_to_latent(
@@ -883,8 +880,11 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         print(f"(n_freq, n_time): ({self.n_freq}, {self.n_time})")
         print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
 
+        scale_norm = self.gp_var / jnp.sum(self.pk)
+        self.pk = scale_norm * self.pk
+
         self.n_k_freq_rfi, self.n_k_time_rfi = self.pk.shape
-        self.sigma_rfi_k = jnp.sqrt(self.pk / self.pk.size)[None, None, :, :]
+        self.sigma_rfi_k = jnp.sqrt(self.pk)[None, None, :, :]
 
     def _compute_data_est(self, vis_obs: Array) -> Array:
 
