@@ -85,7 +85,7 @@ class PhaseCalculationRFI(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
 
         def forward(params, state):
             # Pure JAX operations only
@@ -279,7 +279,7 @@ class KeplerOrbit(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         forward_transform = self.forward_transform
 
         def forward(params, state):

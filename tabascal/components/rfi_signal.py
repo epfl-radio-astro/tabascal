@@ -84,7 +84,7 @@ class RealRFI(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         forward_transform = self.forward_transform
 
         def forward(params: dict, state: dict):
@@ -312,7 +312,7 @@ class ComplexRFI(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         forward_transform = self.forward_transform
 
         def forward(params: dict, state: dict):
@@ -585,7 +585,7 @@ class FourierGPRFI(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         forward_transform = self.forward_transform
         pads = self.pads
         ss_idxs = self.ss_idxs

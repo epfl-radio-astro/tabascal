@@ -229,9 +229,8 @@ class Model:
         self.state = {k: v for d in state for k, v in d.items()}
 
         for comp in components:
-            prefix = f"_c/{comp.__class__.__name__}"
             for key, value in comp.build_constants().items():
-                self.state[f"{prefix}/{key}"] = value
+                self.state[f"{comp.prefix}/{key}"] = value
 
         self.state["vis_ast"] = jnp.zeros_like(self.state["vis_obs"])
         self.state["vis_rfi"] = jnp.zeros_like(self.state["vis_obs"])

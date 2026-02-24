@@ -50,7 +50,7 @@ class RiemannVisCalculation(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         n_int_time = self.n_int_time
         n_time = self.n_time
         n_bl = self.n_bl
@@ -127,7 +127,7 @@ class RiemannVisTimeFreqCalculation(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_time = self.n_time
@@ -288,7 +288,7 @@ class RiemannVisTimeFreqVariable(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_rfi = self.n_rfi

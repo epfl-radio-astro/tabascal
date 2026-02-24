@@ -29,6 +29,10 @@ class Component(ABC):
 
         return forward
 
+    @property
+    def prefix(self) -> str:
+        return f"_c/{self.__class__.__name__}"
+
     def build_constants(self) -> Dict[str, Any]:
         """Return arrays to pass via state instead of closure.
 

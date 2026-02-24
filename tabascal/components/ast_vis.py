@@ -87,7 +87,7 @@ class FourierTimeAst(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
@@ -287,7 +287,7 @@ class FourierTimeConstFreqAst(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
@@ -492,7 +492,7 @@ class FourierTimeFreqAst(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
@@ -740,7 +740,7 @@ class FourierTimeFreqGPAst(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        prefix = f"_c/{self.__class__.__name__}"
+        prefix = self.prefix
         pads = self.pads
         ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform

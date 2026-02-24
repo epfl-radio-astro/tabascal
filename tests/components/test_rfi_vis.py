@@ -52,7 +52,7 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     def compute_vis_rfi(impl):
         state = create_state(config, False, 42)
         impl.setup(config)
-        prefix = f"_c/{impl.__class__.__name__}"
+        prefix = impl.prefix
         for key, value in impl.build_constants().items():
             state[f"{prefix}/{key}"] = value
         return impl.build_forward()({}, state)["vis_rfi"]
@@ -73,7 +73,7 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         state = create_state(config, False, r_key = 42)
         tangents_state = create_state(config, False, r_key = 50)
         impl.setup(config)
-        prefix = f"_c/{impl.__class__.__name__}"
+        prefix = impl.prefix
         for key, value in impl.build_constants().items():
             state[f"{prefix}/{key}"] = value
             if jnp.issubdtype(value.dtype, jnp.integer) or jnp.issubdtype(value.dtype, jnp.bool_):
@@ -100,7 +100,7 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         input_state = create_state(config, False, r_key = 42)
         vjp_state = create_state(config, True, r_key = 50)
         impl.setup(config)
-        prefix = f"_c/{impl.__class__.__name__}"
+        prefix = impl.prefix
         for key, value in impl.build_constants().items():
             input_state[f"{prefix}/{key}"] = value
             vjp_state[f"{prefix}/{key}"] = jnp.zeros_like(value)
