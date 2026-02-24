@@ -76,7 +76,10 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         prefix = f"_c/{impl.__class__.__name__}"
         for key, value in impl.build_constants().items():
             state[f"{prefix}/{key}"] = value
-            tangents_state[f"{prefix}/{key}"] = jnp.zeros_like(value)
+            if jnp.issubdtype(value.dtype, jnp.integer) or jnp.issubdtype(value.dtype, jnp.bool_):
+                tangents_state[f"{prefix}/{key}"] = jnp.zeros(value.shape, dtype=jax.dtypes.float0)
+            else:
+                tangents_state[f"{prefix}/{key}"] = jnp.zeros_like(value)
         _, tangents = jax.jvp(impl.build_forward(), ({}, state), ({}, tangents_state))
 
         return tangents["vis_rfi"]
