@@ -17,12 +17,29 @@ import numpy as np
 from datetime import datetime
 
 from typing import Callable, Optional
-from functools import reduce
+from functools import reduce, partial
 
 from daskms import xds_from_ms, xds_from_table
 
 from numpyro.infer import log_likelihood
 from numpyro.infer.util import log_density
+
+
+@partial(jax.jit, static_argnums=(0, 1))
+def _map_step(model, optimizer, params, opt_state, state, obs_data):
+    """Single MAP optimization step.
+
+    state and obs_data are explicit traced arguments, not closure captures,
+    so large arrays in state are never embedded as XLA constants.
+    """
+    def neg_log_post(params):
+        lp, _ = log_density(model, (obs_data,), {"state": state}, params)
+        return -lp / obs_data.size
+
+    loss, grads = jax.value_and_grad(neg_log_post)(params)
+    updates, new_opt_state = optimizer.update(grads, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+    return new_params, new_opt_state, loss
 
 
 def nlog_like(prob_model, params, obs_data, state=None):
@@ -256,6 +273,49 @@ def run_svi(
 
 
 @measure_runtime
+def run_custom_svi(
+    prob_model: Callable,
+    obs_data: jax.Array,
+    max_iter: int = 1_000,
+    init_params: dict = None,
+    epsilon: float = 1e-3,
+    dual_run: bool = True,
+    state: dict = None,
+) -> SVIRunResult:
+    """MAP optimization that avoids capturing large state arrays as JAX constants.
+
+    Unlike NumPyro's SVI.run(), which binds model kwargs (including state) into a
+    lax.scan closure causing all arrays in state to be lowered as XLA constants,
+    this passes state as an explicit traced argument to _map_step so JAX sees it
+    as a dynamic input buffer.
+
+    Optimizes log p(obs | params) + log p(params) directly, equivalent to
+    AutoDelta SVI for MAP estimation.
+    """
+    def _run_phase(params, epsilon, max_iter):
+        optimizer = optax.adabelief(epsilon)
+        opt_state = optimizer.init(params)
+        losses = []
+        for _ in range(max_iter):
+            params, opt_state, loss = _map_step(
+                prob_model, optimizer, params, opt_state, state, obs_data
+            )
+            losses.append(float(loss))
+        return params, losses
+
+    params = init_params
+    params, losses = _run_phase(params, epsilon, max_iter)
+
+    if dual_run:
+        params, losses2 = _run_phase(params, epsilon / 10, max_iter)
+        losses = losses + losses2
+
+    # Add _auto_loc suffix to match AutoDelta convention expected by downstream code
+    params_out = {k + "_auto_loc": v for k, v in params.items()}
+    return SVIRunResult(params_out, None, jnp.array(losses))
+
+
+@measure_runtime
 def svi_predict(
     prob_model: Callable,
     guide: autoguide.AutoGuide,
@@ -304,35 +364,26 @@ def run_opt(
     state=None,
 ):
 
-    guides = {
-        "map": "AutoDelta",
-    }
     start = datetime.now()
     print()
     print("Running Optimization ...")
-    guide_family = guides[tab_config.args["opt"]["guide"]]
-    vi_results, vi_guide = run_svi(
+    vi_results = run_custom_svi(
         prob_model=prob_model,
         obs_data=tab_config.vis_obs,
         max_iter=tab_config.args["opt"]["max_iter"],
-        guide_family=guide_family,
-        init_params={
-            **{k + "_auto_loc": v for k, v in init_params.items()},
-        },
+        init_params=init_params,
         epsilon=tab_config.args["opt"]["epsilon"],
-        key=subkeys[0],
         dual_run=tab_config.args["opt"]["dual_run"],
         state=state,
     )
     vi_params = vi_results.params
-    vi_pred = svi_predict(
-        prob_model=prob_model,
-        guide=vi_guide,
-        vi_params=vi_params,
-        num_samples=1,
-        key=subkeys[1],
-        state=state,
-    )
+    # Strip _auto_loc suffix to get raw param names for Predictive
+    raw_params = {k.removesuffix("_auto_loc"): v for k, v in vi_params.items()}
+    vi_pred = Predictive(
+        model=prob_model,
+        posterior_samples=tree_map(lambda x: x[None], raw_params),
+        batch_ndims=1,
+    )(subkeys[1], obs_data=tab_config.vis_obs, state=state)
     
     write_results_xds(vi_pred, tab_config, map_path)
     # write_params_xds(vi_params, gp_params, ms_params, params_path, overwrite=True)
