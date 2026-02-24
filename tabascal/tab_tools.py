@@ -25,22 +25,22 @@ from numpyro.infer import log_likelihood
 from numpyro.infer.util import log_density
 
 
-def nlog_like(prob_model, params, obs_data):
+def nlog_like(prob_model, params, obs_data, state=None):
 
-    nlog_l = -log_likelihood(prob_model, params, obs_data=obs_data, batch_ndims=0)[
-        "obs"
-    ].mean()
+    nlog_l = -log_likelihood(
+        prob_model, params, obs_data=obs_data, state=state, batch_ndims=0
+    )["obs"].mean()
 
     return nlog_l
 
 
-def nlog_post(prob_model, params, obs_data):
+def nlog_post(prob_model, params, obs_data, state=None):
 
     nlog_p = (
         -log_density(
             prob_model,
             model_args=(obs_data,),
-            model_kwargs={},
+            model_kwargs={"state": state},
             params=params,
         )[0]
         / obs_data.size
@@ -212,6 +212,7 @@ def run_svi(
     epsilon=1e-3,
     key=random.PRNGKey(1),
     dual_run=True,
+    state=None,
 ):
     if guide_family == "AutoDelta":
         guide = autoguide.AutoDelta(prob_model)
@@ -231,6 +232,7 @@ def run_svi(
         key,
         max_iter,
         obs_data=obs_data,
+        state=state,
         init_params=init_params,
     )
     losses = svi_results.losses / obs_data.size
@@ -244,6 +246,7 @@ def run_svi(
             key,
             max_iter,
             obs_data=obs_data,
+            state=state,
             init_params=svi_results.params,
         )
         losses = jnp.concatenate([losses, svi_results.losses / obs_data.size])
@@ -259,18 +262,19 @@ def svi_predict(
     vi_params: dict,
     num_samples=100,
     key=random.PRNGKey(2),
+    state=None,
 ):
     predictive = Predictive(
         model=prob_model, guide=guide, params=vi_params, num_samples=num_samples
     )
-    predictions = predictive(key)
+    predictions = predictive(key, state=state)
 
     return predictions
 
 
 @measure_runtime
 def init_predict(
-    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict
+    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict, state=None
 ):
 
     pred = Predictive(
@@ -278,7 +282,7 @@ def init_predict(
         posterior_samples=tree_map(lambda x: x[None, :], init_params),
         batch_ndims=1,
     )
-    init_pred = pred(subkey)
+    init_pred = pred(subkey, state=state)
     rchi2 = reduced_chi2(
         init_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise, tab_config.flags
     )
@@ -297,6 +301,7 @@ def run_opt(
     ms_path,
     map_path,
     params_path,
+    state=None,
 ):
 
     guides = {
@@ -317,6 +322,7 @@ def run_opt(
         epsilon=tab_config.args["opt"]["epsilon"],
         key=subkeys[0],
         dual_run=tab_config.args["opt"]["dual_run"],
+        state=state,
     )
     vi_params = vi_results.params
     vi_pred = svi_predict(
@@ -325,6 +331,7 @@ def run_opt(
         vi_params=vi_params,
         num_samples=1,
         key=subkeys[1],
+        state=state,
     )
     
     write_results_xds(vi_pred, tab_config, map_path)

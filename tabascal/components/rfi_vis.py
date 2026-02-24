@@ -45,11 +45,12 @@ class RiemannVisCalculation(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {"a1": self.a1, "a2": self.a2}
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        a1 = self.a1
-        a2 = self.a2
+        prefix = f"_c/{self.__class__.__name__}"
         n_int_time = self.n_int_time
         n_time = self.n_time
         n_bl = self.n_bl
@@ -57,15 +58,15 @@ class RiemannVisCalculation(Component):
 
         def forward(params, state):
             # Pure JAX operations only
+            a1 = state[f"{prefix}/a1"]
+            a2 = state[f"{prefix}/a2"]
+
             vis_rfi_fine = calculate_rfi_vis_fine(
                 state["rfi_A"], state["rfi_phase"], a1, a2
             )
 
             new_shape = (n_bl, n_freq, n_time, n_int_time)
-            # new_shape = (n_bl, n_time, n_int)
 
-            # vis_rfi_fine is shape (n_bl, n_time_fine)
-            # vis_rfi is shape (n_bl, n_time)
             vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=-1)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
@@ -121,13 +122,12 @@ class RiemannVisTimeFreqCalculation(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {"a1": self.a1, "a2": self.a2}
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        a1 = self.a1
-        a2 = self.a2
-        # a1 = self.a2
-        # a2 = self.a1
+        prefix = f"_c/{self.__class__.__name__}"
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_time = self.n_time
@@ -136,6 +136,9 @@ class RiemannVisTimeFreqCalculation(Component):
 
         def forward(params, state):
             # Pure JAX operations only
+            a1 = state[f"{prefix}/a1"]
+            a2 = state[f"{prefix}/a2"]
+
             vis_rfi_fine = calculate_rfi_vis_fine(
                 state["rfi_A"], state["rfi_phase"], a1, a2
             )
@@ -144,7 +147,6 @@ class RiemannVisTimeFreqCalculation(Component):
             vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=(-3, -1))
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
-            # state = {**state, "vis_rfi": state["vis_rfi"] + jnp.conjugate(vis_rfi)}
 
             return state
 
@@ -278,27 +280,29 @@ class RiemannVisTimeFreqVariable(Component):
 
         return set_params
 
+    def build_constants(self):
+        constants = {"a1": self.a1, "a2": self.a2}
+        for i, idx in enumerate(self.time_sample_idxs):
+            constants[f"time_sample_idxs_{i}"] = idx
+        return constants
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        a1 = self.a1
-        a2 = self.a2
-        # a1 = self.a2
-        # a2 = self.a1
+        prefix = f"_c/{self.__class__.__name__}"
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_rfi = self.n_rfi
         n_time = self.n_time
         n_bl = self.n_bl
         n_freq = self.n_freq
-
-        time_sample_idxs = self.time_sample_idxs
+        n_groups = len(self.time_sample_idxs)
         time_strides = self.time_strides
 
-        def calculate_rfi_vis_single(rfi_A, rfi_phase):
+        def calculate_rfi_vis_single(rfi_A, rfi_phase, a1, a2, state_const):
 
             vis_rfi = jnp.empty((n_bl, n_freq, n_time), dtype=complex)
-            for idx, time_stride in zip(time_sample_idxs, time_strides):
+            for i, time_stride in zip(range(n_groups), time_strides):
+                idx = state_const[f"{prefix}/time_sample_idxs_{i}"]
                 vis_rfi = vis_rfi.at[idx].set(
                     calculate_rfi_vis_variable(
                         rfi_A, rfi_phase, a1[idx], a2[idx], 1, time_stride
@@ -309,6 +313,8 @@ class RiemannVisTimeFreqVariable(Component):
 
         def forward(params, state):
             # Pure JAX operations only
+            a1 = state[f"{prefix}/a1"]
+            a2 = state[f"{prefix}/a2"]
 
             new_shape = (
                 self.n_rfi,
@@ -323,13 +329,14 @@ class RiemannVisTimeFreqVariable(Component):
             rfi_phase = jnp.reshape(state["rfi_phase"], new_shape)
 
             vis_rfi = jnp.sum(
-                vmap(calculate_rfi_vis_single)(rfi_A, rfi_phase),
+                vmap(
+                    lambda A, P: calculate_rfi_vis_single(A, P, a1, a2, state)
+                )(rfi_A, rfi_phase),
                 axis=0,
             )
 
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
-            # state = {**state, "vis_rfi": state["vis_rfi"] + jnp.conjugate(vis_rfi)}
 
             return state
 

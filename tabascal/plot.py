@@ -284,6 +284,7 @@ def plot_prior(
     model_name: str,
     subkey: jax.Array,
     plot_dir: str,
+    state=None,
 ):
 
     start = datetime.now()
@@ -291,7 +292,7 @@ def plot_prior(
     print()
     print(f"Plotting {n_prior:.0f} Prior Parameter Samples")
     pred = Predictive(prob_model, num_samples=n_prior)
-    prior_pred = pred(subkey)
+    prior_pred = pred(subkey, state=state)
     print("Prior Samples Drawn")
     plot_predictions(
         times=tab_config.times,

@@ -75,16 +75,23 @@ class RealRFI(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "L_rfi_A": self.L_rfi_A,
+            "mu_rfi_A": self.mu_rfi_A,
+            "resample_rfi": self.resample_rfi,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        L_rfi_A = self.L_rfi_A
-        mu_rfi_A = self.mu_rfi_A
-        resample_rfi = self.resample_rfi
+        prefix = f"_c/{self.__class__.__name__}"
         forward_transform = self.forward_transform
 
         def forward(params: dict, state: dict):
             # Pure JAX operations only
+            L_rfi_A = state[f"{prefix}/L_rfi_A"]
+            mu_rfi_A = state[f"{prefix}/mu_rfi_A"]
+            resample_rfi = state[f"{prefix}/resample_rfi"]
 
             rfi_A_induce_base = params["rfi_r_induce_base"]
 
@@ -296,16 +303,23 @@ class ComplexRFI(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "L_rfi_A": self.L_rfi_A,
+            "mu_rfi_A": self.mu_rfi_A,
+            "resample_rfi": self.resample_rfi,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        L_rfi_A = self.L_rfi_A
-        mu_rfi_A = self.mu_rfi_A
-        resample_rfi = self.resample_rfi
+        prefix = f"_c/{self.__class__.__name__}"
         forward_transform = self.forward_transform
 
         def forward(params: dict, state: dict):
             # Pure JAX operations only
+            L_rfi_A = state[f"{prefix}/L_rfi_A"]
+            mu_rfi_A = state[f"{prefix}/mu_rfi_A"]
+            resample_rfi = state[f"{prefix}/resample_rfi"]
 
             rfi_A_induce_base = (
                 params["rfi_r_induce_base"] + 1.0j * params["rfi_i_induce_base"]
@@ -563,17 +577,23 @@ class FourierGPRFI(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "sigma_rfi_k": self.sigma_rfi_k,
+            "mu_rfi_k": self.mu_rfi_k,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        sigma_rfi_k = self.sigma_rfi_k
-        mu_rfi_k = self.mu_rfi_k
+        prefix = f"_c/{self.__class__.__name__}"
         forward_transform = self.forward_transform
         pads = self.pads
         ss_idxs = self.ss_idxs
 
         def forward(params: dict, state: dict):
             # Pure JAX operations only
+            sigma_rfi_k = state[f"{prefix}/sigma_rfi_k"]
+            mu_rfi_k = state[f"{prefix}/mu_rfi_k"]
 
             rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
 

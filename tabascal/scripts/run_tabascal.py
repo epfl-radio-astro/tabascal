@@ -140,7 +140,7 @@ def tabascal_subtraction(
     print(f"{end_start}")
 
     key, subkey = random.split(key)
-    init_pred = init_predict(tab_config, prob_model, subkey, model.init_params)
+    init_pred = init_predict(tab_config, prob_model, subkey, model.init_params, state=model.state)
     write_results_xds(init_pred, tab_config, init_pred_path)
     # write_params_xds(
     #     {key + "_auto_loc": value for key, value in init_params_base.items()},
@@ -149,8 +149,8 @@ def tabascal_subtraction(
     #     init_params_path,
     # )
 
-    nlog_l = nlog_like(prob_model, model.init_params, tab_config.vis_obs)
-    nlog_p = nlog_post(prob_model, model.init_params, tab_config.vis_obs)
+    nlog_l = nlog_like(prob_model, model.init_params, tab_config.vis_obs, state=model.state)
+    nlog_p = nlog_post(prob_model, model.init_params, tab_config.vis_obs, state=model.state)
 
     print(f"log_l : {nlog_l:.3e}")
     print(f"log_p : {nlog_p:.3e}")
@@ -211,6 +211,7 @@ def tabascal_subtraction(
             model_name,
             subkey,
             plot_dir,
+            state=model.state,
         )
 
     # ### Run MCMC Inference
@@ -243,6 +244,7 @@ def tabascal_subtraction(
             ms_path,
             map_path,
             params_path,
+            state=model.state,
         )
 
         if config["plots"]["opt"]:
@@ -257,8 +259,8 @@ def tabascal_subtraction(
             key.removesuffix("_auto_loc"): value for key, value in vi_params.items()
         }
 
-        nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs)
-        nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs)
+        nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state)
+        nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state)
 
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")
