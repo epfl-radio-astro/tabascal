@@ -30,6 +30,7 @@ dependencies = [
     "PyYAML",
     "skyfield",
     "tabsim",
+    "tqdm",
     "xarray",
 ]
 

@@ -1,3 +1,5 @@
+from tqdm import trange
+
 from numpyro.optim import optax_to_numpyro
 from numpyro.infer import Predictive, SVI, autoguide, Trace_ELBO
 
@@ -299,11 +301,25 @@ def run_custom_svi(
         optimizer = optax.adabelief(epsilon)
         opt_state = optimizer.init(params)
         losses = []
-        for _ in range(max_iter):
+        window = max(max_iter // 10, 1)
+        init_loss = None
+        pbar = trange(max_iter)
+        for i in pbar:
             params, opt_state, loss = _map_step(
                 prob_model, optimizer, params, opt_state, state, constants, obs_data
             )
-            losses.append(float(loss))
+            loss_val = float(loss)
+            losses.append(loss_val)
+            if init_loss is None:
+                init_loss = loss_val
+            start_idx = max(0, i + 1 - window)
+            avg_loss = sum(losses[start_idx:]) / len(losses[start_idx:])
+            n1 = start_idx + 1
+            n2 = i + 1
+            pbar.set_postfix_str(
+                f"init loss: {init_loss:.4f}, avg. loss [{n1}-{n2}]: {avg_loss:.4f}",
+                refresh=False,
+            )
         return params, losses
 
     params = init_params
