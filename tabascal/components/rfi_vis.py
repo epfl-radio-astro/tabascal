@@ -135,7 +135,6 @@ class RiemannVisTimeFreqCalculation(Component):
         n_freq = self.n_freq
 
         def forward(params, state):
-            # Pure JAX operations only
             vis_rfi_fine = calculate_rfi_vis_fine(
                 state["rfi_A"], state["rfi_phase"], a1, a2
             )
@@ -270,6 +269,18 @@ class RiemannVisTimeFreqVariable(Component):
     #     """Ensure all setup operations completed successfully"""
 
     #     assert hasattr(self, "")
+
+    def _print_saving(self):
+
+        saving = (
+            jnp.sum(
+                [i.size / s for i, s in zip(self.time_sample_idxs, self.time_strides)]
+            )
+            / self.n_bl
+        )
+
+        print(f"New intermediate is {100*saving:.2f} % of original size")
+
 
     def build_set_params(self):
 
