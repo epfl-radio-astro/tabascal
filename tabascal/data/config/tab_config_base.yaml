@@ -44,7 +44,7 @@ fisher:
 # Astronomical prior and initialization parameters
 ####################################################
 ast:
-  init: est             # Optional - The initialization method for the astronomical visibility parameters. Options are 'est', 'prior', 'truth', 'truth_mean'
+  init: sample          # Optional - The initialization method for the astronomical visibility parameters. Options are 'est', 'prior', 'truth', 'truth_mean'
   mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'prior', 'truth', 'truth_mean'
   pow_spec:
     P0: null            # Optional - Power spectrum value at k=0 for the astronomical visibility parameters prior standard deviation 
@@ -54,12 +54,18 @@ ast:
 # RFI prior and initialization parameters
 ##########################################
 rfi:
-  init: est             # Optional - The initialization method for the RFI signal parameters. Options are 'est', 'prior', 'truth'
+  est: null
+  init: sample          # Optional - The initialization method for the RFI signal parameters. Options are 'est', 'prior', 'truth'
   mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'truth'
-  corr_time: 24         # Optional - Correlation time of the RFI signal in seconds
   var: null             # Optional - Variance of the RFI signal in Jy. When null an estimate is made based on the data
+  corr_time: 24         # Optional - Correlation time of the RFI signal in seconds
+  corr_freq: 1e6        # Optional - Correlation bandwidth of the RFI signal in Hz
+  time_pad_factor: 2
+  freq_pad_factor: 2
   n_int_factor: 1       # Optional - Factor to increase the number of integration samples over the predicted value
-  n_int_samples: null   # Optional - Specify the number of integration samples to use
+  n_int_time: null      # Optional - Specify the number of integration samples to use along the time axis
+  n_int_freq: 1         # Optional - Specify the number of integration samples to use along the frequency axis
+  r_seed: 123           # Optional - Random seed to use for sampling
 ############################
 # Satellite path parameters
 ############################
