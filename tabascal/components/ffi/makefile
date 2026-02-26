@@ -8,22 +8,31 @@ endif
 
 CXX ?= c++
 
+# macOS-specific configuration
+ifeq ($(shell uname -s),Darwin)
+    SDKROOT := $(shell xcrun --show-sdk-path)
+    CXXFLAGS ?= -O2 -DNDEBUG -Wno-return-type -Wno-attributes -isysroot $(SDKROOT)
+    ifeq ($(shell uname -m),arm64)
+        CXXFLAGS += -mcpu=apple-m1
+    else
+        CXXFLAGS += -march=native
+    endif
+else
+    CXXFLAGS ?= -O2 -DNDEBUG -march=native -Wno-return-type -Wno-attributes
+endif
+
 CUDAFLAGS ?= -O2 -DNDEBUG  \
-			  -gencode arch=compute_70,code=compute_70 \
-			  -gencode arch=compute_80,code=compute_80 \
-			  -gencode arch=compute_90,code=compute_90 \
-			  -gencode arch=compute_90a,code=sm_90a
-
-CXXFLAGS ?= -O2 -DNDEBUG -march=native -Wno-return-type -Wno-attributes
-
+                          -gencode arch=compute_70,code=compute_70 \
+                          -gencode arch=compute_80,code=compute_80 \
+                          -gencode arch=compute_90,code=compute_90 \
+                          -gencode arch=compute_90a,code=sm_90a
 
 CXXFLAGS += -std=c++17 -fPIC -I $(JAXLIB_HOME)/include
 
 CUDAFLAGS += -std=c++17 -Xcompiler -fPIC -I $(JAXLIB_HOME)/include \
-			 -Xcompiler -Wno-attributes \
-			 -Xcompiler -Wno-return-type \
-			 -Xcudafe "--diag_suppress=940 --diag_suppress=2473"
-
+                         -Xcompiler -Wno-attributes \
+                         -Xcompiler -Wno-return-type \
+                         -Xcudafe "--diag_suppress=940 --diag_suppress=2473"
 
 CXX_SOURCES = $(wildcard *.cpp)
 CUDA_SOURCES = $(wildcard *.cu)
