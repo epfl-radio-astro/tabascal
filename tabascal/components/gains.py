@@ -1,36 +1,167 @@
-from tabascal.components import Component
+from tabascal.components import Component, assert_attr_shape
 from tabascal.interferometry import apply_gains
 from tabascal.dist import standard_normal
+from tabascal.config import TabConfig
+from tabascal.gp import cholesky, resampling_kernel, get_times
+from tabascal.transform import affine_transform_full
 
 import jax.numpy as jnp
+from jax import vmap, Array
 
+from typing import Dict
 
-class UnitaryGains(Component):
+def gains_config_validation(gains_config: Dict, freqs: Array, times: Array) -> Dict:
 
-    required_inputs = {"vis_rfi": ("n_bl", "n_time"), "vis_ast": ("n_bl", "n_time")}
-    output_shapes = {"gains": ("n_ant", "n_time"), "vis_obs": ("n_bl", "n_time")}
+    extent = lambda x: float(jnp.max(x) - jnp.min(x))
 
-    parameters = {}
+    try:
+        r_seed = gains_config["r_seed"]
+        gp_amp_mean = gains_config["amp_mean"]
+        gp_amp_std = gains_config["amp_std"]
+        gp_amp_freq_l = gains_config["amp_corr_freq"]
+        gp_amp_time_l = gains_config["amp_corr_time"]
+        gp_phase_mean = gains_config["phase_mean"]
+        gp_phase_std = gains_config["phase_std"]
+        gp_phase_freq_l = gains_config["phase_corr_freq"]
+        gp_phase_time_l = gains_config["phase_corr_time"]
+    except Exception as e:
+        raise ValueError(f"Gains configuration validation failed.")
 
-    def setup(self, config):
-        """All validation and error-prone operations here"""
-        try:
-
-            self.n_ant = config.n_ant
-            self.n_bl = config.n_bl
-            self.n_freq = config.n_freq
-            self.n_time = config.n_time
-
-            # Validate dimensions
-            self._set_outputs()
-            self._validate_dimensions()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__name__} setup failed: {e}")
-
-    def _validate_dimensions(self):
-        """Ensure all setup operations completed successfully"""
+    if not r_seed: # Set Default
+        gains_config["r_seed"] = 2
+    elif isinstance(r_seed, int):
         pass
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tr_seed: {r_seed}) is not of type int.")
+
+    if not gp_amp_mean: # Set Default
+        est_gp_amp_mean = 1.0
+        gains_config["amp_mean"] = est_gp_amp_mean
+        print(f"Using Gains amplitude mean : {est_gp_amp_mean:.1e}")
+    elif isinstance(gp_amp_mean, (float, int)):
+        gains_config["amp_mean"] = float(gp_amp_mean)
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tamp_mean: {gp_amp_mean}) is not of type float or int.")
+
+    if not gp_amp_std: # Set Default
+        est_gp_amp_std = 0.1 * gains_config["amp_mean"] # 10 %
+        gains_config["amp_std"] = est_gp_amp_std
+        print(f"Using Gains amplitude std : {est_gp_amp_std*100:.1e} %")
+    elif isinstance(gp_amp_std, (float, int)):
+        gains_config["amp_std"] = float(gp_amp_std) / 100 * gains_config["amp_mean"]
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tamp_std: {gp_amp_std}) is not of type float or int.")
+    
+    if not gp_amp_freq_l: # Set Default
+        est_gp_amp_freq_l = extent(freqs)
+        gains_config["amp_corr_freq"] = est_gp_amp_freq_l
+        print(f"Using Gains amplitude corr_freq : {est_gp_amp_freq_l:.3e} Hz")
+    elif isinstance(gp_amp_freq_l, (float, int)):
+        gains_config["amp_corr_freq"] = float(gp_amp_freq_l)
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tamp_corr_freq: {gp_amp_freq_l}) is not of type float or int.")
+    
+    if not gp_amp_time_l: # Set Default
+        est_gp_amp_time_l = extent(times)
+        gains_config["amp_corr_time"] = est_gp_amp_time_l
+        print(f"Using Gains amplitude corr_time : {est_gp_amp_time_l:.3e} s")
+    elif isinstance(gp_amp_time_l, (float, int)):
+        gains_config["amp_corr_time"] = float(gp_amp_time_l)
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tamp_corr_time: {gp_amp_time_l}) is not of type float or int.")    
+    
+    if not gp_amp_mean: # Set Default
+        est_gp_phase_mean = 0.0
+        gains_config["phase_mean"] = est_gp_phase_mean
+        print(f"Using Gains phase mean : {jnp.rad2deg(est_gp_phase_mean):.1e} degrees")
+    elif isinstance(gp_phase_mean, (float, int)):
+        gains_config["phase_mean"] = float(gp_phase_mean)
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tphase_mean: {gp_phase_mean}) is not of type float or int.")
+
+    if not gp_phase_std: # Set Default
+        est_gp_phase_std = float(jnp.deg2rad(10)) # degrees
+        gains_config["phase_std"] = est_gp_phase_std
+        print(f"Using Gains phase std : {est_gp_phase_std:.3e} Jy")
+    elif isinstance(gp_phase_std, (float, int)):
+        gains_config["phase_std"] = float(jnp.deg2rad(gp_phase_std))
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tphase_std: {gp_phase_std}) is not of type float or int.")
+    
+    if not gp_phase_freq_l: # Set Default
+        est_gp_phase_freq_l = extent(freqs)
+        gains_config["phase_corr_freq"] = est_gp_phase_freq_l
+        print(f"Using Gains phase corr_freq : {est_gp_phase_freq_l:.3e} Hz")
+    elif isinstance(gp_phase_freq_l, (float, int)):
+        gains_config["phase_corr_freq"] = float(gp_phase_freq_l)
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tphase_corr_freq: {gp_phase_freq_l}) is not of type float or int.")
+    
+    if not gp_phase_time_l: # Set Default
+        est_gp_phase_time_l = extent(times)
+        gains_config["phase_corr_time"] = est_gp_phase_time_l
+        print(f"Using Gains phase corr_time : {est_gp_phase_time_l:.3e} s")
+    elif isinstance(gp_phase_time_l, (float, int)):
+        gains_config["phase_corr_time"] = float(gp_phase_time_l)
+    else:
+        raise ValueError(f"Config parameter (gains:\n\tphase_corr_time: {gp_phase_time_l}) is not of type float or int.")   
+
+    return gains_config
+
+
+class BaseGPGains(Component):
+
+    required_inputs = {
+        "vis_rfi": ("n_bl", "n_freq", "n_time"), 
+        "vis_ast": ("n_bl", "n_freq", "n_time")
+    }
+    output_shapes = {
+        "gains": ("n_ant", "n_freq", "n_time"), 
+        "vis_obs": ("n_bl", "n_freq", "n_time")
+    }
+    parameter_shapes = {}
+
+    def setup(self, tab_config: TabConfig):
+
+        # Validate config and set defaults
+        gains_config = gains_config_validation(
+            tab_config.args["gains"], tab_config.freqs, tab_config.times)
+
+        # Random seed used for random sampling such as initial parameters drawn from the prior
+        self.r_seed = gains_config["r_seed"]
+        # Basic shape parameters
+        self.n_ant = tab_config.n_ant
+        self.n_bl = tab_config.n_bl
+        self.n_freq = tab_config.n_freq
+        self.n_freq_fine = tab_config.n_freq_fine
+        self.n_int_freq = tab_config.n_int_freq
+        self.n_time = tab_config.n_time
+        self.n_time_fine = tab_config.n_time_fine
+        self.n_int_time = tab_config.n_int_time
+
+        self.a1 = tab_config.a1
+        self.a2 = tab_config.a2
+
+        # Domain arrays needed to calculate Gaussian process parameters
+        self.freqs = tab_config.freqs
+        self.chan_width = tab_config.chan_width
+        self.times = tab_config.times
+        self.int_time = tab_config.int_time
+
+        self.gp_amp_std = gains_config["amp_std"]
+        self.amp_corr_freq = gains_config["amp_corr_freq"]
+        self.amp_corr_time = gains_config["amp_corr_time"]
+        self.gp_phase_std = gains_config["phase_std"]
+        self.phase_corr_freq = gains_config["phase_corr_freq"]
+        self.phase_corr_time = gains_config["phase_corr_time"]
+
+    def build_set_params(self):
+
+        def set_params(params: Dict) -> Dict:
+
+            return params
+
+        return set_params
 
     def _set_outputs(self):
 
@@ -39,161 +170,186 @@ class UnitaryGains(Component):
             "vis_obs": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
 
+    def _compute_gp_params(self):
+        pass
+
+    def _compute_prior_params(self):
+        pass
+
+    def _compute_init_params(self):
+        pass
+
+class UnitaryGains(BaseGPGains):
+
+    parameters = {}
+
+    def setup(self, tab_config: TabConfig):
+        """All validation and error-prone operations here"""
+        try:
+            super().setup(tab_config)
+
+            # Validate dimensions
+            self._set_outputs()
+            self._validate_dimensions()
+
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def _validate_dimensions(self):
+        """Ensure all setup operations completed successfully"""
+        pass
+
+    def build_forward(self):
+
+        def forward(params: Dict, state: Dict) -> Dict:
+
+            vis_obs = state["vis_rfi"] + state["vis_ast"]
+            state = {**state, "vis_obs": vis_obs}
+            
+            return state
+
+        return forward
+
+
+class GPGains(BaseGPGains):
+
+    parameters = {
+        "gains_amp_induce_base": ("n_ant", "n_g_times"),
+        "gains_phase_induce_base": ("n_ant-1", "n_g_times"),
+    }
+
+    def setup(self, tab_config: TabConfig):
+        """All validation and error-prone operations here"""
+        try:
+            super().setup(tab_config)
+
+            self._set_outputs()
+            self._compute_gp_params()
+            self._compute_prior_params()
+            self._compute_init_params()
+            # Validate dimensions
+            self._validate_dimensions()
+
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+
     def build_set_params(self):
 
         def set_params(params):
+
+            params["gains_amp_induce_base"] = standard_normal("gains_amp_induce_base", (self.n_ant, self.n_freq, self.n_g_times))
+            params["gains_phase_induce_base"] = standard_normal("gains_phase_induce_base", (self.n_ant-1, self.n_freq, self.n_g_times))
+
             return params
 
         return set_params
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        gains = self.state_outputs["gains"]
 
         def forward(params, state, constants):
-            # Pure JAX operations only
-            vis_obs = state["vis_rfi"] + state["vis_ast"]
+
+            interp = lambda R, x: jnp.einsum("ij,afj->afi", R, x)
+
+            gains_amp_induce_base = params["gains_amp_induce_base"]
+            gains_phase_induce_base = params["gains_phase_induce_base"]
+
+            gains_amp_induce = self.forward_transform(gains_amp_induce_base, self.L_gains_amp, self.mu_gains_amp)
+            gains_phase_induce = self.forward_transform(gains_phase_induce_base, self.L_gains_phase, self.mu_gains_phase)
+
+            gains_amp = interp(self.resample_amp, gains_amp_induce)
+            gains_phase = jnp.concatenate([interp(self.resample_phase, gains_phase_induce), jnp.zeros((1, self.n_freq, self.n_time))], axis=0)
+
+            gains = gains_amp * jnp.exp(1.0j * gains_phase)
+
+            vis_obs = apply_gains(gains, state["vis_rfi"] + state["vis_ast"], self.a1, self.a2)
+
             state = {**state, "vis_obs": vis_obs, "gains": gains}
             return state
 
         return forward
 
+    def _compute_gp_params(self):
 
-# class GPGains(Component):
+        self.g_times = get_times(self.times, min(self.amp_corr_time, self.phase_corr_time))
+        self.n_g_times = len(self.g_times)
 
-#     required_inputs = {"vis_rfi": ("n_bl", "n_time"), "vis_ast": ("n_bl", "n_time")}
-#     outputs = {"vis_obs": ("n_bl", "n_time")}
-
-#     parameters = {
-#         "g_amp_induce_base": ("n_ant", "n_g_times"),
-#         "g_phase_induce_base": ("n_ant-1", "n_g_times"),
-#     }
-
-#     def setup(self, config):
-#         """All validation and error-prone operations here"""
-#         try:
-
-#             # Validate dimensions
-#             self._validate_dimensions()
-
-#         except Exception as e:
-#             raise RuntimeError(f"GPGains setup failed: {e}")
-
-#     def _validate_dimensions(self):
-#         """Ensure all setup operations completed successfully"""
-#         pass
-
-#     def build_set_params(self):
-#         n_ant = self.n_ant
-#         n_g_times = self.n_g_times
-
-#         def set_params(params):
-
-#             params["g_amp_induce_base"] = standard_normal("g_amp_induce_base", (n_ant, n_g_times))
-#             params["g_phase_induce_base"] = standard_normal("g_phase_induce_base", (n_ant-1, n_g_times))
-
-#             return params
-
-#         return set_params
-
-#     def build_forward(self):
-#         """Return pure, JIT-compatible function"""
-#         # Pre-compute everything possible
-#         forward_transform = self.forward_transform
-
-#         def forward(params, state):
-#             # Pure JAX operations only
+        self.resample_amp = resampling_kernel(
+            self.g_times,
+            self.times,
+            self.gp_amp_std**2,
+            self.amp_corr_time,
+            1e-8,
+        )
+        self.resample_phase = resampling_kernel(
+            self.g_times,
+            self.times,
+            self.gp_phase_std**2,
+            self.phase_corr_time,
+            1e-8,
+        )
 
 
-#             vis_obs =
-#             vis_obs = state["vis_rfi"] + state["vis_ast"]
-#             state = {**state, "vis_obs": vis_obs}
-#             return state
+    def _compute_prior_params(self):
 
-#         return forward
+        self.L_gains_amp = cholesky(self.g_times, self.gp_amp_std**2, self.amp_corr_time, 1e-8)
+        self.mu_gains_amp = jnp.ones(
+            (self.n_ant, self.n_freq, self.n_g_times)
+        )
 
-#     def _compute_gp_params(self):
+        self.L_gains_phase = cholesky(self.g_times, self.gp_phase_std**2, self.amp_corr_time, 1e-8)
+        self.mu_gains_phase = jnp.zeros(
+            (self.n_ant-1, self.n_freq, self.n_g_times)
+        )
 
-#         if self.gp_var is None:
-#             self.gp_var = jnp.max(jnp.abs(self.vis_obs))
+    def forward_transform(self, base_params: Array, L: Array, mu: Array) -> Array:
 
-#         if self.gp_l is None:
-#             self.gp_l = 1.0
+        affine_same_scale = lambda _base_params, _mu: affine_transform_full(_base_params, L, _mu)
+        params = vmap(vmap(affine_same_scale))(base_params, mu)
 
-#         self.rfi_times = get_times(self.times, self.gp_l)
-#         self.n_rfi_times = len(self.rfi_times)
+        return params
 
-#         self.resample_rfi = resampling_kernel(
-#             self.rfi_times,
-#             self.times_fine,
-#             self.gp_var,
-#             self.gp_l,
-#             1e-8,
-#         )
+    def inv_transform(self, params: Array, L: Array, mu: Array) -> Array:
 
-#     def _set_outputs(self):
+        inv_affine_same_scale = lambda centred_params: jnp.linalg.solve(L, centred_params)
+        base_params = vmap(vmap(inv_affine_same_scale))(params - mu)
 
-#         self.state_outputs = {
-#             "rfi_A": jnp.zeros(
-#                 (self.n_rfi, self.n_ant, self.n_time_fine), dtype=complex
-#             ),
-#         }
+        return base_params
 
-#     def _compute_prior_params(self):
+    def _compute_init_params(self):
 
-#         self.L_rfi_A = cholesky(self.rfi_times, self.gp_var, self.gp_l, 1e-8)
-#         self.mu_rfi_A = jnp.zeros(
-#             (self.n_rfi, self.n_ant, self.n_rfi_times), dtype=complex
-#         )
+        self.init_gains_amp_induce = self.mu_gains_amp
+        self.init_gains_amp_induce_base = self.inv_transform(
+            self.init_gains_amp_induce, self.L_gains_amp, self.mu_gains_amp
+        )
 
-#     def forward_transform(self, base_params, L, mu):
+        self.init_gains_phase_induce = self.mu_gains_phase
+        self.init_gains_phase_induce_base = self.inv_transform(
+            self.init_gains_phase_induce, self.L_gains_phase, self.mu_gains_phase
+        )
 
-#         # params = vmap(
-#         #     vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1),
-#         #     (2, None, 2),
-#         #     2,
-#         # )(base_params, L, mu)
-#         params = vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1)(
-#             base_params, L, mu
-#         )
+        self.init_params = {
+            "gains_amp_induce": self.init_gains_amp_induce,
+            "gains_phase_induce": self.init_gains_phase_induce,
+        }
+        self.init_params_base = {
+            "gains_amp_induce_base": self.init_gains_amp_induce_base,
+            "gains_phase_induce_base": self.init_gains_phase_induce_base,
+        }
 
-#         return params
+    def _validate_dimensions(self):
+        """Ensure all setup operations completed successfully"""
 
-#     def inv_transform(self, params, L, mu):
+        amp_shape = (self.n_ant, self.n_freq, self.n_g_times)
+        phase_shape = (self.n_ant-1, self.n_freq, self.n_g_times)
 
-#         # base_params = vmap(
-#         #     vmap(vmap(jnp.linalg.solve, (None, 0), 0), (None, 1), 1), (None, 2), 2
-#         # )(L, params - mu)
-#         base_params = vmap(vmap(jnp.linalg.solve, (None, 0), 0), (None, 1), 1)(
-#             L, params - mu
-#         )
+        assert_attr_shape(self, "mu_gains_amp", amp_shape)
+        assert_attr_shape(self, "L_gains_amp", (self.n_g_times, self.n_g_times))
+        assert_attr_shape(self, "init_gains_amp_induce", amp_shape)
+        assert_attr_shape(self, "init_gains_amp_induce_base", amp_shape)
 
-#         return base_params
-
-#     def _compute_init_params(self):
-
-#         self.init_rfi_A_induce = self.mu_rfi_A
-
-#         self.init_rfi_A_induce_base = self.inv_transform(
-#             self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A
-#         )
-
-#         self.init_params = {
-#             "rfi_r_induce": self.init_rfi_A_induce.real,
-#             "rfi_i_induce": self.init_rfi_A_induce.imag,
-#         }
-#         self.init_params_base = {
-#             "rfi_r_induce_base": self.init_rfi_A_induce_base.real,
-#             "rfi_i_induce_base": self.init_rfi_A_induce_base.imag,
-#         }
-
-#     def _validate_dimensions(self):
-#         """Ensure all setup operations completed successfully"""
-
-#         rfi_shape = (self.n_rfi, self.n_ant, self.n_rfi_times)
-
-#         assert_attr_shape(self, "mu_rfi_A", rfi_shape)
-#         assert_attr_shape(self, "L_rfi_A", (self.n_rfi_times, self.n_rfi_times))
-#         assert_attr_shape(self, "init_rfi_A_induce", rfi_shape)
-#         assert_attr_shape(self, "init_rfi_A_induce_base", rfi_shape)
+        assert_attr_shape(self, "mu_gains_phase", phase_shape)
+        assert_attr_shape(self, "L_gains_amp", (self.n_g_times, self.n_g_times))
+        assert_attr_shape(self, "init_gains_phase_induce", phase_shape)
+        assert_attr_shape(self, "init_gains_phase_induce_base", phase_shape)
