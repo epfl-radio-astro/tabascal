@@ -228,9 +228,10 @@ class Model:
         state = [comp.state_outputs for comp in components]
         self.state = {k: v for d in state for k, v in d.items()}
 
+        self.constants = {}
         for comp in components:
             for key, value in comp.build_constants().items():
-                self.state[f"{comp.prefix}/{key}"] = value
+                self.constants[f"{comp.prefix}/{key}"] = value
 
         self.state["vis_ast"] = jnp.zeros_like(self.state["vis_obs"])
         self.state["vis_rfi"] = jnp.zeros_like(self.state["vis_obs"])
@@ -245,10 +246,10 @@ class Model:
     def build_forward(self):
         forwards = [comp.build_forward() for comp in self.components]
 
-        def forward(params, state):
+        def forward(params, state, constants):
 
             for sub_forward in forwards:
-                state = sub_forward(params, state)
+                state = sub_forward(params, state, constants)
 
             return state
 
@@ -273,11 +274,11 @@ class Model:
         forward = self.forward
         likelihood = self.likelihood
 
-        def prob_model(obs_data=None, state=None):
+        def prob_model(obs_data=None, state=None, constants=None):
 
             params = set_params()
 
-            state = forward(params, state)
+            state = forward(params, state, constants)
 
             numpyro.deterministic("rfi_phase", state["rfi_phase"])
             numpyro.deterministic("rfi_A", state["rfi_A"])

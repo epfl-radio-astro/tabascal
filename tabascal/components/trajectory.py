@@ -87,13 +87,13 @@ class PhaseCalculationRFI(Component):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
             rfi_phase = get_rfi_phase(
                 state["rfi_xyz"],
-                state[f"{prefix}/ants_uvw"],
-                state[f"{prefix}/ants_xyz"],
-                state[f"{prefix}/freqs"],
+                constants[f"{prefix}/ants_uvw"],
+                constants[f"{prefix}/ants_xyz"],
+                constants[f"{prefix}/freqs"],
             )
             state = {**state, "rfi_phase": rfi_phase}
 
@@ -164,7 +164,7 @@ class FixedOrbit(Component):
     def build_forward(self):
         """Return pure, JIT-compatible function"""
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # rfi_xyz and rfi_phase already in state via state_outputs
             return state
 
@@ -282,15 +282,15 @@ class KeplerOrbit(Component):
         prefix = self.prefix
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
-            L_orbit = state[f"{prefix}/L_rfi_orbit"]
-            mu_orbit = state[f"{prefix}/mu_rfi_orbit"]
+            L_orbit = constants[f"{prefix}/L_rfi_orbit"]
+            mu_orbit = constants[f"{prefix}/mu_rfi_orbit"]
 
             elements = forward_transform(params["rfi_orbit_base"], L_orbit, mu_orbit)
             rfi_xyz = kepler_orbit_many(
-                state[f"{prefix}/times_jd_fine"],
-                state[f"{prefix}/epoch_jd"],
+                constants[f"{prefix}/times_jd_fine"],
+                constants[f"{prefix}/epoch_jd"],
                 elements,
             )
 

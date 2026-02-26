@@ -91,10 +91,10 @@ class FourierTimeAst(Component):
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
-            sigma_ast_k = state[f"{prefix}/sigma_ast_k"]
-            mu_ast_k = state[f"{prefix}/mu_ast_k"]
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
@@ -291,10 +291,10 @@ class FourierTimeConstFreqAst(Component):
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
-            sigma_ast_k = state[f"{prefix}/sigma_ast_k"]
-            mu_ast_k = state[f"{prefix}/mu_ast_k"]
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
@@ -496,10 +496,10 @@ class FourierTimeFreqAst(Component):
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
-            sigma_ast_k = state[f"{prefix}/sigma_ast_k"]
-            mu_ast_k = state[f"{prefix}/mu_ast_k"]
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
@@ -745,10 +745,10 @@ class FourierTimeFreqGPAst(Component):
         ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
-            sigma_ast_k = state[f"{prefix}/sigma_ast_k"]
-            mu_ast_k = state[f"{prefix}/mu_ast_k"]
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 

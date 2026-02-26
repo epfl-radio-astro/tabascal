@@ -26,14 +26,14 @@ from numpyro.infer.util import log_density
 
 
 @partial(jax.jit, static_argnums=(0, 1))
-def _map_step(model, optimizer, params, opt_state, state, obs_data):
+def _map_step(model, optimizer, params, opt_state, state, constants, obs_data):
     """Single MAP optimization step.
 
-    state and obs_data are explicit traced arguments, not closure captures,
-    so large arrays in state are never embedded as XLA constants.
+    state, constants, and obs_data are explicit traced arguments, not closure captures,
+    so large arrays are never embedded as XLA constants.
     """
     def neg_log_post(params):
-        lp, _ = log_density(model, (obs_data,), {"state": state}, params)
+        lp, _ = log_density(model, (obs_data,), {"state": state, "constants": constants}, params)
         return -lp / obs_data.size
 
     loss, grads = jax.value_and_grad(neg_log_post)(params)
@@ -42,22 +42,22 @@ def _map_step(model, optimizer, params, opt_state, state, obs_data):
     return new_params, new_opt_state, loss
 
 
-def nlog_like(prob_model, params, obs_data, state=None):
+def nlog_like(prob_model, params, obs_data, state=None, constants=None):
 
     nlog_l = -log_likelihood(
-        prob_model, params, obs_data=obs_data, state=state, batch_ndims=0
+        prob_model, params, obs_data=obs_data, state=state, constants=constants, batch_ndims=0
     )["obs"].mean()
 
     return nlog_l
 
 
-def nlog_post(prob_model, params, obs_data, state=None):
+def nlog_post(prob_model, params, obs_data, state=None, constants=None):
 
     nlog_p = (
         -log_density(
             prob_model,
             model_args=(obs_data,),
-            model_kwargs={"state": state},
+            model_kwargs={"state": state, "constants": constants},
             params=params,
         )[0]
         / obs_data.size
@@ -230,6 +230,7 @@ def run_svi(
     key=random.PRNGKey(1),
     dual_run=True,
     state=None,
+    constants=None,
 ):
     if guide_family == "AutoDelta":
         guide = autoguide.AutoDelta(prob_model)
@@ -250,6 +251,7 @@ def run_svi(
         max_iter,
         obs_data=obs_data,
         state=state,
+        constants=constants,
         init_params=init_params,
     )
     losses = svi_results.losses / obs_data.size
@@ -264,6 +266,7 @@ def run_svi(
             max_iter,
             obs_data=obs_data,
             state=state,
+            constants=constants,
             init_params=svi_results.params,
         )
         losses = jnp.concatenate([losses, svi_results.losses / obs_data.size])
@@ -281,13 +284,14 @@ def run_custom_svi(
     epsilon: float = 1e-3,
     dual_run: bool = True,
     state: dict = None,
+    constants: dict = None,
 ) -> SVIRunResult:
     """MAP optimization that avoids capturing large state arrays as JAX constants.
 
-    Unlike NumPyro's SVI.run(), which binds model kwargs (including state) into a
-    lax.scan closure causing all arrays in state to be lowered as XLA constants,
-    this passes state as an explicit traced argument to _map_step so JAX sees it
-    as a dynamic input buffer.
+    Unlike NumPyro's SVI.run(), which binds model kwargs (including state/constants)
+    into a lax.scan closure causing all arrays to be lowered as XLA constants,
+    this passes state and constants as explicit traced arguments to _map_step so JAX
+    sees them as dynamic input buffers.
 
     Optimizes log p(obs | params) + log p(params) directly, equivalent to
     AutoDelta SVI for MAP estimation.
@@ -298,7 +302,7 @@ def run_custom_svi(
         losses = []
         for _ in range(max_iter):
             params, opt_state, loss = _map_step(
-                prob_model, optimizer, params, opt_state, state, obs_data
+                prob_model, optimizer, params, opt_state, state, constants, obs_data
             )
             losses.append(float(loss))
         return params, losses
@@ -323,18 +327,19 @@ def svi_predict(
     num_samples=100,
     key=random.PRNGKey(2),
     state=None,
+    constants=None,
 ):
     predictive = Predictive(
         model=prob_model, guide=guide, params=vi_params, num_samples=num_samples
     )
-    predictions = predictive(key, state=state)
+    predictions = predictive(key, state=state, constants=constants)
 
     return predictions
 
 
 @measure_runtime
 def init_predict(
-    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict, state=None
+    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict, state=None, constants=None
 ):
 
     pred = Predictive(
@@ -342,7 +347,7 @@ def init_predict(
         posterior_samples=tree_map(lambda x: x[None, :], init_params),
         batch_ndims=1,
     )
-    init_pred = pred(subkey, state=state)
+    init_pred = pred(subkey, state=state, constants=constants)
     rchi2 = reduced_chi2(
         init_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise, tab_config.flags
     )
@@ -362,6 +367,7 @@ def run_opt(
     map_path,
     params_path,
     state=None,
+    constants=None,
 ):
 
     start = datetime.now()
@@ -375,6 +381,7 @@ def run_opt(
         epsilon=tab_config.args["opt"]["epsilon"],
         dual_run=tab_config.args["opt"]["dual_run"],
         state=state,
+        constants=constants,
     )
     vi_params = vi_results.params
     # Strip _auto_loc suffix to get raw param names for Predictive
@@ -383,7 +390,7 @@ def run_opt(
         model=prob_model,
         posterior_samples=tree_map(lambda x: x[None], raw_params),
         batch_ndims=1,
-    )(subkeys[1], obs_data=tab_config.vis_obs, state=state)
+    )(subkeys[1], obs_data=tab_config.vis_obs, state=state, constants=constants)
     
     write_results_xds(vi_pred, tab_config, map_path)
     # write_params_xds(vi_params, gp_params, ms_params, params_path, overwrite=True)

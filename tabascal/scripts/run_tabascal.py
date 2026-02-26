@@ -140,7 +140,7 @@ def tabascal_subtraction(
     print(f"{end_start}")
 
     key, subkey = random.split(key)
-    init_pred = init_predict(tab_config, prob_model, subkey, model.init_params, state=model.state)
+    init_pred = init_predict(tab_config, prob_model, subkey, model.init_params, state=model.state, constants=model.constants)
     write_results_xds(init_pred, tab_config, init_pred_path)
     # write_params_xds(
     #     {key + "_auto_loc": value for key, value in init_params_base.items()},
@@ -149,13 +149,13 @@ def tabascal_subtraction(
     #     init_params_path,
     # )
 
-    nlog_l = nlog_like(prob_model, model.init_params, tab_config.vis_obs, state=model.state)
-    nlog_p = nlog_post(prob_model, model.init_params, tab_config.vis_obs, state=model.state)
+    nlog_l = nlog_like(prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+    nlog_p = nlog_post(prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
 
     print(f"log_l : {nlog_l:.3e}")
     print(f"log_p : {nlog_p:.3e}")
 
-    init_state = model.forward(model.init_params, model.state)
+    init_state = model.forward(model.init_params, model.state, model.constants)
 
     # truth = {
     #     "vis_rfi": init_state["vis_rfi"],
@@ -212,6 +212,7 @@ def tabascal_subtraction(
             subkey,
             plot_dir,
             state=model.state,
+            constants=model.constants,
         )
 
     # ### Run MCMC Inference
@@ -245,6 +246,7 @@ def tabascal_subtraction(
             map_path,
             params_path,
             state=model.state,
+            constants=model.constants,
         )
 
         if config["plots"]["opt"]:
@@ -259,8 +261,8 @@ def tabascal_subtraction(
             key.removesuffix("_auto_loc"): value for key, value in vi_params.items()
         }
 
-        nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state)
-        nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state)
+        nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+        nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
 
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")

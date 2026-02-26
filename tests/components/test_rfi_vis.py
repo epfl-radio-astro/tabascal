@@ -53,9 +53,10 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         state = create_state(config, False, 42)
         impl.setup(config)
         prefix = impl.prefix
+        constants = {}
         for key, value in impl.build_constants().items():
-            state[f"{prefix}/{key}"] = value
-        return impl.build_forward()({}, state)["vis_rfi"]
+            constants[f"{prefix}/{key}"] = value
+        return impl.build_forward()({}, state, constants)["vis_rfi"]
 
     ref_result = compute_vis_rfi(RiemannVisTimeFreqCalculation())
     ffi_result = compute_vis_rfi(RiemannVisTimeFreqCalculationFFI())
@@ -74,13 +75,13 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         tangents_state = create_state(config, False, r_key = 50)
         impl.setup(config)
         prefix = impl.prefix
+        constants = {}
         for key, value in impl.build_constants().items():
-            state[f"{prefix}/{key}"] = value
-            if jnp.issubdtype(value.dtype, jnp.integer) or jnp.issubdtype(value.dtype, jnp.bool_):
-                tangents_state[f"{prefix}/{key}"] = jnp.zeros(value.shape, dtype=jax.dtypes.float0)
-            else:
-                tangents_state[f"{prefix}/{key}"] = jnp.zeros_like(value)
-        _, tangents = jax.jvp(impl.build_forward(), ({}, state), ({}, tangents_state))
+            constants[f"{prefix}/{key}"] = value
+        _, tangents = jax.jvp(
+            lambda s: impl.build_forward()({}, s, constants),
+            (state,), (tangents_state,)
+        )
 
         return tangents["vis_rfi"]
 
@@ -101,12 +102,14 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         vjp_state = create_state(config, True, r_key = 50)
         impl.setup(config)
         prefix = impl.prefix
+        constants = {}
         for key, value in impl.build_constants().items():
-            input_state[f"{prefix}/{key}"] = value
-            vjp_state[f"{prefix}/{key}"] = jnp.zeros_like(value)
-        primal_state, vjp_func = jax.vjp(impl.build_forward(), {}, input_state)
+            constants[f"{prefix}/{key}"] = value
+        primal_state, vjp_func = jax.vjp(
+            lambda s: impl.build_forward()({}, s, constants), input_state
+        )
 
-        _, output_state = vjp_func(vjp_state)
+        (output_state,) = vjp_func(vjp_state)
 
         return output_state
 
