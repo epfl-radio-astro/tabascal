@@ -10,6 +10,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
 #include <hipcub/block/block_reduce.hpp>
+#include <hipcub/warp/warp_reduce.hpp>
 namespace cub = hipcub;
 
 // Map CUDA complex types and functions to their HIP equivalents.
@@ -46,6 +47,8 @@ __device__ inline cuDoubleComplex tab_cg_reduce_add(TileT &tile,
 #include <cuComplex.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
+#include <cub/block/block_reduce.cuh>
+#include <cub/warp/warp_reduce.cuh>
 
 template <typename TileT>
 __device__ inline cuDoubleComplex tab_cg_reduce_add(TileT &tile,

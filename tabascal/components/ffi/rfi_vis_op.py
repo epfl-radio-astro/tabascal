@@ -95,8 +95,8 @@ def _load_library(name):
 
 
 _TAB_LIB = _load_library("tabascal.so")
-_TAB_LIB_GPU = _load_library("tabascal_gpu.so")
-_TAB_LIB_HIP = _load_library("tabascal_hip.so")
+_TAB_LIB_GPU = _load_library("tabascal_hip.so")
+#  _TAB_LIB_HIP = _load_library("tabascal_hip.so")
 
 if _TAB_LIB:
     jax.ffi.register_ffi_target(
@@ -125,23 +125,6 @@ if _TAB_LIB_GPU:
         jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_transpose_gpu),
         platform="gpu",
     )
-
-if _TAB_LIB_HIP:
-    jax.ffi.register_ffi_target(
-        "calc_rfi_gpu", jax.ffi.pycapsule(_TAB_LIB_HIP.calc_rfi_vis_gpu), platform="rocm"
-    )
-    jax.ffi.register_ffi_target(
-        "calc_rfi_jvp_gpu",
-        jax.ffi.pycapsule(_TAB_LIB_HIP.calc_rfi_jvp_gpu),
-        platform="rocm",
-    )
-    jax.ffi.register_ffi_target(
-        "calc_rfi_transpose_gpu",
-        jax.ffi.pycapsule(_TAB_LIB_HIP.calc_rfi_transpose_gpu),
-        platform="rocm",
-    )
-
-_TAB_LIB_GPU = _TAB_LIB_GPU or _TAB_LIB_HIP
 
 
 def _check_tab_lib():

@@ -8,9 +8,6 @@
 #include <stdexcept>
 #include <unistd.h>
 
-#ifndef __HIPCC__
-#include <cub/block/block_reduce.cuh>
-#endif
 
 #include "gpu_compat.h"
 #include "tensor.hpp"
@@ -19,7 +16,6 @@
 #include "xla/ffi/api/ffi.h"
 
 namespace ffi = xla::ffi;
-namespace cg = cooperative_groups;
 
 namespace tabascal {
 namespace gpu {
