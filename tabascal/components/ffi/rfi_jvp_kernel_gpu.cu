@@ -1,18 +1,14 @@
 #include <algorithm>
 #include <cassert>
 #include <complex>
-#include <cooperative_groups.h>
-#include <cooperative_groups/reduce.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cuComplex.h>
-#include <cuda_runtime.h>
-#include <cuda_runtime_api.h>
 #include <limits>
 #include <stdexcept>
 #include <unistd.h>
 
+#include "gpu_compat.h"
 #include "tensor.hpp"
 #include "util_gpu.h"
 #include "xla/ffi/api/c_api.h"
@@ -127,7 +123,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             }
           }
         }
-        sum = cg::reduce(tile, sum, cuCadd);
+        sum = tab_cg_reduce_add(tile, sum);
 
         if (tile.thread_rank() == 0) {
           sum.x *= n_int_inv;
