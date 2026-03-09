@@ -15,7 +15,6 @@
 #include "xla/ffi/api/ffi.h"
 
 namespace ffi = xla::ffi;
-namespace cg = cooperative_groups;
 
 namespace tabascal {
 namespace gpu {
