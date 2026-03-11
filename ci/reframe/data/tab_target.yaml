@@ -107,4 +107,3 @@ gains:
   amp_std: 1.0      # %
   phase_std: 1.0    # degrees
   corr_time: 180    # minutes
-[daint][fraschs@daint-ln003 bench]$
