@@ -10,14 +10,22 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
 
     variant = parameter(["Riemann", "RiemannFFI"])
 
-    valid_systems = ["generic:default"]
+    valid_systems = ["alps:daint"]
     valid_prog_environs = ["builtin"]
     time_limit = "30m"
 
-    reference = {
-        "generic:default": {
-            "total_runtime": (35.0, -0.15, 0.15, "s"),
-            "optimizer_runtime": (52.0, -0.15, 0.15, "s"),
+    _reference_by_variant = {
+        "Riemann": {
+            "alps:daint": {
+                "total_runtime": (35.0, -0.15, 0.15, "s"),
+                "optimizer_runtime": (52.0, -0.15, 0.15, "s"),
+            },
+        },
+        "RiemannFFI": {
+            "alps:daint": {
+                "total_runtime": (35.0, -0.15, 0.15, "s"),
+                "optimizer_runtime": (52.0, -0.15, 0.15, "s"),
+            },
         },
     }
 
@@ -37,6 +45,10 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
             "gains:UnitaryGains",
         ],
     }
+
+    @run_before("performance")
+    def set_reference(self):
+        self.reference = self._reference_by_variant[self.variant]
 
     @run_before("run")
     def prepare_run(self):

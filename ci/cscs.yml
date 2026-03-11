@@ -41,7 +41,7 @@ perf_job:
     - >
       reframe
       -c ci/reframe/tabascal_perf_check.py
-      --system=generic:default
+      --system=alps:daint
       --exec-policy=serial
       --run
       --performance-report
