@@ -10,19 +10,19 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
 
     variant = parameter(["Riemann", "RiemannFFI"])
 
-    valid_systems = ["alps:daint"]
+    valid_systems = ["daint:normal"]
     valid_prog_environs = ["builtin"]
     time_limit = "30m"
 
     _reference_by_variant = {
         "Riemann": {
-            "alps:daint": {
+            "daint:normal": {
                 "total_runtime": (35.0, -0.15, 0.15, "s"),
                 "optimizer_runtime": (52.0, -0.15, 0.15, "s"),
             },
         },
         "RiemannFFI": {
-            "alps:daint": {
+            "daint:normal": {
                 "total_runtime": (35.0, -0.15, 0.15, "s"),
                 "optimizer_runtime": (52.0, -0.15, 0.15, "s"),
             },

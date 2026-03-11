@@ -32,20 +32,17 @@ test_job:
 perf_job:
   stage: perf
   needs: [build_job]
-  extends: .container-runner-daint-gh200
+  extends: .reframe-runner
   image: $PERSIST_IMAGE_NAME
   script:
-    - . /opt/conda/etc/profile.d/conda.sh
-    - conda activate tab
-    - cd /tabascal/src
     - >
       reframe
-      -c ci/reframe/tabascal_perf_check.py
-      --system=alps:daint
+      -C $RFM_CONFIG
+      -c $RFM_CHECKPATH
+      --system=daint:normal
       --exec-policy=serial
       --run
       --performance-report
   variables:
-    SLURM_JOB_NUM_NODES: 1
-    SLURM_NTASKS: 1
+    RFM_CHECKPATH: ci/reframe/tabascal_perf_check.py
   allow_failure: false
