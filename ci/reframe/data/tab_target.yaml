@@ -10,18 +10,19 @@ model:
     # - rfi_signal:FourierGPRFI
   # RFI visibility calculation
     # - rfi_vis:RiemannVisCalculation
-    - rfi_vis:RiemannVisTimeFreqCalculation
+    #- rfi_vis:RiemannVisTimeFreqCalculation
+    - rfi_vis:RiemannVisTimeFreqCalculationFFI
     # - rfi_vis:RiemannVisTimeFreqVariable
   # Astronomical signal model
     # - ast_vis:FourierTimeAst
     # - ast_vis:FourierTimeFreqAst
     - ast_vis:FourierTimeFreqGPAst
-  # Antenna Gain model 
+  # Antenna Gain model
     - gains:UnitaryGains
 
 data:
   data_col: DATA
-  noise: 
+  noise:
 
 plots:
   init: False
@@ -40,7 +41,7 @@ inference:
 
 opt:
   epsilon: 1e-3
-  max_iter: 100
+  max_iter: 1000
   dual_run: True
   guide: map
 
@@ -89,7 +90,7 @@ rfi:
     cutoff: 1e-6
 
 satellites:
-  norad_ids: [20452, 38833, 45854]
+  norad_ids: [11141,11690,20361,20959,21890,21930,22231,22275,22877,23953,25030,25933,27663,27704,28129,28190]
   spacetrack_path: spacetrack_login.yaml
   # tle_offset: -2
   tle_offset: 0
@@ -106,3 +107,4 @@ gains:
   amp_std: 1.0      # %
   phase_std: 1.0    # degrees
   corr_time: 180    # minutes
+[daint][fraschs@daint-ln003 bench]$
