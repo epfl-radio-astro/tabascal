@@ -14,6 +14,7 @@ build_job:
   extends: .container-builder-cscs-gh200
   variables:
     DOCKERFILE: ci/docker/Dockerfile_cuda
+    CSCS_REBUILD_POLICY: "if-not-exists"
 
 test_job:
   stage: test
@@ -32,17 +33,18 @@ test_job:
 perf_job:
   stage: perf
   needs: [build_job]
-  extends: .reframe-runner
+  extends: .container-runner-daint-gh200
   image: $PERSIST_IMAGE_NAME
   script:
     - >
       reframe
       -C $RFM_CONFIG
       -c $RFM_CHECKPATH
-      --system=daint:normal
+      --system=daint:gpu
       --exec-policy=serial
       --run
       --performance-report
   variables:
     RFM_CHECKPATH: ci/reframe/tabascal_perf_check.py
+    RFM_CONFIG: ci/reframe/settings.py
   allow_failure: false
