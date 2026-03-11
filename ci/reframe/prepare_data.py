@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,18 @@ def main():
     sim_config = data_dir / "sim_target_96A.yaml"
     tab_template = data_dir / "tab_target.yaml"
 
+    # Step 0: Create spacetrack_login.yaml from environment variables
+    st_user = os.environ.get("SPACETRACK_LOGIN")
+    st_pass = os.environ.get("SPACETRACK_PASSWORD")
+    if not st_user or not st_pass:
+        raise RuntimeError(
+            "SPACETRACK_LOGIN and SPACETRACK_PASSWORD environment variables must be set"
+        )
+    spacetrack_path = workdir / "spacetrack_login.yaml"
+    spacetrack_path.write_text(
+        yaml.dump({"username": st_user, "password": st_pass})
+    )
+
     # Step 1: Download or generate simulation data
     branch = f"tabsim_v{tabsim.__version__}"
     input_hash = compute_sha256(sim_config)
@@ -80,6 +93,7 @@ def main():
         for ancillary in data_dir.glob("*"):
             if ancillary.is_file() and ancillary.suffix != ".yaml":
                 shutil.copy2(ancillary, local_dir / ancillary.name)
+        shutil.copy2(spacetrack_path, local_dir / spacetrack_path.name)
         tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
         subprocess.run(
             [
