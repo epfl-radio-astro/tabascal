@@ -29,6 +29,9 @@ ENV PATH="/opt/conda/envs/tab/bin:${PATH}" \
 # Install JAX (separate layer — large download, changes infrequently)
 RUN pip install --no-cache-dir "jax[cuda12]"
 
+# Install dependencies
+RUN pip install --no-cache-dir "ReFrame-HPC"
+
 WORKDIR /tabascal/src
 
 # Copy source last to maximise layer cache reuse
