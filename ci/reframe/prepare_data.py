@@ -88,25 +88,30 @@ def main():
         local_dir = workdir / "generated_data"
         local_dir.mkdir(exist_ok=True)
         input_dir = local_dir / input_hash
-        # Copy ancillary files referenced by relative paths in sim_config
-        # into the working directory so sim_vis.py can find them.
-        for ancillary in data_dir.glob("*"):
-            if ancillary.is_file() and ancillary.suffix != ".yaml":
-                shutil.copy2(ancillary, local_dir / ancillary.name)
-        shutil.copy2(spacetrack_path, local_dir / spacetrack_path.name)
-        tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
-        subprocess.run(
-            [
-                sys.executable,
-                str(tabsim_script),
-                "-c",
-                str(sim_config),
-                "-sp",
-                str(input_dir),
-            ],
-            cwd=str(local_dir),
-            check=True,
-        )
+        if input_dir.is_dir():
+            logging.info(
+                f"Simulation output {input_dir} already exists. Skipping generation."
+            )
+        else:
+            # Copy ancillary files referenced by relative paths in sim_config
+            # into the working directory so sim_vis.py can find them.
+            for ancillary in data_dir.glob("*"):
+                if ancillary.is_file() and ancillary.suffix != ".yaml":
+                    shutil.copy2(ancillary, local_dir / ancillary.name)
+            shutil.copy2(spacetrack_path, local_dir / spacetrack_path.name)
+            tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(tabsim_script),
+                    "-c",
+                    str(sim_config),
+                    "-sp",
+                    str(input_dir),
+                ],
+                cwd=str(local_dir),
+                check=True,
+            )
 
     sim_dir = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
     if sim_dir is None:
