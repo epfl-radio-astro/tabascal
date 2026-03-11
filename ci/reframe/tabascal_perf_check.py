@@ -85,8 +85,10 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
 
     @performance_function("s")
     def total_runtime(self):
+        # Extract the Mean column from the runtime statistics table.
+        # Columns: Function | Calls | Total | Glob (%) | Rel (%) | Mean | Std
         return sn.extractsingle(
-            r"^tabascal_subtraction\s+\d+\s+(?P<val>[\d.]+)\s+s\s",
+            r"^tabascal_subtraction\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+(?P<val>[\d.]+)\s+s\s",
             self.stdout,
             "val",
             float,
@@ -94,8 +96,10 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
 
     @performance_function("s")
     def optimizer_runtime(self):
+        # Extract the Mean column from the runtime statistics table.
+        # Columns: Function | Calls | Total | Glob (%) | Rel (%) | Mean | Std
         return sn.extractsingle(
-            r"^\s{2}run_opt\s+\d+\s+(?P<val>[\d.]+)\s+s\s",
+            r"^\s{2}run_opt\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+(?P<val>[\d.]+)\s+s\s",
             self.stdout,
             "val",
             float,
