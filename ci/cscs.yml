@@ -4,6 +4,7 @@ include:
 stages:
   - build
   - test
+  - perf
 
 variables:
   PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA
@@ -26,3 +27,23 @@ test_job:
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
+
+perf_job:
+  stage: perf
+  extends: .container-runner-daint-gh200
+  image: $PERSIST_IMAGE_NAME
+  script:
+    - . /opt/conda/etc/profile.d/conda.sh
+    - conda activate tab
+    - cd /tabascal/src
+    - >
+      reframe
+      -c ci/reframe/tabascal_perf_check.py
+      --system=generic:default
+      --exec-policy=serial
+      --run
+      --performance-report
+  variables:
+    SLURM_JOB_NUM_NODES: 1
+    SLURM_NTASKS: 1
+  allow_failure: true

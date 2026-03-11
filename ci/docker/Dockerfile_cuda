@@ -26,6 +26,9 @@ RUN conda create -y -n tab python=3.12 \
 ENV PATH="/opt/conda/envs/tab/bin:${PATH}" \
     CONDA_DEFAULT_ENV=tab
 
+# Install additional deps
+RUN pip install --no-cache-dir "reframe-hpc"
+
 # Install JAX (separate layer — large download, changes infrequently)
 RUN pip install --no-cache-dir "jax[cuda12]"
 
