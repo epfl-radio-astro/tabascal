@@ -36,17 +36,16 @@ perf_job:
   extends: .container-runner-daint-gh200
   image: $PERSIST_IMAGE_NAME
   script:
+    - cd /tabascal/src
     - >
       reframe
-      -C $RFM_CONFIG
-      -c $RFM_CHECKPATH
+      -C ci/reframe/settings.py
+      -c ci/reframe/tabascal_perf_check.py
       --system=daint:gpu
       --exec-policy=serial
       --run
       --performance-report
   variables:
-    RFM_CHECKPATH: ci/reframe/tabascal_perf_check.py
-    RFM_CONFIG: ci/reframe/settings.py
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
   allow_failure: false
