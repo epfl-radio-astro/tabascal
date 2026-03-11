@@ -47,4 +47,6 @@ perf_job:
   variables:
     RFM_CHECKPATH: ci/reframe/tabascal_perf_check.py
     RFM_CONFIG: ci/reframe/settings.py
+    SLURM_JOB_NUM_NODES: 1
+    SLURM_NTASKS: 1
   allow_failure: false
