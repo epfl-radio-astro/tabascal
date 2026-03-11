@@ -34,8 +34,8 @@ def main():
     )
     parser.add_argument(
         "--src-root",
-        default="/tabascal/src",
-        help="Root of the tabascal source tree (default: /tabascal/src)",
+        default="./tabascal",
+        help="Root of the tabascal source tree (default: ./tabascal)",
     )
     args = parser.parse_args()
 
@@ -43,8 +43,8 @@ def main():
     workdir.mkdir(parents=True, exist_ok=True)
 
     src_root = Path(args.src_root)
-    data_dir = src_root / "tests" / "data"
-    sim_config = data_dir / "sim_target_8A.yaml"
+    data_dir = src_root / "ci" / "reframe" / "data"
+    sim_config = data_dir / "sim_target_96A.yaml"
     tab_template = data_dir / "tab_target.yaml"
 
     # Step 1: Download or generate simulation data

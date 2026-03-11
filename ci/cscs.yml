@@ -46,4 +46,4 @@ perf_job:
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
-  allow_failure: true
+  allow_failure: false

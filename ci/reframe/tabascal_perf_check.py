@@ -16,8 +16,8 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
 
     reference = {
         "generic:default": {
-            "total_runtime": (85.0, -0.30, 0.30, "s"),
-            "optimizer_runtime": (52.0, -0.30, 0.30, "s"),
+            "total_runtime": (35.0, -0.15, 0.15, "s"),
+            "optimizer_runtime": (52.0, -0.15, 0.15, "s"),
         },
     }
 
