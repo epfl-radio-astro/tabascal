@@ -34,8 +34,8 @@ def main():
     )
     parser.add_argument(
         "--src-root",
-        default="./tabascal",
-        help="Root of the tabascal source tree (default: ./tabascal)",
+        default=".",
+        help="Root of the tabascal source tree (default: .)",
     )
     args = parser.parse_args()
 
