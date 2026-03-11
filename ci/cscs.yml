@@ -6,20 +6,25 @@ stages:
   - test
   - perf
 
-variables:
-  PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA
-
 build_job:
   stage: build
   extends: .container-builder-cscs-gh200
+  parallel:
+    matrix:
+      - JAX_VERSION: ["0.6.0", "latest"]
   variables:
     DOCKERFILE: ci/docker/Dockerfile_cuda
     CSCS_REBUILD_POLICY: "if-not-exists"
+    PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
+    DOCKER_BUILD_ARGS: '["JAX_VERSION=$JAX_VERSION"]'
 
 test_job:
   stage: test
   needs: [build_job]
   extends: .container-runner-daint-gh200
+  parallel:
+    matrix:
+      - JAX_VERSION: ["0.6.0", "latest"]
   image: $PERSIST_IMAGE_NAME
   script:
     - . /opt/conda/etc/profile.d/conda.sh
@@ -29,11 +34,15 @@ test_job:
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
+    PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
 
 perf_job:
   stage: perf
   needs: [build_job]
   extends: .container-runner-daint-gh200
+  parallel:
+    matrix:
+      - JAX_VERSION: ["0.6.0", "latest"]
   image: $PERSIST_IMAGE_NAME
   script:
     - cd /tabascal/src
@@ -48,4 +57,5 @@ perf_job:
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
+    PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
   allow_failure: false
