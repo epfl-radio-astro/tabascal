@@ -17,6 +17,7 @@ build_job:
 
 test_job:
   stage: test
+  needs: [build_job]
   extends: .container-runner-daint-gh200
   image: $PERSIST_IMAGE_NAME
   script:
@@ -30,6 +31,7 @@ test_job:
 
 perf_job:
   stage: perf
+  needs: [build_job]
   extends: .container-runner-daint-gh200
   image: $PERSIST_IMAGE_NAME
   script:

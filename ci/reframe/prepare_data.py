@@ -61,8 +61,19 @@ def main():
         )
     except Exception as e:
         logging.warning(f"HuggingFace download failed: {e}. Generating with tabsim.")
+        local_dir = None
+
+    # Step 2: Check for cached data or generate locally
+    input_dir = local_dir / input_hash if local_dir is not None else None
+    if input_dir is None or not input_dir.is_dir():
+        if local_dir is not None:
+            logging.warning(
+                f"Hash directory {input_hash} not found in HF snapshot. "
+                "Generating data with tabsim."
+            )
         local_dir = workdir / "generated_data"
         local_dir.mkdir(exist_ok=True)
+        input_dir = local_dir / input_hash
         tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
         subprocess.run(
             [
@@ -71,14 +82,12 @@ def main():
                 "-c",
                 str(sim_config),
                 "-sp",
-                str(local_dir / input_hash),
+                str(input_dir),
             ],
             cwd=str(local_dir),
             check=True,
         )
 
-    # Step 2: Locate pnt_src directory
-    input_dir = local_dir / input_hash
     sim_dir = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
     if sim_dir is None:
         raise RuntimeError(f"No pnt_src* directory found in {input_dir}")
