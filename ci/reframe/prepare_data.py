@@ -43,7 +43,7 @@ def main():
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
-    src_root = Path(args.src_root)
+    src_root = Path(args.src_root).resolve()
     data_dir = src_root / "ci" / "reframe" / "data"
     sim_config = data_dir / "sim_target_96A.yaml"
     tab_template = data_dir / "tab_target.yaml"
