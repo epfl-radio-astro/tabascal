@@ -44,6 +44,7 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
         components_str = ",".join(components)
 
         self.prerun_cmds = [
+            "set -e",
             ". /opt/conda/etc/profile.d/conda.sh",
             "conda activate tab",
             "cd /tabascal/src",
