@@ -42,7 +42,7 @@ perf_job:
   extends: .container-runner-daint-gh200
   parallel:
     matrix:
-      - JAX_VERSION: ["0.6.0", "latest"]
+      - JAX_VERSION: ["0.6.0"]
   image: $PERSIST_IMAGE_NAME
   script:
     - cd /tabascal/src
