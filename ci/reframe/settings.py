@@ -3,11 +3,25 @@ site_configuration = {
         {
             "name": "daint",
             "descr": "Piz Daint",
-            "hostnames": [".*"],
+            "hostnames": ["daint"],
             "partitions": [
                 {
                     "name": "gpu",
                     "descr": "GPU partition",
+                    "scheduler": "local",
+                    "launcher": "local",
+                    "environs": ["builtin"],
+                },
+            ],
+        },
+        {
+            "name": "generic",
+            "descr": "Generic local system",
+            "hostnames": [".*"],
+            "partitions": [
+                {
+                    "name": "default",
+                    "descr": "Default partition",
                     "scheduler": "local",
                     "launcher": "local",
                     "environs": ["builtin"],

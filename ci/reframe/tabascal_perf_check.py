@@ -1,7 +1,12 @@
 """ReFrame performance regression check for the tabascal pipeline."""
 
+import os
+from pathlib import Path
+
 import reframe as rfm
 import reframe.utility.sanity as sn
+
+_src_root = str(Path(__file__).resolve().parents[2])
 
 
 @rfm.simple_test
@@ -10,7 +15,7 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
 
     variant = parameter(["Riemann", "RiemannFFI"])
 
-    valid_systems = ["daint:gpu"]
+    valid_systems = ["daint:gpu", "generic:default"]
     valid_prog_environs = ["builtin"]
     time_limit = "30m"
 
@@ -54,26 +59,30 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
     def prepare_run(self):
         components = self._components_map[self.variant]
         components_str = ",".join(components)
+        workdir = os.path.join(self.stagedir, "workdir")
 
-        self.prerun_cmds = [
-            "set -e",
-            ". /opt/conda/etc/profile.d/conda.sh",
-            "conda activate tab",
-            "cd /tabascal/src",
-            (
-                f"python ci/reframe/prepare_data.py "
-                f"--components '{components_str}' "
-                f"--workdir /tmp/rfm_workdir"
-            ),
-        ]
+        self.prerun_cmds = ["set -e"]
+
+        if self.current_partition.fullname == "daint:gpu":
+            self.prerun_cmds += [
+                ". /opt/conda/etc/profile.d/conda.sh",
+                "conda activate tab",
+            ]
+
+        self.prerun_cmds.append(
+            f"python {_src_root}/ci/reframe/prepare_data.py"
+            f" --components '{components_str}'"
+            f" --workdir {workdir}"
+            f" --src-root {_src_root}"
+        )
 
         self.executable = "python"
         self.executable_opts = [
-            "/tabascal/src/tabascal/scripts/run_tabascal.py",
+            f"{_src_root}/tabascal/scripts/run_tabascal.py",
             "-c",
-            "/tmp/rfm_workdir/tab_target.yaml",
+            f"{workdir}/tab_target.yaml",
             "-s",
-            "$(cat /tmp/rfm_workdir/sim_dir.txt)",
+            f"$(cat {workdir}/sim_dir.txt)",
             "-t",
         ]
 
