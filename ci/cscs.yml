@@ -36,13 +36,10 @@ test_job:
     SLURM_NTASKS: 1
     PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
 
-perf_job:
+.perf_job_template:
   stage: perf
   needs: [build_job]
   extends: .container-runner-daint-gh200
-  parallel:
-    matrix:
-      - JAX_VERSION: ["0.6.0"]
   image: $PERSIST_IMAGE_NAME
   script:
     - cd /tabascal/src
@@ -54,8 +51,37 @@ perf_job:
       --exec-policy=serial
       --run
       --performance-report
+      --report-file=reframe_results.json
+    - |
+      if [ "$CRON_RUN" = "true" ]; then
+        python ci/reframe/reframe_to_bmf.py reframe_results.json --jax-version "$JAX_VERSION" > bmf_results.json
+        bencher run \
+          --project tabascal \
+          --branch "$CI_COMMIT_REF_NAME" \
+          --hash "$CI_COMMIT_SHA" \
+          --testbed cscs-daint-gh200 \
+          --adapter json \
+          --file bmf_results.json
+      fi
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
     PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
-  allow_failure: false
+    BENCHER_API_TOKEN: $BENCHER_API_TOKEN
+
+perf_job:
+  extends: .perf_job_template
+  parallel:
+    matrix:
+      - JAX_VERSION: ["0.6.0"]
+  rules:
+    - if: $CRON_RUN != "true"
+
+perf_job_cron:
+  extends: .perf_job_template
+  parallel:
+    matrix:
+      - JAX_VERSION: ["0.6.0", "latest"]
+  rules:
+    - if: $CRON_RUN == "true"
+      allow_failure: true
