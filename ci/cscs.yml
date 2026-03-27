@@ -52,16 +52,7 @@ test_job:
       --run
       --performance-report
       --report-file=reframe_results.json
-      -S strict_check=0
-    - |
-      python ci/reframe/reframe_to_bmf.py reframe_results.json --jax-version "$JAX_VERSION" > bmf_results.json
-      bencher run \
-        --project tabascal \
-        --branch "$CI_COMMIT_REF_NAME" \
-        --hash "$CI_COMMIT_SHA" \
-        --testbed cscs-daint-gh200 \
-        --adapter json \
-        --file bmf_results.json
+      $(if [ "$CRON_RUN" = "true" ]; then echo "-S strict_check=0"; fi)
     - |
       if [ "$CRON_RUN" = "true" ]; then
         python ci/reframe/reframe_to_bmf.py reframe_results.json --jax-version "$JAX_VERSION" > bmf_results.json
@@ -79,14 +70,13 @@ test_job:
     PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
     BENCHER_API_TOKEN: $BENCHER_API_TOKEN
 
-# perf_job:
-#   extends: .perf_job_template
-#   parallel:
-#     matrix:
-#       - JAX_VERSION: ["0.6.0"]
-#   rules:
-#     - if: $CRON_RUN != "true"
-#
+perf_job:
+  extends: .perf_job_template
+  parallel:
+    matrix:
+      - JAX_VERSION: ["0.6.0"]
+  rules:
+    - if: $CRON_RUN != "true"
 
 perf_job_cron:
   extends: .perf_job_template
@@ -94,6 +84,5 @@ perf_job_cron:
     matrix:
       - JAX_VERSION: ["0.6.0", "latest"]
   rules:
-    - if: $CRON_RUN != "true"
-    # - if: $CRON_RUN == "true"
-    #   allow_failure: true
+    - if: $CRON_RUN == "true"
+      allow_failure: true
