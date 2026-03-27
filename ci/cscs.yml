@@ -52,7 +52,8 @@ test_job:
       --run
       --performance-report
       --report-file=reframe_results.json
-    - python ci/reframe/reframe_to_bmf.py reframe_results.json --jax-version "$JAX_VERSION" > bmf_results.json
+    - |
+      python ci/reframe/reframe_to_bmf.py reframe_results.json --jax-version "$JAX_VERSION" > bmf_results.json
       bencher run \
         --project tabascal \
         --branch "$CI_COMMIT_REF_NAME" \
