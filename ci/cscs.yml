@@ -63,7 +63,6 @@ test_job:
           --adapter json \
           --file bmf_results.json
       fi
-    - bencher --help
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
