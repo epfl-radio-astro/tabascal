@@ -6,7 +6,7 @@ SHELL ["/bin/bash", "-c"]
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive TZ=Europe/Zurich \
      apt-get install -yqq --no-install-recommends \
-       build-essential git wget \
+       build-essential curl git wget \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Miniforge
@@ -36,6 +36,10 @@ RUN if [ "$JAX_VERSION" = "latest" ] || [ -z "$JAX_VERSION" ]; then \
 
 # Install dependencies
 RUN pip install --no-cache-dir "ReFrame-HPC"
+
+# Install Bencher CLI (used for perf tracking in cron jobs)
+RUN curl --proto '=https' --tlsv1.2 -sSfL https://bencher.dev/download/install-cli.sh | bash \
+  && mv /root/.cargo/bin/bencher /usr/local/bin/bencher
 
 WORKDIR /tabascal/src
 
