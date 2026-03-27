@@ -85,6 +85,7 @@ test_job:
 #       - JAX_VERSION: ["0.6.0"]
 #   rules:
 #     - if: $CRON_RUN != "true"
+#
 
 perf_job_cron:
   extends: .perf_job_template
