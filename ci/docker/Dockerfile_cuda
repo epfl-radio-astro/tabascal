@@ -39,7 +39,7 @@ RUN pip install --no-cache-dir "ReFrame-HPC"
 
 # Install Bencher CLI (used for perf tracking in cron jobs)
 RUN curl --proto '=https' --tlsv1.2 -sSfL https://bencher.dev/download/install-cli.sh | bash \
-  && mv /root/.bencher/bin/bencher /usr/local/bin/bencher
+  && mv /root/.cargo/bin/bencher /usr/local/bin/bencher
 
 WORKDIR /tabascal/src
 
