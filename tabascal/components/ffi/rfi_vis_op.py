@@ -94,9 +94,17 @@ def _load_library(name):
     return None
 
 
+
+_TAB_LIB_GPU_NAME = "tabascal_cuda.so"
+_TAB_PLATFORM_NAME = "CUDA"
+
+if any("rocm" in str(s) for s in list(jax.devices())):
+    _TAB_LIB_GPU_NAME = "tabascal_hip.so"
+    _TAB_PLATFORM_NAME = "ROCM"
+
+
 _TAB_LIB = _load_library("tabascal.so")
-_TAB_LIB_GPU = _load_library("tabascal_hip.so")
-#  _TAB_LIB_HIP = _load_library("tabascal_hip.so")
+_TAB_LIB_GPU = _load_library(_TAB_LIB_GPU_NAME)
 
 if _TAB_LIB:
     jax.ffi.register_ffi_target(
@@ -113,17 +121,17 @@ if _TAB_LIB:
 
 if _TAB_LIB_GPU:
     jax.ffi.register_ffi_target(
-        "calc_rfi_gpu", jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_vis_gpu), platform="gpu"
+        "calc_rfi_gpu", jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_vis_gpu), platform=_TAB_PLATFORM_NAME
     )
     jax.ffi.register_ffi_target(
         "calc_rfi_jvp_gpu",
         jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_jvp_gpu),
-        platform="gpu",
+        platform=_TAB_PLATFORM_NAME
     )
     jax.ffi.register_ffi_target(
         "calc_rfi_transpose_gpu",
         jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_transpose_gpu),
-        platform="gpu",
+        platform=_TAB_PLATFORM_NAME
     )
 
 
@@ -207,7 +215,6 @@ def rfi_transpose_lowering_gpu(
 
 
 mlir.register_lowering(rfi_transpose_op, rfi_transpose_lowering_gpu, platform="gpu")
-mlir.register_lowering(rfi_transpose_op, rfi_transpose_lowering_gpu, platform="rocm")
 
 
 # --- JVP Op ---
@@ -305,7 +312,6 @@ def rfi_jvp_lowering_gpu(
 
 
 mlir.register_lowering(rfi_jvp_op, rfi_jvp_lowering_gpu, platform="gpu")
-mlir.register_lowering(rfi_jvp_op, rfi_jvp_lowering_gpu, platform="rocm")
 
 
 def rfi_jvp_transpose(
@@ -394,7 +400,6 @@ def rfi_vis_lowering_gpu(
 
 
 mlir.register_lowering(rfi_vis_op, rfi_vis_lowering_gpu, platform="gpu")
-mlir.register_lowering(rfi_vis_op, rfi_vis_lowering_gpu, platform="rocm")
 
 
 def rfi_vis_jvp(args, tangents):

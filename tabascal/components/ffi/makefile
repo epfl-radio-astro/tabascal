@@ -47,7 +47,7 @@ CXX_OBJECTS = $(patsubst %.cpp,%.o,$(CXX_SOURCES))
 CUDA_OBJECTS = $(patsubst %.cu,%.o,$(CUDA_SOURCES))
 HIP_OBJECTS = $(patsubst %.cu,%.hip.o,$(CUDA_SOURCES))
 
-all: cpu gpu
+all: cpu cuda
 
 cpu: tabascal.so
 
@@ -57,9 +57,9 @@ tabascal.so: $(CXX_OBJECTS)
 %.o: %.cpp
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
-gpu: tabascal_gpu.so
+cuda: tabascal_cuda.so
 
-tabascal_gpu.so: $(CUDA_OBJECTS)
+tabascal_cuda.so: $(CUDA_OBJECTS)
 	$(CUDACXX) $^ -shared -o $@
 
 %.o: %.cu
@@ -74,6 +74,6 @@ tabascal_hip.so: $(HIP_OBJECTS)
 	$(HIPCXX) -c $< -o $@ $(HIPFLAGS)
 
 clean:
-	-rm -f $(CXX_OBJECTS) $(CUDA_OBJECTS) $(HIP_OBJECTS) tabascal.so tabascal_gpu.so tabascal_hip.so
+	-rm -f $(CXX_OBJECTS) $(CUDA_OBJECTS) $(HIP_OBJECTS) tabascal.so tabascal_cuda.so tabascal_hip.so
 
-.PHONY: clean all cpu gpu hip
+.PHONY: clean all cpu cuda hip
