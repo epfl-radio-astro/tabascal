@@ -24,6 +24,7 @@ HIPFLAGS ?= -O2 -DNDEBUG \
 			--offload-arch=gfx906 \
 			--offload-arch=gfx908 \
 			--offload-arch=gfx90a \
+			--offload-arch=gfx942 \
 			--offload-arch=gfx1030 \
 			--offload-arch=gfx1100
 
