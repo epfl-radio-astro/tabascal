@@ -1,7 +1,22 @@
 [build-system]
-# XXX: If your project needs other packages to build properly, add them to this list.
-requires = ["setuptools >= 64"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "jax"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+cmake.version = ">=3.20"
+cmake.build-type = "Release"
+cmake.source-dir = "."
+wheel.packages = ["tabascal"]
+wheel.py-api = "py3"
+editable.mode = "inplace"
+
+[[tool.scikit-build.overrides]]
+if.env.TABASCAL_CUDA = "(?i)1|on|true|yes"
+cmake.define.TABASCAL_CUDA = "ON"
+
+[[tool.scikit-build.overrides]]
+if.env.TABASCAL_ROCM = "(?i)1|on|true|yes"
+cmake.define.TABASCAL_ROCM = "ON"
 
 [project]
 name = "tabascal"
@@ -43,9 +58,6 @@ cuda13 = ["jax[cuda13]"]
 
 [project.urls]
 Repository = "https://github.com/epfl-radio-astro/tabascal.git"
-
-[tool.setuptools.packages.find]
-where = ["."]
 
 [project.scripts]
 tabascal = "tabascal.scripts.run_tabascal:main"
