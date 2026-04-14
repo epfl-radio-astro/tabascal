@@ -94,8 +94,17 @@ def _load_library(name):
     return None
 
 
+
+_TAB_LIB_GPU_NAME = "tabascal_cuda.so"
+_TAB_PLATFORM_NAME = "CUDA"
+
+if any("rocm" in str(s) for s in list(jax.devices())):
+    _TAB_LIB_GPU_NAME = "tabascal_hip.so"
+    _TAB_PLATFORM_NAME = "ROCM"
+
+
 _TAB_LIB = _load_library("tabascal.so")
-_TAB_LIB_GPU = _load_library("tabascal_gpu.so")
+_TAB_LIB_GPU = _load_library(_TAB_LIB_GPU_NAME)
 
 if _TAB_LIB:
     jax.ffi.register_ffi_target(
@@ -112,17 +121,17 @@ if _TAB_LIB:
 
 if _TAB_LIB_GPU:
     jax.ffi.register_ffi_target(
-        "calc_rfi_gpu", jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_vis_gpu), platform="gpu"
+        "calc_rfi_gpu", jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_vis_gpu), platform=_TAB_PLATFORM_NAME
     )
     jax.ffi.register_ffi_target(
         "calc_rfi_jvp_gpu",
         jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_jvp_gpu),
-        platform="gpu",
+        platform=_TAB_PLATFORM_NAME
     )
     jax.ffi.register_ffi_target(
         "calc_rfi_transpose_gpu",
         jax.ffi.pycapsule(_TAB_LIB_GPU.calc_rfi_transpose_gpu),
-        platform="gpu",
+        platform=_TAB_PLATFORM_NAME
     )
 
 

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <cuda_runtime.h>
+#include "gpu_compat.h"
 
 namespace tabascal {
 namespace gpu {

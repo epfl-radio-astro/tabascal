@@ -1,6 +1,6 @@
 #include "util_gpu.h"
 
-#include <cuda_runtime.h>
+#include "gpu_compat.h"
 #include <mutex>
 
 namespace tabascal {

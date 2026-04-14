@@ -1,30 +1,25 @@
 #include <algorithm>
 #include <cassert>
 #include <complex>
-#include <cooperative_groups.h>
-#include <cooperative_groups/reduce.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cuComplex.h>
-#include <cuda_runtime.h>
-#include <cuda_runtime_api.h>
 #include <limits>
 #include <stdexcept>
 #include <unistd.h>
 
+#include "gpu_compat.h"
 #include "tensor.hpp"
 #include "util_gpu.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
 
 namespace ffi = xla::ffi;
-namespace cg = cooperative_groups;
 
 namespace tabascal {
 namespace gpu {
 
-template <int BLOCK_SIZE, int TILE_SIZE, typename INT_T>
+template <int BLOCK_SIZE, int WARP_SIZE, typename INT_T>
 __global__ void __launch_bounds__(BLOCK_SIZE)
     rfi_jvp_kernel(Tensor1D<const int *, INT_T> a1,
                    Tensor1D<const int *, INT_T> a2,
@@ -34,8 +29,18 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
                    Tensor4D<const double *, INT_T> rfi_phase_grad,
                    Tensor3D<cuDoubleComplex *, INT_T> rfi_grad) {
 
-  auto block = cg::this_thread_block();
-  auto tile = cg::tiled_partition<TILE_SIZE>(block);
+  static_assert(BLOCK_SIZE % WARP_SIZE == 0);
+  constexpr int WARPS_PER_BLOCK = BLOCK_SIZE / WARP_SIZE;
+
+  using WarpReduce_t = cub::WarpReduce<double>;
+
+  __shared__ typename WarpReduce_t::TempStorage temp_storage_1[WARPS_PER_BLOCK];
+  __shared__ typename WarpReduce_t::TempStorage temp_storage_2[WARPS_PER_BLOCK];
+
+  const int warp_id = threadIdx.x / WARP_SIZE;
+  const int lane_id = threadIdx.x % WARP_SIZE;
+
+  const int n_warps_global = gridDim.x * WARPS_PER_BLOCK;
 
   const auto n_rfi = rfi_amp_fine.shape[0];
   const auto n_freq_fine = rfi_amp_fine.shape[2];
@@ -63,9 +68,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
       const auto i_f_fine_begin = i_f * n_int_f;
 
       // warp reduction
-      for (INT_T i_t = block.group_index().x * tile.meta_group_size() +
-                       tile.meta_group_rank();
-           i_t < n_time; i_t += block.group_dim().x * tile.meta_group_size()) {
+      for (INT_T i_t = blockIdx.x * WARPS_PER_BLOCK + warp_id; i_t < n_time;
+           i_t += n_warps_global) {
         cuDoubleComplex sum{0, 0};
 
         const auto i_t_fine_begin = i_t * n_int_t;
@@ -75,8 +79,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
           for (INT_T i_f_fine = i_f_fine_begin;
                i_f_fine < i_f_fine_begin + n_int_f; ++i_f_fine) {
 
-            for (INT_T i_t_fine = i_t_fine_begin + tile.thread_rank();
-                 i_t_fine < i_t_fine_begin + n_int_t; i_t_fine += tile.size()) {
+            for (INT_T i_t_fine = i_t_fine_begin + lane_id;
+                 i_t_fine < i_t_fine_begin + n_int_t; i_t_fine += WARP_SIZE) {
 
               const auto val_rfi_amp_1 =
                   rfi_amp_fine(i_rfi, i_a1, i_f_fine, i_t_fine);
@@ -127,9 +131,11 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             }
           }
         }
-        sum = cg::reduce(tile, sum, cuCadd);
+        sum.x = WarpReduce_t(temp_storage_1[warp_id]).Sum(sum.x);
+        sum.y = WarpReduce_t(temp_storage_2[warp_id]).Sum(sum.y);
+        __syncwarp();
 
-        if (tile.thread_rank() == 0) {
+        if (lane_id == 0) {
           sum.x *= n_int_inv;
           sum.y *= n_int_inv;
 
@@ -224,23 +230,31 @@ ffi::Error calc_rfi_jvp_gpu_dispatch(
   // Cooperative group size. Must be power of 2. Used to iterate over n_int and
   // reduce result. If 32, equal to warp size on Nvidia for fast reduce
   // operation.
-  constexpr int tile_size = 32;
 
   constexpr int block_size = 256;
-  static_assert(block_size % tile_size == 0);
   const auto n_time = rfi_grad_tensor.shape[2];
   const auto n_bl = a1.dimensions()[0];
   const auto n_freq = rfi_grad_tensor.shape[1];
 
+  const int warp_size = get_device_prop().warpSize;
+
   dim3 block(block_size);
-  auto n_warps = block.x / 32;
+  auto n_warps = block.x / warp_size;
 
   auto grid =
       create_clamped_grid((n_time + n_warps - 1) / n_warps, n_bl, n_freq);
 
-  rfi_jvp_kernel<block_size, tile_size, INT_T><<<grid, block, 0, stream>>>(
-      a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_amp_fine_grad_tensor,
-      rfi_phase_tensor, rfi_phase_grad_tensor, rfi_grad_tensor);
+  if (warp_size == 32) {
+    rfi_jvp_kernel<block_size, 32, INT_T><<<grid, block, 0, stream>>>(
+        a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_amp_fine_grad_tensor,
+        rfi_phase_tensor, rfi_phase_grad_tensor, rfi_grad_tensor);
+  } else if (warp_size == 64) {
+    rfi_jvp_kernel<block_size, 64, INT_T><<<grid, block, 0, stream>>>(
+        a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_amp_fine_grad_tensor,
+        rfi_phase_tensor, rfi_phase_grad_tensor, rfi_grad_tensor);
+  } else {
+    return ffi::Error::Internal("Unsupported GPU warp size.");
+  }
 
   const auto status = cudaGetLastError();
   if (status != cudaSuccess) {

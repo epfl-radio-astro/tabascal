@@ -3,7 +3,7 @@
 #include <cassert>
 #include <cstdint>
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #define TAB_H_D __host__ __device__
 #else
 #define TAB_H_D
