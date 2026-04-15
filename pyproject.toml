@@ -29,6 +29,7 @@ dependencies = [
     "optax",
     "PyYAML",
     "skyfield",
+    "spacetrack",
     "tabsim",
     "tqdm",
     "xarray",

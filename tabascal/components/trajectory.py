@@ -1,4 +1,4 @@
-from tabsim.tle import get_tles_by_id, load_spacetrack_credentials  # type: ignore
+from tabascal.tle import get_tles_by_id, load_spacetrack_credentials
 
 from tabsim.jax.coordinates import (  # type: ignore
     secs_to_days,
@@ -576,23 +576,23 @@ class SGP4LEOOrbit(Component):
 
     def _compute_prior_params(self):
 
-        sats = self.sats_init(self.elements)    
+        sats = self.sats_init(self.elements)
+        # kepler_cov shape: (n_rfi, 6, 6)
         kepler_cov = vmap(sgp4jax.cov_ric_to_elements, (None, 0, 0, 0))(self.ric_cov, sats, self.epoch_jd_whole, self.epoch_jd_frac)
 
         bstar_cov = 1e-6
 
-        kepler_cov = jnp.block([[jnp.array([[bstar_cov]]), jnp.zeros((1, 6))],
-                                [jnp.zeros((6, 1)), kepler_cov]]
-        )
+        # Prepend a bstar row/column to each (6, 6) covariance → (n_rfi, 7, 7)
+        def _prepend_bstar(cov_6x6):
+            return jnp.block([
+                [jnp.array([[bstar_cov]]), jnp.zeros((1, 6))],
+                [jnp.zeros((6, 1)),        cov_6x6           ],
+            ])
 
-        print(kepler_cov.shape)
-        print(kepler_cov)
+        kepler_cov = vmap(_prepend_bstar)(kepler_cov)  # (n_rfi, 7, 7)
 
         self.L_rfi_orbit = vmap(jnp.linalg.cholesky)(kepler_cov)
         self.mu_rfi_orbit = self.elements
-
-        print(self.L_rfi_orbit)
-        print(self.mu_rfi_orbit)
 
     def _set_outputs(self):
 
