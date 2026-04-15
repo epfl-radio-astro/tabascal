@@ -10,9 +10,14 @@ from jax import vmap, Array
 
 from typing import Dict
 
-def gains_config_validation(gains_config: Dict, freqs: Array, times: Array) -> Dict:
+def gains_config_validation(gains_config: Dict, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
 
-    extent = lambda x: float(jnp.max(x) - jnp.min(x))
+    def extent(x, dx):
+        ext = float(jnp.max(x) - jnp.min(x))
+        if ext == 0.0:
+            return float(dx)
+        else:
+            return ext
 
     try:
         r_seed = gains_config["r_seed"]
@@ -37,74 +42,77 @@ def gains_config_validation(gains_config: Dict, freqs: Array, times: Array) -> D
     if not gp_amp_mean: # Set Default
         est_gp_amp_mean = 1.0
         gains_config["amp_mean"] = est_gp_amp_mean
-        print(f"Using Gains amplitude mean : {est_gp_amp_mean:.1e}")
     elif isinstance(gp_amp_mean, (float, int)):
         gains_config["amp_mean"] = float(gp_amp_mean)
     else:
         raise ValueError(f"Config parameter (gains:\n\tamp_mean: {gp_amp_mean}) is not of type float or int.")
 
     if not gp_amp_std: # Set Default
-        est_gp_amp_std = 0.1 * gains_config["amp_mean"] # 10 %
+        est_gp_amp_std = 1 / 100 * gains_config["amp_mean"] # 1 %
         gains_config["amp_std"] = est_gp_amp_std
-        print(f"Using Gains amplitude std : {est_gp_amp_std*100:.1e} %")
     elif isinstance(gp_amp_std, (float, int)):
         gains_config["amp_std"] = float(gp_amp_std) / 100 * gains_config["amp_mean"]
     else:
         raise ValueError(f"Config parameter (gains:\n\tamp_std: {gp_amp_std}) is not of type float or int.")
     
     if not gp_amp_freq_l: # Set Default
-        est_gp_amp_freq_l = extent(freqs)
+        est_gp_amp_freq_l = extent(freqs, chan_width)
         gains_config["amp_corr_freq"] = est_gp_amp_freq_l
-        print(f"Using Gains amplitude corr_freq : {est_gp_amp_freq_l:.3e} Hz")
     elif isinstance(gp_amp_freq_l, (float, int)):
         gains_config["amp_corr_freq"] = float(gp_amp_freq_l)
     else:
         raise ValueError(f"Config parameter (gains:\n\tamp_corr_freq: {gp_amp_freq_l}) is not of type float or int.")
     
     if not gp_amp_time_l: # Set Default
-        est_gp_amp_time_l = extent(times)
+        est_gp_amp_time_l = extent(times, int_time)
         gains_config["amp_corr_time"] = est_gp_amp_time_l
-        print(f"Using Gains amplitude corr_time : {est_gp_amp_time_l:.3e} s")
     elif isinstance(gp_amp_time_l, (float, int)):
         gains_config["amp_corr_time"] = float(gp_amp_time_l)
     else:
         raise ValueError(f"Config parameter (gains:\n\tamp_corr_time: {gp_amp_time_l}) is not of type float or int.")    
     
-    if not gp_amp_mean: # Set Default
+    if not gp_phase_mean: # Set Default
         est_gp_phase_mean = 0.0
         gains_config["phase_mean"] = est_gp_phase_mean
-        print(f"Using Gains phase mean : {jnp.rad2deg(est_gp_phase_mean):.1e} degrees")
     elif isinstance(gp_phase_mean, (float, int)):
         gains_config["phase_mean"] = float(gp_phase_mean)
     else:
         raise ValueError(f"Config parameter (gains:\n\tphase_mean: {gp_phase_mean}) is not of type float or int.")
 
     if not gp_phase_std: # Set Default
-        est_gp_phase_std = float(jnp.deg2rad(10)) # degrees
+        est_gp_phase_std = float(jnp.deg2rad(1)) # degrees
         gains_config["phase_std"] = est_gp_phase_std
-        print(f"Using Gains phase std : {est_gp_phase_std:.3e} Jy")
     elif isinstance(gp_phase_std, (float, int)):
         gains_config["phase_std"] = float(jnp.deg2rad(gp_phase_std))
     else:
         raise ValueError(f"Config parameter (gains:\n\tphase_std: {gp_phase_std}) is not of type float or int.")
     
     if not gp_phase_freq_l: # Set Default
-        est_gp_phase_freq_l = extent(freqs)
+        est_gp_phase_freq_l = extent(freqs, chan_width)
         gains_config["phase_corr_freq"] = est_gp_phase_freq_l
-        print(f"Using Gains phase corr_freq : {est_gp_phase_freq_l:.3e} Hz")
     elif isinstance(gp_phase_freq_l, (float, int)):
         gains_config["phase_corr_freq"] = float(gp_phase_freq_l)
     else:
         raise ValueError(f"Config parameter (gains:\n\tphase_corr_freq: {gp_phase_freq_l}) is not of type float or int.")
     
     if not gp_phase_time_l: # Set Default
-        est_gp_phase_time_l = extent(times)
+        est_gp_phase_time_l = extent(times, int_time)
         gains_config["phase_corr_time"] = est_gp_phase_time_l
-        print(f"Using Gains phase corr_time : {est_gp_phase_time_l:.3e} s")
     elif isinstance(gp_phase_time_l, (float, int)):
         gains_config["phase_corr_time"] = float(gp_phase_time_l)
     else:
         raise ValueError(f"Config parameter (gains:\n\tphase_corr_time: {gp_phase_time_l}) is not of type float or int.")   
+    
+    print()
+    print(f"Using Gains amplitude mean : {gains_config['amp_mean']:.1f}")
+    print(f"Using Gains amplitude std : {gains_config['amp_std']*100/gains_config['amp_mean']:.1f} %")
+    print(f"Using Gains amplitude corr_freq : {gains_config['amp_corr_freq']/1e3:.1f} kHz")
+    print(f"Using Gains amplitude corr_time : {gains_config['amp_corr_time']:.1f} s")
+    print()
+    print(f"Using Gains phase mean : {jnp.rad2deg(gains_config['phase_mean']):.1f} degrees")
+    print(f"Using Gains phase std : {jnp.rad2deg(gains_config['phase_std']):.1f} degrees")
+    print(f"Using Gains phase corr_freq : {gains_config['phase_corr_freq']/1e3:.1f} kHz")
+    print(f"Using Gains phase corr_time : {gains_config['phase_corr_time']:.1f} s")
 
     return gains_config
 
@@ -125,7 +133,7 @@ class BaseGPGains(Component):
 
         # Validate config and set defaults
         gains_config = gains_config_validation(
-            tab_config.args["gains"], tab_config.freqs, tab_config.times)
+            tab_config.args["gains"], tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
 
         # Random seed used for random sampling such as initial parameters drawn from the prior
         self.r_seed = gains_config["r_seed"]
@@ -148,9 +156,11 @@ class BaseGPGains(Component):
         self.times = tab_config.times
         self.int_time = tab_config.int_time
 
+        self.gp_amp_mean = gains_config["amp_mean"]
         self.gp_amp_std = gains_config["amp_std"]
         self.amp_corr_freq = gains_config["amp_corr_freq"]
         self.amp_corr_time = gains_config["amp_corr_time"]
+        self.gp_phase_mean = gains_config["phase_mean"]
         self.gp_phase_std = gains_config["phase_std"]
         self.phase_corr_freq = gains_config["phase_corr_freq"]
         self.phase_corr_time = gains_config["phase_corr_time"]
@@ -250,20 +260,21 @@ class GPGains(BaseGPGains):
 
         def forward(params, state, constants):
 
-            interp = lambda R, x: jnp.einsum("ij,afj->afi", R, x)
+            interp = lambda R, x, mu: jnp.einsum("ij,afj->afi", R, x - mu) + mu
 
             gains_amp_induce_base = params["gains_amp_induce_base"]
             gains_phase_induce_base = params["gains_phase_induce_base"]
 
-            gains_amp_induce = self.forward_transform(gains_amp_induce_base, self.L_gains_amp, self.mu_gains_amp)
+            gains_amp_induce = self.forward_transform(gains_amp_induce_base, self.L_gains_amp, self.mu_gains_amp) 
             gains_phase_induce = self.forward_transform(gains_phase_induce_base, self.L_gains_phase, self.mu_gains_phase)
 
-            gains_amp = interp(self.resample_amp, gains_amp_induce)
-            gains_phase = jnp.concatenate([interp(self.resample_phase, gains_phase_induce), jnp.zeros((1, self.n_freq, self.n_time))], axis=0)
+            gains_amp = interp(self.resample_amp, gains_amp_induce, self.gp_amp_mean)
+            gains_phase = jnp.concatenate([interp(self.resample_phase, gains_phase_induce, self.gp_phase_mean), jnp.zeros((1, self.n_freq, self.n_time))], axis=0)
 
             gains = gains_amp * jnp.exp(1.0j * gains_phase)
 
             vis_obs = apply_gains(gains, state["vis_rfi"] + state["vis_ast"], self.a1, self.a2)
+            # vis_obs = apply_gains(gains, state["vis_rfi"], self.a1, self.a2) + state["vis_ast"]
 
             state = {**state, "vis_obs": vis_obs, "gains": gains}
             return state
@@ -290,16 +301,15 @@ class GPGains(BaseGPGains):
             1e-8,
         )
 
-
     def _compute_prior_params(self):
 
         self.L_gains_amp = cholesky(self.g_times, self.gp_amp_std**2, self.amp_corr_time, 1e-8)
-        self.mu_gains_amp = jnp.ones(
+        self.mu_gains_amp = self.gp_amp_mean * jnp.ones(
             (self.n_ant, self.n_freq, self.n_g_times)
         )
 
-        self.L_gains_phase = cholesky(self.g_times, self.gp_phase_std**2, self.amp_corr_time, 1e-8)
-        self.mu_gains_phase = jnp.zeros(
+        self.L_gains_phase = cholesky(self.g_times, self.gp_phase_std**2, self.phase_corr_time, 1e-8)
+        self.mu_gains_phase = self.gp_phase_mean * jnp.ones(
             (self.n_ant-1, self.n_freq, self.n_g_times)
         )
 
