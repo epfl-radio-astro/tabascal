@@ -3,6 +3,7 @@ from tabascal.components.likelihood import gaussian
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements
 from tabascal.interferometry import get_strides_and_idxs
+from tabascal.fft_gp import domain_ss
 
 import jax.numpy as jnp
 from jax import vmap, Array
@@ -66,6 +67,7 @@ class TabConfig:
     def __init__(self, config: Dict, ms_path: str):
 
         # self.config = config
+        self.args = config
         self.ms_path = ms_path
         self.spacetrack_path = config["satellites"]["spacetrack_path"]
 
@@ -94,10 +96,7 @@ class TabConfig:
             config["rfi"]["max_time_bins"],
         )
 
-        self._set_times()
-        self._set_freqs()
-
-        self.args = config
+        self._set_freqs_times()
 
     def set_noise(self, noise: float):
 
@@ -194,16 +193,20 @@ class TabConfig:
             get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
         )
 
-    def _set_times(self):
+    def _set_freqs_times(self):
 
-        self.times_fine = int_sample_times(self.times, self.n_int_time).compute()
-        self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
-        self.n_time_fine = len(self.times_fine)
-
-    def _set_freqs(self):
-
-        self.freqs_fine = int_sample_times(self.freqs, self.n_int_freq).compute()
+        ns = [self.n_freq, self.n_time]
+        dxs = [self.chan_width, self.int_time]
+        x0s = [self.freqs[0], self.times[0]]
+        ss_factors = [self.n_int_freq, self.n_int_time]
+        pad_factors = [
+            self.args["rfi"]["freq_pad_factor"],
+            self.args["rfi"]["time_pad_factor"],
+        ]
+        self.freqs_fine, self.times_fine = domain_ss(ns, dxs, x0s, ss_factors, pad_factors)
         self.n_freq_fine = len(self.freqs_fine)
+        self.n_time_fine = len(self.times_fine)
+        self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
 
     def get_orbital_elements(self, norad_ids: List[int]):
 

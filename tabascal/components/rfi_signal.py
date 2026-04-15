@@ -75,7 +75,7 @@ def compute_real_space_gp_params(gp_l: float, gp_var: float, times: Array, times
 #     return B * rfi_amp
 
 
-def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, times: Array) -> Dict:
+def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
     """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
 
     Parameters
@@ -94,7 +94,12 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
         Raised when an invalid input is provided for one fo the configuration parameters.
     """
 
-    extent = lambda x: float(jnp.max(x) - jnp.min(x))
+    def extent(x, dx):
+        ext = float(jnp.max(x) - jnp.min(x))
+        if ext == 0.0:
+            return float(dx)
+        else:
+            return ext
 
     try:
         r_seed = rfi_config["r_seed"]
@@ -114,29 +119,31 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     if not gp_var: # Set Default
         est_gp_var = float(jnp.max(jnp.abs(vis_obs)))
         rfi_config["var"] = est_gp_var
-        print(f"Using RFI var : {est_gp_var:.3e} Jy")
     elif isinstance(gp_var, (float, int)):
         rfi_config["var"] = float(gp_var)
     else:
         raise ValueError(f"Config parameter (rfi:\n\tvar: {gp_var}) is not of type float or int.")
     
     if not gp_freq_l: # Set Default
-        est_gp_freq_l = extent(freqs) / 2
+        est_gp_freq_l = extent(freqs, chan_width) / 2
         rfi_config["corr_freq"] = est_gp_freq_l
-        print(f"Using RFI corr_freq : {est_gp_freq_l:.3e} Hz")
     elif isinstance(gp_freq_l, (float, int)):
         rfi_config["corr_freq"] = float(gp_freq_l)
     else:
         raise ValueError(f"Config parameter (rfi:\n\tcorr_freq: {gp_freq_l}) is not of type float or int.")
     
     if not gp_time_l: # Set Default
-        est_gp_time_l = extent(times) / 2
+        est_gp_time_l = extent(times, int_time) / 2
         rfi_config["corr_freq"] = est_gp_time_l
-        print(f"Using RFI corr_time : {est_gp_time_l:.3e} s")
     elif isinstance(gp_time_l, (float, int)):
         rfi_config["corr_time"] = float(gp_time_l)
     else:
         raise ValueError(f"Config parameter (rfi:\n\tcorr_time: {gp_time_l}) is not of type float or int.")    
+    
+    print()
+    print(f"Using RFI var : {rfi_config['var']:.1e} Jy")
+    print(f"Using RFI corr_freq : {rfi_config['corr_freq']/1e3:.1f} kHz")
+    print(f"Using RFI corr_time : {rfi_config['corr_time']:.1f} s")
 
     return rfi_config
 
@@ -159,7 +166,7 @@ class BaseGPRFI(Component):
 
         # Validate config and set defaults
         rfi_config = rfi_signal_config_validation(
-            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.times)
+            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
 
         # Random seed used for random sampling such as initial parameters drawn from the prior
         self.r_seed = rfi_config["r_seed"]
@@ -652,8 +659,10 @@ class FourierGPRFI(BaseGPRFI):
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
         k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
         p0 = self.gp_var #* self.n_time * self.n_freq
-        gammas = [1e2, 1e2]
-        pk_cutoff = 1e-6
+        # gammas = [1e2, 1e2]
+        # gammas = [5, 5]
+        gammas = [3, 3]
+        pk_cutoff = 1e-9
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,
@@ -712,7 +721,7 @@ class FourierGPRFI(BaseGPRFI):
             print("Using data for RFI prior mean")
             self.mu_rfi_k = self._compute_data_est(vis_obs)
         elif prior_type == "est": 
-            print("Using provided estimate for rfi_k")
+            print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
         elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
@@ -752,28 +761,28 @@ class FourierGPRFI(BaseGPRFI):
     def _compute_init_params(self, init_type: str, est_path: str):
 
         if init_type == "prior":
-            print("Using prior mean for rfi_k")
+            print("Using prior mean for rfi_A init")
             self.init_rfi_k = self.mu_rfi_k
         elif init_type == "est":
-            print("Using provided estimate for rfi_k")
+            print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
         elif init_type == "truth":
-            print("Using truth for rfi_A")
+            print("Using truth for rfi_A init")
             self.init_rfi_k = self.true_rfi_k_A
         elif init_type in ["zeros", 0]:
-            print("Using zeros for rfi_k")
+            print("Using zeros for rfi_A init")
             # zeros_k is shape (1, 1, n_k_freq_rfi, n_k_time_rfi)
             zeros_k = self.signal_to_latent(jnp.zeros((self.n_freq, self.n_time), dtype=complex))[None,None,:,:]
             # init_rfi_k is shape (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
             self.init_rfi_k = zeros_k * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type in ["ones", 1]:
-            print("Using ones for rfi_k")
+            print("Using ones for rfi_A init")
             # ones_k is shape (1, 1, n_k_freq_rfi, n_k_time_rfi)
             ones_k = self.signal_to_latent(jnp.ones((self.n_freq, self.n_time), dtype=complex))[None,None,:,:]
             # init_rfi_k is shape (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
             self.init_rfi_k = ones_k * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type == "sample":
-            print("Drawing sample from prior for rfi_k")
+            print("Drawing sample from prior for rfi_A init")
             base_sample = random.normal(
                 random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
@@ -979,7 +988,7 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             print("Using data for RFI prior mean")
             self.mu_rfi_k = self._compute_data_est(vis_obs)
         elif prior_type == "est": 
-            print("Using provided estimate for rfi_k")
+            print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
         elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
@@ -1023,24 +1032,24 @@ class FourierGPRFIConstAnt(BaseGPRFI):
     def _compute_init_params(self, init_type, est_path):
 
         if init_type == "prior":
-            print("Using prior mean for rfi_k")
+            print("Using prior mean for rfi_A init")
             self.init_rfi_k = self.mu_rfi_k
         elif init_type == "est": 
-            print("Using provided estimate for rfi_k")
+            print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
         elif init_type == "truth":
-            print("Using truth for rfi_A")
+            print("Using truth for rfi_A int")
             self.init_rfi_k = self.true_rfi_k_A
         elif init_type in ["zeros", 0]:
-            print("Using zeros for rfi_k")
+            print("Using zeros for rfi_A init")
             ones = jnp.zeros((self.n_freq, self.n_time), dtype=complex)
             self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type == "ones":
-            print("Using ones for rfi_k")
+            print("Using ones for rfi_A init")
             ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
             self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type == "sample":
-            print("Drawing sample from prior for rfi_k")
+            print("Drawing sample from prior for rfi_A init")
             base_sample = random.normal(
                 random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
