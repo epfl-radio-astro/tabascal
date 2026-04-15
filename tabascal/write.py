@@ -30,7 +30,7 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         )
 
     elif xds_tab.ast_vis.data.ndim == 4:
-        n_freq = xds_tab.ast_vis.data.shape[2]
+        n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
         n_corr = 1
 
         vis_ast = da.transpose(
@@ -43,17 +43,33 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         ).reshape(-1, n_freq, n_corr)
         vis_rfi = xr.DataArray(vis_rfi, dims=dims).chunk(chunks)
 
+        a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
+        a2 = xds_ms.ANTENNA1.data[:n_bl].compute()
+
+        gains = xds_tab.gains.data.astype(np.complex64).mean(axis=0)
+        gains_bl = da.transpose(gains[a1] * da.conj(gains[a2]), (2, 0, 1)).reshape(-1, n_freq, n_corr)
+        gains_bl = xr.DataArray(gains_bl, dims=dims).chunk(chunks)
+
     else:
         raise ValueError(
             f"Unknown data dimensions. Expected 3 or 4 but got {xds_tab.ast_vis.data.ndim}"
         )
+    
+    
 
     vis_obs = xds_ms[data_col]
+    vis_cal = vis_obs
 
     vis_ast_res = vis_obs - vis_ast
     vis_rfi_res = vis_obs - vis_rfi
-    vis_res = vis_obs - vis_ast - vis_rfi
+    vis_res = vis_obs - (vis_ast + vis_rfi)
+    # vis_cal = vis_obs / gains_bl
 
+    # vis_ast_res = vis_obs - vis_ast * gains_bl
+    # vis_rfi_res = vis_obs - vis_rfi * gains_bl
+    # vis_res = vis_obs - (vis_ast + vis_rfi) * gains_bl
+
+    xds_ms = xds_ms.assign(CORRECTED_DATA=vis_cal)
     xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)
     xds_ms = xds_ms.assign(TAB_RFI_DATA=vis_rfi)
     xds_ms = xds_ms.assign(TAB_AST_RES=vis_ast_res)
@@ -61,6 +77,7 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     xds_ms = xds_ms.assign(TAB_RES_DATA=vis_res)
 
     cols = [
+        "CORRECTED_DATA",
         "TAB_AST_DATA",
         "TAB_RFI_DATA",
         "TAB_AST_RES",

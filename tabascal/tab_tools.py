@@ -151,8 +151,8 @@ def read_ms(
 
     n_ant = ants_itrf.shape[0]
     n_time = len(np.unique(xds.TIME.data.compute()))
-    n_bl = xds.DATA.data.shape[0] // n_time
-    n_freq, n_corr = xds.DATA.data.shape[1:]
+    n_bl = xds[data_col].data.shape[0] // n_time
+    n_freq, n_corr = xds[data_col].data.shape[1:]
 
     freqs = jnp.array(xds_spec.CHAN_FREQ.data[0].compute())
     chan_width = jnp.array(xds_spec.CHAN_WIDTH.data[0,0].compute())
@@ -179,10 +179,13 @@ def read_ms(
 
     n_freq = len(chans)
 
+    print(n_freq, chans)
+
     read_data = lambda col_name: jnp.transpose(
         jnp.array(
             xds[col_name]
-            .data[:, chans, corr_idx].reshape(n_time, n_bl, n_freq)
+            # .data[:, chans, corr_idx].reshape(n_time, n_bl, n_freq)
+            .data[:, :, corr_idx].reshape(n_time, n_bl, n_freq)
             .compute()
         ),
         (1, 2, 0),
