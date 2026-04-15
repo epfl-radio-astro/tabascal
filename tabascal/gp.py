@@ -46,7 +46,7 @@ def get_times(times, gp_l):
     t_f = times[-1] + int_time / 2
     n_gp_times = jnp.ceil(2.0 * ((t_f - t_i) / gp_l) + 1).astype(int)
 
-    n_gp_times = find_closest_factor_greater_than(len(times), n_gp_times) + 1
+    # n_gp_times = find_closest_factor_greater_than(len(times), n_gp_times) + 1
 
     n_gp_times = jnp.where(n_gp_times < 2, 2, n_gp_times)
     sample_times = jnp.linspace(t_i, t_f, n_gp_times)
