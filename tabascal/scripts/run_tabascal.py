@@ -70,7 +70,7 @@ def tabascal_subtraction(
     print(f"Model : {model_name}")
     results_name = f"{model_name}{suffix}"
 
-    if config["data"]["sim_dir"] is None:
+    if sim_dir:
         config["data"]["sim_dir"] = os.path.abspath(sim_dir)
     else:
         sim_dir = os.path.abspath(config["data"]["sim_dir"])
@@ -332,25 +332,25 @@ def main():
     conf_path = args.config
     spacetrack_path = args.spacetrack
     norad_path = args.norad_path
-    if sim_dir:
-        norad_path = os.path.join(sim_dir, "input_data/norad_ids.yaml")
-    else:
-        sim_dir = os.path.split(args.ms_path)[0]
+    # if sim_dir:
+        # norad_path = os.path.join(sim_dir, "input_data/norad_ids.yaml")
+    # else:
+    # sim_dir = os.path.split(args.ms_path)[0]
 
-    if norad_path:
-        norad_ids = [int(x) for x in np.atleast_1d(np.loadtxt(norad_path))]
-    else:
-        norad_ids = []
+    # if norad_path:
+    #     norad_ids = [int(x) for x in np.atleast_1d(np.loadtxt(norad_path))]
+    # else:
+    norad_ids = []
 
     config = load_config(conf_path)
 
-    config_st_path = config["satellites"]["spacetrack_path"]
-    if spacetrack_path:
-        config["satellites"]["spacetrack_path"] = os.path.abspath(spacetrack_path)
-    elif config_st_path:
-        config_st_path = os.path.abspath(config_st_path)
-        config["satellites"]["spacetrack_path"] = config_st_path
-        spacetrack_path = config_st_path
+    # config_st_path = config["satellites"]["spacetrack_path"]
+    # if spacetrack_path:
+    #     config["satellites"]["spacetrack_path"] = os.path.abspath(spacetrack_path)
+    # elif config_st_path:
+    #     config_st_path = os.path.abspath(config_st_path)
+    #     config["satellites"]["spacetrack_path"] = config_st_path
+    #     spacetrack_path = config_st_path
 
     if args.timings:
         enable_timings()
