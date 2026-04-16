@@ -47,6 +47,7 @@ test_sizes = [(1, 1, 1, 1, 1, 1), (4, 5, 6, 7, 8, 9), (64, 20, 16, 12, 4, 2)]
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
+    """FFI and reference Riemann kernels produce identical vis_rfi outputs."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
 
     def compute_vis_rfi(impl):
@@ -66,7 +67,7 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
-
+    """Forward-mode Jacobian-vector products of FFI and reference kernels match."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
 
 
@@ -93,7 +94,7 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
-
+    """Reverse-mode VJP gradients w.r.t. rfi_A and rfi_phase match between FFI and reference."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
 
 

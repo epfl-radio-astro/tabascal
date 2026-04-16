@@ -141,6 +141,7 @@ def make_trajectory_config(
 class TestPhaseCalculationRFI:
 
     def test_setup_succeeds(self):
+        """Component initialises without error with a default mock config."""
         cfg = make_trajectory_config()
         comp = PhaseCalculationRFI()
         comp.setup(cfg)
@@ -163,6 +164,7 @@ class TestPhaseCalculationRFI:
         assert out is sentinel
 
     def test_forward_output_shape(self):
+        """Forward pass produces rfi_phase with shape (n_rfi, n_ant, n_freq_fine, n_time_fine)."""
         n_ant, n_rfi, n_freq, n_time, n_int_time = 4, 2, 3, 5, 2
         cfg = make_trajectory_config(
             n_ant=n_ant, n_rfi=n_rfi, n_freq=n_freq,
@@ -213,6 +215,7 @@ class TestPhaseCalculationRFI:
         assert not jnp.allclose(phase[0, 0], phase[0, 1])
 
     def test_forward_preserves_rfi_xyz_in_state(self):
+        """Forward pass copies rfi_xyz through to the output state unchanged."""
         cfg = make_trajectory_config()
         comp = PhaseCalculationRFI()
         comp.setup(cfg)
@@ -230,6 +233,7 @@ class TestPhaseCalculationRFI:
         (8, 3, 2, 6, 3),
     ])
     def test_parametric_sizes(self, n_ant, n_rfi, n_freq, n_time, n_int_time):
+        """Output shape and finiteness verified across a range of dimension combinations."""
         cfg = make_trajectory_config(
             n_ant=n_ant, n_rfi=n_rfi, n_freq=n_freq,
             n_time=n_time, n_int_time=n_int_time,
@@ -279,11 +283,13 @@ class TestPhaseCalculationRFI:
 class TestFixedOrbit:
 
     def test_setup_succeeds(self):
+        """Component propagates the TLE orbit and pre-computes phase without error."""
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
 
     def test_rfi_xyz_shape(self):
+        """Pre-computed satellite positions stored at setup have shape (n_rfi, n_time_fine, 3)."""
         n_rfi, n_time, n_int_time = 1, 4, 2
         cfg = make_trajectory_config(n_rfi=n_rfi, n_time=n_time, n_int_time=n_int_time)
         comp = FixedOrbit()
@@ -292,6 +298,7 @@ class TestFixedOrbit:
         assert comp.rfi_xyz.shape == (n_rfi, n_time_fine, 3)
 
     def test_rfi_phase_shape(self):
+        """Pre-computed phase stored at setup has shape (n_rfi, n_ant, n_freq, n_time_fine)."""
         n_rfi, n_ant, n_freq, n_time, n_int_time = 1, 4, 2, 4, 2
         cfg = make_trajectory_config(
             n_rfi=n_rfi, n_ant=n_ant, n_freq=n_freq,
@@ -319,12 +326,14 @@ class TestFixedOrbit:
         assert jnp.all(radii < 8.0e6)
 
     def test_rfi_phase_finite(self):
+        """All pre-computed phase values are finite."""
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
         assert jnp.all(jnp.isfinite(comp.rfi_phase))
 
     def test_forward_adds_rfi_xyz_and_phase_to_state(self):
+        """Forward pass inserts rfi_xyz and rfi_phase into the state dict."""
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
@@ -353,6 +362,7 @@ class TestFixedOrbit:
         assert jnp.array_equal(out1["rfi_xyz"], out2["rfi_xyz"])
 
     def test_two_satellites_shape(self):
+        """Two distinct TLEs produce position and phase arrays of the correct shape."""
         n_rfi = 2
         tles = np.array([
             [_ISS_TLE1, _ISS_TLE2],
@@ -466,12 +476,14 @@ class TestSGP4LEONoDragOrbit:
         )
 
     def test_setup_succeeds(self):
+        """Component loads TLEs from the repo cache and initialises without error."""
         from tabascal.components.trajectory import SGP4LEONoDragOrbit
         cfg = self._make_config()
         comp = SGP4LEONoDragOrbit()
         comp.setup(cfg)
 
     def test_rfi_xyz_shape(self):
+        """Initial state_outputs['rfi_xyz'] placeholder has shape (n_rfi, n_time_fine, 3)."""
         from tabascal.components.trajectory import SGP4LEONoDragOrbit
         cfg = self._make_config()
         comp = SGP4LEONoDragOrbit()
@@ -479,6 +491,7 @@ class TestSGP4LEONoDragOrbit:
         assert comp.state_outputs["rfi_xyz"].shape == (cfg.n_rfi, cfg.n_time_fine, 3)
 
     def test_init_params_base_shape(self):
+        """Initial base orbit parameters have shape (n_rfi, 6) — bstar excluded from learnable params."""
         from tabascal.components.trajectory import SGP4LEONoDragOrbit
         cfg = self._make_config()
         comp = SGP4LEONoDragOrbit()
@@ -496,6 +509,7 @@ class TestSGP4LEONoDragOrbit:
             assert jnp.all(diag > 0), f"Cholesky diagonal not positive for satellite {i}"
 
     def test_forward_output_shapes(self):
+        """Forward pass produces rfi_xyz (n_rfi, n_time_fine, 3) and elements (n_rfi, 6)."""
         from tabascal.components.trajectory import SGP4LEONoDragOrbit
         cfg = self._make_config()
         comp = SGP4LEONoDragOrbit()
@@ -508,6 +522,7 @@ class TestSGP4LEONoDragOrbit:
         assert out["elements"].shape == (cfg.n_rfi, 6)
 
     def test_forward_rfi_xyz_finite(self):
+        """SGP4-propagated satellite positions from the forward pass are all finite."""
         from tabascal.components.trajectory import SGP4LEONoDragOrbit
         cfg = self._make_config()
         comp = SGP4LEONoDragOrbit()
@@ -622,12 +637,14 @@ class TestSGP4LEOOrbit:
         )
 
     def test_setup_succeeds(self):
+        """Component loads TLEs from the repo cache and initialises without error."""
         from tabascal.components.trajectory import SGP4LEOOrbit
         cfg = self._make_config()
         comp = SGP4LEOOrbit()
         comp.setup(cfg)
 
     def test_rfi_xyz_shape(self):
+        """Initial state_outputs['rfi_xyz'] placeholder has shape (n_rfi, n_time_fine, 3)."""
         from tabascal.components.trajectory import SGP4LEOOrbit
         cfg = self._make_config()
         comp = SGP4LEOOrbit()
@@ -643,6 +660,7 @@ class TestSGP4LEOOrbit:
         assert comp.init_params_base["rfi_orbit_base"].shape == (cfg.n_rfi, 7)
 
     def test_prior_covariance_positive_definite(self):
+        """Cholesky factor L_rfi_orbit (7x7) has a positive diagonal for every satellite."""
         from tabascal.components.trajectory import SGP4LEOOrbit
         cfg = self._make_config()
         comp = SGP4LEOOrbit()
@@ -652,6 +670,7 @@ class TestSGP4LEOOrbit:
             assert jnp.all(diag > 0), f"Cholesky diagonal not positive for satellite {i}"
 
     def test_forward_output_shapes(self):
+        """Forward pass produces rfi_xyz (n_rfi, n_time_fine, 3) and elements (n_rfi, 7)."""
         from tabascal.components.trajectory import SGP4LEOOrbit
         cfg = self._make_config()
         comp = SGP4LEOOrbit()
@@ -664,6 +683,7 @@ class TestSGP4LEOOrbit:
         assert out["elements"].shape == (cfg.n_rfi, 7)
 
     def test_forward_rfi_xyz_finite(self):
+        """SGP4-propagated satellite positions from the forward pass are all finite."""
         from tabascal.components.trajectory import SGP4LEOOrbit
         cfg = self._make_config()
         comp = SGP4LEOOrbit()

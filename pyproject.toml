@@ -28,6 +28,7 @@ dependencies = [
     "numpyro",
     "optax",
     "PyYAML",
+    "sgp4jax",
     "skyfield",
     "spacetrack",
     "tabsim",

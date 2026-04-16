@@ -92,6 +92,7 @@ def make_vis_state(n_ant, n_freq, n_time, rng_key=0):
 class TestGainsConfigValidation:
 
     def test_null_values_get_defaults(self):
+        """None corr_time / corr_freq values are replaced with defaults derived from the observation grid."""
         freqs = jnp.linspace(1.4e9, 1.41e9, 4)
         times = jnp.linspace(0.0, 120.0, 8)
         cfg = {
@@ -115,6 +116,7 @@ class TestGainsConfigValidation:
         assert result["phase_corr_time"] > 0
 
     def test_explicit_values_stored_correctly(self):
+        """Non-null correlation times and frequencies are stored unchanged on the component."""
         freqs = jnp.linspace(1.4e9, 1.41e9, 4)
         times = jnp.linspace(0.0, 120.0, 8)
         cfg = {
@@ -140,6 +142,7 @@ class TestGainsConfigValidation:
         assert result["phase_corr_time"] == pytest.approx(30.0)
 
     def test_invalid_amp_mean_type_raises(self):
+        """A non-numeric amp_mean raises ValueError during gains_config_validation."""
         freqs = jnp.linspace(1.4e9, 1.41e9, 4)
         times = jnp.linspace(0.0, 120.0, 8)
         cfg = {
@@ -157,6 +160,7 @@ class TestGainsConfigValidation:
             gains_config_validation(cfg, freqs, 1e6, times, 8.0)
 
     def test_invalid_phase_std_type_raises(self):
+        """A non-numeric phase_std raises ValueError during gains_config_validation."""
         freqs = jnp.linspace(1.4e9, 1.41e9, 4)
         times = jnp.linspace(0.0, 120.0, 8)
         cfg = {
@@ -193,11 +197,13 @@ class TestGainsConfigValidation:
 class TestUnitaryGains:
 
     def test_setup_succeeds(self):
+        """Component initialises without error."""
         cfg = make_gains_config()
         comp = UnitaryGains()
         comp.setup(cfg)  # must not raise
 
     def test_state_outputs_shapes(self):
+        """state_outputs['gains'] placeholder has shape (n_ant, n_freq, n_time)."""
         n_ant, n_freq, n_time = 4, 3, 6
         cfg = make_gains_config(n_ant=n_ant, n_freq=n_freq, n_time=n_time)
         comp = UnitaryGains()
@@ -208,6 +214,7 @@ class TestUnitaryGains:
         assert comp.state_outputs["vis_obs"].shape == (n_bl, n_freq, n_time)
 
     def test_no_learnable_params(self):
+        """init_params_base is empty — UnitaryGains has no free parameters."""
         cfg = make_gains_config()
         comp = UnitaryGains()
         comp.setup(cfg)
@@ -228,6 +235,7 @@ class TestUnitaryGains:
         assert jnp.allclose(out["vis_obs"], expected)
 
     def test_forward_preserves_other_state_keys(self):
+        """Forward does not drop pre-existing keys in the state dict."""
         cfg = make_gains_config()
         comp = UnitaryGains()
         comp.setup(cfg)
@@ -242,6 +250,7 @@ class TestUnitaryGains:
         (16, 4, 12),
     ])
     def test_forward_output_shapes(self, n_ant, n_freq, n_time):
+        """gains and vis_obs output shapes are correct for the given (n_ant, n_freq, n_time) dimensions."""
         cfg = make_gains_config(n_ant=n_ant, n_freq=n_freq, n_time=n_time)
         comp = UnitaryGains()
         comp.setup(cfg)
@@ -259,11 +268,13 @@ class TestUnitaryGains:
 class TestGPGains:
 
     def test_setup_succeeds(self):
+        """Component initialises without error."""
         cfg = make_gains_config(amp_corr_time=60.0, phase_corr_time=60.0)
         comp = GPGains()
         comp.setup(cfg)
 
     def test_prior_params_shapes(self):
+        """Prior mean and Cholesky L arrays have shapes consistent with the GP parameterisation."""
         n_ant, n_freq, n_time = 4, 3, 8
         cfg = make_gains_config(
             n_ant=n_ant, n_freq=n_freq, n_time=n_time,
@@ -279,6 +290,7 @@ class TestGPGains:
         assert comp.mu_gains_phase.shape == (n_ant - 1, n_freq, n_g)
 
     def test_init_params_base_shapes(self):
+        """Initial base parameter arrays match the GP amplitude and phase grid sizes."""
         n_ant, n_freq, n_time = 4, 3, 8
         cfg = make_gains_config(
             n_ant=n_ant, n_freq=n_freq, n_time=n_time,
@@ -294,6 +306,7 @@ class TestGPGains:
         assert comp.init_params_base["gains_phase_induce_base"].shape == (n_ant - 1, n_freq, n_g)
 
     def test_forward_output_shapes(self):
+        """Forward produces gains (n_ant, n_freq, n_time) and vis_obs (n_bl, n_freq, n_time)."""
         n_ant, n_freq, n_time = 4, 2, 8
         cfg = make_gains_config(
             n_ant=n_ant, n_freq=n_freq, n_time=n_time,
@@ -360,6 +373,7 @@ class TestGPGains:
         assert jnp.allclose(last_phase, 0.0, atol=1e-6)
 
     def test_forward_output_is_complex(self):
+        """gains and vis_obs from the forward pass are complex-valued."""
         cfg = make_gains_config(amp_corr_time=60.0, phase_corr_time=60.0)
         comp = GPGains()
         comp.setup(cfg)
@@ -375,6 +389,7 @@ class TestGPGains:
         assert jnp.issubdtype(out["vis_obs"].dtype, jnp.complexfloating)
 
     def test_resample_matrices_shapes(self):
+        """GP resampling matrices have shapes consistent with the coarse/fine time grids."""
         n_ant, n_freq, n_time = 5, 4, 16
         cfg = make_gains_config(
             n_ant=n_ant, n_freq=n_freq, n_time=n_time,
@@ -393,6 +408,7 @@ class TestGPGains:
         (8, 4, 16),
     ])
     def test_setup_and_forward_various_sizes(self, n_ant, n_freq, n_time):
+        """Setup and forward succeed end-to-end for the given (n_ant, n_freq, n_time)."""
         cfg = make_gains_config(
             n_ant=n_ant, n_freq=n_freq, n_time=n_time,
             amp_corr_time=60.0, phase_corr_time=60.0,
