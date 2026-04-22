@@ -255,8 +255,26 @@ class GPGains(BaseGPGains):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "resample_amp": self.resample_amp,
+            "L_gains_amp": self.L_gains_amp,
+            "mu_gains_amp": self.mu_gains_amp,
+            "resample_phase": self.resample_phase,
+            "L_gains_phase": self.L_gains_phase,
+            "mu_gains_phase": self.mu_gains_phase,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        forward_transform = self.forward_transform
+        gp_amp_mean = self.gp_amp_mean
+        gp_phase_mean = self.gp_phase_mean
+        a1 = self.a1
+        a2 = self.a2
+        n_freq = self.n_freq
+        n_time = self.n_time
 
         def forward(params, state, constants):
 
@@ -265,16 +283,23 @@ class GPGains(BaseGPGains):
             gains_amp_induce_base = params["gains_amp_induce_base"]
             gains_phase_induce_base = params["gains_phase_induce_base"]
 
-            gains_amp_induce = self.forward_transform(gains_amp_induce_base, self.L_gains_amp, self.mu_gains_amp) 
-            gains_phase_induce = self.forward_transform(gains_phase_induce_base, self.L_gains_phase, self.mu_gains_phase)
+            L_gains_amp = constants[f"{prefix}/L_gains_amp"]
+            mu_gains_amp = constants[f"{prefix}/mu_gains_amp"]
+            L_gains_phase = constants[f"{prefix}/L_gains_phase"]
+            mu_gains_phase = constants[f"{prefix}/mu_gains_phase"]
+            resample_amp = constants[f"{prefix}/resample_amp"]
+            resample_phase = constants[f"{prefix}/resample_phase"]
 
-            gains_amp = interp(self.resample_amp, gains_amp_induce, self.gp_amp_mean)
-            gains_phase = jnp.concatenate([interp(self.resample_phase, gains_phase_induce, self.gp_phase_mean), jnp.zeros((1, self.n_freq, self.n_time))], axis=0)
+            gains_amp_induce = forward_transform(gains_amp_induce_base, L_gains_amp, mu_gains_amp)
+            gains_phase_induce = forward_transform(gains_phase_induce_base, L_gains_phase, mu_gains_phase)
+
+            gains_amp = interp(resample_amp, gains_amp_induce, gp_amp_mean)
+            gains_phase = jnp.concatenate([interp(resample_phase, gains_phase_induce, gp_phase_mean), jnp.zeros((1, n_freq, n_time))], axis=0)
 
             gains = gains_amp * jnp.exp(1.0j * gains_phase)
 
-            vis_obs = apply_gains(gains, state["vis_rfi"] + state["vis_ast"], self.a1, self.a2)
-            # vis_obs = apply_gains(gains, state["vis_rfi"], self.a1, self.a2) + state["vis_ast"]
+            vis_obs = apply_gains(gains, state["vis_rfi"] + state["vis_ast"], a1, a2)
+            # vis_obs = apply_gains(gains, state["vis_rfi"], a1, a2) + state["vis_ast"]
 
             state = {**state, "vis_obs": vis_obs, "gains": gains}
             return state

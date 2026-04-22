@@ -546,22 +546,28 @@ class SGP4LEOOrbit(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "times_jd_fine": self.times_jd_fine,
+            "L_rfi_orbit": self.L_rfi_orbit,
+            "mu_rfi_orbit": self.mu_rfi_orbit,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        times_jd_fine = self.times_jd_fine
-        L_orbit = self.L_rfi_orbit
-        mu_orbit = self.mu_rfi_orbit
+        prefix = self.prefix
         forward_transform = self.forward_transform
-        
+        sats_init = self.sats_init
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
+            L_orbit = constants[f"{prefix}/L_rfi_orbit"]
+            mu_orbit = constants[f"{prefix}/mu_rfi_orbit"]
 
             elements = forward_transform(params["rfi_orbit_base"], L_orbit, mu_orbit)
-            
-            sats = self.sats_init(elements)
-            rfi_xyz, _ = sgp4jax.gcrf_positions_multi_leo(sats, times_jd_fine)
+
+            sats = sats_init(elements)
+            rfi_xyz, _ = sgp4jax.gcrf_positions_multi_leo(sats, constants[f"{prefix}/times_jd_fine"])
             rfi_xyz = rfi_xyz * 1e3
 
             state = {**state, "elements": elements, "rfi_xyz": rfi_xyz}
