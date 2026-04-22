@@ -8,13 +8,16 @@ platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
 # ── Tasks ──────────────────────────────────────────────────────────────────────
 
 [tasks]
-test = "pytest tests/"
-test-components = "pytest tests/components/"
-docs-build = "sphinx-build -b html docs/ docs/_build/html"
-docs-clean = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
-build-ffi     = { cmd = "make cpu",  cwd = "tabascal/components/ffi", description = "Compile CPU FFI shared library (tabascal.so)" }
+build-ffi      = { cmd = "make cpu",  cwd = "tabascal/components/ffi", description = "Compile CPU FFI shared library (tabascal.so)" }
 build-ffi-cuda = { cmd = "make cuda", cwd = "tabascal/components/ffi", description = "Compile CUDA FFI shared library (tabascal_cuda.so)" }
 build-ffi-hip  = { cmd = "make hip",  cwd = "tabascal/components/ffi", description = "Compile HIP/ROCm FFI shared library (tabascal_hip.so)" }
+
+[feature.dev.tasks]
+test           = "pytest tests/"
+test-components = "pytest tests/components/"
+test-inventory = { cmd = "python scripts/generate_test_inventory.py", description = "Regenerate tests/TEST_INVENTORY.md from docstrings" }
+docs-build     = "sphinx-build -b html docs/ docs/_build/html"
+docs-clean     = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
 
 # ── Shared conda dependencies (all environments) ───────────────────────────────
 

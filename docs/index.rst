@@ -10,6 +10,7 @@ Welcome to tabscal documentation
    config
    components
    concepts
+   spacetrack
 
 .. toctree::
    :maxdepth: 2

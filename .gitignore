@@ -1,4 +1,5 @@
 pixi.lock
+tests/TEST_INVENTORY.md
 tabascal.egg-info/*
 build/*
 docs/_build

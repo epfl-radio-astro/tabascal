@@ -2,8 +2,8 @@
 """
 Generate tests/TEST_INVENTORY.md from test file docstrings.
 
-Run from the tabascal/ directory:
-    python tests/generate_inventory.py
+Run from the repo root:
+    python scripts/generate_test_inventory.py
 
 Each test function's one-line docstring becomes the Description column.
 Parametrised variants share their function's docstring.
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-TESTS_DIR = Path(__file__).parent
+TESTS_DIR = Path(__file__).parent.parent / "tests"
 
 # Ordered list of test files to include in the inventory.
 FILE_ORDER = [
