@@ -23,10 +23,22 @@ class Component(ABC):
     def build_forward(self) -> Callable:
         """Build the forward computation function"""
 
-        def forward(params: Dict, state: Dict) -> Dict:
+        def forward(params: Dict, state: Dict, constants: Dict) -> Dict:
             return state
 
         return forward
+
+    @property
+    def prefix(self) -> str:
+        return f"_c/{self.__class__.__name__}"
+
+    def build_constants(self) -> Dict[str, Any]:
+        """Return arrays that do not change during the forward pass.
+
+        Returns a dict of array_name -> array_value. These will be stored
+        in constants as "_c/<ClassName>/array_name" by Model.__init__.
+        """
+        return {}
 
     def build_set_params(self) -> Callable:
         """Build parameter sampling function (optional)"""

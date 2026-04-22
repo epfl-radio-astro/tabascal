@@ -79,23 +79,28 @@ class FourierTimeAst(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "sigma_ast_k": self.sigma_ast_k,
+            "mu_ast_k": self.mu_ast_k,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        sigma_ast_k = self.sigma_ast_k
-        mu_ast_k = self.mu_ast_k
+        prefix = self.prefix
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
             ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
 
             vis_ast = jnp.fft.ifft(ast_k, axis=2)[:, :, n_pad:-n_pad]
-            # vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, n_pad:-n_pad]
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 
@@ -274,23 +279,28 @@ class FourierTimeConstFreqAst(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "sigma_ast_k": self.sigma_ast_k,
+            "mu_ast_k": self.mu_ast_k,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        sigma_ast_k = self.sigma_ast_k
-        mu_ast_k = self.mu_ast_k
+        prefix = self.prefix
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
             ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
 
             vis_ast = jnp.fft.ifft(ast_k, axis=2)[:, :, n_pad:-n_pad]
-            # vis_ast = jnp.fft.ifft(ast_k, axis=1)[:, n_pad:-n_pad]
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 
@@ -474,16 +484,22 @@ class FourierTimeFreqAst(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "sigma_ast_k": self.sigma_ast_k,
+            "mu_ast_k": self.mu_ast_k,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        sigma_ast_k = self.sigma_ast_k
-        mu_ast_k = self.mu_ast_k
+        prefix = self.prefix
         n_pad = self.n_pad
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
@@ -718,17 +734,23 @@ class FourierTimeFreqGPAst(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "sigma_ast_k": self.sigma_ast_k,
+            "mu_ast_k": self.mu_ast_k,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
-        # Pre-compute everything possible
-        sigma_ast_k = self.sigma_ast_k
-        mu_ast_k = self.mu_ast_k
+        prefix = self.prefix
         pads = self.pads
         ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
 
-        def forward(params, state):
+        def forward(params, state, constants):
             # Pure JAX operations only
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
