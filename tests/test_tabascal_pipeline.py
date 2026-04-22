@@ -381,7 +381,7 @@ def test_phase_calculation_rfi_pipeline(provide_test_data: Path, tmp_path: Path,
     _assert_new_chi2(stdout, t_config.chi2_ref)
 
 
-# SGP4LEONoDragOrbit + PhaseCalculationRFI — requires Space-Track credentials
+# SGP4LEONoDragOrbit + PhaseCalculationRFI — uses bundled TLE cache, no credentials needed
 sgp4_configs = [
     pytest.param(
         NewComponentPipelineTestConfig(
@@ -444,17 +444,13 @@ sgp4_configs = [
 ]
 
 
-@pytest.mark.skipif(
-    not _has_spacetrack_credentials(),
-    reason="Space-Track credentials not configured",
-)
 @pytest.mark.parametrize("t_config", sgp4_configs)
 def test_sgp4_component_pipeline(provide_test_data: Path, tmp_path: Path, t_config) -> None:
     """Integration tests for SGP4LEONoDragOrbit + PhaseCalculationRFI pipelines.
 
-    These require Space-Track credentials because SGP4LEONoDragOrbit fetches
-    fresh TLEs from the Space-Track API during component setup (in addition to
-    the TLE fetch performed by TabConfig itself).
+    The test data uses a 2023-02-21 observation epoch. NORAD IDs [20452, 38833, 45854]
+    are all present in the bundled TLE cache (tabascal/data/tles/2023-02-21-HMZGLE.json),
+    so no Space-Track credentials are required.
 
     Verifies the pipeline runs without error and emits a reasonable chi-squared.
     """

@@ -54,12 +54,10 @@ FILE_NOTES: dict[str, str] = {
         "simulation data (from HuggingFace) uses the tabsim default epoch of 2023-02-21; "
         "the repo ships `tabascal/data/tles/2023-02-21-HMZGLE.json` containing NORAD IDs "
         "20452, 38833, and 45854 (all three listed in `tests/data/tab_target.yaml`), so the "
-        "`TabConfig` TLE lookup is always satisfied from disk. Tests that additionally use "
+        "`TabConfig` TLE lookup is always satisfied from disk. Tests that use "
         "`SGP4LEONoDragOrbit` or `SGP4LEOOrbit` call `fetch_standard_orbital_elements` a "
         "second time during component `setup`; that second call is also satisfied by the same "
-        "bundled cache file — but only when the component's observation epoch likewise falls "
-        "on 2023-02-21. Tests marked **requires Space-Track** are skipped automatically when "
-        "`tabascal.tle.load_spacetrack_credentials` returns `(None, None)`."
+        "bundled cache file. No Space-Track credentials are required to run any test in this file."
     ),
 }
 
