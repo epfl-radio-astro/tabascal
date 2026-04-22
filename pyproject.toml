@@ -22,7 +22,7 @@ dependencies = [
     "astropy",
     "dask",
     "dask-ms",
-    "jax>=0.6.0,<=0.9",
+    "jax>=0.6.0,<0.10",
     "matplotlib",
     "numpy",
     "numpyro",
