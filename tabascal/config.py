@@ -196,13 +196,13 @@ class TabConfig:
 
     def _set_times(self):
 
-        self.times_fine = int_sample_times(self.times, self.n_int_time).compute()
+        self.times_fine = int_sample_times(np.asarray(self.times), self.n_int_time).compute()
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
         self.n_time_fine = len(self.times_fine)
-    
+
     def _set_freqs(self):
 
-        self.freqs_fine = int_sample_times(self.freqs, self.n_int_freq).compute()
+        self.freqs_fine = int_sample_times(np.asarray(self.freqs), self.n_int_freq).compute()
         self.n_freq_fine = len(self.freqs_fine)
 
     def get_orbital_elements(self, norad_ids: List[int]):
