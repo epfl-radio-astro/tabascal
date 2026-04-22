@@ -1,5 +1,6 @@
 pixi.lock
 tests/TEST_INVENTORY.md
+log_tab_*.txt
 tabascal.egg-info/*
 build/*
 docs/_build

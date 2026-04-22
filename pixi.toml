@@ -18,6 +18,7 @@ test-components = "pytest tests/components/"
 test-inventory = { cmd = "python scripts/generate_test_inventory.py", description = "Regenerate tests/TEST_INVENTORY.md from docstrings" }
 docs-build     = "sphinx-build -b html docs/ docs/_build/html"
 docs-clean     = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
+perf-test      = { cmd = "python ci/reframe/prepare_data.py --components 'trajectory:FixedOrbit,rfi_signal:ComplexRFI,rfi_vis:RiemannVisTimeFreqCalculation,ast_vis:FourierTimeFreqGPAst,gains:UnitaryGains' --workdir /tmp/tab-perf --src-root . && python tabascal/scripts/run_tabascal.py -c /tmp/tab-perf/tab_target.yaml -s $(cat /tmp/tab-perf/sim_dir.txt) -t", description = "Run performance benchmark locally (Riemann variant)" }
 
 # ── Shared conda dependencies (all environments) ───────────────────────────────
 
