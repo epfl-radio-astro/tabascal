@@ -17,6 +17,10 @@ from tabascal.components.gains import (
 )
 
 
+def make_constants(comp):
+    return {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -228,8 +232,9 @@ class TestUnitaryGains:
         comp.setup(cfg)
 
         state = make_vis_state(n_ant, n_freq, n_time)
+        constants = make_constants(comp)
         fwd = comp.build_forward()
-        out = fwd({}, state)
+        out = fwd({}, state, constants)
 
         expected = state["vis_rfi"] + state["vis_ast"]
         assert jnp.allclose(out["vis_obs"], expected)
@@ -241,7 +246,7 @@ class TestUnitaryGains:
         comp.setup(cfg)
         state = make_vis_state(cfg.n_ant, cfg.n_freq, cfg.n_time)
         state["some_extra_key"] = jnp.array(42.0)
-        out = comp.build_forward()({}, state)
+        out = comp.build_forward()({}, state, make_constants(comp))
         assert "some_extra_key" in out
 
     @pytest.mark.parametrize("n_ant,n_freq,n_time", [
@@ -255,7 +260,7 @@ class TestUnitaryGains:
         comp = UnitaryGains()
         comp.setup(cfg)
         state = make_vis_state(n_ant, n_freq, n_time)
-        out = comp.build_forward()({}, state)
+        out = comp.build_forward()({}, state, make_constants(comp))
         a1, _ = jnp.triu_indices(n_ant, 1)
         n_bl = len(a1)
         assert out["vis_obs"].shape == (n_bl, n_freq, n_time)
@@ -323,7 +328,7 @@ class TestGPGains:
             "gains_amp_induce_base": comp.init_params_base["gains_amp_induce_base"],
             "gains_phase_induce_base": comp.init_params_base["gains_phase_induce_base"],
         }
-        out = comp.build_forward()(params, state)
+        out = comp.build_forward()(params, state, make_constants(comp))
 
         assert out["gains"].shape == (n_ant, n_freq, n_time)
         assert out["vis_obs"].shape == (n_bl, n_freq, n_time)
@@ -345,7 +350,7 @@ class TestGPGains:
             "gains_amp_induce_base": comp.init_params_base["gains_amp_induce_base"],
             "gains_phase_induce_base": comp.init_params_base["gains_phase_induce_base"],
         }
-        out = comp.build_forward()(params, state)
+        out = comp.build_forward()(params, state, make_constants(comp))
 
         gain_amps = jnp.abs(out["gains"])
         assert jnp.allclose(gain_amps, amp_mean, atol=1e-3), (
@@ -367,7 +372,7 @@ class TestGPGains:
             "gains_amp_induce_base": comp.init_params_base["gains_amp_induce_base"],
             "gains_phase_induce_base": comp.init_params_base["gains_phase_induce_base"],
         }
-        out = comp.build_forward()(params, state)
+        out = comp.build_forward()(params, state, make_constants(comp))
 
         last_phase = jnp.angle(out["gains"][-1])  # (n_freq, n_time)
         assert jnp.allclose(last_phase, 0.0, atol=1e-6)
@@ -383,7 +388,7 @@ class TestGPGains:
             "gains_amp_induce_base": comp.init_params_base["gains_amp_induce_base"],
             "gains_phase_induce_base": comp.init_params_base["gains_phase_induce_base"],
         }
-        out = comp.build_forward()(params, state)
+        out = comp.build_forward()(params, state, make_constants(comp))
 
         assert jnp.issubdtype(out["gains"].dtype, jnp.complexfloating)
         assert jnp.issubdtype(out["vis_obs"].dtype, jnp.complexfloating)
@@ -423,7 +428,7 @@ class TestGPGains:
             "gains_amp_induce_base": comp.init_params_base["gains_amp_induce_base"],
             "gains_phase_induce_base": comp.init_params_base["gains_phase_induce_base"],
         }
-        out = comp.build_forward()(params, state)
+        out = comp.build_forward()(params, state, make_constants(comp))
 
         assert out["vis_obs"].shape == (n_bl, n_freq, n_time)
         assert out["gains"].shape == (n_ant, n_freq, n_time)

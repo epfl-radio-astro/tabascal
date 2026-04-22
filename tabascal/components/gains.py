@@ -210,12 +210,11 @@ class UnitaryGains(BaseGPGains):
         pass
 
     def build_forward(self):
+        gains = self.state_outputs["gains"]
 
-        def forward(params: Dict, state: Dict) -> Dict:
-
+        def forward(params: Dict, state: Dict, constants: Dict) -> Dict:
             vis_obs = state["vis_rfi"] + state["vis_ast"]
-            state = {**state, "vis_obs": vis_obs}
-            
+            state = {**state, "vis_obs": vis_obs, "gains": gains}
             return state
 
         return forward

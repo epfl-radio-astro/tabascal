@@ -212,12 +212,20 @@ class FixedOrbit(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {
+            "rfi_xyz": self.rfi_xyz,
+            "rfi_phase": self.rfi_phase,
+        }
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
+        prefix = self.prefix
 
         def forward(params, state, constants):
-            # rfi_xyz and rfi_phase already in state via state_outputs
-            return state
+            rfi_xyz = constants[f"{prefix}/rfi_xyz"]
+            rfi_phase = constants[f"{prefix}/rfi_phase"]
+            return {**state, "rfi_xyz": rfi_xyz, "rfi_phase": rfi_phase}
 
         return forward
 
@@ -382,7 +390,6 @@ class SGP4LEONoDragOrbit(Component):
     def build_constants(self):
         return {
             "times_jd_fine": self.times_jd_fine,
-            "epoch_jd": self.epoch_jd,
             "L_rfi_orbit": self.L_rfi_orbit,
             "mu_rfi_orbit": self.mu_rfi_orbit,
         }

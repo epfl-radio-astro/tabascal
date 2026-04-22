@@ -19,6 +19,10 @@ from tabascal.components.trajectory import FixedOrbit, PhaseCalculationRFI
 from tabascal.interferometry import get_rfi_phase
 
 
+def make_constants(comp):
+    return {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
+
+
 # ---------------------------------------------------------------------------
 # Space-Track credential detection
 # ---------------------------------------------------------------------------
@@ -178,7 +182,7 @@ class TestPhaseCalculationRFI:
         rfi_xyz = jnp.zeros((n_rfi, n_time_fine, 3)) + jnp.array([7e6, 0.0, 0.0])
         state = {"rfi_xyz": rfi_xyz}
 
-        out = comp.build_forward()({}, state)
+        out = comp.build_forward()({}, state, make_constants(comp))
 
         assert "rfi_phase" in out
         assert out["rfi_phase"].shape == (n_rfi, n_ant, n_freq_fine, n_time_fine)
@@ -195,7 +199,7 @@ class TestPhaseCalculationRFI:
             jnp.array([[6.8e6, 0.0, 0.0]]),
             (n_rfi, cfg.n_time_fine, 3),
         )
-        out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz})
+        out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz}, make_constants(comp))
         assert jnp.all(jnp.isfinite(out["rfi_phase"]))
 
     def test_forward_phase_varies_across_antennas(self):
@@ -209,7 +213,7 @@ class TestPhaseCalculationRFI:
             jnp.array([[6.8e6, 0.0, 0.0]]),
             (n_rfi, cfg.n_time_fine, 3),
         )
-        out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz})
+        out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz}, make_constants(comp))
         phase = out["rfi_phase"]  # (n_rfi, n_ant, n_freq_fine, n_time_fine)
         # Not all antennas should have identical phases
         assert not jnp.allclose(phase[0, 0], phase[0, 1])
@@ -222,7 +226,7 @@ class TestPhaseCalculationRFI:
 
         rfi_xyz = jnp.zeros((cfg.n_rfi, cfg.n_time_fine, 3)) + 6.8e6
         state = {"rfi_xyz": rfi_xyz}
-        out = comp.build_forward()({}, state)
+        out = comp.build_forward()({}, state, make_constants(comp))
 
         assert "rfi_xyz" in out
         assert jnp.array_equal(out["rfi_xyz"], rfi_xyz)
@@ -243,7 +247,7 @@ class TestPhaseCalculationRFI:
 
         n_time_fine = n_time * n_int_time
         rfi_xyz = jnp.zeros((n_rfi, n_time_fine, 3)) + jnp.array([6.8e6, 0.0, 0.0])
-        out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz})
+        out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz}, make_constants(comp))
 
         assert out["rfi_phase"].shape == (n_rfi, n_ant, n_freq, n_time_fine)
         assert jnp.all(jnp.isfinite(out["rfi_phase"]))
@@ -338,7 +342,7 @@ class TestFixedOrbit:
         comp = FixedOrbit()
         comp.setup(cfg)
         state = {}
-        out = comp.build_forward()({}, state)
+        out = comp.build_forward()({}, state, make_constants(comp))
         assert "rfi_xyz" in out
         assert "rfi_phase" in out
 
@@ -347,7 +351,7 @@ class TestFixedOrbit:
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
-        out = comp.build_forward()({}, {})
+        out = comp.build_forward()({}, {}, make_constants(comp))
         assert jnp.array_equal(out["rfi_xyz"], comp.rfi_xyz)
         assert jnp.array_equal(out["rfi_phase"], comp.rfi_phase)
 
@@ -356,9 +360,10 @@ class TestFixedOrbit:
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
+        constants = make_constants(comp)
         fwd = comp.build_forward()
-        out1 = fwd({}, {})
-        out2 = fwd({}, {})
+        out1 = fwd({}, {}, constants)
+        out2 = fwd({}, {}, constants)
         assert jnp.array_equal(out1["rfi_xyz"], out2["rfi_xyz"])
 
     def test_two_satellites_shape(self):
@@ -516,7 +521,7 @@ class TestSGP4LEONoDragOrbit:
         comp.setup(cfg)
 
         params = {"rfi_orbit_base": comp.init_params_base["rfi_orbit_base"]}
-        out = comp.build_forward()(params, {})
+        out = comp.build_forward()(params, {}, make_constants(comp))
 
         assert out["rfi_xyz"].shape == (cfg.n_rfi, cfg.n_time_fine, 3)
         assert out["elements"].shape == (cfg.n_rfi, 6)
@@ -529,7 +534,7 @@ class TestSGP4LEONoDragOrbit:
         comp.setup(cfg)
 
         params = {"rfi_orbit_base": comp.init_params_base["rfi_orbit_base"]}
-        out = comp.build_forward()(params, {})
+        out = comp.build_forward()(params, {}, make_constants(comp))
 
         assert jnp.all(jnp.isfinite(out["rfi_xyz"]))
 
@@ -677,7 +682,7 @@ class TestSGP4LEOOrbit:
         comp.setup(cfg)
 
         params = {"rfi_orbit_base": comp.init_params_base["rfi_orbit_base"]}
-        out = comp.build_forward()(params, {})
+        out = comp.build_forward()(params, {}, make_constants(comp))
 
         assert out["rfi_xyz"].shape == (cfg.n_rfi, cfg.n_time_fine, 3)
         assert out["elements"].shape == (cfg.n_rfi, 7)
@@ -690,7 +695,7 @@ class TestSGP4LEOOrbit:
         comp.setup(cfg)
 
         params = {"rfi_orbit_base": comp.init_params_base["rfi_orbit_base"]}
-        out = comp.build_forward()(params, {})
+        out = comp.build_forward()(params, {}, make_constants(comp))
 
         assert jnp.all(jnp.isfinite(out["rfi_xyz"]))
 
