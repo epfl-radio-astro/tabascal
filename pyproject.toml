@@ -1,5 +1,8 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "jax"]
+requires = [
+    "scikit-build-core>=0.10",
+    "jax>=0.6.0",
+]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -8,7 +11,6 @@ cmake.build-type = "Release"
 cmake.source-dir = "."
 wheel.packages = ["tabascal"]
 wheel.py-api = "py3"
-editable.mode = "inplace"
 
 [[tool.scikit-build.overrides]]
 if.env.TABASCAL_CUDA = "(?i)1|on|true|yes"

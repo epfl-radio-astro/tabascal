@@ -3,7 +3,10 @@ Custom JAX primitives for RFI visibility calculation using FFI.
 """
 
 import ctypes
+import importlib.util
 import os
+import site
+import sysconfig
 from functools import partial
 
 import jax
@@ -85,12 +88,38 @@ def prepare_indices(n_ant, a1, a2):
 
 
 _DIR_PATH = os.path.dirname(os.path.realpath(__file__))
+_PKG_SUBPATH = os.path.join("tabascal", "components", "ffi")
+
+
+def _candidate_dirs():
+    dirs = [_DIR_PATH]
+    try:
+        spec = importlib.util.find_spec("tabascal.components.ffi")
+        if spec and spec.submodule_search_locations:
+            dirs.extend(spec.submodule_search_locations)
+    except (ModuleNotFoundError, ValueError):
+        pass
+    site_dirs = list(site.getsitepackages())
+    user_site = site.getusersitepackages()
+    if user_site:
+        site_dirs.append(user_site)
+    purelib = sysconfig.get_paths().get("purelib")
+    if purelib:
+        site_dirs.append(purelib)
+    for sp in site_dirs:
+        dirs.append(os.path.join(sp, _PKG_SUBPATH))
+    return dirs
 
 
 def _load_library(name):
-    lib_path = os.path.join(_DIR_PATH, name)
-    if os.path.exists(lib_path):
-        return ctypes.cdll.LoadLibrary(lib_path)
+    seen = set()
+    for d in _candidate_dirs():
+        lib_path = os.path.join(d, name)
+        if lib_path in seen:
+            continue
+        seen.add(lib_path)
+        if os.path.isfile(lib_path):
+            return ctypes.cdll.LoadLibrary(lib_path)
     return None
 
 
