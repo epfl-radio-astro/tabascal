@@ -129,11 +129,11 @@ class TabConfig:
         self.n_corr = ms_params["n_corr"]
 
         self.int_time = ms_params["int_time"]
-        self.times = ms_params["times"]
+        self.times = np.asarray(ms_params["times"])
         self.times_jd = mjd_to_jd(ms_params["times_mjd"])
 
         self.chan_width = ms_params["chan_width"]
-        self.freqs = ms_params["freqs"]
+        self.freqs = np.asarray(ms_params["freqs"])
 
         self.noise = ms_params["noise"]
         self.a1 = ms_params["a1"]
@@ -199,7 +199,7 @@ class TabConfig:
         self.times_fine = int_sample_times(self.times, self.n_int_time).compute()
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
         self.n_time_fine = len(self.times_fine)
-    
+
     def _set_freqs(self):
 
         self.freqs_fine = int_sample_times(self.freqs, self.n_int_freq).compute()
