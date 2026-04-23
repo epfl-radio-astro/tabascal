@@ -1,7 +1,7 @@
 [build-system]
 requires = [
     "scikit-build-core>=0.10",
-    "jax>=0.6.0",
+    "jax==0.6.0", # Use minimum FFI api to build
 ]
 build-backend = "scikit_build_core.build"
 
