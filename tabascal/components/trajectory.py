@@ -13,6 +13,7 @@ from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase
 from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
+from tabascal.timing import measure_runtime
 
 import jax.numpy as jnp
 from jax import vmap, Array
@@ -176,6 +177,7 @@ class FixedOrbit(Component):
         """Call this before using in JIT context"""
         pass
 
+    @measure_runtime
     def _compute_rfi_phase(self):
 
         from astropy.time import Time

@@ -44,6 +44,7 @@ def _map_step(model, optimizer, params, opt_state, state, constants, obs_data):
     return new_params, new_opt_state, loss
 
 
+@measure_runtime
 def nlog_like(prob_model, params, obs_data, state=None, constants=None):
 
     nlog_l = -log_likelihood(
@@ -53,6 +54,7 @@ def nlog_like(prob_model, params, obs_data, state=None, constants=None):
     return nlog_l
 
 
+@measure_runtime
 def nlog_post(prob_model, params, obs_data, state=None, constants=None):
 
     nlog_p = (
