@@ -40,6 +40,23 @@ from typing import Optional
 
 
 @measure_runtime
+def build_model(config: dict, ms_path: str):
+    tab_config = TabConfig(config, ms_path)
+    model = Model(tab_config, config["model"]["components"])  # type: ignore
+    return tab_config, model
+
+
+@measure_runtime
+def evaluate_init(tab_config, model, key):
+    key, subkey = random.split(key)
+    init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants)
+    nlog_l = nlog_like(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+    nlog_p = nlog_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+    init_state = model.forward(model.init_params, model.state, model.constants)
+    return key, init_pred, nlog_l, nlog_p, init_state
+
+
+@measure_runtime
 def tabascal_subtraction(
     config: dict,
     sim_dir: str,
@@ -114,9 +131,7 @@ def tabascal_subtraction(
     init_params_path = os.path.join(results_dir, f"init_params_{results_name}.zarr")
     true_params_path = os.path.join(results_dir, f"true_params_{results_name}.zarr")
 
-    tab_config = TabConfig(config, ms_path)
-
-    model = Model(tab_config, config["model"]["components"])  # type: ignore
+    tab_config, model = build_model(config, ms_path)
 
     prob_model = model.prob_model
 
@@ -139,23 +154,11 @@ def tabascal_subtraction(
     print(f"Startup Time : {end_start - start_time}")
     print(f"{end_start}")
 
-    key, subkey = random.split(key)
-    init_pred = init_predict(tab_config, prob_model, subkey, model.init_params, state=model.state, constants=model.constants)
+    key, init_pred, nlog_l, nlog_p, init_state = evaluate_init(tab_config, model, key)
     write_results_xds(init_pred, tab_config, init_pred_path)
-    # write_params_xds(
-    #     {key + "_auto_loc": value for key, value in init_params_base.items()},
-    #     gp_params,
-    #     ms_params,
-    #     init_params_path,
-    # )
-
-    nlog_l = nlog_like(prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-    nlog_p = nlog_post(prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
 
     print(f"log_l : {nlog_l:.3e}")
     print(f"log_p : {nlog_p:.3e}")
-
-    init_state = model.forward(model.init_params, model.state, model.constants)
 
     # truth = {
     #     "vis_rfi": init_state["vis_rfi"],

@@ -14,6 +14,7 @@ from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase
 from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
+from tabascal.timing import measure_runtime
 
 import sgp4jax
 from sgp4jax import WGS72 as gravity
@@ -233,24 +234,13 @@ class FixedOrbit(Component):
         """Call this before using in JIT context"""
         pass
 
+    @measure_runtime
     def _compute_rfi_phase(self):
-
-        # from tabsim.tle import get_satellite_positions  # type: ignore
-
-        # self.rfi_xyz = jnp.asarray(
-        #     get_satellite_positions(self.tles, list(self.times_jd_fine))
-        # )
 
         sats = sgp4jax.tles_to_satrec(self.tles)
         r_gcrf, _ = sgp4jax.gcrf_positions_multi(sats, self.times_jd_fine)
 
         self.rfi_xyz = r_gcrf * 1e3
-
-        sf_rfi_xyz = jnp.asarray(
-            get_satellite_positions(self.tles, list(self.times_jd_fine))
-        )
-
-        print(f"RFI Error: {jnp.sqrt(jnp.mean(jnp.sum((sf_rfi_xyz-self.rfi_xyz)**2, axis=-1))):.2e}")
 
         gsa = (
             Time(self.times_jd_fine, format="jd")
@@ -259,25 +249,16 @@ class FixedOrbit(Component):
             * 15
         )  # type: ignore
 
-        # self.rfi_xyz = kepler_orbit_many(
-        #     self.times_jd_fine, self.epoch_jd, self.elements
-        # )
-        # gsa = gmsa_from_jd(self.times_jd_fine) % 360
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
         self.ants_xyz = vmap(vmap(sgp4jax.itrf_to_gcrf, (0, None, None), 0), (None, 0, 0), 1)(
-            self.ants_itrf, 
-            jnp.floor(self.times_jd_fine), 
+            self.ants_itrf,
+            jnp.floor(self.times_jd_fine),
             self.times_jd_fine - jnp.floor(self.times_jd_fine)
         )
-        # self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        sf_ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        # self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
         self.ants_uvw = jnp.transpose(
             itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
-
-        print(f"Ants Error: {jnp.sqrt(jnp.mean(jnp.sum((sf_ants_xyz-self.ants_xyz)**2, axis=-1))):.2e}")
 
         self.rfi_phase = get_rfi_phase(
             self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
