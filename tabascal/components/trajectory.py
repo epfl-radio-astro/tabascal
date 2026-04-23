@@ -183,7 +183,7 @@ class FixedOrbit(Component):
     def _compute_rfi_phase(self):
 
         sats = sgp4jax.tles_to_satrec(self.tles)
-        r_gcrf, _ = sgp4jax.gcrf_positions_multi(sats, self.times_jd_fine)
+        r_gcrf, _ = sgp4jax.gcrf_positions_mixed(sats, self.times_jd_fine)
         self.rfi_xyz = r_gcrf * 1e3
 
         gsa = (
