@@ -48,8 +48,9 @@ def get_satellite_positions(tles: list, times_jd: list):
     """
 
     ts = load.timescale()
-    # sf_times = ts.ut1_jd(times_jd)
-    sf_times = ts._utc_jd(np.floor(times_jd), np.array(times_jd) - np.floor(times_jd))
+    times_jd_whole = np.floor(times_jd)
+    times_jd_frac = np.array(times_jd) - times_jd_whole
+    sf_times = ts._utc_jd(times_jd_whole, times_jd_frac)
 
     sat_pos = np.array(
         [
@@ -237,15 +238,9 @@ class FixedOrbit(Component):
     @measure_runtime
     def _compute_rfi_phase(self):
 
-        sats = sgp4jax.tles_to_satrec(self.tles)
-        r_gcrf, _ = sgp4jax.gcrf_positions_multi(sats, self.times_jd_fine)
-
-        self.rfi_xyz = r_gcrf * 1e3
-
-        sf_rfi_xyz = jnp.asarray(
+        self.rfi_xyz = jnp.asarray(
             get_satellite_positions(self.tles, list(self.times_jd_fine))
         )
-        print(f"RFI Error: {jnp.sqrt(jnp.mean(jnp.sum((sf_rfi_xyz-self.rfi_xyz)**2, axis=-1))):.2e}")
 
         gsa = (
             Time(self.times_jd_fine, format="jd")
@@ -256,14 +251,8 @@ class FixedOrbit(Component):
 
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
-        self.ants_xyz = vmap(vmap(sgp4jax.itrf_to_gcrf, (0, None, None), 0), (None, 0, 0), 1)(
-            self.ants_itrf,
-            jnp.floor(self.times_jd_fine),
-            self.times_jd_fine - jnp.floor(self.times_jd_fine)
-        )
-        sf_ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        print(f"Ants Error: {jnp.sqrt(jnp.mean(jnp.sum((sf_ants_xyz-self.ants_xyz)**2, axis=-1))):.2e}")
-
+        self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
+        
         self.ants_uvw = jnp.transpose(
             itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
