@@ -21,6 +21,10 @@ import numpy as np
 from skyfield.api import Distance, load
 from skyfield.toposlib import ITRSPosition
 
+from astropy.time import Time
+
+import sgp4jax
+
 
 class PhaseCalculationRFI(Component):
 
@@ -178,27 +182,23 @@ class FixedOrbit(Component):
 
     def _compute_rfi_phase(self):
 
-        from astropy.time import Time
-        from tabsim.tle import get_satellite_positions  # type: ignore
+        sats = sgp4jax.tles_to_satrec(self.tles)
+        r_gcrf, _ = sgp4jax.gcrf_positions_multi(sats, self.times_jd_fine)
+        self.rfi_xyz = r_gcrf * 1e3
 
-        self.rfi_xyz = jnp.asarray(
-            get_satellite_positions(self.tles, list(self.times_jd_fine))
-        )
         gsa = (
             Time(self.times_jd_fine, format="jd")
             .sidereal_time("mean", "greenwich")
             .hour
             * 15
         )  # type: ignore
-
-        # self.rfi_xyz = kepler_orbit_many(
-        #     self.times_jd_fine, self.epoch_jd, self.elements
-        # )
-        # gsa = gmsa_from_jd(self.times_jd_fine) % 360
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
-        self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        # self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
+        self.ants_xyz = vmap(vmap(sgp4jax.itrf_to_gcrf, (0, None, None), 0), (None, 0, 0), 1)(
+            self.ants_itrf,
+            jnp.floor(self.times_jd_fine),
+            self.times_jd_fine - jnp.floor(self.times_jd_fine)
+        )
         self.ants_uvw = jnp.transpose(
             itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
