@@ -429,13 +429,13 @@ class TestFixedOrbit:
 
 
 # ---------------------------------------------------------------------------
-# Bundled TLE constants (NAVSTAR 18 / 67, cached 2026-04-15)
-# These match tabascal/data/tles/2026-04-15-bundled.json so no Space-Track
+# Bundled TLE constants (NAVSTAR 18 / 67, cached 2023-02-21)
+# These match tabascal/data/tles/2023-02-21-navstar.json so no Space-Track
 # call is needed — get_tles_by_id finds the file from cache.
 # ---------------------------------------------------------------------------
 
-# JD of 2026-04-15 12:00 UTC — must match the date prefix of the bundled file.
-_BUNDLED_TLE_EPOCH_JD = 2461146.0
+# JD of 2023-02-21 13:55:04.589 UTC — must match the date prefix of the bundled file.
+_BUNDLED_TLE_EPOCH_JD = 2459997.079914223  # 2023-02-21 13:55:04.589 UTC => GMSA = 0
 _BUNDLED_NORAD_IDS = [20452, 38833]
 
 

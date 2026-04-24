@@ -2,7 +2,7 @@ telescope:
   name: SKA-Low
   latitude: -26.82472208
   longitude: 116.7644482
-  elevation: 377
+  elevation: 377 
   dish_d: 40
   itrf_path: SKA-Low-512.itrf.txt
   n_ant: 8
@@ -13,7 +13,7 @@ observation:
   dec: -30.0
   start_time_lha: 0.0
   int_time: 10.0
-  n_time: 20
+  n_time: 90
   n_int: 1
   start_freq: 1.5e8
   chan_width: 209e3
@@ -25,7 +25,7 @@ observation:
 
 ast_sources:
   point:
-    random:
+    random: 
       n_src: 50
       min_I: 10sigma
       max_I: 1.0
@@ -38,13 +38,22 @@ ast_sources:
 
 rfi_sources:
   tle_satellite:
-    sat_names: [navstar]
-    max_n_sat: 4
+    # norad_ids: []
+    sat_names: [navstar, galileo]
+    # sat_names: [starlink]
+    max_n_sat: 32
     spacetrack_path: spacetrack_login.yaml
     power_scale: 1e-2
     max_ang_sep: 90  # degrees
     min_alt: 0       # degrees
     vis_step: 1      # minutes
+
+# gains:
+#   G0_mean: 1.0
+#   G0_std: 0.05
+#   Gt_std_amp: 1e-5
+#   Gt_std_phase: 1e-3
+#   random_seed: 999
 
 output:
   path: ./data
@@ -54,9 +63,9 @@ output:
   ms: True
 
 diagnostics:
-  uv_cov: False
-  src_alt: False
-  rfi_seps: False
+  uv_cov: True
+  src_alt: True
+  rfi_seps: True
 
 dask:
   max_chunk_MB: 100.0
