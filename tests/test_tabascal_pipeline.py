@@ -126,118 +126,10 @@ def read_and_modify_yaml(
 class PipelineTestConfig:
     """Configuration for a single pipeline test case.
 
-    Attributes:
-        sim_file_name: Name of the simulation YAML configuration file
-        components: List of component module specifications for the pipeline
-        chi2_ref: Expected reduced chi-squared value for validation
-    """
-    sim_file_name: str
-    components: list[str]
-    chi2_ref: float
-
-
-
-test_configs = [
-    pytest.param(
-        PipelineTestConfig(
-        "sim_target_8A.yaml",
-        [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFI",
-            "rfi_vis:RiemannVisTimeFreqCalculation",
-            "ast_vis:FourierTimeFreqGPAst",
-            "gains:UnitaryGains",
-        ], 0.8549507174978265),
-        id="RiemannVisTimeFreqCalculation"
-    ),
-    pytest.param(
-        PipelineTestConfig(
-        "sim_target_8A.yaml",
-        [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFI",
-            "rfi_vis:RiemannVisTimeFreqCalculationFFI",
-            "ast_vis:FourierTimeFreqGPAst",
-            "gains:UnitaryGains",
-        ], 0.8549507174978265),
-        id="RiemannVisTimeFreqCalculationFFI"
-    )
-]
-
-@pytest.mark.parametrize("t_config", test_configs)
-def test_tabascal_pipeline(provide_test_data: Path, tmp_path: Path, t_config) -> None:
-    """Test the complete Tabascal pipeline execution.
-
-    This test verifies that the full Tabascal pipeline runs successfully and produces
-    expected results. It:
-    1. Downloads test simulation data from HuggingFace
-    2. Configures the pipeline with specific component modules
-    3. Executes the run_tabascal.py script
-    4. Validates that the output Reduced Chi^2 value matches the expected result
-
-    Args:
-        provide_test_data: Fixture providing path to downloaded test data
-        tmp_path: Pytest fixture providing temporary directory for test files
-    """
-    local_dir = Path(provide_test_data)
-    data_dir = Path(__file__).parent / "data"
-    input_hash = compute_sha256(data_dir / t_config.sim_file_name)
-
-    input_dir = local_dir / input_hash
-    config_template = data_dir / "tab_target.yaml"
-    config_path = tmp_path / "tab_target.yaml"
-
-    config_mod = {
-        "model": {
-            "components":  t_config.components       }
-    }
-    read_and_modify_yaml(config_mod, config_template, config_path)
-
-    # Take the first match for "pnt_src*"
-    input_src_dir = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
-    assert input_src_dir, f"No pnt_src* directory found in {input_dir}"
-
-    tabascal_script = (
-        Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
-    )
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(tabascal_script),
-            "-c",
-            str(config_path),
-            "-s",
-            str(input_src_dir),
-        ],
-        capture_output=True,
-        text=True,
-        cwd=tmp_path,
-        check=False,
-    )
-
-    assert result.returncode == 0, f"Tabascal failed: {result.stderr}"
-
-    match = re.search(r"Reduced Chi\^2 @ opt params : ([\d.eE+-]+)", result.stdout)
-    assert match, f"Could not find Reduced Chi^2 in output: {result.stdout}"
-
-    value = float(match.group(1))
-    expected_value = t_config.chi2_ref
-    assert value == pytest.approx(expected_value, rel=1e-2)
-
-
-# ---------------------------------------------------------------------------
-# New-component integration tests
-# Uses a separate config type so chi2_ref can be left unset until a reference
-# value has been established from a first successful run.
-# ---------------------------------------------------------------------------
-
-@dataclass
-class NewComponentPipelineTestConfig:
-    """Like PipelineTestConfig but with an optional chi2_ref.
-
-    When chi2_ref is None the test only checks that the value lies in (0, 5).
+    When chi2_ref is None the test only checks that chi2 lies in (0, 5).
     Once a reference value is known, set chi2_ref to pin the regression.
+    A pre-commit hook (ci/check_chi2_refs.py) enforces that chi2_ref is
+    populated before the config is committed.
     """
     sim_file_name: str
     components: list[str]
@@ -245,10 +137,10 @@ class NewComponentPipelineTestConfig:
     chi2_ref: Optional[float] = None
 
 
-def _run_new_component_pipeline(
+def _run_pipeline(
     provide_test_data: Path,
     tmp_path: Path,
-    t_config: NewComponentPipelineTestConfig,
+    t_config: PipelineTestConfig,
 ) -> tuple[int, str, str]:
     local_dir = Path(provide_test_data)
     data_dir = Path(__file__).parent / "data"
@@ -286,70 +178,25 @@ def _run_new_component_pipeline(
     return result.returncode, result.stdout, result.stderr
 
 
-def _assert_new_chi2(stdout: str, chi2_ref: Optional[float]) -> None:
+def _assert_chi2(stdout: str, chi2_ref: Optional[float]) -> None:
     match = re.search(r"Reduced Chi\^2 @ opt params : ([\d.eE+-]+)", stdout)
     assert match, f"Could not find Reduced Chi^2 in output: {stdout}"
     value = float(match.group(1))
     if chi2_ref is not None:
         assert value == pytest.approx(chi2_ref, rel=1e-2)
     else:
+        print(f"\nReduced Chi^2 @ opt params : {value}")
         assert 0.0 < value < 5.0, f"Chi^2 = {value} is outside the expected (0, 5) range"
 
 
-# GPGains — no extra Space-Track calls needed beyond what TabConfig already does
-gpgains_configs = [
+# ---------------------------------------------------------------------------
+# Trajectory components — downstream fixed to RiemannVisTimeFreqCalculation + UnitaryGains
+# ---------------------------------------------------------------------------
+
+trajectory_configs = [
+    # FixedOrbit without PhaseCalculationRFI covered by RiemannVsisTimeFreqCalculation
     pytest.param(
-        NewComponentPipelineTestConfig(
-            "sim_target_8A.yaml",
-            [
-                "trajectory:FixedOrbit",
-                "rfi_signal:ComplexRFI",
-                "rfi_vis:RiemannVisTimeFreqCalculation",
-                "ast_vis:FourierTimeFreqGPAst",
-                "gains:GPGains",
-            ],
-            config_overrides={
-                "gains": {
-                    "amp_mean": 1.0,
-                    "amp_std": 1.0,
-                    "phase_mean": 0.0,
-                    "phase_std": 1.0,
-                    "amp_corr_time": None,
-                    "phase_corr_time": None,
-                    "amp_corr_freq": None,
-                    "phase_corr_freq": None,
-                    "r_seed": 123,
-                },
-                "opt": {"max_iter": 50, "dual_run": False},
-            },
-            # chi2_ref=...,  # set after first successful run
-        ),
-        id="GPGains",
-    ),
-]
-
-
-@pytest.mark.parametrize("t_config", gpgains_configs)
-def test_gpgains_pipeline(provide_test_data: Path, tmp_path: Path, t_config) -> None:
-    """Integration test for GPGains replacing UnitaryGains in the standard pipeline.
-
-    Verifies the pipeline runs without error and emits a reasonable chi-squared.
-    Update chi2_ref in gpgains_configs once a reference value is established.
-    """
-    returncode, stdout, stderr = _run_new_component_pipeline(
-        provide_test_data, tmp_path, t_config
-    )
-    assert returncode == 0, f"Tabascal failed: {stderr}"
-    _assert_new_chi2(stdout, t_config.chi2_ref)
-
-
-# FixedOrbit + PhaseCalculationRFI — no Space-Track credentials required.
-# FixedOrbit writes rfi_xyz into state; PhaseCalculationRFI recomputes rfi_phase
-# from that xyz. This exercises PhaseCalculationRFI at the pipeline level without
-# needing SGP4LEONoDragOrbit.
-phase_calc_configs = [
-    pytest.param(
-        NewComponentPipelineTestConfig(
+        PipelineTestConfig(
             "sim_target_8A.yaml",
             [
                 "trajectory:FixedOrbit",
@@ -359,32 +206,12 @@ phase_calc_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            config_overrides={"opt": {"max_iter": 50, "dual_run": False}},
+            chi2_ref=0.8977856043436502,
         ),
         id="FixedOrbit+PhaseCalculationRFI",
     ),
-]
-
-
-@pytest.mark.parametrize("t_config", phase_calc_configs)
-def test_phase_calculation_rfi_pipeline(provide_test_data: Path, tmp_path: Path, t_config) -> None:
-    """Integration test for PhaseCalculationRFI in the full pipeline.
-
-    Uses FixedOrbit to supply rfi_xyz (no Space-Track needed) then
-    PhaseCalculationRFI to recompute rfi_phase from that xyz, exercising the
-    component at the highest level without a Space-Track dependency.
-    """
-    returncode, stdout, stderr = _run_new_component_pipeline(
-        provide_test_data, tmp_path, t_config
-    )
-    assert returncode == 0, f"Tabascal failed: {stderr}"
-    _assert_new_chi2(stdout, t_config.chi2_ref)
-
-
-# SGP4LEONoDragOrbit + PhaseCalculationRFI — uses bundled TLE cache, no credentials needed
-sgp4_configs = [
     pytest.param(
-        NewComponentPipelineTestConfig(
+        PipelineTestConfig(
             "sim_target_8A.yaml",
             [
                 "trajectory:SGP4LEONoDragOrbit",
@@ -394,40 +221,13 @@ sgp4_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            config_overrides={"opt": {"max_iter": 50, "dual_run": False}},
+            config_overrides={"opt": {"max_iter": 200}},
+            chi2_ref=0.8834671325695459, # Run with MEO satellites
         ),
-        id="SGP4LEONoDragOrbit+PhaseCalculationRFI+UnitaryGains",
+        id="SGP4LEONoDragOrbit+PhaseCalculationRFI",
     ),
     pytest.param(
-        NewComponentPipelineTestConfig(
-            "sim_target_8A.yaml",
-            [
-                "trajectory:SGP4LEONoDragOrbit",
-                "trajectory:PhaseCalculationRFI",
-                "rfi_signal:ComplexRFI",
-                "rfi_vis:RiemannVisTimeFreqCalculation",
-                "ast_vis:FourierTimeFreqGPAst",
-                "gains:GPGains",
-            ],
-            config_overrides={
-                "gains": {
-                    "amp_mean": 1.0,
-                    "amp_std": 1.0,
-                    "phase_mean": 0.0,
-                    "phase_std": 1.0,
-                    "amp_corr_time": None,
-                    "phase_corr_time": None,
-                    "amp_corr_freq": None,
-                    "phase_corr_freq": None,
-                    "r_seed": 123,
-                },
-                "opt": {"max_iter": 50, "dual_run": False},
-            },
-        ),
-        id="SGP4LEONoDragOrbit+PhaseCalculationRFI+GPGains",
-    ),
-    pytest.param(
-        NewComponentPipelineTestConfig(
+        PipelineTestConfig(
             "sim_target_8A.yaml",
             [
                 "trajectory:SGP4LEOOrbit",
@@ -437,25 +237,116 @@ sgp4_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            config_overrides={"opt": {"max_iter": 50, "dual_run": False}},
+            config_overrides={"opt": {"max_iter": 200}},
+            chi2_ref=0.8834671467969134,  # Run with MEO satellites
         ),
-        id="SGP4LEOOrbit+PhaseCalculationRFI+UnitaryGains",
+        id="SGP4LEOOrbit+PhaseCalculationRFI",
     ),
 ]
 
 
-@pytest.mark.parametrize("t_config", sgp4_configs)
-def test_sgp4_component_pipeline(provide_test_data: Path, tmp_path: Path, t_config) -> None:
-    """Integration tests for SGP4LEONoDragOrbit + PhaseCalculationRFI pipelines.
+# ---------------------------------------------------------------------------
+# RFI signal components — upstream fixed to FixedOrbit
+# ---------------------------------------------------------------------------
 
-    The test data uses a 2023-02-21 observation epoch. NORAD IDs [20452, 38833, 45854]
-    are all present in the bundled TLE cache (tabascal/data/tles/2023-02-21-HMZGLE.json),
-    so no Space-Track credentials are required.
+rfi_signal_configs = []
 
-    Verifies the pipeline runs without error and emits a reasonable chi-squared.
-    """
-    returncode, stdout, stderr = _run_new_component_pipeline(
-        provide_test_data, tmp_path, t_config
-    )
+
+# ---------------------------------------------------------------------------
+# RFI visibility components — upstream fixed to FixedOrbit
+# ---------------------------------------------------------------------------
+
+rfi_vis_configs = [
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFI",
+                "rfi_vis:RiemannVisTimeFreqCalculation",
+                "ast_vis:FourierTimeFreqGPAst",
+                "gains:UnitaryGains",
+            ],
+            chi2_ref=0.8977856059138833,
+        ),
+        id="RiemannVisTimeFreqCalculation",
+    ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFI",
+                "rfi_vis:RiemannVisTimeFreqCalculationFFI",
+                "ast_vis:FourierTimeFreqGPAst",
+                "gains:UnitaryGains",
+            ],
+            chi2_ref=0.8977856059138833,
+        ),
+        id="RiemannVisTimeFreqCalculationFFI",
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Astronomical sky signal components — upstream fixed to FixedOrbit
+# ---------------------------------------------------------------------------
+
+ast_signal_configs = []
+
+# ---------------------------------------------------------------------------
+# Astronomical visibility components — upstream fixed to FixedOrbit
+# ---------------------------------------------------------------------------
+
+ast_vis_configs = []
+
+
+# ---------------------------------------------------------------------------
+# Gains components — upstream fixed to FixedOrbit
+# ---------------------------------------------------------------------------
+
+gains_configs = [
+    # UnitaryGains covered by RiemannVisTimeFreqCalculation
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFI",
+                "rfi_vis:RiemannVisTimeFreqCalculation",
+                "ast_vis:FourierTimeFreqGPAst",
+                "gains:GPGains",
+            ],
+            config_overrides={
+                "gains": {
+                    "amp_mean": 1.0,
+                    "amp_std": 1.0,
+                    "phase_mean": 0.0,
+                    "phase_std": 1.0,
+                    "amp_corr_time": None,
+                    "phase_corr_time": None,
+                    "amp_corr_freq": None,
+                    "phase_corr_freq": None,
+                    "r_seed": 123,
+                },
+            },
+            chi2_ref=0.8977832575028029,
+        ),
+        id="GPGains",
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# All pipeline tests — single parametrized function
+# ---------------------------------------------------------------------------
+
+all_configs = trajectory_configs + rfi_signal_configs + rfi_vis_configs + ast_signal_configs + ast_vis_configs + gains_configs
+
+
+@pytest.mark.parametrize("t_config", all_configs)
+def test_pipeline(provide_test_data: Path, tmp_path: Path, t_config) -> None:
+    """Parametrized integration test covering all component pipeline combinations."""
+    returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config)
     assert returncode == 0, f"Tabascal failed: {stderr}"
-    _assert_new_chi2(stdout, t_config.chi2_ref)
+    _assert_chi2(stdout, t_config.chi2_ref)

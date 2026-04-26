@@ -3,16 +3,13 @@ name = "tabascal"
 version = "0.0.1"
 description = "Trajectory-based RFI subtraction for radio interferometric data"
 channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
+platforms = ["osx-64", "osx-arm64", "linux-64", "linux-aarch64"]
 
 # ── Tasks ──────────────────────────────────────────────────────────────────────
 
-[tasks]
+[feature.dev.tasks]
 build-ffi      = { cmd = "make cpu",  cwd = "tabascal/components/ffi", description = "Compile CPU FFI shared library (tabascal.so)" }
 build-ffi-cuda = { cmd = "make cuda", cwd = "tabascal/components/ffi", description = "Compile CUDA FFI shared library (tabascal_cuda.so)" }
-build-ffi-hip  = { cmd = "make hip",  cwd = "tabascal/components/ffi", description = "Compile HIP/ROCm FFI shared library (tabascal_hip.so)" }
-
-[feature.dev.tasks]
 test           = "pytest tests/"
 test-components = "pytest tests/components/"
 test-inventory = { cmd = "python scripts/generate_test_inventory.py", description = "Regenerate tests/TEST_INVENTORY.md from docstrings" }
@@ -23,42 +20,40 @@ perf-test      = { cmd = "python ci/reframe/prepare_data.py --components 'trajec
 # ── Shared conda dependencies (all environments) ───────────────────────────────
 
 [dependencies]
-python = ">=3.10,<3.13"
-cxx-compiler = "*"
+python = ">=3.10,<=3.13"
 astropy = "*"
 casacore = "*"
 dask = "*"
+dask-ms = "*"
+jax = ">=0.6.0,<0.10.0"
 matplotlib = "*"
 numpy = "*"
+numpyro = "*"
+optax = "*"
 python-casacore = "*"
 pyyaml = "*"
+sgp4jax = "*"
 skyfield = "*"
+spacetrack = "*"
 tqdm = "*"
 xarray = "*"
+zarr = "<3.0.0"
 
 # ── CPU feature ────────────────────────────────────────────────────────────────
 # Used by the default and dev environments on all platforms (including CPU-only
-# linux-64 and linux-aarch64). Carries all PyPI-only packages so that GPU
-# environments (which must be locked on a native linux machine) remain pure
-# conda and are cross-solvable from any host platform.
+# linux-64 and linux-aarch64). Carries PyPI-only packages (sgp4jax, tabsim) so
+# that GPU environments remain pure conda and are cross-solvable from any host.
 
 [feature.cpu.dependencies]
-jax = ">=0.6.0,<0.10.0"
-numpyro = "*"
-optax = "*"
+jaxlib = "*"
 
 [feature.cpu.pypi-dependencies]
 tabascal = { path = ".", editable = true }
-dask-ms = "*"
-sgp4jax = "*"
 tabsim = "*"
-spacetrack = "*"
 
 # ── CUDA 12 feature ────────────────────────────────────────────────────────────
-# linux-64 (NVIDIA) and linux-aarch64 (NVIDIA GH200 etc.).
 # Installs the cuda-enabled jaxlib build from conda-forge, equivalent to:
 #   conda install "jaxlib=*=*cuda12*" jax -c conda-forge
-# Pure conda — no PyPI deps — so the lockfile can be generated from any host.
 # Use cuda12-dev for a full development install including tabascal and tooling.
 
 [feature.cuda12]
@@ -68,36 +63,16 @@ platforms = ["linux-64", "linux-aarch64"]
 cuda = "12"
 
 [feature.cuda12.dependencies]
-jax = ">=0.6.0,<0.10.0"
 jaxlib = { version = "*", build = "*cuda12*" }
-numpyro = "*"
-optax = "*"
-
-# ── ROCm feature ───────────────────────────────────────────────────────────────
-# linux-64 (AMD GPU) only. jax[rocm] is PyPI-only and has native extensions,
-# so this environment can only be locked from a linux-64 machine.
-
-[feature.rocm]
-platforms = ["linux-64"]
-
-[feature.rocm.dependencies]
-jax = ">=0.6.0,<0.10.0"
-numpyro = "*"
-optax = "*"
-
-[feature.rocm.pypi-dependencies]
-# Installs jax-rocm plugin on top of conda jax; ROCm backend takes over at
-# runtime. Note: jax[rocm] has native extensions so this environment's
-# lockfile entries can only be generated on a linux-64 host.
-jax = { version = ">=0.6.0,<0.10.0", extras = ["rocm"] }
 
 # ── Dev feature ────────────────────────────────────────────────────────────────
 # Adds docs and test tooling. Also carries the full PyPI package set so that
-# cuda12-dev and rocm-dev environments get tabascal and friends even though
-# they don't include the cpu feature.
+# cuda12-dev gets tabascal and friends even though it doesn't include the cpu feature.
 
 [feature.dev.dependencies]
+cxx-compiler = "*"
 pytest = "*"
+pre-commit = "*"
 huggingface_hub = "*"
 sphinx = "*"
 sphinx-rtd-theme = "*"
@@ -106,10 +81,7 @@ graphviz = "*"
 
 [feature.dev.pypi-dependencies]
 tabascal = { path = ".", editable = true }
-dask-ms = "*"
-sgp4jax = "*"
 tabsim = "*"
-spacetrack = "*"
 
 # ── Environments ───────────────────────────────────────────────────────────────
 
@@ -122,6 +94,6 @@ dev     = { features = ["cpu", "dev"], solve-group = "cpu" }
 cuda12     = { features = ["cuda12"], solve-group = "cuda12" }
 cuda12-dev = { features = ["cuda12", "dev"], solve-group = "cuda12" }
 
-# AMD GPU environments — requires locking from a linux-64 host
-rocm     = { features = ["rocm"], solve-group = "rocm" }
-rocm-dev = { features = ["rocm", "dev"], solve-group = "rocm" }
+# NVIDIA GPU environments — pure conda, lockable from any host platform
+cuda13     = { features = ["cuda13"], solve-group = "cuda13" }
+cuda13-dev = { features = ["cuda13", "dev"], solve-group = "cuda13" }
