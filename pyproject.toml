@@ -37,7 +37,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pre-commit", "pytest", "huggingface-hub", "sphinx", "sphinx-rtd-theme"]
+test = ["pytest", "huggingface-hub"]
+docs = ["sphinx", "sphinx-rtd-theme"]
+dev = ["pre-commit", "tabascal[test,docs]"]
 cuda12 = ["jax[cuda12]"]
 cuda13 = ["jax[cuda13]"]
 
