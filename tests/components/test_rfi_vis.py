@@ -1,28 +1,29 @@
 import pytest
+from types import SimpleNamespace
 from tabascal.components.rfi_vis import *
-from collections import namedtuple
 import jax.numpy as jnp
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from .conftest import make_constants
+
+
 def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     a1, a2 = jnp.triu_indices(n_ant, 1)
     a1 = a1.astype('int32')
     a2 = a2.astype('int32')
-
-    n_bl = a1.shape[0]
-    config = namedtuple("config", ["n_ant", "n_rfi", "n_time", "n_freq", "n_int_time", "n_int_freq", "n_bl","a1","a2"])
-    config.n_ant = n_ant
-    config.n_rfi = n_rfi
-    config.n_time = n_time
-    config.n_freq = n_freq
-    config.n_int_time = n_int_time
-    config.args = {"rfi": {"freq_int_samples": n_int_freq}}
-    config.n_bl = n_bl
-    config.a1 = a1
-    config.a2 = a2
-    return config
+    return SimpleNamespace(
+        n_ant=n_ant,
+        n_rfi=n_rfi,
+        n_time=n_time,
+        n_freq=n_freq,
+        n_int_time=n_int_time,
+        n_bl=a1.shape[0],
+        a1=a1,
+        a2=a2,
+        args={"rfi": {"freq_int_samples": n_int_freq}},
+    )
 
 
 def create_state(config, rand_vis_rfi = False, r_key = 42):
@@ -53,11 +54,7 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     def compute_vis_rfi(impl):
         state = create_state(config, False, 42)
         impl.setup(config)
-        prefix = impl.prefix
-        constants = {}
-        for key, value in impl.build_constants().items():
-            constants[f"{prefix}/{key}"] = value
-        return impl.build_forward()({}, state, constants)["vis_rfi"]
+        return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
     ref_result = compute_vis_rfi(RiemannVisTimeFreqCalculation())
     ffi_result = compute_vis_rfi(RiemannVisTimeFreqCalculationFFI())
@@ -72,18 +69,14 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
 
     def compue_jvp(impl):
-        state = create_state(config, False, r_key = 42)
-        tangents_state = create_state(config, False, r_key = 50)
+        state = create_state(config, False, r_key=42)
+        tangents_state = create_state(config, False, r_key=50)
         impl.setup(config)
-        prefix = impl.prefix
-        constants = {}
-        for key, value in impl.build_constants().items():
-            constants[f"{prefix}/{key}"] = value
+        constants = make_constants(impl)
         _, tangents = jax.jvp(
             lambda s: impl.build_forward()({}, s, constants),
             (state,), (tangents_state,)
         )
-
         return tangents["vis_rfi"]
 
     ref_result = compue_jvp(RiemannVisTimeFreqCalculation())
@@ -99,13 +92,10 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
 
     def compue_vjp(impl):
-        input_state = create_state(config, False, r_key = 42)
-        vjp_state = create_state(config, True, r_key = 50)
+        input_state = create_state(config, False, r_key=42)
+        vjp_state = create_state(config, True, r_key=50)
         impl.setup(config)
-        prefix = impl.prefix
-        constants = {}
-        for key, value in impl.build_constants().items():
-            constants[f"{prefix}/{key}"] = value
+        constants = make_constants(impl)
         primal_state, vjp_func = jax.vjp(
             lambda s: impl.build_forward()({}, s, constants), input_state
         )

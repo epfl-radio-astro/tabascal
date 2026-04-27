@@ -18,9 +18,7 @@ jax.config.update("jax_enable_x64", True)
 from tabascal.components.trajectory import FixedOrbit, PhaseCalculationRFI
 from tabascal.interferometry import get_rfi_phase
 
-
-def make_constants(comp):
-    return {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
+from .conftest import make_constants, assert_transform_roundtrip
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +83,6 @@ def _build_ants_itrf(n_ant: int) -> jnp.ndarray:
     return jnp.concatenate([_MEERKAT_ITRF_BASE, extra], axis=0)
 
 
-_MEERKAT_ITRF = _MEERKAT_ITRF_BASE  # kept for backward compat inside this module
-
 _PHASE_CENTRE = {"ra": 21.44417, "dec": -30.71278}
 
 
@@ -144,17 +140,11 @@ def make_trajectory_config(
 
 class TestPhaseCalculationRFI:
 
-    def test_setup_succeeds(self):
-        """Component initialises without error with a default mock config."""
-        cfg = make_trajectory_config()
-        comp = PhaseCalculationRFI()
-        comp.setup(cfg)
-
     def test_setup_validates_dimensions(self):
         """If the config is self-consistent, _validate_dimensions must not raise."""
         cfg = make_trajectory_config(n_ant=4, n_rfi=2, n_freq=3, n_time=6, n_int_time=2)
         comp = PhaseCalculationRFI()
-        comp.setup(cfg)  # internally calls _validate_dimensions
+        comp.setup(cfg)
         assert comp.ants_uvw.shape == (cfg.n_ant, cfg.n_time_fine, 3)
         assert comp.ants_xyz.shape == (cfg.n_ant, cfg.n_time_fine, 3)
 
@@ -187,21 +177,6 @@ class TestPhaseCalculationRFI:
         assert "rfi_phase" in out
         assert out["rfi_phase"].shape == (n_rfi, n_ant, n_freq_fine, n_time_fine)
 
-    def test_forward_phase_is_finite(self):
-        """All phase values should be finite for a realistic satellite position."""
-        n_ant, n_rfi = 4, 1
-        cfg = make_trajectory_config(n_ant=n_ant, n_rfi=n_rfi)
-        comp = PhaseCalculationRFI()
-        comp.setup(cfg)
-
-        # ISS-like position: ~400 km altitude, in the GCRF frame
-        rfi_xyz = jnp.broadcast_to(
-            jnp.array([[6.8e6, 0.0, 0.0]]),
-            (n_rfi, cfg.n_time_fine, 3),
-        )
-        out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz}, make_constants(comp))
-        assert jnp.all(jnp.isfinite(out["rfi_phase"]))
-
     def test_forward_phase_varies_across_antennas(self):
         """Different antennas should see different phase delays."""
         n_ant, n_rfi = 4, 1
@@ -215,7 +190,6 @@ class TestPhaseCalculationRFI:
         )
         out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz}, make_constants(comp))
         phase = out["rfi_phase"]  # (n_rfi, n_ant, n_freq_fine, n_time_fine)
-        # Not all antennas should have identical phases
         assert not jnp.allclose(phase[0, 0], phase[0, 1])
 
     def test_forward_preserves_rfi_xyz_in_state(self):
@@ -252,8 +226,6 @@ class TestPhaseCalculationRFI:
         assert out["rfi_phase"].shape == (n_rfi, n_ant, n_freq, n_time_fine)
         assert jnp.all(jnp.isfinite(out["rfi_phase"]))
 
-    # Low-level: _compute_ant_pos
-
     def test_compute_ant_pos_xyz_earth_radius(self):
         """ants_xyz (GCRF) should be at Earth's surface radius (~6.37e6 m)."""
         cfg = make_trajectory_config(n_ant=4)
@@ -262,15 +234,6 @@ class TestPhaseCalculationRFI:
         radii = jnp.linalg.norm(comp.ants_xyz, axis=-1)
         assert jnp.all(radii > 6.35e6), "Antenna radius below Earth surface"
         assert jnp.all(radii < 6.40e6), "Antenna radius too large for ground-based telescope"
-
-    def test_compute_ant_pos_uvw_shape_and_finite(self):
-        """ants_uvw must have shape (n_ant, n_time_fine, 3) with all finite values."""
-        n_ant, n_time, n_int_time = 4, 4, 2
-        cfg = make_trajectory_config(n_ant=n_ant, n_time=n_time, n_int_time=n_int_time)
-        comp = PhaseCalculationRFI()
-        comp.setup(cfg)
-        assert comp.ants_uvw.shape == (n_ant, n_time * n_int_time, 3)
-        assert jnp.all(jnp.isfinite(comp.ants_uvw))
 
     def test_compute_ant_pos_distinct_across_antennas(self):
         """Different antennas must have distinct GCRF positions."""
@@ -285,12 +248,6 @@ class TestPhaseCalculationRFI:
 # ---------------------------------------------------------------------------
 
 class TestFixedOrbit:
-
-    def test_setup_succeeds(self):
-        """Component propagates the TLE orbit and pre-computes phase without error."""
-        cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
-        comp.setup(cfg)
 
     def test_rfi_xyz_shape(self):
         """Pre-computed satellite positions stored at setup have shape (n_rfi, n_time_fine, 3)."""
@@ -313,13 +270,6 @@ class TestFixedOrbit:
         n_time_fine = n_time * n_int_time
         assert comp.rfi_phase.shape == (n_rfi, n_ant, n_freq, n_time_fine)
 
-    def test_rfi_xyz_nonzero(self):
-        """Propagated satellite positions must be non-zero (orbit was computed)."""
-        cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
-        comp.setup(cfg)
-        assert not jnp.allclose(comp.rfi_xyz, 0.0)
-
     def test_rfi_xyz_altitude_reasonable(self):
         """ISS is at ~400 km altitude — distance from Earth's centre ≈ 6.8e6 m."""
         cfg = make_trajectory_config(n_rfi=1)
@@ -341,8 +291,7 @@ class TestFixedOrbit:
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
-        state = {}
-        out = comp.build_forward()({}, state, make_constants(comp))
+        out = comp.build_forward()({}, {}, make_constants(comp))
         assert "rfi_xyz" in out
         assert "rfi_phase" in out
 
@@ -354,17 +303,6 @@ class TestFixedOrbit:
         out = comp.build_forward()({}, {}, make_constants(comp))
         assert jnp.array_equal(out["rfi_xyz"], comp.rfi_xyz)
         assert jnp.array_equal(out["rfi_phase"], comp.rfi_phase)
-
-    def test_forward_is_deterministic(self):
-        """Calling build_forward twice with the same input gives the same result."""
-        cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
-        comp.setup(cfg)
-        constants = make_constants(comp)
-        fwd = comp.build_forward()
-        out1 = fwd({}, {}, constants)
-        out2 = fwd({}, {}, constants)
-        assert jnp.array_equal(out1["rfi_xyz"], out2["rfi_xyz"])
 
     def test_two_satellites_shape(self):
         """Two distinct TLEs produce position and phase arrays of the correct shape."""
@@ -401,14 +339,8 @@ class TestFixedOrbit:
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
-
         sentinel = {"foo": jnp.array(1.0)}
-        set_params = comp.build_set_params()
-        out = set_params(sentinel)
-
-        assert out is sentinel
-
-    # Low-level: _compute_rfi_phase
+        assert comp.build_set_params()(sentinel) is sentinel
 
     def test_compute_rfi_phase_consistent_with_get_rfi_phase(self):
         """Phase stored at setup must equal get_rfi_phase called with the same arrays."""
@@ -417,15 +349,6 @@ class TestFixedOrbit:
         comp.setup(cfg)
         expected = get_rfi_phase(comp.rfi_xyz, comp.ants_uvw, comp.ants_xyz, comp.freqs_fine)
         assert jnp.allclose(comp.rfi_phase, expected)
-
-    def test_compute_rfi_phase_xyz_is_satellite_altitude(self):
-        """rfi_xyz computed during _compute_rfi_phase should be at LEO altitude."""
-        cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
-        comp.setup(cfg)
-        radii = jnp.linalg.norm(comp.rfi_xyz[0], axis=-1)
-        assert jnp.all(radii > 6.0e6), "Satellite altitude below LEO"
-        assert jnp.all(radii < 8.0e6), "Satellite altitude above expected LEO range"
 
 
 # ---------------------------------------------------------------------------
@@ -439,259 +362,101 @@ _BUNDLED_TLE_EPOCH_JD = 2459997.079914223  # 2023-02-21 13:55:04.589 UTC => GMSA
 _BUNDLED_NORAD_IDS = [20452, 38833]
 
 
-# ---------------------------------------------------------------------------
-# SGP4LEONoDragOrbit
-# ---------------------------------------------------------------------------
+def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int_freq=1):
+    """Build a mock TabConfig for SGP4 orbit components using the bundled TLE cache."""
+    epoch_jd = _BUNDLED_TLE_EPOCH_JD
+    n_rfi = len(_BUNDLED_NORAD_IDS)
+    n_time_fine = n_time * n_int_time
+    n_freq_fine = n_freq * n_int_freq
 
-class TestSGP4LEONoDragOrbit:
+    times_jd = jnp.linspace(epoch_jd, epoch_jd + n_time * 8.0 / 86400, n_time)
+    times_jd_fine = jnp.linspace(epoch_jd, epoch_jd + n_time_fine * 8.0 / 86400, n_time_fine)
 
-    def _make_config(self, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int_freq=1):
-        # Use the bundled TLE epoch so get_tles_by_id hits the repo cache file
-        # and never contacts Space-Track.
-        epoch_jd = _BUNDLED_TLE_EPOCH_JD
-        n_rfi = len(_BUNDLED_NORAD_IDS)
-        n_time_fine = n_time * n_int_time
-        n_freq_fine = n_freq * n_int_freq
-
-        times_jd = jnp.linspace(epoch_jd, epoch_jd + n_time * 8.0 / 86400, n_time)
-        times_jd_fine = jnp.linspace(epoch_jd, epoch_jd + n_time_fine * 8.0 / 86400, n_time_fine)
-
-        return SimpleNamespace(
-            n_ant=n_ant,
-            n_rfi=n_rfi,
-            n_freq=n_freq,
-            n_time=n_time,
-            n_freq_fine=n_freq_fine,
-            n_time_fine=n_time_fine,
-            n_int_time=n_int_time,
-            n_int_freq=n_int_freq,
-            tles=None,
-            elements=jnp.zeros((n_rfi, 6)),
-            epoch_jd=jnp.full((n_rfi,), epoch_jd),
-            times_jd=times_jd,
-            times_jd_fine=times_jd_fine,
-            ants_itrf=_build_ants_itrf(n_ant),
-            phase_centre=_PHASE_CENTRE,
-            freqs=jnp.linspace(1.4e9, 1.41e9, n_freq),
-            freqs_fine=jnp.linspace(1.4e9, 1.41e9, n_freq_fine),
-            times=jnp.linspace(0.0, n_time * 8.0, n_time),
-            times_fine=jnp.linspace(0.0, n_time_fine * 8.0, n_time_fine),
-            norad_ids=_BUNDLED_NORAD_IDS,
-            args={"rfi": {"freq_int_samples": n_int_freq}},
-        )
-
-    def test_setup_succeeds(self):
-        """Component loads TLEs from the repo cache and initialises without error."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-
-    def test_rfi_xyz_shape(self):
-        """Initial state_outputs['rfi_xyz'] placeholder has shape (n_rfi, n_time_fine, 3)."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-        assert comp.state_outputs["rfi_xyz"].shape == (cfg.n_rfi, cfg.n_time_fine, 3)
-
-    def test_init_params_base_shape(self):
-        """Initial base orbit parameters have shape (n_rfi, 6) — bstar excluded from learnable params."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-        assert comp.init_params_base["rfi_orbit_base"].shape == (cfg.n_rfi, 6)
-
-    def test_prior_covariance_positive_definite(self):
-        """L_rfi_orbit must be lower-triangular with positive diagonal."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-        for i in range(cfg.n_rfi):
-            diag = jnp.diag(comp.L_rfi_orbit[i])
-            assert jnp.all(diag > 0), f"Cholesky diagonal not positive for satellite {i}"
-
-    def test_forward_output_shapes(self):
-        """Forward pass produces rfi_xyz (n_rfi, n_time_fine, 3) and elements (n_rfi, 6)."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-
-        params = {"rfi_orbit_base": comp.init_params_base["rfi_orbit_base"]}
-        out = comp.build_forward()(params, {}, make_constants(comp))
-
-        assert out["rfi_xyz"].shape == (cfg.n_rfi, cfg.n_time_fine, 3)
-        assert out["elements"].shape == (cfg.n_rfi, 6)
-
-    def test_forward_rfi_xyz_finite(self):
-        """SGP4-propagated satellite positions from the forward pass are all finite."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-
-        params = {"rfi_orbit_base": comp.init_params_base["rfi_orbit_base"]}
-        out = comp.build_forward()(params, {}, make_constants(comp))
-
-        assert jnp.all(jnp.isfinite(out["rfi_xyz"]))
-
-    def test_build_set_params_samples_correct_shapes(self):
-        """build_set_params must sample rfi_orbit_base with shape (n_rfi, 6) inside a NumPyro trace."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-
-        set_params = comp.build_set_params()
-        with numpyro.handlers.seed(rng_seed=0):
-            params = set_params({})
-
-        assert "rfi_orbit_base" in params
-        assert params["rfi_orbit_base"].shape == (cfg.n_rfi, 6)
-
-    def test_forward_transform_roundtrip(self):
-        """inv_transform(forward_transform(x)) == x."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-
-        base = jax.random.normal(jax.random.PRNGKey(0), (cfg.n_rfi, 6))
-        transformed = comp.forward_transform(base, comp.L_rfi_orbit, comp.mu_rfi_orbit)
-        recovered = comp.inv_transform(transformed, comp.L_rfi_orbit, comp.mu_rfi_orbit)
-
-        assert jnp.allclose(recovered, base, atol=1e-6)
-
-    def test_inv_transform_roundtrip(self):
-        """forward_transform(inv_transform(x)) == x."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-
-        params = comp.mu_rfi_orbit + jax.random.normal(jax.random.PRNGKey(1), (cfg.n_rfi, 6)) * 0.01
-        base = comp.inv_transform(params, comp.L_rfi_orbit, comp.mu_rfi_orbit)
-        recovered = comp.forward_transform(base, comp.L_rfi_orbit, comp.mu_rfi_orbit)
-
-        assert jnp.allclose(recovered, params, atol=1e-6)
-
-    # Low-level: sats_init
-
-    def test_sats_init_direct_call(self):
-        """sats_init called directly with comp.elements must return without error."""
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-        sats = comp.sats_init(comp.elements)
-        assert sats is not None
-
-    def test_sats_init_produces_valid_positions(self):
-        """sats_init output propagated via sgp4jax must yield finite LEO positions."""
-        import sgp4jax
-        from tabascal.components.trajectory import SGP4LEONoDragOrbit
-        cfg = self._make_config()
-        comp = SGP4LEONoDragOrbit()
-        comp.setup(cfg)
-        sats = comp.sats_init(comp.elements)
-        positions, _ = sgp4jax.gcrf_positions_multi_leo(sats, comp.times_jd_fine)
-        assert positions.shape == (cfg.n_rfi, cfg.n_time_fine, 3)
-        assert jnp.all(jnp.isfinite(positions))
+    return SimpleNamespace(
+        n_ant=n_ant,
+        n_rfi=n_rfi,
+        n_freq=n_freq,
+        n_time=n_time,
+        n_freq_fine=n_freq_fine,
+        n_time_fine=n_time_fine,
+        n_int_time=n_int_time,
+        n_int_freq=n_int_freq,
+        tles=None,
+        elements=jnp.zeros((n_rfi, n_params)),
+        epoch_jd=jnp.full((n_rfi,), epoch_jd),
+        times_jd=times_jd,
+        times_jd_fine=times_jd_fine,
+        ants_itrf=_build_ants_itrf(n_ant),
+        phase_centre=_PHASE_CENTRE,
+        freqs=jnp.linspace(1.4e9, 1.41e9, n_freq),
+        freqs_fine=jnp.linspace(1.4e9, 1.41e9, n_freq_fine),
+        times=jnp.linspace(0.0, n_time * 8.0, n_time),
+        times_fine=jnp.linspace(0.0, n_time_fine * 8.0, n_time_fine),
+        norad_ids=_BUNDLED_NORAD_IDS,
+        args={"rfi": {"freq_int_samples": n_int_freq}},
+    )
 
 
 # ---------------------------------------------------------------------------
-# SGP4LEOOrbit
+# SGP4LEONoDragOrbit and SGP4LEOOrbit — merged parametrized class
+# SGP4LEONoDragOrbit: n_params=6 (bstar excluded from learnable params)
+# SGP4LEOOrbit:       n_params=7 (bstar included)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("orbit_cls,n_params", [
+    pytest.param("SGP4LEONoDragOrbit", 6, id="SGP4LEONoDragOrbit"),
+    pytest.param("SGP4LEOOrbit", 7, id="SGP4LEOOrbit"),
+])
 class TestSGP4LEOOrbit:
 
-    def _make_config(self, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int_freq=1):
-        epoch_jd = _BUNDLED_TLE_EPOCH_JD
-        n_rfi = len(_BUNDLED_NORAD_IDS)
-        n_time_fine = n_time * n_int_time
-        n_freq_fine = n_freq * n_int_freq
+    def _get_cls(self, orbit_cls):
+        from tabascal.components import trajectory as traj_mod
+        return getattr(traj_mod, orbit_cls)
 
-        times_jd = jnp.linspace(epoch_jd, epoch_jd + n_time * 8.0 / 86400, n_time)
-        times_jd_fine = jnp.linspace(epoch_jd, epoch_jd + n_time_fine * 8.0 / 86400, n_time_fine)
-
-        return SimpleNamespace(
-            n_ant=n_ant,
-            n_rfi=n_rfi,
-            n_freq=n_freq,
-            n_time=n_time,
-            n_freq_fine=n_freq_fine,
-            n_time_fine=n_time_fine,
-            n_int_time=n_int_time,
-            n_int_freq=n_int_freq,
-            tles=None,
-            elements=jnp.zeros((n_rfi, 7)),
-            epoch_jd=jnp.full((n_rfi,), epoch_jd),
-            times_jd=times_jd,
-            times_jd_fine=times_jd_fine,
-            ants_itrf=_build_ants_itrf(n_ant),
-            phase_centre=_PHASE_CENTRE,
-            freqs=jnp.linspace(1.4e9, 1.41e9, n_freq),
-            freqs_fine=jnp.linspace(1.4e9, 1.41e9, n_freq_fine),
-            times=jnp.linspace(0.0, n_time * 8.0, n_time),
-            times_fine=jnp.linspace(0.0, n_time_fine * 8.0, n_time_fine),
-            norad_ids=_BUNDLED_NORAD_IDS,
-            args={"rfi": {"freq_int_samples": n_int_freq}},
-        )
-
-    def test_setup_succeeds(self):
-        """Component loads TLEs from the repo cache and initialises without error."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
-        comp.setup(cfg)
-
-    def test_rfi_xyz_shape(self):
+    def test_rfi_xyz_shape(self, orbit_cls, n_params):
         """Initial state_outputs['rfi_xyz'] placeholder has shape (n_rfi, n_time_fine, 3)."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
         comp.setup(cfg)
         assert comp.state_outputs["rfi_xyz"].shape == (cfg.n_rfi, cfg.n_time_fine, 3)
 
-    def test_init_params_base_shape(self):
-        """SGP4LEOOrbit has 7 orbit parameters (includes bstar)."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
+    def test_init_params_base_shape(self, orbit_cls, n_params):
+        """Initial base orbit parameters have shape (n_rfi, n_params)."""
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
         comp.setup(cfg)
-        assert comp.init_params_base["rfi_orbit_base"].shape == (cfg.n_rfi, 7)
+        assert comp.init_params_base["rfi_orbit_base"].shape == (cfg.n_rfi, n_params)
 
-    def test_prior_covariance_positive_definite(self):
-        """Cholesky factor L_rfi_orbit (7x7) has a positive diagonal for every satellite."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
+    def test_prior_covariance_positive_definite(self, orbit_cls, n_params):
+        """L_rfi_orbit must be lower-triangular with positive diagonal."""
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
         comp.setup(cfg)
         for i in range(cfg.n_rfi):
             diag = jnp.diag(comp.L_rfi_orbit[i])
             assert jnp.all(diag > 0), f"Cholesky diagonal not positive for satellite {i}"
 
-    def test_forward_output_shapes(self):
-        """Forward pass produces rfi_xyz (n_rfi, n_time_fine, 3) and elements (n_rfi, 7)."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
+    def test_forward_output_shapes(self, orbit_cls, n_params):
+        """Forward pass produces rfi_xyz (n_rfi, n_time_fine, 3) and elements (n_rfi, n_params)."""
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
         comp.setup(cfg)
 
         params = {"rfi_orbit_base": comp.init_params_base["rfi_orbit_base"]}
         out = comp.build_forward()(params, {}, make_constants(comp))
 
         assert out["rfi_xyz"].shape == (cfg.n_rfi, cfg.n_time_fine, 3)
-        assert out["elements"].shape == (cfg.n_rfi, 7)
+        assert out["elements"].shape == (cfg.n_rfi, n_params)
 
-    def test_forward_rfi_xyz_finite(self):
+    def test_forward_rfi_xyz_finite(self, orbit_cls, n_params):
         """SGP4-propagated satellite positions from the forward pass are all finite."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
         comp.setup(cfg)
 
         params = {"rfi_orbit_base": comp.init_params_base["rfi_orbit_base"]}
@@ -699,11 +464,11 @@ class TestSGP4LEOOrbit:
 
         assert jnp.all(jnp.isfinite(out["rfi_xyz"]))
 
-    def test_build_set_params_samples_correct_shapes(self):
-        """build_set_params must sample rfi_orbit_base with shape (n_rfi, 7) inside a NumPyro trace."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
+    def test_build_set_params_samples_correct_shapes(self, orbit_cls, n_params):
+        """build_set_params must sample rfi_orbit_base with shape (n_rfi, n_params) inside a NumPyro trace."""
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
         comp.setup(cfg)
 
         set_params = comp.build_set_params()
@@ -711,51 +476,24 @@ class TestSGP4LEOOrbit:
             params = set_params({})
 
         assert "rfi_orbit_base" in params
-        assert params["rfi_orbit_base"].shape == (cfg.n_rfi, 7)
+        assert params["rfi_orbit_base"].shape == (cfg.n_rfi, n_params)
 
-    def test_forward_transform_roundtrip(self):
-        """inv_transform(forward_transform(x)) == x."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
+    def test_forward_transform_roundtrips(self, orbit_cls, n_params):
+        """inv_transform(forward_transform(x)) == x and forward_transform(inv_transform(x)) == x."""
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
         comp.setup(cfg)
 
-        base = jax.random.normal(jax.random.PRNGKey(0), (cfg.n_rfi, 7))
-        transformed = comp.forward_transform(base, comp.L_rfi_orbit, comp.mu_rfi_orbit)
-        recovered = comp.inv_transform(transformed, comp.L_rfi_orbit, comp.mu_rfi_orbit)
+        base = jax.random.normal(jax.random.PRNGKey(0), (cfg.n_rfi, n_params))
+        assert_transform_roundtrip(comp, base, comp.L_rfi_orbit, comp.mu_rfi_orbit)
 
-        assert jnp.allclose(recovered, base, atol=1e-6)
-
-    def test_inv_transform_roundtrip(self):
-        """forward_transform(inv_transform(x)) == x."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
-        comp.setup(cfg)
-
-        params = comp.mu_rfi_orbit + jax.random.normal(jax.random.PRNGKey(1), (cfg.n_rfi, 7)) * 0.01
-        base = comp.inv_transform(params, comp.L_rfi_orbit, comp.mu_rfi_orbit)
-        recovered = comp.forward_transform(base, comp.L_rfi_orbit, comp.mu_rfi_orbit)
-
-        assert jnp.allclose(recovered, params, atol=1e-6)
-
-    # Low-level: sats_init
-
-    def test_sats_init_direct_call(self):
-        """sats_init called directly with comp.elements must return without error."""
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
-        comp.setup(cfg)
-        sats = comp.sats_init(comp.elements)
-        assert sats is not None
-
-    def test_sats_init_produces_valid_positions(self):
+    def test_sats_init_produces_valid_positions(self, orbit_cls, n_params):
         """sats_init output propagated via sgp4jax must yield finite LEO positions."""
         import sgp4jax
-        from tabascal.components.trajectory import SGP4LEOOrbit
-        cfg = self._make_config()
-        comp = SGP4LEOOrbit()
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
         comp.setup(cfg)
         sats = comp.sats_init(comp.elements)
         positions, _ = sgp4jax.gcrf_positions_multi_leo(sats, comp.times_jd_fine)

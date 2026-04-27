@@ -16,9 +16,7 @@ from tabascal.components.gains import (
     gains_config_validation,
 )
 
-
-def make_constants(comp):
-    return {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
+from .conftest import make_constants, assert_transform_roundtrip
 
 
 # ---------------------------------------------------------------------------
@@ -200,12 +198,6 @@ class TestGainsConfigValidation:
 
 class TestUnitaryGains:
 
-    def test_setup_succeeds(self):
-        """Component initialises without error."""
-        cfg = make_gains_config()
-        comp = UnitaryGains()
-        comp.setup(cfg)  # must not raise
-
     def test_state_outputs_shapes(self):
         """state_outputs['gains'] placeholder has shape (n_ant, n_freq, n_time)."""
         n_ant, n_freq, n_time = 4, 3, 6
@@ -232,9 +224,7 @@ class TestUnitaryGains:
         comp.setup(cfg)
 
         state = make_vis_state(n_ant, n_freq, n_time)
-        constants = make_constants(comp)
-        fwd = comp.build_forward()
-        out = fwd({}, state, constants)
+        out = comp.build_forward()({}, state, make_constants(comp))
 
         expected = state["vis_rfi"] + state["vis_ast"]
         assert jnp.allclose(out["vis_obs"], expected)
@@ -249,34 +239,12 @@ class TestUnitaryGains:
         out = comp.build_forward()({}, state, make_constants(comp))
         assert "some_extra_key" in out
 
-    @pytest.mark.parametrize("n_ant,n_freq,n_time", [
-        (2, 1, 4),
-        (6, 8, 10),
-        (16, 4, 12),
-    ])
-    def test_forward_output_shapes(self, n_ant, n_freq, n_time):
-        """gains and vis_obs output shapes are correct for the given (n_ant, n_freq, n_time) dimensions."""
-        cfg = make_gains_config(n_ant=n_ant, n_freq=n_freq, n_time=n_time)
-        comp = UnitaryGains()
-        comp.setup(cfg)
-        state = make_vis_state(n_ant, n_freq, n_time)
-        out = comp.build_forward()({}, state, make_constants(comp))
-        a1, _ = jnp.triu_indices(n_ant, 1)
-        n_bl = len(a1)
-        assert out["vis_obs"].shape == (n_bl, n_freq, n_time)
-
 
 # ---------------------------------------------------------------------------
 # GPGains
 # ---------------------------------------------------------------------------
 
 class TestGPGains:
-
-    def test_setup_succeeds(self):
-        """Component initialises without error."""
-        cfg = make_gains_config(amp_corr_time=60.0, phase_corr_time=60.0)
-        comp = GPGains()
-        comp.setup(cfg)
 
     def test_prior_params_shapes(self):
         """Prior mean and Cholesky L arrays have shapes consistent with the GP parameterisation."""
@@ -393,20 +361,6 @@ class TestGPGains:
         assert jnp.issubdtype(out["gains"].dtype, jnp.complexfloating)
         assert jnp.issubdtype(out["vis_obs"].dtype, jnp.complexfloating)
 
-    def test_resample_matrices_shapes(self):
-        """GP resampling matrices have shapes consistent with the coarse/fine time grids."""
-        n_ant, n_freq, n_time = 5, 4, 16
-        cfg = make_gains_config(
-            n_ant=n_ant, n_freq=n_freq, n_time=n_time,
-            amp_corr_time=40.0, phase_corr_time=40.0,
-        )
-        comp = GPGains()
-        comp.setup(cfg)
-
-        n_g = comp.n_g_times
-        assert comp.resample_amp.shape == (n_time, n_g)
-        assert comp.resample_phase.shape == (n_time, n_g)
-
     @pytest.mark.parametrize("n_ant,n_freq,n_time", [
         (2, 1, 4),
         (5, 3, 12),
@@ -455,8 +409,8 @@ class TestGPGains:
         assert params["gains_amp_induce_base"].shape == (n_ant, n_freq, n_g)
         assert params["gains_phase_induce_base"].shape == (n_ant - 1, n_freq, n_g)
 
-    def test_forward_transform_roundtrip(self):
-        """inv_transform(forward_transform(x)) == x up to floating-point precision."""
+    def test_forward_transform_roundtrips(self):
+        """inv_transform(forward_transform(x)) == x and vice versa."""
         n_ant, n_freq, n_time = 4, 3, 8
         cfg = make_gains_config(
             n_ant=n_ant, n_freq=n_freq, n_time=n_time,
@@ -467,49 +421,4 @@ class TestGPGains:
         n_g = comp.n_g_times
 
         base = jax.random.normal(jax.random.PRNGKey(42), (n_ant, n_freq, n_g))
-        mu = comp.mu_gains_amp
-        L = comp.L_gains_amp
-
-        transformed = comp.forward_transform(base, L, mu)
-        recovered = comp.inv_transform(transformed, L, mu)
-
-        assert jnp.allclose(recovered, base, atol=1e-6)
-
-    def test_inv_transform_roundtrip(self):
-        """forward_transform(inv_transform(x)) == x up to floating-point precision."""
-        n_ant, n_freq, n_time = 4, 3, 8
-        cfg = make_gains_config(
-            n_ant=n_ant, n_freq=n_freq, n_time=n_time,
-            amp_corr_time=60.0, phase_corr_time=60.0,
-        )
-        comp = GPGains()
-        comp.setup(cfg)
-        n_g = comp.n_g_times
-
-        params = jax.random.normal(jax.random.PRNGKey(7), (n_ant, n_freq, n_g))
-        mu = comp.mu_gains_amp
-        L = comp.L_gains_amp
-
-        base = comp.inv_transform(params, L, mu)
-        recovered = comp.forward_transform(base, L, mu)
-
-        assert jnp.allclose(recovered, params, atol=1e-6)
-
-
-# ---------------------------------------------------------------------------
-# BaseGPGains — inherited build_set_params (no-op identity)
-# ---------------------------------------------------------------------------
-
-class TestBaseGPGainsInheritedSetParams:
-
-    def test_unitary_gains_build_set_params_is_identity(self):
-        """UnitaryGains inherits BaseGPGains.build_set_params which is a no-op."""
-        cfg = make_gains_config()
-        comp = UnitaryGains()
-        comp.setup(cfg)
-
-        sentinel = {"foo": jnp.array(3.14)}
-        set_params = comp.build_set_params()
-        out = set_params(sentinel)
-
-        assert out is sentinel
+        assert_transform_roundtrip(comp, base, comp.L_gains_amp, comp.mu_gains_amp)

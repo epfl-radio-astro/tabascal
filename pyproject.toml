@@ -49,6 +49,9 @@ Repository = "https://github.com/epfl-radio-astro/tabascal.git"
 [tool.setuptools.packages.find]
 where = ["."]
 
+[tool.setuptools.package-data]
+tabascal = ["data/config/*", "data/tles/*"]
+
 [project.scripts]
 tabascal = "tabascal.scripts.run_tabascal:main"
 tab2MS="tabascal.scripts.results_to_MS:main"

@@ -93,7 +93,3 @@ dev     = { features = ["cpu", "dev"], solve-group = "cpu" }
 # NVIDIA GPU environments — pure conda, lockable from any host platform
 cuda12     = { features = ["cuda12"], solve-group = "cuda12" }
 cuda12-dev = { features = ["cuda12", "dev"], solve-group = "cuda12" }
-
-# NVIDIA GPU environments — pure conda, lockable from any host platform
-cuda13     = { features = ["cuda13"], solve-group = "cuda13" }
-cuda13-dev = { features = ["cuda13", "dev"], solve-group = "cuda13" }

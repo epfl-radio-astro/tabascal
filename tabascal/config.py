@@ -45,7 +45,7 @@ def load_config(path: str) -> Dict:
     dict
         Configuration dictionary.
     """
-    config_dir = files("tabascal.data").joinpath("config").__str__()
+    config_dir = files("tabascal").joinpath("data/config").__str__()
     tab_base_config_path = os.path.join(config_dir, "tab_config_base.yaml")
     base_config = yaml_load(tab_base_config_path)
 

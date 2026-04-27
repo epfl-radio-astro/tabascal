@@ -49,7 +49,7 @@ def make_tle_dir(tle_dir: Optional[str] = None) -> str:
     if tle_dir:
         tle_dir = os.path.abspath(tle_dir)
     else:
-        tle_dir = files("tabascal.data").joinpath("tles").__str__()
+        tle_dir = files("tabascal").joinpath("data/tles").__str__()
 
     os.makedirs(tle_dir, exist_ok=True)
     return tle_dir
