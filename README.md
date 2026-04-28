@@ -97,3 +97,20 @@ pixi run -e dev docs-build
 ```
 
 After building, open `docs/_build/html/index.html` in a browser.
+
+## Debugging a performance regression locally
+
+When a performance regression is detected in CI, reproduce it on a smaller dataset with 8
+antennas (faster to simulate, runs on any dev machine):
+
+```bash
+# Generate an 8-antenna simulation from the standard 96A config
+sim-vis -c ci/reframe/data/sim_target_96A.yaml -a 8
+
+# Run tabascal with timing output against the generated dataset
+tabascal -c ci/reframe/data/tab_target.yaml \
+         -s ci/reframe/data/data/pnt_src_obs_08A_090T-0000-0890_001I_001F-1.500e+08-1.500e+08_050PAST_000GAST_000EAST_32SAT_0GRD_1.0e+00RFI \
+         -t
+```
+
+The `-t` flag prints a per-function timing table identical to the CI output.

@@ -49,27 +49,6 @@ def main():
     sim_config = data_dir / "sim_target_96A.yaml"
     tab_template = data_dir / "tab_target.yaml"
 
-    # Step 0: Write SpaceTrack credentials from environment variables.
-    # Written to ~/.credentials/spacetrack_login.yaml so that
-    # load_spacetrack_credentials() finds them via its default search path
-    # regardless of working directory. Credentials are optional when the
-    # required TLEs are already present in the bundled cache.
-    st_user = os.environ.get("SPACETRACK_LOGIN")
-    st_pass = os.environ.get("SPACETRACK_PASSWORD")
-    spacetrack_path = None
-    if st_user and st_pass:
-        creds = yaml.dump({"username": st_user, "password": st_pass})
-        creds_dir = Path.home() / ".credentials"
-        creds_dir.mkdir(parents=True, exist_ok=True)
-        (creds_dir / "spacetrack_login.yaml").write_text(creds)
-        spacetrack_path = workdir / "spacetrack_login.yaml"
-        spacetrack_path.write_text(creds)
-    else:
-        logging.warning(
-            "SPACETRACK_LOGIN/SPACETRACK_PASSWORD not set; "
-            "relying on bundled TLE cache."
-        )
-
     # Step 1: Download or generate simulation data
     branch = f"tabsim_v{tabsim.__version__}"
     input_hash = compute_sha256(sim_config)
@@ -107,8 +86,6 @@ def main():
             for ancillary in data_dir.glob("*"):
                 if ancillary.is_file() and ancillary.suffix != ".yaml":
                     shutil.copy2(ancillary, local_dir / ancillary.name)
-            if spacetrack_path:
-                shutil.copy2(spacetrack_path, local_dir / spacetrack_path.name)
             tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
             subprocess.run(
                 [

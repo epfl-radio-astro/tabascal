@@ -1,14 +1,14 @@
 [build-system]
-# XXX: If your project needs other packages to build properly, add them to this list.
 requires = ["setuptools >= 64"]
 build-backend = "setuptools.build_meta"
+
+# ── Project metadata ───────────────────────────────────────────────────────────
 
 [project]
 name = "tabascal"
 version = "0.0.1"
 license = {file = "LICENSE"}
 readme = "README.md"
-# dynamic = ["version", "readme"]
 authors = [
   {name = "Chris Finlay", email = "christopher.finlay@epfl.ch"},
 ]
@@ -37,14 +37,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "huggingface-hub"]
-docs = ["sphinx", "sphinx-rtd-theme"]
-dev = ["pre-commit", "tabascal[test,docs]"]
+test  = ["pytest", "pytest-cov", "huggingface-hub"]
+docs  = ["sphinx", "sphinx-rtd-theme"]
+dev   = ["pre-commit", "reframe-hpc", "tabascal[test,docs]"]
 cuda12 = ["jax[cuda12]"]
 cuda13 = ["jax[cuda13]"]
 
 [project.urls]
 Repository = "https://github.com/epfl-radio-astro/tabascal.git"
+
+[project.scripts]
+tabascal = "tabascal.scripts.run_tabascal:main"
+tab2MS   = "tabascal.scripts.results_to_MS:main"
+
+# ── Setuptools ─────────────────────────────────────────────────────────────────
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -52,10 +58,106 @@ where = ["."]
 [tool.setuptools.package-data]
 tabascal = ["data/config/*", "data/tles/*"]
 
-[project.scripts]
-tabascal = "tabascal.scripts.run_tabascal:main"
-tab2MS="tabascal.scripts.results_to_MS:main"
+# ── Pytest ─────────────────────────────────────────────────────────────────────
 
 [tool.pytest.ini_options]
-log_cli = true
+log_cli       = true
 log_cli_level = "WARNING"
+
+# ── Pixi ──────────────────────────────────────────────────────────────────────
+# name / version / description are inherited from [project] above.
+
+[tool.pixi.workspace]
+channels  = ["conda-forge"]
+platforms = ["osx-64", "osx-arm64", "linux-64", "linux-aarch64"]
+
+# ── Tasks ──────────────────────────────────────────────────────────────────────
+
+[tool.pixi.feature.dev.tasks]
+build-ffi      = { cmd = "make cpu",  cwd = "tabascal/components/ffi", description = "Compile CPU FFI shared library (tabascal.so)" }
+build-ffi-cuda = { cmd = "make cuda", cwd = "tabascal/components/ffi", description = "Compile CUDA FFI shared library (tabascal_cuda.so)" }
+test           = "pytest tests/"
+test-components = "pytest tests/components/"
+test-inventory = { cmd = "python scripts/generate_test_inventory.py", description = "Regenerate tests/TEST_INVENTORY.md from docstrings" }
+docs-build     = "sphinx-build -b html docs/ docs/_build/html"
+docs-clean     = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
+perf-test      = { cmd = "python ci/reframe/prepare_data.py --components 'trajectory:FixedOrbit,rfi_signal:ComplexRFI,rfi_vis:RiemannVisTimeFreqCalculation,ast_vis:FourierTimeFreqGPAst,gains:UnitaryGains' --workdir /tmp/tab-perf --src-root . && python tabascal/scripts/run_tabascal.py -c /tmp/tab-perf/tab_target.yaml -s $(cat /tmp/tab-perf/sim_dir.txt) -t", description = "Run performance benchmark locally (Riemann variant)" }
+
+# ── Shared conda dependencies (all environments) ───────────────────────────────
+
+[tool.pixi.dependencies]
+python         = ">=3.10,<=3.13"
+astropy        = "*"
+casacore       = "*"
+dask           = "*"
+dask-ms        = "*"
+jax            = ">=0.6.0,<0.10.0"
+matplotlib     = "*"
+numpy          = "*"
+numpyro        = "*"
+optax          = "*"
+python-casacore = "*"
+pyyaml         = "*"
+sgp4jax        = "*"
+skyfield       = "*"
+spacetrack     = "*"
+tqdm           = "*"
+xarray         = "*"
+zarr           = "<3.0.0"
+
+# ── CPU feature ────────────────────────────────────────────────────────────────
+# Used by the default and dev environments on all platforms (including CPU-only
+# linux-64 and linux-aarch64). Carries PyPI-only packages (tabascal, tabsim) so
+# that GPU environments remain pure conda and are cross-solvable from any host.
+
+[tool.pixi.feature.cpu.dependencies]
+jaxlib = "*"
+
+[tool.pixi.feature.cpu.pypi-dependencies]
+tabascal = { path = ".", editable = true }
+tabsim   = "*"
+
+# ── CUDA 12 feature ────────────────────────────────────────────────────────────
+# Installs the cuda-enabled jaxlib build from conda-forge, equivalent to:
+#   conda install "jaxlib=*=*cuda12*" jax -c conda-forge
+# Use cuda12-dev for a full development install including tabascal and tooling.
+
+[tool.pixi.feature.cuda12]
+platforms = ["linux-64", "linux-aarch64"]
+
+[tool.pixi.feature.cuda12.system-requirements]
+cuda = "12"
+
+[tool.pixi.feature.cuda12.dependencies]
+jaxlib = { version = "*", build = "*cuda12*" }
+
+# ── Dev feature ────────────────────────────────────────────────────────────────
+# Adds docs and test tooling. Also carries the full PyPI package set so that
+# cuda12-dev gets tabascal and friends even though it doesn't include the cpu feature.
+
+[tool.pixi.feature.dev.dependencies]
+cxx-compiler   = "*"
+pytest         = "*"
+pytest-cov     = "*"
+pre-commit     = "*"
+huggingface_hub = "*"
+sphinx         = "*"
+sphinx-rtd-theme = "*"
+myst-parser    = "*"
+graphviz       = "*"
+
+[tool.pixi.feature.dev.pypi-dependencies]
+tabascal    = { path = ".", editable = true }
+tabsim      = "*"
+reframe-hpc = "*"
+
+# ── Environments ───────────────────────────────────────────────────────────────
+
+[tool.pixi.environments]
+# CPU environments — lockable from any host platform
+default    = { features = ["cpu"],        solve-group = "cpu" }
+dev        = { features = ["cpu", "dev"], solve-group = "cpu" }
+
+# NVIDIA GPU environments — pure conda, lockable from any host platform
+cuda12     = { features = ["cuda12"],        solve-group = "cuda12" }
+cuda12-dev = { features = ["cuda12", "dev"], solve-group = "cuda12" }

@@ -1,4 +1,6 @@
 pixi.lock
+.coverage
+htmlcov/
 tests/TEST_INVENTORY.md
 **/log_tab_*.txt
 **/log_sim_*.txt
