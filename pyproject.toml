@@ -160,12 +160,10 @@ platforms = ["linux-64", "linux-aarch64"]
 build-ffi-cuda = { cmd = "make cuda", cwd = "tabascal/components/ffi", description = "Compile CUDA FFI shared library (tabascal_cuda.so)" }
 
 [tool.pixi.feature.compile.dependencies]
-cuda-nvcc        = "12.*"
-cuda-cudart-dev  = "12.*"
-libcub-dev       = "*"
-libcucomplex-dev = "*"
-make             = "*"
-cxx-compiler     = "*"
+cuda-nvcc       = "12.*"
+cuda-cudart-dev = "12.*"
+make            = "*"
+cxx-compiler    = "*"
 
 # ── Environments ───────────────────────────────────────────────────────────────
 
