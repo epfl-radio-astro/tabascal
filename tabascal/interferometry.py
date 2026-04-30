@@ -1,8 +1,16 @@
+from tabascal.time import gmsa_from_jd, mjd_to_jd
+from tabascal.coordinates import xyz_to_itrf
+
 from jax import jit, vmap, Array
 import jax.numpy as jnp
 from functools import partial
 import numpy as np
 from numpy.typing import NDArray
+
+
+T_s = 86164.0905  # Sidereal day in seconds
+Omega_e = 2 * jnp.pi / T_s  # Earth rotation rate in rad/s
+C = 299792458.0  # Speed of light in m/s
 
 
 def get_rfi_phase(
@@ -126,6 +134,57 @@ def apply_gains(gains: Array, vis: Array, a1: Array, a2: Array) -> Array:
 
     return vis_obs
 
+
+def calculate_fringe_frequency(
+    times_mjd: Array,
+    freq: float,
+    rfi_xyz: Array,
+    ants_itrf: Array,
+    ants_u: Array,
+    dec: float,
+) -> Array:
+    """Calculate the fringe frequency of an RFI source.
+
+    Parameters
+    ----------
+    times_mjd : Array (n_time,)
+        Times are which the RFI and antenna positions are given in Modified Julian Date.
+    freq : float
+        Observational frequency in Hz.
+    rfi_xyz : Array (n_time, 3)
+        Position of the RFI source in the ECI frame in metres.
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in the ITRF (ECEF) frame in metres.
+    ants_u : Array (n_time, n_ant)
+        U component of the antennas in UVW frame in metres.
+    dec : float
+        Phase centre declination in degrees.
+
+    Returns
+    -------
+    Array (n_time, n_bl)
+        Fringe frequencies on each baseline.
+    """
+
+    lam = C / freq
+    # Should change this to astropy.time.Time
+    gsa = gmsa_from_jd(mjd_to_jd(times_mjd))  # type: ignore
+    times = (times_mjd - times_mjd[0]) * 24 * 3600
+
+    r_ecef = xyz_to_itrf(rfi_xyz, gsa)  # type: ignore
+    s_ecef = r_ecef - jnp.mean(ants_itrf, axis=0)
+    s_hat_ecef = s_ecef / jnp.linalg.norm(s_ecef, axis=-1, keepdims=True)
+    s_hat_dot = jnp.gradient(s_hat_ecef, jnp.diff(times[:2])[0], axis=0)
+
+    a1, a2 = jnp.triu_indices(len(ants_itrf), 1)
+    bl_ecef = ants_itrf[a1] - ants_itrf[a2]
+    bl_u = ants_u[:, a1] - ants_u[:, a2]
+
+    fringe_move = jnp.einsum("bi,ti->tb", bl_ecef, s_hat_dot) / lam
+    fringe_stat = -bl_u * Omega_e * jnp.cos(jnp.deg2rad(dec)) / lam
+    fringe_freq = fringe_move - fringe_stat
+
+    return fringe_freq
 
 #########################################################################
 

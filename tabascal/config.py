@@ -1,29 +1,18 @@
 from tabascal.imports import import_components
 from tabascal.components.likelihood import gaussian
 from tabascal.tab_tools import read_ms, fix_padding
-from tabascal.components.trajectory import fetch_orbital_elements
+from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
 from tabascal.tle import print_spacetrack_status, preflight_tle_check
-from tabascal.interferometry import get_strides_and_idxs
+from tabascal.interferometry import calculate_fringe_frequency, get_strides_and_idxs
 from tabascal.fft_gp import domain_ss
+from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd, gmsa_from_jd
+from tabascal.coordinates import itrf_to_uvw
+
 
 import jax.numpy as jnp
 from jax import vmap, Array
 
 import numpy as np
-
-from tabsim.jax.coordinates import (
-    secs_to_days,
-    mjd_to_jd,
-    itrf_to_uvw,
-    kepler_orbit_many,
-    gmsa_from_jd,
-    calculate_fringe_frequency,
-    jd_to_mjd,
-)
-
-# from tabsim.jax.interferometry import int_sample_times
-from tabsim.dask.interferometry import int_sample_times
-from tabsim.config import deep_update, yaml_load
 
 import numpyro
 
@@ -31,6 +20,68 @@ from typing import Optional, Callable, Dict, List
 
 from importlib.resources import files
 import os
+import re
+import yaml
+import collections.abc
+
+
+class Tee(object):
+    """https://stackoverflow.com/questions/17866724/python-logging-print-statements-while-having-them-print-to-stdout"""
+
+    def __init__(self, *files):
+        self.files = files
+
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+
+    def flush(self):
+        pass
+
+    
+def deep_update(d: Dict, u: Dict) -> Dict:
+    """Recursively update a dictionary which includes subdictionaries.
+
+    Parameters
+    ----------
+    d : Dict
+        Base dictionary to update.
+    u : Dict
+        Update dictionary.
+
+    Returns
+    -------
+    Dict
+        Updated dictionary.
+    """
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = deep_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
+
+loader = yaml.SafeLoader
+loader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    re.compile(
+        """^(?:
+     [-+]?(?:[0-9][0-9_]*)\\.[0-9_]*(?:[eE][-+]?[0-9]+)?
+    |[-+]?(?:[0-9][0-9_]*)(?:[eE][-+]?[0-9]+)
+    |\\.[0-9_]+(?:[eE][-+][0-9]+)?
+    |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*
+    |[-+]?\\.(?:inf|Inf|INF)
+    |\\.(?:nan|NaN|NAN))$""",
+        re.X,
+    ),
+    list("-+0123456789."),
+)
+
+
+def yaml_load(path):
+    config = yaml.load(open(path), Loader=loader)
+    return config
 
 
 def load_config(path: str) -> Dict:
@@ -55,12 +106,6 @@ def load_config(path: str) -> Dict:
     except:
         raise IOError(f"Configuration file could not be loaded from {path}")
 
-
-def validate_tab_config(config: Dict):
-
-    pass
-
-    
     
 class TabConfig:
     """Configuration parameters for tabascal method"""
@@ -163,7 +208,9 @@ class TabConfig:
 
         ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
 
-        rfi_xyz = kepler_orbit_many(times_jd_coarse, self.epoch_jd, self.elements)
+        rfi_xyz = get_satellite_positions(self.tles, times_jd_coarse)
+        print(rfi_xyz.shape)
+
 
         calc_fringe_freq = lambda _rfi_xyz: calculate_fringe_frequency(
             jd_to_mjd(times_jd_coarse),

@@ -32,13 +32,12 @@ dependencies = [
     "sgp4jax",
     "skyfield",
     "spacetrack",
-    "tabsim",
     "tqdm",
     "xarray",
 ]
 
 [project.optional-dependencies]
-test  = ["pytest", "pytest-cov", "huggingface-hub"]
+test  = ["pytest", "pytest-cov", "huggingface-hub", "tabsim"]
 docs  = ["sphinx", "sphinx-rtd-theme"]
 dev   = ["pre-commit", "reframe-hpc", "tabascal[test,docs]"]
 cuda12 = ["jax[cuda12]"]
@@ -113,7 +112,6 @@ jaxlib = "*"
 
 [tool.pixi.feature.cpu.pypi-dependencies]
 tabascal = { path = ".", editable = true }
-tabsim   = "*"
 
 # ── CUDA 12 feature ────────────────────────────────────────────────────────────
 # Installs the cuda-enabled jaxlib build from conda-forge, equivalent to:
@@ -131,7 +129,6 @@ jaxlib = { version = "*", build = "*cuda12*" }
 
 [tool.pixi.feature.cuda12.pypi-dependencies]
 tabascal = { path = ".", editable = true }
-tabsim   = "*"
 
 # ── Dev feature ────────────────────────────────────────────────────────────────
 # Adds docs and test tooling. Also carries the full PyPI package set so that
@@ -151,6 +148,7 @@ graphviz         = "*"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 reframe-hpc = "*"
+tabsim   = "*"
 
 # ── Compile feature ────────────────────────────────────────────────────────────
 # CUDA 12 build toolchain for compiling the FFI kernels in tabascal/components/ffi
