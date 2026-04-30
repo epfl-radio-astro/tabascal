@@ -70,24 +70,6 @@ pytest tests/components/test_gains.py::TestGPGains::test_forward_output_shapes
 
 SGP4 component tests use a bundled TLE cache (`tabascal/data/tles/`) and run without Space-Track credentials. 
 
-## Test inventory
-
-`tests/TEST_INVENTORY.md` is a generated file — do not edit it by hand. Regenerate it after adding or modifying tests:
-
-```bash
-pixi run -e dev test-inventory
-```
-
-The script (`scripts/generate_test_inventory.py`) collects test IDs via `pytest --collect-only` and reads descriptions from each test function's docstring (first line only). The output is a Markdown table per test class with each test name linked to its source line.
-
-When adding tests, give every test function a one-line docstring — this becomes the Description column in the inventory. New test files must be added to `FILE_ORDER` in `scripts/generate_test_inventory.py`.
-
-```python
-def test_forward_output_shape(self):
-    """Forward pass produces rfi_phase with shape (n_rfi, n_ant, n_freq_fine, n_time_fine)."""
-    ...
-```
-
 ## Build the documentation
 
 ```bash

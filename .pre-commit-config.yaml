@@ -1,9 +1,0 @@
-repos:
-  - repo: local
-    hooks:
-      - id: check-chi2-refs
-        name: Check pipeline test chi2_ref values are populated
-        entry: sh ci/run_check_chi2_refs.sh
-        language: system
-        files: ^tests/test_tabascal_pipeline\.py$
-        pass_filenames: false

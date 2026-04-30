@@ -7,21 +7,13 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 import tabsim
 import yaml
 from huggingface_hub import snapshot_download
 
-
-def _has_spacetrack_credentials() -> bool:
-    try:
-        from tabascal.tle import load_spacetrack_credentials
-        user, passwd = load_spacetrack_credentials()
-        return user is not None and passwd is not None
-    except Exception:
-        return False
 
 def compute_sha256(file_path: Path) -> str:
     """Compute the SHA256 hash of a file.
@@ -126,15 +118,12 @@ def read_and_modify_yaml(
 class PipelineTestConfig:
     """Configuration for a single pipeline test case.
 
-    When chi2_ref is None the test only checks that chi2 lies in (0, 5).
-    Once a reference value is known, set chi2_ref to pin the regression.
-    A pre-commit hook (ci/check_chi2_refs.py) enforces that chi2_ref is
-    populated before the config is committed.
+    Set chi2_ref to pin the regression.
     """
     sim_file_name: str
     components: list[str]
+    chi2_ref: float
     config_overrides: dict = field(default_factory=dict)
-    chi2_ref: Optional[float] = None
 
 
 def _run_pipeline(
@@ -178,16 +167,11 @@ def _run_pipeline(
     return result.returncode, result.stdout, result.stderr
 
 
-def _assert_chi2(stdout: str, chi2_ref: Optional[float]) -> None:
+def _assert_chi2(stdout: str, chi2_ref: float) -> None:
     match = re.search(r"Reduced Chi\^2 @ opt params : ([\d.eE+-]+)", stdout)
     assert match, f"Could not find Reduced Chi^2 in output: {stdout}"
     value = float(match.group(1))
-    if chi2_ref is not None:
-        assert value == pytest.approx(chi2_ref, rel=1e-2)
-    else:
-        print(f"\nReduced Chi^2 @ opt params : {value}")
-        assert 0.0 < value < 5.0, f"Chi^2 = {value} is outside the expected (0, 5) range"
-
+    assert value == pytest.approx(chi2_ref, rel=1e-2)
 
 # ---------------------------------------------------------------------------
 # Trajectory components — downstream fixed to RiemannVisTimeFreqCalculation + UnitaryGains
@@ -221,8 +205,8 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            config_overrides={"opt": {"max_iter": 200}},
             chi2_ref=0.8834671325695459, # Run with MEO satellites
+            config_overrides={"opt": {"max_iter": 200}},
         ),
         id="SGP4LEONoDragOrbit+PhaseCalculationRFI",
     ),
@@ -237,8 +221,8 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            config_overrides={"opt": {"max_iter": 200}},
             chi2_ref=0.8834671467969134,  # Run with MEO satellites
+            config_overrides={"opt": {"max_iter": 200}},
         ),
         id="SGP4LEOOrbit+PhaseCalculationRFI",
     ),
@@ -345,8 +329,21 @@ all_configs = trajectory_configs + rfi_signal_configs + rfi_vis_configs + ast_si
 
 
 @pytest.mark.parametrize("t_config", all_configs)
-def test_pipeline(provide_test_data: Path, tmp_path: Path, t_config) -> None:
-    """Parametrized integration test covering all component pipeline combinations."""
+def test_pipeline(provide_test_data: Path, tmp_path: Path, t_config: PipelineTestConfig) -> None:
+    """Test the complete Tabascal pipeline execution.
+
+    This test verifies that the full Tabascal pipeline runs successfully and produces
+    expected results. It:
+    1. Downloads test simulation data from HuggingFace
+    2. Configures the pipeline with specific component modules
+    3. Executes the run_tabascal.py script
+    4. Validates that the output Reduced Chi^2 value matches the expected result
+
+    Args:
+        provide_test_data: Fixture providing path to downloaded test data
+        tmp_path: Pytest fixture providing temporary directory for test files
+        t_config: Tabascal pipeline test config 
+    """
     returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config)
     assert returncode == 0, f"Tabascal failed: {stderr}"
     _assert_chi2(stdout, t_config.chi2_ref)

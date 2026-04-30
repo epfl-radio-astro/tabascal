@@ -76,8 +76,6 @@ platforms = ["osx-64", "osx-arm64", "linux-64", "linux-aarch64"]
 [tool.pixi.feature.dev.tasks]
 build-ffi = { cmd = "make cpu", cwd = "tabascal/components/ffi", description = "Compile CPU FFI shared library (tabascal.so)" }
 test           = "pytest tests/"
-test-components = "pytest tests/components/"
-test-inventory = { cmd = "python scripts/generate_test_inventory.py", description = "Regenerate tests/TEST_INVENTORY.md from docstrings" }
 docs-build     = "sphinx-build -b html docs/ docs/_build/html"
 docs-clean     = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
 perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabascal_perf_check.py --system=generic --exec-policy=serial --run --performance-report --report-file=reframe_results.json", description = "Run Re-Frame performance benchmark locally" }
