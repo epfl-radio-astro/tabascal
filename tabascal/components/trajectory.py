@@ -1,14 +1,5 @@
 from tabascal.tle import get_tles_by_id
-
-from tabsim.jax.coordinates import (  # type: ignore
-    secs_to_days,
-    itrf_to_uvw,
-    itrf_to_xyz,
-    kepler_orbit_many,
-    kepler_orbit_fisher,
-    gmsa_from_jd,
-    mjd_to_jd,
-)
+from tabascal.coordinates import itrf_to_uvw
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase
