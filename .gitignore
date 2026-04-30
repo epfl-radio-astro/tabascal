@@ -1,14 +1,12 @@
 pixi.lock
 .coverage
 htmlcov/
-tests/TEST_INVENTORY.md
 **/log_tab_*.txt
 **/log_sim_*.txt
 ci/reframe/data/data
 tabascal.egg-info/*
 build/*
 docs/_build
-examples/spacetrack_login.yaml
 examples/data
 examples/test
 **/*.pyc
