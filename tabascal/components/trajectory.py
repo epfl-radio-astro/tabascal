@@ -1,7 +1,6 @@
 from tabascal.tle import get_tles_by_id
 from tabascal.coordinates import itrf_to_uvw
 from tabascal.dist import standard_normal
-from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase
 from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
@@ -408,7 +407,9 @@ class SGP4LEONoDragOrbit(Component):
 
     def forward_transform(self, base_params, L, mu):
 
-        params = vmap(affine_transform_full)(base_params, L, mu)
+        affine = lambda _x, _L, _mu: _L @ _x + _mu
+
+        params = vmap(affine)(base_params, L, mu)
 
         return params
 
@@ -587,7 +588,9 @@ class SGP4LEOOrbit(Component):
 
     def forward_transform(self, base_params, L, mu):
 
-        params = vmap(affine_transform_full)(base_params, L, mu)
+        affine = lambda _x, _L, _mu: _L @ _x + _mu
+
+        params = vmap(affine)(base_params, L, mu)
 
         return params
 

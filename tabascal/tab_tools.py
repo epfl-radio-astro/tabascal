@@ -10,7 +10,6 @@ import jax.numpy as jnp
 from jax import random, Array
 from jax.tree_util import tree_map
 
-from tabascal.opt import SVIRunResult
 from tabascal.timing import measure_runtime
 from tabascal.write import write_results_ms, write_results_xds
 
@@ -25,6 +24,18 @@ from daskms import xds_from_ms, xds_from_table
 
 from numpyro.infer import log_likelihood
 from numpyro.infer.util import log_density
+
+
+# Taken directly from numpyro
+from collections import namedtuple
+
+SVIRunResult = namedtuple("SVIRunResult", ["params", "state", "losses"])
+"""
+A :func:`~collections.namedtuple` consisting of the following fields:
+ - **params** - the optimized parameters.
+ - **state** - the last :data:`SVIState`
+ - **losses** - the losses collected at every step.
+"""
 
 
 @partial(jax.jit, static_argnums=(0, 1))

@@ -4,7 +4,6 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
-from tabascal.transform import affine_transform_full
 from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.tab_tools import get_observation_data_type
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
@@ -316,8 +315,10 @@ class RealRFI(BaseGPRFI):
 
     def forward_transform(self, base_params, L, mu):
 
+        affine = lambda _x, _L, _mu: _L @ _x + _mu
+
         params = vmap(
-            vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1),
+            vmap(vmap(affine, (0, None, 0), 0), (1, None, 1), 1),
             (2, None, 2),
             2,
         )(base_params, L, mu)
@@ -488,8 +489,10 @@ class ComplexRFI(BaseGPRFI):
 
     def forward_transform(self, base_params, L, mu):
 
+        affine = lambda _x, _L, _mu: _L @ _x + _mu
+
         params = vmap(
-            vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1),
+            vmap(vmap(affine, (0, None, 0), 0), (1, None, 1), 1),
             (2, None, 2),
             2,
         )(base_params, L, mu)

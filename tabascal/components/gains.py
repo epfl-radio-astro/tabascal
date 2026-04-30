@@ -3,7 +3,6 @@ from tabascal.interferometry import apply_gains
 from tabascal.dist import standard_normal
 from tabascal.config import TabConfig
 from tabascal.gp import cholesky, resampling_kernel, get_times
-from tabascal.transform import affine_transform_full
 
 import jax.numpy as jnp
 from jax import vmap, Array
@@ -339,7 +338,7 @@ class GPGains(BaseGPGains):
 
     def forward_transform(self, base_params: Array, L: Array, mu: Array) -> Array:
 
-        affine_same_scale = lambda _base_params, _mu: affine_transform_full(_base_params, L, _mu)
+        affine_same_scale = lambda _base_params, _mu: L @ _base_params + _mu
         params = vmap(vmap(affine_same_scale))(base_params, mu)
 
         return params
