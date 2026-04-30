@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from importlib.resources import files as _res_files
 from pathlib import Path
 from typing import Any
 
@@ -150,14 +151,19 @@ def _run_pipeline(
         Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
     )
 
+    bundled_tle_dir = str(_res_files("tabascal").joinpath("data/tles"))
+
     result = subprocess.run(
         [
             sys.executable,
             str(tabascal_script),
+            "run",
             "-c",
             str(config_path),
             "-s",
             str(input_src_dir),
+            "--extra-tle-dir",
+            bundled_tle_dir,
         ],
         capture_output=True,
         text=True,

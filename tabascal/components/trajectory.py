@@ -1,4 +1,4 @@
-from tabascal.tle import get_tles_by_id, load_spacetrack_credentials
+from tabascal.tle import get_tles_by_id
 
 from tabsim.jax.coordinates import (  # type: ignore
     secs_to_days,
@@ -304,7 +304,8 @@ class SGP4LEONoDragOrbit(Component):
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
             # self.ric_std = config.args["satellites"]["ric_std"]
 
-            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(jnp.mean(config.times_jd), config.norad_ids)
+            extra_tle_dir = getattr(config, "extra_tle_dir", None)
+            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(jnp.mean(config.times_jd), config.norad_ids, extra_tle_dir=extra_tle_dir)
             self.bstar = self.elements[:, 0]
             self.elements = self.elements[:, 1:] # Remove the bstar drag element
             self.sat_epoch = epoch_jd - 2433281.5
@@ -473,7 +474,8 @@ class SGP4LEOOrbit(Component):
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
             # self.ric_std = config.args["satellites"]["ric_std"]
 
-            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(jnp.mean(config.times_jd), config.norad_ids)
+            extra_tle_dir = getattr(config, "extra_tle_dir", None)
+            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(jnp.mean(config.times_jd), config.norad_ids, extra_tle_dir=extra_tle_dir)
             self.sat_epoch = epoch_jd - 2433281.5
             self.epoch_jd_whole = jnp.floor(epoch_jd)
             self.epoch_jd_frac = epoch_jd - self.epoch_jd_whole
@@ -638,15 +640,12 @@ def itrs_to_gcrs_sf(pos_itrs: Array, times_jd: Array) -> Array:
     return pos_gcrs
 
 
-def fetch_orbital_elements(obs_epoch_jd, norad_ids):
-
-    st_user, st_pass = load_spacetrack_credentials()
+def fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
 
     tles_df = get_tles_by_id(
-        st_user,
-        st_pass,
         norad_ids,
         obs_epoch_jd,
+        extra_tle_dir=extra_tle_dir,
     )
 
     elements = jnp.atleast_2d(
@@ -667,15 +666,12 @@ def fetch_orbital_elements(obs_epoch_jd, norad_ids):
 
     return elements, epoch_jd, norad_ids, tles
 
-def fetch_standard_orbital_elements(obs_epoch_jd, norad_ids):
-
-    st_user, st_pass = load_spacetrack_credentials()
+def fetch_standard_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
 
     tles_df = get_tles_by_id(
-        st_user,
-        st_pass,
         norad_ids,
         obs_epoch_jd,
+        extra_tle_dir=extra_tle_dir,
     )
 
     # tles_df columns
@@ -772,16 +768,4 @@ def fetch_standard_orbital_elements(obs_epoch_jd, norad_ids):
 
     return elements, epoch_jd, norad_ids, tles
 
-
-# def get_leo_pos_vel(elements):
-
-#     sat = sgp4init(
-#         gravity, sat_epoch, 
-#         bstar,
-#         0.0, 0.0,  # ndot, nddot (fixed)
-#         ecco, argpo, inclo, mo, no_kozai, nodeo,
-#         jdsatepoch, jdsatepochF,
-#     )
-
-# def satrec_from_df(df):
 

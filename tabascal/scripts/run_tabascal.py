@@ -1,369 +1,274 @@
-from datetime import datetime
-
-import shutil
 import os
 import sys
-import yaml
-from tabascal.timing import measure_runtime, print_timings, enable_timings
-
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = (
-    "false"  # Disable GPU Memory Preallocation
-)
-# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = (
-#     "platform"  # Enable GPU Memory allocation and deallocation on-the-fly
-# )
-# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90" # GPU Memory Preallocation Factor
-
-import jax
-from jax import random
-import jax.numpy as jnp
-
-jax.config.update(
-    "jax_enable_x64", True
-)  # Not working without float64 probably due to times in JD
-# jax.config.update("jax_platform_name", "cpu")
-
-import numpy as np
-
-from tabsim.config import Tee
-
-from tabascal.tab_tools import (
-    init_predict,
-    run_opt,
-    nlog_like,
-    nlog_post,
-)
-from tabascal.config import load_config, TabConfig, Model
-from tabascal.write import write_results_xds
-
-from typing import Optional
 
 
-@measure_runtime
-def build_model(config: dict, ms_path: str):
-    tab_config = TabConfig(config, ms_path)
-    model = Model(tab_config, config["model"]["components"])  # type: ignore
-    return tab_config, model
+# ---------------------------------------------------------------------------
+# 'run' subcommand
+# ---------------------------------------------------------------------------
 
+def _run_cmd(args):
+    from contextlib import redirect_stdout
+    from datetime import datetime
+    import shutil
+    import yaml
 
-@measure_runtime
-def evaluate_init(tab_config, model, key):
-    key, subkey = random.split(key)
-    init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants)
-    nlog_l = nlog_like(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-    nlog_p = nlog_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-    init_state = model.forward(model.init_params, model.state, model.constants)
-    return key, init_pred, nlog_l, nlog_p, init_state
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
+    import jax
+    from jax import random
+    import jax.numpy as jnp
+    import numpy as np
 
-@measure_runtime
-def tabascal_subtraction(
-    config: dict,
-    sim_dir: str,
-    ms_path: Optional[str] = None,
-    spacetrack_path: Optional[str] = None,
-    norad_ids: list = [],
-    suffix: str = "",
-):
+    from tabascal.timing import measure_runtime, print_timings, enable_timings
+    from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
+    from tabascal.config import load_config, TabConfig, Model
+    from tabascal.write import write_results_xds
 
-    if suffix:
-        suffix = "_" + suffix
+    jax.config.update("jax_enable_x64", True)
 
-    run_id = datetime.now().strftime("%m-%d-%YT%H:%M:%S")
+    @measure_runtime
+    def build_model(config, ms_path):
+        tab_config = TabConfig(config, ms_path)
+        model = Model(tab_config, config["model"]["components"])
+        return tab_config, model
 
-    log_path = f"log_tab_{run_id}.txt"
-    log = open(log_path, "w")
-    backup = sys.stdout
-    sys.stdout = Tee(sys.stdout, log)
+    @measure_runtime
+    def evaluate_init(tab_config, model, key):
+        key, subkey = random.split(key)
+        init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants)
+        nlog_l = nlog_like(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+        nlog_p = nlog_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+        init_state = model.forward(model.init_params, model.state, model.constants)
+        return key, init_pred, nlog_l, nlog_p, init_state
 
-    print()
-    start_time = datetime.now()
-    print(f"Start Time : {start_time}")
+    @measure_runtime
+    def tabascal_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="", extra_tle_dir=None):
+        if suffix:
+            suffix = "_" + suffix
 
-    key, subkey = random.split(random.PRNGKey(1))
+        run_id = datetime.now().strftime("%m-%d-%YT%H:%M:%S")
+        log_path = f"log_tab_{run_id}.txt"
 
+        class _Tee:
+            def __init__(self, *writers):
+                self._writers = writers
+            def write(self, text):
+                for w in self._writers: w.write(text)
+            def flush(self):
+                for w in self._writers: w.flush()
 
-    model_name = "Custom"
-    print(f"Model : {model_name}")
-    results_name = f"{model_name}{suffix}"
+        model_name = "Custom"
+        results_name = f"{model_name}{suffix}"
 
-    if sim_dir:
-        config["data"]["sim_dir"] = os.path.abspath(sim_dir)
-    else:
-        sim_dir = os.path.abspath(config["data"]["sim_dir"])
-        config["data"]["sim_dir"] = sim_dir
+        if sim_dir:
+            config["data"]["sim_dir"] = os.path.abspath(sim_dir)
+        else:
+            sim_dir = os.path.abspath(config["data"]["sim_dir"])
+            config["data"]["sim_dir"] = sim_dir
 
-    config["model"]["name"] = model_name
+        config["model"]["name"] = model_name
 
-    if sim_dir[-1] == "/":
-        sim_dir = sim_dir[:-1]
-    f_name = os.path.split(sim_dir)[1]
+        if sim_dir[-1] == "/":
+            sim_dir = sim_dir[:-1]
+        f_name = os.path.split(sim_dir)[1]
 
-    print()
-    print(f_name)
-    print()
+        zarr_path = os.path.join(sim_dir, f"{f_name}.zarr")
+        config["data"]["zarr_path"] = zarr_path
 
-    zarr_path = os.path.join(sim_dir, f"{f_name}.zarr")
-    config["data"]["zarr_path"] = zarr_path
+        if not ms_path:
+            ms_path = os.path.join(sim_dir, f"{f_name}.ms")
+        else:
+            ms_path = os.path.abspath(ms_path)
 
-    if not ms_path:
-        ms_path = os.path.join(sim_dir, f"{f_name}.ms")
-    else:
-        ms_path = os.path.abspath(ms_path)
+        config["data"]["ms_path"] = ms_path
 
-    config["data"]["ms_path"] = ms_path
+        plot_dir = os.path.join(sim_dir, f"plots/{suffix[1:]}")
+        results_dir = os.path.join(sim_dir, "results")
+        mem_dir = os.path.join(sim_dir, "memory_profiles")
 
-    plot_dir = os.path.join(sim_dir, f"plots/{suffix[1:]}")
-    results_dir = os.path.join(sim_dir, "results")
-    mem_dir = os.path.join(sim_dir, "memory_profiles")
+        os.makedirs(plot_dir, exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
+        os.makedirs(mem_dir, exist_ok=True)
 
-    os.makedirs(plot_dir, exist_ok=True)
-    os.makedirs(results_dir, exist_ok=True)
-    os.makedirs(mem_dir, exist_ok=True)
+        map_path = os.path.join(results_dir, f"map_pred_{results_name}.zarr")
+        params_path = os.path.join(results_dir, f"map_params_{results_name}.zarr")
+        init_pred_path = os.path.join(results_dir, f"init_pred_{results_name}.zarr")
 
-    map_path = os.path.join(results_dir, f"map_pred_{results_name}.zarr")
-    params_path = os.path.join(results_dir, f"map_params_{results_name}.zarr")
-    fisher_path = os.path.join(results_dir, f"fisher_pred_{results_name}.zarr")
-    mcmc_path = os.path.join(results_dir, f"mcmc_pred_{results_name}.zarr")
-    init_pred_path = os.path.join(results_dir, f"init_pred_{results_name}.zarr")
-    true_pred_path = os.path.join(results_dir, f"true_pred_{results_name}.zarr")
+        if extra_tle_dir:
+            config["satellites"]["extra_tle_dir"] = extra_tle_dir
 
-    init_params_path = os.path.join(results_dir, f"init_params_{results_name}.zarr")
-    true_params_path = os.path.join(results_dir, f"true_params_{results_name}.zarr")
+        with open(log_path, "w") as log:
+            with redirect_stdout(_Tee(sys.stdout, log)):
 
-    tab_config, model = build_model(config, ms_path)
+                print()
+                start_time = datetime.now()
+                print(f"Start Time : {start_time}")
 
-    prob_model = model.prob_model
+                key, subkey = random.split(random.PRNGKey(1))
 
-    shapes = {key: value.shape for key, value in model.init_params.items()}
-    n_params = sum([x.size for x in model.init_params.values()])
-    n_data = 2 * tab_config.vis_obs.size
+                print(f"Model : {model_name}")
+                print()
+                print(f_name)
+                print()
 
-    print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
-    print()
-    print(f"Number of Antennas   : {tab_config.n_ant: 4}")
-    print(f"Number of Time Steps : {tab_config.n_time: 4}")
-    print()
-    print(f"Parameter shapes     : {shapes}")
-    print(f"Number of parameters : {n_params}")
-    print(f"Data shape           : {tab_config.vis_obs.shape}")
-    print(f"Number of data points: {n_data}")
+                tab_config, model = build_model(config, ms_path)
 
-    print()
-    end_start = datetime.now()
-    print(f"Startup Time : {end_start - start_time}")
-    print(f"{end_start}")
+                prob_model = model.prob_model
 
-    key, init_pred, nlog_l, nlog_p, init_state = evaluate_init(tab_config, model, key)
-    write_results_xds(init_pred, tab_config, init_pred_path)
+                shapes = {key: value.shape for key, value in model.init_params.items()}
+                n_params = sum([x.size for x in model.init_params.values()])
+                n_data = 2 * tab_config.vis_obs.size
 
-    print(f"log_l : {nlog_l:.3e}")
-    print(f"log_p : {nlog_p:.3e}")
+                print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
+                print()
+                print(f"Number of Antennas   : {tab_config.n_ant: 4}")
+                print(f"Number of Time Steps : {tab_config.n_time: 4}")
+                print()
+                print(f"Parameter shapes     : {shapes}")
+                print(f"Number of parameters : {n_params}")
+                print(f"Data shape           : {tab_config.vis_obs.shape}")
+                print(f"Number of data points: {n_data}")
 
-    # truth = {
-    #     "vis_rfi": init_state["vis_rfi"],
-    #     "vis_ast": init_state["vis_ast"],
-    #     "gains": init_state["gains"],
-    # }
+                print()
+                end_start = datetime.now()
+                print(f"Startup Time : {end_start - start_time}")
+                print(f"{end_start}")
 
-    truth = {
-        "vis_rfi": jnp.nan
-        * jnp.zeros(
-            (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
-        ),
-        "vis_ast": jnp.nan
-        * jnp.zeros(
-            (tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex
-        ),
-        "gains": jnp.nan
-        * jnp.ones(
-            (tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex
-        ),
-    }
+                key, init_pred, nlog_l, nlog_p, init_state = evaluate_init(tab_config, model, key)
+                write_results_xds(init_pred, tab_config, init_pred_path)
 
-    if config["plots"]["init"]:
-        from tabascal.plot import plot_init
-        plot_init(tab_config, init_pred, truth, model_name, plot_dir)
+                print(f"log_l : {nlog_l:.3e}")
+                print(f"log_p : {nlog_p:.3e}")
 
-    ### Check and Plot Model at true parameters
-    # if config["plots"]["truth"]:
-    #     key, subkey = random.split(key)
-    #     plot_truth(
-    #         zarr_path,
-    #         ms_params,
-    #         static_args,
-    #         array_args,
-    #         model,
-    #         model_name,
-    #         subkey,
-    #         true_params,
-    #         gp_params,
-    #         inv_scaling,
-    #         plot_dir,
-    #         true_pred_path,
-    #     )
+                truth = {
+                    "vis_rfi": jnp.nan * jnp.zeros((tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex),
+                    "vis_ast": jnp.nan * jnp.zeros((tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex),
+                    "gains": jnp.nan * jnp.ones((tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex),
+                }
 
-    ### Check and Plot Model at prior parameters
-    key, subkey = random.split(key)
-    if config["plots"]["prior"]:
-        from tabascal.plot import plot_prior
-        plot_prior(
-            tab_config,
-            prob_model,
-            truth,
-            model_name,
-            subkey,
-            plot_dir,
-            state=model.state,
-            constants=model.constants,
-        )
+                if config["plots"]["init"]:
+                    from tabascal.plot import plot_init
+                    plot_init(tab_config, init_pred, truth, model_name, plot_dir)
 
-    # ### Run MCMC Inference
-    # key, *subkeys = random.split(key, 3)
-    # if config["inference"]["mcmc"]:
-    #     mcmc = run_mcmc(
-    #         ms_params,
-    #         model,
-    #         model_name,
-    #         subkeys,
-    #         static_args,
-    #         array_args,
-    #         init_params_base,
-    #         plot_dir,
-    #         mcmc_path,
-    #         num_warmup=config["mcmc"]["n_warmup"],
-    #         num_samples=config["mcmc"]["n_samples"],
-    #         max_tree_depth=config["mcmc"]["max_tree_depth"],
-    #         thin_factor=config["mcmc"]["thin_factor"],
-    #     )
+                key, subkey = random.split(key)
+                if config["plots"]["prior"]:
+                    from tabascal.plot import plot_prior
+                    plot_prior(tab_config, prob_model, truth, model_name, subkey, plot_dir, state=model.state, constants=model.constants)
 
-    ### Run Optimization
-    key, *subkeys = random.split(key, 3)
-    if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
-        vi_pred, losses, vi_params, rchi2 = run_opt(
-            tab_config,
-            prob_model,
-            subkeys,
-            model.init_params,
-            ms_path,
-            map_path,
-            params_path,
-            state=model.state,
-            constants=model.constants,
-        )
+                key, *subkeys = random.split(key, 3)
+                if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
+                    vi_pred, losses, vi_params, rchi2 = run_opt(
+                        tab_config, prob_model, subkeys, model.init_params, ms_path, map_path, params_path,
+                        state=model.state, constants=model.constants,
+                    )
 
-        if config["plots"]["opt"]:
-            from tabascal.plot import plot_opt
-            plot_opt(tab_config, vi_pred, truth, model_name, plot_dir)
+                    if config["plots"]["opt"]:
+                        from tabascal.plot import plot_opt
+                        plot_opt(tab_config, vi_pred, truth, model_name, plot_dir)
 
-        if config["plots"]["losses"]:
-            from tabascal.plot import plot_losses
-            plot_losses(losses, model_name, plot_dir)
+                    if config["plots"]["losses"]:
+                        from tabascal.plot import plot_losses
+                        plot_losses(losses, model_name, plot_dir)
 
-        opt_params = {
-            key.removesuffix("_auto_loc"): value for key, value in vi_params.items()
-        }
+                    opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
 
-        nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-        nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+                    nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+                    nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
 
-        print(f"log_l : {nlog_l:.3e}")
-        print(f"log_p : {nlog_p:.3e}")
-    else:
-        from tabascal.write import write_results_ms
-        print(f"Copying tabascal initial values to MS file from {init_pred_path}")
-        write_results_ms(ms_path, init_pred_path, tab_config.args["data"]["data_col"])
+                    print(f"log_l : {nlog_l:.3e}")
+                    print(f"log_p : {nlog_p:.3e}")
+                else:
+                    from tabascal.write import write_results_ms
+                    print(f"Copying tabascal initial values to MS file from {init_pred_path}")
+                    write_results_ms(ms_path, init_pred_path, tab_config.args["data"]["data_col"])
 
-    max_fisher_time = 30 * 60  # seconds
+        shutil.copy(log_path, plot_dir)
+        os.remove(log_path)
 
-    # ### Run Fisher Covariance Prediction
-    # key, *subkeys = random.split(key, 3)
-    # if config["inference"]["fisher"] and rchi2 < 1.1 and n_int_samples < 30:
-    #     from tabsim.tools import time_limit, TimeoutException
-
-    #     try:
-    #         with time_limit(max_fisher_time):
-    #             run_fisher(
-    #                 config,
-    #                 gp_params,
-    #                 ms_params,
-    #                 model,
-    #                 model_name,
-    #                 subkeys,
-    #                 vis_model,
-    #                 static_args,
-    #                 array_args,
-    #                 vi_params,
-    #                 init_params_base,
-    #                 plot_dir,
-    #                 fisher_path,
-    #             )
-    #     except TimeoutException as e:
-    #         print("Timed out!")
-
-
-    log.close()
-    shutil.copy(log_path, plot_dir)
-    os.remove(log_path)
-    sys.stdout = backup
-
-    with open(os.path.join(plot_dir, f"tab_config_{run_id}.yaml"), "w") as fp:
-        yaml.dump(config, fp)
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Apply tabascal to a simulation.")
-    parser.add_argument(
-        "-c", "--config", required=True, help="Path to the config file."
-    )
-    parser.add_argument(
-        "-s", "--sim_dir", help="Path to the directory of the simulation."
-    )
-    parser.add_argument("-ms", "--ms_path", help="Path to Measurement Set.")
-    parser.add_argument(
-        "-np", "--norad_path", help="Path to text file containing NORAD IDs to include."
-    )
-    parser.add_argument(
-        "-st", "--spacetrack", help="Path to Space-Track login details."
-    )
-    parser.add_argument("-sx", "--suffix", default="", help="Image name suffix.")
-    parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
-    args = parser.parse_args()
-    sim_dir = args.sim_dir
-    conf_path = args.config
-    spacetrack_path = args.spacetrack
-    norad_path = args.norad_path
-    # if sim_dir:
-        # norad_path = os.path.join(sim_dir, "input_data/norad_ids.yaml")
-    # else:
-    # sim_dir = os.path.split(args.ms_path)[0]
-
-    # if norad_path:
-    #     norad_ids = [int(x) for x in np.atleast_1d(np.loadtxt(norad_path))]
-    # else:
-    norad_ids = []
-
-    config = load_config(conf_path)
-
-    # config_st_path = config["satellites"]["spacetrack_path"]
-    # if spacetrack_path:
-    #     config["satellites"]["spacetrack_path"] = os.path.abspath(spacetrack_path)
-    # elif config_st_path:
-    #     config_st_path = os.path.abspath(config_st_path)
-    #     config["satellites"]["spacetrack_path"] = config_st_path
-    #     spacetrack_path = config_st_path
+        with open(os.path.join(plot_dir, f"tab_config_{run_id}.yaml"), "w") as fp:
+            yaml.dump(config, fp)
 
     if args.timings:
         enable_timings()
 
-    tabascal_subtraction(
-        config, sim_dir, args.ms_path, spacetrack_path, norad_ids, args.suffix
-    )
+    config = load_config(args.config)
+    norad_ids = []
+
+    from tabascal.tle import TLEError
+    try:
+        tabascal_subtraction(
+            config,
+            args.sim_dir,
+            args.ms_path,
+            norad_ids,
+            args.suffix,
+            extra_tle_dir=args.extra_tle_dir,
+        )
+    except TLEError as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if args.timings:
         print_timings()
+
+
+# ---------------------------------------------------------------------------
+# 'spacetrack-login' subcommand
+# ---------------------------------------------------------------------------
+
+def _spacetrack_login_cmd(args):
+    import getpass
+    from tabascal.tle import save_spacetrack_credentials, spacetrack_config_path
+
+    username = args.username or input("Space-Track username (email): ")
+    password = getpass.getpass("Space-Track password: ")
+    path = save_spacetrack_credentials(username, password)
+    print(f"Credentials saved to: {path}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="tabascal CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # -- run --
+    run_parser = subparsers.add_parser("run", help="Apply tabascal to a simulation.")
+    run_parser.add_argument("-c", "--config", required=True, help="Path to the config file.")
+    run_parser.add_argument("-s", "--sim_dir", help="Path to the directory of the simulation.")
+    run_parser.add_argument("-ms", "--ms_path", help="Path to Measurement Set.")
+    run_parser.add_argument("-np", "--norad_path", help="Path to text file containing NORAD IDs to include.")
+    run_parser.add_argument("-sx", "--suffix", default="", help="Image name suffix.")
+    run_parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
+    run_parser.add_argument(
+        "--extra-tle-dir",
+        dest="extra_tle_dir",
+        default=None,
+        metavar="DIR",
+        help="Extra directory searched for cached TLEs before the managed cache and Space-Track.",
+    )
+
+    # -- spacetrack-login --
+    login_parser = subparsers.add_parser(
+        "spacetrack-login",
+        help="Save Space-Track credentials to the user config file.",
+    )
+    login_parser.add_argument(
+        "-u", "--username",
+        default=None,
+        help="Space-Track username (email address). Prompted interactively if not given.",
+    )
+
+    args = parser.parse_args()
+
+    if args.command == "run":
+        _run_cmd(args)
+    elif args.command == "spacetrack-login":
+        _spacetrack_login_cmd(args)
 
 
 if __name__ == "__main__":

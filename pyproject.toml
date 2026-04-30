@@ -27,6 +27,7 @@ dependencies = [
     "numpy",
     "numpyro",
     "optax",
+    "platformdirs",
     "PyYAML",
     "sgp4jax",
     "skyfield",
@@ -93,6 +94,7 @@ numpy           = "*"
 numpyro         = "*"
 optax           = "*"
 python-casacore = "*"
+platformdirs    = "*"
 pyyaml          = "*"
 sgp4jax         = "*"
 skyfield        = "*"

@@ -28,8 +28,8 @@ from .conftest import make_constants, assert_transform_roundtrip
 def _has_spacetrack_credentials() -> bool:
     try:
         from tabascal.tle import load_spacetrack_credentials
-        user, passwd = load_spacetrack_credentials()
-        return user is not None and passwd is not None
+        load_spacetrack_credentials()
+        return True
     except Exception:
         return False
 
@@ -364,6 +364,9 @@ _BUNDLED_NORAD_IDS = [20452, 38833]
 
 def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int_freq=1):
     """Build a mock TabConfig for SGP4 orbit components using the bundled TLE cache."""
+    from importlib.resources import files as _res_files
+    _bundled_tle_dir = str(_res_files("tabascal").joinpath("data/tles"))
+
     epoch_jd = _BUNDLED_TLE_EPOCH_JD
     n_rfi = len(_BUNDLED_NORAD_IDS)
     n_time_fine = n_time * n_int_time
@@ -393,6 +396,7 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
         times=jnp.linspace(0.0, n_time * 8.0, n_time),
         times_fine=jnp.linspace(0.0, n_time_fine * 8.0, n_time_fine),
         norad_ids=_BUNDLED_NORAD_IDS,
+        extra_tle_dir=_bundled_tle_dir,
         args={"rfi": {"freq_int_samples": n_int_freq}},
     )
 

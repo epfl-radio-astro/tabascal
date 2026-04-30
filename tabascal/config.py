@@ -2,6 +2,7 @@ from tabascal.imports import import_components
 from tabascal.components.likelihood import gaussian
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements
+from tabascal.tle import print_spacetrack_status, preflight_tle_check
 from tabascal.interferometry import get_strides_and_idxs
 from tabascal.fft_gp import domain_ss
 
@@ -69,7 +70,15 @@ class TabConfig:
         # self.config = config
         self.args = config
         self.ms_path = ms_path
-        self.spacetrack_path = config["satellites"]["spacetrack_path"]
+        self.spacetrack_path = config["satellites"].get("spacetrack_path")
+        self.extra_tle_dir = config["satellites"].get("extra_tle_dir")
+
+        print_spacetrack_status()
+        preflight_tle_check(
+            config["satellites"].get("norad_ids") or [],
+            ms_path,
+            extra_tle_dir=self.extra_tle_dir,
+        )
 
         self.read_ms_params(
             config["data"]["freq"],
@@ -82,7 +91,10 @@ class TabConfig:
             config, self.n_freq
         )  # Bad solution, should be fixed in fft_gp. Issue when using a single frequency channel.
 
-        self.get_orbital_elements(config["satellites"]["norad_ids"])
+        self.get_orbital_elements(
+            config["satellites"].get("norad_ids"),
+            extra_tle_dir=config["satellites"].get("extra_tle_dir"),
+        )
 
         config["rfi"]["min_time_bins"] = 1
         config["rfi"]["max_time_bins"] = 30
@@ -208,12 +220,12 @@ class TabConfig:
         self.n_time_fine = len(self.times_fine)
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
 
-    def get_orbital_elements(self, norad_ids: List[int]):
+    def get_orbital_elements(self, norad_ids: List[int], extra_tle_dir: Optional[str] = None):
 
         obs_epoch_jd = float(self.times_jd.mean())
 
         self.elements, self.epoch_jd, self.norad_ids, self.tles = (
-            fetch_orbital_elements(obs_epoch_jd, norad_ids)
+            fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=extra_tle_dir)
         )
         self.n_rfi = len(self.norad_ids)
 
