@@ -17,7 +17,7 @@ maintainers = [
 ]
 description = "Trajectory based Radio Frequency Interference (RFI) subtraction and calibration using Bayesian methods for radio interferometeric data."
 
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.10"
 dependencies = [
     "astropy",
     "dask",
@@ -65,7 +65,7 @@ log_cli       = true
 log_cli_level = "WARNING"
 
 # ── Pixi ──────────────────────────────────────────────────────────────────────
-# name / version / description are inherited from [project] above.
+# name / version / description / python are inherited from [project] above.
 
 [tool.pixi.workspace]
 channels  = ["conda-forge"]
@@ -118,7 +118,7 @@ tabsim   = "*"
 # ── CUDA 12 feature ────────────────────────────────────────────────────────────
 # Installs the cuda-enabled jaxlib build from conda-forge, equivalent to:
 #   conda install "jaxlib=*=*cuda12*" jax -c conda-forge
-# Use cuda12-dev for a full development install including tabascal and tooling.
+# Use cuda12-dev for a full development install.
 
 [tool.pixi.feature.cuda12]
 platforms = ["linux-64", "linux-aarch64"]
@@ -128,6 +128,10 @@ cuda = "12"
 
 [tool.pixi.feature.cuda12.dependencies]
 jaxlib = { version = "*", build = "*cuda12*" }
+
+[tool.pixi.feature.cuda12.pypi-dependencies]
+tabascal = { path = ".", editable = true }
+tabsim   = "*"
 
 # ── Dev feature ────────────────────────────────────────────────────────────────
 # Adds docs and test tooling. Also carries the full PyPI package set so that
@@ -146,8 +150,6 @@ myst-parser      = "*"
 graphviz         = "*"
 
 [tool.pixi.feature.dev.pypi-dependencies]
-tabascal    = { path = ".", editable = true }
-tabsim      = "*"
 reframe-hpc = "*"
 
 # ── Compile feature ────────────────────────────────────────────────────────────
@@ -176,6 +178,5 @@ dev        = { features = ["cpu", "dev"], solve-group = "cpu" }
 cuda12     = { features = ["cuda12"],        solve-group = "cuda12" }
 cuda12-dev = { features = ["cuda12", "dev"], solve-group = "cuda12" }
 
-# NVIDIA GPU environments with CUDA 12 kernel compilation toolchain
-cuda12-compile     = { features = ["cuda12", "compile"],        solve-group = "cuda12-compile" }
-cuda12-dev-compile = { features = ["cuda12", "dev", "compile"], solve-group = "cuda12-compile" }
+# NVIDIA GPU environment with CUDA 12 kernel compilation toolchain
+cuda12-compile     = { features = ["cuda12", "compile"], solve-group = "cuda12-compile" }

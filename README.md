@@ -14,14 +14,13 @@ curl -fsSL https://pixi.sh/install.sh | sh
 
 ## Available environments
 
-| Environment  | Platform             | Description                           |
-|--------------|----------------------|---------------------------------------|
-| `default`    | any                  | CPU-only runtime environment          |
-| `dev`        | any                  | CPU + testing and documentation tools |
-| `cuda12`     | linux-64, aarch64    | NVIDIA GPU (CUDA 12) runtime          |
-| `cuda12-dev` | linux-64, aarch64    | NVIDIA GPU + testing and docs         |
-| `rocm`       | linux-64             | AMD GPU (ROCm) runtime                |
-| `rocm-dev`   | linux-64             | AMD GPU + testing and docs            |
+| Environment      | Platform          | Description                           |
+|------------------|-------------------|---------------------------------------|
+| `default`        | linux-*, macos-*  | CPU-only runtime environment          |
+| `dev`            | linux-*, macos-*  | CPU + testing and documentation tools |
+| `cuda12`         | linux-*           | NVIDIA GPU (CUDA 12) runtime          |
+| `cuda12-dev`     | linux-*           | NVIDIA GPU + testing and docs         |
+| `cuda12-compile` | linux-*           | NVIDIA GPU + compilation toolchain    |
 
 ## Install an environment
 
@@ -50,7 +49,6 @@ The `RiemannVisTimeFreqCalculationFFI` component requires a compiled shared libr
 ```bash
 pixi run build-ffi        # CPU (tabascal.so)
 pixi run build-ffi-cuda   # NVIDIA GPU (tabascal_cuda.so)
-pixi run build-ffi-hip    # AMD GPU / ROCm (tabascal_hip.so)
 ```
 
 # Developer
@@ -70,7 +68,7 @@ pytest tests/components/test_gains.py
 pytest tests/components/test_gains.py::TestGPGains::test_forward_output_shapes
 ```
 
-SGP4 component tests use a bundled TLE cache (`tabascal/data/tles/`) and run without Space-Track credentials. Pipeline tests that use `SGP4LEONoDragOrbit` or `SGP4LEOOrbit` require credentials and are skipped automatically when none are found.
+SGP4 component tests use a bundled TLE cache (`tabascal/data/tles/`) and run without Space-Track credentials. 
 
 ## Test inventory
 
