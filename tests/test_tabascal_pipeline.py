@@ -118,8 +118,12 @@ def read_and_modify_yaml(
 @dataclass
 class PipelineTestConfig:
     """Configuration for a single pipeline test case.
-
-    Set chi2_ref to pin the regression.
+    
+    Attributes:
+        sim_file_name: Name of the simulation YAML configuration file
+        components: List of component module specifications for the pipeline
+        chi2_ref: Expected reduced chi-squared value for validation
+        config_overrides: Dictionary of overrides to the tabascal config file
     """
     sim_file_name: str
     components: list[str]
