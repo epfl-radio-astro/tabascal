@@ -5,10 +5,9 @@ from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.tab_tools import (
     get_ast_fringe_rate,
-    pow_spec,
     get_observation_data_type,
 )
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec, pow_spec_nd
 from tabascal.timing import measure_runtime
 
 import xarray as xr

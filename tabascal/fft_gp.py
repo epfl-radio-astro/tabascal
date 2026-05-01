@@ -1,12 +1,9 @@
 """FFT-based Gaussian Process utilities."""
 
-import functools
 from functools import reduce
-from typing import Any, Callable, List, Tuple
+from typing import List, Tuple
 
-import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import Array
 
 from tabascal.timing import measure_runtime
@@ -75,93 +72,6 @@ def supersample_domain(ns: List[int], dxs: List[float], x0s: List[float], ss_fac
 
     return xs_ss
 
-
-@measure_runtime
-def supersample_domain_k(ns: List[int], dxs: List[float], ss_factors: List[int]) -> List[Array]:
-    """
-    Calculate the supersampled k-domain given integer factors for each axis.
-
-    Parameters
-    ----------
-    ns: List[int]
-        The sizes (on each axis) of the orginal domain
-    dxs : list[float]
-        The spacing (on each axis) of the regularly-spaced original domain.
-    ss_factors : list[int]
-        The integer factors to supersample each axis.
-
-    Returns
-    -------
-    list[Array]
-        The supersampled k-domain arrays.
-    """
-    # Size and resolution of supersampled domain
-    ns_ss, dxs_ss = supersample_domain_specs(ns, dxs, ss_factors)
-
-    # Supersampled k-domain values
-    ks_ss = [jnp.fft.fftshift(jnp.fft.fftfreq(n_ss, dx_ss)) for n_ss, dx_ss in zip(ns_ss, dxs_ss)]
-
-    return ks_ss
-
-
-@measure_runtime
-def supersample(y: Array, ss_factors: List[int]) -> Array:
-    """
-    Supersample a signal by integer factors along each axis via zero-padding in Fourier space.
-
-    Parameters
-    ----------
-    y : Array
-        The signal to supersample.
-    ss_factors : list[int]
-        The integer factors to supersample each axis.
-
-    Returns
-    -------
-    Array
-        The supersampled signal.
-    """
-    # Size of original signal
-    ns = y.shape
-    # Pads needed to increase size of signal to supersampled size
-    pads = [(n * (f - 1) // 2, n * (f - 1) // 2) for n, f in zip(ns, ss_factors)]
-
-    # Forward FFT (no normalization)
-    Y = jnp.fft.fftn(y)
-
-    # Pad in shifted Fourier space, then shift back
-    Y_shifted = jnp.fft.fftshift(Y)
-    Y_padded = jnp.pad(Y_shifted, pads, mode="constant", constant_values=0)
-    Y_ss = jnp.fft.ifftshift(Y_padded)
-
-    # Inverse FFT (default normalization scales by 1/n)
-    # Scale by product of supersample factors to preserve signal amplitude
-    scale = jnp.prod(jnp.array(ss_factors))
-    return jnp.fft.ifftn(Y_ss) * scale
-
-
-@measure_runtime
-def domain_k(ns: List[int], dxs: List[float]) -> List[Array]:
-    """
-    Calculate the k-domain given a regularly sampled domain.
-
-    Parameters
-    ----------
-    ns: List[int]
-        The sizes (on each axis) of the orginal domain
-    dxs : list[float]
-        The spacing (on each axis) of the regularly-spaced original domain.
-
-    Returns
-    -------
-    list[Array]
-        The 1-D arrays of the k-domain.
-    """
-
-    # Calculate k-domain values of original signal
-    ks = [jnp.fft.fftshift(jnp.fft.fftfreq(n, dx)) for n, dx in zip(ns, dxs)]
-
-    return ks
 
 # Used in final function
 @measure_runtime

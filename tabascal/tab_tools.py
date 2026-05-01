@@ -118,16 +118,6 @@ def get_ast_fringe_rate(uv, freq=1.227e9, D=13.5):
     return max_fr
 
 
-def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
-
-    k_ = k / k0
-    Pk = P0 * 0.5 * (jnp.exp(-(k_**2)) + (1.0 + k_**2) ** -gamma)
-    # Pk = P0 / (1.0 + k_**2) ** gamma
-    # Pk = P0 * jnp.exp(-(k_**2)) # Leads to NaN values after division
-
-    return Pk
-
-
 def fix_padding(config: dict, n_freq):
 
     try:

@@ -23,7 +23,6 @@ from tabascal.fft_gp import (
     pow_spec_nd,
     supersample,
     supersample_domain,
-    supersample_domain_k,
     supersample_domain_specs,
     supersample_fourier,
 )
@@ -84,78 +83,6 @@ class TestSupersample:
         assert len(xs_ss[0]) == 22
         assert jnp.isclose(xs_ss[0][0], x[0])
         assert jnp.isclose(xs_ss[0][-1], x[-1] + 0.5)
-
-    def test_supersample_domain_k_1d(self):
-        """Test k-domain supersampling in 1D."""
-        x = jnp.linspace(0, 10, 11)
-        ns = [len(x)]
-        dxs = [float(jnp.diff(x)[0])]
-        ss_factors = [2]
-        ks_ss = supersample_domain_k(ns, dxs, ss_factors)
-
-        assert len(ks_ss) == 1
-        assert len(ks_ss[0]) == 22
-
-    def test_supersample_signal_1d(self):
-        """Test signal supersampling in 1D."""
-        # Create a simple sine wave
-        x = jnp.linspace(0, 2 * jnp.pi, 32)
-        y = jnp.sin(x)
-
-        # Supersample by factor of 2
-        y_ss = supersample(y, [2])
-
-        assert y_ss.shape == (64,)
-        # Check that energy is preserved (up to numerical precision)
-        # Supersampling should approximately double the sum of absolute values
-        assert jnp.isclose(jnp.abs(y_ss).sum(), jnp.abs(y).sum() * 2, rtol=1e-3)
-
-    def test_supersample_signal_2d(self):
-        """Test signal supersampling in 2D."""
-        y = jnp.ones((8, 8))
-        y_ss = supersample(y, [2, 2])
-
-        assert y_ss.shape == (16, 16)
-        # For a constant signal, supersampling should preserve the constant
-        assert jnp.allclose(y_ss, 1.0, rtol=1e-5)
-
-    def test_supersample_jit_compatible(self):
-        """Test that supersample is JIT-compatible."""
-        @jax.jit
-        def supersample_jitted(y):
-            return supersample(y, [2, 2])
-
-        y = jnp.ones((8, 8))
-        y_ss = supersample_jitted(y)
-        assert y_ss.shape == (16, 16)
-
-
-class TestDomainK:
-    """Test k-domain calculation functions."""
-
-    def test_domain_k_1d(self):
-        """Test k-domain calculation in 1D."""
-        x = jnp.linspace(0, 10, 11)
-        ns = [len(x)]
-        dxs = [float(jnp.diff(x)[0])]
-        ks = domain_k(ns, dxs)
-
-        assert len(ks) == 1
-        assert len(ks[0]) == len(x)
-        # Check that k=0 is in the center (after fftshift)
-        assert jnp.isclose(ks[0][len(ks[0]) // 2], 0.0, atol=1e-6)
-
-    def test_domain_k_2d(self):
-        """Test k-domain calculation in 2D."""
-        x = jnp.linspace(0, 10, 11)
-        y = jnp.linspace(0, 5, 6)
-        ns = [len(_x) for _x in [x,y]]
-        dxs = [float(jnp.diff(_x)[0]) for _x in [x,y]]
-        ks = domain_k(ns, dxs)
-
-        assert len(ks) == 2
-        assert len(ks[0]) == len(x)
-        assert len(ks[1]) == len(y)
 
 
 class TestPadding:
@@ -526,17 +453,6 @@ class TestJAXCompatibility:
 
 class TestNumericalAccuracy:
     """Test numerical accuracy of transformations."""
-
-    def test_supersample_preserves_dc_component(self):
-        """Test that supersampling preserves DC component."""
-        y = jnp.ones(16)
-        y_ss = supersample(y, [2])
-
-        # DC component should be preserved
-        Y_orig = jnp.fft.fftn(y, norm="forward")
-        Y_ss = jnp.fft.fftn(y_ss, norm="forward")
-
-        assert jnp.isclose(Y_orig.flatten()[0], Y_ss.flatten()[0])
 
     def test_fourier_cut_uncut_preserves_kept_modes(self):
         """Test that cutting and uncutting preserves kept Fourier modes."""
