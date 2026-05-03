@@ -146,7 +146,7 @@ def _check_tab_lib():
 def _check_tab_lib_gpu():
     if _TAB_LIB_GPU is None:
         raise RuntimeError(
-            f"FFI selected, but tabascal_gpu.so not found! "
+            f"FFI selected, but {_TAB_LIB_GPU_NAME} not found! "
             f"Compilation required, check included makefile at {_DIR_PATH}"
         )
 

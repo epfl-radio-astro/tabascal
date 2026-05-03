@@ -2,11 +2,9 @@
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 from tabascal.fft_gp import (
-    domain_k,
     domain_ss,
     fourier_cut,
     fourier_uncut,
@@ -21,7 +19,6 @@ from tabascal.fft_gp import (
     pk_cut,
     pow_spec,
     pow_spec_nd,
-    supersample,
     supersample_domain,
     supersample_domain_specs,
     supersample_fourier,

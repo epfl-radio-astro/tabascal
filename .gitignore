@@ -9,6 +9,10 @@ build/*
 docs/_build
 examples/data
 examples/test
+**/output
+**/perflogs
+**/stage
+**/reframe_results.json
 **/*.pyc
 *.o
 *.so
