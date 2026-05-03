@@ -84,9 +84,13 @@ gains:
   init: prior           # Optional - The initialization method for the gain parameters. Options are 'prior', 'truth'
   amp_mean: 1.0         # Optional - Mean of the prior distribution over the gain amplitudes. Options are 'truth' or a value like 1.0
   phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radiands. Options are 'truth' or a value like 0.0
-  amp_std: 1.0          # Optional - Standard deviation of the prior distribution over the gain amplitudes as a percentage
-  phase_std: 1.0        # Optional - Standard deviation of the prior distribution over the gain phases in degrees
-  corr_time: 180        # Optional - Correlation time of the gains in minutes
+  amp_std: null          # Optional - Standard deviation of the prior distribution over the gain amplitudes as a percentage
+  phase_std: null        # Optional - Standard deviation of the prior distribution over the gain phases in degrees
+  amp_corr_freq: null        # Optional - Correlation time of the gains in minutes
+  amp_corr_time: null        # Optional - Correlation time of the gains in minutes
+  phase_corr_freq: null        # Optional - Correlation time of the gains in minutes
+  phase_corr_time: null        # Optional - Correlation time of the gains in minutes
+  r_seed: 123
 # ###################
 # # Model parameters
 # ###################

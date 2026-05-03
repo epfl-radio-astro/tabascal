@@ -79,10 +79,13 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
         self.executable = "python"
         self.executable_opts = [
             f"{_src_root}/tabascal/scripts/run_tabascal.py",
+            "run",
             "-c",
             f"{workdir}/tab_target.yaml",
             "-s",
             f"$(cat {workdir}/sim_dir.txt)",
+            "--extra-tle-dir",
+            f"{_src_root}/tabascal/data/tles",
             "-t",
         ]
 

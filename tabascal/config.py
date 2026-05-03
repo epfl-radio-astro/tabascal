@@ -2,7 +2,9 @@ from tabascal.imports import import_components
 from tabascal.components.likelihood import gaussian
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements
+from tabascal.tle import print_spacetrack_status, preflight_tle_check
 from tabascal.interferometry import get_strides_and_idxs
+from tabascal.fft_gp import domain_ss
 
 import jax.numpy as jnp
 from jax import vmap, Array
@@ -44,7 +46,7 @@ def load_config(path: str) -> Dict:
     dict
         Configuration dictionary.
     """
-    config_dir = files("tabascal.data").joinpath("config").__str__()
+    config_dir = files("tabascal").joinpath("data/config").__str__()
     tab_base_config_path = os.path.join(config_dir, "tab_config_base.yaml")
     base_config = yaml_load(tab_base_config_path)
 
@@ -66,8 +68,17 @@ class TabConfig:
     def __init__(self, config: Dict, ms_path: str):
 
         # self.config = config
+        self.args = config
         self.ms_path = ms_path
-        self.spacetrack_path = config["satellites"]["spacetrack_path"]
+        self.spacetrack_path = config["satellites"].get("spacetrack_path")
+        self.extra_tle_dir = config["satellites"].get("extra_tle_dir")
+
+        print_spacetrack_status()
+        preflight_tle_check(
+            config["satellites"].get("norad_ids") or [],
+            ms_path,
+            extra_tle_dir=self.extra_tle_dir,
+        )
 
         self.read_ms_params(
             config["data"]["freq"],
@@ -80,7 +91,10 @@ class TabConfig:
             config, self.n_freq
         )  # Bad solution, should be fixed in fft_gp. Issue when using a single frequency channel.
 
-        self.get_orbital_elements(config["satellites"]["norad_ids"])
+        self.get_orbital_elements(
+            config["satellites"].get("norad_ids"),
+            extra_tle_dir=config["satellites"].get("extra_tle_dir"),
+        )
 
         config["rfi"]["min_time_bins"] = 1
         config["rfi"]["max_time_bins"] = 30
@@ -94,10 +108,7 @@ class TabConfig:
             config["rfi"]["max_time_bins"],
         )
 
-        self._set_times()
-        self._set_freqs()
-
-        self.args = config
+        self._set_freqs_times()
 
     def set_noise(self, noise: float):
 
@@ -194,23 +205,27 @@ class TabConfig:
             get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
         )
 
-    def _set_times(self):
+    def _set_freqs_times(self):
 
-        self.times_fine = int_sample_times(self.times, self.n_int_time).compute()
-        self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
-        self.n_time_fine = len(self.times_fine)
-
-    def _set_freqs(self):
-
-        self.freqs_fine = int_sample_times(self.freqs, self.n_int_freq).compute()
+        ns = [self.n_freq, self.n_time]
+        dxs = [self.chan_width, self.int_time]
+        x0s = [self.freqs[0], self.times[0]]
+        ss_factors = [self.n_int_freq, self.n_int_time]
+        pad_factors = [
+            self.args["rfi"]["freq_pad_factor"],
+            self.args["rfi"]["time_pad_factor"],
+        ]
+        self.freqs_fine, self.times_fine = domain_ss(ns, dxs, x0s, ss_factors, pad_factors)
         self.n_freq_fine = len(self.freqs_fine)
+        self.n_time_fine = len(self.times_fine)
+        self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
 
-    def get_orbital_elements(self, norad_ids: List[int]):
+    def get_orbital_elements(self, norad_ids: List[int], extra_tle_dir: Optional[str] = None):
 
         obs_epoch_jd = float(self.times_jd.mean())
 
         self.elements, self.epoch_jd, self.norad_ids, self.tles = (
-            fetch_orbital_elements(obs_epoch_jd, norad_ids)
+            fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=extra_tle_dir)
         )
         self.n_rfi = len(self.norad_ids)
 
