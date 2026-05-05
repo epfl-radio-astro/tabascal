@@ -18,16 +18,25 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # set language and standard
-set(CMAKE_CXX_STANDARD 17)
-set(CUDA_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+set(CUDA_STANDARD 20)
 set(CUDA_STANDARD_REQUIRED ON)
 
 include(CMakeDependentOption)
+include(FetchContent)
+
+if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
+	cmake_policy(SET CMP0135 NEW)
+endif()
 
 # Options
 option(TABASCAL_CPU "Build CPU extension" ON)
 option(TABASCAL_CUDA "Build CUDA extension" OFF)
 option(TABASCAL_ROCM "Build ROCm extension" OFF)
+
+option(TABASCAL_BUNDLED_LIBS "Use all bundled libraries" ON)
+cmake_dependent_option(TABASCAL_BUNDLED_HIGHWAY "Use bundled highway lib" ON "TABASCAL_BUNDLED_LIBS" OFF)
+option(TABASCAL_MULTI_ARCH "Build kernels for multiple CPU architectues with dynamic dispatch. When disabled, arch flags should be set through CMAKE_CXX_FLAGS." ON)
 
 set(CMAKE_CUDA_ARCHITECTURES "80;90a-real;90" CACHE STRING "CUDA Architectures")
 set(CMAKE_HIP_ARCHITECTURES "gfx90a;gfx942;gfx1030;gfx1100" CACHE STRING "HIP Architectures")
@@ -71,6 +80,32 @@ if(TABASCAL_CPU)
 	$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-return-type>
 	$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-attributes>
   )
+
+  if(TABASCAL_BUNDLED_HIGHWAY)
+	# add google highway
+	set(HWY_ENABLE_CONTRIB ON CACHE BOOL "")
+	set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "")
+	set(HWY_ENABLE_INSTALL OFF CACHE BOOL "")
+	set(HWY_ENABLE_TESTS OFF CACHE BOOL "")
+	set(HWY_FORCE_STATIC_LIBS ON CACHE BOOL "")
+	set(HWY_ENABLE_CONTRIB ON CACHE BOOL "")
+	FetchContent_Declare(
+	  hwy
+	  URL https://github.com/google/highway/archive/refs/tags/1.4.0.tar.gz
+	  URL_MD5 9d335797777e17f827c7980b8313a34b
+	)
+	FetchContent_MakeAvailable(hwy)
+	if(NOT TARGET hwy::hwy)
+	  add_library(hwy::hwy ALIAS hwy)
+	endif()
+  else()
+	find_package(hwy CONFIG REQUIRED)
+  endif()
+  target_link_libraries(tabascal PRIVATE hwy::hwy)
+
+  if(TABASCAL_MULTI_ARCH)
+	target_compile_definitions(tabascal PUBLIC -DTABASCAL_MULTI_ARCH)
+  endif()
 endif()
 
 if(TABASCAL_CUDA)
