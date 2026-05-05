@@ -5,12 +5,12 @@ from tabascal.components.trajectory import fetch_orbital_elements, get_satellite
 from tabascal.tle import print_spacetrack_status, preflight_tle_check
 from tabascal.interferometry import calculate_fringe_frequency, get_strides_and_idxs
 from tabascal.fft_gp import domain_ss
-from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd, gmsa_from_jd
+from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd
 from tabascal.coordinates import itrf_to_uvw
 
 
 import jax.numpy as jnp
-from jax import vmap, Array
+from jax import vmap
 
 import numpy as np
 
@@ -23,20 +23,6 @@ import os
 import re
 import yaml
 import collections.abc
-
-
-class Tee(object):
-    """https://stackoverflow.com/questions/17866724/python-logging-print-statements-while-having-them-print-to-stdout"""
-
-    def __init__(self, *files):
-        self.files = files
-
-    def write(self, obj):
-        for f in self.files:
-            f.write(obj)
-
-    def flush(self):
-        pass
 
     
 def deep_update(d: Dict, u: Dict) -> Dict:
@@ -203,13 +189,17 @@ class TabConfig:
         times_jd_coarse = np.arange(
             self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
         )
+        times_jd_coarse_whole = np.floor(times_jd_coarse)
+        times_jd_coarse_frac = times_jd_coarse - times_jd_coarse_whole
 
-        gh0 = (gmsa_from_jd(times_jd_coarse) - self.phase_centre["ra"]) % 360  # type: ignore
+        from sgp4jax._frames import _earth_orientation
+
+        _, gast_rad = vmap(_earth_orientation)(times_jd_coarse_whole, times_jd_coarse_frac)
+        gh0 = (jnp.rad2deg(gast_rad) - self.phase_centre["ra"]) % 360  # type: ignore
 
         ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
 
         rfi_xyz = get_satellite_positions(self.tles, times_jd_coarse)
-        print(rfi_xyz.shape)
 
 
         calc_fringe_freq = lambda _rfi_xyz: calculate_fringe_frequency(

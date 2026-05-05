@@ -1,5 +1,5 @@
-from tabascal.time import gmsa_from_jd, mjd_to_jd
-from tabascal.coordinates import xyz_to_itrf
+import sgp4jax
+from tabascal.time import mjd_to_jd
 
 from jax import jit, vmap, Array
 import jax.numpy as jnp
@@ -152,7 +152,7 @@ def calculate_fringe_frequency(
     freq : float
         Observational frequency in Hz.
     rfi_xyz : Array (n_time, 3)
-        Position of the RFI source in the ECI frame in metres.
+        Position of the RFI source in the GCRF frame in metres.
     ants_itrf : Array (n_ant, 3)
         Antenna positions in the ITRF (ECEF) frame in metres.
     ants_u : Array (n_time, n_ant)
@@ -167,11 +167,12 @@ def calculate_fringe_frequency(
     """
 
     lam = C / freq
-    # Should change this to astropy.time.Time
-    gsa = gmsa_from_jd(mjd_to_jd(times_mjd))  # type: ignore
     times = (times_mjd - times_mjd[0]) * 24 * 3600
 
-    r_ecef = xyz_to_itrf(rfi_xyz, gsa)  # type: ignore
+    times_jd = mjd_to_jd(times_mjd)
+    jd_whole = jnp.floor(times_jd)
+    jd_frac = times_jd - jd_whole
+    r_ecef = vmap(sgp4jax.gcrf_to_itrf)(rfi_xyz / 1e3, jd_whole, jd_frac) * 1e3
     s_ecef = r_ecef - jnp.mean(ants_itrf, axis=0)
     s_hat_ecef = s_ecef / jnp.linalg.norm(s_ecef, axis=-1, keepdims=True)
     s_hat_dot = jnp.gradient(s_hat_ecef, jnp.diff(times[:2])[0], axis=0)
