@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include <array>
 #include <unistd.h>
 
 #include "tensor.hpp"
@@ -93,17 +94,27 @@ rfi_transpose_kernel_opt(std::int64_t n_int_f, std::int64_t n_int_t,
       for (; i_tf_fine + n_lanes <= rfi_amp_fine.shape[2];
            i_tf_fine += n_lanes) {
 
-        const auto i_t = (i_tf_fine % (n_time * n_int_t)) / n_int_t;
-        const auto i_f = (i_tf_fine / (n_time * n_int_t)) / n_int_f;
+        HWY_ALIGN std::array<double, n_lanes> val_rfi_vis_grad_re;
+        HWY_ALIGN std::array<double, n_lanes> val_rfi_vis_grad_im;
 
-        assert(i_t < rfi_vis_grad.shape[2]);
-        assert(i_f < rfi_vis_grad.shape[1]);
+        for(std::int64_t l =0; l < n_lanes; ++l) {
+          const auto i_t = ((i_tf_fine + l) % (n_time * n_int_t)) / n_int_t;
+          const auto i_f = ((i_tf_fine + l) / (n_time * n_int_t)) / n_int_f;
 
-        const auto val_rfi_vis_grad_scalar = rfi_vis_grad(i_bl, i_f, i_t) * n_int_inv;
+          assert(i_t < rfi_vis_grad.shape[2]);
+          assert(i_f < rfi_vis_grad.shape[1]);
+
+          const auto val_rfi_vis_grad_scalar =
+              rfi_vis_grad(i_bl, i_f, i_t) * n_int_inv;
+
+          val_rfi_vis_grad_re[l] = val_rfi_vis_grad_scalar.real();
+          val_rfi_vis_grad_im[l] = val_rfi_vis_grad_scalar.imag();
+        }
 
         const auto val_rfi_vis_grad =
-            ComplexV<D>{hn::Set(d, val_rfi_vis_grad_scalar.real()),
-                        hn::Set(d, val_rfi_vis_grad_scalar.imag())};
+            ComplexV<D>{hn::Load(d, val_rfi_vis_grad_re.data()),
+                        hn::Load(d, val_rfi_vis_grad_im.data())};
+
         const auto val_rfi_phase_1 =
             hn::LoadU(d, ptr_val_rfi_phase_1 + i_tf_fine);
         const auto val_rfi_phase_2 =
@@ -341,14 +352,28 @@ ffi::Error calc_rfi_transpose_cpu_impl(
   const auto n_int_t = rfi_amp_fine.dimensions()[5];
   const auto n_int_f = rfi_amp_fine.dimensions()[3];
 
-  // rfi_transpose_kernel(n_int_f, n_int_t, a1_tensor, a2_tensor,
-  //                      rfi_amp_fine_tensor, rfi_phase_tensor, rfi_grad_tensor,
-  //                      rfi_amp_fine_grad_tensor, rfi_phase_grad_tensor);
+  {
+    auto start = std::chrono::high_resolution_clock::now();
+    TABASCAL_EXPORT_AND_DISPATCH_T(rfi_transpose_kernel_opt)
+    (n_int_f, n_int_t, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
+     rfi_phase_tensor, rfi_grad_tensor, rfi_amp_fine_grad_tensor,
+     rfi_phase_grad_tensor);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cerr << "opt time: " << duration.count() << " ms" << std::endl;
+  }
 
-  TABASCAL_EXPORT_AND_DISPATCH_T(rfi_transpose_kernel_opt)
-  (n_int_f, n_int_t, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
-   rfi_phase_tensor, rfi_grad_tensor, rfi_amp_fine_grad_tensor,
-   rfi_phase_grad_tensor);
+  // {
+  //   auto start = std::chrono::high_resolution_clock::now();
+  //   rfi_transpose_kernel(n_int_f, n_int_t, a1_tensor, a2_tensor,
+  //                        rfi_amp_fine_tensor, rfi_phase_tensor, rfi_grad_tensor,
+  //                        rfi_amp_fine_grad_tensor, rfi_phase_grad_tensor);
+  //   auto end = std::chrono::high_resolution_clock::now();
+  //   auto duration =
+  //       std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  //   std::cerr << "ref time: " << duration.count() << " ms" << std::endl;
+  // }
 
   return ffi::Error::Success();
 }
