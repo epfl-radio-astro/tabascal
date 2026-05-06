@@ -70,6 +70,7 @@ set(TABASCAL_GPU_SOURCES
   ./tabascal/components/ffi/rfi_kernel_gpu.cu
   ./tabascal/components/ffi/rfi_jvp_kernel_gpu.cu
   ./tabascal/components/ffi/rfi_transpose_kernel_gpu.cu
+  ./tabascal/components/ffi/util_gpu.cu
 )
 
 if(TABASCAL_CPU)
@@ -117,7 +118,7 @@ if(TABASCAL_CUDA)
 
   add_library(tabascal_cuda SHARED ${TABASCAL_GPU_SOURCES})
   # set_target_properties(tabascal_cuda PROPERTIES OUTPUT_NAME "tabascal_cuda_${CUDAToolkit_VERSION_MAJOR}")
-  target_include_directories(tabascal PRIVATE ${JAXLIB_HOME}/include ./tabascal/components/ffi)
+  target_include_directories(tabascal_cuda PRIVATE ${JAXLIB_HOME}/include ./tabascal/components/ffi)
   target_link_libraries(tabascal_cuda PRIVATE CUDA::cudart)
   target_compile_options(tabascal_cuda PRIVATE
 	$<$<COMPILE_LANGUAGE:CUDA>:--diag-suppress=940>
@@ -132,7 +133,7 @@ if(TABASCAL_ROCM)
   set_source_files_properties(${TABASCAL_GPU_SOURCES} PROPERTIES LANGUAGE HIP)
 
   add_library(tabascal_hip SHARED ${TABASCAL_GPU_SOURCES})
-  target_include_directories(tabascal PRIVATE ${JAXLIB_HOME}/include ./tabascal/components/ffi)
+  target_include_directories(tabascal_hip PRIVATE ${JAXLIB_HOME}/include ./tabascal/components/ffi)
   target_link_libraries(tabascal_hip PRIVATE hip::host)
 endif()
 
