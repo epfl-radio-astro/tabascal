@@ -11,9 +11,177 @@
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
 
-namespace ffi = xla::ffi;
+// Generates code for every target that this compiler can support.
+#undef HWY_TARGET_INCLUDE
+#define HWY_TARGET_INCLUDE "rfi_transpose_kernel.cpp" // this file
+
+#include "hwy_dispatch.hpp"
+
 
 namespace tabascal {
+
+namespace ffi = xla::ffi;
+
+namespace HWY_NAMESPACE { // required: unique per target
+
+namespace hn = ::hwy::HWY_NAMESPACE;
+
+#include "complex_vector_inl.hpp"
+
+// HWY_ATTR void
+// rfi_kernel_opt(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
+//                Tensor4D<const std::complex<double> *> rfi_amp_fine,
+//                Tensor4D<const double *> rfi_phase,
+//                Tensor3D<std::complex<double> *> rfi_vis) {
+// }
+
+HWY_ATTR void
+rfi_transpose_kernel_opt(std::int64_t n_int_f, std::int64_t n_int_t,
+                         Tensor1D<const int *> a1, Tensor1D<const int *> a2,
+                         Tensor3D<const std::complex<double> *> rfi_amp_fine,
+                         Tensor3D<const double *> rfi_phase,
+                         Tensor3D<const std::complex<double> *> rfi_vis_grad,
+                         Tensor3D<std::complex<double> *> rfi_amp_fine_grad,
+                         Tensor3D<double *> rfi_phase_grad) {
+
+  using D = TagType<double>;
+
+  const TagType<double> d;
+  constexpr std::int64_t n_lanes = hn::Lanes(d);
+
+  // set to 0 before accumulation
+  const auto out_size = rfi_amp_fine_grad.shape[0] *
+                        rfi_amp_fine_grad.shape[1] * rfi_amp_fine_grad.shape[2];
+
+  std::memset(rfi_amp_fine_grad.ptr, 0,
+              sizeof(std::complex<double>) * out_size);
+  std::memset(rfi_phase_grad.ptr, 0, sizeof(double) * out_size);
+
+  const auto n_rfi = rfi_amp_fine.shape[0];
+  const auto n_ant = rfi_amp_fine.shape[1];
+  const auto n_bl = a1.shape[0];
+  const auto n_time = rfi_vis_grad.shape[2];
+  const auto n_freq = rfi_vis_grad.shape[1];
+
+  assert(a1.shape[0] == a2.shape[0]);
+  assert(a1.shape[0] == rfi_vis_grad.shape[0]);
+  assert(rfi_phase.shape[0] == rfi_amp_fine.shape[0]);
+  assert(rfi_phase.shape[1] == rfi_amp_fine.shape[1]);
+  assert(rfi_phase.shape[2] == rfi_amp_fine.shape[2]);
+
+  const double n_int_inv = 1.f / double(n_int_t * n_int_f);
+
+  for (std::int64_t i_bl = 0; i_bl < n_bl; ++i_bl) {
+    std::int64_t i_a1 = a1(i_bl);
+    std::int64_t i_a2 = a2(i_bl);
+
+    for (std::int64_t i_rfi = 0; i_rfi < n_rfi; ++i_rfi) {
+
+      auto ptr_val_rfi_amp_1 = &rfi_amp_fine(i_rfi, i_a1, 0);
+      auto ptr_val_rfi_amp_2 = &rfi_amp_fine(i_rfi, i_a2, 0);
+
+      auto ptr_val_rfi_phase_1 = &rfi_phase(i_rfi, i_a1, 0);
+      auto ptr_val_rfi_phase_2 = &rfi_phase(i_rfi, i_a2, 0);
+
+      auto ptr_phase_grad_1 = &rfi_phase_grad(i_rfi, i_a1, 0);
+      auto ptr_phase_grad_2 = &rfi_phase_grad(i_rfi, i_a2, 0);
+      auto ptr_rfi_amp_fine_grad_1 = &rfi_amp_fine_grad(i_rfi, i_a1, 0);
+      auto ptr_rfi_amp_fine_grad_2 = &rfi_amp_fine_grad(i_rfi, i_a2, 0);
+
+      std::int64_t i_tf_fine = 0;
+
+      for (; i_tf_fine + n_lanes <= rfi_amp_fine.shape[2];
+           i_tf_fine += n_lanes) {
+
+        const auto i_t = (i_tf_fine % (n_time * n_int_t)) / n_int_t;
+        const auto i_f = (i_tf_fine / (n_time * n_int_t)) / n_int_f;
+
+        assert(i_t < rfi_vis_grad.shape[2]);
+        assert(i_f < rfi_vis_grad.shape[1]);
+
+        const auto val_rfi_vis_grad_scalar = rfi_vis_grad(i_bl, i_f, i_t) * n_int_inv;
+
+        const auto val_rfi_vis_grad =
+            ComplexV<D>{hn::Set(d, val_rfi_vis_grad_scalar.real()),
+                        hn::Set(d, val_rfi_vis_grad_scalar.imag())};
+        const auto val_rfi_phase_1 =
+            hn::LoadU(d, ptr_val_rfi_phase_1 + i_tf_fine);
+        const auto val_rfi_phase_2 =
+            hn::LoadU(d, ptr_val_rfi_phase_2 + i_tf_fine);
+
+        const auto val_rfi_amp_1 = LoadU(d, ptr_val_rfi_amp_1 + i_tf_fine);
+
+        const auto val_rfi_amp_2 = LoadU(d, ptr_val_rfi_amp_2 + i_tf_fine);
+
+        const auto phase_diff = hn::Sub(val_rfi_phase_1, val_rfi_phase_2);
+
+        const auto val_c = hn::Cos(d, phase_diff);
+        const auto val_s = hn::Sin(d, phase_diff);
+
+        const auto val_e = ComplexV<D>{val_c, val_s};
+
+        const auto t1 = Mul(MulConj(val_rfi_vis_grad, val_rfi_amp_2), val_e);
+
+        auto t2 = Mul(Mul(val_rfi_vis_grad, val_rfi_amp_1), val_e);
+        t2 = ComplexV<D>{t2.re, hn::Neg(t2.im)};
+
+        StoreAddU(d, t1, ptr_rfi_amp_fine_grad_1 + i_tf_fine);
+        StoreAddU(d, t2, ptr_rfi_amp_fine_grad_2 + i_tf_fine);
+
+        const auto f1 =
+            Mul(val_rfi_vis_grad,
+                Mul(ComplexV<D>{hn::Zero(d), hn::Set(d, 1)},
+                    Mul(val_e, MulConj(val_rfi_amp_1, val_rfi_amp_2))));
+
+        hn::StoreU(hn::Add(hn::LoadU(d, ptr_phase_grad_1 + i_tf_fine), f1.re),
+                   d, ptr_phase_grad_1 + i_tf_fine);
+
+        hn::StoreU(hn::Sub(hn::LoadU(d, ptr_phase_grad_2 + i_tf_fine), f1.re),
+                   d, ptr_phase_grad_2 + i_tf_fine);
+      }
+
+      for (; i_tf_fine < rfi_amp_fine.shape[2]; ++i_tf_fine) {
+
+        const auto i_t = (i_tf_fine % (n_time * n_int_t)) / n_int_t;
+        const auto i_f = (i_tf_fine / (n_time * n_int_t)) / n_int_f;
+
+        assert(i_t < rfi_vis_grad.shape[2]);
+        assert(i_f < rfi_vis_grad.shape[1]);
+
+        const auto val_rfi_vis_grad = rfi_vis_grad(i_bl, i_f, i_t) * n_int_inv;
+
+        const auto val_rfi_amp_1 = rfi_amp_fine(i_rfi, i_a1, i_tf_fine);
+        const auto val_rfi_amp_2 = rfi_amp_fine(i_rfi, i_a2, i_tf_fine);
+
+        const auto val_rfi_phase_1 = rfi_phase(i_rfi, i_a1, i_tf_fine);
+        const auto val_rfi_phase_2 = rfi_phase(i_rfi, i_a2, i_tf_fine);
+
+        std::complex<double> val_e(std::cos(val_rfi_phase_1 - val_rfi_phase_2),
+                                   std::sin(val_rfi_phase_1 - val_rfi_phase_2));
+
+        const auto t1 = val_rfi_vis_grad * std::conj(val_rfi_amp_2) * val_e;
+        const auto t2 = std::conj(val_rfi_vis_grad * val_rfi_amp_1 * val_e);
+
+        rfi_amp_fine_grad(i_rfi, i_a1, i_tf_fine) += t1;
+        rfi_amp_fine_grad(i_rfi, i_a2, i_tf_fine) += t2;
+
+        const auto f1 = (val_rfi_vis_grad * std::complex<double>(0, 1) * val_e *
+                         val_rfi_amp_1 * std::conj(val_rfi_amp_2))
+                            .real();
+
+        rfi_phase_grad(i_rfi, i_a1, i_tf_fine) += f1;
+        rfi_phase_grad(i_rfi, i_a2, i_tf_fine) -= f1;
+      }
+    }
+  }
+}
+
+} // namespace HWY_NAMESPACE
+
+#if HWY_ONCE
+
+
+
 
 void rfi_transpose_kernel(std::int64_t n_int_f, std::int64_t n_int_t,
                           Tensor1D<const int *> a1, Tensor1D<const int *> a2,
@@ -173,9 +341,14 @@ ffi::Error calc_rfi_transpose_cpu_impl(
   const auto n_int_t = rfi_amp_fine.dimensions()[5];
   const auto n_int_f = rfi_amp_fine.dimensions()[3];
 
-  rfi_transpose_kernel(n_int_f, n_int_t, a1_tensor, a2_tensor,
-                       rfi_amp_fine_tensor, rfi_phase_tensor, rfi_grad_tensor,
-                       rfi_amp_fine_grad_tensor, rfi_phase_grad_tensor);
+  // rfi_transpose_kernel(n_int_f, n_int_t, a1_tensor, a2_tensor,
+  //                      rfi_amp_fine_tensor, rfi_phase_tensor, rfi_grad_tensor,
+  //                      rfi_amp_fine_grad_tensor, rfi_phase_grad_tensor);
+
+  TABASCAL_EXPORT_AND_DISPATCH_T(rfi_transpose_kernel_opt)
+  (n_int_f, n_int_t, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
+   rfi_phase_tensor, rfi_grad_tensor, rfi_amp_fine_grad_tensor,
+   rfi_phase_grad_tensor);
 
   return ffi::Error::Success();
 }
@@ -194,4 +367,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_transpose_cpu,
                                   .Arg<ffi::BufferR3<ffi::C128>>()
                                   .Ret<rfi_amp_fine_t>()
                                   .Ret<rfi_phase_t>());
+
+#endif
+
 } // namespace tabascal
