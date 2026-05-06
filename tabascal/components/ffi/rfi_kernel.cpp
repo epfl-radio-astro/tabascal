@@ -28,46 +28,7 @@ namespace HWY_NAMESPACE { // required: unique per target
 
 namespace hn = ::hwy::HWY_NAMESPACE;
 
-template <class D> struct ComplexV {
-  hn::Vec<D> re, im;
-};
-
-template <class D>
-HWY_INLINE HWY_ATTR ComplexV<D> Mul(ComplexV<D> a, ComplexV<D> b) {
-
-  const auto re = hn::Sub(hn::Mul(a.re, b.re), hn::Mul(a.im, b.im));
-  const auto im = hn::Add(hn::Mul(a.im, b.re), hn::Mul(a.re, b.im));
-
-  return ComplexV<D>{re, im};
-};
-
-template <class D>
-HWY_INLINE HWY_ATTR ComplexV<D> MulConj(ComplexV<D> a, ComplexV<D> b) {
-
-  const auto re = hn::Add(hn::Mul(a.re, b.re), hn::Mul(a.im, b.im));
-  const auto im = hn::Sub(hn::Mul(a.im, b.re), hn::Mul(a.re, b.im));
-
-  return ComplexV<D>{re, im};
-};
-
-template <class D>
-HWY_INLINE HWY_ATTR ComplexV<D> LoadU(D d,
-                                      const std::complex<hn::TFromD<D>> *ptr) {
-
-  using T = hn::TFromD<D>;
-
-  constexpr std::int64_t n_lanes = hn::Lanes(d);
-
-  auto scalar_ptr = reinterpret_cast<const T *>(ptr);
-
-  const auto val_1 = hn::LoadU(d, scalar_ptr);
-  const auto val_2 = hn::LoadU(d, scalar_ptr + n_lanes);
-
-  const auto re = hn::ConcatEven(d, val_2, val_1);
-  const auto im = hn::ConcatOdd(d, val_2, val_1);
-
-  return ComplexV<D>{re, im};
-};
+#include "complex_vector_inl.hpp"
 
 HWY_ATTR void
 rfi_kernel_opt(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
@@ -319,9 +280,9 @@ ffi::Error calc_rfi_vis_cpu_impl(
 
   // {
   //   auto start = std::chrono::high_resolution_clock::now();
-  //   TABASCAL_EXPORT_AND_DISPATCH_T(rfi_kernel_opt)
-  //   (a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
-  //    rfi_vis_tensor);
+    TABASCAL_EXPORT_AND_DISPATCH_T(rfi_kernel_opt)
+    (a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+     rfi_vis_tensor);
   //   auto end = std::chrono::high_resolution_clock::now();
   //   auto duration =
   //       std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -338,44 +299,46 @@ ffi::Error calc_rfi_vis_cpu_impl(
   //   std::cerr << "ref time: " << duration.count() << " ms" << std::endl;
   // }
 
-  const int64_t n_threads = std::max<int64_t>(thread_pool.num_threads(), 1);
+  // int64_t n_threads = std::max<int64_t>(thread_pool.num_threads(), 1);
 
-  const int64_t n_bl = a1.dimensions()[0];
-  const int64_t n_bl_per_thread = (n_bl + n_threads -1) / n_threads;
+  // n_threads = std::min<int64_t>(n_threads, 6);
 
-  std::latch done(n_threads);
+  // const int64_t n_bl = a1.dimensions()[0];
+  // const int64_t n_bl_per_thread = (n_bl + n_threads -1) / n_threads;
 
-  auto start = std::chrono::high_resolution_clock::now();
-  for (int64_t thread_id = 0; thread_id < n_threads; ++thread_id) {
-    thread_pool.Schedule([&, thread_id]() {
+  // std::latch done(n_threads);
 
-      const int64_t i_bl_start = thread_id * n_bl_per_thread;
-      const int64_t n_bl_this_thread =
-          std::max(i_bl_start + n_bl_per_thread, n_bl) - i_bl_start;
+  // auto start = std::chrono::high_resolution_clock::now();
+  // for (int64_t thread_id = 0; thread_id < n_threads; ++thread_id) {
+  //   thread_pool.Schedule([&, thread_id]() {
 
-      Tensor1D<const int *> a1_tensor_th(a1.typed_data() + i_bl_start,
-                                         n_bl_this_thread);
-      Tensor1D<const int *> a2_tensor_th(a2.typed_data() + i_bl_start,
-                                         n_bl_this_thread);
+  //     const int64_t i_bl_start = thread_id * n_bl_per_thread;
+  //     const int64_t n_bl_this_thread =
+  //         std::max(i_bl_start + n_bl_per_thread, n_bl) - i_bl_start;
 
-      Tensor3D<std::complex<double> *> rfi_vis_tensor_th(
-          &rfi_vis_tensor(i_bl_start, 0, 0), n_bl_this_thread,
-          rfi_vis->dimensions()[1], rfi_vis->dimensions()[2]);
+  //     Tensor1D<const int *> a1_tensor_th(a1.typed_data() + i_bl_start,
+  //                                        n_bl_this_thread);
+  //     Tensor1D<const int *> a2_tensor_th(a2.typed_data() + i_bl_start,
+  //                                        n_bl_this_thread);
 
-      TABASCAL_EXPORT_AND_DISPATCH_T(rfi_kernel_opt)
-      (a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
-       rfi_vis_tensor);
+  //     Tensor3D<std::complex<double> *> rfi_vis_tensor_th(
+  //         &rfi_vis_tensor(i_bl_start, 0, 0), n_bl_this_thread,
+  //         rfi_vis->dimensions()[1], rfi_vis->dimensions()[2]);
 
-      done.count_down();
-    });
-  }
+  //     TABASCAL_EXPORT_AND_DISPATCH_T(rfi_kernel_opt)
+  //     (a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+  //      rfi_vis_tensor);
 
-  done.wait(); // blocks the caller thread via futex — no spin
-  auto end = std::chrono::high_resolution_clock::now();
-  auto duration =
-      std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-  std::cerr << "opt threaded (" << n_threads << ") time: " << duration.count()
-            << " ms" << std::endl;
+  //     done.count_down();
+  //   });
+  // }
+
+  // done.wait(); // blocks the caller thread via futex — no spin
+  // auto end = std::chrono::high_resolution_clock::now();
+  // auto duration =
+  //     std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  // std::cerr << "opt threaded (" << n_threads << ") time: " << duration.count()
+  //           << " ms" << std::endl;
 
   return ffi::Error::Success();
 }

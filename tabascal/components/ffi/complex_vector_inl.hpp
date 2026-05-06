@@ -14,6 +14,16 @@ HWY_INLINE HWY_ATTR ComplexV<D> Mul(ComplexV<D> a, ComplexV<D> b) {
 };
 
 template <class D>
+HWY_INLINE HWY_ATTR ComplexV<D> Add(ComplexV<D> a, ComplexV<D> b) {
+  return ComplexV<D>{hn::Add(a.re, b.re), hn::Add(a.im, b.im)};
+};
+
+template <class D>
+HWY_INLINE HWY_ATTR ComplexV<D> Sub(ComplexV<D> a, ComplexV<D> b) {
+  return ComplexV<D>{hn::Sub(a.re, b.re), hn::Sub(a.im, b.im)};
+};
+
+template <class D>
 HWY_INLINE HWY_ATTR ComplexV<D> MulConj(ComplexV<D> a, ComplexV<D> b) {
 
   const auto re = hn::MulAdd(a.im, b.im, hn::Mul(a.re, b.re));

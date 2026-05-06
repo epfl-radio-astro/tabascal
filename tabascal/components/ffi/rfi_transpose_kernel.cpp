@@ -325,17 +325,10 @@ ffi::Error calc_rfi_transpose_cpu_impl(
   const auto n_int_t = rfi_amp_fine.dimensions()[5];
   const auto n_int_f = rfi_amp_fine.dimensions()[3];
 
-  {
-    auto start = std::chrono::high_resolution_clock::now();
-    TABASCAL_EXPORT_AND_DISPATCH_T(rfi_transpose_kernel_opt)
-    (n_int_f, n_int_t, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
-     rfi_phase_tensor, rfi_grad_tensor, rfi_amp_fine_grad_tensor,
-     rfi_phase_grad_tensor);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    std::cerr << "opt time: " << duration.count() << " ms" << std::endl;
-  }
+  TABASCAL_EXPORT_AND_DISPATCH_T(rfi_transpose_kernel_opt)
+  (n_int_f, n_int_t, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
+   rfi_phase_tensor, rfi_grad_tensor, rfi_amp_fine_grad_tensor,
+   rfi_phase_grad_tensor);
 
   return ffi::Error::Success();
 }
