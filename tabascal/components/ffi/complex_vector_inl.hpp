@@ -51,8 +51,8 @@ HWY_INLINE HWY_ATTR void StoreU(D d, ComplexV<D> value,
 
   auto scalar_ptr = reinterpret_cast<T *>(ptr);
 
-  const auto lo = hn::InterleaveLower(d, value.re, value.im);
-  const auto hi = hn::InterleaveUpper(d, value.re, value.im);
+  const auto lo = hn::InterleaveWholeLower(d, value.re, value.im);
+  const auto hi = hn::InterleaveWholeUpper(d, value.re, value.im);
 
   hn::StoreU(lo, d, scalar_ptr);
   hn::StoreU(hi, d, scalar_ptr + n_lanes);
@@ -68,8 +68,8 @@ HWY_INLINE HWY_ATTR void StoreAddU(D d, ComplexV<D> value,
 
   auto scalar_ptr = reinterpret_cast<T *>(ptr);
 
-  const auto lo = hn::InterleaveLower(d, value.re, value.im);
-  const auto hi = hn::InterleaveUpper(d, value.re, value.im);
+  const auto lo = hn::InterleaveWholeLower(d, value.re, value.im);
+  const auto hi = hn::InterleaveWholeUpper(d, value.re, value.im);
 
   const auto lo_res = hn::Add(hn::LoadU(d, scalar_ptr), lo);
   const auto hi_res = hn::Add(hn::LoadU(d, scalar_ptr + n_lanes), hi);
@@ -88,8 +88,8 @@ HWY_INLINE HWY_ATTR void StoreSubU(D d, ComplexV<D> value,
 
   auto scalar_ptr = reinterpret_cast<T *>(ptr);
 
-  const auto lo = hn::InterleaveLower(d, value.re, value.im);
-  const auto hi = hn::InterleaveUpper(d, value.re, value.im);
+  const auto lo = hn::InterleaveWholeLower(d, value.re, value.im);
+  const auto hi = hn::InterleaveWholeUpper(d, value.re, value.im);
 
   const auto lo_res = hn::Sub(hn::LoadU(d, scalar_ptr), lo);
   const auto hi_res = hn::Sub(hn::LoadU(d, scalar_ptr + n_lanes), hi);
