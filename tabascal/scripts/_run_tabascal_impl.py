@@ -4,7 +4,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import sys
 import shutil
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from datetime import datetime
 
 import yaml
@@ -53,8 +53,18 @@ def evaluate_init(tab_config, model, key):
     return key, init_pred, nlog_l, nlog_p, init_state
 
 
+@contextmanager
+def _stdout_logger(log_path, enabled):
+    if not enabled:
+        yield
+        return
+    with open(log_path, "w") as log:
+        with redirect_stdout(_Tee(sys.stdout, log)):
+            yield
+
+
 @measure_runtime
-def run_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="", extra_tle_dir=None):
+def run_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="", extra_tle_dir=None, log=True):
     if suffix:
         suffix = "_" + suffix
 
@@ -101,93 +111,92 @@ def run_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="", extr
     if extra_tle_dir:
         config["satellites"]["extra_tle_dir"] = extra_tle_dir
 
-    with open(log_path, "w") as log:
-        with redirect_stdout(_Tee(sys.stdout, log)):
+    with _stdout_logger(log_path, log):
+        print()
+        start_time = datetime.now()
+        print(f"Start Time : {start_time}")
 
-            print()
-            start_time = datetime.now()
-            print(f"Start Time : {start_time}")
+        key, subkey = random.split(random.PRNGKey(1))
 
-            key, subkey = random.split(random.PRNGKey(1))
+        print(f"Model : {model_name}")
+        print()
+        print(f_name)
+        print()
 
-            print(f"Model : {model_name}")
-            print()
-            print(f_name)
-            print()
+        tab_config, model = build_model(config, ms_path)
 
-            tab_config, model = build_model(config, ms_path)
+        prob_model = model.prob_model
 
-            prob_model = model.prob_model
+        shapes = {key: value.shape for key, value in model.init_params.items()}
+        n_params = sum([x.size for x in model.init_params.values()])
+        n_data = 2 * tab_config.vis_obs.size
 
-            shapes = {key: value.shape for key, value in model.init_params.items()}
-            n_params = sum([x.size for x in model.init_params.values()])
-            n_data = 2 * tab_config.vis_obs.size
+        print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
+        print()
+        print(f"Number of Antennas   : {tab_config.n_ant: 4}")
+        print(f"Number of Time Steps : {tab_config.n_time: 4}")
+        print()
+        print(f"Parameter shapes     : {shapes}")
+        print(f"Number of parameters : {n_params}")
+        print(f"Data shape           : {tab_config.vis_obs.shape}")
+        print(f"Number of data points: {n_data}")
 
-            print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
-            print()
-            print(f"Number of Antennas   : {tab_config.n_ant: 4}")
-            print(f"Number of Time Steps : {tab_config.n_time: 4}")
-            print()
-            print(f"Parameter shapes     : {shapes}")
-            print(f"Number of parameters : {n_params}")
-            print(f"Data shape           : {tab_config.vis_obs.shape}")
-            print(f"Number of data points: {n_data}")
+        print()
+        end_start = datetime.now()
+        print(f"Startup Time : {end_start - start_time}")
+        print(f"{end_start}")
 
-            print()
-            end_start = datetime.now()
-            print(f"Startup Time : {end_start - start_time}")
-            print(f"{end_start}")
+        key, init_pred, nlog_l, nlog_p, init_state = evaluate_init(tab_config, model, key)
+        write_results_xds(init_pred, tab_config, init_pred_path)
 
-            key, init_pred, nlog_l, nlog_p, init_state = evaluate_init(tab_config, model, key)
-            write_results_xds(init_pred, tab_config, init_pred_path)
+        print(f"log_l : {nlog_l:.3e}")
+        print(f"log_p : {nlog_p:.3e}")
+
+        truth = {
+            "vis_rfi": jnp.nan * jnp.zeros((tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex),
+            "vis_ast": jnp.nan * jnp.zeros((tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex),
+            "gains": jnp.nan * jnp.ones((tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex),
+        }
+
+        if config["plots"]["init"]:
+            from tabascal.plot import plot_init
+            plot_init(tab_config, init_pred, truth, model_name, plot_dir)
+
+        key, subkey = random.split(key)
+        if config["plots"]["prior"]:
+            from tabascal.plot import plot_prior
+            plot_prior(tab_config, prob_model, truth, model_name, subkey, plot_dir, state=model.state, constants=model.constants)
+
+        key, *subkeys = random.split(key, 3)
+        if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
+            vi_pred, losses, vi_params, rchi2 = run_opt(
+                tab_config, prob_model, subkeys, model.init_params, ms_path, map_path, params_path,
+                state=model.state, constants=model.constants,
+            )
+
+            if config["plots"]["opt"]:
+                from tabascal.plot import plot_opt
+                plot_opt(tab_config, vi_pred, truth, model_name, plot_dir)
+
+            if config["plots"]["losses"]:
+                from tabascal.plot import plot_losses
+                plot_losses(losses, model_name, plot_dir)
+
+            opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
+
+            nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+            nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
 
             print(f"log_l : {nlog_l:.3e}")
             print(f"log_p : {nlog_p:.3e}")
+        else:
+            from tabascal.write import write_results_ms
+            print(f"Copying tabascal initial values to MS file from {init_pred_path}")
+            write_results_ms(ms_path, init_pred_path, tab_config.args["data"]["data_col"])
 
-            truth = {
-                "vis_rfi": jnp.nan * jnp.zeros((tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex),
-                "vis_ast": jnp.nan * jnp.zeros((tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex),
-                "gains": jnp.nan * jnp.ones((tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex),
-            }
-
-            if config["plots"]["init"]:
-                from tabascal.plot import plot_init
-                plot_init(tab_config, init_pred, truth, model_name, plot_dir)
-
-            key, subkey = random.split(key)
-            if config["plots"]["prior"]:
-                from tabascal.plot import plot_prior
-                plot_prior(tab_config, prob_model, truth, model_name, subkey, plot_dir, state=model.state, constants=model.constants)
-
-            key, *subkeys = random.split(key, 3)
-            if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
-                vi_pred, losses, vi_params, rchi2 = run_opt(
-                    tab_config, prob_model, subkeys, model.init_params, ms_path, map_path, params_path,
-                    state=model.state, constants=model.constants,
-                )
-
-                if config["plots"]["opt"]:
-                    from tabascal.plot import plot_opt
-                    plot_opt(tab_config, vi_pred, truth, model_name, plot_dir)
-
-                if config["plots"]["losses"]:
-                    from tabascal.plot import plot_losses
-                    plot_losses(losses, model_name, plot_dir)
-
-                opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
-
-                nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-                nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-
-                print(f"log_l : {nlog_l:.3e}")
-                print(f"log_p : {nlog_p:.3e}")
-            else:
-                from tabascal.write import write_results_ms
-                print(f"Copying tabascal initial values to MS file from {init_pred_path}")
-                write_results_ms(ms_path, init_pred_path, tab_config.args["data"]["data_col"])
-
-    shutil.copy(log_path, plot_dir)
-    os.remove(log_path)
+    if log:
+        shutil.copy(log_path, plot_dir)
+        os.remove(log_path)
 
     with open(os.path.join(plot_dir, f"tab_config_{run_id}.yaml"), "w") as fp:
         yaml.dump(config, fp)
@@ -208,6 +217,7 @@ def run(args):
             norad_ids,
             args.suffix,
             extra_tle_dir=args.extra_tle_dir,
+            log=getattr(args, "log", True),
         )
     except TLEError as e:
         print(f"\nError: {e}", file=sys.stderr)

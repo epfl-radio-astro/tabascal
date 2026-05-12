@@ -42,6 +42,13 @@ def main():
     run_parser.add_argument("-sx", "--suffix", default="", help="Image name suffix.")
     run_parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
     run_parser.add_argument(
+        "-nl", "--no-log",
+        dest="log",
+        action="store_false",
+        default=True,
+        help="Do not write the stdout output to a log file (enabled by default).",
+    )
+    run_parser.add_argument(
         "--extra-tle-dir",
         dest="extra_tle_dir",
         default=None,
