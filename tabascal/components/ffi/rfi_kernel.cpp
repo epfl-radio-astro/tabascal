@@ -5,8 +5,6 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
-#include <chrono>
-#include <iostream>
 #include <latch>
 #include <unistd.h>
 
@@ -143,81 +141,6 @@ rfi_kernel_opt(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
 
 #if HWY_ONCE
 
-void rfi_kernel(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
-                Tensor4D<const std::complex<double> *> rfi_amp_fine,
-                Tensor4D<const double *> rfi_phase,
-                Tensor3D<std::complex<double> *> rfi_vis) {
-
-  const auto n_rfi = rfi_amp_fine.shape[0];
-  const auto n_ant = rfi_amp_fine.shape[1];
-  const auto n_freq_fine = rfi_amp_fine.shape[2];
-  const auto n_time_fine = rfi_amp_fine.shape[3];
-  const auto n_bl = a1.shape[0];
-  const auto n_time = rfi_vis.shape[2];
-  const auto n_freq = rfi_vis.shape[1];
-
-  assert(a1.shape[0] == a2.shape[0]);
-  assert(a1.shape[0] == rfi_vis.shape[0]);
-  assert(rfi_phase.shape[0] == rfi_amp_fine.shape[0]);
-  assert(rfi_phase.shape[1] == rfi_amp_fine.shape[1]);
-  assert(rfi_phase.shape[2] == rfi_amp_fine.shape[2]);
-  assert(rfi_phase.shape[3] == rfi_amp_fine.shape[3]);
-
-  const auto n_int_t = n_time_fine / n_time;
-  const auto n_int_f = n_freq_fine / n_freq;
-  const double n_int_inv = 1.f / double(n_int_t * n_int_f);
-
-  for (std::int64_t i_bl = 0; i_bl < n_bl; ++i_bl) {
-    std::int64_t i_a1 = a1(i_bl);
-    std::int64_t i_a2 = a2(i_bl);
-
-    for (std::int64_t i_f = 0; i_f < n_freq; ++i_f) {
-      const auto i_f_fine_begin = i_f * n_int_f;
-      for (std::int64_t i_t = 0; i_t < n_time; ++i_t) {
-        std::complex<double> sum{0, 0};
-
-        const auto i_t_fine_begin = i_t * n_int_t;
-
-        for (std::int64_t i_rfi = 0; i_rfi < n_rfi; ++i_rfi) {
-
-          for (std::int64_t i_f_fine = i_f_fine_begin;
-               i_f_fine < i_f_fine_begin + n_int_f; ++i_f_fine) {
-
-            for (std::int64_t i_t_fine = i_t_fine_begin;
-                 i_t_fine < i_t_fine_begin + n_int_t; ++i_t_fine) {
-
-              const auto val_rfi_amp_1 =
-                  rfi_amp_fine(i_rfi, i_a1, i_f_fine, i_t_fine);
-              const auto val_rfi_amp_2 =
-                  rfi_amp_fine(i_rfi, i_a2, i_f_fine, i_t_fine);
-
-              const auto val_rfi_phase_1 =
-                  rfi_phase(i_rfi, i_a1, i_f_fine, i_t_fine);
-              const auto val_rfi_phase_2 =
-                  rfi_phase(i_rfi, i_a2, i_f_fine, i_t_fine);
-
-              // ideal shape for memory access: (n_ant, n_f, n_t, n_f_int,
-              // n_t_int, n_rfi) currently: (n_rfi, n_ant, n_f * n_f_int, n_t *
-              // n_t_int)
-              std::complex<double> e(
-                  std::cos(val_rfi_phase_1 - val_rfi_phase_2),
-                  std::sin(val_rfi_phase_1 - val_rfi_phase_2));
-
-              auto res = val_rfi_amp_1 * std::conj(val_rfi_amp_2) * e;
-
-              sum += res;
-            }
-          }
-        }
-
-        sum *= n_int_inv;
-
-        rfi_vis(i_bl, i_f, i_t) = sum;
-      }
-    }
-  }
-}
-
 using rfi_amp_fine_t = ffi::Buffer<ffi::C128, 6>;
 using rfi_phase_t = ffi::Buffer<ffi::F64, 6>;
 
@@ -273,72 +196,41 @@ ffi::Error calc_rfi_vis_cpu_impl(
       rfi_vis->typed_data(), rfi_vis->dimensions()[0], rfi_vis->dimensions()[1],
       rfi_vis->dimensions()[2]);
 
-  // ffi::Ffi::Bind().Ctx<ffi::ThreadPool>().To(
-  //     [](ffi::ThreadPool thread_pool) -> ffi::Error {
-  //       return ffi::Error::Success();
-  //     });
+  const int64_t n_threads = std::max<int64_t>(thread_pool.num_threads(), 1);
 
-  // {
-  //   auto start = std::chrono::high_resolution_clock::now();
-    TABASCAL_EXPORT_AND_DISPATCH_T(rfi_kernel_opt)
-    (a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
-     rfi_vis_tensor);
-  //   auto end = std::chrono::high_resolution_clock::now();
-  //   auto duration =
-  //       std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-  //   std::cerr << "opt time: " << duration.count() << " ms" << std::endl;
-  // }
+  const int64_t n_bl = a1.dimensions()[0];
+  const int64_t n_bl_per_thread = (n_bl + n_threads -1) / n_threads;
 
-  // {
-  //   auto start = std::chrono::high_resolution_clock::now();
-  //   rfi_kernel(a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
-  //              rfi_vis_tensor);
-  //   auto end = std::chrono::high_resolution_clock::now();
-  //   auto duration =
-  //       std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-  //   std::cerr << "ref time: " << duration.count() << " ms" << std::endl;
-  // }
+  std::latch done(n_threads);
 
-  // int64_t n_threads = std::max<int64_t>(thread_pool.num_threads(), 1);
+  for (int64_t thread_id = 0; thread_id < n_threads; ++thread_id) {
+    const int64_t i_bl_start = thread_id * n_bl_per_thread;
+    if (i_bl_start >= n_bl) {
+      done.count_down();
+      continue;
+    }
+    thread_pool.Schedule([&, thread_id, i_bl_start]() {
+      const int64_t n_bl_this_thread =
+          std::min(i_bl_start + n_bl_per_thread, n_bl) - i_bl_start;
 
-  // n_threads = std::min<int64_t>(n_threads, 6);
+      Tensor1D<const int *> a1_tensor_th(a1.typed_data() + i_bl_start,
+                                         n_bl_this_thread);
+      Tensor1D<const int *> a2_tensor_th(a2.typed_data() + i_bl_start,
+                                         n_bl_this_thread);
 
-  // const int64_t n_bl = a1.dimensions()[0];
-  // const int64_t n_bl_per_thread = (n_bl + n_threads -1) / n_threads;
+      Tensor3D<std::complex<double> *> rfi_vis_tensor_th(
+          &rfi_vis_tensor(i_bl_start, 0, 0), n_bl_this_thread,
+          rfi_vis->dimensions()[1], rfi_vis->dimensions()[2]);
 
-  // std::latch done(n_threads);
+      TABASCAL_EXPORT_AND_DISPATCH_T(rfi_kernel_opt)
+      (a1_tensor_th, a2_tensor_th, rfi_amp_fine_tensor, rfi_phase_tensor,
+       rfi_vis_tensor_th);
 
-  // auto start = std::chrono::high_resolution_clock::now();
-  // for (int64_t thread_id = 0; thread_id < n_threads; ++thread_id) {
-  //   thread_pool.Schedule([&, thread_id]() {
+      done.count_down();
+    });
+  }
 
-  //     const int64_t i_bl_start = thread_id * n_bl_per_thread;
-  //     const int64_t n_bl_this_thread =
-  //         std::max(i_bl_start + n_bl_per_thread, n_bl) - i_bl_start;
-
-  //     Tensor1D<const int *> a1_tensor_th(a1.typed_data() + i_bl_start,
-  //                                        n_bl_this_thread);
-  //     Tensor1D<const int *> a2_tensor_th(a2.typed_data() + i_bl_start,
-  //                                        n_bl_this_thread);
-
-  //     Tensor3D<std::complex<double> *> rfi_vis_tensor_th(
-  //         &rfi_vis_tensor(i_bl_start, 0, 0), n_bl_this_thread,
-  //         rfi_vis->dimensions()[1], rfi_vis->dimensions()[2]);
-
-  //     TABASCAL_EXPORT_AND_DISPATCH_T(rfi_kernel_opt)
-  //     (a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
-  //      rfi_vis_tensor);
-
-  //     done.count_down();
-  //   });
-  // }
-
-  // done.wait(); // blocks the caller thread via futex — no spin
-  // auto end = std::chrono::high_resolution_clock::now();
-  // auto duration =
-  //     std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-  // std::cerr << "opt threaded (" << n_threads << ") time: " << duration.count()
-  //           << " ms" << std::endl;
+  done.wait(); // blocks the caller thread via futex — no spin
 
   return ffi::Error::Success();
 }

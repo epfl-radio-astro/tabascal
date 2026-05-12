@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <cassert>
 #include <complex>
 #include <cstdint>
 #include <cstring>
+#include <latch>
 #include <unistd.h>
 
 #include "tensor.hpp"
@@ -193,6 +195,7 @@ using rfi_amp_fine_t = ffi::Buffer<ffi::C128, 6>;
 using rfi_phase_t = ffi::Buffer<ffi::F64, 6>;
 
 ffi::Error calc_rfi_jvp_cpu_impl(
+    ffi::ThreadPool thread_pool,
     ffi::BufferR1<ffi::S32> a1, ffi::BufferR1<ffi::S32> a1_sorter,
     ffi::BufferR1<ffi::S32> a1_start, ffi::BufferR1<ffi::S32> a2,
     ffi::BufferR1<ffi::S32> a2_sorter, ffi::BufferR1<ffi::S32> a2_start,
@@ -266,15 +269,49 @@ ffi::Error calc_rfi_jvp_cpu_impl(
       rfi_grad->typed_data(), rfi_grad->dimensions()[0],
       rfi_grad->dimensions()[1], rfi_grad->dimensions()[2]);
 
-  TABASCAL_EXPORT_AND_DISPATCH_T(rfi_jvp_kernel_opt)
-  (a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_amp_fine_grad_tensor,
-   rfi_phase_tensor, rfi_phase_grad_tensor, rfi_grad_tensor);
+  const int64_t n_threads = std::max<int64_t>(thread_pool.num_threads(), 1);
+
+  const int64_t n_bl = a1.dimensions()[0];
+  const int64_t n_bl_per_thread = (n_bl + n_threads - 1) / n_threads;
+
+  std::latch done(n_threads);
+
+  for (int64_t thread_id = 0; thread_id < n_threads; ++thread_id) {
+    const int64_t i_bl_start = thread_id * n_bl_per_thread;
+    if (i_bl_start >= n_bl) {
+      done.count_down();
+      continue;
+    }
+    thread_pool.Schedule([&, thread_id, i_bl_start]() {
+      const int64_t n_bl_this_thread =
+          std::min(i_bl_start + n_bl_per_thread, n_bl) - i_bl_start;
+
+      Tensor1D<const int *> a1_tensor_th(a1.typed_data() + i_bl_start,
+                                         n_bl_this_thread);
+      Tensor1D<const int *> a2_tensor_th(a2.typed_data() + i_bl_start,
+                                         n_bl_this_thread);
+
+      Tensor3D<std::complex<double> *> rfi_grad_tensor_th(
+          &rfi_grad_tensor(i_bl_start, 0, 0), n_bl_this_thread,
+          rfi_grad->dimensions()[1], rfi_grad->dimensions()[2]);
+
+      TABASCAL_EXPORT_AND_DISPATCH_T(rfi_jvp_kernel_opt)
+      (a1_tensor_th, a2_tensor_th, rfi_amp_fine_tensor,
+       rfi_amp_fine_grad_tensor, rfi_phase_tensor, rfi_phase_grad_tensor,
+       rfi_grad_tensor_th);
+
+      done.count_down();
+    });
+  }
+
+  done.wait();
 
   return ffi::Error::Success();
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_jvp_cpu, calc_rfi_jvp_cpu_impl,
                               ffi::Ffi::Bind()
+                                  .Ctx<ffi::ThreadPool>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
