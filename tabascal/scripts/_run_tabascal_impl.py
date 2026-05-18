@@ -64,7 +64,7 @@ def _stdout_logger(log_path, enabled):
 
 
 @measure_runtime
-def run_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="", extra_tle_dir=None, log=True):
+def tabascal_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="", extra_tle_dir=None, log=True):
     if suffix:
         suffix = "_" + suffix
 
@@ -210,7 +210,7 @@ def run(args):
     norad_ids = []
 
     try:
-        run_subtraction(
+        tabascal_substraction(
             config,
             args.sim_dir,
             args.ms_path,
