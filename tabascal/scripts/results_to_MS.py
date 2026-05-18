@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from tabascal.write import write_results
+from tabascal.write import write_results_ms
 
 import argparse
 
@@ -22,7 +22,7 @@ def main():
     )
 
     args = parser.parse_args()
-    write_results(
+    write_results_ms(
         ms_path=args.ms_path,
         results_zarr_path=args.results_zarr_path,
         data_col=args.data_col,

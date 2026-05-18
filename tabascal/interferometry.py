@@ -120,7 +120,7 @@ def calculate_rfi_vis_variable(
     return vis_rfi
 
 
-def apply_gains(gains, vis, a1, a2):
+def apply_gains(gains: Array, vis: Array, a1: Array, a2: Array) -> Array:
 
     vis_obs = gains[a1] * vis * jnp.conjugate(gains)[a2]
 

@@ -50,6 +50,8 @@ def main():
     tab_template = data_dir / "tab_target.yaml"
 
     # Step 0: Create spacetrack_login.yaml from environment variables
+    # TLE files are now bundled in tabascal with required code
+    # This step can be removed when tabsim also bundles these TLEs
     st_user = os.environ.get("SPACETRACK_LOGIN")
     st_pass = os.environ.get("SPACETRACK_PASSWORD")
     if not st_user or not st_pass:

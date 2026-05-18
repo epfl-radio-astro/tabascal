@@ -305,6 +305,7 @@ class RiemannVisTimeFreqVariable(Component):
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_rfi = self.n_rfi
+        n_ant = self.n_ant
         n_time = self.n_time
         n_bl = self.n_bl
         n_freq = self.n_freq
@@ -330,12 +331,12 @@ class RiemannVisTimeFreqVariable(Component):
             a2 = constants[f"{prefix}/a2"]
 
             new_shape = (
-                self.n_rfi,
-                self.n_ant,
-                self.n_freq,
-                self.n_int_freq,
-                self.n_time,
-                self.n_int_time,
+                n_rfi,
+                n_ant,
+                n_freq,
+                n_int_freq,
+                n_time,
+                n_int_time,
             )
 
             rfi_A = jnp.reshape(state["rfi_A"], new_shape)
