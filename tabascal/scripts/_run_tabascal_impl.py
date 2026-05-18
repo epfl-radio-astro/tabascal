@@ -210,7 +210,7 @@ def run(args):
     norad_ids = []
 
     try:
-        tabascal_substraction(
+        tabascal_subtraction(
             config,
             args.sim_dir,
             args.ms_path,
