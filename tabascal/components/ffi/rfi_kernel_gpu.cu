@@ -19,31 +19,23 @@ namespace ffi = xla::ffi;
 namespace tabascal {
 namespace gpu {
 
-template <int BLOCK_SIZE, int WARP_SIZE, typename INT_T>
+template <int BLOCK_SIZE, typename INT_T>
 __global__ void __launch_bounds__(BLOCK_SIZE)
-    rfi_kernel(INT_T n_int_f, INT_T n_int_t,
-               Tensor1D<const int *, INT_T> a1, Tensor1D<const int *, INT_T> a2,
-               Tensor5D<const cuDoubleComplex *, INT_T> rfi_amp_fine,
-               Tensor5D<const double *, INT_T> rfi_phase,
+    rfi_kernel(double scale, Tensor1D<const int *, INT_T> a1,
+               Tensor1D<const int *, INT_T> a2,
+               Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine,
+               Tensor4D<const double *, INT_T> rfi_phase,
                Tensor3D<cuDoubleComplex *, INT_T> rfi_vis) {
 
-  static_assert(BLOCK_SIZE % WARP_SIZE == 0);
-  constexpr int WARPS_PER_BLOCK = BLOCK_SIZE / WARP_SIZE;
+  using BlockReduce_t = cub::BlockReduce<double, BLOCK_SIZE>;
 
-  using WarpReduce_t = cub::WarpReduce<double>;
+  __shared__ typename BlockReduce_t::TempStorage temp_storage_1;
+  __shared__ typename BlockReduce_t::TempStorage temp_storage_2;
 
-  __shared__ typename WarpReduce_t::TempStorage temp_storage_1[WARPS_PER_BLOCK];
-  __shared__ typename WarpReduce_t::TempStorage temp_storage_2[WARPS_PER_BLOCK];
-
-  const int warp_id = threadIdx.x / WARP_SIZE;
-  const int lane_id = threadIdx.x % WARP_SIZE;
-
-  const int n_warps_global = gridDim.x * WARPS_PER_BLOCK;
-
-  // rfi_amp_fine layout: (n_ant, n_freq, n_time, n_rfi, n_int_f * n_int_t)
+  // rfi_amp_fine layout: (n_ant, n_freq, n_time, n_rfi * n_int_f * n_int_t)
   const auto n_freq = rfi_amp_fine.shape[1];
   const auto n_time = rfi_amp_fine.shape[2];
-  const auto n_rfi = rfi_amp_fine.shape[3];
+  const auto n_reduce = rfi_amp_fine.shape[3];
   const auto n_bl = a1.shape[0];
 
   assert(a1.shape[0] == a2.shape[0]);
@@ -52,11 +44,9 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
   assert(rfi_phase.shape[1] == rfi_amp_fine.shape[1]);
   assert(rfi_phase.shape[2] == rfi_amp_fine.shape[2]);
   assert(rfi_phase.shape[3] == rfi_amp_fine.shape[3]);
-  assert(rfi_phase.shape[4] == rfi_amp_fine.shape[4]);
   assert(rfi_vis.shape[1] == n_freq);
   assert(rfi_vis.shape[2] == n_time);
 
-  const double n_int_inv = 1.f / double(n_int_t * n_int_f);
 
   for (INT_T i_bl = blockIdx.y; i_bl < n_bl; i_bl += gridDim.y) {
     INT_T i_a1 = a1(i_bl);
@@ -64,48 +54,39 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
     for (INT_T i_f = blockIdx.z; i_f < n_freq; i_f += gridDim.z) {
 
-      // warp reduction
-      for (INT_T i_t = blockIdx.x * WARPS_PER_BLOCK + warp_id; i_t < n_time;
-           i_t += n_warps_global) {
+      for (INT_T i_t = blockIdx.x; i_t < n_time; i_t += gridDim.x) {
         cuDoubleComplex sum{0, 0};
 
-        for (INT_T i_rfi = 0; i_rfi < n_rfi; ++i_rfi) {
+        const auto ptr_rfi_amp_1 = &rfi_amp_fine(i_a1, i_f, i_t, 0);
+        const auto ptr_rfi_amp_2 = &rfi_amp_fine(i_a2, i_f, i_t, 0);
 
-          for (INT_T i_int_f = 0; i_int_f < n_int_f; ++i_int_f) {
+        const auto ptr_rfi_phase_1 = &rfi_phase(i_a1, i_f, i_t, 0);
+        const auto ptr_rfi_phase_2 = &rfi_phase(i_a2, i_f, i_t, 0);
 
-            for (INT_T i_int_t = lane_id; i_int_t < n_int_t;
-                 i_int_t += WARP_SIZE) {
+        // block reduction
+        for (INT_T i_red = threadIdx.x; i_red < n_reduce; i_red += BLOCK_SIZE) {
 
-              const INT_T i_int_ft = i_int_f * n_int_t + i_int_t;
+          const auto val_rfi_amp_1 = ptr_rfi_amp_1[i_red];
+          const auto val_rfi_amp_2 = ptr_rfi_amp_2[i_red];
 
-              const auto val_rfi_amp_1 =
-                  rfi_amp_fine(i_a1, i_f, i_t, i_rfi, i_int_ft);
-              const auto val_rfi_amp_2 =
-                  rfi_amp_fine(i_a2, i_f, i_t, i_rfi, i_int_ft);
+          const auto val_rfi_phase_1 = ptr_rfi_phase_1[i_red];
+          const auto val_rfi_phase_2 = ptr_rfi_phase_2[i_red];
 
-              const auto val_rfi_phase_1 =
-                  rfi_phase(i_a1, i_f, i_t, i_rfi, i_int_ft);
-              const auto val_rfi_phase_2 =
-                  rfi_phase(i_a2, i_f, i_t, i_rfi, i_int_ft);
+          cuDoubleComplex e;
+          sincos(val_rfi_phase_1 - val_rfi_phase_2, &e.y, &e.x);
 
-              cuDoubleComplex e;
-              sincos(val_rfi_phase_1 - val_rfi_phase_2, &e.y, &e.x);
+          auto res = cuCmul(cuCmul(val_rfi_amp_1, cuConj(val_rfi_amp_2)), e);
 
-              auto res =
-                  cuCmul(cuCmul(val_rfi_amp_1, cuConj(val_rfi_amp_2)), e);
-
-              sum = cuCadd(res, sum);
-            }
-          }
+          sum = cuCadd(res, sum);
         }
 
-        sum.x = WarpReduce_t(temp_storage_1[warp_id]).Sum(sum.x);
-        sum.y = WarpReduce_t(temp_storage_2[warp_id]).Sum(sum.y);
-        __syncwarp();
+        sum.x = BlockReduce_t(temp_storage_1).Sum(sum.x);
+        sum.y = BlockReduce_t(temp_storage_2).Sum(sum.y);
+        __syncthreads(); // required for reuse of temp_storage
 
-        if (lane_id == 0) {
-          sum.x *= n_int_inv;
-          sum.y *= n_int_inv;
+        if (threadIdx.x == 0) {
+          sum.x *= scale;
+          sum.y *= scale;
 
           rfi_vis(i_bl, i_f, i_t) = sum;
         }
@@ -160,16 +141,17 @@ calc_rfi_vis_gpu_dispatch(cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
   // one for kernel indexing.
   Tensor1D<const int *, INT_T> a1_tensor(a1.typed_data(), a1.dimensions()[0]);
   Tensor1D<const int *, INT_T> a2_tensor(a2.typed_data(), a2.dimensions()[0]);
-  Tensor5D<const cuDoubleComplex *, INT_T> rfi_amp_fine_tensor(
+  Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine_tensor(
       (const cuDoubleComplex *)rfi_amp_fine.typed_data(),
       rfi_amp_fine.dimensions()[0], rfi_amp_fine.dimensions()[1],
-      rfi_amp_fine.dimensions()[2], rfi_amp_fine.dimensions()[3],
-      rfi_amp_fine.dimensions()[4] * rfi_amp_fine.dimensions()[5]);
-  Tensor5D<const double *, INT_T> rfi_phase_tensor(
+      rfi_amp_fine.dimensions()[2],
+      rfi_amp_fine.dimensions()[3] * rfi_amp_fine.dimensions()[4] *
+          rfi_amp_fine.dimensions()[5]);
+  Tensor4D<const double *, INT_T> rfi_phase_tensor(
       rfi_phase.typed_data(), rfi_phase.dimensions()[0],
       rfi_phase.dimensions()[1], rfi_phase.dimensions()[2],
-      rfi_phase.dimensions()[3],
-      rfi_phase.dimensions()[4] * rfi_phase.dimensions()[5]);
+      rfi_phase.dimensions()[3] * rfi_phase.dimensions()[4] *
+          rfi_phase.dimensions()[5]);
 
   Tensor3D<cuDoubleComplex *, INT_T> rfi_vis_tensor(
       (cuDoubleComplex *)rfi_vis->typed_data(), rfi_vis->dimensions()[0],
@@ -178,34 +160,38 @@ calc_rfi_vis_gpu_dispatch(cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
   const INT_T n_int_f = (INT_T)rfi_amp_fine.dimensions()[4];
   const INT_T n_int_t = (INT_T)rfi_amp_fine.dimensions()[5];
 
-  // Cooperative group size. Must be power of 2. Used to iterate over n_int and
-  // reduce result. If 32, equal to warp size on Nvidia for fast reduce
-  // operation.
+  const double scale = 1 / double(n_int_t * n_int_f);
 
-
-  constexpr int block_size = 256;
   const auto n_time = rfi_vis_tensor.shape[2];
   const auto n_bl = a1.dimensions()[0];
   const auto n_freq = rfi_vis_tensor.shape[1];
 
+  auto grid = create_clamped_grid(n_time, n_bl, n_freq);
 
-  const int warp_size = get_device_prop().warpSize;
-
-  dim3 block(block_size);
-  auto n_warps = block.x / warp_size;
-  auto grid =
-      create_clamped_grid((n_time + n_warps - 1) / n_warps, n_bl, n_freq);
-
-  if (warp_size == 32) {
-    rfi_kernel<block_size, 32, INT_T><<<grid, block, 0, stream>>>(
-        n_int_f, n_int_t, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
-        rfi_phase_tensor, rfi_vis_tensor);
-  } else if(warp_size == 64) {
-    rfi_kernel<block_size, 64, INT_T><<<grid, block, 0, stream>>>(
-        n_int_f, n_int_t, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
-        rfi_phase_tensor, rfi_vis_tensor);
+  if (rfi_phase_tensor.shape[3] / 2 < 32) {
+    constexpr int block_size = 32;
+    dim3 block(block_size);
+    rfi_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
+        scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+        rfi_vis_tensor);
+  } else if (rfi_phase_tensor.shape[3] / 2 < 64) {
+    constexpr int block_size = 64;
+    dim3 block(block_size);
+    rfi_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
+        scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+        rfi_vis_tensor);
+  } else if (rfi_phase_tensor.shape[3] / 2 < 128) {
+    constexpr int block_size = 128;
+    dim3 block(block_size);
+    rfi_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
+        scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+        rfi_vis_tensor);
   } else {
-    return ffi::Error::Internal("Unsupported GPU warp size.");
+    constexpr int block_size = 256;
+    dim3 block(block_size);
+    rfi_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
+        scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+        rfi_vis_tensor);
   }
 
   const auto status = cudaGetLastError();
