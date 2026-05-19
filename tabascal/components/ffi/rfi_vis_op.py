@@ -52,7 +52,7 @@ class RFIVisOp:
         
         Args:
             rfi_amp_fine: Fine-grained RFI amplitude array with shape
-                         (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time).
+                         (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time).
             rfi_phase: RFI phase array with shape matching rfi_amp_fine.
         
         Returns:
@@ -269,9 +269,9 @@ def rfi_jvp_abstract(
     Abstract evaluation for the RFI JVP operation.
     """
     # rfi_amp_fine and rfi_phase shape is
-    # (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
-    n_time = rfi_amp_fine.shape[4]
-    n_freq = rfi_amp_fine.shape[2]
+    # (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+    n_freq = rfi_amp_fine.shape[1]
+    n_time = rfi_amp_fine.shape[2]
     return ShapedArray([a1.shape[0], n_freq, n_time], rfi_amp_fine.dtype)
 
 
@@ -382,8 +382,10 @@ def rfi_vis_abstract(
     """
     Abstract evaluation for the RFI visibility operation.
     """
-    n_time = rfi_amp_fine.shape[4]
-    n_freq = rfi_amp_fine.shape[2]
+    # rfi_amp_fine and rfi_phase shape is
+    # (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+    n_freq = rfi_amp_fine.shape[1]
+    n_time = rfi_amp_fine.shape[2]
     return ShapedArray([a1.shape[0], n_freq, n_time], rfi_amp_fine.dtype)
 
 
