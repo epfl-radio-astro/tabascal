@@ -1,9 +1,10 @@
 // no include guard for hwy/foreach_target.h to work
 
 // Disable scalable vector architetures, because we rely on vector lengths at compile time for
-// optizations
-#ifndef HWY_DISABLED_TARGETS 
-#define HWY_DISABLED_TARGETS (HWY_SVE|HWY_SVE2)
+// optizations. Fixed-length SVE targets (SVE_256, SVE2_128) are also disabled because SVE
+// vector types are sizeless per ACLE and cannot be used as struct members (e.g. ComplexV).
+#ifndef HWY_DISABLED_TARGETS
+#define HWY_DISABLED_TARGETS HWY_ALL_SVE
 #endif
 
 #ifndef HWY_TARGET_INCLUDE
