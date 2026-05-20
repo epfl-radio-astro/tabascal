@@ -1,3 +1,6 @@
+import math
+import warnings
+
 from jax import vmap, random, jit
 import jax.numpy as jnp
 from jax_nufft import make_plan, dirty2vis
@@ -1089,6 +1092,9 @@ class ImageVisCalculation(Component):
             # uvw treated as (n_bl, n_time, 3), flattened to rows r = b*n_time + t
             # to match PointSourceVisCalculation's output ordering.
             uvw = jnp.asarray(config.uvw).reshape(-1, 3)         # (n_rows, 3)
+
+            self._check_grid_sampling(uvw)
+
             # CASA mapping: flip w (ducc +w -> CASA -w), apply hidden toggles.
             plan_sign = self.uvw_sign * jnp.asarray((1.0, 1.0, -1.0))
             uvw_plan = uvw * plan_sign
@@ -1109,6 +1115,67 @@ class ImageVisCalculation(Component):
         def set_params(params):
             return params
         return set_params
+
+    # Pixels-per-synthesised-beam thresholds for the setup-time sampling guard.
+    # 2 px/beam is bare Nyquist; ~3 is the recommended minimum; above ~10 the
+    # grid is wastefully fine for the array.
+    _MIN_PX_PER_BEAM = 2.0
+    _REC_PX_PER_BEAM = 3.0
+    _MAX_PX_PER_BEAM = 10.0
+
+    def _check_grid_sampling(self, uvw):
+        """Warn (never raise) if the image grid is poorly matched to the array:
+        under-sampled (long baselines alias), over-sampled (wasteful grid), or
+        wide enough that grid corners fall beyond the horizon (zeroed pixels)."""
+        c = 299792458.0
+        cls = self.__class__.__name__
+        pixsize = float(self.pixsize)
+        fov_rad = float(jnp.deg2rad(self.fov_deg))
+        freq_max = float(jnp.max(self.freqs))
+
+        # Per-axis worst-case baseline in wavelengths (square grid -> Nyquist is
+        # per-axis). The w-term is handled by w-planes, not the lm-grid.
+        u = jnp.abs(uvw[:, 0])
+        v = jnp.abs(uvw[:, 1])
+        uv_max = float(jnp.maximum(jnp.max(u), jnp.max(v))) * freq_max / c
+
+        if uv_max > 0.0:
+            grid_extent = 1.0 / (2.0 * pixsize)          # max representable |uv|, lambda
+            px_per_beam = 1.0 / (uv_max * pixsize)
+            n_pix_nyq = math.ceil(fov_rad * self._MIN_PX_PER_BEAM * uv_max)
+            n_pix_rec = math.ceil(fov_rad * self._REC_PX_PER_BEAM * uv_max)
+
+            if px_per_beam < self._MIN_PX_PER_BEAM:
+                uv_rows = jnp.maximum(u, v) * freq_max / c
+                frac = float(jnp.mean(uv_rows > grid_extent))
+                warnings.warn(
+                    f"{cls}: image grid under-samples the array. Longest baseline "
+                    f"{uv_max:.0f} lambda exceeds the grid's max spatial frequency "
+                    f"1/(2*pixsize) = {grid_extent:.0f} lambda ({px_per_beam:.2f} "
+                    f"pixels/beam < {self._MIN_PX_PER_BEAM:g}); {frac:.0%} of baselines "
+                    f"alias. For fov_deg={self.fov_deg:g} use n_pix >= {n_pix_nyq} "
+                    f"(>= {n_pix_rec} for ~{self._REC_PX_PER_BEAM:g} px/beam), or reduce "
+                    f"fov_deg.",
+                    stacklevel=2,
+                )
+            elif px_per_beam > self._MAX_PX_PER_BEAM:
+                warnings.warn(
+                    f"{cls}: image grid over-samples the array ({px_per_beam:.0f} "
+                    f"pixels/beam). n_pix could drop to ~{n_pix_rec} "
+                    f"(~{self._REC_PX_PER_BEAM:g} px/beam) for fov_deg={self.fov_deg:g} "
+                    f"to save memory and compute.",
+                    stacklevel=2,
+                )
+
+        # Horizon clip: grid corners at radius sqrt(2)*(fov/2). Beyond 1 rad,
+        # l^2+m^2 >= 1 and the wgridder zeros those pixels.
+        corner_radius = fov_rad * (2.0 ** 0.5) / 2.0
+        if corner_radius >= 1.0:
+            warnings.warn(
+                f"{cls}: fov_deg={self.fov_deg:g} places image-grid corners beyond "
+                f"the horizon (l^2 + m^2 >= 1); the wgridder zeros those pixels.",
+                stacklevel=2,
+            )
 
     def build_constants(self):
         # WGridderPlan is a registered JAX pytree, so storing it whole keeps its

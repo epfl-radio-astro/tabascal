@@ -1,6 +1,8 @@
 """Tests for tabascal.components.ast_vis.ImageVisCalculation (dense-sky wgridder)
 and its parity with PointSourceVisCalculation."""
 
+import warnings
+
 import pytest
 from types import SimpleNamespace
 
@@ -16,8 +18,10 @@ from .conftest import make_constants
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def make_config(n_ant=4, n_time=3, n_freq=2, fov_deg=8.0, n_pix=256,
-                epsilon=1e-9, uvw_scale=150.0, ra0=0.0, dec0=0.0, seed=0):
+def make_config(n_ant=4, n_time=3, n_freq=2, fov_deg=8.0, n_pix=128,
+                epsilon=1e-9, uvw_scale=20.0, ra0=0.0, dec0=0.0, seed=0):
+    # Defaults are well-sampled (~3.6 pixels/beam) so functional tests do not
+    # trip the grid-sampling guard; the guard tests below set their own configs.
     a1, a2 = jnp.triu_indices(n_ant, 1)
     n_bl = a1.shape[0]
     uvw = jax.random.normal(jax.random.PRNGKey(seed), (n_bl, n_time, 3)) * uvw_scale
@@ -59,20 +63,22 @@ def run_image(config, image):
     return comp.build_forward()({}, state, make_constants(comp))
 
 
-# ── tests ─────────────────────────────────────────────────────────────────────
+# ── functional tests (well-sampled configs, no sampling warnings) ─────────────
 
 @pytest.mark.parametrize("n_ant, n_time, n_freq", [(3, 1, 1), (4, 3, 2)])
 def test_output_shape(n_ant, n_time, n_freq):
-    config = make_config(n_ant=n_ant, n_time=n_time, n_freq=n_freq, n_pix=64)
-    image = jnp.zeros((n_freq, 64, 64))
+    config = make_config(n_ant=n_ant, n_time=n_time, n_freq=n_freq)
+    n_pix = config.args["ast"]["image"]["n_pix"]
+    image = jnp.zeros((n_freq, n_pix, n_pix))
     out = run_image(config, image)
     assert out["vis_ast"].shape == (config.n_bl, n_freq, n_time)
 
 
 def test_central_pixel_gives_flux():
     """A single pixel at the phase centre (l=m=0, n=1) gives V = I everywhere."""
-    n_freq, n_pix = 2, 64
-    config = make_config(n_freq=n_freq, n_pix=n_pix)
+    n_freq = 2
+    config = make_config(n_freq=n_freq)
+    n_pix = config.args["ast"]["image"]["n_pix"]
     image = np.zeros((n_freq, n_pix, n_pix))
     flux = np.array([2.5, 1.7])
     image[:, n_pix // 2, n_pix // 2] = flux
@@ -85,7 +91,7 @@ def test_matches_point_source():
     """Dense wgridder visibilities match the point-source DFT for on-grid sources,
     to within the requested wgridder accuracy (~10·epsilon)."""
     config = make_config()
-    pixels = [(158, 108), (78, 143), (138, 168)]   # off-centre, on-grid
+    pixels = [(94, 44), (34, 79), (104, 84)]      # off-centre, on-grid (n_pix=128)
     fluxes = np.array([[1.0, 0.8], [0.5, 1.2], [1.3, 0.4]])
     image, radec, I = on_grid_sources(config, pixels, fluxes)
 
@@ -103,8 +109,8 @@ def test_matches_point_source():
 
 def test_accumulates_into_vis_ast():
     """The component adds to an existing vis_ast rather than overwriting it."""
-    config = make_config(n_pix=64)
-    image, _, _ = on_grid_sources(config, [(40, 28), (20, 44)],
+    config = make_config()
+    image, _, _ = on_grid_sources(config, [(94, 44), (34, 79)],
                                   np.array([[1.0, 0.8], [0.6, 1.1]]))
     increment = run_image(config, image)["vis_ast"]
 
@@ -117,8 +123,8 @@ def test_accumulates_into_vis_ast():
 
 def test_jvp_ast_image():
     """Forward-mode JVP through ast_image is finite and non-trivially non-zero."""
-    config = make_config(n_pix=64)
-    image, _, _ = on_grid_sources(config, [(40, 28)], np.array([[1.0, 0.8]]))
+    config = make_config()
+    image, _, _ = on_grid_sources(config, [(94, 44)], np.array([[1.0, 0.8]]))
     comp = ImageVisCalculation()
     comp.setup(config)
     constants = make_constants(comp)
@@ -136,8 +142,8 @@ def test_jvp_ast_image():
 
 def test_vjp_ast_image():
     """Reverse-mode VJP propagates finite, non-zero gradients back to ast_image."""
-    config = make_config(n_pix=64)
-    image, _, _ = on_grid_sources(config, [(40, 28)], np.array([[1.0, 0.8]]))
+    config = make_config()
+    image, _, _ = on_grid_sources(config, [(94, 44)], np.array([[1.0, 0.8]]))
     comp = ImageVisCalculation()
     comp.setup(config)
     constants = make_constants(comp)
@@ -154,3 +160,34 @@ def test_vjp_ast_image():
     assert grad_state["ast_image"].shape == image.shape
     assert jnp.all(jnp.isfinite(grad_state["ast_image"]))
     assert jnp.any(jnp.abs(grad_state["ast_image"]) > 0)
+
+
+# ── grid-sampling guard tests (warn, never raise) ─────────────────────────────
+
+def test_no_warning_when_well_sampled():
+    """The default config is well-sampled; setup emits no sampling warnings."""
+    config = make_config()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")        # any warning would raise here
+        ImageVisCalculation().setup(config)
+
+
+def test_warns_under_resolution():
+    """A coarse grid against long baselines warns about aliasing (but does not raise)."""
+    config = make_config(n_pix=64, uvw_scale=200.0)
+    with pytest.warns(UserWarning, match="under-samples"):
+        ImageVisCalculation().setup(config)
+
+
+def test_warns_over_resolution():
+    """A very fine grid against short baselines warns about a wasteful grid."""
+    config = make_config(n_pix=1024, uvw_scale=2.0)
+    with pytest.warns(UserWarning, match="over-samples"):
+        ImageVisCalculation().setup(config)
+
+
+def test_warns_horizon_clip():
+    """A field wide enough that grid corners pass the horizon warns about zeroed pixels."""
+    config = make_config(fov_deg=120.0)
+    with pytest.warns(UserWarning, match="horizon"):
+        ImageVisCalculation().setup(config)
