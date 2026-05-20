@@ -23,6 +23,7 @@ dependencies = [
     "dask",
     "dask-ms",
     "jax>=0.6.0,<0.10",
+    "jax-nufft @ git+https://github.com/chrisfinlay/jax-nufft.git@dev",
     "matplotlib",
     "numpy",
     "numpyro",

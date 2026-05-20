@@ -12,3 +12,6 @@ examples/test
 **/*.pyc
 *.o
 *.so
+
+# Scratch / planning (not tracked)
+tmp/
