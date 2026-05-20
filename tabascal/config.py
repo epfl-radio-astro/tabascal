@@ -182,7 +182,11 @@ class TabConfig:
         self.dish_d = ms_params["dish_d"]
         self.ants_itrf = ms_params["ants_itrf"]
         self.vis_obs = ms_params["vis_obs"]
-        self.uvw = ms_params["uvw"]
+        # read_ms returns uvw time-first (n_time, n_bl, 3), but vis_obs and the
+        # visibility components use baseline-first (n_bl, n_freq/.., n_time). Make
+        # uvw consistent here. This boundary transpose is a stopgap until n_bl
+        # becomes the standard leading axis throughout.
+        self.uvw = jnp.swapaxes(ms_params["uvw"], 0, 1)   # -> (n_bl, n_time, 3)
         self.flags = ms_params["flags"]
 
         self.n_ant = ms_params["n_ant"]

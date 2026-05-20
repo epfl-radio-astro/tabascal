@@ -126,7 +126,7 @@ class FourierTimeAst(Component):
             eff_dish_d = self.dish_d
 
         self.ast_fr = vmap(get_ast_fringe_rate, (None, 0, None), (1))(
-            self.uvw[:, :, :2], self.freqs, eff_dish_d
+            jnp.swapaxes(self.uvw, 0, 1)[:, :, :2], self.freqs, eff_dish_d
         )
 
     def _compute_true_params(self, zarr_path, data_col):
@@ -326,7 +326,7 @@ class FourierTimeConstFreqAst(Component):
             eff_dish_d = self.dish_d
 
         self.ast_fr = vmap(get_ast_fringe_rate, (None, 0, None), (1))(
-            self.uvw[:, :, :2], self.freqs, eff_dish_d
+            jnp.swapaxes(self.uvw, 0, 1)[:, :, :2], self.freqs, eff_dish_d
         )
 
     def _compute_true_params(self, zarr_path, data_col):
@@ -531,7 +531,7 @@ class FourierTimeFreqAst(Component):
             eff_dish_d = self.dish_d
 
         self.ast_fr = vmap(get_ast_fringe_rate, (None, 0, None), (1))(
-            self.uvw[:, :, :2], self.freqs, eff_dish_d
+            jnp.swapaxes(self.uvw, 0, 1)[:, :, :2], self.freqs, eff_dish_d
         )
 
     # def _compute_true_params(self, zarr_path, data_col):
@@ -782,7 +782,7 @@ class FourierTimeFreqGPAst(Component):
         #     self.uvw[:, :, :2], self.freqs, eff_dish_d
         # ) # Separate Fringe Rate for each baseline and frequency
         self.ast_fr = get_ast_fringe_rate(
-            self.uvw[:, :, :2], self.freqs.max(), eff_dish_d
+            jnp.swapaxes(self.uvw, 0, 1)[:, :, :2], self.freqs.max(), eff_dish_d
         )
 
         self.k0_time = self.ast_fr
