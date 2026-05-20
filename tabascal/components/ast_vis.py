@@ -1,5 +1,6 @@
 from jax import vmap, random, jit
 import jax.numpy as jnp
+from jax_nufft import make_plan, dirty2vis
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
@@ -969,6 +970,10 @@ class PointSourceVisCalculation(Component):
             self.freqs = config.freqs
             self.phase_centre_ra = jnp.deg2rad(config.phase_centre["ra"])
             self.phase_centre_dec = jnp.deg2rad(config.phase_centre["dec"])
+            # Per-term uvw sign toggles (u, v, w). Default (1, 1, 1) is the CASA
+            # measurement-equation convention. Hidden for now; later wired to the
+            # config or inferred from the input data format (only MS today).
+            self.uvw_sign = jnp.asarray((1.0, 1.0, 1.0))
             self._set_outputs()
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
@@ -984,6 +989,7 @@ class PointSourceVisCalculation(Component):
             "freqs": self.freqs,
             "ra0": self.phase_centre_ra,
             "dec0": self.phase_centre_dec,
+            "uvw_sign": self.uvw_sign,
         }
 
     def build_forward(self):
@@ -998,6 +1004,7 @@ class PointSourceVisCalculation(Component):
             freqs = constants[f"{prefix}/freqs"]  # (n_freq,)
             ra0 = constants[f"{prefix}/ra0"]
             dec0 = constants[f"{prefix}/dec0"]
+            uvw_sign = constants[f"{prefix}/uvw_sign"]   # (3,) CASA default (1,1,1)
 
             ra = state["ast_radec"][:, 0]   # (n_src,)
             dec = state["ast_radec"][:, 1]
@@ -1010,7 +1017,7 @@ class PointSourceVisCalculation(Component):
 
             # Geometric path-length delay per (baseline, time, source), in metres
             lmn = jnp.stack([l, m, n - 1.0], axis=-1)         # (n_src, 3)
-            tau = jnp.einsum("btx,sx->bts", uvw, lmn)         # (n_bl, n_time, n_src)
+            tau = jnp.einsum("btx,sx->bts", uvw * uvw_sign, lmn)   # (n_bl, n_time, n_src)
             weights = I / n[:, None]                          # (n_src, n_freq)
 
             # vmap over frequency channels — avoids a 4D (bl,time,src,freq) array
@@ -1021,6 +1028,109 @@ class PointSourceVisCalculation(Component):
 
             vis = vmap(vis_at_freq)(freqs, weights.T)         # (n_freq, n_bl, n_time)
             vis_ast = vis.transpose(1, 0, 2)                  # (n_bl, n_freq, n_time)
+
+            state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
+            return state
+
+        return forward
+
+    def _set_outputs(self):
+        self.state_outputs = {
+            "vis_ast": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
+        }
+
+
+class ImageVisCalculation(Component):
+    """No-parameter component that computes dense-sky visibilities from an image
+    via the wgridder NUFFT (jax-nufft).
+
+    Reads a per-frequency sky image ``ast_image`` (shape ``(n_freq, n_l, n_m)``)
+    from the state and accumulates the result into ``vis_ast`` using the same
+    CASA measurement-equation convention as ``PointSourceVisCalculation``:
+
+        V(u,v,w) = Σ_{l,m} (I(l,m)/n) exp(-2πi (u l + v m + w (n-1)) / λ)
+
+    The image lies on a cosine grid centred on the phase centre, with
+    ``l_i = (i - n_l/2)·pixsize`` and ``pixsize = deg2rad(fov_deg)/n_pix``.
+    Grid parameters come from ``config.args["ast"]["image"]`` (``fov_deg``,
+    ``n_pix``, ``epsilon``).
+
+    Convention mapping: jax-nufft's ``dirty2vis`` natively computes
+    ``Σ I·exp(-2πi(ul+vm))·exp(+2πi w(n-1))`` with no 1/n. To reproduce the CASA
+    convention we (a) feed the plan ``uvw·[t_u, t_v, -t_w]`` (flip w to turn
+    ducc's +w into CASA's -w, modulated by the hidden per-term toggles) and
+    (b) feed ``dirty2vis`` the image divided by ``n`` (``n = plan.n_minus_1 + 1``).
+    """
+
+    required_inputs = {
+        "ast_image": ("n_freq", "n_l", "n_m"),
+    }
+    output_shape = {"vis_ast": ("n_bl", "n_freq", "n_time")}
+    parameters = {}
+
+    def setup(self, config):
+        try:
+            self.n_bl = config.n_bl
+            self.n_freq = config.n_freq
+            self.n_time = config.n_time
+            self.freqs = jnp.asarray(config.freqs)
+
+            img_args = config.args["ast"]["image"]
+            self.fov_deg = img_args["fov_deg"]
+            self.n_pix = int(img_args["n_pix"])
+            self.epsilon = float(img_args["epsilon"])
+            # Per-term uvw sign toggles (u, v, w). Default (1, 1, 1) is the CASA
+            # convention. Hidden for now; later wired to the config or inferred
+            # from the input data format (only MS today).
+            self.uvw_sign = jnp.asarray((1.0, 1.0, 1.0))
+
+            self.pixsize = jnp.deg2rad(self.fov_deg) / self.n_pix
+
+            # uvw treated as (n_bl, n_time, 3), flattened to rows r = b*n_time + t
+            # to match PointSourceVisCalculation's output ordering.
+            uvw = jnp.asarray(config.uvw).reshape(-1, 3)         # (n_rows, 3)
+            # CASA mapping: flip w (ducc +w -> CASA -w), apply hidden toggles.
+            plan_sign = self.uvw_sign * jnp.asarray((1.0, 1.0, -1.0))
+            uvw_plan = uvw * plan_sign
+
+            self.plan = make_plan(
+                uvw_plan,
+                self.freqs,
+                (self.n_pix, self.n_pix),
+                self.pixsize,
+                self.pixsize,
+                self.epsilon,
+            )
+            self._set_outputs()
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def build_set_params(self):
+        def set_params(params):
+            return params
+        return set_params
+
+    def build_constants(self):
+        # WGridderPlan is a registered JAX pytree, so storing it whole keeps its
+        # arrays as traced constants (nothing large closed over in the forward).
+        return {"plan": self.plan}
+
+    def build_forward(self):
+        prefix = self.prefix
+        n_bl = self.n_bl
+        n_time = self.n_time
+
+        def forward(params, state, constants):
+            plan = constants[f"{prefix}/plan"]
+            ast_image = state["ast_image"]            # (n_freq, n_l, n_m)
+
+            # Supply the 1/n the wgridder forward omits (n from the image grid).
+            n_grid = plan.n_minus_1 + 1.0             # (n_l, n_m)
+            safe_n = jnp.where(n_grid > 0.0, n_grid, 1.0)
+            image = jnp.where(n_grid > 0.0, ast_image / safe_n, 0.0)
+
+            vis_rows = dirty2vis(plan, image.astype(complex))   # (n_rows, n_freq)
+            vis_ast = vis_rows.reshape(n_bl, n_time, -1).transpose(0, 2, 1)
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
             return state
