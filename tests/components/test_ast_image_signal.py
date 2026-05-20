@@ -139,6 +139,45 @@ def test_fits_continuum_image(tmp_path):
     assert np.allclose(img[0], data) and np.allclose(img[1], data)
 
 
+def test_fits_jy_per_beam_conversion(tmp_path):
+    """A Jy/beam FITS image is converted to Jy/pixel using BMAJ/BMIN/CDELT."""
+    from astropy.io import fits
+
+    n_pix = 64
+    fov_deg = 8.0
+    cdelt = fov_deg / n_pix                          # 0.125 deg/pixel
+    bmaj = bmin = 0.25                               # restoring beam FWHM, deg
+    data = np.zeros((n_pix, n_pix))
+    data[20, 30] = 1.0                               # 1 Jy/beam
+    hdr = fits.Header()
+    hdr["BUNIT"] = "Jy/beam"
+    hdr["BMAJ"], hdr["BMIN"] = bmaj, bmin
+    hdr["CDELT1"], hdr["CDELT2"] = -cdelt, cdelt
+    path = tmp_path / "beam.fits"
+    fits.PrimaryHDU(data, hdr).writeto(path)
+
+    config = make_config(fixed_path=path, n_pix=n_pix, n_freq=2, fov_deg=fov_deg)
+    fis = FixedImageSky()
+    fis.setup(config)
+
+    beam_area = (np.pi / (4.0 * np.log(2.0))) * bmaj * bmin
+    factor = cdelt**2 / beam_area
+    assert np.isclose(np.asarray(fis.ast_image)[0, 20, 30], factor)
+
+
+def test_fits_jy_per_beam_missing_beam_errors(tmp_path):
+    """Jy/beam without a beam in the header cannot be converted -> error."""
+    from astropy.io import fits
+
+    hdr = fits.Header()
+    hdr["BUNIT"] = "Jy/beam"
+    path = tmp_path / "nobeam.fits"
+    fits.PrimaryHDU(np.zeros((64, 64)), hdr).writeto(path)
+    config = make_config(fixed_path=path, n_pix=64)
+    with pytest.raises(RuntimeError, match="Jy/beam"):
+        FixedImageSky().setup(config)
+
+
 def test_fits_grid_mismatch_errors(tmp_path):
     """A FITS image whose spatial grid differs from the config grid errors."""
     from astropy.io import fits

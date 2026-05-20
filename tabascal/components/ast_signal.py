@@ -5,7 +5,7 @@ import xarray as xr
 from jax_nufft import vis2dirty
 
 from tabascal.components import Component, assert_attr_shape
-from tabascal.dist import standard_normal
+from tabascal.dist import standard_normal, gaussian_to_laplace, laplace_to_gaussian
 from tabascal.fft_gp import (
     latent_to_signal_init,
     latent_to_signal,
@@ -181,6 +181,8 @@ class FixedImageSky(Component):
             data = np.squeeze(np.asarray(hdul[0].data, dtype=float))
             header = hdul[0].header
 
+        data = data * self._jy_beam_to_jy_pixel_factor(header)
+
         if data.ndim == 2:
             if data.shape != (self.n_pix, self.n_pix):
                 raise ValueError(
@@ -202,6 +204,36 @@ class FixedImageSky(Component):
             return _interp_to_freqs(fits_freqs, data, self.freqs, axis=0)
 
         raise ValueError(f"Unsupported FITS data shape {data.shape}.")
+
+    @staticmethod
+    def _jy_beam_to_jy_pixel_factor(header):
+        """Scale factor converting a WSClean-style Jy/beam image to Jy/pixel.
+
+        A point source in Jy/beam has peak = flux density, so Jy/pixel =
+        Jy/beam · (pixel area / beam area) = Jy/beam / (pixels per beam), where
+        the Gaussian restoring-beam solid angle is
+        ``Omega_beam = (pi / (4 ln2)) · BMAJ · BMIN``.
+
+        Header keys (WSClean restored images): ``BUNIT`` ('Jy/beam' vs 'Jy/pixel'),
+        ``BMAJ``/``BMIN`` (restoring-beam FWHM, degrees) and ``CDELT1``/``CDELT2``
+        (pixel scale, degrees). A model image (BUNIT 'Jy/pixel', or no beam) needs
+        no conversion. A single header beam is applied to all channels.
+        """
+        bunit = str(header.get("BUNIT", "")).strip().lower().replace(" ", "")
+        if "beam" not in bunit:                       # Jy/pixel, dimensionless, or absent
+            return 1.0
+
+        bmaj, bmin = header.get("BMAJ"), header.get("BMIN")
+        cdelt1, cdelt2 = header.get("CDELT1"), header.get("CDELT2")
+        if None in (bmaj, bmin, cdelt1, cdelt2):
+            raise ValueError(
+                "FITS BUNIT is Jy/beam but the restoring beam (BMAJ/BMIN) or pixel "
+                "scale (CDELT1/CDELT2) is missing, so it cannot be converted to "
+                "Jy/pixel."
+            )
+        beam_area = (np.pi / (4.0 * np.log(2.0))) * float(bmaj) * float(bmin)
+        pixel_area = abs(float(cdelt1) * float(cdelt2))
+        return pixel_area / beam_area
 
     @staticmethod
     def _fits_freqs(header, n_chan):
@@ -433,3 +465,107 @@ class ImageSky(Component):
         assert_attr_shape(self, "mu_image_k", k_shape)
         assert_attr_shape(self, "init_image_k", k_shape)
         assert_attr_shape(self, "init_image_k_base", k_shape)
+
+
+class PointSky(Component):
+    """Learnable point-source sky with a Laplace (sparsity) image-space prior.
+
+    Source positions are fixed (read from a tabsim catalogue); the per-source,
+    per-frequency fluxes are inferred. The flux parameters carry a zero-mean
+    Laplace prior - a LASSO-style sparsity prior whose only parameter is the
+    width ``laplace_width`` - implemented by mapping white standard-normal base
+    parameters through :func:`tabascal.dist.gaussian_to_laplace` (whiteness
+    preserved). Writes ``ast_radec`` (n_src, 2) and ``ast_I`` (n_src, n_freq);
+    pairs with ``PointSourceVisCalculation``.
+
+    Config: positions from ``args["data"]["zarr_path"]`` (as ``FixedPointSky``);
+    ``args["ast"]["point"]`` block with ``laplace_width`` and ``init``
+    (``zeros``, ``sample``, ``truth``).
+    """
+
+    required_inputs = {}
+    output_shape = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
+    parameters = {"ast_I_base": ("n_src", "n_freq")}
+
+    def setup(self, config):
+        try:
+            self.n_freq = config.n_freq
+            self.freqs_np = np.asarray(config.freqs, dtype=float)
+
+            point_args = config.args["ast"]["point"]
+            self.laplace_width = float(point_args["laplace_width"])
+            init_type = point_args.get("init", "sample")
+
+            zarr_path = config.args["data"]["zarr_path"]
+            if zarr_path is None:
+                raise ValueError("config.args['data']['zarr_path'] is not set")
+            xds = xr.open_zarr(zarr_path)
+            if "ast_p_radec" not in xds:
+                raise ValueError(
+                    f"No point sources found in zarr at {zarr_path}. "
+                    "Expected variable 'ast_p_radec'."
+                )
+            self.ast_radec = jnp.deg2rad(jnp.asarray(xds.ast_p_radec.values))  # (n_src, 2)
+            self.n_src = self.ast_radec.shape[0]
+
+            self._compute_init_params(init_type, xds)
+            self._set_outputs()
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def _catalogue_flux(self, xds):
+        flux = np.asarray(xds.ast_p_I.values).mean(axis=1)               # (n_src, n_chan)
+        return _interp_to_freqs(np.asarray(xds.freq.values), flux,
+                                self.freqs_np, axis=1)                   # (n_src, n_freq)
+
+    def _compute_init_params(self, init_type, xds):
+        shape = (self.n_src, self.n_freq)
+        if init_type == "zeros":
+            init_base = jnp.zeros(shape)
+        elif init_type == "sample":
+            init_base = random.normal(random.PRNGKey(1), shape)
+        elif init_type == "truth":
+            flux = jnp.asarray(self._catalogue_flux(xds))
+            init_base = laplace_to_gaussian(flux, self.laplace_width)
+        else:
+            raise ValueError(
+                f"Provided init type: {init_type} is not valid. "
+                "Choose from (zeros, sample, truth)."
+            )
+        self.init_params_base = {"ast_I_base": init_base}
+        self.init_params = {
+            "ast_I": gaussian_to_laplace(init_base, self.laplace_width)
+        }
+
+    def build_set_params(self):
+        n_src = self.n_src
+        n_freq = self.n_freq
+
+        def set_params(params):
+            params["ast_I_base"] = standard_normal("ast_I_base", (n_src, n_freq))
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        return {"ast_radec": self.ast_radec}
+
+    def build_forward(self):
+        prefix = self.prefix
+        width = self.laplace_width
+
+        def forward(params, state, constants):
+            ast_I = gaussian_to_laplace(params["ast_I_base"], width)
+            return {
+                **state,
+                "ast_radec": constants[f"{prefix}/ast_radec"],
+                "ast_I": ast_I,
+            }
+
+        return forward
+
+    def _set_outputs(self):
+        self.state_outputs = {
+            "ast_radec": self.ast_radec,
+            "ast_I": jnp.zeros((self.n_src, self.n_freq)),
+        }
