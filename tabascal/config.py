@@ -7,6 +7,7 @@ from tabascal.interferometry import calculate_fringe_frequency, get_strides_and_
 from tabascal.fft_gp import domain_ss
 from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd
 from tabascal.coordinates import itrf_to_uvw
+from tabascal.imaging import make_image_plan
 
 
 import jax.numpy as jnp
@@ -140,6 +141,26 @@ class TabConfig:
         )
 
         self._set_freqs_times()
+
+        self._set_image_grid()
+
+    def _set_image_grid(self):
+        """Build the shared dense-sky image grid + wgridder plan, if requested.
+
+        Only built when the user supplies an ``args["ast"]["image"]`` block;
+        otherwise left as ``None`` and the dense-sky components error if used.
+        """
+        self.image_grid = None
+        image_args = self.args.get("ast", {}).get("image")
+        if image_args is not None:
+            self.image_grid = make_image_plan(
+                self.uvw,
+                self.freqs,
+                image_args["fov_deg"],
+                image_args["n_pix"],
+                image_args["epsilon"],
+                image_args.get("uvw_sign", (1.0, 1.0, 1.0)),
+            )
 
     def set_noise(self, noise: float):
 

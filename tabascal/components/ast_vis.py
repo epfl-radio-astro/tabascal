@@ -1,9 +1,6 @@
-import math
-import warnings
-
 from jax import vmap, random, jit
 import jax.numpy as jnp
-from jax_nufft import make_plan, dirty2vis
+from jax_nufft import dirty2vis
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
@@ -1054,15 +1051,15 @@ class ImageVisCalculation(Component):
         V(u,v,w) = Σ_{l,m} (I(l,m)/n) exp(-2πi (u l + v m + w (n-1)) / λ)
 
     The image lies on a cosine grid centred on the phase centre, with
-    ``l_i = (i - n_l/2)·pixsize`` and ``pixsize = deg2rad(fov_deg)/n_pix``.
-    Grid parameters come from ``config.args["ast"]["image"]`` (``fov_deg``,
-    ``n_pix``, ``epsilon``).
+    ``l_i = (i - n_l/2)·pixsize``. The grid and the reusable ``WGridderPlan`` are
+    owned by the config (``config.image_grid``, built from
+    ``args["ast"]["image"]``); this component errors if that grid is absent.
 
     Convention mapping: jax-nufft's ``dirty2vis`` natively computes
-    ``Σ I·exp(-2πi(ul+vm))·exp(+2πi w(n-1))`` with no 1/n. To reproduce the CASA
-    convention we (a) feed the plan ``uvw·[t_u, t_v, -t_w]`` (flip w to turn
-    ducc's +w into CASA's -w, modulated by the hidden per-term toggles) and
-    (b) feed ``dirty2vis`` the image divided by ``n`` (``n = plan.n_minus_1 + 1``).
+    ``Σ I·exp(-2πi(ul+vm))·exp(+2πi w(n-1))`` with no 1/n. The CASA convention is
+    realised by (a) feeding the plan ``uvw·[t_u, t_v, -t_w]`` (done in
+    ``tabascal.imaging.make_image_plan``) and (b) feeding ``dirty2vis`` the image
+    divided by ``n`` (``n = plan.n_minus_1 + 1``), handled in the forward here.
     """
 
     required_inputs = {
@@ -1076,37 +1073,17 @@ class ImageVisCalculation(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
             self.n_time = config.n_time
-            self.freqs = jnp.asarray(config.freqs)
 
-            img_args = config.args["ast"]["image"]
-            self.fov_deg = img_args["fov_deg"]
-            self.n_pix = int(img_args["n_pix"])
-            self.epsilon = float(img_args["epsilon"])
-            # Per-term uvw sign toggles (u, v, w). Default (1, 1, 1) is the CASA
-            # convention. Hidden for now; later wired to the config or inferred
-            # from the input data format (only MS today).
-            self.uvw_sign = jnp.asarray((1.0, 1.0, 1.0))
+            grid = getattr(config, "image_grid", None)
+            if grid is None:
+                raise ValueError(
+                    "no image grid on the config; set args['ast']['image'] "
+                    "(fov_deg, n_pix, epsilon) so the config builds the shared "
+                    "wgridder plan."
+                )
+            self.plan = grid.plan
+            self.n_pix = grid.n_pix
 
-            self.pixsize = jnp.deg2rad(self.fov_deg) / self.n_pix
-
-            # uvw treated as (n_bl, n_time, 3), flattened to rows r = b*n_time + t
-            # to match PointSourceVisCalculation's output ordering.
-            uvw = jnp.asarray(config.uvw).reshape(-1, 3)         # (n_rows, 3)
-
-            self._check_grid_sampling(uvw)
-
-            # CASA mapping: flip w (ducc +w -> CASA -w), apply hidden toggles.
-            plan_sign = self.uvw_sign * jnp.asarray((1.0, 1.0, -1.0))
-            uvw_plan = uvw * plan_sign
-
-            self.plan = make_plan(
-                uvw_plan,
-                self.freqs,
-                (self.n_pix, self.n_pix),
-                self.pixsize,
-                self.pixsize,
-                self.epsilon,
-            )
             self._set_outputs()
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
@@ -1115,67 +1092,6 @@ class ImageVisCalculation(Component):
         def set_params(params):
             return params
         return set_params
-
-    # Pixels-per-synthesised-beam thresholds for the setup-time sampling guard.
-    # 2 px/beam is bare Nyquist; ~3 is the recommended minimum; above ~10 the
-    # grid is wastefully fine for the array.
-    _MIN_PX_PER_BEAM = 2.0
-    _REC_PX_PER_BEAM = 3.0
-    _MAX_PX_PER_BEAM = 10.0
-
-    def _check_grid_sampling(self, uvw):
-        """Warn (never raise) if the image grid is poorly matched to the array:
-        under-sampled (long baselines alias), over-sampled (wasteful grid), or
-        wide enough that grid corners fall beyond the horizon (zeroed pixels)."""
-        c = 299792458.0
-        cls = self.__class__.__name__
-        pixsize = float(self.pixsize)
-        fov_rad = float(jnp.deg2rad(self.fov_deg))
-        freq_max = float(jnp.max(self.freqs))
-
-        # Per-axis worst-case baseline in wavelengths (square grid -> Nyquist is
-        # per-axis). The w-term is handled by w-planes, not the lm-grid.
-        u = jnp.abs(uvw[:, 0])
-        v = jnp.abs(uvw[:, 1])
-        uv_max = float(jnp.maximum(jnp.max(u), jnp.max(v))) * freq_max / c
-
-        if uv_max > 0.0:
-            grid_extent = 1.0 / (2.0 * pixsize)          # max representable |uv|, lambda
-            px_per_beam = 1.0 / (uv_max * pixsize)
-            n_pix_nyq = math.ceil(fov_rad * self._MIN_PX_PER_BEAM * uv_max)
-            n_pix_rec = math.ceil(fov_rad * self._REC_PX_PER_BEAM * uv_max)
-
-            if px_per_beam < self._MIN_PX_PER_BEAM:
-                uv_rows = jnp.maximum(u, v) * freq_max / c
-                frac = float(jnp.mean(uv_rows > grid_extent))
-                warnings.warn(
-                    f"{cls}: image grid under-samples the array. Longest baseline "
-                    f"{uv_max:.0f} lambda exceeds the grid's max spatial frequency "
-                    f"1/(2*pixsize) = {grid_extent:.0f} lambda ({px_per_beam:.2f} "
-                    f"pixels/beam < {self._MIN_PX_PER_BEAM:g}); {frac:.0%} of baselines "
-                    f"alias. For fov_deg={self.fov_deg:g} use n_pix >= {n_pix_nyq} "
-                    f"(>= {n_pix_rec} for ~{self._REC_PX_PER_BEAM:g} px/beam), or reduce "
-                    f"fov_deg.",
-                    stacklevel=2,
-                )
-            elif px_per_beam > self._MAX_PX_PER_BEAM:
-                warnings.warn(
-                    f"{cls}: image grid over-samples the array ({px_per_beam:.0f} "
-                    f"pixels/beam). n_pix could drop to ~{n_pix_rec} "
-                    f"(~{self._REC_PX_PER_BEAM:g} px/beam) for fov_deg={self.fov_deg:g} "
-                    f"to save memory and compute.",
-                    stacklevel=2,
-                )
-
-        # Horizon clip: grid corners at radius sqrt(2)*(fov/2). Beyond 1 rad,
-        # l^2+m^2 >= 1 and the wgridder zeros those pixels.
-        corner_radius = fov_rad * (2.0 ** 0.5) / 2.0
-        if corner_radius >= 1.0:
-            warnings.warn(
-                f"{cls}: fov_deg={self.fov_deg:g} places image-grid corners beyond "
-                f"the horizon (l^2 + m^2 >= 1); the wgridder zeros those pixels.",
-                stacklevel=2,
-            )
 
     def build_constants(self):
         # WGridderPlan is a registered JAX pytree, so storing it whole keeps its

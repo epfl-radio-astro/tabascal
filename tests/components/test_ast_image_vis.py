@@ -13,6 +13,7 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 from tabascal.components.ast_vis import ImageVisCalculation, PointSourceVisCalculation
+from tabascal.imaging import make_image_plan
 from .conftest import make_constants
 
 
@@ -26,13 +27,17 @@ def make_config(n_ant=4, n_time=3, n_freq=2, fov_deg=8.0, n_pix=128,
     n_bl = a1.shape[0]
     uvw = jax.random.normal(jax.random.PRNGKey(seed), (n_bl, n_time, 3)) * uvw_scale
     freqs = jnp.linspace(1.4e9, 1.5e9, n_freq)
-    return SimpleNamespace(
+    config = SimpleNamespace(
         n_ant=n_ant, n_bl=n_bl, n_time=n_time, n_freq=n_freq,
         uvw=uvw, freqs=freqs,
         phase_centre={"ra": ra0, "dec": dec0},
         args={"ast": {"image": {"fov_deg": fov_deg, "n_pix": n_pix,
                                 "epsilon": epsilon}}},
     )
+    # The config owns the shared grid + wgridder plan (built once); the sampling
+    # guard runs inside make_image_plan.
+    config.image_grid = make_image_plan(uvw, freqs, fov_deg, n_pix, epsilon)
+    return config
 
 
 def on_grid_sources(config, pixels, fluxes):
@@ -165,29 +170,33 @@ def test_vjp_ast_image():
 # ── grid-sampling guard tests (warn, never raise) ─────────────────────────────
 
 def test_no_warning_when_well_sampled():
-    """The default config is well-sampled; setup emits no sampling warnings."""
-    config = make_config()
+    """The default config is well-sampled; building the grid emits no warnings."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")        # any warning would raise here
-        ImageVisCalculation().setup(config)
+        make_config()
 
 
 def test_warns_under_resolution():
     """A coarse grid against long baselines warns about aliasing (but does not raise)."""
-    config = make_config(n_pix=64, uvw_scale=200.0)
     with pytest.warns(UserWarning, match="under-samples"):
-        ImageVisCalculation().setup(config)
+        make_config(n_pix=64, uvw_scale=200.0)
 
 
 def test_warns_over_resolution():
     """A very fine grid against short baselines warns about a wasteful grid."""
-    config = make_config(n_pix=1024, uvw_scale=2.0)
     with pytest.warns(UserWarning, match="over-samples"):
-        ImageVisCalculation().setup(config)
+        make_config(n_pix=1024, uvw_scale=2.0)
 
 
 def test_warns_horizon_clip():
     """A field wide enough that grid corners pass the horizon warns about zeroed pixels."""
-    config = make_config(fov_deg=120.0)
     with pytest.warns(UserWarning, match="horizon"):
+        make_config(fov_deg=120.0)
+
+
+def test_errors_without_image_grid():
+    """ImageVisCalculation errors clearly if the config built no image grid."""
+    config = make_config()
+    config.image_grid = None
+    with pytest.raises(RuntimeError, match="image grid"):
         ImageVisCalculation().setup(config)
