@@ -286,7 +286,71 @@ rfi_vis_configs = [
 # Astronomical sky signal components — upstream fixed to FixedOrbit
 # ---------------------------------------------------------------------------
 
-ast_signal_configs = []
+ast_signal_configs = [
+    # Learnable point-source sky with a Laplace sparsity prior, init at the
+    # catalogue truth. Exercises PointSky end to end (params optimised in SVI).
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFI",
+                "rfi_vis:RiemannVisTimeFreqCalculation",
+                "ast_signal:PointSky",
+                "ast_vis:PointSourceVisCalculation",
+                "gains:UnitaryGains",
+            ],
+            config_overrides={"ast": {"point": {"laplace_width": 1.0,
+                                                "init": "truth"}}},
+            chi2_ref=3.2505896974263226,
+        ),
+        id="PointSky+PointSourceVisCalculation",
+    ),
+    # Fixed dense image: rasterise the data catalogue onto the config grid and
+    # degrid with the wgridder. Exercises FixedImageSky + ImageVisCalculation
+    # (and the shared image grid/plan) end to end.
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFI",
+                "rfi_vis:RiemannVisTimeFreqCalculation",
+                "ast_signal:FixedImageSky",
+                "ast_vis:ImageVisCalculation",
+                "gains:UnitaryGains",
+            ],
+            config_overrides={"ast": {"image": {"fov_deg": 5.0, "n_pix": 256,
+                                                "epsilon": 1e-6}}},
+            chi2_ref=8.108350608931893,
+        ),
+        id="FixedImageSky+ImageVisCalculation",
+    ),
+    # Learnable dense image (log-normal GRF) -> wgridder visibilities. Exercises
+    # ImageSky + ImageVisCalculation end to end (params optimised in SVI).
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFI",
+                "rfi_vis:RiemannVisTimeFreqCalculation",
+                "ast_signal:ImageSky",
+                "ast_vis:ImageVisCalculation",
+                "gains:UnitaryGains",
+            ],
+            config_overrides={"ast": {"image": {
+                "fov_deg": 5.0, "n_pix": 256, "epsilon": 1e-6,
+                "init": "prior",
+                "pow_spec": {"p0": 1.0, "k0_freq": 1.0, "k0_lm": 300.0,
+                             "gamma_freq": 2.0, "gamma_lm": 2.0,
+                             "cutoff": 1e-6, "mu": -2.0},
+            }}},
+            chi2_ref=1.050073696043625,
+        ),
+        id="ImageSky+ImageVisCalculation",
+    ),
+]
 
 # ---------------------------------------------------------------------------
 # Astronomical visibility components — upstream fixed to FixedOrbit

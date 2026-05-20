@@ -152,8 +152,13 @@ class FixedImageSky(Component):
 
             fixed_path = config.args["ast"]["image"].get("fixed_path")
             if fixed_path is None:
+                # Fall back to the data catalogue (rasterise the same point
+                # sources the rest of the pipeline uses).
+                fixed_path = config.args.get("data", {}).get("zarr_path")
+            if fixed_path is None:
                 raise ValueError(
-                    "config.args['ast']['image']['fixed_path'] is not set"
+                    "set args['ast']['image']['fixed_path'] (or "
+                    "args['data']['zarr_path'])"
                 )
 
             if str(fixed_path).endswith(".fits"):
