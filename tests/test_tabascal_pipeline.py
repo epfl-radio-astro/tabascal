@@ -292,7 +292,31 @@ ast_signal_configs = []
 # Astronomical visibility components — upstream fixed to FixedOrbit
 # ---------------------------------------------------------------------------
 
-ast_vis_configs = []
+ast_vis_configs = [
+    # Fixed point-source sky (catalogue) -> direct-DFT visibilities. The
+    # astronomy is fixed to truth (no free params), so this exercises the full
+    # pipeline through FixedPointSky + PointSourceVisCalculation and validates
+    # the uvw/visibility convention end to end. The reduced chi^2 is elevated
+    # (vs the learnable FourierTimeFreqGPAst case) because the fixed model uses
+    # the catalogue's intrinsic fluxes while the data carries the primary-beam
+    # attenuation; it is still a stable regression guard (a convention/uvw error
+    # would inflate it far more).
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFI",
+                "rfi_vis:RiemannVisTimeFreqCalculation",
+                "ast_signal:FixedPointSky",
+                "ast_vis:PointSourceVisCalculation",
+                "gains:UnitaryGains",
+            ],
+            chi2_ref=8.310332651546352,
+        ),
+        id="FixedPointSky+PointSourceVisCalculation",
+    ),
+]
 
 
 # ---------------------------------------------------------------------------
