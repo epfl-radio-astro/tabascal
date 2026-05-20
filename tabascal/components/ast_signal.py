@@ -124,8 +124,10 @@ class FixedImageSky(Component):
     - ``.zarr``: a tabsim point catalogue (``ast_p_radec``, ``ast_p_I``) rasterised
       onto the grid (nearest pixel), time-averaged and spectrally interpolated.
 
-    Note on units: model images are Jy/pixel. WSClean *restored* images are
-    Jy/beam; a conversion flag is left for later.
+    Note on units: the model expects Jy/pixel. A FITS image whose ``BUNIT`` is
+    Jy/beam (e.g. a WSClean restored image) is converted from the header's
+    restoring beam (``BMAJ``/``BMIN``/``CDELT``); Jy/pixel model images pass
+    through unchanged.
     """
 
     required_inputs = {}
