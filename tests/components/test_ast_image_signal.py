@@ -11,7 +11,7 @@ import xarray as xr
 
 jax.config.update("jax_enable_x64", True)
 
-from tabascal.components.ast_signal import FixedImageSky
+from tabascal.components.ast_signal import FixedImageSky, ImageSky
 from tabascal.components.ast_vis import ImageVisCalculation, PointSourceVisCalculation
 from tabascal.imaging import make_image_plan
 from .conftest import make_constants
@@ -169,3 +169,125 @@ def test_error_on_unsupported_extension():
     config = make_config(fixed_path="sky.txt")
     with pytest.raises(RuntimeError, match="Unsupported"):
         FixedImageSky().setup(config)
+
+
+# ── ImageSky (learnable log-normal GRF) ───────────────────────────────────────
+
+def make_sky_config(n_ant=4, n_time=3, n_freq=2, fov_deg=8.0, n_pix=64,
+                    epsilon=1e-7, uvw_scale=15.0, mu=-2.0, init="sample",
+                    chan_width=1e6, with_vis_obs=False, seed=0):
+    a1, a2 = jnp.triu_indices(n_ant, 1)
+    n_bl = a1.shape[0]
+    uvw = jax.random.normal(jax.random.PRNGKey(seed), (n_bl, n_time, 3)) * uvw_scale
+    freqs = jnp.linspace(1.4e9, 1.5e9, n_freq)
+    pow_spec = {"p0": 1.0, "k0_freq": 1e-6, "k0_lm": 300.0,
+                "gamma_freq": 2.0, "gamma_lm": 2.0, "cutoff": 0.0, "mu": mu}
+    config = SimpleNamespace(
+        n_ant=n_ant, n_bl=n_bl, n_time=n_time, n_freq=n_freq,
+        uvw=uvw, freqs=freqs, chan_width=chan_width,
+        phase_centre={"ra": 0.0, "dec": 0.0},
+        args={"ast": {"image": {"fov_deg": fov_deg, "n_pix": n_pix,
+                                "epsilon": epsilon, "pow_spec": pow_spec,
+                                "init": init}}},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        config.image_grid = make_image_plan(uvw, freqs, fov_deg, n_pix, epsilon)
+    if with_vis_obs:
+        k = jax.random.PRNGKey(seed + 9)
+        config.vis_obs = (jax.random.normal(k, (n_bl, n_freq, n_time))
+                          + 1j * jax.random.normal(jax.random.PRNGKey(seed + 10),
+                                                   (n_bl, n_freq, n_time)))
+    return config
+
+
+def run_sky(config):
+    sky = ImageSky()
+    sky.setup(config)
+    out = sky.build_forward()(sky.init_params_base, {}, make_constants(sky))
+    return sky, out
+
+
+def test_imagesky_shape_and_positive():
+    config = make_sky_config(n_pix=64, n_freq=2)
+    sky, out = run_sky(config)
+    img = out["ast_image"]
+    assert img.shape == (config.n_freq, 64, 64)
+    assert jnp.all(img > 0) and jnp.all(jnp.isfinite(img))
+
+
+def test_imagesky_zeros_init_is_flat():
+    """zeros init -> base params zero -> I = exp(mu) everywhere."""
+    config = make_sky_config(init="zeros", mu=-1.5)
+    sky, out = run_sky(config)
+    assert jnp.allclose(out["ast_image"], jnp.exp(-1.5), atol=1e-8)
+
+
+@pytest.mark.parametrize("init", ["zeros", "prior", "sample", "data"])
+def test_imagesky_init_paths(init):
+    config = make_sky_config(init=init, with_vis_obs=(init == "data"))
+    sky, out = run_sky(config)
+    assert jnp.all(out["ast_image"] > 0) and jnp.all(jnp.isfinite(out["ast_image"]))
+    # base params live on the latent Fourier grid
+    assert sky.init_params_base["image_k_r_base"].shape == sky.pk.shape
+
+
+def test_imagesky_param_and_prior_shapes():
+    config = make_sky_config()
+    sky = ImageSky()
+    sky.setup(config)
+    k_shape = sky.pk.shape
+    assert sky.sigma_image_k.shape == k_shape
+    assert sky.mu_image_k.shape == k_shape
+    assert sky.init_params_base["image_k_i_base"].shape == k_shape
+
+
+def test_imagesky_pipeline_to_vis():
+    config = make_sky_config(n_pix=64, n_freq=2)
+    sky = ImageSky()
+    iv = ImageVisCalculation()
+    sky.setup(config)
+    iv.setup(config)
+    state = {**sky.state_outputs, **iv.state_outputs}
+    constants = {**make_constants(sky), **make_constants(iv)}
+    params = sky.init_params_base
+    state = sky.build_forward()(params, state, constants)
+    state = iv.build_forward()(params, state, constants)
+    vis = state["vis_ast"]
+    assert vis.shape == (config.n_bl, config.n_freq, config.n_time)
+    assert jnp.all(jnp.isfinite(vis)) and jnp.any(jnp.abs(vis) > 0)
+
+
+def test_imagesky_differentiable():
+    """JVP and VJP through the base params are finite and non-trivially non-zero."""
+    config = make_sky_config()
+    sky = ImageSky()
+    sky.setup(config)
+    constants = make_constants(sky)
+    fwd = sky.build_forward()
+    params = sky.init_params_base
+
+    def f(p):
+        return fwd(p, {}, constants)["ast_image"]
+
+    tangent = {k: jnp.ones_like(v) for k, v in params.items()}
+    _, jvp_out = jax.jvp(f, (params,), (tangent,))
+    assert jnp.all(jnp.isfinite(jvp_out)) and jnp.any(jnp.abs(jvp_out) > 0)
+
+    _, vjp_fn = jax.vjp(f, params)
+    (grad,) = vjp_fn(jnp.ones((config.n_freq, sky.n_pix, sky.n_pix)))
+    assert grad["image_k_r_base"].shape == sky.pk.shape
+    assert jnp.all(jnp.isfinite(grad["image_k_r_base"]))
+    assert jnp.any(jnp.abs(grad["image_k_r_base"]) > 0)
+
+
+def test_imagesky_invalid_init_errors():
+    config = make_sky_config(init="bogus")
+    with pytest.raises(RuntimeError, match="init type"):
+        ImageSky().setup(config)
+
+
+def test_imagesky_data_requires_vis_obs():
+    config = make_sky_config(init="data", with_vis_obs=False)
+    with pytest.raises(RuntimeError, match="vis_obs"):
+        ImageSky().setup(config)

@@ -1,8 +1,17 @@
 import numpy as np
 import jax.numpy as jnp
+from jax import random
 import xarray as xr
+from jax_nufft import vis2dirty
 
-from tabascal.components import Component
+from tabascal.components import Component, assert_attr_shape
+from tabascal.dist import standard_normal
+from tabascal.fft_gp import (
+    latent_to_signal_init,
+    latent_to_signal,
+    signal_to_latent_init,
+    signal_to_latent,
+)
 
 
 class FixedPointSky(Component):
@@ -253,3 +262,174 @@ class FixedImageSky(Component):
 
     def _set_outputs(self):
         self.state_outputs = {"ast_image": self.ast_image}
+
+
+class ImageSky(Component):
+    """Learnable dense-sky image modelled as a log-normal Gaussian random field.
+
+    The log-sky ``s(l, m, nu)`` is a GRF with a separable, stationary power
+    spectrum ``P_freq(k_nu)·P_lm(|k_l|)·P_lm(|k_m|)`` (the same analytic
+    ``pow_spec`` form used by the Fourier-GP / RFI components), and the sky
+    brightness is ``I = exp(s + mu)`` (positivity, as in resolve). Inference is
+    over whitened Fourier coefficients (``image_k_*_base`` ~ N(0,1)); the forward
+    maps them to ``ast_image`` ``(n_freq, n_l, n_m)`` on the config grid.
+
+    Mirrors ``FourierTimeFreqGPAst`` but over the 3-D (freq, l, m) image domain
+    and with an exponential link. Config block ``args["ast"]["image"]["pow_spec"]``:
+    ``p0``, ``k0_freq``, ``k0_lm``, ``gamma_freq``, ``gamma_lm``, ``cutoff``, and
+    optional ``mu`` (log-sky offset), ``freq_pad_factor``, ``lm_pad_factor``.
+    Init (``args["ast"]["image"]["init"]``): ``zeros``/``prior``, ``sample``, ``data``.
+    """
+
+    required_inputs = {}
+    output_shape = {"ast_image": ("n_freq", "n_l", "n_m")}
+    parameters = {
+        "image_k_r_base": ("n_k_freq", "n_k_l", "n_k_m"),
+        "image_k_i_base": ("n_k_freq", "n_k_l", "n_k_m"),
+    }
+
+    def setup(self, config):
+        try:
+            self.n_freq = config.n_freq
+            self.chan_width = float(config.chan_width)
+
+            grid = getattr(config, "image_grid", None)
+            if grid is None:
+                raise ValueError(
+                    "no image grid on the config; set args['ast']['image'] "
+                    "(fov_deg, n_pix, epsilon) so the config builds the grid."
+                )
+            self.n_pix = grid.n_pix
+            self.pixsize = float(grid.pixsize)
+            self.plan = grid.plan
+
+            ps = config.args["ast"]["image"]["pow_spec"]
+            self.p0 = ps["p0"]
+            self.k0s = [ps["k0_freq"], ps["k0_lm"], ps["k0_lm"]]
+            self.gammas = [ps["gamma_freq"], ps["gamma_lm"], ps["gamma_lm"]]
+            self.pk_cutoff = ps["cutoff"]
+            self.mu_scalar = float(ps.get("mu", 0.0))
+            # Pad factor 1.0 == no padding (the fft_gp helpers require >= 1.0).
+            self.pad_factors = [ps.get("freq_pad_factor", 1.0),
+                                ps.get("lm_pad_factor", 1.0),
+                                ps.get("lm_pad_factor", 1.0)]
+            self.ss_factors = [1, 1, 1]
+
+            self._compute_gp_params()
+            self.mu_image_k = jnp.zeros(self.pk.shape, dtype=complex)
+
+            init_type = config.args["ast"]["image"].get("init", "prior")
+            self._compute_init_params(init_type, getattr(config, "vis_obs", None))
+            self._set_outputs()
+            self._validate_dimensions()
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def _compute_gp_params(self):
+        ns = [self.n_freq, self.n_pix, self.n_pix]
+        dxs = [self.chan_width, self.pixsize, self.pixsize]
+
+        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
+            ns, dxs, self.pad_factors, self.ss_factors,
+            self.p0, self.k0s, self.gammas, self.pk_cutoff,
+        )
+        self.latent_idxs, _ = signal_to_latent_init(
+            ns, dxs, self.pad_factors, self.p0, self.k0s, self.gammas, self.pk_cutoff,
+        )
+        self.n_k_freq, self.n_k_l, self.n_k_m = self.pk.shape
+
+        # Prior std of each whitened Fourier mode (forward FFT norm => / size).
+        self.sigma_image_k = jnp.sqrt(self.pk / self.pk.size)
+
+    def _dirty_image(self, vis_obs):
+        """Adjoint (dirty) image of the observed visibilities on the grid."""
+        # vis_obs: (n_bl, n_freq, n_time) -> rows (n_bl*n_time, n_freq)
+        vis_rows = jnp.asarray(vis_obs).transpose(0, 2, 1).reshape(-1, self.n_freq)
+        return vis2dirty(self.plan, vis_rows)              # (n_freq, n_l, n_m) real
+
+    def _compute_data_est(self, vis_obs):
+        if vis_obs is None:
+            raise ValueError("init='data' requires config.vis_obs.")
+        dirty = self._dirty_image(vis_obs)
+        floor = 1e-8 * jnp.max(jnp.abs(dirty)) + 1e-30
+        s_data = jnp.log(jnp.clip(dirty, min=floor)) - self.mu_scalar
+        return signal_to_latent(s_data, self.pad_factors, self.latent_idxs)
+
+    def _compute_init_params(self, init_type, vis_obs):
+        if init_type == "data":
+            self.init_image_k = self._compute_data_est(vis_obs)
+        elif init_type in ("zeros", "prior"):
+            self.init_image_k = self.mu_image_k
+        elif init_type == "sample":
+            sample = random.normal(random.PRNGKey(1), self.pk.shape, dtype=complex)
+            self.init_image_k = self.forward_transform(
+                sample, self.sigma_image_k, self.mu_image_k
+            )
+        else:
+            raise ValueError(
+                f"Provided init type: {init_type} is not valid. "
+                "Choose from (zeros, prior, sample, data)."
+            )
+
+        self.init_image_k_base = self.inv_transform(
+            self.init_image_k, self.sigma_image_k, self.mu_image_k
+        )
+        self.init_params = {
+            "image_k_r": self.init_image_k.real,
+            "image_k_i": self.init_image_k.imag,
+        }
+        self.init_params_base = {
+            "image_k_r_base": self.init_image_k_base.real,
+            "image_k_i_base": self.init_image_k_base.imag,
+        }
+
+    def forward_transform(self, base_params, sigma, mu):
+        return sigma * base_params + mu
+
+    def inv_transform(self, params, sigma, mu):
+        return (params - mu) / sigma
+
+    def build_set_params(self):
+        shape = self.pk.shape
+
+        def set_params(params):
+            params["image_k_r_base"] = standard_normal("image_k_r_base", shape)
+            params["image_k_i_base"] = standard_normal("image_k_i_base", shape)
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        return {"sigma_image_k": self.sigma_image_k, "mu_image_k": self.mu_image_k}
+
+    def build_forward(self):
+        prefix = self.prefix
+        pads = self.pads
+        ss_idxs = self.ss_idxs
+        mu_scalar = self.mu_scalar
+        forward_transform = self.forward_transform
+
+        def forward(params, state, constants):
+            sigma = constants[f"{prefix}/sigma_image_k"]
+            mu_k = constants[f"{prefix}/mu_image_k"]
+
+            base = params["image_k_r_base"] + 1.0j * params["image_k_i_base"]
+            s_k = forward_transform(base, sigma, mu_k)
+            s = latent_to_signal(s_k, pads, ss_idxs).real     # (n_freq, n_l, n_m)
+            image = jnp.exp(s + mu_scalar)                     # Jy/pixel, positive
+
+            return {**state, "ast_image": image}
+
+        return forward
+
+    def _set_outputs(self):
+        self.state_outputs = {
+            "ast_image": jnp.zeros((self.n_freq, self.n_pix, self.n_pix)),
+        }
+
+    def _validate_dimensions(self):
+        k_shape = (self.n_k_freq, self.n_k_l, self.n_k_m)
+        assert_attr_shape(self, "sigma_image_k", k_shape)
+        assert_attr_shape(self, "mu_image_k", k_shape)
+        assert_attr_shape(self, "init_image_k", k_shape)
+        assert_attr_shape(self, "init_image_k_base", k_shape)
