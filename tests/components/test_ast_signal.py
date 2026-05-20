@@ -187,3 +187,136 @@ class TestPointSkyPipeline:
         dft_vis = jnp.sum(weights * jnp.exp(1.0j * phase), axis=2).transpose(0, 2, 1)
 
         assert jnp.allclose(nufft_vis, dft_vis, atol=1e-6)
+
+
+# ── Laplace sparsity transform + learnable PointSky ───────────────────────────
+
+from tabascal.components.ast_signal import PointSky
+from tabascal.dist import gaussian_to_laplace, laplace_to_gaussian
+
+
+def test_gaussian_to_laplace_stats():
+    """White N(0,1) -> white Laplace(0, b): mean 0, variance 2 b^2."""
+    z = jax.random.normal(jax.random.PRNGKey(0), (200_000,))
+    for b in (0.5, 2.0):
+        x = np.asarray(gaussian_to_laplace(z, b))
+        assert abs(x.mean()) < 0.02
+        assert np.isclose(x.var(), 2 * b**2, rtol=0.05)
+
+
+def test_laplace_gaussian_roundtrip():
+    z = jax.random.normal(jax.random.PRNGKey(1), (1000,))
+    z2 = laplace_to_gaussian(gaussian_to_laplace(z, 1.3), 1.3)
+    assert jnp.allclose(z2, z, atol=1e-8)
+
+
+def write_point_catalogue(path: Path, radec_deg, flux_cube, freqs):
+    ds = xr.Dataset(
+        {
+            "ast_p_radec": (["ast_p_src", "radec"], np.asarray(radec_deg)),
+            "ast_p_I": (["ast_p_src", "time", "freq"], np.asarray(flux_cube)),
+        },
+        coords={"freq": np.asarray(freqs)},
+    )
+    zp = str(path / "point.zarr")
+    ds.to_zarr(zp, mode="w")
+    return zp
+
+
+def make_point_config(zarr_path, width=1.0, init="sample", n_ant=4, n_freq=2,
+                      n_time=2, freqs=None):
+    a1, a2 = jnp.triu_indices(n_ant, 1)
+    n_bl = a1.shape[0]
+    uvw = jax.random.normal(jax.random.PRNGKey(3), (n_bl, n_time, 3)) * 100.0
+    freqs = jnp.linspace(1.4e9, 1.5e9, n_freq) if freqs is None else jnp.asarray(freqs)
+    return SimpleNamespace(
+        n_ant=n_ant, n_bl=n_bl, n_freq=n_freq, n_time=n_time,
+        uvw=uvw, freqs=freqs, phase_centre={"ra": 27.0, "dec": -30.0},
+        args={"data": {"zarr_path": zarr_path},
+              "ast": {"point": {"laplace_width": width, "init": init}}},
+    )
+
+
+class TestPointSky:
+
+    def _catalogue(self, tmp_path, n_src=5, n_time=2, n_freq=2):
+        freqs = np.linspace(1.4e9, 1.5e9, n_freq)
+        rng = np.random.default_rng(0)
+        radec = rng.uniform([20.0, -32.0], [34.0, -28.0], size=(n_src, 2))
+        flux = np.abs(rng.normal(size=(n_src, n_time, n_freq))) + 0.1
+        zp = write_point_catalogue(tmp_path, radec, flux, freqs)
+        return zp, radec, flux, freqs
+
+    def test_shapes(self, tmp_path):
+        zp, radec, _, freqs = self._catalogue(tmp_path)
+        config = make_point_config(zp, freqs=freqs)
+        ps = PointSky()
+        ps.setup(config)
+        out = ps.build_forward()(ps.init_params_base, {}, make_constants(ps))
+        assert out["ast_radec"].shape == (radec.shape[0], 2)
+        assert out["ast_I"].shape == (radec.shape[0], config.n_freq)
+        assert jnp.all(jnp.isfinite(out["ast_I"]))
+
+    def test_zeros_init_all_off(self, tmp_path):
+        zp, _, _, freqs = self._catalogue(tmp_path)
+        config = make_point_config(zp, init="zeros", freqs=freqs)
+        ps = PointSky()
+        ps.setup(config)
+        out = ps.build_forward()(ps.init_params_base, {}, make_constants(ps))
+        assert jnp.allclose(out["ast_I"], 0.0, atol=1e-12)
+
+    def test_truth_init_recovers_flux(self, tmp_path):
+        zp, _, flux, freqs = self._catalogue(tmp_path)
+        config = make_point_config(zp, init="truth", width=1.0, freqs=freqs)
+        ps = PointSky()
+        ps.setup(config)
+        out = ps.build_forward()(ps.init_params_base, {}, make_constants(ps))
+        assert jnp.allclose(out["ast_I"], flux.mean(axis=1), atol=1e-6)
+
+    @pytest.mark.parametrize("init", ["zeros", "sample", "truth"])
+    def test_init_paths(self, tmp_path, init):
+        zp, _, _, freqs = self._catalogue(tmp_path)
+        config = make_point_config(zp, init=init, freqs=freqs)
+        ps = PointSky()
+        ps.setup(config)
+        assert ps.init_params_base["ast_I_base"].shape == (ps.n_src, config.n_freq)
+
+    def test_pipeline_to_vis(self, tmp_path):
+        zp, radec, _, freqs = self._catalogue(tmp_path)
+        config = make_point_config(zp, freqs=freqs)
+        ps = PointSky()
+        pv = PointSourceVisCalculation()
+        ps.setup(config)
+        pv.setup(config)
+        state = {**ps.state_outputs, **pv.state_outputs,
+                 "vis_ast": jnp.zeros((config.n_bl, config.n_freq, config.n_time), complex)}
+        constants = {**make_constants(ps), **make_constants(pv)}
+        params = ps.init_params_base
+        state = ps.build_forward()(params, state, constants)
+        state = pv.build_forward()(params, state, constants)
+        assert state["vis_ast"].shape == (config.n_bl, config.n_freq, config.n_time)
+        assert jnp.all(jnp.isfinite(state["vis_ast"]))
+
+    def test_differentiable(self, tmp_path):
+        zp, _, _, freqs = self._catalogue(tmp_path)
+        config = make_point_config(zp, freqs=freqs)
+        ps = PointSky()
+        ps.setup(config)
+        constants = make_constants(ps)
+        fwd = ps.build_forward()
+        params = ps.init_params_base
+
+        def f(p):
+            return fwd(p, {}, constants)["ast_I"]
+
+        _, vjp_fn = jax.vjp(f, params)
+        (grad,) = vjp_fn(jnp.ones((ps.n_src, config.n_freq)))
+        assert grad["ast_I_base"].shape == (ps.n_src, config.n_freq)
+        assert jnp.all(jnp.isfinite(grad["ast_I_base"]))
+        assert jnp.any(jnp.abs(grad["ast_I_base"]) > 0)
+
+    def test_invalid_init_errors(self, tmp_path):
+        zp, _, _, freqs = self._catalogue(tmp_path)
+        config = make_point_config(zp, init="bogus", freqs=freqs)
+        with pytest.raises(RuntimeError, match="init type"):
+            PointSky().setup(config)
