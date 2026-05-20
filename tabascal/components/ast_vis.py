@@ -933,3 +933,101 @@ class FourierTimeFreqGPAst(Component):
         assert_attr_shape(self, "sigma_ast_k", ast_shape)
         assert_attr_shape(self, "init_ast_k", ast_shape)
         assert_attr_shape(self, "init_ast_k_base", ast_shape)
+
+
+class PointSourceVisCalculation(Component):
+    """No-parameter component that computes point-source visibilities via a
+    direct DFT.
+
+    Reads ``ast_radec`` (RA/Dec in radians, shape ``(n_src, 2)``) and
+    ``ast_I`` (flux density, shape ``(n_src, n_freq)``) from the state and
+    accumulates the result into ``vis_ast`` using the full w-projection
+    visibility equation:
+
+        V(u,v,w) = Σ_k (I_k/n_k) exp(-2πi (u l_k + v m_k + w (n_k-1)) / λ)
+
+    For a sparse (point-source) sky the direct sum is exact, gridless and fully
+    differentiable, and is unaffected by field of view or baseline length. A
+    type-3 NUFFT would be cheaper only for a *dense* sky with a moderate
+    space-bandwidth product; for points its internal grid scales as the cube of
+    ``max|uvw|/λ · max|lmn|`` and blows up for wide fields on long baselines.
+    """
+
+    required_inputs = {
+        "ast_radec": ("n_src", 2),
+        "ast_I": ("n_src", "n_freq"),
+    }
+    output_shape = {"vis_ast": ("n_bl", "n_freq", "n_time")}
+    parameters = {}
+
+    def setup(self, config):
+        try:
+            self.n_bl = config.n_bl
+            self.n_freq = config.n_freq
+            self.n_time = config.n_time
+            self.uvw = config.uvw
+            self.freqs = config.freqs
+            self.phase_centre_ra = jnp.deg2rad(config.phase_centre["ra"])
+            self.phase_centre_dec = jnp.deg2rad(config.phase_centre["dec"])
+            self._set_outputs()
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def build_set_params(self):
+        def set_params(params):
+            return params
+        return set_params
+
+    def build_constants(self):
+        return {
+            "uvw": self.uvw,
+            "freqs": self.freqs,
+            "ra0": self.phase_centre_ra,
+            "dec0": self.phase_centre_dec,
+        }
+
+    def build_forward(self):
+        prefix = self.prefix
+        n_bl = self.n_bl
+        n_freq = self.n_freq
+        n_time = self.n_time
+        C = 299792458.0
+
+        def forward(params, state, constants):
+            uvw = constants[f"{prefix}/uvw"]      # (n_bl, n_time, 3)
+            freqs = constants[f"{prefix}/freqs"]  # (n_freq,)
+            ra0 = constants[f"{prefix}/ra0"]
+            dec0 = constants[f"{prefix}/dec0"]
+
+            ra = state["ast_radec"][:, 0]   # (n_src,)
+            dec = state["ast_radec"][:, 1]
+            I = state["ast_I"]              # (n_src, n_freq)
+
+            dra = ra - ra0
+            l = jnp.cos(dec) * jnp.sin(dra)
+            m = jnp.sin(dec) * jnp.cos(dec0) - jnp.cos(dec) * jnp.sin(dec0) * jnp.cos(dra)
+            n = jnp.sqrt(1.0 - l**2 - m**2)    # (n_src,)
+
+            # Geometric path-length delay per (baseline, time, source), in metres
+            lmn = jnp.stack([l, m, n - 1.0], axis=-1)         # (n_src, 3)
+            tau = jnp.einsum("btx,sx->bts", uvw, lmn)         # (n_bl, n_time, n_src)
+            weights = I / n[:, None]                          # (n_src, n_freq)
+
+            # vmap over frequency channels — avoids a 4D (bl,time,src,freq) array
+            def vis_at_freq(freq, w_freq):
+                phase = -2.0 * jnp.pi * tau * freq / C        # (n_bl, n_time, n_src)
+                fringe = jnp.exp(1.0j * phase)
+                return jnp.sum(fringe * w_freq, axis=-1)      # (n_bl, n_time)
+
+            vis = vmap(vis_at_freq)(freqs, weights.T)         # (n_freq, n_bl, n_time)
+            vis_ast = vis.transpose(1, 0, 2)                  # (n_bl, n_freq, n_time)
+
+            state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
+            return state
+
+        return forward
+
+    def _set_outputs(self):
+        self.state_outputs = {
+            "vis_ast": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
+        }
