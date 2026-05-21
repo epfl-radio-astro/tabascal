@@ -8,12 +8,6 @@ from tabascal.components.ffi.rfi_vis_op import RFIVisOp
 
 class RiemannVisCalculation(Component):
 
-    required_inputs = {
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-    }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
-
     reads = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
@@ -88,12 +82,6 @@ class RiemannVisCalculation(Component):
 
 
 class RiemannVisTimeFreqCalculation(Component):
-
-    required_inputs = {
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-    }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     reads = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -173,12 +161,6 @@ class RiemannVisTimeFreqCalculation(Component):
 
 class RiemannVisTimeFreqCalculationFFI(Component):
 
-    required_inputs = {
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-    }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
-
     reads = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -254,12 +236,6 @@ class RiemannVisTimeFreqCalculationFFI(Component):
 
 
 class RiemannVisTimeFreqVariable(Component):
-
-    required_inputs = {
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-    }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     reads = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),

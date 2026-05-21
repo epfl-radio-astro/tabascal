@@ -17,11 +17,6 @@ import xarray as xr
 
 class FourierTimeAst(Component):
 
-    required_inputs = {}  # No inputs needed
-    output_shape = {
-        "vis_ast": ("n_bl", "n_freq", "n_time"),
-    }
-
     accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
 
     # Add parameter specifications
@@ -224,11 +219,6 @@ class FourierTimeAst(Component):
 
 class FourierTimeConstFreqAst(Component):
 
-    required_inputs = {}  # No inputs needed
-    output_shape = {
-        "vis_ast": ("n_bl", 1, "n_time"),
-    }
-
     # The per-channel contribution is (n_bl, 1, n_time); it broadcasts onto the
     # (n_bl, n_freq, n_time) vis_ast bus when accumulated.
     accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
@@ -427,11 +417,6 @@ class FourierTimeConstFreqAst(Component):
 
 
 class FourierTimeFreqAst(Component):
-
-    required_inputs = {}  # No inputs needed
-    output_shape = {
-        "vis_ast": ("n_bl", "n_freq", "n_time"),
-    }
 
     accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
 
@@ -667,11 +652,6 @@ class FourierTimeFreqAst(Component):
 
 
 class FourierTimeFreqGPAst(Component):
-
-    required_inputs = {}  # No inputs needed
-    output_shape = {
-        "vis_ast": ("n_bl", "n_freq", "n_time"),
-    }
 
     accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
 
@@ -964,12 +944,6 @@ class PointSourceVisCalculation(Component):
     ``max|uvw|/λ · max|lmn|`` and blows up for wide fields on long baselines.
     """
 
-    required_inputs = {
-        "ast_radec": ("n_src", 2),
-        "ast_I": ("n_src", "n_freq"),
-    }
-    output_shape = {"vis_ast": ("n_bl", "n_freq", "n_time")}
-
     reads = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
     accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
 
@@ -1075,11 +1049,6 @@ class ImageVisCalculation(Component):
     ``tabascal.imaging.make_image_plan``) and (b) feeding ``dirty2vis`` the image
     divided by ``n`` (``n = plan.n_minus_1 + 1``), handled in the forward here.
     """
-
-    required_inputs = {
-        "ast_image": ("n_freq", "n_l", "n_m"),
-    }
-    output_shape = {"vis_ast": ("n_bl", "n_freq", "n_time")}
 
     reads = {"ast_image": ("n_freq", "n_l", "n_m")}
     accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}

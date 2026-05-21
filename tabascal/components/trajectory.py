@@ -55,9 +55,6 @@ def get_satellite_positions(tles: list, times_jd: list):
 
 class PhaseCalculationRFI(Component):
 
-    required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
-    output_shapes = {"rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}
-
     reads = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
     writes = {"rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}
 
@@ -156,12 +153,6 @@ class PhaseCalculationRFI(Component):
 
 
 class FixedOrbit(Component):
-
-    required_inputs = {}  # No inputs needed
-    outputs_shapes = {
-        "rfi_xyz": ("n_rfi", "n_time_fine", 3),
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-    }
 
     writes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
@@ -279,12 +270,6 @@ class FixedOrbit(Component):
 
 
 class SGP4LEONoDragOrbit(Component):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_xyz": ("n_rfi", "n_time_fine", 3),
-        "elements": ("n_rfi", 6),  # Also output elements for downstream use
-    }
 
     writes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
@@ -454,12 +439,6 @@ class SGP4LEONoDragOrbit(Component):
 
 
 class SGP4LEOOrbit(Component):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_xyz": ("n_rfi", "n_time_fine", 3),
-        "elements": ("n_rfi", 7),  # Also output elements for downstream use
-    }
 
     writes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),

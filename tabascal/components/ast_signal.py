@@ -27,11 +27,6 @@ class FixedPointSky(Component):
     - ``ast_I``:     ``(n_src, n_freq)`` in Jy
     """
 
-    required_inputs = {}
-    output_shape = {
-        "ast_radec": ("n_src", 2),
-        "ast_I": ("n_src", "n_freq"),
-    }
     writes = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
     parameters = {}
 
@@ -131,8 +126,6 @@ class FixedImageSky(Component):
     through unchanged.
     """
 
-    required_inputs = {}
-    output_shape = {"ast_image": ("n_freq", "n_l", "n_m")}
     writes = {"ast_image": ("n_freq", "n_l", "n_m")}
     parameters = {}
 
@@ -322,8 +315,6 @@ class ImageSky(Component):
     Init (``args["ast"]["image"]["init"]``): ``zeros``/``prior``, ``sample``, ``data``.
     """
 
-    required_inputs = {}
-    output_shape = {"ast_image": ("n_freq", "n_l", "n_m")}
     writes = {"ast_image": ("n_freq", "n_l", "n_m")}
     parameters = {
         "image_k_r_base": ("n_k_freq", "n_k_l", "n_k_m"),
@@ -499,8 +490,6 @@ class PointSky(Component):
     (``zeros``, ``sample``, ``truth``).
     """
 
-    required_inputs = {}
-    output_shape = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
     writes = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
     parameters = {"ast_I_base": ("n_src", "n_freq")}
 

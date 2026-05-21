@@ -151,14 +151,6 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
 class BaseGPRFI(Component):
 
-    # The required state parameter needed in the forward model for this component to function
-    required_inputs = {}  # No inputs needed
-
-    # The additional state parameters included in the forward model from this component
-    output_shapes = {
-        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-    }
-
     # The base parameter shapes used to produce the output parameters
     parameter_shapes = {}
 
@@ -213,11 +205,6 @@ class BaseGPRFI(Component):
 
 
 class RealRFI(BaseGPRFI):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-    }
 
     # Real-space GP: the freq axis stays coarse (no frequency integration).
     writes = {"rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine")}
@@ -380,11 +367,6 @@ class RealRFI(BaseGPRFI):
 
 
 class ComplexRFI(BaseGPRFI):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-    }
 
     # Real-space GP: the freq axis stays coarse (no frequency integration).
     writes = {"rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine")}
@@ -562,11 +544,6 @@ class ComplexRFI(BaseGPRFI):
 
 
 class FourierGPRFI(BaseGPRFI):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-    }
 
     # Fourier GP: produces the frequency-integrated (fine) axis.
     writes = {"rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}
@@ -826,11 +803,6 @@ class FourierGPRFI(BaseGPRFI):
 
 
 class FourierGPRFIConstAnt(BaseGPRFI):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-    }
 
     # Fourier GP: produces the frequency-integrated (fine) axis.
     writes = {"rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}

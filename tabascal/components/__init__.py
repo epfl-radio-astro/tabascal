@@ -7,9 +7,7 @@ class Component(ABC):
     """Base class for all tabascal components"""
 
     # Class attributes defining component interface
-    required_inputs: Dict[str, tuple] = {}
     parameter_shapes: Dict[str, tuple] = {}
-    output_shapes: Dict[str, tuple] = {}
     outputs: Dict[str, Array] = {}
     init_params: Dict[str, Array] = {}
     init_params_base: Dict[str, Array] = {}
@@ -17,10 +15,8 @@ class Component(ABC):
     # Explicit declaration of the component's state I/O, used by the config-time
     # dependency resolver (``tabascal.config.validate_component_dependencies``).
     # These describe what the ``forward`` built by ``build_forward`` does to the
-    # state dict and are the authoritative interface for ordering validation
-    # (the legacy ``required_inputs`` / ``output_shape(s)`` attrs are kept for
-    # shape metadata but are inconsistent across components and not relied on
-    # here).
+    # state dict and are the authoritative interface for ordering + shape
+    # validation.
     #
     # Each maps a state key -> its (symbolic) shape. Dimensions are dim-name
     # strings (e.g. "n_bl", "n_freq") or literal ints; the resolver resolves the
@@ -71,12 +67,6 @@ class Component(ABC):
             return params
 
         return set_params
-
-    def validate_state(self, state: Dict[str, Any]) -> None:
-        """Validate required inputs are present"""
-        for key in self.required_inputs:
-            if key not in state:
-                raise ValueError(f"Required input '{key}' missing from state")
 
     def _set_outputs(self):
         pass
