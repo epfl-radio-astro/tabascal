@@ -382,8 +382,14 @@ class ImageSky(Component):
 
     def _dirty_image(self, vis_obs):
         """Adjoint (dirty) image of the observed visibilities on the grid."""
-        # vis_obs: (n_bl, n_freq, n_time) -> rows (n_bl*n_time, n_freq)
-        vis_rows = jnp.asarray(vis_obs).transpose(0, 2, 1).reshape(-1, self.n_freq)
+        # vis_obs: (n_bl, n_freq, n_time) -> rows (n_bl*n_time, n_freq). Cast to
+        # the default complex precision so it matches the plan's float precision
+        # (MS data is complex64, but with x64 the plan is float64; jax-finufft
+        # requires the source and coordinates to share precision).
+        vis_rows = (
+            jnp.asarray(vis_obs).astype(complex).transpose(0, 2, 1)
+            .reshape(-1, self.n_freq)
+        )
         return vis2dirty(self.plan, vis_rows)              # (n_freq, n_l, n_m) real
 
     def _compute_data_est(self, vis_obs):

@@ -341,6 +341,9 @@ ast_signal_configs = [
             ],
             config_overrides={"ast": {"image": {
                 "fov_deg": 5.0, "n_pix": 256, "epsilon": 1e-6,
+                # 'prior' init: the 'data' (dirty-image) init now works but
+                # imprints unsubtracted RFI from vis_obs into the sky, so it is
+                # only suitable on RFI-subtracted / astronomy-dominated data.
                 "init": "prior",
                 "pow_spec": {"p0": 1.0, "k0_freq": 1.0, "k0_lm": 300.0,
                              "gamma_freq": 2.0, "gamma_lm": 2.0,

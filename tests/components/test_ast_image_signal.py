@@ -234,9 +234,12 @@ def make_sky_config(n_ant=4, n_time=3, n_freq=2, fov_deg=8.0, n_pix=64,
         config.image_grid = make_image_plan(uvw, freqs, fov_deg, n_pix, epsilon)
     if with_vis_obs:
         k = jax.random.PRNGKey(seed + 9)
-        config.vis_obs = (jax.random.normal(k, (n_bl, n_freq, n_time))
-                          + 1j * jax.random.normal(jax.random.PRNGKey(seed + 10),
-                                                   (n_bl, n_freq, n_time)))
+        vis = (jax.random.normal(k, (n_bl, n_freq, n_time))
+               + 1j * jax.random.normal(jax.random.PRNGKey(seed + 10),
+                                        (n_bl, n_freq, n_time)))
+        # Mirror real MS data: single precision (complex64). The data init must
+        # cope with this against the float64 (x64) wgridder plan.
+        config.vis_obs = vis.astype(jnp.complex64)
     return config
 
 
@@ -330,3 +333,12 @@ def test_imagesky_data_requires_vis_obs():
     config = make_sky_config(init="data", with_vis_obs=False)
     with pytest.raises(RuntimeError, match="vis_obs"):
         ImageSky().setup(config)
+
+
+def test_imagesky_data_init_single_channel_complex64():
+    """Regression: data init (dirty image) with single-channel complex64 vis_obs
+    against the float64 wgridder plan must not hit a precision mismatch."""
+    config = make_sky_config(n_freq=1, init="data", with_vis_obs=True)
+    sky, out = run_sky(config)
+    assert out["ast_image"].shape == (1, sky.n_pix, sky.n_pix)
+    assert jnp.all(out["ast_image"] > 0) and jnp.all(jnp.isfinite(out["ast_image"]))
