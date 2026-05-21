@@ -387,6 +387,38 @@ def validate_component_dependencies(
             available[key] = shape
 
 
+def classify_live_components(components: List) -> List[bool]:
+    """Classify components by parameter-dependence (provenance taint).
+
+    Returns ``live[i]``: ``True`` iff component ``i``'s output depends —
+    transitively, through the state — on a learnable parameter. A component is
+    live if it carries learnable params (non-empty ``init_params_base``) or if it
+    reads/accumulates a state key that currently carries param-dependence.
+
+    Walks the stack in list order, tracking which state keys are tainted: a live
+    component taints everything it writes/accumulates; a *static* ``writes``
+    clears the key's taint (it overwrites with a param-independent value), while a
+    *static* ``accumulates`` leaves the key's taint unchanged (it only adds a
+    constant). Seeded keys start untainted.
+
+    The complement (static components) can be evaluated once up front: their
+    outputs never change during inference, and they never read a live output.
+    """
+    live_keys: set = set()
+    live: List[bool] = []
+    for comp in components:
+        inputs = set(comp.reads) | set(comp.accumulates)
+        is_live = bool(comp.init_params_base) or bool(inputs & live_keys)
+        live.append(is_live)
+        if is_live:
+            live_keys.update(comp.writes)
+            live_keys.update(comp.accumulates)
+        else:
+            for key in comp.writes:          # static overwrite clears taint
+                live_keys.discard(key)
+    return live
+
+
 class Model:
 
     def __init__(
@@ -434,11 +466,42 @@ class Model:
         }
         validate_component_dependencies(components, _MODEL_SEED_SHAPES, dims)
 
+        # Classify components by parameter-dependence and precompute the static
+        # ones once into the baseline state (provenance taint over the declared
+        # dataflow). The per-step forward then runs only the live components on
+        # top of this baseline — equivalent to running every component each step
+        # because accumulators are additive and static components never read a
+        # live output, but the constant work (e.g. a fixed-sky degrid, the RFI
+        # phase) runs only once instead of every inference step.
+        live_flags = classify_live_components(components)
+        self.static_components = [c for c, lv in zip(components, live_flags) if not lv]
+        self.live_components = [c for c, lv in zip(components, live_flags) if lv]
+
+        # A `writes` key produced by both partitions would change result under
+        # static-first evaluation (accumulated keys are additive, so safe).
+        static_writes = {k for c in self.static_components for k in c.writes}
+        live_writes = {k for c in self.live_components for k in c.writes}
+        clash = static_writes & live_writes
+        if clash:
+            raise ValueError(
+                f"Cannot precompute static components: state key(s) {sorted(clash)} "
+                "are written by both a static and a live component; static-first "
+                "evaluation would change the result."
+            )
+
+        # Static components do not read learnable params, so {} suffices. Run
+        # them in list order (the resolver guarantees upstream producers run
+        # first) to fold their outputs into the baseline state.
+        for comp in self.static_components:
+            self.state = comp.build_forward()({}, self.state, self.constants)
+
         self.forward = self.build_forward()
         self.prob_model = self.build_prob_model()
 
     def build_forward(self):
-        forwards = [comp.build_forward() for comp in self.components]
+        # Only the live (parameter-dependent) components run per step; the static
+        # components were folded into the baseline ``self.state`` at construction.
+        forwards = [comp.build_forward() for comp in self.live_components]
 
         def forward(params, state, constants):
 
