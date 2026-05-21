@@ -32,6 +32,7 @@ class FixedPointSky(Component):
         "ast_radec": ("n_src", 2),
         "ast_I": ("n_src", "n_freq"),
     }
+    writes = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
     parameters = {}
 
     def setup(self, config):
@@ -132,6 +133,7 @@ class FixedImageSky(Component):
 
     required_inputs = {}
     output_shape = {"ast_image": ("n_freq", "n_l", "n_m")}
+    writes = {"ast_image": ("n_freq", "n_l", "n_m")}
     parameters = {}
 
     def setup(self, config):
@@ -322,6 +324,7 @@ class ImageSky(Component):
 
     required_inputs = {}
     output_shape = {"ast_image": ("n_freq", "n_l", "n_m")}
+    writes = {"ast_image": ("n_freq", "n_l", "n_m")}
     parameters = {
         "image_k_r_base": ("n_k_freq", "n_k_l", "n_k_m"),
         "image_k_i_base": ("n_k_freq", "n_k_l", "n_k_m"),
@@ -498,6 +501,7 @@ class PointSky(Component):
 
     required_inputs = {}
     output_shape = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
+    writes = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
     parameters = {"ast_I_base": ("n_src", "n_freq")}
 
     def setup(self, config):

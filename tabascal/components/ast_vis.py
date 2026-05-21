@@ -22,6 +22,8 @@ class FourierTimeAst(Component):
         "vis_ast": ("n_bl", "n_freq", "n_time"),
     }
 
+    accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
+
     # Add parameter specifications
     parameters = {
         "ast_k_r_base": ("n_bl", "n_freq", "n_k_ast"),
@@ -227,6 +229,10 @@ class FourierTimeConstFreqAst(Component):
         "vis_ast": ("n_bl", 1, "n_time"),
     }
 
+    # The per-channel contribution is (n_bl, 1, n_time); it broadcasts onto the
+    # (n_bl, n_freq, n_time) vis_ast bus when accumulated.
+    accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
+
     # Add parameter specifications
     parameters = {
         "ast_k_r_base": ("n_bl", 1, "n_k_ast"),
@@ -426,6 +432,8 @@ class FourierTimeFreqAst(Component):
     output_shape = {
         "vis_ast": ("n_bl", "n_freq", "n_time"),
     }
+
+    accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
 
     # Add parameter specifications
     parameters = {
@@ -664,6 +672,8 @@ class FourierTimeFreqGPAst(Component):
     output_shape = {
         "vis_ast": ("n_bl", "n_freq", "n_time"),
     }
+
+    accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
 
     # Add parameter specifications
     parameters = {
@@ -959,6 +969,10 @@ class PointSourceVisCalculation(Component):
         "ast_I": ("n_src", "n_freq"),
     }
     output_shape = {"vis_ast": ("n_bl", "n_freq", "n_time")}
+
+    reads = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
+    accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
+
     parameters = {}
 
     def setup(self, config):
@@ -1066,6 +1080,10 @@ class ImageVisCalculation(Component):
         "ast_image": ("n_freq", "n_l", "n_m"),
     }
     output_shape = {"vis_ast": ("n_bl", "n_freq", "n_time")}
+
+    reads = {"ast_image": ("n_freq", "n_l", "n_m")}
+    accumulates = {"vis_ast": ("n_bl", "n_freq", "n_time")}
+
     parameters = {}
 
     def setup(self, config):

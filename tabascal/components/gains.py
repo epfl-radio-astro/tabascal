@@ -120,12 +120,21 @@ def gains_config_validation(gains_config: Dict, freqs: Array, chan_width: float,
 class BaseGPGains(Component):
 
     required_inputs = {
-        "vis_rfi": ("n_bl", "n_freq", "n_time"), 
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
         "vis_ast": ("n_bl", "n_freq", "n_time")
     }
     output_shapes = {
-        "gains": ("n_ant", "n_freq", "n_time"), 
+        "gains": ("n_ant", "n_freq", "n_time"),
         "vis_obs": ("n_bl", "n_freq", "n_time")
+    }
+
+    reads = {
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
+        "vis_ast": ("n_bl", "n_freq", "n_time"),
+    }
+    writes = {
+        "gains": ("n_ant", "n_freq", "n_time"),
+        "vis_obs": ("n_bl", "n_freq", "n_time"),
     }
     parameter_shapes = {}
 

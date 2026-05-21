@@ -292,6 +292,101 @@ class TabConfig:
         self.n_rfi = len(self.norad_ids)
 
 
+# State keys the Model seeds before any component forward runs, independent of
+# the component list (see Model.__init__). This is the dependency resolver's
+# initial "available" set. It is deliberately stricter than the permissive
+# runtime ``Model.state`` (which also pre-seeds every component's
+# ``state_outputs`` for shape stability and manual ``forward`` calls): seeding
+# the resolver with all of those would make the ordering check vacuous.
+_MODEL_SEED_SHAPES: Dict[str, tuple] = {
+    "vis_ast": ("n_bl", "n_freq", "n_time"),
+    "vis_rfi": ("n_bl", "n_freq", "n_time"),
+    "rmse_ast": (1,),
+    "rmse_rfi": (1,),
+    "rmse_gains": (1,),
+}
+
+# Symbolic dimension names the resolver resolves to concrete sizes from the
+# config (names not listed here — e.g. n_src, n_l, n_m — are component-specific
+# and compared symbolically instead).
+_RESOLVER_DIM_NAMES = (
+    "n_rfi", "n_ant", "n_freq", "n_freq_fine", "n_time", "n_time_fine", "n_bl",
+)
+
+
+def _resolve_shape(shape: tuple, dims: Dict[str, int]) -> tuple:
+    """Replace known symbolic dim names with concrete ints; leave the rest as-is."""
+    return tuple(dims.get(d, d) if isinstance(d, str) else d for d in shape)
+
+
+def validate_component_dependencies(
+    components: List, seed_shapes: Dict[str, tuple], dims: Optional[Dict[str, int]] = None
+) -> None:
+    """Validate the declared state dataflow of a component stack (validate-only).
+
+    Walks ``components`` in list order, maintaining the set of state keys
+    available so far (seeded with ``seed_shapes``). For each component, every
+    ``reads`` and ``accumulates`` key must already be available — produced by an
+    upstream component or seeded by the Model. Declared shapes are compared
+    across the producer->consumer edge after resolving the symbolic dimensions
+    named in ``dims`` to concrete sizes (unknown names compared as-is).
+
+    Raises ``ValueError`` with a clear message when a consumed key has no
+    producer, has its producer listed *after* it, or has an incompatible shape.
+    Does not reorder the stack and does not change execution; deriving an order
+    via topological sort is deferred (v1 only validates the given order).
+    """
+    dims = dims or {}
+
+    # Where each key is produced, so a missing key can be reported as "produced
+    # later" (ordering bug) vs "never produced" (incomplete stack).
+    producers: Dict[str, list] = {}
+    for i, comp in enumerate(components):
+        for key in (*comp.writes, *comp.accumulates):
+            producers.setdefault(key, []).append((i, type(comp).__name__))
+
+    available: Dict[str, tuple] = dict(seed_shapes)  # key -> authoritative shape
+
+    def _compatible(a: tuple, b: tuple) -> bool:
+        return _resolve_shape(a, dims) == _resolve_shape(b, dims)
+
+    for i, comp in enumerate(components):
+        name = type(comp).__name__
+
+        # 1. Every consumed key (reads + accumulates) must be available upstream
+        #    and shape-compatible with the value that produced it.
+        for kind, decl in (("reads", comp.reads), ("accumulates", comp.accumulates)):
+            for key, shape in decl.items():
+                if key not in available:
+                    later = [nm for (j, nm) in producers.get(key, ()) if j > i]
+                    verb = "accumulates into" if kind == "accumulates" else "reads"
+                    if later:
+                        raise ValueError(
+                            f"Component ordering error: '{name}' (position {i}) "
+                            f"{verb} state key '{key}', but it is only produced "
+                            f"later by {later}. List the producer first."
+                        )
+                    raise ValueError(
+                        f"Unresolved dependency: '{name}' (position {i}) {verb} "
+                        f"state key '{key}', but no component produces it and it "
+                        f"is not an initial state key {sorted(seed_shapes)}."
+                    )
+                if not _compatible(shape, available[key]):
+                    raise ValueError(
+                        f"Shape mismatch: '{name}' (position {i}) expects state key "
+                        f"'{key}' with shape {shape}, but the upstream value has "
+                        f"shape {available[key]} (resolved "
+                        f"{_resolve_shape(shape, dims)} vs "
+                        f"{_resolve_shape(available[key], dims)})."
+                    )
+
+        # 2. Make this component's outputs available downstream. ``writes``
+        #    establish/overwrite the key; ``accumulates`` add to the existing
+        #    (already-validated) key and so leave the authoritative shape intact.
+        for key, shape in comp.writes.items():
+            available[key] = shape
+
+
 class Model:
 
     def __init__(
@@ -328,6 +423,16 @@ class Model:
         self.state["rmse_ast"] = jnp.array([jnp.nan])
         self.state["rmse_rfi"] = jnp.array([jnp.nan])
         self.state["rmse_gains"] = jnp.array([jnp.nan])
+
+        # Validate the declared component dataflow at config time (validate-only;
+        # does not reorder or change execution). Resolves symbolic shape dims
+        # against the observation's concrete sizes.
+        dims = {
+            d: getattr(tab_config, d)
+            for d in _RESOLVER_DIM_NAMES
+            if getattr(tab_config, d, None) is not None
+        }
+        validate_component_dependencies(components, _MODEL_SEED_SHAPES, dims)
 
         self.forward = self.build_forward()
         self.prob_model = self.build_prob_model()

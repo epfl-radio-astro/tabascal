@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Tuple
 
 from jax import Array
 
@@ -13,6 +13,29 @@ class Component(ABC):
     outputs: Dict[str, Array] = {}
     init_params: Dict[str, Array] = {}
     init_params_base: Dict[str, Array] = {}
+
+    # Explicit declaration of the component's state I/O, used by the config-time
+    # dependency resolver (``tabascal.config.validate_component_dependencies``).
+    # These describe what the ``forward`` built by ``build_forward`` does to the
+    # state dict and are the authoritative interface for ordering validation
+    # (the legacy ``required_inputs`` / ``output_shape(s)`` attrs are kept for
+    # shape metadata but are inconsistent across components and not relied on
+    # here).
+    #
+    # Each maps a state key -> its (symbolic) shape. Dimensions are dim-name
+    # strings (e.g. "n_bl", "n_freq") or literal ints; the resolver resolves the
+    # names it knows to concrete sizes from the config and compares shapes across
+    # the producer->consumer edge.
+    #
+    # - ``reads``       : state keys consumed but not produced (pure inputs).
+    # - ``writes``      : state keys established/overwritten (value does not
+    #                     depend on a prior value of the key).
+    # - ``accumulates`` : state keys read-modified-written (``state[k] += dk``).
+    #                     The key must already be available (seeded by the Model
+    #                     or written upstream); contributions are additive.
+    reads: Dict[str, Tuple] = {}
+    writes: Dict[str, Tuple] = {}
+    accumulates: Dict[str, Tuple] = {}
 
     @abstractmethod
     def setup(self, tab_config: Any) -> None:

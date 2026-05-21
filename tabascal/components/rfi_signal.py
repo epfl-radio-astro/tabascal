@@ -219,6 +219,9 @@ class RealRFI(BaseGPRFI):
         "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
     }
 
+    # Real-space GP: the freq axis stays coarse (no frequency integration).
+    writes = {"rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine")}
+
     # Add parameter specifications
     parameter_shapes = {
         "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
@@ -382,6 +385,9 @@ class ComplexRFI(BaseGPRFI):
     output_shapes = {
         "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
     }
+
+    # Real-space GP: the freq axis stays coarse (no frequency integration).
+    writes = {"rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine")}
 
     # Add parameter specifications
     parameter_shapes = {
@@ -561,6 +567,9 @@ class FourierGPRFI(BaseGPRFI):
     output_shapes = {
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
     }
+
+    # Fourier GP: produces the frequency-integrated (fine) axis.
+    writes = {"rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}
 
     # Add parameter specifications
     parameter_shapes = {
@@ -822,6 +831,9 @@ class FourierGPRFIConstAnt(BaseGPRFI):
     output_shapes = {
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
     }
+
+    # Fourier GP: produces the frequency-integrated (fine) axis.
+    writes = {"rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}
 
     # Add parameter specifications
     parameter_shapes = {

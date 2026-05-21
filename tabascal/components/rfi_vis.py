@@ -14,6 +14,12 @@ class RiemannVisCalculation(Component):
     }
     output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
+    reads = {
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
+    }
+    accumulates = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+
     parameters = {}
 
     def setup(self, config):
@@ -88,6 +94,12 @@ class RiemannVisTimeFreqCalculation(Component):
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
     }
     output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+
+    reads = {
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+    }
+    accumulates = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
 
@@ -167,6 +179,12 @@ class RiemannVisTimeFreqCalculationFFI(Component):
     }
     output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
+    reads = {
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+    }
+    accumulates = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+
     parameters = {}
 
     def setup(self, config):
@@ -242,6 +260,12 @@ class RiemannVisTimeFreqVariable(Component):
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
     }
     output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+
+    reads = {
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+    }
+    accumulates = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
 
