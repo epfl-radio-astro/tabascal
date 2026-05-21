@@ -1,4 +1,5 @@
-"""Tests for tabascal.components.ast_signal.FixedImageSky (dense fixed sky)."""
+"""Tests for tabascal.components.ast_signal.FixedImageSky and ImageSky on the
+ast.signals / ast.grid config schema (sources resolved via tabascal.sky_sources)."""
 
 import warnings
 from types import SimpleNamespace
@@ -19,20 +20,23 @@ from .conftest import make_constants
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def make_config(fixed_path=None, n_ant=4, n_time=3, n_freq=2, fov_deg=8.0,
-                n_pix=128, epsilon=1e-9, uvw_scale=20.0, ra0=0.0, dec0=0.0, seed=0):
+def make_config(init=None, n_ant=4, n_time=3, n_freq=2, fov_deg=8.0,
+                n_pix=128, epsilon=1e-9, uvw_scale=20.0, ra0=0.0, dec0=0.0,
+                zarr_path=None, seed=0):
+    """Config for FixedImageSky. ``init`` is an ast.signals.FixedImageSky source
+    spec (or None to leave the block out)."""
     a1, a2 = jnp.triu_indices(n_ant, 1)
     n_bl = a1.shape[0]
     uvw = jax.random.normal(jax.random.PRNGKey(seed), (n_bl, n_time, 3)) * uvw_scale
     freqs = jnp.linspace(1.4e9, 1.5e9, n_freq)
-    image_args = {"fov_deg": fov_deg, "n_pix": n_pix, "epsilon": epsilon}
-    if fixed_path is not None:
-        image_args["fixed_path"] = str(fixed_path)
+    signals = {} if init is None else {"FixedImageSky": {"init": init}}
     config = SimpleNamespace(
         n_ant=n_ant, n_bl=n_bl, n_time=n_time, n_freq=n_freq,
         uvw=uvw, freqs=freqs,
         phase_centre={"ra": ra0, "dec": dec0},
-        args={"ast": {"image": image_args}},
+        args={"ast": {"grid": {"fov_deg": fov_deg, "n_pix": n_pix, "epsilon": epsilon},
+                      "signals": signals},
+              "data": {"zarr_path": zarr_path, "data_col": "DATA"}},
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -63,6 +67,14 @@ def write_catalogue_zarr(path, radec_deg, flux_per_freq, n_time, freqs):
     ds.to_zarr(str(path), mode="w")
 
 
+def _catalogue_init(zarr_path):
+    return {"type": "from_catalogue", "fmt": "zarr", "path": str(zarr_path)}
+
+
+def _fits_init(path):
+    return {"type": "from_fits", "path": str(path)}
+
+
 # ── catalogue path: parity with PointSourceVisCalculation ─────────────────────
 
 def test_catalogue_pipeline_matches_point_source(tmp_path):
@@ -78,7 +90,7 @@ def test_catalogue_pipeline_matches_point_source(tmp_path):
 
     zarr_path = tmp_path / "cat.zarr"
     write_catalogue_zarr(zarr_path, np.rad2deg(radec), flux, config.n_time, config.freqs)
-    config.args["ast"]["image"]["fixed_path"] = str(zarr_path)
+    config.args["ast"]["signals"]["FixedImageSky"] = {"init": _catalogue_init(zarr_path)}
 
     fis = FixedImageSky()
     iv = ImageVisCalculation()
@@ -109,7 +121,7 @@ def test_catalogue_continuum_broadcasts(tmp_path):
     zarr_path = tmp_path / "cont.zarr"
     write_catalogue_zarr(zarr_path, np.rad2deg(radec), flux, config.n_time,
                          np.array([1.227e9]))
-    config.args["ast"]["image"]["fixed_path"] = str(zarr_path)
+    config.args["ast"]["signals"]["FixedImageSky"] = {"init": _catalogue_init(zarr_path)}
 
     fis = FixedImageSky()
     fis.setup(config)
@@ -131,7 +143,7 @@ def test_fits_continuum_image(tmp_path):
     path = tmp_path / "sky.fits"
     fits.PrimaryHDU(data).writeto(path)
 
-    config = make_config(fixed_path=path, n_pix=n_pix, n_freq=n_freq)
+    config = make_config(init=_fits_init(path), n_pix=n_pix, n_freq=n_freq)
     fis = FixedImageSky()
     fis.setup(config)
     img = np.asarray(fis.ast_image)
@@ -156,7 +168,7 @@ def test_fits_jy_per_beam_conversion(tmp_path):
     path = tmp_path / "beam.fits"
     fits.PrimaryHDU(data, hdr).writeto(path)
 
-    config = make_config(fixed_path=path, n_pix=n_pix, n_freq=2, fov_deg=fov_deg)
+    config = make_config(init=_fits_init(path), n_pix=n_pix, n_freq=2, fov_deg=fov_deg)
     fis = FixedImageSky()
     fis.setup(config)
 
@@ -173,7 +185,7 @@ def test_fits_jy_per_beam_missing_beam_errors(tmp_path):
     hdr["BUNIT"] = "Jy/beam"
     path = tmp_path / "nobeam.fits"
     fits.PrimaryHDU(np.zeros((64, 64)), hdr).writeto(path)
-    config = make_config(fixed_path=path, n_pix=64)
+    config = make_config(init=_fits_init(path), n_pix=64)
     with pytest.raises(RuntimeError, match="Jy/beam"):
         FixedImageSky().setup(config)
 
@@ -184,33 +196,43 @@ def test_fits_grid_mismatch_errors(tmp_path):
 
     path = tmp_path / "wrong.fits"
     fits.PrimaryHDU(np.zeros((66, 66))).writeto(path)
-    config = make_config(fixed_path=path, n_pix=64)
+    config = make_config(init=_fits_init(path), n_pix=64)
     with pytest.raises(RuntimeError, match="does not match"):
         FixedImageSky().setup(config)
 
 
 # ── error handling ─────────────────────────────────────────────────────────────
 
-def test_error_on_missing_fixed_path():
-    config = make_config(fixed_path=None)
-    with pytest.raises(RuntimeError, match="fixed_path"):
+def test_error_on_missing_source(tmp_path):
+    """No FixedImageSky source and no data.zarr_path fallback -> clear error."""
+    config = make_config(init=None, zarr_path=None)
+    with pytest.raises(RuntimeError, match="path"):
         FixedImageSky().setup(config)
 
 
 def test_error_without_image_grid(tmp_path):
-    config = make_config(fixed_path=tmp_path / "x.fits")
+    config = make_config(init=_fits_init(tmp_path / "x.fits"))
     config.image_grid = None
     with pytest.raises(RuntimeError, match="image grid"):
         FixedImageSky().setup(config)
 
 
-def test_error_on_unsupported_extension():
-    config = make_config(fixed_path="sky.txt")
-    with pytest.raises(RuntimeError, match="Unsupported"):
+def test_error_on_unknown_source_type():
+    config = make_config(init={"type": "bogus"})
+    with pytest.raises(RuntimeError, match="Unknown sky-source"):
         FixedImageSky().setup(config)
 
 
 # ── ImageSky (learnable log-normal GRF) ───────────────────────────────────────
+
+_INIT_SPECS = {
+    "zeros": {"type": "zeros"},
+    "prior": {"type": "prior"},
+    "sample": {"type": "sample"},
+    "data": {"type": "from_ms"},          # dirty image of the data column
+    "bogus": {"type": "bogus"},
+}
+
 
 def make_sky_config(n_ant=4, n_time=3, n_freq=2, fov_deg=8.0, n_pix=64,
                     epsilon=1e-7, uvw_scale=15.0, mu=-2.0, init="sample",
@@ -221,13 +243,16 @@ def make_sky_config(n_ant=4, n_time=3, n_freq=2, fov_deg=8.0, n_pix=64,
     freqs = jnp.linspace(1.4e9, 1.5e9, n_freq)
     pow_spec = {"p0": 1.0, "k0_freq": 1e-6, "k0_lm": 300.0,
                 "gamma_freq": 2.0, "gamma_lm": 2.0, "cutoff": 0.0, "mu": mu}
+    init_spec = _INIT_SPECS.get(init, {"type": init})
     config = SimpleNamespace(
         n_ant=n_ant, n_bl=n_bl, n_time=n_time, n_freq=n_freq,
         uvw=uvw, freqs=freqs, chan_width=chan_width,
         phase_centre={"ra": 0.0, "dec": 0.0},
-        args={"ast": {"image": {"fov_deg": fov_deg, "n_pix": n_pix,
-                                "epsilon": epsilon, "pow_spec": pow_spec,
-                                "init": init}}},
+        args={"ast": {"grid": {"fov_deg": fov_deg, "n_pix": n_pix, "epsilon": epsilon},
+                      "signals": {"ImageSky": {
+                          "init": init_spec,
+                          "prior": {"mean": {"type": "zeros"}, "pow_spec": pow_spec}}}},
+              "data": {"zarr_path": None, "data_col": "DATA"}},
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -284,6 +309,27 @@ def test_imagesky_param_and_prior_shapes():
     assert sky.init_params_base["image_k_i_base"].shape == k_shape
 
 
+def test_imagesky_prior_mean_from_source(tmp_path):
+    """A source prior mean (a FITS image) sets the GRF latent mean: with zeros
+    init the sky reproduces that image."""
+    from astropy.io import fits
+
+    n_pix, n_freq = 64, 2
+    config = make_sky_config(n_pix=n_pix, n_freq=n_freq, init="zeros", mu=-2.0)
+    # Strictly-positive image so log is well defined.
+    img = np.full((n_pix, n_pix), 0.05)
+    img[30, 18] = 1.2
+    path = tmp_path / "mean.fits"
+    fits.PrimaryHDU(img).writeto(path)
+    sig = config.args["ast"]["signals"]["ImageSky"]
+    sig["prior"]["mean"] = {"type": "from_fits", "path": str(path)}
+
+    sky, out = run_sky(config)
+    # Round-trips through log -> latent -> signal -> exp, so allow modest error.
+    rel = jnp.linalg.norm(out["ast_image"][0] - img) / jnp.linalg.norm(img)
+    assert rel < 1e-2, f"prior-mean reconstruction rel_err {rel:.2e}"
+
+
 def test_imagesky_pipeline_to_vis():
     config = make_sky_config(n_pix=64, n_freq=2)
     sky = ImageSky()
@@ -325,7 +371,7 @@ def test_imagesky_differentiable():
 
 def test_imagesky_invalid_init_errors():
     config = make_sky_config(init="bogus")
-    with pytest.raises(RuntimeError, match="init type"):
+    with pytest.raises(RuntimeError, match="Unknown sky-source"):
         ImageSky().setup(config)
 
 

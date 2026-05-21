@@ -43,7 +43,9 @@ def deep_update(d: Dict, u: Dict) -> Dict:
     """
     for k, v in u.items():
         if isinstance(v, collections.abc.Mapping):
-            d[k] = deep_update(d.get(k, {}), v)
+            # ``d.get(k) or {}`` so a null placeholder (e.g. ``grid: null`` in the
+            # base config) accepts a dict override instead of failing on None[k].
+            d[k] = deep_update(d.get(k) or {}, v)
         else:
             d[k] = v
     return d
@@ -147,19 +149,20 @@ class TabConfig:
     def _set_image_grid(self):
         """Build the shared dense-sky image grid + wgridder plan, if requested.
 
-        Only built when the user supplies an ``args["ast"]["image"]`` block;
-        otherwise left as ``None`` and the dense-sky components error if used.
+        Only built when the user supplies an ``args["ast"]["grid"]`` block
+        (``fov_deg``, ``n_pix``, ``epsilon``); otherwise left as ``None`` and the
+        dense-sky components error if used.
         """
         self.image_grid = None
-        image_args = self.args.get("ast", {}).get("image")
-        if image_args is not None:
+        grid_args = self.args.get("ast", {}).get("grid")
+        if grid_args is not None:
             self.image_grid = make_image_plan(
                 self.uvw,
                 self.freqs,
-                image_args["fov_deg"],
-                image_args["n_pix"],
-                image_args["epsilon"],
-                image_args.get("uvw_sign", (1.0, 1.0, 1.0)),
+                grid_args["fov_deg"],
+                grid_args["n_pix"],
+                grid_args["epsilon"],
+                grid_args.get("uvw_sign", (1.0, 1.0, 1.0)),
             )
 
     def set_noise(self, noise: float):

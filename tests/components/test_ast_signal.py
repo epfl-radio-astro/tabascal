@@ -225,6 +225,7 @@ def write_point_catalogue(path: Path, radec_deg, flux_cube, freqs):
 
 def make_point_config(zarr_path, width=1.0, init="sample", n_ant=4, n_freq=2,
                       n_time=2, freqs=None):
+    """``init`` is the PointSky flux-parameter ``start`` policy (zeros/sample/truth)."""
     a1, a2 = jnp.triu_indices(n_ant, 1)
     n_bl = a1.shape[0]
     uvw = jax.random.normal(jax.random.PRNGKey(3), (n_bl, n_time, 3)) * 100.0
@@ -232,8 +233,11 @@ def make_point_config(zarr_path, width=1.0, init="sample", n_ant=4, n_freq=2,
     return SimpleNamespace(
         n_ant=n_ant, n_bl=n_bl, n_freq=n_freq, n_time=n_time,
         uvw=uvw, freqs=freqs, phase_centre={"ra": 27.0, "dec": -30.0},
-        args={"data": {"zarr_path": zarr_path},
-              "ast": {"point": {"laplace_width": width, "init": init}}},
+        args={"data": {"zarr_path": zarr_path, "data_col": "DATA"},
+              "ast": {"signals": {"PointSky": {
+                  "init": {"type": "from_catalogue", "fmt": "zarr"},
+                  "start": init,
+                  "prior": {"laplace_width": width}}}}},
     )
 
 
@@ -318,5 +322,5 @@ class TestPointSky:
     def test_invalid_init_errors(self, tmp_path):
         zp, _, _, freqs = self._catalogue(tmp_path)
         config = make_point_config(zp, init="bogus", freqs=freqs)
-        with pytest.raises(RuntimeError, match="init type"):
+        with pytest.raises(RuntimeError, match="start"):
             PointSky().setup(config)

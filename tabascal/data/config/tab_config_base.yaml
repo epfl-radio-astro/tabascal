@@ -47,9 +47,15 @@ ast:
   init: sample          # Optional - The initialization method for the astronomical visibility parameters. Options are 'est', 'prior', 'truth', 'truth_mean'
   mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'prior', 'truth', 'truth_mean'
   pow_spec:
-    P0: null            # Optional - Power spectrum value at k=0 for the astronomical visibility parameters prior standard deviation 
+    P0: null            # Optional - Power spectrum value at k=0 for the astronomical visibility parameters prior standard deviation
     gamma: 1.0          # Optional - Exponential of the power law section of the power spectrum for astronomical visibility parameters
     k0: 1e-3            # Optional - Position of the knee of the power spectrum
+  grid: null            # Optional - Dense-sky image grid + wgridder plan {fov_deg, n_pix, epsilon}; built only when set (needed by the image-based sky components)
+  signals: {}           # Optional - Per sky-signal-component source specs, keyed by component class name, e.g.
+                        #   signals:
+                        #     FixedPointSky: {init: {type: from_catalogue, fmt: zarr}}
+                        #     ImageSky: {init: {type: zeros}, prior: {mean: {type: zeros}, pow_spec: {...}}}
+                        #     PointSky: {init: {type: from_catalogue, fmt: zarr}, start: sample, prior: {laplace_width: 1.0}}
 ##########################################
 # RFI prior and initialization parameters
 ##########################################

@@ -300,8 +300,10 @@ ast_signal_configs = [
                 "ast_vis:PointSourceVisCalculation",
                 "gains:UnitaryGains",
             ],
-            config_overrides={"ast": {"point": {"laplace_width": 1.0,
-                                                "init": "truth"}}},
+            config_overrides={"ast": {"signals": {"PointSky": {
+                "init": {"type": "from_catalogue", "fmt": "zarr"},
+                "start": "truth",
+                "prior": {"laplace_width": 1.0}}}}},
             chi2_ref=3.2505896974263226,
         ),
         id="PointSky+PointSourceVisCalculation",
@@ -320,8 +322,9 @@ ast_signal_configs = [
                 "ast_vis:ImageVisCalculation",
                 "gains:UnitaryGains",
             ],
-            config_overrides={"ast": {"image": {"fov_deg": 5.0, "n_pix": 256,
-                                                "epsilon": 1e-6}}},
+            config_overrides={"ast": {
+                "grid": {"fov_deg": 5.0, "n_pix": 256, "epsilon": 1e-6},
+                "signals": {"FixedImageSky": {}}}},
             chi2_ref=8.108350608931893,
         ),
         id="FixedImageSky+ImageVisCalculation",
@@ -339,16 +342,17 @@ ast_signal_configs = [
                 "ast_vis:ImageVisCalculation",
                 "gains:UnitaryGains",
             ],
-            config_overrides={"ast": {"image": {
-                "fov_deg": 5.0, "n_pix": 256, "epsilon": 1e-6,
-                # 'prior' init: the 'data' (dirty-image) init now works but
-                # imprints unsubtracted RFI from vis_obs into the sky, so it is
-                # only suitable on RFI-subtracted / astronomy-dominated data.
-                "init": "prior",
-                "pow_spec": {"p0": 1.0, "k0_freq": 1.0, "k0_lm": 300.0,
-                             "gamma_freq": 2.0, "gamma_lm": 2.0,
-                             "cutoff": 1e-6, "mu": -2.0},
-            }}},
+            config_overrides={"ast": {
+                "grid": {"fov_deg": 5.0, "n_pix": 256, "epsilon": 1e-6},
+                "signals": {"ImageSky": {
+                    # 'zeros' init (== prior mean): a 'from_ms' dirty-image init
+                    # now works but imprints unsubtracted RFI from the data into
+                    # the sky, so it suits only RFI-subtracted / astronomy data.
+                    "init": {"type": "zeros"},
+                    "prior": {"mean": {"type": "zeros"},
+                              "pow_spec": {"p0": 1.0, "k0_freq": 1.0, "k0_lm": 300.0,
+                                           "gamma_freq": 2.0, "gamma_lm": 2.0,
+                                           "cutoff": 1e-6, "mu": -2.0}}}}}},
             chi2_ref=1.050073696043625,
         ),
         id="ImageSky+ImageVisCalculation",

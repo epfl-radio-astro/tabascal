@@ -1,8 +1,5 @@
-import numpy as np
 import jax.numpy as jnp
 from jax import random
-import xarray as xr
-from jax_nufft import vis2dirty
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal, gaussian_to_laplace, laplace_to_gaussian
@@ -12,19 +9,32 @@ from tabascal.fft_gp import (
     signal_to_latent_init,
     signal_to_latent,
 )
+from tabascal.sky_sources import resolve_sky_source, warn_if_large_catalogue
+
+
+def _signal_spec(config, cls_name):
+    """Return the ``ast.signals.<cls_name>`` config block (``{}`` if absent)."""
+    signals = config.args.get("ast", {}).get("signals", {}) or {}
+    return signals.get(cls_name, {})
+
+
+def _require_grid(config):
+    grid = getattr(config, "image_grid", None)
+    if grid is None:
+        raise ValueError(
+            "no image grid on the config; set args['ast']['grid'] "
+            "(fov_deg, n_pix, epsilon) so the config builds the shared grid."
+        )
+    return grid
 
 
 class FixedPointSky(Component):
-    """No-parameter component that loads a fixed point-source sky catalogue
-    from a tabsim zarr file and writes it into the state.
+    """No-parameter component that writes a fixed point-source sky into the state.
 
-    Reads ``ast_p_radec`` (degrees, shape ``(n_src, 2)``) and ``ast_p_I``
-    (Jy, shape ``(n_src, n_time, n_freq)``) from the zarr at
-    ``config.args["data"]["zarr_path"]``, averages the flux over the time
-    axis, converts RA/Dec to radians, and writes the results as:
-
-    - ``ast_radec``: ``(n_src, 2)`` in radians
-    - ``ast_I``:     ``(n_src, n_freq)`` in Jy
+    The sky comes from a catalogue source (``ast.signals.FixedPointSky.init``,
+    default ``{type: from_catalogue, fmt: zarr}`` against ``data.zarr_path``).
+    Writes ``ast_radec`` ``(n_src, 2)`` radians and ``ast_I`` ``(n_src, n_freq)``
+    Jy; pairs with ``PointSourceVisCalculation``.
     """
 
     writes = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
@@ -32,31 +42,14 @@ class FixedPointSky(Component):
 
     def setup(self, config):
         try:
-            zarr_path = config.args["data"]["zarr_path"]
-            if zarr_path is None:
-                raise ValueError("config.args['data']['zarr_path'] is not set")
-
-            xds = xr.open_zarr(zarr_path)
-
-            if "ast_p_radec" not in xds:
-                raise ValueError(
-                    f"No point sources found in zarr at {zarr_path}. "
-                    "Expected variable 'ast_p_radec'."
-                )
-
-            # ast_p_radec: (n_src, 2) in degrees
-            radec_deg = jnp.array(xds.ast_p_radec.data.compute())
-            self.ast_radec = jnp.deg2rad(radec_deg)  # (n_src, 2) radians
-
-            # ast_p_I: (n_src, n_time, n_freq) → mean over time → (n_src, n_freq)
-            ast_p_I = jnp.array(xds.ast_p_I.data.compute())
-            self.ast_I = jnp.mean(ast_p_I, axis=1)  # (n_src, n_freq)
-
-            self.n_src = self.ast_radec.shape[0]
             self.n_freq = config.n_freq
-
+            spec = _signal_spec(config, "FixedPointSky")
+            init = spec.get("init", {"type": "from_catalogue", "fmt": "zarr"})
+            source = resolve_sky_source(init, config)
+            self.ast_radec, self.ast_I = source.catalogue()   # radians, (n_src, n_freq)
+            self.n_src = int(self.ast_radec.shape[0])
+            warn_if_large_catalogue(self.n_src, "FixedPointSky -> PointSourceVisCalculation")
             self._set_outputs()
-
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
@@ -66,10 +59,7 @@ class FixedPointSky(Component):
         return set_params
 
     def build_constants(self):
-        return {
-            "ast_radec": self.ast_radec,
-            "ast_I": self.ast_I,
-        }
+        return {"ast_radec": self.ast_radec, "ast_I": self.ast_I}
 
     def build_forward(self):
         prefix = self.prefix
@@ -84,46 +74,17 @@ class FixedPointSky(Component):
         return forward
 
     def _set_outputs(self):
-        self.state_outputs = {
-            "ast_radec": self.ast_radec,
-            "ast_I": self.ast_I,
-        }
-
-
-def _interp_to_freqs(src_freqs, values, dst_freqs, axis):
-    """Interpolate ``values`` along ``axis`` from ``src_freqs`` onto ``dst_freqs``.
-
-    A single source channel is broadcast (flat spectrum); otherwise 1-D linear
-    interpolation per element (the spectrum is smooth, so this is adequate)."""
-    src_freqs = np.asarray(src_freqs, dtype=float)
-    dst_freqs = np.asarray(dst_freqs, dtype=float)
-    if src_freqs.size == 1:
-        return np.repeat(values, dst_freqs.size, axis=axis)
-    order = np.argsort(src_freqs)
-    src_sorted = src_freqs[order]
-    vals_sorted = np.take(values, order, axis=axis)
-    return np.apply_along_axis(
-        lambda y: np.interp(dst_freqs, src_sorted, y), axis, vals_sorted
-    )
+        self.state_outputs = {"ast_radec": self.ast_radec, "ast_I": self.ast_I}
 
 
 class FixedImageSky(Component):
     """No-parameter component that writes a fixed dense-sky image into the state.
 
-    Produces ``ast_image`` (shape ``(n_freq, n_l, n_m)``, Jy/pixel, Stokes I) on
-    the cosine grid owned by the config (``config.image_grid``). The source is
-    selected by extension of ``config.args["ast"]["image"]["fixed_path"]``:
-
-    - ``.fits``: a FITS image (2-D continuum) or cube (spectral axis interpolated
-      onto ``config.freqs``). The spatial grid must already match the config grid
-      (``n_pix x n_pix``); reprojection/regridding is not done here.
-    - ``.zarr``: a tabsim point catalogue (``ast_p_radec``, ``ast_p_I``) rasterised
-      onto the grid (nearest pixel), time-averaged and spectrally interpolated.
-
-    Note on units: the model expects Jy/pixel. A FITS image whose ``BUNIT`` is
-    Jy/beam (e.g. a WSClean restored image) is converted from the header's
-    restoring beam (``BMAJ``/``BMIN``/``CDELT``); Jy/pixel model images pass
-    through unchanged.
+    Produces ``ast_image`` ``(n_freq, n_l, n_m)`` Jy/pixel (Stokes I) on the
+    config grid (``ast.grid``) from a source (``ast.signals.FixedImageSky.init``,
+    default ``{type: from_catalogue, fmt: zarr}`` rasterised from
+    ``data.zarr_path``; or ``{type: from_fits, path: ...}``). Pairs with
+    ``ImageVisCalculation``.
     """
 
     writes = {"ast_image": ("n_freq", "n_l", "n_m")}
@@ -132,39 +93,12 @@ class FixedImageSky(Component):
     def setup(self, config):
         try:
             self.n_freq = config.n_freq
-
-            grid = getattr(config, "image_grid", None)
-            if grid is None:
-                raise ValueError(
-                    "no image grid on the config; set args['ast']['image'] "
-                    "(fov_deg, n_pix, epsilon) so the config builds the grid."
-                )
+            grid = _require_grid(config)
             self.n_pix = grid.n_pix
-            self.pixsize = float(grid.pixsize)
-            self.freqs = np.asarray(config.freqs, dtype=float)
-            self.ra0 = float(np.deg2rad(config.phase_centre["ra"]))
-            self.dec0 = float(np.deg2rad(config.phase_centre["dec"]))
 
-            fixed_path = config.args["ast"]["image"].get("fixed_path")
-            if fixed_path is None:
-                # Fall back to the data catalogue (rasterise the same point
-                # sources the rest of the pipeline uses).
-                fixed_path = config.args.get("data", {}).get("zarr_path")
-            if fixed_path is None:
-                raise ValueError(
-                    "set args['ast']['image']['fixed_path'] (or "
-                    "args['data']['zarr_path'])"
-                )
-
-            if str(fixed_path).endswith(".fits"):
-                image = self._load_fits(fixed_path)
-            elif str(fixed_path).endswith(".zarr"):
-                image = self._rasterise_catalogue(fixed_path)
-            else:
-                raise ValueError(
-                    f"Unsupported fixed_path '{fixed_path}'. Expected a .fits image "
-                    "or a .zarr point catalogue."
-                )
+            spec = _signal_spec(config, "FixedImageSky")
+            init = spec.get("init", {"type": "from_catalogue", "fmt": "zarr"})
+            image = resolve_sky_source(init, config).image(grid)
 
             if image.shape != (self.n_freq, self.n_pix, self.n_pix):
                 raise ValueError(
@@ -175,108 +109,6 @@ class FixedImageSky(Component):
             self._set_outputs()
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def _load_fits(self, path):
-        from astropy.io import fits
-
-        with fits.open(path) as hdul:
-            data = np.squeeze(np.asarray(hdul[0].data, dtype=float))
-            header = hdul[0].header
-
-        data = data * self._jy_beam_to_jy_pixel_factor(header)
-
-        if data.ndim == 2:
-            if data.shape != (self.n_pix, self.n_pix):
-                raise ValueError(
-                    f"FITS spatial shape {data.shape} does not match grid "
-                    f"({self.n_pix}, {self.n_pix}); reprojection is not supported."
-                )
-            return np.broadcast_to(data[None], (self.n_freq, self.n_pix, self.n_pix)).copy()
-
-        if data.ndim == 3:
-            n_chan = data.shape[0]
-            if data.shape[1:] != (self.n_pix, self.n_pix):
-                raise ValueError(
-                    f"FITS spatial shape {data.shape[1:]} does not match grid "
-                    f"({self.n_pix}, {self.n_pix}); reprojection is not supported."
-                )
-            if n_chan == self.n_freq:
-                return data
-            fits_freqs = self._fits_freqs(header, n_chan)
-            return _interp_to_freqs(fits_freqs, data, self.freqs, axis=0)
-
-        raise ValueError(f"Unsupported FITS data shape {data.shape}.")
-
-    @staticmethod
-    def _jy_beam_to_jy_pixel_factor(header):
-        """Scale factor converting a WSClean-style Jy/beam image to Jy/pixel.
-
-        A point source in Jy/beam has peak = flux density, so Jy/pixel =
-        Jy/beam · (pixel area / beam area) = Jy/beam / (pixels per beam), where
-        the Gaussian restoring-beam solid angle is
-        ``Omega_beam = (pi / (4 ln2)) · BMAJ · BMIN``.
-
-        Header keys (WSClean restored images): ``BUNIT`` ('Jy/beam' vs 'Jy/pixel'),
-        ``BMAJ``/``BMIN`` (restoring-beam FWHM, degrees) and ``CDELT1``/``CDELT2``
-        (pixel scale, degrees). A model image (BUNIT 'Jy/pixel', or no beam) needs
-        no conversion. A single header beam is applied to all channels.
-        """
-        bunit = str(header.get("BUNIT", "")).strip().lower().replace(" ", "")
-        if "beam" not in bunit:                       # Jy/pixel, dimensionless, or absent
-            return 1.0
-
-        bmaj, bmin = header.get("BMAJ"), header.get("BMIN")
-        cdelt1, cdelt2 = header.get("CDELT1"), header.get("CDELT2")
-        if None in (bmaj, bmin, cdelt1, cdelt2):
-            raise ValueError(
-                "FITS BUNIT is Jy/beam but the restoring beam (BMAJ/BMIN) or pixel "
-                "scale (CDELT1/CDELT2) is missing, so it cannot be converted to "
-                "Jy/pixel."
-            )
-        beam_area = (np.pi / (4.0 * np.log(2.0))) * float(bmaj) * float(bmin)
-        pixel_area = abs(float(cdelt1) * float(cdelt2))
-        return pixel_area / beam_area
-
-    @staticmethod
-    def _fits_freqs(header, n_chan):
-        from astropy.wcs import WCS
-
-        wcs = WCS(header)
-        if not wcs.has_spectral:
-            raise ValueError(
-                "FITS cube has no spectral WCS; provide a frequency axis or a "
-                "single-channel (continuum) image."
-            )
-        spec = wcs.spectral
-        return spec.pixel_to_world(np.arange(n_chan)).to("Hz").value
-
-    def _rasterise_catalogue(self, path):
-        xds = xr.open_zarr(path)
-        if "ast_p_radec" not in xds:
-            raise ValueError(
-                f"No point sources found in zarr at {path}. Expected 'ast_p_radec'."
-            )
-        radec = np.deg2rad(np.asarray(xds.ast_p_radec.values))           # (n_src, 2)
-        flux = np.asarray(xds.ast_p_I.values)                            # (n_src, n_time, n_chan)
-        flux = flux.mean(axis=1)                                         # (n_src, n_chan)
-        flux = _interp_to_freqs(np.asarray(xds.freq.values), flux,
-                                self.freqs, axis=1)                      # (n_src, n_freq)
-
-        ra, dec = radec[:, 0], radec[:, 1]
-        dra = ra - self.ra0
-        l = np.cos(dec) * np.sin(dra)
-        m = (np.sin(dec) * np.cos(self.dec0)
-             - np.cos(dec) * np.sin(self.dec0) * np.cos(dra))
-
-        # Nearest pixel on the cosine grid: l_i = (i - n_pix/2) * pixsize
-        i_l = np.rint(l / self.pixsize + self.n_pix / 2).astype(int)
-        i_m = np.rint(m / self.pixsize + self.n_pix / 2).astype(int)
-        inside = (i_l >= 0) & (i_l < self.n_pix) & (i_m >= 0) & (i_m < self.n_pix)
-
-        image = np.zeros((self.n_freq, self.n_pix, self.n_pix))
-        for k in np.nonzero(inside)[0]:
-            image[:, i_l[k], i_m[k]] += flux[k]
-        return image
 
     def build_set_params(self):
         def set_params(params):
@@ -302,17 +134,19 @@ class ImageSky(Component):
     """Learnable dense-sky image modelled as a log-normal Gaussian random field.
 
     The log-sky ``s(l, m, nu)`` is a GRF with a separable, stationary power
-    spectrum ``P_freq(k_nu)·P_lm(|k_l|)·P_lm(|k_m|)`` (the same analytic
-    ``pow_spec`` form used by the Fourier-GP / RFI components), and the sky
-    brightness is ``I = exp(s + mu)`` (positivity, as in resolve). Inference is
-    over whitened Fourier coefficients (``image_k_*_base`` ~ N(0,1)); the forward
-    maps them to ``ast_image`` ``(n_freq, n_l, n_m)`` on the config grid.
+    spectrum (the analytic ``pow_spec`` form used by the Fourier-GP / RFI
+    components) and sky brightness ``I = exp(s + mu)`` (positivity). Inference is
+    over whitened Fourier coefficients (``image_k_*_base`` ~ N(0,1)).
 
-    Mirrors ``FourierTimeFreqGPAst`` but over the 3-D (freq, l, m) image domain
-    and with an exponential link. Config block ``args["ast"]["image"]["pow_spec"]``:
-    ``p0``, ``k0_freq``, ``k0_lm``, ``gamma_freq``, ``gamma_lm``, ``cutoff``, and
-    optional ``mu`` (log-sky offset), ``freq_pad_factor``, ``lm_pad_factor``.
-    Init (``args["ast"]["image"]["init"]``): ``zeros``/``prior``, ``sample``, ``data``.
+    Config ``ast.signals.ImageSky``:
+    - ``prior.pow_spec``: ``p0``, ``k0_freq``, ``k0_lm``, ``gamma_freq``,
+      ``gamma_lm``, ``cutoff``, and optional ``mu`` (log-sky offset),
+      ``freq_pad_factor``, ``lm_pad_factor``.
+    - ``prior.mean``: a source spec (rendered to an image and used as the GRF
+      latent mean) or ``{type: zeros}`` (default).
+    - ``init``: ``{type: zeros}``/``prior`` (start at the prior mean), ``sample``
+      (a prior sample), or a source spec (e.g. ``from_ms`` dirty image,
+      ``from_fits``/``from_catalogue``) inverted into the latent space.
     """
 
     writes = {"ast_image": ("n_freq", "n_l", "n_m")}
@@ -326,17 +160,20 @@ class ImageSky(Component):
             self.n_freq = config.n_freq
             self.chan_width = float(config.chan_width)
 
-            grid = getattr(config, "image_grid", None)
-            if grid is None:
-                raise ValueError(
-                    "no image grid on the config; set args['ast']['image'] "
-                    "(fov_deg, n_pix, epsilon) so the config builds the grid."
-                )
+            grid = _require_grid(config)
             self.n_pix = grid.n_pix
             self.pixsize = float(grid.pixsize)
             self.plan = grid.plan
 
-            ps = config.args["ast"]["image"]["pow_spec"]
+            spec = _signal_spec(config, "ImageSky")
+            prior = spec.get("prior", {})
+            try:
+                ps = prior["pow_spec"]
+            except (KeyError, TypeError):
+                raise ValueError(
+                    "ImageSky needs ast.signals.ImageSky.prior.pow_spec "
+                    "(p0, k0_freq, k0_lm, gamma_freq, gamma_lm, cutoff)."
+                )
             self.p0 = ps["p0"]
             self.k0s = [ps["k0_freq"], ps["k0_lm"], ps["k0_lm"]]
             self.gammas = [ps["gamma_freq"], ps["gamma_lm"], ps["gamma_lm"]]
@@ -349,10 +186,17 @@ class ImageSky(Component):
             self.ss_factors = [1, 1, 1]
 
             self._compute_gp_params()
-            self.mu_image_k = jnp.zeros(self.pk.shape, dtype=complex)
 
-            init_type = config.args["ast"]["image"].get("init", "prior")
-            self._compute_init_params(init_type, getattr(config, "vis_obs", None))
+            # Prior mean: zeros (default) or a source image -> latent mean.
+            mean_spec = prior.get("mean", {"type": "zeros"})
+            if mean_spec.get("type", "zeros") == "zeros":
+                self.mu_image_k = jnp.zeros(self.pk.shape, dtype=complex)
+            else:
+                mean_image = resolve_sky_source(mean_spec, config).image(grid)
+                self.mu_image_k = self._image_to_latent(mean_image)
+
+            init_spec = spec.get("init", {"type": "zeros"})
+            self._compute_init_params(init_spec, config, grid)
             self._set_outputs()
             self._validate_dimensions()
         except Exception as e:
@@ -374,41 +218,28 @@ class ImageSky(Component):
         # Prior std of each whitened Fourier mode (forward FFT norm => / size).
         self.sigma_image_k = jnp.sqrt(self.pk / self.pk.size)
 
-    def _dirty_image(self, vis_obs):
-        """Adjoint (dirty) image of the observed visibilities on the grid."""
-        # vis_obs: (n_bl, n_freq, n_time) -> rows (n_bl*n_time, n_freq). Cast to
-        # the default complex precision so it matches the plan's float precision
-        # (MS data is complex64, but with x64 the plan is float64; jax-finufft
-        # requires the source and coordinates to share precision).
-        vis_rows = (
-            jnp.asarray(vis_obs).astype(complex).transpose(0, 2, 1)
-            .reshape(-1, self.n_freq)
-        )
-        return vis2dirty(self.plan, vis_rows)              # (n_freq, n_l, n_m) real
+    def _image_to_latent(self, image):
+        """Whitened-Fourier latent coefficients of an image's log-sky.
 
-    def _compute_data_est(self, vis_obs):
-        if vis_obs is None:
-            raise ValueError("init='data' requires config.vis_obs.")
-        dirty = self._dirty_image(vis_obs)
-        floor = 1e-8 * jnp.max(jnp.abs(dirty)) + 1e-30
-        s_data = jnp.log(jnp.clip(dirty, min=floor)) - self.mu_scalar
-        return signal_to_latent(s_data, self.pad_factors, self.latent_idxs)
+        ``s = log(I) - mu_scalar`` (floored for positivity), then forward to the
+        latent domain. Used both for a source-based prior mean and a source
+        ``init`` (e.g. the ``from_ms`` dirty image)."""
+        floor = 1e-8 * jnp.max(jnp.abs(image)) + 1e-30
+        s = jnp.log(jnp.clip(image, min=floor)) - self.mu_scalar
+        return signal_to_latent(s, self.pad_factors, self.latent_idxs)
 
-    def _compute_init_params(self, init_type, vis_obs):
-        if init_type == "data":
-            self.init_image_k = self._compute_data_est(vis_obs)
-        elif init_type in ("zeros", "prior"):
+    def _compute_init_params(self, init_spec, config, grid):
+        t = init_spec.get("type", "zeros")
+        if t in ("zeros", "prior"):
             self.init_image_k = self.mu_image_k
-        elif init_type == "sample":
+        elif t == "sample":
             sample = random.normal(random.PRNGKey(1), self.pk.shape, dtype=complex)
             self.init_image_k = self.forward_transform(
                 sample, self.sigma_image_k, self.mu_image_k
             )
         else:
-            raise ValueError(
-                f"Provided init type: {init_type} is not valid. "
-                "Choose from (zeros, prior, sample, data)."
-            )
+            image = resolve_sky_source(init_spec, config).image(grid)
+            self.init_image_k = self._image_to_latent(image)
 
         self.init_image_k_base = self.inv_transform(
             self.init_image_k, self.sigma_image_k, self.mu_image_k
@@ -477,17 +308,19 @@ class ImageSky(Component):
 class PointSky(Component):
     """Learnable point-source sky with a Laplace (sparsity) image-space prior.
 
-    Source positions are fixed (read from a tabsim catalogue); the per-source,
+    Source positions are fixed (from a catalogue source); the per-source,
     per-frequency fluxes are inferred. The flux parameters carry a zero-mean
-    Laplace prior - a LASSO-style sparsity prior whose only parameter is the
-    width ``laplace_width`` - implemented by mapping white standard-normal base
-    parameters through :func:`tabascal.dist.gaussian_to_laplace` (whiteness
-    preserved). Writes ``ast_radec`` (n_src, 2) and ``ast_I`` (n_src, n_freq);
-    pairs with ``PointSourceVisCalculation``.
+    Laplace prior (LASSO-style sparsity; only parameter ``laplace_width``),
+    implemented by mapping white standard-normal base parameters through
+    :func:`tabascal.dist.gaussian_to_laplace`. Writes ``ast_radec`` ``(n_src, 2)``
+    and ``ast_I`` ``(n_src, n_freq)``; pairs with ``PointSourceVisCalculation``.
 
-    Config: positions from ``args["data"]["zarr_path"]`` (as ``FixedPointSky``);
-    ``args["ast"]["point"]`` block with ``laplace_width`` and ``init``
-    (``zeros``, ``sample``, ``truth``).
+    Config ``ast.signals.PointSky``:
+    - ``init``: a catalogue source (default ``{type: from_catalogue, fmt: zarr}``)
+      providing the fixed positions (and flux for ``start: truth``).
+    - ``start``: flux-parameter start, ``sample`` (default), ``zeros``, or
+      ``truth`` (the catalogue flux, inverted through the Laplace map).
+    - ``prior.laplace_width``: required Laplace width.
     """
 
     writes = {"ast_radec": ("n_src", 2), "ast_I": ("n_src", "n_freq")}
@@ -496,46 +329,39 @@ class PointSky(Component):
     def setup(self, config):
         try:
             self.n_freq = config.n_freq
-            self.freqs_np = np.asarray(config.freqs, dtype=float)
 
-            point_args = config.args["ast"]["point"]
-            self.laplace_width = float(point_args["laplace_width"])
-            init_type = point_args.get("init", "sample")
-
-            zarr_path = config.args["data"]["zarr_path"]
-            if zarr_path is None:
-                raise ValueError("config.args['data']['zarr_path'] is not set")
-            xds = xr.open_zarr(zarr_path)
-            if "ast_p_radec" not in xds:
+            spec = _signal_spec(config, "PointSky")
+            prior = spec.get("prior", {})
+            try:
+                self.laplace_width = float(prior["laplace_width"])
+            except (KeyError, TypeError):
                 raise ValueError(
-                    f"No point sources found in zarr at {zarr_path}. "
-                    "Expected variable 'ast_p_radec'."
+                    "PointSky needs ast.signals.PointSky.prior.laplace_width."
                 )
-            self.ast_radec = jnp.deg2rad(jnp.asarray(xds.ast_p_radec.values))  # (n_src, 2)
-            self.n_src = self.ast_radec.shape[0]
+            start = spec.get("start", "sample")
+            init = spec.get("init", {"type": "from_catalogue", "fmt": "zarr"})
 
-            self._compute_init_params(init_type, xds)
+            source = resolve_sky_source(init, config)
+            self.ast_radec, cat_flux = source.catalogue()    # positions (+ flux)
+            self.n_src = int(self.ast_radec.shape[0])
+            warn_if_large_catalogue(self.n_src, "PointSky -> PointSourceVisCalculation")
+
+            self._compute_init_params(start, cat_flux)
             self._set_outputs()
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
-    def _catalogue_flux(self, xds):
-        flux = np.asarray(xds.ast_p_I.values).mean(axis=1)               # (n_src, n_chan)
-        return _interp_to_freqs(np.asarray(xds.freq.values), flux,
-                                self.freqs_np, axis=1)                   # (n_src, n_freq)
-
-    def _compute_init_params(self, init_type, xds):
+    def _compute_init_params(self, start, cat_flux):
         shape = (self.n_src, self.n_freq)
-        if init_type == "zeros":
+        if start == "zeros":
             init_base = jnp.zeros(shape)
-        elif init_type == "sample":
+        elif start == "sample":
             init_base = random.normal(random.PRNGKey(1), shape)
-        elif init_type == "truth":
-            flux = jnp.asarray(self._catalogue_flux(xds))
-            init_base = laplace_to_gaussian(flux, self.laplace_width)
+        elif start == "truth":
+            init_base = laplace_to_gaussian(jnp.asarray(cat_flux), self.laplace_width)
         else:
             raise ValueError(
-                f"Provided init type: {init_type} is not valid. "
+                f"Provided start: {start} is not valid. "
                 "Choose from (zeros, sample, truth)."
             )
         self.init_params_base = {"ast_I_base": init_base}
