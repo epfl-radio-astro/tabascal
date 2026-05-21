@@ -104,7 +104,12 @@ The covariance approximation is not performed in the traditional way of evaluati
 
 ## Astronomical Signal
 
-The `ast` section defines the prior distrbution, intialisation and forward model parameters for the astronomical signal. An example is given below.
+The `ast` section defines the prior distribution, initialisation and forward model parameters for the astronomical signal. There are two ways to model the sky, which may be combined:
+
+* a **visibility-domain Gaussian process** that models `vis_ast` directly (used by the `ast_vis:FourierTime*Ast` components), configured by the flat `ast.{init, mean, pow_spec, freq_pad_factor, time_pad_factor}` keys documented immediately below; and
+* **sky-domain** point and image models (used by the `ast_signal:*` components together with `ast_vis:PointSourceVisCalculation` / `ast_vis:ImageVisCalculation`), configured by the `ast.grid` and `ast.signals` keys documented below under **Dense and point sky models**.
+
+The visibility-domain GP is configured as follows.
 
 ```yaml
 ast:
@@ -133,6 +138,54 @@ The parameters for the power spectrum are defined as
 * `fov_deg`: The field of view in degrees of the acceptable fringe rate range. The default value for this is calculated from the expected field of view of the telescope based on the dish diameter and frequency as read form the MS file.
 * `gammas`: The rate of drop off in the power spectrum. As $\gamma \rightarrow \infty$, the power spectrum tends to a Gaussian with width given by `k0_freq` in the frequency axis and inferred from `fov_deg` in the itme axis.
 * `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and then Fourier components, where the power spectrum value is less than `p0 * cutoff`, are removed and not modelled. This reduces the number of parameters to fit.   
+
+### Dense and point sky models
+
+The sky-domain components model the sky as a **point catalogue** or a **dense image** and are configured per component under `ast.signals`, with an optional shared image grid under `ast.grid`. An example is given below.
+
+```yaml
+ast:
+  grid:                              # shared image grid + wgridder plan (image skies only)
+    fov_deg: 5.0
+    n_pix: 256
+    epsilon: 1e-6
+  signals:                          # one entry per sky-signal component, keyed by class name
+    FixedPointSky:
+      init: {type: from_catalogue, fmt: zarr}
+    PointSky:
+      init: {type: from_catalogue, fmt: bbs, path: model.bbs}
+      start: truth
+      prior: {laplace_width: 1.0}
+    ImageSky:
+      init: {type: zeros}
+      prior:
+        mean: {type: zeros}
+        pow_spec: {p0: 1.0, k0_freq: 1.0, k0_lm: 300.0, gamma_freq: 2.0, gamma_lm: 2.0, cutoff: 1e-6, mu: -2.0}
+```
+
+* `grid`: Builds the shared cosine image grid and reusable wgridder plan used by the image-based components (`FixedImageSky`, `ImageSky`, `ImageVisCalculation`). `fov_deg` is the field of view in degrees, `n_pix` the number of pixels per side, and `epsilon` the wgridder accuracy. Omit it (or leave `null`) when no image component is used.
+* `signals`: A map keyed by the **component class name**. Each entry configures that component, most importantly its sky **source** under `init` (and, for learnable components, its `prior`).
+
+#### Sky sources
+
+A *source spec* is a small dict with an explicit `type`, resolved by {func}`~tabascal.sky_sources.resolve_sky_source`. The same source can act as a fixed sky, a learnable initialisation, or a learnable prior mean. The supported types are
+
+* `zeros`: an empty sky (a zero image / empty catalogue); useful as a neutral prior mean.
+* `from_catalogue`: a point catalogue. `fmt` is `zarr` (a tabsim simulation catalogue) or `bbs` (a WSClean/DP3 component list). `path` is the file; if omitted it falls back to `data.zarr_path`.
+* `from_fits`: a FITS image (2-D continuum or a spectral cube interpolated onto the model channels). The spatial grid must match `ast.grid`. A Jy/beam image is converted to Jy/pixel from the header beam (`BMAJ`/`BMIN`/`CDELT`); set `unit` to override the header `BUNIT`. `hdu` selects the HDU (default 0).
+* `from_ms`: a MeasurementSet visibility column, rendered to an image as its (adjoint) dirty image. `column` selects the column and is independent of `data.data_col`.
+
+Only Stokes I is supported. A source spec may carry a `stokes` field, but anything other than `[I]` is currently rejected.
+
+#### Per-component keys
+
+* `init`: the source seeding the component. For the fixed components (`FixedPointSky`, `FixedImageSky`) it *is* the sky; for the learnable components it sets the starting point of the parameters.
+* `start` (`PointSky` only): the flux-parameter initialisation — `sample` (default), `zeros`, or `truth` (the catalogue flux). The source positions are always taken from `init`.
+* `prior.laplace_width` (`PointSky`): the width of the zero-mean Laplace (sparsity) prior on the per-source fluxes.
+* `prior.pow_spec` (`ImageSky`): the power-spectrum prior of the log-sky Gaussian random field — `p0`, `k0_freq`, `k0_lm`, `gamma_freq`, `gamma_lm`, `cutoff`, and an optional `mu` (log-sky offset) and `freq_pad_factor`/`lm_pad_factor`.
+* `prior.mean` (`ImageSky`): a source spec (rendered to an image and used as the GRF mean) or `{type: zeros}` (the default). This lets an external sky model centre the prior.
+
+Pair each signal component with the matching visibility calculator in the `model.components` list — a point sky with `ast_vis:PointSourceVisCalculation`, an image sky with `ast_vis:ImageVisCalculation`. See the [astronomical signal](components/ast_signal.md) and [astronomical visibility](components/ast_vis.md) component pages for details.
 
 
 ## RFI signal

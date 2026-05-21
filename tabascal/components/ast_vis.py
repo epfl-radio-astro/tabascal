@@ -1041,7 +1041,7 @@ class ImageVisCalculation(Component):
     The image lies on a cosine grid centred on the phase centre, with
     ``l_i = (i - n_l/2)·pixsize``. The grid and the reusable ``WGridderPlan`` are
     owned by the config (``config.image_grid``, built from
-    ``args["ast"]["image"]``); this component errors if that grid is absent.
+    ``args["ast"]["grid"]``); this component errors if that grid is absent.
 
     Convention mapping: jax-nufft's ``dirty2vis`` natively computes
     ``Σ I·exp(-2πi(ul+vm))·exp(+2πi w(n-1))`` with no 1/n. The CASA convention is
@@ -1064,7 +1064,7 @@ class ImageVisCalculation(Component):
             grid = getattr(config, "image_grid", None)
             if grid is None:
                 raise ValueError(
-                    "no image grid on the config; set args['ast']['image'] "
+                    "no image grid on the config; set args['ast']['grid'] "
                     "(fov_deg, n_pix, epsilon) so the config builds the shared "
                     "wgridder plan."
                 )

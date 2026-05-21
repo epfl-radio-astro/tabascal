@@ -10,6 +10,7 @@ TABASCAL uses a component-based model description. This means that various diffe
    components/trajectory
    components/rfi_signal
    components/rfi_vis
+   components/ast_signal
    components/ast_vis
    components/gains
 
@@ -24,7 +25,6 @@ TABASCAL uses a component-based model description. This means that various diffe
        Traj [label="Trajectory\nComponent", shape=box];
        RFISig [label="RFI Signal\nComponent", shape=box];
        RFIVis [label="RFI Visibility\nCalculation\nComponent", shape=box];
-       AstPos [label="Astronomical\nPosition\nComponent", shape=box];
        AstSig [label="Astronomical\nSignal\nComponent", shape=box];
        AstVis [label="Astronomical\nVisibility\nComponent", shape=box];
        Gain [label="Gain\nComponent", shape=box];
@@ -33,8 +33,7 @@ TABASCAL uses a component-based model description. This means that various diffe
        rfi_xyz [label="• rfi_xyz\l• rfi_phase", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        rfi_A [label="rfi_A", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        vis_rfi [label="vis_rfi", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
-       ast_radec [label="ast_radec", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
-       ast_I [label="ast_I", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
+       ast_sky [label="• ast_radec\l• ast_I\l• ast_image", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        vis_ast [label="vis_ast", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        vis_obs [label="• gains\l• vis_obs", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
 
@@ -44,10 +43,8 @@ TABASCAL uses a component-based model description. This means that various diffe
        rfi_xyz -> RFIVis;
        rfi_A -> RFIVis;
        RFIVis -> vis_rfi;
-       AstPos -> ast_radec;
-       AstSig -> ast_I;
-       ast_radec -> AstVis;
-       ast_I -> AstVis;
+       AstSig -> ast_sky;
+       ast_sky -> AstVis;
        AstVis -> vis_ast;
        vis_rfi -> Gain;
        vis_ast -> Gain;
