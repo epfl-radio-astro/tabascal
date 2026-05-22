@@ -163,7 +163,7 @@ ast:
         pow_spec: {p0: 1.0, k0_freq: 1.0, k0_lm: 300.0, gamma_freq: 2.0, gamma_lm: 2.0, cutoff: 1e-6, mu: -2.0}
 ```
 
-* `grid`: Builds the shared cosine image grid and reusable wgridder plan used by the image-based components (`FixedImageSky`, `ImageSky`, `ImageVisCalculation`). `fov_deg` is the field of view in degrees, `n_pix` the number of pixels per side, and `epsilon` the wgridder accuracy. Omit it (or leave `null`) when no image component is used.
+* `grid`: Builds the shared cosine image grid and reusable wgridder plan used by the image-based components (`FixedImageSky`, `ImageSky`, `ImageVisCalculation`). `fov_deg` is the true angular field of view in degrees across an axis (the SIN-projected grid spans `2·sin(fov_deg/2)` in direction cosines, so the requested and actual sky coverage agree even for wide fields), `n_pix` the number of pixels per side, and `epsilon` the wgridder accuracy. Omit it (or leave `null`) when no image component is used.
 * `signals`: A map keyed by the **component class name**. Each entry configures that component, most importantly its sky **source** under `init` (and, for learnable components, its `prior`).
 
 #### Sky sources

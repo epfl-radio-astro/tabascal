@@ -44,7 +44,7 @@ def on_grid_sources(config, pixels, fluxes):
     """Build an ast_image with bright pixels, and the matching point-source
     (ra, dec, flux) at the exact pixel centres. Assumes phase centre (0, 0)."""
     n_pix = config.args["ast"]["image"]["n_pix"]
-    pixsize = np.deg2rad(config.args["ast"]["image"]["fov_deg"]) / n_pix
+    pixsize = config.image_grid.pixsize
     image = np.zeros((config.n_freq, n_pix, n_pix))
     ls, ms = [], []
     for (a, b), f in zip(pixels, fluxes):

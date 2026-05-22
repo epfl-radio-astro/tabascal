@@ -48,7 +48,11 @@ def _warn_grid_sampling(uvw_rows, freqs, pixsize, fov_deg, n_pix):
     sampled (long baselines alias), over-sampled (wasteful), or wide enough that
     grid corners fall beyond the horizon (zeroed pixels)."""
     pixsize = float(pixsize)
-    fov_rad = float(jnp.deg2rad(fov_deg))
+    # Direction-cosine extent across an axis for a true angular FoV of fov_deg:
+    # the edge pixel sits at angular offset fov_deg/2, i.e. direction cosine
+    # sin(fov_rad/2), so the full extent is 2*sin(fov_rad/2). Matches the
+    # pixsize = 2*sin(fov_rad/2)/n_pix mapping in make_image_plan.
+    lm_extent = 2.0 * float(jnp.sin(jnp.deg2rad(fov_deg) / 2.0))
     freq_max = float(jnp.max(freqs))
 
     # Per-axis worst-case baseline in wavelengths (square grid -> Nyquist is
@@ -60,8 +64,8 @@ def _warn_grid_sampling(uvw_rows, freqs, pixsize, fov_deg, n_pix):
     if uv_max > 0.0:
         grid_extent = 1.0 / (2.0 * pixsize)          # max representable |uv|, lambda
         px_per_beam = 1.0 / (uv_max * pixsize)
-        n_pix_nyq = math.ceil(fov_rad * _MIN_PX_PER_BEAM * uv_max)
-        n_pix_rec = math.ceil(fov_rad * _REC_PX_PER_BEAM * uv_max)
+        n_pix_nyq = math.ceil(lm_extent * _MIN_PX_PER_BEAM * uv_max)
+        n_pix_rec = math.ceil(lm_extent * _REC_PX_PER_BEAM * uv_max)
 
         if px_per_beam < _MIN_PX_PER_BEAM:
             uv_rows = jnp.maximum(u, v) * freq_max / _C
@@ -84,9 +88,9 @@ def _warn_grid_sampling(uvw_rows, freqs, pixsize, fov_deg, n_pix):
                 stacklevel=3,
             )
 
-    # Horizon clip: grid corners at radius sqrt(2)*(fov/2). Beyond 1 rad,
-    # l^2+m^2 >= 1 and the wgridder zeros those pixels.
-    corner_radius = fov_rad * (2.0 ** 0.5) / 2.0
+    # Horizon clip: grid corners at direction-cosine radius sqrt(2)*(lm_extent/2).
+    # Beyond 1, l^2+m^2 >= 1 and the wgridder zeros those pixels.
+    corner_radius = lm_extent * (2.0 ** 0.5) / 2.0
     if corner_radius >= 1.0:
         warnings.warn(
             f"ImageGrid: fov_deg={fov_deg:g} places image-grid corners beyond the "
@@ -99,6 +103,10 @@ def make_image_plan(uvw, freqs, fov_deg, n_pix, epsilon,
                     uvw_sign=(1.0, 1.0, 1.0)) -> ImageGrid:
     """Build the shared cosine-grid wgridder plan from the array geometry.
 
+    ``fov_deg`` is the true angular field of view across an axis (SIN
+    projection): the grid spans ``2*sin(deg2rad(fov_deg)/2)`` in direction
+    cosines, so ``fov_deg`` and the sky coverage agree at wide fields too.
+
     ``uvw`` is treated as ``(n_bl, n_time, 3)`` (metres) and flattened to rows
     ``r = b*n_time + t`` to match ``PointSourceVisCalculation`` / the dense
     components' output ordering. The CASA convention is realised by feeding the
@@ -107,7 +115,12 @@ def make_image_plan(uvw, freqs, fov_deg, n_pix, epsilon,
     """
     n_pix = int(n_pix)
     epsilon = float(epsilon)
-    pixsize = float(jnp.deg2rad(fov_deg) / n_pix)
+    # fov_deg is the true angular field of view across an axis. In the SIN
+    # projection the edge pixel at angular offset fov_deg/2 has direction cosine
+    # sin(fov_rad/2), so the grid spans 2*sin(fov_rad/2) in direction cosines
+    # and pixsize (the wgridder's per-pixel direction-cosine increment) is that
+    # over n_pix. Reduces to deg2rad(fov_deg)/n_pix for small fields.
+    pixsize = float(2.0 * jnp.sin(jnp.deg2rad(fov_deg) / 2.0) / n_pix)
 
     uvw_rows = jnp.asarray(uvw).reshape(-1, 3)
     _warn_grid_sampling(uvw_rows, freqs, pixsize, fov_deg, n_pix)
