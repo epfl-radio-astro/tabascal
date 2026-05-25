@@ -30,7 +30,7 @@ import warnings
 import numpy as np
 import jax.numpy as jnp
 import xarray as xr
-from jax_nufft import vis2dirty
+from jax_nufft import vis2dirty, dirty2vis
 
 
 # A direct-DFT point sky scales as O(n_src * n_bl * n_time * n_freq); above this
@@ -274,9 +274,48 @@ class FitsSource(SkySource):
         return wcs.spectral.pixel_to_world(np.arange(n_chan)).to("Hz").value
 
 
+def _synthesised_beam_area(plan, n_safe, n_freq):
+    """Synthesised-beam area in pixels, per frequency (data-independent).
+
+    A from_ms dirty image is in Jy/beam, but ``ImageVisCalculation``'s forward
+    sums ``ast_image/n`` over pixels as if it were Jy/pixel, over-counting the flux
+    by ~the beam area. This computes the factor to convert Jy/beam -> Jy/pixel:
+    run a unit point source at the phase centre through the forward then adjoint
+    in the *same* normalisation as :meth:`MSSource.image`, giving the synthesised
+    beam (peak 1); its main-lobe integral (out to the first radial null) divided
+    by the peak is the beam area in pixels. It depends only on the array geometry
+    and imaging grid (the ``plan``), not on the visibility data, so it generalises
+    to any telescope. Runs at setup (eager), so plain NumPy reductions are fine.
+    """
+    n_l, n_m = n_safe.shape
+    c_l, c_m = n_l // 2, n_m // 2
+    n_np = np.asarray(n_safe)                                  # coordinate n, 0 beyond horizon
+    delta = np.zeros((n_freq, n_l, n_m))
+    delta[:, c_l, c_m] = 1.0                                   # unit point source (n=1 at centre)
+    img = np.where(n_np[None] > 0.0, delta / np.where(n_np > 0.0, n_np, 1.0)[None], 0.0)
+    v_pt = dirty2vis(plan, jnp.asarray(img).astype(complex))   # forward
+    adj = np.asarray(vis2dirty(plan, v_pt))                    # adjoint
+    psf = n_np[None] * (n_np[None] * adj) / v_pt.shape[0]      # same norm as MSSource.image; peak~1
+
+    # First radial null of the frequency-averaged PSF (azimuthal profile).
+    yy, xx = np.mgrid[0:n_l, 0:n_m]
+    r = np.hypot(yy - c_l, xx - c_m).astype(int)
+    pmean = psf.mean(axis=0)
+    prof = np.bincount(r.ravel(), weights=pmean.ravel()) / np.maximum(np.bincount(r.ravel()), 1)
+    neg = np.where(prof <= 0.0)[0]
+    r_null = int(neg[0]) if neg.size else int(r.max())
+
+    mask = r < r_null                                          # main lobe
+    peak = psf[:, c_l, c_m]
+    peak = np.where(peak != 0.0, peak, 1.0)
+    return (psf * mask[None]).sum(axis=(1, 2)) / peak          # (n_freq,)
+
+
 class MSSource(SkySource):
-    """A MeasurementSet visibility column. Its image is the (adjoint) dirty
-    image; this is independent of the likelihood's ``data.data_col``."""
+    """A MeasurementSet visibility column. Its image is the n-corrected,
+    beam-area-normalised adjoint dirty image -- the true sky brightness I in
+    Jy/pixel (not the I/n Jy/beam dirty image); this is independent of the
+    likelihood's ``data.data_col``."""
 
     def __init__(self, config, column=None):
         super().__init__(config)
@@ -314,7 +353,31 @@ class MSSource(SkySource):
         # source and coordinates to share precision).
         vis = jnp.asarray(self._read_vis()).astype(complex)
         vis_rows = vis.transpose(0, 2, 1).reshape(-1, self.n_freq)
-        return vis2dirty(grid.plan, vis_rows)               # (n_freq, n_l, n_m)
+
+        # We want the true sky brightness I, so that ImageSky's ast_image = I and
+        # the forward vis_ast = dirty2vis(I/n) reproduces the data. jax_nufft's
+        # vis2dirty applies divide_by_n=True, so for physical visibilities
+        # V = sum I/n exp(...) it returns ~ N*I/n^2 (one 1/n from the measurement
+        # equation, one from vis2dirty; verified to match ducc0.wgridder
+        # vis2dirty(divide_by_n=True) to ~1e-6). Undo vis2dirty's 1/n to recover
+        # the standard adjoint dirty image (~ N*I/n, the divide_by_n=False /
+        # nufft-gif convention), then apply the single physical n-correction to
+        # land on I. Normalise by the number of visibility samples N (cheap, and
+        # = ||dirty2vis(delta)||^2 so a point source recovers its flux) instead of
+        # an extra vis2dirty(ones) PSF-peak call.
+        n = grid.plan.n_minus_1 + 1.0                       # coordinate n; <= 0 beyond horizon
+        n = jnp.where(n > 0.0, n, 0.0)
+        N = vis_rows.shape[0]
+        adjoint = n[None] * vis2dirty(grid.plan, vis_rows)  # undo divide_by_n -> ~ N*I/n
+        dirty = n[None] * adjoint / N                       # x n / N -> ~ I (Jy/beam)
+
+        # Jy/beam -> Jy/pixel: the dirty image is the sky convolved with the
+        # synthesised beam, but the forward sums ast_image/n over pixels as if it
+        # were Jy/pixel, over-counting flux by ~the beam area. Divide by the
+        # (data-independent) synthesised-beam area so a source recovers its flux
+        # and the init's vis_ast matches the data scale.
+        beam_area = _synthesised_beam_area(grid.plan, n, self.n_freq)   # (n_freq,)
+        return dirty / jnp.asarray(beam_area)[:, None, None]
 
 
 def resolve_sky_source(spec: dict, config) -> SkySource:

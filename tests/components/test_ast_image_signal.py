@@ -223,7 +223,7 @@ def test_error_on_unknown_source_type():
         FixedImageSky().setup(config)
 
 
-# ── ImageSky (learnable log-normal GRF) ───────────────────────────────────────
+# ── ImageSky (learnable Gaussian random-field sky) ────────────────────────────
 
 _INIT_SPECS = {
     "zeros": {"type": "zeros"},
@@ -275,26 +275,27 @@ def run_sky(config):
     return sky, out
 
 
-def test_imagesky_shape_and_positive():
+def test_imagesky_shape_and_finite():
     config = make_sky_config(n_pix=64, n_freq=2)
     sky, out = run_sky(config)
     img = out["ast_image"]
     assert img.shape == (config.n_freq, 64, 64)
-    assert jnp.all(img > 0) and jnp.all(jnp.isfinite(img))
+    assert jnp.all(jnp.isfinite(img))
 
 
 def test_imagesky_zeros_init_is_flat():
-    """zeros init -> base params zero -> I = exp(mu) everywhere."""
-    config = make_sky_config(init="zeros", mu=-1.5)
+    """zeros init + zeros prior mean -> base params zero -> I = 0 everywhere
+    (the field is linear, so the prior-mean flux is zero)."""
+    config = make_sky_config(init="zeros")
     sky, out = run_sky(config)
-    assert jnp.allclose(out["ast_image"], jnp.exp(-1.5), atol=1e-8)
+    assert jnp.allclose(out["ast_image"], 0.0, atol=1e-8)
 
 
 @pytest.mark.parametrize("init", ["zeros", "prior", "sample", "data"])
 def test_imagesky_init_paths(init):
     config = make_sky_config(init=init, with_vis_obs=(init == "data"))
     sky, out = run_sky(config)
-    assert jnp.all(out["ast_image"] > 0) and jnp.all(jnp.isfinite(out["ast_image"]))
+    assert jnp.all(jnp.isfinite(out["ast_image"]))
     # base params live on the latent Fourier grid
     assert sky.init_params_base["image_k_r_base"].shape == sky.pk.shape
 
@@ -315,8 +316,7 @@ def test_imagesky_prior_mean_from_source(tmp_path):
     from astropy.io import fits
 
     n_pix, n_freq = 64, 2
-    config = make_sky_config(n_pix=n_pix, n_freq=n_freq, init="zeros", mu=-2.0)
-    # Strictly-positive image so log is well defined.
+    config = make_sky_config(n_pix=n_pix, n_freq=n_freq, init="zeros")
     img = np.full((n_pix, n_pix), 0.05)
     img[30, 18] = 1.2
     path = tmp_path / "mean.fits"
@@ -325,7 +325,7 @@ def test_imagesky_prior_mean_from_source(tmp_path):
     sig["prior"]["mean"] = {"type": "from_fits", "path": str(path)}
 
     sky, out = run_sky(config)
-    # Round-trips through log -> latent -> signal -> exp, so allow modest error.
+    # Round-trips through latent -> signal (band-limited), so allow modest error.
     rel = jnp.linalg.norm(out["ast_image"][0] - img) / jnp.linalg.norm(img)
     assert rel < 1e-2, f"prior-mean reconstruction rel_err {rel:.2e}"
 
@@ -387,4 +387,4 @@ def test_imagesky_data_init_single_channel_complex64():
     config = make_sky_config(n_freq=1, init="data", with_vis_obs=True)
     sky, out = run_sky(config)
     assert out["ast_image"].shape == (1, sky.n_pix, sky.n_pix)
-    assert jnp.all(out["ast_image"] > 0) and jnp.all(jnp.isfinite(out["ast_image"]))
+    assert jnp.all(jnp.isfinite(out["ast_image"]))

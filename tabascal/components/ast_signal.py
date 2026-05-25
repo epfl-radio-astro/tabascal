@@ -131,17 +131,18 @@ class FixedImageSky(Component):
 
 
 class ImageSky(Component):
-    """Learnable dense-sky image modelled as a log-normal Gaussian random field.
+    """Learnable dense-sky image modelled as a Gaussian random field.
 
-    The log-sky ``s(l, m, nu)`` is a GRF with a separable, stationary power
-    spectrum (the analytic ``pow_spec`` form used by the Fourier-GP / RFI
-    components) and sky brightness ``I = exp(s + mu)`` (positivity). Inference is
-    over whitened Fourier coefficients (``image_k_*_base`` ~ N(0,1)).
+    The sky brightness ``I(l, m, nu)`` is itself a GRF with a separable,
+    stationary power spectrum (the analytic ``pow_spec`` form used by the
+    Fourier-GP / RFI components): ``I`` is linear in the field, so it is not
+    constrained positive. Inference is over whitened Fourier coefficients
+    (``image_k_*_base`` ~ N(0,1)).
 
     Config ``ast.signals.ImageSky``:
     - ``prior.pow_spec``: ``p0``, ``k0_freq``, ``k0_lm``, ``gamma_freq``,
-      ``gamma_lm``, ``cutoff``, and optional ``mu`` (log-sky offset),
-      ``freq_pad_factor``, ``lm_pad_factor``.
+      ``gamma_lm``, ``cutoff``, and optional ``freq_pad_factor``,
+      ``lm_pad_factor``.
     - ``prior.mean``: a source spec (rendered to an image and used as the GRF
       latent mean) or ``{type: zeros}`` (default).
     - ``init``: ``{type: zeros}``/``prior`` (start at the prior mean), ``sample``
@@ -178,11 +179,10 @@ class ImageSky(Component):
             self.k0s = [ps["k0_freq"], ps["k0_lm"], ps["k0_lm"]]
             self.gammas = [ps["gamma_freq"], ps["gamma_lm"], ps["gamma_lm"]]
             self.pk_cutoff = ps["cutoff"]
-            self.mu_scalar = float(ps.get("mu", 0.0))
             # Pad factor 1.0 == no padding (the fft_gp helpers require >= 1.0).
-            self.pad_factors = [ps.get("freq_pad_factor", 1.0),
-                                ps.get("lm_pad_factor", 1.0),
-                                ps.get("lm_pad_factor", 1.0)]
+            self.pad_factors = [ps.get("freq_pad_factor", 2.0),
+                                ps.get("lm_pad_factor", 2.0),
+                                ps.get("lm_pad_factor", 2.0)]
             self.ss_factors = [1, 1, 1]
 
             self._compute_gp_params()
@@ -219,14 +219,12 @@ class ImageSky(Component):
         self.sigma_image_k = jnp.sqrt(self.pk / self.pk.size)
 
     def _image_to_latent(self, image):
-        """Whitened-Fourier latent coefficients of an image's log-sky.
+        """Whitened-Fourier latent coefficients of an image.
 
-        ``s = log(I) - mu_scalar`` (floored for positivity), then forward to the
-        latent domain. Used both for a source-based prior mean and a source
-        ``init`` (e.g. the ``from_ms`` dirty image)."""
-        floor = 1e-8 * jnp.max(jnp.abs(image)) + 1e-30
-        s = jnp.log(jnp.clip(image, min=floor)) - self.mu_scalar
-        return signal_to_latent(s, self.pad_factors, self.latent_idxs)
+        The brightness field is linear, so this is just a forward transform of
+        the (real) image into the latent domain. Used both for a source-based
+        prior mean and a source ``init`` (e.g. the ``from_ms`` dirty image)."""
+        return signal_to_latent(image, self.pad_factors, self.latent_idxs)
 
     def _compute_init_params(self, init_spec, config, grid):
         t = init_spec.get("type", "zeros")
@@ -276,7 +274,6 @@ class ImageSky(Component):
         prefix = self.prefix
         pads = self.pads
         ss_idxs = self.ss_idxs
-        mu_scalar = self.mu_scalar
         forward_transform = self.forward_transform
 
         def forward(params, state, constants):
@@ -285,8 +282,7 @@ class ImageSky(Component):
 
             base = params["image_k_r_base"] + 1.0j * params["image_k_i_base"]
             s_k = forward_transform(base, sigma, mu_k)
-            s = latent_to_signal(s_k, pads, ss_idxs).real     # (n_freq, n_l, n_m)
-            image = jnp.exp(s + mu_scalar)                     # Jy/pixel, positive
+            image = latent_to_signal(s_k, pads, ss_idxs).real  # (n_freq, n_l, n_m) Jy/pixel
 
             return {**state, "ast_image": image}
 

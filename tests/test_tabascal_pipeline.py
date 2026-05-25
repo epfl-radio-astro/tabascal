@@ -329,7 +329,7 @@ ast_signal_configs = [
         ),
         id="FixedImageSky+ImageVisCalculation",
     ),
-    # Learnable dense image (log-normal GRF) -> wgridder visibilities. Exercises
+    # Learnable dense image (linear GRF) -> wgridder visibilities. Exercises
     # ImageSky + ImageVisCalculation end to end (params optimised in SVI).
     pytest.param(
         PipelineTestConfig(
