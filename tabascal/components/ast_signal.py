@@ -139,6 +139,13 @@ class ImageSky(Component):
     constrained positive. Inference is over whitened Fourier coefficients
     (``image_k_*_base`` ~ N(0,1)).
 
+    The modelled brightness is masked to the ``ast.grid.fov_deg`` disk (pixels
+    with direction cosine ``n >= cos(fov_deg/2)``); pixels outside -- the square
+    grid's corners and, for ``fov_deg < 180``, the near-horizon ``n~0`` ring --
+    are held at zero so they carry no likelihood gradient. This removes the
+    ill-conditioned high-``1/n`` directions of the ``ImageVisCalculation``
+    forward (``image = ast_image/n``).
+
     Config ``ast.signals.ImageSky``:
     - ``prior.pow_spec``: ``p0``, ``k0_freq``, ``k0_lm``, ``gamma_freq``,
       ``gamma_lm``, ``cutoff``, and optional ``freq_pad_factor``,
@@ -165,6 +172,20 @@ class ImageSky(Component):
             self.n_pix = grid.n_pix
             self.pixsize = float(grid.pixsize)
             self.plan = grid.plan
+
+            # Disk mask: model only pixels within the fov_deg disk (angular radius
+            # fov_deg/2 from the phase centre, i.e. direction cosine n >=
+            # cos(fov_deg/2)). This zeros the square grid's corners and -- for
+            # fov_deg < 180 -- the n~0 horizon ring whose 1/n amplification in the
+            # ImageVisCalculation forward (image = ast_image/n) makes those latent
+            # directions ill-conditioned and the optimisation erratic. At
+            # fov_deg = 180 the disk edge sits at n = 0, so only the (already
+            # forward-zeroed) beyond-horizon corners are removed; use fov_deg < 180
+            # to bound the modelled n away from 0.
+            self.fov_deg = float(grid.fov_deg)
+            n_grid = self.plan.n_minus_1 + 1.0                       # (n_l, n_m)
+            n_floor = float(jnp.cos(jnp.deg2rad(self.fov_deg / 2.0)))
+            self.disk_mask = (n_grid >= n_floor).astype(float)       # 1 inside disk
 
             spec = _signal_spec(config, "ImageSky")
             prior = spec.get("prior", {})
@@ -193,7 +214,7 @@ class ImageSky(Component):
                 self.mu_image_k = jnp.zeros(self.pk.shape, dtype=complex)
             else:
                 mean_image = resolve_sky_source(mean_spec, config).image(grid)
-                self.mu_image_k = self._image_to_latent(mean_image)
+                self.mu_image_k = self._image_to_latent(mean_image * self.disk_mask)
 
             init_spec = spec.get("init", {"type": "zeros"})
             self._compute_init_params(init_spec, config, grid)
@@ -237,7 +258,7 @@ class ImageSky(Component):
             )
         else:
             image = resolve_sky_source(init_spec, config).image(grid)
-            self.init_image_k = self._image_to_latent(image)
+            self.init_image_k = self._image_to_latent(image * self.disk_mask)
 
         self.init_image_k_base = self.inv_transform(
             self.init_image_k, self.sigma_image_k, self.mu_image_k
@@ -274,6 +295,7 @@ class ImageSky(Component):
         prefix = self.prefix
         pads = self.pads
         ss_idxs = self.ss_idxs
+        disk_mask = self.disk_mask
         forward_transform = self.forward_transform
 
         def forward(params, state, constants):
@@ -283,6 +305,7 @@ class ImageSky(Component):
             base = params["image_k_r_base"] + 1.0j * params["image_k_i_base"]
             s_k = forward_transform(base, sigma, mu_k)
             image = latent_to_signal(s_k, pads, ss_idxs).real  # (n_freq, n_l, n_m) Jy/pixel
+            image = image * disk_mask                          # zero outside the fov disk
 
             return {**state, "ast_image": image}
 

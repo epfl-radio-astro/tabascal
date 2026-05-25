@@ -325,9 +325,25 @@ def test_imagesky_prior_mean_from_source(tmp_path):
     sig["prior"]["mean"] = {"type": "from_fits", "path": str(path)}
 
     sky, out = run_sky(config)
+    # The model masks brightness to the fov disk, so compare to the masked image.
+    ref = np.asarray(img) * np.asarray(sky.disk_mask)
     # Round-trips through latent -> signal (band-limited), so allow modest error.
-    rel = jnp.linalg.norm(out["ast_image"][0] - img) / jnp.linalg.norm(img)
+    rel = jnp.linalg.norm(out["ast_image"][0] - ref) / jnp.linalg.norm(ref)
     assert rel < 1e-2, f"prior-mean reconstruction rel_err {rel:.2e}"
+
+
+def test_imagesky_disk_mask():
+    """ast_image is held at zero outside the fov_deg disk (n < cos(fov_deg/2))
+    and retains structure inside it."""
+    fov_deg = 8.0
+    config = make_sky_config(n_pix=64, n_freq=2, fov_deg=fov_deg, init="sample")
+    sky, out = run_sky(config)
+    n = np.asarray(sky.plan.n_minus_1 + 1.0)
+    outside = n < np.cos(np.deg2rad(fov_deg / 2.0))
+    img = np.asarray(out["ast_image"])
+    assert outside.any() and (~outside).any(), "test grid should straddle the disk edge"
+    assert np.allclose(img[:, outside], 0.0), "brightness leaked outside the fov disk"
+    assert np.any(np.abs(img[:, ~outside]) > 0), "no structure inside the disk"
 
 
 def test_imagesky_pipeline_to_vis():
