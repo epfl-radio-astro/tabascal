@@ -739,7 +739,12 @@ class FourierGPRFI(BaseGPRFI):
 
         from numpy import load
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi]))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
+        if est_path.endswith(".npz"):
+            light_curve = load(est_path)["light_curves"][:self.n_rfi]
+        else:
+            light_curve = load(est_path)[:self.n_rfi]
+            
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(light_curve))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
         est_rfi_k_A = vmap(vmap(self.signal_to_latent))(est_rfi_A)
 
         return est_rfi_k_A
