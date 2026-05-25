@@ -33,10 +33,6 @@ class RiemannVisCalculation(Component):
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
-    # def _validate_dimensions(self):
-    #     """Ensure all setup operations completed successfully"""
-
-    #     assert hasattr(self, "")
 
     def build_set_params(self):
 
@@ -110,10 +106,6 @@ class RiemannVisTimeFreqCalculation(Component):
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
-    # def _validate_dimensions(self):
-    #     """Ensure all setup operations completed successfully"""
-
-    #     assert hasattr(self, "")
 
     def build_set_params(self):
 
@@ -190,10 +182,6 @@ class RiemannVisTimeFreqCalculationFFI(Component):
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
-    # def _validate_dimensions(self):
-    #     """Ensure all setup operations completed successfully"""
-
-    #     assert hasattr(self, "")
 
     def build_set_params(self):
 
@@ -268,11 +256,7 @@ class RiemannVisTimeFreqVariable(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    # def _validate_dimensions(self):
-    #     """Ensure all setup operations completed successfully"""
-
-    #     assert hasattr(self, "")
+        
 
     def _print_saving(self):
 
