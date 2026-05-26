@@ -29,7 +29,8 @@ namespace hn = ::hwy::HWY_NAMESPACE;
 #include "complex_vector_inl.hpp"
 
 HWY_ATTR void
-rfi_kernel_opt(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
+rfi_kernel_opt(double n_int_inv,
+               Tensor1D<const int *> a1, Tensor1D<const int *> a2,
                Tensor4D<const std::complex<double> *> rfi_amp_fine,
                Tensor4D<const double *> rfi_phase,
                Tensor3D<std::complex<double> *> rfi_vis) {
@@ -39,13 +40,11 @@ rfi_kernel_opt(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
   const TagType<double> d;
   constexpr std::int64_t n_lanes = hn::Lanes(d);
 
-  const auto n_rfi = rfi_amp_fine.shape[0];
-  const auto n_ant = rfi_amp_fine.shape[1];
-  const auto n_freq_fine = rfi_amp_fine.shape[2];
-  const auto n_time_fine = rfi_amp_fine.shape[3];
+  // rfi_amp_fine layout: (n_ant, n_freq, n_time, n_rfi * n_int_f * n_int_t)
+  const auto n_freq = rfi_amp_fine.shape[1];
+  const auto n_time = rfi_amp_fine.shape[2];
+  const auto n_red = rfi_amp_fine.shape[3];
   const auto n_bl = a1.shape[0];
-  const auto n_time = rfi_vis.shape[2];
-  const auto n_freq = rfi_vis.shape[1];
 
   assert(a1.shape[0] == a2.shape[0]);
   assert(a1.shape[0] == rfi_vis.shape[0]);
@@ -53,81 +52,58 @@ rfi_kernel_opt(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
   assert(rfi_phase.shape[1] == rfi_amp_fine.shape[1]);
   assert(rfi_phase.shape[2] == rfi_amp_fine.shape[2]);
   assert(rfi_phase.shape[3] == rfi_amp_fine.shape[3]);
-
-  const auto n_int_t = n_time_fine / n_time;
-  const auto n_int_f = n_freq_fine / n_freq;
-  const double n_int_inv = 1.f / double(n_int_t * n_int_f);
+  assert(rfi_vis.shape[1] == n_freq);
+  assert(rfi_vis.shape[2] == n_time);
 
   for (std::int64_t i_bl = 0; i_bl < n_bl; ++i_bl) {
     std::int64_t i_a1 = a1(i_bl);
     std::int64_t i_a2 = a2(i_bl);
 
     for (std::int64_t i_f = 0; i_f < n_freq; ++i_f) {
-      const auto i_f_fine_begin = i_f * n_int_f;
       for (std::int64_t i_t = 0; i_t < n_time; ++i_t) {
         std::complex<double> sum{0, 0};
 
-        const auto i_t_fine_begin = i_t * n_int_t;
+        const auto ptr_val_rfi_amp_1 = &rfi_amp_fine(i_a1, i_f, i_t, 0);
+        const auto ptr_val_rfi_amp_2 = &rfi_amp_fine(i_a2, i_f, i_t, 0);
 
-        for (std::int64_t i_rfi = 0; i_rfi < n_rfi; ++i_rfi) {
+        const auto ptr_val_rfi_phase_1 = &rfi_phase(i_a1, i_f, i_t, 0);
+        const auto ptr_val_rfi_phase_2 = &rfi_phase(i_a2, i_f, i_t, 0);
 
-          for (std::int64_t i_f_fine = i_f_fine_begin;
-               i_f_fine < i_f_fine_begin + n_int_f; ++i_f_fine) {
+        std::int64_t i_red = 0;
+        for (; i_red + n_lanes <= n_red; i_red += n_lanes) {
+          const auto val_rfi_phase_1 =
+              hn::LoadU(d, ptr_val_rfi_phase_1 + i_red);
+          const auto val_rfi_phase_2 =
+              hn::LoadU(d, ptr_val_rfi_phase_2 + i_red);
 
-            auto ptr_val_rfi_amp_1 = &rfi_amp_fine(i_rfi, i_a1, i_f_fine, 0);
-            auto ptr_val_rfi_amp_2 = &rfi_amp_fine(i_rfi, i_a2, i_f_fine, 0);
+          const auto val_rfi_amp_1 = LoadU(d, ptr_val_rfi_amp_1 + i_red);
+          const auto val_rfi_amp_2 = LoadU(d, ptr_val_rfi_amp_2 + i_red);
 
-            auto ptr_val_rfi_phase_1 = &rfi_phase(i_rfi, i_a1, i_f_fine, 0);
-            auto ptr_val_rfi_phase_2 = &rfi_phase(i_rfi, i_a2, i_f_fine, 0);
+          const auto phase_diff = hn::Sub(val_rfi_phase_1, val_rfi_phase_2);
 
-            std::int64_t i_t_fine = i_t_fine_begin;
-            for (; i_t_fine + n_lanes <= i_t_fine_begin + n_int_t;
-                 i_t_fine += n_lanes) {
-              const auto val_rfi_phase_1 =
-                  hn::LoadU(d, ptr_val_rfi_phase_1 + i_t_fine);
-              const auto val_rfi_phase_2 =
-                  hn::LoadU(d, ptr_val_rfi_phase_2 + i_t_fine);
+          const auto c = hn::Cos(d, phase_diff);
+          const auto s = hn::Sin(d, phase_diff);
 
-              const auto val_rfi_amp_1 = LoadU(d, ptr_val_rfi_amp_1 + i_t_fine);
+          const auto e = ComplexV<D>{c, s};
 
-              const auto val_rfi_amp_2 = LoadU(d, ptr_val_rfi_amp_2 + i_t_fine);
+          const auto res = Mul(MulConj(val_rfi_amp_1, val_rfi_amp_2), e);
 
-              const auto phase_diff = hn::Sub(val_rfi_phase_1, val_rfi_phase_2);
+          sum += std::complex<double>(hn::ReduceSum(d, res.re),
+                                      hn::ReduceSum(d, res.im));
+        }
 
-              const auto c = hn::Cos(d, phase_diff);
-              const auto s = hn::Sin(d, phase_diff);
+        for (; i_red < n_red; ++i_red) {
+          const auto val_rfi_amp_1 = ptr_val_rfi_amp_1[i_red];
+          const auto val_rfi_amp_2 = ptr_val_rfi_amp_2[i_red];
 
-              const auto e = ComplexV<D>{c, s};
+          const auto val_rfi_phase_1 = ptr_val_rfi_phase_1[i_red];
+          const auto val_rfi_phase_2 = ptr_val_rfi_phase_2[i_red];
 
-              const auto res = Mul(MulConj(val_rfi_amp_1, val_rfi_amp_2), e);
+          std::complex<double> e(
+              std::cos(val_rfi_phase_1 - val_rfi_phase_2),
+              std::sin(val_rfi_phase_1 - val_rfi_phase_2));
 
-              sum += std::complex<double>(hn::ReduceSum(d, res.re),
-                                          hn::ReduceSum(d, res.im));
-            }
-
-            for (; i_t_fine < i_t_fine_begin + n_int_t; ++i_t_fine) {
-              const auto val_rfi_amp_1 =
-                  rfi_amp_fine(i_rfi, i_a1, i_f_fine, i_t_fine);
-              const auto val_rfi_amp_2 =
-                  rfi_amp_fine(i_rfi, i_a2, i_f_fine, i_t_fine);
-
-              const auto val_rfi_phase_1 =
-                  rfi_phase(i_rfi, i_a1, i_f_fine, i_t_fine);
-              const auto val_rfi_phase_2 =
-                  rfi_phase(i_rfi, i_a2, i_f_fine, i_t_fine);
-
-              // ideal shape for memory access: (n_ant, n_f, n_t, n_f_int,
-              // n_t_int, n_rfi) currently: (n_rfi, n_ant, n_f * n_f_int, n_t *
-              // n_t_int)
-              std::complex<double> e(
-                  std::cos(val_rfi_phase_1 - val_rfi_phase_2),
-                  std::sin(val_rfi_phase_1 - val_rfi_phase_2));
-
-              auto res = val_rfi_amp_1 * std::conj(val_rfi_amp_2) * e;
-
-              sum += res;
-            }
-          }
+          sum += val_rfi_amp_1 * std::conj(val_rfi_amp_2) * e;
         }
 
         sum *= n_int_inv;
@@ -168,33 +144,41 @@ ffi::Error calc_rfi_vis_cpu_impl(
         "Expected rfi_vis and a1 to have the same number of baselines");
   }
 
-  if (rfi_vis->dimensions()[1] != rfi_amp_fine.dimensions()[2]) {
+  if (rfi_vis->dimensions()[1] != rfi_amp_fine.dimensions()[1]) {
     return ffi::Error::InvalidArgument(
         "Expected rfi_vis and rfi_amp_fine to have the same number of "
         "frequencies");
   }
 
-  if (rfi_vis->dimensions()[2] != rfi_amp_fine.dimensions()[4]) {
+  if (rfi_vis->dimensions()[2] != rfi_amp_fine.dimensions()[2]) {
     return ffi::Error::InvalidArgument(
         "Expected rfi_vis and rfi_amp_fine to have the same number of times");
   }
 
+  // rfi_amp_fine / rfi_phase layout:
+  //   (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+  // Collapse the three innermost contiguous dims (n_rfi, n_int_freq,
+  // n_int_time) into one for kernel indexing.
   Tensor1D<const int *> a1_tensor(a1.typed_data(), a1.dimensions()[0]);
   Tensor1D<const int *> a2_tensor(a2.typed_data(), a2.dimensions()[0]);
   Tensor4D<const std::complex<double> *> rfi_amp_fine_tensor(
       rfi_amp_fine.typed_data(), rfi_amp_fine.dimensions()[0],
-      rfi_amp_fine.dimensions()[1],
-      rfi_amp_fine.dimensions()[2] * rfi_amp_fine.dimensions()[3],
-      rfi_amp_fine.dimensions()[4] * rfi_amp_fine.dimensions()[5]);
+      rfi_amp_fine.dimensions()[1], rfi_amp_fine.dimensions()[2],
+      rfi_amp_fine.dimensions()[3] * rfi_amp_fine.dimensions()[4] *
+          rfi_amp_fine.dimensions()[5]);
   Tensor4D<const double *> rfi_phase_tensor(
       rfi_phase.typed_data(), rfi_phase.dimensions()[0],
-      rfi_phase.dimensions()[1],
-      rfi_phase.dimensions()[2] * rfi_phase.dimensions()[3],
-      rfi_phase.dimensions()[4] * rfi_phase.dimensions()[5]);
+      rfi_phase.dimensions()[1], rfi_phase.dimensions()[2],
+      rfi_phase.dimensions()[3] * rfi_phase.dimensions()[4] *
+          rfi_phase.dimensions()[5]);
 
   Tensor3D<std::complex<double> *> rfi_vis_tensor(
       rfi_vis->typed_data(), rfi_vis->dimensions()[0], rfi_vis->dimensions()[1],
       rfi_vis->dimensions()[2]);
+
+  const auto n_int_f = rfi_amp_fine.dimensions()[4];
+  const auto n_int_t = rfi_amp_fine.dimensions()[5];
+  const double n_int_inv = 1.0 / double(n_int_f * n_int_t);
 
   const int64_t n_threads = std::max<int64_t>(thread_pool.num_threads(), 1);
 
@@ -223,8 +207,8 @@ ffi::Error calc_rfi_vis_cpu_impl(
           rfi_vis->dimensions()[1], rfi_vis->dimensions()[2]);
 
       TABASCAL_EXPORT_AND_DISPATCH_T(rfi_kernel_opt)
-      (a1_tensor_th, a2_tensor_th, rfi_amp_fine_tensor, rfi_phase_tensor,
-       rfi_vis_tensor_th);
+      (n_int_inv, a1_tensor_th, a2_tensor_th, rfi_amp_fine_tensor,
+       rfi_phase_tensor, rfi_vis_tensor_th);
 
       done.count_down();
     });
