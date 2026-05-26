@@ -39,7 +39,7 @@ WORKDIR /tabascal/src
 COPY . .
 
 # enable FFI CUDA support
-ENV TABASCAL_GPU=CUDA
+ENV TABASCAL_CUDA=1
 
 # Build FFI and install package
 ARG JAX_VERSION="latest"
