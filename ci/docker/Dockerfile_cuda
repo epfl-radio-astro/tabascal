@@ -38,6 +38,9 @@ WORKDIR /tabascal/src
 # Copy source last to maximise layer cache reuse
 COPY . .
 
+# enable FFI CUDA support
+ENV TABASCAL_CUDA=1
+
 # Build FFI and install package
 ARG JAX_VERSION="latest"
 RUN if [ "$JAX_VERSION" = "latest" ] || [ -z "$JAX_VERSION" ]; then \
