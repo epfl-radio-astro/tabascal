@@ -19,17 +19,20 @@ namespace ffi = xla::ffi;
 namespace tabascal {
 namespace gpu {
 
-template <int BLOCK_SIZE, typename INT_T>
+template <typename T, int BLOCK_SIZE, typename INT_T>
 __global__ void __launch_bounds__(BLOCK_SIZE)
-    rfi_jvp_kernel(double scale, Tensor1D<const int *, INT_T> a1,
+    rfi_jvp_kernel(T scale, Tensor1D<const int *, INT_T> a1,
                    Tensor1D<const int *, INT_T> a2,
-                   Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine,
-                   Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine_grad,
-                   Tensor4D<const double *, INT_T> rfi_phase,
-                   Tensor4D<const double *, INT_T> rfi_phase_grad,
-                   Tensor3D<cuDoubleComplex *, INT_T> rfi_grad) {
+                   Tensor4D<const typename gpu_complex_traits<T>::complex_t *, INT_T> rfi_amp_fine,
+                   Tensor4D<const typename gpu_complex_traits<T>::complex_t *, INT_T> rfi_amp_fine_grad,
+                   Tensor4D<const T *, INT_T> rfi_phase,
+                   Tensor4D<const T *, INT_T> rfi_phase_grad,
+                   Tensor3D<typename gpu_complex_traits<T>::complex_t *, INT_T> rfi_grad) {
 
-  using BlockReduce_t = cub::BlockReduce<double, BLOCK_SIZE>;
+  using traits = gpu_complex_traits<T>;
+  using complex_t = typename traits::complex_t;
+
+  using BlockReduce_t = cub::BlockReduce<T, BLOCK_SIZE>;
 
   __shared__ typename BlockReduce_t::TempStorage temp_storage_1;
   __shared__ typename BlockReduce_t::TempStorage temp_storage_2;
@@ -57,7 +60,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
     for (INT_T i_f = blockIdx.z; i_f < n_freq; i_f += gridDim.z) {
 
       for (INT_T i_t = blockIdx.x; i_t < n_time; i_t += gridDim.x) {
-        cuDoubleComplex sum{0, 0};
+        complex_t sum{0, 0};
 
         const auto ptr_rfi_amp_1 = &rfi_amp_fine(i_a1, i_f, i_t, 0);
         const auto ptr_rfi_amp_2 = &rfi_amp_fine(i_a2, i_f, i_t, 0);
@@ -86,31 +89,21 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
           const auto val_rfi_phase_grad_1 = ptr_rfi_phase_grad_1[i_red];
           const auto val_rfi_phase_grad_2 = ptr_rfi_phase_grad_2[i_red];
 
-          cuDoubleComplex e_val;
-          sincos(val_rfi_phase_1 - val_rfi_phase_2, &e_val.y, &e_val.x);
+          complex_t e_val;
+          traits::sincos_(val_rfi_phase_1 - val_rfi_phase_2, &e_val.y, &e_val.x);
 
-          // const auto g1 =
-          //     val_e * (val_rfi_amp_grad_1 * std::conj(val_rfi_amp_2) +
-          //              val_rfi_amp_1 * std::conj(val_rfi_amp_grad_2));
+          // g1 = val_e * (val_rfi_amp_grad_1 * conj(val_rfi_amp_2) +
+          //               val_rfi_amp_1 * conj(val_rfi_amp_grad_2))
+          auto g1 = traits::mul(val_rfi_amp_grad_1, traits::conj(val_rfi_amp_2));
+          g1 = traits::add(g1, traits::mul(val_rfi_amp_1, traits::conj(val_rfi_amp_grad_2)));
+          g1 = traits::mul(g1, e_val);
 
-          auto g1 = cuCmul(val_rfi_amp_grad_1, cuConj(val_rfi_amp_2));
+          // g2 = val_e * i * (phase_grad_1 - phase_grad_2) * val_rfi_amp_1 * conj(val_rfi_amp_2)
+          complex_t g2{val_rfi_phase_grad_1 - val_rfi_phase_grad_2, T(0)};
+          g2 = traits::mul(g2, traits::mul(val_rfi_amp_1, traits::conj(val_rfi_amp_2)));
+          g2 = traits::mul(g2, complex_t{-e_val.y, e_val.x});
 
-          g1 = cuCadd(g1, cuCmul(val_rfi_amp_1, cuConj(val_rfi_amp_grad_2)));
-
-          g1 = cuCmul(g1, e_val);
-
-          // const auto g2 = val_e * std::complex<double>(0, 1) *
-          //                 (val_rfi_phase_grad_1 - val_rfi_phase_grad_2) *
-          //                 val_rfi_amp_1 * std::conj(val_rfi_amp_2);
-
-          auto g2 =
-              cuDoubleComplex{val_rfi_phase_grad_1 - val_rfi_phase_grad_2, 0};
-
-          g2 = cuCmul(g2, cuCmul(val_rfi_amp_1, cuConj(val_rfi_amp_2)));
-
-          g2 = cuCmul(g2, cuDoubleComplex{-e_val.y, e_val.x});
-
-          sum = cuCadd(sum, cuCadd(g1, g2));
+          sum = traits::add(sum, traits::add(g1, g2));
         }
 
         sum.x = BlockReduce_t(temp_storage_1).Sum(sum.x);
@@ -128,18 +121,14 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
   }
 }
 
-using rfi_amp_fine_t = ffi::Buffer<ffi::C128, 6>;
-using rfi_phase_t = ffi::Buffer<ffi::F64, 6>;
-
-// A wrapper function providing the interface between the XLA FFI call and our
-// library function `ComputeRFI` above. This function handles the batch
-// dimensions by calling `ComputeRFI` within a loop.
-template <typename INT_T>
+template <typename T, typename INT_T, ffi::DataType AMP_DT, ffi::DataType PHASE_DT>
 ffi::Error calc_rfi_jvp_gpu_dispatch(
     cudaStream_t stream, ffi::BufferR1<ffi::S32> a1, ffi::BufferR1<ffi::S32> a2,
-    rfi_amp_fine_t rfi_amp_fine, rfi_amp_fine_t rfi_amp_fine_grad,
-    rfi_phase_t rfi_phase, rfi_phase_t rfi_phase_grad,
-    ffi::ResultBufferR3<ffi::C128> rfi_grad) {
+    ffi::Buffer<AMP_DT, 6> rfi_amp_fine, ffi::Buffer<AMP_DT, 6> rfi_amp_fine_grad,
+    ffi::Buffer<PHASE_DT, 6> rfi_phase, ffi::Buffer<PHASE_DT, 6> rfi_phase_grad,
+    ffi::Result<ffi::BufferR3<AMP_DT>> rfi_grad) {
+  using complex_t = typename gpu_complex_traits<T>::complex_t;
+
   if (a1.dimensions()[0] != a2.dimensions()[0]) {
     return ffi::Error::InvalidArgument(
         "Expected a1 and a2 to have the same size");
@@ -179,46 +168,42 @@ ffi::Error calc_rfi_jvp_gpu_dispatch(
     }
   }
 
-  // rfi_amp_fine / rfi_phase (and their grads) layout:
-  //   (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
-  // Collapse the three innermost contiguous dims (n_rfi, n_int_freq,
-  // n_int_time) into one for kernel indexing.
   Tensor1D<const int *, INT_T> a1_tensor(a1.typed_data(), a1.dimensions()[0]);
   Tensor1D<const int *, INT_T> a2_tensor(a2.typed_data(), a2.dimensions()[0]);
-  Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine_tensor(
-      (const cuDoubleComplex *)rfi_amp_fine.typed_data(),
+  Tensor4D<const complex_t *, INT_T> rfi_amp_fine_tensor(
+      (const complex_t *)rfi_amp_fine.typed_data(),
       rfi_amp_fine.dimensions()[0], rfi_amp_fine.dimensions()[1],
       rfi_amp_fine.dimensions()[2],
       rfi_amp_fine.dimensions()[3] * rfi_amp_fine.dimensions()[4] *
           rfi_amp_fine.dimensions()[5]);
 
-  Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine_grad_tensor(
-      (const cuDoubleComplex *)rfi_amp_fine_grad.typed_data(),
+  Tensor4D<const complex_t *, INT_T> rfi_amp_fine_grad_tensor(
+      (const complex_t *)rfi_amp_fine_grad.typed_data(),
       rfi_amp_fine_grad.dimensions()[0], rfi_amp_fine_grad.dimensions()[1],
       rfi_amp_fine_grad.dimensions()[2],
       rfi_amp_fine_grad.dimensions()[3] * rfi_amp_fine_grad.dimensions()[4] *
           rfi_amp_fine_grad.dimensions()[5]);
 
-  Tensor4D<const double *, INT_T> rfi_phase_tensor(
+  Tensor4D<const T *, INT_T> rfi_phase_tensor(
       rfi_phase.typed_data(), rfi_phase.dimensions()[0],
       rfi_phase.dimensions()[1], rfi_phase.dimensions()[2],
       rfi_phase.dimensions()[3] * rfi_phase.dimensions()[4] *
           rfi_phase.dimensions()[5]);
 
-  Tensor4D<const double *, INT_T> rfi_phase_grad_tensor(
+  Tensor4D<const T *, INT_T> rfi_phase_grad_tensor(
       rfi_phase_grad.typed_data(), rfi_phase_grad.dimensions()[0],
       rfi_phase_grad.dimensions()[1], rfi_phase_grad.dimensions()[2],
       rfi_phase_grad.dimensions()[3] * rfi_phase_grad.dimensions()[4] *
           rfi_phase_grad.dimensions()[5]);
 
-  Tensor3D<cuDoubleComplex *, INT_T> rfi_grad_tensor(
-      (cuDoubleComplex *)rfi_grad->typed_data(), rfi_grad->dimensions()[0],
+  Tensor3D<complex_t *, INT_T> rfi_grad_tensor(
+      (complex_t *)rfi_grad->typed_data(), rfi_grad->dimensions()[0],
       rfi_grad->dimensions()[1], rfi_grad->dimensions()[2]);
 
   const INT_T n_int_f = (INT_T)rfi_amp_fine.dimensions()[4];
   const INT_T n_int_t = (INT_T)rfi_amp_fine.dimensions()[5];
 
-  const double scale = 1 / double(n_int_t * n_int_f);
+  const T scale = T(1) / T(n_int_t * n_int_f);
 
   const auto n_time = rfi_grad_tensor.shape[2];
   const auto n_bl = a1.dimensions()[0];
@@ -229,28 +214,28 @@ ffi::Error calc_rfi_jvp_gpu_dispatch(
   if (rfi_phase_tensor.shape[3] / 2 < 32) {
     constexpr int block_size = 32;
     dim3 block(block_size);
-    rfi_jvp_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
+    rfi_jvp_kernel<T, block_size, INT_T><<<grid, block, 0, stream>>>(
         scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
         rfi_amp_fine_grad_tensor, rfi_phase_tensor, rfi_phase_grad_tensor,
         rfi_grad_tensor);
   } else if (rfi_phase_tensor.shape[3] / 2 < 64) {
     constexpr int block_size = 64;
     dim3 block(block_size);
-    rfi_jvp_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
+    rfi_jvp_kernel<T, block_size, INT_T><<<grid, block, 0, stream>>>(
         scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
         rfi_amp_fine_grad_tensor, rfi_phase_tensor, rfi_phase_grad_tensor,
         rfi_grad_tensor);
   } else if (rfi_phase_tensor.shape[3] / 2 < 128) {
     constexpr int block_size = 128;
     dim3 block(block_size);
-    rfi_jvp_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
+    rfi_jvp_kernel<T, block_size, INT_T><<<grid, block, 0, stream>>>(
         scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
         rfi_amp_fine_grad_tensor, rfi_phase_tensor, rfi_phase_grad_tensor,
         rfi_grad_tensor);
   } else {
     constexpr int block_size = 256;
     dim3 block(block_size);
-    rfi_jvp_kernel<block_size, INT_T><<<grid, block, 0, stream>>>(
+    rfi_jvp_kernel<T, block_size, INT_T><<<grid, block, 0, stream>>>(
         scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor,
         rfi_amp_fine_grad_tensor, rfi_phase_tensor, rfi_phase_grad_tensor,
         rfi_grad_tensor);
@@ -265,29 +250,63 @@ ffi::Error calc_rfi_jvp_gpu_dispatch(
   return ffi::Error::Success();
 }
 
-ffi::Error calc_rfi_jvp_gpu_impl(
+template <typename T, ffi::DataType AMP_DT, ffi::DataType PHASE_DT>
+ffi::Error calc_rfi_jvp_gpu_impl_tmpl(
     cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
     ffi::BufferR1<ffi::S32> a1_sorter, ffi::BufferR1<ffi::S32> a1_start,
     ffi::BufferR1<ffi::S32> a2, ffi::BufferR1<ffi::S32> a2_sorter,
-    ffi::BufferR1<ffi::S32> a2_start, rfi_amp_fine_t rfi_amp_fine,
-    rfi_amp_fine_t rfi_amp_fine_grad, rfi_phase_t rfi_phase,
-    rfi_phase_t rfi_phase_grad, ffi::ResultBufferR3<ffi::C128> rfi_grad) {
+    ffi::BufferR1<ffi::S32> a2_start, ffi::Buffer<AMP_DT, 6> rfi_amp_fine,
+    ffi::Buffer<AMP_DT, 6> rfi_amp_fine_grad,
+    ffi::Buffer<PHASE_DT, 6> rfi_phase, ffi::Buffer<PHASE_DT, 6> rfi_phase_grad,
+    ffi::Result<ffi::BufferR3<AMP_DT>> rfi_grad) {
   constexpr std::int64_t max32 = std::numeric_limits<std::int32_t>::max();
   // use 32 bit indexing if possible
   if (a1.element_count() < max32 && a2.element_count() < max32 &&
       rfi_amp_fine.element_count() < max32 &&
       rfi_phase.element_count() < max32 && rfi_grad->element_count() < max32) {
-    return calc_rfi_jvp_gpu_dispatch<std::int32_t>(stream, a1, a2, rfi_amp_fine,
-                                                   rfi_amp_fine_grad, rfi_phase,
-                                                   rfi_phase_grad, rfi_grad);
+    return calc_rfi_jvp_gpu_dispatch<T, std::int32_t, AMP_DT, PHASE_DT>(
+        stream, a1, a2, rfi_amp_fine, rfi_amp_fine_grad, rfi_phase,
+        rfi_phase_grad, rfi_grad);
   } else {
-    return calc_rfi_jvp_gpu_dispatch<std::int64_t>(stream, a1, a2, rfi_amp_fine,
-                                                   rfi_amp_fine_grad, rfi_phase,
-                                                   rfi_phase_grad, rfi_grad);
+    return calc_rfi_jvp_gpu_dispatch<T, std::int64_t, AMP_DT, PHASE_DT>(
+        stream, a1, a2, rfi_amp_fine, rfi_amp_fine_grad, rfi_phase,
+        rfi_phase_grad, rfi_grad);
   }
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_jvp_gpu, calc_rfi_jvp_gpu_impl,
+ffi::Error calc_rfi_jvp_gpu_f32_impl(
+    cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
+    ffi::BufferR1<ffi::S32> a1_sorter, ffi::BufferR1<ffi::S32> a1_start,
+    ffi::BufferR1<ffi::S32> a2, ffi::BufferR1<ffi::S32> a2_sorter,
+    ffi::BufferR1<ffi::S32> a2_start, ffi::Buffer<ffi::C64, 6> rfi_amp_fine,
+    ffi::Buffer<ffi::C64, 6> rfi_amp_fine_grad,
+    ffi::Buffer<ffi::F32, 6> rfi_phase, ffi::Buffer<ffi::F32, 6> rfi_phase_grad,
+    ffi::Result<ffi::BufferR3<ffi::C64>> rfi_grad) {
+  return calc_rfi_jvp_gpu_impl_tmpl<float, ffi::C64, ffi::F32>(
+      stream, a1, a1_sorter, a1_start, a2, a2_sorter, a2_start, rfi_amp_fine,
+      rfi_amp_fine_grad, rfi_phase, rfi_phase_grad, rfi_grad);
+}
+
+ffi::Error calc_rfi_jvp_gpu_f64_impl(
+    cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
+    ffi::BufferR1<ffi::S32> a1_sorter, ffi::BufferR1<ffi::S32> a1_start,
+    ffi::BufferR1<ffi::S32> a2, ffi::BufferR1<ffi::S32> a2_sorter,
+    ffi::BufferR1<ffi::S32> a2_start, ffi::Buffer<ffi::C128, 6> rfi_amp_fine,
+    ffi::Buffer<ffi::C128, 6> rfi_amp_fine_grad,
+    ffi::Buffer<ffi::F64, 6> rfi_phase, ffi::Buffer<ffi::F64, 6> rfi_phase_grad,
+    ffi::Result<ffi::BufferR3<ffi::C128>> rfi_grad) {
+  return calc_rfi_jvp_gpu_impl_tmpl<double, ffi::C128, ffi::F64>(
+      stream, a1, a1_sorter, a1_start, a2, a2_sorter, a2_start, rfi_amp_fine,
+      rfi_amp_fine_grad, rfi_phase, rfi_phase_grad, rfi_grad);
+}
+
+// Type aliases to avoid commas inside XLA_FFI_DEFINE_HANDLER_SYMBOL macro args.
+using rfi_amp_f32_t = ffi::Buffer<ffi::C64, 6>;
+using rfi_phase_f32_t = ffi::Buffer<ffi::F32, 6>;
+using rfi_amp_f64_t = ffi::Buffer<ffi::C128, 6>;
+using rfi_phase_f64_t = ffi::Buffer<ffi::F64, 6>;
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_jvp_gpu_f32, calc_rfi_jvp_gpu_f32_impl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
@@ -296,10 +315,25 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_jvp_gpu, calc_rfi_jvp_gpu_impl,
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
-                                  .Arg<rfi_amp_fine_t>()
-                                  .Arg<rfi_amp_fine_t>()
-                                  .Arg<rfi_phase_t>()
-                                  .Arg<rfi_phase_t>()
+                                  .Arg<rfi_amp_f32_t>()
+                                  .Arg<rfi_amp_f32_t>()
+                                  .Arg<rfi_phase_f32_t>()
+                                  .Arg<rfi_phase_f32_t>()
+                                  .Ret<ffi::BufferR3<ffi::C64>>());
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_jvp_gpu_f64, calc_rfi_jvp_gpu_f64_impl,
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<rfi_amp_f64_t>()
+                                  .Arg<rfi_amp_f64_t>()
+                                  .Arg<rfi_phase_f64_t>()
+                                  .Arg<rfi_phase_f64_t>()
                                   .Ret<ffi::BufferR3<ffi::C128>>());
 
 } // namespace gpu
