@@ -102,6 +102,9 @@ matplotlib      = "*"
 numpy           = "*"
 numpyro         = "*"
 optax           = "*"
+# Upper-bounded because the build-system pins jax==0.6.0 (see [build-system]),
+# whose jaxlib wheels only cover cp310-cp313; Python 3.14 has no matching wheel.
+python          = ">=3.10,<3.14"
 python-casacore = "*"
 platformdirs    = "*"
 pyyaml          = "*"
