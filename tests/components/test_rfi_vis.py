@@ -4,8 +4,6 @@ from tabascal.components.rfi_vis import *
 import jax.numpy as jnp
 import jax
 
-jax.config.update("jax_enable_x64", True)
-
 from .conftest import make_constants
 
 

@@ -13,8 +13,6 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 
-jax.config.update("jax_enable_x64", True)
-
 from tabascal.components.trajectory import FixedOrbit, PhaseCalculationRFI
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy
 
