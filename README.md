@@ -44,11 +44,14 @@ pixi shell -e dev   # dev environment
 
 # Build the FFI shared libraries
 
-The `RiemannVisTimeFreqCalculationFFI` component requires a compiled shared library. Build it with:
+The `RiemannVisTimeFreqCalculationFFI` component requires a compiled shared
+library (`libtabascal.so`, or `libtabascal_cuda.so` for NVIDIA GPUs). These are
+built automatically by CMake/scikit-build-core when the environment is created
+(`pixi install`). To rebuild after editing the C++/CUDA kernels:
 
 ```bash
-pixi run build-ffi        # CPU (tabascal.so)
-pixi run build-ffi-cuda   # NVIDIA GPU (tabascal_cuda.so)
+pixi run -e dev build-ffi                    # CPU (libtabascal.so)
+pixi run -e cuda12-compile build-ffi-cuda    # NVIDIA GPU (libtabascal_cuda.so)
 ```
 
 # Developer

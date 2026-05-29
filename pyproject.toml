@@ -84,8 +84,9 @@ platforms = ["osx-64", "osx-arm64", "linux-64", "linux-aarch64"]
 # ── Tasks ──────────────────────────────────────────────────────────────────────
 
 [tool.pixi.feature.dev.tasks]
-build-ffi = { cmd = "make cpu", cwd = "tabascal/components/ffi", description = "Compile CPU FFI shared library (tabascal.so)" }
+build-ffi = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CPU FFI shared library (libtabascal.so) via scikit-build-core/CMake" }
 test           = "pytest tests/"
+test-components = { cmd = "pytest tests/components/", description = "Run component tests only" }
 docs-build     = "sphinx-build -b html docs/ docs/_build/html"
 docs-clean     = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
 perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabascal_perf_check.py --system=generic --exec-policy=serial --run --performance-report --report-file=reframe_results.json", description = "Run Re-Frame performance benchmark locally" }
@@ -149,7 +150,6 @@ tabascal = { path = ".", editable = true }
 
 [tool.pixi.feature.dev.dependencies]
 cxx-compiler     = "*"
-make             = "*"
 pytest           = "*"
 pytest-cov       = "*"
 pre-commit       = "*"
@@ -169,13 +169,18 @@ tabsim   = "*"
 [tool.pixi.feature.compile]
 platforms = ["linux-64", "linux-aarch64"]
 
+# Enables the CUDA FFI kernel build (scikit-build-core override in [tool.scikit-build]).
+# Set at the feature level so even the initial `pixi install -e cuda12-compile`
+# builds libtabascal_cuda.so, and any rebuild in the env stays CUDA-enabled.
+[tool.pixi.feature.compile.activation.env]
+TABASCAL_CUDA = "1"
+
 [tool.pixi.feature.compile.tasks]
-build-ffi-cuda = { cmd = "make cuda", cwd = "tabascal/components/ffi", description = "Compile CUDA FFI shared library (tabascal_cuda.so)" }
+build-ffi-cuda = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CUDA FFI shared library (libtabascal_cuda.so) via scikit-build-core/CMake" }
 
 [tool.pixi.feature.compile.dependencies]
 cuda-nvcc       = "12.*"
 cuda-cudart-dev = "12.*"
-make            = "*"
 cxx-compiler    = "*"
 
 # ── Environments ───────────────────────────────────────────────────────────────

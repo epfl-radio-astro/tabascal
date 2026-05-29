@@ -1,21 +1,20 @@
 # Custom kernel
 ## Compilation
 
-Compilation requires a shell environment, where JAX is available from python.
-For GPU support, the `nvcc` compiler must be avaible or the environment variable `CUDACXX` must be set to point to the location of `nvcc`.
+The CPU and GPU shared libraries are built by CMake via scikit-build-core as
+part of installing tabascal (`pip install -e .`, or `pixi install`). See the
+top-level `CMakeLists.txt` and the `[tool.scikit-build]` section of
+`pyproject.toml`.
 
-By default, both CPU and GPU libraries are compiled.
-To compile for CPU only:
+To rebuild after editing the kernels:
 ```
-make cpu
-```
-
-To compile for GPU only:
-```
-make gpu
+pixi run -e dev build-ffi                   # CPU (libtabascal.so)
+pixi run -e cuda12-compile build-ffi-cuda   # NVIDIA GPU (libtabascal_cuda.so)
 ```
 
-Note: The targeted GPU architecture can be changed inside the makefile at the `CUDAFLAGS` section. By default, architectures from sm_70 to sm_90 are supported.
+GPU builds are enabled by the `TABASCAL_CUDA=1` environment variable (set by the
+`build-ffi-cuda` task); `nvcc` must be available on the `PATH`. The targeted GPU
+architectures are configured via `CMAKE_CUDA_ARCHITECTURES` in `CMakeLists.txt`.
 
 ## Usage
 
