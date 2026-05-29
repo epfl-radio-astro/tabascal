@@ -125,7 +125,7 @@ def main():
     components = args.components.split(",")
     with open(tab_template) as f:
         config = yaml.safe_load(f)
-    config["model"] = {"components": components}
+    config["model"] = {"components": components, "precision": "double"}
     config_out = workdir / "tab_target.yaml"
     with open(config_out, "w") as f:
         yaml.dump(config, f)

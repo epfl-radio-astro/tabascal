@@ -5,8 +5,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_enable_x64", True)
-
 from tabascal.time import secs_to_days, days_to_secs, jd_to_mjd, mjd_to_jd
 from tabascal.coordinates import gcrf_to_uvw, itrf_to_uvw, itrf_to_uvw_jd
 

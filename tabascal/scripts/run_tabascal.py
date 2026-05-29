@@ -24,8 +24,6 @@ def _run_cmd(args):
     from tabascal.config import load_config, TabConfig, Model
     from tabascal.write import write_results_xds
 
-    jax.config.update("jax_enable_x64", True)
-
     @measure_runtime
     def build_model(config, ms_path):
         tab_config = TabConfig(config, ms_path)
@@ -193,6 +191,13 @@ def _run_cmd(args):
 
     config = load_config(args.config)
     norad_ids = []
+
+    # Set precision explicitly in both directions: sgp4jax enables x64 at import
+    # time, so single precision must actively disable it here (after imports).
+    jax.config.update(
+        "jax_enable_x64",
+        config.get("model", {}).get("precision", "single") == "double",
+    )
 
     from tabascal.tle import TLEError
     try:

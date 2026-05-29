@@ -8,8 +8,6 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 
-jax.config.update("jax_enable_x64", True)
-
 from tabascal.components.gains import (
     UnitaryGains,
     GPGains,

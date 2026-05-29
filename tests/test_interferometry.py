@@ -7,8 +7,6 @@ import jax.numpy as jnp
 import sgp4jax
 from jax import vmap
 
-jax.config.update("jax_enable_x64", True)
-
 from tabascal.interferometry import calculate_fringe_frequency, C, Omega_e
 from tabascal.time import mjd_to_jd
 from tabascal.coordinates import itrf_to_uvw_jd

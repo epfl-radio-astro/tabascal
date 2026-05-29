@@ -128,6 +128,7 @@ class PipelineTestConfig:
     sim_file_name: str
     components: list[str]
     chi2_ref: float
+    precision: str = "single"
     config_overrides: dict = field(default_factory=dict)
 
 
@@ -144,7 +145,9 @@ def _run_pipeline(
     config_template = data_dir / "tab_target.yaml"
     config_path = tmp_path / "tab_target.yaml"
 
-    config_mod: dict = {"model": {"components": t_config.components}}
+    config_mod: dict = {
+        "model": {"components": t_config.components, "precision": t_config.precision}
+    }
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
@@ -201,6 +204,7 @@ trajectory_configs = [
                 "gains:UnitaryGains",
             ],
             chi2_ref=0.8977856043436502,
+            precision="double",
         ),
         id="FixedOrbit+PhaseCalculationRFI",
     ),
@@ -216,6 +220,7 @@ trajectory_configs = [
                 "gains:UnitaryGains",
             ],
             chi2_ref=0.8834671325695459, # Run with MEO satellites
+            precision="double",
             config_overrides={"opt": {"max_iter": 200}},
         ),
         id="SGP4LEONoDragOrbit+PhaseCalculationRFI",
@@ -232,6 +237,7 @@ trajectory_configs = [
                 "gains:UnitaryGains",
             ],
             chi2_ref=0.8834671467969134,  # Run with MEO satellites
+            precision="double",
             config_overrides={"opt": {"max_iter": 200}},
         ),
         id="SGP4LEOOrbit+PhaseCalculationRFI",
@@ -262,6 +268,7 @@ rfi_vis_configs = [
                 "gains:UnitaryGains",
             ],
             chi2_ref=0.8977856059138833,
+            precision="double",
         ),
         id="RiemannVisTimeFreqCalculation",
     ),
@@ -276,6 +283,7 @@ rfi_vis_configs = [
                 "gains:UnitaryGains",
             ],
             chi2_ref=0.8977856059138833,
+            precision="double",
         ),
         id="RiemannVisTimeFreqCalculationFFI",
     ),
@@ -325,6 +333,7 @@ gains_configs = [
                 },
             },
             chi2_ref=0.8977832575028029,
+            precision="double",
         ),
         id="GPGains",
     ),
