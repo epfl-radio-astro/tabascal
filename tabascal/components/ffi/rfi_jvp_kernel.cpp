@@ -1,22 +1,43 @@
+#include <algorithm>
 #include <cassert>
 #include <complex>
 #include <cstdint>
 #include <cstring>
+#include <latch>
 #include <unistd.h>
 
 #include "tensor.hpp"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
 
-namespace ffi = xla::ffi;
+// Generates code for every target that this compiler can support.
+#undef HWY_TARGET_INCLUDE
+#define HWY_TARGET_INCLUDE "rfi_jvp_kernel.cpp" // this file
+
+#include "hwy_dispatch.hpp"
 
 namespace tabascal {
-void rfi_jvp_kernel(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
-                    Tensor4D<const std::complex<double> *> rfi_amp_fine,
-                    Tensor4D<const std::complex<double> *> rfi_amp_fine_grad,
-                    Tensor4D<const double *> rfi_phase,
-                    Tensor4D<const double *> rfi_phase_grad,
-                    Tensor3D<std::complex<double> *> grad) {
+
+namespace ffi = xla::ffi;
+
+namespace HWY_NAMESPACE { // required: unique per target
+
+namespace hn = ::hwy::HWY_NAMESPACE;
+
+#include "complex_vector_inl.hpp"
+
+HWY_ATTR void
+rfi_jvp_kernel_opt(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
+                   Tensor4D<const std::complex<double> *> rfi_amp_fine,
+                   Tensor4D<const std::complex<double> *> rfi_amp_fine_grad,
+                   Tensor4D<const double *> rfi_phase,
+                   Tensor4D<const double *> rfi_phase_grad,
+                   Tensor3D<std::complex<double> *> grad) {
+
+  using D = TagType<double>;
+
+  const TagType<double> d;
+  constexpr std::int64_t n_lanes = hn::Lanes(d);
 
   const auto n_rfi = rfi_amp_fine.shape[0];
   const auto n_ant = rfi_amp_fine.shape[1];
@@ -37,6 +58,8 @@ void rfi_jvp_kernel(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
   const auto n_int_f = n_freq_fine / n_freq;
   const double n_int_inv = 1.f / double(n_int_t * n_int_f);
 
+  const ComplexV<D> i_unit{hn::Zero(d), hn::Set(d, 1)};
+
   for (std::int64_t i_bl = 0; i_bl < n_bl; ++i_bl) {
     std::int64_t i_a1 = a1(i_bl);
     std::int64_t i_a2 = a2(i_bl);
@@ -53,8 +76,68 @@ void rfi_jvp_kernel(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
           for (std::int64_t i_f_fine = i_f_fine_begin;
                i_f_fine < i_f_fine_begin + n_int_f; ++i_f_fine) {
 
-            for (std::int64_t i_t_fine = i_t_fine_begin;
-                 i_t_fine < i_t_fine_begin + n_int_t; ++i_t_fine) {
+            auto ptr_val_rfi_amp_1 = &rfi_amp_fine(i_rfi, i_a1, i_f_fine, 0);
+            auto ptr_val_rfi_amp_2 = &rfi_amp_fine(i_rfi, i_a2, i_f_fine, 0);
+
+            auto ptr_val_rfi_phase_1 = &rfi_phase(i_rfi, i_a1, i_f_fine, 0);
+            auto ptr_val_rfi_phase_2 = &rfi_phase(i_rfi, i_a2, i_f_fine, 0);
+
+            auto ptr_rfi_amp_grad_1 =
+                &rfi_amp_fine_grad(i_rfi, i_a1, i_f_fine, 0);
+            auto ptr_rfi_amp_grad_2 =
+                &rfi_amp_fine_grad(i_rfi, i_a2, i_f_fine, 0);
+
+            auto ptr_val_rfi_phase_grad_1 =
+                &rfi_phase_grad(i_rfi, i_a1, i_f_fine, 0);
+            auto ptr_val_rfi_phase_grad_2 =
+                &rfi_phase_grad(i_rfi, i_a2, i_f_fine, 0);
+
+            std::int64_t i_t_fine = i_t_fine_begin;
+            for (; i_t_fine + n_lanes <= i_t_fine_begin + n_int_t;
+                 i_t_fine += n_lanes) {
+              const auto val_rfi_phase_1 =
+                  hn::LoadU(d, ptr_val_rfi_phase_1 + i_t_fine);
+              const auto val_rfi_phase_2 =
+                  hn::LoadU(d, ptr_val_rfi_phase_2 + i_t_fine);
+
+              const auto val_rfi_amp_1 = LoadU(d, ptr_val_rfi_amp_1 + i_t_fine);
+              const auto val_rfi_amp_2 = LoadU(d, ptr_val_rfi_amp_2 + i_t_fine);
+
+              const auto val_rfi_amp_grad_1 =
+                  LoadU(d, ptr_rfi_amp_grad_1 + i_t_fine);
+              const auto val_rfi_amp_grad_2 =
+                  LoadU(d, ptr_rfi_amp_grad_2 + i_t_fine);
+
+              const auto val_rfi_phase_grad_1 =
+                  ComplexV<D>{hn::LoadU(d, ptr_val_rfi_phase_grad_1 + i_t_fine),
+                              hn::Zero(d)};
+              const auto val_rfi_phase_grad_2 =
+                  ComplexV<D>{hn::LoadU(d, ptr_val_rfi_phase_grad_2 + i_t_fine),
+                              hn::Zero(d)};
+
+              const auto phase_diff = hn::Sub(val_rfi_phase_1, val_rfi_phase_2);
+
+              const auto val_c = hn::Cos(d, phase_diff);
+              const auto val_s = hn::Sin(d, phase_diff);
+
+              const auto val_e = ComplexV<D>{val_c, val_s};
+
+              const auto g1 =
+                  Mul(val_e, Add(MulConj(val_rfi_amp_grad_1, val_rfi_amp_2),
+                                 MulConj(val_rfi_amp_1, val_rfi_amp_grad_2)));
+
+              const auto g2 =
+                  Mul(Mul(val_e, i_unit),
+                      Mul(Sub(val_rfi_phase_grad_1, val_rfi_phase_grad_2),
+                          MulConj(val_rfi_amp_1, val_rfi_amp_2)));
+
+              const auto g_sum = Add(g1, g2);
+
+              sum += std::complex<double>(hn::ReduceSum(d, g_sum.re),
+                                          hn::ReduceSum(d, g_sum.im));
+            }
+
+            for (; i_t_fine < i_t_fine_begin + n_int_t; ++i_t_fine) {
 
               const auto val_rfi_amp_1 =
                   rfi_amp_fine(i_rfi, i_a1, i_f_fine, i_t_fine);
@@ -104,10 +187,15 @@ void rfi_jvp_kernel(Tensor1D<const int *> a1, Tensor1D<const int *> a2,
   }
 }
 
+} // namespace HWY_NAMESPACE
+
+#if HWY_ONCE
+
 using rfi_amp_fine_t = ffi::Buffer<ffi::C128, 6>;
 using rfi_phase_t = ffi::Buffer<ffi::F64, 6>;
 
 ffi::Error calc_rfi_jvp_cpu_impl(
+    ffi::ThreadPool thread_pool,
     ffi::BufferR1<ffi::S32> a1, ffi::BufferR1<ffi::S32> a1_sorter,
     ffi::BufferR1<ffi::S32> a1_start, ffi::BufferR1<ffi::S32> a2,
     ffi::BufferR1<ffi::S32> a2_sorter, ffi::BufferR1<ffi::S32> a2_start,
@@ -181,15 +269,49 @@ ffi::Error calc_rfi_jvp_cpu_impl(
       rfi_grad->typed_data(), rfi_grad->dimensions()[0],
       rfi_grad->dimensions()[1], rfi_grad->dimensions()[2]);
 
-  rfi_jvp_kernel(a1_tensor, a2_tensor, rfi_amp_fine_tensor,
-                 rfi_amp_fine_grad_tensor, rfi_phase_tensor,
-                 rfi_phase_grad_tensor, rfi_grad_tensor);
+  const int64_t n_threads = std::max<int64_t>(thread_pool.num_threads(), 1);
+
+  const int64_t n_bl = a1.dimensions()[0];
+  const int64_t n_bl_per_thread = (n_bl + n_threads - 1) / n_threads;
+
+  std::latch done(n_threads);
+
+  for (int64_t thread_id = 0; thread_id < n_threads; ++thread_id) {
+    const int64_t i_bl_start = thread_id * n_bl_per_thread;
+    if (i_bl_start >= n_bl) {
+      done.count_down();
+      continue;
+    }
+    thread_pool.Schedule([&, thread_id, i_bl_start]() {
+      const int64_t n_bl_this_thread =
+          std::min(i_bl_start + n_bl_per_thread, n_bl) - i_bl_start;
+
+      Tensor1D<const int *> a1_tensor_th(a1.typed_data() + i_bl_start,
+                                         n_bl_this_thread);
+      Tensor1D<const int *> a2_tensor_th(a2.typed_data() + i_bl_start,
+                                         n_bl_this_thread);
+
+      Tensor3D<std::complex<double> *> rfi_grad_tensor_th(
+          &rfi_grad_tensor(i_bl_start, 0, 0), n_bl_this_thread,
+          rfi_grad->dimensions()[1], rfi_grad->dimensions()[2]);
+
+      TABASCAL_EXPORT_AND_DISPATCH_T(rfi_jvp_kernel_opt)
+      (a1_tensor_th, a2_tensor_th, rfi_amp_fine_tensor,
+       rfi_amp_fine_grad_tensor, rfi_phase_tensor, rfi_phase_grad_tensor,
+       rfi_grad_tensor_th);
+
+      done.count_down();
+    });
+  }
+
+  done.wait();
 
   return ffi::Error::Success();
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_jvp_cpu, calc_rfi_jvp_cpu_impl,
                               ffi::Ffi::Bind()
+                                  .Ctx<ffi::ThreadPool>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
@@ -201,5 +323,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_jvp_cpu, calc_rfi_jvp_cpu_impl,
                                   .Arg<rfi_phase_t>()
                                   .Arg<rfi_phase_t>()
                                   .Ret<ffi::BufferR3<ffi::C128>>());
+
+#endif
 
 } // namespace tabascal

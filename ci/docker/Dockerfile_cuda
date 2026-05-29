@@ -26,14 +26,6 @@ RUN conda create -y -n tab python=3.12 pip \
 ENV PATH="/opt/conda/envs/tab/bin:${PATH}" \
     CONDA_DEFAULT_ENV=tab
 
-# Install JAX (separate layer — large download, changes infrequently)
-ARG JAX_VERSION="latest"
-RUN if [ "$JAX_VERSION" = "latest" ] || [ -z "$JAX_VERSION" ]; then \
-      pip install --no-cache-dir "jax[cuda12]==0.9.2"; \
-    else \
-      pip install --no-cache-dir "jax[cuda12]==$JAX_VERSION"; \
-    fi
-
 # Install dependencies
 RUN pip install --no-cache-dir "ReFrame-HPC"
 
@@ -46,7 +38,14 @@ WORKDIR /tabascal/src
 # Copy source last to maximise layer cache reuse
 COPY . .
 
+# enable FFI CUDA support
+ENV TABASCAL_CUDA=1
+
 # Build FFI and install package
-RUN make -j4 -C tabascal/components/ffi \
-  && pip install --no-cache-dir -e ".[test,cuda12]"
+ARG JAX_VERSION="latest"
+RUN if [ "$JAX_VERSION" = "latest" ] || [ -z "$JAX_VERSION" ]; then \
+      pip install --no-cache-dir -e ".[test,cuda13]"; \
+    else \
+      pip install --no-cache-dir -e ".[test,cuda12]" "jax[cuda12]==$JAX_VERSION"; \
+    fi
 

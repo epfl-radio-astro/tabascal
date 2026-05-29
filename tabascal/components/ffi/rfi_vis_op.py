@@ -3,7 +3,10 @@ Custom JAX primitives for RFI visibility calculation using FFI.
 """
 
 import ctypes
+import importlib.util
 import os
+import site
+import sysconfig
 from functools import partial
 
 import jax
@@ -85,25 +88,51 @@ def prepare_indices(n_ant, a1, a2):
 
 
 _DIR_PATH = os.path.dirname(os.path.realpath(__file__))
+_PKG_SUBPATH = os.path.join("tabascal", "components", "ffi")
+
+
+def _candidate_dirs():
+    dirs = [_DIR_PATH]
+    try:
+        spec = importlib.util.find_spec("tabascal.components.ffi")
+        if spec and spec.submodule_search_locations:
+            dirs.extend(spec.submodule_search_locations)
+    except (ModuleNotFoundError, ValueError):
+        pass
+    site_dirs = list(site.getsitepackages())
+    user_site = site.getusersitepackages()
+    if user_site:
+        site_dirs.append(user_site)
+    purelib = sysconfig.get_paths().get("purelib")
+    if purelib:
+        site_dirs.append(purelib)
+    for sp in site_dirs:
+        dirs.append(os.path.join(sp, _PKG_SUBPATH))
+    return dirs
 
 
 def _load_library(name):
-    lib_path = os.path.join(_DIR_PATH, name)
-    if os.path.exists(lib_path):
-        return ctypes.cdll.LoadLibrary(lib_path)
+    seen = set()
+    for d in _candidate_dirs():
+        lib_path = os.path.join(d, name)
+        if lib_path in seen:
+            continue
+        seen.add(lib_path)
+        if os.path.isfile(lib_path):
+            return ctypes.cdll.LoadLibrary(lib_path)
     return None
 
 
 
-_TAB_LIB_GPU_NAME = "tabascal_cuda.so"
+_TAB_LIB_GPU_NAME = "libtabascal_cuda.so"
 _TAB_PLATFORM_NAME = "CUDA"
 
 if any("rocm" in str(s) for s in list(jax.devices())):
-    _TAB_LIB_GPU_NAME = "tabascal_hip.so"
+    _TAB_LIB_GPU_NAME = "libtabascal_hip.so"
     _TAB_PLATFORM_NAME = "ROCM"
 
 
-_TAB_LIB = _load_library("tabascal.so")
+_TAB_LIB = _load_library("libtabascal.so")
 _TAB_LIB_GPU = _load_library(_TAB_LIB_GPU_NAME)
 
 if _TAB_LIB:
@@ -138,16 +167,17 @@ if _TAB_LIB_GPU:
 def _check_tab_lib():
     if _TAB_LIB is None:
         raise RuntimeError(
-            f"FFI selected, but tabascal.so not found! "
-            f"Compilation required, check included makefile at {_DIR_PATH}"
+            f"FFI selected, but libtabascal.so not found! "
+            f"Install the wheel built via scikit-build-core or build from "
+            f"{_DIR_PATH}"
         )
 
 
 def _check_tab_lib_gpu():
     if _TAB_LIB_GPU is None:
         raise RuntimeError(
-            f"FFI selected, but tabascal_gpu.so not found! "
-            f"Compilation required, check included makefile at {_DIR_PATH}"
+            f"FFI selected, but {_TAB_LIB_GPU_NAME} not found! "
+            f"Rebuild the wheel with -Ccmake.define.TABASCAL_GPU=CUDA (or ROCM)"
         )
 
 
