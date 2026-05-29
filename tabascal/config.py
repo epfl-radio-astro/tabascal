@@ -278,7 +278,21 @@ class TabConfig:
             self.args["rfi"]["freq_pad_factor"],
             self.args["rfi"]["time_pad_factor"],
         ]
-        self.freqs_fine, self.times_fine = domain_ss(ns, dxs, x0s, ss_factors, pad_factors)
+        # domain_ss is jax-based, so under jax_enable_x64=False it builds the grids
+        # in f32 internally. The real grids carry large magnitudes (freqs ~1e9 Hz,
+        # and times_jd_fine ~2.4e6 JD) that lose all usable precision in f32. Since
+        # domain_ss is affine in (x0, dx) (output = x0 + dx * normalised_grid), build
+        # the normalised grid with x0=0, dx=1 (small, f32-safe) and apply the real
+        # offset/scale in numpy f64.
+        unit_freqs, unit_times = domain_ss(
+            ns, [1.0, 1.0], [0.0, 0.0], ss_factors, pad_factors
+        )
+        self.freqs_fine = self.freqs[0] + self.chan_width * np.asarray(
+            unit_freqs, dtype=np.float64
+        )
+        self.times_fine = self.times[0] + self.int_time * np.asarray(
+            unit_times, dtype=np.float64
+        )
         self.n_freq_fine = len(self.freqs_fine)
         self.n_time_fine = len(self.times_fine)
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)

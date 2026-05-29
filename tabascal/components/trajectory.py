@@ -650,8 +650,12 @@ class SGP4LEOOrbit(Component):
 
 def itrs_to_gcrs_sf(pos_itrs: NDArray, times_jd: NDArray) -> NDArray:
 
+    # skyfield must always receive numpy (it divides by AU as a python int, which
+    # overflows int32 if a jax f32 array is passed under jax_enable_x64=False).
+    pos_itrs = np.asarray(pos_itrs)
+
     ts = load.timescale()
-    t_sf = ts.ut1_jd(np.array(times_jd))
+    t_sf = ts.ut1_jd(np.asarray(times_jd))
 
     pos_gcrs = np.stack(
         [ITRSPosition(Distance(m=pos)).at(t_sf).position.m.T for pos in pos_itrs]
