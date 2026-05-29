@@ -199,6 +199,10 @@ class TabConfig:
         times_jd_coarse_whole = np.floor(times_jd_coarse)
         times_jd_coarse_frac = times_jd_coarse - times_jd_coarse_whole
 
+        # Satellite positions always use skyfield (faster than sgp4jax), regardless
+        # of precision.
+        rfi_xyz = np.asarray(get_satellite_positions(self.tles, times_jd_coarse))
+
         if self.precision == "double":
             from sgp4jax._frames import _earth_orientation
 
@@ -208,7 +212,6 @@ class TabConfig:
             gh0 = (jnp.rad2deg(gast_rad) - self.phase_centre["ra"]) % 360  # type: ignore
 
             ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
-            rfi_xyz = get_satellite_positions(self.tles, times_jd_coarse)
 
             calc_fringe_freq = lambda _rfi_xyz: calculate_fringe_frequency(
                 jd_to_mjd(times_jd_coarse),
@@ -226,7 +229,6 @@ class TabConfig:
             gh0 = (gsa - self.phase_centre["ra"]) % 360  # type: ignore
 
             ants_u = itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
-            rfi_xyz = np.asarray(get_satellite_positions(self.tles, times_jd_coarse))
 
             get_fringe_freq = lambda rfi_pos: calculate_fringe_frequency_numpy(
                 jd_to_mjd(times_jd_coarse),
