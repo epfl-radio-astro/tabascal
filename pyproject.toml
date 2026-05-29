@@ -1,6 +1,24 @@
 [build-system]
-requires = ["setuptools >= 64"]
-build-backend = "setuptools.build_meta"
+requires = [
+    "scikit-build-core>=0.10",
+    "jax==0.6.0", # Use minimum FFI api to build
+]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+cmake.version = ">=3.20"
+cmake.build-type = "Release"
+cmake.source-dir = "."
+wheel.packages = ["tabascal"]
+wheel.py-api = "py3"
+
+[[tool.scikit-build.overrides]]
+if.env.TABASCAL_CUDA = "(?i)1|on|true|yes"
+cmake.define.TABASCAL_CUDA = "ON"
+
+[[tool.scikit-build.overrides]]
+if.env.TABASCAL_ROCM = "(?i)1|on|true|yes"
+cmake.define.TABASCAL_ROCM = "ON"
 
 # ── Project metadata ───────────────────────────────────────────────────────────
 
@@ -49,15 +67,7 @@ Repository = "https://github.com/epfl-radio-astro/tabascal.git"
 
 [project.scripts]
 tabascal = "tabascal.scripts.run_tabascal:main"
-tab2MS   = "tabascal.scripts.results_to_MS:main"
-
-# ── Setuptools ─────────────────────────────────────────────────────────────────
-
-[tool.setuptools.packages.find]
-where = ["."]
-
-[tool.setuptools.package-data]
-tabascal = ["data/config/*", "data/tles/*"]
+tab2MS = "tabascal.scripts.results_to_MS:main"
 
 # ── Pytest ─────────────────────────────────────────────────────────────────────
 
