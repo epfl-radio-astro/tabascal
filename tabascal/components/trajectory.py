@@ -190,7 +190,6 @@ class FixedOrbit(Component):
             self.phase_centre = config.phase_centre
             self.freqs = config.freqs
             self.times = config.times
-            self.precision = config.precision
             self.freqs_fine = config.freqs_fine
             self.times_fine = config.times_fine
             self.times_jd_fine = config.times_jd_fine
@@ -242,34 +241,21 @@ class FixedOrbit(Component):
 
         self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
 
-        if self.precision == "double":
-            gsa = (
-                Time(self.times_jd_fine, format="jd")
-                .sidereal_time("mean", "greenwich")
-                .hour
-                * 15
-            )  # type: ignore
-            gh0 = (gsa - self.phase_centre["ra"]) % 360
+        # rfi_phase is one-shot setup producing a forward constant, so compute it in
+        # numpy/skyfield (f64) in both precisions — faster than the jax path (no JIT
+        # compile) and accurate. jnp.array casts to the active precision (f64/f32).
+        ts = load.timescale()
+        gsa = np.asarray(ts.ut1_jd(np.asarray(self.times_jd_fine)).gast) * 15  # GAST in degrees
+        gh0 = (gsa - self.phase_centre["ra"]) % 360
 
-            self.ants_uvw = jnp.transpose(
-                itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
-            )
-            self.rfi_phase = get_rfi_phase(
+        self.ants_uvw = np.transpose(
+            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
+        )
+        self.rfi_phase = jnp.array(
+            get_rfi_phase_numpy(
                 self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
             )
-        else:
-            ts = load.timescale()
-            gsa = np.asarray(ts.ut1_jd(np.asarray(self.times_jd_fine)).gast) * 15  # GAST in degrees
-            gh0 = (gsa - self.phase_centre["ra"]) % 360
-
-            self.ants_uvw = np.transpose(
-                itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
-            )
-            self.rfi_phase = jnp.array(
-                get_rfi_phase_numpy(
-                    self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
-                )
-            )
+        )
 
     def _set_outputs(self):
 

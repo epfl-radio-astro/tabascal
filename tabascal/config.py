@@ -4,17 +4,14 @@ from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
 from tabascal.tle import print_spacetrack_status, preflight_tle_check
 from tabascal.interferometry import (
-    calculate_fringe_frequency,
     calculate_fringe_frequency_numpy,
     get_strides_and_idxs,
     itrf_to_uvw_numpy,
 )
 from tabascal.fft_gp import domain_ss
 from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd
-from tabascal.coordinates import itrf_to_uvw
 
 import jax.numpy as jnp
-from jax import vmap
 
 import numpy as np
 
@@ -196,50 +193,27 @@ class TabConfig:
         times_jd_coarse = np.arange(
             self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
         )
-        times_jd_coarse_whole = np.floor(times_jd_coarse)
-        times_jd_coarse_frac = times_jd_coarse - times_jd_coarse_whole
-
-        # Satellite positions always use skyfield (faster than sgp4jax), regardless
-        # of precision.
+        # Satellite positions, GAST, antenna UVW and fringe frequencies are all
+        # one-shot host-side setup, so always compute them in numpy/skyfield (f64):
+        # faster than the jax path (no JIT compile) and accurate in both precisions.
         rfi_xyz = np.asarray(get_satellite_positions(self.tles, times_jd_coarse))
 
-        if self.precision == "double":
-            from sgp4jax._frames import _earth_orientation
+        ts = load.timescale()
+        gsa = np.asarray(ts.ut1_jd(times_jd_coarse).gast) * 15  # GAST in degrees
+        gh0 = (gsa - self.phase_centre["ra"]) % 360  # type: ignore
 
-            _, gast_rad = vmap(_earth_orientation)(
-                times_jd_coarse_whole, times_jd_coarse_frac
-            )
-            gh0 = (jnp.rad2deg(gast_rad) - self.phase_centre["ra"]) % 360  # type: ignore
+        ants_u = itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
 
-            ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
-
-            calc_fringe_freq = lambda _rfi_xyz: calculate_fringe_frequency(
-                jd_to_mjd(times_jd_coarse),
-                jnp.max(self.freqs),
-                _rfi_xyz,
-                self.ants_itrf,
-                ants_u,
-                self.phase_centre["dec"],
-            )
-            # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
-            fringe_freq = np.asarray(vmap(calc_fringe_freq)(rfi_xyz))
-        else:
-            ts = load.timescale()
-            gsa = np.asarray(ts.ut1_jd(times_jd_coarse).gast) * 15  # GAST in degrees
-            gh0 = (gsa - self.phase_centre["ra"]) % 360  # type: ignore
-
-            ants_u = itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
-
-            get_fringe_freq = lambda rfi_pos: calculate_fringe_frequency_numpy(
-                jd_to_mjd(times_jd_coarse),
-                np.max(self.freqs),
-                rfi_pos,
-                self.ants_itrf,
-                ants_u,
-                self.phase_centre["dec"],
-            )
-            # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
-            fringe_freq = np.array([get_fringe_freq(rfi_pos) for rfi_pos in rfi_xyz])
+        get_fringe_freq = lambda rfi_pos: calculate_fringe_frequency_numpy(
+            jd_to_mjd(times_jd_coarse),
+            np.max(self.freqs),
+            rfi_pos,
+            self.ants_itrf,
+            ants_u,
+            self.phase_centre["dec"],
+        )
+        # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
+        fringe_freq = np.array([get_fringe_freq(rfi_pos) for rfi_pos in rfi_xyz])
 
         # # self.fringe_freqs is shape (n_rfi, n_bl)
         # self.fringe_freqs = jnp.max(jnp.abs(fringe_freq), axis=1)
