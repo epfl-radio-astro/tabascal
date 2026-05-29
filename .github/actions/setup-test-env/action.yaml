@@ -63,12 +63,6 @@ runs:
         python -m pip install --upgrade pip
         pip install -e ".[test]"
 
-    - name: Build FFI CPU library
-      shell: bash
-      run: |
-        cd tabascal/components/ffi
-        make cpu
-
     - name: Install coverage dependencies
       if: inputs.install-coverage == 'true'
       shell: bash
