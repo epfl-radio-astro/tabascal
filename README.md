@@ -42,6 +42,63 @@ pixi shell          # default environment
 pixi shell -e dev   # dev environment
 ```
 
+# Installing without pixi
+
+pixi is recommended, but tabascal can also be installed with plain `pip` or into
+a conda/mamba environment.
+
+Prerequisites:
+- **Python 3.10–3.13.** The build pins `jax==0.6.0` for the minimum FFI ABI, and
+  that jaxlib has no wheels for Python 3.14.
+- **A C++ compiler.** The FFI kernels are compiled from source during install
+  (CMake and ninja are fetched automatically). GPU builds additionally need the
+  CUDA toolkit (`nvcc`) or the ROCm/HIP toolchain on `PATH`.
+- **`python-casacore`** is required at runtime but is *not* a pip dependency. On
+  Linux it can be pip-installed; on **macOS installing via conda is strongly
+  recommended** because `python-casacore` is difficult to build from source there
+  (see the conda/mamba section).
+
+`TABASCAL_CUDA` / `TABASCAL_ROCM` select which FFI kernel is compiled
+(`libtabascal_cuda.so` / `libtabascal_hip.so`); with neither set, only the CPU
+library (`libtabascal.so`) is built.
+
+## pip
+
+Run these from a clone of the repository (`pip install .`), or replace `.` with
+`git+https://github.com/epfl-radio-astro/tabascal.git`.
+
+```bash
+# CPU
+pip install .
+
+# NVIDIA GPU — requires the CUDA toolkit (nvcc) on PATH.
+TABASCAL_CUDA=1 pip install ".[cuda12]"     # or ".[cuda13]" for CUDA 13
+
+# AMD GPU (ROCm) — first install a ROCm-compatible jax/jaxlib by following the
+# JAX install guide: https://docs.jax.dev/en/latest/installation.html
+# then build the ROCm kernels (requires the ROCm/HIP toolchain on PATH):
+TABASCAL_ROCM=1 pip install .
+```
+
+## conda / mamba
+
+Use conda to provide `python-casacore` (and a C++ compiler), then pip-install
+tabascal into the activated environment:
+
+```bash
+mamba create -n tabascal -c conda-forge "python>=3.10,<3.14" python-casacore cxx-compiler
+mamba activate tabascal
+
+# CPU
+pip install .
+
+# NVIDIA GPU — also bring the CUDA toolchain into the environment:
+mamba install -c conda-forge cuda-nvcc cuda-cudart-dev
+TABASCAL_CUDA=1 pip install ".[cuda12]"
+```
+
+On macOS this conda route is the recommended way to install tabascal.
+
 # Build the FFI shared libraries
 
 The `RiemannVisTimeFreqCalculationFFI` component requires a compiled shared
