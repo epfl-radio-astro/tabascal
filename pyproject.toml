@@ -96,6 +96,7 @@ perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabasc
 [tool.pixi.dependencies]
 astropy         = "*"
 casacore        = "*"
+cxx-compiler    = "*"
 dask            = "*"
 dask-ms         = "*"
 jax             = ">=0.6.0,<0.10.0"
@@ -128,9 +129,10 @@ jaxlib = "*"
 tabascal = { path = ".", editable = true }
 
 # ── CUDA 12 feature ────────────────────────────────────────────────────────────
-# Installs the cuda-enabled jaxlib build from conda-forge, equivalent to:
+# Installs the cuda-enabled jaxlib build from conda-forge and the CUDA 12 build
+# toolchain (nvcc, cudart-dev) needed to compile the FFI kernels in
+# tabascal/components/ffi. Equivalent jaxlib install:
 #   conda install "jaxlib=*=*cuda12*" jax -c conda-forge
-# Use cuda12-dev for a full development install.
 
 [tool.pixi.feature.cuda12]
 platforms = ["linux-64", "linux-aarch64"]
@@ -139,17 +141,27 @@ platforms = ["linux-64", "linux-aarch64"]
 cuda = "12"
 
 [tool.pixi.feature.cuda12.dependencies]
-jaxlib = { version = "*", build = "*cuda12*" }
+jaxlib          = { version = "*", build = "*cuda12*" }
+cuda-nvcc       = "12.*"
+cuda-cudart-dev = "12.*"
 
 [tool.pixi.feature.cuda12.pypi-dependencies]
 tabascal = { path = ".", editable = true }
+
+# Enables the CUDA FFI kernel build (scikit-build-core override in [tool.scikit-build]).
+# Set at the feature level so even the initial `pixi install -e cuda12` builds
+# libtabascal_cuda.so, and any rebuild in the env stays CUDA-enabled.
+[tool.pixi.feature.cuda12.activation.env]
+TABASCAL_CUDA = "1"
+
+[tool.pixi.feature.cuda12.tasks]
+build-ffi-cuda = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CUDA FFI shared library (libtabascal_cuda.so) via scikit-build-core/CMake" }
 
 # ── Dev feature ────────────────────────────────────────────────────────────────
 # Adds docs and test tooling. Also carries the full PyPI package set so that
 # cuda12-dev gets tabascal and friends even though it doesn't include the cpu feature.
 
 [tool.pixi.feature.dev.dependencies]
-cxx-compiler     = "*"
 pytest           = "*"
 pytest-cov       = "*"
 pre-commit       = "*"
@@ -163,26 +175,6 @@ graphviz         = "*"
 reframe-hpc = "*"
 tabsim   = "*"
 
-# ── Compile feature ────────────────────────────────────────────────────────────
-# CUDA 12 build toolchain for compiling the FFI kernels in tabascal/components/ffi
-
-[tool.pixi.feature.compile]
-platforms = ["linux-64", "linux-aarch64"]
-
-# Enables the CUDA FFI kernel build (scikit-build-core override in [tool.scikit-build]).
-# Set at the feature level so even the initial `pixi install -e cuda12-compile`
-# builds libtabascal_cuda.so, and any rebuild in the env stays CUDA-enabled.
-[tool.pixi.feature.compile.activation.env]
-TABASCAL_CUDA = "1"
-
-[tool.pixi.feature.compile.tasks]
-build-ffi-cuda = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CUDA FFI shared library (libtabascal_cuda.so) via scikit-build-core/CMake" }
-
-[tool.pixi.feature.compile.dependencies]
-cuda-nvcc       = "12.*"
-cuda-cudart-dev = "12.*"
-cxx-compiler    = "*"
-
 # ── Environments ───────────────────────────────────────────────────────────────
 
 [tool.pixi.environments]
@@ -193,6 +185,3 @@ dev        = { features = ["cpu", "dev"], solve-group = "cpu" }
 # NVIDIA GPU environments — pure conda, lockable from any host platform
 cuda12     = { features = ["cuda12"],        solve-group = "cuda12" }
 cuda12-dev = { features = ["cuda12", "dev"], solve-group = "cuda12" }
-
-# NVIDIA GPU environment with CUDA 12 kernel compilation toolchain
-cuda12-compile     = { features = ["cuda12", "compile"], solve-group = "cuda12-compile" }
