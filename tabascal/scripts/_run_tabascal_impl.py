@@ -9,18 +9,14 @@ from datetime import datetime
 
 import yaml
 
-import jax
 from jax import random
 import jax.numpy as jnp
-import numpy as np
 
 from tabascal.timing import measure_runtime, print_timings, enable_timings
 from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.write import write_results_xds
 from tabascal.tle import TLEError
-
-jax.config.update("jax_enable_x64", True)
 
 
 class _Tee:
@@ -202,12 +198,36 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="",
         yaml.dump(config, fp)
 
 
+def set_precision(config):
+    """Enable/disable JAX float64 based on ``config["model"]["precision"]``.
+
+    sgp4jax (and potentially other jax-based libraries) call
+    jax.config.update("jax_enable_x64", True) at import time, so this toggle must
+    run *after* those imports to take effect — single precision has to actively
+    disable x64 that they turned on. The x64-setting libraries are imported
+    explicitly here so the ordering is preserved even if the module-level imports
+    are refactored away. WARNING: any future jax-based dependency that flips
+    jax_enable_x64 on import must be imported here, before this update, or single
+    precision will silently run as double.
+
+    Returns the resulting ``jax_enable_x64`` value.
+    """
+    import jax  # noqa: F811 (re-imported to guarantee it's available here)
+    import sgp4jax  # noqa: F401 (enables x64 on import; must precede the toggle)
+
+    x64 = config.get("model", {}).get("precision", "single") == "double"
+    jax.config.update("jax_enable_x64", x64)
+    return x64
+
+
 def run(args):
     if args.timings:
         enable_timings()
 
     config = load_config(args.config)
     norad_ids = []
+
+    set_precision(config)
 
     try:
         tabascal_subtraction(
