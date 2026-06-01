@@ -46,8 +46,7 @@ def evaluate_init(tab_config, model, key):
     init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants)
     nlog_l = nlog_like(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
     nlog_p = nlog_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-    init_state = model.forward(model.init_params, model.state, model.constants)
-    return key, init_pred, nlog_l, nlog_p, init_state
+    return key, init_pred, nlog_l, nlog_p
 
 
 @contextmanager
@@ -66,12 +65,9 @@ class _RunPaths:
     run_id: str
     log_path: str
     model_name: str
-    results_name: str
     f_name: str
     ms_path: str
     plot_dir: str
-    results_dir: str
-    mem_dir: str
     map_path: str
     params_path: str
     init_pred_path: str
@@ -110,8 +106,7 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
 
     plot_dir = os.path.join(sim_dir, f"plots/{suffix[1:]}")
     results_dir = os.path.join(sim_dir, "results")
-    mem_dir = os.path.join(sim_dir, "memory_profiles")
-    for directory in (plot_dir, results_dir, mem_dir):
+    for directory in (plot_dir, results_dir):
         os.makedirs(directory, exist_ok=True)
 
     if extra_tle_dir:
@@ -121,12 +116,9 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
         run_id=run_id,
         log_path=f"log_tab_{run_id}.txt",
         model_name=model_name,
-        results_name=results_name,
         f_name=f_name,
         ms_path=ms_path,
         plot_dir=plot_dir,
-        results_dir=results_dir,
-        mem_dir=mem_dir,
         map_path=os.path.join(results_dir, f"map_pred_{results_name}.zarr"),
         params_path=os.path.join(results_dir, f"map_params_{results_name}.zarr"),
         init_pred_path=os.path.join(results_dir, f"init_pred_{results_name}.zarr"),
@@ -164,13 +156,13 @@ def _print_model_summary(tab_config, model, start_time):
 
 
 @measure_runtime
-def tabascal_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="", extra_tle_dir=None, log=True):
+def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir=None, log=True):
     paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir)
     ms_path = paths.ms_path
 
     with _stdout_logger(paths.log_path, log):
         start_time = datetime.now()
-        key, subkey = random.split(random.PRNGKey(1))
+        key, _ = random.split(random.PRNGKey(1))
 
         _print_run_header(paths.model_name, paths.f_name, start_time)
 
@@ -179,7 +171,7 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="",
 
         _print_model_summary(tab_config, model, start_time)
 
-        key, init_pred, nlog_l, nlog_p, init_state = evaluate_init(tab_config, model, key)
+        key, init_pred, nlog_l, nlog_p = evaluate_init(tab_config, model, key)
         write_results_xds(init_pred, tab_config, paths.init_pred_path)
 
         print(f"log_l : {nlog_l:.3e}")
@@ -202,7 +194,7 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, norad_ids=[], suffix="",
 
         key, *subkeys = random.split(key, 3)
         if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
-            vi_pred, losses, vi_params, rchi2 = run_opt(
+            vi_pred, losses, vi_params, _ = run_opt(
                 tab_config, prob_model, subkeys, model.init_params, ms_path, paths.map_path, paths.params_path,
                 state=model.state, constants=model.constants,
             )
@@ -262,7 +254,6 @@ def run(args):
         enable_timings()
 
     config = load_config(args.config)
-    norad_ids = []
 
     set_precision(config)
 
@@ -271,7 +262,6 @@ def run(args):
             config,
             args.sim_dir,
             args.ms_path,
-            norad_ids,
             args.suffix,
             extra_tle_dir=args.extra_tle_dir,
             log=getattr(args, "log", True),
