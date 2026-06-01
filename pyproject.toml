@@ -148,11 +148,11 @@ cuda-cudart-dev = "12.*"
 [tool.pixi.feature.cuda12.pypi-dependencies]
 tabascal = { path = ".", editable = true }
 
-# Enables the CUDA FFI kernel build (scikit-build-core override in [tool.scikit-build]).
-# Set at the feature level so even the initial `pixi install -e cuda12` builds
-# libtabascal_cuda.so, and any rebuild in the env stays CUDA-enabled.
-[tool.pixi.feature.cuda12.activation.env]
-TABASCAL_CUDA = "1"
+# The CUDA FFI kernels build automatically: CMake auto-enables them when nvcc and
+# the CUDA toolkit are present in the build env (the cuda-nvcc / cuda-cudart-dev
+# deps above), so `pixi install -e cuda12` produces libtabascal_cuda.so with no
+# activation-env or env-var plumbing. Force on/off with -DTABASCAL_CUDA=ON/OFF
+# (or the TABASCAL_CUDA env var, see the [[tool.scikit-build.overrides]] above).
 
 [tool.pixi.feature.cuda12.tasks]
 build-ffi-cuda = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CUDA FFI shared library (libtabascal_cuda.so) via scikit-build-core/CMake" }
