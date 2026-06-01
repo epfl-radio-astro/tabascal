@@ -14,13 +14,12 @@ curl -fsSL https://pixi.sh/install.sh | sh
 
 ## Available environments
 
-| Environment      | Platform          | Description                           |
-|------------------|-------------------|---------------------------------------|
-| `default`        | linux-*, macos-*  | CPU-only runtime environment          |
-| `dev`            | linux-*, macos-*  | CPU + testing and documentation tools |
-| `cuda12`         | linux-*           | NVIDIA GPU (CUDA 12) runtime          |
-| `cuda12-dev`     | linux-*           | NVIDIA GPU + testing and docs         |
-| `cuda12-compile` | linux-*           | NVIDIA GPU + compilation toolchain    |
+| Environment  | Platform          | Description                           |
+|--------------|-------------------|---------------------------------------|
+| `default`    | linux-*, macos-*  | CPU-only runtime environment          |
+| `dev`        | linux-*, macos-*  | CPU + testing and documentation tools |
+| `cuda12`     | linux-*           | NVIDIA GPU (CUDA 12) runtime          |
+| `cuda12-dev` | linux-*           | NVIDIA GPU + testing and docs         |
 
 ## Install an environment
 
@@ -107,8 +106,8 @@ built automatically by CMake/scikit-build-core when the environment is created
 (`pixi install`). To rebuild after editing the C++/CUDA kernels:
 
 ```bash
-pixi run -e dev build-ffi                    # CPU (libtabascal.so)
-pixi run -e cuda12-compile build-ffi-cuda    # NVIDIA GPU (libtabascal_cuda.so)
+pixi run -e dev build-ffi             # CPU (libtabascal.so)
+pixi run -e cuda12 build-ffi-cuda     # NVIDIA GPU (libtabascal_cuda.so)
 ```
 
 # Developer
