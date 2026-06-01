@@ -49,17 +49,22 @@ a conda/mamba environment.
 Prerequisites:
 - **Python 3.10–3.13.** The build pins `jax==0.6.0` for the minimum FFI ABI, and
   that jaxlib has no wheels for Python 3.14.
-- **A C++ compiler.** The FFI kernels are compiled from source during install
-  (CMake and ninja are fetched automatically). GPU builds additionally need the
-  CUDA toolkit (`nvcc`) or the ROCm/HIP toolchain on `PATH`.
-- **`python-casacore`** is required at runtime but is *not* a pip dependency. On
-  Linux it can be pip-installed; on **macOS installing via conda is strongly
-  recommended** because `python-casacore` is difficult to build from source there
-  (see the conda/mamba section).
+- **A C++20-capable compiler** (GCC ≥10, Clang ≥10, or Apple Clang ≥13). The
+  FFI kernels are compiled from source during install (CMake and ninja are
+  fetched automatically). GPU builds additionally need the CUDA 12 or 13
+  toolkit (`nvcc`) or the ROCm/HIP toolchain on `PATH`.
+- **`python-casacore`** is required at runtime but is *not* a pip dependency.
+  It is pip-installable on **linux-x86_64**; on **macOS and linux-aarch64**,
+  installing via conda is strongly recommended because `python-casacore` is
+  difficult to build from source on those platforms (see the conda/mamba
+  section).
 
 `TABASCAL_CUDA` / `TABASCAL_ROCM` select which FFI kernel is compiled
 (`libtabascal_cuda.so` / `libtabascal_hip.so`); with neither set, only the CPU
-library (`libtabascal.so`) is built.
+library (`libtabascal.so`) is built. GPU kernels target Ampere + Hopper (CUDA
+`sm_80`, `sm_90`) and MI200/MI300 + RDNA2/3 (HIP `gfx90a`, `gfx942`, `gfx1030`,
+`gfx1100`) by default — override `CMAKE_CUDA_ARCHITECTURES` /
+`CMAKE_HIP_ARCHITECTURES` (e.g. via `CMAKE_ARGS`) to target other GPUs.
 
 ## pip
 
@@ -96,7 +101,7 @@ mamba install -c conda-forge cuda-nvcc cuda-cudart-dev
 TABASCAL_CUDA=1 pip install ".[cuda12]"
 ```
 
-On macOS this conda route is the recommended way to install tabascal.
+On macOS and linux-aarch64 this conda route is the recommended way to install tabascal.
 
 # Build the FFI shared libraries
 
