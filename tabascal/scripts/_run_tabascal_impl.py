@@ -93,15 +93,12 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
     results_name = f"{model_name}{suffix}"
 
     if sim_dir:
-        config["data"]["sim_dir"] = os.path.abspath(sim_dir)
+        sim_dir = os.path.abspath(sim_dir)
     else:
         sim_dir = os.path.abspath(config["data"]["sim_dir"])
-        config["data"]["sim_dir"] = sim_dir
-
+    config["data"]["sim_dir"] = sim_dir
     config["model"]["name"] = model_name
 
-    if sim_dir[-1] == "/":
-        sim_dir = sim_dir[:-1]
     f_name = os.path.split(sim_dir)[1]
     config["data"]["zarr_path"] = os.path.join(sim_dir, f"{f_name}.zarr")
 
