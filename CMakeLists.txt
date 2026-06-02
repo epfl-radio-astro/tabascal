@@ -29,57 +29,10 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
 	cmake_policy(SET CMP0135 NEW)
 endif()
 
-include(CheckLanguage)
-
 # Options
 option(TABASCAL_CPU "Build CPU extension" ON)
-
-# GPU backends auto-enable when a usable toolchain is discoverable in the build
-# environment, unless the user forces a value with -DTABASCAL_CUDA=ON/OFF (or the
-# TABASCAL_CUDA env var, mapped to the cache define in pyproject.toml). This lets
-# `pixi install -e cuda12` and a `pip install .` on a CUDA-capable host build the
-# GPU kernels out of the box, while CPU-only hosts (no nvcc) stay CPU-only.
-#
-# The default flips ON only when BOTH the compiler (nvcc) AND the CUDA toolkit
-# (cudart, found via CUDAToolkit) are present. A stray nvcc without the toolkit
-# leaves the default OFF so a previously-working CPU build never starts failing;
-# the find_package(... REQUIRED) error below is reserved for explicit opt-in.
-if(NOT DEFINED TABASCAL_CUDA)
-  check_language(CUDA)
-  set(_TABASCAL_CUDA_DEFAULT OFF)
-  if(CMAKE_CUDA_COMPILER)
-    find_package(CUDAToolkit QUIET)
-    if(CUDAToolkit_FOUND)
-      message(STATUS "CUDA toolkit detected (${CMAKE_CUDA_COMPILER}); enabling CUDA extension")
-      set(_TABASCAL_CUDA_DEFAULT ON)
-    else()
-      message(STATUS "nvcc found but CUDAToolkit incomplete; CUDA extension stays OFF "
-                     "(use -DTABASCAL_CUDA=ON to force)")
-    endif()
-  endif()
-else()
-  set(_TABASCAL_CUDA_DEFAULT ${TABASCAL_CUDA})
-endif()
-option(TABASCAL_CUDA "Build CUDA extension" ${_TABASCAL_CUDA_DEFAULT})
-
-# Mirror the same toolchain-presence gating for ROCm/HIP.
-if(NOT DEFINED TABASCAL_ROCM)
-  check_language(HIP)
-  set(_TABASCAL_ROCM_DEFAULT OFF)
-  if(CMAKE_HIP_COMPILER)
-    find_package(hip CONFIG QUIET)
-    if(hip_FOUND)
-      message(STATUS "HIP toolkit detected (${CMAKE_HIP_COMPILER}); enabling ROCm extension")
-      set(_TABASCAL_ROCM_DEFAULT ON)
-    else()
-      message(STATUS "HIP compiler found but hip package incomplete; ROCm extension stays OFF "
-                     "(use -DTABASCAL_ROCM=ON to force)")
-    endif()
-  endif()
-else()
-  set(_TABASCAL_ROCM_DEFAULT ${TABASCAL_ROCM})
-endif()
-option(TABASCAL_ROCM "Build ROCm extension" ${_TABASCAL_ROCM_DEFAULT})
+option(TABASCAL_CUDA "Build CUDA extension" OFF)
+option(TABASCAL_ROCM "Build ROCm extension" OFF)
 
 option(TABASCAL_BUNDLED_LIBS "Use all bundled libraries" ON)
 cmake_dependent_option(TABASCAL_BUNDLED_HIGHWAY "Use bundled highway lib" ON "TABASCAL_BUNDLED_LIBS" OFF)
