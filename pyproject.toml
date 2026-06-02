@@ -37,7 +37,6 @@ description = "Trajectory based Radio Frequency Interference (RFI) subtraction a
 
 requires-python = ">=3.10"
 dependencies = [
-    "astropy",
     "dask",
     "dask-ms",
     "jax>=0.6.0,<0.10",
@@ -73,6 +72,22 @@ tab2MS = "tabascal.scripts.results_to_MS:main"
 [tool.pytest.ini_options]
 log_cli       = true
 log_cli_level = "WARNING"
+addopts       = "--cov=tabascal --cov-report=term-missing"
+
+# ── Coverage ────────────────────────────────────────────────────────────────────
+
+[tool.coverage.run]
+source = ["tabascal"]
+omit = [
+    "tabascal/plot.py",          # matplotlib plotting, not unit-tested
+    "tabascal/scripts/*",        # CLI entry points
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
 
 # ── Pixi ──────────────────────────────────────────────────────────────────────
 # name / version / description / python are inherited from [project] above.
@@ -93,6 +108,7 @@ check-install = { cmd = "python -m tabascal.scripts.check_install", description 
 build-ffi = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CPU FFI shared library (libtabascal.so) via scikit-build-core/CMake" }
 test           = "pytest tests/"
 test-components = { cmd = "pytest tests/components/", description = "Run component tests only" }
+coverage       = { cmd = "pytest tests/ --cov-report=html", description = "Run tests with coverage and write an HTML report to htmlcov/" }
 docs-build     = "sphinx-build -b html docs/ docs/_build/html"
 docs-clean     = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
 perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabascal_perf_check.py --system=generic --exec-policy=serial --run --performance-report --report-file=reframe_results.json", description = "Run Re-Frame performance benchmark locally" }
@@ -100,7 +116,6 @@ perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabasc
 # ── Shared conda dependencies (all environments) ───────────────────────────────
 
 [tool.pixi.dependencies]
-astropy         = "*"
 casacore        = "*"
 cxx-compiler    = "*"
 dask            = "*"

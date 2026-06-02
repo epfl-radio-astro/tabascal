@@ -1,12 +1,10 @@
-import sgp4jax
-from tabascal.time import mjd_to_jd
+from tabascal.time import mjd_to_jd, gast_deg
 
-from jax import jit, vmap, Array
+from jax import jit, Array
 import jax.numpy as jnp
 from functools import partial
 import numpy as np
 from numpy.typing import NDArray
-from skyfield.api import load
 
 
 T_s = 86164.0905  # Sidereal day in seconds
@@ -177,9 +175,7 @@ def calculate_fringe_frequency_numpy(
     """
 
     lam = C / freq
-    ts = load.timescale()
-    t_sf = ts.ut1_jd(np.asarray(mjd_to_jd(times_mjd)))
-    gsa = np.asarray(t_sf.gast) * 15  # GAST in degrees
+    gsa = gast_deg(mjd_to_jd(times_mjd))  # GAST in degrees (UTC convention)
     times = (times_mjd - times_mjd[0]) * 24 * 3600
 
     r_ecef = xyz_to_itrf_numpy(rfi_xyz, gsa)  # type: ignore
@@ -319,58 +315,6 @@ def apply_gains(gains: Array, vis: Array, a1: Array, a2: Array) -> Array:
 
     return vis_obs
 
-
-def calculate_fringe_frequency(
-    times_mjd: Array,
-    freq: float,
-    rfi_xyz: Array,
-    ants_itrf: Array,
-    ants_u: Array,
-    dec: float,
-) -> Array:
-    """Calculate the fringe frequency of an RFI source.
-
-    Parameters
-    ----------
-    times_mjd : Array (n_time,)
-        Times are which the RFI and antenna positions are given in Modified Julian Date.
-    freq : float
-        Observational frequency in Hz.
-    rfi_xyz : Array (n_time, 3)
-        Position of the RFI source in the GCRF frame in metres.
-    ants_itrf : Array (n_ant, 3)
-        Antenna positions in the ITRF (ECEF) frame in metres.
-    ants_u : Array (n_time, n_ant)
-        U component of the antennas in UVW frame in metres.
-    dec : float
-        Phase centre declination in degrees.
-
-    Returns
-    -------
-    Array (n_time, n_bl)
-        Fringe frequencies on each baseline.
-    """
-
-    lam = C / freq
-    times = (times_mjd - times_mjd[0]) * 24 * 3600
-
-    times_jd = mjd_to_jd(times_mjd)
-    jd_whole = jnp.floor(times_jd)
-    jd_frac = times_jd - jd_whole
-    r_ecef = vmap(sgp4jax.gcrf_to_itrf)(rfi_xyz / 1e3, jd_whole, jd_frac) * 1e3
-    s_ecef = r_ecef - jnp.mean(ants_itrf, axis=0)
-    s_hat_ecef = s_ecef / jnp.linalg.norm(s_ecef, axis=-1, keepdims=True)
-    s_hat_dot = jnp.gradient(s_hat_ecef, jnp.diff(times[:2])[0], axis=0)
-
-    a1, a2 = jnp.triu_indices(len(ants_itrf), 1)
-    bl_ecef = ants_itrf[a1] - ants_itrf[a2]
-    bl_u = ants_u[:, a1] - ants_u[:, a2]
-
-    fringe_move = jnp.einsum("bi,ti->tb", bl_ecef, s_hat_dot) / lam
-    fringe_stat = -bl_u * Omega_e * jnp.cos(jnp.deg2rad(dec)) / lam
-    fringe_freq = fringe_move - fringe_stat
-
-    return fringe_freq
 
 #########################################################################
 

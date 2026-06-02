@@ -9,13 +9,11 @@ from tabascal.interferometry import (
     itrf_to_uvw_numpy,
 )
 from tabascal.fft_gp import domain_ss
-from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd
+from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd, gast_deg
 
 import jax.numpy as jnp
 
 import numpy as np
-
-from skyfield.api import load
 
 import numpyro
 
@@ -198,8 +196,7 @@ class TabConfig:
         # faster than the jax path (no JIT compile) and accurate in both precisions.
         rfi_xyz = np.asarray(get_satellite_positions(self.tles, times_jd_coarse))
 
-        ts = load.timescale()
-        gsa = np.asarray(ts.ut1_jd(times_jd_coarse).gast) * 15  # GAST in degrees
+        gsa = gast_deg(times_jd_coarse)  # GAST in degrees (UTC convention)
         gh0 = (gsa - self.phase_centre["ra"]) % 360  # type: ignore
 
         ants_u = itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]

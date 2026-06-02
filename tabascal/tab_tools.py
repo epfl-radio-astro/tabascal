@@ -167,9 +167,9 @@ def read_ms(
     # times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()) / (
     #     24 * 3600
     # )
-    from astropy.time import Time
+    from tabascal.time import jd_to_datetime, mjd_to_jd
 
-    print(Time(times_mjd[0], format="mjd").isot)
+    print(jd_to_datetime(mjd_to_jd(times_mjd[0])).isoformat())
 
     times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
 

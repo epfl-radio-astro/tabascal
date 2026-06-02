@@ -1,29 +1,19 @@
-"""Tests for tabascal.time and tabascal.coordinates."""
+"""Tests for tabascal.time."""
+
+from datetime import datetime
 
 import pytest
 import numpy as np
-import jax
-import jax.numpy as jnp
 
-from tabascal.time import secs_to_days, days_to_secs, jd_to_mjd, mjd_to_jd
-from tabascal.coordinates import gcrf_to_uvw, itrf_to_uvw, itrf_to_uvw_jd
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-# Three antenna positions roughly resembling a compact array (ITRF, metres)
-ANTS_ITRF = jnp.array([
-    [5109360.133,  2006852.586, -3238948.127],
-    [5109383.997,  2006807.012, -3238949.528],
-    [5109366.222,  2006839.543, -3238966.127],
-])
-
-# A test epoch close to J2000
-TIMES_JD = jnp.array([2451545.0, 2451545.01, 2451545.02])
-
-RA, DEC = 120.0, -30.0
+from tabascal.time import (
+    secs_to_days,
+    days_to_secs,
+    jd_to_mjd,
+    mjd_to_jd,
+    gast_deg,
+    jd_to_datetime,
+    datetime_to_jd,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,140 +53,85 @@ class TestTime:
 
 
 # ---------------------------------------------------------------------------
-# tabascal.coordinates — gcrf_to_uvw
+# tabascal.time — jd_to_datetime / datetime_to_jd
 # ---------------------------------------------------------------------------
 
-class TestGcrfToUvw:
+class TestJdDatetime:
 
-    def test_phase_centre_direction_maps_to_w_axis(self):
-        # The unit vector pointing toward the phase centre should map to (0, 0, 1)
-        ra_r = jnp.deg2rad(jnp.array(RA))
-        dec_r = jnp.deg2rad(jnp.array(DEC))
-        source_gcrf = jnp.array([
-            jnp.cos(dec_r) * jnp.cos(ra_r),
-            jnp.cos(dec_r) * jnp.sin(ra_r),
-            jnp.sin(dec_r),
-        ])
-        uvw = gcrf_to_uvw(source_gcrf, RA, DEC)
-        assert float(uvw[2]) == pytest.approx(1.0, abs=1e-12)
-        assert float(uvw[0]) == pytest.approx(0.0, abs=1e-12)
-        assert float(uvw[1]) == pytest.approx(0.0, abs=1e-12)
+    def test_j2000_known_value(self):
+        # JD 2451545.0 == 2000-01-01T12:00:00 UTC
+        dt = jd_to_datetime(2451545.0)
+        assert dt == datetime(2000, 1, 1, 12, 0, 0)
 
-    def test_rotation_preserves_norm(self):
-        rng = np.random.default_rng(0)
-        vecs = jnp.array(rng.standard_normal((10, 3)))
-        uvw = gcrf_to_uvw(vecs, RA, DEC)
-        np.testing.assert_allclose(
-            jnp.linalg.norm(uvw, axis=-1),
-            jnp.linalg.norm(vecs, axis=-1),
-            atol=1e-12,
-        )
+    def test_datetime_to_jd_known_value(self):
+        assert datetime_to_jd(datetime(2000, 1, 1, 12, 0, 0)) == pytest.approx(2451545.0)
 
-    def test_rotation_matrix_is_orthonormal(self):
-        # Build R implicitly: apply gcrf_to_uvw to the identity columns
-        I = jnp.eye(3)
-        R = gcrf_to_uvw(I, RA, DEC)  # rows of R are the UVW axes in GCRF
-        np.testing.assert_allclose(R @ R.T, jnp.eye(3), atol=1e-12)
+    def test_unix_epoch(self):
+        assert jd_to_datetime(2440587.5) == datetime(1970, 1, 1, 0, 0, 0)
 
-    def test_vector_input_shape(self):
-        v = jnp.ones(3)
-        assert gcrf_to_uvw(v, RA, DEC).shape == (3,)
+    def test_roundtrip(self):
+        jd = 2461112.369018021
+        assert datetime_to_jd(jd_to_datetime(jd)) == pytest.approx(jd, abs=1e-9)
 
-    def test_2d_batch_shape(self):
-        vecs = jnp.ones((5, 3))
-        assert gcrf_to_uvw(vecs, RA, DEC).shape == (5, 3)
+    def test_isoformat_parse_roundtrip(self):
+        # Mirrors the TLE EPOCH -> EPOCH_JD path in tle.py
+        isot = "2026-03-12T20:51:23.157"
+        jd = datetime_to_jd(datetime.fromisoformat(isot))
+        assert jd == pytest.approx(2461112.369018021, abs=1e-9)
 
-    def test_3d_batch_shape(self):
-        vecs = jnp.ones((4, 6, 3))
-        assert gcrf_to_uvw(vecs, RA, DEC).shape == (4, 6, 3)
-
-    def test_known_value_ra0_dec0(self):
-        # At ra=0, dec=0: w-hat is (1,0,0), v-hat is (0,0,1), u-hat is (0,1,0)
-        x_hat = jnp.array([1.0, 0.0, 0.0])
-        y_hat = jnp.array([0.0, 1.0, 0.0])
-        z_hat = jnp.array([0.0, 0.0, 1.0])
-        assert float(gcrf_to_uvw(x_hat, 0.0, 0.0)[2]) == pytest.approx(1.0, abs=1e-12)  # w
-        assert float(gcrf_to_uvw(y_hat, 0.0, 0.0)[0]) == pytest.approx(1.0, abs=1e-12)  # u
-        assert float(gcrf_to_uvw(z_hat, 0.0, 0.0)[1]) == pytest.approx(1.0, abs=1e-12)  # v
+    def test_tz_aware_input_treated_as_utc(self):
+        from datetime import timezone
+        aware = datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        assert datetime_to_jd(aware) == pytest.approx(2451545.0)
 
 
 # ---------------------------------------------------------------------------
-# tabascal.coordinates — itrf_to_uvw
+# tabascal.time — gast_deg
 # ---------------------------------------------------------------------------
 
-class TestItrfToUvw:
+class TestGastDeg:
 
-    def test_output_shape(self):
-        h0 = jnp.array([10.0, 20.0, 30.0])
-        uvw = itrf_to_uvw(ANTS_ITRF, h0, DEC)
-        assert uvw.shape == (3, 3, 3)  # (n_time, n_ant, 3)
+    def test_shape_and_range(self):
+        jds = np.array([2451545.0, 2451545.5, 2451546.0])
+        gast = gast_deg(jds)
+        assert gast.shape == (3,)
+        assert np.all((gast >= 0) & (gast < 360))
 
-    def test_first_antenna_baseline_is_zero(self):
-        h0 = jnp.array([0.0, 45.0])
-        uvw = itrf_to_uvw(ANTS_ITRF, h0, DEC)
-        np.testing.assert_allclose(uvw[:, 0, :], 0.0, atol=1e-8)
+    def test_advances_with_sidereal_rate(self):
+        # Over one solar day GAST advances by ~360.985 degrees (one full turn
+        # plus the ~0.9856 deg/day the stars gain on the Sun), i.e. ~0.985 deg
+        # net after wrapping.
+        g0 = gast_deg(np.array([2451545.0]))[0]
+        g1 = gast_deg(np.array([2451546.0]))[0]
+        assert (g1 - g0) % 360 == pytest.approx(0.9856, abs=0.05)
 
-    def test_single_time(self):
-        uvw = itrf_to_uvw(ANTS_ITRF, jnp.array([0.0]), DEC)
-        assert uvw.shape == (1, 3, 3)
+    def test_is_apparent_not_mean(self):
+        # GAST = GMST + equation of the equinoxes. Cross-check against skyfield's
+        # own GMST: the two must differ (by up to ~18 arcsec) and agree to within
+        # the equation-of-equinoxes magnitude.
+        from skyfield.api import load
 
-    def test_uvw_changes_with_hour_angle(self):
-        uvw_0 = itrf_to_uvw(ANTS_ITRF, jnp.array([0.0]), DEC)
-        uvw_45 = itrf_to_uvw(ANTS_ITRF, jnp.array([45.0]), DEC)
-        assert not jnp.allclose(uvw_0, uvw_45)
+        jd = 2451545.3
+        jd_whole = np.floor(jd)
+        jd_frac = jd - jd_whole
+        ts = load.timescale()
+        t_sf = ts._utc_jd(jd_whole, jd_frac)
+        gmst_deg = float(np.asarray(t_sf.gmst)) * 15.0
 
+        gast = gast_deg(np.array([jd]))[0]
+        diff_arcsec = abs((gast - gmst_deg) * 3600.0)
+        assert diff_arcsec > 0.0          # genuinely apparent, not mean
+        assert diff_arcsec < 20.0         # equation of equinoxes is < ~18 arcsec
 
-# ---------------------------------------------------------------------------
-# tabascal.coordinates — itrf_to_uvw_jd
-# ---------------------------------------------------------------------------
+    def test_uses_utc_not_ut1(self):
+        # Interpreting the JD as UTC (not UT1) shifts GAST by the UT1-UTC offset.
+        # Confirm gast_deg matches the UTC interpretation, not the UT1 one.
+        from skyfield.api import load
 
-class TestItrfToUvwJd:
+        jd = 2451545.3
+        ts = load.timescale()
+        gast_ut1 = float(np.asarray(ts.ut1_jd(jd).gast)) * 15.0
 
-    def test_output_shape(self):
-        uvw = itrf_to_uvw_jd(ANTS_ITRF, TIMES_JD, RA, DEC)
-        assert uvw.shape == (3, 3, 3)  # (n_time, n_ant, 3)
-
-    def test_first_antenna_baseline_is_zero(self):
-        uvw = itrf_to_uvw_jd(ANTS_ITRF, TIMES_JD, RA, DEC)
-        np.testing.assert_allclose(uvw[:, 0, :], 0.0, atol=1e-8)
-
-    def test_single_time(self):
-        uvw = itrf_to_uvw_jd(ANTS_ITRF, jnp.array([2451545.0]), RA, DEC)
-        assert uvw.shape == (1, 3, 3)
-
-    def test_uvw_changes_with_time(self):
-        t0 = jnp.array([2451545.0])
-        t1 = jnp.array([2451545.01])  # ~14 minutes later
-        uvw_0 = itrf_to_uvw_jd(ANTS_ITRF, t0, RA, DEC)
-        uvw_1 = itrf_to_uvw_jd(ANTS_ITRF, t1, RA, DEC)
-        assert not jnp.allclose(uvw_0, uvw_1)
-
-    def test_baseline_norm_preserved_across_times(self):
-        # The ITRF → GCRF → UVW chain is a rotation so baseline norms are constant
-        uvw = itrf_to_uvw_jd(ANTS_ITRF, TIMES_JD, RA, DEC)
-        norms = jnp.linalg.norm(uvw, axis=-1)  # (n_time, n_ant)
-        # Variance across times should be negligible
-        assert float(norms.std(axis=0).max()) < 1e-6
-
-    def test_agrees_with_itrf_to_uvw_given_gast(self):
-        # Cross-check: itrf_to_uvw_jd should agree with itrf_to_uvw when the
-        # hour angle is derived from the same GAST used internally by sgp4jax.
-        from sgp4jax._frames import _earth_orientation
-        from jax import vmap as jvmap
-
-        jd = 2451545.0
-        jd_arr = jnp.array([jd])
-        jd_whole = jnp.floor(jd_arr)
-        jd_frac = jd_arr - jd_whole
-
-        _, gast_rad = jvmap(_earth_orientation)(jd_whole, jd_frac)
-        gast_deg = float(jnp.rad2deg(gast_rad[0]))
-        h0 = (gast_deg - RA) % 360
-
-        uvw_h0 = itrf_to_uvw(ANTS_ITRF, jnp.array([h0]), DEC)
-        uvw_jd = itrf_to_uvw_jd(ANTS_ITRF, jd_arr, RA, DEC)
-
-        # itrf_to_uvw applies only Rz(GAST); itrf_to_uvw_jd applies the full
-        # precession/nutation matrix on top.  The difference is ~arcseconds,
-        # which for a ~50 m baseline amounts to a few mm.
-        np.testing.assert_allclose(uvw_h0, uvw_jd, atol=0.01)
+        gast = gast_deg(np.array([jd]))[0]
+        # The two interpretations differ at the milli-degree level (DUT1 ~ 0.9 s).
+        assert gast != pytest.approx(gast_ut1, abs=1e-6)

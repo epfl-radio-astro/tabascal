@@ -20,7 +20,7 @@ import json
 import os
 import random
 import string
-from datetime import datetime
+from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
 from typing import Optional
@@ -30,9 +30,10 @@ from platformdirs import user_cache_path, user_config_path
 import numpy as np
 import pandas as pd
 import yaml
-from astropy.time import Time
 from spacetrack import SpaceTrackClient
 import spacetrack.operators as op
+
+from tabascal.time import jd_to_datetime, datetime_to_jd
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +187,7 @@ def preflight_tle_check(
     with _ms_table(ms_path, readonly=True, ack=False) as t:
         mean_epoch_jd = float(t.getcol("TIME").mean()) / 86400.0 + 2400000.5
 
-    epoch_str = Time(mean_epoch_jd, format="jd", scale="ut1").strftime("%Y-%m-%d")
+    epoch_str = jd_to_datetime(mean_epoch_jd).strftime("%Y-%m-%d")
     print(f"Preflight TLE check    : epoch {epoch_str}, NORAD IDs {sorted(norad_ids)}")
 
     cache_dir = tle_cache_dir()
@@ -252,8 +253,8 @@ def fetch_tle_data(
     limit:
         Maximum number of records to return per request.
     """
-    start_time = Time(epoch_jd - window_days, format="jd", scale="ut1").datetime
-    end_time   = Time(epoch_jd + window_days, format="jd", scale="ut1").datetime
+    start_time = jd_to_datetime(epoch_jd - window_days)
+    end_time   = jd_to_datetime(epoch_jd + window_days)
     date_range = op.inclusive_range(start_time, end_time)
 
     raw = st_client.gp_history(
@@ -311,7 +312,7 @@ def get_tles_by_id(
 
     remaining: list[int] = list(np.array(list(set(norad_ids))).astype(int))
     n_ids_start = len(remaining)
-    epoch_str = Time(epoch_jd, format="jd", scale="ut1").strftime("%Y-%m-%d")
+    epoch_str = jd_to_datetime(epoch_jd).strftime("%Y-%m-%d")
 
     # --- load from local dirs (extra first, then cache) ---
     tles_local = pd.DataFrame()
@@ -344,7 +345,9 @@ def get_tles_by_id(
         non_empty = [f for f in frames if len(f) > 0]
         if non_empty:
             tles_remote = pd.concat(non_empty)
-            tles_remote["Fetch_Timestamp"] = Time.now().fits
+            tles_remote["Fetch_Timestamp"] = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3]
             remote_ids = list(tles_remote["NORAD_CAT_ID"].unique())
 
             save_path = cache_dir / f"{epoch_str}-{_random_id()}.json"
@@ -368,7 +371,9 @@ def get_tles_by_id(
 
     tles = pd.concat(frames)
     tles.reset_index(drop=True, inplace=True)
-    tles["EPOCH_JD"] = tles["EPOCH"].apply(lambda x: Time(spacetrack_time_to_isot(x)).jd)
+    tles["EPOCH_JD"] = tles["EPOCH"].apply(
+        lambda x: datetime_to_jd(datetime.fromisoformat(spacetrack_time_to_isot(x)))
+    )
     tles = _type_cast_tles(tles)
     tles = _get_closest_times(tles, epoch_jd)
     return tles
