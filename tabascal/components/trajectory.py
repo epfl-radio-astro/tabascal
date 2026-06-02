@@ -54,6 +54,7 @@ def get_satellite_positions(tles: list, times_jd: list):
 
 class PhaseCalculationRFI(Component):
 
+    requires_double = True
     required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
     output_shapes = {"rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}
 
@@ -263,6 +264,7 @@ class FixedOrbit(Component):
 
 class SGP4LEONoDragOrbit(Component):
 
+    requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
@@ -434,6 +436,7 @@ class SGP4LEONoDragOrbit(Component):
 
 class SGP4LEOOrbit(Component):
 
+    requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),

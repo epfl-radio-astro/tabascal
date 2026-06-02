@@ -8,7 +8,10 @@
 import jax
 import pytest
 
-from tabascal.scripts._run_tabascal_impl import set_precision
+from tabascal.scripts._run_tabascal_impl import (
+    assert_precision_supported,
+    set_precision,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -48,3 +51,51 @@ def test_single_disables_x64_after_sgp4jax_enabled_it():
     jax.config.update("jax_enable_x64", True)
     assert set_precision({"model": {"precision": "single"}}) is False
     assert jax.config.read("jax_enable_x64") is False
+
+
+# ---------------------------------------------------------------------------
+# assert_precision_supported — fast-fail preflight before TabConfig setup
+# ---------------------------------------------------------------------------
+
+_DOUBLE_ONLY = "rfi_vis:RiemannVisTimeFreqCalculationFFI"
+_SINGLE_OK = ["rfi_vis:RiemannVisTimeFreqCalculation", "gains:UnitaryGains"]
+
+
+def test_preflight_single_rejects_double_only_component():
+    """A single-precision config using a double-only component raises, naming it."""
+    config = {"model": {"precision": "single", "components": [_DOUBLE_ONLY] + _SINGLE_OK}}
+    with pytest.raises(ValueError, match="RiemannVisTimeFreqCalculationFFI"):
+        assert_precision_supported(config)
+
+
+def test_preflight_reports_every_offender():
+    """The error lists all offending components, not just the first."""
+    config = {
+        "model": {
+            "precision": "single",
+            "components": ["trajectory:SGP4LEOOrbit", _DOUBLE_ONLY],
+        }
+    }
+    with pytest.raises(ValueError) as exc:
+        assert_precision_supported(config)
+    msg = str(exc.value)
+    assert "SGP4LEOOrbit" in msg and "RiemannVisTimeFreqCalculationFFI" in msg
+
+
+def test_preflight_single_allows_single_capable_components():
+    """Single precision with only single-capable components passes."""
+    assert_precision_supported({"model": {"precision": "single", "components": _SINGLE_OK}})
+
+
+def test_preflight_double_allows_double_only_component():
+    """Double precision allows the double-only components."""
+    assert_precision_supported(
+        {"model": {"precision": "double", "components": [_DOUBLE_ONLY]}}
+    )
+
+
+def test_preflight_defaults_and_empty_components_are_noops():
+    """Missing precision defaults to single; empty/absent components never raise."""
+    assert_precision_supported({"model": {"components": _SINGLE_OK}})
+    assert_precision_supported({"model": {}})
+    assert_precision_supported({})

@@ -16,6 +16,7 @@ import jax.numpy as jnp
 from tabascal.timing import measure_runtime, print_timings, enable_timings
 from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
 from tabascal.config import load_config, TabConfig, Model
+from tabascal.imports import import_components
 from tabascal.write import write_results_xds
 from tabascal.tle import TLEError
 
@@ -34,7 +35,31 @@ class _Tee:
 
 
 @measure_runtime
+def assert_precision_supported(config):
+    """Fail fast if a requested component requires double precision under single.
+
+    Resolves the component list and checks each class's ``requires_double`` flag
+    up front, so an incompatible config errors *before* the expensive
+    ``TabConfig`` setup (MS read, TLE fetch) and names every offending component
+    at once, rather than tripping a single component's own gate deep in the run.
+    """
+    model_cfg = config.get("model", {})
+    if model_cfg.get("precision", "single") == "double":
+        return
+    classes = import_components(model_cfg.get("components", []) or [])
+    offenders = sorted(
+        cls.__name__ for cls in classes if getattr(cls, "requires_double", False)
+    )
+    if offenders:
+        raise ValueError(
+            "model.precision is 'single', but these components require double "
+            f"precision: {', '.join(offenders)}. "
+            "Set model.precision to 'double' to use them."
+        )
+
+
 def build_model(config, ms_path):
+    assert_precision_supported(config)
     tab_config = TabConfig(config, ms_path)
     model = Model(tab_config, config["model"]["components"])
     return tab_config, model

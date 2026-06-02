@@ -468,27 +468,36 @@ class TestSGP4LEOOrbit:
 # ---------------------------------------------------------------------------
 
 def test_require_double_gate():
-    """``Component.require_double`` raises iff ``config.precision != 'double'``.
+    """``Component.require_double`` raises for a ``requires_double`` component run
+    in any non-double precision, and is a no-op otherwise.
 
-    Reads ``config.precision`` (not the live ``jax_enable_x64``), so it behaves
-    the same in either test precision. This exercises the raise path that the
-    ``requires_double``-marked component tests skip.
+    Reads ``config.precision`` / the ``requires_double`` flag (not the live
+    ``jax_enable_x64``), so it behaves the same in either test precision. This
+    exercises the raise path that the ``requires_double``-marked component tests
+    skip.
     """
     from tabascal.components import Component
 
-    class _Dummy(Component):
+    class _NeedsDouble(Component):
+        requires_double = True
+
         def setup(self, config):  # pragma: no cover - not called
             ...
 
         def build_forward(self):  # pragma: no cover - not called
             return lambda params, state, constants: state
 
-    comp = _Dummy()
-    comp.require_double(SimpleNamespace(precision="double"))  # must not raise
+    class _AnyPrecision(_NeedsDouble):
+        requires_double = False
 
+    comp = _NeedsDouble()
+    comp.require_double(SimpleNamespace(precision="double"))  # must not raise
     for bad in ("single", "half", ""):
         with pytest.raises(ValueError, match="requires double precision"):
             comp.require_double(SimpleNamespace(precision=bad))
+
+    # A component that does not require double is never gated.
+    _AnyPrecision().require_double(SimpleNamespace(precision="single"))
 
     def test_forward_output_shapes(self, orbit_cls, n_params):
         """Forward pass produces rfi_xyz (n_rfi, n_time_fine, 3) and elements (n_rfi, n_params)."""

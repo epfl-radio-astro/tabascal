@@ -161,6 +161,7 @@ class RiemannVisTimeFreqCalculation(Component):
 
 class RiemannVisTimeFreqCalculationFFI(Component):
 
+    requires_double = True  # FFI kernel is compiled for complex128
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
