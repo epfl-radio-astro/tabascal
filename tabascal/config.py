@@ -49,8 +49,19 @@ def deep_update(d: Dict, u: Dict) -> Dict:
     return d
 
 
-loader = yaml.SafeLoader
-loader.add_implicit_resolver(
+class _TabSafeLoader(yaml.SafeLoader):
+    """SafeLoader whose float resolver also accepts bare scientific notation.
+
+    PyYAML's stock resolver only treats a token as a float when the exponent is
+    signed (``1.0e+9``); it parses ``1e9`` / ``3e3`` / ``209e3`` as *strings*. The
+    config files use the bare form throughout, so add a resolver that accepts it.
+    It is attached to this private subclass — not the shared ``yaml.SafeLoader`` —
+    so importing tabascal does not reprogram YAML float parsing for the whole
+    process. Anything that needs this behaviour must load via :func:`yaml_load`.
+    """
+
+
+_TabSafeLoader.add_implicit_resolver(
     "tag:yaml.org,2002:float",
     re.compile(
         """^(?:
@@ -67,8 +78,8 @@ loader.add_implicit_resolver(
 
 
 def yaml_load(path):
-    config = yaml.load(open(path), Loader=loader)
-    return config
+    with open(path) as f:
+        return yaml.load(f, Loader=_TabSafeLoader)
 
 
 def load_config(path: str) -> Dict:
@@ -90,8 +101,8 @@ def load_config(path: str) -> Dict:
 
     try:
         return deep_update(base_config, yaml_load(path))
-    except:
-        raise IOError(f"Configuration file could not be loaded from {path}")
+    except Exception as e:
+        raise IOError(f"Configuration file could not be loaded from {path}") from e
 
     
 class TabConfig:

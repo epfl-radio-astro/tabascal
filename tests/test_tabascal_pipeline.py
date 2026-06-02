@@ -105,8 +105,11 @@ def read_and_modify_yaml(
         input_path: Path to the input YAML file to read
         output_path: Path where the modified YAML will be written
     """
-    with open(input_path) as f:
-        data = yaml.safe_load(f)
+    # Use tabascal's loader so bare scientific-notation floats (e.g. 1e6, 209e3)
+    # parse as floats rather than strings; the stock yaml.safe_load does not.
+    from tabascal.config import yaml_load
+
+    data = yaml_load(input_path)
 
     data.update(new_data)
 
