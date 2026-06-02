@@ -47,7 +47,7 @@ dependencies = [
     "platformdirs",
     "PyYAML",
     "sgp4jax",
-    "skyfield",
+    "skyfield>=1.49,<2",  # uses skyfield's _utc_jd(whole, fraction); see tabascal/time.py
     "spacetrack",
     "tqdm",
     "xarray",
@@ -132,7 +132,9 @@ python-casacore = "*"
 platformdirs    = "*"
 pyyaml          = "*"
 sgp4jax         = "*"
-skyfield        = "*"
+# Bounded: tabascal/time.py and components/trajectory.py call skyfield's private
+# _utc_jd(whole, fraction); pin a known-good range and guard it with a smoke test.
+skyfield        = ">=1.49,<2"
 spacetrack      = "*"
 tqdm            = "*"
 xarray          = "*"

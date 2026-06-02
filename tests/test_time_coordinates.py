@@ -135,3 +135,29 @@ class TestGastDeg:
         gast = gast_deg(np.array([jd]))[0]
         # The two interpretations differ at the milli-degree level (DUT1 ~ 0.9 s).
         assert gast != pytest.approx(gast_ut1, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# skyfield private-API smoke test
+# ---------------------------------------------------------------------------
+
+def test_skyfield_utc_jd_whole_fraction_available():
+    """Guard the private skyfield API that gast_deg / itrs_to_gcrs_sf depend on.
+
+    Both call ``ts._utc_jd(whole, fraction)`` (a private method, used to feed UTC
+    Julian Dates split into whole + fractional parts for full f64 precision). The
+    skyfield pin in pyproject.toml is bounded for exactly this reason; if a
+    resolved version drops or changes the method, fail loudly here in CI instead
+    of deep inside a run.
+    """
+    from skyfield.api import load
+
+    ts = load.timescale()
+    assert hasattr(ts, "_utc_jd"), "skyfield removed Timescale._utc_jd"
+
+    # J2000.0 = JD 2451545.0; whole + fraction must reconstruct the same instant.
+    t_split = ts._utc_jd(2451545.0, 0.0)
+    t_whole = ts._utc_jd(2451544.0, 1.0)
+    assert float(np.asarray(t_split.gast)) == pytest.approx(
+        float(np.asarray(t_whole.gast)), abs=1e-9
+    )
