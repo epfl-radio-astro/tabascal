@@ -33,6 +33,11 @@ def pytest_configure(config):
     import sgp4jax  # noqa: F401
 
     jax.config.update("jax_enable_x64", config.getoption("--x64") == "true")
+    # Mirror run_tabascal's set_precision: pin true fp32 matmuls. On Ampere+ GPUs
+    # JAX defaults f32 matmuls to TF32 (~10-bit mantissa), which wrecks the
+    # single-precision linear algebra; "highest" forces real fp32 (no-op under
+    # x64). Without this the tests would not match the production precision.
+    jax.config.update("jax_default_matmul_precision", "highest")
     config.addinivalue_line(
         "markers",
         "requires_double: test only runs under double precision (skipped with --x64 false)",

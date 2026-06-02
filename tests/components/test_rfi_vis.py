@@ -43,7 +43,7 @@ def create_state(config, rand_vis_rfi = False, r_key = 42):
     return state
 
 
-test_sizes = [(1, 1, 1, 1, 1, 1), (4, 5, 6, 7, 8, 9), (64, 20, 16, 12, 4, 2)]
+test_sizes = [(2, 1, 1, 1, 1, 1), (4, 5, 6, 7, 8, 9), (64, 20, 16, 12, 4, 2)]
 
 @pytest.mark.requires_double
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)

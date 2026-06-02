@@ -118,17 +118,21 @@ def read_and_modify_yaml(
 @dataclass
 class PipelineTestConfig:
     """Configuration for a single pipeline test case.
-    
+
     Attributes:
         sim_file_name: Name of the simulation YAML configuration file
         components: List of component module specifications for the pipeline
-        chi2_ref: Expected reduced chi-squared value for validation
+        chi2_ref: Expected reduced chi-squared per precision, keyed by the
+            precision string ("double"/"single"). ``requires_double`` cases only
+            need the "double" entry.
+        requires_double: True if any component only runs in double precision; the
+            case is skipped under single precision (``--x64 false``).
         config_overrides: Dictionary of overrides to the tabascal config file
     """
     sim_file_name: str
     components: list[str]
-    chi2_ref: float
-    precision: str = "single"
+    chi2_ref: dict[str, float]
+    requires_double: bool = False
     config_overrides: dict = field(default_factory=dict)
 
 
@@ -136,6 +140,7 @@ def _run_pipeline(
     provide_test_data: Path,
     tmp_path: Path,
     t_config: PipelineTestConfig,
+    precision: str,
 ) -> tuple[int, str, str]:
     local_dir = Path(provide_test_data)
     data_dir = Path(__file__).parent / "data"
@@ -146,7 +151,7 @@ def _run_pipeline(
     config_path = tmp_path / "tab_target.yaml"
 
     config_mod: dict = {
-        "model": {"components": t_config.components, "precision": t_config.precision}
+        "model": {"components": t_config.components, "precision": precision}
     }
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
@@ -203,8 +208,8 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8977856043436502,
-            precision="double",
+            chi2_ref={"double": 0.8977856043436502},
+            requires_double=True,
         ),
         id="FixedOrbit+PhaseCalculationRFI",
     ),
@@ -219,8 +224,8 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8834671325695459, # Run with MEO satellites
-            precision="double",
+            chi2_ref={"double": 0.8834671325695459}, # Run with MEO satellites
+            requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
         ),
         id="SGP4LEONoDragOrbit+PhaseCalculationRFI",
@@ -236,8 +241,8 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8834671467969134,  # Run with MEO satellites
-            precision="double",
+            chi2_ref={"double": 0.8834671467969134},  # Run with MEO satellites
+            requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
         ),
         id="SGP4LEOOrbit+PhaseCalculationRFI",
@@ -267,8 +272,7 @@ rfi_vis_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8977856059138833,
-            precision="double",
+            chi2_ref={"double": 0.8977856059138833, "single": 0.9159612655639648},
         ),
         id="RiemannVisTimeFreqCalculation",
     ),
@@ -282,8 +286,8 @@ rfi_vis_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8977856059138833,
-            precision="double",
+            chi2_ref={"double": 0.8977856059138833},
+            requires_double=True,
         ),
         id="RiemannVisTimeFreqCalculationFFI",
     ),
@@ -332,8 +336,7 @@ gains_configs = [
                     "r_seed": 123,
                 },
             },
-            chi2_ref=0.8977832575028029,
-            precision="double",
+            chi2_ref={"double": 0.8977832575028029, "single": 0.9159691333770752},
         ),
         id="GPGains",
     ),
@@ -348,21 +351,39 @@ all_configs = trajectory_configs + rfi_signal_configs + rfi_vis_configs + ast_si
 
 
 @pytest.mark.parametrize("t_config", all_configs)
-def test_pipeline(provide_test_data: Path, tmp_path: Path, t_config: PipelineTestConfig) -> None:
+def test_pipeline(
+    provide_test_data: Path,
+    tmp_path: Path,
+    t_config: PipelineTestConfig,
+    precision: str,
+) -> None:
     """Test the complete Tabascal pipeline execution.
 
     This test verifies that the full Tabascal pipeline runs successfully and produces
     expected results. It:
     1. Downloads test simulation data from HuggingFace
-    2. Configures the pipeline with specific component modules
+    2. Configures the pipeline with specific component modules at the session
+       precision (driven by the ``--x64`` flag)
     3. Executes the run_tabascal.py script
     4. Validates that the output Reduced Chi^2 value matches the expected result
+       for that precision
 
     Args:
         provide_test_data: Fixture providing path to downloaded test data
         tmp_path: Pytest fixture providing temporary directory for test files
-        t_config: Tabascal pipeline test config 
+        t_config: Tabascal pipeline test config
+        precision: Session precision ("double"/"single") from the --x64 flag
     """
-    returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config)
+    if t_config.requires_double and precision != "double":
+        pytest.skip(
+            "uses a component that requires double precision; not run under --x64 false"
+        )
+
+    chi2_ref = t_config.chi2_ref[precision]
+    assert chi2_ref is not None, (
+        f"No {precision}-precision chi^2 reference recorded for this case"
+    )
+
+    returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config, precision)
     assert returncode == 0, f"Tabascal failed: {stderr}"
-    _assert_chi2(stdout, t_config.chi2_ref)
+    _assert_chi2(stdout, chi2_ref)
