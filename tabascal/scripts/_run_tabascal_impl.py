@@ -239,6 +239,12 @@ def set_precision(config):
     jax_enable_x64 on import must be imported here, before this update, or single
     precision will silently run as double.
 
+    Also force full-fp32 matmuls. On Ampere+ GPUs JAX defaults f32 matmuls to
+    TF32 (~10-bit mantissa), which silently wrecks the visibility/GP linear
+    algebra in single precision (reduced chi^2 explodes to ~1e14) while leaving
+    CPU and double precision untouched — so it only bites on GPU once x64 is
+    genuinely off. "highest" pins true fp32 (and is a no-op under x64).
+
     Returns the resulting ``jax_enable_x64`` value.
     """
     import jax  # noqa: F811 (re-imported to guarantee it's available here)
@@ -246,6 +252,7 @@ def set_precision(config):
 
     x64 = config.get("model", {}).get("precision", "single") == "double"
     jax.config.update("jax_enable_x64", x64)
+    jax.config.update("jax_default_matmul_precision", "highest")
     return x64
 
 
