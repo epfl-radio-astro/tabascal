@@ -138,6 +138,34 @@ CPU/GPU kernels actually execute — with:
 pixi run -e cuda12 check-install      # or -e default / -e dev
 ```
 
+# Precision
+
+tabascal runs in **single precision (fp32) by default**. Set it in the config:
+
+```yaml
+model:
+  precision: single   # default; or "double" for fp64
+```
+
+- **`single` (default).** Halves device-memory use (~2×), which raises the
+  largest problem size that fits on a GPU. On GPUs with first-class fp64 (e.g.
+  Hopper/GH200) it is **not** faster in wall-clock — the win is memory capacity,
+  not speed.
+- **`double`.** Required by some components, and recommended when fitting
+  satellite trajectories (the differentiable orbit models need fp64 accuracy).
+
+The following components run in **double precision only** and raise a clear error
+under `single` (set `model.precision: double` to use them):
+
+- `trajectory:PhaseCalculationRFI`
+- `trajectory:SGP4LEONoDragOrbit`
+- `trajectory:SGP4LEOOrbit`
+- `rfi_vis:RiemannVisTimeFreqCalculationFFI` (the FFI kernel is compiled for
+  complex128)
+
+The non-FFI `rfi_vis:RiemannVisTimeFreqCalculation` and the GP astronomical/gains
+components run in either precision.
+
 # Developer
 
 ## Running tests

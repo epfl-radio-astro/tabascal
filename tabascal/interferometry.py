@@ -16,6 +16,11 @@ def get_rfi_phase_numpy(
 ) -> NDArray:
     """Calculate phase at each antenna for each RFI source
 
+    numpy twin of the jax :func:`get_rfi_phase` — same formula, kept in numpy/f64
+    for the host-side one-shot setup in ``FixedOrbit`` (large magnitudes need f64).
+    The two must stay in sync; their equivalence is checked by
+    ``tests/components/test_trajectory.py::TestFixedOrbit::test_compute_rfi_phase_consistent_with_get_rfi_phase``.
+
     Parameters
     ----------
     rfi_xyz: Array (n_src, n_time, 3)
@@ -198,6 +203,10 @@ def get_rfi_phase(
     rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array
 ) -> Array:
     """Calculate phase at each antenna for each RFI source
+
+    jax (differentiable) version, used by ``PhaseCalculationRFI`` (double-only).
+    Keep in sync with the numpy twin :func:`get_rfi_phase_numpy`.
+
 
     Parameters
     ----------
