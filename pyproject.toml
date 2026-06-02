@@ -46,7 +46,7 @@ dependencies = [
     "optax",
     "platformdirs",
     "PyYAML",
-    "sgp4jax",
+    "sgp4jax>=0.1.6,<0.2",  # enables jax x64 at import; orbit API is pre-1.0
     "skyfield>=1.49,<2",  # uses skyfield's _utc_jd(whole, fraction); see tabascal/time.py
     "spacetrack",
     "tqdm",
@@ -131,7 +131,9 @@ python          = ">=3.10,<3.14"
 python-casacore = "*"
 platformdirs    = "*"
 pyyaml          = "*"
-sgp4jax         = "*"
+# Bounded: sgp4jax enables jax_enable_x64 at import (set_precision relies on this
+# ordering) and its orbit API is pre-1.0, so pin a known-good range.
+sgp4jax         = ">=0.1.6,<0.2"
 # Bounded: tabascal/time.py and components/trajectory.py call skyfield's private
 # _utc_jd(whole, fraction); pin a known-good range and guard it with a smoke test.
 skyfield        = ">=1.49,<2"
