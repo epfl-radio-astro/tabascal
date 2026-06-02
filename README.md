@@ -106,13 +106,31 @@ On macOS and linux-aarch64 this conda route is the recommended way to install ta
 # Build the FFI shared libraries
 
 The `RiemannVisTimeFreqCalculationFFI` component requires a compiled shared
-library (`libtabascal.so`, or `libtabascal_cuda.so` for NVIDIA GPUs). These are
-built automatically by CMake/scikit-build-core when the environment is created
-(`pixi install`). To rebuild after editing the C++/CUDA kernels:
+library: `libtabascal.so` on CPU, or `libtabascal_cuda.so` for NVIDIA GPUs
+(`RiemannVisTimeFreqCalculationFFI` only runs in double precision — set
+`model.precision: double`). `pixi install` builds the **CPU** library
+automatically.
+
+The **GPU** kernel is *not* built by a plain `pixi install`: pixi/uv build the
+editable `tabascal` package once and share that single (CPU) build across every
+environment, so the cuda12 env inherits the CPU-only library. Build the CUDA
+kernel explicitly after installing:
 
 ```bash
-pixi run -e dev build-ffi             # CPU (libtabascal.so)
-pixi run -e cuda12 build-ffi-cuda     # NVIDIA GPU (libtabascal_cuda.so)
+pixi install -e cuda12                # base env (gets the shared CPU build)
+pixi run -e cuda12 build-ffi-cuda     # force the cuda12-specific CUDA build
+```
+
+`build-ffi-cuda` (`pixi reinstall -e cuda12 tabascal`) rebuilds `tabascal` in the
+cuda12 environment, where `TABASCAL_CUDA=1` is active, producing
+`libtabascal_cuda.so`. Use the same task to rebuild after editing the C++/CUDA
+kernels (`pixi run -e dev build-ffi` for the CPU library).
+
+Verify an environment is wired correctly — the FFI libraries load and the
+CPU/GPU kernels actually execute — with:
+
+```bash
+pixi run -e cuda12 check-install      # or -e default / -e dev
 ```
 
 # Developer

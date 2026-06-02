@@ -83,6 +83,12 @@ platforms = ["osx-64", "osx-arm64", "linux-64", "linux-aarch64"]
 
 # ── Tasks ──────────────────────────────────────────────────────────────────────
 
+# Available in every environment (default feature). Verifies the FFI libraries
+# load and the CPU/GPU kernels actually execute on each device JAX sees; exits
+# non-zero (CI-usable) if a required kernel is missing or broken.
+[tool.pixi.tasks]
+check-install = { cmd = "python -m tabascal.scripts.check_install", description = "Verify the env: FFI libraries load and the CPU/GPU kernels run" }
+
 [tool.pixi.feature.dev.tasks]
 build-ffi = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CPU FFI shared library (libtabascal.so) via scikit-build-core/CMake" }
 test           = "pytest tests/"
@@ -149,12 +155,13 @@ cuda-cudart-dev = "12.*"
 tabascal = { path = ".", editable = true }
 
 # Enables the CUDA FFI kernel build (scikit-build-core override in [tool.scikit-build]
-# maps this env var to -DTABASCAL_CUDA=ON). Set at the feature level so the env's
-# activation carries it into the install-time editable build, making `pixi install
-# -e cuda12` produce libtabascal_cuda.so. CMake itself stays CPU-only by default,
-# so the GPU build is opt-in via this var (or -DTABASCAL_CUDA=ON for a manual build).
-# Note: pixi caches the built editable install, so after adding/removing this var an
-# existing env needs `pixi reinstall -e cuda12 tabascal` (see build-ffi-cuda) to rebuild.
+# maps this env var to -DTABASCAL_CUDA=ON; CMake stays CPU-only by default). This is
+# active during `pixi run`/`pixi shell` and during a per-env (re)build of tabascal in
+# this env — i.e. `pixi run -e cuda12 build-ffi-cuda`, which is how the CUDA kernel
+# gets built. A plain `pixi install` does NOT build it: pixi/uv build the editable
+# tabascal once and share that single (CPU) wheel across every env, so cuda12 inherits
+# the CPU-only build until build-ffi-cuda forces a cuda12-specific rebuild. See the
+# "Build the FFI shared libraries" section of the README.
 [tool.pixi.feature.cuda12.activation.env]
 TABASCAL_CUDA = "1"
 
