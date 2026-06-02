@@ -30,9 +30,14 @@ pixi install
 # Development (includes pytest, sphinx, etc.)
 pixi install -e dev
 
-# NVIDIA GPU
+# NVIDIA GPU — installs CPU-only; the CUDA FFI kernel must be built separately
 pixi install -e cuda12
+pixi run -e cuda12 build-ffi-cuda     # see "Build the FFI shared libraries"
 ```
+
+`pixi install` builds only the CPU FFI library; the GPU kernel needs the extra
+`build-ffi-cuda` step (explained under "Build the FFI shared libraries"). Verify
+any environment with `pixi run -e <env> check-install`.
 
 ## Open a shell in the environment
 
