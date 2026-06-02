@@ -212,21 +212,6 @@ class TabConfig:
         # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
         fringe_freq = np.array([get_fringe_freq(rfi_pos) for rfi_pos in rfi_xyz])
 
-        # # self.fringe_freqs is shape (n_rfi, n_bl)
-        # self.fringe_freqs = jnp.max(jnp.abs(fringe_freq), axis=1)
-
-        # self.max_fringe_freq = jnp.max(jnp.abs(fringe_freq))
-
-        # self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
-
-        # sample_freq = (
-        #     jnp.pi
-        #     * self.max_fringe_freq
-        #     * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
-        # )
-        # self.n_int_time = int(jnp.ceil(n_int_factor * self.int_time * sample_freq))
-        # self.n_int_time = max(1, self.n_int_time)
-
         self.max_rfi_vis = np.max(np.abs(self.vis_obs))
         sample_freq_bl = (
             np.pi
@@ -234,7 +219,6 @@ class TabConfig:
             * np.sqrt(self.max_rfi_vis / (6 * self.noise))
         )
         n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(int)
-        # print(bl_fr.max() * bl_fr.size / jnp.sum(bl_fr))
 
         # time_sample_idxs and time_strides are only used in RiemannVisTimeFreqVariable
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
@@ -244,8 +228,6 @@ class TabConfig:
     def _set_freqs_times(self):
 
         ns = [self.n_freq, self.n_time]
-        dxs = [self.chan_width, self.int_time]
-        x0s = [self.freqs[0], self.times[0]]
         ss_factors = [self.n_int_freq, self.n_int_time]
         pad_factors = [
             self.args["rfi"]["freq_pad_factor"],

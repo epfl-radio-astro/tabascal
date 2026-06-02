@@ -462,6 +462,34 @@ class TestSGP4LEOOrbit:
             diag = jnp.diag(comp.L_rfi_orbit[i])
             assert jnp.all(diag > 0), f"Cholesky diagonal not positive for satellite {i}"
 
+
+# ---------------------------------------------------------------------------
+# Component.require_double — the shared double-precision gate
+# ---------------------------------------------------------------------------
+
+def test_require_double_gate():
+    """``Component.require_double`` raises iff ``config.precision != 'double'``.
+
+    Reads ``config.precision`` (not the live ``jax_enable_x64``), so it behaves
+    the same in either test precision. This exercises the raise path that the
+    ``requires_double``-marked component tests skip.
+    """
+    from tabascal.components import Component
+
+    class _Dummy(Component):
+        def setup(self, config):  # pragma: no cover - not called
+            ...
+
+        def build_forward(self):  # pragma: no cover - not called
+            return lambda params, state, constants: state
+
+    comp = _Dummy()
+    comp.require_double(SimpleNamespace(precision="double"))  # must not raise
+
+    for bad in ("single", "half", ""):
+        with pytest.raises(ValueError, match="requires double precision"):
+            comp.require_double(SimpleNamespace(precision=bad))
+
     def test_forward_output_shapes(self, orbit_cls, n_params):
         """Forward pass produces rfi_xyz (n_rfi, n_time_fine, 3) and elements (n_rfi, n_params)."""
         cls = self._get_cls(orbit_cls)

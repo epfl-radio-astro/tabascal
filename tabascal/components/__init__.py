@@ -55,6 +55,21 @@ class Component(ABC):
             if key not in state:
                 raise ValueError(f"Required input '{key}' missing from state")
 
+    def require_double(self, config: Any) -> None:
+        """Raise if the active precision cannot run this component.
+
+        Some components only work in double precision: the SGP4/phase trajectory
+        components (differentiable orbits) and the FFI RFI-vis kernel (compiled
+        for complex128). Call this at the top of ``setup`` so they fail with a
+        clear message under single precision instead of producing silently-wrong
+        fp32 results.
+        """
+        if config.precision != "double":
+            raise ValueError(
+                f"{self.__class__.__name__} requires double precision; "
+                "set model.precision to 'double' in the config."
+            )
+
     def _set_outputs(self):
         pass
 

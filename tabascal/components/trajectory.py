@@ -61,11 +61,7 @@ class PhaseCalculationRFI(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
-        if config.precision != "double":
-            raise ValueError(
-                f"{self.__class__.__name__} requires double precision; "
-                "set model.precision to 'double' in the config."
-            )
+        self.require_double(config)
         try:
             self.times_jd_fine = config.times_jd_fine
             self.ants_itrf = config.ants_itrf
@@ -278,11 +274,7 @@ class SGP4LEONoDragOrbit(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
-        if config.precision != "double":
-            raise ValueError(
-                f"{self.__class__.__name__} requires double precision; "
-                "set model.precision to 'double' in the config."
-            )
+        self.require_double(config)
         try:
             # Store only what's needed for forward computation
             self.times_jd = config.times_jd
@@ -453,11 +445,7 @@ class SGP4LEOOrbit(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
-        if config.precision != "double":
-            raise ValueError(
-                f"{self.__class__.__name__} requires double precision; "
-                "set model.precision to 'double' in the config."
-            )
+        self.require_double(config)
         try:
             # Store only what's needed for forward computation
             self.times_jd = config.times_jd

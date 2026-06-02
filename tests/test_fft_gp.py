@@ -380,6 +380,35 @@ class TestDomainSS:
 
         assert len(xs_ss) == 2
 
+    @pytest.mark.requires_double
+    def test_domain_ss_is_affine_in_dx_x0(self):
+        """``domain_ss`` is affine in ``(dx, x0)``: the real grid equals
+        ``x0 + dx * unit_grid`` where ``unit_grid`` is built with ``dx=1, x0=0``.
+
+        ``config.TabConfig._set_freqs_times`` relies on exactly this property: it
+        builds the unit grid via ``domain_ss`` (jax, f32 under single precision)
+        and applies the real ``freqs[0]/chan_width`` and ``times[0]/int_time``
+        offset/scale in numpy f64, because the real grids carry large magnitudes
+        (freqs ~1e9, times_jd ~2.4e6) that lose all usable precision in f32. If
+        this identity ever breaks, the single-precision fine grids are silently
+        wrong, so guard it directly here. Checked in double precision, where
+        ``domain_ss`` itself is f64-accurate at these magnitudes.
+        """
+        ns = [11, 6]
+        dxs = [2.0e6, 3.0]        # freq-like and time-like scales
+        x0s = [1.4e9, 2.4e6]      # large offsets, as in real freqs / times_jd
+        ss_factors = [2, 3]
+        pad_factors = [1.5, 1.5]
+
+        real = domain_ss(ns, dxs, x0s, ss_factors, pad_factors)
+        unit = domain_ss(ns, [1.0, 1.0], [0.0, 0.0], ss_factors, pad_factors)
+
+        assert len(real) == len(unit) == 2
+        for r, u, dx, x0 in zip(real, unit, dxs, x0s):
+            np.testing.assert_allclose(
+                np.asarray(r), x0 + dx * np.asarray(u), rtol=1e-9
+            )
+
 
 class TestLatentSpace:
     """Test latent space operations."""
