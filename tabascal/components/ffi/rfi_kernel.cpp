@@ -114,9 +114,6 @@ rfi_kernel_opt_tmpl(T n_int_inv,
     }
   }
 }
-} // namespace HWY_NAMESPACE
-
-#if HWY_ONCE
 
 // Thin wrappers with distinct (non-templated) symbols so that Highway's
 // per-target dispatch (HWY_EXPORT_*) can target each precision separately.
