@@ -58,6 +58,8 @@ rfi_jvp_kernel_opt_tmpl(T n_int_inv,
 
   const ComplexV<D> i_unit{hn::Zero(d), hn::Set(d, T(1))};
 
+  const ComplexV<D> i_unit{hn::Zero(d), hn::Set(d, 1)};
+
   for (std::int64_t i_bl = 0; i_bl < n_bl; ++i_bl) {
     std::int64_t i_a1 = a1(i_bl);
     std::int64_t i_a2 = a2(i_bl);

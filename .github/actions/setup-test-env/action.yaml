@@ -5,10 +5,6 @@ inputs:
   python-version:
     description: 'Python version to set up'
     required: true
-  install-coverage:
-    description: 'Whether to install pytest-cov for coverage reporting'
-    required: false
-    default: 'false'
 
 outputs:
   tabsim-version:
@@ -62,15 +58,3 @@ runs:
       run: |
         python -m pip install --upgrade pip
         pip install -e ".[test]"
-
-    - name: Build FFI CPU library
-      shell: bash
-      run: |
-        cd tabascal/components/ffi
-        make cpu
-
-    - name: Install coverage dependencies
-      if: inputs.install-coverage == 'true'
-      shell: bash
-      run: |
-        pip install pytest-cov
