@@ -16,7 +16,7 @@ import numpyro
 from tabascal.components.trajectory import FixedOrbit, PhaseCalculationRFI
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy
 
-from .conftest import make_constants, assert_transform_roundtrip
+from .conftest import active_precision, make_constants, assert_transform_roundtrip
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +93,10 @@ def make_trajectory_config(
     n_int_freq=1,
     tles=None,
     epoch_jd=None,
-    precision="double",
+    precision=None,
 ):
     """Build a minimal mock TabConfig for trajectory components."""
+    precision = precision or active_precision()
     n_freq_fine = n_freq * n_int_freq
     n_time_fine = n_time * n_int_time
     ep = _EPOCH_JD if epoch_jd is None else epoch_jd
@@ -138,6 +139,7 @@ def make_trajectory_config(
 # PhaseCalculationRFI
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_double
 class TestPhaseCalculationRFI:
 
     def test_setup_validates_dimensions(self):
@@ -376,8 +378,9 @@ _BUNDLED_TLE_EPOCH_JD = 2459997.079914223  # 2023-02-21 13:55:04.589 UTC => GMSA
 _BUNDLED_NORAD_IDS = [20452, 38833]
 
 
-def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int_freq=1, precision="double"):
+def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int_freq=1, precision=None):
     """Build a mock TabConfig for SGP4 orbit components using the bundled TLE cache."""
+    precision = precision or active_precision()
     from importlib.resources import files as _res_files
     _bundled_tle_dir = str(_res_files("tabascal").joinpath("data/tles"))
 
@@ -422,6 +425,7 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
 # SGP4LEOOrbit:       n_params=7 (bstar included)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_double
 @pytest.mark.parametrize("orbit_cls,n_params", [
     pytest.param("SGP4LEONoDragOrbit", 6, id="SGP4LEONoDragOrbit"),
     pytest.param("SGP4LEOOrbit", 7, id="SGP4LEOOrbit"),

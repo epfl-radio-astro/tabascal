@@ -5,9 +5,15 @@ in-process unit tests can be run in either precision. Defaults to ``true`` to
 preserve the historical behaviour. Set ``--x64 false`` to exercise the tests in
 single precision. (Pipeline tests run ``run_tabascal`` in a subprocess and pick
 their precision from the config, so they are unaffected by this flag.)
+
+Some components only work in double precision (the SGP4/phase trajectory
+components and the FFI RFI-vis kernel, which is compiled for complex128). Mark
+their tests with ``@pytest.mark.requires_double``; they are skipped under
+``--x64 false`` instead of erroring on the components' precision gate.
 """
 
 import jax
+import pytest
 
 
 def pytest_addoption(parser):
@@ -27,3 +33,23 @@ def pytest_configure(config):
     import sgp4jax  # noqa: F401
 
     jax.config.update("jax_enable_x64", config.getoption("--x64") == "true")
+    config.addinivalue_line(
+        "markers",
+        "requires_double: test only runs under double precision (skipped with --x64 false)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``requires_double`` tests when the session runs in single precision."""
+    if config.getoption("--x64") == "true":
+        return
+    skip_single = pytest.mark.skip(reason="requires double precision; not run under --x64 false")
+    for item in items:
+        if "requires_double" in item.keywords:
+            item.add_marker(skip_single)
+
+
+@pytest.fixture(scope="session")
+def precision(pytestconfig):
+    """Session precision string ('double'/'single') from the --x64 flag."""
+    return "double" if pytestconfig.getoption("--x64") == "true" else "single"

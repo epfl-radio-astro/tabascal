@@ -4,10 +4,10 @@ from tabascal.components.rfi_vis import *
 import jax.numpy as jnp
 import jax
 
-from .conftest import make_constants
+from .conftest import active_precision, make_constants
 
 
-def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
+def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, precision=None):
     a1, a2 = jnp.triu_indices(n_ant, 1)
     a1 = a1.astype('int32')
     a2 = a2.astype('int32')
@@ -20,6 +20,7 @@ def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         n_bl=a1.shape[0],
         a1=a1,
         a2=a2,
+        precision=precision or active_precision(),
         args={"rfi": {"freq_int_samples": n_int_freq}},
     )
 
@@ -44,6 +45,7 @@ def create_state(config, rand_vis_rfi = False, r_key = 42):
 
 test_sizes = [(1, 1, 1, 1, 1, 1), (4, 5, 6, 7, 8, 9), (64, 20, 16, 12, 4, 2)]
 
+@pytest.mark.requires_double
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """FFI and reference Riemann kernels produce identical vis_rfi outputs."""
@@ -60,6 +62,7 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
     assert jnp.allclose(ref_result, ffi_result)
 
+@pytest.mark.requires_double
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """Forward-mode Jacobian-vector products of FFI and reference kernels match."""
@@ -83,6 +86,7 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     assert jnp.allclose(ref_result, ffi_result)
 
 
+@pytest.mark.requires_double
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """Reverse-mode VJP gradients w.r.t. rfi_A and rfi_phase match between FFI and reference."""

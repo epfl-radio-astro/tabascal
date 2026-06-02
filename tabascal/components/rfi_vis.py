@@ -171,6 +171,11 @@ class RiemannVisTimeFreqCalculationFFI(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
+        if config.precision != "double":
+            raise ValueError(
+                f"{self.__class__.__name__} requires double precision; "
+                "set model.precision to 'double' in the config."
+            )
         try:
             self.a1 = config.a1
             self.a2 = config.a2
