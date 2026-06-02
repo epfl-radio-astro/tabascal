@@ -31,9 +31,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Run pytest
+      - name: Run pytest (double precision)
         run: |
           pytest -v --tb=short --color=yes
+
+      # tabascal defaults to single precision (model.precision: single), so guard
+      # that path explicitly. requires_double tests skip; the single-capable
+      # pipeline cases run against their fp32 chi^2 references. Pipeline test data
+      # is cached by the double run above, so this is fast.
+      - name: Run pytest (single precision)
+        run: |
+          pytest -v --tb=short --color=yes --x64 false --no-cov
 
   coverage:
     name: Test Coverage
