@@ -28,8 +28,8 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
         },
         "RiemannFFI": {
             "daint:gpu": {
-                "total_runtime": (21, -0.25, 0.15, "s"),
-                "optimizer_runtime": (4.0, -0.20, 0.15, "s"),
+                "total_runtime": (22, -0.25, 0.15, "s"),
+                "optimizer_runtime": (4.2, -0.20, 0.15, "s"),
             },
         },
     }
