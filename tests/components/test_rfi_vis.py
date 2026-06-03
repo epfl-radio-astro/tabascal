@@ -52,20 +52,17 @@ def create_state(config, rand_vis_rfi=False, r_key=42, real_dtype=jnp.float64):
 # degenerate zero-baseline configuration.
 test_sizes = [(2, 1, 1, 1, 1, 1), (4, 5, 6, 7, 8, 9), (64, 20, 16, 12, 4, 2)]
 
-# The FFI kernel runs in whichever precision the inputs carry. float32 is always
-# exercised; float64 only when JAX has x64 enabled (--x64 true), since otherwise
-# a float64 request is silently downcast to float32 and the case would be a
-# redundant float32 run held to a fp64 tolerance.
-test_dtypes = [
-    jnp.float32,
-    pytest.param(
-        jnp.float64,
-        marks=pytest.mark.skipif(
-            not jax.config.read("jax_enable_x64"),
-            reason="float64 requires --x64 true",
-        ),
-    ),
-]
+
+def _session_dtype():
+    """Real dtype matching the session precision (driven by the --x64 flag).
+
+    The FFI kernel runs in whichever precision its inputs carry, and the suite
+    fixes one precision per run via --x64. So the comparison tests below use fp32
+    under --x64 false and fp64 under --x64 true, each with matching tolerances,
+    rather than exercising both dtypes in a single session (a float64 request
+    would silently downcast to float32 under --x64 false anyway).
+    """
+    return jnp.float64 if active_precision() == "double" else jnp.float32
 
 
 def _tols(dtype):
@@ -73,10 +70,10 @@ def _tols(dtype):
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
-@pytest.mark.parametrize("real_dtype", test_dtypes)
-def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtype):
+def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """FFI and reference Riemann kernels produce identical vis_rfi outputs."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
+    real_dtype = _session_dtype()
 
     def compute_vis_rfi(impl):
         state = create_state(config, False, 42, real_dtype=real_dtype)
@@ -92,11 +89,10 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtype):
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
-@pytest.mark.parametrize("real_dtype", test_dtypes)
-def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtype):
+def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """Forward-mode Jacobian-vector products of FFI and reference kernels match."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
-
+    real_dtype = _session_dtype()
 
     def compue_jvp(impl):
         state = create_state(config, False, r_key=42, real_dtype=real_dtype)
@@ -118,11 +114,10 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtyp
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
-@pytest.mark.parametrize("real_dtype", test_dtypes)
-def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtype):
+def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """Reverse-mode VJP gradients w.r.t. rfi_A and rfi_phase match between FFI and reference."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
-
+    real_dtype = _session_dtype()
 
     def compue_vjp(impl):
         input_state = create_state(config, False, r_key=42, real_dtype=real_dtype)
