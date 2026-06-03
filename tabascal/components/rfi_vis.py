@@ -220,7 +220,6 @@ class RiemannVisTimeFreqCalculationFFI(Component):
             rfi_phase = state["rfi_phase"].reshape(new_shape)
 
             # Transpose to (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
-            # TODO: update custom kernels to accept this order
             rfi_amp_fine = jnp.transpose(rfi_amp_fine , (1, 2, 4, 0, 3, 5))
             rfi_phase = jnp.transpose(rfi_phase, (1, 2, 4, 0, 3, 5))
 
