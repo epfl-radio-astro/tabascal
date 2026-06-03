@@ -63,11 +63,11 @@ class Component(ABC):
         """Raise if this ``requires_double`` component is run in single precision.
 
         Some components only work in double precision: the SGP4/phase trajectory
-        components (differentiable orbits) and the FFI RFI-vis kernel (compiled
-        for complex128). Those set ``requires_double = True`` and call this at the
-        top of ``setup`` so they fail with a clear message under single precision
-        instead of producing silently-wrong fp32 results. Driven by the
-        ``requires_double`` flag so it stays in sync with the run-time preflight.
+        components (differentiable orbits). Those set ``requires_double = True``
+        and call this at the top of ``setup`` so they fail with a clear message
+        under single precision instead of producing silently-wrong fp32 results.
+        Driven by the ``requires_double`` flag so it stays in sync with the
+        run-time preflight.
         """
         if self.requires_double and config.precision != "double":
             raise ValueError(

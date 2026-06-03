@@ -111,10 +111,9 @@ On macOS and linux-aarch64 this conda route is the recommended way to install ta
 # Build the FFI shared libraries
 
 The `RiemannVisTimeFreqCalculationFFI` component requires a compiled shared
-library: `libtabascal.so` on CPU, or `libtabascal_cuda.so` for NVIDIA GPUs
-(`RiemannVisTimeFreqCalculationFFI` only runs in double precision — set
-`model.precision: double`). `pixi install` builds the **CPU** library
-automatically.
+library: `libtabascal.so` on CPU, or `libtabascal_cuda.so` for NVIDIA GPUs. The
+kernel is built for both single and double precision and runs in whichever the
+config selects. `pixi install` builds the **CPU** library automatically.
 
 The **GPU** kernel is *not* built by a plain `pixi install`: pixi/uv build the
 editable `tabascal` package once and share that single (CPU) build across every
@@ -160,11 +159,10 @@ under `single` (set `model.precision: double` to use them):
 - `trajectory:PhaseCalculationRFI`
 - `trajectory:SGP4LEONoDragOrbit`
 - `trajectory:SGP4LEOOrbit`
-- `rfi_vis:RiemannVisTimeFreqCalculationFFI` (the FFI kernel is compiled for
-  complex128)
 
-The non-FFI `rfi_vis:RiemannVisTimeFreqCalculation` and the GP astronomical/gains
-components run in either precision.
+Both `rfi_vis` kernels (`RiemannVisTimeFreqCalculation` and the FFI
+`RiemannVisTimeFreqCalculationFFI`) and the GP astronomical/gains components run
+in either precision.
 
 # Developer
 

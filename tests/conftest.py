@@ -7,9 +7,10 @@ single precision. (Pipeline tests run ``run_tabascal`` in a subprocess and pick
 their precision from the config, so they are unaffected by this flag.)
 
 Some components only work in double precision (the SGP4/phase trajectory
-components and the FFI RFI-vis kernel, which is compiled for complex128). Mark
-their tests with ``@pytest.mark.requires_double``; they are skipped under
-``--x64 false`` instead of erroring on the components' precision gate.
+components, which need fp64 for the orbit propagation). Mark their tests with
+``@pytest.mark.requires_double``; they are skipped under ``--x64 false`` instead
+of erroring on the components' precision gate. (The FFI RFI-vis kernel is built
+for both complex64 and complex128, so it is exercised in either precision.)
 """
 
 import jax

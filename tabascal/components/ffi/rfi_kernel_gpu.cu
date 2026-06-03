@@ -19,32 +19,27 @@ namespace ffi = xla::ffi;
 namespace tabascal {
 namespace gpu {
 
-template <int BLOCK_SIZE, int WARP_SIZE, typename INT_T>
+template <typename T, int BLOCK_SIZE, typename INT_T>
 __global__ void __launch_bounds__(BLOCK_SIZE)
-    rfi_kernel(Tensor1D<const int *, INT_T> a1, Tensor1D<const int *, INT_T> a2,
-               Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine,
-               Tensor4D<const double *, INT_T> rfi_phase,
-               Tensor3D<cuDoubleComplex *, INT_T> rfi_vis) {
+    rfi_kernel(T scale, Tensor1D<const int *, INT_T> a1,
+               Tensor1D<const int *, INT_T> a2,
+               Tensor4D<const typename gpu_complex_traits<T>::complex_t *, INT_T> rfi_amp_fine,
+               Tensor4D<const T *, INT_T> rfi_phase,
+               Tensor3D<typename gpu_complex_traits<T>::complex_t *, INT_T> rfi_vis) {
 
-  static_assert(BLOCK_SIZE % WARP_SIZE == 0);
-  constexpr int WARPS_PER_BLOCK = BLOCK_SIZE / WARP_SIZE;
+  using traits = gpu_complex_traits<T>;
+  using complex_t = typename traits::complex_t;
 
-  using WarpReduce_t = cub::WarpReduce<double>;
+  using BlockReduce_t = cub::BlockReduce<T, BLOCK_SIZE>;
 
-  __shared__ typename WarpReduce_t::TempStorage temp_storage_1[WARPS_PER_BLOCK];
-  __shared__ typename WarpReduce_t::TempStorage temp_storage_2[WARPS_PER_BLOCK];
+  __shared__ typename BlockReduce_t::TempStorage temp_storage_1;
+  __shared__ typename BlockReduce_t::TempStorage temp_storage_2;
 
-  const int warp_id = threadIdx.x / WARP_SIZE;
-  const int lane_id = threadIdx.x % WARP_SIZE;
-
-  const int n_warps_global = gridDim.x * WARPS_PER_BLOCK;
-
-  const auto n_rfi = rfi_amp_fine.shape[0];
-  const auto n_freq_fine = rfi_amp_fine.shape[2];
-  const auto n_time_fine = rfi_amp_fine.shape[3];
+  // rfi_amp_fine layout: (n_ant, n_freq, n_time, n_rfi * n_int_f * n_int_t)
+  const auto n_freq = rfi_amp_fine.shape[1];
+  const auto n_time = rfi_amp_fine.shape[2];
+  const auto n_reduce = rfi_amp_fine.shape[3];
   const auto n_bl = a1.shape[0];
-  const auto n_time = rfi_vis.shape[2];
-  const auto n_freq = rfi_vis.shape[1];
 
   assert(a1.shape[0] == a2.shape[0]);
   assert(a1.shape[0] == rfi_vis.shape[0]);
@@ -52,61 +47,49 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
   assert(rfi_phase.shape[1] == rfi_amp_fine.shape[1]);
   assert(rfi_phase.shape[2] == rfi_amp_fine.shape[2]);
   assert(rfi_phase.shape[3] == rfi_amp_fine.shape[3]);
+  assert(rfi_vis.shape[1] == n_freq);
+  assert(rfi_vis.shape[2] == n_time);
 
-  const auto n_int_t = n_time_fine / n_time;
-  const auto n_int_f = n_freq_fine / n_freq;
-  const double n_int_inv = 1.f / double(n_int_t * n_int_f);
 
   for (INT_T i_bl = blockIdx.y; i_bl < n_bl; i_bl += gridDim.y) {
     INT_T i_a1 = a1(i_bl);
     INT_T i_a2 = a2(i_bl);
 
     for (INT_T i_f = blockIdx.z; i_f < n_freq; i_f += gridDim.z) {
-      const auto i_f_fine_begin = i_f * n_int_f;
 
-      // warp reduction
-      for (INT_T i_t = blockIdx.x * WARPS_PER_BLOCK + warp_id; i_t < n_time;
-           i_t += n_warps_global) {
-        cuDoubleComplex sum{0, 0};
+      for (INT_T i_t = blockIdx.x; i_t < n_time; i_t += gridDim.x) {
+        complex_t sum{0, 0};
 
-        const auto i_t_fine_begin = i_t * n_int_t;
+        const auto ptr_rfi_amp_1 = &rfi_amp_fine(i_a1, i_f, i_t, 0);
+        const auto ptr_rfi_amp_2 = &rfi_amp_fine(i_a2, i_f, i_t, 0);
 
-        for (INT_T i_rfi = 0; i_rfi < n_rfi; ++i_rfi) {
+        const auto ptr_rfi_phase_1 = &rfi_phase(i_a1, i_f, i_t, 0);
+        const auto ptr_rfi_phase_2 = &rfi_phase(i_a2, i_f, i_t, 0);
 
-          for (INT_T i_f_fine = i_f_fine_begin;
-               i_f_fine < i_f_fine_begin + n_int_f; ++i_f_fine) {
+        // block reduction
+        for (INT_T i_red = threadIdx.x; i_red < n_reduce; i_red += BLOCK_SIZE) {
 
-            for (INT_T i_t_fine = i_t_fine_begin + lane_id;
-                 i_t_fine < i_t_fine_begin + n_int_t; i_t_fine += WARP_SIZE) {
+          const auto val_rfi_amp_1 = ptr_rfi_amp_1[i_red];
+          const auto val_rfi_amp_2 = ptr_rfi_amp_2[i_red];
 
-              const auto val_rfi_amp_1 =
-                  rfi_amp_fine(i_rfi, i_a1, i_f_fine, i_t_fine);
-              const auto val_rfi_amp_2 =
-                  rfi_amp_fine(i_rfi, i_a2, i_f_fine, i_t_fine);
+          const auto val_rfi_phase_1 = ptr_rfi_phase_1[i_red];
+          const auto val_rfi_phase_2 = ptr_rfi_phase_2[i_red];
 
-              const auto val_rfi_phase_1 =
-                  rfi_phase(i_rfi, i_a1, i_f_fine, i_t_fine);
-              const auto val_rfi_phase_2 =
-                  rfi_phase(i_rfi, i_a2, i_f_fine, i_t_fine);
+          complex_t e;
+          traits::sincos_(val_rfi_phase_1 - val_rfi_phase_2, &e.y, &e.x);
 
-              cuDoubleComplex e;
-              sincos(val_rfi_phase_1 - val_rfi_phase_2, &e.y, &e.x);
+          auto res = traits::mul(traits::mul(val_rfi_amp_1, traits::conj(val_rfi_amp_2)), e);
 
-              auto res =
-                  cuCmul(cuCmul(val_rfi_amp_1, cuConj(val_rfi_amp_2)), e);
-
-              sum = cuCadd(res, sum);
-            }
-          }
+          sum = traits::add(res, sum);
         }
 
-        sum.x = WarpReduce_t(temp_storage_1[warp_id]).Sum(sum.x);
-        sum.y = WarpReduce_t(temp_storage_2[warp_id]).Sum(sum.y);
-        __syncwarp();
+        sum.x = BlockReduce_t(temp_storage_1).Sum(sum.x);
+        sum.y = BlockReduce_t(temp_storage_2).Sum(sum.y);
+        __syncthreads(); // required for reuse of temp_storage
 
-        if (lane_id == 0) {
-          sum.x *= n_int_inv;
-          sum.y *= n_int_inv;
+        if (threadIdx.x == 0) {
+          sum.x *= scale;
+          sum.y *= scale;
 
           rfi_vis(i_bl, i_f, i_t) = sum;
         }
@@ -115,18 +98,18 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
   }
 }
 
-using rfi_amp_fine_t = ffi::Buffer<ffi::C128, 6>;
-using rfi_phase_t = ffi::Buffer<ffi::F64, 6>;
-
 // A wrapper function providing the interface between the XLA FFI call and our
 // library function `ComputeRFI` above. This function handles the batch
 // dimensions by calling `ComputeRFI` within a loop.
-template <typename INT_T>
+template <typename T, typename INT_T, ffi::DataType AMP_DT, ffi::DataType PHASE_DT>
 ffi::Error
 calc_rfi_vis_gpu_dispatch(cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
                           ffi::BufferR1<ffi::S32> a2,
-                          rfi_amp_fine_t rfi_amp_fine, rfi_phase_t rfi_phase,
-                          ffi::ResultBufferR3<ffi::C128> rfi_vis) {
+                          ffi::Buffer<AMP_DT, 6> rfi_amp_fine,
+                          ffi::Buffer<PHASE_DT, 6> rfi_phase,
+                          ffi::Result<ffi::BufferR3<AMP_DT>> rfi_vis) {
+  using complex_t = typename gpu_complex_traits<T>::complex_t;
+
   if (a1.dimensions()[0] != a2.dimensions()[0]) {
     return ffi::Error::InvalidArgument(
         "Expected a1 and a2 to have the same size");
@@ -144,62 +127,70 @@ calc_rfi_vis_gpu_dispatch(cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
         "Expected rfi_vis and a1 to have the same number of baselines");
   }
 
-  if (rfi_vis->dimensions()[1] != rfi_amp_fine.dimensions()[2]) {
+  if (rfi_vis->dimensions()[1] != rfi_amp_fine.dimensions()[1]) {
     return ffi::Error::InvalidArgument(
         "Expected rfi_vis and rfi_amp_fine to have the same number of "
         "frequencies");
   }
 
-  if (rfi_vis->dimensions()[2] != rfi_amp_fine.dimensions()[4]) {
+  if (rfi_vis->dimensions()[2] != rfi_amp_fine.dimensions()[2]) {
     return ffi::Error::InvalidArgument(
         "Expected rfi_vis and rfi_amp_fine to have the same number of times");
   }
 
   Tensor1D<const int *, INT_T> a1_tensor(a1.typed_data(), a1.dimensions()[0]);
   Tensor1D<const int *, INT_T> a2_tensor(a2.typed_data(), a2.dimensions()[0]);
-  Tensor4D<const cuDoubleComplex *, INT_T> rfi_amp_fine_tensor(
-      (const cuDoubleComplex *)rfi_amp_fine.typed_data(),
+  Tensor4D<const complex_t *, INT_T> rfi_amp_fine_tensor(
+      (const complex_t *)rfi_amp_fine.typed_data(),
       rfi_amp_fine.dimensions()[0], rfi_amp_fine.dimensions()[1],
-      rfi_amp_fine.dimensions()[2] * rfi_amp_fine.dimensions()[3],
-      rfi_amp_fine.dimensions()[4] * rfi_amp_fine.dimensions()[5]);
-  Tensor4D<const double *, INT_T> rfi_phase_tensor(
+      rfi_amp_fine.dimensions()[2],
+      rfi_amp_fine.dimensions()[3] * rfi_amp_fine.dimensions()[4] *
+          rfi_amp_fine.dimensions()[5]);
+  Tensor4D<const T *, INT_T> rfi_phase_tensor(
       rfi_phase.typed_data(), rfi_phase.dimensions()[0],
-      rfi_phase.dimensions()[1],
-      rfi_phase.dimensions()[2] * rfi_phase.dimensions()[3],
-      rfi_phase.dimensions()[4] * rfi_phase.dimensions()[5]);
+      rfi_phase.dimensions()[1], rfi_phase.dimensions()[2],
+      rfi_phase.dimensions()[3] * rfi_phase.dimensions()[4] *
+          rfi_phase.dimensions()[5]);
 
-  Tensor3D<cuDoubleComplex *, INT_T> rfi_vis_tensor(
-      (cuDoubleComplex *)rfi_vis->typed_data(), rfi_vis->dimensions()[0],
+  Tensor3D<complex_t *, INT_T> rfi_vis_tensor(
+      (complex_t *)rfi_vis->typed_data(), rfi_vis->dimensions()[0],
       rfi_vis->dimensions()[1], rfi_vis->dimensions()[2]);
 
-  // Cooperative group size. Must be power of 2. Used to iterate over n_int and
-  // reduce result. If 32, equal to warp size on Nvidia for fast reduce
-  // operation.
+  const INT_T n_int_f = (INT_T)rfi_amp_fine.dimensions()[4];
+  const INT_T n_int_t = (INT_T)rfi_amp_fine.dimensions()[5];
 
+  const T scale = T(1) / T(n_int_t * n_int_f);
 
-  constexpr int block_size = 256;
   const auto n_time = rfi_vis_tensor.shape[2];
   const auto n_bl = a1.dimensions()[0];
   const auto n_freq = rfi_vis_tensor.shape[1];
 
+  auto grid = create_clamped_grid(n_time, n_bl, n_freq);
 
-  const int warp_size = get_device_prop().warpSize;
-
-  dim3 block(block_size);
-  auto n_warps = block.x / warp_size;
-  auto grid =
-      create_clamped_grid((n_time + n_warps - 1) / n_warps, n_bl, n_freq);
-
-  if (warp_size == 32) {
-    rfi_kernel<block_size, 32, INT_T>
-        <<<grid, block, 0, stream>>>(a1_tensor, a2_tensor, rfi_amp_fine_tensor,
-                                     rfi_phase_tensor, rfi_vis_tensor);
-  } else if(warp_size == 64) {
-    rfi_kernel<block_size, 64, INT_T>
-        <<<grid, block, 0, stream>>>(a1_tensor, a2_tensor, rfi_amp_fine_tensor,
-                                     rfi_phase_tensor, rfi_vis_tensor);
+  if (rfi_phase_tensor.shape[3] / 2 < 32) {
+    constexpr int block_size = 32;
+    dim3 block(block_size);
+    rfi_kernel<T, block_size, INT_T><<<grid, block, 0, stream>>>(
+        scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+        rfi_vis_tensor);
+  } else if (rfi_phase_tensor.shape[3] / 2 < 64) {
+    constexpr int block_size = 64;
+    dim3 block(block_size);
+    rfi_kernel<T, block_size, INT_T><<<grid, block, 0, stream>>>(
+        scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+        rfi_vis_tensor);
+  } else if (rfi_phase_tensor.shape[3] / 2 < 128) {
+    constexpr int block_size = 128;
+    dim3 block(block_size);
+    rfi_kernel<T, block_size, INT_T><<<grid, block, 0, stream>>>(
+        scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+        rfi_vis_tensor);
   } else {
-    return ffi::Error::Internal("Unsupported GPU warp size.");
+    constexpr int block_size = 256;
+    dim3 block(block_size);
+    rfi_kernel<T, block_size, INT_T><<<grid, block, 0, stream>>>(
+        scale, a1_tensor, a2_tensor, rfi_amp_fine_tensor, rfi_phase_tensor,
+        rfi_vis_tensor);
   }
 
   const auto status = cudaGetLastError();
@@ -211,26 +202,58 @@ calc_rfi_vis_gpu_dispatch(cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
   return ffi::Error::Success();
 }
 
-ffi::Error calc_rfi_vis_gpu_impl(
+template <typename T, ffi::DataType AMP_DT, ffi::DataType PHASE_DT>
+ffi::Error calc_rfi_vis_gpu_impl_tmpl(
     cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
     ffi::BufferR1<ffi::S32> a1_sorter, ffi::BufferR1<ffi::S32> a1_start,
     ffi::BufferR1<ffi::S32> a2, ffi::BufferR1<ffi::S32> a2_sorter,
-    ffi::BufferR1<ffi::S32> a2_start, rfi_amp_fine_t rfi_amp_fine,
-    rfi_phase_t rfi_phase, ffi::ResultBufferR3<ffi::C128> rfi_vis) {
+    ffi::BufferR1<ffi::S32> a2_start, ffi::Buffer<AMP_DT, 6> rfi_amp_fine,
+    ffi::Buffer<PHASE_DT, 6> rfi_phase,
+    ffi::Result<ffi::BufferR3<AMP_DT>> rfi_vis) {
   constexpr std::int64_t max32 = std::numeric_limits<std::int32_t>::max();
   // use 32 bit indexing if possible
   if (a1.element_count() < max32 && a2.element_count() < max32 &&
       rfi_amp_fine.element_count() < max32 &&
       rfi_phase.element_count() < max32 && rfi_vis->element_count() < max32) {
-    return calc_rfi_vis_gpu_dispatch<std::int32_t>(stream, a1, a2, rfi_amp_fine,
-                                                   rfi_phase, rfi_vis);
+    return calc_rfi_vis_gpu_dispatch<T, std::int32_t, AMP_DT, PHASE_DT>(
+        stream, a1, a2, rfi_amp_fine, rfi_phase, rfi_vis);
   } else {
-    return calc_rfi_vis_gpu_dispatch<std::int64_t>(stream, a1, a2, rfi_amp_fine,
-                                                   rfi_phase, rfi_vis);
+    return calc_rfi_vis_gpu_dispatch<T, std::int64_t, AMP_DT, PHASE_DT>(
+        stream, a1, a2, rfi_amp_fine, rfi_phase, rfi_vis);
   }
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_vis_gpu, calc_rfi_vis_gpu_impl,
+ffi::Error calc_rfi_vis_gpu_f32_impl(
+    cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
+    ffi::BufferR1<ffi::S32> a1_sorter, ffi::BufferR1<ffi::S32> a1_start,
+    ffi::BufferR1<ffi::S32> a2, ffi::BufferR1<ffi::S32> a2_sorter,
+    ffi::BufferR1<ffi::S32> a2_start, ffi::Buffer<ffi::C64, 6> rfi_amp_fine,
+    ffi::Buffer<ffi::F32, 6> rfi_phase,
+    ffi::Result<ffi::BufferR3<ffi::C64>> rfi_vis) {
+  return calc_rfi_vis_gpu_impl_tmpl<float, ffi::C64, ffi::F32>(
+      stream, a1, a1_sorter, a1_start, a2, a2_sorter, a2_start, rfi_amp_fine,
+      rfi_phase, rfi_vis);
+}
+
+ffi::Error calc_rfi_vis_gpu_f64_impl(
+    cudaStream_t stream, ffi::BufferR1<ffi::S32> a1,
+    ffi::BufferR1<ffi::S32> a1_sorter, ffi::BufferR1<ffi::S32> a1_start,
+    ffi::BufferR1<ffi::S32> a2, ffi::BufferR1<ffi::S32> a2_sorter,
+    ffi::BufferR1<ffi::S32> a2_start, ffi::Buffer<ffi::C128, 6> rfi_amp_fine,
+    ffi::Buffer<ffi::F64, 6> rfi_phase,
+    ffi::Result<ffi::BufferR3<ffi::C128>> rfi_vis) {
+  return calc_rfi_vis_gpu_impl_tmpl<double, ffi::C128, ffi::F64>(
+      stream, a1, a1_sorter, a1_start, a2, a2_sorter, a2_start, rfi_amp_fine,
+      rfi_phase, rfi_vis);
+}
+
+// Type aliases to avoid commas inside XLA_FFI_DEFINE_HANDLER_SYMBOL macro args.
+using rfi_amp_f32_t = ffi::Buffer<ffi::C64, 6>;
+using rfi_phase_f32_t = ffi::Buffer<ffi::F32, 6>;
+using rfi_amp_f64_t = ffi::Buffer<ffi::C128, 6>;
+using rfi_phase_f64_t = ffi::Buffer<ffi::F64, 6>;
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_vis_gpu_f32, calc_rfi_vis_gpu_f32_impl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
@@ -239,8 +262,21 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_vis_gpu, calc_rfi_vis_gpu_impl,
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
                                   .Arg<ffi::BufferR1<ffi::S32>>()
-                                  .Arg<rfi_amp_fine_t>()
-                                  .Arg<rfi_phase_t>()
+                                  .Arg<rfi_amp_f32_t>()
+                                  .Arg<rfi_phase_f32_t>()
+                                  .Ret<ffi::BufferR3<ffi::C64>>());
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(calc_rfi_vis_gpu_f64, calc_rfi_vis_gpu_f64_impl,
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<ffi::BufferR1<ffi::S32>>()
+                                  .Arg<rfi_amp_f64_t>()
+                                  .Arg<rfi_phase_f64_t>()
                                   .Ret<ffi::BufferR3<ffi::C128>>());
 } // namespace gpu
 } // namespace tabascal

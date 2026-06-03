@@ -57,14 +57,22 @@ def test_single_disables_x64_after_sgp4jax_enabled_it():
 # assert_precision_supported — fast-fail preflight before TabConfig setup
 # ---------------------------------------------------------------------------
 
-_DOUBLE_ONLY = "rfi_vis:RiemannVisTimeFreqCalculationFFI"
-_SINGLE_OK = ["rfi_vis:RiemannVisTimeFreqCalculation", "gains:UnitaryGains"]
+# The differentiable orbit/phase trajectory components are the genuinely
+# double-only ones. (The FFI RFI-vis kernel is built for both precisions, so it
+# is single-capable and belongs in _SINGLE_OK.)
+_DOUBLE_ONLY = "trajectory:SGP4LEOOrbit"
+_DOUBLE_ONLY_2 = "trajectory:PhaseCalculationRFI"
+_SINGLE_OK = [
+    "rfi_vis:RiemannVisTimeFreqCalculation",
+    "rfi_vis:RiemannVisTimeFreqCalculationFFI",
+    "gains:UnitaryGains",
+]
 
 
 def test_preflight_single_rejects_double_only_component():
     """A single-precision config using a double-only component raises, naming it."""
     config = {"model": {"precision": "single", "components": [_DOUBLE_ONLY] + _SINGLE_OK}}
-    with pytest.raises(ValueError, match="RiemannVisTimeFreqCalculationFFI"):
+    with pytest.raises(ValueError, match="SGP4LEOOrbit"):
         assert_precision_supported(config)
 
 
@@ -73,13 +81,13 @@ def test_preflight_reports_every_offender():
     config = {
         "model": {
             "precision": "single",
-            "components": ["trajectory:SGP4LEOOrbit", _DOUBLE_ONLY],
+            "components": [_DOUBLE_ONLY, _DOUBLE_ONLY_2],
         }
     }
     with pytest.raises(ValueError) as exc:
         assert_precision_supported(config)
     msg = str(exc.value)
-    assert "SGP4LEOOrbit" in msg and "RiemannVisTimeFreqCalculationFFI" in msg
+    assert "SGP4LEOOrbit" in msg and "PhaseCalculationRFI" in msg
 
 
 def test_preflight_single_allows_single_capable_components():

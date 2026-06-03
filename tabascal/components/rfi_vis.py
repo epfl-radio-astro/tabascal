@@ -161,7 +161,6 @@ class RiemannVisTimeFreqCalculation(Component):
 
 class RiemannVisTimeFreqCalculationFFI(Component):
 
-    requires_double = True  # FFI kernel is compiled for complex128
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -172,7 +171,6 @@ class RiemannVisTimeFreqCalculationFFI(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
-        self.require_double(config)
         try:
             self.a1 = config.a1
             self.a2 = config.a2
@@ -220,6 +218,10 @@ class RiemannVisTimeFreqCalculationFFI(Component):
             new_shape = (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
             rfi_amp_fine = state["rfi_A"].reshape(new_shape)
             rfi_phase = state["rfi_phase"].reshape(new_shape)
+
+            # Transpose to (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+            rfi_amp_fine = jnp.transpose(rfi_amp_fine , (1, 2, 4, 0, 3, 5))
+            rfi_phase = jnp.transpose(rfi_phase, (1, 2, 4, 0, 3, 5))
 
             vis_rfi = op.eval(rfi_amp_fine, rfi_phase)
 
