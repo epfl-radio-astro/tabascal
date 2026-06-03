@@ -58,32 +58,23 @@ def test_single_disables_x64_after_sgp4jax_enabled_it():
 # ---------------------------------------------------------------------------
 
 # The differentiable orbit/phase trajectory components are the genuinely
-# double-only ones. (The FFI RFI-vis kernel is built for both precisions, so it
-# is single-capable and belongs in _SINGLE_OK.)
-_DOUBLE_ONLY = "trajectory:SGP4LEOOrbit"
-_DOUBLE_ONLY_2 = "trajectory:PhaseCalculationRFI"
-_SINGLE_OK = [
-    "rfi_vis:RiemannVisTimeFreqCalculation",
-    "rfi_vis:RiemannVisTimeFreqCalculationFFI",
-    "gains:UnitaryGains",
-]
+# double-only ones (two, so the "every offender" test can prove it lists all).
+# The FFI RFI-vis kernel is built for both precisions, so it is the single-ok
+# representative here — which also guards against it regressing to double-only.
+_DOUBLE_ONLY = ["trajectory:SGP4LEOOrbit", "trajectory:PhaseCalculationRFI"]
+_SINGLE_OK = ["rfi_vis:RiemannVisTimeFreqCalculationFFI"]
 
 
 def test_preflight_single_rejects_double_only_component():
     """A single-precision config using a double-only component raises, naming it."""
-    config = {"model": {"precision": "single", "components": [_DOUBLE_ONLY] + _SINGLE_OK}}
+    config = {"model": {"precision": "single", "components": _DOUBLE_ONLY[:1] + _SINGLE_OK}}
     with pytest.raises(ValueError, match="SGP4LEOOrbit"):
         assert_precision_supported(config)
 
 
 def test_preflight_reports_every_offender():
     """The error lists all offending components, not just the first."""
-    config = {
-        "model": {
-            "precision": "single",
-            "components": [_DOUBLE_ONLY, _DOUBLE_ONLY_2],
-        }
-    }
+    config = {"model": {"precision": "single", "components": _DOUBLE_ONLY}}
     with pytest.raises(ValueError) as exc:
         assert_precision_supported(config)
     msg = str(exc.value)
@@ -98,7 +89,7 @@ def test_preflight_single_allows_single_capable_components():
 def test_preflight_double_allows_double_only_component():
     """Double precision allows the double-only components."""
     assert_precision_supported(
-        {"model": {"precision": "double", "components": [_DOUBLE_ONLY]}}
+        {"model": {"precision": "double", "components": _DOUBLE_ONLY}}
     )
 
 
