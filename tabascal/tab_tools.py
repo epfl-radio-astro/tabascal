@@ -149,27 +149,27 @@ def read_ms(
     xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
     xds_src = xds_from_table(ms_path + "::SOURCE")[0]
 
-    ants_itrf = jnp.array(xds_ant.POSITION.data.compute())
+    ants_itrf = np.array(xds_ant.POSITION.data.compute())
 
     n_ant = ants_itrf.shape[0]
     n_time = len(np.unique(xds.TIME.data.compute()))
     n_bl = xds[data_col].data.shape[0] // n_time
     n_freq, n_corr = xds[data_col].data.shape[1:]
 
-    freqs = jnp.array(xds_spec.CHAN_FREQ.data[0].compute())
-    chan_width = jnp.array(xds_spec.CHAN_WIDTH.data[0,0].compute())
+    freqs = np.array(xds_spec.CHAN_FREQ.data[0].compute())
+    chan_width = np.array(xds_spec.CHAN_WIDTH.data[0, 0].compute())
     int_time = xds.INTERVAL.data[0].compute()
 
-    times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
+    times_mjd = np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
     if times_mjd[1] - times_mjd[0] > 0.5:
         times_mjd = times_mjd / (24 * 3600)
 
     # times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()) / (
     #     24 * 3600
     # )
-    from astropy.time import Time
+    from tabascal.time import jd_to_datetime, mjd_to_jd
 
-    print(Time(times_mjd[0], format="mjd").isot)
+    print(jd_to_datetime(mjd_to_jd(times_mjd[0])).isoformat())
 
     times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
 

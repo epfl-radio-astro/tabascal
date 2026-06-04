@@ -105,8 +105,11 @@ def read_and_modify_yaml(
         input_path: Path to the input YAML file to read
         output_path: Path where the modified YAML will be written
     """
-    with open(input_path) as f:
-        data = yaml.safe_load(f)
+    # Use tabascal's loader so bare scientific-notation floats (e.g. 1e6, 209e3)
+    # parse as floats rather than strings; the stock yaml.safe_load does not.
+    from tabascal.config import yaml_load
+
+    data = yaml_load(input_path)
 
     data.update(new_data)
 
@@ -118,16 +121,27 @@ def read_and_modify_yaml(
 @dataclass
 class PipelineTestConfig:
     """Configuration for a single pipeline test case.
-    
+
     Attributes:
         sim_file_name: Name of the simulation YAML configuration file
         components: List of component module specifications for the pipeline
-        chi2_ref: Expected reduced chi-squared value for validation
+        chi2_ref: Expected reduced chi-squared per precision, keyed by the
+            precision string ("double"/"single"). Double-precision values are
+            consistent across architectures and tested with 1% relative
+            tolerance. Single-precision values are given as ``(lo, hi)`` bounds
+            because fp32 convergence rate differs across architectures: ARM
+            converges in ~100 iterations (chi2 ~0.92), x86 needs ~2000
+            iterations to reach a similar value (chi2 ~1.13 at 100 iters), and
+            GPU overshoots to ~0.91 at 100 iters. All three land in (0.9, 1.2).
+            ``requires_double`` cases only need the "double" entry.
+        requires_double: True if any component only runs in double precision; the
+            case is skipped under single precision (``--x64 false``).
         config_overrides: Dictionary of overrides to the tabascal config file
     """
     sim_file_name: str
     components: list[str]
-    chi2_ref: float
+    chi2_ref: dict[str, float | tuple[float, float]]
+    requires_double: bool = False
     config_overrides: dict = field(default_factory=dict)
 
 
@@ -135,6 +149,7 @@ def _run_pipeline(
     provide_test_data: Path,
     tmp_path: Path,
     t_config: PipelineTestConfig,
+    precision: str,
 ) -> tuple[int, str, str]:
     local_dir = Path(provide_test_data)
     data_dir = Path(__file__).parent / "data"
@@ -144,7 +159,9 @@ def _run_pipeline(
     config_template = data_dir / "tab_target.yaml"
     config_path = tmp_path / "tab_target.yaml"
 
-    config_mod: dict = {"model": {"components": t_config.components}}
+    config_mod: dict = {
+        "model": {"components": t_config.components, "precision": precision}
+    }
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
@@ -177,11 +194,15 @@ def _run_pipeline(
     return result.returncode, result.stdout, result.stderr
 
 
-def _assert_chi2(stdout: str, chi2_ref: float) -> None:
+def _assert_chi2(stdout: str, chi2_ref: float | tuple[float, float]) -> None:
     match = re.search(r"Reduced Chi\^2 @ opt params : ([\d.eE+-]+)", stdout)
     assert match, f"Could not find Reduced Chi^2 in output: {stdout}"
     value = float(match.group(1))
-    assert value == pytest.approx(chi2_ref, rel=1e-2)
+    if isinstance(chi2_ref, tuple):
+        lo, hi = chi2_ref
+        assert lo <= value <= hi, f"chi2 {value:.6f} not in [{lo}, {hi}]"
+    else:
+        assert value == pytest.approx(chi2_ref, rel=1e-2)
 
 # ---------------------------------------------------------------------------
 # Trajectory components — downstream fixed to RiemannVisTimeFreqCalculation + UnitaryGains
@@ -200,7 +221,8 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8977856043436502,
+            chi2_ref={"double": 0.8977856043436502},
+            requires_double=True,
         ),
         id="FixedOrbit+PhaseCalculationRFI",
     ),
@@ -215,7 +237,8 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8834671325695459, # Run with MEO satellites
+            chi2_ref={"double": 0.8834671325695459}, # Run with MEO satellites
+            requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
         ),
         id="SGP4LEONoDragOrbit+PhaseCalculationRFI",
@@ -231,7 +254,8 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8834671467969134,  # Run with MEO satellites
+            chi2_ref={"double": 0.8834671467969134},  # Run with MEO satellites
+            requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
         ),
         id="SGP4LEOOrbit+PhaseCalculationRFI",
@@ -261,7 +285,8 @@ rfi_vis_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8977856059138833,
+            # single: ARM~0.916 (100 iters), x86~1.128 (100 iters), GPU~0.910 (100 iters)
+            chi2_ref={"double": 0.8977856059138833, "single": (0.9, 1.2)},
         ),
         id="RiemannVisTimeFreqCalculation",
     ),
@@ -275,7 +300,8 @@ rfi_vis_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8977856059138833,
+            # single: ARM~0.921 (100 iters), x86~1.128 (100 iters), GPU~0.910 (100 iters)
+            chi2_ref={"double": 0.8977856059138833, "single": (0.9, 1.2)},
         ),
         id="RiemannVisTimeFreqCalculationFFI",
     ),
@@ -324,7 +350,8 @@ gains_configs = [
                     "r_seed": 123,
                 },
             },
-            chi2_ref=0.8977832575028029,
+            # single: ARM~0.916 (100 iters), x86~1.128 (100 iters), GPU~0.910 (100 iters)
+            chi2_ref={"double": 0.8977832575028029, "single": (0.9, 1.2)},
         ),
         id="GPGains",
     ),
@@ -339,21 +366,39 @@ all_configs = trajectory_configs + rfi_signal_configs + rfi_vis_configs + ast_si
 
 
 @pytest.mark.parametrize("t_config", all_configs)
-def test_pipeline(provide_test_data: Path, tmp_path: Path, t_config: PipelineTestConfig) -> None:
+def test_pipeline(
+    provide_test_data: Path,
+    tmp_path: Path,
+    t_config: PipelineTestConfig,
+    precision: str,
+) -> None:
     """Test the complete Tabascal pipeline execution.
 
     This test verifies that the full Tabascal pipeline runs successfully and produces
     expected results. It:
     1. Downloads test simulation data from HuggingFace
-    2. Configures the pipeline with specific component modules
+    2. Configures the pipeline with specific component modules at the session
+       precision (driven by the ``--x64`` flag)
     3. Executes the run_tabascal.py script
     4. Validates that the output Reduced Chi^2 value matches the expected result
+       for that precision
 
     Args:
         provide_test_data: Fixture providing path to downloaded test data
         tmp_path: Pytest fixture providing temporary directory for test files
-        t_config: Tabascal pipeline test config 
+        t_config: Tabascal pipeline test config
+        precision: Session precision ("double"/"single") from the --x64 flag
     """
-    returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config)
+    if t_config.requires_double and precision != "double":
+        pytest.skip(
+            "uses a component that requires double precision; not run under --x64 false"
+        )
+
+    chi2_ref = t_config.chi2_ref[precision]
+    assert chi2_ref is not None, (
+        f"No {precision}-precision chi^2 reference recorded for this case"
+    )
+
+    returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config, precision)
     assert returncode == 0, f"Tabascal failed: {stderr}"
-    _assert_chi2(stdout, t_config.chi2_ref)
+    _assert_chi2(stdout, chi2_ref)

@@ -1,20 +1,11 @@
 from tabascal.tle import get_tles_by_id
-
-from tabsim.jax.coordinates import (  # type: ignore
-    secs_to_days,
-    itrf_to_uvw,
-    itrf_to_xyz,
-    kepler_orbit_many,
-    kepler_orbit_fisher,
-    gmsa_from_jd,
-    mjd_to_jd,
-)
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
-from tabascal.interferometry import get_rfi_phase
+from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
 from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
+from tabascal.time import gast_deg
 
 import sgp4jax
 from sgp4jax import WGS72 as gravity
@@ -23,11 +14,10 @@ from sgp4jax._sgp4init import sgp4init
 import jax.numpy as jnp
 from jax import vmap, Array
 import numpy as np
+from numpy.typing import NDArray
 
 from skyfield.api import Distance, load
 from skyfield.toposlib import ITRSPosition
-
-from astropy.time import Time
 
 from skyfield.api import EarthSatellite
 
@@ -64,6 +54,7 @@ def get_satellite_positions(tles: list, times_jd: list):
 
 class PhaseCalculationRFI(Component):
 
+    requires_double = True
     required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
     output_shapes = {"rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}
 
@@ -71,6 +62,7 @@ class PhaseCalculationRFI(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
+        self.require_double(config)
         try:
             self.times_jd_fine = config.times_jd_fine
             self.ants_itrf = config.ants_itrf
@@ -92,15 +84,8 @@ class PhaseCalculationRFI(Component):
 
     def _compute_ant_pos(self):
 
-        gsa = (
-            Time(self.times_jd_fine, format="jd")
-            .sidereal_time("mean", "greenwich")
-            .hour
-            * 15
-        )  # type: ignore
-
-        # gsa = gmsa_from_jd(self.times_jd_fine) % 360
-        gh0 = (gsa - self.phase_centre["ra"]) % 360    
+        gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
+        gh0 = (gsa - self.phase_centre["ra"]) % 360
 
         self.ants_xyz = vmap(vmap(sgp4jax.itrf_to_gcrf, (0, None, None), 0), (None, 0, 0), 1)(
             self.ants_itrf, 
@@ -110,7 +95,7 @@ class PhaseCalculationRFI(Component):
         # self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
         # self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
         self.ants_uvw = jnp.transpose(
-            itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
+            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
 
     def _validate_dimensions(self):
@@ -238,27 +223,25 @@ class FixedOrbit(Component):
     @measure_runtime
     def _compute_rfi_phase(self):
 
-        self.rfi_xyz = jnp.asarray(
+        self.rfi_xyz = np.asarray(
             get_satellite_positions(self.tles, list(self.times_jd_fine))
         )
 
-        gsa = (
-            Time(self.times_jd_fine, format="jd")
-            .sidereal_time("mean", "greenwich")
-            .hour
-            * 15
-        )  # type: ignore
+        self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
 
+        # rfi_phase is one-shot setup producing a forward constant, so compute it in
+        # numpy/skyfield (f64) in both precisions — faster than the jax path (no JIT
+        # compile) and accurate. jnp.array casts to the active precision (f64/f32).
+        gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
-        self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        
-        self.ants_uvw = jnp.transpose(
-            itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
+        self.ants_uvw = np.transpose(
+            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
-
-        self.rfi_phase = get_rfi_phase(
-            self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
+        self.rfi_phase = jnp.array(
+            get_rfi_phase_numpy(
+                self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
+            )
         )
 
     def _set_outputs(self):
@@ -281,6 +264,7 @@ class FixedOrbit(Component):
 
 class SGP4LEONoDragOrbit(Component):
 
+    requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
@@ -292,6 +276,7 @@ class SGP4LEONoDragOrbit(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
+        self.require_double(config)
         try:
             # Store only what's needed for forward computation
             self.times_jd = config.times_jd
@@ -451,6 +436,7 @@ class SGP4LEONoDragOrbit(Component):
 
 class SGP4LEOOrbit(Component):
 
+    requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
@@ -462,6 +448,7 @@ class SGP4LEOOrbit(Component):
 
     def setup(self, config):
         """All validation and error-prone operations here"""
+        self.require_double(config)
         try:
             # Store only what's needed for forward computation
             self.times_jd = config.times_jd
@@ -628,12 +615,17 @@ class SGP4LEOOrbit(Component):
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
 
 
-def itrs_to_gcrs_sf(pos_itrs: Array, times_jd: Array) -> Array:
+def itrs_to_gcrs_sf(pos_itrs: NDArray, times_jd: NDArray) -> NDArray:
+
+    # skyfield must always receive numpy (it divides by AU as a python int, which
+    # overflows int32 if a jax f32 array is passed under jax_enable_x64=False).
+    pos_itrs = np.asarray(pos_itrs)
+    times_jd = np.asarray(times_jd)
 
     ts = load.timescale()
-    t_sf = ts.ut1_jd(np.array(times_jd))
+    t_sf = ts._utc_jd(np.floor(times_jd), times_jd - np.floor(times_jd))
 
-    pos_gcrs = jnp.stack(
+    pos_gcrs = np.stack(
         [ITRSPosition(Distance(m=pos)).at(t_sf).position.m.T for pos in pos_itrs]
     )
 

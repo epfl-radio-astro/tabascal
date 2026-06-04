@@ -13,12 +13,10 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 
-jax.config.update("jax_enable_x64", True)
-
 from tabascal.components.trajectory import FixedOrbit, PhaseCalculationRFI
-from tabascal.interferometry import get_rfi_phase
+from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy
 
-from .conftest import make_constants, assert_transform_roundtrip
+from .conftest import active_precision, make_constants, assert_transform_roundtrip
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +93,10 @@ def make_trajectory_config(
     n_int_freq=1,
     tles=None,
     epoch_jd=None,
+    precision=None,
 ):
     """Build a minimal mock TabConfig for trajectory components."""
+    precision = precision or active_precision()
     n_freq_fine = n_freq * n_int_freq
     n_time_fine = n_time * n_int_time
     ep = _EPOCH_JD if epoch_jd is None else epoch_jd
@@ -130,6 +130,7 @@ def make_trajectory_config(
         freqs_fine=freqs_fine,
         times=times,
         times_fine=times_fine,
+        precision=precision,
         args={"rfi": {"freq_int_samples": n_int_freq}},
     )
 
@@ -138,6 +139,7 @@ def make_trajectory_config(
 # PhaseCalculationRFI
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_double
 class TestPhaseCalculationRFI:
 
     def test_setup_validates_dimensions(self):
@@ -350,6 +352,20 @@ class TestFixedOrbit:
         expected = get_rfi_phase(comp.rfi_xyz, comp.ants_uvw, comp.ants_xyz, comp.freqs_fine)
         assert jnp.allclose(comp.rfi_phase, expected)
 
+    def test_single_precision_uses_numpy_phase(self):
+        """Under single precision, rfi_phase is precomputed in numpy and matches get_rfi_phase_numpy."""
+        cfg = make_trajectory_config(
+            n_rfi=1, n_ant=4, n_freq=2, n_time=4, n_int_time=2, precision="single"
+        )
+        comp = FixedOrbit()
+        comp.setup(cfg)
+        assert comp.rfi_phase.shape == (cfg.n_rfi, cfg.n_ant, cfg.n_freq_fine, cfg.n_time_fine)
+        assert jnp.all(jnp.isfinite(comp.rfi_phase))
+        expected = get_rfi_phase_numpy(
+            comp.rfi_xyz, comp.ants_uvw, comp.ants_xyz, comp.freqs_fine
+        )
+        assert jnp.allclose(comp.rfi_phase, expected)
+
 
 # ---------------------------------------------------------------------------
 # Bundled TLE constants (NAVSTAR 18 / 67, cached 2023-02-21)
@@ -362,8 +378,9 @@ _BUNDLED_TLE_EPOCH_JD = 2459997.079914223  # 2023-02-21 13:55:04.589 UTC => GMSA
 _BUNDLED_NORAD_IDS = [20452, 38833]
 
 
-def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int_freq=1):
+def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int_freq=1, precision=None):
     """Build a mock TabConfig for SGP4 orbit components using the bundled TLE cache."""
+    precision = precision or active_precision()
     from importlib.resources import files as _res_files
     _bundled_tle_dir = str(_res_files("tabascal").joinpath("data/tles"))
 
@@ -397,6 +414,7 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
         times_fine=jnp.linspace(0.0, n_time_fine * 8.0, n_time_fine),
         norad_ids=_BUNDLED_NORAD_IDS,
         extra_tle_dir=_bundled_tle_dir,
+        precision=precision,
         args={"rfi": {"freq_int_samples": n_int_freq}},
     )
 
@@ -407,6 +425,7 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
 # SGP4LEOOrbit:       n_params=7 (bstar included)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_double
 @pytest.mark.parametrize("orbit_cls,n_params", [
     pytest.param("SGP4LEONoDragOrbit", 6, id="SGP4LEONoDragOrbit"),
     pytest.param("SGP4LEOOrbit", 7, id="SGP4LEOOrbit"),
@@ -442,6 +461,43 @@ class TestSGP4LEOOrbit:
         for i in range(cfg.n_rfi):
             diag = jnp.diag(comp.L_rfi_orbit[i])
             assert jnp.all(diag > 0), f"Cholesky diagonal not positive for satellite {i}"
+
+
+# ---------------------------------------------------------------------------
+# Component.require_double — the shared double-precision gate
+# ---------------------------------------------------------------------------
+
+def test_require_double_gate():
+    """``Component.require_double`` raises for a ``requires_double`` component run
+    in any non-double precision, and is a no-op otherwise.
+
+    Reads ``config.precision`` / the ``requires_double`` flag (not the live
+    ``jax_enable_x64``), so it behaves the same in either test precision. This
+    exercises the raise path that the ``requires_double``-marked component tests
+    skip.
+    """
+    from tabascal.components import Component
+
+    class _NeedsDouble(Component):
+        requires_double = True
+
+        def setup(self, config):  # pragma: no cover - not called
+            ...
+
+        def build_forward(self):  # pragma: no cover - not called
+            return lambda params, state, constants: state
+
+    class _AnyPrecision(_NeedsDouble):
+        requires_double = False
+
+    comp = _NeedsDouble()
+    comp.require_double(SimpleNamespace(precision="double"))  # must not raise
+    for bad in ("single", "half", ""):
+        with pytest.raises(ValueError, match="requires double precision"):
+            comp.require_double(SimpleNamespace(precision=bad))
+
+    # A component that does not require double is never gated.
+    _AnyPrecision().require_double(SimpleNamespace(precision="single"))
 
     def test_forward_output_shapes(self, orbit_cls, n_params):
         """Forward pass produces rfi_xyz (n_rfi, n_time_fine, 3) and elements (n_rfi, n_params)."""

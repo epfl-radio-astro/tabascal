@@ -37,7 +37,6 @@ description = "Trajectory based Radio Frequency Interference (RFI) subtraction a
 
 requires-python = ">=3.10"
 dependencies = [
-    "astropy",
     "dask",
     "dask-ms",
     "jax>=0.6.0,<0.10",
@@ -47,16 +46,15 @@ dependencies = [
     "optax",
     "platformdirs",
     "PyYAML",
-    "sgp4jax",
-    "skyfield",
+    "sgp4jax>=0.1.6,<0.2",  # enables jax x64 at import; orbit API is pre-1.0
+    "skyfield>=1.49,<2",  # uses skyfield's _utc_jd(whole, fraction); see tabascal/time.py
     "spacetrack",
-    "tabsim",
     "tqdm",
     "xarray",
 ]
 
 [project.optional-dependencies]
-test  = ["pytest", "pytest-cov", "huggingface-hub"]
+test  = ["pytest", "pytest-cov", "huggingface-hub", "tabsim"]
 docs  = ["sphinx", "sphinx-rtd-theme"]
 dev   = ["pre-commit", "reframe-hpc", "tabascal[test,docs]"]
 cuda12 = ["jax[cuda12]"]
@@ -74,6 +72,22 @@ tab2MS = "tabascal.scripts.results_to_MS:main"
 [tool.pytest.ini_options]
 log_cli       = true
 log_cli_level = "WARNING"
+addopts       = "--cov=tabascal --cov-report=term-missing"
+
+# ── Coverage ────────────────────────────────────────────────────────────────────
+
+[tool.coverage.run]
+source = ["tabascal"]
+omit = [
+    "tabascal/plot.py",          # matplotlib plotting, not unit-tested
+    "tabascal/scripts/*",        # CLI entry points
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
 
 # ── Pixi ──────────────────────────────────────────────────────────────────────
 # name / version / description / python are inherited from [project] above.
@@ -84,9 +98,17 @@ platforms = ["osx-64", "osx-arm64", "linux-64", "linux-aarch64"]
 
 # ── Tasks ──────────────────────────────────────────────────────────────────────
 
+# Available in every environment (default feature). Verifies the FFI libraries
+# load and the CPU/GPU kernels actually execute on each device JAX sees; exits
+# non-zero (CI-usable) if a required kernel is missing or broken.
+[tool.pixi.tasks]
+check-install = { cmd = "python -m tabascal.scripts.check_install", description = "Verify the env: FFI libraries load and the CPU/GPU kernels run" }
+
 [tool.pixi.feature.dev.tasks]
-build-ffi = { cmd = "make cpu", cwd = "tabascal/components/ffi", description = "Compile CPU FFI shared library (tabascal.so)" }
+build-ffi = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CPU FFI shared library (libtabascal.so) via scikit-build-core/CMake" }
 test           = "pytest tests/"
+test-components = { cmd = "pytest tests/components/", description = "Run component tests only" }
+coverage       = { cmd = "pytest tests/ --cov-report=html", description = "Run tests with coverage and write an HTML report to htmlcov/" }
 docs-build     = "sphinx-build -b html docs/ docs/_build/html"
 docs-clean     = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
 perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabascal_perf_check.py --system=generic --exec-policy=serial --run --performance-report --report-file=reframe_results.json", description = "Run Re-Frame performance benchmark locally" }
@@ -94,8 +116,8 @@ perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabasc
 # ── Shared conda dependencies (all environments) ───────────────────────────────
 
 [tool.pixi.dependencies]
-astropy         = "*"
 casacore        = "*"
+cxx-compiler    = "*"
 dask            = "*"
 dask-ms         = "*"
 jax             = ">=0.6.0,<0.10.0"
@@ -103,11 +125,18 @@ matplotlib      = "*"
 numpy           = "*"
 numpyro         = "*"
 optax           = "*"
+# Upper-bounded because the build-system pins jax==0.6.0 (see [build-system]),
+# whose jaxlib wheels only cover cp310-cp313; Python 3.14 has no matching wheel.
+python          = ">=3.10,<3.14"
 python-casacore = "*"
 platformdirs    = "*"
 pyyaml          = "*"
-sgp4jax         = "*"
-skyfield        = "*"
+# Bounded: sgp4jax enables jax_enable_x64 at import (set_precision relies on this
+# ordering) and its orbit API is pre-1.0, so pin a known-good range.
+sgp4jax         = ">=0.1.6,<0.2"
+# Bounded: tabascal/time.py and components/trajectory.py call skyfield's private
+# _utc_jd(whole, fraction); pin a known-good range and guard it with a smoke test.
+skyfield        = ">=1.49,<2"
 spacetrack      = "*"
 tqdm            = "*"
 xarray          = "*"
@@ -123,12 +152,12 @@ jaxlib = "*"
 
 [tool.pixi.feature.cpu.pypi-dependencies]
 tabascal = { path = ".", editable = true }
-tabsim   = "*"
 
 # ── CUDA 12 feature ────────────────────────────────────────────────────────────
-# Installs the cuda-enabled jaxlib build from conda-forge, equivalent to:
+# Installs the cuda-enabled jaxlib build from conda-forge and the CUDA 12 build
+# toolchain (nvcc, cudart-dev) needed to compile the FFI kernels in
+# tabascal/components/ffi. Equivalent jaxlib install:
 #   conda install "jaxlib=*=*cuda12*" jax -c conda-forge
-# Use cuda12-dev for a full development install.
 
 [tool.pixi.feature.cuda12]
 platforms = ["linux-64", "linux-aarch64"]
@@ -137,19 +166,32 @@ platforms = ["linux-64", "linux-aarch64"]
 cuda = "12"
 
 [tool.pixi.feature.cuda12.dependencies]
-jaxlib = { version = "*", build = "*cuda12*" }
+jaxlib          = { version = "*", build = "*cuda12*" }
+cuda-nvcc       = "12.*"
+cuda-cudart-dev = "12.*"
 
 [tool.pixi.feature.cuda12.pypi-dependencies]
 tabascal = { path = ".", editable = true }
-tabsim   = "*"
+
+# Enables the CUDA FFI kernel build (scikit-build-core override in [tool.scikit-build]
+# maps this env var to -DTABASCAL_CUDA=ON; CMake stays CPU-only by default). This is
+# active during `pixi run`/`pixi shell` and during a per-env (re)build of tabascal in
+# this env — i.e. `pixi run -e cuda12 build-ffi-cuda`, which is how the CUDA kernel
+# gets built. A plain `pixi install` does NOT build it: pixi/uv build the editable
+# tabascal once and share that single (CPU) wheel across every env, so cuda12 inherits
+# the CPU-only build until build-ffi-cuda forces a cuda12-specific rebuild. See the
+# "Build the FFI shared libraries" section of the README.
+[tool.pixi.feature.cuda12.activation.env]
+TABASCAL_CUDA = "1"
+
+[tool.pixi.feature.cuda12.tasks]
+build-ffi-cuda = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", description = "Rebuild the CUDA FFI shared library (libtabascal_cuda.so) via scikit-build-core/CMake" }
 
 # ── Dev feature ────────────────────────────────────────────────────────────────
 # Adds docs and test tooling. Also carries the full PyPI package set so that
 # cuda12-dev gets tabascal and friends even though it doesn't include the cpu feature.
 
 [tool.pixi.feature.dev.dependencies]
-cxx-compiler     = "*"
-make             = "*"
 pytest           = "*"
 pytest-cov       = "*"
 pre-commit       = "*"
@@ -161,21 +203,7 @@ graphviz         = "*"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 reframe-hpc = "*"
-
-# ── Compile feature ────────────────────────────────────────────────────────────
-# CUDA 12 build toolchain for compiling the FFI kernels in tabascal/components/ffi
-
-[tool.pixi.feature.compile]
-platforms = ["linux-64", "linux-aarch64"]
-
-[tool.pixi.feature.compile.tasks]
-build-ffi-cuda = { cmd = "make cuda", cwd = "tabascal/components/ffi", description = "Compile CUDA FFI shared library (tabascal_cuda.so)" }
-
-[tool.pixi.feature.compile.dependencies]
-cuda-nvcc       = "12.*"
-cuda-cudart-dev = "12.*"
-make            = "*"
-cxx-compiler    = "*"
+tabsim   = "*"
 
 # ── Environments ───────────────────────────────────────────────────────────────
 
@@ -187,6 +215,3 @@ dev        = { features = ["cpu", "dev"], solve-group = "cpu" }
 # NVIDIA GPU environments — pure conda, lockable from any host platform
 cuda12     = { features = ["cuda12"],        solve-group = "cuda12" }
 cuda12-dev = { features = ["cuda12", "dev"], solve-group = "cuda12" }
-
-# NVIDIA GPU environment with CUDA 12 kernel compilation toolchain
-cuda12-compile     = { features = ["cuda12", "compile"], solve-group = "cuda12-compile" }

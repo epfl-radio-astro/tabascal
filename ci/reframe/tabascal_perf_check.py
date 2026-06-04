@@ -22,13 +22,13 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
     _reference_by_variant = {
         "Riemann": {
             "daint:gpu": {
-                "total_runtime": (34.0, -0.25, 0.15, "s"),
+                "total_runtime": (23.0, -0.25, 0.15, "s"),
                 "optimizer_runtime": (10.0, -0.20, 0.15, "s"),
             },
         },
         "RiemannFFI": {
             "daint:gpu": {
-                "total_runtime": (22, -0.25, 0.15, "s"),
+                "total_runtime": (16, -0.25, 0.15, "s"),
                 "optimizer_runtime": (4.2, -0.20, 0.15, "s"),
             },
         },

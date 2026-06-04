@@ -122,10 +122,12 @@ def main():
     (workdir / "sim_dir.txt").write_text(str(sim_dir))
 
     # Step 3: Create modified config with requested components
+    # Use tabascal's loader so bare scientific-notation floats parse as floats.
+    from tabascal.config import yaml_load
+
     components = args.components.split(",")
-    with open(tab_template) as f:
-        config = yaml.safe_load(f)
-    config["model"] = {"components": components}
+    config = yaml_load(tab_template)
+    config["model"] = {"components": components, "precision": "double"}
     config_out = workdir / "tab_target.yaml"
     with open(config_out, "w") as f:
         yaml.dump(config, f)

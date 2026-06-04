@@ -1,29 +1,19 @@
 from tabascal.imports import import_components
 from tabascal.components.likelihood import gaussian
 from tabascal.tab_tools import read_ms, fix_padding
-from tabascal.components.trajectory import fetch_orbital_elements
+from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
 from tabascal.tle import print_spacetrack_status, preflight_tle_check
-from tabascal.interferometry import get_strides_and_idxs
+from tabascal.interferometry import (
+    calculate_fringe_frequency_numpy,
+    get_strides_and_idxs,
+    itrf_to_uvw_numpy,
+)
 from tabascal.fft_gp import domain_ss
+from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd, gast_deg
 
 import jax.numpy as jnp
-from jax import vmap, Array
 
 import numpy as np
-
-from tabsim.jax.coordinates import (
-    secs_to_days,
-    mjd_to_jd,
-    itrf_to_uvw,
-    kepler_orbit_many,
-    gmsa_from_jd,
-    calculate_fringe_frequency,
-    jd_to_mjd,
-)
-
-# from tabsim.jax.interferometry import int_sample_times
-from tabsim.dask.interferometry import int_sample_times
-from tabsim.config import deep_update, yaml_load
 
 import numpyro
 
@@ -31,6 +21,65 @@ from typing import Optional, Callable, Dict, List
 
 from importlib.resources import files
 import os
+import re
+import yaml
+import collections.abc
+
+    
+def deep_update(d: Dict, u: Dict) -> Dict:
+    """Recursively update a dictionary which includes subdictionaries.
+
+    Parameters
+    ----------
+    d : Dict
+        Base dictionary to update.
+    u : Dict
+        Update dictionary.
+
+    Returns
+    -------
+    Dict
+        Updated dictionary.
+    """
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = deep_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
+
+class _TabSafeLoader(yaml.SafeLoader):
+    """SafeLoader whose float resolver also accepts bare scientific notation.
+
+    PyYAML's stock resolver only treats a token as a float when the exponent is
+    signed (``1.0e+9``); it parses ``1e9`` / ``3e3`` / ``209e3`` as *strings*. The
+    config files use the bare form throughout, so add a resolver that accepts it.
+    It is attached to this private subclass — not the shared ``yaml.SafeLoader`` —
+    so importing tabascal does not reprogram YAML float parsing for the whole
+    process. Anything that needs this behaviour must load via :func:`yaml_load`.
+    """
+
+
+_TabSafeLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    re.compile(
+        """^(?:
+     [-+]?(?:[0-9][0-9_]*)\\.[0-9_]*(?:[eE][-+]?[0-9]+)?
+    |[-+]?(?:[0-9][0-9_]*)(?:[eE][-+]?[0-9]+)
+    |\\.[0-9_]+(?:[eE][-+][0-9]+)?
+    |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*
+    |[-+]?\\.(?:inf|Inf|INF)
+    |\\.(?:nan|NaN|NAN))$""",
+        re.X,
+    ),
+    list("-+0123456789."),
+)
+
+
+def yaml_load(path):
+    with open(path) as f:
+        return yaml.load(f, Loader=_TabSafeLoader)
 
 
 def load_config(path: str) -> Dict:
@@ -52,15 +101,9 @@ def load_config(path: str) -> Dict:
 
     try:
         return deep_update(base_config, yaml_load(path))
-    except:
-        raise IOError(f"Configuration file could not be loaded from {path}")
+    except Exception as e:
+        raise IOError(f"Configuration file could not be loaded from {path}") from e
 
-
-def validate_tab_config(config: Dict):
-
-    pass
-
-    
     
 class TabConfig:
     """Configuration parameters for tabascal method"""
@@ -69,6 +112,7 @@ class TabConfig:
 
         # self.config = config
         self.args = config
+        self.precision = config.get("model", {}).get("precision", "single")
         self.ms_path = ms_path
         self.spacetrack_path = config["satellites"].get("spacetrack_path")
         self.extra_tle_dir = config["satellites"].get("extra_tle_dir")
@@ -158,47 +202,34 @@ class TabConfig:
         times_jd_coarse = np.arange(
             self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
         )
+        # Satellite positions, GAST, antenna UVW and fringe frequencies are all
+        # one-shot host-side setup, so always compute them in numpy/skyfield (f64):
+        # faster than the jax path (no JIT compile) and accurate in both precisions.
+        rfi_xyz = np.asarray(get_satellite_positions(self.tles, times_jd_coarse))
 
-        gh0 = (gmsa_from_jd(times_jd_coarse) - self.phase_centre["ra"]) % 360  # type: ignore
+        gsa = gast_deg(times_jd_coarse)  # GAST in degrees (UTC convention)
+        gh0 = (gsa - self.phase_centre["ra"]) % 360  # type: ignore
 
-        ants_u = itrf_to_uvw(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
+        ants_u = itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"])[:, :, 0]
 
-        rfi_xyz = kepler_orbit_many(times_jd_coarse, self.epoch_jd, self.elements)
-
-        calc_fringe_freq = lambda _rfi_xyz: calculate_fringe_frequency(
+        get_fringe_freq = lambda rfi_pos: calculate_fringe_frequency_numpy(
             jd_to_mjd(times_jd_coarse),
-            jnp.max(self.freqs),
-            _rfi_xyz,
+            np.max(self.freqs),
+            rfi_pos,
             self.ants_itrf,
             ants_u,
             self.phase_centre["dec"],
         )
         # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
-        fringe_freq = vmap(calc_fringe_freq)(rfi_xyz)
+        fringe_freq = np.array([get_fringe_freq(rfi_pos) for rfi_pos in rfi_xyz])
 
-        # # self.fringe_freqs is shape (n_rfi, n_bl)
-        # self.fringe_freqs = jnp.max(jnp.abs(fringe_freq), axis=1)
-
-        # self.max_fringe_freq = jnp.max(jnp.abs(fringe_freq))
-
-        # self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
-
-        # sample_freq = (
-        #     jnp.pi
-        #     * self.max_fringe_freq
-        #     * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
-        # )
-        # self.n_int_time = int(jnp.ceil(n_int_factor * self.int_time * sample_freq))
-        # self.n_int_time = max(1, self.n_int_time)
-
-        self.max_rfi_vis = jnp.max(jnp.abs(self.vis_obs))
+        self.max_rfi_vis = np.max(np.abs(self.vis_obs))
         sample_freq_bl = (
-            jnp.pi
-            * jnp.max(jnp.abs(fringe_freq), axis=(0, 1))
-            * jnp.sqrt(self.max_rfi_vis / (6 * self.noise))
+            np.pi
+            * np.max(np.abs(fringe_freq), axis=(0, 1))
+            * np.sqrt(self.max_rfi_vis / (6 * self.noise))
         )
         n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(int)
-        # print(bl_fr.max() * bl_fr.size / jnp.sum(bl_fr))
 
         # time_sample_idxs and time_strides are only used in RiemannVisTimeFreqVariable
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
@@ -208,14 +239,26 @@ class TabConfig:
     def _set_freqs_times(self):
 
         ns = [self.n_freq, self.n_time]
-        dxs = [self.chan_width, self.int_time]
-        x0s = [self.freqs[0], self.times[0]]
         ss_factors = [self.n_int_freq, self.n_int_time]
         pad_factors = [
             self.args["rfi"]["freq_pad_factor"],
             self.args["rfi"]["time_pad_factor"],
         ]
-        self.freqs_fine, self.times_fine = domain_ss(ns, dxs, x0s, ss_factors, pad_factors)
+        # domain_ss is jax-based, so under jax_enable_x64=False it builds the grids
+        # in f32 internally. The real grids carry large magnitudes (freqs ~1e9 Hz,
+        # and times_jd_fine ~2.4e6 JD) that lose all usable precision in f32. Since
+        # domain_ss is affine in (x0, dx) (output = x0 + dx * normalised_grid), build
+        # the normalised grid with x0=0, dx=1 (small, f32-safe) and apply the real
+        # offset/scale in numpy f64.
+        unit_freqs, unit_times = domain_ss(
+            ns, [1.0, 1.0], [0.0, 0.0], ss_factors, pad_factors
+        )
+        self.freqs_fine = self.freqs[0] + self.chan_width * np.asarray(
+            unit_freqs, dtype=np.float64
+        )
+        self.times_fine = self.times[0] + self.int_time * np.asarray(
+            unit_times, dtype=np.float64
+        )
         self.n_freq_fine = len(self.freqs_fine)
         self.n_time_fine = len(self.times_fine)
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)

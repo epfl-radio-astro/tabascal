@@ -12,3 +12,6 @@ examples/test
 **/*.pyc
 *.o
 *.so
+
+# Local scratch / working notes (not part of the package)
+/tmp/

@@ -4,12 +4,10 @@ from tabascal.components.rfi_vis import *
 import jax.numpy as jnp
 import jax
 
-jax.config.update("jax_enable_x64", True)
-
-from .conftest import make_constants
+from .conftest import active_precision, make_constants
 
 
-def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
+def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, precision=None):
     a1, a2 = jnp.triu_indices(n_ant, 1)
     a1 = a1.astype('int32')
     a2 = a2.astype('int32')
@@ -22,6 +20,7 @@ def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         n_bl=a1.shape[0],
         a1=a1,
         a2=a2,
+        precision=precision or active_precision(),
         args={"rfi": {"freq_int_samples": n_int_freq}},
     )
 
@@ -49,8 +48,21 @@ def create_state(config, rand_vis_rfi=False, r_key=42, real_dtype=jnp.float64):
     return state
 
 
-test_sizes = [(1, 1, 1, 1, 1, 1), (4, 5, 6, 7, 8, 9), (64, 20, 16, 12, 4, 2)]
-test_dtypes = [jnp.float32, jnp.float64]
+# First case uses 2 antennas so it exercises a real baseline rather than the
+# degenerate zero-baseline configuration.
+test_sizes = [(2, 1, 1, 1, 1, 1), (4, 5, 6, 7, 8, 9), (64, 20, 16, 12, 4, 2)]
+
+
+def _session_dtype():
+    """Real dtype matching the session precision (driven by the --x64 flag).
+
+    The FFI kernel runs in whichever precision its inputs carry, and the suite
+    fixes one precision per run via --x64. So the comparison tests below use fp32
+    under --x64 false and fp64 under --x64 true, each with matching tolerances,
+    rather than exercising both dtypes in a single session (a float64 request
+    would silently downcast to float32 under --x64 false anyway).
+    """
+    return jnp.float64 if active_precision() == "double" else jnp.float32
 
 
 def _tols(dtype):
@@ -58,10 +70,10 @@ def _tols(dtype):
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
-@pytest.mark.parametrize("real_dtype", test_dtypes)
-def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtype):
+def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """FFI and reference Riemann kernels produce identical vis_rfi outputs."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
+    real_dtype = _session_dtype()
 
     def compute_vis_rfi(impl):
         state = create_state(config, False, 42, real_dtype=real_dtype)
@@ -77,11 +89,10 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtype):
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
-@pytest.mark.parametrize("real_dtype", test_dtypes)
-def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtype):
+def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """Forward-mode Jacobian-vector products of FFI and reference kernels match."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
-
+    real_dtype = _session_dtype()
 
     def compue_jvp(impl):
         state = create_state(config, False, r_key=42, real_dtype=real_dtype)
@@ -103,11 +114,10 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtyp
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
-@pytest.mark.parametrize("real_dtype", test_dtypes)
-def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtype):
+def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """Reverse-mode VJP gradients w.r.t. rfi_A and rfi_phase match between FFI and reference."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
-
+    real_dtype = _session_dtype()
 
     def compue_vjp(impl):
         input_state = create_state(config, False, r_key=42, real_dtype=real_dtype)
@@ -134,8 +144,14 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, real_dtyp
     assert jnp.allclose(ref_state["rfi_phase"], ffi_state["rfi_phase"], atol=atol, rtol=rtol)
 
 
+@pytest.mark.requires_double
 def test_mixed_precision_rejected():
-    """Mismatched amp/phase precision is rejected at the lowering boundary."""
+    """Mismatched amp/phase precision is rejected at the lowering boundary.
+
+    Needs x64 enabled to construct a genuine float64 phase array; under
+    ``--x64 false`` the float64 request downcasts to float32 and there is no
+    mismatch to reject.
+    """
     config = create_config(4, 2, 3, 3, 2, 2)
     n_int_freq = config.args["rfi"]["freq_int_samples"]
     input_shape = (config.n_rfi, config.n_ant, config.n_freq * n_int_freq, config.n_time * config.n_int_time)

@@ -30,7 +30,9 @@ test_job:
     - . /opt/conda/etc/profile.d/conda.sh
     - conda activate tab
     - cd /tabascal/src
-    - python3 -m pytest
+    # Run the suite in both precisions; the --x64 flag drives jax_enable_x64.
+    - python3 -m pytest --x64 false   # single precision (fp32)
+    - python3 -m pytest --x64 true    # double precision (fp64)
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
