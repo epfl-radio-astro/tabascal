@@ -65,6 +65,7 @@ rfi:
   n_int_factor: 1       # Optional - Factor to increase the number of integration samples over the predicted value
   n_int_time: null      # Optional - Specify the number of integration samples to use along the time axis
   n_int_freq: 1         # Optional - Specify the number of integration samples to use along the frequency axis
+  rfi_vis_batch_size: null  # Optional - Baselines per block in the pure-JAX RFI vis kernel. null vmaps over all baselines (fastest, e.g. CPU); an integer chunks them via jax.lax.map to cap peak memory (e.g. GPU); 1 is a full per-baseline scan
   r_seed: 123           # Optional - Random seed to use for sampling
 ############################
 # Satellite path parameters

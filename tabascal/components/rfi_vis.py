@@ -1,9 +1,21 @@
 import jax.numpy as jnp
 from jax import vmap
 
-from tabascal.interferometry import calculate_rfi_vis_fine, calculate_rfi_vis_variable
+from tabascal.interferometry import calculate_rfi_vis, calculate_rfi_vis_variable
 from tabascal.components import Component
 from tabascal.components.ffi.rfi_vis_op import RFIVisOp
+
+
+def _rfi_vis_batch_size(config):
+    """Per-run baseline batch size for the pure-JAX RFI vis kernels.
+
+    ``None`` (the default) vmaps over all baselines; an integer chunks them via
+    ``jax.lax.map`` to cap peak memory. Read from ``rfi.rfi_vis_batch_size`` in the
+    config, defaulting to ``None`` when absent (e.g. hand-built test configs)."""
+    try:
+        return config.args.get("rfi", {}).get("rfi_vis_batch_size", None)
+    except AttributeError:
+        return None
 
 
 class RiemannVisCalculation(Component):
@@ -25,6 +37,9 @@ class RiemannVisCalculation(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
+            self.n_ant = config.n_ant
+            self.n_rfi = config.n_rfi
+            self.batch_size = _rfi_vis_batch_size(config)
 
             # Validate dimensions
             self._set_outputs()
@@ -53,21 +68,24 @@ class RiemannVisCalculation(Component):
         prefix = self.prefix
         n_int_time = self.n_int_time
         n_time = self.n_time
-        n_bl = self.n_bl
         n_freq = self.n_freq
+        n_ant = self.n_ant
+        n_rfi = self.n_rfi
+        batch_size = self.batch_size
 
         def forward(params, state, constants):
             # Pure JAX operations only
             a1 = constants[f"{prefix}/a1"]
             a2 = constants[f"{prefix}/a2"]
 
-            vis_rfi_fine = calculate_rfi_vis_fine(
-                state["rfi_A"], state["rfi_phase"], a1, a2
-            )
+            # Reshape to the contiguous-reduction layout (no frequency
+            # integration here, so n_int_freq == 1):
+            # (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+            new_shape = (n_rfi, n_ant, n_freq, 1, n_time, n_int_time)
+            rfi_A = jnp.transpose(state["rfi_A"].reshape(new_shape), (1, 2, 4, 0, 3, 5))
+            rfi_phase = jnp.transpose(state["rfi_phase"].reshape(new_shape), (1, 2, 4, 0, 3, 5))
 
-            new_shape = (n_bl, n_freq, n_time, n_int_time)
-
-            vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=-1)
+            vis_rfi = calculate_rfi_vis(rfi_A, rfi_phase, a1, a2, batch_size)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
             return state
@@ -102,6 +120,9 @@ class RiemannVisTimeFreqCalculation(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
+            self.n_ant = config.n_ant
+            self.n_rfi = config.n_rfi
+            self.batch_size = _rfi_vis_batch_size(config)
 
             # Validate dimensions
             self._set_outputs()
@@ -131,21 +152,23 @@ class RiemannVisTimeFreqCalculation(Component):
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_time = self.n_time
-        n_bl = self.n_bl
         n_freq = self.n_freq
+        n_ant = self.n_ant
+        n_rfi = self.n_rfi
+        batch_size = self.batch_size
 
         def forward(params, state, constants):
             # Pure JAX operations only
             a1 = constants[f"{prefix}/a1"]
             a2 = constants[f"{prefix}/a2"]
 
+            # Reshape to the contiguous-reduction layout (reduction axes last):
+            # (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+            new_shape = (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
+            rfi_A = jnp.transpose(state["rfi_A"].reshape(new_shape), (1, 2, 4, 0, 3, 5))
+            rfi_phase = jnp.transpose(state["rfi_phase"].reshape(new_shape), (1, 2, 4, 0, 3, 5))
 
-            vis_rfi_fine = calculate_rfi_vis_fine(
-                state["rfi_A"], state["rfi_phase"], a1, a2
-            )
-            # vis_rfi_fine is shape (n_bl, n_freq_fine, n_time_fine)
-            new_shape = (n_bl, n_freq, n_int_freq, n_time, n_int_time)
-            vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=(-3, -1))
+            vis_rfi = calculate_rfi_vis(rfi_A, rfi_phase, a1, a2, batch_size)
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 

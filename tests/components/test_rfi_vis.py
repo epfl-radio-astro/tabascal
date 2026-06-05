@@ -144,6 +144,29 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     assert jnp.allclose(ref_state["rfi_phase"], ffi_state["rfi_phase"], atol=atol, rtol=rtol)
 
 
+@pytest.mark.parametrize("batch_size", [1, 64, 256])
+def test_batch_size_matches_vmap(batch_size):
+    """Chunked (lax.map) and full-scan baseline batching match the vmap default.
+
+    ``rfi_vis_batch_size`` only changes how many baselines are evaluated at once
+    (a memory/speed knob); the visibilities must be identical to the default
+    ``None`` (single vmap over all baselines).
+    """
+    n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq = 64, 10, 16, 12, 4, 2
+    real_dtype = _session_dtype()
+
+    def compute(bs):
+        config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
+        config.args["rfi"]["rfi_vis_batch_size"] = bs
+        state = create_state(config, False, 42, real_dtype=real_dtype)
+        impl = RiemannVisTimeFreqCalculation()
+        impl.setup(config)
+        return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
+
+    atol, rtol = _tols(real_dtype)
+    assert jnp.allclose(compute(None), compute(batch_size), atol=atol, rtol=rtol)
+
+
 @pytest.mark.requires_double
 def test_mixed_precision_rejected():
     """Mismatched amp/phase precision is rejected at the lowering boundary.

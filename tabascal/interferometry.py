@@ -1,10 +1,12 @@
 from tabascal.time import mjd_to_jd, gast_deg
 
-from jax import jit, Array
+import jax
+from jax import jit, vmap, Array
 import jax.numpy as jnp
 from functools import partial
 import numpy as np
 from numpy.typing import NDArray
+from typing import Optional
 
 
 T_s = 86164.0905  # Sidereal day in seconds
@@ -237,45 +239,71 @@ def get_rfi_phase(
     return phases
 
 
-def calculate_rfi_vis_fine(
-    rfi_A: Array, rfi_phase: Array, a1: Array, a2: Array
+def calculate_rfi_vis(
+    rfi_amp_fine: Array,
+    rfi_phase: Array,
+    a1: Array,
+    a2: Array,
+    batch_size: Optional[int] = None,
 ) -> Array:
-    """Calculates the visibility across baselines from the complex antenna signals and geometric phase delays at each antenna.
+    """Cross-correlate per-antenna RFI signals into per-baseline visibilities.
+
+    The pure-JAX twin of the FFI kernel (:class:`~tabascal.components.ffi.rfi_vis_op.RFIVisOp`).
+    Both consume the same *contiguous-reduction* layout — the reduction axes
+    (RFI source and the freq/time integration samples) are last, so the reduce
+    runs over contiguous memory. The reduction sums over RFI sources and averages
+    over the integration samples, producing ``(n_bl, n_freq, n_time)`` directly
+    (no fine-grained intermediate handed back to the caller).
+
+    ``batch_size`` trades peak memory for speed by bounding how many baselines are
+    materialised at once. This matters on backends that do not fuse the gather
+    into the reduction (e.g. GPU); on CPU XLA fuses it regardless, so the default
+    is fastest there.
+
+    * ``None`` — a single :func:`jax.vmap` over all baselines (fastest; lets XLA
+      fuse the whole gather+reduce where it can).
+    * ``int``  — :func:`jax.lax.map` scans over blocks of ``batch_size`` baselines,
+      vmapping within each block, capping the intermediate at ``batch_size``
+      baselines.
+    * ``1``    — a pure per-baseline scan (minimum memory, slowest).
 
     Parameters
     ----------
-    rfi_A : Array (n_rfi, n_ant, ...)
-        The complex-valued signal at each antennna.
-    rfi_phase : Array (n_rfi, n_ant, ...)
-        The geometric phase delay at each antenna.
+    rfi_amp_fine : Array (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+        The complex-valued signal at each antenna in contiguous-reduction layout.
+    rfi_phase : Array (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+        The geometric phase delay at each antenna, same layout as ``rfi_amp_fine``.
     a1 : Array (n_bl,)
         The antenna index for antenna 1 in a baseline.
     a2 : Array (n_bl,)
         The antenna index for antenna 2 in a baseline.
+    batch_size : int, optional
+        Number of baselines to evaluate at once. ``None`` (default) vmaps over all
+        baselines; an integer chunks them via :func:`jax.lax.map`.
 
     Returns
     -------
-    Array (n_bl, ...)
+    Array (n_bl, n_freq, n_time)
         The visibilities on each baseline.
     """
+    # Number of integration samples averaged per (freq, time) cell.
+    n_int = rfi_amp_fine.shape[-2] * rfi_amp_fine.shape[-1]
 
-    # rfi_A is shape (n_rfi, n_ant, ...)
-    # rfi_phase is shape (n_rfi, n_ant, ...)
-    # a1 and a2 are shape (n_bl,)
-    # rfi_vis_fine is shape (n_bl, ...)
+    def per_baseline(ant_pair):
+        i, j = ant_pair
+        cross = (
+            rfi_amp_fine[i]
+            * jnp.conjugate(rfi_amp_fine[j])
+            * jnp.exp(1.0j * (rfi_phase[i] - rfi_phase[j]))
+        )
+        # cross is (n_freq, n_time, n_rfi, n_int_freq, n_int_time); sum over the
+        # RFI sources and the integration samples, then average the latter.
+        return jnp.sum(cross, axis=(-3, -2, -1)) / n_int
 
-    # Workaround for bug in jax>=0.5.3
-    rfi_A_ = jnp.swapaxes(rfi_A, 0, 1)
-    rfi_phase_ = jnp.swapaxes(rfi_phase, 0, 1)
+    if batch_size is None:
+        return vmap(per_baseline)((a1, a2))
 
-    vis_rfi_fine = jnp.sum(
-        rfi_A_[a1]
-        * jnp.conjugate(rfi_A_[a2])
-        * jnp.exp(1.0j * (rfi_phase_[a1] - rfi_phase_[a2])),
-        axis=1,
-    )
-
-    return vis_rfi_fine
+    return jax.lax.map(per_baseline, (a1, a2), batch_size=batch_size)
 
 
 @partial(jit, static_argnames=("freq_stride", "time_stride"))
