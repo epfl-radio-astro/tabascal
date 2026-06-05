@@ -109,7 +109,7 @@ build-ffi = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", descrip
 test           = "pytest tests/"
 test-components = { cmd = "pytest tests/components/", description = "Run component tests only" }
 coverage       = { cmd = "pytest tests/ --cov-report=html", description = "Run tests with coverage and write an HTML report to htmlcov/" }
-docs-build     = "sphinx-build -b html docs/ docs/_build/html"
+docs-build     = { cmd = "dot -c && sphinx-build -b html docs/ docs/_build/html", description = "Register graphviz plugins then build the HTML docs" }
 docs-clean     = { cmd = "rm -rf docs/_build", description = "Remove built docs" }
 perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabascal_perf_check.py --system=generic --exec-policy=serial --run --performance-report --report-file=reframe_results.json", description = "Run Re-Frame performance benchmark locally" }
 
