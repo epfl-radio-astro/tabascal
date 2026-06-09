@@ -307,6 +307,7 @@ class RiemannVisTimeFreqVariable(Component):
         n_freq = self.n_freq
         n_groups = len(self.time_sample_idxs)
         time_strides = self.time_strides
+        print(f"DEBUG: n_groups = {n_groups}")
 
         def calculate_rfi_vis_single(rfi_A, rfi_phase, a1, a2, constants):
 
@@ -420,6 +421,7 @@ class RiemannVisTimeFreqVariableFFI(Component):
         n_groups = len(self.time_sample_idxs)
         time_strides = self.time_strides
         time_sample_idxs = self.time_sample_idxs
+        print(f"DEBUG: n_groups = {n_groups}")
 
         # Build one FFI operator per baseline group, each holding the precomputed
         # antenna-baseline indices for that group's subset of baselines.

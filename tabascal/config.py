@@ -140,16 +140,14 @@ class TabConfig:
             extra_tle_dir=config["satellites"].get("extra_tle_dir"),
         )
 
-        config["rfi"]["min_time_bins"] = 1
-        config["rfi"]["max_time_bins"] = 30
-
         self.n_int_time = config["rfi"]["n_int_time"]
         self.n_int_freq = config["rfi"]["n_int_freq"]
 
         self.estimate_rfi_sampling(
             config["rfi"]["time_int_factor"],
-            config["rfi"]["min_time_bins"],
-            config["rfi"]["max_time_bins"],
+            config["rfi"].get("min_time_bins", 1),
+            config["rfi"].get("max_time_bins", 30),
+            config["rfi"].get("min_divisors_per_bin", 8),
         )
 
         self._set_freqs_times()
@@ -195,7 +193,11 @@ class TabConfig:
         self.a2 = ms_params["a2"]
 
     def estimate_rfi_sampling(
-        self, n_int_factor: float, min_time_bins: int, max_time_bins: int
+        self,
+        n_int_factor: float,
+        min_time_bins: int,
+        max_time_bins: int,
+        min_divisors_per_bin: int = 8,
     ):
 
         jd_minute = 1 / (24 * 60)
@@ -233,7 +235,9 @@ class TabConfig:
 
         # time_sample_idxs and time_strides are only used in RiemannVisTimeFreqVariable
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
-            get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
+            get_strides_and_idxs(
+                n_int_times, min_time_bins, max_time_bins, min_divisors_per_bin
+            )
         )
 
     def _set_freqs_times(self):

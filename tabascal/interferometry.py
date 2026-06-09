@@ -370,6 +370,9 @@ def round_up_to_nearest(original: NDArray, roundings: NDArray) -> NDArray:
     roundings = np.unique(roundings)
 
     indices = np.searchsorted(roundings, original, side="left")
+    # Values above max(roundings) yield index == len(roundings); clip so they
+    # round down to the largest available value instead of raising IndexError.
+    indices = np.minimum(indices, len(roundings) - 1)
 
     rounded = roundings[indices]
 
@@ -377,7 +380,7 @@ def round_up_to_nearest(original: NDArray, roundings: NDArray) -> NDArray:
 
 
 def get_strides_and_idxs(
-    samplings: NDArray, min_bins: int, max_bins: int, div_richness: int = 8
+    samplings: NDArray, min_bins: int, max_bins: int, min_divisors_per_bin: int = 8
 ) -> tuple[list, list[int], int]:
     """Calculate the binned indices, strides, and maximum sampling from an array of random sampling rates.
 
@@ -402,8 +405,8 @@ def get_strides_and_idxs(
         The minimum number of sampling bins.
     max_bins : int
         The maximum number of sampling bins.
-    div_richness : int, optional
-        Require at least ``div_richness * min_bins`` divisors of ``max_sampling``
+    min_divisors_per_bin : int, optional
+        Require at least ``min_divisors_per_bin * min_bins`` divisors of ``max_sampling``
         so candidate strides are dense enough to separate the samplings. Higher
         values give more, better-separated groups at the cost of a larger
         ``max_sampling`` (hence larger fine grid). Default 8.
@@ -420,7 +423,7 @@ def get_strides_and_idxs(
     # 1. Fine-grid size >= max(samplings), chosen to be divisor-rich so the
     #    candidate strides (its divisors) are dense enough to separate the
     #    sampling distribution. Bounded overshoot keeps the fine grid in check.
-    need = max(div_richness * min_bins, min_bins + 1)
+    need = max(min_divisors_per_bin * min_bins, min_bins + 1)
     max_sampling = max_samp
     while len(get_divisors(max_sampling)) < need and max_sampling < 2 * max_samp:
         max_sampling += 1
