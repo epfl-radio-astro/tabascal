@@ -14,6 +14,8 @@ from tabascal.interferometry import (
     Omega_e,
     Rotz_numpy,
     calculate_fringe_frequency_numpy,
+    get_divisors,
+    get_strides_and_idxs,
     itrf_to_uvw_numpy,
 )
 from tabascal.time import mjd_to_jd, gast_deg
@@ -136,3 +138,131 @@ class TestCalculateFringeFrequencyNumpy:
         fringe_stat_neg = bl_u * float(Omega_e) * np.cos(np.deg2rad(DEC)) / lam
 
         assert not np.allclose(ff, fringe_stat_neg, rtol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# get_strides_and_idxs
+#
+# Groups per-baseline sampling rates into stride bins for
+# RiemannVisTimeFreqVariable. The hard downstream invariant is that every
+# returned stride divides max_sampling (= n_int_time, the fine-grid size), since
+# each group slices the fine grid as slice(stride//2, None, stride). The binning
+# must also partition every baseline into exactly one non-empty group, and must
+# not collapse to a single group merely because max(samplings) is prime.
+# ---------------------------------------------------------------------------
+
+def _assert_valid_grouping(samplings, idxs, u_strides, max_sampling, min_bins):
+    """Assert the structural invariants every grouping must satisfy."""
+    samplings = np.asarray(samplings)
+    n = samplings.size
+
+    # max_sampling (= n_int_time) must cover the largest required sampling.
+    assert max_sampling >= int(samplings.max())
+
+    # Hard invariant: every stride divides max_sampling so the fine-grid slicing
+    # stays uniform downstream.
+    for s in u_strides:
+        assert max_sampling % s == 0, (s, max_sampling)
+
+    # Strides are unique, sorted, and plain ints.
+    assert list(u_strides) == sorted(set(u_strides))
+    assert all(isinstance(s, int) for s in u_strides)
+
+    # One index group per stride.
+    assert len(idxs) == len(u_strides)
+
+    # Groups are non-empty and partition every baseline exactly once.
+    for grp in idxs:
+        assert len(grp) > 0
+    concat = np.concatenate([np.asarray(g) for g in idxs])
+    np.testing.assert_array_equal(np.sort(concat), np.arange(n))
+
+
+class TestGetStridesAndIdxs:
+
+    MIN_BINS, MAX_BINS = 1, 30
+
+    @pytest.mark.parametrize("seed", range(8))
+    def test_invariants_on_random_samplings(self, seed):
+        # Random spreads of per-baseline sampling rates must always satisfy the
+        # structural invariants regardless of where max(samplings) lands.
+        rng = np.random.default_rng(seed)
+        samplings = rng.integers(1, 60, size=200)
+        idxs, u_strides, max_sampling = get_strides_and_idxs(
+            samplings, self.MIN_BINS, self.MAX_BINS
+        )
+        _assert_valid_grouping(samplings, idxs, u_strides, max_sampling, self.MIN_BINS)
+
+    def test_prime_max_does_not_collapse(self):
+        # Regression: with the old divisors(max(samplings)) scheme a prime max
+        # (43 -> divisors {1, 43}) collapsed every baseline onto a single stride.
+        # A genuinely spread distribution must now yield more than one group.
+        rng = np.random.default_rng(0)
+        samplings = rng.integers(2, 44, size=300)
+        samplings[0] = 43  # force a prime max
+        assert int(samplings.max()) == 43
+
+        idxs, u_strides, max_sampling = get_strides_and_idxs(
+            samplings, self.MIN_BINS, self.MAX_BINS
+        )
+        _assert_valid_grouping(samplings, idxs, u_strides, max_sampling, self.MIN_BINS)
+        assert len(u_strides) > 1
+
+    def test_max_sampling_is_divisor_rich(self):
+        # When the overshoot cap is not hit, max_sampling is bumped up to an
+        # integer with at least div_richness * min_bins divisors.
+        div_richness = 4
+        samplings = np.array([43])  # prime; needs bumping for richer divisors
+        _, _, max_sampling = get_strides_and_idxs(
+            samplings, self.MIN_BINS, self.MAX_BINS, div_richness=div_richness
+        )
+        need = max(div_richness * self.MIN_BINS, self.MIN_BINS + 1)
+        assert len(get_divisors(max_sampling)) >= need
+        assert max_sampling >= 43
+
+    def test_overshoot_is_bounded(self):
+        # max_sampling never more than doubles max(samplings); divisor-poor
+        # maxima fall back to the 2*M cap rather than searching unboundedly.
+        for m in [9, 17, 43, 97]:
+            _, _, max_sampling = get_strides_and_idxs(
+                np.array([m]), self.MIN_BINS, self.MAX_BINS
+            )
+            assert m <= max_sampling <= 2 * m
+
+    def test_all_equal_samplings_single_group(self):
+        # Identical sampling on every baseline cannot be meaningfully split, so a
+        # single valid group is expected (and must not raise).
+        samplings = np.full(50, 10)
+        idxs, u_strides, max_sampling = get_strides_and_idxs(
+            samplings, self.MIN_BINS, self.MAX_BINS
+        )
+        _assert_valid_grouping(samplings, idxs, u_strides, max_sampling, self.MIN_BINS)
+        assert len(u_strides) == 1
+
+    def test_spread_samplings_produce_multiple_groups(self):
+        # A broad spread of sampling rates should resolve into several groups.
+        samplings = np.repeat(np.arange(1, 25), 8)  # 1..24, evenly populated
+        idxs, u_strides, max_sampling = get_strides_and_idxs(
+            samplings, self.MIN_BINS, self.MAX_BINS
+        )
+        _assert_valid_grouping(samplings, idxs, u_strides, max_sampling, self.MIN_BINS)
+        assert len(u_strides) >= self.MIN_BINS
+
+    def test_single_baseline(self):
+        # Degenerate one-baseline case stays well defined.
+        idxs, u_strides, max_sampling = get_strides_and_idxs(
+            np.array([7]), self.MIN_BINS, self.MAX_BINS
+        )
+        _assert_valid_grouping(np.array([7]), idxs, u_strides, max_sampling, self.MIN_BINS)
+        assert len(u_strides) == 1
+
+    def test_higher_div_richness_is_at_least_as_rich(self):
+        # Raising div_richness cannot reduce the divisor count of max_sampling.
+        samplings = np.array([43])
+        counts = [
+            len(get_divisors(get_strides_and_idxs(
+                samplings, self.MIN_BINS, self.MAX_BINS, div_richness=r
+            )[2]))
+            for r in (1, 2, 4, 6)
+        ]
+        assert counts == sorted(counts)
