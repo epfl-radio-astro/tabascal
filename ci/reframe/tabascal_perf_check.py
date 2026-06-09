@@ -14,19 +14,34 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
     """Verify tabascal pipeline performance on GPU."""
 
     variant = parameter(["Riemann", "RiemannFFI"])
+    precision = parameter(["single", "double"])
 
     valid_systems = ["daint:gpu", "generic:default"]
     valid_prog_environs = ["builtin"]
     time_limit = "30m"
 
+    # References are keyed by (variant, precision). Single precision timings
+    # are placeholders to be measured and updated later.
     _reference_by_variant = {
-        "Riemann": {
+        ("Riemann", "single"): {
             "daint:gpu": {
                 "total_runtime": (23.0, -0.25, 0.15, "s"),
                 "optimizer_runtime": (10.0, -0.20, 0.15, "s"),
             },
         },
-        "RiemannFFI": {
+        ("Riemann", "double"): {
+            "daint:gpu": {
+                "total_runtime": (23.0, -0.25, 0.15, "s"),
+                "optimizer_runtime": (10.0, -0.20, 0.15, "s"),
+            },
+        },
+        ("RiemannFFI", "single"): {
+            "daint:gpu": {
+                "total_runtime": (16, -0.25, 0.15, "s"),
+                "optimizer_runtime": (4.2, -0.20, 0.15, "s"),
+            },
+        },
+        ("RiemannFFI", "double"): {
             "daint:gpu": {
                 "total_runtime": (16, -0.25, 0.15, "s"),
                 "optimizer_runtime": (4.2, -0.20, 0.15, "s"),
@@ -53,7 +68,7 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
 
     @run_before("performance")
     def set_reference(self):
-        self.reference = self._reference_by_variant[self.variant]
+        self.reference = self._reference_by_variant[(self.variant, self.precision)]
 
     @run_before("run")
     def prepare_run(self):
@@ -74,6 +89,7 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
             f" --components '{components_str}'"
             f" --workdir {workdir}"
             f" --src-root {_src_root}"
+            f" --precision {self.precision}"
         )
 
         self.executable = "python"

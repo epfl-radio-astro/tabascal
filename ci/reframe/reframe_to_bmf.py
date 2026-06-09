@@ -14,12 +14,15 @@ def reframe_to_bmf(report_path: str, jax_version: str | None = None) -> dict:
             if tc["result"] != "pass":
                 continue
             variant = tc.get("variant", tc["name"])
+            precision = tc.get("precision")
             for key, values in tc["perfvalues"].items():
                 # key format: "system:partition:metric_name"
                 metric = key.rsplit(":", 1)[-1]
                 measured = values[0]  # first element is the value
                 unit = values[4] if len(values) > 4 else "s"
                 parts = [variant]
+                if precision:
+                    parts.append(precision)
                 if jax_version:
                     parts.append(f"jax-{jax_version}")
                 parts.append(metric)
