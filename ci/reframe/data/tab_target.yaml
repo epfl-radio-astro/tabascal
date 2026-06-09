@@ -41,7 +41,7 @@ inference:
 
 opt:
   epsilon: 1e-3
-  max_iter: 100
+  max_iter: 1000
   dual_run: True
   guide: map
 
