@@ -11,12 +11,17 @@ build_job:
   extends: .container-builder-cscs-gh200
   parallel:
     matrix:
-      - JAX_VERSION: ["0.6.0", "latest"]
+      # CUDA_VARIANT selects the base image: 13 for the "latest" JAX build,
+      # 12 for the pinned build (see ci/docker/Dockerfile_cuda).
+      - JAX_VERSION: ["0.6.0"]
+        CUDA_VARIANT: ["12"]
+      - JAX_VERSION: ["latest"]
+        CUDA_VARIANT: ["13"]
   variables:
     DOCKERFILE: ci/docker/Dockerfile_cuda
     CSCS_REBUILD_POLICY: "if-not-exists"
     PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
-    DOCKER_BUILD_ARGS: '["JAX_VERSION=$JAX_VERSION"]'
+    DOCKER_BUILD_ARGS: '["JAX_VERSION=$JAX_VERSION", "CUDA_VARIANT=$CUDA_VARIANT"]'
 
 test_job:
   stage: test
