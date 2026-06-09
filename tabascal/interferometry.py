@@ -377,7 +377,7 @@ def round_up_to_nearest(original: NDArray, roundings: NDArray) -> NDArray:
 
 
 def get_strides_and_idxs(
-    samplings: NDArray, min_bins: int, max_bins: int, div_richness: int = 4
+    samplings: NDArray, min_bins: int, max_bins: int, div_richness: int = 8
 ) -> tuple[list, list[int], int]:
     """Calculate the binned indices, strides, and maximum sampling from an array of random sampling rates.
 
@@ -406,7 +406,7 @@ def get_strides_and_idxs(
         Require at least ``div_richness * min_bins`` divisors of ``max_sampling``
         so candidate strides are dense enough to separate the samplings. Higher
         values give more, better-separated groups at the cost of a larger
-        ``max_sampling`` (hence larger fine grid). Default 4.
+        ``max_sampling`` (hence larger fine grid). Default 8.
 
     Returns
     -------
