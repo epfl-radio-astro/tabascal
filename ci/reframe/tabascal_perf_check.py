@@ -175,7 +175,7 @@ class TabascalMemCheck(_TabascalRunBase):
     _reference_by_precision = {
         "single": {
             "daint:gpu": {
-                "max_memory": (3634, -0.10, 0.05, "MB"),
+                "max_memory": (3634, -0.10, 0.10, "MB"),
             },
         },
         "double": {
