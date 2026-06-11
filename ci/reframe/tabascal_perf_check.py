@@ -54,7 +54,7 @@ class _TabascalRunBase(rfm.RunOnlyRegressionTest):
         # Memory checks only need a few optimizer iterations to reach peak
         # usage, while timing checks run the full optimization to hide
         # compilation overhead
-        max_iter = 10 if self.measure_memory else 1000
+        max_iter = 20 if self.measure_memory else 1000
 
         self.prerun_cmds.append(
             f"python {_src_root}/ci/reframe/prepare_data.py"
