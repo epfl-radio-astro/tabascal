@@ -147,7 +147,7 @@ class TabConfig:
             config["rfi"]["time_int_factor"],
             config["rfi"].get("min_time_bins", 1),
             config["rfi"].get("max_time_bins", 30),
-            config["rfi"].get("min_divisors_per_bin", 8),
+            config["rfi"].get("min_divisors", 8),
         )
 
         self._set_freqs_times()
@@ -197,7 +197,7 @@ class TabConfig:
         n_int_factor: float,
         min_time_bins: int,
         max_time_bins: int,
-        min_divisors_per_bin: int = 8,
+        min_divisors: int = 8,
     ):
 
         jd_minute = 1 / (24 * 60)
@@ -236,7 +236,7 @@ class TabConfig:
         # time_sample_idxs and time_strides are only used in RiemannVisTimeFreqVariable
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
             get_strides_and_idxs(
-                n_int_times, min_time_bins, max_time_bins, min_divisors_per_bin
+                n_int_times, min_time_bins, max_time_bins, min_divisors
             )
         )
 

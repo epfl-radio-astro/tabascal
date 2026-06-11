@@ -380,7 +380,7 @@ def round_up_to_nearest(original: NDArray, roundings: NDArray) -> NDArray:
 
 
 def get_strides_and_idxs(
-    samplings: NDArray, min_bins: int, max_bins: int, min_divisors_per_bin: int = 8
+    samplings: NDArray, min_bins: int, max_bins: int, min_divisors: int = 8
 ) -> tuple[list, list[int], int]:
     """Calculate the binned indices, strides, and maximum sampling from an array of random sampling rates.
 
@@ -405,11 +405,11 @@ def get_strides_and_idxs(
         The minimum number of sampling bins.
     max_bins : int
         The maximum number of sampling bins.
-    min_divisors_per_bin : int, optional
-        Require at least ``min_divisors_per_bin * min_bins`` divisors of ``max_sampling``
-        so candidate strides are dense enough to separate the samplings. Higher
-        values give more, better-separated groups at the cost of a larger
-        ``max_sampling`` (hence larger fine grid). Default 8.
+    min_divisors : int, optional
+        Require at least this many divisors of ``max_sampling`` so the candidate
+        strides are dense enough to separate the samplings. Higher values give
+        more, better-separated groups at the cost of a larger ``max_sampling``
+        (hence larger fine grid). Default 8.
 
     Returns
     -------
@@ -423,7 +423,7 @@ def get_strides_and_idxs(
     # 1. Fine-grid size >= max(samplings), chosen to be divisor-rich so the
     #    candidate strides (its divisors) are dense enough to separate the
     #    sampling distribution. Bounded overshoot keeps the fine grid in check.
-    need = max(min_divisors_per_bin * min_bins, min_bins + 1)
+    need = max(min_divisors, min_bins + 1)
     max_sampling = max_samp
     while len(get_divisors(max_sampling)) < need and max_sampling < 2 * max_samp:
         max_sampling += 1

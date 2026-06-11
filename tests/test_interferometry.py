@@ -210,13 +210,13 @@ class TestGetStridesAndIdxs:
 
     def test_max_sampling_is_divisor_rich(self):
         # When the overshoot cap is not hit, max_sampling is bumped up to an
-        # integer with at least min_divisors_per_bin * min_bins divisors.
-        min_divisors_per_bin = 4
+        # integer with at least min_divisors divisors.
+        min_divisors = 4
         samplings = np.array([43])  # prime; needs bumping for richer divisors
         _, _, max_sampling = get_strides_and_idxs(
-            samplings, self.MIN_BINS, self.MAX_BINS, min_divisors_per_bin=min_divisors_per_bin
+            samplings, self.MIN_BINS, self.MAX_BINS, min_divisors=min_divisors
         )
-        need = max(min_divisors_per_bin * self.MIN_BINS, self.MIN_BINS + 1)
+        need = max(min_divisors, self.MIN_BINS + 1)
         assert len(get_divisors(max_sampling)) >= need
         assert max_sampling >= 43
 
@@ -256,12 +256,12 @@ class TestGetStridesAndIdxs:
         _assert_valid_grouping(np.array([7]), idxs, u_strides, max_sampling, self.MIN_BINS)
         assert len(u_strides) == 1
 
-    def test_higher_min_divisors_per_bin_is_at_least_as_rich(self):
-        # Raising min_divisors_per_bin cannot reduce the divisor count of max_sampling.
+    def test_higher_min_divisors_is_at_least_as_rich(self):
+        # Raising min_divisors cannot reduce the divisor count of max_sampling.
         samplings = np.array([43])
         counts = [
             len(get_divisors(get_strides_and_idxs(
-                samplings, self.MIN_BINS, self.MAX_BINS, min_divisors_per_bin=r
+                samplings, self.MIN_BINS, self.MAX_BINS, min_divisors=r
             )[2]))
             for r in (1, 2, 4, 6)
         ]
