@@ -92,6 +92,69 @@ def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
     return rchi2
 
 
+def rmse(pred: Array, true: Array, flags: Optional[Array] = None) -> Array:
+    """Root-mean-square error between a prediction and the truth.
+
+    Complex-aware (uses ``|pred - true|``) and, when ``flags`` is supplied and matches the
+    array shape, flag-masked using the same ``~flags`` convention as :func:`reduced_chi2`
+    so the two metrics are computed over the same data. ``flags=None`` (or a shape
+    mismatch, e.g. per-antenna gains vs per-baseline flags) means no masking.
+    """
+    diff = pred - true
+    if flags is not None and flags.shape == diff.shape:
+        diff = diff[~flags]
+    return jnp.sqrt(jnp.mean(jnp.abs(diff) ** 2))
+
+
+# (label, pred/truth key, apply visibility flags?, noise-normalise?)
+_TRUTH_METRIC_SPECS = [
+    ("Ast. Vis", "vis_ast", True, True),
+    ("RFI Vis ", "vis_rfi", True, True),
+    ("Gains   ", "gains", False, False),  # noise-normalisation is not meaningful for gains
+]
+
+
+def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
+    """Print RMSE of the true ast/rfi visibilities and gains against ``pred``.
+
+    Dynamic: only quantities whose truth is actually available (not all-NaN) are printed,
+    so the block adapts to what the tab-sim zarr provides. For each available quantity the
+    raw RMSE and three normalised variants are shown with labels -- normalised by the true
+    signal RMS, by the data noise (visibilities only) and by the peak truth amplitude.
+    ``point`` is e.g. ``"init"`` or ``"opt"``.
+    """
+    noise = tab_config.noise
+    flags = tab_config.flags
+
+    printed_header = False
+    for label, key, use_flags, use_noise in _TRUTH_METRIC_SPECS:
+        true = truth.get(key)
+        if true is None or bool(jnp.all(jnp.isnan(true))):
+            continue
+
+        # pred arrays carry a leading sample axis (batch_ndims=1 from Predictive).
+        p = pred[key]
+        p = p[0] if p.ndim == true.ndim + 1 else p
+
+        mask = flags if (use_flags and flags is not None and flags.shape == true.shape) else None
+        masked_true = true[~mask] if mask is not None else true
+
+        r = rmse(p, true, mask)
+        signal = jnp.sqrt(jnp.mean(jnp.abs(masked_true) ** 2))
+        peak = jnp.max(jnp.abs(true))
+
+        if not printed_header:
+            print()
+            print(f"Truth metrics @ {point} params:")
+            printed_header = True
+
+        parts = [f"RMSE: {r:.3e}", f"NRMSE(signal): {r / signal:.3e}"]
+        if use_noise:
+            parts.append(f"NRMSE(noise): {r / noise:.3e}")
+        parts.append(f"NRMSE(peak): {r / peak:.3e}")
+        print(f"  {label} | " + "  ".join(parts))
+
+
 def get_ast_fringe_rate(uv, freq=1.227e9, D=13.5):
 
     omega = 2 * np.pi / (24 * 3600)
@@ -359,7 +422,7 @@ def svi_predict(
 
 @measure_runtime
 def init_predict(
-    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict, state=None, constants=None
+    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict, state=None, constants=None, truth=None
 ):
 
     pred = Predictive(
@@ -373,6 +436,9 @@ def init_predict(
     )
     print()
     print(f"Reduced Chi^2 @ init params : {rchi2}")
+
+    if truth is not None:
+        print_truth_metrics(init_pred, truth, tab_config, "init")
 
     return init_pred
 
@@ -388,6 +454,7 @@ def run_opt(
     params_path,
     state=None,
     constants=None,
+    truth=None,
 ):
 
     start = datetime.now()
@@ -415,13 +482,6 @@ def run_opt(
     write_results_xds(vi_pred, tab_config, map_path)
     # write_params_xds(vi_params, gp_params, ms_params, params_path, overwrite=True)
 
-    # if get_truth_conditional(config):
-
-    #     # vi_pred keys are ['ast_vis', 'gains', 'rfi_vis', 'rmse_ast', 'rmse_gains', 'rmse_rfi', 'vis_obs']
-    #     print(f"RMSE Gains      : {jnp.mean(vi_pred['rmse_gains']):.5f}")
-    #     print(f"RMSE RFI Vis    : {jnp.mean(vi_pred['rmse_rfi']):.5f}")
-    #     print(f"RMSE AST Vis    : {jnp.mean(vi_pred['rmse_ast']):.5f}")
-
     print()
     print(f"Optimization Run Time : {datetime.now() - start}")
     print(f"{datetime.now()}")
@@ -432,6 +492,9 @@ def run_opt(
     )
     print()
     print(f"Reduced Chi^2 @ opt params : {rchi2}")
+
+    if truth is not None:
+        print_truth_metrics(vi_pred, truth, tab_config, "opt")
 
     print()
     print(f"Copying tabascal results to MS file from {map_path}")
