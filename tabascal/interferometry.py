@@ -414,7 +414,8 @@ def get_strides_and_idxs(
     Returns
     -------
     tuple[list, list[int], int]
-        The indices from the samplings array that fall into each stride bin, the binned strides, and the maximum sampling rate which is divisible by all strides.
+        The indices from the samplings array that fall into each stride bin,
+        the binned strides, and the maximum sampling rate which is divisible by all strides.
     """
 
     samplings = np.asarray(samplings)
