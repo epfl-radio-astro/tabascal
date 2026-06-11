@@ -166,7 +166,7 @@ class TabascalPerfCheck(_TabascalRunBase):
 class TabascalMemCheck(_TabascalRunBase):
     """Verify peak GPU memory usage of the RiemannFFI run."""
 
-    variant = "RiemannFFI"
+    variant = parameter(["RiemannFFI"])
     precision = parameter(["single", "double"])
     measure_memory = True
 
