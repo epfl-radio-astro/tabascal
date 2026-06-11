@@ -9,16 +9,96 @@ import reframe.utility.sanity as sn
 _src_root = str(Path(__file__).resolve().parents[2])
 
 
-@rfm.simple_test
-class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
-    """Verify tabascal pipeline performance on GPU."""
-
-    variant = parameter(["Riemann", "RiemannFFI"])
-    precision = parameter(["single", "double"])
+class _TabascalRunBase(rfm.RunOnlyRegressionTest):
+    """Common configuration and run setup for the tabascal checks."""
 
     valid_systems = ["daint:gpu", "generic:default"]
     valid_prog_environs = ["builtin"]
     time_limit = "30m"
+
+    # Subclasses must define ``variant`` and ``precision`` (as parameters or
+    # plain attributes). ``measure_memory`` enables GPU memory profiling.
+    measure_memory = False
+
+    _components_map = {
+        "Riemann": [
+            "trajectory:FixedOrbit",
+            "rfi_signal:ComplexRFI",
+            "rfi_vis:RiemannVisTimeFreqCalculation",
+            "ast_vis:FourierTimeFreqGPAst",
+            "gains:UnitaryGains",
+        ],
+        "RiemannFFI": [
+            "trajectory:FixedOrbit",
+            "rfi_signal:ComplexRFI",
+            "rfi_vis:RiemannVisTimeFreqCalculationFFI",
+            "ast_vis:FourierTimeFreqGPAst",
+            "gains:UnitaryGains",
+        ],
+    }
+
+    @run_before("run")
+    def prepare_run(self):
+        components = self._components_map[self.variant]
+        components_str = ",".join(components)
+        workdir = os.path.join(self.stagedir, "workdir")
+
+        self.prerun_cmds = ["set -e"]
+
+        if self.current_partition.fullname == "daint:gpu":
+            self.prerun_cmds += [
+                ". /opt/conda/etc/profile.d/conda.sh",
+                "conda activate tab",
+            ]
+
+        self.prerun_cmds.append(
+            f"python {_src_root}/ci/reframe/prepare_data.py"
+            f" --components '{components_str}'"
+            f" --workdir {workdir}"
+            f" --src-root {_src_root}"
+            f" --precision {self.precision}"
+        )
+
+        run_cmd = [
+            "python",
+            f"{_src_root}/tabascal/scripts/run_tabascal.py",
+            "run",
+            "-c",
+            f"{workdir}/tab_target.yaml",
+            "-s",
+            f"$(cat {workdir}/sim_dir.txt)",
+            "--extra-tle-dir",
+            f"{_src_root}/tabascal/data/tles",
+            "-t",
+        ]
+
+        if self.measure_memory:
+            # Use the platform allocator so JAX releases memory on demand,
+            # giving an accurate peak GPU memory reading via gpu_stats. This
+            # disables the caching BFC allocator and slows execution, so this
+            # path is kept separate from the timing references.
+            self.env_vars["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+            # Wrap the run with gpu_stats (https://github.com/AdhocMan/gpu_stats),
+            # which must be available on PATH on the target system.
+            self.executable = "gpu_stats"
+            self.executable_opts = run_cmd
+        else:
+            self.executable = run_cmd[0]
+            self.executable_opts = run_cmd[1:]
+
+    @sanity_function
+    def validate(self):
+        return sn.assert_found(
+            r"Reduced Chi\^2 @ opt params : [\d.eE+-]+", self.stdout
+        )
+
+
+@rfm.simple_test
+class TabascalPerfCheck(_TabascalRunBase):
+    """Verify tabascal pipeline performance on GPU."""
+
+    variant = parameter(["Riemann", "RiemannFFI"])
+    precision = parameter(["single", "double"])
 
     # References are keyed by (variant, precision). Single precision timings
     # are placeholders to be measured and updated later.
@@ -49,67 +129,9 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
         },
     }
 
-    _components_map = {
-        "Riemann": [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFI",
-            "rfi_vis:RiemannVisTimeFreqCalculation",
-            "ast_vis:FourierTimeFreqGPAst",
-            "gains:UnitaryGains",
-        ],
-        "RiemannFFI": [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFI",
-            "rfi_vis:RiemannVisTimeFreqCalculationFFI",
-            "ast_vis:FourierTimeFreqGPAst",
-            "gains:UnitaryGains",
-        ],
-    }
-
     @run_before("performance")
     def set_reference(self):
         self.reference = self._reference_by_variant[(self.variant, self.precision)]
-
-    @run_before("run")
-    def prepare_run(self):
-        components = self._components_map[self.variant]
-        components_str = ",".join(components)
-        workdir = os.path.join(self.stagedir, "workdir")
-
-        self.prerun_cmds = ["set -e"]
-
-        if self.current_partition.fullname == "daint:gpu":
-            self.prerun_cmds += [
-                ". /opt/conda/etc/profile.d/conda.sh",
-                "conda activate tab",
-            ]
-
-        self.prerun_cmds.append(
-            f"python {_src_root}/ci/reframe/prepare_data.py"
-            f" --components '{components_str}'"
-            f" --workdir {workdir}"
-            f" --src-root {_src_root}"
-            f" --precision {self.precision}"
-        )
-
-        self.executable = "python"
-        self.executable_opts = [
-            f"{_src_root}/tabascal/scripts/run_tabascal.py",
-            "run",
-            "-c",
-            f"{workdir}/tab_target.yaml",
-            "-s",
-            f"$(cat {workdir}/sim_dir.txt)",
-            "--extra-tle-dir",
-            f"{_src_root}/tabascal/data/tles",
-            "-t",
-        ]
-
-    @sanity_function
-    def validate(self):
-        return sn.assert_found(
-            r"Reduced Chi\^2 @ opt params : [\d.eE+-]+", self.stdout
-        )
 
     @performance_function("s")
     def total_runtime(self):
@@ -131,4 +153,34 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
             self.stdout,
             "val",
             float,
+        )
+
+
+@rfm.simple_test
+class TabascalMemCheck(_TabascalRunBase):
+    """Verify peak GPU memory usage of the RiemannFFI double precision run."""
+
+    variant = "RiemannFFI"
+    precision = "double"
+    measure_memory = True
+
+    # Peak memory reference is a placeholder to be measured and updated later.
+    reference = {
+        "daint:gpu": {
+            "max_memory": (0.0, -0.50, 0.15, "MB"),
+        },
+    }
+
+    @performance_function("MB")
+    def max_memory(self):
+        # gpu_stats prints a per-process summary line to stdout:
+        #   total memory: mean <X> MB, max <Y> MB
+        # Take the largest reported peak across any reported process.
+        return sn.max(
+            sn.extractall(
+                r"total memory:\s+mean\s+[\d.]+\s+MB,\s+max\s+(?P<val>[\d.]+)\s+MB",
+                self.stdout,
+                "val",
+                float,
+            )
         )
