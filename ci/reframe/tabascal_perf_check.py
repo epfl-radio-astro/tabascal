@@ -51,12 +51,17 @@ class _TabascalRunBase(rfm.RunOnlyRegressionTest):
                 "conda activate tab",
             ]
 
+        # Memory checks only need a few optimizer iterations to reach peak
+        # usage, while timing checks run the full optimization.
+        max_iter = 10 if self.measure_memory else 1000
+
         self.prerun_cmds.append(
             f"python {_src_root}/ci/reframe/prepare_data.py"
             f" --components '{components_str}'"
             f" --workdir {workdir}"
             f" --src-root {_src_root}"
             f" --precision {self.precision}"
+            f" --max-iter {max_iter}"
         )
 
         run_cmd = [
@@ -158,18 +163,30 @@ class TabascalPerfCheck(_TabascalRunBase):
 
 @rfm.simple_test
 class TabascalMemCheck(_TabascalRunBase):
-    """Verify peak GPU memory usage of the RiemannFFI double precision run."""
+    """Verify peak GPU memory usage of the RiemannFFI run."""
 
     variant = "RiemannFFI"
-    precision = "double"
+    precision = parameter(["single", "double"])
     measure_memory = True
 
-    # Peak memory reference is a placeholder to be measured and updated later.
-    reference = {
-        "daint:gpu": {
-            "max_memory": (4047, -0.20, 0.10, "MB"),
+    # Peak memory references keyed by precision. The single precision value is
+    # a placeholder to be measured and updated later.
+    _reference_by_precision = {
+        "single": {
+            "daint:gpu": {
+                "max_memory": (2024, -0.20, 0.10, "MB"),
+            },
+        },
+        "double": {
+            "daint:gpu": {
+                "max_memory": (4047, -0.20, 0.10, "MB"),
+            },
         },
     }
+
+    @run_before("performance")
+    def set_reference(self):
+        self.reference = self._reference_by_precision[self.precision]
 
     @performance_function("MB")
     def max_memory(self):
