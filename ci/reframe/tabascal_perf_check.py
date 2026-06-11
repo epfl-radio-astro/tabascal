@@ -167,7 +167,7 @@ class TabascalMemCheck(_TabascalRunBase):
     # Peak memory reference is a placeholder to be measured and updated later.
     reference = {
         "daint:gpu": {
-            "max_memory": (0.0, -0.50, 0.15, "MB"),
+            "max_memory": (4047, -0.20, 0.10, "MB"),
         },
     }
 
