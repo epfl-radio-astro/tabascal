@@ -1,4 +1,8 @@
-FROM docker.io/nvidia/cuda:12.9.1-devel-ubuntu22.04
+# Select the base image via CUDA_VARIANT.
+ARG CUDA_VARIANT="12"
+FROM docker.io/nvidia/cuda:12.9.1-devel-ubuntu22.04 AS base-12
+FROM docker.io/nvidia/cuda:13.2.1-devel-ubuntu24.04 AS base-13
+FROM base-${CUDA_VARIANT} AS base
 
 SHELL ["/bin/bash", "-c"]
 
@@ -41,11 +45,14 @@ COPY . .
 # enable FFI CUDA support
 ENV TABASCAL_CUDA=1
 
-# Build FFI and install package
+# Build FFI and install package. The CUDA extra and the pinned jax wheel both
+# follow CUDA_VARIANT so they match the selected base image; JAX_VERSION only
+# decides whether the jax wheel is pinned ("latest" leaves it unpinned).
 ARG JAX_VERSION="latest"
+ARG CUDA_VARIANT
 RUN if [ "$JAX_VERSION" = "latest" ] || [ -z "$JAX_VERSION" ]; then \
-      pip install --no-cache-dir -e ".[test,cuda13]"; \
+      pip install --no-cache-dir -e ".[test,cuda${CUDA_VARIANT}]"; \
     else \
-      pip install --no-cache-dir -e ".[test,cuda12]" "jax[cuda12]==$JAX_VERSION"; \
+      pip install --no-cache-dir -e ".[test,cuda${CUDA_VARIANT}]" "jax[cuda${CUDA_VARIANT}]==$JAX_VERSION"; \
     fi
 

@@ -35,6 +35,12 @@ def main():
         "--workdir", required=True, help="Working directory for output files"
     )
     parser.add_argument(
+        "--precision",
+        default="double",
+        choices=["single", "double"],
+        help="Model floating point precision (default: double)",
+    )
+    parser.add_argument(
         "--src-root",
         default=".",
         help="Root of the tabascal source tree (default: .)",
@@ -127,7 +133,7 @@ def main():
 
     components = args.components.split(",")
     config = yaml_load(tab_template)
-    config["model"] = {"components": components, "precision": "double"}
+    config["model"] = {"components": components, "precision": args.precision}
     config_out = workdir / "tab_target.yaml"
     with open(config_out, "w") as f:
         yaml.dump(config, f)
