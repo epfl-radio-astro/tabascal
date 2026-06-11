@@ -52,7 +52,8 @@ class _TabascalRunBase(rfm.RunOnlyRegressionTest):
             ]
 
         # Memory checks only need a few optimizer iterations to reach peak
-        # usage, while timing checks run the full optimization.
+        # usage, while timing checks run the full optimization to hide
+        # compilation overhead
         max_iter = 10 if self.measure_memory else 1000
 
         self.prerun_cmds.append(
@@ -174,12 +175,12 @@ class TabascalMemCheck(_TabascalRunBase):
     _reference_by_precision = {
         "single": {
             "daint:gpu": {
-                "max_memory": (2024, -0.20, 0.10, "MB"),
+                "max_memory": (3634, -0.10, 0.05, "MB"),
             },
         },
         "double": {
             "daint:gpu": {
-                "max_memory": (4047, -0.20, 0.10, "MB"),
+                "max_memory": (4047, -0.10, 0.05, "MB"),
             },
         },
     }
