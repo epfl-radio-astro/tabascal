@@ -35,7 +35,7 @@ class TruthError(Exception):
 # variable simply makes that truth unavailable (reporting is dynamic).
 _VIS_AST_VARS = ["vis_ast"]
 _VIS_RFI_VARS = ["vis_rfi"]
-_GAINS_VARS = ["gains_ant", "gains"]
+_GAINS_VARS = ["gains_ants", "gains_ant", "gains"]
 _RFI_A_VARS = ["rfi_tle_sat_A"]
 
 

@@ -36,7 +36,7 @@ def _write_sim_zarr(path, *, vis_ast=True, vis_rfi=True, gains=False):
     if vis_rfi:
         data["vis_rfi"] = (("time", "bl", "freq"), rng.standard_normal((N_TIME, N_BL, N_FREQ)) + 2j)
     if gains:
-        data["gains_ant"] = (("time", "ant", "freq"), rng.standard_normal((N_TIME, N_ANT, N_FREQ)) + 1j)
+        data["gains_ants"] = (("time", "ant", "freq"), rng.standard_normal((N_TIME, N_ANT, N_FREQ)) + 1j)
     xr.Dataset(data).to_zarr(path, mode="w")
     return str(path)
 
