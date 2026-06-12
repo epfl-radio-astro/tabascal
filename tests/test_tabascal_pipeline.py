@@ -408,6 +408,24 @@ rfi_vis_configs = [
             ],
             # single: ARM~0.916 (100 iters), x86~1.128 (100 iters), GPU~0.910 (100 iters)
             chi2_ref={"double": 0.8977856059138833, "single": (0.9, 1.2)},
+            # Truth-based RMSE at the opt point (true ast/rfi/gains vis present in the
+            # sim). Captured from local ARM runs: double bounds ~+/-5% (double is
+            # architecture-stable); single bounds are wider to absorb the documented
+            # cross-architecture spread (single chi2 ranges ARM~0.92 / x86~1.13 /
+            # GPU~0.91). This sim has identity gains and UnitaryGains predicts identity,
+            # so gains RMSE is ~0 exactly. Tighten once canonical CI values are recorded.
+            metrics_ref={
+                "double": {
+                    "ast": {"RMSE": (0.18, 0.20), "NRMSE(signal)": (0.104, 0.115)},
+                    "rfi": {"RMSE": (0.24, 0.26), "NRMSE(signal)": (0.022, 0.024)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+                "single": {
+                    "ast": {"RMSE": (0.17, 0.26), "NRMSE(signal)": (0.10, 0.15)},
+                    "rfi": {"RMSE": (0.24, 0.36), "NRMSE(signal)": (0.021, 0.032)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+            },
         ),
         id="RiemannVisTimeFreqCalculation",
     ),
@@ -473,6 +491,24 @@ gains_configs = [
             },
             # single: ARM~0.916 (100 iters), x86~1.128 (100 iters), GPU~0.910 (100 iters)
             chi2_ref={"double": 0.8977832575028029, "single": (0.9, 1.2)},
+            # Truth-based RMSE at the opt point (true ast/rfi/gains vis present in the
+            # sim). Captured from local ARM runs: double bounds ~+/-5%; single bounds
+            # widened for the documented cross-architecture spread. GPGains fits the gains
+            # and recovers them to ~4e-4; the gains upper bound leaves headroom for the
+            # single-precision / cross-architecture fit residual. Tighten once canonical
+            # CI values are recorded.
+            metrics_ref={
+                "double": {
+                    "ast": {"RMSE": (0.18, 0.20), "NRMSE(signal)": (0.104, 0.115)},
+                    "rfi": {"RMSE": (0.24, 0.26), "NRMSE(signal)": (0.022, 0.024)},
+                    "gains": {"RMSE": (0.0, 1e-3)},
+                },
+                "single": {
+                    "ast": {"RMSE": (0.17, 0.26), "NRMSE(signal)": (0.10, 0.15)},
+                    "rfi": {"RMSE": (0.24, 0.36), "NRMSE(signal)": (0.021, 0.032)},
+                    "gains": {"RMSE": (0.0, 3e-3)},
+                },
+            },
         ),
         id="GPGains",
     ),
