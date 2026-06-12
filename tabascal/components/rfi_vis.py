@@ -254,7 +254,6 @@ class RiemannVisTimeFreqVariable(Component):
             self.a1 = config.a1
             self.a2 = config.a2
             self.n_int_time = config.n_int_time
-            # self.n_int_freq = config.n_int_freq
             self.n_int_freq = config.args["rfi"]["freq_int_samples"]
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
@@ -269,17 +268,6 @@ class RiemannVisTimeFreqVariable(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def _print_saving(self):
-
-        saving = (
-            jnp.sum(
-                [i.size / s for i, s in zip(self.time_sample_idxs, self.time_strides)]
-            )
-            / self.n_bl
-        )
-
-        print(f"New intermediate is {100*saving:.2f} % of original size")
 
 
     def build_set_params(self):
@@ -307,7 +295,6 @@ class RiemannVisTimeFreqVariable(Component):
         n_freq = self.n_freq
         n_groups = len(self.time_sample_idxs)
         time_strides = self.time_strides
-        print(f"DEBUG: n_groups = {n_groups}")
 
         def calculate_rfi_vis_single(rfi_A, rfi_phase, a1, a2, constants):
 
@@ -374,7 +361,6 @@ class RiemannVisTimeFreqVariableFFI(Component):
             self.a1 = config.a1
             self.a2 = config.a2
             self.n_int_time = config.n_int_time
-            # self.n_int_freq = config.n_int_freq
             self.n_int_freq = config.args["rfi"]["freq_int_samples"]
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
@@ -389,17 +375,6 @@ class RiemannVisTimeFreqVariableFFI(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def _print_saving(self):
-
-        saving = (
-            jnp.sum(
-                [i.size / s for i, s in zip(self.time_sample_idxs, self.time_strides)]
-            )
-            / self.n_bl
-        )
-
-        print(f"New intermediate is {100*saving:.2f} % of original size")
 
     def build_set_params(self):
 
@@ -421,7 +396,6 @@ class RiemannVisTimeFreqVariableFFI(Component):
         n_groups = len(self.time_sample_idxs)
         time_strides = self.time_strides
         time_sample_idxs = self.time_sample_idxs
-        print(f"DEBUG: n_groups = {n_groups}")
 
         # Build one FFI operator per baseline group, each holding the precomputed
         # antenna-baseline indices for that group's subset of baselines.
