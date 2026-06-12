@@ -137,12 +137,21 @@ class PipelineTestConfig:
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
         config_overrides: Dictionary of overrides to the tabascal config file
+        metrics_ref: Optional truth-based RMSE references, keyed by precision then by
+            quantity (``ast``/``rfi``/``gains``) then by metric name (``RMSE``,
+            ``NRMSE(signal)``, ``NRMSE(noise)``, ``NRMSE(peak)``). Each value follows the
+            same scalar-or-``(lo, hi)`` tolerance convention as ``chi2_ref`` and is
+            asserted at the opt point. Only the listed metrics are checked; omit the
+            field (or a precision) to skip the RMSE assertion for that case.
     """
     sim_file_name: str
     components: list[str]
     chi2_ref: dict[str, float | tuple[float, float]]
     requires_double: bool = False
     config_overrides: dict = field(default_factory=dict)
+    metrics_ref: dict[str, dict[str, dict[str, float | tuple[float, float]]]] = field(
+        default_factory=dict
+    )
 
 
 def _run_pipeline(
@@ -194,15 +203,127 @@ def _run_pipeline(
     return result.returncode, result.stdout, result.stderr
 
 
+def _check_value(value: float, ref: float | tuple[float, float], label: str, rel: float = 1e-2) -> None:
+    """Compare a captured value against a reference.
+
+    A scalar ``ref`` is matched with relative tolerance ``rel``; a ``(lo, hi)`` tuple is
+    treated as inclusive bounds (used for single precision, whose convergence varies
+    across architectures). Shared by the chi^2 and truth-metric assertions.
+    """
+    if isinstance(ref, tuple):
+        lo, hi = ref
+        assert lo <= value <= hi, f"{label} {value:.6g} not in [{lo}, {hi}]"
+    else:
+        assert value == pytest.approx(ref, rel=rel), f"{label} {value:.6g} != {ref} (rel={rel})"
+
+
 def _assert_chi2(stdout: str, chi2_ref: float | tuple[float, float]) -> None:
     match = re.search(r"Reduced Chi\^2 @ opt params : ([\d.eE+-]+)", stdout)
     assert match, f"Could not find Reduced Chi^2 in output: {stdout}"
-    value = float(match.group(1))
-    if isinstance(chi2_ref, tuple):
-        lo, hi = chi2_ref
-        assert lo <= value <= hi, f"chi2 {value:.6f} not in [{lo}, {hi}]"
-    else:
-        assert value == pytest.approx(chi2_ref, rel=1e-2)
+    _check_value(float(match.group(1)), chi2_ref, "chi2")
+
+
+# Truth-metric quantity labels as printed by tabascal.tab_tools.print_truth_metrics,
+# mapped to the short keys used in PipelineTestConfig.metrics_ref.
+_TRUTH_QUANTITY_KEYS = {"Ast. Vis": "ast", "RFI Vis": "rfi", "Gains": "gains"}
+
+
+def _parse_truth_metrics(stdout: str, point: str) -> dict[str, dict[str, float]]:
+    """Capture the ``Truth metrics @ <point> params:`` block printed by a run.
+
+    Returns ``{quantity: {metric: value}}`` where ``quantity`` is one of ``ast``/``rfi``/
+    ``gains`` and ``metric`` is the printed name (``RMSE``, ``NRMSE(signal)``,
+    ``NRMSE(noise)``, ``NRMSE(peak)``). An absent block (no truth available) yields ``{}``.
+    """
+    lines = stdout.splitlines()
+    header = f"Truth metrics @ {point} params:"
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == header)
+    except StopIteration:
+        return {}
+
+    metrics: dict[str, dict[str, float]] = {}
+    for ln in lines[start + 1:]:
+        label, sep, rest = ln.partition("|")
+        if not sep:
+            break  # block ends at the first non-metric line
+        key = _TRUTH_QUANTITY_KEYS.get(label.strip())
+        if key is None:
+            break
+        metrics[key] = {
+            name: float(val)
+            for name, val in re.findall(r"(RMSE|NRMSE\([a-z]+\)):\s*([-\d.eE+]+)", rest)
+        }
+    return metrics
+
+
+def _assert_truth_metrics(
+    stdout: str, point: str, metrics_ref: dict[str, dict[str, float | tuple[float, float]]]
+) -> None:
+    """Assert captured truth metrics against references (mirrors :func:`_assert_chi2`).
+
+    ``metrics_ref`` is ``{quantity: {metric: scalar | (lo, hi)}}``; each value uses the
+    same tolerance convention as the chi^2 reference. Only the quantities/metrics listed
+    are checked, so a case can assert just the metrics it cares about.
+    """
+    parsed = _parse_truth_metrics(stdout, point)
+    for quantity, wanted in metrics_ref.items():
+        assert quantity in parsed, (
+            f"No '{quantity}' truth metrics @ {point} params found in output:\n{stdout}"
+        )
+        for metric, ref in wanted.items():
+            assert metric in parsed[quantity], (
+                f"Metric '{metric}' missing for '{quantity}' @ {point} params: {parsed[quantity]}"
+            )
+            _check_value(parsed[quantity][metric], ref, f"{quantity} {metric}")
+
+
+def test_truth_metric_capture_roundtrips_printed_output(capsys):
+    """The capture parses exactly what ``print_truth_metrics`` emits.
+
+    Round-trips the real reporter through the parser so the regex stays in sync with the
+    printed format (and a future format change fails here rather than silently parsing to
+    nothing). No network / sim data required.
+    """
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+
+    from tabascal.tab_tools import print_truth_metrics
+
+    n_bl, n_freq, n_time, n_ant = 3, 2, 4, 5
+    tab_config = SimpleNamespace(noise=2.0, flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool))
+
+    true_ast = jnp.ones((n_bl, n_freq, n_time), dtype=complex)
+    truth = {
+        "vis_ast": true_ast,                  # RMSE 1, signal 1, peak 1
+        "vis_rfi": jnp.nan * true_ast,        # unavailable -> dynamically skipped
+        "gains": jnp.full((n_ant, n_freq, n_time), 2.0 + 0j),  # RMSE 2, signal 2, peak 2
+    }
+    pred = {
+        "vis_ast": jnp.zeros((1, n_bl, n_freq, n_time), dtype=complex),
+        "vis_rfi": jnp.zeros((1, n_bl, n_freq, n_time), dtype=complex),
+        "gains": jnp.zeros((1, n_ant, n_freq, n_time), dtype=complex),
+    }
+
+    print_truth_metrics(pred, truth, tab_config, "opt")
+    stdout = capsys.readouterr().out
+
+    parsed = _parse_truth_metrics(stdout, "opt")
+    assert set(parsed) == {"ast", "gains"}  # rfi truth is NaN -> not printed/captured
+    assert parsed["ast"]["RMSE"] == pytest.approx(1.0)
+    assert parsed["ast"]["NRMSE(signal)"] == pytest.approx(1.0)
+    assert parsed["ast"]["NRMSE(noise)"] == pytest.approx(0.5)   # noise = 2
+    assert parsed["ast"]["NRMSE(peak)"] == pytest.approx(1.0)
+    assert parsed["gains"]["RMSE"] == pytest.approx(2.0)
+    assert "NRMSE(noise)" not in parsed["gains"]  # noise-norm not printed for gains
+
+    # Assertion helper: scalar (rel tol) and (lo, hi) bounds, plus the failure paths.
+    _assert_truth_metrics(stdout, "opt", {"ast": {"RMSE": 1.0, "NRMSE(noise)": (0.4, 0.6)}})
+    with pytest.raises(AssertionError):
+        _assert_truth_metrics(stdout, "opt", {"ast": {"RMSE": 2.0}})
+    with pytest.raises(AssertionError, match="No 'rfi'"):
+        _assert_truth_metrics(stdout, "opt", {"rfi": {"RMSE": 1.0}})
 
 # ---------------------------------------------------------------------------
 # Trajectory components — downstream fixed to RiemannVisTimeFreqCalculation + UnitaryGains
@@ -402,3 +523,7 @@ def test_pipeline(
     returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config, precision)
     assert returncode == 0, f"Tabascal failed: {stderr}"
     _assert_chi2(stdout, chi2_ref)
+
+    metrics_ref = t_config.metrics_ref.get(precision)
+    if metrics_ref:
+        _assert_truth_metrics(stdout, "opt", metrics_ref)
