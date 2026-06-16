@@ -21,7 +21,7 @@ from tabascal.truth import (
     read_true_vis_ast,
     has_truth,
 )
-from tabascal.tab_tools import rmse, print_truth_metrics
+from tabascal.tab_tools import rmse, print_truth_metrics, _effective_sample_size
 
 
 N_TIME, N_BL, N_FREQ, N_ANT = 4, 3, 2, 5
@@ -152,3 +152,31 @@ def test_print_truth_metrics_dynamic(tmp_path, capsys):
     assert "Ast. Vis" in out          # available
     assert "RFI Vis" not in out       # NaN truth -> skipped (dynamic)
     assert "Gains" not in out
+
+
+def test_effective_sample_size_tracks_correlation():
+    """N_eff deflates from N as the residual becomes more correlated.
+
+    The bias significance divides by sqrt(N_eff), so this is what stops a strongly
+    time-correlated residual from looking like a real bias. Three regimes:
+    uncorrelated ~ N, constant-in-time ~ N / n_time, fully constant -> 1.
+    """
+    rng = np.random.default_rng(0)
+    n_row, n_freq, n_time = 20, 1, 200
+    N = n_row * n_freq * n_time
+
+    white = (rng.standard_normal((n_row, n_freq, n_time))
+             + 1j * rng.standard_normal((n_row, n_freq, n_time)))
+    n_white = _effective_sample_size(white)
+    assert n_white > 0.4 * N            # ~independent -> close to N
+
+    # Same value repeated along time (rows still independent) -> deflated by ~n_time.
+    per_row = (rng.standard_normal((n_row, n_freq, 1))
+               + 1j * rng.standard_normal((n_row, n_freq, 1)))
+    constant_in_time = np.broadcast_to(per_row, (n_row, n_freq, n_time)).copy()
+    n_corr = _effective_sample_size(constant_in_time)
+    assert n_corr < n_white / 10        # strongly deflated
+    assert 5 < n_corr < 80              # ~ n_row (= N / n_time)
+
+    # A single constant offset everywhere is fully coherent -> one effective sample.
+    assert _effective_sample_size(np.full((n_row, n_freq, n_time), 1.0 + 1j)) == 1.0

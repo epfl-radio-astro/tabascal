@@ -106,28 +106,104 @@ def rmse(pred: Array, true: Array, flags: Optional[Array] = None) -> Array:
     return jnp.sqrt(jnp.mean(jnp.abs(diff) ** 2))
 
 
-# (label, pred/truth key, apply visibility flags?, noise-normalise?)
+# (label, pred/truth key, apply visibility flags?, noise-normalise?, unit)
 _TRUTH_METRIC_SPECS = [
-    ("Ast. Vis", "vis_ast", True, True),
-    ("RFI Vis ", "vis_rfi", True, True),
-    ("Gains   ", "gains", False, False),  # noise-normalisation is not meaningful for gains
+    ("Ast. Vis", "vis_ast", True, True, "Jy"),
+    ("RFI Vis ", "vis_rfi", True, True, "Jy"),
+    ("Gains   ", "gains", False, False, ""),  # gains are dimensionless; noise-norm meaningless
 ]
 
 
-def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
-    """Print RMSE of the true ast/rfi visibilities and gains against ``pred``.
+def _integrated_autocorr_time(arr: np.ndarray, axis: int) -> float:
+    """Integrated autocorrelation time along ``axis`` (MCMC effective-sample-size formula).
 
-    Dynamic: only quantities whose truth is actually available (not all-NaN) are printed,
-    so the block adapts to what the tab-sim zarr provides. For each available quantity the
-    raw RMSE and three normalised variants are shown with labels -- normalised by the true
-    signal RMS, by the data noise (visibilities only) and by the peak truth amplitude.
-    ``point`` is e.g. ``"init"`` or ``"opt"``.
+    The complex autocovariance is averaged over all other axes (treating them as repeats of
+    a stationary 1D series) and summed with the triangular ``(1 - k/n)`` weight, truncated at
+    the first non-positive lag (Sokal automatic windowing) to avoid summing noise. Returns
+    ``tau >= 1``; ``N / tau`` is the effective number of independent samples along that axis.
+    """
+    n = arr.shape[axis]
+    if n < 4:
+        return 1.0
+    m = np.moveaxis(arr, axis, -1).reshape(-1, n)
+    g0 = np.mean(np.sum(np.abs(m) ** 2, axis=1))
+    if g0 <= 0:
+        return 1.0
+    tau = 1.0
+    for k in range(1, n):
+        rho = np.mean(np.sum(m[:, : n - k] * np.conj(m[:, k:]), axis=1).real) / g0
+        if rho <= 0:
+            break
+        tau += 2.0 * (1.0 - k / n) * rho
+    return tau
+
+
+def _effective_sample_size(resid: np.ndarray) -> float:
+    """Effective number of independent samples for the *mean* (bias) of a structured residual.
+
+    ``resid`` is the complex error array with shape ``(n_row, n_freq, n_time)`` where ``n_row``
+    is baselines (visibilities) or antennas (gains). Such errors are strongly correlated --
+    chiefly along time -- so the naive count ``N`` hugely overstates how much independent
+    information the mean carries, and a bias z-score built on ``N`` is correspondingly
+    inflated. Estimate a separable deflation ``N_eff = N_eff_row * N_eff_freq * N_eff_time``:
+    the ordered freq/time axes use the integrated-autocorrelation time, while the unordered
+    row axis uses its full cross-correlation matrix. Centred on the global mean (the bias
+    under test), so correlation is mildly under-estimated -- good to a factor of ~2, which is
+    all the bias significance needs. A constant residual (no fluctuation) is fully coherent
+    and returns ``N_eff = 1``.
+    """
+    y = np.asarray(resid)
+    N = y.size
+    if N <= 1:
+        return 1.0
+    y = y - y.mean()  # centre on the bias under test
+    if np.mean(np.abs(y) ** 2) <= 0:
+        return 1.0  # constant residual -> perfectly coherent -> one effective sample
+
+    n_row, n_freq, n_time = y.shape
+    neff_time = n_time / _integrated_autocorr_time(y, 2)
+    neff_freq = n_freq / _integrated_autocorr_time(y, 1)
+
+    # Row axis is unordered (baseline/antenna index is not a sequence), so use the full
+    # correlation matrix rather than an autocorrelation: N_eff_row = n_row^2 / sum(rho_ij).
+    yr = y.reshape(n_row, -1)
+    yr = yr - yr.mean(axis=1, keepdims=True)
+    nrm = np.sqrt(np.sum(np.abs(yr) ** 2, axis=1))
+    good = nrm > 0
+    if good.sum() >= 2:
+        yg = yr[good] / nrm[good][:, None]
+        neff_row = good.sum() ** 2 / (yg @ yg.conj().T).real.sum()
+    else:
+        neff_row = float(n_row)
+
+    return float(min(max(neff_time * neff_freq * neff_row, 1.0), N))
+
+
+def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
+    """Print truth-based error metrics for the available ast/rfi visibilities and gains.
+
+    Dynamic: only quantities whose truth is actually available (not all-NaN) are printed, so
+    the block adapts to what the tab-sim zarr provides. Each available quantity gets two rows,
+    both in absolute units and normalised by the data noise and the true signal RMS:
+
+    - ``RMSE`` -- root-mean-square error, i.e. total error power (coherent bias + random
+      scatter).
+    - ``bias`` -- magnitude of the (complex) mean error, the coherent component the RMSE
+      cannot isolate (e.g. RFI leaking systematically into the recovered sky). It is also
+      quoted as a significance in sigma, ``|ME| * sqrt(2 * N_eff) / RMSE``, where ``N_eff``
+      (see :func:`_effective_sample_size`) is the *correlation-deflated* sample count -- using
+      the raw count would inflate the significance by ~1/sqrt(correlation) and make an
+      acceptable fluctuation look like a real bias.
+
+    Absolute values carry the quantity's unit (Jy for visibilities; gains are dimensionless);
+    ``/noise`` and ``/signal`` columns are dimensionless ratios. Noise normalisation is
+    omitted for gains. ``point`` is e.g. ``"init"`` or ``"opt"``.
     """
     noise = tab_config.noise
     flags = tab_config.flags
 
     printed_header = False
-    for label, key, use_flags, use_noise in _TRUTH_METRIC_SPECS:
+    for label, key, use_flags, use_noise, unit in _TRUTH_METRIC_SPECS:
         true = truth.get(key)
         if true is None or bool(jnp.all(jnp.isnan(true))):
             continue
@@ -136,23 +212,36 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
         p = pred[key]
         p = p[0] if p.ndim == true.ndim + 1 else p
 
+        diff_full = p - true
         mask = flags if (use_flags and flags is not None and flags.shape == true.shape) else None
-        masked_true = true[~mask] if mask is not None else true
+        if mask is not None:
+            diff, masked_true = diff_full[~mask], true[~mask]
+        else:
+            diff, masked_true = diff_full, true
 
-        r = rmse(p, true, mask)
-        signal = jnp.sqrt(jnp.mean(jnp.abs(masked_true) ** 2))
-        peak = jnp.max(jnp.abs(true))
+        r = float(jnp.sqrt(jnp.mean(jnp.abs(diff) ** 2)))   # RMSE: bias + scatter
+        me = float(jnp.abs(jnp.mean(diff)))                 # |mean error|: coherent bias
+        signal = float(jnp.sqrt(jnp.mean(jnp.abs(masked_true) ** 2)))
+        n_eff = _effective_sample_size(np.asarray(diff_full))
+        sigma = np.sqrt(2.0 * n_eff) * me / r if r > 0 else 0.0
 
         if not printed_header:
             print()
             print(f"Truth metrics @ {point} params:")
             printed_header = True
 
-        parts = [f"RMSE: {r:.3e}", f"NRMSE(signal): {r / signal:.3e}"]
-        if use_noise:
-            parts.append(f"NRMSE(noise): {r / noise:.3e}")
-        parts.append(f"NRMSE(peak): {r / peak:.3e}")
-        print(f"  {label} | " + "  ".join(parts))
+        u = f" {unit}" if unit else ""
+
+        def row(name: str, value: float, tail: str = "") -> str:
+            parts = [f"{name}  {value:.3e}{u}"]
+            if use_noise:
+                parts.append(f"/noise {value / noise:.3e}")
+            parts.append(f"/signal {value / signal:.3e}")
+            return "  ".join(parts) + tail
+
+        print(f"  {label} | " + row("RMSE", r))
+        sig = f"  [ {sigma:.1f} sigma, N_eff {n_eff:.0f} ]"
+        print(f"  {' ' * len(label)} | " + row("bias", me, sig))
 
 
 def get_ast_fringe_rate(uv, freq=1.227e9, D=13.5):
