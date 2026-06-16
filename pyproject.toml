@@ -70,6 +70,11 @@ tab2MS = "tabascal.scripts.results_to_MS:main"
 # ── Pytest ─────────────────────────────────────────────────────────────────────
 
 [tool.pytest.ini_options]
+# testpaths makes tests/ the initial collection path when pytest is run with no path
+# argument (as CI does). This loads tests/conftest.py as an *initial* conftest, so its
+# --x64 option is registered before command-line parsing -- without it, pytest 9.1+ errors
+# "unrecognized arguments: --x64" on the `pytest --x64 false` single-precision invocation.
+testpaths     = ["tests"]
 log_cli       = true
 log_cli_level = "WARNING"
 addopts       = "--cov=tabascal --cov-report=term-missing"
