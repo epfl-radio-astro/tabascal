@@ -31,9 +31,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # Pass the tests/ path explicitly: the --x64 option is defined in
+      # tests/conftest.py, and since pytest 9.1 a bare `pytest` (no path) does not
+      # load that subdirectory conftest early enough to register the option, so
+      # `pytest --x64 false` below fails with "unrecognized arguments: --x64".
+      # Naming tests/ makes it an initial conftest and registers --x64 in time.
       - name: Run pytest (double precision)
         run: |
-          pytest -v --tb=short --color=yes
+          pytest tests/ -v --tb=short --color=yes
 
       # tabascal defaults to single precision (model.precision: single), so guard
       # that path explicitly. requires_double tests skip; the single-capable
@@ -41,7 +46,7 @@ jobs:
       # is cached by the double run above, so this is fast.
       - name: Run pytest (single precision)
         run: |
-          pytest -v --tb=short --color=yes --x64 false --no-cov
+          pytest tests/ -v --tb=short --color=yes --x64 false --no-cov
 
   coverage:
     name: Test Coverage
@@ -58,7 +63,7 @@ jobs:
 
       - name: Run pytest with coverage
         run: |
-          pytest --cov=tabascal --cov-report=xml --cov-report=html --cov-report=term -v
+          pytest tests/ --cov=tabascal --cov-report=xml --cov-report=html --cov-report=term -v
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
