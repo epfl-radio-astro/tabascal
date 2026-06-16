@@ -36,8 +36,11 @@ test_job:
     - conda activate tab
     - cd /tabascal/src
     # Run the suite in both precisions; the --x64 flag drives jax_enable_x64.
-    - python3 -m pytest --x64 false   # single precision (fp32)
-    - python3 -m pytest --x64 true    # double precision (fp64)
+    # Pass the tests/ path explicitly: pytest_addoption (which registers --x64)
+    # lives in tests/conftest.py, and only conftests reached via a path arg (or
+    # rootdir) are loaded early enough to register options on all pytest versions.
+    - python3 -m pytest tests/ --x64 false   # single precision (fp32)
+    - python3 -m pytest tests/ --x64 true    # double precision (fp64)
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
