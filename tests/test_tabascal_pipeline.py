@@ -137,12 +137,23 @@ class PipelineTestConfig:
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
         config_overrides: Dictionary of overrides to the tabascal config file
+        metrics_ref: Optional truth-based error references, keyed by precision then by
+            quantity (``ast``/``rfi``/``gains``) then by metric name. Available metrics are
+            the RMSE family (``RMSE``, ``NRMSE(noise)``, ``NRMSE(signal)``), the
+            mean-error / bias family (``|ME|``, ``NME(noise)``, ``NME(signal)``) and
+            ``bias_significance`` (the bias in units of sigma). Each value follows the same
+            scalar-or-``(lo, hi)`` tolerance convention as ``chi2_ref`` and is asserted at the
+            opt point. Only the listed metrics are checked; omit the field (or a precision) to
+            skip the assertion for that case.
     """
     sim_file_name: str
     components: list[str]
     chi2_ref: dict[str, float | tuple[float, float]]
     requires_double: bool = False
     config_overrides: dict = field(default_factory=dict)
+    metrics_ref: dict[str, dict[str, dict[str, float | tuple[float, float]]]] = field(
+        default_factory=dict
+    )
 
 
 def _run_pipeline(
@@ -194,15 +205,158 @@ def _run_pipeline(
     return result.returncode, result.stdout, result.stderr
 
 
+def _check_value(value: float, ref: float | tuple[float, float], label: str, rel: float = 1e-2) -> None:
+    """Compare a captured value against a reference.
+
+    A scalar ``ref`` is matched with relative tolerance ``rel``; a ``(lo, hi)`` tuple is
+    treated as inclusive bounds (used for single precision, whose convergence varies
+    across architectures). Shared by the chi^2 and truth-metric assertions.
+    """
+    if isinstance(ref, tuple):
+        lo, hi = ref
+        assert lo <= value <= hi, f"{label} {value:.6g} not in [{lo}, {hi}]"
+    else:
+        assert value == pytest.approx(ref, rel=rel), f"{label} {value:.6g} != {ref} (rel={rel})"
+
+
 def _assert_chi2(stdout: str, chi2_ref: float | tuple[float, float]) -> None:
     match = re.search(r"Reduced Chi\^2 @ opt params : ([\d.eE+-]+)", stdout)
     assert match, f"Could not find Reduced Chi^2 in output: {stdout}"
-    value = float(match.group(1))
-    if isinstance(chi2_ref, tuple):
-        lo, hi = chi2_ref
-        assert lo <= value <= hi, f"chi2 {value:.6f} not in [{lo}, {hi}]"
-    else:
-        assert value == pytest.approx(chi2_ref, rel=1e-2)
+    _check_value(float(match.group(1)), chi2_ref, "chi2")
+
+
+# Truth-metric quantity labels as printed by tabascal.tab_tools.print_truth_metrics,
+# mapped to the short keys used in PipelineTestConfig.metrics_ref.
+_TRUTH_QUANTITY_KEYS = {"Ast. Vis": "ast", "RFI Vis": "rfi", "Gains": "gains"}
+
+
+def _parse_truth_metrics(stdout: str, point: str) -> dict[str, dict[str, float]]:
+    """Capture the ``Truth metrics @ <point> params:`` block printed by a run.
+
+    The reporter prints two rows per quantity (``RMSE`` and ``bias``), each an absolute value
+    plus ``/noise`` and ``/signal`` ratios; the ``bias`` row also carries a significance in
+    sigma. They are flattened to ``{quantity: {metric: value}}`` where ``quantity`` is one of
+    ``ast``/``rfi``/``gains`` and ``metric`` is one of the RMSE family (``RMSE``,
+    ``NRMSE(noise)``, ``NRMSE(signal)``), the mean-error/bias family (``|ME|``, ``NME(noise)``,
+    ``NME(signal)``) or ``bias_significance`` (the bias in units of sigma). An absent block
+    (no truth available) yields ``{}``.
+    """
+    lines = stdout.splitlines()
+    header = f"Truth metrics @ {point} params:"
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == header)
+    except StopIteration:
+        return {}
+
+    # (row keyword) -> (absolute key, /noise key, /signal key)
+    row_keys = {
+        "RMSE": ("RMSE", "NRMSE(noise)", "NRMSE(signal)"),
+        "bias": ("|ME|", "NME(noise)", "NME(signal)"),
+    }
+    metrics: dict[str, dict[str, float]] = {}
+    current: str | None = None
+    for ln in lines[start + 1:]:
+        # The quantity label only appears on its first ("RMSE") row; the "bias" row has a
+        # blank label, so an empty label means "still the previous quantity".
+        label, sep, rest = ln.partition("|")
+        if not sep:
+            break  # block ends at the first non-metric line
+        lbl = label.strip()
+        if lbl:
+            current = _TRUTH_QUANTITY_KEYS.get(lbl)
+            if current is None:
+                break
+        rest = rest.strip()
+        row = rest.split(None, 1)[0] if rest else ""
+        if row not in row_keys or current is None:
+            break
+        abs_k, noise_k, sig_k = row_keys[row]
+        d = metrics.setdefault(current, {})
+        d[abs_k] = float(re.search(r"[-\d.eE+]+", rest[len(row):]).group())
+        if (m := re.search(r"/noise\s+([-\d.eE+]+)", rest)):
+            d[noise_k] = float(m.group(1))
+        if (m := re.search(r"/signal\s+([-\d.eE+]+)", rest)):
+            d[sig_k] = float(m.group(1))
+        if (m := re.search(r"\[\s*([-\d.eE+]+)\s*sigma", rest)):
+            d["bias_significance"] = float(m.group(1))  # printed in units of sigma
+    return metrics
+
+
+def _assert_truth_metrics(
+    stdout: str, point: str, metrics_ref: dict[str, dict[str, float | tuple[float, float]]]
+) -> None:
+    """Assert captured truth metrics against references (mirrors :func:`_assert_chi2`).
+
+    ``metrics_ref`` is ``{quantity: {metric: scalar | (lo, hi)}}``; each value uses the
+    same tolerance convention as the chi^2 reference. Only the quantities/metrics listed
+    are checked, so a case can assert just the metrics it cares about.
+    """
+    parsed = _parse_truth_metrics(stdout, point)
+    for quantity, wanted in metrics_ref.items():
+        assert quantity in parsed, (
+            f"No '{quantity}' truth metrics @ {point} params found in output:\n{stdout}"
+        )
+        for metric, ref in wanted.items():
+            assert metric in parsed[quantity], (
+                f"Metric '{metric}' missing for '{quantity}' @ {point} params: {parsed[quantity]}"
+            )
+            _check_value(parsed[quantity][metric], ref, f"{quantity} {metric}")
+
+
+def test_truth_metric_capture_roundtrips_printed_output(capsys):
+    """The capture parses exactly what ``print_truth_metrics`` emits.
+
+    Round-trips the real reporter through the parser so the regex stays in sync with the
+    printed format (and a future format change fails here rather than silently parsing to
+    nothing). No network / sim data required.
+    """
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+
+    from tabascal.tab_tools import print_truth_metrics
+
+    n_bl, n_freq, n_time, n_ant = 3, 2, 4, 5
+    tab_config = SimpleNamespace(noise=2.0, flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool))
+
+    true_ast = jnp.ones((n_bl, n_freq, n_time), dtype=complex)
+    truth = {
+        "vis_ast": true_ast,                  # RMSE 1, signal 1
+        "vis_rfi": jnp.nan * true_ast,        # unavailable -> dynamically skipped
+        "gains": jnp.full((n_ant, n_freq, n_time), 2.0 + 0j),  # RMSE 2, signal 2
+    }
+    pred = {
+        "vis_ast": jnp.zeros((1, n_bl, n_freq, n_time), dtype=complex),
+        "vis_rfi": jnp.zeros((1, n_bl, n_freq, n_time), dtype=complex),
+        "gains": jnp.zeros((1, n_ant, n_freq, n_time), dtype=complex),
+    }
+
+    print_truth_metrics(pred, truth, tab_config, "opt")
+    stdout = capsys.readouterr().out
+
+    parsed = _parse_truth_metrics(stdout, "opt")
+    assert set(parsed) == {"ast", "gains"}  # rfi truth is NaN -> not printed/captured
+    # ast: pred 0 vs true 1 -> RMSE 1, |ME| 1 (constant error -> coherent), signal 1, noise 2.
+    # A constant residual is fully coherent: N_eff = 1, so sigma = |ME| * sqrt(2) / RMSE ~ 1.4.
+    assert parsed["ast"]["RMSE"] == pytest.approx(1.0)
+    assert parsed["ast"]["NRMSE(noise)"] == pytest.approx(0.5)   # noise = 2
+    assert parsed["ast"]["NRMSE(signal)"] == pytest.approx(1.0)
+    assert parsed["ast"]["|ME|"] == pytest.approx(1.0)
+    assert parsed["ast"]["NME(noise)"] == pytest.approx(0.5)
+    assert parsed["ast"]["NME(signal)"] == pytest.approx(1.0)
+    assert parsed["ast"]["bias_significance"] == pytest.approx(1.4)   # printed to 1 dp
+    assert parsed["gains"]["RMSE"] == pytest.approx(2.0)
+    assert parsed["gains"]["|ME|"] == pytest.approx(2.0)
+    assert parsed["gains"]["bias_significance"] == pytest.approx(1.4)
+    assert "NRMSE(noise)" not in parsed["gains"]  # noise-norm not printed for gains
+    assert "NME(noise)" not in parsed["gains"]
+
+    # Assertion helper: scalar (rel tol) and (lo, hi) bounds, plus the failure paths.
+    _assert_truth_metrics(stdout, "opt", {"ast": {"RMSE": 1.0, "NRMSE(noise)": (0.4, 0.6)}})
+    with pytest.raises(AssertionError):
+        _assert_truth_metrics(stdout, "opt", {"ast": {"RMSE": 2.0}})
+    with pytest.raises(AssertionError, match="No 'rfi'"):
+        _assert_truth_metrics(stdout, "opt", {"rfi": {"RMSE": 1.0}})
 
 # ---------------------------------------------------------------------------
 # Trajectory components — downstream fixed to RiemannVisTimeFreqCalculation + UnitaryGains
@@ -221,6 +375,14 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
+            # requires_double (phase trajectory needs fp64): only the double chi2 is asserted;
+            # truth metrics are printed but not asserted. Measured opt-point values, double
+            # precision (gains identity -> RMSE 0). Fill in x86/GPU after running there:
+            #   arch | chi2  | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   ARM  | 0.904 |     0.293        0.7      |     0.388        0.2
+            #   x86  |  TBD  |      TBD         TBD      |      TBD         TBD
+            #   GPU  |  TBD  |      TBD         TBD      |      TBD         TBD
+            # (recorded chi2_ref below is the CI/x86 value; ARM reproduces ~0.7% high, within 1% tol.)
             chi2_ref={"double": 0.8977856043436502},
             requires_double=True,
         ),
@@ -237,7 +399,14 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref={"double": 0.8834671325695459}, # Run with MEO satellites
+            # requires_double; only double chi2 asserted (MEO satellites, opt max_iter 200).
+            # Measured opt-point values, double precision (gains identity -> RMSE 0). Fill in
+            # x86/GPU after running there:
+            #   arch | chi2  | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   ARM  | 0.883 |     0.343        0.7      |     0.452        0.4
+            #   x86  |  TBD  |      TBD         TBD      |      TBD         TBD
+            #   GPU  |  TBD  |      TBD         TBD      |      TBD         TBD
+            chi2_ref={"double": 0.8834671325695459},
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
         ),
@@ -254,7 +423,14 @@ trajectory_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref={"double": 0.8834671467969134},  # Run with MEO satellites
+            # requires_double; only double chi2 asserted (MEO satellites, opt max_iter 200).
+            # Measured opt-point values, double precision (gains identity -> RMSE 0; matches
+            # SGP4LEONoDragOrbit -- same orbit to fp precision). Fill in x86/GPU after running:
+            #   arch | chi2  | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   ARM  | 0.883 |     0.343        0.7      |     0.452        0.4
+            #   x86  |  TBD  |      TBD         TBD      |      TBD         TBD
+            #   GPU  |  TBD  |      TBD         TBD      |      TBD         TBD
+            chi2_ref={"double": 0.8834671467969134},
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
         ),
@@ -287,6 +463,39 @@ rfi_vis_configs = [
             ],
             # single: ARM~0.916 (100 iters), x86~1.128 (100 iters), GPU~0.910 (100 iters)
             chi2_ref={"double": 0.8977856059138833, "single": (0.9, 1.2)},
+            # Truth-based metrics at the opt point. ast/rfi assert NRMSE(noise) -- the residual
+            # against the thermal-noise floor, the science-meaningful yardstick (< 1 means
+            # sub-noise) and the most architecture-stable normalisation -- plus
+            # bias_significance, the coherent mean error in units of sigma (correlation-deflated
+            # by N_eff; see print_truth_metrics). The significance bound is a "no significant
+            # coherent bias" guard, not a tight value: the bias is ~1 sigma here (N_eff ~ 50),
+            # so the upper bound only trips on gross RFI->ast leakage.
+            #
+            # Measured opt-point values (UnitaryGains -> identity gains, so gains RMSE ~0); chi2
+            # is the ARM-measured opt value (chi2_ref above is the asserted CI/x86 reference).
+            # Fill in the TBD rows after running on those arches:
+            #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | chi2
+            #   double  ARM    |      0.293         0.7     |      0.389        0.2     | 0.904
+            #   double  x86    |       TBD          TBD     |       TBD         TBD     |  TBD
+            #   double  GPU    |       TBD          TBD     |       TBD         TBD     |  TBD
+            #   single  ARM    |      0.294         1.0     |      0.407        1.3     | 0.916
+            #   single  x86    |       TBD          TBD     |      ~0.78        TBD     | 1.128
+            #   single  GPU    |       TBD          TBD     |       TBD         TBD     | 0.910
+            # (single x86 rfi ~0.78 is inferred from the CI RMSE that motivated the wide single
+            # bounds; its slower fp32 convergence inflates the rfi residual. double is
+            # architecture-stable to ~+/-5%. Tighten once canonical CI values are recorded.)
+            metrics_ref={
+                "double": {
+                    "ast": {"NRMSE(noise)": (0.27, 0.31), "bias_significance": (0.0, 2.0)},
+                    "rfi": {"NRMSE(noise)": (0.36, 0.41), "bias_significance": (0.0, 2.0)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+                "single": {
+                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 4.0)},
+                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 4.0)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+            },
         ),
         id="RiemannVisTimeFreqCalculation",
     ),
@@ -300,7 +509,16 @@ rfi_vis_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            # single: ARM~0.921 (100 iters), x86~1.128 (100 iters), GPU~0.910 (100 iters)
+            # Only chi2 is asserted -- the FFI kernel is the unit under test; truth metrics
+            # match the non-FFI RiemannVisTimeFreqCalculation case above. Measured opt-point
+            # values (local ARM via the real harness; gains identity -> RMSE 0):
+            #   precision/arch | chi2  | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   double  ARM    | 0.904 |     0.293        0.7      |     0.389        0.2
+            #   double  x86    |  TBD  |      TBD         TBD      |      TBD         TBD
+            #   double  GPU    |  TBD  |      TBD         TBD      |      TBD         TBD
+            #   single  ARM    | 0.921 |     0.294        1.0      |     0.407        1.3
+            #   single  x86    | 1.128 |      TBD         TBD      |      TBD         TBD
+            #   single  GPU    | 0.910 |      TBD         TBD      |      TBD         TBD
             chi2_ref={"double": 0.8977856059138833, "single": (0.9, 1.2)},
         ),
         id="RiemannVisTimeFreqCalculationFFI",
@@ -352,6 +570,35 @@ gains_configs = [
             },
             # single: ARM~0.916 (100 iters), x86~1.128 (100 iters), GPU~0.910 (100 iters)
             chi2_ref={"double": 0.8977832575028029, "single": (0.9, 1.2)},
+            # Truth-based metrics at the opt point; same scheme as RiemannVisTimeFreqCalculation
+            # (ast/rfi assert NRMSE(noise) against the noise floor + bias_significance as a
+            # "no significant coherent bias" guard). Here GPGains fits the gains and recovers
+            # them, so gains keeps an RMSE bound with headroom for the fp32 fit residual.
+            #
+            # Measured opt-point values; chi2 is the ARM-measured opt value (chi2_ref above is
+            # the asserted CI/x86 reference). Fill in the TBD rows after running on those arches:
+            #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | gains RMSE | chi2
+            #   double  ARM    |      0.293         0.7     |      0.389        0.2     |  3.9e-4    | 0.904
+            #   double  x86    |       TBD          TBD     |       TBD         TBD     |   TBD      |  TBD
+            #   double  GPU    |       TBD          TBD     |       TBD         TBD     |   TBD      |  TBD
+            #   single  ARM    |      0.294         0.9     |      0.407        1.3     |  4.3e-4    | 0.916
+            #   single  x86    |       TBD          TBD     |      ~0.78        TBD     |   TBD      | 1.128
+            #   single  GPU    |       TBD          TBD     |       TBD         TBD     |   TBD      | 0.910
+            # (single x86 rfi ~0.78 inferred from the CI RMSE that motivated the wide single
+            # bounds. double is architecture-stable to ~+/-5%. Tighten once canonical CI values
+            # are recorded.)
+            metrics_ref={
+                "double": {
+                    "ast": {"NRMSE(noise)": (0.27, 0.31), "bias_significance": (0.0, 2.0)},
+                    "rfi": {"NRMSE(noise)": (0.36, 0.41), "bias_significance": (0.0, 2.0)},
+                    "gains": {"RMSE": (0.0, 1e-3)},
+                },
+                "single": {
+                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 4.0)},
+                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 4.0)},
+                    "gains": {"RMSE": (0.0, 3e-3)},
+                },
+            },
         ),
         id="GPGains",
     ),
@@ -402,3 +649,7 @@ def test_pipeline(
     returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config, precision)
     assert returncode == 0, f"Tabascal failed: {stderr}"
     _assert_chi2(stdout, chi2_ref)
+
+    metrics_ref = t_config.metrics_ref.get(precision)
+    if metrics_ref:
+        _assert_truth_metrics(stdout, "opt", metrics_ref)

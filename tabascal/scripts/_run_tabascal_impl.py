@@ -11,7 +11,6 @@ from datetime import datetime
 import yaml
 
 from jax import random
-import jax.numpy as jnp
 
 from tabascal.timing import measure_runtime, print_timings, enable_timings
 from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
@@ -19,6 +18,7 @@ from tabascal.config import load_config, TabConfig, Model
 from tabascal.imports import import_components
 from tabascal.write import write_results_xds
 from tabascal.tle import TLEError
+from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 
 
 class _Tee:
@@ -60,15 +60,16 @@ def assert_precision_supported(config):
 
 def build_model(config, ms_path):
     assert_precision_supported(config)
+    require_truth(config)
     tab_config = TabConfig(config, ms_path)
     model = Model(tab_config, config["model"]["components"])
     return tab_config, model
 
 
 @measure_runtime
-def evaluate_init(tab_config, model, key):
+def evaluate_init(tab_config, model, key, truth=None):
     key, subkey = random.split(key)
-    init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants)
+    init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants, truth=truth)
     nlog_l = nlog_like(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
     nlog_p = nlog_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
     return key, init_pred, nlog_l, nlog_p
@@ -196,17 +197,18 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
 
         _print_model_summary(tab_config, model, start_time)
 
-        key, init_pred, nlog_l, nlog_p = evaluate_init(tab_config, model, key)
+        # Load the tab-sim ground truth once and share it across the init/opt RMSE
+        # reporting and all plotting. Missing quantities come back as NaN so consumers
+        # can index unconditionally; reporting skips whatever is unavailable.
+        truth = load_truth(tab_config)
+        if not has_truth(truth):
+            print("\nNo tab-sim truth available - skipping truth-based RMSE reporting.")
+
+        key, init_pred, nlog_l, nlog_p = evaluate_init(tab_config, model, key, truth=truth)
         write_results_xds(init_pred, tab_config, paths.init_pred_path)
 
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")
-
-        truth = {
-            "vis_rfi": jnp.nan * jnp.zeros((tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex),
-            "vis_ast": jnp.nan * jnp.zeros((tab_config.n_bl, tab_config.n_freq, tab_config.n_time), dtype=complex),
-            "gains": jnp.nan * jnp.ones((tab_config.n_ant, tab_config.n_freq, tab_config.n_time), dtype=complex),
-        }
 
         if config["plots"]["init"]:
             from tabascal.plot import plot_init
@@ -221,7 +223,7 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
             vi_pred, losses, vi_params, _ = run_opt(
                 tab_config, prob_model, subkeys, model.init_params, ms_path, paths.map_path, paths.params_path,
-                state=model.state, constants=model.constants,
+                state=model.state, constants=model.constants, truth=truth,
             )
 
             if config["plots"]["opt"]:
@@ -298,7 +300,7 @@ def run(args):
             extra_tle_dir=args.extra_tle_dir,
             log=getattr(args, "log", True),
         )
-    except TLEError as e:
+    except (TLEError, TruthError) as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
 
