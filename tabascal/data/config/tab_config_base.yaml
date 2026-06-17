@@ -65,7 +65,6 @@ rfi:
   time_int_factor: 1    # Optional - Factor to increase the number of time integration samples over the predicted value
   min_time_bins: 1      # Optional - Minimum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisTimeFreqVariable / +FFI)
   max_time_bins: 30     # Optional - Maximum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisTimeFreqVariable / +FFI)
-  min_divisors: 8       # Optional - Minimum number of divisors of the fine-grid size (n_int_time) required when binning per-baseline RFI sampling rates (RiemannVisTimeFreqVariable / +FFI). Higher gives more, better-separated groups at the cost of a larger fine grid
   n_int_time: null      # Optional - Specify the number of integration samples to use along the time axis
   n_int_freq: 1         # Optional - Specify the number of integration samples to use along the frequency axis
   r_seed: 123           # Optional - Random seed to use for sampling

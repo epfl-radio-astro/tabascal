@@ -108,6 +108,11 @@ def load_config(path: str) -> Dict:
 class TabConfig:
     """Configuration parameters for tabascal method"""
 
+    # Minimum number of divisors required of the fine-grid size (n_int_time) when
+    # binning per-baseline RFI sampling rates for the variable-sampling components.
+    # Internal tuning parameter, intentionally not exposed in the config.
+    _MIN_DIVISORS_VARIABLE = 8
+
     def __init__(self, config: Dict, ms_path: str):
 
         # self.config = config
@@ -143,11 +148,21 @@ class TabConfig:
         self.n_int_time = config["rfi"]["n_int_time"]
         self.n_int_freq = config["rfi"]["n_int_freq"]
 
+        # The divisor-rich fine grid (min_divisors > 1) is only needed by the
+        # RiemannVisTimeFreqVariable / +FFI components, which split baselines into
+        # multiple stride groups. For every other rfi_vis component it just
+        # inflates n_int_time (the fine-grid time dimension) and slows the run,
+        # so only request it when a Variable component is actually selected.
+        # min_divisors is an internal tuning parameter, not user-configurable.
+        uses_variable = any(
+            "Variable" in comp for comp in config["model"]["components"]
+        )
+
         self.estimate_rfi_sampling(
             config["rfi"]["time_int_factor"],
             config["rfi"].get("min_time_bins", 1),
             config["rfi"].get("max_time_bins", 30),
-            config["rfi"].get("min_divisors", 8),
+            min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
         )
 
         self._set_freqs_times()
