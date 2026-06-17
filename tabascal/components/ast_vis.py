@@ -6,12 +6,10 @@ from tabascal.dist import standard_normal
 from tabascal.tab_tools import (
     get_ast_fringe_rate,
     pow_spec,
-    get_observation_data_type,
 )
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
-
-import xarray as xr
+from tabascal.truth import read_true_vis_ast
 
 
 class FourierTimeAst(Component):
@@ -130,18 +128,7 @@ class FourierTimeAst(Component):
 
     def _compute_true_params(self, zarr_path, data_col):
 
-        xds = xr.open_zarr(zarr_path)
-
-        data_type = get_observation_data_type(data_col)
-
-        vis_ast = jnp.transpose(
-            (
-                xds.vis_ast.data[:, :, :].compute()
-                if data_type["ast"]
-                else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
-            ),
-            (1, 2, 0),
-        )
+        vis_ast = read_true_vis_ast(zarr_path, data_col)
 
         vis_ast_padded = vmap(
             vmap(jnp.pad, in_axes=(0, None, None), out_axes=(0)),
@@ -330,18 +317,7 @@ class FourierTimeConstFreqAst(Component):
 
     def _compute_true_params(self, zarr_path, data_col):
 
-        xds = xr.open_zarr(zarr_path)
-
-        data_type = get_observation_data_type(data_col)
-
-        vis_ast = jnp.transpose(
-            (
-                xds.vis_ast.data[:, :, :].compute()
-                if data_type["ast"]
-                else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
-            ),
-            (1, 2, 0),
-        )
+        vis_ast = read_true_vis_ast(zarr_path, data_col)
 
         vis_ast_padded = vmap(
             vmap(jnp.pad, in_axes=(0, None, None), out_axes=(0)),
@@ -561,18 +537,7 @@ class FourierTimeFreqAst(Component):
 
     def _compute_true_params(self, zarr_path, data_col):
 
-        xds = xr.open_zarr(zarr_path)
-
-        data_type = get_observation_data_type(data_col)
-
-        vis_ast = jnp.transpose(
-            (
-                xds.vis_ast.data[:, :, :].compute()
-                if data_type["ast"]
-                else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
-            ),
-            (1, 2, 0),
-        )
+        vis_ast = read_true_vis_ast(zarr_path, data_col)
 
         vis_ast_padded = vmap(
             vmap(jnp.pad, in_axes=(0, None, None), out_axes=(0)),
@@ -831,18 +796,7 @@ class FourierTimeFreqGPAst(Component):
     @measure_runtime
     def _compute_true_params(self, zarr_path, data_col):
 
-        xds = xr.open_zarr(zarr_path)
-
-        data_type = get_observation_data_type(data_col)
-
-        true_vis_ast = jnp.transpose(
-            (
-                xds.vis_ast.data[:, :, :].compute()
-                if data_type["ast"]
-                else jnp.zeros_like((xds.vis_ast.data[:, :, :]))
-            ),
-            (1, 2, 0),
-        )
+        true_vis_ast = read_true_vis_ast(zarr_path, data_col)
 
         self.true_ast_k = self.signal_to_latent(true_vis_ast)
         
