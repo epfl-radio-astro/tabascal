@@ -264,13 +264,6 @@ def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_di
         max_plots=10,
         save_dir=plot_dir,
     )
-    # if get_truth_conditional(config):
-
-    #     # vi_pred keys are ['ast_vis', 'gains', 'rfi_vis', 'rmse_ast', 'rmse_gains', 'rmse_rfi', 'vis_obs']
-    #     print(f"RMSE Gains      : {jnp.mean(init_pred['rmse_gains']):.5f}")
-    #     print(f"RMSE RFI Vis    : {jnp.mean(init_pred['rmse_rfi']):.5f}")
-    #     print(f"RMSE AST Vis    : {jnp.mean(init_pred['rmse_ast']):.5f}")
-
     print()
     print(f"Initial Plot Time : {datetime.now() - start}")
     print(f"{datetime.now()}")
