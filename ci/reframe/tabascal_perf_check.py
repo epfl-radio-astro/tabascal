@@ -139,15 +139,17 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
 
     # Parse the per-device peak from the "Memory usage" table printed by
     # print_memory_usage at the end of the run, e.g.:
-    #   Device  Peak memory (GB)  Limit (GB)
-    #   ------  ----------------  ----------
-    #   cuda:0  32.798            102.005
-    # Only the first reported device is considered (extractsingle takes the
-    # first match). The peak is printed in GB
+    #   Device  Peak (GB)  Limit (GB)
+    #   ------  ---------  ----------
+    #   cuda:0  32.798     102.005
+    # The device column is anchored to the JAX CUDA device format (cuda:N) so
+    # the match cannot be stolen by an earlier "word number word" line (e.g.
+    # rows of the Runtime Statistics table). Only the first GPU device is
+    # considered (extractsingle takes the first match). The peak is in GB.
     @performance_function("GB")
     def memory_usage(self):
         return sn.extractsingle(
-        r"^(?P<device>\S+)\s+(?P<val>\d[\d.]*)\s+\S+",
+        r"^(?P<device>cuda:\d+)\s+(?P<val>\d[\d.]*)\s+\S+",
         self.stdout,
         "val",
         float,
