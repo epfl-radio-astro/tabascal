@@ -753,7 +753,16 @@ class FourierGPRFI(BaseGPRFI):
 
         from numpy import load
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi]))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
+        light_curves = load(est_path)
+        if est_path.endswith(".npz"):
+            light_curves = light_curves["light_curves"]
+
+        # Light curves carry NaN for timesteps/channels where a satellite is out
+        # of view (off-image aperture).  Treat those as a zero RFI estimate so the
+        # init stays finite for partially-visible satellites.
+        light_curves = jnp.nan_to_num(jnp.array(light_curves[:self.n_rfi]))
+
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(light_curves)), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
         est_rfi_k_A = vmap(vmap(self.signal_to_latent))(est_rfi_A)
 
         return est_rfi_k_A
@@ -1025,7 +1034,14 @@ class FourierGPRFIConstAnt(BaseGPRFI):
 
         from numpy import load
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi]))), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
+        light_curves = load(est_path)
+        if est_path.endswith(".npz"):
+            light_curves = light_curves["light_curves"]
+
+        # NaN (satellite out of view) -> 0 RFI estimate; keeps the init finite.
+        light_curves = jnp.nan_to_num(jnp.array(light_curves[:self.n_rfi]))
+
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(light_curves)), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
 
         return vmap(vmap(self.signal_to_latent))(est_rfi_A)
 
