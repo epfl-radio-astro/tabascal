@@ -13,16 +13,6 @@ RUN apt-get update \
        build-essential curl git wget \
   && rm -rf /var/lib/apt/lists/*
 
-# Install gpu_stats (per-GPU/process memory and utilization monitor).
-# Link against the CUDA NVML stub at build time (no GPU/driver available here);
-# the real libnvidia-ml.so.1 is provided by the NVIDIA container runtime at run
-# time. Install into /usr/local/bin so it is on PATH.
-RUN git clone --depth 1 https://github.com/AdhocMan/gpu_stats.git /tmp/gpu_stats \
-  && cd /tmp/gpu_stats \
-  && git checkout e954a993d588c248ab1b49d2dad37cf48c2f6a4b \
-  && make install PREFIX=/usr/local \
-  && rm -rf /tmp/gpu_stats
-
 # Install Miniforge
 RUN wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh \
        -O /tmp/miniforge.sh \

@@ -10,6 +10,7 @@ from datetime import datetime
 
 import yaml
 
+import jax
 from jax import random
 import jax.numpy as jnp
 
@@ -57,6 +58,41 @@ def assert_precision_supported(config):
             "Set model.precision to 'double' to use them."
         )
 
+
+def print_memory_usage():
+    """Print a table of Peak memory usage across all local JAX devices.
+
+    Peak usage is reported per device in GB. Devices whose backend exposes no
+    stats (e.g. CPU) are still listed with ``n/a`` so the table accounts for
+    every device.
+    """
+    devices = jax.local_devices()
+
+    headers = ("Device", "Peak (GB)", "Limit (GB)")
+    rows = []
+    for d in devices:
+        stats = d.memory_stats() or {}
+        peak = stats.get("peak_bytes_in_use")
+        peak_gb = f"{peak / 1e9:.3f}" if peak is not None else "n/a"
+        limit = stats.get("bytes_limit")
+        limit_gb = f"{limit / 1e9:.3f}" if limit is not None else "n/a"
+        rows.append((str(d), peak_gb, limit_gb))
+
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i])
+        for i in range(len(headers))
+    ]
+
+    def _fmt(cells):
+        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells))
+
+    print()
+    print("Memory usage:")
+    print("".join("=" * (w + 1) for w in widths))
+    print(_fmt(headers))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print(_fmt(row))
 
 def build_model(config, ms_path):
     assert_precision_supported(config)
@@ -301,6 +337,8 @@ def run(args):
     except TLEError as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
+
+    print_memory_usage()
 
     if args.timings:
         print_timings()
