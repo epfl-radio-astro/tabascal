@@ -27,28 +27,28 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
             "daint:gpu": {
                 "total_runtime": (86.0, -0.25, 0.15, "s"),
                 "optimizer_runtime": (74.0, -0.20, 0.15, "s"),
-                "memory_usage": (12.1, -0.20, 0.15, "GB"),
+                "memory_usage": (8.391, -0.1, 0.1, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
                 "total_runtime": (84.0, -0.25, 0.15, "s"),
                 "optimizer_runtime": (71.0, -0.20, 0.15, "s"),
-                "memory_usage": (12.1, -0.20, 0.15, "GB"),
+                "memory_usage": (16.901, -0.1, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
             "daint:gpu": {
                 "total_runtime": (24.1, -0.25, 0.15, "s"),
                 "optimizer_runtime": (12.1, -0.20, 0.15, "s"),
-                "memory_usage": (12.1, -0.20, 0.15, "GB"),
+                "memory_usage": (0.566, -0.1, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "double"): {
             "daint:gpu": {
                 "total_runtime": (35.4, -0.25, 0.15, "s"),
                 "optimizer_runtime": (22.1, -0.20, 0.15, "s"),
-                "memory_usage": (12.1, -0.20, 0.15, "GB"),
+                "memory_usage": (1.252, -0.1, 0.1, "GB"),
             },
         },
     }
