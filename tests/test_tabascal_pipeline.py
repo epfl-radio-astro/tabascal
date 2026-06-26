@@ -137,14 +137,16 @@ class PipelineTestConfig:
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
         config_overrides: Dictionary of overrides to the tabascal config file
-        metrics_ref: Optional truth-based error references, keyed by precision then by
-            quantity (``ast``/``rfi``/``gains``) then by metric name. Available metrics are
-            the RMSE family (``RMSE``, ``NRMSE(noise)``, ``NRMSE(signal)``), the
-            mean-error / bias family (``|ME|``, ``NME(noise)``, ``NME(signal)``) and
-            ``bias_significance`` (the bias in units of sigma). Each value follows the same
-            scalar-or-``(lo, hi)`` tolerance convention as ``chi2_ref`` and is asserted at the
-            opt point. Only the listed metrics are checked; omit the field (or a precision) to
-            skip the assertion for that case.
+        metrics_ref: Truth-based error references, keyed by precision then by quantity
+            (``ast``/``rfi``/``gains``) then by metric name. Available metrics are the RMSE
+            family (``RMSE``, ``NRMSE(noise)``, ``NRMSE(signal)``), the mean-error / bias
+            family (``|ME|``, ``NME(noise)``, ``NME(signal)``) and ``bias_significance``
+            (the bias in units of sigma). Each value follows the same scalar-or-``(lo, hi)``
+            tolerance convention as ``chi2_ref`` and is asserted at the opt point. Only the
+            listed metrics are checked, but every case must supply a reference for each
+            precision it runs under: ``test_pipeline`` requires it (a missing entry fails the
+            test) so no case ships with chi^2-only coverage. ``requires_double`` cases only
+            need the ``double`` entry (they are skipped under single).
     """
     sim_file_name: str
     components: list[str]
@@ -385,6 +387,17 @@ trajectory_configs = [
             # (recorded chi2_ref below is the CI/x86 value; ARM reproduces ~0.7% high, within 1% tol.)
             chi2_ref={"double": 0.8977856043436502},
             requires_double=True,
+            # Same scheme as RiemannVisTimeFreqCalculation (NRMSE(noise) against the noise
+            # floor + bias_significance as a "no significant coherent bias" guard). ast/rfi
+            # match the RiemannVis case (identical sim/components bar PhaseCalculationRFI);
+            # gains identity -> RMSE ~0. Double only (requires_double).
+            metrics_ref={
+                "double": {
+                    "ast": {"NRMSE(noise)": (0.27, 0.31), "bias_significance": (0.0, 1.0)},
+                    "rfi": {"NRMSE(noise)": (0.36, 0.41), "bias_significance": (0.0, 1.0)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+            },
         ),
         id="FixedOrbit+PhaseCalculationRFI",
     ),
@@ -409,6 +422,16 @@ trajectory_configs = [
             chi2_ref={"double": 0.8834671325695459},
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
+            # Same scheme as RiemannVisTimeFreqCalculation; NRMSE(noise) bounds bracket the
+            # ARM values above (MEO orbit -> slightly higher residual than FixedOrbit). gains
+            # identity -> RMSE ~0. Double only (requires_double).
+            metrics_ref={
+                "double": {
+                    "ast": {"NRMSE(noise)": (0.32, 0.36), "bias_significance": (0.0, 1.0)},
+                    "rfi": {"NRMSE(noise)": (0.42, 0.48), "bias_significance": (0.0, 1.0)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+            },
         ),
         id="SGP4LEONoDragOrbit+PhaseCalculationRFI",
     ),
@@ -433,6 +456,15 @@ trajectory_configs = [
             chi2_ref={"double": 0.8834671467969134},
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
+            # Same scheme/values as SGP4LEONoDragOrbit (same orbit to fp precision). gains
+            # identity -> RMSE ~0. Double only (requires_double).
+            metrics_ref={
+                "double": {
+                    "ast": {"NRMSE(noise)": (0.32, 0.36), "bias_significance": (0.0, 1.0)},
+                    "rfi": {"NRMSE(noise)": (0.42, 0.48), "bias_significance": (0.0, 1.0)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+            },
         ),
         id="SGP4LEOOrbit+PhaseCalculationRFI",
     ),
@@ -486,13 +518,13 @@ rfi_vis_configs = [
             # architecture-stable to ~+/-5%. Tighten once canonical CI values are recorded.)
             metrics_ref={
                 "double": {
-                    "ast": {"NRMSE(noise)": (0.27, 0.31), "bias_significance": (0.0, 2.0)},
-                    "rfi": {"NRMSE(noise)": (0.36, 0.41), "bias_significance": (0.0, 2.0)},
+                    "ast": {"NRMSE(noise)": (0.27, 0.31), "bias_significance": (0.0, 1.0)},
+                    "rfi": {"NRMSE(noise)": (0.36, 0.41), "bias_significance": (0.0, 1.0)},
                     "gains": {"RMSE": (0.0, 1e-6)},
                 },
                 "single": {
-                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 4.0)},
-                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 4.0)},
+                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 1.8)},
+                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 1.8)},
                     "gains": {"RMSE": (0.0, 1e-6)},
                 },
             },
@@ -509,9 +541,10 @@ rfi_vis_configs = [
                 "ast_vis:FourierTimeFreqGPAst",
                 "gains:UnitaryGains",
             ],
-            # Only chi2 is asserted -- the FFI kernel is the unit under test; truth metrics
-            # match the non-FFI RiemannVisTimeFreqCalculation case above. Measured opt-point
-            # values (local ARM via the real harness; gains identity -> RMSE 0):
+            # The FFI kernel is the unit under test; truth metrics match the non-FFI
+            # RiemannVisTimeFreqCalculation case above, so the same metrics_ref is reused
+            # for both precisions. Measured opt-point values (local ARM via the real harness;
+            # gains identity -> RMSE 0):
             #   precision/arch | chi2  | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   double  ARM    | 0.904 |     0.293        0.7      |     0.389        0.2
             #   double  x86    |  TBD  |      TBD         TBD      |      TBD         TBD
@@ -520,6 +553,18 @@ rfi_vis_configs = [
             #   single  x86    | 1.128 |      TBD         TBD      |      TBD         TBD
             #   single  GPU    | 0.910 |      TBD         TBD      |      TBD         TBD
             chi2_ref={"double": 0.8977856059138833, "single": (0.9, 1.2)},
+            metrics_ref={
+                "double": {
+                    "ast": {"NRMSE(noise)": (0.27, 0.31), "bias_significance": (0.0, 1.0)},
+                    "rfi": {"NRMSE(noise)": (0.36, 0.41), "bias_significance": (0.0, 1.0)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+                "single": {
+                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 1.8)},
+                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 1.8)},
+                    "gains": {"RMSE": (0.0, 1e-6)},
+                },
+            },
         ),
         id="RiemannVisTimeFreqCalculationFFI",
     ),
@@ -589,13 +634,13 @@ gains_configs = [
             # are recorded.)
             metrics_ref={
                 "double": {
-                    "ast": {"NRMSE(noise)": (0.27, 0.31), "bias_significance": (0.0, 2.0)},
-                    "rfi": {"NRMSE(noise)": (0.36, 0.41), "bias_significance": (0.0, 2.0)},
+                    "ast": {"NRMSE(noise)": (0.27, 0.31), "bias_significance": (0.0, 1.0)},
+                    "rfi": {"NRMSE(noise)": (0.36, 0.41), "bias_significance": (0.0, 1.0)},
                     "gains": {"RMSE": (0.0, 1e-3)},
                 },
                 "single": {
-                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 4.0)},
-                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 4.0)},
+                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 1.8)},
+                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 1.8)},
                     "gains": {"RMSE": (0.0, 3e-3)},
                 },
             },
@@ -646,10 +691,18 @@ def test_pipeline(
         f"No {precision}-precision chi^2 reference recorded for this case"
     )
 
+    # Every case that actually runs must assert its truth-based error metrics, not just the
+    # reduced chi^2 -- chi^2 only measures fit to the noisy data, while the truth metrics are
+    # the science-meaningful check that the recovered ast/rfi/gains match the simulation. The
+    # reference is required (rather than optional) so a new case cannot silently ship with
+    # chi^2-only coverage.
+    metrics_ref = t_config.metrics_ref.get(precision)
+    assert metrics_ref, (
+        f"No {precision}-precision truth-metric reference recorded for this case; "
+        "every pipeline case must assert truth metrics (see PipelineTestConfig.metrics_ref)"
+    )
+
     returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config, precision)
     assert returncode == 0, f"Tabascal failed: {stderr}"
     _assert_chi2(stdout, chi2_ref)
-
-    metrics_ref = t_config.metrics_ref.get(precision)
-    if metrics_ref:
-        _assert_truth_metrics(stdout, "opt", metrics_ref)
+    _assert_truth_metrics(stdout, "opt", metrics_ref)
