@@ -1,10 +1,17 @@
 from tabascal.imports import import_components
 from tabascal.components.likelihood import gaussian
 from tabascal.tab_tools import read_ms, fix_padding
-from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
+from tabascal.components.trajectory import (
+    fetch_orbital_elements,
+    get_satellite_positions,
+    itrs_to_gcrs_sf,
+)
 from tabascal.tle import print_spacetrack_status, preflight_tle_check
 from tabascal.interferometry import (
     calculate_fringe_frequency_numpy,
+    fit_nearfield_fringe_freq_poly_numpy,
+    fringe_params_at_offsets,
+    size_subwindows,
     get_strides_and_idxs,
     itrf_to_uvw_numpy,
 )
@@ -152,6 +159,14 @@ class TabConfig:
             config["rfi"]["max_time_bins"],
         )
 
+        # Analytic RFI-visibility path: when selected, size the uniform sub-window count
+        # K from the trajectory cubic phase-curvature and build the per-sub-window fringe
+        # parameters. This replaces the oversampled time grid with an edge/centre grid
+        # (built in _set_freqs_times). Default stays the oversample path.
+        self.vis_method = config["rfi"].get("vis_method", "oversample")
+        if self.vis_method == "analytic":
+            self.setup_analytic_sampling(config["rfi"])
+
         self._set_freqs_times()
 
     def set_noise(self, noise: float):
@@ -236,6 +251,87 @@ class TabConfig:
             get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
         )
 
+    def setup_analytic_sampling(self, rfi_config: Dict):
+        """Size the analytic sub-window count K and build per-sub-window fringe params.
+
+        Host-side (numpy/skyfield, f64) one-shot setup, mirroring ``estimate_rfi_sampling``.
+        Produces the constants the ``AnalyticVisCalculation`` component consumes:
+
+        * ``analytic_K`` / ``analytic_dt_sub`` — uniform sub-window count and width.
+        * ``analytic_f`` / ``analytic_fdot`` — fringe frequency (Hz) and rate-derivative
+          (Hz/s) at every sub-window centre, ``(n_rfi, n_bl, n_time*K)``, at the reference
+          frequency ``max(freqs)``. They scale linearly with channel frequency (handled in
+          the component).
+        * ``analytic_edge_gather`` — ``(n_time, K+1)`` index of each window's edges into the
+          shared global edge grid (G2: edges shared between adjacent sub-windows/windows).
+        * ``analytic_freq_scale`` — ``freqs / freq_ref`` per channel.
+
+        Assumes uniform, contiguous integration windows (spacing == int_time), the standard
+        drift-scan layout also assumed by ``estimate_rfi_sampling``.
+        """
+        # The frequency axis must not be sub-integrated: the analytic factor is time-only.
+        if self.n_int_freq != 1:
+            raise ValueError(
+                "analytic vis_method requires n_int_freq == 1 (time-only path); "
+                f"got n_int_freq={self.n_int_freq}"
+            )
+
+        resid_tol = float(rfi_config.get("resid_tol", 3e-4))
+        resid_A = float(rfi_config.get("resid_A", 3.3))
+        k_max = int(rfi_config.get("max_subwindows", 64))
+        n_fit = int(rfi_config.get("fit_samples", 16))
+
+        dec = self.phase_centre["dec"]
+        ra = self.phase_centre["ra"]
+        freq_ref = float(np.max(self.freqs))
+        n_time = self.n_time
+        dt = self.int_time
+
+        # Uniform, window-contiguous fit grid: n_fit samples per coarse window, symmetric
+        # about each window centre.
+        dt_fit = dt / n_fit
+        n_fit_total = n_time * n_fit
+        t_fit_sec = self.times[0] - dt / 2.0 + (np.arange(n_fit_total) + 0.5) * dt_fit
+        times_jd_fit = self.times_jd[0] + secs_to_days(t_fit_sec)
+
+        # Near-field geometric path inputs (ECI satellite + antenna positions, UVW w),
+        # matching what get_rfi_phase / the trajectory component uses. The fringe params
+        # are derived from this path so f, fdot are consistent with the geometric phase
+        # phi0 the component reads (a far-field fringe rate would be inconsistent).
+        rfi_xyz_fit = np.asarray(get_satellite_positions(self.tles, times_jd_fit))
+        ants_xyz_fit = np.asarray(itrs_to_gcrs_sf(self.ants_itrf, times_jd_fit))
+        gsa = gast_deg(times_jd_fit)
+        gh0 = (gsa - ra) % 360
+        # itrf_to_uvw_numpy -> (n_time, n_ant, 3); take the w component per antenna.
+        ants_w_fit = itrf_to_uvw_numpy(self.ants_itrf, gh0, dec)[:, :, 2].T  # (n_ant, n_tot)
+
+        coeffs = fit_nearfield_fringe_freq_poly_numpy(
+            t_fit_sec, freq_ref, rfi_xyz_fit, ants_xyz_fit, ants_w_fit,
+            np.asarray(self.a1), np.asarray(self.a2), n_time,
+        )
+        K, fddot_max = size_subwindows(coeffs, dt, resid_tol, resid_A, k_max)
+
+        dt_sub = dt / K
+        centre_offsets = -dt / 2.0 + (np.arange(K) + 0.5) * dt_sub
+        f_ref, fdot_ref = fringe_params_at_offsets(coeffs, centre_offsets)
+
+        self.analytic_K = int(K)
+        self.analytic_dt_sub = float(dt_sub)
+        self.analytic_fddot_max = float(fddot_max)
+        self.analytic_f = np.asarray(f_ref)          # (n_rfi, n_bl, n_time*K)
+        self.analytic_fdot = np.asarray(fdot_ref)
+        self.analytic_freq_scale = np.asarray(self.freqs, dtype=np.float64) / freq_ref
+        # Window i uses shared global edges [i*K .. i*K + K].
+        self.analytic_edge_gather = (
+            np.arange(n_time)[:, None] * K + np.arange(K + 1)[None, :]
+        ).astype(np.int32)
+
+        print(
+            f"\nAnalytic RFI-vis: K={K} sub-windows (dt_sub={dt_sub:.4g}s), "
+            f"max |fddot|={fddot_max:.3g} Hz/s^2, fine grid {2 * n_time * K + 1} "
+            f"vs oversample {n_time * self.n_int_time} samples\n"
+        )
+
     def _set_freqs_times(self):
 
         ns = [self.n_freq, self.n_time]
@@ -256,9 +352,29 @@ class TabConfig:
         self.freqs_fine = self.freqs[0] + self.chan_width * np.asarray(
             unit_freqs, dtype=np.float64
         )
-        self.times_fine = self.times[0] + self.int_time * np.asarray(
-            unit_times, dtype=np.float64
-        )
+
+        if getattr(self, "vis_method", "oversample") == "analytic":
+            # Edge/centre grid: interleave the shared global sub-window edges (n_time*K+1)
+            # with the sub-window centres (n_time*K) into a single fine grid, so the
+            # existing trajectory (phase) and GP-envelope components fill both in one pass.
+            # times_fine[0::2] = edges, times_fine[1::2] = centres.
+            K = self.analytic_K
+            dt = self.int_time
+            dt_sub = self.analytic_dt_sub
+            n_e = self.n_time * K + 1
+            n_c = self.n_time * K
+            t0 = self.times[0] - dt / 2.0
+            edges = t0 + np.arange(n_e) * dt_sub
+            centres = t0 + (np.arange(n_c) + 0.5) * dt_sub
+            times_fine = np.empty(n_e + n_c, dtype=np.float64)
+            times_fine[0::2] = edges
+            times_fine[1::2] = centres
+            self.times_fine = times_fine
+        else:
+            self.times_fine = self.times[0] + self.int_time * np.asarray(
+                unit_times, dtype=np.float64
+            )
+
         self.n_freq_fine = len(self.freqs_fine)
         self.n_time_fine = len(self.times_fine)
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)

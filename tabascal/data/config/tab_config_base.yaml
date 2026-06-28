@@ -66,6 +66,15 @@ rfi:
   n_int_time: null      # Optional - Specify the number of integration samples to use along the time axis
   n_int_freq: 1         # Optional - Specify the number of integration samples to use along the frequency axis
   r_seed: 123           # Optional - Random seed to use for sampling
+  # --- Analytic RFI-visibility path (used only with the AnalyticVisCalculation component) ---
+  vis_method: oversample # Optional - 'oversample' (default, oversample-and-average) or 'analytic'
+                         #   (closed-form Fresnel fringe factor). The analytic path replaces the
+                         #   oversampled time grid with a sub-windowed edge/centre grid.
+  resid_tol: 3e-4       # Optional - Target relative residual epsilon for analytic K-sizing
+                        #   (K = ceil((A*fddot*dt^3/eps)^(1/3))); set from the science floor.
+  resid_A: 3.3          # Optional - Measured cubic-error slope A used in the K-sizing rule
+  max_subwindows: 64    # Optional - Cap on the analytic uniform sub-window count K
+  fit_samples: 16       # Optional - Fringe-frequency fit samples per window (analytic path)
 ############################
 # Satellite path parameters
 ############################
