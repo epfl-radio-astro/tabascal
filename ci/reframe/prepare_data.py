@@ -45,6 +45,12 @@ def main():
         default=".",
         help="Root of the tabascal source tree (default: .)",
     )
+    parser.add_argument(
+        "--max-iter",
+        type=int,
+        default=1000,
+        help="Value for opt.max_iter in the generated config (default: 1000)",
+    )
     args = parser.parse_args()
 
     workdir = Path(args.workdir)
@@ -134,6 +140,7 @@ def main():
     components = args.components.split(",")
     config = yaml_load(tab_template)
     config["model"] = {"components": components, "precision": args.precision}
+    config.setdefault("opt", {})["max_iter"] = args.max_iter
     config_out = workdir / "tab_target.yaml"
     with open(config_out, "w") as f:
         yaml.dump(config, f)

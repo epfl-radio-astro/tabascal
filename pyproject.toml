@@ -70,6 +70,7 @@ tab2MS = "tabascal.scripts.results_to_MS:main"
 # ── Pytest ─────────────────────────────────────────────────────────────────────
 
 [tool.pytest.ini_options]
+testpaths     = ["tests"]
 log_cli       = true
 log_cli_level = "WARNING"
 addopts       = "--cov=tabascal --cov-report=term-missing"
