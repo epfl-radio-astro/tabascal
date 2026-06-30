@@ -54,7 +54,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test  = ["pytest>=8", "pytest-cov", "huggingface-hub", "tabsim"]
+test  = ["pytest", "pytest-cov", "huggingface-hub", "tabsim"]
 docs  = ["sphinx", "sphinx-rtd-theme"]
 dev   = ["pre-commit", "reframe-hpc", "tabascal[test,docs]"]
 cuda12 = ["jax[cuda12]"]
@@ -193,7 +193,7 @@ build-ffi-cuda = { cmd = "pixi reinstall -e $PIXI_ENVIRONMENT_NAME tabascal", de
 # cuda12-dev gets tabascal and friends even though it doesn't include the cpu feature.
 
 [tool.pixi.feature.dev.dependencies]
-pytest           = ">=8"
+pytest           = "*"
 pytest-cov       = "*"
 pre-commit       = "*"
 huggingface_hub  = "*"
