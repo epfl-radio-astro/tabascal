@@ -55,4 +55,3 @@ RUN if [ "$JAX_VERSION" = "latest" ] || [ -z "$JAX_VERSION" ]; then \
     else \
       pip install --no-cache-dir -e ".[test,cuda${CUDA_VARIANT}]" "jax[cuda${CUDA_VARIANT}]==$JAX_VERSION"; \
     fi
-

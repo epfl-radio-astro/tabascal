@@ -27,24 +27,28 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
             "daint:gpu": {
                 "total_runtime": (86.0, -0.25, 0.15, "s"),
                 "optimizer_runtime": (74.0, -0.20, 0.15, "s"),
+                "memory_usage": (8.391, -0.1, 0.1, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
                 "total_runtime": (84.0, -0.25, 0.15, "s"),
                 "optimizer_runtime": (71.0, -0.20, 0.15, "s"),
+                "memory_usage": (16.901, -0.1, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
             "daint:gpu": {
                 "total_runtime": (24.1, -0.25, 0.15, "s"),
                 "optimizer_runtime": (12.1, -0.20, 0.15, "s"),
+                "memory_usage": (0.566, -0.1, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "double"): {
             "daint:gpu": {
                 "total_runtime": (35.4, -0.25, 0.15, "s"),
                 "optimizer_runtime": (22.1, -0.20, 0.15, "s"),
+                "memory_usage": (1.252, -0.1, 0.1, "GB"),
             },
         },
     }
@@ -131,4 +135,22 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
             self.stdout,
             "val",
             float,
+        )
+
+    # Parse the per-device peak from the "Memory usage" table printed by
+    # print_memory_usage at the end of the run, e.g.:
+    #   Device  Peak (GB)  Limit (GB)
+    #   ------  ---------  ----------
+    #   cuda:0  32.798     102.005
+    # The device column is anchored to the JAX CUDA device format (cuda:N) so
+    # the match cannot be stolen by an earlier "word number word" line (e.g.
+    # rows of the Runtime Statistics table). Only the first GPU device is
+    # considered (extractsingle takes the first match). The peak is in GB.
+    @performance_function("GB")
+    def memory_usage(self):
+        return sn.extractsingle(
+        r"^(?P<device>cuda:\d+)\s+(?P<val>\d[\d.]*)\s+\S+",
+        self.stdout,
+        "val",
+        float,
         )
