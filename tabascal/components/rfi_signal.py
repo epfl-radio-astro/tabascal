@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
+from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
 from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.tab_tools import get_observation_data_type
@@ -193,12 +194,35 @@ class BaseGPRFI(Component):
         self.corr_freq = rfi_config["corr_freq"]
         self.corr_time = rfi_config["corr_time"]
 
+        # Real (unpadded) source count. Under device sharding n_rfi is padded up to a
+        # multiple of the device count with dark dummy sources; every prior mean and
+        # init below zeroes rows [n_rfi_real:] so the dummies carry exactly zero
+        # amplitude and zero gradient (the vis contribution is quadratic in rfi_A).
+        self.n_rfi_real = getattr(tab_config, "n_rfi_real", tab_config.n_rfi)
+
+    def _zero_padded_rows(self, arr: Array) -> Array:
+        """Zero the padded (dark dummy) rows of an (n_rfi, ...) array; no-op unpadded."""
+        return arr.at[self.n_rfi_real:].set(0)
+
+    def _zero_pad_rfi(self, arr: Array) -> Array:
+        """Zero-pad axis 0 up to the (padded) n_rfi count; no-op when already there.
+
+        Truth/estimate sources (tab-sim zarr, estimate files) only know the real
+        satellites, so their arrays arrive with n_rfi_real rows.
+        """
+        n_pad = self.n_rfi - arr.shape[0]
+        if n_pad <= 0:
+            return arr
+        pad = jnp.zeros((n_pad,) + arr.shape[1:], dtype=arr.dtype)
+        return jnp.concatenate([arr, pad], axis=0)
 
     def _set_outputs(self):
 
+        # This placeholder is a fine-grid memory hog; under sharding each device only
+        # ever allocates its own RFI shard (never the full array).
         self.state_outputs = {
-            "rfi_A": jnp.zeros(
-                (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine), dtype=complex
+            "rfi_A": sharded_rfi_zeros(
+                (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine), complex
             ),
         }
 
@@ -311,7 +335,10 @@ class RealRFI(BaseGPRFI):
 
     def _compute_true_params(self, sim_zarr_path: str, data_col: str):
 
-        self.true_rfi_A_induce = read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times).real
+        # The zarr only knows the real satellites; zero-pad to the sharded count.
+        self.true_rfi_A_induce = self._zero_pad_rfi(
+            read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times).real
+        )
         self.true_rfi_A_induce_base = self.inv_transform(self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
 
     def forward_transform(self, base_params, L, mu):
@@ -356,7 +383,10 @@ class RealRFI(BaseGPRFI):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
 
+        # Padded dummy sources must start exactly dark in every init mode.
+        self.init_rfi_A_induce = self._zero_padded_rows(self.init_rfi_A_induce)
         self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
+        self.init_rfi_A_induce_base = self._zero_padded_rows(self.init_rfi_A_induce_base)
 
         self.init_params = {
             "rfi_r_induce": self.init_rfi_A_induce,
@@ -483,7 +513,10 @@ class ComplexRFI(BaseGPRFI):
 
     def _compute_true_params(self, sim_zarr_path, data_col):
 
-        self.true_rfi_A_induce = read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times)
+        # The zarr only knows the real satellites; zero-pad to the sharded count.
+        self.true_rfi_A_induce = self._zero_pad_rfi(
+            read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times)
+        )
         self.true_rfi_A_induce_base = self.inv_transform(self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
 
     def forward_transform(self, base_params, L, mu):
@@ -530,7 +563,10 @@ class ComplexRFI(BaseGPRFI):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
 
+        # Padded dummy sources must start exactly dark in every init mode.
+        self.init_rfi_A_induce = self._zero_padded_rows(self.init_rfi_A_induce)
         self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
+        self.init_rfi_A_induce_base = self._zero_padded_rows(self.init_rfi_A_induce_base)
 
         self.init_params = {
             "rfi_r_induce": self.init_rfi_A_induce.real,
@@ -711,9 +747,11 @@ class FourierGPRFI(BaseGPRFI):
 
     def _compute_data_est(self, vis_obs):
 
-        est_rfi_k = self.signal_to_latent(jnp.sqrt(jnp.max(jnp.abs(vis_obs), axis=0)))[None, None, :, :] * jnp.ones((self.n_rfi, self.n_ant, 1, 1)) / self.n_rfi
+        # Split the data estimate over the *real* sources only; padded dummies get a
+        # zero mean so they stay dark.
+        est_rfi_k = self.signal_to_latent(jnp.sqrt(jnp.max(jnp.abs(vis_obs), axis=0)))[None, None, :, :] * jnp.ones((self.n_rfi, self.n_ant, 1, 1)) / self.n_rfi_real
 
-        return est_rfi_k
+        return self._zero_padded_rows(est_rfi_k)
 
     def _compute_prior_params(self, prior_type, vis_obs, est_path):
 
@@ -745,18 +783,19 @@ class FourierGPRFI(BaseGPRFI):
 
     def _compute_true_params(self, sim_zarr_path: str, data_col: str):
 
+        # The zarr only knows the real satellites; zero-pad to the sharded count.
         rfi_A = read_true_rfi_A(sim_zarr_path, data_col, self.times)
-        self.true_rfi_k_A = vmap(vmap(self.signal_to_latent))(rfi_A)
+        self.true_rfi_k_A = self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(rfi_A))
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
     def _read_estimate(self, est_path):
 
         from numpy import load
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi]))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi_real]))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
         est_rfi_k_A = vmap(vmap(self.signal_to_latent))(est_rfi_A)
 
-        return est_rfi_k_A
+        return self._zero_pad_rfi(est_rfi_k_A)
 
     def _compute_init_params(self, init_type: str, est_path: str):
 
@@ -792,7 +831,11 @@ class FourierGPRFI(BaseGPRFI):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
 
+        # Padded dummy sources must start exactly dark in every init mode (ones,
+        # sample, truth, ...): zero amplitude means zero signal and zero gradient.
+        self.init_rfi_k = self._zero_padded_rows(self.init_rfi_k)
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
+        self.init_rfi_k_base = self._zero_padded_rows(self.init_rfi_k_base)
 
         self.init_params = {
             "rfi_k_r": self.init_rfi_k.real,
@@ -973,14 +1016,15 @@ class FourierGPRFIConstAnt(BaseGPRFI):
     def _compute_data_est(self, vis_obs: Array) -> Array:
 
         # est_vis_rfi is shape (n_freq, n_time)
-        # RFI antenna estimate is sqrt of average visibility amplitude on maximum baseline
-        est_rfi_A = jnp.sqrt(jnp.max(jnp.abs(vis_obs / self.n_rfi), axis=0)) 
+        # RFI antenna estimate is sqrt of average visibility amplitude on maximum baseline.
+        # Split over the *real* sources only; padded dummies get a zero mean.
+        est_rfi_A = jnp.sqrt(jnp.max(jnp.abs(vis_obs / self.n_rfi_real), axis=0))
         # est_rfi_k_A is shape (n_k_freq_rfi, n_k_time_rfi)
         est_rfi_k_A = self.signal_to_latent(est_rfi_A)
         # est_rfi_k_A is now shape (n_rfi, 1, n_k_freq_rfi, n_k_time_rfi)
-        est_rfi_k_A = est_rfi_k_A[None, None, :, :] * jnp.ones((self.n_rfi, 1, 1, 1)) 
+        est_rfi_k_A = est_rfi_k_A[None, None, :, :] * jnp.ones((self.n_rfi, 1, 1, 1))
 
-        return est_rfi_k_A
+        return self._zero_padded_rows(est_rfi_k_A)
 
     def _compute_prior_params(self, prior_type, vis_obs, est_path):
 
@@ -1017,7 +1061,8 @@ class FourierGPRFIConstAnt(BaseGPRFI):
 
         # true_rfi_k_A is shape (n_rfi, 1, n_k_freq_rfi, n_k_time_rfi)
         # Latent prediction is mapped over axes (0, 1)
-        self.true_rfi_k_A = vmap(vmap(self.signal_to_latent))(true_rfi_A)
+        # The zarr only knows the real satellites; zero-pad to the sharded count.
+        self.true_rfi_k_A = self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(true_rfi_A))
 
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
@@ -1025,9 +1070,9 @@ class FourierGPRFIConstAnt(BaseGPRFI):
 
         from numpy import load
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi]))), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi_real]))), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
 
-        return vmap(vmap(self.signal_to_latent))(est_rfi_A)
+        return self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(est_rfi_A))
 
     def _compute_init_params(self, init_type, est_path):
 
@@ -1059,7 +1104,11 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
 
+        # Padded dummy sources must start exactly dark in every init mode (ones,
+        # sample, truth, ...): zero amplitude means zero signal and zero gradient.
+        self.init_rfi_k = self._zero_padded_rows(self.init_rfi_k)
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
+        self.init_rfi_k_base = self._zero_padded_rows(self.init_rfi_k_base)
 
         self.init_params = {
             "rfi_k_r": self.init_rfi_k.real,

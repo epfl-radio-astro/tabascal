@@ -280,6 +280,29 @@ def get_tles_by_id(
 ) -> pd.DataFrame:
     """Fetch TLE records for the given NORAD IDs, using a local JSON cache.
 
+    In multi-process runs process 0 goes first (cache scan + any Space-Track fetch +
+    cache write) while the workers wait at a barrier; the workers then find the
+    records in the managed cache, so Space-Track sees one client instead of a
+    stampede. Single-process this is a plain call.
+    """
+    from tabascal.distributed import rank0_first
+
+    with rank0_first("tle-fetch"):
+        return _get_tles_by_id(
+            norad_ids, epoch_jd, window_days=window_days, limit=limit,
+            extra_tle_dir=extra_tle_dir,
+        )
+
+
+def _get_tles_by_id(
+    norad_ids: list[int],
+    epoch_jd: float,
+    window_days: float = 1.0,
+    limit: int = 2000,
+    extra_tle_dir: Optional[str] = None,
+) -> pd.DataFrame:
+    """Fetch TLE records for the given NORAD IDs, using a local JSON cache.
+
     Searches for already-cached records in *extra_tle_dir* (if given) first,
     then in the managed cache directory (``tle_cache_dir()``).  Only IDs not
     found locally are fetched from Space-Track; credentials are loaded via

@@ -15,10 +15,21 @@ from jax import random
 from tabascal.timing import measure_runtime, print_timings, enable_timings
 from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
 from tabascal.config import load_config, TabConfig, Model
+from tabascal.distributed import (
+    barrier,
+    is_process_0,
+    make_global,
+    replicated_sharding,
+    shard_pytree,
+    sharding_enabled,
+    suppress_worker_stdout,
+)
 from tabascal.imports import import_components
 from tabascal.write import write_results_xds
 from tabascal.tle import TLEError
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
+
+import jax
 
 
 class _Tee:
@@ -195,12 +206,27 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         tab_config, model = build_model(config, ms_path)
         prob_model = model.prob_model
 
+        if sharding_enabled():
+            # Split every leading-RFI-axis array across the device mesh and replicate
+            # the rest. _map_step takes all of these as traced jit arguments, so GSPMD
+            # propagates the shardings through the whole optimization (gradients and
+            # optimizer state included) from here on. (vis_obs/flags/noise were already
+            # globalized in TabConfig, before Model captured them in closures.)
+            print(f"Sharding {tab_config.n_rfi} RFI sources over {jax.device_count()} devices.")
+            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
+            model.state = shard_pytree(model.state, tab_config.n_rfi)
+            model.constants = shard_pytree(model.constants, tab_config.n_rfi)
+
         _print_model_summary(tab_config, model, start_time)
 
         # Load the tab-sim ground truth once and share it across the init/opt RMSE
         # reporting and all plotting. Missing quantities come back as NaN so consumers
         # can index unconditionally; reporting skips whatever is unavailable.
         truth = load_truth(tab_config)
+        if sharding_enabled():
+            # Truth arrays are compared eagerly against globally-sharded predictions;
+            # process-local device arrays cannot mix with global ones in multi-process.
+            truth = {k: make_global(v, replicated_sharding()) for k, v in truth.items()}
         if not has_truth(truth):
             print("\nNo tab-sim truth available - skipping truth-based RMSE reporting.")
 
@@ -210,14 +236,21 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")
 
-        if config["plots"]["init"]:
+        # Plotting from precomputed (replicated) predictions is safe on process 0
+        # alone. plot_prior is different: it draws fresh model samples, and under
+        # multi-process any model evaluation is a collective -- running it on one
+        # rank would deadlock -- so it is skipped there rather than gated.
+        if config["plots"]["init"] and is_process_0():
             from tabascal.plot import plot_init
             plot_init(tab_config, init_pred, truth, paths.model_name, paths.plot_dir)
 
         key, subkey = random.split(key)
         if config["plots"]["prior"]:
-            from tabascal.plot import plot_prior
-            plot_prior(tab_config, prob_model, truth, paths.model_name, subkey, paths.plot_dir, state=model.state, constants=model.constants)
+            if jax.process_count() > 1:
+                print("Skipping prior plots: not supported in multi-process runs.")
+            else:
+                from tabascal.plot import plot_prior
+                plot_prior(tab_config, prob_model, truth, paths.model_name, subkey, paths.plot_dir, state=model.state, constants=model.constants)
 
         key, *subkeys = random.split(key, 3)
         if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
@@ -226,11 +259,11 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
                 state=model.state, constants=model.constants, truth=truth,
             )
 
-            if config["plots"]["opt"]:
+            if config["plots"]["opt"] and is_process_0():
                 from tabascal.plot import plot_opt
                 plot_opt(tab_config, vi_pred, truth, paths.model_name, paths.plot_dir)
 
-            if config["plots"]["losses"]:
+            if config["plots"]["losses"] and is_process_0():
                 from tabascal.plot import plot_losses
                 plot_losses(losses, paths.model_name, paths.plot_dir)
 
@@ -250,8 +283,13 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         shutil.copy(paths.log_path, paths.plot_dir)
         os.remove(paths.log_path)
 
-    with open(os.path.join(paths.plot_dir, f"tab_config_{paths.run_id}.yaml"), "w") as fp:
-        yaml.dump(config, fp)
+    if is_process_0():
+        with open(os.path.join(paths.plot_dir, f"tab_config_{paths.run_id}.yaml"), "w") as fp:
+            yaml.dump(config, fp)
+
+    # Workers must not tear down the distributed runtime while process 0 is still
+    # writing results / running its final collectives.
+    barrier("tabascal-run-end")
 
 
 def set_precision(config):
@@ -291,18 +329,22 @@ def run(args):
 
     set_precision(config)
 
+    # Workers run the identical program (multi-process collectives require it) but
+    # only process 0 talks: stdout, the log file, plots and result writes are all
+    # rank-0-gated. Errors still reach stderr on every process.
     try:
-        tabascal_subtraction(
-            config,
-            args.sim_dir,
-            args.ms_path,
-            args.suffix,
-            extra_tle_dir=args.extra_tle_dir,
-            log=getattr(args, "log", True),
-        )
+        with suppress_worker_stdout():
+            tabascal_subtraction(
+                config,
+                args.sim_dir,
+                args.ms_path,
+                args.suffix,
+                extra_tle_dir=args.extra_tle_dir,
+                log=getattr(args, "log", True) and is_process_0(),
+            )
     except (TLEError, TruthError) as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if args.timings:
+    if args.timings and is_process_0():
         print_timings()

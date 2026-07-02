@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from jax import vmap
 
+from tabascal.distributed import psum_over_rfi
 from tabascal.interferometry import calculate_rfi_vis_fine, calculate_rfi_vis_variable
 from tabascal.components import Component
 from tabascal.components.ffi.rfi_vis_op import RFIVisOp
@@ -61,13 +62,15 @@ class RiemannVisCalculation(Component):
             a1 = constants[f"{prefix}/a1"]
             a2 = constants[f"{prefix}/a2"]
 
-            vis_rfi_fine = calculate_rfi_vis_fine(
-                state["rfi_A"], state["rfi_phase"], a1, a2
-            )
+            # Works on any leading RFI count: under sharding it runs per device on
+            # the local RFI shard (a1/a2 are replicated closures) and the coarse
+            # results are psum-ed; unsharded it is called directly.
+            def local_vis(rfi_A, rfi_phase):
+                vis_rfi_fine = calculate_rfi_vis_fine(rfi_A, rfi_phase, a1, a2)
+                new_shape = (n_bl, n_freq, n_time, n_int_time)
+                return jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=-1)
 
-            new_shape = (n_bl, n_freq, n_time, n_int_time)
-
-            vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=-1)
+            vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
             return state
@@ -139,13 +142,16 @@ class RiemannVisTimeFreqCalculation(Component):
             a1 = constants[f"{prefix}/a1"]
             a2 = constants[f"{prefix}/a2"]
 
+            # Per-RFI-shard body (any leading RFI count); psum-ed across devices
+            # under sharding. The fine->coarse mean runs before the cross-device
+            # sum, so the collective is only coarse-grid sized (sum/mean commute).
+            def local_vis(rfi_A, rfi_phase):
+                vis_rfi_fine = calculate_rfi_vis_fine(rfi_A, rfi_phase, a1, a2)
+                # vis_rfi_fine is shape (n_bl, n_freq_fine, n_time_fine)
+                new_shape = (n_bl, n_freq, n_int_freq, n_time, n_int_time)
+                return jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=(-3, -1))
 
-            vis_rfi_fine = calculate_rfi_vis_fine(
-                state["rfi_A"], state["rfi_phase"], a1, a2
-            )
-            # vis_rfi_fine is shape (n_bl, n_freq_fine, n_time_fine)
-            new_shape = (n_bl, n_freq, n_int_freq, n_time, n_int_time)
-            vis_rfi = jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=(-3, -1))
+            vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
@@ -215,15 +221,22 @@ class RiemannVisTimeFreqCalculationFFI(Component):
         op = RFIVisOp(n_ant, self.a1, self.a2)
 
         def forward(params, state, constants):
-            new_shape = (n_rfi, n_ant, n_freq, n_int_freq, n_time, n_int_time)
-            rfi_amp_fine = state["rfi_A"].reshape(new_shape)
-            rfi_phase = state["rfi_phase"].reshape(new_shape)
+            # Leading dim is -1, not n_rfi: under sharding the body below runs on
+            # the per-device RFI shard, whose count is n_rfi / n_devices. The FFI
+            # kernel itself runs unmodified per device inside shard_map (GSPMD
+            # cannot partition a custom call); results are psum-ed across devices.
+            def local_vis(rfi_A, rfi_phase):
+                new_shape = (-1, n_ant, n_freq, n_int_freq, n_time, n_int_time)
+                rfi_amp_fine = rfi_A.reshape(new_shape)
+                rfi_phase_fine = rfi_phase.reshape(new_shape)
 
-            # Transpose to (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
-            rfi_amp_fine = jnp.transpose(rfi_amp_fine , (1, 2, 4, 0, 3, 5))
-            rfi_phase = jnp.transpose(rfi_phase, (1, 2, 4, 0, 3, 5))
+                # Transpose to (n_ant, n_freq, n_time, n_rfi_local, n_int_freq, n_int_time)
+                rfi_amp_fine = jnp.transpose(rfi_amp_fine, (1, 2, 4, 0, 3, 5))
+                rfi_phase_fine = jnp.transpose(rfi_phase_fine, (1, 2, 4, 0, 3, 5))
 
-            vis_rfi = op.eval(rfi_amp_fine, rfi_phase)
+                return op.eval(rfi_amp_fine, rfi_phase_fine)
+
+            vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
 
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
@@ -334,24 +347,30 @@ class RiemannVisTimeFreqVariable(Component):
             a1 = constants[f"{prefix}/a1"]
             a2 = constants[f"{prefix}/a2"]
 
-            new_shape = (
-                n_rfi,
-                n_ant,
-                n_freq,
-                n_int_freq,
-                n_time,
-                n_int_time,
-            )
+            # Leading dim -1: under sharding the body sees the per-device RFI
+            # shard. Only replicated arrays (a1/a2, time_sample_idxs) are closed
+            # over; the local sum over sources happens before the psum.
+            def local_vis(rfi_A_flat, rfi_phase_flat):
+                new_shape = (
+                    -1,
+                    n_ant,
+                    n_freq,
+                    n_int_freq,
+                    n_time,
+                    n_int_time,
+                )
 
-            rfi_A = jnp.reshape(state["rfi_A"], new_shape)
-            rfi_phase = jnp.reshape(state["rfi_phase"], new_shape)
+                rfi_A = jnp.reshape(rfi_A_flat, new_shape)
+                rfi_phase = jnp.reshape(rfi_phase_flat, new_shape)
 
-            vis_rfi = jnp.sum(
-                vmap(
-                    lambda A, P: calculate_rfi_vis_single(A, P, a1, a2, constants)
-                )(rfi_A, rfi_phase),
-                axis=0,
-            )
+                return jnp.sum(
+                    vmap(
+                        lambda A, P: calculate_rfi_vis_single(A, P, a1, a2, constants)
+                    )(rfi_A, rfi_phase),
+                    axis=0,
+                )
+
+            vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
 
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}

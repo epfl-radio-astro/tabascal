@@ -3,6 +3,16 @@
 # ---------------------------------------------------------------------------
 
 def _run_cmd(args):
+    # Multi-process bring-up must precede everything jax-related: the distributed
+    # runtime has to exist before the device backend initializes, and the impl module
+    # import pulls in the whole jax/numpyro stack. Memory-on-demand likewise has to be
+    # set before the backend grabs the GPU (the impl module also sets it, but by then
+    # only for the single-process path -- here it must land before init_distributed).
+    import os
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    from tabascal.distributed import init_distributed
+    init_distributed()
+
     # Imported lazily so the lightweight subcommands (and --help) don't pay the
     # JAX import cost. The heavy implementation lives in a separate module.
     from tabascal.scripts._run_tabascal_impl import run

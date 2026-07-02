@@ -1,5 +1,11 @@
 from tabascal.imports import import_components
 from tabascal.components.likelihood import gaussian
+from tabascal.distributed import (
+    constrain_rfi_state,
+    make_global,
+    replicated_sharding,
+    sharding_enabled,
+)
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
 from tabascal.tle import print_spacetrack_status, preflight_tle_check
@@ -154,6 +160,16 @@ class TabConfig:
 
         self._set_freqs_times()
 
+        if sharding_enabled():
+            # These are captured in closures during Model setup (likelihood) and used
+            # eagerly against globally-sharded arrays; process-local device arrays
+            # cannot mix with global ones in multi-process, so globalize them here,
+            # before any component sees them. noise becomes a plain float (a closure
+            # literal has no device placement to conflict).
+            self.vis_obs = make_global(self.vis_obs, replicated_sharding())
+            self.flags = make_global(self.flags, replicated_sharding())
+            self.noise = float(self.noise)
+
     def set_noise(self, noise: float):
 
         if noise:
@@ -270,7 +286,17 @@ class TabConfig:
         self.elements, self.epoch_jd, self.norad_ids, self.tles = (
             fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=extra_tle_dir)
         )
+        # Under sharding the fetch pads the source list to a multiple of the device
+        # count by duplicating the last satellite; padded slots are unique-id copies,
+        # so the real (unpadded) count is the number of distinct ids. The RFI signal
+        # components use n_rfi_real to keep padded sources dark.
         self.n_rfi = len(self.norad_ids)
+        self.n_rfi_real = len(set(self.norad_ids))
+        if self.n_rfi > self.n_rfi_real:
+            print(
+                f"Padded {self.n_rfi_real} RFI sources to {self.n_rfi} "
+                "(dark dummies) to divide evenly across devices."
+            )
 
 
 class Model:
@@ -283,6 +309,7 @@ class Model:
     ):
 
         self.noise = tab_config.noise
+        self.n_rfi = tab_config.n_rfi
         self.likelihood = lambda pred, obs_data: likelihood(
             pred, obs_data, {"noise": tab_config.noise, "flags": tab_config.flags}
         )
@@ -315,11 +342,16 @@ class Model:
 
     def build_forward(self):
         forwards = [comp.build_forward() for comp in self.components]
+        n_rfi = self.n_rfi
 
         def forward(params, state, constants):
 
             for sub_forward in forwards:
                 state = sub_forward(params, state, constants)
+                # Keep the per-RFI fine grids (rfi_A/rfi_phase -- the memory hogs)
+                # pinned to the RFI sharding between components, so XLA never
+                # materializes a replicated copy. No-op on a single device.
+                state = constrain_rfi_state(state, n_rfi)
 
             return state
 
