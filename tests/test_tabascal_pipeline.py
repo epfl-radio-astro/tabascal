@@ -653,3 +653,177 @@ def test_pipeline(
     metrics_ref = t_config.metrics_ref.get(precision)
     if metrics_ref:
         _assert_truth_metrics(stdout, "opt", metrics_ref)
+
+
+# ---------------------------------------------------------------------------
+# RFI-axis device sharding (multi-GPU / multi-process)
+# ---------------------------------------------------------------------------
+#
+# tabascal shards the MAP solve over the RFI-source axis whenever more than one
+# device is visible (see tabascal/distributed.py). These tests fake extra devices
+# on CPU (XLA_FLAGS) / spawn two coordinated processes (jax.distributed) and
+# require the sharded solve to reproduce the single-device solve. The test sim has
+# 3 satellites, so a 2-device mesh also exercises the dark-dummy padding (3 -> 4).
+
+def _sharded_components(rfi_vis: str) -> list[str]:
+    return [
+        "trajectory:FixedOrbit",
+        "trajectory:PhaseCalculationRFI",
+        "rfi_signal:ComplexRFI",
+        f"rfi_vis:{rfi_vis}",
+        "ast_vis:FourierTimeFreqGPAst",
+        "gains:UnitaryGains",
+    ]
+
+
+# Same case as FixedOrbit+PhaseCalculationRFI above (double precision).
+_SHARDED_CHI2_REF = 0.8977856043436502
+
+
+def _prepare_sharded_run(
+    provide_test_data: Path,
+    work_dir: Path,
+    rfi_vis: str = "RiemannVisTimeFreqCalculation",
+) -> tuple[list[str], Path]:
+    """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command.
+
+    The copy keeps the sim directory basename (the zarr/MS paths inside the run are
+    derived from it) and keeps these runs from writing results into the shared
+    HuggingFace cache -- the multi-process test in particular has two processes
+    using one sim directory.
+    """
+    import shutil
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = Path(__file__).parent / "data"
+    input_hash = compute_sha256(data_dir / "sim_target_8A.yaml")
+    input_dir = Path(provide_test_data) / input_hash
+    src = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
+    assert src, f"No pnt_src* directory found in {input_dir}"
+    sim_dir = work_dir / src.name
+    shutil.copytree(src, sim_dir)
+
+    config_path = work_dir / "tab_target.yaml"
+    read_and_modify_yaml(
+        {"model": {"components": _sharded_components(rfi_vis), "precision": "double"}},
+        data_dir / "tab_target.yaml",
+        config_path,
+    )
+
+    script = Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
+    tle_dir = str(_res_files("tabascal").joinpath("data/tles"))
+    cmd = [
+        sys.executable, str(script), "run",
+        "-c", str(config_path),
+        "-s", str(sim_dir),
+        "--extra-tle-dir", tle_dir,
+        "-nl",
+    ]
+    return cmd, sim_dir
+
+
+def _extract_chi2(stdout: str, point: str) -> float:
+    match = re.search(rf"Reduced Chi\^2 @ {point} params : ([\d.eE+-]+)", stdout)
+    assert match, f"Could not find 'Reduced Chi^2 @ {point}' in output:\n{stdout}"
+    return float(match.group(1))
+
+
+@pytest.mark.parametrize(
+    "rfi_vis",
+    [
+        # The plain variant runs entirely through GSPMD+shard_map on pure JAX ops;
+        # the FFI variant additionally exercises the custom C kernel inside
+        # shard_map (the reason for check_vma=False in psum_over_rfi).
+        "RiemannVisTimeFreqCalculation",
+        "RiemannVisTimeFreqCalculationFFI",
+    ],
+)
+def test_pipeline_sharded_equivalence(
+    provide_test_data: Path, tmp_path: Path, precision: str, rfi_vis: str
+) -> None:
+    """Sharded run (2 fake CPU devices, padding 3 sats -> 4) == single-device run.
+
+    Exact in double precision up to summation reduction order, hence the requires-
+    double skip and the tight (but not bitwise) tolerance on the optimized chi^2.
+    """
+    if precision != "double":
+        pytest.skip("equivalence is asserted exactly; components require double")
+
+    import os
+
+    ref_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "ref", rfi_vis)
+    ref = subprocess.run(ref_cmd, capture_output=True, text=True, cwd=tmp_path / "ref")
+    assert ref.returncode == 0, f"single-device run failed: {ref.stderr}"
+
+    shard_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "shard", rfi_vis)
+    shard_env = dict(os.environ)
+    shard_env["XLA_FLAGS"] = (
+        shard_env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=2"
+    ).strip()
+    shard = subprocess.run(
+        shard_cmd, capture_output=True, text=True, cwd=tmp_path / "shard", env=shard_env
+    )
+    assert shard.returncode == 0, f"sharded run failed: {shard.stderr}"
+
+    assert "Padded 3 RFI sources to 4" in shard.stdout
+    assert "Sharding 4 RFI sources over 2 devices." in shard.stdout
+    assert "Sharding" not in ref.stdout
+
+    assert _extract_chi2(shard.stdout, "opt") == pytest.approx(
+        _extract_chi2(ref.stdout, "opt"), rel=1e-12
+    )
+    assert _extract_chi2(shard.stdout, "init") == pytest.approx(
+        _extract_chi2(ref.stdout, "init"), rel=1e-9
+    )
+    _assert_chi2(shard.stdout, _SHARDED_CHI2_REF)
+
+
+def test_pipeline_multiprocess(
+    provide_test_data: Path, tmp_path: Path, precision: str
+) -> None:
+    """Two coordinated processes (jax.distributed, 1 CPU device each) solve once.
+
+    Verifies the full multi-process path: coordinator bring-up through the
+    MASTER_ADDR/RANK env route in init_distributed, RFI padding/sharding across
+    processes, worker stdout silence, and rank-0-only result writing.
+    """
+    if precision != "double":
+        pytest.skip("uses components that require double precision")
+
+    import os
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("localhost", 0))
+        port = s.getsockname()[1]
+
+    cmd, sim_dir = _prepare_sharded_run(provide_test_data, tmp_path)
+    base_env = dict(os.environ)
+    base_env.update({
+        "MASTER_ADDR": "localhost",
+        "MASTER_PORT": str(port),
+        "WORLD_SIZE": "2",
+    })
+
+    procs = [
+        subprocess.Popen(
+            cmd,
+            env={**base_env, "RANK": str(rank)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tmp_path,
+        )
+        for rank in (0, 1)
+    ]
+    outs = [p.communicate(timeout=600) for p in procs]
+    for rank, (p, (out, err)) in enumerate(zip(procs, outs)):
+        assert p.returncode == 0, f"rank {rank} failed:\nstdout:\n{out}\nstderr:\n{err}"
+
+    rank0_out = outs[0][0]
+    assert "Sharding 4 RFI sources over 2 devices." in rank0_out
+    _assert_chi2(rank0_out, _SHARDED_CHI2_REF)
+
+    # Workers must be silent and must not write results; rank 0 wrote them once.
+    assert outs[1][0] == "", f"rank 1 was not silent:\n{outs[1][0]}"
+    assert (sim_dir / "results" / "map_pred_Custom.zarr").is_dir()
