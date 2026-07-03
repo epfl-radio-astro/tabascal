@@ -214,9 +214,7 @@ class RiemannVisTimeFreqCalculationFFI(Component):
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
         n_time = self.n_time
-        n_bl = self.n_bl
         n_freq = self.n_freq
-        n_rfi = self.n_rfi
         n_ant = self.n_ant
         op = RFIVisOp(n_ant, self.a1, self.a2)
 
@@ -321,7 +319,6 @@ class RiemannVisTimeFreqVariable(Component):
         prefix = self.prefix
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
-        n_rfi = self.n_rfi
         n_ant = self.n_ant
         n_time = self.n_time
         n_bl = self.n_bl

@@ -68,8 +68,9 @@ def init_distributed() -> None:
     coordinates. After this call ``jax.device_count()`` reports the *global* device
     count, so :func:`sharding_enabled` and everything downstream turn on automatically.
 
-    Must be called before any JAX array is created (it initializes the device backend),
-    i.e. first thing in :func:`tabascal.scripts._run_tabascal_impl.run`.
+    Must be called before any JAX array is created (it initializes the device backend);
+    the CLI calls it in ``run_tabascal._run_cmd`` before even importing the run
+    implementation module.
     """
     if not (os.environ.get("TABASCAL_FORCE_DISTRIBUTED") or _world_size() > 1):
         return
@@ -256,12 +257,15 @@ def psum_over_rfi(local_fn: Callable) -> Callable:
     def summed(rfi_A, rfi_phase):
         return lax.psum(local_fn(rfi_A, rfi_phase), "rfi")
 
-    return shard_map(
-        summed,
-        mesh=rfi_mesh(),
-        in_specs=(P("rfi"), P("rfi")),
-        out_specs=P(),
-    )
+    # Varying-axis type checking must be off: the FFI kernel's custom JVP/transpose
+    # rules produce cotangents without the {V:rfi} annotation, which trips the check
+    # under value_and_grad. The out_specs still hold -- the psum makes the result
+    # replicated -- the checker just cannot prove it for custom primitives.
+    kwargs = dict(mesh=rfi_mesh(), in_specs=(P("rfi"), P("rfi")), out_specs=P())
+    try:
+        return shard_map(summed, check_vma=False, **kwargs)
+    except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
+        return shard_map(summed, check_rep=False, **kwargs)
 
 
 # ---------------------------------------------------------------------------
