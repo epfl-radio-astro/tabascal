@@ -7,7 +7,11 @@ from tabascal.distributed import (
     sharding_enabled,
 )
 from tabascal.tab_tools import read_ms, fix_padding
-from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
+from tabascal.components.trajectory import (
+    fetch_orbital_elements,
+    get_satellite_elevations,
+    get_satellite_positions,
+)
 from tabascal.tle import print_spacetrack_status, preflight_tle_check
 from tabascal.interferometry import (
     calculate_fringe_frequency_numpy,
@@ -173,6 +177,8 @@ class TabConfig:
 
         self._set_freqs_times()
 
+        self.set_elevation_mask(config["rfi"].get("min_elevation"))
+
         if sharding_enabled():
             # These are captured in closures during Model setup (likelihood) and used
             # eagerly against globally-sharded arrays; process-local device arrays
@@ -182,6 +188,41 @@ class TabConfig:
             self.vis_obs = make_global(self.vis_obs, replicated_sharding())
             self.flags = make_global(self.flags, replicated_sharding())
             self.noise = float(self.noise)
+
+    def set_elevation_mask(self, min_elevation: Optional[float]):
+        """Mask the RFI signal to zero whenever a satellite is below `min_elevation`.
+
+        The elevation is evaluated on the observation time grid and the mask is
+        expanded over each integration, so an integration is either fully modelled
+        or fully masked. `min_elevation` is in degrees; None disables masking.
+        """
+
+        self.min_elevation = min_elevation
+
+        if min_elevation is None or self.n_rfi == 0:
+            self.rfi_elevation = None
+            self.rfi_mask = None
+            self.rfi_mask_fine = None
+            return
+
+        self.rfi_elevation = get_satellite_elevations(
+            self.tles, self.times_jd, self.ants_itrf
+        )
+        self.rfi_mask = self.rfi_elevation > min_elevation
+        self.rfi_mask_fine = np.repeat(self.rfi_mask, self.n_int_time, axis=-1)
+
+        print(f"\nRFI signal masked below {min_elevation} deg elevation")
+        for norad_id, mask, el in zip(self.norad_ids, self.rfi_mask, self.rfi_elevation):
+            if not mask.any():
+                raise ValueError(
+                    f"Satellite {norad_id} is never above {min_elevation} deg "
+                    "elevation, so its RFI signal is fully masked. Remove it from "
+                    "satellites.norad_ids or lower rfi.min_elevation."
+                )
+            print(
+                f"{norad_id}: {100 * mask.mean():5.1f} % of times in view "
+                f"(elevation {el.min():.1f} to {el.max():.1f} deg)"
+            )
 
     def set_noise(self, noise: float):
 

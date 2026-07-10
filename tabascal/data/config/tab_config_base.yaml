@@ -58,6 +58,7 @@ rfi:
   init: sample          # Optional - The initialization method for the RFI signal parameters. Options are 'est', 'prior', 'truth'
   mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'truth'
   var: null             # Optional - Variance of the RFI signal in Jy. When null an estimate is made based on the data
+  min_elevation: null   # Optional - Elevation in degrees below which the RFI signal of a satellite is masked to zero. When null no masking is applied
   corr_time: 24         # Optional - Correlation time of the RFI signal in seconds
   corr_freq: 1e6        # Optional - Correlation bandwidth of the RFI signal in Hz
   time_pad_factor: 2

@@ -13,9 +13,50 @@ from tabascal.tab_tools import get_observation_data_type
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
 from tabascal.timing import measure_runtime
 
+import numpy as np
 import xarray as xr
 
-from typing import Tuple, Dict, Callable
+from typing import Tuple, Dict, Callable, List
+
+
+def read_light_curves(est_path: str, norad_ids: List[int]) -> Array:
+    """Read an RFI light curve estimate, ordered to match `norad_ids`.
+
+    Light curve files written by `nufft-gif` label each source in `titles`, so the
+    satellites are matched by NORAD ID and any non-satellite sources (e.g. Fornax A)
+    are dropped. Files without `titles` fall back to the leading `n_rfi` sources,
+    which is only correct when `norad_ids` is ascending.
+
+    Returns
+    -------
+    Array (n_rfi, n_time, n_freq)
+        Light curves, with out-of-view NaNs replaced by a zero RFI estimate.
+    """
+
+    est = np.load(est_path)
+    titles = None
+    if est_path.endswith(".npz"):
+        titles = [str(t) for t in est["titles"]] if "titles" in est.files else None
+        est = est["light_curves"]
+
+    if titles is None:
+        print(
+            f"Warning: {est_path} has no source labels. Taking the first "
+            f"{len(norad_ids)} light curves as the satellites, in file order."
+        )
+        idxs = list(range(len(norad_ids)))
+    else:
+        lc_idx = {int(t): i for i, t in enumerate(titles) if t.strip().isdigit()}
+        missing = [n_id for n_id in norad_ids if int(n_id) not in lc_idx]
+        if missing:
+            raise ValueError(
+                f"No light curve found in {est_path} for NORAD IDs {missing}. "
+                f"It contains {sorted(lc_idx)}."
+            )
+        idxs = [lc_idx[int(n_id)] for n_id in norad_ids]
+
+    # NaN (satellite out of view) -> 0 RFI estimate; keeps the init finite.
+    return jnp.nan_to_num(jnp.asarray(est[idxs]))
 
 
 def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
@@ -202,6 +243,24 @@ class BaseGPRFI(Component):
         # amplitude and zero gradient (the vis contribution is quadratic in rfi_A).
         self.n_rfi_real = getattr(tab_config, "n_rfi_real", tab_config.n_rfi)
 
+        # Elevation mask, zeroing the RFI signal while a satellite is below the
+        # horizon. None when disabled. Shape (n_rfi, n_time_fine), i.e. it covers the
+        # padded dummy rows too -- they duplicate the last real satellite, so they
+        # inherit its mask and are zeroed independently by masked_forward_transform.
+        rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None)
+        self.rfi_mask_fine = None if rfi_mask_fine is None else jnp.array(rfi_mask_fine)
+
+        # NORAD IDs, ordered as the n_rfi axis of every RFI array. Under sharding the
+        # tail entries are padding duplicates, so consumers that look ids up in an
+        # external file slice to [:n_rfi_real] and zero-pad the result instead.
+        self.norad_ids = tab_config.norad_ids
+
+    @staticmethod
+    def mask_signal(rfi_A: Array, mask: Array) -> Array:
+        """Zero the RFI signal (n_rfi, n_ant, n_freq_fine, n_time_fine) outside the mask."""
+
+        return rfi_A * mask[:, None, None, :]
+
     def _mask_dummy_rfi(self, arr: Array) -> Array:
         """Zero the padded (dark dummy) rows of an (n_rfi, ...) array; no-op unpadded."""
         return arr.at[self.n_rfi_real:].set(0)
@@ -302,16 +361,22 @@ class RealRFI(BaseGPRFI):
         return set_params
 
     def build_constants(self):
-        return {
+        constants = {
             "L_rfi_A": self.L_rfi_A,
             "mu_rfi_A": self.mu_rfi_A,
             "resample_rfi": self.resample_rfi,
         }
+        if self.rfi_mask_fine is not None:
+            constants["rfi_mask_fine"] = self.rfi_mask_fine.astype(self.mu_rfi_A.dtype)
+
+        return constants
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
+        mask_signal = self.mask_signal
+        masked = self.rfi_mask_fine is not None
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -326,6 +391,10 @@ class RealRFI(BaseGPRFI):
             rfi_A = vmap(vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1), (None, 2), 2)(
                 resample_rfi, rfi_A_induce
             )
+
+            if masked:
+                rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])
+
             state = {**state, "rfi_A": rfi_A}
 
             return state
@@ -479,16 +548,22 @@ class ComplexRFI(BaseGPRFI):
         return set_params
 
     def build_constants(self):
-        return {
+        constants = {
             "L_rfi_A": self.L_rfi_A,
             "mu_rfi_A": self.mu_rfi_A,
             "resample_rfi": self.resample_rfi,
         }
+        if self.rfi_mask_fine is not None:
+            constants["rfi_mask_fine"] = self.rfi_mask_fine.astype(self.resample_rfi.dtype)
+
+        return constants
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
+        mask_signal = self.mask_signal
+        masked = self.rfi_mask_fine is not None
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -505,6 +580,10 @@ class ComplexRFI(BaseGPRFI):
             rfi_A = vmap(vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1), (None, 2), 2)(
                 resample_rfi, rfi_A_induce
             )
+
+            if masked:
+                rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])
+
             state = {**state, "rfi_A": rfi_A}
 
             return state
@@ -668,15 +747,23 @@ class FourierGPRFI(BaseGPRFI):
         return set_params
 
     def build_constants(self):
-        return {
+        constants = {
             "sigma_rfi_k": self.sigma_rfi_k,
             "mu_rfi_k": self.mu_rfi_k,
         }
+        if self.rfi_mask_fine is not None:
+            constants["rfi_mask_fine"] = self.rfi_mask_fine.astype(
+                self.sigma_rfi_k.dtype
+            )
+
+        return constants
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
+        mask_signal = self.mask_signal
+        masked = self.rfi_mask_fine is not None
         pads = self.pads
         ss_idxs = self.ss_idxs
 
@@ -692,6 +779,9 @@ class FourierGPRFI(BaseGPRFI):
             rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
                 rfi_k_A, pads, ss_idxs
             )
+
+            if masked:
+                rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -806,16 +896,10 @@ class FourierGPRFI(BaseGPRFI):
 
     def _read_estimate(self, est_path):
 
-        from numpy import load
-
-        light_curves = load(est_path)
-        if est_path.endswith(".npz"):
-            light_curves = light_curves["light_curves"]
-
-        # Light curves carry NaN for timesteps/channels where a satellite is out
-        # of view (off-image aperture).  Treat those as a zero RFI estimate so the
-        # init stays finite for partially-visible satellites.
-        light_curves = jnp.nan_to_num(jnp.array(light_curves[:self.n_rfi_real]))
+        # Only the real satellites have a light curve; the padded rows are restored as
+        # zeros by _zero_pad_rfi below, so a padding duplicate is never looked up (and
+        # read_light_curves' missing-id error stays about genuinely missing sources).
+        light_curves = read_light_curves(est_path, self.norad_ids[:self.n_rfi_real])
 
         est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(light_curves)), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
         est_rfi_k_A = vmap(vmap(self.signal_to_latent))(est_rfi_A)
@@ -939,15 +1023,21 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         return set_params
 
     def build_constants(self):
-        return {
+        constants = {
             "sigma_rfi_k": self.sigma_rfi_k,
             "mu_rfi_k": self.mu_rfi_k,
         }
+        if self.rfi_mask_fine is not None:
+            constants["rfi_mask_fine"] = self.rfi_mask_fine.astype(self.sigma_rfi_k.dtype)
+
+        return constants
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
+        mask_signal = self.mask_signal
+        masked = self.rfi_mask_fine is not None
         pads = self.pads
         ss_idxs = self.ss_idxs
         n_rfi = self.n_rfi
@@ -967,6 +1057,9 @@ class FourierGPRFIConstAnt(BaseGPRFI):
                 rfi_k_A, pads, ss_idxs
             )
             rfi_A = rfi_A * jnp.ones((n_rfi, n_ant, n_freq_fine, n_time_fine))
+
+            if masked:
+                rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -1089,14 +1182,8 @@ class FourierGPRFIConstAnt(BaseGPRFI):
 
     def _read_estimate(self, est_path):
 
-        from numpy import load
-
-        light_curves = load(est_path)
-        if est_path.endswith(".npz"):
-            light_curves = light_curves["light_curves"]
-
-        # NaN (satellite out of view) -> 0 RFI estimate; keeps the init finite.
-        light_curves = jnp.nan_to_num(jnp.array(light_curves[:self.n_rfi_real]))
+        # Real satellites only; _zero_pad_rfi below restores the padded rows as zeros.
+        light_curves = read_light_curves(est_path, self.norad_ids[:self.n_rfi_real])
 
         est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(light_curves)), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
 

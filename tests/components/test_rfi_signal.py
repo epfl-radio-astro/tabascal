@@ -52,6 +52,18 @@ FOURIER_CLASSES = [FourierGPRFI, FourierGPRFIConstAnt]
 COMMON_INITS = ["prior", "zeros", "ones", "sample"]
 
 
+def _norad_ids(n_rfi, n_rfi_real):
+    """NORAD ids laid out as TabConfig builds them: real sources, then padding.
+
+    Device sharding pads the satellite list to a multiple of the device count by
+    repeating the *last real* satellite, so the tail entries are duplicates of it --
+    which is exactly why consumers that look ids up in an external file must slice to
+    ``[:n_rfi_real]`` rather than trust the full list to be unique.
+    """
+    ids = [40000 + i for i in range(n_rfi_real)]
+    return ids + [ids[-1]] * (n_rfi - n_rfi_real)
+
+
 def make_rfi_config(
     n_rfi=N_RFI,
     n_rfi_real=N_RFI_REAL,
@@ -69,6 +81,7 @@ def make_rfi_config(
     corr_time=60.0,
     pad_factor=2,
     with_n_rfi_real=True,
+    rfi_mask_fine=None,
 ):
     """Build a minimal mock TabConfig for the RFI-signal components.
 
@@ -87,6 +100,8 @@ def make_rfi_config(
     n_bl = n_ant * (n_ant - 1) // 2
 
     config = SimpleNamespace(
+        norad_ids=_norad_ids(n_rfi, n_rfi_real),
+        rfi_mask_fine=rfi_mask_fine,
         n_rfi=n_rfi,
         n_ant=n_ant,
         n_freq=n_freq,
@@ -603,6 +618,84 @@ class TestDummySourcesStayDark:
 
 
 # ---------------------------------------------------------------------------
+# Elevation mask
+# ---------------------------------------------------------------------------
+
+def elevation_mask(n_rfi=N_RFI, n_time_fine=N_TIME, down_from=N_TIME // 2):
+    """A mask putting source 0 below the cut from ``down_from`` on; the rest always up.
+
+    Shaped like ``TabConfig.rfi_mask_fine`` — (n_rfi, n_time_fine), already expanded
+    over each integration so a sample is never partially masked.
+    """
+    mask = np.ones((n_rfi, n_time_fine), dtype=bool)
+    mask[0, down_from:] = False
+    return mask
+
+
+class TestElevationMask:
+    """rfi.min_elevation zeroes a satellite's signal while it is below the cut.
+
+    The mask is applied in the forward, so — like the padding mask it composes with —
+    it holds for arbitrary parameters, not just the init values.
+    """
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_masked_samples_are_exactly_zero(self, cls):
+        comp = setup_component(cls, rfi_mask_fine=elevation_mask())
+        rfi_A = run_forward(comp, random_params(comp))
+
+        # Exactly zero, not merely small: the mask multiplies the signal by 0.
+        assert jnp.max(jnp.abs(rfi_A[0, :, :, N_TIME // 2:])) == 0.0
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_in_view_samples_are_untouched(self, cls):
+        """Masking is confined to the out-of-view samples of the masked source."""
+        masked = setup_component(cls, rfi_mask_fine=elevation_mask())
+        plain = setup_component(cls)
+        params = random_params(plain)
+
+        got, want = run_forward(masked, params), run_forward(plain, params)
+
+        assert jnp.allclose(got[0, :, :, : N_TIME // 2], want[0, :, :, : N_TIME // 2])
+        # Sources that never drop below the cut are unaffected everywhere.
+        assert jnp.allclose(got[1:N_RFI_REAL], want[1:N_RFI_REAL])
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_no_mask_leaves_the_forward_unchanged(self, cls):
+        """min_elevation: null must be a true no-op, not a multiply by ones."""
+        comp = setup_component(cls)
+
+        assert comp.rfi_mask_fine is None
+        assert "rfi_mask_fine" not in comp.build_constants()
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_mask_composes_with_dummy_padding(self, cls):
+        """Both masks apply: padded rows stay dark and the masked source still cuts."""
+        comp = setup_component(cls, rfi_mask_fine=elevation_mask())
+        rfi_A = run_forward(comp, random_params(comp))
+
+        assert jnp.all(rfi_A[N_RFI_REAL:] == 0), "padded dummy sources are not dark"
+        assert jnp.max(jnp.abs(rfi_A[0, :, :, N_TIME // 2:])) == 0.0
+        # The masking must not have swallowed the signal wholesale.
+        assert jnp.max(jnp.abs(rfi_A[:N_RFI_REAL])) > 0
+
+    def test_mask_is_expanded_over_integrations(self):
+        """A mask on the fine grid masks whole integrations, never part of one."""
+        n_int_time = 2
+        comp = setup_component(
+            ComplexRFI,
+            n_int_time=n_int_time,
+            rfi_mask_fine=elevation_mask(n_time_fine=N_TIME * n_int_time,
+                                         down_from=N_TIME),
+        )
+        rfi_A = run_forward(comp, random_params(comp))
+
+        assert rfi_A.shape[-1] == N_TIME * n_int_time
+        assert jnp.max(jnp.abs(rfi_A[0, :, :, N_TIME:])) == 0.0
+        assert jnp.max(jnp.abs(rfi_A[0, :, :, :N_TIME])) > 0
+
+
+# ---------------------------------------------------------------------------
 # Transforms
 # ---------------------------------------------------------------------------
 
@@ -726,6 +819,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     times = jnp.linspace(0.0, 120.0, n_time)
 
     config = SimpleNamespace(
+        norad_ids=[40000, 40001, 40002, 40002],
         n_rfi=n_rfi, n_rfi_real=n_rfi_real, n_ant=n_ant, n_freq=n_freq, n_time=n_time,
         n_freq_fine=n_freq, n_time_fine=n_time, n_int_freq=1, n_int_time=1,
         freqs=freqs, freqs_fine=freqs, chan_width=float(freqs[1] - freqs[0]),
