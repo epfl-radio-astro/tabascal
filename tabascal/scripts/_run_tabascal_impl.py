@@ -339,8 +339,10 @@ def run(args):
     except (TLEError, TruthError) as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
-
-    print_memory_usage()
+    finally:
+        # Report even when the run dies mid-way (e.g. OOM): the peak up to
+        # the failure is the number needed to diagnose it.
+        print_memory_usage()
 
     if args.timings:
         print_timings()

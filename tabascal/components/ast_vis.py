@@ -1,4 +1,4 @@
-from jax import vmap, random, jit
+from jax import vmap, random, jit, checkpoint
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -712,6 +712,14 @@ class FourierTimeFreqGPAst(Component):
         ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
 
+        # Rematerialise the latent->signal chain under reverse-mode AD: the
+        # padded grid / FFT intermediates (n_bl x n_freq_pad x n_time_pad, the
+        # dominant memory term) are recomputed in the backward pass instead of
+        # stored. Only the small latent modes and the cropped output are kept.
+        latent_to_signal_ckpt = checkpoint(
+            lambda k: latent_to_signal(k, pads, ss_idxs)
+        )
+
         def forward(params, state, constants):
             # Pure JAX operations only
             sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
@@ -721,7 +729,7 @@ class FourierTimeFreqGPAst(Component):
 
             ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
 
-            vis_ast = vmap(latent_to_signal, (0, None, None), 0)(ast_k, pads, ss_idxs)
+            vis_ast = vmap(latent_to_signal_ckpt, 0, 0)(ast_k)
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 
