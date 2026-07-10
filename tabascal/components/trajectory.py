@@ -16,7 +16,7 @@ from jax import vmap, Array
 import numpy as np
 from numpy.typing import NDArray
 
-from skyfield.api import Distance, load
+from skyfield.api import Distance, load, wgs84
 from skyfield.toposlib import ITRSPosition
 
 from skyfield.api import EarthSatellite
@@ -50,6 +50,48 @@ def get_satellite_positions(tles: list, times_jd: list):
     )
 
     return sat_pos
+
+
+def get_satellite_elevations(tles: list, times_jd, ants_itrf) -> NDArray:
+    """Topocentric elevation of each satellite, as seen from the array centre.
+
+    Parameters
+    ----------
+    tles : Array (n_sat, 2)
+        TLEs used to propagate positions.
+    times_jd : Array (n_time,)
+        Times to calculate elevations at in Julian date.
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in ITRF, in metres. The mean is taken as the site.
+
+    Returns
+    -------
+    Array (n_sat, n_time)
+        Satellite elevation above the horizon, in degrees.
+    """
+
+    times_jd = np.asarray(times_jd)
+    ts = load.timescale()
+    sf_times = ts._utc_jd(np.floor(times_jd), times_jd - np.floor(times_jd))
+
+    # geographic_position_of needs an ICRF position, so evaluate the (time-independent)
+    # geodetic site position of the array centre at an arbitrary time
+    centre_itrf = np.mean(np.asarray(ants_itrf), axis=0)
+    site = wgs84.geographic_position_of(
+        ITRSPosition(Distance(m=centre_itrf)).at(sf_times[0])
+    )
+
+    elevation = np.stack(
+        [
+            (EarthSatellite(tle_line1, tle_line2, ts=ts) - site)
+            .at(sf_times)
+            .altaz()[0]
+            .degrees
+            for tle_line1, tle_line2 in tles
+        ]
+    )
+
+    return elevation
 
 
 class PhaseCalculationRFI(Component):
