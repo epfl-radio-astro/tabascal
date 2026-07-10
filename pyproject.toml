@@ -66,6 +66,7 @@ Repository = "https://github.com/epfl-radio-astro/tabascal.git"
 [project.scripts]
 tabascal = "tabascal.scripts.run_tabascal:main"
 tab2MS = "tabascal.scripts.results_to_MS:main"
+tab2MS-persat = "tabascal.scripts.rfi_per_sat_to_MS:main"
 
 # ── Pytest ─────────────────────────────────────────────────────────────────────
 
