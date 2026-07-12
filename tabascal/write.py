@@ -113,6 +113,8 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
             chunks
         )
 
+        gains_bl = 1.0  # this path carries no gains
+
     elif xds_tab.ast_vis.data.ndim == 4:
         n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
         n_corr = 1
@@ -128,7 +130,7 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         vis_rfi = xr.DataArray(vis_rfi, dims=dims).chunk(chunks)
 
         a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
-        a2 = xds_ms.ANTENNA1.data[:n_bl].compute()
+        a2 = xds_ms.ANTENNA2.data[:n_bl].compute()
 
         gains = xds_tab.gains.data.astype(np.complex64).mean(axis=0)
         gains_bl = da.transpose(gains[a1] * da.conj(gains[a2]), (2, 0, 1)).reshape(-1, n_freq, n_corr)
@@ -138,20 +140,27 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         raise ValueError(
             f"Unknown data dimensions. Expected 3 or 4 but got {xds_tab.ast_vis.data.ndim}"
         )
-    
-    
 
     vis_obs = xds_ms[data_col]
-    vis_cal = vis_obs
+
+    # The forward model is vis_obs = gains_bl * (vis_ast + vis_rfi), but the model
+    # visibilities in the zarr are the *un-gained* vis_ast / vis_rfi. Subtracting them
+    # straight off the raw data subtracts a model in the wrong frame, so with a
+    # non-unit gain the "residual" is meaningless.
+    #
+    # Residuals are formed in the DATA frame (vis_obs - gains_bl * model), not the
+    # calibrated frame (vis_obs/gains_bl - model): dividing by the gain inflates the
+    # noise on low-gain baselines, which distorts any noise-referenced residual metric.
+    # CORRECTED_DATA carries the calibrated data for imaging the sky.
+    # All of this reduces to the old behaviour exactly when the gains are unity.
+    vis_cal = vis_obs / gains_bl
+
+    vis_ast = vis_ast * gains_bl
+    vis_rfi = vis_rfi * gains_bl
 
     vis_ast_res = vis_obs - vis_ast
     vis_rfi_res = vis_obs - vis_rfi
     vis_res = vis_obs - (vis_ast + vis_rfi)
-    # vis_cal = vis_obs / gains_bl
-
-    # vis_ast_res = vis_obs - vis_ast * gains_bl
-    # vis_rfi_res = vis_obs - vis_rfi * gains_bl
-    # vis_res = vis_obs - (vis_ast + vis_rfi) * gains_bl
 
     xds_ms = xds_ms.assign(CORRECTED_DATA=vis_cal)
     xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)
