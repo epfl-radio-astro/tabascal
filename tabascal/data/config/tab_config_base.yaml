@@ -7,7 +7,8 @@ data:
   freq: null              # Optional - Defaults to channel 0
   data_col: DATA          # Optional - Defaults to 'DATA'
   corr: xx                # Optional - Defaults to 'xx' polarization, i.e. correlation 0
-  noise: null             # Optional - Defaults to reading from the MS file
+  noise: null             # Optional - Defaults to reading from the MS SIGMA. A float, or a path to an .npz of per-baseline/antenna noise (tabascal.noise). NOTE it is in the frame of data_col, i.e. BEFORE gain_table is applied - so with a gain table, leave it null and let SIGMA carry it rather than pre-scaling it by hand
+  gain_table: null        # Optional - Path to a CASA calibration table (e.g. from `flux-calibrate --gain-table`) to divide out of the data AND the noise at read time. Everything downstream then lives in the calibrated frame, and the gains are applied once rather than every forward pass. This replaces hand-scaling noise by k and ast.pow_spec.p0 by k^2
   flags: false            # Optional - Defaults to not including the flags from the MS file
   save_rfi_per_sat: false # Optional - Also save per-satellite RFI visibilities (rfi_vis_src) to the results zarr for per-NORAD imaging
   save_rfi_A: false       # Optional - Also save the fitted complex per-antenna RFI amplitudes (rfi_A) and the geometric rfi_phase to the results zarr

@@ -134,6 +134,7 @@ class TabConfig:
             config["data"]["data_col"],
         )
         self.set_noise(config["data"]["noise"])
+        self.apply_gain_table(config["data"].get("gain_table"))
         self.set_flags(config["data"]["flags"])
         config = fix_padding(
             config, self.n_freq
@@ -227,10 +228,79 @@ class TabConfig:
         else:
             self.noise_scalar = float(np.median(np.asarray(self.noise)))
 
+    def apply_gain_table(self, gain_table):
+        """Divide an externally-solved gain table out of the data and the noise, ONCE.
+
+        ``data.gain_table`` is a CASA caltable (see :mod:`tabascal.caltable`) from
+        whatever did the initial calibration -- ``flux-calibrate --gain-table``, or any
+        standard tool. Applying it here rather than inside the model means the gains are
+        applied once at read time instead of on every forward pass, and everything
+        downstream (priors, RFI/AST models, chi^2, and the results written back to the MS)
+        lives in one frame: the calibrated one.
+
+        The noise is carried with the data -- ``sigma_cal = sigma / |g_p conj(g_q)|`` --
+        which is the whole point of using a gain table rather than scaling the data by
+        hand: get this wrong and chi^2 is wrong by |g|^2.
+
+        A visibility whose gain is flagged or zero cannot be calibrated, so it is FLAGGED
+        rather than allowed to become inf/NaN.
+        """
+        self.gain_table = None
+        self.gain_flags = None
+        if not gain_table:
+            return
+
+        from tabascal.caltable import baseline_gains, match_gains_to_grid, read_caltable
+
+        path = os.path.abspath(gain_table)
+        self.gain_table = path
+        cal = read_caltable(path)
+
+        # The caltable's TIME column holds raw MS TIME (MJD seconds). self.times is
+        # seconds-from-start, so match on the MJD instead -- in float64, because an MJD
+        # second in float32 is coarser than an integration.
+        ms_times_sec = self.times_mjd.astype(np.float64) * 86400.0
+        gains = match_gains_to_grid(cal, ms_times_sec, self.freqs)  # (n_ant, n_freq, n_time)
+
+        if gains.shape[0] < self.n_ant:
+            raise ValueError(
+                f"Gain table has {gains.shape[0]} antennas but the MS has {self.n_ant}."
+            )
+        g_bl = baseline_gains(gains, self.a1, self.a2)             # (n_bl, n_freq, n_time)
+
+        bad = ~np.isfinite(g_bl) | (g_bl == 0)
+        g_bl = np.where(bad, 1.0, g_bl)          # avoid 0/0; these are flagged below
+
+        self.vis_obs = self.vis_obs / jnp.asarray(g_bl)
+        # sigma follows the data. self.noise may be a scalar or (n_bl, 1, 1); it becomes
+        # (n_bl, n_freq, n_time) whenever the gain varies with frequency or time.
+        self.noise = jnp.asarray(self.noise) / jnp.abs(jnp.asarray(g_bl))
+        self.noise_scalar = float(np.median(np.asarray(self.noise)[~bad]))
+        # Kept separate from self.flags: data.flags controls whether the MS FLAGs are
+        # honoured, but an uncalibratable visibility is not data at all and must be
+        # excluded even when data.flags is false (which zeroes self.flags).
+        self.gain_flags = jnp.asarray(bad)
+
+        amp = np.abs(g_bl[~bad])
+        print(
+            f"\nApplied gain table {path}"
+            f"\n  |g_p conj(g_q)|: p10/p50/p90 = {np.percentile(amp, 10):.4g} / "
+            f"{np.median(amp):.4g} / {np.percentile(amp, 90):.4g}"
+            f"  (data scaled by ~{1 / np.median(amp):.4g}x)"
+            f"\n  calibrated noise: median {self.noise_scalar:.4g}"
+        )
+        if bad.any():
+            print(f"  {100 * bad.mean():.2f} % of visibilities flagged (no valid gain)")
+
     def set_flags(self, include_flags: bool):
 
         if not include_flags:
             self.flags = jnp.zeros_like(self.flags, dtype=bool)
+
+        # A visibility with no valid gain was never calibrated, so it is excluded even
+        # when data.flags is false -- see apply_gain_table.
+        if getattr(self, "gain_flags", None) is not None:
+            self.flags = self.flags | self.gain_flags
 
         print(f"\n{100*self.flags.mean():.1f} % Data Flagged (Not Included in Likelihood)\n")
 
@@ -252,7 +322,8 @@ class TabConfig:
         self.n_corr = ms_params["n_corr"]
 
         self.int_time = ms_params["int_time"]
-        self.times = np.asarray(ms_params["times"])
+        self.times = np.asarray(ms_params["times"])          # seconds from the start
+        self.times_mjd = np.asarray(ms_params["times_mjd"])  # MJD days (float64)
         self.times_jd = mjd_to_jd(ms_params["times_mjd"])
 
         self.chan_width = ms_params["chan_width"]

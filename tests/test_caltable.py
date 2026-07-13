@@ -14,6 +14,7 @@ from casacore.tables import table
 from tabascal.caltable import (
     apply_gains_to_data,
     baseline_gains,
+    match_gains_to_grid,
     read_caltable,
     write_caltable,
 )
@@ -100,6 +101,34 @@ def test_noise_and_weight_transform(gains):
     assert np.allclose(sigma_cal, sigma / np.abs(g_bl))
     weight, weight_cal = 1.0 / sigma**2, 1.0 / sigma_cal**2
     assert np.allclose(weight_cal, weight * np.abs(g_bl) ** 2)
+
+
+def test_match_subset_grid(gains):
+    """A table solved on a master must select correctly onto a subset carved from it."""
+    cal = {
+        "gains": gains,                                   # (6 ant, 4 freq, 3 time)
+        "times": np.array([10.0, 20.0, 30.0]),
+        "freqs": np.array([1e8, 2e8, 3e8, 4e8]),
+    }
+    # A subset: the middle time, two of the four channels — deliberately out of order.
+    got = match_gains_to_grid(cal, times=[20.0], freqs=[3e8, 1e8])
+
+    assert got.shape == (6, 2, 1)
+    assert np.allclose(got[:, 0, 0], gains[:, 2, 1])      # 3e8 -> channel 2
+    assert np.allclose(got[:, 1, 0], gains[:, 0, 1])      # 1e8 -> channel 0
+
+
+def test_match_rejects_missing_sample(gains):
+    """Silently interpolating a missing solution is how you get a plausible wrong answer."""
+    cal = {
+        "gains": gains,
+        "times": np.array([10.0, 20.0, 30.0]),
+        "freqs": np.array([1e8, 2e8, 3e8, 4e8]),
+    }
+    with pytest.raises(ValueError, match="time"):
+        match_gains_to_grid(cal, times=[25.0], freqs=[1e8])
+    with pytest.raises(ValueError, match="frequency"):
+        match_gains_to_grid(cal, times=[10.0], freqs=[5e8])
 
 
 def test_scalar_flux_scale_is_g_k_minus_half():
