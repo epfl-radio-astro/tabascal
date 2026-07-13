@@ -1,6 +1,8 @@
 from tabascal.timing import measure_runtime
 
-from daskms import xds_from_ms, xds_to_table
+from daskms import xds_from_ms, xds_from_table, xds_to_table
+
+import os
 
 import numpy as np
 
@@ -94,8 +96,32 @@ def write_per_sat_rfi_ms(ms_path: str, results_zarr_path: str, prefix: str = "TA
 
 
 @measure_runtime
-def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
+def write_results_ms(
+    ms_path: str,
+    results_zarr_path: str,
+    data_col: str = "DATA",
+    gain_table: str | None = None,
+):
+    """Write a run's results back into the MS, all in the CALIBRATED frame.
 
+    Every column written here -- CORRECTED_DATA and the TAB_* models and residuals --
+    lives in one frame: the data with all gains divided out. That is what makes the
+    WEIGHT column meaningful for all of them, and it makes
+    ``TAB_AST_DATA + TAB_RFI_DATA + TAB_RES_DATA == CORRECTED_DATA`` hold exactly.
+
+    There are two gain layers and both are removed:
+
+    * ``gain_table`` -- the external calibration (e.g. from ``flux-calibrate
+      --gain-table``) that ``data.gain_table`` divided out at read time. ``data_col`` in
+      the MS is still RAW, so it has to be re-applied here or the models (which were fit
+      to calibrated data) would be subtracted in the wrong frame.
+    * the DIE gains fitted by the model, stored in the results zarr.
+
+    Dividing by the gain makes the noise heteroscedastic -- low-gain baselines get noisier
+    -- which is exactly why WEIGHT_SPECTRUM is written alongside: sigma_cal = SIGMA /
+    |g_total|, so weight_cal = |g_total|^2 / SIGMA^2. Noise-referenced metrics must read
+    the weights rather than assume a single sigma.
+    """
     xds_ms = xds_from_ms(ms_path)[0]
     xds_tab = xr.open_zarr(results_zarr_path)
 
@@ -143,24 +169,20 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
 
     vis_obs = xds_ms[data_col]
 
-    # The forward model is vis_obs = gains_bl * (vis_ast + vis_rfi), but the model
-    # visibilities in the zarr are the *un-gained* vis_ast / vis_rfi. Subtracting them
-    # straight off the raw data subtracts a model in the wrong frame, so with a
-    # non-unit gain the "residual" is meaningless.
-    #
-    # Residuals are formed in the DATA frame (vis_obs - gains_bl * model), not the
-    # calibrated frame (vis_obs/gains_bl - model): dividing by the gain inflates the
-    # noise on low-gain baselines, which distorts any noise-referenced residual metric.
-    # CORRECTED_DATA carries the calibrated data for imaging the sky.
-    # All of this reduces to the old behaviour exactly when the gains are unity.
-    vis_cal = vis_obs / gains_bl
+    # The external calibration that data.gain_table divided out at read time. The MS's
+    # data_col is still raw, so the model -- fit to calibrated data -- has to be brought
+    # back together with it here.
+    gains_ext_bl = _external_gains_bl(xds_ms, ms_path, gain_table, dims, chunks)
 
-    vis_ast = vis_ast * gains_bl
-    vis_rfi = vis_rfi * gains_bl
+    # Both gain layers, so vis_cal is the fully calibrated (but still RFI-contaminated)
+    # data, and the zarr's vis_ast / vis_rfi are already in that same frame.
+    gains_tot = gains_ext_bl * gains_bl
 
-    vis_ast_res = vis_obs - vis_ast
-    vis_rfi_res = vis_obs - vis_rfi
-    vis_res = vis_obs - (vis_ast + vis_rfi)
+    vis_cal = vis_obs / gains_tot
+
+    vis_ast_res = vis_cal - vis_ast
+    vis_rfi_res = vis_cal - vis_rfi
+    vis_res = vis_cal - (vis_ast + vis_rfi)
 
     xds_ms = xds_ms.assign(CORRECTED_DATA=vis_cal)
     xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)
@@ -179,9 +201,63 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     ]
     col_keywords = {col: {"UNIT": "Jy"} for col in cols}
 
+    # The weights that belong to those columns. SIGMA is the noise of the RAW data, so
+    # the calibrated noise is SIGMA / |g_total| and the weight scales as |g_total|^2.
+    # Written per channel because a frequency-dependent gain gives a frequency-dependent
+    # weight -- which a single per-row WEIGHT cannot carry (and which CASA's
+    # applycal(calwt=True) does not do either; see tabascal.caltable).
+    if "SIGMA" in xds_ms:
+        sigma = xds_ms.SIGMA.data[:, 0][:, None, None]          # (row, 1, 1)
+        g_amp2 = da.abs(gains_tot.data if hasattr(gains_tot, "data") else gains_tot) ** 2
+        with np.errstate(divide="ignore", invalid="ignore"):
+            weight = g_amp2 / da.where(sigma > 0, sigma, np.nan) ** 2
+        weight = da.where(da.isfinite(weight), weight, 0.0).astype(np.float32)
+
+        xds_ms = xds_ms.assign(
+            WEIGHT_SPECTRUM=xr.DataArray(weight, dims=dims).chunk(chunks)
+        )
+        # Keep the per-row WEIGHT consistent for tools that only read it.
+        xds_ms = xds_ms.assign(
+            WEIGHT=xr.DataArray(weight.mean(axis=1), dims=["row", "corr"])
+        )
+        cols += ["WEIGHT_SPECTRUM", "WEIGHT"]
+
     print(f"Writing tabascal results to {cols} columns in MS file.")
 
     dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
+
+
+def _external_gains_bl(xds_ms, ms_path: str, gain_table: str | None, dims, chunks):
+    """Per-baseline product of an external caltable's gains, in MS row order.
+
+    Returns 1.0 when there is no table, so the caller reduces to the no-gain case.
+    """
+    if not gain_table:
+        return 1.0
+
+    from tabascal.caltable import baseline_gains, match_gains_to_grid, read_caltable
+
+    spw = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
+    freqs = np.asarray(spw.CHAN_FREQ.data[0].compute(), dtype=float)
+
+    times_all = np.asarray(xds_ms.TIME.data.compute(), dtype=np.float64)
+    times = np.unique(times_all)
+    n_time = len(times)
+    n_row = len(times_all)
+    n_bl = n_row // n_time
+    n_freq = len(freqs)
+
+    a1 = np.asarray(xds_ms.ANTENNA1.data[:n_bl].compute())
+    a2 = np.asarray(xds_ms.ANTENNA2.data[:n_bl].compute())
+
+    cal = read_caltable(os.path.abspath(gain_table))
+    gains = match_gains_to_grid(cal, times, freqs)          # (n_ant, n_freq, n_time)
+    g_bl = baseline_gains(gains, a1, a2)                    # (n_bl, n_freq, n_time)
+    g_bl = np.where(np.isfinite(g_bl) & (g_bl != 0), g_bl, 1.0)
+
+    # (bl, freq, time) -> MS row order, which is time-major.
+    g_rows = np.transpose(g_bl, (2, 0, 1)).reshape(n_row, n_freq, 1).astype(np.complex64)
+    return xr.DataArray(da.from_array(g_rows), dims=dims).chunk(chunks)
 
 
 @measure_runtime 

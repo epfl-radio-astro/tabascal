@@ -280,7 +280,12 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         else:
             from tabascal.write import write_results_ms
             print(f"Copying tabascal initial values to MS file from {paths.init_pred_path}")
-            write_results_ms(ms_path, paths.init_pred_path, tab_config.args["data"]["data_col"])
+            write_results_ms(
+                ms_path,
+                paths.init_pred_path,
+                tab_config.args["data"]["data_col"],
+                gain_table=tab_config.args["data"].get("gain_table"),
+            )
 
     if log:
         shutil.copy(paths.log_path, paths.plot_dir)
