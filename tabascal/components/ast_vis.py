@@ -887,3 +887,98 @@ class FourierTimeFreqGPAst(Component):
         assert_attr_shape(self, "sigma_ast_k", ast_shape)
         assert_attr_shape(self, "init_ast_k", ast_shape)
         assert_attr_shape(self, "init_ast_k_base", ast_shape)
+
+
+class PointSourceVisCalculation(Component):
+    """Point-source visibilities via a direct DFT.
+
+    Ported from the `nufft-ast-vis` branch. Reads ``ast_radec`` (n_src, 2) radians and
+    ``ast_I`` (n_src, n_freq) Jy from the state (see
+    :class:`~tabascal.components.ast_signal.FixedPointSky`) and ACCUMULATES into
+    ``vis_ast`` using the full w-projection visibility equation
+
+        V(u,v,w) = sum_k (I_k / n_k) exp(-2i pi (u l_k + v m_k + w (n_k - 1)) / lambda)
+
+    For a sparse (point-source) sky the direct sum is exact, gridless, differentiable, and
+    unaffected by field of view or baseline length.
+
+    It accumulates rather than assigns, so it composes with the astronomical GP: list the
+    GP first and this adds the fixed sources on top.
+    """
+
+    parameters = {}
+
+    def setup(self, config):
+        try:
+            self.n_bl = config.n_bl
+            self.n_freq = config.n_freq
+            self.n_time = config.n_time
+            # config.uvw is (n_time, n_bl, 3) on this branch; the DFT below is written
+            # baseline-first (as on nufft-ast-vis, which swaps it at the config boundary).
+            self.uvw = jnp.swapaxes(jnp.asarray(config.uvw), 0, 1)   # (n_bl, n_time, 3)
+            self.freqs = jnp.asarray(config.freqs)
+            self.phase_centre_ra = jnp.deg2rad(config.phase_centre["ra"])
+            self.phase_centre_dec = jnp.deg2rad(config.phase_centre["dec"])
+            # Per-term uvw sign toggles (u, v, w); (1,1,1) is the CASA measurement-equation
+            # convention, which is what read_ms gives us.
+            self.uvw_sign = jnp.asarray((1.0, 1.0, 1.0))
+            self._set_outputs()
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def build_set_params(self):
+        def set_params(params):
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        return {
+            "uvw": self.uvw,
+            "freqs": self.freqs,
+            "ra0": self.phase_centre_ra,
+            "dec0": self.phase_centre_dec,
+            "uvw_sign": self.uvw_sign,
+        }
+
+    def build_forward(self):
+        prefix = self.prefix
+        C = 299792458.0
+
+        def forward(params, state, constants):
+            uvw = constants[f"{prefix}/uvw"]              # (n_bl, n_time, 3)
+            freqs = constants[f"{prefix}/freqs"]          # (n_freq,)
+            ra0 = constants[f"{prefix}/ra0"]
+            dec0 = constants[f"{prefix}/dec0"]
+            uvw_sign = constants[f"{prefix}/uvw_sign"]
+
+            ra = state["ast_radec"][:, 0]                 # (n_src,)
+            dec = state["ast_radec"][:, 1]
+            I = state["ast_I"]                            # (n_src, n_freq)
+
+            dra = ra - ra0
+            l = jnp.cos(dec) * jnp.sin(dra)
+            m = jnp.sin(dec) * jnp.cos(dec0) - jnp.cos(dec) * jnp.sin(dec0) * jnp.cos(dra)
+            n = jnp.sqrt(1.0 - l**2 - m**2)               # (n_src,)
+
+            # Geometric path-length delay per (baseline, time, source), in metres.
+            lmn = jnp.stack([l, m, n - 1.0], axis=-1)                    # (n_src, 3)
+            tau = jnp.einsum("btx,sx->bts", uvw * uvw_sign, lmn)         # (n_bl, n_time, n_src)
+            weights = I / n[:, None]                                     # (n_src, n_freq)
+
+            # vmap over frequency to avoid materialising a 4D (bl, time, src, freq) array.
+            def vis_at_freq(freq, w_freq):
+                phase = -2.0 * jnp.pi * tau * freq / C
+                return jnp.sum(jnp.exp(1.0j * phase) * w_freq, axis=-1)  # (n_bl, n_time)
+
+            vis = vmap(vis_at_freq)(freqs, weights.T)                    # (n_freq, n_bl, n_time)
+            vis_ast = vis.transpose(1, 0, 2)                             # (n_bl, n_freq, n_time)
+
+            return {**state, "vis_ast": state["vis_ast"] + vis_ast}
+
+        return forward
+
+    def _set_outputs(self):
+        self.state_outputs = {
+            "vis_ast": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
+        }

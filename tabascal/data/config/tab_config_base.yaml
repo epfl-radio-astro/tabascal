@@ -47,6 +47,7 @@ fisher:
 # Astronomical prior and initialization parameters
 ####################################################
 ast:
+  point_sources: null   # Optional - Fixed (non-fitted) point sources for ast_signal:FixedPointSky + ast_vis:PointSourceVisCalculation, e.g. [{name: Fornax A, ra: 50.6738, dec: -37.2083, I: 750.0, ref_freq_mhz: 154.0, alpha: -0.77}] (ra/dec in degrees, I in Jy at ref_freq_mhz). A rigid sky the gain cannot deform, so it anchors a per-antenna gain that a flexible sky model would otherwise absorb
   init: sample          # Optional - The initialization method for the astronomical visibility parameters. Options are 'est', 'prior', 'truth', 'truth_mean'
   mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'prior', 'truth', 'truth_mean'
   pow_spec:
