@@ -195,10 +195,37 @@ class TabConfig:
                 f"(elevation {el.min():.1f} to {el.max():.1f} deg)"
             )
 
-    def set_noise(self, noise: float):
+    def set_noise(self, noise):
+        """Set the likelihood noise: a scalar, or a per-baseline noise table.
 
-        if noise:
+        ``data.noise`` may be a float (the old homoscedastic behaviour) or a path to an
+        .npz written by ``tabascal.noise`` (keys ``sigma_bl`` or ``s_ant``). The antennas
+        differ in sensitivity -- on EDA2 the per-baseline noise spans 3.2x -- so a single
+        scalar mis-weights every visibility. See :mod:`tabascal.noise`.
+
+        ``self.noise`` is broadcastable against (n_bl, n_freq, n_time); ``self.noise_scalar``
+        is a representative scalar for the places that need one (e.g. the integration-sampling
+        heuristic, truth metrics).
+        """
+        if isinstance(noise, str):
+            from tabascal.noise import load_baseline_noise
+
+            sig = load_baseline_noise(
+                os.path.abspath(noise), self.n_bl, self.a1, self.a2
+            )
+            self.noise = jnp.asarray(sig)[:, None, None]  # (n_bl, 1, 1)
+            self.noise_scalar = float(np.median(sig))
+            print(
+                f"\nUsing per-baseline noise from {noise}: p10/p50/p90 = "
+                f"{np.percentile(sig, 10):.0f} / {np.median(sig):.0f} / "
+                f"{np.percentile(sig, 90):.0f} Jy "
+                f"({np.percentile(sig, 90) / np.percentile(sig, 10):.1f}x spread)"
+            )
+        elif noise:
             self.noise = noise
+            self.noise_scalar = float(noise)
+        else:
+            self.noise_scalar = float(np.median(np.asarray(self.noise)))
 
     def set_flags(self, include_flags: bool):
 
@@ -268,7 +295,7 @@ class TabConfig:
         sample_freq_bl = (
             np.pi
             * np.max(np.abs(fringe_freq), axis=(0, 1))
-            * np.sqrt(self.max_rfi_vis / (6 * self.noise))
+            * np.sqrt(self.max_rfi_vis / (6 * self.noise_scalar))
         )
         n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(int)
 

@@ -87,7 +87,12 @@ def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
     else:
         norm = true[~flags].size
 
-    rchi2 = jnp.sum((jnp.abs(pred[~flags] - true[~flags]) / noise) ** 2) / norm
+    # noise may be a scalar or a per-baseline array broadcastable against `true`
+    # (see tabascal.noise); broadcast it before masking so the flags line up.
+    sigma = jnp.broadcast_to(jnp.asarray(noise), true.shape) if jnp.ndim(noise) else noise
+    sigma = sigma[~flags] if jnp.ndim(noise) else sigma
+
+    rchi2 = jnp.sum((jnp.abs(pred[~flags] - true[~flags]) / sigma) ** 2) / norm
 
     return rchi2
 
@@ -199,7 +204,7 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
     ``/noise`` and ``/signal`` columns are dimensionless ratios. Noise normalisation is
     omitted for gains. ``point`` is e.g. ``"init"`` or ``"opt"``.
     """
-    noise = tab_config.noise
+    noise = getattr(tab_config, "noise_scalar", tab_config.noise)
     flags = tab_config.flags
 
     printed_header = False
