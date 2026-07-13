@@ -250,6 +250,51 @@ class BaseGPRFI(Component):
 
         return rfi_A * mask[:, None, None, :]
 
+    # ------------------------------------------------------------------
+    # Seeding the RFI amplitude from a per-satellite light curve
+    # ------------------------------------------------------------------
+
+    @property
+    def _est_n_ant(self) -> int:
+        """Antenna axis of the RFI amplitude. 1 when the amplitude is shared."""
+        return self.n_ant
+
+    def _rfi_k_from_light_curves(self, light_curves):
+        """Latent ``rfi_k`` seeded from a per-satellite light curve.
+
+        An RFI visibility is ``V ~ A_p conj(A_q)``, so the per-antenna amplitude that
+        reproduces a measured source flux ``|V|`` is ``sqrt(|V|)``.
+
+        ``light_curves`` is either ``(n_rfi, n_time)`` -- one value per timestep,
+        broadcast across the band -- or ``(n_rfi, n_freq, n_time)`` from the matched
+        filter, which resolves the RFI spectrum as well.
+        """
+        A = jnp.sqrt(jnp.abs(jnp.asarray(light_curves)))
+        if A.ndim == 2:
+            A = A[:, None, :]
+        A = A * jnp.ones((1, self.n_freq, 1))                  # (n_rfi, n_freq, n_time)
+        est_rfi_A = A[:, None, :, :] * jnp.ones((1, self._est_n_ant, 1, 1))
+
+        return vmap(vmap(self.signal_to_latent))(est_rfi_A)
+
+    def _read_estimate(self, est_path):
+        """Seed from a light-curve .npz (produced by imaging, e.g. `nufft-gif`)."""
+        light_curves = read_light_curves(est_path, self.norad_ids)   # (n_rfi, n_time, 2)
+
+        return self._rfi_k_from_light_curves(jnp.max(jnp.abs(light_curves), axis=-1))
+
+    def _matched_filter_estimate(self, tab_config):
+        """Seed by matched-filtering the visibilities against the satellite trajectories.
+
+        The same estimate as ``est``, but computed from the data already in memory --
+        no imaging step, no light-curve file, and it resolves the RFI per channel.
+        """
+        from tabascal.rfi_estimate import light_curves_from_config
+
+        print("Estimating RFI light curves by matched filter (no imaging required)")
+        lc = light_curves_from_config(tab_config)["light_curves"]    # (n_rfi, n_freq, n_time)
+
+        return self._rfi_k_from_light_curves(lc)
 
     def _set_outputs(self):
 
@@ -656,7 +701,7 @@ class FourierGPRFI(BaseGPRFI):
 
             # Do expensive setup operations once
             self._compute_gp_params()
-            self._compute_prior_params(tab_config.args["rfi"]["mean"], tab_config.vis_obs, tab_config.args["rfi"]["est"])
+            self._compute_prior_params(tab_config.args["rfi"]["mean"], tab_config.vis_obs, tab_config.args["rfi"]["est"], tab_config)
             self._set_outputs()
 
             if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
@@ -667,7 +712,7 @@ class FourierGPRFI(BaseGPRFI):
             # if tab_config.args["rfi"]["init"] == "est":
             #     self._estimate_params(tab_config.fringe_freqs)
 
-            self._compute_init_params(tab_config.args["rfi"]["init"], tab_config.args["rfi"]["est"])
+            self._compute_init_params(tab_config.args["rfi"]["init"], tab_config.args["rfi"]["est"], tab_config)
 
             # Validate dimensions
             self._validate_dimensions()
@@ -803,21 +848,24 @@ class FourierGPRFI(BaseGPRFI):
 
         return est_rfi_k
 
-    def _compute_prior_params(self, prior_type, vis_obs, est_path):
+    def _compute_prior_params(self, prior_type, vis_obs, est_path, tab_config=None):
 
         if prior_type == "data":
             print("Using data for RFI prior mean")
             self.mu_rfi_k = self._compute_data_est(vis_obs)
-        elif prior_type == "est": 
+        elif prior_type == "est":
             print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
+        elif prior_type in ["matched-filter", "mf"]:
+            print("Using matched-filter estimate for RFI prior mean")
+            self.mu_rfi_k = self._matched_filter_estimate(tab_config)
         elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
             )
         else:
-            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, est, matched-filter, zeros).")
 
     def forward_transform(self, base_params, sigma, mu):
 
@@ -837,16 +885,7 @@ class FourierGPRFI(BaseGPRFI):
         self.true_rfi_k_A = vmap(vmap(self.signal_to_latent))(rfi_A)
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
-    def _read_estimate(self, est_path):
-
-        light_curves = read_light_curves(est_path, self.norad_ids)
-
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(light_curves)), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
-        est_rfi_k_A = vmap(vmap(self.signal_to_latent))(est_rfi_A)
-
-        return est_rfi_k_A
-
-    def _compute_init_params(self, init_type: str, est_path: str):
+    def _compute_init_params(self, init_type: str, est_path: str, tab_config=None):
 
         if init_type == "prior":
             print("Using prior mean for rfi_A init")
@@ -854,6 +893,9 @@ class FourierGPRFI(BaseGPRFI):
         elif init_type == "est":
             print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
+        elif init_type in ["matched-filter", "mf"]:
+            print("Using matched-filter estimate for rfi_A init")
+            self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":
             print("Using truth for rfi_A init")
             self.init_rfi_k = self.true_rfi_k_A
@@ -878,7 +920,7 @@ class FourierGPRFI(BaseGPRFI):
             )
             self.init_rfi_k = self.forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
         else:
-            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
+            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, est, matched-filter, truth, zeros, ones, sample).")
 
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
 
@@ -928,7 +970,7 @@ class FourierGPRFIConstAnt(BaseGPRFI):
 
             # Do expensive setup operations once
             self._compute_gp_params()
-            self._compute_prior_params(tab_config.args["rfi"]["mean"], tab_config.vis_obs, tab_config.args["rfi"]["est"])
+            self._compute_prior_params(tab_config.args["rfi"]["mean"], tab_config.vis_obs, tab_config.args["rfi"]["est"], tab_config)
             self._set_outputs()
 
             if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
@@ -939,7 +981,7 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             # if tab_config.args["rfi"]["init"] == "est":
             #     self._estimate_params(tab_config.fringe_freqs)
 
-            self._compute_init_params(tab_config.args["rfi"]["init"], tab_config.args["rfi"]["est"])
+            self._compute_init_params(tab_config.args["rfi"]["init"], tab_config.args["rfi"]["est"], tab_config)
             self._load_ant_gain(tab_config)
 
             # Validate dimensions
@@ -1116,21 +1158,24 @@ class FourierGPRFIConstAnt(BaseGPRFI):
 
         return est_rfi_k_A
 
-    def _compute_prior_params(self, prior_type, vis_obs, est_path):
+    def _compute_prior_params(self, prior_type, vis_obs, est_path, tab_config=None):
 
         if prior_type == "data":
             print("Using data for RFI prior mean")
             self.mu_rfi_k = self._compute_data_est(vis_obs)
-        elif prior_type == "est": 
+        elif prior_type == "est":
             print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
+        elif prior_type in ["matched-filter", "mf"]:
+            print("Using matched-filter estimate for RFI prior mean")
+            self.mu_rfi_k = self._matched_filter_estimate(tab_config)
         elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
                 (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
             )
         else:
-            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, est, matched-filter, zeros).")
 
     def forward_transform(self, base_params, sigma, mu):
 
@@ -1155,22 +1200,22 @@ class FourierGPRFIConstAnt(BaseGPRFI):
 
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
-    def _read_estimate(self, est_path):
+    @property
+    def _est_n_ant(self) -> int:
+        """This model's RFI amplitude is shared across antennas, so a single axis."""
+        return 1
 
-        light_curves = read_light_curves(est_path, self.norad_ids)
-
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(light_curves)), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
-
-        return vmap(vmap(self.signal_to_latent))(est_rfi_A)
-
-    def _compute_init_params(self, init_type, est_path):
+    def _compute_init_params(self, init_type, est_path, tab_config=None):
 
         if init_type == "prior":
             print("Using prior mean for rfi_A init")
             self.init_rfi_k = self.mu_rfi_k
-        elif init_type == "est": 
+        elif init_type == "est":
             print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
+        elif init_type in ["matched-filter", "mf"]:
+            print("Using matched-filter estimate for rfi_A init")
+            self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":
             print("Using truth for rfi_A int")
             self.init_rfi_k = self.true_rfi_k_A
@@ -1191,7 +1236,7 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             )
             self.init_rfi_k = self.forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
         else:
-            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
+            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, est, matched-filter, truth, zeros, ones, sample).")
 
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
 
