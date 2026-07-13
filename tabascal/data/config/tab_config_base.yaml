@@ -10,6 +10,7 @@ data:
   noise: null             # Optional - Defaults to reading from the MS file
   flags: false            # Optional - Defaults to not including the flags from the MS file
   save_rfi_per_sat: false # Optional - Also save per-satellite RFI visibilities (rfi_vis_src) to the results zarr for per-NORAD imaging
+  save_rfi_A: false       # Optional - Also save the fitted complex per-antenna RFI amplitudes (rfi_A) and the geometric rfi_phase to the results zarr
 ######################
 # Plotting parameters
 ######################
@@ -67,6 +68,7 @@ rfi:
   n_int_factor: 1       # Optional - Factor to increase the number of integration samples over the predicted value
   n_int_time: null      # Optional - Specify the number of integration samples to use along the time axis
   n_int_freq: 1         # Optional - Specify the number of integration samples to use along the frequency axis
+  ant_gain: null        # Optional - Path to an .npz with a fixed complex per-antenna RFI gain g_p (key 'gain', shape (n_ant,)). Used by FourierGPRFIConstAnt to model rfi_A = g_p * s(nu,t). When null, g_p = 1.
   r_seed: 123           # Optional - Random seed to use for sampling
 ############################
 # Satellite path parameters
@@ -83,6 +85,7 @@ satellites:
 # Gain prior and initialization parameters
 ###########################################
 gains:
+  ant_gain: null        # Optional - Path to an .npz ('gain', shape (n_ant,)) used to INITIALISE ConstGains at a previously measured complex per-antenna gain
   init: prior           # Optional - The initialization method for the gain parameters. Options are 'prior', 'truth'
   amp_mean: 1.0         # Optional - Mean of the prior distribution over the gain amplitudes. Options are 'truth' or a value like 1.0
   phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radiands. Options are 'truth' or a value like 0.0

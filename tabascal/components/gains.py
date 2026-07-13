@@ -8,6 +8,9 @@ from tabascal.transform import affine_transform_full
 import jax.numpy as jnp
 from jax import vmap, Array
 
+import numpy as np
+import os
+
 from typing import Dict
 
 def gains_config_validation(gains_config: Dict, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
@@ -387,3 +390,133 @@ class GPGains(BaseGPGains):
         assert_attr_shape(self, "L_gains_amp", (self.n_g_times, self.n_g_times))
         assert_attr_shape(self, "init_gains_phase_induce", phase_shape)
         assert_attr_shape(self, "init_gains_phase_induce_base", phase_shape)
+
+
+class ConstGains(BaseGPGains):
+    """A single complex direction-independent (DIE) gain per antenna.
+
+    g_p is constant across time and frequency -- the static DIE gain the array is
+    known to have -- and is FITTED, one complex number per antenna:
+
+        vis_obs[p, q] = g_p * conj(g_q) * (vis_ast[p, q] + vis_rfi[p, q])
+
+    Unlike a GP gain this adds only 2*n_ant - 1 parameters, and unlike a *fixed* gain
+    it is constrained by the data.
+
+    Pair it with rfi_signal:FourierGPRFIConstAnt. With the free per-antenna RFI model
+    (FourierGPRFI) a gain term is an exact no-op -- g_p A_p conj(g_q A_q) is just a
+    reparametrisation of an already-free A_p -- so the gain is only identifiable when
+    the RFI amplitude carries no per-antenna freedom of its own.
+
+    This gain is purely RELATIVE -- it carries no absolute flux scale:
+
+    * the overall PHASE is unobservable, so the last antenna's phase is pinned to 0
+      (as in GPGains);
+    * the overall AMPLITUDE is degenerate with the RFI source amplitude and the
+      astronomical amplitude, so it is REMOVED by construction: the amplitudes are
+      parameterised in log space with a zero-sum constraint, giving a geometric mean of
+      exactly 1. Left free, the fit simply drifts (it settled at median |g| = 0.70 in an
+      earlier run, with the sky model absorbing the reciprocal), which is a nuisance
+      direction that buys nothing and slows convergence.
+
+    So the amplitude has n_ant - 1 effective degrees of freedom, as the phase does. The
+    absolute flux scale is assumed already set by the data (e.g. REAL_DATA_FLUXCAL) and,
+    if it ever needs fitting, belongs in a separate scalar component -- not here.
+
+    `gains.ant_gain` (an .npz with key 'gain', shape (n_ant,)) optionally initialises
+    the fit at a previously measured g_p, which is a much better starting point than
+    the prior mean.
+    """
+
+    parameters = {
+        "gains_amp_base": ("n_ant",),
+        "gains_phase_base": ("n_ant-1",),
+    }
+
+    def setup(self, tab_config: TabConfig):
+        try:
+            super().setup(tab_config)
+            self._set_outputs()
+            self._compute_init_params(tab_config)
+            self._validate_dimensions()
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def build_set_params(self):
+
+        def set_params(params):
+            params["gains_amp_base"] = standard_normal("gains_amp_base", (self.n_ant,))
+            params["gains_phase_base"] = standard_normal(
+                "gains_phase_base", (self.n_ant - 1,)
+            )
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        return {}
+
+    def build_forward(self):
+        # amp_std is a fractional spread (config gives a percentage); use it as the
+        # log-amplitude sigma, which is the same thing to first order for spreads of
+        # tens of percent and keeps the gain positive by construction.
+        log_amp_std = self.gp_amp_std / max(self.gp_amp_mean, 1e-12)
+        phase_mean, phase_std = self.gp_phase_mean, self.gp_phase_std
+        a1, a2 = self.a1, self.a2
+        n_freq, n_time = self.n_freq, self.n_time
+
+        def forward(params, state, constants):
+            # Zero-sum in log space => prod(|g_p|) = 1 exactly: the overall amplitude
+            # scale is removed, not fitted. Only relative antenna amplitudes remain.
+            log_amp = log_amp_std * params["gains_amp_base"]
+            log_amp = log_amp - jnp.mean(log_amp)
+            amp = jnp.exp(log_amp)
+
+            # Reference antenna phase pinned to 0: the overall phase is unobservable.
+            phase = jnp.concatenate(
+                [phase_mean + phase_std * params["gains_phase_base"], jnp.zeros(1)]
+            )
+
+            g = amp * jnp.exp(1.0j * phase)                       # (n_ant,)
+            gains = g[:, None, None] * jnp.ones((1, n_freq, n_time))
+
+            vis_obs = apply_gains(gains, state["vis_rfi"] + state["vis_ast"], a1, a2)
+
+            return {**state, "vis_obs": vis_obs, "gains": gains}
+
+        return forward
+
+    def _compute_init_params(self, tab_config):
+        log_amp_std = self.gp_amp_std / max(self.gp_amp_mean, 1e-12)
+        path = tab_config.args["gains"].get("ant_gain", None)
+        if path:
+            g = np.asarray(np.load(os.path.abspath(path))["gain"])
+            if g.shape != (self.n_ant,):
+                raise ValueError(
+                    f"gains.ant_gain has shape {g.shape}, expected ({self.n_ant},)"
+                )
+            # Project the measured gain into the model's gauge: zero-sum log amplitude
+            # (geometric mean 1) and reference-antenna phase 0.
+            log_amp = np.log(np.abs(g))
+            log_amp = log_amp - log_amp.mean()
+            phase = np.angle(g * np.conj(g[-1]))
+            print(f"Initialising ConstGains at the measured antenna gain from {path}")
+        else:
+            log_amp = np.zeros(self.n_ant)
+            phase = np.zeros(self.n_ant)
+            print("Initialising ConstGains at unit gain")
+
+        self.init_params = {
+            "gains_amp": jnp.asarray(np.exp(log_amp)),
+            "gains_phase": jnp.asarray(phase),
+        }
+        self.init_params_base = {
+            "gains_amp_base": jnp.asarray(log_amp / log_amp_std),
+            "gains_phase_base": jnp.asarray(
+                (phase[:-1] - self.gp_phase_mean) / self.gp_phase_std
+            ),
+        }
+
+    def _validate_dimensions(self):
+        assert self.init_params_base["gains_amp_base"].shape == (self.n_ant,)
+        assert self.init_params_base["gains_phase_base"].shape == (self.n_ant - 1,)

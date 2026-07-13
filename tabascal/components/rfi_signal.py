@@ -13,6 +13,8 @@ from tabascal.timing import measure_runtime
 import numpy as np
 import xarray as xr
 
+import os
+
 from typing import Tuple, Dict, Callable, List
 
 
@@ -938,6 +940,7 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             #     self._estimate_params(tab_config.fringe_freqs)
 
             self._compute_init_params(tab_config.args["rfi"]["init"], tab_config.args["rfi"]["est"])
+            self._load_ant_gain(tab_config)
 
             # Validate dimensions
             self._validate_dimensions()
@@ -970,6 +973,31 @@ class FourierGPRFIConstAnt(BaseGPRFI):
 
         return constants
 
+    def _load_ant_gain(self, tab_config):
+        """Fixed complex per-antenna RFI gain g_p from `rfi.ant_gain` (an .npz path).
+
+        Measured from a previous run's fitted rfi_A (see
+        eda2/analysis/rfi_amplitudes/export_antenna_gain.py). Its overall complex scale
+        is arbitrary -- the source amplitude absorbs it -- so no normalisation is imposed
+        here. When unset, g_p = 1 (the original constant-across-antennas model).
+        """
+        path = tab_config.args["rfi"].get("ant_gain", None)
+        if not path:
+            self.ant_gain = jnp.ones(self.n_ant, dtype=complex)
+            print("Using unit antenna gain for rfi_A (ant_gain not set)")
+            return
+
+        path = os.path.abspath(path)
+        g = np.asarray(np.load(path)["gain"])
+        if g.shape != (self.n_ant,):
+            raise ValueError(
+                f"rfi.ant_gain in {path} has shape {g.shape}, expected ({self.n_ant},)"
+            )
+        self.ant_gain = jnp.asarray(g, dtype=complex)
+        print(f"Using measured complex antenna gain for rfi_A from {path} "
+              f"(|g| median {float(np.median(np.abs(g))):.3f}, "
+              f"phase std {float(np.rad2deg(np.std(np.angle(g)))):.1f} deg)")
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
@@ -982,6 +1010,7 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         n_ant = self.n_ant
         n_freq_fine = self.n_freq_fine
         n_time_fine = self.n_time_fine
+        ant_gain = self.ant_gain
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -994,7 +1023,17 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
                 rfi_k_A, pads, ss_idxs
             )
-            rfi_A = rfi_A * jnp.ones((n_rfi, n_ant, n_freq_fine, n_time_fine))
+            # rfi_A[src, p, nu, t] = g_p * s_src(nu, t): one source amplitude s, broadcast
+            # over antennas through a FIXED complex per-antenna gain g_p. With ant_gain
+            # unset, g_p = 1 for every antenna (the original behaviour).
+            #
+            # NOTE this is the *only* place a known g_p buys anything. Applying it via the
+            # `gains` component instead would be an exact no-op for the RFI model, since
+            #   g_p A_p conj(g_q A_q) = (g_p A_p) conj(g_q A_q)
+            # and A_p is already free per antenna -- the gain is simply reabsorbed. Here it
+            # *removes* per-antenna freedom (n_ant x fewer RFI parameters) rather than
+            # adding a redundant factor.
+            rfi_A = rfi_A * ant_gain[None, :, None, None]
 
             if masked:
                 rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])

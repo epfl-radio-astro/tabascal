@@ -206,23 +206,53 @@ def write_results_xds(
             "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
             "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
             "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
-            # "rfi_A": (
-            #     ["sample", "src", "ant", "rfi_time"],
-            #     da.asarray(vi_pred["rfi_A"]),
-            # ),
-            # "rfi_phase": (
-            #     ["src", "ant", "time_mjd_fine"],
-            #     da.asarray(args["rfi_phase"]),
-            # ),
         },
         coords={
             "time": da.asarray(tab_config.times),  # type: ignore
             "freq": da.asarray(tab_config.freqs),  # type: ignore
-            # "rfi_time": da.asarray(args["rfi_times"]),
-            # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
         },
     )
     # print(map_xds)
+
+    # Optionally save the fitted complex per-antenna RFI amplitudes. The RFI model is
+    #     vis_rfi[p, q] = sum_src rfi_A[src, p] * conj(rfi_A[src, q])
+    #                     * exp(1j * (rfi_phase[src, p] - rfi_phase[src, q]))
+    # so rfi_A carries the per-antenna gain/beam response toward each satellite while
+    # rfi_phase is the *known* geometric (trajectory) phase. Note vis_rfi is invariant
+    # under rfi_A[src] -> rfi_A[src] * exp(1j * theta) for any per-(src, freq, time)
+    # theta, so only *baseline* phase differences arg(A_p) - arg(A_q) are identifiable.
+    # rfi_phase stays float64: it runs to ~1e6 rad, which float32 would quantise to ~0.5 rad.
+    if tab_config.args["data"].get("save_rfi_A", False) and "rfi_A" in vi_pred:
+        amp_dims = ["sample", "src", "ant", "freq_fine", "time_fine"]
+        map_xds = map_xds.assign(
+            rfi_A=(amp_dims, da.asarray(np.asarray(vi_pred["rfi_A"]).astype(np.complex64))),
+            rfi_phase=(amp_dims, da.asarray(np.asarray(vi_pred["rfi_phase"]).astype(np.float64))),
+        )
+        # Antenna positions and the baseline map, so the amplitudes can be related to
+        # array geometry (e.g. a phase gradient across the array) without the MS.
+        map_xds = map_xds.assign(
+            ants_itrf=(["ant", "xyz"], np.asarray(tab_config.ants_itrf, dtype=np.float64)),
+            a1=("bl", np.asarray(tab_config.a1, dtype=np.int32)),
+            a2=("bl", np.asarray(tab_config.a2, dtype=np.int32)),
+        )
+        map_xds = map_xds.assign_coords(
+            norad_id=("src", np.asarray([int(n) for n in tab_config.norad_ids])),
+            time_fine=("time_fine", np.asarray(tab_config.times_fine, dtype=np.float64)),
+            freq_fine=("freq_fine", np.asarray(tab_config.freqs_fine, dtype=np.float64)),
+        )
+        # Absolute times and the exact TLEs this run propagated, so downstream geometry
+        # (e.g. fitting a satellite position offset to the fitted phases) reproduces the
+        # model's own trajectory rather than re-fetching a possibly different TLE.
+        map_xds = map_xds.assign(
+            time_jd_fine=("time_fine", np.asarray(tab_config.times_jd_fine, dtype=np.float64)),
+        )
+        map_xds.attrs.update(
+            n_int_time=int(tab_config.n_int_time),
+            n_int_freq=int(tab_config.n_int_freq),
+            tles=[[str(l1), str(l2)] for l1, l2 in np.asarray(tab_config.tles)],
+            ra=float(tab_config.phase_centre["ra"]),
+            dec=float(tab_config.phase_centre["dec"]),
+        )
 
     # Optionally decompose the RFI visibility per satellite (one ``src`` slice per
     # NORAD id) so each source can be imaged on its own -- a diagnostic for
