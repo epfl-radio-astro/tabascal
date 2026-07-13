@@ -10,6 +10,16 @@ def _run_cmd(args):
 
 
 # ---------------------------------------------------------------------------
+# 'light-curve' subcommand
+# ---------------------------------------------------------------------------
+
+def _light_curve_cmd(args):
+    # Imported lazily so --help and other subcommands don't pay the JAX cost.
+    from tabascal.scripts.rfi_estimate import run
+    run(args)
+
+
+# ---------------------------------------------------------------------------
 # 'spacetrack-login' subcommand
 # ---------------------------------------------------------------------------
 
@@ -56,6 +66,14 @@ def main():
         help="Extra directory searched for cached TLEs before the managed cache and Space-Track.",
     )
 
+    # -- light-curve --
+    from tabascal.scripts.rfi_estimate import build_parser as _build_lc_parser
+    lc_parser = subparsers.add_parser(
+        "light-curve",
+        help="Matched-filter RFI light-curve extraction from an MS column.",
+    )
+    _build_lc_parser(lc_parser)
+
     # -- spacetrack-login --
     login_parser = subparsers.add_parser(
         "spacetrack-login",
@@ -71,6 +89,8 @@ def main():
 
     if args.command == "run":
         _run_cmd(args)
+    elif args.command == "light-curve":
+        _light_curve_cmd(args)
     elif args.command == "spacetrack-login":
         _spacetrack_login_cmd(args)
 
