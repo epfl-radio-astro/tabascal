@@ -289,6 +289,42 @@ def fix_padding(config: dict, n_freq):
     return config
 
 
+def read_baseline_sigma(xds, n_time: int, n_bl: int, corr_idx: int):
+    """Per-baseline noise from the MS SIGMA column, shape (n_bl, 1, 1).
+
+    The antennas differ in sensitivity, so the noise does too: on EDA2 the per-baseline
+    SIGMA spans ~30x. Collapsing it to a single scalar (which is what this used to do)
+    under-weights the quietest baselines by up to ~200x and over-weights the noisiest,
+    and -- because the per-antenna noise CORRELATES with the per-antenna gain -- the
+    likelihood then cannot tell a high-gain antenna from a noisy one, so a fitted gain
+    absorbs the noise structure. See tabascal.noise and the closure diagnostic.
+
+    SIGMA is written per row (time x baseline) and is constant in time per baseline, so a
+    median over time is a robust reduction. Baselines with no valid estimate (sigma <= 0,
+    i.e. the dead/fully-flagged ones) would divide by zero in the likelihood, so they take
+    the median -- they are masked out by their flags anyway.
+    """
+    sigma = xds.SIGMA.data.compute()
+    idx = min(corr_idx, sigma.shape[1] - 1)
+    sigma_bl = np.median(np.asarray(sigma[:, idx]).reshape(n_time, n_bl), axis=0)
+
+    good = np.isfinite(sigma_bl) & (sigma_bl > 0)
+    if not good.any():
+        raise ValueError("The MS SIGMA column has no valid (positive) entries.")
+    sigma_bl = np.where(good, sigma_bl, np.median(sigma_bl[good]))
+
+    print(
+        f"\nPer-baseline noise from MS SIGMA: p1/p50/p99 = "
+        f"{np.percentile(sigma_bl, 1):.4g} / {np.median(sigma_bl):.4g} / "
+        f"{np.percentile(sigma_bl, 99):.4g} "
+        f"({np.percentile(sigma_bl, 99) / np.percentile(sigma_bl, 1):.0f}x spread"
+        + (f", {(~good).sum()} baselines with no estimate" if (~good).any() else "")
+        + ")"
+    )
+
+    return jnp.asarray(sigma_bl)[:, None, None]
+
+
 @measure_runtime
 def read_ms(
     ms_path,
@@ -372,7 +408,7 @@ def read_ms(
         "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),
         "vis_obs": read_data(data_col),
         "flags": read_data("FLAG"),
-        "noise": jnp.array(xds.SIGMA.data.mean().compute()),
+        "noise": read_baseline_sigma(xds, n_time, n_bl, corr_idx),
         "a1": jnp.array(xds.ANTENNA1.data.reshape(n_time, n_bl)[0, :].compute()),
         "a2": jnp.array(xds.ANTENNA2.data.reshape(n_time, n_bl)[0, :].compute()),
         "a1": jnp.array(xds.ANTENNA1.data[:n_bl].compute()),
