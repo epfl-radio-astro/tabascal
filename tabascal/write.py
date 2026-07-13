@@ -226,6 +226,53 @@ def write_results_ms(
 
     dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
 
+    # Export the calibration this run implies, so it can be applied by standard tooling.
+    write_gain_caltable(ms_path, results_zarr_path, gain_table=gain_table)
+
+
+@measure_runtime
+def write_gain_caltable(
+    ms_path: str,
+    results_zarr_path: str,
+    out_path: str | None = None,
+    gain_table: str | None = None,
+) -> str | None:
+    """Export the DIE gains tabascal fitted as an applycal-compatible caltable.
+
+    So a tabascal solution can be consumed by standard tooling (``applycal``, CASA,
+    CARAcal/stimela) like any other calibration.
+
+    If the run also consumed an external ``gain_table``, the emitted gains are the TOTAL
+    calibration (external x fitted), so applying this one table alone reproduces
+    CORRECTED_DATA. Returns the path, or None if the run fitted no gains.
+    """
+    from tabascal.caltable import match_gains_to_grid, read_caltable, write_caltable
+
+    xds_tab = xr.open_zarr(results_zarr_path)
+    if "gains" not in xds_tab:
+        return None
+
+    gains = np.asarray(xds_tab.gains.data.mean(axis=0))       # (n_ant, n_freq, n_time)
+    if gains.ndim != 3:
+        return None
+
+    xds_ms = xds_from_ms(ms_path)[0]
+    times = np.unique(np.asarray(xds_ms.TIME.data.compute(), dtype=np.float64))
+    spw = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
+    freqs = np.asarray(spw.CHAN_FREQ.data[0].compute(), dtype=float)
+
+    if gain_table:
+        g_ext = match_gains_to_grid(read_caltable(os.path.abspath(gain_table)), times, freqs)
+        gains = g_ext * gains          # total calibration: external x fitted
+
+    if out_path is None:
+        out_path = os.path.splitext(results_zarr_path)[0] + ".B"
+
+    write_caltable(out_path, gains, times, ms_path=ms_path)
+    print(f"Wrote gain table: {out_path}  (apply with casatasks.applycal)")
+
+    return out_path
+
 
 def _external_gains_bl(xds_ms, ms_path: str, gain_table: str | None, dims, chunks):
     """Per-baseline product of an external caltable's gains, in MS row order.
