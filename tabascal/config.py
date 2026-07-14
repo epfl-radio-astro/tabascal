@@ -283,15 +283,15 @@ class TabConfig:
 
         obs_epoch_jd = float(self.times_jd.mean())
 
-        self.elements, self.epoch_jd, self.norad_ids, self.tles = (
+        self.elements, self.epoch_jd, self.norad_ids, self.tles, self.n_rfi_real = (
             fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=extra_tle_dir)
         )
         # Under sharding the fetch pads the source list to a multiple of the device
-        # count by duplicating the last satellite; padded slots are unique-id copies,
-        # so the real (unpadded) count is the number of distinct ids. The RFI signal
-        # components use n_rfi_real to keep padded sources dark.
+        # count by duplicating the last satellite. n_rfi_real is the pre-padding row
+        # count reported by the fetch (not inferred from the id list, which would be
+        # wrong if the real sources contain a repeated NORAD id); the RFI signal
+        # components use it to keep only the padded dummy sources dark.
         self.n_rfi = len(self.norad_ids)
-        self.n_rfi_real = len(set(self.norad_ids))
         if self.n_rfi > self.n_rfi_real:
             print(
                 f"Padded {self.n_rfi_real} RFI sources to {self.n_rfi} "

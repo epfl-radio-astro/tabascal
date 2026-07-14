@@ -669,11 +669,16 @@ def _pad_rfi_sources(tles_df):
 
 def fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
 
-    tles_df = _pad_rfi_sources(get_tles_by_id(
+    tles_df = get_tles_by_id(
         norad_ids,
         obs_epoch_jd,
         extra_tle_dir=extra_tle_dir,
-    ))
+    )
+    # Real (unpadded) source count is the number of rows the fetch actually returned,
+    # captured before padding. Inferring it from the padded id list (e.g. counting
+    # distinct ids) is wrong when the real sources already contain a repeated NORAD id.
+    n_rfi_real = len(tles_df)
+    tles_df = _pad_rfi_sources(tles_df)
 
     elements = jnp.atleast_2d(
         tles_df[
@@ -691,7 +696,7 @@ def fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
     norad_ids = list(tles_df["NORAD_CAT_ID"].values)
     tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
 
-    return elements, epoch_jd, norad_ids, tles
+    return elements, epoch_jd, norad_ids, tles, n_rfi_real
 
 def fetch_standard_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
 
