@@ -296,9 +296,9 @@ class RiemannVisTimeFreqVariable(Component):
         n_groups = len(self.time_sample_idxs)
         time_strides = self.time_strides
 
-        def calculate_rfi_vis_single(rfi_A, rfi_phase, a1, a2, constants):
+        def calculate_rfi(rfi_A, rfi_phase, a1, a2, constants):
 
-            vis_rfi = jnp.empty((n_bl, n_freq, n_time), dtype=rfi_A.dtype)
+            vis_rfi = jnp.empty((n_bl, n_freq, n_time), dtype=complex)
             for i, time_stride in zip(range(n_groups), time_strides):
                 idx = constants[f"{prefix}/time_sample_idxs_{i}"]
                 vis_rfi = vis_rfi.at[idx].set(
@@ -329,7 +329,7 @@ class RiemannVisTimeFreqVariable(Component):
             rfi_A = jnp.swapaxes(jnp.reshape(state["rfi_A"], new_shape), 0, 1)
             rfi_phase = jnp.swapaxes(jnp.reshape(state["rfi_phase"], new_shape), 0, 1)
 
-            vis_rfi = calculate_rfi_vis_single(rfi_A, rfi_phase, a1, a2, constants)
+            vis_rfi = calculate_rfi(rfi_A, rfi_phase, a1, a2, constants)
 
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
@@ -403,7 +403,7 @@ class RiemannVisTimeFreqVariableFFI(Component):
             RFIVisOp(n_ant, self.a1[idx], self.a2[idx]) for idx in time_sample_idxs
         ]
 
-        def calculate_rfi_vis_single(rfi_amp_fine, rfi_phase):
+        def calculate_rfi(rfi_amp_fine, rfi_phase):
 
             vis_rfi = jnp.empty((n_bl, n_freq, n_time), dtype=rfi_amp_fine.dtype)
             for i, time_stride in zip(range(n_groups), time_strides):
@@ -438,7 +438,7 @@ class RiemannVisTimeFreqVariableFFI(Component):
             rfi_amp_fine = jnp.transpose(rfi_amp_fine, (1, 2, 4, 0, 3, 5))
             rfi_phase = jnp.transpose(rfi_phase, (1, 2, 4, 0, 3, 5))
 
-            vis_rfi = calculate_rfi_vis_single(rfi_amp_fine, rfi_phase)
+            vis_rfi = calculate_rfi(rfi_amp_fine, rfi_phase)
 
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
