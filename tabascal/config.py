@@ -209,7 +209,7 @@ class TabConfig:
 
     def estimate_rfi_sampling(
         self,
-        n_int_factor: float,
+        time_int_factor: float,
         min_time_bins: int,
         max_time_bins: int,
         min_divisors: int = 8,
@@ -246,7 +246,7 @@ class TabConfig:
             * np.max(np.abs(fringe_freq), axis=(0, 1))
             * np.sqrt(self.max_rfi_vis / (6 * self.noise))
         )
-        n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(int)
+        n_int_times = np.ceil(time_int_factor * self.int_time * sample_freq_bl).astype(int)
 
         # time_sample_idxs and time_strides are only used in RiemannVisTimeFreqVariable
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
