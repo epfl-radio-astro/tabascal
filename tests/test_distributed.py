@@ -198,3 +198,60 @@ def test_multi_device_helpers_subprocess():
     )
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "MULTI_DEVICE_OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# rank0_first control flow: process 0 must release the barrier even on error
+# ---------------------------------------------------------------------------
+#
+# The real cross-process behaviour needs working multi-host collectives (see
+# test_pipeline_multiprocess), which are unavailable in this single-host CPU test
+# session. These patch rank0_first into its multi-process branch and assert the
+# barrier ordering directly -- in particular that a raise inside process 0's block
+# still hits the barrier, which is what wakes the workers instead of deadlocking
+# them at their entry barrier until the coordinator timeout.
+
+
+def _patch_multiprocess(monkeypatch, *, is_rank0: bool):
+    """Force rank0_first's multi-process branch and record barrier calls."""
+    calls = []
+    monkeypatch.setattr(dist.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(dist, "is_process_0", lambda: is_rank0)
+    monkeypatch.setattr(dist, "barrier", lambda name: calls.append(name))
+    return calls
+
+
+def test_rank0_first_releases_barrier_on_error(monkeypatch):
+    calls = _patch_multiprocess(monkeypatch, is_rank0=True)
+
+    with pytest.raises(RuntimeError):
+        with dist.rank0_first("boom"):
+            raise RuntimeError("process 0 failed inside the block")
+
+    # The finally released the barrier despite the raise; workers are not stranded.
+    assert calls == ["rank0_first:boom"]
+
+
+def test_rank0_first_process0_barrier_after_success(monkeypatch):
+    calls = _patch_multiprocess(monkeypatch, is_rank0=True)
+
+    order = []
+    with dist.rank0_first("ok"):
+        order.append("body")
+        assert calls == []  # barrier fires only after the block completes
+    order.append("after")
+
+    assert order == ["body", "after"]
+    assert calls == ["rank0_first:ok"]
+
+
+def test_rank0_first_worker_waits_before_body(monkeypatch):
+    calls = _patch_multiprocess(monkeypatch, is_rank0=False)
+
+    order = []
+    with dist.rank0_first("w"):
+        # Worker barriered on entry, so the resource is already in place.
+        assert calls == ["rank0_first:w"]
+        order.append("body")
+
+    assert order == ["body"]

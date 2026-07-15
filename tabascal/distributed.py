@@ -286,13 +286,20 @@ def rank0_first(name: str):
 
     Serializes shared-resource setup (e.g. the Space-Track TLE fetch writing the file
     cache) so workers find the resource already in place. Single-process: plain yield.
+
+    Process 0 releases the barrier from a ``finally``, so if its block raises (e.g. a
+    ``TLEError`` from missing credentials or a network failure) the workers are woken
+    instead of blocking until the coordinator timeout; they then fail independently on
+    the missing resource. Turns a multi-process hang into a fast, symmetric error.
     """
     if jax.process_count() == 1:
         yield
         return
     if is_process_0():
-        yield
-        barrier(f"rank0_first:{name}")
+        try:
+            yield
+        finally:
+            barrier(f"rank0_first:{name}")
     else:
         barrier(f"rank0_first:{name}")
         yield
