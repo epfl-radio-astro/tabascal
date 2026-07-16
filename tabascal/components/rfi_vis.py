@@ -405,7 +405,7 @@ class RiemannVisTimeFreqVariableFFI(Component):
 
         def calculate_grouped_rfi_vis(rfi_amp_fine, rfi_phase):
 
-            vis_rfi = jnp.empty((n_bl, n_freq, n_time), dtype=rfi_amp_fine.dtype)
+            vis_rfi = jnp.empty((n_bl, n_freq, n_time), dtype=complex)
             for i, time_stride in zip(range(n_groups), time_strides):
                 idx = time_sample_idxs[i]
                 # Subsample the integration-time axis by the group's stride,
