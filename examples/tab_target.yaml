@@ -10,8 +10,8 @@ model:
     # - rfi_signal:FourierGPRFI
   # RFI visibility calculation
     # - rfi_vis:RiemannVisCalculation
-    - rfi_vis:RiemannVisTimeFreqCalculation
-    # - rfi_vis:RiemannVisTimeFreqVariable
+    # - rfi_vis:RiemannVisTimeFreqCalculation
+    - rfi_vis:RiemannVisTimeFreqVariableFFI
   # Astronomical signal model
     # - ast_vis:FourierTimeAst
     # - ast_vis:FourierTimeFreqAst

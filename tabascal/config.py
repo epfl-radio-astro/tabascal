@@ -114,6 +114,11 @@ def load_config(path: str) -> Dict:
 class TabConfig:
     """Configuration parameters for tabascal method"""
 
+    # Minimum number of divisors required of the fine-grid size (n_int_time) when
+    # binning per-baseline RFI sampling rates for the variable-sampling components.
+    # Internal tuning parameter, intentionally not exposed in the config.
+    _MIN_DIVISORS_VARIABLE = 8
+
     def __init__(self, config: Dict, ms_path: str):
 
         # self.config = config
@@ -146,16 +151,24 @@ class TabConfig:
             extra_tle_dir=config["satellites"].get("extra_tle_dir"),
         )
 
-        config["rfi"]["min_time_bins"] = 1
-        config["rfi"]["max_time_bins"] = 30
-
         self.n_int_time = config["rfi"]["n_int_time"]
         self.n_int_freq = config["rfi"]["n_int_freq"]
 
+        # The divisor-rich fine grid (min_divisors > 1) is only needed by the
+        # RiemannVisTimeFreqVariable / +FFI components, which split baselines into
+        # multiple stride groups. For every other rfi_vis component it just
+        # inflates n_int_time (the fine-grid time dimension) and slows the run,
+        # so only request it when a Variable component is actually selected.
+        # min_divisors is an internal tuning parameter, not user-configurable.
+        uses_variable = any(
+            "Variable" in comp for comp in config["model"]["components"]
+        )
+
         self.estimate_rfi_sampling(
             config["rfi"]["time_int_factor"],
-            config["rfi"]["min_time_bins"],
-            config["rfi"]["max_time_bins"],
+            config["rfi"].get("min_time_bins", 1),
+            config["rfi"].get("max_time_bins", 30),
+            min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
         )
 
         self._set_freqs_times()
@@ -211,7 +224,11 @@ class TabConfig:
         self.a2 = ms_params["a2"]
 
     def estimate_rfi_sampling(
-        self, n_int_factor: float, min_time_bins: int, max_time_bins: int
+        self,
+        time_int_factor: float,
+        min_time_bins: int,
+        max_time_bins: int,
+        min_divisors: int = 8,
     ):
 
         jd_minute = 1 / (24 * 60)
@@ -245,11 +262,13 @@ class TabConfig:
             * np.max(np.abs(fringe_freq), axis=(0, 1))
             * np.sqrt(self.max_rfi_vis / (6 * self.noise))
         )
-        n_int_times = np.ceil(n_int_factor * self.int_time * sample_freq_bl).astype(int)
+        n_int_times = np.ceil(time_int_factor * self.int_time * sample_freq_bl).astype(int)
 
         # time_sample_idxs and time_strides are only used in RiemannVisTimeFreqVariable
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
-            get_strides_and_idxs(n_int_times, min_time_bins, max_time_bins)
+            get_strides_and_idxs(
+                n_int_times, min_time_bins, max_time_bins, min_divisors
+            )
         )
 
     def _set_freqs_times(self):

@@ -351,36 +351,6 @@ def get_divisors(n: int) -> NDArray:
     return np.unique(divisors)
 
 
-def get_sampling_bins(min_sampling: int, min_bins: int, max_bins: int) -> NDArray:
-    """Get a set of set of divisible samplings where the largest sampling is greater than min_sampling.
-
-    Parameters
-    ----------
-    min_sampling : int
-        The minimum sampling required at the top end of the range.
-    min_bins : int
-        The minimum number of sampling bins.
-    max_bins : int
-        The maximum number of sampling bins. If more divisble sampling than desired are found, then the largest are returned.
-
-    Returns
-    -------
-    NDArray
-        The set of sampling bins that are all divisors of the largest sampling.
-    """
-
-    assert min_bins < max_bins, "min_bins must be smaller than max_bins"
-
-    i = 0
-    divisors = get_divisors(min_sampling + i)[-max_bins:]
-
-    while len(divisors) < min_bins:
-        i += 1
-        divisors = get_divisors(min_sampling + i)[-max_bins:]
-
-    return divisors
-
-
 def round_up_to_nearest(original: NDArray, roundings: NDArray) -> NDArray:
     """Round up values to the nearest values in the roundings array.
 
@@ -400,6 +370,9 @@ def round_up_to_nearest(original: NDArray, roundings: NDArray) -> NDArray:
     roundings = np.unique(roundings)
 
     indices = np.searchsorted(roundings, original, side="left")
+    # Values above max(roundings) yield index == len(roundings); clip so they
+    # round down to the largest available value instead of raising IndexError.
+    indices = np.minimum(indices, len(roundings) - 1)
 
     rounded = roundings[indices]
 
@@ -407,9 +380,22 @@ def round_up_to_nearest(original: NDArray, roundings: NDArray) -> NDArray:
 
 
 def get_strides_and_idxs(
-    samplings: NDArray, min_bins: int, max_bins: int
+    samplings: NDArray, min_bins: int, max_bins: int, min_divisors: int = 8
 ) -> tuple[list, list[int], int]:
     """Calculate the binned indices, strides, and maximum sampling from an array of random sampling rates.
+
+    The sampling rates are grouped into stride bins for ``RiemannVisTimeFreqVariable``.
+    Each returned stride must divide ``max_sampling`` (which becomes ``n_int_time``,
+    the fine-grid size) so that the per-group fine-grid slicing stays uniform.
+
+    The naive approach of keying the bins off ``divisors(max(samplings))`` is
+    fragile: when ``max(samplings)`` is prime (e.g. 43) its only divisors are
+    ``{1, 43}``, so every baseline rounds onto a single stride and the whole
+    observation collapses into one group. To avoid this we (1) bump
+    ``max_sampling`` up to a divisor-RICH integer ``>= max(samplings)`` so there
+    are enough candidate strides to separate the distribution, and (2) place the
+    bin levels at quantiles of the actual sampling distribution (snapped to
+    divisors) so each group is non-empty and balanced by baseline count.
 
     Parameters
     ----------
@@ -419,21 +405,43 @@ def get_strides_and_idxs(
         The minimum number of sampling bins.
     max_bins : int
         The maximum number of sampling bins.
+    min_divisors : int, optional
+        Require at least this many divisors of ``max_sampling`` so the candidate
+        strides are dense enough to separate the samplings. Higher values give
+        more, better-separated groups at the cost of a larger ``max_sampling``
+        (hence larger fine grid). Default 8.
 
     Returns
     -------
     tuple[list, list[int], int]
-        The indices from the samplings array that fall into each stride bin, the binned strides, and the maximum sampling rate which is divisible by all strides.
+        The indices from the samplings array that fall into each stride bin,
+        the binned strides, and the maximum sampling rate which is divisible by all strides.
     """
 
-    divisors = get_sampling_bins(np.max(samplings), min_bins, max_bins)
+    samplings = np.asarray(samplings)
+    max_samp = int(np.max(samplings))
 
-    max_sampling = max(divisors)
+    # 1. Fine-grid size >= max(samplings), chosen to be divisor-rich so the
+    #    candidate strides (its divisors) are dense enough to separate the
+    #    sampling distribution. Bounded overshoot keeps the fine grid in check.
+    need = max(min_divisors, min_bins + 1)
+    max_sampling = max_samp
+    while len(get_divisors(max_sampling)) < need and max_sampling < 2 * max_samp:
+        max_sampling += 1
+    divisors = get_divisors(max_sampling)
 
-    rounded_samplings = round_up_to_nearest(samplings, divisors)
+    # 2. Place up to max_bins bin levels at quantiles of the sampling
+    #    distribution, snapped up to divisors of max_sampling. The top divisor is
+    #    always included so it covers max(samplings).
+    n_levels = max(min(max_bins, len(divisors)), min_bins)
+    targets = np.quantile(samplings, np.linspace(0.0, 1.0, n_levels))
+    levels = np.unique(round_up_to_nearest(targets, divisors))
+    levels = np.unique(np.append(levels, max_sampling))
 
-    strides = [max_sampling // i for i in rounded_samplings]
+    # 3. stride = max_sampling // rounded level; each stride divides max_sampling.
+    rounded_samplings = round_up_to_nearest(samplings, levels)
+    strides = max_sampling // rounded_samplings
     u_strides = [int(x) for x in np.unique(strides)]
-    idxs = [np.where(np.array(strides) == i)[0] for i in u_strides]
+    idxs = [np.where(strides == i)[0] for i in u_strides]
 
     return idxs, u_strides, max_sampling
