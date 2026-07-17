@@ -337,13 +337,15 @@ class RiemannVisTimeFreqVariable(Component):
                     n_int_time,
                 )
 
-            # calculate_rfi_vis_variable expects the n_rfi axis on axis 1 and
-            # reduces over it internally, so reshape to (n_rfi, n_ant, ...) and
-            # swap to (n_ant, n_rfi, n_freq, n_int_freq, n_time, n_int_time).
-            rfi_A = jnp.swapaxes(jnp.reshape(state["rfi_A"], new_shape), 0, 1)
-            rfi_phase = jnp.swapaxes(jnp.reshape(state["rfi_phase"], new_shape), 0, 1)
+                # calculate_rfi_vis_variable expects the n_rfi axis on axis 1 and
+                # reduces over it internally, so reshape to (n_rfi, n_ant, ...) and
+                # swap to (n_ant, n_rfi, n_freq, n_int_freq, n_time, n_int_time).
+                rfi_A = jnp.swapaxes(jnp.reshape(rfi_A_flat, new_shape), 0, 1)
+                rfi_phase = jnp.swapaxes(jnp.reshape(rfi_phase_flat, new_shape), 0, 1)
 
-            vis_rfi = calculate_grouped_rfi_vis(rfi_A, rfi_phase, a1, a2, constants)
+                return calculate_grouped_rfi_vis(rfi_A, rfi_phase, a1, a2, constants)
+
+            vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
 
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
@@ -402,7 +404,6 @@ class RiemannVisTimeFreqVariableFFI(Component):
         # Pre-compute everything possible
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
-        n_rfi = self.n_rfi
         n_ant = self.n_ant
         n_time = self.n_time
         n_bl = self.n_bl
@@ -436,23 +437,31 @@ class RiemannVisTimeFreqVariableFFI(Component):
             return vis_rfi
 
         def forward(params, state, constants):
-            new_shape = (
-                n_rfi,
-                n_ant,
-                n_freq,
-                n_int_freq,
-                n_time,
-                n_int_time,
-            )
 
-            rfi_amp_fine = jnp.reshape(state["rfi_A"], new_shape)
-            rfi_phase = jnp.reshape(state["rfi_phase"], new_shape)
+            # Leading dim -1: under sharding the body sees the per-device RFI
+            # shard. The FFI kernel reduces over the source axis itself, so the
+            # local sum over sources happens before the psum. shard_map is also
+            # what lets the custom call run at all -- GSPMD cannot partition it.
+            def local_vis(rfi_A_flat, rfi_phase_flat):
+                new_shape = (
+                    -1,
+                    n_ant,
+                    n_freq,
+                    n_int_freq,
+                    n_time,
+                    n_int_time,
+                )
 
-            # Transpose to (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
-            rfi_amp_fine = jnp.transpose(rfi_amp_fine, (1, 2, 4, 0, 3, 5))
-            rfi_phase = jnp.transpose(rfi_phase, (1, 2, 4, 0, 3, 5))
+                rfi_amp_fine = jnp.reshape(rfi_A_flat, new_shape)
+                rfi_phase = jnp.reshape(rfi_phase_flat, new_shape)
 
-            vis_rfi = calculate_grouped_rfi_vis(rfi_amp_fine, rfi_phase)
+                # Transpose to (n_ant, n_freq, n_time, n_rfi, n_int_freq, n_int_time)
+                rfi_amp_fine = jnp.transpose(rfi_amp_fine, (1, 2, 4, 0, 3, 5))
+                rfi_phase = jnp.transpose(rfi_phase, (1, 2, 4, 0, 3, 5))
+
+                return calculate_grouped_rfi_vis(rfi_amp_fine, rfi_phase)
+
+            vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
 
             # vis_rfi is shape (n_bl, n_freq, n_time)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
