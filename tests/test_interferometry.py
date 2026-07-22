@@ -277,13 +277,12 @@ def _brute_force_fringe_rate(uvw, dec_deg, freq, D, n_chi=4000):
     """Reference max fringe rate by maximising f = (1/lam) b.(Omega x (s - s0))
     directly over the beam azimuth and time, with no closed-form simplification.
 
-    The source sits at the beam half-angle rho = bw / 2 (the maximising offset),
-    and we sweep the azimuth chi around the phase centre s0 = w_hat.
+    The source sits at the beam radius rho = 1.22 lam / D (the first null, the
+    maximising offset), and we sweep the azimuth chi around s0 = w_hat.
     """
     lam = C / freq
     d = np.deg2rad(dec_deg)
-    bw = 1.22 * lam / D
-    rho = bw / 2
+    rho = 1.22 * lam / D
 
     nhat = np.array([0.0, np.cos(d), np.sin(d)])  # celestial pole in UVW frame
     s0 = np.array([0.0, 0.0, 1.0])
@@ -303,12 +302,13 @@ def _brute_force_fringe_rate(uvw, dec_deg, freq, D, n_chi=4000):
 class TestGetAstFringeRate:
     """The exact maximum astronomical fringe rate is
 
-        f_max = (Omega_e / lam) max_t [ sin(bw/2) sqrt((v sin d - w cos d)^2
-                                                       + (u sin d)^2)
-                                        + (1 - cos(bw/2)) |u cos d| ]
+        f_max = (Omega_e / lam) max_t [ sin(rho) sqrt((v sin d - w cos d)^2
+                                                      + (u sin d)^2)
+                                        + (1 - cos(rho)) |u cos d| ]
 
-    the transverse (sin rho) plus radial / (n - 1) curvature (1 - cos rho)
-    couplings. These tests pin it against an independent brute-force
+    with the beam radius rho = 1.22 lam / D (first null); the transverse
+    (sin rho) plus radial / (n - 1) curvature (1 - cos rho) couplings. These
+    tests pin it against an independent brute-force
     maximisation over the sphere, the two limiting declinations, the presence of
     the radial term, the shape/broadcasting, and the monotonic dependences.
     """
@@ -348,20 +348,20 @@ class TestGetAstFringeRate:
         # to the uv-plane baseline length sqrt(u^2 + v^2); w is irrelevant.
         uvw = np.array([[[300.0, 400.0, 900.0]]])  # sqrt(u^2+v^2) = 500
         lam = C / self.FREQ
-        bw = 1.22 * lam / self.D
-        expected = float(Omega_e) * np.sin(bw / 2) * 500.0 / lam
+        rho = 1.22 * lam / self.D
+        expected = float(Omega_e) * np.sin(rho) * 500.0 / lam
         fr = get_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)
         np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-6)
 
     def test_equator_transverse_plus_radial(self):
         # At dec = 0 deg the transverse term uses |w| and the radial term uses
-        # |u|: f = (Omega_e/lam)[sin(bw/2)|w| + (1-cos(bw/2))|u|].
+        # |u|: f = (Omega_e/lam)[sin(rho)|w| + (1-cos(rho))|u|].
         uvw = np.array([[[300.0, 400.0, 700.0]]])
         lam = C / self.FREQ
-        bw = 1.22 * lam / self.D
+        rho = 1.22 * lam / self.D
         expected = (
             float(Omega_e)
-            * (np.sin(bw / 2) * 700.0 + (1 - np.cos(bw / 2)) * 300.0)
+            * (np.sin(rho) * 700.0 + (1 - np.cos(rho)) * 300.0)
             / lam
         )
         fr = get_ast_fringe_rate(uvw, 0.0, self.FREQ, self.D)
@@ -371,10 +371,9 @@ class TestGetAstFringeRate:
         # Away from the pole a wide beam must exceed the transverse-only estimate
         # because of the (n - 1) radial contribution.
         uvw = np.array([[[600.0, 100.0, 100.0]]])
-        d = np.deg2rad(0.0)
         lam = C / self.FREQ
-        bw = 1.22 * lam / 0.5  # wide beam
-        transverse_only = float(Omega_e) * np.sin(bw / 2) * abs(100.0) / lam
+        rho = 1.22 * lam / 0.5  # wide beam
+        transverse_only = float(Omega_e) * np.sin(rho) * abs(100.0) / lam
         fr = float(get_ast_fringe_rate(uvw, 0.0, self.FREQ, 0.5)[0])
         assert fr > transverse_only
 
@@ -395,8 +394,8 @@ class TestGetAstFringeRate:
             [[300.0, 0.0, 0.0]],
         ])
         lam = C / self.FREQ
-        bw = 1.22 * lam / self.D
-        expected = float(Omega_e) * np.sin(bw / 2) * 500.0 / lam
+        rho = 1.22 * lam / self.D
+        expected = float(Omega_e) * np.sin(rho) * 500.0 / lam
         fr = get_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)
         np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-6)
 

@@ -119,7 +119,11 @@ class FourierTimeAst(Component):
         self.k_ast = jnp.fft.fftfreq(self.n_ast_k, self.int_time)
 
         if self.fov_deg:
-            eff_dish_d = 1.22 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+            # fov_deg is the full field of view (diameter) out to the first null
+            # of the primary beam. get_ast_fringe_rate uses a beam radius
+            # rho = 1.22 lam / D, so the effective diameter is 2 * 1.22 lam / fov
+            # to make rho = fov / 2 (the field radius).
+            eff_dish_d = 2.44 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
         else:
             eff_dish_d = self.dish_d
 
@@ -309,7 +313,11 @@ class FourierTimeConstFreqAst(Component):
         self.k_ast = jnp.fft.fftfreq(self.n_ast_k, self.int_time)
 
         if self.fov_deg:
-            eff_dish_d = 1.22 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+            # fov_deg is the full field of view (diameter) out to the first null
+            # of the primary beam. get_ast_fringe_rate uses a beam radius
+            # rho = 1.22 lam / D, so the effective diameter is 2 * 1.22 lam / fov
+            # to make rho = fov / 2 (the field radius).
+            eff_dish_d = 2.44 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
         else:
             eff_dish_d = self.dish_d
 
@@ -504,7 +512,11 @@ class FourierTimeFreqAst(Component):
         self.k_ast = jnp.fft.fftfreq(self.n_ast_k, self.int_time)
 
         if self.fov_deg:
-            eff_dish_d = 1.22 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+            # fov_deg is the full field of view (diameter) out to the first null
+            # of the primary beam. get_ast_fringe_rate uses a beam radius
+            # rho = 1.22 lam / D, so the effective diameter is 2 * 1.22 lam / fov
+            # to make rho = fov / 2 (the field radius).
+            eff_dish_d = 2.44 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
         else:
             eff_dish_d = self.dish_d
 
@@ -740,8 +752,11 @@ class FourierTimeFreqGPAst(Component):
     def _compute_gp_params(self):
 
         if self.fov_deg:
+            # fov_deg is the full field of view (diameter) out to the first null;
+            # 2.44 = 2 * 1.22 makes the beam radius rho = fov / 2 in
+            # get_ast_fringe_rate (see the other components).
             eff_dish_d = float(
-                1.22 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+                2.44 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
             )
         else:
             eff_dish_d = self.dish_d

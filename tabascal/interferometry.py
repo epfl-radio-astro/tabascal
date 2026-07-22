@@ -211,12 +211,12 @@ def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float 
     offset rho, azimuth chi has s - s0 = (l, m, n - 1) with
     (l, m, n) = (sin(rho) cos(chi), sin(rho) sin(chi), cos(rho)). Expanding
     b . (Omega x (s - s0)) and maximising over chi (the transverse l, m terms),
-    over the beam (rho <= bw / 2, monotonic so rho = bw / 2), and over the
-    observation gives the exact result
+    over the beam (offset <= rho, monotonic so the maximum is at the beam edge
+    rho), and over the observation gives the exact result
 
-        f_max = (Omega_e / lam) max_t [ sin(bw / 2) sqrt((v sin d - w cos d)^2
-                                                         + (u sin d)^2)
-                                        + (1 - cos(bw / 2)) |u cos d| ]
+        f_max = (Omega_e / lam) max_t [ sin(rho) sqrt((v sin d - w cos d)^2
+                                                      + (u sin d)^2)
+                                        + (1 - cos(rho)) |u cos d| ]
 
     The two terms couple to different baseline projections:
 
@@ -228,9 +228,15 @@ def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float 
       vanishes at the pole (d = 90 deg), so it only matters for wide fields away
       from the pole.
 
-    The previous uv-plane-only expression Omega_e U sin(bw / 2) / lam is the
+    The previous uv-plane-only expression Omega_e U sin(rho) / lam is the
     special case d = 90 deg (phase centre at the pole), where the radial term is
     zero and the projection collapses to sqrt(u^2 + v^2).
+
+    This fringe rate is used as the knee k0 of the astronomical power-spectrum
+    prior (the width of its Gaussian roll-off), so rho is taken to the first
+    null of the primary beam rather than the half-power point: it should be the
+    largest offset that still contributes appreciable flux, and underestimating
+    it suppresses genuine fast-fringe power in the prior.
 
     Parameters
     ----------
@@ -253,8 +259,12 @@ def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float 
 
     u, v, w = uvw[..., 0], uvw[..., 1], uvw[..., 2]
 
-    bw = 1.22 * lam / D
-    rho = bw / 2  # beam half-angle
+    # Primary-beam radius: the largest angular offset of a source from the phase
+    # centre. Taken to the first null of a uniformly illuminated aperture,
+    # rho = 1.22 lam / D (the edge of the main lobe). For a configured field of
+    # view, D is the effective diameter chosen so that rho equals half the field
+    # of view (see components/ast_vis.py).
+    rho = 1.22 * lam / D
 
     # Transverse coupling: source offset perpendicular to the line of sight
     # (direction cosines l, m; magnitude sin(rho)) against the baseline
