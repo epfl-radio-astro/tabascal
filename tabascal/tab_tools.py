@@ -244,28 +244,6 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
         print(f"  {' ' * len(label)} | " + row("bias", me, sig))
 
 
-def get_ast_fringe_rate(uv, freq=1.227e9, D=13.5):
-
-    omega = 2 * np.pi / (24 * 3600)
-    lam = 3e8 / freq
-
-    U = jnp.max(jnp.linalg.norm(uv, axis=-1), axis=0)
-
-    bw = 1.22 * lam / D
-
-    # The fringe rate is proportional to the sky displacement of a source
-    # relative to the phase centre, |s - s0|, not the transverse direction
-    # cosine sin(rho). For a source at the beam half-angle rho = bw / 2, the
-    # exact chord length is |s - s0| = sqrt(2 - 2 cos(rho)) = 2 sin(rho / 2).
-    # This is general for all angles and reduces to sin(bw / 2) ~ bw / 2 in the
-    # small-angle limit.
-    max_ds = 2 * jnp.sin(bw / 4)
-
-    max_fr = omega * U * max_ds / lam
-
-    return max_fr
-
-
 def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
 
     k_ = k / k0

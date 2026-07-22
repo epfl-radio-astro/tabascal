@@ -199,6 +199,64 @@ def calculate_fringe_frequency_numpy(
     return fringe_freq
 
 
+def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float = 13.5) -> Array:
+    """Maximum astronomical fringe rate for a source within the primary beam.
+
+    The fringe-stopped visibility phase is phi = (2 pi / lam) b . (s - s0),
+    where s - s0 is the offset of the source direction from the phase centre.
+    Because the sky and the baseline rotate rigidly with respect to each other
+    at the Earth rotation rate Omega, the fringe rate is
+    f = (1 / lam) b . (Omega x (s - s0)). Maximising over sources within the
+    beam (half-angle rho = bw / 2) and over the observation gives
+
+        f_max = (Omega / lam) |s - s0| max_t sqrt(u^2 sin^2 d
+                                                  + (v sin d - w cos d)^2)
+
+    where d is the phase-centre declination. The declination dependence enters
+    because the celestial pole lies along cos(d) v_hat + sin(d) w_hat in the UVW
+    frame; the previous uv-plane-only expression is the special case d = 90 deg
+    (phase centre at the pole).
+
+    The sky displacement of a source at the beam half-angle is the exact chord
+    |s - s0| = sqrt(2 - 2 cos(rho)) = 2 sin(bw / 4), which is general for all
+    beam widths and reduces to the small-angle sin(bw / 2) ~ bw / 2.
+
+    Parameters
+    ----------
+    uvw : Array (n_time, n_bl, 3)
+        UVW coordinates of the baselines in metres.
+    dec : float
+        Phase centre declination in degrees.
+    freq : float
+        Observational frequency in Hz.
+    D : float
+        Dish diameter (or effective diameter for a given field of view) in metres.
+
+    Returns
+    -------
+    Array (n_bl,)
+        Maximum astronomical fringe rate on each baseline in Hz.
+    """
+    lam = C / freq
+    d = jnp.deg2rad(dec)
+
+    u, v, w = uvw[..., 0], uvw[..., 1], uvw[..., 2]
+
+    # Baseline projected onto the plane perpendicular to the celestial pole and
+    # to the line of sight, per time sample. The max over time is the worst-case
+    # fringe rate over the observation.
+    proj = jnp.sqrt((u * jnp.sin(d)) ** 2 + (v * jnp.sin(d) - w * jnp.cos(d)) ** 2)
+    max_proj = jnp.max(proj, axis=0)
+
+    # Sky displacement chord of a source at the beam half-angle rho = bw / 2.
+    bw = 1.22 * lam / D
+    max_ds = 2 * jnp.sin(bw / 4)
+
+    max_fr = Omega_e * max_proj * max_ds / lam
+
+    return max_fr
+
+
 def get_rfi_phase(
     rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array
 ) -> Array:

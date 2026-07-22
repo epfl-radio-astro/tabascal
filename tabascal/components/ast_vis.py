@@ -4,9 +4,9 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.tab_tools import (
-    get_ast_fringe_rate,
     pow_spec,
 )
+from tabascal.interferometry import get_ast_fringe_rate
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
@@ -35,6 +35,7 @@ class FourierTimeAst(Component):
             self.int_time = config.int_time
             self.dish_d = config.dish_d
             self.uvw = config.uvw
+            self.dec = config.phase_centre["dec"]
             self.freqs = config.freqs
             self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
@@ -122,8 +123,8 @@ class FourierTimeAst(Component):
         else:
             eff_dish_d = self.dish_d
 
-        self.ast_fr = vmap(get_ast_fringe_rate, (None, 0, None), (1))(
-            self.uvw[:, :, :2], self.freqs, eff_dish_d
+        self.ast_fr = vmap(get_ast_fringe_rate, (None, None, 0, None), (1))(
+            self.uvw, self.dec, self.freqs, eff_dish_d
         )
 
     def _compute_true_params(self, zarr_path, data_col):
@@ -229,6 +230,7 @@ class FourierTimeConstFreqAst(Component):
             self.int_time = config.int_time
             self.dish_d = config.dish_d
             self.uvw = config.uvw
+            self.dec = config.phase_centre["dec"]
             self.freqs = config.freqs
             self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
@@ -311,8 +313,8 @@ class FourierTimeConstFreqAst(Component):
         else:
             eff_dish_d = self.dish_d
 
-        self.ast_fr = vmap(get_ast_fringe_rate, (None, 0, None), (1))(
-            self.uvw[:, :, :2], self.freqs, eff_dish_d
+        self.ast_fr = vmap(get_ast_fringe_rate, (None, None, 0, None), (1))(
+            self.uvw, self.dec, self.freqs, eff_dish_d
         )
 
     def _compute_true_params(self, zarr_path, data_col):
@@ -418,6 +420,7 @@ class FourierTimeFreqAst(Component):
             self.int_time = config.int_time
             self.dish_d = config.dish_d
             self.uvw = config.uvw
+            self.dec = config.phase_centre["dec"]
             self.freqs = config.freqs
             self.p0 = config.args["ast"]["pow_spec"]["p0"]
             self.gamma = config.args["ast"]["pow_spec"]["gamma"]
@@ -505,8 +508,8 @@ class FourierTimeFreqAst(Component):
         else:
             eff_dish_d = self.dish_d
 
-        self.ast_fr = vmap(get_ast_fringe_rate, (None, 0, None), (1))(
-            self.uvw[:, :, :2], self.freqs, eff_dish_d
+        self.ast_fr = vmap(get_ast_fringe_rate, (None, None, 0, None), (1))(
+            self.uvw, self.dec, self.freqs, eff_dish_d
         )
 
     # def _compute_true_params(self, zarr_path, data_col):
@@ -646,6 +649,7 @@ class FourierTimeFreqGPAst(Component):
             self.chan_width = config.chan_width
             self.dish_d = config.dish_d
             self.uvw = config.uvw
+            self.dec = config.phase_centre["dec"]
             self.freqs = config.freqs
             self.times = config.times
 
@@ -742,11 +746,11 @@ class FourierTimeFreqGPAst(Component):
         else:
             eff_dish_d = self.dish_d
 
-        # self.ast_fr = vmap(get_ast_fringe_rate, (None, 0, None), (1))(
-        #     self.uvw[:, :, :2], self.freqs, eff_dish_d
+        # self.ast_fr = vmap(get_ast_fringe_rate, (None, None, 0, None), (1))(
+        #     self.uvw, self.dec, self.freqs, eff_dish_d
         # ) # Separate Fringe Rate for each baseline and frequency
         self.ast_fr = get_ast_fringe_rate(
-            self.uvw[:, :, :2], self.freqs.max(), eff_dish_d
+            self.uvw, self.dec, self.freqs.max(), eff_dish_d
         )
 
         self.k0_time = self.ast_fr

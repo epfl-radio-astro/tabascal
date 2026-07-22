@@ -14,6 +14,7 @@ from tabascal.interferometry import (
     Omega_e,
     Rotz_numpy,
     calculate_fringe_frequency_numpy,
+    get_ast_fringe_rate,
     get_divisors,
     get_strides_and_idxs,
     itrf_to_uvw_numpy,
@@ -266,3 +267,108 @@ class TestGetStridesAndIdxs:
             for r in (1, 2, 4, 6)
         ]
         assert counts == sorted(counts)
+
+
+# ---------------------------------------------------------------------------
+# get_ast_fringe_rate
+# ---------------------------------------------------------------------------
+
+def _chord(freq, D):
+    """Sky-displacement chord 2 sin(bw / 4) of a source at the beam half-angle."""
+    lam = C / freq
+    bw = 1.22 * lam / D
+    return 2 * np.sin(bw / 4)
+
+
+class TestGetAstFringeRate:
+    """The maximum astronomical fringe rate f_max is
+
+        f_max = (Omega_e / lam) |s - s0| max_t sqrt(u^2 sin^2 d
+                                                    + (v sin d - w cos d)^2)
+
+    with the sky-displacement chord |s - s0| = 2 sin(bw / 4).  These tests pin
+    the two limiting geometries (pole and equator), the shape/broadcasting, and
+    the monotonic dependence on baseline length and beam width.
+    """
+
+    FREQ = 1.5e9
+    D = 13.5
+
+    # --- shape ---
+
+    def test_output_shape(self):
+        rng = np.random.default_rng(0)
+        n_time, n_bl = 12, 6
+        uvw = rng.normal(scale=1000.0, size=(n_time, n_bl, 3))
+        fr = get_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)
+        assert fr.shape == (n_bl,)
+
+    def test_single_baseline_single_time(self):
+        uvw = np.array([[[300.0, 400.0, 500.0]]])  # (1, 1, 3)
+        fr = get_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)
+        assert fr.shape == (1,)
+
+    # --- analytic limiting geometries ---
+
+    def test_pole_reduces_to_uv_projection(self):
+        # At dec = 90 deg the pole lies along w_hat, so the projection collapses
+        # to the uv-plane baseline length sqrt(u^2 + v^2).
+        uvw = np.array([[[300.0, 400.0, 900.0]]])  # sqrt(u^2+v^2) = 500, w ignored
+        lam = C / self.FREQ
+        expected = float(Omega_e) * 500.0 * _chord(self.FREQ, self.D) / lam
+        fr = get_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)
+        np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-6)
+
+    def test_equator_reduces_to_w_component(self):
+        # At dec = 0 deg the pole lies along v_hat, so the projection collapses
+        # to |w| and is independent of u and v.
+        uvw = np.array([[[300.0, 400.0, 700.0]]])
+        lam = C / self.FREQ
+        expected = float(Omega_e) * 700.0 * _chord(self.FREQ, self.D) / lam
+        fr = get_ast_fringe_rate(uvw, 0.0, self.FREQ, self.D)
+        np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-6)
+
+    def test_declination_dependence_is_real(self):
+        # A baseline whose uv length differs from |w| must give a different rate
+        # at the pole than at the equator.
+        uvw = np.array([[[300.0, 400.0, 700.0]]])  # sqrt(u^2+v^2)=500 != |w|=700
+        fr_pole = float(get_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)[0])
+        fr_equ = float(get_ast_fringe_rate(uvw, 0.0, self.FREQ, self.D)[0])
+        assert not np.isclose(fr_pole, fr_equ, rtol=1e-3)
+
+    # --- time reduction ---
+
+    def test_takes_max_over_time(self):
+        # The largest per-sample projection sets the rate (evaluated at the pole
+        # where the projection is just sqrt(u^2 + v^2)).
+        uvw = np.array([
+            [[100.0, 0.0, 0.0]],
+            [[500.0, 0.0, 0.0]],  # largest
+            [[300.0, 0.0, 0.0]],
+        ])
+        lam = C / self.FREQ
+        expected = float(Omega_e) * 500.0 * _chord(self.FREQ, self.D) / lam
+        fr = get_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)
+        np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-6)
+
+    # --- monotonicity / scaling ---
+
+    def test_proportional_to_baseline_length(self):
+        uvw = np.array([[[300.0, 400.0, 500.0]]])
+        fr1 = float(get_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)[0])
+        fr2 = float(get_ast_fringe_rate(2 * uvw, DEC, self.FREQ, self.D)[0])
+        np.testing.assert_allclose(fr2, 2 * fr1, rtol=1e-6)
+
+    def test_increases_with_beam_width(self):
+        # A smaller dish -> wider beam -> larger sky displacement -> higher rate.
+        uvw = np.array([[[300.0, 400.0, 500.0]]])
+        fr_wide = float(get_ast_fringe_rate(uvw, DEC, self.FREQ, 5.0)[0])
+        fr_narrow = float(get_ast_fringe_rate(uvw, DEC, self.FREQ, 50.0)[0])
+        assert fr_wide > fr_narrow > 0.0
+
+    def test_small_angle_matches_direction_cosine(self):
+        # For a narrow beam the chord 2 sin(bw / 4) agrees with the old
+        # small-angle direction cosine sin(bw / 2) to high precision.
+        lam = C / self.FREQ
+        bw = 1.22 * lam / self.D
+        np.testing.assert_allclose(_chord(self.FREQ, self.D), np.sin(bw / 2), rtol=1e-3)
