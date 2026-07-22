@@ -206,20 +206,31 @@ def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float 
     where s - s0 is the offset of the source direction from the phase centre.
     Because the sky and the baseline rotate rigidly with respect to each other
     at the Earth rotation rate Omega, the fringe rate is
-    f = (1 / lam) b . (Omega x (s - s0)). Maximising over sources within the
-    beam (half-angle rho = bw / 2) and over the observation gives
+    f = (1 / lam) b . (Omega x (s - s0)). In the UVW frame the celestial pole
+    lies along n_hat = cos(d) v_hat + sin(d) w_hat, and a source at angular
+    offset rho, azimuth chi has s - s0 = (l, m, n - 1) with
+    (l, m, n) = (sin(rho) cos(chi), sin(rho) sin(chi), cos(rho)). Expanding
+    b . (Omega x (s - s0)) and maximising over chi (the transverse l, m terms),
+    over the beam (rho <= bw / 2, monotonic so rho = bw / 2), and over the
+    observation gives the exact result
 
-        f_max = (Omega / lam) |s - s0| max_t sqrt(u^2 sin^2 d
-                                                  + (v sin d - w cos d)^2)
+        f_max = (Omega_e / lam) max_t [ sin(bw / 2) sqrt((v sin d - w cos d)^2
+                                                         + (u sin d)^2)
+                                        + (1 - cos(bw / 2)) |u cos d| ]
 
-    where d is the phase-centre declination. The declination dependence enters
-    because the celestial pole lies along cos(d) v_hat + sin(d) w_hat in the UVW
-    frame; the previous uv-plane-only expression is the special case d = 90 deg
-    (phase centre at the pole).
+    The two terms couple to different baseline projections:
 
-    The sky displacement of a source at the beam half-angle is the exact chord
-    |s - s0| = sqrt(2 - 2 cos(rho)) = 2 sin(bw / 4), which is general for all
-    beam widths and reduces to the small-angle sin(bw / 2) ~ bw / 2.
+    * Transverse term - the offset perpendicular to the line of sight, of
+      magnitude sin(rho), against the baseline component perpendicular to the
+      celestial pole. This is the dominant, first-order contribution.
+    * Radial term - the (n - 1) curvature of the celestial sphere, of magnitude
+      1 - cos(rho), against u cos(d). It is second order in the beam width and
+      vanishes at the pole (d = 90 deg), so it only matters for wide fields away
+      from the pole.
+
+    The previous uv-plane-only expression Omega_e U sin(bw / 2) / lam is the
+    special case d = 90 deg (phase centre at the pole), where the radial term is
+    zero and the projection collapses to sqrt(u^2 + v^2).
 
     Parameters
     ----------
@@ -242,17 +253,22 @@ def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float 
 
     u, v, w = uvw[..., 0], uvw[..., 1], uvw[..., 2]
 
-    # Baseline projected onto the plane perpendicular to the celestial pole and
-    # to the line of sight, per time sample. The max over time is the worst-case
-    # fringe rate over the observation.
-    proj = jnp.sqrt((u * jnp.sin(d)) ** 2 + (v * jnp.sin(d) - w * jnp.cos(d)) ** 2)
-    max_proj = jnp.max(proj, axis=0)
-
-    # Sky displacement chord of a source at the beam half-angle rho = bw / 2.
     bw = 1.22 * lam / D
-    max_ds = 2 * jnp.sin(bw / 4)
+    rho = bw / 2  # beam half-angle
 
-    max_fr = Omega_e * max_proj * max_ds / lam
+    # Transverse coupling: source offset perpendicular to the line of sight
+    # (direction cosines l, m; magnitude sin(rho)) against the baseline
+    # component perpendicular to the celestial pole.
+    transverse = jnp.sin(rho) * jnp.sqrt(
+        (v * jnp.sin(d) - w * jnp.cos(d)) ** 2 + (u * jnp.sin(d)) ** 2
+    )
+    # Radial coupling: the (n - 1) curvature of the celestial sphere
+    # (magnitude 1 - cos(rho)) against u cos(d). Second order in the beam width
+    # and zero at the pole.
+    radial = (1 - jnp.cos(rho)) * jnp.abs(u * jnp.cos(d))
+
+    # Max over time is the worst-case fringe rate over the observation.
+    max_fr = Omega_e * jnp.max(transverse + radial, axis=0) / lam
 
     return max_fr
 
