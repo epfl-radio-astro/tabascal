@@ -1,25 +1,28 @@
-"""TLE caching and local orbital-element parsing for tabascal.
+"""TABASCAL TLE orchestration and local orbital-element parsing.
 
 TLEs are sourced from the IAU CPS SatChecker service via
 :mod:`tabascal.satchecker` — no account or credentials are required. This module
-adds the local cache, the per-observation retrieval/fallback logic, and parses
-the orbital elements locally from the two TLE lines. All filtering and
-computation is done locally.
+is the TABASCAL adapter: it resolves each requested NORAD ID against an ordered
+set of sources, applies the configurable age policy, drives the deterministic
+catalogue cache, and parses OMM-style orbital elements locally from the two TLE
+lines. All filtering and element computation is done locally.
 
-TLE search order (each observation date is resolved independently):
-  1. User-supplied directory  (--extra-tle-dir <dir> CLI flag)
-  2. Managed cache directory  (default: platformdirs user cache / tle-cache,
-                               override via TLE_CACHE_DIR env var)
-  3. SatChecker API           (the full catalogue is saved to the managed cache;
-                               any requested NORAD ID still missing is fetched
-                               individually and cached alongside it)
+Source precedence is resolved **independently per NORAD ID**:
 
-Cache files: one deterministic ``<YYYY-MM-DD>-catalogue.json`` per UTC date, plus
-an optional ``<YYYY-MM-DD>-extra.json`` holding per-satellite fallback records —
-so repeated runs over the same date reuse the cache instead of creating
-duplicates. The ``<YYYY-MM-DD>-*.json`` glob is retained so legacy Space-Track
-cache files (and the bundled test fixtures) are still discovered; only
-``NORAD_CAT_ID`` and the two TLE lines are read from any cache file.
+  1. ``extra_tle_dir`` — user-supplied local TLE files. The record whose TLE-line
+     epoch is closest to the observation epoch is chosen; it is accepted only if
+     within ``extra_tle_max_age_days`` (``None`` = unlimited). An accepted record
+     wins outright — later sources are not consulted for that ID.
+  2. Managed canonical catalogue — one deterministic snapshot per fixed UTC bucket
+     (see :func:`tabascal.satchecker.cache.canonical_epoch_jd`), fetched from
+     SatChecker on a miss and cached atomically.
+  3. Per-satellite SatChecker fallback — only for IDs still missing from the bulk
+     snapshot; the records are associated with the same canonical snapshot so a
+     later run over the same request reuses them.
+
+Catalogue reuse follows the bucket policy: the cached record is nearest to the
+canonical bucket epoch, not necessarily nearest to the exact observation epoch.
+Cache contents cannot change the result for a fixed request and policy.
 """
 
 from __future__ import annotations
@@ -28,7 +31,6 @@ import math
 import os
 import time
 from datetime import datetime, timedelta
-from glob import glob
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +40,13 @@ import numpy as np
 import pandas as pd
 
 from tabascal import satchecker
+from tabascal.satchecker import (
+    CatalogueSnapshot,
+    TextCatalogueCache,
+    canonical_epoch_jd,
+    canonical_stamp,
+    read_legacy_tle_records,
+)
 from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-compat alias
 from tabascal.time import datetime_to_jd, jd_to_datetime
 
@@ -48,6 +57,14 @@ from tabascal.time import datetime_to_jd, jd_to_datetime
 
 _MU_KM3_S2 = 398600.4418  # Earth gravitational parameter, km^3/s^2
 _THROTTLE_SECONDS = 1.0   # delay between per-satellite fallback requests
+DEFAULT_CATALOGUE_INTERVAL_HOURS = 2.0
+
+# A TLE line-1 epoch is quantised to ~1e-8 day (8 decimal places of a day, ~0.9 ms),
+# and the datetime<->JD round-trip adds only sub-microsecond-day noise (measured
+# ~3.7e-9 day). This tolerance covers one epoch quantum plus that slack (~2.6 ms), so
+# ``extra_tle_max_age_days: 0`` accepts a record matching the observation to TLE
+# precision while rejecting one several ms away — matching the documented semantics.
+_AGE_TOL_DAYS = 3e-8
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +72,7 @@ _THROTTLE_SECONDS = 1.0   # delay between per-satellite fallback requests
 # ---------------------------------------------------------------------------
 
 def tle_cache_dir() -> Path:
-    """Return the TLE cache directory, creating it if needed.
+    """Return the managed TLE cache directory, creating it if needed.
 
     The directory is resolved in priority order:
     1. ``TLE_CACHE_DIR`` environment variable (if set).
@@ -67,12 +84,21 @@ def tle_cache_dir() -> Path:
     return p
 
 
-def _search_dirs(extra_tle_dir: Optional[str]) -> list[Path]:
-    """Directories searched for cached catalogues (extra first, then managed cache)."""
-    cache_dir = tle_cache_dir()
-    if extra_tle_dir:
-        return [Path(extra_tle_dir).resolve(), cache_dir]
-    return [cache_dir]
+# ---------------------------------------------------------------------------
+# Configuration validation
+# ---------------------------------------------------------------------------
+
+def _validate_max_age(extra_tle_max_age_days) -> Optional[float]:
+    """Validate ``extra_tle_max_age_days``: ``None`` or a non-negative float."""
+    if extra_tle_max_age_days is None:
+        return None
+    value = float(extra_tle_max_age_days)
+    if value < 0 or math.isnan(value):
+        raise ValueError(
+            f"extra_tle_max_age_days must be null or a non-negative number, "
+            f"got {extra_tle_max_age_days!r}"
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -154,74 +180,60 @@ def _add_parsed_elements(tles: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Date helpers
+# Per-ID source resolution
 # ---------------------------------------------------------------------------
 
-def _spanned_dates(times_jd) -> list[str]:
-    """UTC calendar dates (YYYY-MM-DD) covered by the observation times."""
-    times = np.atleast_1d(np.asarray(times_jd, dtype=float))
-    d0 = jd_to_datetime(times.min()).date()
-    d1 = jd_to_datetime(times.max()).date()
-    dates, d = [], d0
-    while d <= d1:
-        dates.append(d.strftime("%Y-%m-%d"))
-        d += timedelta(days=1)
-    return dates
+def _select_from_extra_dir(
+    extra_tle_dir: str,
+    wanted: set[int],
+    obs_epoch_jd: float,
+    max_age_days: Optional[float],
+) -> dict[int, dict]:
+    """Resolve IDs from ``extra_tle_dir`` with per-ID nearest + age policy.
 
-
-def _date_query_jd(date_str: str) -> float:
-    """Deterministic query epoch (noon UTC) for a catalogue date."""
-    dt = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(hours=12)
-    return datetime_to_jd(dt)
-
-
-# ---------------------------------------------------------------------------
-# Cached catalogue access
-# ---------------------------------------------------------------------------
-
-def _load_cached_catalogue(date_str: str, search_dirs: list[Path]) -> pd.DataFrame:
-    """Return any locally cached catalogue rows for *date_str* (may be empty)."""
-    frames = []
-    for d in search_dirs:
-        for path in glob(str(d / f"{date_str}-*.json")):
-            try:
-                frames.append(pd.read_json(path))
-            except Exception:
-                continue
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
-
-
-def _ensure_catalogue(date_str: str, search_dirs: list[Path]) -> pd.DataFrame:
-    """Return the catalogue for *date_str*, downloading + caching if absent."""
-    cached = _load_cached_catalogue(date_str, search_dirs)
-    if len(cached):
-        return cached
-
-    print(f"Fetching TLE catalogue from SatChecker for {date_str} ...")
-    catalogue = satchecker.fetch_full_catalogue(_date_query_jd(date_str))
-    save_path = tle_cache_dir() / f"{date_str}-catalogue.json"
-    catalogue.to_json(save_path)
-    print(f"Saved {len(catalogue)} TLEs to {save_path}")
-    return catalogue
-
-
-def _append_extra_cache(date_str: str, extra: pd.DataFrame) -> None:
-    """Merge per-satellite fallback records into the date's ``-extra`` cache file.
-
-    Kept in a separate ``<date>-extra.json`` file (still matched by the
-    ``<date>-*.json`` glob) so future runs reuse them without re-querying, and
-    the bulk catalogue file is never rewritten.
+    Returns ``{norad_id: record}`` only for IDs whose nearest local TLE is within
+    ``max_age_days`` of *obs_epoch_jd* (``None`` = unlimited). The age is measured
+    from the TLE line-1 epoch, not the filename or file modification time.
     """
-    path = tle_cache_dir() / f"{date_str}-extra.json"
-    if path.exists():
-        try:
-            extra = pd.concat([pd.read_json(path), extra], ignore_index=True)
-        except Exception:
-            pass
-    extra = extra.drop_duplicates(subset=["NORAD_CAT_ID", "TLE_LINE1", "TLE_LINE2"])
-    extra.to_json(path)
+    resolved: dict[int, dict] = {}
+    records = read_legacy_tle_records(extra_tle_dir)
+    if not len(records):
+        return resolved
+    records = records.copy()
+    records["NORAD_CAT_ID"] = pd.to_numeric(records["NORAD_CAT_ID"]).astype(int)
+    records = records[records["NORAD_CAT_ID"].isin(wanted)]
+    if not len(records):
+        return resolved
+    records["EPOCH_JD"] = records["TLE_LINE1"].map(_tle_epoch_jd)
+
+    for nid, group in records.groupby("NORAD_CAT_ID"):
+        best = group.loc[(group["EPOCH_JD"] - obs_epoch_jd).abs().idxmin()]
+        age = abs(float(best["EPOCH_JD"]) - obs_epoch_jd)
+        if max_age_days is None or age <= max_age_days + _AGE_TOL_DAYS:
+            resolved[int(nid)] = best.to_dict()
+            print(f"  {nid}: from extra_tle_dir (epoch {age:.3f} d from observation)")
+        else:
+            print(
+                f"  {nid}: extra_tle_dir record rejected — {age:.3f} d old "
+                f"> extra_tle_max_age_days={max_age_days}; trying managed catalogue"
+            )
+    return resolved
+
+
+def _select_from_records(
+    records: pd.DataFrame,
+    wanted: set[int],
+) -> dict[int, dict]:
+    """One record per wanted ID from a normalised catalogue/fallback frame."""
+    resolved: dict[int, dict] = {}
+    if not len(records):
+        return resolved
+    records = records.copy()
+    records["NORAD_CAT_ID"] = pd.to_numeric(records["NORAD_CAT_ID"]).astype(int)
+    match = records[records["NORAD_CAT_ID"].isin(wanted)]
+    for nid, group in match.groupby("NORAD_CAT_ID"):
+        resolved[int(nid)] = group.iloc[0].to_dict()
+    return resolved
 
 
 def _fetch_missing_ids(missing: list[int], epoch_jd: float) -> pd.DataFrame:
@@ -242,69 +254,123 @@ def _fetch_missing_ids(missing: list[int], epoch_jd: float) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
+def _ensure_snapshot(
+    cache: TextCatalogueCache,
+    catalogue_epoch_jd: float,
+    obs_epoch_jd: float,
+) -> CatalogueSnapshot:
+    """Return the canonical snapshot, downloading + caching atomically on a miss."""
+    snapshot = cache.get_snapshot(catalogue_epoch_jd)
+    if snapshot is not None:
+        print(f"  managed catalogue cached at {canonical_stamp(catalogue_epoch_jd)}")
+        return snapshot
+
+    print(
+        f"Fetching TLE catalogue from SatChecker for canonical epoch "
+        f"{canonical_stamp(catalogue_epoch_jd)} ..."
+    )
+    result = satchecker.fetch_full_catalogue(catalogue_epoch_jd)
+    snapshot = CatalogueSnapshot(
+        catalogue_epoch_jd=catalogue_epoch_jd,
+        records=result.records,
+        requested_epoch_jd=obs_epoch_jd,
+        expected_count=result.expected_count,
+        actual_count=result.actual_count,
+        service_version=result.service_version,
+    )
+    cache.store_snapshot(snapshot)
+    print(f"Saved {len(result.records)} TLEs for {canonical_stamp(catalogue_epoch_jd)}")
+    return snapshot
+
+
+# ---------------------------------------------------------------------------
+# Public orchestration
+# ---------------------------------------------------------------------------
+
 def get_tles_by_id(
     norad_ids: list[int],
     times_jd,
     extra_tle_dir: Optional[str] = None,
+    extra_tle_max_age_days: Optional[float] = None,
+    catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
 ) -> pd.DataFrame:
-    """Return TLE records + parsed elements for *norad_ids* near the observation.
+    """Return TLE records + locally parsed elements for *norad_ids*.
 
-    The full catalogue for each UTC date spanned by *times_jd* is loaded from a
-    local cache (downloading from SatChecker on a miss), filtered to the
-    requested NORAD IDs, and any ID missing from the bulk catalogue is fetched
-    individually. Orbital elements are parsed locally from the TLE lines. One row
-    per satellite is returned — the epoch closest to the mean observation time.
+    Source precedence is resolved independently per NORAD ID: ``extra_tle_dir``
+    (subject to ``extra_tle_max_age_days``), then the managed canonical catalogue
+    snapshot, then the per-satellite SatChecker fallback. One row per resolved ID
+    is returned, with OMM-style element columns parsed locally from the TLE lines.
 
     Parameters
     ----------
     norad_ids:
         NORAD catalogue IDs to select.
     times_jd:
-        Observation time(s) as UTC Julian Date(s); scalar or array. Determines
-        the spanned catalogue date(s) and the target epoch for nearest-TLE
-        selection.
+        Observation time(s) as UTC Julian Date(s); scalar or array. The mean is
+        used as the requested observation epoch, which sets both the extra-dir age
+        comparison and (after bucketing) the canonical catalogue epoch.
     extra_tle_dir:
-        Optional user-supplied directory searched before the managed cache.
+        Optional user-supplied directory of local TLE files searched first, per ID.
+    extra_tle_max_age_days:
+        Maximum absolute difference, in days, between a local TLE's epoch and the
+        observation epoch for it to be accepted. ``None`` = unlimited; ``0`` =
+        exact-epoch only; negative is a configuration error.
+    catalogue_interval_hours:
+        Width of the fixed UTC catalogue-reuse bucket (default 2 h).
     """
-    search_dirs = _search_dirs(extra_tle_dir)
-    print(f"TLE search dirs        : {[str(d) for d in search_dirs]}")
-
-    wanted = set(int(x) for x in np.atleast_1d(np.asarray(norad_ids)).astype(int))
-    epoch_mean = float(np.atleast_1d(np.asarray(times_jd, dtype=float)).mean())
-    dates = _spanned_dates(times_jd)
-
-    frames = [_ensure_catalogue(d, search_dirs) for d in dates]
-    catalogue = pd.concat([f for f in frames if len(f)], ignore_index=True)
-    if not len(catalogue):
+    max_age = _validate_max_age(extra_tle_max_age_days)
+    wanted = {int(x) for x in np.atleast_1d(np.asarray(norad_ids)).astype(int)}
+    if not wanted:
         return pd.DataFrame()
 
-    catalogue["NORAD_CAT_ID"] = pd.to_numeric(catalogue["NORAD_CAT_ID"]).astype(int)
-    tles = catalogue[catalogue["NORAD_CAT_ID"].isin(wanted)].copy()
+    obs_epoch_jd = float(np.atleast_1d(np.asarray(times_jd, dtype=float)).mean())
+    catalogue_epoch_jd = canonical_epoch_jd(obs_epoch_jd, catalogue_interval_hours)
 
-    found = set(tles["NORAD_CAT_ID"].unique())
-    print(f"Catalogue TLEs matched : {len(found)} / {len(wanted)}")
+    print(f"TLE requested epoch    : {jd_to_datetime(obs_epoch_jd).isoformat()} UTC")
+    print(
+        f"TLE catalogue epoch    : {jd_to_datetime(catalogue_epoch_jd).isoformat()} UTC "
+        f"(nearest to a {catalogue_interval_hours:g} h bucket, not the exact observation)"
+    )
 
-    # --- per-satellite fallback for IDs absent from the bulk catalogue ---
-    missing = sorted(wanted - found)
-    if missing:
-        print(f"Fetching {len(missing)} missing TLE(s) individually from SatChecker: {missing}")
-        extra = _fetch_missing_ids(missing, epoch_mean)
-        if len(extra):
-            extra["NORAD_CAT_ID"] = pd.to_numeric(extra["NORAD_CAT_ID"]).astype(int)
-            _append_extra_cache(jd_to_datetime(epoch_mean).strftime("%Y-%m-%d"), extra)
-            tles = pd.concat([tles, extra], ignore_index=True)
-            found = set(tles["NORAD_CAT_ID"].unique())
+    resolved: dict[int, dict] = {}
 
-    still_missing = sorted(wanted - found)
+    # 1. extra_tle_dir (per-ID precedence + age policy)
+    if extra_tle_dir:
+        print(f"TLE extra dir          : {Path(extra_tle_dir).resolve()}")
+        resolved.update(_select_from_extra_dir(extra_tle_dir, wanted, obs_epoch_jd, max_age))
+
+    remaining = wanted - set(resolved)
+
+    # 2 + 3. managed canonical snapshot, then per-satellite fallback
+    if remaining:
+        cache = TextCatalogueCache(tle_cache_dir())
+        snapshot = _ensure_snapshot(cache, catalogue_epoch_jd, obs_epoch_jd)
+        resolved.update(_select_from_records(snapshot.records, remaining))
+        remaining = wanted - set(resolved)
+
+        if remaining:
+            cached_extra = cache.get_extra(catalogue_epoch_jd)
+            resolved.update(_select_from_records(cached_extra, remaining))
+            remaining = wanted - set(resolved)
+
+        if remaining:
+            missing = sorted(remaining)
+            print(f"Fetching {len(missing)} missing TLE(s) individually from SatChecker: {missing}")
+            fetched = _fetch_missing_ids(missing, catalogue_epoch_jd)
+            if len(fetched):
+                cache.store_extra(catalogue_epoch_jd, fetched)
+                resolved.update(_select_from_records(fetched, remaining))
+                remaining = wanted - set(resolved)
+
+    still_missing = sorted(wanted - set(resolved))
     if still_missing:
         print(f"TLEs not found         : {still_missing}")
-
-    if not len(tles):
+    if not resolved:
         return pd.DataFrame()
 
-    tles = tles.drop_duplicates(subset=["NORAD_CAT_ID", "TLE_LINE1", "TLE_LINE2"])
+    tles = pd.DataFrame([resolved[nid] for nid in sorted(resolved)])
+    tles["NORAD_CAT_ID"] = pd.to_numeric(tles["NORAD_CAT_ID"]).astype(int)
     tles = _add_parsed_elements(tles)
-    tles = _get_closest_times(tles, epoch_mean)
     return tles.reset_index(drop=True)
 
 
@@ -312,55 +378,67 @@ def get_tles_by_id(
 # Preflight check
 # ---------------------------------------------------------------------------
 
+def _ms_mean_epoch_jd(ms_path: str) -> float:
+    """Mean observation epoch (UTC Julian Date) from an MS ``TIME`` column.
+
+    Isolated so :func:`preflight_tle_check` can be exercised offline by patching
+    this one casacore-touching seam.
+    """
+    from casacore.tables import table as _ms_table
+    with _ms_table(ms_path, readonly=True, ack=False) as t:
+        return float(t.getcol("TIME").mean()) / 86400.0 + 2400000.5
+
+
 def preflight_tle_check(
     norad_ids: list[int],
     ms_path: str,
     extra_tle_dir: Optional[str] = None,
+    extra_tle_max_age_days: Optional[float] = None,
+    catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
 ) -> None:
-    """Report whether the required TLE catalogue(s) are cached locally.
+    """Report whether the required canonical catalogue snapshot is cached locally.
 
-    Reads the mean observation epoch from the MS ``TIME`` column (MJD seconds)
-    and lists, per spanned UTC date, whether a catalogue is already cached or
-    will be downloaded from SatChecker (which needs no credentials). Purely
-    informational — no exception is raised for a cache miss.
+    Reads the mean observation epoch from the MS ``TIME`` column (MJD seconds),
+    reports the requested epoch and the deterministic canonical catalogue epoch it
+    maps to, and states whether that snapshot is already cached or will be
+    downloaded from SatChecker (which needs no credentials). Purely informational
+    — no exception is raised for a cache miss or configuration issue.
     """
     if not norad_ids:
         return
 
-    from casacore.tables import table as _ms_table
-    with _ms_table(ms_path, readonly=True, ack=False) as t:
-        mean_epoch_jd = float(t.getcol("TIME").mean()) / 86400.0 + 2400000.5
+    max_age = _validate_max_age(extra_tle_max_age_days)
 
-    dates = _spanned_dates(mean_epoch_jd)
-    search_dirs = _search_dirs(extra_tle_dir)
-    print(f"Preflight TLE check    : dates {dates}, NORAD IDs {sorted(norad_ids)}")
-    print(f"TLE search dirs        : {[str(d) for d in search_dirs]}")
+    mean_epoch_jd = _ms_mean_epoch_jd(ms_path)
 
-    for date_str in dates:
-        cached = _load_cached_catalogue(date_str, search_dirs)
-        if len(cached):
-            print(f"  {date_str}: catalogue cached ({len(cached)} TLEs)")
-        else:
-            print(f"  {date_str}: not cached — will download from SatChecker")
+    catalogue_epoch_jd = canonical_epoch_jd(mean_epoch_jd, catalogue_interval_hours)
+    cache = TextCatalogueCache(tle_cache_dir())
+    wanted = {int(x) for x in norad_ids}
+
+    print(f"Preflight TLE check    : NORAD IDs {sorted(wanted)}")
+    print(f"TLE requested epoch    : {jd_to_datetime(mean_epoch_jd).isoformat()} UTC")
+    print(
+        f"TLE catalogue epoch    : {jd_to_datetime(catalogue_epoch_jd).isoformat()} UTC "
+        f"({catalogue_interval_hours:g} h bucket)"
+    )
+
+    # Account for IDs already covered by extra_tle_dir so we don't wrongly promise a
+    # download when no managed snapshot is actually needed.
+    remaining = set(wanted)
+    if extra_tle_dir:
+        print(f"TLE extra dir          : {Path(extra_tle_dir).resolve()}"
+              f"  (max age {extra_tle_max_age_days} d)")
+        from_extra = _select_from_extra_dir(extra_tle_dir, wanted, mean_epoch_jd, max_age)
+        remaining -= set(from_extra)
+
+    if not remaining:
+        print("  all requested TLEs available from extra_tle_dir — no download needed")
+    elif cache.get_snapshot(catalogue_epoch_jd) is not None:
+        print(f"  managed catalogue cached at {canonical_stamp(catalogue_epoch_jd)}")
+    else:
+        print(f"  managed catalogue not cached — will download from SatChecker")
     print(
         "  To search additional local TLE directories:\n"
         "    --extra-tle-dir <dir>  (CLI flag)\n"
         "    TLE_CACHE_DIR=<dir>    (env var, overrides managed cache location)"
     )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _get_closest_times(
-    df: pd.DataFrame,
-    target_jd: float,
-    id_col: str = "NORAD_CAT_ID",
-    time_col: str = "EPOCH_JD",
-) -> pd.DataFrame:
-    """Return one row per NORAD ID — the one whose epoch is closest to *target_jd*."""
-    df = df.copy()
-    df["time_diff"] = df[time_col] - target_jd
-    df["time_diff_abs"] = df[time_col].sub(target_jd).abs()
-    return df.loc[df.groupby(id_col)["time_diff_abs"].idxmin()]

@@ -306,7 +306,15 @@ class SGP4LEONoDragOrbit(Component):
             # self.ric_std = config.args["satellites"]["ric_std"]
 
             extra_tle_dir = getattr(config, "extra_tle_dir", None)
-            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(config.times_jd, config.norad_ids, extra_tle_dir=extra_tle_dir)
+            extra_tle_max_age_days = getattr(config, "extra_tle_max_age_days", None)
+            catalogue_interval_hours = getattr(config, "tle_catalogue_interval_hours", 2.0)
+            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
+                config.times_jd,
+                config.norad_ids,
+                extra_tle_dir=extra_tle_dir,
+                extra_tle_max_age_days=extra_tle_max_age_days,
+                catalogue_interval_hours=catalogue_interval_hours,
+            )
             self.bstar = self.elements[:, 0]
             self.elements = self.elements[:, 1:] # Remove the bstar drag element
             self.sat_epoch = epoch_jd - 2433281.5
@@ -478,7 +486,15 @@ class SGP4LEOOrbit(Component):
             # self.ric_std = config.args["satellites"]["ric_std"]
 
             extra_tle_dir = getattr(config, "extra_tle_dir", None)
-            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(config.times_jd, config.norad_ids, extra_tle_dir=extra_tle_dir)
+            extra_tle_max_age_days = getattr(config, "extra_tle_max_age_days", None)
+            catalogue_interval_hours = getattr(config, "tle_catalogue_interval_hours", 2.0)
+            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
+                config.times_jd,
+                config.norad_ids,
+                extra_tle_dir=extra_tle_dir,
+                extra_tle_max_age_days=extra_tle_max_age_days,
+                catalogue_interval_hours=catalogue_interval_hours,
+            )
             self.sat_epoch = epoch_jd - 2433281.5
             self.epoch_jd_whole = jnp.floor(epoch_jd)
             self.epoch_jd_frac = epoch_jd - self.epoch_jd_whole
@@ -667,12 +683,20 @@ def _pad_rfi_sources(tles_df):
     return pd.concat([tles_df, *([tles_df.iloc[[-1]]] * n_pad)], ignore_index=True)
 
 
-def fetch_orbital_elements(times_jd, norad_ids, extra_tle_dir=None):
+def fetch_orbital_elements(
+    times_jd,
+    norad_ids,
+    extra_tle_dir=None,
+    extra_tle_max_age_days=None,
+    catalogue_interval_hours=2.0,
+):
 
     tles_df = get_tles_by_id(
         norad_ids,
         times_jd,
         extra_tle_dir=extra_tle_dir,
+        extra_tle_max_age_days=extra_tle_max_age_days,
+        catalogue_interval_hours=catalogue_interval_hours,
     )
     # Real (unpadded) source count is the number of rows the fetch actually returned,
     # captured before padding. Inferring it from the padded id list (e.g. counting
@@ -698,12 +722,20 @@ def fetch_orbital_elements(times_jd, norad_ids, extra_tle_dir=None):
 
     return elements, epoch_jd, norad_ids, tles, n_rfi_real
 
-def fetch_standard_orbital_elements(times_jd, norad_ids, extra_tle_dir=None):
+def fetch_standard_orbital_elements(
+    times_jd,
+    norad_ids,
+    extra_tle_dir=None,
+    extra_tle_max_age_days=None,
+    catalogue_interval_hours=2.0,
+):
 
     tles_df = _pad_rfi_sources(get_tles_by_id(
         norad_ids,
         times_jd,
         extra_tle_dir=extra_tle_dir,
+        extra_tle_max_age_days=extra_tle_max_age_days,
+        catalogue_interval_hours=catalogue_interval_hours,
     ))
 
     # tles_df carries the OMM-style element columns parsed locally from the TLE
@@ -753,4 +785,3 @@ def fetch_standard_orbital_elements(times_jd, norad_ids, extra_tle_dir=None):
     tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
 
     return elements, epoch_jd, norad_ids, tles
-

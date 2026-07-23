@@ -126,11 +126,17 @@ class TabConfig:
         self.precision = config.get("model", {}).get("precision", "single")
         self.ms_path = ms_path
         self.extra_tle_dir = config["satellites"].get("extra_tle_dir")
+        self.extra_tle_max_age_days = config["satellites"].get("extra_tle_max_age_days")
+        self.tle_catalogue_interval_hours = config["satellites"].get(
+            "tle_catalogue_interval_hours", 2
+        )
 
         preflight_tle_check(
             config["satellites"].get("norad_ids") or [],
             ms_path,
             extra_tle_dir=self.extra_tle_dir,
+            extra_tle_max_age_days=self.extra_tle_max_age_days,
+            catalogue_interval_hours=self.tle_catalogue_interval_hours,
         )
 
         self.read_ms_params(
@@ -146,7 +152,9 @@ class TabConfig:
 
         self.get_orbital_elements(
             config["satellites"].get("norad_ids"),
-            extra_tle_dir=config["satellites"].get("extra_tle_dir"),
+            extra_tle_dir=self.extra_tle_dir,
+            extra_tle_max_age_days=self.extra_tle_max_age_days,
+            catalogue_interval_hours=self.tle_catalogue_interval_hours,
         )
 
         self.n_int_time = config["rfi"]["n_int_time"]
@@ -296,10 +304,22 @@ class TabConfig:
         self.n_time_fine = len(self.times_fine)
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
 
-    def get_orbital_elements(self, norad_ids: List[int], extra_tle_dir: Optional[str] = None):
+    def get_orbital_elements(
+        self,
+        norad_ids: List[int],
+        extra_tle_dir: Optional[str] = None,
+        extra_tle_max_age_days: Optional[float] = None,
+        catalogue_interval_hours: float = 2.0,
+    ):
 
         self.elements, self.epoch_jd, self.norad_ids, self.tles, self.n_rfi_real = (
-            fetch_orbital_elements(self.times_jd, norad_ids, extra_tle_dir=extra_tle_dir)
+            fetch_orbital_elements(
+                self.times_jd,
+                norad_ids,
+                extra_tle_dir=extra_tle_dir,
+                extra_tle_max_age_days=extra_tle_max_age_days,
+                catalogue_interval_hours=catalogue_interval_hours,
+            )
         )
         # Under sharding the fetch pads the source list to a multiple of the device
         # count by duplicating the last satellite. n_rfi_real is the pre-padding row
