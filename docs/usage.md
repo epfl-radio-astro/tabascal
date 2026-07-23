@@ -37,18 +37,16 @@ pip install -e ./tabascal/
 pip install -e ./tabascal/[gpu]
 ```
 
-## Space-Track Login
+## Satellite Orbital Elements (TLEs)
 
-To get historical orbital elements to predict the positions of satellites in an observation, a [Space-Track](https://www.space-track.org/auth/login) account is needed. Currently, Space-Track login details are required both for simulating a dataset and for applying TABASCAL to a dataset.
+TABASCAL retrieves the historical orbital elements (TLEs) needed to predict
+satellite positions from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/)
+service. **No account or credentials are required** — the TLEs are fetched
+automatically for the requested NORAD IDs and cached locally for reuse.
 
-Your login details should then be saved in a YAML file that is formatted as follows:
-
-```yaml
-username: user@email.com
-password: password1234
-```
-
-The rest of the example below assumes you have a Space-Track account with your login details saved in a file named `spacetrack_login.yaml`.
+Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
+Space-Track and requires a `spacetrack_login.yaml`. That requirement applies only
+to the simulation step below, not to running TABASCAL.
 
 # Example Simulation and RFI Subtraction
 
@@ -57,7 +55,6 @@ Assuming you have cloned the repository, navigate to the `tabascal/examples` dir
 ``` 
 tabascal/
     ├── examples/
-|       └── ex_spacetrack_login.yaml    # Space-Track login details template
 |       └── sim_target_8A.yaml          # Simulation configuration file
 |       └── tab_target.yaml             # TABASCAL configuration file
 ```
@@ -97,7 +94,7 @@ sim-vis -h
 RFI subtraction (TABASCAL) runs are also defined by YAML configuration files and can be run in much the same way. Given the simulation dataset created in the previous step, we can run TABASCAL on it using
 
 ```bash
-tabascal -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI -st spacetrack_login.yaml
+tabascal -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
 ```
 
 The output of a successful run with TABASCAL will show lines like
@@ -114,7 +111,7 @@ The results of the TABASCAL run are saved in a `.zarr` file and then transferred
 If you have a Measurement Set from another source you can run TABASCAL on that directly with
 
 ```bash
-tabascal -c path/to/config.yaml -ms path/to/ms/file.ms -st spacetrack_login.yaml
+tabascal -c path/to/config.yaml -ms path/to/ms/file.ms
 ```
 
 The `tabascal` script also has a help context whcih can be accessed with

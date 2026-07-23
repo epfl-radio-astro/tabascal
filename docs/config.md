@@ -170,14 +170,14 @@ The `satellites` section determines which satelites to include in the model and 
 ```yaml
 satellites:
   norad_ids: [20452, 38833, 45854]
-  spacetrack_path: spacetrack_login.yaml
+  extra_tle_dir: null
   tle_offset: 0
   ric_std: 1e2
 ```
 
-* `norad_ids`: List of the NORAD IDs of the satellites to include.
-* `spacetrack_path`: Path to the Space-Track login details for collecting the orbital elements. This can also be given at runtime of the `tabascal` script with the `-st` flag.
-* `tle_offset`: The orbital elements collected from Space-Track are called two-line element sets (TLE). They are updated regularly as the associated model becomes inaccurate far away from the measurement time and satellites also perform orbital manoeuvres to avoid collisions. By default the TLEs collected are the closest measurement to the observation time. This forms the mean of the prior distribution. The offset given by this parameter is in days where a negative value collects TLEs from times prior to the observation and positive values lead to TLEs from after the observation.
+* `norad_ids`: List of the NORAD IDs of the satellites to include. Their orbital elements (TLEs) are fetched automatically from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service — no account or credentials are required — and cached locally for reuse.
+* `extra_tle_dir`: Optional path to an additional directory searched for cached TLEs before the managed cache and SatChecker. The managed cache location can also be overridden with the `TLE_CACHE_DIR` environment variable. Can also be given at runtime with the `--extra-tle-dir` flag.
+* `tle_offset`: The orbital elements collected are called two-line element sets (TLE). They are updated regularly as the associated model becomes inaccurate far away from the measurement time and satellites also perform orbital manoeuvres to avoid collisions. By default the TLEs collected are the closest measurement to the observation time. This forms the mean of the prior distribution. The offset given by this parameter is in days where a negative value collects TLEs from times prior to the observation and positive values lead to TLEs from after the observation.
 * `ric_std`: The error in the orbital elements are not provided as part of the TLEs. When TLE estimated positions are analysed the error is calculated in a local reference frame of the satellite. This is the radial, in-track, and cross-track (RIC) frame. This parameter gives a factor by which to scale the RIC covariance that is stored internally which is taken from a paper where the average errors are calculated.  
 
 ## Gains

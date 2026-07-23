@@ -39,7 +39,6 @@ dependencies = [
     "ri_kernels>=0.2.0",
     "sgp4jax>=0.1.6,<0.2",  # enables jax x64 at import; orbit API is pre-1.0
     "skyfield>=1.49,<2",  # uses skyfield's _utc_jd(whole, fraction); see tabascal/time.py
-    "spacetrack",
     "tqdm",
     "xarray",
 ]
@@ -127,7 +126,6 @@ sgp4jax         = ">=0.1.6,<0.2"
 # Bounded: tabascal/time.py and components/trajectory.py call skyfield's private
 # _utc_jd(whole, fraction); pin a known-good range and guard it with a smoke test.
 skyfield        = ">=1.49,<2"
-spacetrack      = "*"
 tqdm            = "*"
 xarray          = "*"
 zarr            = "<3.0.0"

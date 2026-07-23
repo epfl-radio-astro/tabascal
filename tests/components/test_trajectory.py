@@ -1,8 +1,8 @@
 """Tests for tabascal.components.trajectory — FixedOrbit, PhaseCalculationRFI,
 SGP4LEONoDragOrbit, and SGP4LEOOrbit.
 
-Space-Track-dependent tests are skipped automatically when credentials are
-not configured on the current machine.
+TLEs are sourced from IAU CPS SatChecker (no credentials). The SGP4 orbit tests
+run fully offline against the bundled TLE cache under tabascal/data/tles/.
 """
 
 import pytest
@@ -17,25 +17,6 @@ from tabascal.components.trajectory import FixedOrbit, PhaseCalculationRFI
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy
 
 from .conftest import active_precision, make_constants, assert_transform_roundtrip
-
-
-# ---------------------------------------------------------------------------
-# Space-Track credential detection
-# ---------------------------------------------------------------------------
-
-def _has_spacetrack_credentials() -> bool:
-    try:
-        from tabascal.tle import load_spacetrack_credentials
-        load_spacetrack_credentials()
-        return True
-    except Exception:
-        return False
-
-
-requires_spacetrack = pytest.mark.skipif(
-    not _has_spacetrack_credentials(),
-    reason="Space-Track credentials not configured — skipping",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +350,7 @@ class TestFixedOrbit:
 
 # ---------------------------------------------------------------------------
 # Bundled TLE constants (NAVSTAR 18 / 67, cached 2023-02-21)
-# These match tabascal/data/tles/2023-02-21-navstar.json so no Space-Track
+# These match tabascal/data/tles/2023-02-21-navstar.json so no SatChecker
 # call is needed — get_tles_by_id finds the file from cache.
 # ---------------------------------------------------------------------------
 

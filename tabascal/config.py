@@ -8,7 +8,7 @@ from tabascal.distributed import (
 )
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
-from tabascal.tle import print_spacetrack_status, preflight_tle_check
+from tabascal.tle import preflight_tle_check
 from tabascal.interferometry import (
     calculate_fringe_frequency_numpy,
     get_strides_and_idxs,
@@ -125,10 +125,8 @@ class TabConfig:
         self.args = config
         self.precision = config.get("model", {}).get("precision", "single")
         self.ms_path = ms_path
-        self.spacetrack_path = config["satellites"].get("spacetrack_path")
         self.extra_tle_dir = config["satellites"].get("extra_tle_dir")
 
-        print_spacetrack_status()
         preflight_tle_check(
             config["satellites"].get("norad_ids") or [],
             ms_path,
@@ -300,10 +298,8 @@ class TabConfig:
 
     def get_orbital_elements(self, norad_ids: List[int], extra_tle_dir: Optional[str] = None):
 
-        obs_epoch_jd = float(self.times_jd.mean())
-
         self.elements, self.epoch_jd, self.norad_ids, self.tles, self.n_rfi_real = (
-            fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=extra_tle_dir)
+            fetch_orbital_elements(self.times_jd, norad_ids, extra_tle_dir=extra_tle_dir)
         )
         # Under sharding the fetch pads the source list to a multiple of the device
         # count by duplicating the last satellite. n_rfi_real is the pre-padding row

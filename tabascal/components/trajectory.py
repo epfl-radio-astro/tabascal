@@ -306,7 +306,7 @@ class SGP4LEONoDragOrbit(Component):
             # self.ric_std = config.args["satellites"]["ric_std"]
 
             extra_tle_dir = getattr(config, "extra_tle_dir", None)
-            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(jnp.mean(config.times_jd), config.norad_ids, extra_tle_dir=extra_tle_dir)
+            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(config.times_jd, config.norad_ids, extra_tle_dir=extra_tle_dir)
             self.bstar = self.elements[:, 0]
             self.elements = self.elements[:, 1:] # Remove the bstar drag element
             self.sat_epoch = epoch_jd - 2433281.5
@@ -478,7 +478,7 @@ class SGP4LEOOrbit(Component):
             # self.ric_std = config.args["satellites"]["ric_std"]
 
             extra_tle_dir = getattr(config, "extra_tle_dir", None)
-            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(jnp.mean(config.times_jd), config.norad_ids, extra_tle_dir=extra_tle_dir)
+            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(config.times_jd, config.norad_ids, extra_tle_dir=extra_tle_dir)
             self.sat_epoch = epoch_jd - 2433281.5
             self.epoch_jd_whole = jnp.floor(epoch_jd)
             self.epoch_jd_frac = epoch_jd - self.epoch_jd_whole
@@ -667,11 +667,11 @@ def _pad_rfi_sources(tles_df):
     return pd.concat([tles_df, *([tles_df.iloc[[-1]]] * n_pad)], ignore_index=True)
 
 
-def fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
+def fetch_orbital_elements(times_jd, norad_ids, extra_tle_dir=None):
 
     tles_df = get_tles_by_id(
         norad_ids,
-        obs_epoch_jd,
+        times_jd,
         extra_tle_dir=extra_tle_dir,
     )
     # Real (unpadded) source count is the number of rows the fetch actually returned,
@@ -698,64 +698,18 @@ def fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
 
     return elements, epoch_jd, norad_ids, tles, n_rfi_real
 
-def fetch_standard_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
+def fetch_standard_orbital_elements(times_jd, norad_ids, extra_tle_dir=None):
 
     tles_df = _pad_rfi_sources(get_tles_by_id(
         norad_ids,
-        obs_epoch_jd,
+        times_jd,
         extra_tle_dir=extra_tle_dir,
     ))
 
-    # tles_df columns
-    # 'CCSDS_OMM_VERS', 'COMMENT', 'CREATION_DATE', 'ORIGINATOR',
-    # 'OBJECT_NAME', 'OBJECT_ID', 'CENTER_NAME', 'REF_FRAME', 'TIME_SYSTEM',
-    # 'MEAN_ELEMENT_THEORY', 'EPOCH', 'MEAN_MOTION', 'ECCENTRICITY',
-    # 'INCLINATION', 'RA_OF_ASC_NODE', 'ARG_OF_PERICENTER', 'MEAN_ANOMALY',
-    # 'EPHEMERIS_TYPE', 'CLASSIFICATION_TYPE', 'NORAD_CAT_ID',
-    # 'ELEMENT_SET_NO', 'REV_AT_EPOCH', 'BSTAR', 'MEAN_MOTION_DOT',
-    # 'MEAN_MOTION_DDOT', 'SEMIMAJOR_AXIS', 'PERIOD', 'APOAPSIS', 'PERIAPSIS',
-    # 'OBJECT_TYPE', 'RCS_SIZE', 'COUNTRY_CODE', 'LAUNCH_DATE', 'SITE',
-    # 'DECAY_DATE', 'FILE', 'GP_ID', 'TLE_LINE0', 'TLE_LINE1', 'TLE_LINE2',
-    # 'Fetch_Timestamp', 'EPOCH_JD', 'time_diff', 'time_diff_abs'
+    # tles_df carries the OMM-style element columns parsed locally from the TLE
+    # lines by tabascal.tle.parse_tle_elements (degrees, rev/day, km), plus
+    # NORAD_CAT_ID, EPOCH_JD, TLE_LINE1 and TLE_LINE2.
 
-# CCSDS_OMM_VERS                     =3.0                      
-# COMMENT                            =GENERATED VIA SPACE-TRACK.ORG API
-# CREATION_DATE                      =2026-03-13T03:38:44      
-# ORIGINATOR                         =18 SPCS                  
-# OBJECT_NAME                        =ISS (ZARYA)              
-# OBJECT_ID                          =1998-067A                
-# CENTER_NAME                        =EARTH                    
-# REF_FRAME                          =TEME                     
-# TIME_SYSTEM                        =UTC                      
-# MEAN_ELEMENT_THEORY                =SGP4                     
-# EPOCH                              =2026-03-12T20:51:23.157792
-# MEAN_MOTION                        =15.48614629              
-# ECCENTRICITY                       =0.00079238               
-# INCLINATION                        =51.6324                  
-# RA_OF_ASC_NODE                     =56.6367                  
-# ARG_OF_PERICENTER                  =186.1410                 
-# MEAN_ANOMALY                       =173.9482                 
-# EPHEMERIS_TYPE                     =0                        
-# CLASSIFICATION_TYPE                =U                        
-# NORAD_CAT_ID                       =25544                    
-# ELEMENT_SET_NO                     =999                      
-# REV_AT_EPOCH                       =55682                    
-# BSTAR                              =0.00021655360000         
-# MEAN_MOTION_DOT                    =0.00011348               
-# MEAN_MOTION_DDOT                   =0.0000000000000          
-# USER_DEFINED_SEMIMAJOR_AXIS        =6798.915                 
-# USER_DEFINED_PERIOD                =92.986                   
-# USER_DEFINED_APOAPSIS              =426.167                  
-# USER_DEFINED_PERIAPSIS             =415.393                  
-# USER_DEFINED_OBJECT_TYPE           =PAYLOAD                  
-# USER_DEFINED_RCS_SIZE              =LARGE                    
-# USER_DEFINED_COUNTRY_CODE          =CIS                      
-# USER_DEFINED_LAUNCH_DATE           =1998-11-20               
-# USER_DEFINED_SITE                  =TTMTR                    
-# USER_DEFINED_DECAY_DATE            =                         
-# USER_DEFINED_FILE                  =5086888                  
-# USER_DEFINED_GP_ID                 =315816402   
-    
     # SGP4 MINIMUM REQUIREMENTS:
     # To propagate an orbit using SGP4, you need:
     # - EPOCH (reference time)
@@ -799,5 +753,4 @@ def fetch_standard_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None)
     tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
 
     return elements, epoch_jd, norad_ids, tles
-
 

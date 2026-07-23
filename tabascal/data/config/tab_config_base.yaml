@@ -73,8 +73,8 @@ rfi:
 ############################
 satellites:
   norad_ids_path: null  # Optional - Path to text file containing NORAD IDs of astellits to include. File should have one NORAD ID per line
-  norad_ids: []         # Optional - NORAD IDs of satellites to include
-  spacetrack_path: null # Required if any TLE satellites are included - Path to the Space-Track login config file
+  norad_ids: []         # Optional - NORAD IDs of satellites to include. TLEs are fetched from IAU CPS SatChecker (no credentials required)
+  extra_tle_dir: null   # Optional - Extra directory searched for cached TLEs before the managed cache and SatChecker
   tle_dir: null         # Optional - Path of the directory where TLEs will be saved for future runs
   tle_offset: 0         # Optional - Time offset (in days) for the TLE that is used in tabascal. Specifically for testing 
   sat_ids: []           # Optional - Satellite IDs of satellites with circular trajectories to include
