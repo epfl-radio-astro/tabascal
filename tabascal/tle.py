@@ -1,40 +1,32 @@
-"""TLE fetching, caching, and local orbital-element parsing for tabascal.
+"""TLE caching and local orbital-element parsing for tabascal.
 
-TLEs are sourced from the IAU CPS **SatChecker** service
-(https://satchecker.cps.iau.org/) — no account or credentials are required.
+TLEs are sourced from the IAU CPS SatChecker service via
+:mod:`tabascal.satchecker` — no account or credentials are required. This module
+adds the local cache, the per-observation retrieval/fallback logic, and parses
+the orbital elements locally from the two TLE lines. All filtering and
+computation is done locally.
 
-Strategy: on each run the *full* TLE catalogue for the observation date(s) is
-downloaded once (``/tools/tles-at-epoch/``, one nearest TLE per satellite),
-cached locally, and then all filtering by NORAD ID and orbital-element
-computation is done locally by parsing the two TLE lines. The bulk download is
-validated against the reported ``total_results`` (the zip is occasionally
-truncated); any requested NORAD ID still missing is fetched individually via
-``/tools/get-nearest-tle/`` (throttled) and cached alongside the catalogue.
-
-TLE search order (each date is resolved independently):
+TLE search order (each observation date is resolved independently):
   1. User-supplied directory  (--extra-tle-dir <dir> CLI flag)
   2. Managed cache directory  (default: platformdirs user cache / tle-cache,
                                override via TLE_CACHE_DIR env var)
-  3. SatChecker API           (the full catalogue is saved to the managed cache)
+  3. SatChecker API           (the full catalogue is saved to the managed cache;
+                               any requested NORAD ID still missing is fetched
+                               individually and cached alongside it)
 
-Cache files are named ``<YYYY-MM-DD>-catalogue.json`` — one deterministic file
-per UTC date, so repeated runs over the same date reuse the cache instead of
-creating duplicates. The ``<YYYY-MM-DD>-*.json`` glob is retained so legacy
-Space-Track cache files (and the bundled test fixtures) are still discovered;
-only ``NORAD_CAT_ID`` and the two TLE lines are read from any cache file.
+Cache files: one deterministic ``<YYYY-MM-DD>-catalogue.json`` per UTC date, plus
+an optional ``<YYYY-MM-DD>-extra.json`` holding per-satellite fallback records —
+so repeated runs over the same date reuse the cache instead of creating
+duplicates. The ``<YYYY-MM-DD>-*.json`` glob is retained so legacy Space-Track
+cache files (and the bundled test fixtures) are still discovered; only
+``NORAD_CAT_ID`` and the two TLE lines are read from any cache file.
 """
 
 from __future__ import annotations
 
-import io
-import json
 import math
 import os
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-import zipfile
 from datetime import datetime, timedelta
 from glob import glob
 from pathlib import Path
@@ -45,6 +37,8 @@ from platformdirs import user_cache_path
 import numpy as np
 import pandas as pd
 
+from tabascal import satchecker
+from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-compat alias
 from tabascal.time import datetime_to_jd, jd_to_datetime
 
 
@@ -52,36 +46,12 @@ from tabascal.time import datetime_to_jd, jd_to_datetime
 # Constants
 # ---------------------------------------------------------------------------
 
-SATCHECKER_BASE_URL = "https://satchecker.cps.iau.org/tools"
-_USER_AGENT = "tabascal-tle/1.0"
-_REQUEST_TIMEOUT = 300  # seconds — the full catalogue zip is a few MB
 _MU_KM3_S2 = 398600.4418  # Earth gravitational parameter, km^3/s^2
 _THROTTLE_SECONDS = 1.0   # delay between per-satellite fallback requests
-_CATALOGUE_MIN_FRACTION = 0.99  # accept a zip download this complete vs total_results
-
-# Columns the cached catalogue is normalised to (a superset of what any
-# downstream consumer reads from a cache file).
-_CATALOGUE_COLUMNS = [
-    "NORAD_CAT_ID",
-    "OBJECT_NAME",
-    "EPOCH",
-    "TLE_LINE1",
-    "TLE_LINE2",
-    "DATA_SOURCE",
-    "DATE_COLLECTED",
-]
 
 
 # ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
-class TLEError(RuntimeError):
-    """Raised when TLEs cannot be fetched or no data is available."""
-
-
-# ---------------------------------------------------------------------------
-# TLE directory helpers
+# TLE cache directory helpers
 # ---------------------------------------------------------------------------
 
 def tle_cache_dir() -> Path:
@@ -103,150 +73,6 @@ def _search_dirs(extra_tle_dir: Optional[str]) -> list[Path]:
     if extra_tle_dir:
         return [Path(extra_tle_dir).resolve(), cache_dir]
     return [cache_dir]
-
-
-# ---------------------------------------------------------------------------
-# SatChecker catalogue fetch
-# ---------------------------------------------------------------------------
-
-def _http_get(url: str, timeout: int = _REQUEST_TIMEOUT) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except (urllib.error.URLError, TimeoutError) as e:
-        raise TLEError(f"SatChecker request failed ({url}): {e}") from e
-
-
-def _normalise_catalogue(records: pd.DataFrame) -> pd.DataFrame:
-    """Rename SatChecker fields to the cached-catalogue column names."""
-    rename = {
-        "satellite_id": "NORAD_CAT_ID",
-        "satellite_name": "OBJECT_NAME",
-        "epoch": "EPOCH",
-        "tle_line1": "TLE_LINE1",
-        "tle_line2": "TLE_LINE2",
-        "data_source": "DATA_SOURCE",
-        "date_collected": "DATE_COLLECTED",
-    }
-    df = records.rename(columns=rename)
-    for col in _CATALOGUE_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-    df = df[_CATALOGUE_COLUMNS].copy()
-    df["NORAD_CAT_ID"] = pd.to_numeric(df["NORAD_CAT_ID"]).astype(int)
-    return df.reset_index(drop=True)
-
-
-def _fetch_catalogue_zip(epoch_jd: float) -> pd.DataFrame:
-    q = urllib.parse.urlencode({"epoch": repr(float(epoch_jd)), "format": "zip"})
-    url = f"{SATCHECKER_BASE_URL}/tles-at-epoch/?{q}"
-    raw = _http_get(url)
-    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-        names = zf.namelist()
-        if not names:
-            raise TLEError("SatChecker returned an empty zip archive.")
-        with zf.open(names[0]) as f:
-            df = pd.read_csv(f)
-    return _normalise_catalogue(df)
-
-
-def _catalogue_total(epoch_jd: float) -> int:
-    """Expected number of catalogue records at *epoch_jd* (from JSON total_results)."""
-    q = urllib.parse.urlencode(
-        {"epoch": repr(float(epoch_jd)), "format": "json", "per_page": 1, "page": 1}
-    )
-    payload = json.loads(_http_get(f"{SATCHECKER_BASE_URL}/tles-at-epoch/?{q}", timeout=120))
-    obj = payload[0] if isinstance(payload, list) else payload
-    return int(obj.get("total_results", 0))
-
-
-def _fetch_catalogue_json(epoch_jd: float, per_page: int = 5000) -> pd.DataFrame:
-    """Paginated JSON fallback for the full catalogue at *epoch_jd*."""
-    frames: list[pd.DataFrame] = []
-    page = 1
-    while True:
-        q = urllib.parse.urlencode(
-            {
-                "epoch": repr(float(epoch_jd)),
-                "format": "json",
-                "per_page": per_page,
-                "page": page,
-            }
-        )
-        url = f"{SATCHECKER_BASE_URL}/tles-at-epoch/?{q}"
-        payload = json.loads(_http_get(url))
-        obj = payload[0] if isinstance(payload, list) else payload
-        rows = obj.get("data", [])
-        if rows:
-            frames.append(pd.DataFrame(rows))
-        total = int(obj.get("total_results", 0))
-        if page * per_page >= total or not rows:
-            break
-        page += 1
-
-    if not frames:
-        raise TLEError("SatChecker returned no TLE records.")
-    return _normalise_catalogue(pd.concat(frames, ignore_index=True))
-
-
-def fetch_full_catalogue(epoch_jd: float) -> pd.DataFrame:
-    """Download the full TLE catalogue nearest *epoch_jd* from SatChecker.
-
-    Uses the efficient ``format=zip`` endpoint, validating the row count against
-    the ``total_results`` reported by the JSON endpoint (the zip response is
-    occasionally truncated). A short download is retried, then falls back to the
-    paginated ``format=json`` endpoint.
-
-    Returns
-    -------
-    pd.DataFrame
-        One row per satellite in the catalogue, columns ``_CATALOGUE_COLUMNS``.
-    """
-    try:
-        expected = _catalogue_total(epoch_jd)
-    except Exception:
-        expected = 0
-
-    last_err: Optional[Exception] = None
-    for _ in range(2):
-        try:
-            df = _fetch_catalogue_zip(epoch_jd)
-        except Exception as e:  # pragma: no cover - network dependent
-            last_err = e
-            continue
-        if not expected or len(df) >= expected * _CATALOGUE_MIN_FRACTION:
-            return df
-        last_err = TLEError(
-            f"SatChecker zip truncated ({len(df)} of {expected} records) — retrying"
-        )
-        print(f"  {last_err}")
-
-    # zip repeatedly short or failing → paginated JSON (complete but slower)
-    try:
-        return _fetch_catalogue_json(epoch_jd)
-    except Exception as json_err:
-        raise TLEError(
-            f"Failed to fetch TLE catalogue from SatChecker: {json_err} "
-            f"(zip attempt: {last_err})"
-        ) from json_err
-
-
-def fetch_nearest_tle(norad_id: int, epoch_jd: float) -> pd.DataFrame:
-    """Fetch the single TLE nearest *epoch_jd* for one satellite from SatChecker.
-
-    Used as a per-satellite fallback for NORAD IDs missing from the bulk
-    catalogue. Returns an empty DataFrame if SatChecker has no record.
-    """
-    q = urllib.parse.urlencode(
-        {"id": int(norad_id), "id_type": "catalog", "epoch": repr(float(epoch_jd))}
-    )
-    payload = json.loads(_http_get(f"{SATCHECKER_BASE_URL}/get-nearest-tle/?{q}", timeout=120))
-    obj = payload[0] if isinstance(payload, list) else payload
-    rows = obj.get("orbital_data") or obj.get("tle_data") or []
-    if not rows:
-        return pd.DataFrame()
-    return _normalise_catalogue(pd.DataFrame(rows))
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +200,7 @@ def _ensure_catalogue(date_str: str, search_dirs: list[Path]) -> pd.DataFrame:
         return cached
 
     print(f"Fetching TLE catalogue from SatChecker for {date_str} ...")
-    catalogue = fetch_full_catalogue(_date_query_jd(date_str))
+    catalogue = satchecker.fetch_full_catalogue(_date_query_jd(date_str))
     save_path = tle_cache_dir() / f"{date_str}-catalogue.json"
     catalogue.to_json(save_path)
     print(f"Saved {len(catalogue)} TLEs to {save_path}")
@@ -405,7 +231,7 @@ def _fetch_missing_ids(missing: list[int], epoch_jd: float) -> pd.DataFrame:
         if i:
             time.sleep(_THROTTLE_SECONDS)
         try:
-            rec = fetch_nearest_tle(nid, epoch_jd)
+            rec = satchecker.fetch_nearest_tle(nid, epoch_jd)
         except TLEError as e:
             print(f"  fallback fetch failed for {nid}: {e}")
             continue
@@ -425,9 +251,9 @@ def get_tles_by_id(
 
     The full catalogue for each UTC date spanned by *times_jd* is loaded from a
     local cache (downloading from SatChecker on a miss), filtered to the
-    requested NORAD IDs, and the orbital elements are parsed locally from the
-    TLE lines. One row per satellite is returned — the epoch closest to the mean
-    observation time.
+    requested NORAD IDs, and any ID missing from the bulk catalogue is fetched
+    individually. Orbital elements are parsed locally from the TLE lines. One row
+    per satellite is returned — the epoch closest to the mean observation time.
 
     Parameters
     ----------
