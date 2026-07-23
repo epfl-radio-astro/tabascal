@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 
-from tabascal.distributed import psum_over_rfi
+from tabascal.distributed import psum_over_rfi, sharding_enabled
 from tabascal.interferometry import calculate_rfi_vis_fine, calculate_rfi_vis_variable
 from tabascal.components import Component
 from tabascal.components.ffi.rfi_vis_op import RFIVisOp
@@ -417,6 +417,14 @@ class RiemannVisTimeFreqVariableFFI(Component):
         ops = [
             RFIVisOp(n_ant, self.a1[idx], self.a2[idx]) for idx in time_sample_idxs
         ]
+
+        if sharding_enabled():
+            print(
+                "\n!!! WARNING !!!  RiemannVisTimeFreqVariableFFI scales poorly "
+                "across multiple devices. Consider using "
+                "RiemannVisTimeFreqCalculationFFI instead for multi-device runs.\n"
+            )
+
 
         def calculate_grouped_rfi_vis(rfi_amp_fine, rfi_phase):
 
