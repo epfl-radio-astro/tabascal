@@ -105,6 +105,24 @@ class TestFullCatalogue:
         with pytest.raises(SatCheckerError):
             fetch_full_catalogue(_EPOCH)
 
+    def test_unavailable_expected_count_skips_unvalidated_zip(self, monkeypatch):
+        calls = {"zip": 0, "json": 0}
+
+        def handler(url):
+            if "format=zip" in url:
+                calls["zip"] += 1
+                return make_zip_bytes([(1, _EPOCH)])
+            if "per_page=1" in url:
+                return b"[]"  # catalogue_info cannot establish completeness
+            calls["json"] += 1
+            return make_json_page([(1, _EPOCH), (2, _EPOCH)], total=2)
+
+        _route(monkeypatch, handler)
+        result = fetch_full_catalogue(_EPOCH)
+        assert result.source == "json"
+        assert sorted(result.records["NORAD_CAT_ID"]) == [1, 2]
+        assert calls == {"zip": 0, "json": 1}
+
 
 class TestNearestTle:
 
@@ -201,6 +219,27 @@ class TestJsonPaginationValidation:
         _route(monkeypatch, handler)
         df = client._fetch_catalogue_json(_EPOCH, per_page=2)
         assert len(df) == 5
+
+    def test_repeated_page_cannot_satisfy_total(self, monkeypatch):
+        # A count-only check would accept [1, 2, 1, 2] as four complete rows.
+        _route(
+            monkeypatch,
+            lambda url: make_json_page([(1, _EPOCH), (2, _EPOCH)], total=4),
+        )
+        with pytest.raises(SatCheckerError, match="duplicate NORAD IDs"):
+            client._fetch_catalogue_json(_EPOCH, per_page=2)
+
+    def test_mismatched_response_page_raises(self, monkeypatch):
+        import json
+
+        def handler(url):
+            payload = json.loads(make_json_page([(1, _EPOCH)], total=2))
+            payload["page"] = 99
+            return json.dumps(payload).encode()
+
+        _route(monkeypatch, handler)
+        with pytest.raises(SatCheckerError, match="when page 1 was requested"):
+            client._fetch_catalogue_json(_EPOCH, per_page=1)
 
 
 class TestResponseShapes:

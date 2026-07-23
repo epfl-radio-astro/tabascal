@@ -33,6 +33,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from glob import glob
+from numbers import Integral
 from pathlib import Path
 from typing import Optional
 
@@ -176,6 +177,17 @@ class CacheValidationError(ValueError):
     """Raised when a cache envelope is structurally or semantically invalid."""
 
 
+def _required_count(env: dict, field: str) -> int:
+    """Return a required non-negative JSON integer count, or raise validation error."""
+    value = env.get(field)
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise CacheValidationError(f"{field} must be a non-negative integer, got {value!r}")
+    value = int(value)
+    if value < 0:
+        raise CacheValidationError(f"{field} must be non-negative, got {value}")
+    return value
+
+
 def _validate_envelope(
     env, expected_epoch_jd: Optional[float], *, full_snapshot: bool
 ) -> pd.DataFrame:
@@ -227,18 +239,19 @@ def _validate_envelope(
         raise CacheValidationError(f"NORAD_CAT_ID is not numeric: {e}") from e
 
     if full_snapshot:
-        actual = env.get("actual_count")
-        if actual is not None and int(actual) != len(records):
+        actual = _required_count(env, "actual_count")
+        if actual != len(records):
             raise CacheValidationError(
                 f"actual_count {actual} != {len(records)} stored records"
             )
-        expected = env.get("expected_count")
-        if expected is not None and int(expected) > 0:
-            if len(records) < int(expected) * CATALOGUE_MIN_FRACTION:
-                raise CacheValidationError(
-                    f"snapshot incomplete: {len(records)} of {expected} records "
-                    f"(< {CATALOGUE_MIN_FRACTION:.0%})"
-                )
+        expected = _required_count(env, "expected_count")
+        if expected == 0:
+            raise CacheValidationError("expected_count cannot be zero for a non-empty snapshot")
+        if len(records) < expected * CATALOGUE_MIN_FRACTION:
+            raise CacheValidationError(
+                f"snapshot incomplete: {len(records)} of {expected} records "
+                f"(< {CATALOGUE_MIN_FRACTION:.0%})"
+            )
     return records
 
 
@@ -311,12 +324,17 @@ class TextCatalogueCache(CatalogueCache):
             if snapshot.actual_count is not None
             else len(snapshot.records)
         )
+        expected = (
+            snapshot.expected_count
+            if snapshot.expected_count is not None
+            else actual
+        )
         env = {
             "schema_version": snapshot.schema_version,
             "requested_epoch_jd": snapshot.requested_epoch_jd,
             "catalogue_epoch_jd": snapshot.catalogue_epoch_jd,
             "fetched_at": snapshot.fetched_at or _utc_now_iso(),
-            "expected_count": snapshot.expected_count,
+            "expected_count": expected,
             "actual_count": actual,
             "service_version": snapshot.service_version,
             "records": snapshot.records.to_dict(orient="records"),
@@ -324,6 +342,9 @@ class TextCatalogueCache(CatalogueCache):
         # Validate before writing so a caller cannot persist a snapshot that would
         # later be rejected on load (raises before any file is created).
         _validate_envelope(env, snapshot.catalogue_epoch_jd, full_snapshot=True)
+        # Normalise Integral subclasses before passing the envelope to json.dump.
+        env["actual_count"] = int(env["actual_count"])
+        env["expected_count"] = int(env["expected_count"])
         _atomic_write_json(self._snapshot_path(snapshot.catalogue_epoch_jd), env)
 
     # -- fallback records --

@@ -202,7 +202,30 @@ def _fetch_catalogue_json(epoch_jd: float, per_page: int = 5000) -> pd.DataFrame
         payload = _load_json(_http_get(url), url)
         obj = _as_object(payload, url)
 
-        page_total = int(obj.get("total_results", 0))
+        try:
+            page_total = int(obj.get("total_results", 0))
+        except (TypeError, ValueError) as e:
+            raise SatCheckerError(
+                f"SatChecker returned invalid total_results at page {page}: "
+                f"{obj.get('total_results')!r}"
+            ) from e
+        if page_total < 0:
+            raise SatCheckerError(
+                f"SatChecker returned negative total_results at page {page}: {page_total}"
+            )
+
+        response_page = obj.get("page")
+        if response_page is not None:
+            try:
+                response_page = int(response_page)
+            except (TypeError, ValueError) as e:
+                raise SatCheckerError(
+                    f"SatChecker returned invalid page metadata: {response_page!r}"
+                ) from e
+            if response_page != page:
+                raise SatCheckerError(
+                    f"SatChecker returned page {response_page} when page {page} was requested"
+                )
         if total is None:
             total = page_total
         elif page_total != total:
@@ -228,9 +251,16 @@ def _fetch_catalogue_json(epoch_jd: float, per_page: int = 5000) -> pd.DataFrame
     if not frames:
         raise SatCheckerError("SatChecker returned no TLE records.")
     df = _normalise(pd.concat(frames, ignore_index=True))
-    if total and len(df) != total:
+    if total is not None and len(df) != total:
         raise SatCheckerError(
             f"SatChecker JSON catalogue incomplete: {len(df)} of {total} records"
+        )
+    duplicate_ids = df.loc[df["NORAD_CAT_ID"].duplicated(), "NORAD_CAT_ID"].unique()
+    if len(duplicate_ids):
+        sample = ", ".join(str(int(x)) for x in duplicate_ids[:5])
+        raise SatCheckerError(
+            f"SatChecker JSON catalogue contains duplicate NORAD IDs "
+            f"(for example: {sample}); pagination may have repeated a page"
         )
     return df
 
@@ -247,24 +277,36 @@ def fetch_full_catalogue(epoch_jd: float) -> CatalogueResult:
     expected/actual counts and service version, so the caller can decide whether
     the download is complete enough to cache and can record its provenance.
     """
+    info_error: Exception | None = None
     try:
         expected, version = catalogue_info(epoch_jd)
-    except Exception:
-        expected, version = 0, None
+    except Exception as e:
+        expected, version = None, None
+        info_error = e
 
-    last_err: Exception | None = None
-    for _ in range(2):
-        try:
-            df = _fetch_catalogue_zip(epoch_jd)
-        except Exception as e:  # pragma: no cover - network dependent
-            last_err = e
-            continue
-        if not expected or len(df) >= expected * CATALOGUE_MIN_FRACTION:
-            return CatalogueResult(df, expected or len(df), len(df), version, "zip")
-        last_err = SatCheckerError(
-            f"SatChecker zip truncated ({len(df)} of {expected} records) — retrying"
-        )
-        print(f"  {last_err}")
+    last_err: Exception | None = info_error
+    # A ZIP has no independent completeness metadata. Only use it when the cheap
+    # JSON info request supplied a positive expected count; otherwise go straight
+    # to the self-validating paginated JSON path.
+    if expected is not None and expected > 0:
+        for _ in range(2):
+            try:
+                df = _fetch_catalogue_zip(epoch_jd)
+            except Exception as e:  # pragma: no cover - network dependent
+                last_err = e
+                continue
+            duplicate_ids = df.loc[df["NORAD_CAT_ID"].duplicated(), "NORAD_CAT_ID"].unique()
+            if len(duplicate_ids):
+                last_err = SatCheckerError(
+                    "SatChecker zip contains duplicate NORAD IDs — treating as invalid"
+                )
+                continue
+            if len(df) >= expected * CATALOGUE_MIN_FRACTION:
+                return CatalogueResult(df, expected, len(df), version, "zip")
+            last_err = SatCheckerError(
+                f"SatChecker zip truncated ({len(df)} of {expected} records) — retrying"
+            )
+            print(f"  {last_err}")
 
     # zip repeatedly short or failing → paginated JSON. _fetch_catalogue_json
     # guarantees an internally complete result (it raises otherwise), so the JSON

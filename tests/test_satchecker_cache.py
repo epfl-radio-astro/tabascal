@@ -155,6 +155,30 @@ class TestEnvelopeValidation:
                                  actual_count=10))
         assert cache.get_snapshot(canon) is None
 
+    @pytest.mark.parametrize("value", [None, "2", 2.0, True, -1, "bad"])
+    def test_invalid_actual_count_is_a_miss(self, tmp_path, value):
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(
+            canon,
+            [(1, jd(2023, 2, 21, 13)), (2, jd(2023, 2, 21, 13))],
+            actual_count=value,
+        )
+        _write_env(cache._snapshot_path(canon), env)
+        assert cache.get_snapshot(canon) is None
+
+    @pytest.mark.parametrize("value", [None, "2", 2.0, True, -1, "bad", 0])
+    def test_invalid_expected_count_is_a_miss(self, tmp_path, value):
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(
+            canon,
+            [(1, jd(2023, 2, 21, 13)), (2, jd(2023, 2, 21, 13))],
+            expected_count=value,
+        )
+        _write_env(cache._snapshot_path(canon), env)
+        assert cache.get_snapshot(canon) is None
+
     def test_incomplete_snapshot_is_a_miss(self, tmp_path):
         cache = TextCatalogueCache(tmp_path)
         canon = self._canon()
