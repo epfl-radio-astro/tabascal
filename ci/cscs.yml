@@ -3,6 +3,7 @@ include:
 
 variables:
   CUDA_VISIBLE_DEVICES: "0"
+  SLURM_TIMELIMIT: '00:25:00'
 
 stages:
   - build
