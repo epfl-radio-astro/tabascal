@@ -70,6 +70,42 @@ def assert_precision_supported(config):
         )
 
 
+def _print_table(headers, rows):
+    """Print ``rows`` under ``headers`` as a left-aligned, column-padded table."""
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i])
+        for i in range(len(headers))
+    ]
+
+    def _fmt(cells):
+        # rstrip so the last column contributes no trailing whitespace.
+        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells)).rstrip()
+
+    # Columns are joined by a 2-space gap, so the rule spans the padded widths plus
+    # those gaps -- not sum(w + 1), which falls short by one char per extra column.
+    print("=" * (sum(widths) + 2 * (len(widths) - 1)))
+    print(_fmt(headers))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print(_fmt(row))
+
+
+def print_devices():
+    """Print a table of every *global* JAX device the run is spread over.
+
+    Global rather than local: under multi-process only process 0 prints, and the
+    model is sharded over the full mesh (:func:`rfi_mesh` spans ``jax.devices()``),
+    so a local listing would understate what the job is actually using. The process
+    column is what distinguishes the one-GPU-per-process layout from a
+    single-process multi-GPU one at a glance.
+    """
+    rows = [
+        (str(d), d.device_kind, str(d.process_index))
+        for d in jax.devices()
+    ]
+    _print_table(("Device", "Kind", "Process"), rows)
+
+
 def print_memory_usage():
     """Print a table of Peak memory usage across all local JAX devices.
 
@@ -79,7 +115,6 @@ def print_memory_usage():
     """
     devices = jax.local_devices()
 
-    headers = ("Device", "Peak (GB)", "Limit (GB)")
     rows = []
     for d in devices:
         stats = d.memory_stats() or {}
@@ -89,21 +124,10 @@ def print_memory_usage():
         limit_gb = f"{limit / 1e9:.3f}" if limit is not None else "n/a"
         rows.append((str(d), peak_gb, limit_gb))
 
-    widths = [
-        max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i])
-        for i in range(len(headers))
-    ]
-
-    def _fmt(cells):
-        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells))
-
     print()
     print("Memory usage:")
-    print("".join("=" * (w + 1) for w in widths))
-    print(_fmt(headers))
-    print("  ".join("-" * w for w in widths))
-    for row in rows:
-        print(_fmt(row))
+    _print_table(("Device", "Peak (GB)", "Limit (GB)"), rows)
+
 
 def build_model(config, ms_path):
     assert_precision_supported(config)
@@ -239,6 +263,14 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
 
         _print_run_header(paths.model_name, paths.f_name, start_time)
 
+        if sharding_enabled():
+            print(f"Sharding RFI sources over {jax.device_count()} devices:")
+        else:
+            print("Running on single device:")
+
+        print_devices()
+        print()
+
         tab_config, model = build_model(config, ms_path)
         prob_model = model.prob_model
 
@@ -248,7 +280,6 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
             # propagates the shardings through the whole optimization (gradients and
             # optimizer state included) from here on. (vis_obs/flags/noise were already
             # globalized in TabConfig, before Model captured them in closures.)
-            print(f"Sharding {tab_config.n_rfi} RFI sources over {jax.device_count()} devices.")
             model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
             model.state = shard_pytree(model.state, tab_config.n_rfi)
             model.constants = shard_pytree(model.constants, tab_config.n_rfi)
