@@ -142,15 +142,20 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
     #   Device  Peak (GB)  Limit (GB)
     #   ------  ---------  ----------
     #   cuda:0  32.798     102.005
-    # The device column is anchored to the JAX CUDA device format (cuda:N) so
-    # the match cannot be stolen by an earlier "word number word" line (e.g.
-    # rows of the Runtime Statistics table). Only the first GPU device is
-    # considered (extractsingle takes the first match). The peak is in GB.
+    # A cuda:N prefix is not enough to pin down that row any more: the device
+    # overview printed by print_devices at the start of the run uses the same
+    # first column, e.g. "cuda:0  NVIDIA GH200 120GB  0", and comes first, so
+    # it would be the one extractsingle returns. Both remaining columns are
+    # therefore required to be fixed-point numbers (print_memory_usage formats
+    # them with .3f) up to the end of the line, which neither the Kind column
+    # nor the integer Process column of the device table can satisfy. The limit
+    # may be "n/a" on backends that report no bytes_limit. Only the first GPU
+    # device is considered (extractsingle takes the first match). Peak is in GB.
     @performance_function("GB")
     def memory_usage(self):
         return sn.extractsingle(
-        r"^(?P<device>cuda:\d+)\s+(?P<val>\d[\d.]*)\s+\S+",
-        self.stdout,
-        "val",
-        float,
+            r"^(?P<device>cuda:\d+)\s+(?P<val>\d+\.\d+)\s+(?:\d+\.\d+|n/a)\s*$",
+            self.stdout,
+            "val",
+            float,
         )
