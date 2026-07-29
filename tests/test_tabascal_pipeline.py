@@ -767,8 +767,9 @@ def test_pipeline_sharded_equivalence(
     assert shard.returncode == 0, f"sharded run failed: {shard.stderr}"
 
     assert "Padded 3 RFI sources to 4" in shard.stdout
-    assert "Sharding 4 RFI sources over 2 devices." in shard.stdout
+    assert "Sharding RFI sources over 2 devices:" in shard.stdout
     assert "Sharding" not in ref.stdout
+    assert "Running on single device:" in ref.stdout
 
     assert _extract_chi2(shard.stdout, "opt") == pytest.approx(
         _extract_chi2(ref.stdout, "opt"), rel=1e-6
@@ -833,7 +834,7 @@ def test_pipeline_multiprocess(
         assert p.returncode == 0, f"rank {rank} failed:\nstdout:\n{out}\nstderr:\n{err}"
 
     rank0_out = outs[0][0]
-    assert "Sharding 4 RFI sources over 2 devices." in rank0_out
+    assert "Sharding RFI sources over 2 devices:" in rank0_out
     _assert_chi2(rank0_out, _SHARDED_CHI2_REF)
 
     # Workers must be silent and must not write results; rank 0 wrote them once.
