@@ -1,4 +1,4 @@
-"""ReFrame performance regression check for the tabascal pipeline."""
+"""ReFrame performance regression checks for the tabascal pipeline."""
 
 import os
 from pathlib import Path
@@ -8,17 +8,142 @@ import reframe.utility.sanity as sn
 
 _src_root = str(Path(__file__).resolve().parents[2])
 
+# Printed by the pipeline once the optimizer has converged.
+_CHI2_PATTERN = r"Reduced Chi\^2 @ opt params : [\d.eE+-]+"
 
-@rfm.simple_test
-class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
-    """Verify tabascal pipeline performance on GPU."""
+# Printed by _run_tabascal_impl.tabascal_subtraction when more than one global
+# JAX device is visible, i.e. when the RFI axis is sharded across devices.
+_SHARDING_PATTERN = r"Sharding RFI sources over (?P<n>\d+) devices"
+
+
+class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
+    """Shared setup for the tabascal pipeline performance checks."""
 
     variant = parameter(["Riemann", "RiemannFFI"])
     precision = parameter(["single", "double"])
 
+    # Ends up in the ReFrame report and is used by reframe_to_bmf.py to keep the
+    # single- and multi-GPU benchmark series apart on bencher.dev. Anything other
+    # than "single" is appended to the benchmark name, so the existing
+    # single-GPU series keep their historical names.
+    gpu_mode = variable(str, value="single")
+
     valid_systems = ["daint:gpu", "generic:default"]
     valid_prog_environs = ["builtin"]
     time_limit = "30m"
+
+    # Keyed by (variant, precision); metrics without an entry are reported but
+    # not checked by ReFrame.
+    _reference_by_variant: dict = {}
+
+    _components_map = {
+        "Riemann": [
+            "trajectory:FixedOrbit",
+            "rfi_signal:ComplexRFI",
+            "rfi_vis:RiemannVisTimeFreqCalculation",
+            "ast_vis:FourierTimeFreqGPAst",
+            "gains:UnitaryGains",
+        ],
+        "RiemannFFI": [
+            "trajectory:FixedOrbit",
+            "rfi_signal:ComplexRFI",
+            "rfi_vis:RiemannVisTimeFreqCalculationFFI",
+            "ast_vis:FourierTimeFreqGPAst",
+            "gains:UnitaryGains",
+        ],
+    }
+
+    def gpu_setup_cmds(self):
+        """Commands selecting the GPUs the run may use, prepended to prerun_cmds."""
+        return []
+
+    @run_before("performance")
+    def set_reference(self):
+        self.reference = self._reference_by_variant.get(
+            (self.variant, self.precision), {}
+        )
+
+    @run_before("run")
+    def prepare_run(self):
+        components = self._components_map[self.variant]
+        components_str = ",".join(components)
+        workdir = os.path.join(self.stagedir, "workdir")
+
+        self.prerun_cmds = ["set -e"]
+
+        if self.current_partition.fullname == "daint:gpu":
+            self.prerun_cmds += [
+                ". /opt/conda/etc/profile.d/conda.sh",
+                "conda activate tab",
+            ]
+
+        self.prerun_cmds += self.gpu_setup_cmds()
+
+        self.prerun_cmds.append(
+            f"python {_src_root}/ci/reframe/prepare_data.py"
+            f" --components '{components_str}'"
+            f" --workdir {workdir}"
+            f" --src-root {_src_root}"
+            f" --precision {self.precision}"
+        )
+
+        self.executable = "python"
+        self.executable_opts = [
+            f"{_src_root}/tabascal/scripts/run_tabascal.py",
+            "run",
+            "-c",
+            f"{workdir}/tab_target.yaml",
+            "-s",
+            f"$(cat {workdir}/sim_dir.txt)",
+            "--extra-tle-dir",
+            f"{_src_root}/tabascal/data/tles",
+            "-t",
+        ]
+
+    @performance_function("s")
+    def total_runtime(self):
+        # Extract the Mean column from the runtime statistics table.
+        # Columns: Function | Calls | Total | Glob (%) | Rel (%) | Mean | Std
+        return sn.extractsingle(
+            r"^tabascal_subtraction\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+(?P<val>[\d.]+)\s+s\s",
+            self.stdout,
+            "val",
+            float,
+        )
+
+    @performance_function("s")
+    def optimizer_runtime(self):
+        # Extract the Mean column from the runtime statistics table.
+        # Columns: Function | Calls | Total | Glob (%) | Rel (%) | Mean | Std
+        return sn.extractsingle(
+            r"^\s{2}run_opt\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+(?P<val>[\d.]+)\s+s\s",
+            self.stdout,
+            "val",
+            float,
+        )
+
+
+# Parse the per-device peak from the "Memory usage" table printed by
+# print_memory_usage at the end of the run, e.g.:
+#   Device  Peak (GB)  Limit (GB)
+#   ------  ---------  ----------
+#   cuda:0  32.798     102.005
+# A cuda:N prefix is not enough to pin down that row any more: the device
+# overview printed by print_devices at the start of the run uses the same
+# first column, e.g. "cuda:0  NVIDIA GH200 120GB  0", and comes first, so
+# it would be the one extractsingle returns. Both remaining columns are
+# therefore required to be fixed-point numbers (print_memory_usage formats
+# them with .3f) up to the end of the line, which neither the Kind column
+# nor the integer Process column of the device table can satisfy. The limit
+# may be "n/a" on backends that report no bytes_limit. Peak is in GB.
+_MEMORY_PATTERN = r"^(?P<device>cuda:\d+)\s+(?P<val>\d+\.\d+)\s+(?:\d+\.\d+|n/a)\s*$"
+
+
+@rfm.simple_test
+class TabascalPerfCheck(_TabascalPerfCheckBase):
+    """Verify tabascal pipeline performance on a single GPU."""
+
+    descr = "tabascal pipeline performance (single GPU)"
 
     # References are keyed by (variant, precision). Single precision timings
     # are placeholders to be measured and updated later.
@@ -53,109 +178,88 @@ class TabascalPerfCheck(rfm.RunOnlyRegressionTest):
         },
     }
 
-    _components_map = {
-        "Riemann": [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFI",
-            "rfi_vis:RiemannVisTimeFreqCalculation",
-            "ast_vis:FourierTimeFreqGPAst",
-            "gains:UnitaryGains",
-        ],
-        "RiemannFFI": [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFI",
-            "rfi_vis:RiemannVisTimeFreqCalculationFFI",
-            "ast_vis:FourierTimeFreqGPAst",
-            "gains:UnitaryGains",
-        ],
+    def gpu_setup_cmds(self):
+        # The CI job exports CUDA_VISIBLE_DEVICES=0 (ci/cscs.yml), but pin the
+        # single GPU here as well so the test is independent of the environment
+        # it is launched from -- and so it stays single-GPU next to the
+        # multi-GPU check below.
+        return ["export CUDA_VISIBLE_DEVICES=0"]
+
+    @sanity_function
+    def validate(self):
+        return sn.assert_found(_CHI2_PATTERN, self.stdout)
+
+    # Only the first GPU device is considered (extractsingle takes the first
+    # match), which is the only one this test runs on.
+    @performance_function("GB")
+    def memory_usage(self):
+        return sn.extractsingle(_MEMORY_PATTERN, self.stdout, "val", float)
+
+
+@rfm.simple_test
+class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
+    """Verify tabascal pipeline performance across all GPUs of the node.
+
+    The pipeline shards the RFI-source axis over every *global* JAX device
+    (tabascal.distributed), so making all GPUs of the node visible to a single
+    process is enough to exercise the sharded path -- no launcher change needed.
+    """
+
+    descr = "tabascal pipeline performance (all GPUs)"
+    gpu_mode = "all"
+
+    # No references yet: the multi-GPU timings still have to be measured on the
+    # target node. ReFrame only checks metrics that have a reference entry, so
+    # the run reports the numbers without failing. Fill in per (variant,
+    # precision) in the same format as TabascalPerfCheck once measured.
+    _reference_by_variant: dict = {
+        ("RiemannFFI", "double"): {
+            "daint:gpu": {
+                "total_runtime": (35.4, -0.25, 0.15, "s"),
+                "optimizer_runtime": (22.1, -0.20, 0.15, "s"),
+                "memory_usage": (1.252, -0.15, 0.15, "GB"),
+            },
+        },
     }
 
-    @run_before("performance")
-    def set_reference(self):
-        self.reference = self._reference_by_variant[(self.variant, self.precision)]
-
-    @run_before("run")
-    def prepare_run(self):
-        components = self._components_map[self.variant]
-        components_str = ",".join(components)
-        workdir = os.path.join(self.stagedir, "workdir")
-
-        self.prerun_cmds = ["set -e"]
-
-        if self.current_partition.fullname == "daint:gpu":
-            self.prerun_cmds += [
-                ". /opt/conda/etc/profile.d/conda.sh",
-                "conda activate tab",
-            ]
-
-        self.prerun_cmds.append(
-            f"python {_src_root}/ci/reframe/prepare_data.py"
-            f" --components '{components_str}'"
-            f" --workdir {workdir}"
-            f" --src-root {_src_root}"
-            f" --precision {self.precision}"
-        )
-
-        self.executable = "python"
-        self.executable_opts = [
-            f"{_src_root}/tabascal/scripts/run_tabascal.py",
-            "run",
-            "-c",
-            f"{workdir}/tab_target.yaml",
-            "-s",
-            f"$(cat {workdir}/sim_dir.txt)",
-            "--extra-tle-dir",
-            f"{_src_root}/tabascal/data/tles",
-            "-t",
+    def gpu_setup_cmds(self):
+        # The CI job pins CUDA_VISIBLE_DEVICES=0 (ci/cscs.yml) for the
+        # single-GPU checks; drop that pin so JAX sees every GPU of the node.
+        # nvidia-smi is queried after the unset (NVML honours the variable in
+        # recent drivers) and its count is checked against the device count the
+        # pipeline reports, which is what makes this an "all GPUs" test rather
+        # than a "more than one GPU" one. Failures of nvidia-smi are tolerated
+        # under `set -e` and surface as a sanity failure with GPU count 0.
+        return [
+            "unset CUDA_VISIBLE_DEVICES",
+            'echo "Available GPUs: $(nvidia-smi -L 2>/dev/null | wc -l)"',
         ]
 
     @sanity_function
     def validate(self):
-        return sn.assert_found(
-            r"Reduced Chi\^2 @ opt params : [\d.eE+-]+", self.stdout
+        n_avail = sn.extractsingle(
+            r"^Available GPUs:\s+(?P<n>\d+)\s*$", self.stdout, "n", int
+        )
+        n_sharded = sn.extractsingle(_SHARDING_PATTERN, self.stdout, "n", int)
+        return sn.all(
+            [
+                sn.assert_ge(
+                    n_avail,
+                    2,
+                    msg="expected a node with at least 2 GPUs, found {0}",
+                ),
+                sn.assert_eq(
+                    n_sharded,
+                    n_avail,
+                    msg="pipeline sharded over {0} devices, but {1} GPUs are available",
+                ),
+                sn.assert_found(_CHI2_PATTERN, self.stdout),
+            ]
         )
 
-    @performance_function("s")
-    def total_runtime(self):
-        # Extract the Mean column from the runtime statistics table.
-        # Columns: Function | Calls | Total | Glob (%) | Rel (%) | Mean | Std
-        return sn.extractsingle(
-            r"^tabascal_subtraction\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+(?P<val>[\d.]+)\s+s\s",
-            self.stdout,
-            "val",
-            float,
-        )
-
-    @performance_function("s")
-    def optimizer_runtime(self):
-        # Extract the Mean column from the runtime statistics table.
-        # Columns: Function | Calls | Total | Glob (%) | Rel (%) | Mean | Std
-        return sn.extractsingle(
-            r"^\s{2}run_opt\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+(?P<val>[\d.]+)\s+s\s",
-            self.stdout,
-            "val",
-            float,
-        )
-
-    # Parse the per-device peak from the "Memory usage" table printed by
-    # print_memory_usage at the end of the run, e.g.:
-    #   Device  Peak (GB)  Limit (GB)
-    #   ------  ---------  ----------
-    #   cuda:0  32.798     102.005
-    # A cuda:N prefix is not enough to pin down that row any more: the device
-    # overview printed by print_devices at the start of the run uses the same
-    # first column, e.g. "cuda:0  NVIDIA GH200 120GB  0", and comes first, so
-    # it would be the one extractsingle returns. Both remaining columns are
-    # therefore required to be fixed-point numbers (print_memory_usage formats
-    # them with .3f) up to the end of the line, which neither the Kind column
-    # nor the integer Process column of the device table can satisfy. The limit
-    # may be "n/a" on backends that report no bytes_limit. Only the first GPU
-    # device is considered (extractsingle takes the first match). Peak is in GB.
+    # Peak over all local devices: with the RFI axis split across GPUs the
+    # devices do not carry identical loads (n_rfi is padded up to a multiple of
+    # the device count), so the largest peak is the meaningful number.
     @performance_function("GB")
     def memory_usage(self):
-        return sn.extractsingle(
-            r"^(?P<device>cuda:\d+)\s+(?P<val>\d+\.\d+)\s+(?:\d+\.\d+|n/a)\s*$",
-            self.stdout,
-            "val",
-            float,
-        )
+        return sn.max(sn.extractall(_MEMORY_PATTERN, self.stdout, "val", float))
