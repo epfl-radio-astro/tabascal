@@ -157,6 +157,33 @@ class TestZipParsing:
         with pytest.raises(SatCheckerError):
             client._fetch_catalogue_zip(_EPOCH)
 
+    def test_identical_repeated_rows_in_zip_rejected(self, monkeypatch):
+        # Same NORAD ID *and* same TLE lines twice — corrupted content.
+        _route(monkeypatch, lambda url: make_zip_bytes([(1, _EPOCH), (1, _EPOCH), (2, _EPOCH)]))
+        with pytest.raises(SatCheckerError, match="identical repeated TLE rows"):
+            client._fetch_catalogue_zip(_EPOCH)
+
+    def test_duplicate_norad_with_distinct_lines_in_zip_tolerated(self, monkeypatch):
+        rows = [(1, _EPOCH), (1, jd(2023, 2, 21, 15)), (2, _EPOCH)]
+        _route(monkeypatch, lambda url: make_zip_bytes(rows))
+        df = client._fetch_catalogue_zip(_EPOCH)
+        assert sorted(df["NORAD_CAT_ID"]) == [1, 1, 2]
+
+    def test_corrupt_zip_falls_back_to_json(self, monkeypatch):
+        # End-to-end: zip carries identical repeated rows both attempts, so
+        # fetch_full_catalogue lands on the validated JSON path.
+        def handler(url):
+            if "format=zip" in url:
+                return make_zip_bytes([(1, _EPOCH), (1, _EPOCH)])
+            if "per_page=1" in url:
+                return make_info_json(total=2)
+            return make_json_page([(1, _EPOCH), (2, _EPOCH)], total=2)
+
+        _route(monkeypatch, handler)
+        result = fetch_full_catalogue(_EPOCH)
+        assert result.source == "json"
+        assert sorted(result.records["NORAD_CAT_ID"]) == [1, 2]
+
 
 class TestJsonPaginationValidation:
     """Completion is judged by record count, never by ``page * per_page``, and an
@@ -226,8 +253,16 @@ class TestJsonPaginationValidation:
             monkeypatch,
             lambda url: make_json_page([(1, _EPOCH), (2, _EPOCH)], total=4),
         )
-        with pytest.raises(SatCheckerError, match="duplicate NORAD IDs"):
+        with pytest.raises(SatCheckerError, match="identical repeated TLE rows"):
             client._fetch_catalogue_json(_EPOCH, per_page=2)
+
+    def test_duplicate_norad_with_distinct_lines_is_tolerated(self, monkeypatch):
+        # Two records for one object with *different* TLE lines is legitimate
+        # service data, not corruption — it must not fail the download.
+        rows = [(1, _EPOCH), (1, jd(2023, 2, 21, 15)), (2, _EPOCH)]
+        _route(monkeypatch, lambda url: make_json_page(rows, total=3))
+        df = client._fetch_catalogue_json(_EPOCH, per_page=10)
+        assert sorted(df["NORAD_CAT_ID"]) == [1, 1, 2]
 
     def test_mismatched_response_page_raises(self, monkeypatch):
         import json

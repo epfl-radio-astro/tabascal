@@ -157,6 +157,24 @@ def catalogue_total(epoch_jd: float) -> int:
     return catalogue_info(epoch_jd)[0]
 
 
+def _reject_repeated_rows(df: pd.DataFrame, source: str) -> None:
+    """Reject *fully identical* TLE rows (same NORAD ID and both TLE lines).
+
+    An identical repeated row is the signature of corrupted/repeated content (e.g.
+    JSON pagination serving the same page twice), so it invalidates the download.
+    Duplicate NORAD IDs with *different* TLE lines are deliberately tolerated: the
+    service may legitimately carry more than one record per object near an epoch,
+    and downstream selection already takes one record per ID.
+    """
+    dup = df.duplicated(subset=["NORAD_CAT_ID", "TLE_LINE1", "TLE_LINE2"])
+    if dup.any():
+        sample = ", ".join(str(int(x)) for x in df.loc[dup, "NORAD_CAT_ID"].unique()[:5])
+        raise SatCheckerError(
+            f"SatChecker {source} catalogue contains identical repeated TLE rows "
+            f"(for example NORAD {sample}) — treating as corrupted content"
+        )
+
+
 def _fetch_catalogue_zip(epoch_jd: float) -> pd.DataFrame:
     q = urllib.parse.urlencode({"epoch": repr(float(epoch_jd)), "format": "zip"})
     raw = _http_get(f"{BASE_URL}/tles-at-epoch/?{q}")
@@ -169,7 +187,9 @@ def _fetch_catalogue_zip(epoch_jd: float) -> pd.DataFrame:
                 df = pd.read_csv(f)
     except (zipfile.BadZipFile, ValueError, pd.errors.ParserError, pd.errors.EmptyDataError) as e:
         raise SatCheckerError(f"SatChecker zip response could not be read: {e}") from e
-    return _normalise(df)
+    df = _normalise(df)
+    _reject_repeated_rows(df, "zip")
+    return df
 
 
 def _fetch_catalogue_json(epoch_jd: float, per_page: int = 5000) -> pd.DataFrame:
@@ -255,13 +275,7 @@ def _fetch_catalogue_json(epoch_jd: float, per_page: int = 5000) -> pd.DataFrame
         raise SatCheckerError(
             f"SatChecker JSON catalogue incomplete: {len(df)} of {total} records"
         )
-    duplicate_ids = df.loc[df["NORAD_CAT_ID"].duplicated(), "NORAD_CAT_ID"].unique()
-    if len(duplicate_ids):
-        sample = ", ".join(str(int(x)) for x in duplicate_ids[:5])
-        raise SatCheckerError(
-            f"SatChecker JSON catalogue contains duplicate NORAD IDs "
-            f"(for example: {sample}); pagination may have repeated a page"
-        )
+    _reject_repeated_rows(df, "JSON")
     return df
 
 
@@ -291,15 +305,10 @@ def fetch_full_catalogue(epoch_jd: float) -> CatalogueResult:
     if expected is not None and expected > 0:
         for _ in range(2):
             try:
+                # raises on unreadable zips and identical repeated rows alike
                 df = _fetch_catalogue_zip(epoch_jd)
-            except Exception as e:  # pragma: no cover - network dependent
+            except Exception as e:
                 last_err = e
-                continue
-            duplicate_ids = df.loc[df["NORAD_CAT_ID"].duplicated(), "NORAD_CAT_ID"].unique()
-            if len(duplicate_ids):
-                last_err = SatCheckerError(
-                    "SatChecker zip contains duplicate NORAD IDs — treating as invalid"
-                )
                 continue
             if len(df) >= expected * CATALOGUE_MIN_FRACTION:
                 return CatalogueResult(df, expected, len(df), version, "zip")
