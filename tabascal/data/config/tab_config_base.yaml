@@ -77,8 +77,6 @@ satellites:
   extra_tle_dir: null   # Optional - Extra directory of local TLE files searched (per NORAD ID) before the managed cache and SatChecker
   extra_tle_max_age_days: null      # Optional - Max |TLE epoch - observation epoch| (days) to accept an extra_tle_dir TLE. null = unlimited; 0 = exact-epoch only; negative is an error
   tle_catalogue_interval_hours: 2   # Optional - Width (hours) of the fixed UTC bucket used to reuse a catalogue snapshot. The cached record is nearest to the bucket midpoint, not the exact observation
-  tle_dir: null         # Optional - Path of the directory where TLEs will be saved for future runs
-  tle_offset: 0         # Optional - Time offset (in days) for the TLE that is used in tabascal. Specifically for testing 
   sat_ids: []           # Optional - Satellite IDs of satellites with circular trajectories to include
   ole_path: null        # Optional - Path to the csv '.ole' file containing circular trajectory-based satellite orbit parameters
 ###########################################

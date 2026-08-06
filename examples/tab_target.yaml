@@ -90,8 +90,6 @@ rfi:
 
 satellites:
   norad_ids: [20452, 38833, 45854]
-  # tle_offset: -2
-  tle_offset: 0
   # n_int_samples: 3
   ric_std: 1e2
 
