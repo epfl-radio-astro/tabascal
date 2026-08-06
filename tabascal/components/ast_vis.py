@@ -3,10 +3,8 @@ import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
-from tabascal.tab_tools import (
-    pow_spec,
-)
-from tabascal.interferometry import get_ast_fringe_rate
+from tabascal.tab_tools import pow_spec
+from tabascal.interferometry import fov_to_eff_diameter, get_ast_fringe_rate
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
@@ -120,10 +118,9 @@ class FourierTimeAst(Component):
 
         if self.fov_deg:
             # fov_deg is the full field of view (diameter) out to the first null
-            # of the primary beam. get_ast_fringe_rate uses a beam radius
-            # rho = 1.22 lam / D, so the effective diameter is 2 * 1.22 lam / fov
-            # to make rho = fov / 2 (the field radius).
-            eff_dish_d = 2.44 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+            # of the primary beam; the effective diameter makes the beam radius
+            # in get_ast_fringe_rate equal to fov_deg / 2.
+            eff_dish_d = fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs))
         else:
             eff_dish_d = self.dish_d
 
@@ -314,10 +311,9 @@ class FourierTimeConstFreqAst(Component):
 
         if self.fov_deg:
             # fov_deg is the full field of view (diameter) out to the first null
-            # of the primary beam. get_ast_fringe_rate uses a beam radius
-            # rho = 1.22 lam / D, so the effective diameter is 2 * 1.22 lam / fov
-            # to make rho = fov / 2 (the field radius).
-            eff_dish_d = 2.44 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+            # of the primary beam; the effective diameter makes the beam radius
+            # in get_ast_fringe_rate equal to fov_deg / 2.
+            eff_dish_d = fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs))
         else:
             eff_dish_d = self.dish_d
 
@@ -513,10 +509,9 @@ class FourierTimeFreqAst(Component):
 
         if self.fov_deg:
             # fov_deg is the full field of view (diameter) out to the first null
-            # of the primary beam. get_ast_fringe_rate uses a beam radius
-            # rho = 1.22 lam / D, so the effective diameter is 2 * 1.22 lam / fov
-            # to make rho = fov / 2 (the field radius).
-            eff_dish_d = 2.44 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
+            # of the primary beam; the effective diameter makes the beam radius
+            # in get_ast_fringe_rate equal to fov_deg / 2.
+            eff_dish_d = fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs))
         else:
             eff_dish_d = self.dish_d
 
@@ -753,11 +748,9 @@ class FourierTimeFreqGPAst(Component):
 
         if self.fov_deg:
             # fov_deg is the full field of view (diameter) out to the first null;
-            # 2.44 = 2 * 1.22 makes the beam radius rho = fov / 2 in
-            # get_ast_fringe_rate (see the other components).
-            eff_dish_d = float(
-                2.44 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
-            )
+            # the effective diameter makes the beam radius in
+            # get_ast_fringe_rate equal to fov_deg / 2.
+            eff_dish_d = float(fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs)))
         else:
             eff_dish_d = self.dish_d
 

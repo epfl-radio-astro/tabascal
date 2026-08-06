@@ -14,6 +14,7 @@ from tabascal.interferometry import (
     Omega_e,
     Rotz_numpy,
     calculate_fringe_frequency_numpy,
+    fov_to_eff_diameter,
     get_ast_fringe_rate,
     get_divisors,
     get_strides_and_idxs,
@@ -413,3 +414,42 @@ class TestGetAstFringeRate:
         fr_wide = float(get_ast_fringe_rate(uvw, DEC, self.FREQ, 5.0)[0])
         fr_narrow = float(get_ast_fringe_rate(uvw, DEC, self.FREQ, 50.0)[0])
         assert fr_wide > fr_narrow > 0.0
+
+    # --- fov_deg contract ---
+    #
+    # These lock the user-facing meaning of the `fov_deg` config parameter: it
+    # is the *full* field of view, so the maximum source offset used by the
+    # fringe rate (and hence the power-spectrum knee k0) is fov_deg / 2.  The
+    # 1.22 in get_ast_fringe_rate and the 2.44 in fov_to_eff_diameter must stay
+    # in step; changing either alone breaks these.
+
+    @pytest.mark.parametrize("fov_deg", [0.5, 5.0, 20.0])
+    def test_fov_to_eff_diameter_gives_beam_radius_of_half_the_fov(self, fov_deg):
+        D = float(fov_to_eff_diameter(fov_deg, self.FREQ))
+        rho = 1.22 * (C / self.FREQ) / D  # beam radius used by get_ast_fringe_rate
+        np.testing.assert_allclose(np.rad2deg(rho), fov_deg / 2, rtol=1e-12)
+
+    @pytest.mark.parametrize("fov_deg", [0.5, 5.0, 20.0])
+    def test_fringe_rate_from_fov_matches_explicit_half_fov_offset(self, fov_deg):
+        # End-to-end: driving get_ast_fringe_rate through fov_to_eff_diameter
+        # must equal evaluating the closed form with rho = fov_deg / 2.
+        uvw = np.array([[[300.0, 400.0, 700.0]]])
+        dec_deg = -30.0
+        d = np.deg2rad(dec_deg)
+        lam = C / self.FREQ
+        rho = np.deg2rad(fov_deg / 2)
+
+        u, v, w = uvw[0, 0]
+        expected = (
+            float(Omega_e)
+            * (
+                np.sin(rho) * np.sqrt((v * np.sin(d) - w * np.cos(d)) ** 2
+                                      + (u * np.sin(d)) ** 2)
+                + (1 - np.cos(rho)) * abs(u * np.cos(d))
+            )
+            / lam
+        )
+
+        D = float(fov_to_eff_diameter(fov_deg, self.FREQ))
+        fr = get_ast_fringe_rate(uvw, dec_deg, self.FREQ, D)
+        np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-10)

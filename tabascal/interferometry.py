@@ -199,6 +199,30 @@ def calculate_fringe_frequency_numpy(
     return fringe_freq
 
 
+def fov_to_eff_diameter(fov_deg: float, freq: float) -> Array:
+    """Effective dish diameter reproducing a given field of view.
+
+    ``fov_deg`` is the full field of view (angular diameter), so the maximum
+    source offset from the phase centre is ``fov_deg / 2``. Since
+    :func:`get_ast_fringe_rate` uses a beam radius ``rho = 1.22 lam / D``, the
+    diameter that gives ``rho = fov_deg / 2`` is ``2 * 1.22 lam / fov``.
+
+    Parameters
+    ----------
+    fov_deg : float
+        Full field of view (diameter) in degrees.
+    freq : float
+        Observational frequency in Hz. Use the lowest frequency of the band for
+        the widest beam.
+
+    Returns
+    -------
+    Array
+        Effective dish diameter in metres.
+    """
+    return 2.44 * C / (freq * jnp.deg2rad(fov_deg))
+
+
 def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float = 13.5) -> Array:
     """Maximum astronomical fringe rate for a source within the primary beam.
 
@@ -237,6 +261,12 @@ def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float 
     null of the primary beam rather than the half-power point: it should be the
     largest offset that still contributes appreciable flux, and underestimating
     it suppresses genuine fast-fringe power in the prior.
+
+    Note that the maximisation is taken over the beam azimuth and over time
+    independently, so the result is an upper-bound envelope over every source
+    position in the field, not the fringe rate of any one source. This is what
+    is wanted for a band limit, but it means the value is deliberately
+    conservative.
 
     Parameters
     ----------
