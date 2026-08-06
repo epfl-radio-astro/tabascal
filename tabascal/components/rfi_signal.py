@@ -1,3 +1,5 @@
+from abc import abstractmethod
+
 from jax import vmap, random, Array
 import jax.numpy as jnp
 
@@ -135,7 +137,7 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     
     if not gp_time_l: # Set Default
         est_gp_time_l = extent(times, int_time) / 2
-        rfi_config["corr_freq"] = est_gp_time_l
+        rfi_config["corr_time"] = est_gp_time_l
     elif isinstance(gp_time_l, (float, int)):
         rfi_config["corr_time"] = float(gp_time_l)
     else:
@@ -395,7 +397,10 @@ class RealRFI(BaseGPRFI):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
 
-        # Padded dummy sources must start exactly dark in every init mode.
+        # Darkness of the padded dummy sources is enforced in the forward, by
+        # masked_forward_transform -- not here. So init_rfi_A_induce (and the prior mean it
+        # may come from) can carry non-zero padded rows for e.g. init="ones"; they contribute
+        # exactly zero amplitude and zero gradient regardless.
         self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
 
         self.init_params = {
@@ -573,7 +578,10 @@ class ComplexRFI(BaseGPRFI):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
 
-        # Padded dummy sources must start exactly dark in every init mode.
+        # Darkness of the padded dummy sources is enforced in the forward, by
+        # masked_forward_transform -- not here. So init_rfi_A_induce (and the prior mean it
+        # may come from) can carry non-zero padded rows for e.g. init="ones"; they contribute
+        # exactly zero amplitude and zero gradient regardless.
         self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
 
         self.init_params = {
@@ -1091,17 +1099,19 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             self.init_rfi_k = self.true_rfi_k_A
         elif init_type in ["zeros", 0]:
             print("Using zeros for rfi_A init")
-            ones = jnp.zeros((self.n_freq, self.n_time), dtype=complex)
-            self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
-        elif init_type == "ones":
+            zeros = jnp.zeros((self.n_freq, self.n_time), dtype=complex)
+            self.init_rfi_k = self.signal_to_latent(zeros)[None,None,:,:] * jnp.ones((self.n_rfi, 1, 1, 1))
+        elif init_type in ["ones", 1]:
             print("Using ones for rfi_A init")
             ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
-            self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
+            self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, 1, 1, 1))
         elif init_type == "sample":
             print("Drawing sample from prior for rfi_A init")
+            # This variant carries a singleton antenna axis: the latent is shared by
+            # every antenna and only broadcast to n_ant inside the forward.
             base_sample = random.normal(
                 random.PRNGKey(self.r_seed),
-                (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
+                (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
             self.init_rfi_k = self.masked_forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
