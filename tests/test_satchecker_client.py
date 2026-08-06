@@ -12,6 +12,7 @@ import pytest
 from tabascal.satchecker import client
 from tabascal.satchecker.client import (
     CatalogueResult,
+    EmptyCatalogueError,
     SatCheckerError,
     fetch_full_catalogue,
     fetch_nearest_tle,
@@ -104,6 +105,29 @@ class TestFullCatalogue:
         monkeypatch.setattr(urllib.request, "urlopen", boom)
         with pytest.raises(SatCheckerError):
             fetch_full_catalogue(_EPOCH)
+
+    def test_empty_catalogue_raises_empty_catalogue_error(self, monkeypatch):
+        # Live-observed behaviour: tles-at-epoch reports total_results=0 for
+        # epochs beyond the service's TLE ingest horizon. That must surface as
+        # the distinguishable EmptyCatalogueError so callers can fall back to
+        # per-satellite lookups (a transport failure must NOT — see below).
+        def handler(url):
+            if "format=zip" in url:
+                raise AssertionError("zip must not be attempted for an empty catalogue")
+            return make_json_page([], total=0)
+
+        _route(monkeypatch, handler)
+        with pytest.raises(EmptyCatalogueError):
+            fetch_full_catalogue(_EPOCH)
+
+    def test_transport_failure_is_not_empty_catalogue(self, monkeypatch):
+        def boom(req, timeout=None):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        with pytest.raises(SatCheckerError) as exc_info:
+            fetch_full_catalogue(_EPOCH)
+        assert not isinstance(exc_info.value, EmptyCatalogueError)
 
     def test_unavailable_expected_count_skips_unvalidated_zip(self, monkeypatch):
         calls = {"zip": 0, "json": 0}

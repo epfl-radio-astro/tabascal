@@ -66,6 +66,18 @@ class SatCheckerError(RuntimeError):
     """Raised when SatChecker cannot be reached or returns no usable data."""
 
 
+class EmptyCatalogueError(SatCheckerError):
+    """The service is reachable but reports *no* catalogue records at the epoch.
+
+    Observed in production: ``tles-at-epoch`` has a data horizon and returns
+    ``total_results: 0`` for epochs newer than its latest ingested TLE set, while
+    ``get-nearest-tle`` still resolves individual satellites. Callers can catch
+    this (as :mod:`tabascal.tle` does) to fall back to per-satellite lookups
+    instead of failing the whole request. Transport failures raise the plain
+    :class:`SatCheckerError` and are *not* eligible for that fallback.
+    """
+
+
 @dataclass(frozen=True)
 class CatalogueResult:
     """A full-catalogue download plus the metadata needed to validate/cache it.
@@ -269,7 +281,14 @@ def _fetch_catalogue_json(epoch_jd: float, per_page: int = 5000) -> pd.DataFrame
         page += 1
 
     if not frames:
-        raise SatCheckerError("SatChecker returned no TLE records.")
+        # Reached only when total_results <= 0: a page shortfall against a
+        # positive total raises above. The service answered, but has no
+        # catalogue at this epoch (e.g. beyond its TLE ingest horizon).
+        raise EmptyCatalogueError(
+            f"SatChecker reports no TLE catalogue records at epoch {epoch_jd!r} "
+            f"(total_results={total}) — the epoch may be newer than the service's "
+            f"latest ingested TLE set"
+        )
     df = _normalise(pd.concat(frames, ignore_index=True))
     if total is not None and len(df) != total:
         raise SatCheckerError(
@@ -322,6 +341,8 @@ def fetch_full_catalogue(epoch_jd: float) -> CatalogueResult:
     # result is exactly complete: expected == actual == len(df).
     try:
         df = _fetch_catalogue_json(epoch_jd)
+    except EmptyCatalogueError:
+        raise  # service reachable, no catalogue at this epoch — caller may fall back
     except Exception as json_err:
         raise SatCheckerError(
             f"Failed to fetch TLE catalogue from SatChecker: {json_err} "

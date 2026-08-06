@@ -16,8 +16,11 @@ Source precedence is resolved **independently per NORAD ID**:
   2. Managed canonical catalogue — one deterministic snapshot per fixed UTC bucket
      (see :func:`tabascal.satchecker.cache.canonical_epoch_jd`), fetched from
      SatChecker on a miss and cached atomically.
-  3. Per-satellite SatChecker fallback — only for IDs still missing from the bulk
-     snapshot; the records are associated with the same canonical snapshot so a
+  3. Per-satellite SatChecker fallback — for IDs still missing from the bulk
+     snapshot, and for *all* remaining IDs when the service reports an empty
+     catalogue at the epoch (its ``tles-at-epoch`` endpoint has a data horizon;
+     recent observations can fall beyond it while ``get-nearest-tle`` still
+     resolves). The records are associated with the same canonical snapshot so a
      later run over the same request reuses them.
 
 Catalogue reuse follows the bucket policy: the cached record is nearest to the
@@ -258,8 +261,14 @@ def _ensure_snapshot(
     cache: TextCatalogueCache,
     catalogue_epoch_jd: float,
     obs_epoch_jd: float,
-) -> CatalogueSnapshot:
-    """Return the canonical snapshot, downloading + caching atomically on a miss."""
+) -> Optional[CatalogueSnapshot]:
+    """Return the canonical snapshot, downloading + caching atomically on a miss.
+
+    Returns ``None`` when the service is reachable but reports an *empty*
+    catalogue at this epoch (its ``tles-at-epoch`` endpoint has a data horizon and
+    recent epochs can fall beyond it). The caller then resolves satellites through
+    the per-ID fallback instead. Transport failures still raise.
+    """
     snapshot = cache.get_snapshot(catalogue_epoch_jd)
     if snapshot is not None:
         print(f"  managed catalogue cached at {canonical_stamp(catalogue_epoch_jd)}")
@@ -269,7 +278,12 @@ def _ensure_snapshot(
         f"Fetching TLE catalogue from SatChecker for canonical epoch "
         f"{canonical_stamp(catalogue_epoch_jd)} ..."
     )
-    result = satchecker.fetch_full_catalogue(catalogue_epoch_jd)
+    try:
+        result = satchecker.fetch_full_catalogue(catalogue_epoch_jd)
+    except satchecker.EmptyCatalogueError as e:
+        print(f"  {e}")
+        print("  falling back to per-satellite TLE lookups for all requested IDs")
+        return None
     snapshot = CatalogueSnapshot(
         catalogue_epoch_jd=catalogue_epoch_jd,
         records=result.records,
@@ -345,8 +359,9 @@ def get_tles_by_id(
     if remaining:
         cache = TextCatalogueCache(tle_cache_dir())
         snapshot = _ensure_snapshot(cache, catalogue_epoch_jd, obs_epoch_jd)
-        resolved.update(_select_from_records(snapshot.records, remaining))
-        remaining = wanted - set(resolved)
+        if snapshot is not None:
+            resolved.update(_select_from_records(snapshot.records, remaining))
+            remaining = wanted - set(resolved)
 
         if remaining:
             cached_extra = cache.get_extra(catalogue_epoch_jd)

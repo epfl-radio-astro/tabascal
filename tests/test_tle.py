@@ -10,7 +10,7 @@ from datetime import datetime
 import pytest
 
 from tabascal import tle
-from tabascal.satchecker import SatCheckerError, client
+from tabascal.satchecker import EmptyCatalogueError, SatCheckerError, client
 from tabascal.satchecker.client import CatalogueResult
 from tabascal.time import datetime_to_jd
 
@@ -50,6 +50,14 @@ def _install_full(monkeypatch, pairs, counter):
 def _install_full_raise(monkeypatch):
     def fake(epoch_jd):
         raise SatCheckerError("network down")
+    monkeypatch.setattr(tle.satchecker, "fetch_full_catalogue", fake)
+
+
+def _install_full_empty(monkeypatch, counter):
+    """Service reachable but no catalogue at the epoch (beyond its data horizon)."""
+    def fake(epoch_jd):
+        counter["full"] += 1
+        raise EmptyCatalogueError("no records at this epoch")
     monkeypatch.setattr(tle.satchecker, "fetch_full_catalogue", fake)
 
 
@@ -135,6 +143,42 @@ class TestFallback:
         _install_nearest_raise(monkeypatch)
         df = tle.get_tles_by_id([25544, 99999], _OBS)
         assert sorted(df["NORAD_CAT_ID"]) == [25544, 99999]
+
+    def test_empty_catalogue_falls_back_per_satellite(self, cache_dir, monkeypatch):
+        # Live-observed: tles-at-epoch reports zero records for epochs beyond the
+        # service's ingest horizon while get-nearest-tle still resolves. The whole
+        # request must succeed via the per-satellite path, not hard-fail.
+        cfull, cnear = {"full": 0}, {"near": 0}
+        _install_full_empty(monkeypatch, cfull)
+        _install_nearest(monkeypatch, [(25544, _OBS), (38833, _OBS)], cnear)
+        df = tle.get_tles_by_id([25544, 38833], _OBS)
+        assert sorted(df["NORAD_CAT_ID"]) == [25544, 38833]
+        assert cfull["full"] == 1 and cnear["near"] == 2
+        assert "SEMIMAJOR_AXIS" in df.columns  # elements parsed as usual
+        # No snapshot file may exist, but the fallback records are cached.
+        assert not list(cache_dir.glob("catalogue-*[0-9]Z.json"))
+        assert list(cache_dir.glob("catalogue-*-extra.json"))
+
+    def test_empty_catalogue_fallback_reused_from_cache(self, cache_dir, monkeypatch):
+        cfull, cnear = {"full": 0}, {"near": 0}
+        _install_full_empty(monkeypatch, cfull)
+        _install_nearest(monkeypatch, [(25544, _OBS)], cnear)
+        tle.get_tles_by_id([25544], _OBS)
+        assert cnear["near"] == 1
+        # Second run: catalogue still empty, but the fallback record comes from
+        # the extra cache — no further per-satellite requests.
+        _install_nearest_raise(monkeypatch)
+        df = tle.get_tles_by_id([25544], _OBS)
+        assert list(df["NORAD_CAT_ID"]) == [25544]
+        assert cfull["full"] == 2  # catalogue re-probed (cheap), fallback cached
+
+    def test_transport_failure_still_fails_fast(self, cache_dir, monkeypatch):
+        # A plain SatCheckerError (service unreachable) must NOT trigger the
+        # per-satellite fallback — it propagates immediately.
+        _install_full_raise(monkeypatch)
+        _install_nearest_raise(monkeypatch)
+        with pytest.raises(SatCheckerError):
+            tle.get_tles_by_id([25544], _OBS)
 
 
 # ---------------------------------------------------------------------------
