@@ -200,7 +200,7 @@ class BaseGPRFI(Component):
         # amplitude and zero gradient (the vis contribution is quadratic in rfi_A).
         self.n_rfi_real = getattr(tab_config, "n_rfi_real", tab_config.n_rfi)
 
-    def _zero_padded_rows(self, arr: Array) -> Array:
+    def _mask_dummy_rfi(self, arr: Array) -> Array:
         """Zero the padded (dark dummy) rows of an (n_rfi, ...) array; no-op unpadded."""
         return arr.at[self.n_rfi_real:].set(0)
 
@@ -234,6 +234,18 @@ class BaseGPRFI(Component):
 
     def _compute_init_params(self):
         pass
+
+    @abstractmethod
+    def forward_transform(self, base_params, L, mu):
+        pass
+
+    @abstractmethod
+    def inv_transform(self, params, L, mu):
+        pass
+
+    # helper function to set dummy rfi values to 0 for padding. Required for multi-device.
+    def masked_forward_transform(self, base_params, L, mu):
+        return self._mask_dummy_rfi(self.forward_transform(base_params, L, mu))
 
 
 class RealRFI(BaseGPRFI):
@@ -297,7 +309,7 @@ class RealRFI(BaseGPRFI):
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        forward_transform = self.forward_transform
+        forward_transform = self.masked_forward_transform
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -379,14 +391,12 @@ class RealRFI(BaseGPRFI):
                 random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times),
             )
-            self.init_rfi_A_induce = self.forward_transform(base_sample, self.L_rfi_A, self.mu_rfi_A)
+            self.init_rfi_A_induce = self.masked_forward_transform(base_sample, self.L_rfi_A, self.mu_rfi_A)
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
 
         # Padded dummy sources must start exactly dark in every init mode.
-        self.init_rfi_A_induce = self._zero_padded_rows(self.init_rfi_A_induce)
         self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
-        self.init_rfi_A_induce_base = self._zero_padded_rows(self.init_rfi_A_induce_base)
 
         self.init_params = {
             "rfi_r_induce": self.init_rfi_A_induce,
@@ -473,7 +483,7 @@ class ComplexRFI(BaseGPRFI):
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        forward_transform = self.forward_transform
+        forward_transform = self.masked_forward_transform
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -557,16 +567,14 @@ class ComplexRFI(BaseGPRFI):
                 random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times),
             )
-            self.init_rfi_A_induce = self.forward_transform(
+            self.init_rfi_A_induce = self.masked_forward_transform(
                 base_sample, self.L_rfi_A, self.mu_rfi_A
             )
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
 
         # Padded dummy sources must start exactly dark in every init mode.
-        self.init_rfi_A_induce = self._zero_padded_rows(self.init_rfi_A_induce)
         self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
-        self.init_rfi_A_induce_base = self._zero_padded_rows(self.init_rfi_A_induce_base)
 
         self.init_params = {
             "rfi_r_induce": self.init_rfi_A_induce.real,
@@ -660,7 +668,7 @@ class FourierGPRFI(BaseGPRFI):
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        forward_transform = self.forward_transform
+        forward_transform = self.masked_forward_transform
         pads = self.pads
         ss_idxs = self.ss_idxs
 
@@ -751,7 +759,7 @@ class FourierGPRFI(BaseGPRFI):
         # zero mean so they stay dark.
         est_rfi_k = self.signal_to_latent(jnp.sqrt(jnp.max(jnp.abs(vis_obs), axis=0)))[None, None, :, :] * jnp.ones((self.n_rfi, self.n_ant, 1, 1)) / self.n_rfi_real
 
-        return self._zero_padded_rows(est_rfi_k)
+        return est_rfi_k
 
     def _compute_prior_params(self, prior_type, vis_obs, est_path):
 
@@ -827,15 +835,11 @@ class FourierGPRFI(BaseGPRFI):
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
-            self.init_rfi_k = self.forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
+            self.init_rfi_k = self.masked_forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
 
-        # Padded dummy sources must start exactly dark in every init mode (ones,
-        # sample, truth, ...): zero amplitude means zero signal and zero gradient.
-        self.init_rfi_k = self._zero_padded_rows(self.init_rfi_k)
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
-        self.init_rfi_k_base = self._zero_padded_rows(self.init_rfi_k_base)
 
         self.init_params = {
             "rfi_k_r": self.init_rfi_k.real,
@@ -926,7 +930,7 @@ class FourierGPRFIConstAnt(BaseGPRFI):
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        forward_transform = self.forward_transform
+        forward_transform = self.masked_forward_transform
         pads = self.pads
         ss_idxs = self.ss_idxs
         n_rfi = self.n_rfi
@@ -1024,7 +1028,7 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         # est_rfi_k_A is now shape (n_rfi, 1, n_k_freq_rfi, n_k_time_rfi)
         est_rfi_k_A = est_rfi_k_A[None, None, :, :] * jnp.ones((self.n_rfi, 1, 1, 1))
 
-        return self._zero_padded_rows(est_rfi_k_A)
+        return est_rfi_k_A
 
     def _compute_prior_params(self, prior_type, vis_obs, est_path):
 
@@ -1100,15 +1104,11 @@ class FourierGPRFIConstAnt(BaseGPRFI):
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
-            self.init_rfi_k = self.forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
+            self.init_rfi_k = self.masked_forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
 
-        # Padded dummy sources must start exactly dark in every init mode (ones,
-        # sample, truth, ...): zero amplitude means zero signal and zero gradient.
-        self.init_rfi_k = self._zero_padded_rows(self.init_rfi_k)
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
-        self.init_rfi_k_base = self._zero_padded_rows(self.init_rfi_k_base)
 
         self.init_params = {
             "rfi_k_r": self.init_rfi_k.real,
