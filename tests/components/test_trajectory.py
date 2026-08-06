@@ -401,6 +401,34 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
 
 
 # ---------------------------------------------------------------------------
+# Element fetchers — clear error when no TLE resolves
+# ---------------------------------------------------------------------------
+
+class TestFetchOrbitalElementsEmpty:
+    """When no requested NORAD ID resolves to a TLE, the fetchers must raise a
+    clear TLEError naming the IDs — not an opaque pandas KeyError."""
+
+    def _patch_empty(self, monkeypatch):
+        import pandas as pd
+        from tabascal.components import trajectory as traj_mod
+        monkeypatch.setattr(traj_mod, "get_tles_by_id", lambda *a, **k: pd.DataFrame())
+
+    def test_fetch_orbital_elements_raises_tle_error(self, monkeypatch):
+        from tabascal.components.trajectory import fetch_orbital_elements
+        from tabascal.tle import TLEError
+        self._patch_empty(monkeypatch)
+        with pytest.raises(TLEError, match=r"No TLEs could be resolved.*99999"):
+            fetch_orbital_elements(2460000.0, [99999])
+
+    def test_fetch_standard_orbital_elements_raises_tle_error(self, monkeypatch):
+        from tabascal.components.trajectory import fetch_standard_orbital_elements
+        from tabascal.tle import TLEError
+        self._patch_empty(monkeypatch)
+        with pytest.raises(TLEError, match="No TLEs could be resolved"):
+            fetch_standard_orbital_elements(2460000.0, [99999])
+
+
+# ---------------------------------------------------------------------------
 # SGP4LEONoDragOrbit and SGP4LEOOrbit — merged parametrized class
 # SGP4LEONoDragOrbit: n_params=6 (bstar excluded from learnable params)
 # SGP4LEOOrbit:       n_params=7 (bstar included)

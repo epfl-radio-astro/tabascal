@@ -1,4 +1,4 @@
-from tabascal.tle import get_tles_by_id
+from tabascal.tle import TLEError, get_tles_by_id
 from tabascal.distributed import (
     make_global,
     padded_rfi_count,
@@ -683,6 +683,20 @@ def _pad_rfi_sources(tles_df):
     return pd.concat([tles_df, *([tles_df.iloc[[-1]]] * n_pad)], ignore_index=True)
 
 
+def _require_tles(tles_df, norad_ids) -> None:
+    """Fail with a clear message when no requested TLE could be resolved.
+
+    Without this guard an empty frame surfaces as an opaque pandas ``KeyError``
+    on the element columns.
+    """
+    if not len(tles_df):
+        raise TLEError(
+            f"No TLEs could be resolved for NORAD IDs {list(norad_ids)}. "
+            "Check that the IDs are valid, and that either the extra TLE "
+            "directory covers them or the SatChecker service is reachable."
+        )
+
+
 def fetch_orbital_elements(
     times_jd,
     norad_ids,
@@ -698,6 +712,7 @@ def fetch_orbital_elements(
         extra_tle_max_age_days=extra_tle_max_age_days,
         catalogue_interval_hours=catalogue_interval_hours,
     )
+    _require_tles(tles_df, norad_ids)
     # Real (unpadded) source count is the number of rows the fetch actually returned,
     # captured before padding. Inferring it from the padded id list (e.g. counting
     # distinct ids) is wrong when the real sources already contain a repeated NORAD id.
@@ -730,13 +745,15 @@ def fetch_standard_orbital_elements(
     catalogue_interval_hours=2.0,
 ):
 
-    tles_df = _pad_rfi_sources(get_tles_by_id(
+    tles_df = get_tles_by_id(
         norad_ids,
         times_jd,
         extra_tle_dir=extra_tle_dir,
         extra_tle_max_age_days=extra_tle_max_age_days,
         catalogue_interval_hours=catalogue_interval_hours,
-    ))
+    )
+    _require_tles(tles_df, norad_ids)
+    tles_df = _pad_rfi_sources(tles_df)
 
     # tles_df carries the OMM-style element columns parsed locally from the TLE
     # lines by tabascal.tle.parse_tle_elements (degrees, rev/day, km), plus
