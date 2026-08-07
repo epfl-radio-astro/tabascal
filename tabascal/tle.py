@@ -390,6 +390,40 @@ def get_tles_by_id(
 
 
 # ---------------------------------------------------------------------------
+# Reproducibility: persist the TLEs a run actually used
+# ---------------------------------------------------------------------------
+
+def save_tles_for_reuse(path, norad_ids, tles) -> Optional[str]:
+    """Write the TLE lines a run used to *path* in ``extra_tle_dir`` format.
+
+    The file is a pandas-oriented JSON with ``NORAD_CAT_ID``, ``TLE_LINE1`` and
+    ``TLE_LINE2`` columns — exactly what :func:`read_legacy_tle_records` reads —
+    so a later run can reproduce this run's trajectory priors by passing the
+    file's directory via ``--extra-tle-dir`` (with the default unlimited
+    ``extra_tle_max_age_days``), independent of the shared cache or any change
+    in what SatChecker serves.
+
+    ``norad_ids`` and ``tles`` are the aligned arrays produced by the element
+    fetchers (one ``(line1, line2)`` pair per ID). Returns the written path, or
+    ``None`` when there is nothing to save.
+    """
+    tle_pairs = np.atleast_2d(np.asarray(tles)) if tles is not None else np.empty((0, 2))
+    ids = list(norad_ids or [])
+    if not ids or not tle_pairs.size:
+        return None
+    df = pd.DataFrame(
+        {
+            "NORAD_CAT_ID": [int(n) for n in ids],
+            "TLE_LINE1": tle_pairs[:, 0],
+            "TLE_LINE2": tle_pairs[:, 1],
+        }
+    )
+    path = str(path)
+    df.to_json(path)
+    return path
+
+
+# ---------------------------------------------------------------------------
 # Preflight check
 # ---------------------------------------------------------------------------
 

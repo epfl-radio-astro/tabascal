@@ -27,7 +27,7 @@ from tabascal.distributed import (
 )
 from tabascal.imports import import_components
 from tabascal.write import write_results_xds
-from tabascal.tle import TLEError
+from tabascal.tle import TLEError, save_tles_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 
 import jax
@@ -168,6 +168,7 @@ class _RunPaths:
     map_path: str
     params_path: str
     init_pred_path: str
+    used_tles_path: str
 
 
 def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
@@ -219,6 +220,7 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
         map_path=os.path.join(results_dir, f"map_pred_{results_name}.zarr"),
         params_path=os.path.join(results_dir, f"map_params_{results_name}.zarr"),
         init_pred_path=os.path.join(results_dir, f"init_pred_{results_name}.zarr"),
+        used_tles_path=os.path.join(results_dir, f"used_tles_{results_name}.json"),
     )
 
 
@@ -273,6 +275,21 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
 
         tab_config, model = build_model(config, ms_path)
         prob_model = model.prob_model
+
+        # Persist the real TLEs this run resolved so it can be reproduced later.
+        # Only process 0 writes the shared result path in distributed runs.
+        if is_process_0():
+            saved_tles = save_tles_for_reuse(
+                paths.used_tles_path,
+                getattr(tab_config, "norad_ids", None),
+                getattr(tab_config, "tles", None),
+            )
+            if saved_tles:
+                print(f"TLEs used saved to : {saved_tles}")
+                print(
+                    "  (reuse via --extra-tle-dir to reproduce this run's "
+                    "trajectory priors)"
+                )
 
         if sharding_enabled():
             # Split every leading-RFI-axis array across the device mesh and replicate

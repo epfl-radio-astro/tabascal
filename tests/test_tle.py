@@ -380,6 +380,34 @@ class TestPreflight:
 
 
 # ---------------------------------------------------------------------------
+# Reproducibility: save_tles_for_reuse round-trip
+# ---------------------------------------------------------------------------
+
+class TestSaveTlesForReuse:
+
+    def test_round_trip_through_extra_tle_dir(self, cache_dir, tmp_path, monkeypatch):
+        # Save the TLEs "a run used", then reproduce the resolution offline from
+        # the saved file alone — the exact reproducibility workflow.
+        out = tmp_path / "results"
+        out.mkdir()
+        epoch = jd(2023, 2, 21, 13)
+        pairs = [make_tle(25544, epoch), make_tle(38833, epoch)]
+        path = tle.save_tles_for_reuse(
+            out / "used_tles_Custom.json", [25544, 38833], pairs
+        )
+        assert path is not None
+
+        _install_full_raise(monkeypatch)  # no network allowed
+        df = tle.get_tles_by_id([25544, 38833], _OBS, extra_tle_dir=str(out))
+        assert sorted(df["NORAD_CAT_ID"]) == [25544, 38833]
+        assert df.loc[df["NORAD_CAT_ID"] == 25544, "TLE_LINE1"].iloc[0] == pairs[0][0]
+
+    def test_nothing_to_save_returns_none(self, tmp_path):
+        assert tle.save_tles_for_reuse(tmp_path / "x.json", [], None) is None
+        assert not (tmp_path / "x.json").exists()
+
+
+# ---------------------------------------------------------------------------
 # Config validation helper
 # ---------------------------------------------------------------------------
 
