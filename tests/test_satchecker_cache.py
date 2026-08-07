@@ -233,6 +233,74 @@ class TestEnvelopeValidation:
             cache.store_snapshot(snap)
         assert list(tmp_path.glob("catalogue-*.json")) == []
 
+    @pytest.mark.parametrize(
+        "field,garbage",
+        [
+            ("raan", (17, 25)),
+            ("eccentricity", (26, 33)),
+            ("arg_pericenter", (34, 42)),
+            ("mean_anomaly", (43, 51)),
+        ],
+    )
+    def test_every_parsed_line2_field_is_validated(self, tmp_path, field, garbage):
+        # Validation must exercise every field parse_tle_elements consumes, not
+        # just inclination and mean motion.
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(canon, [(25544, jd(2023, 2, 21, 13))])
+        line2 = env["records"][0]["TLE_LINE2"]
+        start, stop = garbage
+        env["records"][0]["TLE_LINE2"] = (
+            line2[:start] + "A" * (stop - start) + line2[stop:]
+        )
+        _write_env(cache._snapshot_path(canon), env)
+        assert cache.get_snapshot(canon) is None
+
+    def test_malformed_bstar_is_validated(self, tmp_path):
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(canon, [(25544, jd(2023, 2, 21, 13))])
+        line1 = env["records"][0]["TLE_LINE1"]
+        env["records"][0]["TLE_LINE1"] = line1[:53] + "ABCDEFGH" + line1[61:]
+        _write_env(cache._snapshot_path(canon), env)
+        assert cache.get_snapshot(canon) is None
+
+    def test_alpha5_identifiers_are_accepted(self, tmp_path):
+        # Valid Alpha-5 IDs (catalogue numbers > 99999) must not invalidate a
+        # snapshot — one such object previously aborted the whole catalogue.
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(canon, [(25544, jd(2023, 2, 21, 13))])
+        rec = env["records"][0]
+        rec["NORAD_CAT_ID"] = 148493
+        rec["TLE_LINE1"] = "1 E8493" + rec["TLE_LINE1"][7:]
+        rec["TLE_LINE2"] = "2 E8493" + rec["TLE_LINE2"][7:]
+        _write_env(cache._snapshot_path(canon), env)
+        snap = cache.get_snapshot(canon)
+        assert snap is not None
+        assert list(snap.records["NORAD_CAT_ID"]) == [148493]
+
+    def test_tle_lines_belonging_to_another_satellite_are_rejected(self, tmp_path):
+        # A row labelled 25544 carrying 38833's TLE lines would silently model
+        # the wrong satellite.
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(canon, [(25544, jd(2023, 2, 21, 13))])
+        other = make_catalogue_df([(38833, jd(2023, 2, 21, 13))]).iloc[0]
+        env["records"][0]["TLE_LINE1"] = other["TLE_LINE1"]
+        env["records"][0]["TLE_LINE2"] = other["TLE_LINE2"]
+        _write_env(cache._snapshot_path(canon), env)
+        assert cache.get_snapshot(canon) is None
+
+    def test_disagreeing_embedded_identifiers_are_rejected(self, tmp_path):
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(canon, [(25544, jd(2023, 2, 21, 13))])
+        other = make_catalogue_df([(38833, jd(2023, 2, 21, 13))]).iloc[0]
+        env["records"][0]["TLE_LINE2"] = other["TLE_LINE2"]  # line 1 stays 25544
+        _write_env(cache._snapshot_path(canon), env)
+        assert cache.get_snapshot(canon) is None
+
     def test_store_side_validation_rejects_and_writes_nothing(self, tmp_path):
         cache = TextCatalogueCache(tmp_path)
         canon = self._canon()

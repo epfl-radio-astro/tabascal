@@ -33,7 +33,6 @@ from __future__ import annotations
 import math
 import os
 import time
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -52,14 +51,21 @@ from tabascal.satchecker import (
     read_legacy_tle_records,
 )
 from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-compat alias
-from tabascal.time import datetime_to_jd, jd_to_datetime
+
+# The TLE parser lives in tabascal.satchecker.tle_parse so cache validation and
+# element extraction exercise the *same* code; re-exported here under this
+# module's historical names.
+from tabascal.satchecker.tle_parse import (
+    parse_tle_elements,  # noqa: F401  re-export
+    tle_epoch_jd as _tle_epoch_jd,
+)
+from tabascal.time import jd_to_datetime
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_MU_KM3_S2 = 398600.4418  # Earth gravitational parameter, km^3/s^2
 _THROTTLE_SECONDS = 1.0   # delay between per-satellite fallback requests
 # DEFAULT_CATALOGUE_INTERVAL_HOURS is imported from tabascal.satchecker above —
 # the bucket policy's single source of truth.
@@ -106,65 +112,6 @@ def _validate_max_age(extra_tle_max_age_days) -> Optional[float]:
     return value
 
 
-# ---------------------------------------------------------------------------
-# Local TLE parsing (elements derived from the two TLE lines)
-# ---------------------------------------------------------------------------
-
-def _parse_exp_field(field: str) -> float:
-    """Parse a TLE exponential field (e.g. '-11606-4' -> -0.11606e-4)."""
-    s = field.strip()
-    if not s or s in ("+00000-0", "00000-0", "00000+0"):
-        return 0.0
-    sign = 1.0
-    if s[0] in "+-":
-        sign = -1.0 if s[0] == "-" else 1.0
-        s = s[1:]
-    mantissa = s[:-2].replace(" ", "")
-    exponent = int(s[-2:])
-    if not mantissa:
-        return 0.0
-    return sign * float("0." + mantissa) * (10.0 ** exponent)
-
-
-def _tle_epoch_jd(line1: str) -> float:
-    """UTC Julian Date of a TLE epoch (line 1 columns 19-32)."""
-    epoch_year = int(line1[18:20])
-    epoch_day = float(line1[20:32])
-    year = 2000 + epoch_year if epoch_year < 57 else 1900 + epoch_year
-    dt = datetime(year, 1, 1) + timedelta(days=epoch_day - 1.0)
-    return datetime_to_jd(dt)
-
-
-def parse_tle_elements(line1: str, line2: str) -> dict:
-    """Derive OMM-style orbital elements from a TLE pair.
-
-    Angles are in degrees, mean motion in rev/day and the semi-major axis in km
-    — matching the units Space-Track's OMM reported, so downstream consumers are
-    unchanged. ``SEMIMAJOR_AXIS`` is computed from the mean motion via Kepler's
-    third law (reproduces the Space-Track OMM value).
-    """
-    inclination = float(line2[8:16])
-    raan = float(line2[17:25])
-    eccentricity = float("0." + line2[26:33].strip())
-    arg_pericenter = float(line2[34:42])
-    mean_anomaly = float(line2[43:51])
-    mean_motion = float(line2[52:63])  # rev/day
-    bstar = _parse_exp_field(line1[53:61])
-
-    n_rad_s = mean_motion * 2.0 * math.pi / 86400.0
-    semimajor_axis = (_MU_KM3_S2 / n_rad_s ** 2) ** (1.0 / 3.0)
-
-    return {
-        "INCLINATION": inclination,
-        "RA_OF_ASC_NODE": raan,
-        "ECCENTRICITY": eccentricity,
-        "ARG_OF_PERICENTER": arg_pericenter,
-        "MEAN_ANOMALY": mean_anomaly,
-        "MEAN_MOTION": mean_motion,
-        "BSTAR": bstar,
-        "SEMIMAJOR_AXIS": semimajor_axis,
-        "EPOCH_JD": _tle_epoch_jd(line1),
-    }
 
 
 def _add_parsed_elements(tles: pd.DataFrame) -> pd.DataFrame:
