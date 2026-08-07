@@ -207,6 +207,32 @@ class TestEnvelopeValidation:
         _write_env(cache._snapshot_path(canon), env)
         assert cache.get_snapshot(canon) is None
 
+    @pytest.mark.parametrize(
+        "line1",
+        ["", "1 25544U truncated", "not a tle line at all", 12345],
+        ids=["empty", "truncated", "garbage", "non-string"],
+    )
+    def test_unparseable_tle_lines_are_a_miss(self, tmp_path, line1):
+        # Column presence and non-null alone are not enough: an empty or
+        # truncated line would otherwise be cached and then fail during element
+        # parsing on every subsequent run.
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(canon, [(25544, jd(2023, 2, 21, 13))])
+        env["records"][0]["TLE_LINE1"] = line1
+        _write_env(cache._snapshot_path(canon), env)
+        assert cache.get_snapshot(canon) is None
+
+    def test_unparseable_tle_lines_cannot_be_stored(self, tmp_path):
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        records = make_catalogue_df([(25544, jd(2023, 2, 21, 13))])
+        records.loc[0, "TLE_LINE1"] = ""  # a poisoned snapshot must never persist
+        snap = CatalogueSnapshot(catalogue_epoch_jd=canon, records=records)
+        with pytest.raises(ValueError):
+            cache.store_snapshot(snap)
+        assert list(tmp_path.glob("catalogue-*.json")) == []
+
     def test_store_side_validation_rejects_and_writes_nothing(self, tmp_path):
         cache = TextCatalogueCache(tmp_path)
         canon = self._canon()

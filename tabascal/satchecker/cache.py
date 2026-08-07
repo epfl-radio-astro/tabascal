@@ -180,6 +180,30 @@ def _has_required_columns(df: pd.DataFrame) -> bool:
     return all(col in df.columns for col in _REQUIRED_COLUMNS)
 
 
+def _tle_lines_parseable(line1, line2) -> bool:
+    """Cheap syntactic check that a TLE pair can be parsed downstream.
+
+    Purely format-level (types, line tags, and the numeric fields the element
+    parser reads) — no orbital computation. This keeps empty strings, truncated
+    lines and otherwise unparseable TLEs out of the cache, so a poisoned
+    envelope can never be stored and then fail on every subsequent run.
+    """
+    try:
+        if not (isinstance(line1, str) and isinstance(line2, str)):
+            return False
+        if not line1.startswith("1 ") or not line2.startswith("2 "):
+            return False
+        int(line1[2:7])
+        int(line2[2:7])
+        int(line1[18:20])                # epoch year
+        day_of_year = float(line1[20:32])  # epoch day
+        float(line2[8:16])               # inclination
+        float(line2[52:63])              # mean motion
+        return 0.0 < day_of_year < 367.0
+    except (ValueError, TypeError):
+        return False
+
+
 class CacheValidationError(ValueError):
     """Raised when a cache envelope is structurally or semantically invalid."""
 
@@ -244,6 +268,18 @@ def _validate_envelope(
         pd.to_numeric(records["NORAD_CAT_ID"])
     except (ValueError, TypeError) as e:
         raise CacheValidationError(f"NORAD_CAT_ID is not numeric: {e}") from e
+    bad_ids = [
+        nid
+        for nid, l1, l2 in zip(
+            records["NORAD_CAT_ID"], records["TLE_LINE1"], records["TLE_LINE2"]
+        )
+        if not _tle_lines_parseable(l1, l2)
+    ]
+    if bad_ids:
+        raise CacheValidationError(
+            f"cache envelope has unparseable TLE lines for NORAD IDs "
+            f"{bad_ids[:5]}{' ...' if len(bad_ids) > 5 else ''}"
+        )
 
     if full_snapshot:
         actual = _required_count(env, "actual_count")
