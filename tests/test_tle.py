@@ -181,6 +181,27 @@ class TestFallback:
             tle.get_tles_by_id([25544], _OBS)
 
 
+class TestDuplicateNoradSelection:
+    """When the catalogue legitimately carries several TLEs for one NORAD ID,
+    the record nearest the canonical epoch must win — independent of row order."""
+
+    # canonical epoch for _OBS (12:30 in the default 2 h bucket) is 13:00 UTC
+    _NEAR = jd(2023, 2, 21, 13, 30)   # 0.5 h from canonical epoch
+    _FAR = jd(2023, 2, 21, 4, 0)      # 9 h from canonical epoch
+
+    @pytest.mark.parametrize("order", ["far_first", "near_first"])
+    def test_nearest_to_canonical_epoch_wins(self, cache_dir, monkeypatch, order):
+        pairs = [(25544, self._FAR), (25544, self._NEAR)]
+        if order == "near_first":
+            pairs = pairs[::-1]
+        counter = {"full": 0}
+        _install_full(monkeypatch, pairs, counter)
+        df = tle.get_tles_by_id([25544], _OBS)
+        expected_l1, _ = make_tle(25544, self._NEAR)
+        assert len(df) == 1
+        assert df["TLE_LINE1"].iloc[0] == expected_l1  # same result either order
+
+
 # ---------------------------------------------------------------------------
 # extra_tle_dir precedence + age policy
 # ---------------------------------------------------------------------------

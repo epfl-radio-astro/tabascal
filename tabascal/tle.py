@@ -228,8 +228,15 @@ def _select_from_extra_dir(
 def _select_from_records(
     records: pd.DataFrame,
     wanted: set[int],
+    reference_epoch_jd: float,
 ) -> dict[int, dict]:
-    """One record per wanted ID from a normalised catalogue/fallback frame."""
+    """One record per wanted ID from a normalised catalogue/fallback frame.
+
+    The service may legitimately carry several distinct TLEs for one NORAD ID.
+    When it does, the record whose line-1 epoch is nearest *reference_epoch_jd*
+    (the canonical catalogue epoch) is chosen, so the selection is deterministic
+    and independent of the service's row order.
+    """
     resolved: dict[int, dict] = {}
     if not len(records):
         return resolved
@@ -237,7 +244,12 @@ def _select_from_records(
     records["NORAD_CAT_ID"] = pd.to_numeric(records["NORAD_CAT_ID"]).astype(int)
     match = records[records["NORAD_CAT_ID"].isin(wanted)]
     for nid, group in match.groupby("NORAD_CAT_ID"):
-        resolved[int(nid)] = group.iloc[0].to_dict()
+        if len(group) > 1:
+            offsets = (group["TLE_LINE1"].map(_tle_epoch_jd) - reference_epoch_jd).abs()
+            best = group.loc[offsets.idxmin()]
+        else:
+            best = group.iloc[0]
+        resolved[int(nid)] = best.to_dict()
     return resolved
 
 
@@ -362,12 +374,16 @@ def get_tles_by_id(
         cache = TextCatalogueCache(tle_cache_dir())
         snapshot = _ensure_snapshot(cache, catalogue_epoch_jd, obs_epoch_jd)
         if snapshot is not None:
-            resolved.update(_select_from_records(snapshot.records, remaining))
+            resolved.update(
+                _select_from_records(snapshot.records, remaining, catalogue_epoch_jd)
+            )
             remaining = wanted - set(resolved)
 
         if remaining:
             cached_extra = cache.get_extra(catalogue_epoch_jd)
-            resolved.update(_select_from_records(cached_extra, remaining))
+            resolved.update(
+                _select_from_records(cached_extra, remaining, catalogue_epoch_jd)
+            )
             remaining = wanted - set(resolved)
 
         if remaining:
@@ -376,7 +392,9 @@ def get_tles_by_id(
             fetched = _fetch_missing_ids(missing, catalogue_epoch_jd)
             if len(fetched):
                 cache.store_extra(catalogue_epoch_jd, fetched)
-                resolved.update(_select_from_records(fetched, remaining))
+                resolved.update(
+                    _select_from_records(fetched, remaining, catalogue_epoch_jd)
+                )
                 remaining = wanted - set(resolved)
 
     still_missing = sorted(wanted - set(resolved))
