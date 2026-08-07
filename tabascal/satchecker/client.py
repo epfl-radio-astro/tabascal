@@ -135,13 +135,32 @@ def _as_object(payload, url: str) -> dict:
 
 
 def _normalise(records: pd.DataFrame) -> pd.DataFrame:
-    """Rename SatChecker fields to the normalised catalogue columns."""
+    """Rename SatChecker fields to the normalised catalogue columns.
+
+    Response rows are validated here so schema problems surface as
+    :class:`SatCheckerError` (the module's error contract) rather than as raw
+    pandas exceptions: satellite IDs must be present and numeric, and both TLE
+    lines must be present.
+    """
     df = records.rename(columns=_FIELD_RENAME)
     for col in CATALOGUE_COLUMNS:
         if col not in df.columns:
             df[col] = None
     df = df[CATALOGUE_COLUMNS].copy()
-    df["NORAD_CAT_ID"] = pd.to_numeric(df["NORAD_CAT_ID"]).astype(int)
+    try:
+        ids = pd.to_numeric(df["NORAD_CAT_ID"])
+    except (ValueError, TypeError) as e:
+        raise SatCheckerError(
+            f"SatChecker response has non-numeric satellite IDs: {e}"
+        ) from e
+    if ids.isnull().any():
+        raise SatCheckerError(
+            "SatChecker response is missing satellite IDs (satellite_id)"
+        )
+    df["NORAD_CAT_ID"] = ids.astype(int)
+    for col in ("TLE_LINE1", "TLE_LINE2"):
+        if df[col].isnull().any():
+            raise SatCheckerError(f"SatChecker response is missing {col} values")
     return df.reset_index(drop=True)
 
 
@@ -184,7 +203,7 @@ def _reject_repeated_rows(df: pd.DataFrame, source: str) -> None:
     JSON pagination serving the same page twice), so it invalidates the download.
     Duplicate NORAD IDs with *different* TLE lines are deliberately tolerated: the
     service may legitimately carry more than one record per object near an epoch,
-    and downstream selection already takes one record per ID.
+    and downstream selection picks the record nearest the canonical epoch per ID.
     """
     dup = df.duplicated(subset=["NORAD_CAT_ID", "TLE_LINE1", "TLE_LINE2"])
     if dup.any():

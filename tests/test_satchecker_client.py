@@ -173,6 +173,24 @@ class TestNearestTle:
         with pytest.raises(SatCheckerError):
             fetch_nearest_tle(25544, _EPOCH)
 
+    def test_missing_satellite_id_becomes_satchecker_error(self, monkeypatch):
+        # A row without satellite_id previously escaped _normalise as a raw
+        # pandas IntCastingNaNError; the module contract is SatCheckerError.
+        import json
+
+        row = {"satellite_name": "MYSTERY", "tle_line1": "1 x", "tle_line2": "2 x"}
+        _route(monkeypatch, lambda url: json.dumps({"orbital_data": [row]}).encode())
+        with pytest.raises(SatCheckerError, match="missing satellite IDs"):
+            fetch_nearest_tle(25544, _EPOCH)
+
+    def test_missing_tle_line_becomes_satchecker_error(self, monkeypatch):
+        import json
+
+        row = {"satellite_id": 25544, "satellite_name": "ISS", "tle_line1": "1 x"}
+        _route(monkeypatch, lambda url: json.dumps({"orbital_data": [row]}).encode())
+        with pytest.raises(SatCheckerError, match="missing TLE_LINE2"):
+            fetch_nearest_tle(25544, _EPOCH)
+
 
 class TestZipParsing:
 
