@@ -361,6 +361,10 @@ def test_truth_metric_capture_roundtrips_printed_output(capsys):
 # ---------------------------------------------------------------------------
 # Recorded references
 #
+# See docs/pipeline_tests.md for what these assert, how to re-record them with
+# --record-refs, and how to read bias_significance (which can rise while the fit
+# improves, because RMSE is in its denominator and N_eff inside its sqrt).
+#
 # The double-precision chi2 references below are CI/x86 values (ubuntu-latest).
 # They were re-recorded when get_ast_fringe_rate gained the declination
 # projection and the (n - 1) curvature term: correcting the astronomical
@@ -629,8 +633,46 @@ gains_configs = [
 all_configs = trajectory_configs + rfi_signal_configs + rfi_vis_configs + ast_signal_configs + ast_vis_configs + gains_configs
 
 
+def _report_measured(case_id: str, precision: str, stdout: str) -> None:
+    """Print the measured chi^2 and opt-point truth metrics for one case.
+
+    Used by ``--record-refs`` to re-record the references after an intentional
+    model change. Prints in the shape the config literals and their arch tables
+    use, so the values can be read straight across. See
+    ``docs/pipeline_tests.md``.
+    """
+    chi2 = re.search(r"Reduced Chi\^2 @ opt params : ([\d.eE+-]+)", stdout)
+    chi2_val = chi2.group(1) if chi2 else "NOT FOUND"
+    metrics = _parse_truth_metrics(stdout, "opt")
+
+    def g(quantity: str, metric: str, fmt: str) -> str:
+        value = metrics.get(quantity, {}).get(metric)
+        return "-" if value is None else format(value, fmt)
+
+    print(f"\n--- measured: {case_id} [{precision}] ---")
+    print(f'    chi2_ref={{"{precision}": {chi2_val}}},')
+    print(
+        "    arch table:  ast NRMSE(noise) {} ast sig {} | rfi NRMSE(noise) {} rfi sig {}"
+        " | gains RMSE {} | chi2 {}".format(
+            g("ast", "NRMSE(noise)", ".3f"),
+            g("ast", "bias_significance", ".1f"),
+            g("rfi", "NRMSE(noise)", ".3f"),
+            g("rfi", "bias_significance", ".1f"),
+            g("gains", "RMSE", ".1e"),
+            f"{float(chi2_val):.3f}" if chi2 else "-",
+        )
+    )
+    for quantity in ("ast", "rfi", "gains"):
+        if quantity in metrics:
+            got = metrics[quantity]
+            shown = {k: got[k] for k in sorted(got) if k in
+                     ("RMSE", "NRMSE(noise)", "NRMSE(signal)", "bias_significance")}
+            print(f"    {quantity}: {shown}")
+
+
 @pytest.mark.parametrize("t_config", all_configs)
 def test_pipeline(
+    request: pytest.FixtureRequest,
     provide_test_data: Path,
     tmp_path: Path,
     t_config: PipelineTestConfig,
@@ -647,7 +689,12 @@ def test_pipeline(
     4. Validates that the output Reduced Chi^2 value matches the expected result
        for that precision
 
+    Under ``--record-refs`` the assertions are skipped and the measured values are
+    printed instead, so an intentional model change can be re-recorded in one run
+    without first having to make the assertions pass. See ``docs/pipeline_tests.md``.
+
     Args:
+        request: Pytest request, used for the case id and the --record-refs flag
         provide_test_data: Fixture providing path to downloaded test data
         tmp_path: Pytest fixture providing temporary directory for test files
         t_config: Tabascal pipeline test config
@@ -658,13 +705,21 @@ def test_pipeline(
             "uses a component that requires double precision; not run under --x64 false"
         )
 
-    chi2_ref = t_config.chi2_ref[precision]
-    assert chi2_ref is not None, (
-        f"No {precision}-precision chi^2 reference recorded for this case"
-    )
+    record = request.config.getoption("--record-refs")
+
+    if not record:
+        chi2_ref = t_config.chi2_ref[precision]
+        assert chi2_ref is not None, (
+            f"No {precision}-precision chi^2 reference recorded for this case"
+        )
 
     returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config, precision)
     assert returncode == 0, f"Tabascal failed: {stderr}"
+
+    if record:
+        _report_measured(request.node.callspec.id, precision, stdout)
+        return
+
     _assert_chi2(stdout, chi2_ref)
 
     metrics_ref = t_config.metrics_ref.get(precision)

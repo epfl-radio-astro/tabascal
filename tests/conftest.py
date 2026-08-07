@@ -25,6 +25,16 @@ def pytest_addoption(parser):
         choices=("true", "false"),
         help="Enable JAX float64 (double precision) in tests. Default: true.",
     )
+    parser.addoption(
+        "--record-refs",
+        action="store_true",
+        default=False,
+        help=(
+            "Pipeline tests: skip the chi^2/truth-metric assertions and print the "
+            "measured values instead, for re-recording the references after an "
+            "intentional model change. See docs/pipeline_tests.md."
+        ),
+    )
 
 
 def pytest_configure(config):
