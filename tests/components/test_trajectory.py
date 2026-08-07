@@ -428,6 +428,41 @@ class TestFetchOrbitalElementsEmpty:
             fetch_standard_orbital_elements(2460000.0, [99999])
 
 
+class TestFetchOrbitalElementsPartial:
+    """A partial resolution proceeds with the reduced satellite set (long-standing
+    behaviour) but must warn loudly, naming the excluded NORAD IDs."""
+
+    def _patch_partial(self, monkeypatch, resolved_ids):
+        from tabascal.components import trajectory as traj_mod
+        from tabascal.tle import _add_parsed_elements
+        from ..tle_helpers import jd, make_catalogue_df
+
+        df = _add_parsed_elements(
+            make_catalogue_df([(nid, jd(2023, 2, 21, 13)) for nid in resolved_ids])
+        )
+        monkeypatch.setattr(traj_mod, "get_tles_by_id", lambda *a, **k: df)
+
+    def test_partial_resolution_warns_and_names_missing_ids(self, monkeypatch):
+        from tabascal.components.trajectory import fetch_orbital_elements
+
+        self._patch_partial(monkeypatch, [25544])
+        with pytest.warns(UserWarning, match=r"NORAD IDs \[99999\]"):
+            elements, epoch_jd, norad_ids, tles = fetch_orbital_elements(
+                2460000.0, [25544, 99999]
+            )
+        assert [int(n) for n in norad_ids] == [25544]  # run proceeds, reduced set
+
+    def test_full_resolution_does_not_warn(self, monkeypatch):
+        import warnings as _warnings
+        from tabascal.components.trajectory import fetch_orbital_elements
+
+        self._patch_partial(monkeypatch, [25544, 38833])
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            _, _, norad_ids, _ = fetch_orbital_elements(2460000.0, [25544, 38833])
+        assert sorted(int(n) for n in norad_ids) == [25544, 38833]
+
+
 # ---------------------------------------------------------------------------
 # SGP4LEONoDragOrbit and SGP4LEOOrbit — merged parametrized class
 # SGP4LEONoDragOrbit: n_params=6 (bstar excluded from learnable params)

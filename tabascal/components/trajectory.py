@@ -18,6 +18,8 @@ import sgp4jax
 from sgp4jax import WGS72 as gravity
 from sgp4jax._sgp4init import sgp4init
 
+import warnings
+
 import jax.numpy as jnp
 from jax import vmap, Array
 import numpy as np
@@ -684,17 +686,34 @@ def _pad_rfi_sources(tles_df):
 
 
 def _require_tles(tles_df, norad_ids) -> None:
-    """Fail with a clear message when no requested TLE could be resolved.
+    """Validate the resolved TLEs against the requested NORAD IDs.
 
-    Without this guard an empty frame surfaces as an opaque pandas ``KeyError``
-    on the element columns.
+    Raises :class:`~tabascal.tle.TLEError` when *nothing* resolved (without this
+    an empty frame surfaces as an opaque pandas ``KeyError`` on the element
+    columns). When only *some* IDs resolved, the run proceeds with the reduced
+    satellite set — matching long-standing behaviour — but a loud warning names
+    the excluded IDs, since a silently absent satellite degrades RFI subtraction
+    with no visible signal.
     """
+    requested = sorted({int(n) for n in np.atleast_1d(np.asarray(norad_ids))})
     if not len(tles_df):
         raise TLEError(
-            f"No TLEs could be resolved for NORAD IDs {list(norad_ids)}. "
+            f"No TLEs could be resolved for NORAD IDs {requested}. "
             "Check that the IDs are valid, and that either the extra TLE "
             "directory covers them or the SatChecker service is reachable."
         )
+    resolved = {int(n) for n in tles_df["NORAD_CAT_ID"]}
+    missing = sorted(set(requested) - resolved)
+    if missing:
+        msg = (
+            f"TLEs could not be resolved for {len(missing)} of {len(requested)} "
+            f"requested satellites: NORAD IDs {missing}. These satellites are "
+            f"EXCLUDED from the RFI model and subtraction quality may degrade. "
+            f"Provide their TLEs via --extra-tle-dir to include them."
+        )
+        warnings.warn(msg, stacklevel=3)
+        banner = "!" * 78
+        print(f"\n{banner}\nWARNING: {msg}\n{banner}\n")
 
 
 def fetch_orbital_elements(
