@@ -11,7 +11,7 @@ Welcome to tabscal documentation
    config
    components
    concepts
-   spacetrack
+   tles
 
 .. toctree::
    :maxdepth: 2

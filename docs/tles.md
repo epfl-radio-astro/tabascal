@@ -1,6 +1,8 @@
-# TLE Retrieval, Caching, and Space-Track Fallback
+# Two-Line Elements (TLEs)
 
-TABASCAL retrieves satellite TLEs from the
+Satellite trajectories in TABASCAL are predicted from Two-Line Element sets
+(TLEs) — the standard published form of a satellite's mean orbital elements at a
+reference epoch. TABASCAL retrieves TLEs from the
 [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service — **no account or
 credentials are required**. This page explains where TLEs come from, how they
 are cached, how to reproduce a run's TLEs exactly, and how to supply TLEs

@@ -49,7 +49,7 @@ Every run also saves the TLEs it actually used to
 via `--extra-tle-dir` reproduces the run's trajectory priors exactly. For the
 full caching behaviour, and for supplying TLEs manually (e.g. from Space-Track)
 when SatChecker cannot provide them, see
-[TLE Retrieval, Caching, and Space-Track Fallback](spacetrack.md).
+[Two-Line Elements (TLEs)](tles.md).
 
 Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
 Space-Track and requires a `spacetrack_login.yaml`. That requirement applies only
