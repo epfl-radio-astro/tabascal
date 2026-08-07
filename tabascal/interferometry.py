@@ -305,7 +305,13 @@ def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float 
     # Radial coupling: the (n - 1) curvature of the celestial sphere
     # (magnitude 1 - cos(rho)) against u cos(d). Second order in the beam width
     # and zero at the pole.
-    radial = (1 - jnp.cos(rho)) * jnp.abs(u * jnp.cos(d))
+    #
+    # 1 - cos(rho) is evaluated as the equivalent 2 sin^2(rho / 2): for the small
+    # rho of a typical beam, cos(rho) is within rounding of 1, so the subtraction
+    # cancels catastrophically (~1e-3 relative error in fp32 at rho = 0.25 deg,
+    # against ~1e-7 for the half-angle form). tabascal defaults to fp32, so the
+    # stable form matters here.
+    radial = 2 * jnp.sin(rho / 2) ** 2 * jnp.abs(u * jnp.cos(d))
 
     # Max over time is the worst-case fringe rate over the observation.
     max_fr = Omega_e * jnp.max(transverse + radial, axis=0) / lam

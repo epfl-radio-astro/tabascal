@@ -424,13 +424,17 @@ class TestGetAstFringeRate:
     # in step; changing either alone breaks these.
 
     @pytest.mark.parametrize("fov_deg", [0.5, 5.0, 20.0])
-    def test_fov_to_eff_diameter_gives_beam_radius_of_half_the_fov(self, fov_deg):
+    def test_fov_to_eff_diameter_gives_beam_radius_of_half_the_fov(
+        self, fov_deg, exact_rtol
+    ):
         D = float(fov_to_eff_diameter(fov_deg, self.FREQ))
         rho = 1.22 * (C / self.FREQ) / D  # beam radius used by get_ast_fringe_rate
-        np.testing.assert_allclose(np.rad2deg(rho), fov_deg / 2, rtol=1e-12)
+        np.testing.assert_allclose(np.rad2deg(rho), fov_deg / 2, rtol=exact_rtol)
 
     @pytest.mark.parametrize("fov_deg", [0.5, 5.0, 20.0])
-    def test_fringe_rate_from_fov_matches_explicit_half_fov_offset(self, fov_deg):
+    def test_fringe_rate_from_fov_matches_explicit_half_fov_offset(
+        self, fov_deg, exact_rtol
+    ):
         # End-to-end: driving get_ast_fringe_rate through fov_to_eff_diameter
         # must equal evaluating the closed form with rho = fov_deg / 2.
         uvw = np.array([[[300.0, 400.0, 700.0]]])
@@ -452,4 +456,4 @@ class TestGetAstFringeRate:
 
         D = float(fov_to_eff_diameter(fov_deg, self.FREQ))
         fr = get_ast_fringe_rate(uvw, dec_deg, self.FREQ, D)
-        np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-10)
+        np.testing.assert_allclose(np.asarray(fr), [expected], rtol=exact_rtol)

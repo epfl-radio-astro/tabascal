@@ -59,3 +59,16 @@ def pytest_collection_modifyitems(config, items):
 def precision(pytestconfig):
     """Session precision string ('double'/'single') from the --x64 flag."""
     return "double" if pytestconfig.getoption("--x64") == "true" else "single"
+
+
+@pytest.fixture(scope="session")
+def exact_rtol(precision):
+    """Relative tolerance for identities that are exact in exact arithmetic.
+
+    Use where the two sides of an assertion differ only by floating-point
+    rounding, so the bound is set by the working precision rather than by any
+    physical approximation. fp32 needs a few epsilon (~1.2e-7) of headroom;
+    both bounds stay far tighter than the O(1) error a genuine mistake (a wrong
+    factor or a dropped term) would produce.
+    """
+    return 1e-12 if precision == "double" else 1e-5
