@@ -1,4 +1,4 @@
-from tabascal.tle import TLEError, get_tles_by_id
+from tabascal.tle import DEFAULT_CATALOGUE_INTERVAL_HOURS, TLEError, get_tles_by_id
 from tabascal.distributed import (
     make_global,
     padded_rfi_count,
@@ -309,7 +309,7 @@ class SGP4LEONoDragOrbit(Component):
 
             extra_tle_dir = getattr(config, "extra_tle_dir", None)
             extra_tle_max_age_days = getattr(config, "extra_tle_max_age_days", None)
-            catalogue_interval_hours = getattr(config, "tle_catalogue_interval_hours", 2.0)
+            catalogue_interval_hours = getattr(config, "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS)
             self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
                 config.times_jd,
                 config.norad_ids,
@@ -489,7 +489,7 @@ class SGP4LEOOrbit(Component):
 
             extra_tle_dir = getattr(config, "extra_tle_dir", None)
             extra_tle_max_age_days = getattr(config, "extra_tle_max_age_days", None)
-            catalogue_interval_hours = getattr(config, "tle_catalogue_interval_hours", 2.0)
+            catalogue_interval_hours = getattr(config, "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS)
             self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
                 config.times_jd,
                 config.norad_ids,
@@ -721,7 +721,7 @@ def fetch_orbital_elements(
     norad_ids,
     extra_tle_dir=None,
     extra_tle_max_age_days=None,
-    catalogue_interval_hours=2.0,
+    catalogue_interval_hours=DEFAULT_CATALOGUE_INTERVAL_HOURS,
 ):
 
     tles_df = get_tles_by_id(
@@ -761,7 +761,7 @@ def fetch_standard_orbital_elements(
     norad_ids,
     extra_tle_dir=None,
     extra_tle_max_age_days=None,
-    catalogue_interval_hours=2.0,
+    catalogue_interval_hours=DEFAULT_CATALOGUE_INTERVAL_HOURS,
 ):
 
     tles_df = get_tles_by_id(

@@ -44,6 +44,7 @@ import pandas as pd
 
 from tabascal import satchecker
 from tabascal.satchecker import (
+    DEFAULT_CATALOGUE_INTERVAL_HOURS,
     CatalogueSnapshot,
     TextCatalogueCache,
     canonical_epoch_jd,
@@ -60,7 +61,8 @@ from tabascal.time import datetime_to_jd, jd_to_datetime
 
 _MU_KM3_S2 = 398600.4418  # Earth gravitational parameter, km^3/s^2
 _THROTTLE_SECONDS = 1.0   # delay between per-satellite fallback requests
-DEFAULT_CATALOGUE_INTERVAL_HOURS = 2.0
+# DEFAULT_CATALOGUE_INTERVAL_HOURS is imported from tabascal.satchecker above —
+# the bucket policy's single source of truth.
 
 # A TLE line-1 epoch is quantised to ~1e-8 day (8 decimal places of a day, ~0.9 ms),
 # and the datetime<->JD round-trip adds only sub-microsecond-day noise (measured

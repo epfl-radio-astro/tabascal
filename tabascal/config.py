@@ -8,7 +8,7 @@ from tabascal.distributed import (
 )
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
-from tabascal.tle import preflight_tle_check
+from tabascal.tle import preflight_tle_check, DEFAULT_CATALOGUE_INTERVAL_HOURS
 from tabascal.interferometry import (
     calculate_fringe_frequency_numpy,
     get_strides_and_idxs,
@@ -128,7 +128,7 @@ class TabConfig:
         self.extra_tle_dir = config["satellites"].get("extra_tle_dir")
         self.extra_tle_max_age_days = config["satellites"].get("extra_tle_max_age_days")
         self.tle_catalogue_interval_hours = config["satellites"].get(
-            "tle_catalogue_interval_hours", 2
+            "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS
         )
 
         preflight_tle_check(
@@ -309,7 +309,7 @@ class TabConfig:
         norad_ids: List[int],
         extra_tle_dir: Optional[str] = None,
         extra_tle_max_age_days: Optional[float] = None,
-        catalogue_interval_hours: float = 2.0,
+        catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
     ):
 
         self.elements, self.epoch_jd, self.norad_ids, self.tles, self.n_rfi_real = (

@@ -309,6 +309,13 @@ class TestResponseShapes:
         with pytest.raises(SatCheckerError):
             client.catalogue_info(_EPOCH)
 
+    def test_catalogue_info_garbage_total_raises_satchecker_error(self, monkeypatch):
+        # The module contract is "errors are SatCheckerError" — a malformed
+        # total_results must not leak a raw ValueError from int().
+        _route(monkeypatch, lambda url: b'{"total_results": "not-a-number"}')
+        with pytest.raises(SatCheckerError, match="invalid total_results"):
+            client.catalogue_info(_EPOCH)
+
     def test_catalogue_info_scalar_raises(self, monkeypatch):
         _route(monkeypatch, lambda url: b"42")
         with pytest.raises(SatCheckerError):

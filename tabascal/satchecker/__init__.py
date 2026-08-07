@@ -24,6 +24,7 @@ from tabascal.satchecker.client import (
     fetch_nearest_tle,
 )
 from tabascal.satchecker.cache import (
+    DEFAULT_CATALOGUE_INTERVAL_HOURS,
     CacheValidationError,
     CatalogueCache,
     CatalogueSnapshot,
@@ -43,6 +44,7 @@ __all__ = [
     "catalogue_total",
     "fetch_full_catalogue",
     "fetch_nearest_tle",
+    "DEFAULT_CATALOGUE_INTERVAL_HOURS",
     "CacheValidationError",
     "CatalogueCache",
     "CatalogueSnapshot",

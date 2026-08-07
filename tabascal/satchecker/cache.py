@@ -44,6 +44,11 @@ from tabascal.time import jd_to_datetime
 
 SCHEMA_VERSION = 1
 
+# Default width (hours) of the fixed UTC catalogue-reuse bucket. The single
+# source of truth — config, orchestration and components import this rather
+# than repeating the literal.
+DEFAULT_CATALOGUE_INTERVAL_HOURS = 2.0
+
 # Columns a normalised TLE record must expose to be a usable cache row.
 _REQUIRED_COLUMNS = ("NORAD_CAT_ID", "TLE_LINE1", "TLE_LINE2")
 
@@ -79,7 +84,9 @@ def _interval_us(interval_hours: float) -> int:
     return us
 
 
-def canonical_epoch_jd(epoch_jd: float, interval_hours: float = 2.0) -> float:
+def canonical_epoch_jd(
+    epoch_jd: float, interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS
+) -> float:
     """Snap *epoch_jd* to the midpoint of its fixed UTC bucket.
 
     Buckets are anchored at the Unix epoch and are *interval_hours* wide. The

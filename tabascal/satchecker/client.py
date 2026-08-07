@@ -35,7 +35,8 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 BASE_URL = "https://satchecker.cps.iau.org/tools"
-USER_AGENT = "tabascal-tle/1.0"
+# Identify ourselves to the SatChecker operators, with a contact URL.
+USER_AGENT = "tabascal-tle/1.0 (+https://github.com/epfl-radio-astro/tabascal)"
 REQUEST_TIMEOUT = 300  # seconds — the full catalogue zip is a few MB
 CATALOGUE_MIN_FRACTION = 0.99  # accept a zip download this complete vs total_results
 
@@ -161,7 +162,14 @@ def catalogue_info(epoch_jd: float) -> tuple[int, Optional[str]]:
     payload = _load_json(_http_get(url, timeout=120), url)
     obj = _as_object(payload, url)
     version = obj.get("version") or obj.get("service_version") or obj.get("api_version")
-    return int(obj.get("total_results", 0)), (str(version) if version else None)
+    try:
+        total = int(obj.get("total_results", 0))
+    except (TypeError, ValueError) as e:
+        raise SatCheckerError(
+            f"SatChecker returned invalid total_results ({url}): "
+            f"{obj.get('total_results')!r}"
+        ) from e
+    return total, (str(version) if version else None)
 
 
 def catalogue_total(epoch_jd: float) -> int:
