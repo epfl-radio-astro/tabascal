@@ -7,6 +7,7 @@ canned bytes routed by URL, so nothing here touches the network.
 import urllib.error
 import urllib.request
 
+import pandas as pd
 import pytest
 
 from tabascal.satchecker import client
@@ -190,6 +191,34 @@ class TestNearestTle:
         _route(monkeypatch, lambda url: json.dumps({"orbital_data": [row]}).encode())
         with pytest.raises(SatCheckerError, match="missing TLE_LINE2"):
             fetch_nearest_tle(25544, _EPOCH)
+
+
+class TestSatelliteIdNormalisation:
+    """Satellite IDs must be finite integers; anything else is a SatCheckerError,
+    never a silent truncation or a raw pandas exception."""
+
+    def _frame(self, sid):
+        return pd.DataFrame([{
+            "satellite_id": sid, "satellite_name": "X",
+            "epoch": "2023-02-21T13:00:00",
+            "tle_line1": "1 25544U", "tle_line2": "2 25544",
+            "data_source": "t", "date_collected": None,
+        }])
+
+    def test_fractional_id_rejected_not_truncated(self):
+        # 25544.5 must not silently become satellite 25544.
+        with pytest.raises(SatCheckerError, match="non-integer satellite IDs"):
+            client._normalise(self._frame(25544.5))
+
+    def test_infinite_id_becomes_satchecker_error(self):
+        # Previously escaped as a raw pandas IntCastingNaNError.
+        with pytest.raises(SatCheckerError, match="non-finite satellite IDs"):
+            client._normalise(self._frame(float("inf")))
+
+    @pytest.mark.parametrize("sid", [25544, "25544", 25544.0])
+    def test_integral_ids_accepted(self, sid):
+        out = client._normalise(self._frame(sid))
+        assert out["NORAD_CAT_ID"].iloc[0] == 25544
 
 
 class TestZipParsing:

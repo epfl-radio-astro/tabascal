@@ -27,6 +27,7 @@ import zipfile
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 
@@ -157,7 +158,19 @@ def _normalise(records: pd.DataFrame) -> pd.DataFrame:
         raise SatCheckerError(
             "SatChecker response is missing satellite IDs (satellite_id)"
         )
-    df["NORAD_CAT_ID"] = ids.astype(int)
+    # Require finite integers before casting: a fractional ID would silently
+    # truncate to a different satellite, and infinities raise inside astype().
+    if not np.isfinite(ids.to_numpy(dtype=float)).all():
+        raise SatCheckerError("SatChecker response has non-finite satellite IDs")
+    if (ids != ids.round()).any():
+        bad = ids[ids != ids.round()].unique()[:5]
+        raise SatCheckerError(
+            f"SatChecker response has non-integer satellite IDs: {list(bad)}"
+        )
+    try:
+        df["NORAD_CAT_ID"] = ids.astype(int)
+    except (ValueError, TypeError, OverflowError) as e:
+        raise SatCheckerError(f"SatChecker satellite IDs are not usable: {e}") from e
     for col in ("TLE_LINE1", "TLE_LINE2"):
         if df[col].isnull().any():
             raise SatCheckerError(f"SatChecker response is missing {col} values")
