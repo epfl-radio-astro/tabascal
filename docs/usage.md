@@ -44,6 +44,13 @@ satellite positions from the [IAU CPS SatChecker](https://satchecker.cps.iau.org
 service. **No account or credentials are required** — the TLEs are fetched
 automatically for the requested NORAD IDs and cached locally for reuse.
 
+Every run also saves the TLEs it actually used to
+`<sim_dir>/results/used_tles_<name>.json`; passing that file's directory back
+via `--extra-tle-dir` reproduces the run's trajectory priors exactly. For the
+full caching behaviour, and for supplying TLEs manually (e.g. from Space-Track)
+when SatChecker cannot provide them, see
+[TLE Retrieval, Caching, and Space-Track Fallback](spacetrack.md).
+
 Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
 Space-Track and requires a `spacetrack_login.yaml`. That requirement applies only
 to the simulation step below, not to running TABASCAL.

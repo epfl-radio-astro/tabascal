@@ -1,6 +1,120 @@
-# Space-Track Orbital Data Column Definitions
+# TLE Retrieval, Caching, and Space-Track Fallback
 
-Complete reference for all columns returned by Space-Track.org GP/GP_History API when retrieving satellite orbital data in JSON/OMM format.
+TABASCAL retrieves satellite TLEs from the
+[IAU CPS SatChecker](https://satchecker.cps.iau.org/) service — **no account or
+credentials are required**. This page explains where TLEs come from, how they
+are cached, how to reproduce a run's TLEs exactly, and how to supply TLEs
+manually (e.g. from Space-Track) when SatChecker cannot provide them. The
+second half of the page is a column reference for the Space-Track/OMM format
+that manually supplied files may use.
+
+## Where TLEs come from
+
+For each requested NORAD ID, sources are consulted **independently per
+satellite**, in this order:
+
+1. **`extra_tle_dir`** — a user-supplied directory of local TLE files
+   (`--extra-tle-dir` on the CLI, or `satellites.extra_tle_dir` in the config).
+   The record whose TLE epoch is closest to the observation is chosen and, if it
+   passes the `extra_tle_max_age_days` policy, it wins outright — no service
+   call is made for that satellite.
+2. **The managed catalogue snapshot** — a full SatChecker catalogue downloaded
+   once per fixed UTC time bucket (default 2 h wide, see
+   `tle_catalogue_interval_hours`) and cached locally.
+3. **Per-satellite fallback** — an individual SatChecker `get-nearest-tle`
+   request for any ID still missing, cached alongside the snapshot.
+
+If a satellite cannot be resolved by any source, the run continues without it —
+with a loud warning naming the excluded NORAD IDs — since a missing RFI source
+degrades subtraction quality. If *no* satellite resolves, the run stops with a
+clear error.
+
+## Caching behaviour by scenario
+
+The managed cache lives in the platform user-cache directory (e.g.
+`~/.cache/tle-cache` on Linux, `~/Library/Caches/tle-cache` on macOS), or
+`TLE_CACHE_DIR` if set. Snapshots are keyed by a *canonical epoch*: the midpoint
+of the fixed UTC bucket containing the observation, so the snapshot used depends
+only on the observation time and bucket width — never on what happens to be
+cached already.
+
+| Scenario | What happens | Later runs |
+|---|---|---|
+| Historical epoch, catalogue available | Full catalogue downloaded once, stored as `catalogue-<stamp>.json` | Served from cache **forever** — deterministic, never refreshed |
+| Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence over the cached fallback records |
+| Satellite missing from an existing snapshot | Per-satellite fallback for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
+| Service unreachable, snapshot cached | Cache hit — run proceeds offline | — |
+| Service unreachable, no snapshot | Run fails fast with a clear error (no satellite-by-satellite retry storm) | — |
+
+Two consequences worth understanding:
+
+- **Determinism wins over freshness.** Once a snapshot exists for a bucket it is
+  never refreshed, even if SatChecker later serves better (closer-epoch) records
+  for that time. This is deliberate: rerunning an analysis gives the same
+  trajectory priors. To force a refresh, delete the relevant
+  `catalogue-<stamp>.json` / `catalogue-<stamp>-extra.json` files from the cache
+  directory (or point `TLE_CACHE_DIR` at a fresh directory) — the next run
+  re-downloads.
+- **The empty-catalogue fallback self-heals.** Because an empty catalogue is
+  never stored, a recent observation first processed with (possibly stale)
+  per-satellite TLEs will automatically pick up the proper catalogue snapshot
+  once SatChecker's ingest catches up — improving the priors on a rerun. If you
+  need the *original* run's priors instead, use the saved run TLEs (next
+  section).
+
+## Reproducing a run's TLEs exactly
+
+Every `tabascal` run writes the TLEs it actually used to
+`<sim_dir>/results/used_tles_<name>.json`, in exactly the format
+`--extra-tle-dir` reads. To reproduce the run's trajectory priors later —
+regardless of cache state or what SatChecker serves by then — copy that file
+into a directory and pass it back:
+
+```bash
+mkdir run_tles && cp path/to/results/used_tles_Custom.json run_tles/
+tabascal run -c config.yaml -s sim_dir --extra-tle-dir run_tles
+```
+
+With the default `extra_tle_max_age_days: null` (unlimited), every satellite
+resolves from the saved file and no service call is made.
+
+## Supplying TLEs manually (Space-Track workaround)
+
+SatChecker's archive does not cover all epochs (very recent observations can be
+beyond its ingest horizon, and old observations may predate its records). For
+any satellite/epoch it cannot serve, supply TLEs yourself via `--extra-tle-dir`:
+
+1. Obtain TLEs near your observation epoch — for historical data, a
+   [Space-Track](https://www.space-track.org/) account gives access to the
+   `gp_history` API, e.g. (after authenticating):
+
+   ```
+   https://www.space-track.org/basicspacedata/query/class/gp_history/
+       NORAD_CAT_ID/25544,20452/EPOCH/2023-02-20--2023-02-23/format/json
+   ```
+
+2. Save the records as one or more `*.json` files in a directory, as a
+   pandas-oriented JSON table (`pandas.DataFrame.to_json(path)`) with at least
+   the columns `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2`. Space-Track's JSON
+   output already uses these column names (the full column set is documented
+   below); orbital-element columns are ignored — TABASCAL parses the elements
+   locally from the two TLE lines.
+
+   ```python
+   import pandas as pd
+   df = pd.DataFrame(records)  # from the Space-Track JSON response
+   df.to_json("my_tles/2023-02-21-gps.json")
+   ```
+
+3. Pass the directory to the run: `--extra-tle-dir my_tles` (or set
+   `satellites.extra_tle_dir`). Set `extra_tle_max_age_days` if you want stale
+   local records rejected in favour of the service.
+
+---
+
+# Space-Track Orbital Data Column Definitions (legacy format reference)
+
+Complete reference for all columns returned by Space-Track.org GP/GP_History API when retrieving satellite orbital data in JSON/OMM format. TABASCAL no longer queries Space-Track directly, but `extra_tle_dir` files may use this format (only `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2` are required).
 
 **Data Source:** Space-Track.org (18th Space Defense Squadron, US Space Force)  
 **Standard:** CCSDS Orbit Data Messages (ODM) Recommended Standard 502.0-B-3  
