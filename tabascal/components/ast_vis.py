@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.tab_tools import pow_spec
-from tabascal.interferometry import fov_to_eff_diameter, get_ast_fringe_rate
+from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
@@ -119,12 +119,14 @@ class FourierTimeAst(Component):
         if self.fov_deg:
             # fov_deg is the full field of view (diameter) out to the first null
             # of the primary beam; the effective diameter makes the beam radius
-            # in get_ast_fringe_rate equal to fov_deg / 2.
+            # in max_ast_fringe_rate equal to fov_deg / 2.
             eff_dish_d = fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs))
         else:
             eff_dish_d = self.dish_d
 
-        self.ast_fr = vmap(get_ast_fringe_rate, (None, None, 0, None), (1))(
+        # One maximum fringe rate per baseline; time and frequency are reduced
+        # inside max_ast_fringe_rate.
+        self.ast_fr = max_ast_fringe_rate(
             self.uvw, self.dec, self.freqs, eff_dish_d
         )
 
@@ -147,7 +149,12 @@ class FourierTimeAst(Component):
 
         sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.p0, k0, self.gamma))
 
-        self.sigma_ast_k = vmap(vmap(sqrt_Pk, (0), (0)), (1), (1))(self.ast_fr)
+        # ast_fr is one knee per baseline (already maximised over time and
+        # frequency), so the same power spectrum applies to every channel.
+        sigma_bl = vmap(sqrt_Pk, (0), (0))(self.ast_fr)  # (n_bl, n_ast_k)
+        self.sigma_ast_k = jnp.broadcast_to(
+            sigma_bl[:, None, :], (self.n_bl, self.n_freq, self.n_ast_k)
+        )
         self.mu_ast_k = jnp.zeros((self.n_bl, self.n_freq, self.n_ast_k), dtype=complex)
 
     def _set_outputs(self):
@@ -312,12 +319,14 @@ class FourierTimeConstFreqAst(Component):
         if self.fov_deg:
             # fov_deg is the full field of view (diameter) out to the first null
             # of the primary beam; the effective diameter makes the beam radius
-            # in get_ast_fringe_rate equal to fov_deg / 2.
+            # in max_ast_fringe_rate equal to fov_deg / 2.
             eff_dish_d = fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs))
         else:
             eff_dish_d = self.dish_d
 
-        self.ast_fr = vmap(get_ast_fringe_rate, (None, None, 0, None), (1))(
+        # One maximum fringe rate per baseline; time and frequency are reduced
+        # inside max_ast_fringe_rate.
+        self.ast_fr = max_ast_fringe_rate(
             self.uvw, self.dec, self.freqs, eff_dish_d
         )
 
@@ -340,7 +349,12 @@ class FourierTimeConstFreqAst(Component):
 
         sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.p0, k0, self.gamma))
 
-        self.sigma_ast_k = vmap(vmap(sqrt_Pk, (0), (0)), (1), (1))(self.ast_fr)
+        # ast_fr is one knee per baseline (already maximised over time and
+        # frequency), so the same power spectrum applies to every channel.
+        sigma_bl = vmap(sqrt_Pk, (0), (0))(self.ast_fr)  # (n_bl, n_ast_k)
+        self.sigma_ast_k = jnp.broadcast_to(
+            sigma_bl[:, None, :], (self.n_bl, self.n_freq, self.n_ast_k)
+        )
         self.mu_ast_k = jnp.zeros((self.n_bl, self.n_freq, self.n_ast_k), dtype=complex)
 
     def _set_outputs(self):
@@ -510,12 +524,14 @@ class FourierTimeFreqAst(Component):
         if self.fov_deg:
             # fov_deg is the full field of view (diameter) out to the first null
             # of the primary beam; the effective diameter makes the beam radius
-            # in get_ast_fringe_rate equal to fov_deg / 2.
+            # in max_ast_fringe_rate equal to fov_deg / 2.
             eff_dish_d = fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs))
         else:
             eff_dish_d = self.dish_d
 
-        self.ast_fr = vmap(get_ast_fringe_rate, (None, None, 0, None), (1))(
+        # One maximum fringe rate per baseline; time and frequency are reduced
+        # inside max_ast_fringe_rate.
+        self.ast_fr = max_ast_fringe_rate(
             self.uvw, self.dec, self.freqs, eff_dish_d
         )
 
@@ -564,7 +580,12 @@ class FourierTimeFreqAst(Component):
 
         sqrt_Pk = lambda k0: jnp.sqrt(pow_spec(self.k_ast, self.p0, k0, self.gamma))
 
-        self.sigma_ast_k = vmap(vmap(sqrt_Pk, (0), (0)), (1), (1))(self.ast_fr)
+        # ast_fr is one knee per baseline (already maximised over time and
+        # frequency), so the same power spectrum applies to every channel.
+        sigma_bl = vmap(sqrt_Pk, (0), (0))(self.ast_fr)  # (n_bl, n_ast_k)
+        self.sigma_ast_k = jnp.broadcast_to(
+            sigma_bl[:, None, :], (self.n_bl, self.n_freq, self.n_ast_k)
+        )
         if self.n_freq > 1:
             self.sigma_ast_k = self.sigma_ast_k.at[:, 1:, :].set(
                 self.sigma_ast_k[:, 1:, :] * 1e-6
@@ -749,16 +770,15 @@ class FourierTimeFreqGPAst(Component):
         if self.fov_deg:
             # fov_deg is the full field of view (diameter) out to the first null;
             # the effective diameter makes the beam radius in
-            # get_ast_fringe_rate equal to fov_deg / 2.
+            # max_ast_fringe_rate equal to fov_deg / 2.
             eff_dish_d = float(fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs)))
         else:
             eff_dish_d = self.dish_d
 
-        # self.ast_fr = vmap(get_ast_fringe_rate, (None, None, 0, None), (1))(
-        #     self.uvw, self.dec, self.freqs, eff_dish_d
-        # ) # Separate Fringe Rate for each baseline and frequency
-        self.ast_fr = get_ast_fringe_rate(
-            self.uvw, self.dec, self.freqs.max(), eff_dish_d
+        # One maximum fringe rate per baseline; time and frequency are reduced
+        # inside max_ast_fringe_rate.
+        self.ast_fr = max_ast_fringe_rate(
+            self.uvw, self.dec, self.freqs, eff_dish_d
         )
 
         self.k0_time = self.ast_fr

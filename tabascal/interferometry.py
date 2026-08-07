@@ -1,6 +1,6 @@
 from tabascal.time import mjd_to_jd, gast_deg
 
-from jax import jit, Array
+from jax import jit, vmap, Array
 import jax.numpy as jnp
 from functools import partial
 import numpy as np
@@ -204,7 +204,7 @@ def fov_to_eff_diameter(fov_deg: float, freq: float) -> Array:
 
     ``fov_deg`` is the full field of view (angular diameter), so the maximum
     source offset from the phase centre is ``fov_deg / 2``. Since
-    :func:`get_ast_fringe_rate` uses a beam radius ``rho = 1.22 lam / D``, the
+    :func:`max_ast_fringe_rate` uses a beam radius ``rho = 1.22 lam / D``, the
     diameter that gives ``rho = fov_deg / 2`` is ``2 * 1.22 lam / fov``.
 
     Parameters
@@ -223,101 +223,128 @@ def fov_to_eff_diameter(fov_deg: float, freq: float) -> Array:
     return 2.44 * C / (freq * jnp.deg2rad(fov_deg))
 
 
-def get_ast_fringe_rate(uvw: Array, dec: float, freq: float = 1.227e9, D: float = 13.5) -> Array:
-    """Maximum astronomical fringe rate for a source within the primary beam.
+def _max_fringe_rate_single(uvw: Array, d: float, freq: float, D: float) -> Array:
+    """Maximum fringe rate over the beam for one UVW sample at one frequency.
 
-    The fringe-stopped visibility phase is phi = (2 pi / lam) b . (s - s0),
-    where s - s0 is the offset of the source direction from the phase centre.
-    Because the sky and the baseline rotate rigidly with respect to each other
-    at the Earth rotation rate Omega, the fringe rate is
-    f = (1 / lam) b . (Omega x (s - s0)). In the UVW frame the celestial pole
-    lies along n_hat = cos(d) v_hat + sin(d) w_hat, and a source at angular
-    offset rho, azimuth chi has s - s0 = (l, m, n - 1) with
-    (l, m, n) = (sin(rho) cos(chi), sin(rho) sin(chi), cos(rho)). Expanding
-    b . (Omega x (s - s0)) and maximising over chi (the transverse l, m terms),
-    over the beam (offset <= rho, monotonic so the maximum is at the beam edge
-    rho), and over the observation gives the exact result
-
-        f_max = (Omega_e / lam) max_t [ sin(rho) sqrt((v sin d - w cos d)^2
-                                                      + (u sin d)^2)
-                                        + (1 - cos(rho)) |u cos d| ]
-
-    The two terms couple to different baseline projections:
-
-    * Transverse term - the offset perpendicular to the line of sight, of
-      magnitude sin(rho), against the baseline component perpendicular to the
-      celestial pole. This is the dominant, first-order contribution.
-    * Radial term - the (n - 1) curvature of the celestial sphere, of magnitude
-      1 - cos(rho), against u cos(d). It is second order in the beam width and
-      vanishes at the pole (d = 90 deg), so it only matters for wide fields away
-      from the pole.
-
-    The previous uv-plane-only expression Omega_e U sin(rho) / lam is the
-    special case d = 90 deg (phase centre at the pole), where the radial term is
-    zero and the projection collapses to sqrt(u^2 + v^2).
-
-    This fringe rate is used as the knee k0 of the astronomical power-spectrum
-    prior (the width of its Gaussian roll-off), so rho is taken to the first
-    null of the primary beam rather than the half-power point: it should be the
-    largest offset that still contributes appreciable flux, and underestimating
-    it suppresses genuine fast-fringe power in the prior.
-
-    Note that the maximisation is taken over the beam azimuth and over time
-    independently, so the result is an upper-bound envelope over every source
-    position in the field, not the fringe rate of any one source. This is what
-    is wanted for a band limit, but it means the value is deliberately
-    conservative.
-
-    Parameters
-    ----------
-    uvw : Array (n_time, n_bl, 3)
-        UVW coordinates of the baselines in metres.
-    dec : float
-        Phase centre declination in degrees.
-    freq : float
-        Observational frequency in Hz.
-    D : float
-        Dish diameter (or effective diameter for a given field of view) in metres.
-
-    Returns
-    -------
-    Array (n_bl,)
-        Maximum astronomical fringe rate on each baseline in Hz.
+    Scalar core of :func:`max_ast_fringe_rate`; see that function for the
+    derivation and for the meaning of the two terms. ``uvw`` is a single
+    ``(3,)`` baseline sample and ``d`` is the declination in *radians*.
     """
     lam = C / freq
-    d = jnp.deg2rad(dec)
-
-    u, v, w = uvw[..., 0], uvw[..., 1], uvw[..., 2]
-
-    # Primary-beam radius: the largest angular offset of a source from the phase
-    # centre. Taken to the first null of a uniformly illuminated aperture,
-    # rho = 1.22 lam / D (the edge of the main lobe). For a configured field of
-    # view, D is the effective diameter chosen so that rho equals half the field
-    # of view (see components/ast_vis.py).
+    # Beam radius: the largest angular offset of a source from the phase centre,
+    # taken to the first null of a uniformly illuminated aperture.
     rho = 1.22 * lam / D
 
-    # Transverse coupling: source offset perpendicular to the line of sight
-    # (direction cosines l, m; magnitude sin(rho)) against the baseline
-    # component perpendicular to the celestial pole.
-    transverse = jnp.sin(rho) * jnp.sqrt(
-        (v * jnp.sin(d) - w * jnp.cos(d)) ** 2 + (u * jnp.sin(d)) ** 2
-    )
-    # Radial coupling: the (n - 1) curvature of the celestial sphere
-    # (magnitude 1 - cos(rho)) against u cos(d). Second order in the beam width
-    # and zero at the pole.
-    #
+    u, v, w = uvw[0], uvw[1], uvw[2]
+
+    # A: baseline component perpendicular to the celestial pole, which the
+    # transverse (l, m) offset couples to.
+    A = jnp.sqrt((v * jnp.sin(d) - w * jnp.cos(d)) ** 2 + (u * jnp.sin(d)) ** 2)
+    # B: the component the radial (n - 1) offset couples to.
+    B = jnp.abs(u * jnp.cos(d))
+
     # 1 - cos(rho) is evaluated as the equivalent 2 sin^2(rho / 2): for the small
     # rho of a typical beam, cos(rho) is within rounding of 1, so the subtraction
     # cancels catastrophically (~1e-3 relative error in fp32 at rho = 0.25 deg,
     # against ~1e-7 for the half-angle form). tabascal defaults to fp32, so the
     # stable form matters here.
-    radial = 2 * jnp.sin(rho / 2) ** 2 * jnp.abs(u * jnp.cos(d))
+    return Omega_e * (A * jnp.sin(rho) + B * 2 * jnp.sin(rho / 2) ** 2) / lam
 
-    # Max over time is the worst-case fringe rate over the observation.
-    max_fr = Omega_e * jnp.max(transverse + radial, axis=0) / lam
 
-    return max_fr
+def max_ast_fringe_rate(
+    uvw: Array, dec: float, freq: float | Array = 1.227e9, D: float = 13.5
+) -> Array:
+    """Maximum astronomical fringe rate of a source within the primary beam.
 
+    The fringe-stopped visibility phase is phi = (2 pi / lam) b . (s - s0), where
+    s - s0 is the offset of the source direction from the phase centre. Because
+    the sky and the baseline rotate rigidly with respect to each other at the
+    Earth rotation rate Omega, the fringe rate is f = (1 / lam) b . (Omega x
+    (s - s0)). In the UVW frame the celestial pole lies along
+    n_hat = cos(d) v_hat + sin(d) w_hat, and a source at angular offset r,
+    azimuth chi has s - s0 = (l, m, n - 1) with
+    (l, m, n) = (sin(r) cos(chi), sin(r) sin(chi), cos(r)). Expanding
+    b . (Omega x (s - s0)) and maximising over chi gives
+
+        f_max(r) = (Omega_e / lam) [ A sin(r) + B (1 - cos(r)) ]
+        A = sqrt((v sin d - w cos d)^2 + (u sin d)^2)
+        B = |u cos d|
+
+    The two terms couple to different baseline projections:
+
+    * Transverse (A) - the offset perpendicular to the line of sight, magnitude
+      sin(r), against the baseline component perpendicular to the celestial
+      pole. This is the dominant, first-order contribution.
+    * Radial (B) - the (n - 1) curvature of the celestial sphere, magnitude
+      1 - cos(r), against u cos(d). Second order in r, and zero at the pole
+      (d = 90 deg), so it only matters for wide fields away from the pole.
+
+    **What is maximised.** The beam position is *always* maximised over: over the
+    azimuth chi (above) and over the offset r within the beam (below). Time and
+    frequency are maximised over only when arrays are supplied for them -- a
+    single UVW sample or a scalar frequency is used as given.
+
+    **Why the beam maximum is at its edge.** Differentiating the expression above,
+
+        df_max/dr = (Omega_e / lam) [ A cos(r) + B sin(r) ]
+
+    Since A, B >= 0, this is non-negative for 0 <= r <= pi/2, so f_max increases
+    out to the beam radius and the maximum over the beam is attained at r = rho.
+    Realistic primary beams satisfy rho <= 90 deg, so this covers every practical
+    case; note that monotonicity is *not* claimed unconditionally, as cos(r) turns
+    negative beyond pi/2.
+
+    The beam radius is taken to the first null, rho = 1.22 lam / D, rather than
+    the half-power point: this rate is used as the knee k0 of the astronomical
+    power-spectrum prior (the width of its Gaussian roll-off), so it should cover
+    the largest offset that still contributes appreciable flux -- underestimating
+    it suppresses genuine fast-fringe power in the prior. Use
+    :func:`fov_to_eff_diameter` to obtain ``D`` from a configured field of view.
+
+    Parameters
+    ----------
+    uvw : Array (3,) or (n_time, n_bl, 3)
+        Either a single baseline sample, or baselines over an observation. No
+        other shape is accepted, so that the axes are never ambiguous.
+    dec : float
+        Phase centre declination in degrees.
+    freq : float or Array (n_freq,)
+        Observational frequency in Hz. An array is maximised over.
+    D : float
+        Dish diameter (or effective diameter for a given field of view) in metres.
+
+    Returns
+    -------
+    Array
+        A scalar for ``(3,)`` input, or one maximum fringe rate per baseline,
+        shape ``(n_bl,)``, for ``(n_time, n_bl, 3)`` input. Time and frequency
+        are reduced away, so no (n_time, n_freq, n_bl) result is ever formed.
+    """
+    uvw = jnp.asarray(uvw)
+    freqs = jnp.atleast_1d(jnp.asarray(freq))
+    d = jnp.deg2rad(dec)
+
+    # Max over frequency for one UVW sample.
+    def over_freq(uvw_sample: Array) -> Array:
+        rates = vmap(_max_fringe_rate_single, (None, None, 0, None))(
+            uvw_sample, d, freqs, D
+        )
+        return jnp.max(rates)
+
+    if uvw.ndim == 1 and uvw.shape[0] == 3:
+        return over_freq(uvw)
+
+    if uvw.ndim == 3 and uvw.shape[-1] == 3:
+        # Max over time and frequency for one baseline, then map over baselines.
+        def over_time_freq(uvw_bl: Array) -> Array:  # (n_time, 3)
+            return jnp.max(vmap(over_freq)(uvw_bl))
+
+        return vmap(over_time_freq, in_axes=1)(uvw)
+
+    raise ValueError(
+        "uvw must have shape (3,) for a single sample or (n_time, n_bl, 3) for "
+        f"an observation, got {uvw.shape}"
+    )
 
 def get_rfi_phase(
     rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array

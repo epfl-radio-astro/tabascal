@@ -15,7 +15,7 @@ from tabascal.interferometry import (
     Rotz_numpy,
     calculate_fringe_frequency_numpy,
     fov_to_eff_diameter,
-    get_ast_fringe_rate,
+    max_ast_fringe_rate,
     get_divisors,
     get_strides_and_idxs,
     itrf_to_uvw_numpy,
@@ -271,7 +271,7 @@ class TestGetStridesAndIdxs:
 
 
 # ---------------------------------------------------------------------------
-# get_ast_fringe_rate
+# max_ast_fringe_rate
 # ---------------------------------------------------------------------------
 
 def _brute_force_fringe_rate(uvw, dec_deg, freq, D, n_chi=4000):
@@ -300,36 +300,110 @@ def _brute_force_fringe_rate(uvw, dec_deg, freq, D, n_chi=4000):
     return np.max(np.abs(f), axis=(0, 2))  # max over time and azimuth -> (n_bl,)
 
 
-class TestGetAstFringeRate:
-    """The exact maximum astronomical fringe rate is
+class TestMaxAstFringeRate:
+    """The exact maximum astronomical fringe rate over the beam is
 
-        f_max = (Omega_e / lam) max_t [ sin(rho) sqrt((v sin d - w cos d)^2
-                                                      + (u sin d)^2)
-                                        + (1 - cos(rho)) |u cos d| ]
+        f_max = (Omega_e / lam) [ A sin(rho) + B (1 - cos(rho)) ]
+        A = sqrt((v sin d - w cos d)^2 + (u sin d)^2)
+        B = |u cos d|
 
-    with the beam radius rho = 1.22 lam / D (first null); the transverse
-    (sin rho) plus radial / (n - 1) curvature (1 - cos rho) couplings. These
-    tests pin it against an independent brute-force
-    maximisation over the sphere, the two limiting declinations, the presence of
-    the radial term, the shape/broadcasting, and the monotonic dependences.
+    with the beam radius rho = 1.22 lam / D (first null): the transverse
+    (sin rho) plus radial / (n - 1) curvature (1 - cos rho) couplings. The beam
+    position is always maximised over; time and frequency are maximised over
+    when arrays are supplied. These tests pin it against an independent
+    brute-force maximisation over the sphere, the two limiting declinations, the
+    presence of the radial term, the accepted input shapes, each reduction axis,
+    and the monotonic dependences.
     """
 
     FREQ = 1.5e9
     D = 13.5
 
-    # --- shape ---
+    # --- accepted shapes ---
 
     def test_output_shape(self):
         rng = np.random.default_rng(0)
         n_time, n_bl = 12, 6
         uvw = rng.normal(scale=1000.0, size=(n_time, n_bl, 3))
-        fr = get_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)
+        fr = max_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)
         assert fr.shape == (n_bl,)
 
     def test_single_baseline_single_time(self):
         uvw = np.array([[[300.0, 400.0, 500.0]]])  # (1, 1, 3)
-        fr = get_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)
+        fr = max_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)
         assert fr.shape == (1,)
+
+    def test_scalar_sample_returns_scalar(self):
+        # A single (3,) UVW sample is still maximised over the beam, and returns
+        # a scalar rather than a length-1 baseline axis.
+        fr = max_ast_fringe_rate(np.array([300.0, 400.0, 700.0]), DEC, self.FREQ, self.D)
+        assert np.asarray(fr).shape == ()
+
+    def test_scalar_sample_matches_observation_of_one(self):
+        sample = np.array([300.0, 400.0, 700.0])
+        scalar = float(max_ast_fringe_rate(sample, DEC, self.FREQ, self.D))
+        obs = float(
+            max_ast_fringe_rate(sample[None, None, :], DEC, self.FREQ, self.D)[0]
+        )
+        np.testing.assert_allclose(scalar, obs, rtol=1e-12)
+
+    @pytest.mark.parametrize("bad", [(5, 3), (3, 5), (2, 2, 2), (4,)])
+    def test_rejects_ambiguous_shapes(self, bad):
+        # Only (3,) and (n_time, n_bl, 3) are accepted, so no axis is ever guessed.
+        with pytest.raises(ValueError, match="uvw must have shape"):
+            max_ast_fringe_rate(np.zeros(bad), DEC, self.FREQ, self.D)
+
+    # --- reductions ---
+
+    def test_max_over_frequency(self):
+        # Supplying a band must give the largest of the per-channel rates.
+        uvw = np.array([[[300.0, 400.0, 700.0]]])
+        freqs = np.array([0.9e9, 1.2e9, 1.5e9])
+        each = [
+            float(max_ast_fringe_rate(uvw, DEC, f, self.D)[0]) for f in freqs
+        ]
+        band = float(max_ast_fringe_rate(uvw, DEC, freqs, self.D)[0])
+        np.testing.assert_allclose(band, max(each), rtol=1e-12)
+
+    def test_lowest_frequency_can_set_the_maximum(self):
+        # The rate is not monotonic in frequency. To leading order the transverse
+        # term is frequency-independent (rho ~ lam cancels the 1/lam), so the
+        # radial term -- which grows linearly with lam -- decides. Differentiating
+        # f(lam) shows the lowest channel wins when B > (2/3) A rho. At dec = 0,
+        # A = |w| and B = |u|, so a baseline with appreciable u satisfies it.
+        uvw = np.array([[[300.0, 400.0, 700.0]]])
+        freqs = np.array([0.9e9, 1.5e9])
+        lo = float(max_ast_fringe_rate(uvw, 0.0, freqs.min(), self.D)[0])
+        hi = float(max_ast_fringe_rate(uvw, 0.0, freqs.max(), self.D)[0])
+        band = float(max_ast_fringe_rate(uvw, 0.0, freqs, self.D)[0])
+
+        assert lo > hi, "expected the lowest channel to dominate at dec = 0"
+        np.testing.assert_allclose(band, lo, rtol=1e-12)
+
+    def test_highest_frequency_sets_the_maximum_at_the_pole(self):
+        # Contrast to the above: at the pole the radial term vanishes (B = 0), so
+        # f = Omega_e A sin(rho) / lam falls with lam and the highest channel wins.
+        uvw = np.array([[[300.0, 400.0, 700.0]]])
+        freqs = np.array([0.9e9, 1.5e9])
+        lo = float(max_ast_fringe_rate(uvw, 90.0, freqs.min(), self.D)[0])
+        hi = float(max_ast_fringe_rate(uvw, 90.0, freqs.max(), self.D)[0])
+        band = float(max_ast_fringe_rate(uvw, 90.0, freqs, self.D)[0])
+
+        assert hi > lo, "expected the highest channel to dominate at the pole"
+        np.testing.assert_allclose(band, hi, rtol=1e-12)
+
+    def test_baselines_are_independent(self):
+        # Each entry of the (n_bl,) result must equal that baseline computed alone,
+        # i.e. the baseline vmap does not mix baselines.
+        rng = np.random.default_rng(3)
+        uvw = rng.normal(scale=800.0, size=(5, 4, 3))
+        freqs = np.array([1.0e9, 1.5e9])
+        together = np.asarray(max_ast_fringe_rate(uvw, DEC, freqs, self.D))
+        for b in range(uvw.shape[1]):
+            alone = np.asarray(
+                max_ast_fringe_rate(uvw[:, b : b + 1, :], DEC, freqs, self.D)
+            )
+            np.testing.assert_allclose(together[b], alone[0], rtol=1e-12)
 
     # --- agreement with independent brute-force maximisation ---
 
@@ -338,7 +412,7 @@ class TestGetAstFringeRate:
     def test_matches_brute_force(self, dec_deg, D):
         rng = np.random.default_rng(1)
         uvw = rng.normal(scale=500.0, size=(8, 5, 3))
-        fr = np.asarray(get_ast_fringe_rate(uvw, dec_deg, self.FREQ, D))
+        fr = np.asarray(max_ast_fringe_rate(uvw, dec_deg, self.FREQ, D))
         ref = _brute_force_fringe_rate(uvw, dec_deg, self.FREQ, D)
         np.testing.assert_allclose(fr, ref, rtol=1e-4)
 
@@ -351,7 +425,7 @@ class TestGetAstFringeRate:
         lam = C / self.FREQ
         rho = 1.22 * lam / self.D
         expected = float(Omega_e) * np.sin(rho) * 500.0 / lam
-        fr = get_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)
+        fr = max_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)
         np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-6)
 
     def test_equator_transverse_plus_radial(self):
@@ -365,7 +439,7 @@ class TestGetAstFringeRate:
             * (np.sin(rho) * 700.0 + (1 - np.cos(rho)) * 300.0)
             / lam
         )
-        fr = get_ast_fringe_rate(uvw, 0.0, self.FREQ, self.D)
+        fr = max_ast_fringe_rate(uvw, 0.0, self.FREQ, self.D)
         np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-6)
 
     def test_radial_term_is_present_off_pole(self):
@@ -375,13 +449,13 @@ class TestGetAstFringeRate:
         lam = C / self.FREQ
         rho = 1.22 * lam / 0.5  # wide beam
         transverse_only = float(Omega_e) * np.sin(rho) * abs(100.0) / lam
-        fr = float(get_ast_fringe_rate(uvw, 0.0, self.FREQ, 0.5)[0])
+        fr = float(max_ast_fringe_rate(uvw, 0.0, self.FREQ, 0.5)[0])
         assert fr > transverse_only
 
     def test_declination_dependence_is_real(self):
         uvw = np.array([[[300.0, 400.0, 700.0]]])
-        fr_pole = float(get_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)[0])
-        fr_equ = float(get_ast_fringe_rate(uvw, 0.0, self.FREQ, self.D)[0])
+        fr_pole = float(max_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)[0])
+        fr_equ = float(max_ast_fringe_rate(uvw, 0.0, self.FREQ, self.D)[0])
         assert not np.isclose(fr_pole, fr_equ, rtol=1e-3)
 
     # --- time reduction ---
@@ -397,22 +471,22 @@ class TestGetAstFringeRate:
         lam = C / self.FREQ
         rho = 1.22 * lam / self.D
         expected = float(Omega_e) * np.sin(rho) * 500.0 / lam
-        fr = get_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)
+        fr = max_ast_fringe_rate(uvw, 90.0, self.FREQ, self.D)
         np.testing.assert_allclose(np.asarray(fr), [expected], rtol=1e-6)
 
     # --- monotonicity / scaling ---
 
     def test_proportional_to_baseline_length(self):
         uvw = np.array([[[300.0, 400.0, 500.0]]])
-        fr1 = float(get_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)[0])
-        fr2 = float(get_ast_fringe_rate(2 * uvw, DEC, self.FREQ, self.D)[0])
+        fr1 = float(max_ast_fringe_rate(uvw, DEC, self.FREQ, self.D)[0])
+        fr2 = float(max_ast_fringe_rate(2 * uvw, DEC, self.FREQ, self.D)[0])
         np.testing.assert_allclose(fr2, 2 * fr1, rtol=1e-6)
 
     def test_increases_with_beam_width(self):
         # A smaller dish -> wider beam -> larger sky displacement -> higher rate.
         uvw = np.array([[[300.0, 400.0, 500.0]]])
-        fr_wide = float(get_ast_fringe_rate(uvw, DEC, self.FREQ, 5.0)[0])
-        fr_narrow = float(get_ast_fringe_rate(uvw, DEC, self.FREQ, 50.0)[0])
+        fr_wide = float(max_ast_fringe_rate(uvw, DEC, self.FREQ, 5.0)[0])
+        fr_narrow = float(max_ast_fringe_rate(uvw, DEC, self.FREQ, 50.0)[0])
         assert fr_wide > fr_narrow > 0.0
 
     # --- fov_deg contract ---
@@ -420,7 +494,7 @@ class TestGetAstFringeRate:
     # These lock the user-facing meaning of the `fov_deg` config parameter: it
     # is the *full* field of view, so the maximum source offset used by the
     # fringe rate (and hence the power-spectrum knee k0) is fov_deg / 2.  The
-    # 1.22 in get_ast_fringe_rate and the 2.44 in fov_to_eff_diameter must stay
+    # 1.22 in max_ast_fringe_rate and the 2.44 in fov_to_eff_diameter must stay
     # in step; changing either alone breaks these.
 
     @pytest.mark.parametrize("fov_deg", [0.5, 5.0, 20.0])
@@ -428,14 +502,14 @@ class TestGetAstFringeRate:
         self, fov_deg, exact_rtol
     ):
         D = float(fov_to_eff_diameter(fov_deg, self.FREQ))
-        rho = 1.22 * (C / self.FREQ) / D  # beam radius used by get_ast_fringe_rate
+        rho = 1.22 * (C / self.FREQ) / D  # beam radius used by max_ast_fringe_rate
         np.testing.assert_allclose(np.rad2deg(rho), fov_deg / 2, rtol=exact_rtol)
 
     @pytest.mark.parametrize("fov_deg", [0.5, 5.0, 20.0])
     def test_fringe_rate_from_fov_matches_explicit_half_fov_offset(
         self, fov_deg, exact_rtol
     ):
-        # End-to-end: driving get_ast_fringe_rate through fov_to_eff_diameter
+        # End-to-end: driving max_ast_fringe_rate through fov_to_eff_diameter
         # must equal evaluating the closed form with rho = fov_deg / 2.
         uvw = np.array([[[300.0, 400.0, 700.0]]])
         dec_deg = -30.0
@@ -455,5 +529,5 @@ class TestGetAstFringeRate:
         )
 
         D = float(fov_to_eff_diameter(fov_deg, self.FREQ))
-        fr = get_ast_fringe_rate(uvw, dec_deg, self.FREQ, D)
+        fr = max_ast_fringe_rate(uvw, dec_deg, self.FREQ, D)
         np.testing.assert_allclose(np.asarray(fr), [expected], rtol=exact_rtol)

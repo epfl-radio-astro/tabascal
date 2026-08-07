@@ -366,7 +366,7 @@ def test_truth_metric_capture_roundtrips_printed_output(capsys):
 # improves, because RMSE is in its denominator and N_eff inside its sqrt).
 #
 # The double-precision chi2 references below are CI/x86 values (ubuntu-latest).
-# They were re-recorded when get_ast_fringe_rate gained the declination
+# They were re-recorded when max_ast_fringe_rate gained the declination
 # projection and the (n - 1) curvature term: correcting the astronomical
 # power-spectrum knee k0 moved chi2 from ~0.898 to ~0.915 (closer to 1) and
 # improved the astronomical residual, ast NRMSE(noise) 0.293 -> 0.251, i.e. a
