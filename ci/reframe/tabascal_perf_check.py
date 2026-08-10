@@ -1,6 +1,7 @@
 """ReFrame performance regression checks for the tabascal pipeline."""
 
 import os
+import re
 from pathlib import Path
 
 import reframe as rfm
@@ -11,9 +12,29 @@ _src_root = str(Path(__file__).resolve().parents[2])
 # Printed by the pipeline once the optimizer has converged.
 _CHI2_PATTERN = r"Reduced Chi\^2 @ opt params : [\d.eE+-]+"
 
-# Printed by _run_tabascal_impl.tabascal_subtraction when more than one global
-# JAX device is visible, i.e. when the RFI axis is sharded across devices.
-_SHARDING_PATTERN = r"Sharding RFI sources over (?P<n>\d+) devices"
+# Printed by _run_tabascal_impl.tabascal_subtraction just above the device table,
+# depending on whether more than one global JAX device is visible, i.e. whether
+# the RFI axis is sharded across devices.
+_SHARDING_PATTERN = r"^Sharding RFI sources over (?P<n>\d+) devices"
+_SINGLE_DEVICE_PATTERN = r"^Running on single device:"
+
+
+def _device_row_pattern(kind=None):
+    """Match one row of the device table printed by _run_tabascal_impl.print_devices.
+
+    The table looks like::
+
+        Device  Kind                Process
+        ------  ------------------  -------
+        cuda:0  NVIDIA GH200 120GB  0
+
+    With ``kind`` given, only rows whose Kind column contains it are matched.
+    The trailing integer is the process index, which is what keeps this from also
+    matching the memory-usage table (its last two columns are fixed-point numbers
+    or "n/a", never a bare integer preceded by whitespace).
+    """
+    kind_re = rf"\S[^\n]*{re.escape(kind)}[^\n]*?" if kind else r"\S.*?"
+    return rf"^cuda:\d+\s+(?P<kind>{kind_re})\s+\d+\s*$"
 
 
 class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
@@ -31,6 +52,13 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     valid_systems = ["daint:gpu", "generic:default"]
     valid_prog_environs = ["builtin"]
     time_limit = "30m"
+
+    # The reference numbers below only mean anything on the node type they were
+    # measured on, so sanity requires the run to have used exactly this many GPUs
+    # of exactly this kind; anything else fails rather than being compared against
+    # timings it cannot be compared against.
+    _expected_gpus = 1
+    _expected_device_kind = "GH200"
 
     # Keyed by (variant, precision); metrics without an entry are reported but
     # not checked by ReFrame.
@@ -56,6 +84,36 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     def gpu_setup_cmds(self):
         """Commands selecting the GPUs the run may use, prepended to prerun_cmds."""
         return []
+
+    def assert_devices(self):
+        """Assert the pipeline ran on exactly the expected GPUs.
+
+        Both the total row count of the device table and the count of rows naming
+        the expected device kind have to match, which is what rules out a node
+        mixing device kinds.
+        """
+        n_expected = self._expected_gpus
+        kind = self._expected_device_kind
+
+        n_devices = sn.count(
+            sn.extractall(_device_row_pattern(), self.stdout, "kind")
+        )
+        n_kind = sn.count(
+            sn.extractall(_device_row_pattern(kind), self.stdout, "kind")
+        )
+
+        return [
+            sn.assert_eq(
+                n_devices,
+                n_expected,
+                msg=f"pipeline listed {{0}} devices, expected {n_expected}",
+            ),
+            sn.assert_eq(
+                n_kind,
+                n_expected,
+                msg=f"only {{0}} of the devices are {kind}, expected {n_expected}",
+            ),
+        ]
 
     @run_before("performance")
     def set_reference(self):
@@ -187,7 +245,21 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
 
     @sanity_function
     def validate(self):
-        return sn.assert_found(_CHI2_PATTERN, self.stdout)
+        # No nvidia-smi cross-check here (unlike the multi-GPU test): this test
+        # pins one GPU of a node that has several, so the device table the
+        # pipeline prints -- one GH200 row, under the single-device header -- is
+        # the only thing that says what the run actually used.
+        return sn.all(
+            [
+                sn.assert_found(
+                    _SINGLE_DEVICE_PATTERN,
+                    self.stdout,
+                    msg="pipeline did not report running on a single device",
+                ),
+                *self.assert_devices(),
+                sn.assert_found(_CHI2_PATTERN, self.stdout),
+            ]
+        )
 
     # Only the first GPU device is considered (extractsingle takes the first
     # match), which is the only one this test runs on.
@@ -207,6 +279,8 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
 
     descr = "tabascal pipeline performance (all GPUs)"
     gpu_mode = "all"
+
+    _expected_gpus = 4
 
     _reference_by_variant: dict = {
         ("RiemannFFI", "double"): {
@@ -233,22 +307,26 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
 
     @sanity_function
     def validate(self):
+        n_expected = self._expected_gpus
+
         n_avail = sn.extractsingle(
             r"^Available GPUs:\s+(?P<n>\d+)\s*$", self.stdout, "n", int
         )
         n_sharded = sn.extractsingle(_SHARDING_PATTERN, self.stdout, "n", int)
+
         return sn.all(
             [
-                sn.assert_ge(
+                sn.assert_eq(
                     n_avail,
-                    2,
-                    msg="expected a node with at least 2 GPUs, found {0}",
+                    n_expected,
+                    msg=f"expected a node with exactly {n_expected} GPUs, found {{0}}",
                 ),
                 sn.assert_eq(
                     n_sharded,
-                    n_avail,
-                    msg="pipeline sharded over {0} devices, but {1} GPUs are available",
+                    n_expected,
+                    msg=f"pipeline sharded over {{0}} devices, expected {n_expected}",
                 ),
+                *self.assert_devices(),
                 sn.assert_found(_CHI2_PATTERN, self.stdout),
             ]
         )
