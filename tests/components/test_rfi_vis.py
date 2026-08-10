@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 
+from ri_kernels.jax_api import RFIVisOp
 from tabascal.interferometry import get_divisors
 from .conftest import active_precision, make_constants
 

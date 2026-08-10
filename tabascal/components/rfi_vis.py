@@ -2,7 +2,7 @@ import jax.numpy as jnp
 
 from tabascal.interferometry import calculate_rfi_vis_fine, calculate_rfi_vis_variable
 from tabascal.components import Component
-from tabascal.components.ffi.rfi_vis_op import RFIVisOp
+from ri_kernels.jax_api import RFIVisOp
 
 
 class RiemannVisCalculation(Component):

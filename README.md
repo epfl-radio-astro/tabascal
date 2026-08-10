@@ -30,14 +30,9 @@ pixi install
 # Development (includes pytest, sphinx, etc.)
 pixi install -e dev
 
-# NVIDIA GPU — installs CPU-only; the CUDA FFI kernel must be built separately
+# NVIDIA GPU
 pixi install -e cuda12
-pixi run -e cuda12 build-ffi-cuda     # see "Build the FFI shared libraries"
 ```
-
-`pixi install` builds only the CPU FFI library; the GPU kernel needs the extra
-`build-ffi-cuda` step (explained under "Build the FFI shared libraries"). Verify
-any environment with `pixi run -e <env> check-install`.
 
 ## Open a shell in the environment
 
@@ -51,25 +46,16 @@ pixi shell -e dev   # dev environment
 pixi is recommended, but tabascal can also be installed with plain `pip` or into
 a conda/mamba environment.
 
+tabascal is pure Python — no compiler or CUDA toolkit is needed to install it.
+
 Prerequisites:
-- **Python 3.10–3.13.** The build pins `jax==0.6.0` for the minimum FFI ABI, and
-  that jaxlib has no wheels for Python 3.14.
-- **A C++20-capable compiler** (GCC ≥10, Clang ≥10, or Apple Clang ≥13). The
-  FFI kernels are compiled from source during install (CMake and ninja are
-  fetched automatically). GPU builds additionally need the CUDA 12 or 13
-  toolkit (`nvcc`) or the ROCm/HIP toolchain on `PATH`.
+- **Python 3.10–3.13.** 3.14 has not been validated against the pinned
+  jax/jaxlib versions.
 - **`python-casacore`** is required at runtime but is *not* a pip dependency.
   It is pip-installable on **linux-x86_64**; on **macOS and linux-aarch64**,
   installing via conda is strongly recommended because `python-casacore` is
   difficult to build from source on those platforms (see the conda/mamba
   section).
-
-`TABASCAL_CUDA` / `TABASCAL_ROCM` select which FFI kernel is compiled
-(`libtabascal_cuda.so` / `libtabascal_hip.so`); with neither set, only the CPU
-library (`libtabascal.so`) is built. GPU kernels target Ampere + Hopper (CUDA
-`sm_80`, `sm_90`) and MI200/MI300 + RDNA2/3 (HIP `gfx90a`, `gfx942`, `gfx1030`,
-`gfx1100`) by default — override `CMAKE_CUDA_ARCHITECTURES` /
-`CMAKE_HIP_ARCHITECTURES` (e.g. via `CMAKE_ARGS`) to target other GPUs.
 
 ## pip
 
@@ -80,62 +66,52 @@ Run these from a clone of the repository (`pip install .`), or replace `.` with
 # CPU
 pip install .
 
-# NVIDIA GPU — requires the CUDA toolkit (nvcc) on PATH.
-TABASCAL_CUDA=1 pip install ".[cuda12]"     # or ".[cuda13]" for CUDA 13
-
-# AMD GPU (ROCm) — first install a ROCm-compatible jax/jaxlib by following the
-# JAX install guide: https://docs.jax.dev/en/latest/installation.html
-# then build the ROCm kernels (requires the ROCm/HIP toolchain on PATH):
-TABASCAL_ROCM=1 pip install .
+# NVIDIA GPU (Linux only)
+pip install ".[cuda12]"     # or ".[cuda13]" for CUDA 13
 ```
 
 ## conda / mamba
 
-Use conda to provide `python-casacore` (and a C++ compiler), then pip-install
-tabascal into the activated environment:
+Use conda to provide `python-casacore`, then pip-install tabascal into the
+activated environment:
 
 ```bash
-mamba create -n tabascal -c conda-forge "python>=3.10,<3.14" python-casacore cxx-compiler
+mamba create -n tabascal -c conda-forge "python>=3.10,<3.14" python-casacore
 mamba activate tabascal
 
 # CPU
 pip install .
 
-# NVIDIA GPU — also bring the CUDA toolchain into the environment:
-mamba install -c conda-forge cuda-nvcc cuda-cudart-dev
-TABASCAL_CUDA=1 pip install ".[cuda12]"
+# NVIDIA GPU (Linux only)
+pip install ".[cuda12]"
 ```
 
 On macOS and linux-aarch64 this conda route is the recommended way to install tabascal.
 
-# Build the FFI shared libraries
+# RFI-visibility kernels
 
-The `RiemannVisTimeFreqCalculationFFI` component requires a compiled shared
-library: `libtabascal.so` on CPU, or `libtabascal_cuda.so` for NVIDIA GPUs. The
-kernel is built for both single and double precision and runs in whichever the
-config selects. `pixi install` builds the **CPU** library automatically.
-
-The **GPU** kernel is *not* built by a plain `pixi install`: pixi/uv build the
-editable `tabascal` package once and share that single (CPU) build across every
-environment, so the cuda12 env inherits the CPU-only library. Build the CUDA
-kernel explicitly after installing:
+The `RiemannVisTimeFreqCalculationFFI` and `RiemannVisTimeFreqVariableFFI`
+components call compiled kernels that ship in the separate
+[`ri_kernels`](https://github.com/epfl-radio-astro/ri_kernels) package, a plain
+runtime dependency of tabascal — nothing is built from this repository. The CPU
+kernel comes with `ri_kernels` itself; the GPU kernel ships as an add-on wheel
+(`ri_kernels_cuda12` / `ri_kernels_cuda13`, Linux only) pulled in by tabascal's
+`cuda12` / `cuda13` extras, or installable on its own:
 
 ```bash
-pixi install -e cuda12                # base env (gets the shared CPU build)
-pixi run -e cuda12 build-ffi-cuda     # force the cuda12-specific CUDA build
+pip install "ri_kernels[cuda12]"
 ```
 
-`build-ffi-cuda` (`pixi reinstall -e cuda12 tabascal`) rebuilds `tabascal` in the
-cuda12 environment, where `TABASCAL_CUDA=1` is active, producing
-`libtabascal_cuda.so`. Use the same task to rebuild after editing the C++/CUDA
-kernels (`pixi run -e dev build-ffi` for the CPU library).
+The kernels are compiled for both single and double precision and run in
+whichever the config selects. Enable them in the config with:
 
-Verify an environment is wired correctly — the FFI libraries load and the
-CPU/GPU kernels actually execute — with:
-
-```bash
-pixi run -e cuda12 check-install      # or -e default / -e dev
+```yaml
+components:
+  - rfi_vis: RiemannVisTimeFreqCalculationFFI
 ```
+
+Note: AMD GPUs using ROCm are supported, but may require the "ri-kernels" package
+to be compiled from source.
 
 # Precision
 
