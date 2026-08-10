@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from jax import random, Array
 from jax.tree_util import tree_map
 
+from tabascal.distributed import is_process_0
 from tabascal.opt import SVIRunResult
 from tabascal.timing import measure_runtime
 from tabascal.write import write_results_ms, write_results_xds
@@ -460,7 +461,7 @@ def run_custom_svi(
         losses = []
         window = max(max_iter // 10, 1)
         init_loss = None
-        pbar = trange(max_iter)
+        pbar = trange(max_iter, disable=not is_process_0())
         for i in pbar:
             params, opt_state, loss = _map_step(
                 prob_model, optimizer, params, opt_state, state, constants, obs_data
@@ -514,6 +515,9 @@ def init_predict(
     tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict, state=None, constants=None, truth=None
 ):
 
+    # Sharding invariant: 1 sample -> numpyro calls the model without vmap, so the
+    # shard_map-wrapped RFI-vis components (incl. the FFI kernel, which has no
+    # batching rule) work under device sharding. Keep this single-sample.
     pred = Predictive(
         model=prob_model,
         posterior_samples=tree_map(lambda x: x[None, :], init_params),
@@ -561,6 +565,10 @@ def run_opt(
     )
     vi_params = vi_results.params
     # Strip _auto_loc suffix to get raw param names for Predictive
+    # Sharding invariant: with exactly 1 sample, numpyro's soft_vmap calls the model
+    # directly (no vmap), which is what lets the shard_map-wrapped RFI-vis components
+    # (incl. the FFI kernel, which has no batching rule) run under device sharding.
+    # Do not switch this to multi-sample parallel prediction while sharding is on.
     raw_params = {k.removesuffix("_auto_loc"): v for k, v in vi_params.items()}
     vi_pred = Predictive(
         model=prob_model,
