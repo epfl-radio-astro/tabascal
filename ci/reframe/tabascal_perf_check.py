@@ -208,16 +208,12 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     descr = "tabascal pipeline performance (all GPUs)"
     gpu_mode = "all"
 
-    # No references yet: the multi-GPU timings still have to be measured on the
-    # target node. ReFrame only checks metrics that have a reference entry, so
-    # the run reports the numbers without failing. Fill in per (variant,
-    # precision) in the same format as TabascalPerfCheck once measured.
     _reference_by_variant: dict = {
         ("RiemannFFI", "double"): {
             "daint:gpu": {
-                "total_runtime": (35.4, -0.25, 0.15, "s"),
-                "optimizer_runtime": (22.1, -0.20, 0.15, "s"),
-                "memory_usage": (1.252, -0.15, 0.15, "GB"),
+                "total_runtime": (27.4, -0.25, 0.15, "s"),
+                "optimizer_runtime": (11.9, -0.20, 0.15, "s"),
+                "memory_usage": (0.477, -0.15, 0.15, "GB"),
             },
         },
     }
