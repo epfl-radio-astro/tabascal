@@ -13,6 +13,12 @@ of erroring on the components' precision gate. (The FFI RFI-vis kernel is built
 for both complex64 and complex128, so it is exercised in either precision.)
 """
 
+import os
+
+# Test are written for single device by default.
+# Must be set before loading any other modules.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+
 import jax
 import pytest
 

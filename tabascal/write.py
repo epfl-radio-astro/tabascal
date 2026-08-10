@@ -1,3 +1,4 @@
+from tabascal.distributed import is_process_0
 from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_to_table
@@ -11,6 +12,11 @@ import dask
 
 @measure_runtime
 def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
+
+    # In multi-process runs only process 0 writes; the arrays involved are replicated
+    # so no other rank needs to participate.
+    if not is_process_0():
+        return
 
     xds_ms = xds_from_ms(ms_path)[0]
     xds_tab = xr.open_zarr(results_zarr_path)
@@ -91,10 +97,16 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
 
 
-@measure_runtime 
+@measure_runtime
 def write_results_xds(
     vi_pred: dict, tab_config, file_path: str, overwrite: bool = True
 ):
+
+    # Only process 0 writes. Everything written below is replicated on every
+    # process; per-RFI arrays (rfi_A/rfi_phase) are sharded and must not be
+    # materialized here without a process_allgather.
+    if not is_process_0():
+        return None
 
     # print(vi_pred.keys())
     # print(vi_pred["rfi_vis"].shape)

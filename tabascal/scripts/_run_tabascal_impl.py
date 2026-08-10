@@ -16,10 +16,21 @@ from jax import random
 from tabascal.timing import measure_runtime, print_timings, enable_timings
 from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
 from tabascal.config import load_config, TabConfig, Model
+from tabascal.distributed import (
+    barrier,
+    is_process_0,
+    make_global,
+    replicated_sharding,
+    shard_pytree,
+    sharding_enabled,
+    suppress_worker_stdout,
+)
 from tabascal.imports import import_components
 from tabascal.write import write_results_xds
 from tabascal.tle import TLEError
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
+
+import jax
 
 
 class _Tee:
@@ -59,6 +70,42 @@ def assert_precision_supported(config):
         )
 
 
+def _print_table(headers, rows):
+    """Print ``rows`` under ``headers`` as a left-aligned, column-padded table."""
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i])
+        for i in range(len(headers))
+    ]
+
+    def _fmt(cells):
+        # rstrip so the last column contributes no trailing whitespace.
+        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells)).rstrip()
+
+    # Columns are joined by a 2-space gap, so the rule spans the padded widths plus
+    # those gaps -- not sum(w + 1), which falls short by one char per extra column.
+    print("=" * (sum(widths) + 2 * (len(widths) - 1)))
+    print(_fmt(headers))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print(_fmt(row))
+
+
+def print_devices():
+    """Print a table of every *global* JAX device the run is spread over.
+
+    Global rather than local: under multi-process only process 0 prints, and the
+    model is sharded over the full mesh (:func:`rfi_mesh` spans ``jax.devices()``),
+    so a local listing would understate what the job is actually using. The process
+    column is what distinguishes the one-GPU-per-process layout from a
+    single-process multi-GPU one at a glance.
+    """
+    rows = [
+        (str(d), d.device_kind, str(d.process_index))
+        for d in jax.devices()
+    ]
+    _print_table(("Device", "Kind", "Process"), rows)
+
+
 def print_memory_usage():
     """Print a table of Peak memory usage across all local JAX devices.
 
@@ -68,7 +115,6 @@ def print_memory_usage():
     """
     devices = jax.local_devices()
 
-    headers = ("Device", "Peak (GB)", "Limit (GB)")
     rows = []
     for d in devices:
         stats = d.memory_stats() or {}
@@ -78,21 +124,10 @@ def print_memory_usage():
         limit_gb = f"{limit / 1e9:.3f}" if limit is not None else "n/a"
         rows.append((str(d), peak_gb, limit_gb))
 
-    widths = [
-        max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i])
-        for i in range(len(headers))
-    ]
-
-    def _fmt(cells):
-        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells))
-
     print()
     print("Memory usage:")
-    print("".join("=" * (w + 1) for w in widths))
-    print(_fmt(headers))
-    print("  ".join("-" * w for w in widths))
-    for row in rows:
-        print(_fmt(row))
+    _print_table(("Device", "Peak (GB)", "Limit (GB)"), rows)
+
 
 def build_model(config, ms_path):
     assert_precision_supported(config)
@@ -228,8 +263,26 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
 
         _print_run_header(paths.model_name, paths.f_name, start_time)
 
+        if sharding_enabled():
+            print(f"Sharding RFI sources over {jax.device_count()} devices:")
+        else:
+            print("Running on single device:")
+
+        print_devices()
+        print()
+
         tab_config, model = build_model(config, ms_path)
         prob_model = model.prob_model
+
+        if sharding_enabled():
+            # Split every leading-RFI-axis array across the device mesh and replicate
+            # the rest. _map_step takes all of these as traced jit arguments, so GSPMD
+            # propagates the shardings through the whole optimization (gradients and
+            # optimizer state included) from here on. (vis_obs/flags/noise were already
+            # globalized in TabConfig, before Model captured them in closures.)
+            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
+            model.state = shard_pytree(model.state, tab_config.n_rfi)
+            model.constants = shard_pytree(model.constants, tab_config.n_rfi)
 
         _print_model_summary(tab_config, model, start_time)
 
@@ -237,6 +290,10 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         # reporting and all plotting. Missing quantities come back as NaN so consumers
         # can index unconditionally; reporting skips whatever is unavailable.
         truth = load_truth(tab_config)
+        if sharding_enabled():
+            # Truth arrays are compared eagerly against globally-sharded predictions;
+            # process-local device arrays cannot mix with global ones in multi-process.
+            truth = {k: make_global(v, replicated_sharding()) for k, v in truth.items()}
         if not has_truth(truth):
             print("\nNo tab-sim truth available - skipping truth-based RMSE reporting.")
 
@@ -246,14 +303,21 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")
 
-        if config["plots"]["init"]:
+        # Plotting from precomputed (replicated) predictions is safe on process 0
+        # alone. plot_prior is different: it draws fresh model samples, and under
+        # multi-process any model evaluation is a collective -- running it on one
+        # rank would deadlock -- so it is skipped there rather than gated.
+        if config["plots"]["init"] and is_process_0():
             from tabascal.plot import plot_init
             plot_init(tab_config, init_pred, truth, paths.model_name, paths.plot_dir)
 
         key, subkey = random.split(key)
         if config["plots"]["prior"]:
-            from tabascal.plot import plot_prior
-            plot_prior(tab_config, prob_model, truth, paths.model_name, subkey, paths.plot_dir, state=model.state, constants=model.constants)
+            if jax.process_count() > 1:
+                print("Skipping prior plots: not supported in multi-process runs.")
+            else:
+                from tabascal.plot import plot_prior
+                plot_prior(tab_config, prob_model, truth, paths.model_name, subkey, paths.plot_dir, state=model.state, constants=model.constants)
 
         key, *subkeys = random.split(key, 3)
         if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
@@ -262,11 +326,11 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
                 state=model.state, constants=model.constants, truth=truth,
             )
 
-            if config["plots"]["opt"]:
+            if config["plots"]["opt"] and is_process_0():
                 from tabascal.plot import plot_opt
                 plot_opt(tab_config, vi_pred, truth, paths.model_name, paths.plot_dir)
 
-            if config["plots"]["losses"]:
+            if config["plots"]["losses"] and is_process_0():
                 from tabascal.plot import plot_losses
                 plot_losses(losses, paths.model_name, paths.plot_dir)
 
@@ -286,8 +350,13 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         shutil.copy(paths.log_path, paths.plot_dir)
         os.remove(paths.log_path)
 
-    with open(os.path.join(paths.plot_dir, f"tab_config_{paths.run_id}.yaml"), "w") as fp:
-        yaml.dump(config, fp)
+    if is_process_0():
+        with open(os.path.join(paths.plot_dir, f"tab_config_{paths.run_id}.yaml"), "w") as fp:
+            yaml.dump(config, fp)
+
+    # Workers must not tear down the distributed runtime while process 0 is still
+    # writing results / running its final collectives.
+    barrier("tabascal-run-end")
 
 
 def set_precision(config):
@@ -327,20 +396,24 @@ def run(args):
 
     set_precision(config)
 
+    # Workers run the identical program (multi-process collectives require it) but
+    # only process 0 talks: stdout, the log file, plots and result writes are all
+    # rank-0-gated. Errors still reach stderr on every process.
     try:
-        tabascal_subtraction(
-            config,
-            args.sim_dir,
-            args.ms_path,
-            args.suffix,
-            extra_tle_dir=args.extra_tle_dir,
-            log=getattr(args, "log", True),
-        )
+        with suppress_worker_stdout():
+            tabascal_subtraction(
+                config,
+                args.sim_dir,
+                args.ms_path,
+                args.suffix,
+                extra_tle_dir=args.extra_tle_dir,
+                log=getattr(args, "log", True) and is_process_0(),
+            )
     except (TLEError, TruthError) as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print_memory_usage()
-
-    if args.timings:
-        print_timings()
+    if is_process_0():
+        print_memory_usage()
+        if args.timings:
+            print_timings()

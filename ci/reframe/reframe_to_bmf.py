@@ -15,6 +15,12 @@ def reframe_to_bmf(report_path: str, jax_version: str | None = None) -> dict:
                 continue
             variant = tc.get("variant", tc["name"])
             precision = tc.get("precision")
+            # Set by the checks in tabascal_perf_check.py. Only non-"single"
+            # modes add a name segment, so the single-GPU series keep the
+            # benchmark names they have been tracked under so far -- without it
+            # the multi-GPU cases would collide with them and overwrite them in
+            # this dict.
+            gpu_mode = tc.get("gpu_mode")
             for key, values in tc["perfvalues"].items():
                 # key format: "system:partition:metric_name"
                 metric = key.rsplit(":", 1)[-1]
@@ -23,6 +29,8 @@ def reframe_to_bmf(report_path: str, jax_version: str | None = None) -> dict:
                 parts = [variant]
                 if precision:
                     parts.append(precision)
+                if gpu_mode and gpu_mode != "single":
+                    parts.append(f"gpus-{gpu_mode}")
                 if jax_version:
                     parts.append(f"jax-{jax_version}")
                 parts.append(metric)
