@@ -72,7 +72,7 @@ rfi:
 # Satellite path parameters
 ############################
 satellites:
-  norad_ids_path: null  # Optional - Path to text file containing NORAD IDs of astellits to include. File should have one NORAD ID per line
+  norad_ids_path: null  # Optional - Path to a text file of NORAD IDs to include, one per line ('#' comments and blank lines ignored). Takes precedence over norad_ids; the -np/--norad-path CLI flag takes precedence over both
   norad_ids: []         # Optional - NORAD IDs of satellites to include. TLEs are fetched from IAU CPS SatChecker (no credentials required). Every listed ID must resolve to an acceptable TLE or the run stops before subtraction
   extra_tle_dir: null   # Optional - Extra directory of local TLE files searched (per NORAD ID) before the managed cache and SatChecker
   extra_tle_max_age_days: null      # Optional - Max |TLE epoch - observation epoch| (days) to accept an extra_tle_dir TLE. null = unlimited (keeps exact used_tles replay working); 0 = exact-epoch only; negative is an error

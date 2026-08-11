@@ -23,7 +23,12 @@ def _run_cmd(args):
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main():
+def build_parser():
+    """Build the CLI parser.
+
+    Separate from :func:`main` so the argument surface can be tested — every
+    command shown in the documentation must parse — without running anything.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(description="tabascal CLI")
@@ -34,7 +39,17 @@ def main():
     run_parser.add_argument("-c", "--config", required=True, help="Path to the config file.")
     run_parser.add_argument("-s", "--sim_dir", help="Path to the directory of the simulation.")
     run_parser.add_argument("-ms", "--ms_path", help="Path to Measurement Set.")
-    run_parser.add_argument("-np", "--norad_path", help="Path to text file containing NORAD IDs to include.")
+    run_parser.add_argument(
+        "-np", "--norad-path",
+        dest="norad_path",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Text file of NORAD IDs to include, one per line (blank lines and "
+            "'#' comments ignored). Overrides satellites.norad_ids_path and "
+            "satellites.norad_ids in the config file."
+        ),
+    )
     run_parser.add_argument("-sx", "--suffix", default="", help="Image name suffix.")
     run_parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
     run_parser.add_argument(
@@ -49,10 +64,19 @@ def main():
         dest="extra_tle_dir",
         default=None,
         metavar="DIR",
-        help="Extra directory searched for cached TLEs before the managed cache and SatChecker.",
+        help=(
+            "Directory of local TLE files searched, per NORAD ID, before the "
+            "managed cache and SatChecker. (To relocate the managed cache "
+            "instead, set the TLE_CACHE_DIR environment variable — that is "
+            "storage, not an additional TLE source.)"
+        ),
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     if args.command == "run":
         _run_cmd(args)

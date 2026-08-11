@@ -171,7 +171,7 @@ class _RunPaths:
     used_tles_path: str
 
 
-def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
+def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir, norad_path=None):
     """Resolve the run's directory layout and write derived paths into ``config``.
 
     Creates the plot/results/memory directories and records the sim, zarr and MS
@@ -209,6 +209,10 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
 
     if extra_tle_dir:
         config["satellites"]["extra_tle_dir"] = extra_tle_dir
+    if norad_path:
+        # The CLI flag wins over both config keys; TabConfig's normalizer reads
+        # norad_ids_path in preference to norad_ids.
+        config["satellites"]["norad_ids_path"] = norad_path
 
     return _RunPaths(
         run_id=run_id,
@@ -255,8 +259,10 @@ def _print_model_summary(tab_config, model, start_time):
 
 
 @measure_runtime
-def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir=None, log=True):
-    paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir)
+def tabascal_subtraction(
+    config, sim_dir, ms_path=None, suffix="", extra_tle_dir=None, norad_path=None, log=True
+):
+    paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir, norad_path)
     ms_path = paths.ms_path
 
     with _stdout_logger(paths.log_path, log):
@@ -430,6 +436,7 @@ def run(args):
                 args.ms_path,
                 args.suffix,
                 extra_tle_dir=args.extra_tle_dir,
+                norad_path=getattr(args, "norad_path", None),
                 log=getattr(args, "log", True) and is_process_0(),
             )
     except (TLEError, TruthError) as e:
