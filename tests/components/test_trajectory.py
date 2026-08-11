@@ -447,10 +447,11 @@ class TestFetchOrbitalElementsPartial:
 
         self._patch_partial(monkeypatch, [25544])
         with pytest.warns(UserWarning, match=r"NORAD IDs \[99999\]"):
-            elements, epoch_jd, norad_ids, tles = fetch_orbital_elements(
+            elements, epoch_jd, norad_ids, tles, n_rfi_real = fetch_orbital_elements(
                 2460000.0, [25544, 99999]
             )
         assert [int(n) for n in norad_ids] == [25544]  # run proceeds, reduced set
+        assert n_rfi_real == 1
 
     def test_full_resolution_does_not_warn(self, monkeypatch):
         import warnings as _warnings
@@ -459,8 +460,11 @@ class TestFetchOrbitalElementsPartial:
         self._patch_partial(monkeypatch, [25544, 38833])
         with _warnings.catch_warnings():
             _warnings.simplefilter("error")
-            _, _, norad_ids, _ = fetch_orbital_elements(2460000.0, [25544, 38833])
+            _, _, norad_ids, _, n_rfi_real = fetch_orbital_elements(
+                2460000.0, [25544, 38833]
+            )
         assert sorted(int(n) for n in norad_ids) == [25544, 38833]
+        assert n_rfi_real == 2
 
 
 # ---------------------------------------------------------------------------

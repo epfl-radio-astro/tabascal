@@ -339,6 +339,31 @@ def get_tles_by_id(
     extra_tle_max_age_days: Optional[float] = None,
     catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
 ) -> pd.DataFrame:
+    """Resolve TLEs while serializing cache/network access across processes.
+
+    Process 0 completes the operation first, including any cache writes. Other
+    processes then resolve the same request from the populated cache. In a normal
+    single-process run :func:`rank0_first` is a no-op.
+    """
+    from tabascal.distributed import rank0_first
+
+    with rank0_first("tle-fetch"):
+        return _get_tles_by_id(
+            norad_ids,
+            times_jd,
+            extra_tle_dir=extra_tle_dir,
+            extra_tle_max_age_days=extra_tle_max_age_days,
+            catalogue_interval_hours=catalogue_interval_hours,
+        )
+
+
+def _get_tles_by_id(
+    norad_ids: list[int],
+    times_jd,
+    extra_tle_dir: Optional[str] = None,
+    extra_tle_max_age_days: Optional[float] = None,
+    catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
+) -> pd.DataFrame:
     """Return TLE records + locally parsed elements for *norad_ids*.
 
     Source precedence is resolved independently per NORAD ID: ``extra_tle_dir``

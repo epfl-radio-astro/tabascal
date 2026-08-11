@@ -6,6 +6,7 @@ SatChecker transport mocked and the managed cache pointed at a temp directory.
 """
 
 import json
+from contextlib import contextmanager
 from datetime import datetime
 
 import pytest
@@ -85,6 +86,21 @@ def _install_nearest_raise(monkeypatch):
 # ---------------------------------------------------------------------------
 
 class TestManagedCatalogue:
+
+    def test_public_fetch_uses_distributed_rank0_gate(self, monkeypatch):
+        from tabascal import distributed
+
+        calls = []
+
+        @contextmanager
+        def gate(name):
+            calls.append(("enter", name))
+            yield
+            calls.append(("exit", name))
+
+        monkeypatch.setattr(distributed, "rank0_first", gate)
+        assert tle.get_tles_by_id([], _OBS).empty
+        assert calls == [("enter", "tle-fetch"), ("exit", "tle-fetch")]
 
     def test_fetch_then_parse_elements(self, cache_dir, monkeypatch):
         counter = {"full": 0}

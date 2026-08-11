@@ -279,10 +279,16 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         # Persist the real TLEs this run resolved so it can be reproduced later.
         # Only process 0 writes the shared result path in distributed runs.
         if is_process_0():
+            n_rfi_real = getattr(tab_config, "n_rfi_real", None)
+            used_ids = getattr(tab_config, "norad_ids", None)
+            used_tles = getattr(tab_config, "tles", None)
+            if n_rfi_real is not None:
+                used_ids = used_ids[:n_rfi_real] if used_ids is not None else None
+                used_tles = used_tles[:n_rfi_real] if used_tles is not None else None
             saved_tles = save_tles_for_reuse(
                 paths.used_tles_path,
-                getattr(tab_config, "norad_ids", None),
-                getattr(tab_config, "tles", None),
+                used_ids,
+                used_tles,
             )
             if saved_tles:
                 print(f"TLEs used saved to : {saved_tles}")
