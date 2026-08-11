@@ -27,7 +27,7 @@ requires-python = ">=3.10"
 dependencies = [
     "dask",
     "dask-ms",
-    "jax>=0.6.0,<0.10",
+    "jax>=0.6.0",
     "matplotlib",
     "numpy",
     "numpyro",
@@ -107,7 +107,7 @@ perf-test      = { cmd = "reframe -C ci/reframe/settings.py -c ci/reframe/tabasc
 casacore        = "*"
 dask            = "*"
 dask-ms         = "*"
-jax             = ">=0.6.0,<0.10.0"
+jax             = ">=0.6.0"
 matplotlib      = "*"
 numpy           = "*"
 numpyro         = "*"
