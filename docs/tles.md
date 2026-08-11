@@ -114,11 +114,19 @@ replay workflow below keeps working no matter how old the saved run is.
 ## Which endpoint answered changes the TLE age
 
 SatChecker's two endpoints do **not** return the same element set for the same
-satellite at the same epoch. `get-nearest-tle` resolves against the full archive;
-`tles-at-epoch` serves a per-epoch catalogue snapshot that can be built from
-materially older elements. Measured over the 32 GNSS satellites of the bundled
-performance benchmark, at observation epoch 2023-02-21T08:03 UTC with both
-endpoints queried at the same canonical bucket (09:00 UTC):
+satellite at the same epoch, because they answer two different questions:
+
+| Endpoint | Selects |
+|---|---|
+| `tles-at-epoch` (bulk) | the **newest record at or before** the requested epoch, within a 14-day lookback |
+| `get-nearest-tle` (per-satellite) | the record with the **smallest \|Δt\|**, in either direction |
+
+This is deliberate upstream — the bulk endpoint exists to answer "what elements
+were current at time *T*", which look-ahead would defeat — but it is not what a
+trajectory prior wants, which is "what best describes the orbit at time *T*".
+Measured over the 32 GNSS satellites of the bundled performance benchmark, at
+observation epoch 2023-02-21T08:03 UTC with both endpoints queried at the same
+canonical bucket (09:00 UTC):
 
 | Path | Median age | Max age | Matched the nearest available record |
 |---|---:|---:|---:|
@@ -133,7 +141,23 @@ all 32.
 
 This is a property of the service, not of the bucket policy: both figures above
 were taken at the *same* canonical epoch, so bucketing (≤ 1 h) cannot account for
-a multi-day gap. It is under investigation upstream; see
+a multi-day gap. Every one of the 22 objects where the two endpoints disagreed
+had its nearest record *after* the requested epoch, exactly as the one-sided
+selection rule predicts.
+
+**The penalty is bounded**, even though the ratio is not. A bulk record's age is
+at most one gap between consecutive records for that object, and at most 14 days
+absolutely — beyond the lookback the object is dropped from the response rather
+than returned stale. Against the nearest available record the expected cost is
+about 2× in both the median and the worst case, which is what the table shows
+(0.595/0.280 = 2.13, 2.160/1.063 = 2.03). The 45× outlier is one target that
+landed just before a new record, not a separate effect. Well-tracked LEO objects
+should fare *better* than the GNSS objects measured here, since their higher
+update cadence means shorter gaps.
+
+The selection rule is undocumented upstream; a documentation request is filed as
+[iausathub/satchecker#247](https://github.com/iausathub/satchecker/issues/247).
+Full analysis, including the source references it was derived from, is in
 `investigations/satchecker-endpoint-freshness.md` in the repository.
 
 **What it means for a run.** TABASCAL fetches the bulk catalogue first and falls
