@@ -3,17 +3,41 @@
 Everything here is synthetic and offline: TLE lines are derived from a real ISS
 template (so they parse through :func:`tabascal.tle.parse_tle_elements`), with
 only the NORAD ID and epoch varied. No network access is involved.
+
+:func:`block_network` enforces that. Import it into a test module and it becomes
+an autouse fixture there, so a test that forgets to stub the transport fails
+loudly instead of quietly querying the live SatChecker service (which would make
+the suite slow, flaky, and dependent on what a third party happens to serve).
 """
 
 from __future__ import annotations
 
 import io
+import urllib.request
 import zipfile
 from datetime import datetime
 
 import pandas as pd
+import pytest
 
 from tabascal.time import datetime_to_jd, jd_to_datetime
+
+
+@pytest.fixture(autouse=True)
+def block_network(monkeypatch):
+    """Fail any test that reaches the network instead of stubbing the transport.
+
+    Tests that need to exercise the real ``_http_get`` wrapping patch
+    ``urlopen`` themselves; a later ``monkeypatch.setattr`` simply replaces this
+    one, so those keep working.
+    """
+    def forbidden(*args, **kwargs):
+        raise AssertionError(
+            "this test attempted a live network request; stub "
+            "tabascal.satchecker.client._http_get (or urlopen) instead"
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", forbidden)
 
 # Real public ISS TLE (epoch 2008-264); used only as a fixed-width template.
 _L1 = "1 25544U 98067A   08264.51782528 -.00002182  00000-0 -11606-4 0  2927"

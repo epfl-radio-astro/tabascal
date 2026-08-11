@@ -10,21 +10,31 @@ import pandas as pd
 import pytest
 
 from tabascal.satchecker.cache import (
+    PROVISIONAL,
+    SCHEMA_VERSION,
+    STABLE,
     CatalogueSnapshot,
     TextCatalogueCache,
     canonical_epoch_jd,
     canonical_stamp,
+    catalogue_state,
     read_legacy_tle_records,
 )
 
-from .tle_helpers import jd, make_catalogue_df, write_legacy_tle_file
+from .tle_helpers import (
+    block_network,  # noqa: F401  autouse fixture: no live SatChecker access
+    jd,
+    make_catalogue_df,
+    write_legacy_tle_file,
+)
 
 
 def _snapshot_env(epoch_jd, pairs, **overrides):
     """A well-formed snapshot envelope dict, with fields overridable for tests."""
     records = make_catalogue_df(pairs).to_dict(orient="records")
     env = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
+        "state": STABLE,
         "requested_epoch_jd": epoch_jd,
         "catalogue_epoch_jd": epoch_jd,
         "fetched_at": "2023-02-21T13:00:00Z",
@@ -383,7 +393,8 @@ class TestTextCatalogueCache:
         cache.store_snapshot(self._snapshot(epoch, [(25544, jd(2023, 2, 21, 13))]))
         path = tmp_path / f"catalogue-{canonical_stamp(canonical_epoch_jd(epoch))}.json"
         env = json.loads(path.read_text())
-        assert env["schema_version"] == 1
+        assert env["schema_version"] == SCHEMA_VERSION
+        assert env["state"] == STABLE
         assert isinstance(env["records"], list)  # row-oriented, not pandas columns
         assert env["records"][0]["NORAD_CAT_ID"] == 25544
         assert env["fetched_at"]  # provenance stamped on write
@@ -396,14 +407,14 @@ class TestTextCatalogueCache:
         cache = TextCatalogueCache(tmp_path)
         epoch = jd(2023, 2, 21, 12, 30)
         path = tmp_path / f"catalogue-{canonical_stamp(canonical_epoch_jd(epoch))}.json"
-        path.write_text('{"schema_version": 1, "records": [')  # truncated JSON
+        path.write_text('{"schema_version": 2, "records": [')  # truncated JSON
         assert cache.get_snapshot(canonical_epoch_jd(epoch)) is None
 
     def test_envelope_without_records_is_ignored(self, tmp_path):
         cache = TextCatalogueCache(tmp_path)
         epoch = jd(2023, 2, 21, 12, 30)
         path = tmp_path / f"catalogue-{canonical_stamp(canonical_epoch_jd(epoch))}.json"
-        path.write_text('{"schema_version": 1, "records": []}')
+        path.write_text('{"schema_version": 2, "state": "stable", "records": []}')
         assert cache.get_snapshot(canonical_epoch_jd(epoch)) is None
 
     def test_store_is_atomic_no_tmp_left_behind(self, tmp_path):
