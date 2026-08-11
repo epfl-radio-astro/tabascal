@@ -92,7 +92,7 @@ On macOS and linux-aarch64 this conda route is the recommended way to install ta
 
 The `RiemannVisTimeFreqCalculationFFI` and `RiemannVisTimeFreqVariableFFI`
 components call compiled kernels that ship in the separate
-[`ri_kernels`](https://github.com/epfl-radio-astro/ri_kernels) package, a plain
+[`ri-kernels`](https://github.com/epfl-radio-astro/ri-kernels) package, a plain
 runtime dependency of tabascal — nothing is built from this repository. The CPU
 kernel comes with `ri_kernels` itself; the GPU kernel ships as an add-on wheel
 (`ri_kernels_cuda12` / `ri_kernels_cuda13`, Linux only) pulled in by tabascal's
