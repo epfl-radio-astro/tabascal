@@ -44,11 +44,18 @@ satellite positions from the [IAU CPS SatChecker](https://satchecker.cps.iau.org
 service. **No account or credentials are required** — the TLEs are fetched
 automatically for the requested NORAD IDs and cached locally for reuse.
 
+Every configured satellite must resolve to an acceptable TLE. TABASCAL checks
+this during preflight — before the visibilities are read — and stops with an
+error naming each failing satellite rather than quietly subtracting an
+incomplete RFI model. The remedies are to supply the missing TLEs via
+`--extra-tle-dir`, to change `satellites.remote_tle_max_age_days` deliberately,
+or to remove the satellite from `satellites.norad_ids`.
+
 Every run also saves the TLEs it actually used to
 `<sim_dir>/results/used_tles_<name>.json`; passing that file's directory back
 via `--extra-tle-dir` reproduces the run's trajectory priors exactly. For the
-full caching behaviour, and for supplying TLEs manually (e.g. from Space-Track)
-when SatChecker cannot provide them, see
+full caching behaviour, the age policies, and for supplying TLEs manually (e.g.
+from Space-Track) when SatChecker cannot provide them, see
 [Two-Line Elements (TLEs)](tles.md).
 
 Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
@@ -101,7 +108,7 @@ sim-vis -h
 RFI subtraction (TABASCAL) runs are also defined by YAML configuration files and can be run in much the same way. Given the simulation dataset created in the previous step, we can run TABASCAL on it using
 
 ```bash
-tabascal -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
+tabascal run -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
 ```
 
 The output of a successful run with TABASCAL will show lines like
@@ -118,11 +125,12 @@ The results of the TABASCAL run are saved in a `.zarr` file and then transferred
 If you have a Measurement Set from another source you can run TABASCAL on that directly with
 
 ```bash
-tabascal -c path/to/config.yaml -ms path/to/ms/file.ms
+tabascal run -c path/to/config.yaml -ms path/to/ms/file.ms
 ```
 
-The `tabascal` script also has a help context whcih can be accessed with
+The `tabascal` script also has a help context which can be accessed with
 
 ```bash
-tabascal -h
+tabascal -h        # top-level: lists the subcommands
+tabascal run -h    # every option of the run subcommand
 ```

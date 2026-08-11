@@ -10,6 +10,22 @@ manually (e.g. from Space-Track) when SatChecker cannot provide them. The
 second half of the page is a column reference for the Space-Track/OMM format
 that manually supplied files may use.
 
+```{note}
+Two of the defaults on this page are **provisional client safeguards, not
+scientific results**, and they mean different things:
+
+* `remote_tle_max_age_days: 3` is an emergency ceiling on how old a TLE the
+  *service* hands you may be. It is not a claim that a three-day-old TLE is
+  accurate enough for your observation. Its calibrated, observation-specific
+  replacement is [issue #101](https://github.com/epfl-radio-astro/tabascal/issues/101).
+* `tle_catalogue_settle_days: 45` is a *caching* boundary: how long to wait
+  before trusting that SatChecker's catalogue for an epoch has stopped filling.
+  It is an observed defensive policy, not a SatChecker API guarantee, and it says
+  nothing about whether a 45-day-old TLE is usable.
+
+Expect both to change.
+```
+
 ## Where TLEs come from
 
 For each requested NORAD ID, sources are consulted **independently per
@@ -26,56 +42,137 @@ satellite**, in this order:
 3. **Per-satellite fallback** — an individual SatChecker `get-nearest-tle`
    request for any ID still missing, cached alongside the snapshot.
 
-If a satellite cannot be resolved by any source, the run continues without it —
-with a loud warning naming the excluded NORAD IDs — since a missing RFI source
-degrades subtraction quality. If *no* satellite resolves, the run stops with a
-clear error.
+## Every configured satellite must resolve
+
+A run **stops before subtraction** if any configured NORAD ID has no acceptable
+TLE. The check happens during preflight, before the visibilities are read, and
+the error names every failing satellite, how close the best available record
+was, and the age limit that rejected it:
+
+```text
+Error: TLEs could not be resolved for 1 of 3 configured satellites at observation
+epoch 2026-08-11T02:14:00 UTC (catalogue bucket 20260811T030000Z):
+  25544: best candidate is 31.204 d from the observation (epoch
+         2026-07-10T21:20:35 UTC, from SatChecker per-satellite, provider
+         celestrak) — rejected by remote_tle_max_age_days=3
+```
+
+There are three remedies, and each of them is an explicit, recorded decision:
+
+* supply an acceptable TLE for that satellite in a local directory and pass
+  `--extra-tle-dir <dir>` (see *Supplying TLEs manually*, below);
+* deliberately change `satellites.remote_tle_max_age_days` (`null` removes the
+  ceiling entirely — an expert opt-out, not a default); or
+* remove that NORAD ID from `satellites.norad_ids`.
+
+TABASCAL never silently shrinks the satellite model. A satellite quietly dropped
+from the RFI model degrades subtraction with no signal in the output, and editing
+the configured list instead makes the changed scientific model visible and
+reproducible.
+
+## How old a TLE may be
+
+Two different age settings exist and they are not interchangeable:
+
+| Setting | Applies to | Default |
+|---|---|---|
+| `extra_tle_max_age_days` | Your own files in `extra_tle_dir` | `null` (unlimited) |
+| `remote_tle_max_age_days` | SatChecker records and the managed cache | `3` days |
+
+The remote ceiling exists because a silent stale fallback is unsafe. For an
+observation on 2026-08-11 SatChecker's empty bulk response fell through to
+per-satellite lookups and returned records around 31 days old; propagating those
+alongside fresh ones gave roughly 9,663 km of separation for the ISS and 4 km for
+a sampled NAVSTAR object. TLE age has strongly orbit-dependent consequences, but
+a month-old LEO TLE must not be accepted without the user knowing.
+
+**Three days is a provisional emergency ceiling, not a claim of three-day
+positional accuracy.** It is well below the seven days an earlier proposal used
+and inside the range the catalogue investigation actually evaluated. The
+calibrated, observation-specific replacement — which may reject records younger
+than three days, or accept older ones where justified — is
+[issue #101](https://github.com/epfl-radio-astro/tabascal/issues/101); the
+emergency ceiling remains a separate backstop underneath it.
+
+Whatever the ceiling, every accepted remote record's provenance is logged:
+
+```text
+TLE remote records     : 2 accepted (limit 3 d)
+  20452: managed catalogue [celestrak] epoch 2023-02-21T13:04:12 UTC, offset +0.0224 d, age 0.0224 d
+  38833: managed catalogue [celestrak] epoch 2023-02-21T09:51:02 UTC, offset -0.1104 d, age 0.1104 d
+```
+
+The epoch is parsed locally from TLE line 1 — a provider's own epoch field is
+never trusted — and compared against the actual mean observation epoch. Large
+satellite lists get a grouped summary instead, with the oldest records still
+named; set `TABASCAL_TLE_LOG_DETAIL=1` for the full per-satellite listing.
+
+Your own `extra_tle_dir` files are exempt from the remote ceiling, so the exact
+replay workflow below keeps working no matter how old the saved run is.
 
 ## Caching behaviour by scenario
 
 The managed cache lives in the platform user-cache directory (e.g.
 `~/.cache/tle-cache` on Linux, `~/Library/Caches/tle-cache` on macOS), or
-`TLE_CACHE_DIR` if set. Snapshots are keyed by a *canonical epoch*: the midpoint
-of the fixed UTC bucket containing the observation, so the snapshot used depends
-only on the observation time and bucket width — never on what happens to be
-cached already.
+`TLE_CACHE_DIR` if set. (`TLE_CACHE_DIR` relocates that *storage*; it is not an
+additional TLE source, which is what `--extra-tle-dir` is.) Snapshots are keyed
+by a *canonical epoch*: the midpoint of the fixed UTC bucket containing the
+observation, so the snapshot used depends only on the observation time and bucket
+width — never on what happens to be cached already.
 
 | Scenario | What happens | Later runs |
 |---|---|---|
-| Historical epoch, catalogue available | Full catalogue downloaded once, stored as `catalogue-<stamp>.json` | Served from cache **forever** — deterministic, never refreshed |
+| Settled epoch (older than `tle_catalogue_settle_days`), catalogue available | Full catalogue downloaded once, stored as `catalogue-<stamp>.json` | Served from cache **forever** — deterministic, never refreshed |
+| Unsettled epoch (newer than `tle_catalogue_settle_days`, or in the future) | Catalogue downloaded and stored only as `catalogue-<stamp>-provisional.json` | Reused for `tle_provisional_cache_hours` (default 12 h), then refetched. **Never promoted** to a stable snapshot: once the epoch settles, the next run downloads a fresh one |
 | Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence over the cached fallback records |
 | Catalogue contains malformed rows or fewer than 99% of the expected rows remain valid | Malformed rows are rejected. An incomplete catalogue is **not cached**, and the requested satellites are fetched individually | The full catalogue is re-attempted on every run |
 | Satellite missing from an existing snapshot | Per-satellite fallback for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
+| Service reachable but the catalogue response is unusable (malformed, truncated) | The requested satellites are fetched individually instead | The full catalogue is re-attempted on every run |
 | Service unreachable, snapshot cached | Cache hit — run proceeds offline | — |
 | Service unreachable, no snapshot | Run fails fast with a clear error (no satellite-by-satellite retry storm) | — |
+| Cache directory read-only or out of quota | A warning names the path; the run proceeds on the validated records it already fetched | Nothing is cached, so the next run fetches again |
 
-Two consequences worth understanding:
+Several consequences are worth understanding:
 
-- **Determinism wins over freshness.** Once a snapshot exists for a bucket it is
-  never refreshed, even if SatChecker later serves better (closer-epoch) records
-  for that time. This is deliberate: rerunning an analysis gives the same
-  trajectory priors. To force a refresh, delete the relevant
+- **Recent catalogues are provisional.** SatChecker's ingest was observed ramping
+  from 9 rows at an observation age of 16 days to 20,458 at 17 days, 26,600 at 18
+  days and 31,108 at 30 days. A response can therefore be complete against its own
+  `total_results` while the upstream catalogue is still filling, so transport
+  completeness is not evidence that a recent catalogue is settled. The 45-day
+  default is an **observed defensive policy**, not a SatChecker API guarantee —
+  and it says nothing about whether a 45-day-old TLE is scientifically usable,
+  which is `remote_tle_max_age_days`' separate job.
+- **Determinism wins over freshness.** Once a *stable* snapshot exists for a
+  bucket it is never refreshed, even if SatChecker later serves better
+  (closer-epoch) records for that time. This is deliberate: rerunning an analysis
+  gives the same trajectory priors. To force a refresh, delete the relevant
   `catalogue-<stamp>.json` / `catalogue-<stamp>-extra.json` files from the cache
   directory (or point `TLE_CACHE_DIR` at a fresh directory) — the next run
-  re-downloads.
+  re-downloads. The exact `<stamp>` is printed in the run log wherever a
+  catalogue epoch is mentioned.
 - **The empty-catalogue fallback self-heals.** Because an empty catalogue is
-  never stored, a recent observation first processed with (possibly stale)
-  per-satellite TLEs will automatically pick up the proper catalogue snapshot
-  once SatChecker's ingest catches up — improving the priors on a rerun. If you
-  need the *original* run's priors instead, use the saved run TLEs (next
-  section).
+  never stored, a recent observation first processed with per-satellite TLEs will
+  automatically pick up the proper catalogue snapshot once SatChecker's ingest
+  catches up — improving the priors on a rerun. If you need the *original* run's
+  priors instead, use the saved run TLEs (next section).
 - **Invalid cache files do not become trusted inputs.** Managed snapshots and
   per-satellite fallback files are checked for their schema, canonical epoch,
-  record counts, completeness, TLE syntax, and matching satellite identities.
-  A corrupt, incomplete, or wrong-epoch file is treated as a cache miss and the
-  service is consulted again.
+  stable/provisional state, record counts, completeness, TLE syntax, and matching
+  satellite identities. A corrupt, incomplete, wrong-epoch or wrong-state file is
+  treated as a cache miss and the service is consulted again. The cache schema
+  version was bumped for the provisional policy, so snapshots written by earlier
+  builds are ignored rather than becoming trusted by aging in place.
 
-In a distributed TABASCAL run, process 0 completes the network and cache work
-before the worker processes read the populated cache. Only process 0 writes the
-shared `used_tles` result, and any synthetic satellite entries added solely for
-device padding are excluded from that file. Cache files are written atomically;
-however, unrelated TABASCAL jobs writing the same per-satellite fallback file at
-the same time are not serialized with each other.
+In a distributed TABASCAL run, process 0 performs the entire resolution and
+broadcasts the resulting TLE lines to every worker, so the service sees exactly
+one fetch per run and every process models the same satellites — including when
+the shared cache could not be written, where workers would otherwise have found
+nothing to read and gone to the provider themselves. If process 0's resolution
+fails, every process stops with the same error. Only process 0 writes the shared
+`used_tles` result, and any synthetic satellite entries added solely for device
+padding are excluded from that file. Cache files are written atomically; however,
+unrelated TABASCAL jobs writing the same per-satellite fallback file at the same
+time are not serialized with each other.
 
 ## Reproducing a run's TLEs exactly
 
@@ -91,7 +188,10 @@ tabascal run -c config.yaml -s sim_dir --extra-tle-dir run_tles
 ```
 
 With the default `extra_tle_max_age_days: null` (unlimited), every satellite
-resolves from the saved file and no service call is made.
+resolves from the saved file and no service call is made. Replay is deliberately
+exempt from `remote_tle_max_age_days`: the remote ceiling is a policy about what
+the *service* may hand you, and it must never stop you reproducing a run you
+already have the records for.
 
 ## Supplying TLEs manually (Space-Track workaround)
 
@@ -118,7 +218,13 @@ any satellite/epoch it cannot serve, supply TLEs yourself via `--extra-tle-dir`:
    form a valid TLE pair and must encode the same satellite as `NORAD_CAT_ID`.
    Unreadable files, files without the required columns, and invalid records are
    skipped; an unresolved satellite then falls through to the managed cache and
-   SatChecker.
+   SatChecker. Space-Track also covers objects SatChecker does not: full-catalogue
+   comparisons at four representative epochs found 92–96% of Space-Track's IDs
+   present in SatChecker within three days of the epoch, and SatChecker exposed
+   no Alpha-5 objects in any sampled catalogue while Space-Track had 163–295
+   recent ones. Optional built-in Space-Track support is
+   [issue #101](https://github.com/epfl-radio-astro/tabascal/issues/101); until
+   then this manual route is how you fill those gaps.
 
    ```python
    import pandas as pd
