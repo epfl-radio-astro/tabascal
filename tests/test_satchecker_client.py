@@ -18,11 +18,14 @@ from tabascal.satchecker.client import (
     CatalogueResult,
     EmptyCatalogueError,
     SatCheckerError,
+    SatCheckerResponseError,
+    SatCheckerTransportError,
     fetch_full_catalogue,
     fetch_nearest_tle,
 )
 
 from .tle_helpers import (
+    block_network,  # noqa: F401  autouse fixture: no live SatChecker access
     jd,
     make_catalogue_df,
     make_empty_zip_bytes,
@@ -153,6 +156,103 @@ class TestFullCatalogue:
         assert calls == {"zip": 0, "json": 1}
 
 
+class TestFailureTyping:
+    """Transport failures and response failures must be distinguishable.
+
+    The caller routes around them differently: a reachable service that answered
+    unusably is worth a per-satellite retry, an unreachable one is not — retrying
+    per satellite would turn an outage into a request storm.
+    """
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            urllib.error.URLError("connection refused"),
+            TimeoutError("timed out"),
+            ssl.SSLError("TLS handshake failed"),
+            ConnectionResetError("reset by peer"),
+        ],
+        ids=["urlerror", "timeout", "ssl", "reset"],
+    )
+    def test_connection_failures_are_transport(self, monkeypatch, error):
+        def boom(req, timeout=None):
+            raise error
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        with pytest.raises(SatCheckerTransportError):
+            fetch_full_catalogue(_EPOCH)
+
+    @pytest.mark.parametrize(
+        "read_error",
+        [
+            http.client.IncompleteRead(b"partial", 100),
+            http.client.RemoteDisconnected("connection closed"),
+            ssl.SSLError("TLS stream failed"),
+        ],
+        ids=["incomplete-read", "remote-disconnected", "ssl-error"],
+    )
+    def test_midstream_failures_are_transport(self, monkeypatch, read_error):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                raise read_error
+
+        monkeypatch.setattr(
+            urllib.request, "urlopen", lambda req, timeout=None: Response()
+        )
+        with pytest.raises(SatCheckerTransportError):
+            fetch_full_catalogue(_EPOCH)
+
+    def test_transport_failure_is_not_reported_as_a_response_failure(self, monkeypatch):
+        def boom(req, timeout=None):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        with pytest.raises(SatCheckerError) as exc_info:
+            fetch_full_catalogue(_EPOCH)
+        assert not isinstance(exc_info.value, SatCheckerResponseError)
+
+    def test_malformed_catalogue_is_a_response_failure(self, monkeypatch):
+        def handler(url):
+            if "format=zip" in url:
+                return b"not a zip"
+            if "per_page=1" in url:
+                return make_info_json(total=4)
+            return b"<html>not json</html>"
+
+        _route(monkeypatch, handler)
+        with pytest.raises(SatCheckerResponseError):
+            fetch_full_catalogue(_EPOCH)
+
+    def test_empty_catalogue_is_a_response_failure(self, monkeypatch):
+        _route(monkeypatch, lambda url: make_json_page([], total=0))
+        with pytest.raises(EmptyCatalogueError) as exc_info:
+            fetch_full_catalogue(_EPOCH)
+        assert isinstance(exc_info.value, SatCheckerResponseError)
+
+    def test_transport_failure_during_json_is_not_masked_as_response(self, monkeypatch):
+        # The zip attempt fails on content, then the JSON fallback loses the
+        # connection: the *transport* type must survive the fallback wrapping.
+        state = {"calls": 0}
+
+        def handler(url):
+            state["calls"] += 1
+            if "per_page=1" in url:
+                return make_info_json(total=4)
+            if "format=zip" in url:
+                return b"not a zip"
+            raise SatCheckerTransportError("connection dropped")
+
+        _route(monkeypatch, handler)
+        with pytest.raises(SatCheckerTransportError):
+            fetch_full_catalogue(_EPOCH)
+
+
 class TestNearestTle:
 
     def test_nearest_response_is_normalised(self, monkeypatch):
@@ -272,11 +372,16 @@ class TestZipParsing:
         with pytest.raises(SatCheckerError):
             client._fetch_catalogue_zip(_EPOCH)
 
-    def test_identical_repeated_rows_in_zip_rejected(self, monkeypatch):
-        # Same NORAD ID *and* same TLE lines twice — corrupted content.
+    def test_identical_repeated_rows_in_zip_are_deduped_not_rejected(
+        self, monkeypatch, capsys
+    ):
+        # A repeated row carries no information the first copy did not, and
+        # rejecting a whole catalogue over one was never reproduced against live
+        # data. The extra copy is dropped, reported, and the catalogue kept.
         _route(monkeypatch, lambda url: make_zip_bytes([(1, _EPOCH), (1, _EPOCH), (2, _EPOCH)]))
-        with pytest.raises(SatCheckerError, match="identical repeated TLE rows"):
-            client._fetch_catalogue_zip(_EPOCH)
+        df = client._fetch_catalogue_zip(_EPOCH)
+        assert sorted(df["NORAD_CAT_ID"]) == [1, 2]
+        assert "repeated 1 identical TLE row" in capsys.readouterr().out
 
     def test_duplicate_norad_with_distinct_lines_in_zip_tolerated(self, monkeypatch):
         rows = [(1, _EPOCH), (1, jd(2023, 2, 21, 15)), (2, _EPOCH)]
@@ -284,24 +389,24 @@ class TestZipParsing:
         df = client._fetch_catalogue_zip(_EPOCH)
         assert sorted(df["NORAD_CAT_ID"]) == [1, 1, 2]
 
-    def test_identical_tle_from_different_sources_is_tolerated(self):
+    def test_identical_tle_from_different_sources_is_kept(self):
+        # SatChecker aggregates providers; the same TLE from two of them is
+        # legitimate data, not a repeat.
         df = make_catalogue_df([(1, _EPOCH), (1, _EPOCH)])
         df["DATA_SOURCE"] = ["provider-a", "provider-b"]
-        client._reject_repeated_rows(df, "test")
+        assert len(client._dedupe_repeated_rows(df, "test")) == 2
 
-    def test_corrupt_zip_falls_back_to_json(self, monkeypatch):
-        # End-to-end: zip carries identical repeated rows both attempts, so
-        # fetch_full_catalogue lands on the validated JSON path.
+    def test_repeated_zip_rows_still_produce_a_usable_catalogue(self, monkeypatch):
+        # End-to-end: the zip's duplicate is dropped and, since the surviving row
+        # count still meets the expected total, the zip result is used as-is.
         def handler(url):
             if "format=zip" in url:
-                return make_zip_bytes([(1, _EPOCH), (1, _EPOCH)])
-            if "per_page=1" in url:
-                return make_info_json(total=2)
-            return make_json_page([(1, _EPOCH), (2, _EPOCH)], total=2)
+                return make_zip_bytes([(1, _EPOCH), (1, _EPOCH), (2, _EPOCH)])
+            return make_info_json(total=2)
 
         _route(monkeypatch, handler)
         result = fetch_full_catalogue(_EPOCH)
-        assert result.source == "json"
+        assert result.source == "zip"
         assert sorted(result.records["NORAD_CAT_ID"]) == [1, 2]
 
 
@@ -369,11 +474,27 @@ class TestJsonPaginationValidation:
 
     def test_repeated_page_cannot_satisfy_total(self, monkeypatch):
         # A count-only check would accept [1, 2, 1, 2] as four complete rows.
+        # Detected on the raw pages, independently of row-level de-duplication.
         _route(
             monkeypatch,
             lambda url: make_json_page([(1, _EPOCH), (2, _EPOCH)], total=4),
         )
-        with pytest.raises(SatCheckerError, match="identical repeated TLE rows"):
+        with pytest.raises(SatCheckerError, match="pagination loop"):
+            client._fetch_catalogue_json(_EPOCH, per_page=2)
+
+    def test_repeated_page_detected_even_when_rows_differ_by_provider(self, monkeypatch):
+        # Row-level dedup would keep both copies (different providers) and the
+        # count check would then pass; the page fingerprint still catches the loop.
+        import json as _json
+
+        def handler(url):
+            payload = _json.loads(make_json_page([(1, _EPOCH), (2, _EPOCH)], total=4))
+            for i, row in enumerate(payload["data"]):
+                row["data_source"] = f"provider-{i}"
+            return _json.dumps(payload).encode()
+
+        _route(monkeypatch, handler)
+        with pytest.raises(SatCheckerError, match="pagination loop"):
             client._fetch_catalogue_json(_EPOCH, per_page=2)
 
     def test_duplicate_norad_with_distinct_lines_is_tolerated(self, monkeypatch):
