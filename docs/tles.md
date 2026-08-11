@@ -124,9 +124,9 @@ width — never on what happens to be cached already.
 |---|---|---|
 | Settled epoch (older than `tle_catalogue_settle_days`), catalogue available | Full catalogue downloaded once, stored as `catalogue-<stamp>.json` | Served from cache **forever** — deterministic, never refreshed |
 | Unsettled epoch (newer than `tle_catalogue_settle_days`, or in the future) | Catalogue downloaded and stored only as `catalogue-<stamp>-provisional.json` | Reused for `tle_provisional_cache_hours` (default 12 h), then refetched. **Never promoted** to a stable snapshot: once the epoch settles, the next run downloads a fresh one |
-| Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence over the cached fallback records |
+| Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra-provisional.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run, and the fallback records expire after `tle_provisional_cache_hours`; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence |
 | Catalogue contains malformed rows or fewer than 99% of the expected rows remain valid | Malformed rows are rejected. An incomplete catalogue is **not cached**, and the requested satellites are fetched individually | The full catalogue is re-attempted on every run |
-| Satellite missing from an existing snapshot | Per-satellite fallback for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
+| Satellite missing from a settled epoch's snapshot | Per-satellite fallback for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
 | Service reachable but the catalogue response is unusable (malformed, truncated) | The requested satellites are fetched individually instead | The full catalogue is re-attempted on every run |
 | Service unreachable, snapshot cached | Cache hit — run proceeds offline | — |
 | Service unreachable, no snapshot | Run fails fast with a clear error (no satellite-by-satellite retry storm) | — |
@@ -141,7 +141,12 @@ Several consequences are worth understanding:
   completeness is not evidence that a recent catalogue is settled. The 45-day
   default is an **observed defensive policy**, not a SatChecker API guarantee —
   and it says nothing about whether a 45-day-old TLE is scientifically usable,
-  which is `remote_tle_max_age_days`' separate job.
+  which is `remote_tle_max_age_days`' separate job. Per-satellite fallback
+  records follow the same policy as the snapshot they stand in for: an unsettled
+  epoch reaches the per-satellite endpoint *precisely because* its bulk catalogue
+  is empty, so caching those responses permanently would exempt the one result
+  the settling policy exists to revisit. (TLE age is measured against the fixed
+  observation epoch, so nothing else would ever make such a record stale.)
 - **Determinism wins over freshness.** Once a *stable* snapshot exists for a
   bucket it is never refreshed, even if SatChecker later serves better
   (closer-epoch) records for that time. This is deliberate: rerunning an analysis
@@ -163,12 +168,15 @@ Several consequences are worth understanding:
   version was bumped for the provisional policy, so snapshots written by earlier
   builds are ignored rather than becoming trusted by aging in place.
 
-In a distributed TABASCAL run, process 0 performs the entire resolution and
-broadcasts the resulting TLE lines to every worker, so the service sees exactly
-one fetch per run and every process models the same satellites — including when
-the shared cache could not be written, where workers would otherwise have found
-nothing to read and gone to the provider themselves. If process 0's resolution
-fails, every process stops with the same error. Only process 0 writes the shared
+In a distributed TABASCAL run, process 0 performs the entire resolution — both
+the preflight check and the element fetch — and broadcasts the resulting TLE
+lines to every worker, so the service sees exactly one fetch per run and every
+process models the same satellites. This matters in two ways: without it every
+rank would download the catalogue independently on a cache miss (or whenever the
+shared cache cannot be written, where workers find nothing to read), and ranks
+could reach *different* coverage verdicts, leaving some to exit while others go
+on to a collective and hang. If process 0's resolution fails, every process stops
+with the same error. Only process 0 writes the shared
 `used_tles` result, and any synthetic satellite entries added solely for device
 padding are excluded from that file. Cache files are written atomically; however,
 unrelated TABASCAL jobs writing the same per-satellite fallback file at the same

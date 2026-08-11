@@ -758,6 +758,9 @@ def resolve_tles(
     if remaining:
         cache = TextCatalogueCache(tle_cache_dir(), clock=clock)
         state = catalogue_state(catalogue_epoch, clock(), catalogue_settle_days)
+        # Stable cache entries are immutable and permanent; provisional ones exist
+        # only to avoid refetching within a session, so they carry an expiry.
+        extra_max_age_hours = None if state == STABLE else provisional_cache_hours
         snapshot = _ensure_snapshot(
             cache, catalogue_epoch, obs_epoch_jd, state, provisional_cache_hours
         )
@@ -773,9 +776,16 @@ def resolve_tles(
             remaining = wanted - set(resolution.resolved)
 
         if remaining:
+            # Fallback records carry the same state and expiry as the snapshot
+            # they stand in for. An unsettled epoch reaches the per-satellite
+            # endpoint *because* its bulk catalogue is empty, so without this the
+            # one result the settling policy never revisits would be exactly the
+            # one it exists to revisit.
             _accept_remote(
                 _select_from_records(
-                    cache.get_extra(catalogue_epoch), remaining, catalogue_epoch
+                    cache.get_extra(catalogue_epoch, state, extra_max_age_hours),
+                    remaining,
+                    catalogue_epoch,
                 ),
                 _SRC_CACHED_FALLBACK,
                 obs_epoch_jd,
@@ -794,8 +804,8 @@ def resolve_tles(
             fetched = _fetch_missing_ids(missing, catalogue_epoch)
             if len(fetched):
                 _store_or_warn(
-                    lambda: cache.store_extra(catalogue_epoch, fetched),
-                    cache.extra_path(catalogue_epoch),
+                    lambda: cache.store_extra(catalogue_epoch, fetched, state),
+                    cache.extra_path(catalogue_epoch, state),
                     "per-satellite fallback records",
                 )
                 _accept_remote(
@@ -849,43 +859,58 @@ def get_tles_by_id(
     element columns parsed locally from the TLE lines. Raises :class:`TLEError`
     unless every requested ID resolved.
     """
+    return resolve_shared(
+        lambda: require_complete_coverage(
+            resolve_tles(
+                norad_ids,
+                observation_epoch_jd(times_jd),
+                extra_tle_dir=extra_tle_dir,
+                extra_tle_max_age_days=extra_tle_max_age_days,
+                remote_tle_max_age_days=remote_tle_max_age_days,
+                catalogue_interval_hours=catalogue_interval_hours,
+                catalogue_settle_days=catalogue_settle_days,
+                provisional_cache_hours=provisional_cache_hours,
+                clock=clock or utc_now_jd,
+            )
+        )
+    ).frame()
+
+
+# ---------------------------------------------------------------------------
+# Multi-process sharing
+# ---------------------------------------------------------------------------
+
+def resolve_shared(resolve) -> TLEResolution:
+    """Run *resolve* on process 0 only and share its outcome with every process.
+
+    Every entry point that resolves TLEs must go through here, not just the
+    element fetch: in a multi-process launch every rank builds its own
+    :class:`~tabascal.config.TabConfig` and would otherwise reach the resolver
+    directly, so a cache miss (or an unwritable cache) would have each rank
+    download the catalogue and issue its own fallback requests. Divergent
+    outcomes are worse still — some ranks exiting while others go on to a JAX
+    collective is a hang, not an error.
+
+    Workers therefore never call the provider themselves: whatever process 0
+    decided — the accepted records or the failure — is what every process acts
+    on, so the run either proceeds from one identical satellite set or fails
+    coherently everywhere. Only the raw identity/TLE-line columns and the epochs
+    cross the wire; every process re-derives the orbital elements locally, so the
+    parsed values are bit-identical rather than serialisation-rounded. Rejection
+    diagnostics stay on process 0, which has already formatted them into the
+    error text being shared.
+
+    Single-process runs call *resolve* directly and are unaffected.
+    """
     from tabascal import distributed
 
-    clock = clock or utc_now_jd
-    resolve = lambda: require_complete_coverage(  # noqa: E731
-        resolve_tles(
-            norad_ids,
-            observation_epoch_jd(times_jd),
-            extra_tle_dir=extra_tle_dir,
-            extra_tle_max_age_days=extra_tle_max_age_days,
-            remote_tle_max_age_days=remote_tle_max_age_days,
-            catalogue_interval_hours=catalogue_interval_hours,
-            catalogue_settle_days=catalogue_settle_days,
-            provisional_cache_hours=provisional_cache_hours,
-            clock=clock,
-        )
-    ).records()
-
     if distributed.process_count() == 1:
-        return _finalise_records(resolve())
-    return _finalise_records(_records_from_rank0(distributed, resolve))
+        return resolve()
 
-
-def _records_from_rank0(distributed, resolve) -> list[dict]:
-    """Resolve on process 0 and broadcast the outcome to every other process.
-
-    Workers never call the provider themselves: whatever process 0 decided — the
-    accepted records or the error — is what every process acts on, so the run
-    either proceeds from one identical satellite set or fails coherently
-    everywhere. Only the raw identity/TLE-line columns cross the wire; every
-    process re-derives the orbital elements locally, so the parsed values are
-    bit-identical rather than serialisation-rounded.
-    """
     payload = None
     if distributed.is_process_0():
         try:
-            records = resolve()
-            message = {"ok": True, "records": [_wire_record(r) for r in records]}
+            message = _resolution_to_wire(resolve())
         except Exception as e:  # reported identically on every process below
             message = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         payload = json.dumps(message).encode()
@@ -896,7 +921,7 @@ def _records_from_rank0(distributed, resolve) -> list[dict]:
             "TLE resolution failed on process 0; every process is stopping with "
             f"the same result.\n{message.get('error')}"
         )
-    return message["records"]
+    return _resolution_from_wire(message)
 
 
 _WIRE_COLUMNS = ("NORAD_CAT_ID", "OBJECT_NAME", "TLE_LINE1", "TLE_LINE2", "DATA_SOURCE")
@@ -909,6 +934,58 @@ def _wire_record(record: dict) -> dict:
         value = record.get(col)
         out[col] = None if value is None or pd.isna(value) else str(value)
     return out
+
+
+def _resolution_to_wire(resolution: TLEResolution) -> dict:
+    """Serialise an accepted resolution for the broadcast.
+
+    ``json`` round-trips a Python float through its ``repr``, so the epochs and
+    offsets survive exactly — the workers judge the run against the same numbers
+    process 0 did.
+    """
+    return {
+        "ok": True,
+        "requested": [int(nid) for nid in resolution.requested],
+        "obs_epoch_jd": float(resolution.obs_epoch_jd),
+        "catalogue_epoch_jd": float(resolution.catalogue_epoch_jd),
+        "remote_max_age_days": (
+            None if resolution.remote_max_age_days is None
+            else float(resolution.remote_max_age_days)
+        ),
+        "resolved": [
+            {
+                "norad_id": int(entry.norad_id),
+                "record": _wire_record(entry.record),
+                "source": entry.source,
+                "provider": entry.provider,
+                "epoch_jd": float(entry.epoch_jd),
+                "offset_days": float(entry.offset_days),
+            }
+            for entry in (resolution.resolved[nid] for nid in resolution.requested
+                          if nid in resolution.resolved)
+        ],
+    }
+
+
+def _resolution_from_wire(message: dict) -> TLEResolution:
+    """Rebuild process 0's resolution on a worker."""
+    return TLEResolution(
+        requested=[int(nid) for nid in message["requested"]],
+        obs_epoch_jd=message["obs_epoch_jd"],
+        catalogue_epoch_jd=message["catalogue_epoch_jd"],
+        remote_max_age_days=message["remote_max_age_days"],
+        resolved={
+            int(entry["norad_id"]): ResolvedTLE(
+                norad_id=int(entry["norad_id"]),
+                record=entry["record"],
+                source=entry["source"],
+                provider=entry["provider"],
+                epoch_jd=entry["epoch_jd"],
+                offset_days=entry["offset_days"],
+            )
+            for entry in message["resolved"]
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -975,6 +1052,11 @@ def preflight_tle_check(
 
     The returned resolution is what execution then builds the model from — it must
     not re-resolve, or the model could differ from what was checked.
+
+    Multi-process runs reach this through every rank's own ``TabConfig``, so the
+    resolution goes through :func:`resolve_shared`: process 0 does the work and
+    the rest receive its outcome, rather than each rank downloading the catalogue
+    and reaching its own coverage verdict.
     """
     clock = clock or utc_now_jd
     if not tle_config.norad_ids:
@@ -985,22 +1067,23 @@ def preflight_tle_check(
             remote_max_age_days=tle_config.remote_tle_max_age_days,
         )
 
-    obs_epoch_jd = _ms_mean_epoch_jd(ms_path)
-
     print(f"Preflight TLE check    : NORAD IDs {tle_config.norad_ids}")
 
-    resolution = resolve_tles(
-        tle_config.norad_ids,
-        obs_epoch_jd,
-        extra_tle_dir=tle_config.extra_tle_dir,
-        extra_tle_max_age_days=tle_config.extra_tle_max_age_days,
-        remote_tle_max_age_days=tle_config.remote_tle_max_age_days,
-        catalogue_interval_hours=tle_config.catalogue_interval_hours,
-        catalogue_settle_days=tle_config.catalogue_settle_days,
-        provisional_cache_hours=tle_config.provisional_cache_hours,
-        clock=clock,
+    resolution = resolve_shared(
+        lambda: require_complete_coverage(
+            resolve_tles(
+                tle_config.norad_ids,
+                _ms_mean_epoch_jd(ms_path),
+                extra_tle_dir=tle_config.extra_tle_dir,
+                extra_tle_max_age_days=tle_config.extra_tle_max_age_days,
+                remote_tle_max_age_days=tle_config.remote_tle_max_age_days,
+                catalogue_interval_hours=tle_config.catalogue_interval_hours,
+                catalogue_settle_days=tle_config.catalogue_settle_days,
+                provisional_cache_hours=tle_config.provisional_cache_hours,
+                clock=clock,
+            )
+        )
     )
-    require_complete_coverage(resolution)
 
     n_extra = sum(1 for e in resolution.resolved.values() if not e.remote)
     print(

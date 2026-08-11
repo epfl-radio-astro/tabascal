@@ -223,11 +223,18 @@ class CatalogueCache(ABC):
         """Persist a validated snapshot atomically, under its state's filename."""
 
     @abstractmethod
-    def get_extra(self, catalogue_epoch_jd: float) -> pd.DataFrame:
-        """Return per-satellite fallback records for the epoch (may be empty)."""
+    def get_extra(
+        self,
+        catalogue_epoch_jd: float,
+        state: str = STABLE,
+        max_age_hours: Optional[float] = None,
+    ) -> pd.DataFrame:
+        """Return per-satellite fallback records for the epoch/state (may be empty)."""
 
     @abstractmethod
-    def store_extra(self, catalogue_epoch_jd: float, records: pd.DataFrame) -> None:
+    def store_extra(
+        self, catalogue_epoch_jd: float, records: pd.DataFrame, state: str = STABLE
+    ) -> None:
         """Merge fallback records into the epoch's fallback store atomically."""
 
 
@@ -424,8 +431,12 @@ class TextCatalogueCache(CatalogueCache):
             / f"catalogue-{canonical_stamp(catalogue_epoch_jd)}{suffix}.json"
         )
 
-    def extra_path(self, catalogue_epoch_jd: float) -> Path:
-        return self.cache_dir / f"catalogue-{canonical_stamp(catalogue_epoch_jd)}-extra.json"
+    def extra_path(self, catalogue_epoch_jd: float, state: str = STABLE) -> Path:
+        suffix = "" if state == STABLE else f"-{state}"
+        return (
+            self.cache_dir
+            / f"catalogue-{canonical_stamp(catalogue_epoch_jd)}-extra{suffix}.json"
+        )
 
     # Historical private spellings, kept so existing callers/tests keep working.
     _snapshot_path = snapshot_path
@@ -521,8 +532,13 @@ class TextCatalogueCache(CatalogueCache):
         )
 
     # -- fallback records --
-    def get_extra(self, catalogue_epoch_jd: float) -> pd.DataFrame:
-        path = self.extra_path(catalogue_epoch_jd)
+    def get_extra(
+        self,
+        catalogue_epoch_jd: float,
+        state: str = STABLE,
+        max_age_hours: Optional[float] = None,
+    ) -> pd.DataFrame:
+        path = self.extra_path(catalogue_epoch_jd, state)
         if not path.exists():
             return pd.DataFrame()
         try:
@@ -531,12 +547,29 @@ class TextCatalogueCache(CatalogueCache):
         except (OSError, ValueError):
             return pd.DataFrame()
         try:
-            return _validate_envelope(env, catalogue_epoch_jd, full_snapshot=False)
+            records = _validate_envelope(
+                env, catalogue_epoch_jd, full_snapshot=False, expected_state=state
+            )
         except CacheValidationError:
             return pd.DataFrame()
+        if max_age_hours is not None and self._is_expired(
+            env.get("fetched_at"), max_age_hours
+        ):
+            return pd.DataFrame()
+        return records
 
-    def store_extra(self, catalogue_epoch_jd: float, records: pd.DataFrame) -> None:
-        """Merge *records* into the epoch's fallback store atomically.
+    def store_extra(
+        self, catalogue_epoch_jd: float, records: pd.DataFrame, state: str = STABLE
+    ) -> None:
+        """Merge *records* into the epoch's fallback store for *state*, atomically.
+
+        Fallback records follow the same settling policy as the snapshot they
+        stand in for. That matters because the per-satellite endpoint is
+        *precisely* the path an unsettled epoch takes — the bulk catalogue is
+        empty there — so a provisional response cached under the stable name
+        would be the one result the settling policy never revisited. TLE age is
+        measured against the fixed observation epoch, so nothing else would ever
+        make it stale.
 
         Note: this is a read-merge-write cycle. Atomic replacement guarantees no
         partial file is ever observed, but it does *not* serialise two processes
@@ -547,7 +580,7 @@ class TextCatalogueCache(CatalogueCache):
         if not len(records):
             return
         merged = records
-        existing = self.get_extra(catalogue_epoch_jd)
+        existing = self.get_extra(catalogue_epoch_jd, state)
         if len(existing):
             merged = pd.concat([existing, records], ignore_index=True)
         merged = merged.drop_duplicates(
@@ -555,12 +588,15 @@ class TextCatalogueCache(CatalogueCache):
         )
         env = {
             "schema_version": SCHEMA_VERSION,
+            "state": state,
             "catalogue_epoch_jd": catalogue_epoch_jd,
             "fetched_at": self._now_iso(),
             "records": merged.to_dict(orient="records"),
         }
-        _validate_envelope(env, catalogue_epoch_jd, full_snapshot=False)
-        _atomic_write_json(self.extra_path(catalogue_epoch_jd), env)
+        _validate_envelope(
+            env, catalogue_epoch_jd, full_snapshot=False, expected_state=state
+        )
+        _atomic_write_json(self.extra_path(catalogue_epoch_jd, state), env)
 
     def _now_iso(self) -> str:
         return jd_to_datetime(self._clock()).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -26,6 +26,7 @@ import pytest
 from tabascal import distributed, tle
 from tabascal.satchecker import cache as cache_mod
 from tabascal.satchecker.client import CatalogueResult
+from tabascal.tle_config import TLEConfig
 
 from .tle_helpers import (
     block_network,  # noqa: F401  autouse fixture: no live SatChecker access
@@ -367,6 +368,55 @@ class TestCatalogueSettling:
         _resolve([25544], now=_UNSETTLED_NOW + 13 / 24)  # 13 h later, past 12 h
         assert counter["full"] == 2
 
+    def test_fallback_records_follow_the_snapshot_state(self, cache_dir, monkeypatch):
+        # An unsettled epoch reaches the per-satellite endpoint *because* its bulk
+        # catalogue is empty, so a provisional response cached under the stable
+        # name would be the one result the settling policy never revisited.
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(25544, jd(2023, 2, 21, 13))])
+        _resolve([25544], now=_UNSETTLED_NOW)
+        names = sorted(p.name for p in cache_dir.glob("catalogue-*-extra*.json"))
+        assert names == [n for n in names if n.endswith("-extra-provisional.json")]
+
+    def test_provisional_fallback_is_reused_before_expiry(self, cache_dir, monkeypatch):
+        counter = {}
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(25544, jd(2023, 2, 21, 13))], counter)
+        _resolve([25544], now=_UNSETTLED_NOW)
+        _resolve([25544], now=_UNSETTLED_NOW + 6 / 24)
+        assert counter["near"] == 1
+
+    def test_provisional_fallback_is_refetched_after_expiry(self, cache_dir, monkeypatch):
+        # Without an expiry this record would be reused forever: TLE age is
+        # measured against the fixed observation epoch, so nothing else about it
+        # ever goes stale, even as upstream ingestion settles.
+        counter = {}
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(25544, jd(2023, 2, 21, 13))], counter)
+        _resolve([25544], now=_UNSETTLED_NOW)
+        _resolve([25544], now=_UNSETTLED_NOW + 13 / 24)
+        assert counter["near"] == 2
+
+    def test_settled_fallback_is_kept_indefinitely(self, cache_dir, monkeypatch):
+        # A settled epoch's fallback record is immutable, like its snapshot.
+        counter = {}
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(25544, jd(2023, 2, 21, 13))], counter)
+        _resolve([25544], now=_SETTLED_NOW)
+        _resolve([25544], now=_SETTLED_NOW + 3650)
+        assert counter["near"] == 1
+        assert list(cache_dir.glob("catalogue-*-extra.json"))
+
+    def test_settled_run_ignores_a_provisional_fallback(self, cache_dir, monkeypatch):
+        counter = {}
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(25544, jd(2023, 2, 21, 13))], counter)
+        _resolve([25544], now=_UNSETTLED_NOW)
+        _resolve([25544], now=_SETTLED_NOW)
+        assert counter["near"] == 2  # refetched for the stable store
+        assert list(cache_dir.glob("catalogue-*-extra.json"))
+        assert list(cache_dir.glob("catalogue-*-extra-provisional.json"))
+
     def test_provisional_is_never_promoted_by_aging_in_place(
         self, cache_dir, monkeypatch
     ):
@@ -574,3 +624,63 @@ class TestMultiProcessResolution:
         cluster = _FakeCluster(monkeypatch, n_processes=1)
         tle.get_tles_by_id([25544], _OBS, clock=lambda: _SETTLED_NOW)
         assert cluster.broadcasts == 0
+
+    def test_preflight_is_shared_not_repeated_per_rank(self, cache_dir, monkeypatch):
+        # Every rank builds its own TabConfig and so reaches preflight. Without
+        # sharing, each would download the catalogue and reach its own coverage
+        # verdict — one provider fetch per rank, and divergent verdicts leaving
+        # some ranks exiting while others enter a JAX collective and hang.
+        counter = {}
+        _serve_catalogue(monkeypatch, [(25544, jd(2023, 2, 21, 13))], counter)
+        _break_cache_writes(monkeypatch)
+        monkeypatch.setattr(tle, "_ms_mean_epoch_jd", lambda ms: _OBS)
+        cluster = _FakeCluster(monkeypatch)
+        config = TLEConfig(norad_ids=[25544])
+
+        resolutions = []
+        for rank in (0, 1):
+            cluster.rank = rank
+            resolutions.append(
+                tle.preflight_tle_check(config, "ignored.ms", clock=lambda: _SETTLED_NOW)
+            )
+
+        assert counter["full"] == 1
+        rank0, worker = resolutions
+        assert worker.requested == rank0.requested == [25544]
+        assert worker.obs_epoch_jd == rank0.obs_epoch_jd
+        assert worker.catalogue_epoch_jd == rank0.catalogue_epoch_jd
+        assert worker.remote_max_age_days == rank0.remote_max_age_days
+        assert worker.resolved[25544].epoch_jd == rank0.resolved[25544].epoch_jd
+        assert worker.resolved[25544].offset_days == rank0.resolved[25544].offset_days
+        assert worker.frame()["TLE_LINE1"].iloc[0] == rank0.frame()["TLE_LINE1"].iloc[0]
+
+    def test_preflight_never_reads_the_ms_on_a_worker(self, cache_dir, monkeypatch):
+        _serve_catalogue(monkeypatch, [(25544, jd(2023, 2, 21, 13))])
+        cluster = _FakeCluster(monkeypatch)
+        config = TLEConfig(norad_ids=[25544])
+
+        monkeypatch.setattr(tle, "_ms_mean_epoch_jd", lambda ms: _OBS)
+        cluster.rank = 0
+        tle.preflight_tle_check(config, "ignored.ms", clock=lambda: _SETTLED_NOW)
+
+        def boom(ms_path):
+            raise AssertionError("a worker must not resolve, or read the MS, itself")
+
+        monkeypatch.setattr(tle, "_ms_mean_epoch_jd", boom)
+        _no_network(monkeypatch)
+        cluster.rank = 1
+        assert tle.preflight_tle_check(
+            config, "ignored.ms", clock=lambda: _SETTLED_NOW
+        ).complete
+
+    def test_preflight_coverage_failure_stops_every_rank(self, cache_dir, monkeypatch):
+        _serve_catalogue(monkeypatch, [])
+        _serve_nearest(monkeypatch, [])
+        monkeypatch.setattr(tle, "_ms_mean_epoch_jd", lambda ms: _OBS)
+        cluster = _FakeCluster(monkeypatch)
+        config = TLEConfig(norad_ids=[25544])
+
+        for rank in (0, 1):
+            cluster.rank = rank
+            with pytest.raises(TLEError, match="25544"):
+                tle.preflight_tle_check(config, "ignored.ms", clock=lambda: _SETTLED_NOW)
