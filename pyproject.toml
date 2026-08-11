@@ -46,7 +46,10 @@ dependencies = [
 
 [project.optional-dependencies]
 test  = ["pytest", "pytest-cov", "huggingface-hub", "tabsim"]
-docs  = ["sphinx", "sphinx-rtd-theme"]
+# Read the Docs installs `.[docs]` (see .readthedocs.yaml), so this has to cover
+# everything docs/conf.py imports. The graphviz `dot` binary is not pip-installable
+# and is provided by apt there / the pixi dev environment here.
+docs  = ["sphinx", "sphinx-rtd-theme", "myst-parser"]
 dev   = ["pre-commit", "reframe-hpc", "tabascal[test,docs]"]
 # ri_kernels[cuda12] chains to jax[cuda12] + the ri_kernels_cuda12 add-on wheel
 # holding libri_kernels_cuda.so, so this is a complete GPU install. Linux only —

@@ -167,6 +167,12 @@ pixi run -e dev docs-build
 
 After building, open `docs/_build/html/index.html` in a browser.
 
+The documentation is also published on Read the Docs, one version per release tag
+plus `latest` from `main`, selectable from the version flyout on every page.
+`docs/readthedocs.md` covers the version scheme, how to publish a
+release or an extra branch, and the warnings-as-errors build that CI and Read the
+Docs both run.
+
 ## Debugging a performance regression locally
 
 When a performance regression is detected in CI, reproduce it on a smaller dataset with 8

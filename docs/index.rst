@@ -19,6 +19,7 @@ Welcome to tabscal documentation
 
    installation
    api
+   readthedocs
 
 
 Indices and tables
