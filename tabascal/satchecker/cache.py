@@ -262,9 +262,19 @@ def _validate_envelope(
         if records[col].isnull().any():
             raise CacheValidationError(f"cache envelope has null values in {col}")
     try:
-        pd.to_numeric(records["NORAD_CAT_ID"])
+        ids = pd.to_numeric(records["NORAD_CAT_ID"])
     except (ValueError, TypeError) as e:
         raise CacheValidationError(f"NORAD_CAT_ID is not numeric: {e}") from e
+    if ids.isnull().any():
+        raise CacheValidationError("NORAD_CAT_ID contains missing values")
+    if not all(math.isfinite(float(value)) for value in ids):
+        raise CacheValidationError("NORAD_CAT_ID contains non-finite values")
+    if any(float(value) != round(float(value)) for value in ids):
+        raise CacheValidationError("NORAD_CAT_ID contains non-integer values")
+    try:
+        records["NORAD_CAT_ID"] = ids.astype(int)
+    except (ValueError, TypeError, OverflowError) as e:
+        raise CacheValidationError(f"NORAD_CAT_ID values are not usable: {e}") from e
     problems = []
     for nid, l1, l2 in zip(
         records["NORAD_CAT_ID"], records["TLE_LINE1"], records["TLE_LINE2"]

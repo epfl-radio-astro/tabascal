@@ -233,6 +233,23 @@ class TestExtraDirPrecedence:
         assert df.loc[df["NORAD_CAT_ID"] == 25544, "TLE_LINE1"].iloc[0] == expected_l1
         assert counter["full"] == 1
 
+    def test_mislabeled_extra_tle_falls_through_to_managed(
+        self, cache_dir, tmp_path, monkeypatch
+    ):
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        local = make_catalogue_df([(38833, _OBS)])
+        local["NORAD_CAT_ID"] = 25544  # metadata and embedded TLE IDs disagree
+        local.to_json(extra / "mislabeled.json")
+
+        counter = {"full": 0}
+        _install_full(monkeypatch, [(25544, _OBS)], counter)
+        df = tle.get_tles_by_id([25544], _OBS, extra_tle_dir=str(extra))
+
+        expected_l1, _ = make_tle(25544, _OBS)
+        assert df["TLE_LINE1"].iloc[0] == expected_l1
+        assert counter["full"] == 1
+
     def test_stale_extra_missing_in_managed_uses_fallback(self, cache_dir, tmp_path, monkeypatch):
         extra = tmp_path / "extra"
         extra.mkdir()

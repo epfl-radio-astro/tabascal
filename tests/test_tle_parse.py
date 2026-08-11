@@ -87,3 +87,21 @@ class TestValidateTlePair:
         l1, l2 = make_tle(25544, _EPOCH)
         with pytest.raises(ValueError):
             validate_tle_pair(l1[:20] + "999.00000000" + l1[32:], l2)
+
+    @pytest.mark.parametrize(
+        "start,stop,value",
+        [(8, 16, "nan"), (17, 25, "inf"), (52, 63, "inf")],
+        ids=["inclination_nan", "raan_inf", "mean_motion_inf"],
+    )
+    def test_non_finite_elements_are_rejected(self, start, stop, value):
+        l1, l2 = make_tle(25544, _EPOCH)
+        bad2 = l2[:start] + value.rjust(stop - start) + l2[stop:]
+        with pytest.raises(ValueError, match="non-finite"):
+            validate_tle_pair(l1, bad2)
+
+    @pytest.mark.parametrize("mean_motion", [" 0.00000000", "-1.00000000"])
+    def test_non_positive_mean_motion_is_rejected(self, mean_motion):
+        l1, l2 = make_tle(25544, _EPOCH)
+        bad2 = l2[:52] + mean_motion + l2[63:]
+        with pytest.raises(ValueError, match="must be positive"):
+            validate_tle_pair(l1, bad2)

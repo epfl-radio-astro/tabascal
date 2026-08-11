@@ -92,6 +92,32 @@ def parse_tle_elements(line1: str, line2: str) -> dict:
     mean_motion = float(line2[52:63])  # rev/day
     bstar = _parse_exp_field(line1[53:61])
 
+    parsed_fields = {
+        "inclination": inclination,
+        "RAAN": raan,
+        "eccentricity": eccentricity,
+        "argument of pericenter": arg_pericenter,
+        "mean anomaly": mean_anomaly,
+        "mean motion": mean_motion,
+        "BSTAR": bstar,
+    }
+    non_finite = [name for name, value in parsed_fields.items() if not math.isfinite(value)]
+    if non_finite:
+        raise ValueError(f"TLE has non-finite fields: {', '.join(non_finite)}")
+    if not 0.0 <= inclination <= 180.0:
+        raise ValueError(f"TLE inclination out of range: {inclination}")
+    for name, value in (
+        ("RAAN", raan),
+        ("argument of pericenter", arg_pericenter),
+        ("mean anomaly", mean_anomaly),
+    ):
+        if not 0.0 <= value < 360.0:
+            raise ValueError(f"TLE {name} out of range: {value}")
+    if not 0.0 <= eccentricity < 1.0:
+        raise ValueError(f"TLE eccentricity out of range: {eccentricity}")
+    if mean_motion <= 0.0:
+        raise ValueError(f"TLE mean motion must be positive, got {mean_motion}")
+
     n_rad_s = mean_motion * 2.0 * math.pi / 86400.0
     semimajor_axis = (_MU_KM3_S2 / n_rad_s ** 2) ** (1.0 / 3.0)
 

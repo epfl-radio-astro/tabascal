@@ -207,6 +207,28 @@ class TestEnvelopeValidation:
         _write_env(cache._snapshot_path(canon), env)
         assert cache.get_snapshot(canon) is None
 
+    @pytest.mark.parametrize("norad_id", [25544.5, float("inf")])
+    def test_non_integral_or_non_finite_norad_id_is_a_miss(self, tmp_path, norad_id):
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        env = _snapshot_env(canon, [(25544, jd(2023, 2, 21, 13))])
+        env["records"][0]["NORAD_CAT_ID"] = norad_id
+        _write_env(cache._snapshot_path(canon), env)
+        assert cache.get_snapshot(canon) is None
+
+    @pytest.mark.parametrize("norad_id", [25544.5, float("inf")])
+    def test_non_integral_or_non_finite_norad_id_cannot_be_stored(
+        self, tmp_path, norad_id
+    ):
+        cache = TextCatalogueCache(tmp_path)
+        canon = self._canon()
+        records = make_catalogue_df([(25544, jd(2023, 2, 21, 13))])
+        records["NORAD_CAT_ID"] = norad_id
+        snap = CatalogueSnapshot(catalogue_epoch_jd=canon, records=records)
+        with pytest.raises(ValueError):
+            cache.store_snapshot(snap)
+        assert list(tmp_path.glob("catalogue-*.json")) == []
+
     @pytest.mark.parametrize(
         "line1",
         ["", "1 25544U truncated", "not a tle line at all", 12345],

@@ -58,6 +58,7 @@ from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-
 from tabascal.satchecker.tle_parse import (
     parse_tle_elements,  # noqa: F401  re-export
     tle_epoch_jd as _tle_epoch_jd,
+    validate_tle_pair,
 )
 from tabascal.time import jd_to_datetime
 
@@ -152,11 +153,34 @@ def _select_from_extra_dir(
     if not len(records):
         return resolved
     records = records.copy()
-    records["NORAD_CAT_ID"] = pd.to_numeric(records["NORAD_CAT_ID"]).astype(int)
+    numeric_ids = pd.to_numeric(records["NORAD_CAT_ID"], errors="coerce")
+    valid_ids = numeric_ids.notnull() & np.isfinite(numeric_ids)
+    valid_ids &= numeric_ids == numeric_ids.round()
+    records = records.loc[valid_ids].copy()
+    records["NORAD_CAT_ID"] = numeric_ids.loc[valid_ids].astype(int)
     records = records[records["NORAD_CAT_ID"].isin(wanted)]
     if not len(records):
         return resolved
-    records["EPOCH_JD"] = records["TLE_LINE1"].map(_tle_epoch_jd)
+
+    valid_rows = []
+    for idx, row in records.iterrows():
+        nid = int(row["NORAD_CAT_ID"])
+        try:
+            embedded_id = validate_tle_pair(row["TLE_LINE1"], row["TLE_LINE2"])
+            if embedded_id != nid:
+                raise ValueError(
+                    f"TLE lines belong to satellite {embedded_id}, not {nid}"
+                )
+            epoch_jd = _tle_epoch_jd(row["TLE_LINE1"])
+        except (ValueError, TypeError) as e:
+            print(f"  {nid}: invalid extra_tle_dir record rejected — {e}")
+            continue
+        valid_row = row.copy()
+        valid_row["EPOCH_JD"] = epoch_jd
+        valid_rows.append(valid_row)
+    if not valid_rows:
+        return resolved
+    records = pd.DataFrame(valid_rows)
 
     for nid, group in records.groupby("NORAD_CAT_ID"):
         best = group.loc[(group["EPOCH_JD"] - obs_epoch_jd).abs().idxmin()]
