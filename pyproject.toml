@@ -36,7 +36,7 @@ dependencies = [
     "PyYAML",
     # CPU RFI-visibility FFI kernels + the RFIVisOp JAX bindings. The GPU
     # kernels ship as add-on wheels pulled in by the cuda12/cuda13 extras.
-    "ri_kernels>=0.1.0",
+    "ri_kernels>=0.2.0",
     "sgp4jax>=0.1.6,<0.2",  # enables jax x64 at import; orbit API is pre-1.0
     "skyfield>=1.49,<2",  # uses skyfield's _utc_jd(whole, fraction); see tabascal/time.py
     "spacetrack",
