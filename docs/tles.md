@@ -39,8 +39,11 @@ satellite**, in this order:
 2. **The managed catalogue snapshot** — a full SatChecker catalogue downloaded
    once per fixed UTC time bucket (default 2 h wide, see
    `tle_catalogue_interval_hours`) and cached locally.
-3. **Per-satellite fallback** — an individual SatChecker `get-nearest-tle`
-   request for any ID still missing, cached alongside the snapshot.
+3. **Per-satellite lookup** — an individual SatChecker `get-nearest-tle`
+   request, cached alongside the snapshot. Used for any ID the snapshot is
+   missing, *and* to replace a snapshot record older than
+   `remote_tle_target_age_days` with the nearest one the service holds (see
+   [Which endpoint answered changes the TLE age](#sec-endpoint-freshness)).
 
 ## Every configured satellite must resolve
 
@@ -72,12 +75,18 @@ reproducible.
 
 ## How old a TLE may be
 
-Two different age settings exist and they are not interchangeable:
+Three settings govern TLE age and they are not interchangeable — two are limits
+that can fail a run, the third is a goal that never can:
 
-| Setting | Applies to | Default |
-|---|---|---|
-| `extra_tle_max_age_days` | Your own files in `extra_tle_dir` | `null` (unlimited) |
-| `remote_tle_max_age_days` | SatChecker records and the managed cache | `3` days |
+| Setting | Kind | Applies to | Default |
+|---|---|---|---|
+| `extra_tle_max_age_days` | limit | Your own files in `extra_tle_dir` | `null` (unlimited) |
+| `remote_tle_max_age_days` | limit | SatChecker records and the managed cache | `3` days |
+| `remote_tle_target_age_days` | goal | Bulk-catalogue records, which are re-requested per satellite when older | `1` day |
+
+Only the two limits can reject a record. The target merely decides when to spend
+a request trying to do better, and is covered under
+[Which endpoint answered changes the TLE age](#sec-endpoint-freshness).
 
 The remote ceiling exists because a silent stale fallback is unsafe. For an
 observation on 2026-08-11 SatChecker's empty bulk response fell through to
@@ -193,7 +202,8 @@ width — never on what happens to be cached already.
 | Unsettled epoch (newer than `tle_catalogue_settle_days`, or in the future) | Catalogue downloaded and stored only as `catalogue-<stamp>-provisional.json` | Reused for `tle_provisional_cache_hours` (default 12 h), then refetched. **Never promoted** to a stable snapshot: once the epoch settles, the next run downloads a fresh one |
 | Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra-provisional.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run, and the fallback records expire after `tle_provisional_cache_hours`; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence |
 | Catalogue contains malformed rows or fewer than 99% of the expected rows remain valid | Malformed rows are rejected. An incomplete catalogue is **not cached**, and the requested satellites are fetched individually | The full catalogue is re-attempted on every run |
-| Satellite missing from a settled epoch's snapshot | Per-satellite fallback for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
+| Satellite missing from a settled epoch's snapshot | Per-satellite lookup for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
+| Snapshot record older than `remote_tle_target_age_days` | Per-satellite lookup replaces it if the service has something nearer, cached in the same `-extra` file | Reused from cache — the upgrade requests are paid once per canonical epoch, not once per run |
 | Service reachable but the catalogue response is unusable (malformed, truncated) | The requested satellites are fetched individually instead | The full catalogue is re-attempted on every run |
 | Service unreachable, snapshot cached | Cache hit — run proceeds offline | — |
 | Service unreachable, no snapshot | Run fails fast with a clear error (no satellite-by-satellite retry storm) | — |
