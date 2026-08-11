@@ -127,7 +127,9 @@ class TestRemoteAgePolicy:
 
     def test_record_exactly_at_the_threshold_is_accepted(self, cache_dir, monkeypatch):
         _serve_catalogue(monkeypatch, [(25544, jd(2023, 2, 20, 12, 30))])  # exactly 1 d
-        resolution = _resolve([25544], remote_tle_max_age_days=1.0)
+        resolution = _resolve(
+            [25544], remote_tle_max_age_days=1.0, remote_tle_target_age_days=None
+        )
         assert resolution.complete
         assert resolution.resolved[25544].age_days == pytest.approx(1.0, abs=1e-6)
 
@@ -151,7 +153,9 @@ class TestRemoteAgePolicy:
 
     def test_null_ceiling_is_an_explicit_expert_override(self, cache_dir, monkeypatch):
         _serve_catalogue(monkeypatch, [(25544, jd(2023, 1, 21, 12, 30))])  # 31 d old
-        resolution = _resolve([25544], remote_tle_max_age_days=None)
+        resolution = _resolve(
+            [25544], remote_tle_max_age_days=None, remote_tle_target_age_days=None
+        )
         assert resolution.complete
         assert resolution.resolved[25544].age_days == pytest.approx(31.0, abs=1e-3)
         assert resolution.remote_max_age_days is None
@@ -222,7 +226,7 @@ class TestRemoteAgeLogging:
     ):
         pairs = [(1000 + i, jd(2023, 2, 21, 13) - i * 0.1) for i in range(30)]
         _serve_catalogue(monkeypatch, pairs)
-        _resolve([nid for nid, _ in pairs])
+        _resolve([nid for nid, _ in pairs], remote_tle_target_age_days=None)
         out = capsys.readouterr().out
         assert "30 accepted (limit 3 d)" in out
         assert "age vs observation" in out
@@ -235,7 +239,7 @@ class TestRemoteAgeLogging:
         monkeypatch.setenv("TABASCAL_TLE_LOG_DETAIL", "1")
         pairs = [(1000 + i, jd(2023, 2, 21, 13) - i * 0.1) for i in range(30)]
         _serve_catalogue(monkeypatch, pairs)
-        _resolve([nid for nid, _ in pairs])
+        _resolve([nid for nid, _ in pairs], remote_tle_target_age_days=None)
         out = capsys.readouterr().out
         assert "1005: managed catalogue" in out
         assert "1029: managed catalogue" in out
@@ -318,6 +322,137 @@ class TestCompleteCoverage:
     def test_no_configured_ids_resolves_to_an_empty_frame(self, cache_dir, monkeypatch):
         _no_network(monkeypatch)
         assert tle.get_tles_by_id([], _OBS).empty
+
+
+# ---------------------------------------------------------------------------
+# Freshness upgrade pass
+# ---------------------------------------------------------------------------
+
+class TestFreshnessUpgrade:
+    """SatChecker's bulk endpoint returns the newest record at or *before* the
+    requested epoch, so it cannot see a closer record just after it. Records
+    older than ``remote_tle_target_age_days`` are re-asked of the per-satellite
+    endpoint, which has no such restriction."""
+
+    _STALE = jd(2023, 2, 19, 12, 30)   # 2 d before the observation
+    _FRESH = jd(2023, 2, 21, 14, 0)    # 1.5 h after it — the bulk cannot return this
+
+    def test_stale_bulk_record_is_upgraded(self, cache_dir, monkeypatch):
+        _serve_catalogue(monkeypatch, [(25544, self._STALE)])
+        counter = {}
+        _serve_nearest(monkeypatch, [(25544, self._FRESH)], counter)
+
+        entry = _resolve([25544]).resolved[25544]
+
+        assert counter["near"] == 1
+        assert entry.source == "SatChecker per-satellite"
+        assert entry.age_days < 0.1          # was 2 d from the catalogue
+        assert entry.offset_days > 0         # the record the bulk endpoint cannot see
+
+    def test_fresh_bulk_record_is_left_alone(self, cache_dir, monkeypatch):
+        _serve_catalogue(monkeypatch, [(25544, jd(2023, 2, 21, 13))])  # 0.02 d
+        counter = {}
+        _serve_nearest(monkeypatch, [(25544, self._FRESH)], counter)
+
+        entry = _resolve([25544]).resolved[25544]
+
+        assert counter.get("near", 0) == 0   # no request spent
+        assert entry.source == "managed catalogue"
+
+    def test_upgrade_keeps_the_bulk_record_when_no_better(self, cache_dir, monkeypatch):
+        # The per-satellite endpoint answers, but with something no fresher.
+        _serve_catalogue(monkeypatch, [(25544, self._STALE)])
+        _serve_nearest(monkeypatch, [(25544, jd(2023, 2, 18, 12, 30))])  # 3 d, worse
+
+        entry = _resolve([25544]).resolved[25544]
+
+        assert entry.source == "managed catalogue"
+        assert entry.age_days == pytest.approx(2.0, abs=1e-3)
+
+    def test_failed_upgrade_never_loses_the_satellite(self, cache_dir, monkeypatch):
+        # A declined upgrade must not turn an otherwise complete run into a
+        # coverage failure.
+        _serve_catalogue(monkeypatch, [(25544, self._STALE)])
+        _serve_nearest(monkeypatch, [])       # endpoint has nothing
+
+        resolution = _resolve([25544])
+
+        assert resolution.complete
+        assert resolution.resolved[25544].source == "managed catalogue"
+
+    def test_upgrade_never_admits_a_record_beyond_the_ceiling(
+        self, cache_dir, monkeypatch
+    ):
+        _serve_catalogue(monkeypatch, [(25544, self._STALE)])
+        _serve_nearest(monkeypatch, [(25544, jd(2023, 1, 1, 12, 30))])  # 51 d
+
+        resolution = _resolve([25544])
+
+        assert resolution.complete
+        assert resolution.resolved[25544].age_days == pytest.approx(2.0, abs=1e-3)
+
+    def test_upgrades_are_cached_and_reused_offline(self, cache_dir, monkeypatch):
+        _serve_catalogue(monkeypatch, [(25544, self._STALE)])
+        counter = {}
+        _serve_nearest(monkeypatch, [(25544, self._FRESH)], counter)
+        _resolve([25544])
+        assert counter["near"] == 1
+
+        _no_network(monkeypatch)
+        entry = _resolve([25544]).resolved[25544]
+        assert entry.source == "cached per-satellite record"
+        assert entry.age_days < 0.1
+
+    def test_null_target_disables_the_pass(self, cache_dir, monkeypatch):
+        _serve_catalogue(monkeypatch, [(25544, self._STALE)])
+        counter = {}
+        _serve_nearest(monkeypatch, [(25544, self._FRESH)], counter)
+
+        entry = _resolve([25544], remote_tle_target_age_days=None).resolved[25544]
+
+        assert counter.get("near", 0) == 0
+        assert entry.source == "managed catalogue"
+
+    def test_extra_dir_records_are_never_upgraded(
+        self, cache_dir, tmp_path, monkeypatch
+    ):
+        # Your own files are outside remote policy entirely, however old.
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        write_legacy_tle_file(extra / "local.json", [(25544, jd(2022, 11, 13, 12, 30))])
+        _no_network(monkeypatch)
+
+        entry = _resolve([25544], extra_tle_dir=str(extra)).resolved[25544]
+
+        assert entry.source == "extra_tle_dir"
+        assert entry.age_days > 90
+
+    def test_missing_and_stale_share_one_fetch_pass(self, cache_dir, monkeypatch, capsys):
+        _serve_catalogue(monkeypatch, [(111, self._STALE)])      # present but stale
+        counter = {}
+        _serve_nearest(monkeypatch, [(111, self._FRESH), (222, self._FRESH)], counter)
+
+        resolution = _resolve([111, 222])                        # 222 absent from bulk
+
+        assert counter["near"] == 2
+        assert resolution.complete
+        out = capsys.readouterr().out
+        assert "1 missing" in out and "1 older than 1 d" in out
+
+    def test_records_already_from_the_per_id_endpoint_are_not_re_requested(
+        self, cache_dir, monkeypatch
+    ):
+        # An empty catalogue sends everything to the per-satellite endpoint; the
+        # answer is already the nearest the service holds, so even if it is older
+        # than the target it must not be asked for twice.
+        _serve_empty_catalogue(monkeypatch)
+        counter = {}
+        _serve_nearest(monkeypatch, [(25544, self._STALE)], counter)
+
+        entry = _resolve([25544]).resolved[25544]
+
+        assert counter["near"] == 1
+        assert entry.age_days == pytest.approx(2.0, abs=1e-3)
 
 
 # ---------------------------------------------------------------------------

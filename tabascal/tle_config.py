@@ -53,6 +53,15 @@ from tabascal.time import mjd_to_jd
 #: observation-specific replacement.
 DEFAULT_REMOTE_TLE_MAX_AGE_DAYS = 3.0
 
+#: Age (days) above which a record taken from the bulk catalogue is re-requested
+#: from the per-satellite endpoint. SatChecker's ``tles-at-epoch`` returns the
+#: newest record at or *before* the requested epoch, so it cannot return a closer
+#: record falling after it; ``get-nearest-tle`` can. Measured over 32 GNSS
+#: satellites, one day is the knee of the trade-off: it upgraded 11 of 32 and
+#: reached a worst-case age of 1.06 d — identical to querying all 32 — where a
+#: lower threshold bought only a better median.
+DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS = 1.0
+
 #: Observed defensive boundary (days) after which a SatChecker full catalogue is
 #: treated as settled. SatChecker's ingest was measured ramping from 9 rows at an
 #: observation age of 16 days to 31,108 at 30 days, so a response can be complete
@@ -266,6 +275,7 @@ class TLEConfig:
     extra_tle_dir: Optional[str] = None
     extra_tle_max_age_days: Optional[float] = None
     remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS
+    remote_tle_target_age_days: Optional[float] = DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS
     catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS
     catalogue_settle_days: Optional[float] = DEFAULT_TLE_CATALOGUE_SETTLE_DAYS
     provisional_cache_hours: float = DEFAULT_TLE_PROVISIONAL_CACHE_HOURS
@@ -307,16 +317,33 @@ def normalise_tle_config(
 
     extra_tle_dir = satellites.get("extra_tle_dir") or None
 
+    remote_max_age = validate_age_days(
+        satellites.get("remote_tle_max_age_days", DEFAULT_REMOTE_TLE_MAX_AGE_DAYS),
+        "remote_tle_max_age_days",
+    )
+    target_age = validate_age_days(
+        satellites.get("remote_tle_target_age_days", DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS),
+        "remote_tle_target_age_days",
+    )
+    # A target above the ceiling can never fire: anything staler than the target
+    # would already have been rejected outright. Almost certainly a mix-up of the
+    # two settings, so say so rather than silently doing nothing.
+    if target_age is not None and remote_max_age is not None and target_age > remote_max_age:
+        raise TLEConfigurationError(
+            f"remote_tle_target_age_days ({target_age:g}) must not exceed "
+            f"remote_tle_max_age_days ({remote_max_age:g}): a target above the "
+            f"ceiling can never trigger an upgrade, because a record that stale "
+            f"is rejected instead."
+        )
+
     return TLEConfig(
         norad_ids=norad_ids,
         extra_tle_dir=str(extra_tle_dir) if extra_tle_dir else None,
         extra_tle_max_age_days=validate_age_days(
             satellites.get("extra_tle_max_age_days"), "extra_tle_max_age_days"
         ),
-        remote_tle_max_age_days=validate_age_days(
-            satellites.get("remote_tle_max_age_days", DEFAULT_REMOTE_TLE_MAX_AGE_DAYS),
-            "remote_tle_max_age_days",
-        ),
+        remote_tle_max_age_days=remote_max_age,
+        remote_tle_target_age_days=target_age,
         catalogue_interval_hours=validate_catalogue_interval_hours(
             satellites.get(
                 "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS

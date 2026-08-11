@@ -67,7 +67,13 @@ class TestConfigNormalisation:
         assert tle_config.normalise_norad_ids([value]) == [25544]
 
     @pytest.mark.parametrize(
-        "field", ["extra_tle_max_age_days", "remote_tle_max_age_days", "tle_catalogue_settle_days"]
+        "field",
+        [
+            "extra_tle_max_age_days",
+            "remote_tle_max_age_days",
+            "remote_tle_target_age_days",
+            "tle_catalogue_settle_days",
+        ],
     )
     @pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), "soon", []])
     def test_malformed_ages_are_configuration_errors(self, field, value):
@@ -88,10 +94,31 @@ class TestConfigNormalisation:
         with pytest.raises(TLEConfigurationError, match="tle_provisional_cache_hours"):
             tle_config.normalise_tle_config(_config(tle_provisional_cache_hours=value))
 
+    def test_target_age_above_the_ceiling_is_a_configuration_error(self):
+        # A target above the ceiling can never fire, so it is almost certainly a
+        # mix-up of the two settings rather than an intent.
+        with pytest.raises(TLEConfigurationError, match="must not exceed"):
+            tle_config.normalise_tle_config(
+                _config(remote_tle_max_age_days=1, remote_tle_target_age_days=2)
+            )
+
+    def test_target_age_equal_to_the_ceiling_is_allowed(self):
+        cfg = tle_config.normalise_tle_config(
+            _config(remote_tle_max_age_days=2, remote_tle_target_age_days=2)
+        )
+        assert cfg.remote_tle_target_age_days == 2.0
+
+    def test_target_age_with_a_null_ceiling_is_allowed(self):
+        cfg = tle_config.normalise_tle_config(
+            _config(remote_tle_max_age_days=None, remote_tle_target_age_days=5)
+        )
+        assert cfg.remote_tle_target_age_days == 5.0
+
     def test_defaults_are_the_documented_ones(self):
         cfg = tle_config.normalise_tle_config(_config(norad_ids=[25544]))
         assert cfg.extra_tle_max_age_days is None      # exact replay stays possible
         assert cfg.remote_tle_max_age_days == 3.0
+        assert cfg.remote_tle_target_age_days == 1.0
         assert cfg.catalogue_settle_days == 45.0
         assert cfg.provisional_cache_hours == 12.0
         assert cfg.catalogue_interval_hours == 2.0

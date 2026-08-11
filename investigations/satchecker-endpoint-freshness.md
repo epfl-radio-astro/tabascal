@@ -265,12 +265,32 @@ not, without asking first.
 
 ## 7. What this means for tabascal
 
-Nothing has been changed on the strength of this yet. The source precedence lives
-in `tabascal/tle.py:resolve_tles`; the relevant tests are
-`tests/test_tle_policy.py`.
+**Acted on, 2026-08-12.** This landed on the "intentional and bounded" row of the
+original decision table, and recommendations 1 and 2 below were implemented as
+the freshness upgrade pass in `tabascal/tle.py:resolve_tles`
+(`_stale_catalogue_ids`), with tests in `tests/test_tle_policy.py`
+(`TestFreshnessUpgrade`):
 
-This lands on the **"intentional and bounded"** row of the original decision
-table. Recommended:
+- New `remote_tle_target_age_days`, default **1 day**. A bulk-catalogue record
+  older than this is re-requested from `get-nearest-tle`, in the same pass that
+  fills IDs the bulk response missed. Records already sourced from the per-ID
+  endpoint are excluded — they are already the nearest the service holds.
+- The threshold was chosen from the measured trade-off rather than picked: at
+  1 day the upgrade touches 11 of 32 satellites and reaches a worst case of
+  1.06 d, *identical* to querying all 32. Below 1 day only the median improves.
+- Live confirmation on the same 32 satellites: 11 upgrades, median 0.434 d, max
+  1.063 d, against 0.752 / 4.529 without the pass — matching the offline
+  prediction of 11 / 0.448 / 1.063.
+- `_accept_remote` now replaces an incumbent only on a *strict* improvement, so a
+  declined, failed or over-age upgrade leaves the existing record untouched and
+  can never turn a complete resolution into a coverage failure.
+- Throttle lowered 1 s → 0.2 s on the strength of §6, still ~6.7× under the
+  published ceiling.
+
+Recommendations 3 and 4 remain open. Original text follows.
+
+The source precedence lives in `tabascal/tle.py:resolve_tles`; the relevant tests
+are `tests/test_tle_policy.py`. Recommended:
 
 1. **Document the bound** where `resolve_tles` chooses its source: bulk records
    carry an age of up to one update interval, capped at 14 days, and are

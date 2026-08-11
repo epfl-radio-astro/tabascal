@@ -160,20 +160,22 @@ The selection rule is undocumented upstream; a documentation request is filed as
 Full analysis, including the source references it was derived from, is in
 `investigations/satchecker-endpoint-freshness.md` in the repository.
 
-**What it means for a run.** TABASCAL fetches the bulk catalogue first and falls
-back to per-satellite lookups only for IDs the bulk response *misses* — one
-multi-megabyte download instead of one request per satellite. So a satellite that
-*is* present in the bulk catalogue keeps that record even when a fresher one is
-available, unless the record is old enough to breach `remote_tle_max_age_days`,
-in which case the rejection routes it to the per-satellite endpoint and it is
-upgraded. Records between "staler than available" and the ceiling are kept as-is.
+**What TABASCAL does about it.** The bulk catalogue is fetched first — one
+multi-megabyte download instead of one request per satellite — and then any record
+older than `remote_tle_target_age_days` (default 1 day) is re-requested from the
+per-satellite endpoint, in the same pass that fills IDs the bulk response missed.
+On the benchmark above that costs 11 requests instead of 32 and brings the worst
+case to 1.06 d, matching what querying every satellite individually would achieve.
 
-If TLE freshness matters more to you than fetch time, the reliable way to get the
-nearest available elements today is to supply them yourself through
-`extra_tle_dir` (see [below](#sec-manual-tles)),
-which bypasses both endpoints. Lowering `remote_tle_max_age_days` also forces
-more satellites onto the per-satellite path, at the cost of failing the run
-outright for any that path cannot satisfy either.
+An upgrade can only improve a record. If the per-satellite endpoint has nothing
+fresher, cannot answer, or offers something beyond `remote_tle_max_age_days`, the
+existing record is kept — a declined upgrade can never turn a complete resolution
+into a failure. Upgraded records are cached alongside the snapshot, so the
+requests are paid once per canonical epoch, not once per run.
+
+Setting `remote_tle_target_age_days: null` disables the pass and restores
+pure bulk-first behaviour. To bypass both endpoints entirely, supply the elements
+yourself through `extra_tle_dir` (see [below](#sec-manual-tles)).
 
 ## Caching behaviour by scenario
 

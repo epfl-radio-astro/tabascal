@@ -20,11 +20,14 @@ Source precedence is resolved **independently per NORAD ID**:
      SatChecker on a miss and cached atomically. A catalogue whose epoch has not
      yet settled (``tle_catalogue_settle_days``) is cached only *provisionally*.
   3. Per-satellite SatChecker fallback — for IDs still missing from the bulk
-     snapshot, and for *all* remaining IDs when the service reports an empty or
+     snapshot, for *all* remaining IDs when the service reports an empty or
      otherwise unusable catalogue at the epoch (its ``tles-at-epoch`` endpoint has
      a data horizon; recent observations can fall beyond it while
-     ``get-nearest-tle`` still resolves). The records are associated with the same
-     canonical snapshot so a later run over the same request reuses them.
+     ``get-nearest-tle`` still resolves), and for IDs whose bulk record is older
+     than ``remote_tle_target_age_days``. That last case exists because the bulk
+     endpoint returns the newest record at or *before* the requested epoch and so
+     cannot see a closer one just after it. The records are associated with the
+     same canonical snapshot so a later run over the same request reuses them.
 
 Two rules govern what is then accepted:
 
@@ -82,6 +85,7 @@ from tabascal.satchecker.tle_parse import (
 )
 from tabascal.tle_config import (  # noqa: F401  re-exported for callers
     DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
+    DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS,
     DEFAULT_TLE_CATALOGUE_SETTLE_DAYS,
     DEFAULT_TLE_PROVISIONAL_CACHE_HOURS,
     TLEConfig,
@@ -99,7 +103,12 @@ from tabascal.time import jd_to_datetime
 # Constants
 # ---------------------------------------------------------------------------
 
-_THROTTLE_SECONDS = 1.0   # delay between per-satellite fallback requests
+# Delay between per-satellite requests. SatChecker publishes "100 per second,
+# 2000 per minute" on these routes, so this is ~6.7x more conservative than the
+# service permits — deliberately, because its rate limiter is configured to fail
+# open and this is a shared public facility run by IAU CPS. It is not a rate the
+# service has asked for; it is us choosing to be a good citizen.
+_THROTTLE_SECONDS = 0.2
 # DEFAULT_CATALOGUE_INTERVAL_HOURS is imported from tabascal.satchecker above —
 # the bucket policy's single source of truth.
 
@@ -424,27 +433,42 @@ def _accept_remote(
     A rejected candidate is remembered (nearest one wins) so the coverage error can
     report exactly how close the best available record was; it is never silently
     re-admitted once the remaining sources are exhausted.
+
+    One rule covers both filling a gap and improving on what is already held: a
+    candidate replaces the incumbent only when it is *strictly fresher*. That makes
+    the freshness upgrade pass safe by construction — a failed or staler upgrade
+    leaves the existing record untouched — and it also stops a later source from
+    quietly downgrading an earlier one.
     """
     for nid, record in candidates.items():
         provider = record.get("DATA_SOURCE") or None
+        incumbent = resolved.get(nid)
         try:
             epoch_jd = _tle_epoch_jd(record["TLE_LINE1"])
         except (KeyError, ValueError, TypeError) as e:
-            rejected[nid] = RejectedTLE(nid, source, provider, None, None, f"unparseable TLE epoch: {e}")
+            if incumbent is None:
+                rejected[nid] = RejectedTLE(
+                    nid, source, provider, None, None, f"unparseable TLE epoch: {e}"
+                )
             continue
         offset = epoch_jd - obs_epoch_jd
         if max_age_days is not None and abs(offset) > max_age_days + _AGE_TOL_DAYS:
-            previous = rejected.get(nid)
-            if previous is None or previous.age_days is None or abs(offset) < previous.age_days:
-                rejected[nid] = RejectedTLE(
-                    norad_id=nid,
-                    source=source,
-                    provider=provider,
-                    epoch_jd=epoch_jd,
-                    offset_days=offset,
-                    reason=f"remote_tle_max_age_days={max_age_days:g}",
-                )
+            # Only worth reporting when nothing acceptable is held for this ID;
+            # an over-age upgrade candidate is simply discarded.
+            if incumbent is None:
+                previous = rejected.get(nid)
+                if previous is None or previous.age_days is None or abs(offset) < previous.age_days:
+                    rejected[nid] = RejectedTLE(
+                        norad_id=nid,
+                        source=source,
+                        provider=provider,
+                        epoch_jd=epoch_jd,
+                        offset_days=offset,
+                        reason=f"remote_tle_max_age_days={max_age_days:g}",
+                    )
             continue
+        if incumbent is not None and incumbent.age_days <= abs(offset):
+            continue  # no improvement — keep what we have
         resolved[nid] = ResolvedTLE(
             norad_id=nid,
             record=record,
@@ -456,14 +480,19 @@ def _accept_remote(
         rejected.pop(nid, None)
 
 
-def _fetch_missing_ids(missing: list[int], epoch_jd: float) -> pd.DataFrame:
-    """Per-satellite fallback fetch for IDs absent from the bulk catalogue.
+def _fetch_per_satellite(norad_ids: list[int], epoch_jd: float) -> pd.DataFrame:
+    """Fetch one record per ID from the per-satellite endpoint.
+
+    Serves both purposes the endpoint has here: filling IDs the bulk catalogue
+    lacks, and upgrading IDs whose bulk record is needlessly old. A satellite the
+    endpoint cannot answer for is simply omitted — the caller decides whether that
+    is a coverage failure or a declined upgrade.
 
     A transport failure aborts the whole loop: the service is down, so continuing
     would issue one doomed request per remaining satellite.
     """
     rows: list[pd.DataFrame] = []
-    for i, nid in enumerate(missing):
+    for i, nid in enumerate(norad_ids):
         if i:
             time.sleep(_THROTTLE_SECONDS)
         try:
@@ -703,6 +732,7 @@ def resolve_tles(
     extra_tle_dir: Optional[str] = None,
     extra_tle_max_age_days: Optional[float] = None,
     remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
+    remote_tle_target_age_days: Optional[float] = DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS,
     catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
     catalogue_settle_days: Optional[float] = DEFAULT_TLE_CATALOGUE_SETTLE_DAYS,
     provisional_cache_hours: float = DEFAULT_TLE_PROVISIONAL_CACHE_HOURS,
@@ -719,6 +749,7 @@ def resolve_tles(
     requested = normalise_norad_ids(norad_ids)
     extra_max_age = validate_age_days(extra_tle_max_age_days, "extra_tle_max_age_days")
     remote_max_age = validate_age_days(remote_tle_max_age_days, "remote_tle_max_age_days")
+    target_age = validate_age_days(remote_tle_target_age_days, "remote_tle_target_age_days")
     obs_epoch_jd = float(obs_epoch_jd)
     catalogue_epoch = canonical_epoch_jd(obs_epoch_jd, catalogue_interval_hours)
 
@@ -775,7 +806,14 @@ def resolve_tles(
             )
             remaining = wanted - set(resolution.resolved)
 
-        if remaining:
+        # The per-satellite endpoint serves two needs from here on: IDs the bulk
+        # catalogue lacks, and IDs whose bulk record is needlessly old (see
+        # _stale_catalogue_ids). Both are satisfied from the same cache read and
+        # the same fetch, so an upgrade costs nothing extra once a run is already
+        # making per-satellite requests.
+        wanted_per_satellite = remaining | _stale_catalogue_ids(resolution, target_age)
+
+        if wanted_per_satellite:
             # Fallback records carry the same state and expiry as the snapshot
             # they stand in for. An unsettled epoch reaches the per-satellite
             # endpoint *because* its bulk catalogue is empty, so without this the
@@ -784,7 +822,7 @@ def resolve_tles(
             _accept_remote(
                 _select_from_records(
                     cache.get_extra(catalogue_epoch, state, extra_max_age_hours),
-                    remaining,
+                    wanted_per_satellite,
                     catalogue_epoch,
                 ),
                 _SRC_CACHED_FALLBACK,
@@ -794,22 +832,31 @@ def resolve_tles(
                 resolution.rejected,
             )
             remaining = wanted - set(resolution.resolved)
+            wanted_per_satellite = remaining | _stale_catalogue_ids(resolution, target_age)
 
-        if remaining:
-            missing = sorted(remaining)
+        if wanted_per_satellite:
+            to_fetch = sorted(wanted_per_satellite)
+            n_missing = len(remaining)
+            n_upgrade = len(to_fetch) - n_missing
+            reasons = (
+                [f"{n_missing} missing"] if n_missing else []
+            ) + ([f"{n_upgrade} older than {target_age:g} d"] if n_upgrade else [])
             print(
-                f"Fetching {len(missing)} missing TLE(s) individually from "
-                f"SatChecker: {missing}"
+                f"Fetching {len(to_fetch)} TLE(s) individually from SatChecker "
+                f"({', '.join(reasons)}): {to_fetch}"
             )
-            fetched = _fetch_missing_ids(missing, catalogue_epoch)
+            fetched = _fetch_per_satellite(to_fetch, catalogue_epoch)
             if len(fetched):
                 _store_or_warn(
                     lambda: cache.store_extra(catalogue_epoch, fetched, state),
                     cache.extra_path(catalogue_epoch, state),
                     "per-satellite fallback records",
                 )
+                # _accept_remote replaces only on a strict improvement, so a
+                # satellite the endpoint could not better keeps its bulk record
+                # and an upgrade can never turn into a coverage failure.
                 _accept_remote(
-                    _select_from_records(fetched, remaining, catalogue_epoch),
+                    _select_from_records(fetched, wanted_per_satellite, catalogue_epoch),
                     _SRC_FALLBACK,
                     obs_epoch_jd,
                     remote_max_age,
@@ -819,6 +866,31 @@ def resolve_tles(
 
     _report_remote_selection(resolution)
     return resolution
+
+
+def _stale_catalogue_ids(
+    resolution: TLEResolution, target_age_days: Optional[float]
+) -> set[int]:
+    """IDs holding a bulk-catalogue record older than *target_age_days*.
+
+    Only records from the bulk catalogue qualify. SatChecker's ``tles-at-epoch``
+    returns the newest record at or *before* the requested epoch, so it cannot see
+    a closer record that happens to fall after it; measured over 32 GNSS
+    satellites, that made its records about twice the age of the best available
+    and, in the worst case, 4.5 days against 1.1. ``get-nearest-tle`` has no such
+    restriction, so re-asking it for the stale ones recovers the difference.
+
+    Records already obtained from the per-satellite endpoint are excluded — they
+    are already the nearest the service holds, so re-requesting them would spend a
+    request to learn nothing. ``None`` disables the upgrade pass entirely.
+    """
+    if target_age_days is None:
+        return set()
+    return {
+        nid
+        for nid, entry in resolution.resolved.items()
+        if entry.source == _SRC_CATALOGUE and entry.age_days > target_age_days
+    }
 
 
 def require_complete_coverage(resolution: TLEResolution) -> TLEResolution:
@@ -843,6 +915,7 @@ def get_tles_by_id(
     extra_tle_dir: Optional[str] = None,
     extra_tle_max_age_days: Optional[float] = None,
     remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
+    remote_tle_target_age_days: Optional[float] = DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS,
     catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
     catalogue_settle_days: Optional[float] = DEFAULT_TLE_CATALOGUE_SETTLE_DAYS,
     provisional_cache_hours: float = DEFAULT_TLE_PROVISIONAL_CACHE_HOURS,
@@ -867,6 +940,7 @@ def get_tles_by_id(
                 extra_tle_dir=extra_tle_dir,
                 extra_tle_max_age_days=extra_tle_max_age_days,
                 remote_tle_max_age_days=remote_tle_max_age_days,
+                remote_tle_target_age_days=remote_tle_target_age_days,
                 catalogue_interval_hours=catalogue_interval_hours,
                 catalogue_settle_days=catalogue_settle_days,
                 provisional_cache_hours=provisional_cache_hours,
@@ -1077,6 +1151,7 @@ def preflight_tle_check(
                 extra_tle_dir=tle_config.extra_tle_dir,
                 extra_tle_max_age_days=tle_config.extra_tle_max_age_days,
                 remote_tle_max_age_days=tle_config.remote_tle_max_age_days,
+                remote_tle_target_age_days=tle_config.remote_tle_target_age_days,
                 catalogue_interval_hours=tle_config.catalogue_interval_hours,
                 catalogue_settle_days=tle_config.catalogue_settle_days,
                 provisional_cache_hours=tle_config.provisional_cache_hours,
