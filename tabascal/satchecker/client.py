@@ -18,6 +18,7 @@ names the rest of tabascal expects): ``NORAD_CAT_ID``, ``OBJECT_NAME``,
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -106,7 +107,12 @@ def _http_get(url: str, timeout: int = REQUEST_TIMEOUT) -> bytes:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
-    except (urllib.error.URLError, TimeoutError) as e:
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        http.client.HTTPException,
+    ) as e:
         raise SatCheckerError(f"SatChecker request failed ({url}): {e}") from e
 
 
@@ -210,15 +216,18 @@ def catalogue_total(epoch_jd: float) -> int:
 
 
 def _reject_repeated_rows(df: pd.DataFrame, source: str) -> None:
-    """Reject *fully identical* TLE rows (same NORAD ID and both TLE lines).
+    """Reject repeated TLE rows from the same provider.
 
-    An identical repeated row is the signature of corrupted/repeated content (e.g.
-    JSON pagination serving the same page twice), so it invalidates the download.
-    Duplicate NORAD IDs with *different* TLE lines are deliberately tolerated: the
-    service may legitimately carry more than one record per object near an epoch,
-    and downstream selection picks the record nearest the canonical epoch per ID.
+    The same provider returning the same TLE twice is the signature of corrupted or
+    repeated content (for example, JSON pagination serving the same page twice), so
+    it invalidates the download. Identical TLEs attributed to different providers
+    are legitimate in SatChecker's aggregated catalogue and are retained. Duplicate
+    NORAD IDs with different TLE lines are also deliberately tolerated; downstream
+    selection picks the record nearest the canonical epoch per ID.
     """
-    dup = df.duplicated(subset=["NORAD_CAT_ID", "TLE_LINE1", "TLE_LINE2"])
+    dup = df.duplicated(
+        subset=["NORAD_CAT_ID", "TLE_LINE1", "TLE_LINE2", "DATA_SOURCE"]
+    )
     if dup.any():
         sample = ", ".join(str(int(x)) for x in df.loc[dup, "NORAD_CAT_ID"].unique()[:5])
         raise SatCheckerError(
@@ -406,4 +415,20 @@ def fetch_nearest_tle(norad_id: int, epoch_jd: float) -> pd.DataFrame:
     rows = obj.get("orbital_data") or obj.get("tle_data") or []
     if not rows:
         return pd.DataFrame()
-    return _normalise(pd.DataFrame(rows))
+    # The endpoint normally returns a list of row objects, but accepting a single
+    # row object costs nothing and keeps pandas' raw "all scalar values" ValueError
+    # from escaping the client's SatCheckerError contract.
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise SatCheckerError(
+            f"SatChecker returned unexpected nearest-TLE rows ({url}): "
+            f"{type(rows).__name__}"
+        )
+    try:
+        records = pd.DataFrame.from_records(rows)
+    except (ValueError, TypeError) as e:
+        raise SatCheckerError(
+            f"SatChecker nearest-TLE rows could not be read ({url}): {e}"
+        ) from e
+    return _normalise(records)

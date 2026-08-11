@@ -5,6 +5,7 @@ managed canonical-snapshot cache, and the per-satellite fallback — all with th
 SatChecker transport mocked and the managed cache pointed at a temp directory.
 """
 
+import json
 from datetime import datetime
 
 import pytest
@@ -117,6 +118,46 @@ class TestManagedCatalogue:
         assert sorted(df["NORAD_CAT_ID"]) == [25544, 38833]
         assert len(df) == 2
 
+    def test_invalid_bulk_row_below_threshold_falls_back_without_cache_failure(
+        self, cache_dir, monkeypatch
+    ):
+        records = make_catalogue_df([(25544, _OBS), (38833, _OBS)])
+        records.loc[1, "TLE_LINE2"] = "not a TLE"
+        monkeypatch.setattr(
+            tle.satchecker,
+            "fetch_full_catalogue",
+            lambda epoch: CatalogueResult(records, 2, 2, "1.6.0", "zip"),
+        )
+        counter = {"near": 0}
+        _install_nearest(monkeypatch, [(25544, _OBS)], counter)
+
+        df = tle.get_tles_by_id([25544], _OBS)
+
+        assert list(df["NORAD_CAT_ID"]) == [25544]
+        assert counter["near"] == 1
+        assert not list(cache_dir.glob("catalogue-*[0-9]Z.json"))
+
+    def test_invalid_bulk_row_is_removed_before_acceptable_snapshot_is_cached(
+        self, cache_dir, monkeypatch
+    ):
+        records = make_catalogue_df([(nid, _OBS) for nid in range(1000, 1100)])
+        records.loc[records["NORAD_CAT_ID"] == 1099, "TLE_LINE1"] = "not a TLE"
+        monkeypatch.setattr(
+            tle.satchecker,
+            "fetch_full_catalogue",
+            lambda epoch: CatalogueResult(records, 100, 100, "1.6.0", "zip"),
+        )
+
+        df = tle.get_tles_by_id([1000], _OBS)
+
+        assert list(df["NORAD_CAT_ID"]) == [1000]
+        snapshot_files = list(cache_dir.glob("catalogue-*[0-9]Z.json"))
+        assert len(snapshot_files) == 1
+        envelope = json.loads(snapshot_files[0].read_text())
+        assert envelope["expected_count"] == 100
+        assert envelope["actual_count"] == 99
+        assert len(envelope["records"]) == 99
+
 
 # ---------------------------------------------------------------------------
 # Per-satellite fallback
@@ -179,6 +220,27 @@ class TestFallback:
         _install_nearest_raise(monkeypatch)
         with pytest.raises(SatCheckerError):
             tle.get_tles_by_id([25544], _OBS)
+
+    def test_invalid_fallback_row_does_not_discard_valid_fallbacks(
+        self, cache_dir, monkeypatch
+    ):
+        counter = {"full": 0}
+        _install_full_empty(monkeypatch, counter)
+
+        def nearest(norad_id, epoch_jd):
+            rec = make_catalogue_df([(norad_id, _OBS)])
+            if norad_id == 38833:
+                rec.loc[0, "TLE_LINE2"] = "not a TLE"
+            return rec
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", nearest)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        df = tle.get_tles_by_id([25544, 38833], _OBS)
+
+        assert list(df["NORAD_CAT_ID"]) == [25544]
+        extra_files = list(cache_dir.glob("catalogue-*-extra.json"))
+        assert len(extra_files) == 1
 
 
 class TestDuplicateNoradSelection:

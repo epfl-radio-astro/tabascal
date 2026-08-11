@@ -4,6 +4,9 @@ The single network choke point ``client._http_get`` is monkeypatched to return
 canned bytes routed by URL, so nothing here touches the network.
 """
 
+import http.client
+import json
+import ssl
 import urllib.error
 import urllib.request
 
@@ -21,6 +24,7 @@ from tabascal.satchecker.client import (
 
 from .tle_helpers import (
     jd,
+    make_catalogue_df,
     make_empty_zip_bytes,
     make_info_json,
     make_json_page,
@@ -174,6 +178,46 @@ class TestNearestTle:
         with pytest.raises(SatCheckerError):
             fetch_nearest_tle(25544, _EPOCH)
 
+    @pytest.mark.parametrize(
+        "read_error",
+        [
+            http.client.IncompleteRead(b"partial", 100),
+            http.client.RemoteDisconnected("connection closed"),
+            ssl.SSLError("TLS stream failed"),
+        ],
+        ids=["incomplete-read", "remote-disconnected", "ssl-error"],
+    )
+    def test_midstream_transport_errors_become_satchecker_error(
+        self, monkeypatch, read_error
+    ):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                raise read_error
+
+        monkeypatch.setattr(
+            urllib.request, "urlopen", lambda req, timeout=None: Response()
+        )
+        with pytest.raises(SatCheckerError, match="SatChecker request failed"):
+            fetch_nearest_tle(25544, _EPOCH)
+
+    def test_single_dict_record_is_normalised(self, monkeypatch):
+        payload = json.loads(make_nearest_json([(25544, _EPOCH)]))
+        payload["orbital_data"] = payload["orbital_data"][0]
+        _route(monkeypatch, lambda url: json.dumps(payload).encode())
+        df = fetch_nearest_tle(25544, _EPOCH)
+        assert list(df["NORAD_CAT_ID"]) == [25544]
+
+    def test_invalid_row_collection_becomes_satchecker_error(self, monkeypatch):
+        _route(monkeypatch, lambda url: b'{"orbital_data": "not-rows"}')
+        with pytest.raises(SatCheckerError, match="unexpected nearest-TLE rows"):
+            fetch_nearest_tle(25544, _EPOCH)
+
     def test_missing_satellite_id_becomes_satchecker_error(self, monkeypatch):
         # A row without satellite_id previously escaped _normalise as a raw
         # pandas IntCastingNaNError; the module contract is SatCheckerError.
@@ -239,6 +283,11 @@ class TestZipParsing:
         _route(monkeypatch, lambda url: make_zip_bytes(rows))
         df = client._fetch_catalogue_zip(_EPOCH)
         assert sorted(df["NORAD_CAT_ID"]) == [1, 1, 2]
+
+    def test_identical_tle_from_different_sources_is_tolerated(self):
+        df = make_catalogue_df([(1, _EPOCH), (1, _EPOCH)])
+        df["DATA_SOURCE"] = ["provider-a", "provider-b"]
+        client._reject_repeated_rows(df, "test")
 
     def test_corrupt_zip_falls_back_to_json(self, monkeypatch):
         # End-to-end: zip carries identical repeated rows both attempts, so

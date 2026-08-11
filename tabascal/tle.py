@@ -51,6 +51,7 @@ from tabascal.satchecker import (
     read_legacy_tle_records,
 )
 from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-compat alias
+from tabascal.satchecker.cache import CATALOGUE_MIN_FRACTION
 
 # The TLE parser lives in tabascal.satchecker.tle_parse so cache validation and
 # element extraction exercise the *same* code; re-exported here under this
@@ -130,6 +131,34 @@ def _add_parsed_elements(tles: pd.DataFrame) -> pd.DataFrame:
     for col in parsed.columns:
         tles[col] = parsed[col]
     return tles
+
+
+def _validated_service_records(records: pd.DataFrame, context: str) -> pd.DataFrame:
+    """Return service rows whose TLE pair parses and matches its catalogue ID.
+
+    Managed-cache validation intentionally remains strict and all-or-nothing. This
+    boundary is different: a single bad row in a remote bulk response must not make
+    valid, requested satellites unusable. Invalid service rows are reported and
+    omitted before any cache write or downstream selection.
+    """
+    if not len(records):
+        return records.copy()
+
+    valid_indices = []
+    for idx, row in records.iterrows():
+        try:
+            nid = int(row["NORAD_CAT_ID"])
+            embedded_id = validate_tle_pair(row["TLE_LINE1"], row["TLE_LINE2"])
+            if embedded_id != nid:
+                raise ValueError(
+                    f"TLE lines belong to satellite {embedded_id}, not {nid}"
+                )
+        except (KeyError, ValueError, TypeError, OverflowError) as e:
+            shown_id = row.get("NORAD_CAT_ID", "unknown")
+            print(f"  {context}: invalid service record {shown_id!r} rejected — {e}")
+            continue
+        valid_indices.append(idx)
+    return records.loc[valid_indices].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +265,9 @@ def _fetch_missing_ids(missing: list[int], epoch_jd: float) -> pd.DataFrame:
             print(f"  fallback fetch failed for {nid}: {e}")
             continue
         if len(rec):
-            rows.append(rec)
+            rec = _validated_service_records(rec, f"fallback fetch for {nid}")
+            if len(rec):
+                rows.append(rec)
     if not rows:
         return pd.DataFrame()
     return pd.concat(rows, ignore_index=True)
@@ -269,16 +300,31 @@ def _ensure_snapshot(
         print(f"  {e}")
         print("  falling back to per-satellite TLE lookups for all requested IDs")
         return None
+    records = _validated_service_records(result.records, "managed catalogue")
+    actual_count = len(records)
+    if not actual_count:
+        print(
+            "  managed catalogue has no valid TLE rows — falling back to "
+            "per-satellite lookups"
+        )
+        return None
+    if actual_count < result.expected_count * CATALOGUE_MIN_FRACTION:
+        print(
+            f"  managed catalogue has {actual_count} valid rows of "
+            f"{result.expected_count} expected (< {CATALOGUE_MIN_FRACTION:.0%}) "
+            "— not caching; falling back to per-satellite lookups"
+        )
+        return None
     snapshot = CatalogueSnapshot(
         catalogue_epoch_jd=catalogue_epoch_jd,
-        records=result.records,
+        records=records,
         requested_epoch_jd=obs_epoch_jd,
         expected_count=result.expected_count,
-        actual_count=result.actual_count,
+        actual_count=actual_count,
         service_version=result.service_version,
     )
     cache.store_snapshot(snapshot)
-    print(f"Saved {len(result.records)} TLEs for {canonical_stamp(catalogue_epoch_jd)}")
+    print(f"Saved {len(records)} TLEs for {canonical_stamp(catalogue_epoch_jd)}")
     return snapshot
 
 
