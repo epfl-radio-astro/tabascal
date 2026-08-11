@@ -3,7 +3,7 @@
 TLEs are sourced from the IAU CPS SatChecker service via
 :mod:`tabascal.satchecker` — no account or credentials are required. This module
 is the TABASCAL adapter: it resolves each requested NORAD ID against an ordered
-set of sources, applies the configurable age policy, drives the deterministic
+set of sources, applies the configurable age policies, drives the deterministic
 catalogue cache, and parses OMM-style orbital elements locally from the two TLE
 lines. All filtering and element computation is done locally.
 
@@ -12,16 +12,30 @@ Source precedence is resolved **independently per NORAD ID**:
   1. ``extra_tle_dir`` — user-supplied local TLE files. The record whose TLE-line
      epoch is closest to the observation epoch is chosen; it is accepted only if
      within ``extra_tle_max_age_days`` (``None`` = unlimited). An accepted record
-     wins outright — later sources are not consulted for that ID.
+     wins outright — later sources are not consulted for that ID. This is *your*
+     data: the remote service's age policy never applies to it, so exact replay
+     of a previous run's ``used_tles_*.json`` is always possible.
   2. Managed canonical catalogue — one deterministic snapshot per fixed UTC bucket
      (see :func:`tabascal.satchecker.cache.canonical_epoch_jd`), fetched from
-     SatChecker on a miss and cached atomically.
+     SatChecker on a miss and cached atomically. A catalogue whose epoch has not
+     yet settled (``tle_catalogue_settle_days``) is cached only *provisionally*.
   3. Per-satellite SatChecker fallback — for IDs still missing from the bulk
-     snapshot, and for *all* remaining IDs when the service reports an empty
-     catalogue at the epoch (its ``tles-at-epoch`` endpoint has a data horizon;
-     recent observations can fall beyond it while ``get-nearest-tle`` still
-     resolves). The records are associated with the same canonical snapshot so a
-     later run over the same request reuses them.
+     snapshot, and for *all* remaining IDs when the service reports an empty or
+     otherwise unusable catalogue at the epoch (its ``tles-at-epoch`` endpoint has
+     a data horizon; recent observations can fall beyond it while
+     ``get-nearest-tle`` still resolves). The records are associated with the same
+     canonical snapshot so a later run over the same request reuses them.
+
+Two rules govern what is then accepted:
+
+* **Age ceiling.** Every record from source 2 or 3 must lie within
+  ``remote_tle_max_age_days`` of the observation epoch. The epoch is parsed
+  locally from TLE line 1 — never taken from a provider field — and every
+  accepted record's provider, epoch, signed offset and absolute age is logged.
+* **Complete coverage.** Every configured NORAD ID must end up with an accepted
+  TLE. If even one does not, resolution raises :class:`TLEError` during preflight,
+  before the expensive subtraction begins, naming every failing ID and the
+  remedies. TABASCAL never silently shrinks the requested satellite model.
 
 Catalogue reuse follows the bucket policy: the cached record is nearest to the
 canonical bucket epoch, not necessarily nearest to the exact observation epoch.
@@ -30,9 +44,10 @@ Cache contents cannot change the result for a fixed request and policy.
 
 from __future__ import annotations
 
-import math
+import json
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -44,11 +59,15 @@ import pandas as pd
 from tabascal import satchecker
 from tabascal.satchecker import (
     DEFAULT_CATALOGUE_INTERVAL_HOURS,
+    PROVISIONAL,
+    STABLE,
     CatalogueSnapshot,
     TextCatalogueCache,
     canonical_epoch_jd,
     canonical_stamp,
+    catalogue_state,
     read_legacy_tle_records,
+    utc_now_jd,
 )
 from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-compat alias
 from tabascal.satchecker.cache import CATALOGUE_MIN_FRACTION
@@ -60,6 +79,18 @@ from tabascal.satchecker.tle_parse import (
     parse_tle_elements,  # noqa: F401  re-export
     tle_epoch_jd as _tle_epoch_jd,
     validate_tle_pair,
+)
+from tabascal.tle_config import (  # noqa: F401  re-exported for callers
+    DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
+    DEFAULT_TLE_CATALOGUE_SETTLE_DAYS,
+    DEFAULT_TLE_PROVISIONAL_CACHE_HOURS,
+    TLEConfig,
+    TLEConfigurationError,
+    ms_observation_epoch_jd,
+    normalise_norad_ids,
+    normalise_tle_config,
+    observation_epoch_jd,
+    validate_age_days,
 )
 from tabascal.time import jd_to_datetime
 
@@ -79,42 +110,135 @@ _THROTTLE_SECONDS = 1.0   # delay between per-satellite fallback requests
 # precision while rejecting one several ms away — matching the documented semantics.
 _AGE_TOL_DAYS = 3e-8
 
+# Above this many remote records the per-satellite log lines are replaced by a
+# grouped summary; set ``TABASCAL_TLE_LOG_DETAIL=1`` to force the full listing.
+_GROUPED_LOG_THRESHOLD = 12
+_LOG_DETAIL_ENV = "TABASCAL_TLE_LOG_DETAIL"
+
+# Preflight and execution must derive the same observation epoch. This tolerance
+# (~86 ms) absorbs float-summation noise while still catching a genuine divergence
+# such as a different unit guard or a different per-integration row selection.
+_EPOCH_AGREEMENT_TOL_DAYS = 1e-6
+
+# Source labels used in logs, errors and provenance.
+_SRC_EXTRA = "extra_tle_dir"
+_SRC_CATALOGUE = "managed catalogue"
+_SRC_CACHED_FALLBACK = "cached per-satellite record"
+_SRC_FALLBACK = "SatChecker per-satellite"
+
 
 # ---------------------------------------------------------------------------
 # TLE cache directory helpers
 # ---------------------------------------------------------------------------
 
 def tle_cache_dir() -> Path:
-    """Return the managed TLE cache directory, creating it if needed.
+    """Return the managed TLE cache directory, creating it if possible.
 
     The directory is resolved in priority order:
     1. ``TLE_CACHE_DIR`` environment variable (if set).
     2. The platform user-cache directory (e.g. ``~/.cache/tle-cache`` on Linux,
        ``~/Library/Caches/tle-cache`` on macOS).
+
+    A directory that cannot be created (read-only filesystem, no permission,
+    quota) is *not* an error here: the path is returned regardless, reads then
+    miss and writes are reported and skipped, so a run with a valid fetch is
+    never lost to an unusable cache location.
     """
     p = Path(os.environ.get("TLE_CACHE_DIR") or user_cache_path("tle-cache"))
-    p.mkdir(parents=True, exist_ok=True)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     return p
 
 
 # ---------------------------------------------------------------------------
-# Configuration validation
+# Configuration validation (back-compat shim over tabascal.tle_config)
 # ---------------------------------------------------------------------------
 
 def _validate_max_age(extra_tle_max_age_days) -> Optional[float]:
-    """Validate ``extra_tle_max_age_days``: ``None`` or a non-negative float."""
-    if extra_tle_max_age_days is None:
-        return None
-    value = float(extra_tle_max_age_days)
-    if value < 0 or math.isnan(value):
-        raise ValueError(
-            f"extra_tle_max_age_days must be null or a non-negative number, "
-            f"got {extra_tle_max_age_days!r}"
-        )
-    return value
+    """Validate ``extra_tle_max_age_days``: ``None`` or a non-negative number."""
+    return validate_age_days(extra_tle_max_age_days, "extra_tle_max_age_days")
 
 
+# ---------------------------------------------------------------------------
+# Resolution results
+# ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class ResolvedTLE:
+    """One accepted TLE, with everything needed to explain *why* it was accepted."""
+
+    norad_id: int
+    record: dict
+    source: str
+    provider: Optional[str]
+    epoch_jd: float
+    offset_days: float          # signed: TLE epoch minus observation epoch
+
+    @property
+    def age_days(self) -> float:
+        return abs(self.offset_days)
+
+    @property
+    def remote(self) -> bool:
+        """True for records that came from the service or its managed cache."""
+        return self.source != _SRC_EXTRA
+
+
+@dataclass(frozen=True)
+class RejectedTLE:
+    """The best (nearest-epoch) candidate that was found but not acceptable."""
+
+    norad_id: int
+    source: str
+    provider: Optional[str]
+    epoch_jd: Optional[float]
+    offset_days: Optional[float]
+    reason: str
+
+    @property
+    def age_days(self) -> Optional[float]:
+        return None if self.offset_days is None else abs(self.offset_days)
+
+
+@dataclass
+class TLEResolution:
+    """The authoritative outcome of resolving one run's satellites.
+
+    Produced once, during preflight, and consumed unchanged by execution — so the
+    coverage decision is made exactly once and the model is built from exactly the
+    records that decision was made about.
+    """
+
+    requested: list[int]
+    obs_epoch_jd: float
+    catalogue_epoch_jd: float
+    remote_max_age_days: Optional[float]
+    resolved: dict[int, ResolvedTLE] = field(default_factory=dict)
+    rejected: dict[int, RejectedTLE] = field(default_factory=dict)
+
+    @property
+    def missing(self) -> list[int]:
+        """Requested IDs with no accepted TLE, in the order they were requested."""
+        return [nid for nid in self.requested if nid not in self.resolved]
+
+    @property
+    def complete(self) -> bool:
+        return not self.missing
+
+    def records(self) -> list[dict]:
+        """Accepted raw records (identity + TLE lines + provenance), in requested order."""
+        return [dict(self.resolved[nid].record) for nid in self.requested if nid in self.resolved]
+
+    def frame(self) -> pd.DataFrame:
+        """Accepted records plus locally parsed orbital elements, in requested order."""
+        return _finalise_records(self.records())
+
+
+# ---------------------------------------------------------------------------
+# Record helpers
+# ---------------------------------------------------------------------------
 
 def _add_parsed_elements(tles: pd.DataFrame) -> pd.DataFrame:
     """Populate OMM-style element columns by parsing each row's TLE lines.
@@ -131,6 +255,15 @@ def _add_parsed_elements(tles: pd.DataFrame) -> pd.DataFrame:
     for col in parsed.columns:
         tles[col] = parsed[col]
     return tles
+
+
+def _finalise_records(records: list[dict]) -> pd.DataFrame:
+    """Turn accepted raw records into the element frame the components consume."""
+    if not records:
+        return pd.DataFrame()
+    tles = pd.DataFrame(records)
+    tles["NORAD_CAT_ID"] = pd.to_numeric(tles["NORAD_CAT_ID"]).astype(int)
+    return _add_parsed_elements(tles).reset_index(drop=True)
 
 
 def _validated_service_records(records: pd.DataFrame, context: str) -> pd.DataFrame:
@@ -170,17 +303,19 @@ def _select_from_extra_dir(
     wanted: set[int],
     obs_epoch_jd: float,
     max_age_days: Optional[float],
-) -> dict[int, dict]:
+) -> tuple[dict[int, ResolvedTLE], dict[int, RejectedTLE]]:
     """Resolve IDs from ``extra_tle_dir`` with per-ID nearest + age policy.
 
-    Returns ``{norad_id: record}`` only for IDs whose nearest local TLE is within
-    ``max_age_days`` of *obs_epoch_jd* (``None`` = unlimited). The age is measured
-    from the TLE line-1 epoch, not the filename or file modification time.
+    Returns the IDs whose nearest local TLE is within ``max_age_days`` of
+    *obs_epoch_jd* (``None`` = unlimited), plus the rejected near-misses. The age
+    is measured from the TLE line-1 epoch, not the filename or file modification
+    time.
     """
-    resolved: dict[int, dict] = {}
+    resolved: dict[int, ResolvedTLE] = {}
+    rejected: dict[int, RejectedTLE] = {}
     records = read_legacy_tle_records(extra_tle_dir)
     if not len(records):
-        return resolved
+        return resolved, rejected
     records = records.copy()
     numeric_ids = pd.to_numeric(records["NORAD_CAT_ID"], errors="coerce")
     valid_ids = numeric_ids.notnull() & np.isfinite(numeric_ids)
@@ -189,10 +324,10 @@ def _select_from_extra_dir(
     records["NORAD_CAT_ID"] = numeric_ids.loc[valid_ids].astype(int)
     records = records[records["NORAD_CAT_ID"].isin(wanted)]
     if not len(records):
-        return resolved
+        return resolved, rejected
 
     valid_rows = []
-    for idx, row in records.iterrows():
+    for _, row in records.iterrows():
         nid = int(row["NORAD_CAT_ID"])
         try:
             embedded_id = validate_tle_pair(row["TLE_LINE1"], row["TLE_LINE2"])
@@ -208,21 +343,41 @@ def _select_from_extra_dir(
         valid_row["EPOCH_JD"] = epoch_jd
         valid_rows.append(valid_row)
     if not valid_rows:
-        return resolved
+        return resolved, rejected
     records = pd.DataFrame(valid_rows)
 
     for nid, group in records.groupby("NORAD_CAT_ID"):
         best = group.loc[(group["EPOCH_JD"] - obs_epoch_jd).abs().idxmin()]
-        age = abs(float(best["EPOCH_JD"]) - obs_epoch_jd)
-        if max_age_days is None or age <= max_age_days + _AGE_TOL_DAYS:
-            resolved[int(nid)] = best.to_dict()
-            print(f"  {nid}: from extra_tle_dir (epoch {age:.3f} d from observation)")
-        else:
+        epoch_jd = float(best["EPOCH_JD"])
+        offset = epoch_jd - obs_epoch_jd
+        record = {k: v for k, v in best.to_dict().items() if k != "EPOCH_JD"}
+        if max_age_days is None or abs(offset) <= max_age_days + _AGE_TOL_DAYS:
+            resolved[int(nid)] = ResolvedTLE(
+                norad_id=int(nid),
+                record=record,
+                source=_SRC_EXTRA,
+                provider=None,
+                epoch_jd=epoch_jd,
+                offset_days=offset,
+            )
             print(
-                f"  {nid}: extra_tle_dir record rejected — {age:.3f} d old "
+                f"  {nid}: from extra_tle_dir "
+                f"(epoch {abs(offset):.3f} d from observation)"
+            )
+        else:
+            rejected[int(nid)] = RejectedTLE(
+                norad_id=int(nid),
+                source=_SRC_EXTRA,
+                provider=None,
+                epoch_jd=epoch_jd,
+                offset_days=offset,
+                reason=f"extra_tle_max_age_days={max_age_days}",
+            )
+            print(
+                f"  {nid}: extra_tle_dir record rejected — {abs(offset):.3f} d old "
                 f"> extra_tle_max_age_days={max_age_days}; trying managed catalogue"
             )
-    return resolved
+    return resolved, rejected
 
 
 def _select_from_records(
@@ -253,14 +408,68 @@ def _select_from_records(
     return resolved
 
 
+def _accept_remote(
+    candidates: dict[int, dict],
+    source: str,
+    obs_epoch_jd: float,
+    max_age_days: Optional[float],
+    resolved: dict[int, ResolvedTLE],
+    rejected: dict[int, RejectedTLE],
+) -> None:
+    """Apply the remote age ceiling to *candidates*, updating accept/reject maps.
+
+    The epoch is parsed locally from TLE line 1 — a provider's own ``epoch`` field
+    is never trusted — and compared against the actual mean observation epoch
+    rather than the canonical catalogue bucket the record was selected against.
+    A rejected candidate is remembered (nearest one wins) so the coverage error can
+    report exactly how close the best available record was; it is never silently
+    re-admitted once the remaining sources are exhausted.
+    """
+    for nid, record in candidates.items():
+        provider = record.get("DATA_SOURCE") or None
+        try:
+            epoch_jd = _tle_epoch_jd(record["TLE_LINE1"])
+        except (KeyError, ValueError, TypeError) as e:
+            rejected[nid] = RejectedTLE(nid, source, provider, None, None, f"unparseable TLE epoch: {e}")
+            continue
+        offset = epoch_jd - obs_epoch_jd
+        if max_age_days is not None and abs(offset) > max_age_days + _AGE_TOL_DAYS:
+            previous = rejected.get(nid)
+            if previous is None or previous.age_days is None or abs(offset) < previous.age_days:
+                rejected[nid] = RejectedTLE(
+                    norad_id=nid,
+                    source=source,
+                    provider=provider,
+                    epoch_jd=epoch_jd,
+                    offset_days=offset,
+                    reason=f"remote_tle_max_age_days={max_age_days:g}",
+                )
+            continue
+        resolved[nid] = ResolvedTLE(
+            norad_id=nid,
+            record=record,
+            source=source,
+            provider=provider,
+            epoch_jd=epoch_jd,
+            offset_days=offset,
+        )
+        rejected.pop(nid, None)
+
+
 def _fetch_missing_ids(missing: list[int], epoch_jd: float) -> pd.DataFrame:
-    """Per-satellite fallback fetch for IDs absent from the bulk catalogue."""
+    """Per-satellite fallback fetch for IDs absent from the bulk catalogue.
+
+    A transport failure aborts the whole loop: the service is down, so continuing
+    would issue one doomed request per remaining satellite.
+    """
     rows: list[pd.DataFrame] = []
     for i, nid in enumerate(missing):
         if i:
             time.sleep(_THROTTLE_SECONDS)
         try:
             rec = satchecker.fetch_nearest_tle(nid, epoch_jd)
+        except satchecker.SatCheckerTransportError:
+            raise
         except TLEError as e:
             print(f"  fallback fetch failed for {nid}: {e}")
             continue
@@ -273,30 +482,79 @@ def _fetch_missing_ids(missing: list[int], epoch_jd: float) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
+# ---------------------------------------------------------------------------
+# Managed snapshot (stable / provisional)
+# ---------------------------------------------------------------------------
+
+def _store_or_warn(action, target: Path, what: str) -> bool:
+    """Run a cache write, downgrading environmental failures to a warning.
+
+    A read-only filesystem, a full quota or a missing permission must not discard
+    a fetch that already succeeded: the validated in-memory records still serve
+    this run, only the reusable cache state is lost. Validation and programming
+    errors are *not* environmental and keep propagating — a snapshot that fails
+    its own validation is a bug, not a disk problem, and the atomic writer has
+    already removed any partial temporary file.
+    """
+    try:
+        action()
+        return True
+    except OSError as e:
+        print(
+            f"  warning: could not write the {what} to {target} ({e}); continuing "
+            f"with the validated records in memory, without reusable cache state"
+        )
+        return False
+
+
 def _ensure_snapshot(
     cache: TextCatalogueCache,
     catalogue_epoch_jd: float,
     obs_epoch_jd: float,
+    state: str,
+    provisional_cache_hours: float,
 ) -> Optional[CatalogueSnapshot]:
     """Return the canonical snapshot, downloading + caching atomically on a miss.
 
-    Returns ``None`` when the service is reachable but reports an *empty*
-    catalogue at this epoch (its ``tles-at-epoch`` endpoint has a data horizon and
-    recent epochs can fall beyond it). The caller then resolves satellites through
-    the per-ID fallback instead. Transport failures still raise.
+    *state* decides how the result may be persisted. A :data:`STABLE` epoch (older
+    than ``tle_catalogue_settle_days``) yields the permanent, immutable snapshot.
+    A :data:`PROVISIONAL` one — a recent or future epoch whose upstream catalogue
+    may still be filling — is stored under its own filename with a short expiry,
+    and is never promoted: once the epoch settles, the next successful request
+    writes a fresh stable snapshot instead.
+
+    Returns ``None`` when the service is reachable but its catalogue is unusable
+    at this epoch (empty, malformed, or too incomplete to cache). The caller then
+    resolves satellites through the per-ID fallback instead. Transport failures
+    still raise.
     """
-    snapshot = cache.get_snapshot(catalogue_epoch_jd)
+    max_age = None if state == STABLE else provisional_cache_hours
+    snapshot = cache.get_snapshot(catalogue_epoch_jd, state, max_age)
     if snapshot is not None:
-        print(f"  managed catalogue cached at {canonical_stamp(catalogue_epoch_jd)}")
+        label = "" if state == STABLE else f" ({state})"
+        print(
+            f"  managed catalogue cached at "
+            f"{canonical_stamp(catalogue_epoch_jd)}{label}"
+        )
         return snapshot
 
     print(
         f"Fetching TLE catalogue from SatChecker for canonical epoch "
         f"{canonical_stamp(catalogue_epoch_jd)} ..."
     )
+    if state == PROVISIONAL:
+        print(
+            "  this epoch has not settled — the catalogue may still be filling "
+            f"upstream, so it will be cached provisionally for "
+            f"{provisional_cache_hours:g} h only"
+        )
     try:
         result = satchecker.fetch_full_catalogue(catalogue_epoch_jd)
-    except satchecker.EmptyCatalogueError as e:
+    except satchecker.SatCheckerTransportError:
+        raise  # service unreachable: per-satellite lookups would only storm it
+    except satchecker.SatCheckerResponseError as e:
+        # The service answered but the catalogue is unusable. get-nearest-tle is a
+        # different endpoint on a service we know is up, so it is worth trying.
         print(f"  {e}")
         print("  falling back to per-satellite TLE lookups for all requested IDs")
         return None
@@ -322,10 +580,247 @@ def _ensure_snapshot(
         expected_count=result.expected_count,
         actual_count=actual_count,
         service_version=result.service_version,
+        state=state,
     )
-    cache.store_snapshot(snapshot)
-    print(f"Saved {len(records)} TLEs for {canonical_stamp(catalogue_epoch_jd)}")
+    stored = _store_or_warn(
+        lambda: cache.store_snapshot(snapshot),
+        cache.snapshot_path(catalogue_epoch_jd, state),
+        f"{state} catalogue snapshot",
+    )
+    if stored:
+        print(
+            f"Saved {len(records)} TLEs for {canonical_stamp(catalogue_epoch_jd)}"
+            + ("" if state == STABLE else f" ({state}, expires in {provisional_cache_hours:g} h)")
+        )
     return snapshot
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def _detail_requested() -> bool:
+    return os.environ.get(_LOG_DETAIL_ENV, "").strip().lower() not in ("", "0", "false", "no")
+
+
+def _describe(entry: ResolvedTLE) -> str:
+    provider = f" [{entry.provider}]" if entry.provider else ""
+    return (
+        f"  {entry.norad_id}: {entry.source}{provider} "
+        f"epoch {jd_to_datetime(entry.epoch_jd).isoformat()} UTC, "
+        f"offset {entry.offset_days:+.4f} d, age {entry.age_days:.4f} d"
+    )
+
+
+def _report_remote_selection(resolution: TLEResolution) -> None:
+    """Log provider, epoch, signed offset and age for every accepted remote TLE.
+
+    Small ID sets get one line each. Larger ones get a grouped summary — an
+    all-Starlink run would otherwise bury the rest of the log — with the oldest
+    records still named individually, and the full listing available on demand via
+    ``TABASCAL_TLE_LOG_DETAIL=1``.
+    """
+    remote = [e for e in resolution.resolved.values() if e.remote]
+    if not remote:
+        return
+    limit = resolution.remote_max_age_days
+    limit_text = "no limit" if limit is None else f"limit {limit:g} d"
+
+    if len(remote) <= _GROUPED_LOG_THRESHOLD or _detail_requested():
+        print(f"TLE remote records     : {len(remote)} accepted ({limit_text})")
+        for entry in sorted(remote, key=lambda e: e.norad_id):
+            print(_describe(entry))
+        return
+
+    ages = np.array([e.age_days for e in remote])
+    by_source: dict[str, int] = {}
+    for entry in remote:
+        key = entry.source + (f" [{entry.provider}]" if entry.provider else "")
+        by_source[key] = by_source.get(key, 0) + 1
+    print(f"TLE remote records     : {len(remote)} accepted ({limit_text})")
+    for key, count in sorted(by_source.items(), key=lambda kv: -kv[1]):
+        print(f"  {count} from {key}")
+    print(
+        f"  age vs observation   : min {ages.min():.4f} d, "
+        f"median {np.median(ages):.4f} d, max {ages.max():.4f} d"
+    )
+    oldest = sorted(remote, key=lambda e: -e.age_days)[:5]
+    print("  oldest               : " + ", ".join(
+        f"{e.norad_id} ({e.offset_days:+.4f} d)" for e in oldest
+    ))
+    print(f"  (set {_LOG_DETAIL_ENV}=1 for a per-satellite listing)")
+
+
+def _coverage_error(resolution: TLEResolution) -> TLEError:
+    """Build the actionable error raised when some configured ID has no TLE."""
+    missing = resolution.missing
+    lines = [
+        f"TLEs could not be resolved for {len(missing)} of "
+        f"{len(resolution.requested)} configured satellites at observation epoch "
+        f"{jd_to_datetime(resolution.obs_epoch_jd).isoformat()} UTC "
+        f"(catalogue bucket {canonical_stamp(resolution.catalogue_epoch_jd)}):"
+    ]
+    for nid in missing:
+        bad = resolution.rejected.get(nid)
+        if bad is None:
+            lines.append(
+                f"  {nid}: no record found in extra_tle_dir, the managed "
+                f"catalogue, or SatChecker"
+            )
+        elif bad.age_days is None:
+            lines.append(f"  {nid}: best candidate unusable — {bad.reason}")
+        else:
+            provider = f", provider {bad.provider}" if bad.provider else ""
+            lines.append(
+                f"  {nid}: best candidate is {bad.age_days:.3f} d from the "
+                f"observation (epoch {jd_to_datetime(bad.epoch_jd).isoformat()} "
+                f"UTC, from {bad.source}{provider}) — rejected by {bad.reason}"
+            )
+    limit = resolution.remote_max_age_days
+    lines += [
+        "",
+        f"The remote age ceiling in force is remote_tle_max_age_days="
+        f"{'null (disabled)' if limit is None else f'{limit:g}'}. Remedies:",
+        "  - put an acceptable TLE for these satellites in a directory and pass "
+        "--extra-tle-dir <dir> (or set satellites.extra_tle_dir)",
+        "  - deliberately change satellites.remote_tle_max_age_days (null removes "
+        "the ceiling entirely; this is an expert opt-out, not a default)",
+        "  - remove these NORAD IDs from satellites.norad_ids",
+        "",
+        "TABASCAL will not silently omit a configured satellite from the RFI "
+        "model: the run stops here rather than subtracting an incomplete one.",
+    ]
+    return TLEError("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Resolution
+# ---------------------------------------------------------------------------
+
+def resolve_tles(
+    norad_ids,
+    obs_epoch_jd: float,
+    extra_tle_dir: Optional[str] = None,
+    extra_tle_max_age_days: Optional[float] = None,
+    remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
+    catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
+    catalogue_settle_days: Optional[float] = DEFAULT_TLE_CATALOGUE_SETTLE_DAYS,
+    provisional_cache_hours: float = DEFAULT_TLE_PROVISIONAL_CACHE_HOURS,
+    clock=None,
+) -> TLEResolution:
+    """Resolve every requested NORAD ID at *obs_epoch_jd*, without raising on gaps.
+
+    Returns the full :class:`TLEResolution` — accepted records, rejected
+    near-misses and the epochs everything was judged against. Callers decide what
+    an incomplete result means; :func:`require_complete_coverage` is the policy
+    TABASCAL runs use.
+    """
+    clock = clock or utc_now_jd
+    requested = normalise_norad_ids(norad_ids)
+    extra_max_age = validate_age_days(extra_tle_max_age_days, "extra_tle_max_age_days")
+    remote_max_age = validate_age_days(remote_tle_max_age_days, "remote_tle_max_age_days")
+    obs_epoch_jd = float(obs_epoch_jd)
+    catalogue_epoch = canonical_epoch_jd(obs_epoch_jd, catalogue_interval_hours)
+
+    resolution = TLEResolution(
+        requested=requested,
+        obs_epoch_jd=obs_epoch_jd,
+        catalogue_epoch_jd=catalogue_epoch,
+        remote_max_age_days=remote_max_age,
+    )
+    if not requested:
+        return resolution
+
+    print(f"TLE requested epoch    : {jd_to_datetime(obs_epoch_jd).isoformat()} UTC")
+    print(
+        f"TLE catalogue epoch    : {canonical_stamp(catalogue_epoch)} "
+        f"(nearest to a {catalogue_interval_hours:g} h bucket, not the exact "
+        f"observation)"
+    )
+
+    wanted = set(requested)
+
+    # 1. extra_tle_dir (per-ID precedence + its own age policy)
+    if extra_tle_dir:
+        print(
+            f"TLE extra dir          : {Path(extra_tle_dir).resolve()} "
+            f"(max age {'unlimited' if extra_max_age is None else f'{extra_max_age:g} d'})"
+        )
+        from_extra, extra_rejected = _select_from_extra_dir(
+            extra_tle_dir, wanted, obs_epoch_jd, extra_max_age
+        )
+        resolution.resolved.update(from_extra)
+        resolution.rejected.update(extra_rejected)
+
+    remaining = wanted - set(resolution.resolved)
+
+    # 2 + 3. managed canonical snapshot, then per-satellite fallback
+    if remaining:
+        cache = TextCatalogueCache(tle_cache_dir(), clock=clock)
+        state = catalogue_state(catalogue_epoch, clock(), catalogue_settle_days)
+        snapshot = _ensure_snapshot(
+            cache, catalogue_epoch, obs_epoch_jd, state, provisional_cache_hours
+        )
+        if snapshot is not None:
+            _accept_remote(
+                _select_from_records(snapshot.records, remaining, catalogue_epoch),
+                _SRC_CATALOGUE,
+                obs_epoch_jd,
+                remote_max_age,
+                resolution.resolved,
+                resolution.rejected,
+            )
+            remaining = wanted - set(resolution.resolved)
+
+        if remaining:
+            _accept_remote(
+                _select_from_records(
+                    cache.get_extra(catalogue_epoch), remaining, catalogue_epoch
+                ),
+                _SRC_CACHED_FALLBACK,
+                obs_epoch_jd,
+                remote_max_age,
+                resolution.resolved,
+                resolution.rejected,
+            )
+            remaining = wanted - set(resolution.resolved)
+
+        if remaining:
+            missing = sorted(remaining)
+            print(
+                f"Fetching {len(missing)} missing TLE(s) individually from "
+                f"SatChecker: {missing}"
+            )
+            fetched = _fetch_missing_ids(missing, catalogue_epoch)
+            if len(fetched):
+                _store_or_warn(
+                    lambda: cache.store_extra(catalogue_epoch, fetched),
+                    cache.extra_path(catalogue_epoch),
+                    "per-satellite fallback records",
+                )
+                _accept_remote(
+                    _select_from_records(fetched, remaining, catalogue_epoch),
+                    _SRC_FALLBACK,
+                    obs_epoch_jd,
+                    remote_max_age,
+                    resolution.resolved,
+                    resolution.rejected,
+                )
+
+    _report_remote_selection(resolution)
+    return resolution
+
+
+def require_complete_coverage(resolution: TLEResolution) -> TLEResolution:
+    """Return *resolution* unchanged, or raise the actionable coverage error.
+
+    Enforced during preflight so an unresolvable satellite stops the run *before*
+    the expensive subtraction, and enforced only once — execution consumes the
+    same resolution rather than making a second, potentially different decision.
+    """
+    if resolution.requested and not resolution.complete:
+        raise _coverage_error(resolution)
+    return resolution
 
 
 # ---------------------------------------------------------------------------
@@ -333,122 +828,87 @@ def _ensure_snapshot(
 # ---------------------------------------------------------------------------
 
 def get_tles_by_id(
-    norad_ids: list[int],
+    norad_ids,
     times_jd,
     extra_tle_dir: Optional[str] = None,
     extra_tle_max_age_days: Optional[float] = None,
+    remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
     catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
+    catalogue_settle_days: Optional[float] = DEFAULT_TLE_CATALOGUE_SETTLE_DAYS,
+    provisional_cache_hours: float = DEFAULT_TLE_PROVISIONAL_CACHE_HOURS,
+    clock=None,
 ) -> pd.DataFrame:
-    """Resolve TLEs while serializing cache/network access across processes.
+    """Resolve TLEs for *norad_ids*, sharing one resolution across all processes.
 
-    Process 0 completes the operation first, including any cache writes. Other
-    processes then resolve the same request from the populated cache. In a normal
-    single-process run :func:`rank0_first` is a no-op.
+    Multi-process runs resolve on process 0 only and broadcast the accepted raw
+    records (or the failure) to every worker, so the provider sees exactly one
+    fetch per run — even when the cache could not be written and workers would
+    otherwise have found nothing to read. Single-process runs resolve directly.
+
+    Returns one row per requested ID, in the requested order, with OMM-style
+    element columns parsed locally from the TLE lines. Raises :class:`TLEError`
+    unless every requested ID resolved.
     """
-    from tabascal.distributed import rank0_first
+    from tabascal import distributed
 
-    with rank0_first("tle-fetch"):
-        return _get_tles_by_id(
+    clock = clock or utc_now_jd
+    resolve = lambda: require_complete_coverage(  # noqa: E731
+        resolve_tles(
             norad_ids,
-            times_jd,
+            observation_epoch_jd(times_jd),
             extra_tle_dir=extra_tle_dir,
             extra_tle_max_age_days=extra_tle_max_age_days,
+            remote_tle_max_age_days=remote_tle_max_age_days,
             catalogue_interval_hours=catalogue_interval_hours,
+            catalogue_settle_days=catalogue_settle_days,
+            provisional_cache_hours=provisional_cache_hours,
+            clock=clock,
         )
+    ).records()
+
+    if distributed.process_count() == 1:
+        return _finalise_records(resolve())
+    return _finalise_records(_records_from_rank0(distributed, resolve))
 
 
-def _get_tles_by_id(
-    norad_ids: list[int],
-    times_jd,
-    extra_tle_dir: Optional[str] = None,
-    extra_tle_max_age_days: Optional[float] = None,
-    catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
-) -> pd.DataFrame:
-    """Return TLE records + locally parsed elements for *norad_ids*.
+def _records_from_rank0(distributed, resolve) -> list[dict]:
+    """Resolve on process 0 and broadcast the outcome to every other process.
 
-    Source precedence is resolved independently per NORAD ID: ``extra_tle_dir``
-    (subject to ``extra_tle_max_age_days``), then the managed canonical catalogue
-    snapshot, then the per-satellite SatChecker fallback. One row per resolved ID
-    is returned, with OMM-style element columns parsed locally from the TLE lines.
-
-    Parameters
-    ----------
-    norad_ids:
-        NORAD catalogue IDs to select.
-    times_jd:
-        Observation time(s) as UTC Julian Date(s); scalar or array. The mean is
-        used as the requested observation epoch, which sets both the extra-dir age
-        comparison and (after bucketing) the canonical catalogue epoch.
-    extra_tle_dir:
-        Optional user-supplied directory of local TLE files searched first, per ID.
-    extra_tle_max_age_days:
-        Maximum absolute difference, in days, between a local TLE's epoch and the
-        observation epoch for it to be accepted. ``None`` = unlimited; ``0`` =
-        exact-epoch only; negative is a configuration error.
-    catalogue_interval_hours:
-        Width of the fixed UTC catalogue-reuse bucket (default 2 h).
+    Workers never call the provider themselves: whatever process 0 decided — the
+    accepted records or the error — is what every process acts on, so the run
+    either proceeds from one identical satellite set or fails coherently
+    everywhere. Only the raw identity/TLE-line columns cross the wire; every
+    process re-derives the orbital elements locally, so the parsed values are
+    bit-identical rather than serialisation-rounded.
     """
-    max_age = _validate_max_age(extra_tle_max_age_days)
-    wanted = {int(x) for x in np.atleast_1d(np.asarray(norad_ids)).astype(int)}
-    if not wanted:
-        return pd.DataFrame()
+    payload = None
+    if distributed.is_process_0():
+        try:
+            records = resolve()
+            message = {"ok": True, "records": [_wire_record(r) for r in records]}
+        except Exception as e:  # reported identically on every process below
+            message = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        payload = json.dumps(message).encode()
 
-    obs_epoch_jd = float(np.atleast_1d(np.asarray(times_jd, dtype=float)).mean())
-    catalogue_epoch_jd = canonical_epoch_jd(obs_epoch_jd, catalogue_interval_hours)
+    message = json.loads(distributed.broadcast_bytes_from_rank0(payload, "tle-fetch"))
+    if not message.get("ok"):
+        raise TLEError(
+            "TLE resolution failed on process 0; every process is stopping with "
+            f"the same result.\n{message.get('error')}"
+        )
+    return message["records"]
 
-    print(f"TLE requested epoch    : {jd_to_datetime(obs_epoch_jd).isoformat()} UTC")
-    print(
-        f"TLE catalogue epoch    : {jd_to_datetime(catalogue_epoch_jd).isoformat()} UTC "
-        f"(nearest to a {catalogue_interval_hours:g} h bucket, not the exact observation)"
-    )
 
-    resolved: dict[int, dict] = {}
+_WIRE_COLUMNS = ("NORAD_CAT_ID", "OBJECT_NAME", "TLE_LINE1", "TLE_LINE2", "DATA_SOURCE")
 
-    # 1. extra_tle_dir (per-ID precedence + age policy)
-    if extra_tle_dir:
-        print(f"TLE extra dir          : {Path(extra_tle_dir).resolve()}")
-        resolved.update(_select_from_extra_dir(extra_tle_dir, wanted, obs_epoch_jd, max_age))
 
-    remaining = wanted - set(resolved)
-
-    # 2 + 3. managed canonical snapshot, then per-satellite fallback
-    if remaining:
-        cache = TextCatalogueCache(tle_cache_dir())
-        snapshot = _ensure_snapshot(cache, catalogue_epoch_jd, obs_epoch_jd)
-        if snapshot is not None:
-            resolved.update(
-                _select_from_records(snapshot.records, remaining, catalogue_epoch_jd)
-            )
-            remaining = wanted - set(resolved)
-
-        if remaining:
-            cached_extra = cache.get_extra(catalogue_epoch_jd)
-            resolved.update(
-                _select_from_records(cached_extra, remaining, catalogue_epoch_jd)
-            )
-            remaining = wanted - set(resolved)
-
-        if remaining:
-            missing = sorted(remaining)
-            print(f"Fetching {len(missing)} missing TLE(s) individually from SatChecker: {missing}")
-            fetched = _fetch_missing_ids(missing, catalogue_epoch_jd)
-            if len(fetched):
-                cache.store_extra(catalogue_epoch_jd, fetched)
-                resolved.update(
-                    _select_from_records(fetched, remaining, catalogue_epoch_jd)
-                )
-                remaining = wanted - set(resolved)
-
-    still_missing = sorted(wanted - set(resolved))
-    if still_missing:
-        print(f"TLEs not found         : {still_missing}")
-    if not resolved:
-        return pd.DataFrame()
-
-    tles = pd.DataFrame([resolved[nid] for nid in sorted(resolved)])
-    tles["NORAD_CAT_ID"] = pd.to_numeric(tles["NORAD_CAT_ID"]).astype(int)
-    tles = _add_parsed_elements(tles)
-    return tles.reset_index(drop=True)
+def _wire_record(record: dict) -> dict:
+    """JSON-safe projection of one record onto the columns workers actually need."""
+    out = {"NORAD_CAT_ID": int(record["NORAD_CAT_ID"])}
+    for col in _WIRE_COLUMNS[1:]:
+        value = record.get(col)
+        out[col] = None if value is None or pd.isna(value) else str(value)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -462,8 +922,8 @@ def save_tles_for_reuse(path, norad_ids, tles) -> Optional[str]:
     ``TLE_LINE2`` columns — exactly what :func:`read_legacy_tle_records` reads —
     so a later run can reproduce this run's trajectory priors by passing the
     file's directory via ``--extra-tle-dir`` (with the default unlimited
-    ``extra_tle_max_age_days``), independent of the shared cache or any change
-    in what SatChecker serves.
+    ``extra_tle_max_age_days``), independent of the shared cache, of what
+    SatChecker serves by then, and of the remote age ceiling.
 
     ``norad_ids`` and ``tles`` are the aligned arrays produced by the element
     fetchers (one ``(line1, line2)`` pair per ID). Returns the written path, or
@@ -490,66 +950,94 @@ def save_tles_for_reuse(path, norad_ids, tles) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _ms_mean_epoch_jd(ms_path: str) -> float:
-    """Mean observation epoch (UTC Julian Date) from an MS ``TIME`` column.
+    """Mean observation epoch (UTC Julian Date) of an MS.
 
-    Isolated so :func:`preflight_tle_check` can be exercised offline by patching
-    this one casacore-touching seam.
+    Thin alias over :func:`tabascal.tle_config.ms_observation_epoch_jd`, kept as
+    the single seam tests patch to exercise preflight offline.
     """
-    from casacore.tables import table as _ms_table
-    with _ms_table(ms_path, readonly=True, ack=False) as t:
-        return float(t.getcol("TIME").mean()) / 86400.0 + 2400000.5
+    return ms_observation_epoch_jd(ms_path)
 
 
 def preflight_tle_check(
-    norad_ids: list[int],
+    tle_config: TLEConfig,
     ms_path: str,
-    extra_tle_dir: Optional[str] = None,
-    extra_tle_max_age_days: Optional[float] = None,
-    catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS,
-) -> None:
-    """Report whether the required canonical catalogue snapshot is cached locally.
+    clock=None,
+) -> TLEResolution:
+    """Resolve every configured satellite before the run commits to any real work.
 
-    Reads the mean observation epoch from the MS ``TIME`` column (MJD seconds),
-    reports the requested epoch and the deterministic canonical catalogue epoch it
-    maps to, and states whether that snapshot is already cached or will be
-    downloaded from SatChecker (which needs no credentials). Purely informational
-    — no exception is raised for a cache miss or configuration issue.
+    This is the *authoritative* resolution and the single enforcement point for
+    complete coverage: it reads the observation epoch from the MS, resolves each
+    NORAD ID through the configured sources, reports what was accepted and from
+    where, and raises :class:`TLEError` naming every failure if any configured ID
+    has no acceptable TLE. It runs before the visibilities are read and long
+    before subtraction, so a missing or unusably stale satellite costs seconds
+    rather than a whole job.
+
+    The returned resolution is what execution then builds the model from — it must
+    not re-resolve, or the model could differ from what was checked.
     """
-    if not norad_ids:
-        return
+    clock = clock or utc_now_jd
+    if not tle_config.norad_ids:
+        return TLEResolution(
+            requested=[],
+            obs_epoch_jd=float("nan"),
+            catalogue_epoch_jd=float("nan"),
+            remote_max_age_days=tle_config.remote_tle_max_age_days,
+        )
 
-    max_age = _validate_max_age(extra_tle_max_age_days)
+    obs_epoch_jd = _ms_mean_epoch_jd(ms_path)
 
-    mean_epoch_jd = _ms_mean_epoch_jd(ms_path)
+    print(f"Preflight TLE check    : NORAD IDs {tle_config.norad_ids}")
 
-    catalogue_epoch_jd = canonical_epoch_jd(mean_epoch_jd, catalogue_interval_hours)
-    cache = TextCatalogueCache(tle_cache_dir())
-    wanted = {int(x) for x in norad_ids}
-
-    print(f"Preflight TLE check    : NORAD IDs {sorted(wanted)}")
-    print(f"TLE requested epoch    : {jd_to_datetime(mean_epoch_jd).isoformat()} UTC")
-    print(
-        f"TLE catalogue epoch    : {jd_to_datetime(catalogue_epoch_jd).isoformat()} UTC "
-        f"({catalogue_interval_hours:g} h bucket)"
+    resolution = resolve_tles(
+        tle_config.norad_ids,
+        obs_epoch_jd,
+        extra_tle_dir=tle_config.extra_tle_dir,
+        extra_tle_max_age_days=tle_config.extra_tle_max_age_days,
+        remote_tle_max_age_days=tle_config.remote_tle_max_age_days,
+        catalogue_interval_hours=tle_config.catalogue_interval_hours,
+        catalogue_settle_days=tle_config.catalogue_settle_days,
+        provisional_cache_hours=tle_config.provisional_cache_hours,
+        clock=clock,
     )
+    require_complete_coverage(resolution)
 
-    # Account for IDs already covered by extra_tle_dir so we don't wrongly promise a
-    # download when no managed snapshot is actually needed.
-    remaining = set(wanted)
-    if extra_tle_dir:
-        print(f"TLE extra dir          : {Path(extra_tle_dir).resolve()}"
-              f"  (max age {extra_tle_max_age_days} d)")
-        from_extra = _select_from_extra_dir(extra_tle_dir, wanted, mean_epoch_jd, max_age)
-        remaining -= set(from_extra)
-
-    if not remaining:
-        print("  all requested TLEs available from extra_tle_dir — no download needed")
-    elif cache.get_snapshot(catalogue_epoch_jd) is not None:
-        print(f"  managed catalogue cached at {canonical_stamp(catalogue_epoch_jd)}")
-    else:
-        print(f"  managed catalogue not cached — will download from SatChecker")
+    n_extra = sum(1 for e in resolution.resolved.values() if not e.remote)
     print(
-        "  To search additional local TLE directories:\n"
-        "    --extra-tle-dir <dir>  (CLI flag)\n"
-        "    TLE_CACHE_DIR=<dir>    (env var, overrides managed cache location)"
+        f"TLE preflight OK       : {len(resolution.resolved)} of "
+        f"{len(resolution.requested)} satellites resolved "
+        f"({n_extra} from extra_tle_dir, "
+        f"{len(resolution.resolved) - n_extra} from SatChecker/managed cache)"
+    )
+    print(
+        "  Local TLE files are searched with --extra-tle-dir <dir>; "
+        "TLE_CACHE_DIR=<dir> relocates the managed cache and is not an "
+        "additional source."
+    )
+    return resolution
+
+
+def check_epoch_agreement(resolution: TLEResolution, times_jd) -> None:
+    """Verify execution's observation epoch matches the one preflight resolved at.
+
+    The epoch sets both the canonical cache bucket and every age comparison, so a
+    divergence between the preflight MS read and the times
+    :func:`tabascal.tab_tools.read_ms` returned would mean the run was checked
+    against one epoch and modelled at another. Raise rather than silently
+    re-resolving: a second resolution could reach a different coverage decision.
+    """
+    if not resolution.requested:
+        return
+    execution_epoch = observation_epoch_jd(times_jd)
+    if abs(execution_epoch - resolution.obs_epoch_jd) <= _EPOCH_AGREEMENT_TOL_DAYS:
+        return
+    raise TLEError(
+        "Observation epoch disagreement between the TLE preflight check and the "
+        "Measurement Set read:\n"
+        f"  preflight : {jd_to_datetime(resolution.obs_epoch_jd).isoformat()} UTC\n"
+        f"  execution : {jd_to_datetime(execution_epoch).isoformat()} UTC\n"
+        "The TLEs were selected and age-checked against the preflight epoch, so "
+        "the run stops rather than model a different one. This usually means the "
+        "MS TIME column is inconsistent (mixed units, or a row count that is not "
+        "a whole number of integrations)."
     )

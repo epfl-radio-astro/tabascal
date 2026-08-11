@@ -349,9 +349,10 @@ class TestFixedOrbit:
 
 
 # ---------------------------------------------------------------------------
-# Bundled TLE constants (NAVSTAR 18 / 67, cached 2023-02-21)
-# These match tabascal/data/tles/2023-02-21-navstar.json so no SatChecker
-# call is needed — get_tles_by_id finds the file from cache.
+# Bundled TLE constants (NAVSTAR 18 / 67, epoch 2023-02-21)
+# These match tabascal/data/tles/2023-02-21-navstar.json, which the mock config
+# below passes as extra_tle_dir — the highest-precedence source — so both IDs
+# resolve locally and no SatChecker call is made.
 # ---------------------------------------------------------------------------
 
 # JD of 2023-02-21 13:55:04.589 UTC — must match the date prefix of the bundled file.
@@ -429,8 +430,13 @@ class TestFetchOrbitalElementsEmpty:
 
 
 class TestFetchOrbitalElementsPartial:
-    """A partial resolution proceeds with the reduced satellite set (long-standing
-    behaviour) but must warn loudly, naming the excluded NORAD IDs."""
+    """A partial resolution must stop the run, naming the excluded NORAD IDs.
+
+    A satellite quietly dropped from the RFI model degrades subtraction with no
+    signal in the output, so the element fetchers refuse to build a model from a
+    subset of what was configured — even though resolution itself already
+    enforces complete coverage upstream.
+    """
 
     def _patch_partial(self, monkeypatch, resolved_ids):
         from tabascal.components import trajectory as traj_mod
@@ -442,28 +448,59 @@ class TestFetchOrbitalElementsPartial:
         )
         monkeypatch.setattr(traj_mod, "get_tles_by_id", lambda *a, **k: df)
 
-    def test_partial_resolution_warns_and_names_missing_ids(self, monkeypatch):
+    def test_partial_resolution_raises_and_names_missing_ids(self, monkeypatch):
         from tabascal.components.trajectory import fetch_orbital_elements
+        from tabascal.tle import TLEError
 
         self._patch_partial(monkeypatch, [25544])
-        with pytest.warns(UserWarning, match=r"NORAD IDs \[99999\]"):
-            elements, epoch_jd, norad_ids, tles, n_rfi_real = fetch_orbital_elements(
-                2460000.0, [25544, 99999]
-            )
-        assert [int(n) for n in norad_ids] == [25544]  # run proceeds, reduced set
-        assert n_rfi_real == 1
+        with pytest.raises(TLEError, match=r"NORAD IDs \[99999\]"):
+            fetch_orbital_elements(2460000.0, [25544, 99999])
 
-    def test_full_resolution_does_not_warn(self, monkeypatch):
-        import warnings as _warnings
+    def test_full_resolution_proceeds(self, monkeypatch):
         from tabascal.components.trajectory import fetch_orbital_elements
 
         self._patch_partial(monkeypatch, [25544, 38833])
-        with _warnings.catch_warnings():
-            _warnings.simplefilter("error")
-            _, _, norad_ids, _, n_rfi_real = fetch_orbital_elements(
-                2460000.0, [25544, 38833]
-            )
+        _, _, norad_ids, _, n_rfi_real = fetch_orbital_elements(
+            2460000.0, [25544, 38833]
+        )
         assert sorted(int(n) for n in norad_ids) == [25544, 38833]
+        assert n_rfi_real == 2
+
+    def test_preflight_resolution_is_reused_without_refetching(self, monkeypatch):
+        # The normal path: TabConfig hands the fetchers the resolution preflight
+        # already made, so no provider work happens here at all.
+        from tabascal.components import trajectory as traj_mod
+        from tabascal.components.trajectory import fetch_orbital_elements
+        from tabascal import tle
+        from ..tle_helpers import jd, make_catalogue_df
+
+        def boom(*args, **kwargs):
+            raise AssertionError("the preflight resolution must be reused as-is")
+
+        monkeypatch.setattr(traj_mod, "get_tles_by_id", boom)
+
+        epoch = jd(2023, 2, 21, 13)
+        records = make_catalogue_df([(25544, epoch), (38833, epoch)])
+        resolution = tle.TLEResolution(
+            requested=[25544, 38833],
+            obs_epoch_jd=epoch,
+            catalogue_epoch_jd=epoch,
+            remote_max_age_days=3.0,
+            resolved={
+                int(row["NORAD_CAT_ID"]): tle.ResolvedTLE(
+                    norad_id=int(row["NORAD_CAT_ID"]),
+                    record=row.to_dict(),
+                    source="managed catalogue",
+                    provider="test",
+                    epoch_jd=epoch,
+                    offset_days=0.0,
+                )
+                for _, row in records.iterrows()
+            },
+        )
+
+        _, _, norad_ids, _, n_rfi_real = fetch_orbital_elements(resolution=resolution)
+        assert [int(n) for n in norad_ids] == [25544, 38833]
         assert n_rfi_real == 2
 
 

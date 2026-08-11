@@ -6,17 +6,24 @@ SatChecker transport mocked and the managed cache pointed at a temp directory.
 """
 
 import json
-from contextlib import contextmanager
 from datetime import datetime
 
 import pytest
 
 from tabascal import tle
-from tabascal.satchecker import EmptyCatalogueError, SatCheckerError, client
+from tabascal.tle_config import TLEConfig
+from tabascal.satchecker import (
+    EmptyCatalogueError,
+    SatCheckerError,
+    SatCheckerResponseError,
+    SatCheckerTransportError,
+    client,
+)
 from tabascal.satchecker.client import CatalogueResult
 from tabascal.time import datetime_to_jd
 
 from .tle_helpers import (
+    block_network,  # noqa: F401  autouse fixture: no live SatChecker access
     jd,
     make_catalogue_df,
     make_info_json,
@@ -25,7 +32,12 @@ from .tle_helpers import (
     write_legacy_tle_file,
 )
 
+TLEError = tle.TLEError
+
 _OBS = jd(2023, 2, 21, 12, 30)
+# A clock far enough past the observation that its catalogue counts as settled
+# under the default 45-day policy, so the default tests exercise the stable path.
+_SETTLED_NOW = jd(2023, 6, 1)
 
 _ELEMENT_COLUMNS = [
     "SEMIMAJOR_AXIS", "ECCENTRICITY", "INCLINATION", "RA_OF_ASC_NODE",
@@ -87,20 +99,9 @@ def _install_nearest_raise(monkeypatch):
 
 class TestManagedCatalogue:
 
-    def test_public_fetch_uses_distributed_rank0_gate(self, monkeypatch):
-        from tabascal import distributed
-
-        calls = []
-
-        @contextmanager
-        def gate(name):
-            calls.append(("enter", name))
-            yield
-            calls.append(("exit", name))
-
-        monkeypatch.setattr(distributed, "rank0_first", gate)
+    def test_no_ids_needs_no_provider(self, cache_dir, monkeypatch):
+        _install_full_raise(monkeypatch)
         assert tle.get_tles_by_id([], _OBS).empty
-        assert calls == [("enter", "tle-fetch"), ("exit", "tle-fetch")]
 
     def test_fetch_then_parse_elements(self, cache_dir, monkeypatch):
         counter = {"full": 0}
@@ -237,9 +238,11 @@ class TestFallback:
         with pytest.raises(SatCheckerError):
             tle.get_tles_by_id([25544], _OBS)
 
-    def test_invalid_fallback_row_does_not_discard_valid_fallbacks(
+    def test_invalid_fallback_row_isolated_but_coverage_still_enforced(
         self, cache_dir, monkeypatch
     ):
+        # One bad row must not poison the *other* satellites' records — the valid
+        # one is still cached — but the run cannot proceed with a satellite short.
         counter = {"full": 0}
         _install_full_empty(monkeypatch, counter)
 
@@ -252,11 +255,57 @@ class TestFallback:
         monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", nearest)
         monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
 
-        df = tle.get_tles_by_id([25544, 38833], _OBS)
+        with pytest.raises(TLEError, match="38833"):
+            tle.get_tles_by_id([25544, 38833], _OBS)
 
-        assert list(df["NORAD_CAT_ID"]) == [25544]
         extra_files = list(cache_dir.glob("catalogue-*-extra.json"))
         assert len(extra_files) == 1
+        assert "25544" in extra_files[0].read_text()
+
+    def test_transport_failure_never_storms_the_per_id_endpoint(
+        self, cache_dir, monkeypatch
+    ):
+        # A service outage must not be followed by one request per satellite.
+        def down(epoch_jd):
+            raise SatCheckerTransportError("connection refused")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_full_catalogue", down)
+        counter = {"near": 0}
+        _install_nearest(monkeypatch, [(n, _OBS) for n in range(100, 140)], counter)
+
+        with pytest.raises(SatCheckerTransportError):
+            tle.get_tles_by_id(list(range(100, 140)), _OBS)
+        assert counter["near"] == 0
+
+    def test_response_failure_uses_the_per_id_fallback(self, cache_dir, monkeypatch):
+        # The service is up but its catalogue response is unusable — a different
+        # endpoint on a working service is worth trying.
+        def malformed(epoch_jd):
+            raise SatCheckerResponseError("catalogue payload was not valid JSON")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_full_catalogue", malformed)
+        counter = {"near": 0}
+        _install_nearest(monkeypatch, [(25544, _OBS)], counter)
+
+        df = tle.get_tles_by_id([25544], _OBS)
+        assert list(df["NORAD_CAT_ID"]) == [25544]
+        assert counter["near"] == 1
+
+    def test_per_id_transport_failure_stops_the_loop(self, cache_dir, monkeypatch):
+        counter = {"full": 0}
+        _install_full_empty(monkeypatch, counter)
+        attempts = {"n": 0}
+
+        def nearest(norad_id, epoch_jd):
+            attempts["n"] += 1
+            raise SatCheckerTransportError("connection refused")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", nearest)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(SatCheckerTransportError):
+            tle.get_tles_by_id(list(range(100, 120)), _OBS)
+        assert attempts["n"] == 1  # stopped at the first unreachable request
 
 
 class TestDuplicateNoradSelection:
@@ -476,23 +525,138 @@ class TestPartialCatalogueNotCached:
 
 class TestPreflight:
 
-    def test_full_extra_coverage_promises_no_download(self, cache_dir, tmp_path, monkeypatch, capsys):
+    def _config(self, **overrides):
+        fields = {"norad_ids": [25544]}
+        fields.update(overrides)
+        return TLEConfig(**fields)
+
+    def test_full_extra_coverage_needs_no_provider(
+        self, cache_dir, tmp_path, monkeypatch, capsys
+    ):
         extra = tmp_path / "extra"
         extra.mkdir()
         write_legacy_tle_file(extra / "local.json", [(25544, _OBS)])
         monkeypatch.setattr(tle, "_ms_mean_epoch_jd", lambda ms: _OBS)
-        tle.preflight_tle_check(
-            [25544], "ignored.ms", extra_tle_dir=str(extra), extra_tle_max_age_days=0
-        )
-        out = capsys.readouterr().out
-        assert "will download" not in out
-        assert "no download needed" in out
+        _install_full_raise(monkeypatch)  # any provider call would fail the test
 
-    def test_missing_extra_promises_download(self, cache_dir, monkeypatch, capsys):
+        resolution = tle.preflight_tle_check(
+            self._config(extra_tle_dir=str(extra), extra_tle_max_age_days=0),
+            "ignored.ms",
+            clock=lambda: _SETTLED_NOW,
+        )
+
+        assert resolution.complete
+        assert "1 from extra_tle_dir" in capsys.readouterr().out
+
+    def test_preflight_resolves_and_reports_remote_records(
+        self, cache_dir, monkeypatch, capsys
+    ):
+        counter = {"full": 0}
+        _install_full(monkeypatch, [(25544, jd(2023, 2, 21, 13))], counter)
         monkeypatch.setattr(tle, "_ms_mean_epoch_jd", lambda ms: _OBS)
-        tle.preflight_tle_check([25544], "ignored.ms")
+
+        resolution = tle.preflight_tle_check(
+            self._config(), "ignored.ms", clock=lambda: _SETTLED_NOW
+        )
+
         out = capsys.readouterr().out
-        assert "will download" in out
+        assert counter["full"] == 1
+        assert list(resolution.resolved) == [25544]
+        assert "TLE preflight OK" in out
+        assert "age" in out  # every accepted remote record's age is reported
+
+    def test_preflight_stops_before_subtraction_on_a_missing_id(
+        self, cache_dir, monkeypatch
+    ):
+        counter = {"full": 0}
+        _install_full(monkeypatch, [(25544, _OBS)], counter)
+        _install_nearest(monkeypatch, [], {"near": 0})
+        monkeypatch.setattr(tle, "_ms_mean_epoch_jd", lambda ms: _OBS)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(TLEError) as exc_info:
+            tle.preflight_tle_check(
+                self._config(norad_ids=[25544, 99999]),
+                "ignored.ms",
+                clock=lambda: _SETTLED_NOW,
+            )
+        message = str(exc_info.value)
+        assert "99999" in message
+        assert "--extra-tle-dir" in message
+        assert "remote_tle_max_age_days" in message
+
+    def test_no_configured_ids_does_no_work(self, cache_dir, monkeypatch):
+        def boom(ms_path):
+            raise AssertionError("the MS must not be read when no IDs are configured")
+
+        monkeypatch.setattr(tle, "_ms_mean_epoch_jd", boom)
+        resolution = tle.preflight_tle_check(TLEConfig(), "ignored.ms")
+        assert resolution.requested == []
+        assert resolution.complete
+
+    def test_extra_dir_selection_is_logged_once(
+        self, cache_dir, tmp_path, monkeypatch, capsys
+    ):
+        # Preflight used to run the extra-directory selection twice purely to
+        # print it, duplicating every per-satellite line.
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        write_legacy_tle_file(extra / "local.json", [(25544, _OBS)])
+        monkeypatch.setattr(tle, "_ms_mean_epoch_jd", lambda ms: _OBS)
+        _install_full_raise(monkeypatch)
+
+        tle.preflight_tle_check(
+            self._config(extra_tle_dir=str(extra)),
+            "ignored.ms",
+            clock=lambda: _SETTLED_NOW,
+        )
+
+        out = capsys.readouterr().out
+        assert out.count("25544: from extra_tle_dir") == 1
+        assert out.count("TLE extra dir") == 1
+
+    def test_cache_key_in_logs_matches_the_created_filename(
+        self, cache_dir, monkeypatch, capsys
+    ):
+        counter = {"full": 0}
+        _install_full(monkeypatch, [(25544, jd(2023, 2, 21, 13))], counter)
+        monkeypatch.setattr(tle, "_ms_mean_epoch_jd", lambda ms: _OBS)
+
+        tle.preflight_tle_check(
+            self._config(), "ignored.ms", clock=lambda: _SETTLED_NOW
+        )
+
+        out = capsys.readouterr().out
+        written = list(cache_dir.glob("catalogue-*[0-9]Z.json"))
+        assert len(written) == 1
+        stamp = written[0].stem.removeprefix("catalogue-")
+        assert stamp in out
+
+
+class TestEpochAgreement:
+    """Preflight and execution must judge the run at the same instant."""
+
+    def _resolution(self, obs_epoch_jd):
+        return tle.TLEResolution(
+            requested=[25544],
+            obs_epoch_jd=obs_epoch_jd,
+            catalogue_epoch_jd=obs_epoch_jd,
+            remote_max_age_days=3.0,
+        )
+
+    def test_matching_epochs_pass(self):
+        tle.check_epoch_agreement(self._resolution(_OBS), [_OBS - 1e-9, _OBS + 1e-9])
+
+    def test_divergent_epochs_raise(self):
+        with pytest.raises(TLEError, match="Observation epoch disagreement"):
+            tle.check_epoch_agreement(self._resolution(_OBS), [_OBS + 0.5])
+
+    def test_no_satellites_needs_no_agreement(self):
+        empty = tle.TLEResolution(
+            requested=[], obs_epoch_jd=float("nan"),
+            catalogue_epoch_jd=float("nan"), remote_max_age_days=None,
+        )
+        tle.check_epoch_agreement(empty, [_OBS])
 
 
 # ---------------------------------------------------------------------------

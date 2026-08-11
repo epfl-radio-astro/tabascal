@@ -74,6 +74,15 @@ def test_is_process_0_single_process():
     dist.print0("", end="")  # rank-0 print; must not raise
 
 
+def test_process_count_single_process():
+    assert dist.process_count() == 1
+
+
+def test_broadcast_bytes_single_process_is_the_payload():
+    assert dist.broadcast_bytes_from_rank0(b"resolved-tles", "tle-fetch") == b"resolved-tles"
+    assert dist.broadcast_bytes_from_rank0(None, "tle-fetch") == b""
+
+
 # ---------------------------------------------------------------------------
 # Name/shape matching rules
 # ---------------------------------------------------------------------------

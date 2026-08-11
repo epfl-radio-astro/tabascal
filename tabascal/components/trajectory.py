@@ -18,8 +18,6 @@ import sgp4jax
 from sgp4jax import WGS72 as gravity
 from sgp4jax._sgp4init import sgp4init
 
-import warnings
-
 import jax.numpy as jnp
 from jax import vmap, Array
 import numpy as np
@@ -307,15 +305,20 @@ class SGP4LEONoDragOrbit(Component):
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
             # self.ric_std = config.args["satellites"]["ric_std"]
 
-            extra_tle_dir = getattr(config, "extra_tle_dir", None)
-            extra_tle_max_age_days = getattr(config, "extra_tle_max_age_days", None)
-            catalogue_interval_hours = getattr(config, "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS)
+            # Reuse the resolution the preflight check already made and enforced
+            # coverage on: re-resolving here could reach a different satellite set
+            # from the one the run was checked against, and would repeat the
+            # provider work. Falls back to resolving when there is no preflight
+            # (standalone component use and tests).
             self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
                 config.times_jd,
                 config.norad_ids,
-                extra_tle_dir=extra_tle_dir,
-                extra_tle_max_age_days=extra_tle_max_age_days,
-                catalogue_interval_hours=catalogue_interval_hours,
+                extra_tle_dir=getattr(config, "extra_tle_dir", None),
+                extra_tle_max_age_days=getattr(config, "extra_tle_max_age_days", None),
+                catalogue_interval_hours=getattr(
+                    config, "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS
+                ),
+                resolution=getattr(config, "tle_resolution", None),
             )
             self.bstar = self.elements[:, 0]
             self.elements = self.elements[:, 1:] # Remove the bstar drag element
@@ -487,15 +490,20 @@ class SGP4LEOOrbit(Component):
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
             # self.ric_std = config.args["satellites"]["ric_std"]
 
-            extra_tle_dir = getattr(config, "extra_tle_dir", None)
-            extra_tle_max_age_days = getattr(config, "extra_tle_max_age_days", None)
-            catalogue_interval_hours = getattr(config, "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS)
+            # Reuse the resolution the preflight check already made and enforced
+            # coverage on: re-resolving here could reach a different satellite set
+            # from the one the run was checked against, and would repeat the
+            # provider work. Falls back to resolving when there is no preflight
+            # (standalone component use and tests).
             self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
                 config.times_jd,
                 config.norad_ids,
-                extra_tle_dir=extra_tle_dir,
-                extra_tle_max_age_days=extra_tle_max_age_days,
-                catalogue_interval_hours=catalogue_interval_hours,
+                extra_tle_dir=getattr(config, "extra_tle_dir", None),
+                extra_tle_max_age_days=getattr(config, "extra_tle_max_age_days", None),
+                catalogue_interval_hours=getattr(
+                    config, "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS
+                ),
+                resolution=getattr(config, "tle_resolution", None),
             )
             self.sat_epoch = epoch_jd - 2433281.5
             self.epoch_jd_whole = jnp.floor(epoch_jd)
@@ -688,12 +696,12 @@ def _pad_rfi_sources(tles_df):
 def _require_tles(tles_df, norad_ids) -> None:
     """Validate the resolved TLEs against the requested NORAD IDs.
 
-    Raises :class:`~tabascal.tle.TLEError` when *nothing* resolved (without this
-    an empty frame surfaces as an opaque pandas ``KeyError`` on the element
-    columns). When only *some* IDs resolved, the run proceeds with the reduced
-    satellite set — matching long-standing behaviour — but a loud warning names
-    the excluded IDs, since a silently absent satellite degrades RFI subtraction
-    with no visible signal.
+    Resolution is all-or-nothing, so by the time a frame reaches here every
+    requested ID should be present; this is the defence in depth that stops an
+    incomplete set reaching the model by another route. An empty frame would
+    otherwise surface as an opaque pandas ``KeyError`` on the element columns, and
+    a partial one would silently shrink the RFI model — degrading subtraction with
+    no visible signal.
     """
     requested = sorted({int(n) for n in np.atleast_1d(np.asarray(norad_ids))})
     if not len(tles_df):
@@ -705,31 +713,38 @@ def _require_tles(tles_df, norad_ids) -> None:
     resolved = {int(n) for n in tles_df["NORAD_CAT_ID"]}
     missing = sorted(set(requested) - resolved)
     if missing:
-        msg = (
+        raise TLEError(
             f"TLEs could not be resolved for {len(missing)} of {len(requested)} "
-            f"requested satellites: NORAD IDs {missing}. These satellites are "
-            f"EXCLUDED from the RFI model and subtraction quality may degrade. "
-            f"Provide their TLEs via --extra-tle-dir to include them."
+            f"requested satellites: NORAD IDs {missing}. TABASCAL does not "
+            f"subtract an incomplete satellite model: supply their TLEs via "
+            f"--extra-tle-dir, relax satellites.remote_tle_max_age_days "
+            f"deliberately, or remove these IDs from satellites.norad_ids."
         )
-        warnings.warn(msg, stacklevel=3)
-        banner = "!" * 78
-        print(f"\n{banner}\nWARNING: {msg}\n{banner}\n")
 
 
 def fetch_orbital_elements(
-    times_jd,
-    norad_ids,
+    times_jd=None,
+    norad_ids=None,
     extra_tle_dir=None,
     extra_tle_max_age_days=None,
     catalogue_interval_hours=DEFAULT_CATALOGUE_INTERVAL_HOURS,
+    resolution=None,
 ):
+    """Orbital elements for the RFI model.
 
-    tles_df = get_tles_by_id(
-        norad_ids,
+    *resolution* is the :class:`~tabascal.tle.TLEResolution` the preflight check
+    already produced; passing it is the normal path and guarantees the model is
+    built from exactly the records whose coverage and ages were checked. Without
+    it the satellites are resolved here instead, for callers that have no
+    preflight (the components' own re-fetch, and tests).
+    """
+    tles_df, norad_ids = _resolved_frame(
+        resolution,
         times_jd,
-        extra_tle_dir=extra_tle_dir,
-        extra_tle_max_age_days=extra_tle_max_age_days,
-        catalogue_interval_hours=catalogue_interval_hours,
+        norad_ids,
+        extra_tle_dir,
+        extra_tle_max_age_days,
+        catalogue_interval_hours,
     )
     _require_tles(tles_df, norad_ids)
     # Real (unpadded) source count is the number of rows the fetch actually returned,
@@ -756,20 +771,43 @@ def fetch_orbital_elements(
 
     return elements, epoch_jd, norad_ids, tles, n_rfi_real
 
-def fetch_standard_orbital_elements(
+def _resolved_frame(
+    resolution,
     times_jd,
     norad_ids,
-    extra_tle_dir=None,
-    extra_tle_max_age_days=None,
-    catalogue_interval_hours=DEFAULT_CATALOGUE_INTERVAL_HOURS,
+    extra_tle_dir,
+    extra_tle_max_age_days,
+    catalogue_interval_hours,
 ):
-
+    """The element frame plus the ID list it must cover, from either source."""
+    if resolution is not None:
+        return resolution.frame(), list(resolution.requested)
     tles_df = get_tles_by_id(
         norad_ids,
         times_jd,
         extra_tle_dir=extra_tle_dir,
         extra_tle_max_age_days=extra_tle_max_age_days,
         catalogue_interval_hours=catalogue_interval_hours,
+    )
+    return tles_df, norad_ids
+
+
+def fetch_standard_orbital_elements(
+    times_jd=None,
+    norad_ids=None,
+    extra_tle_dir=None,
+    extra_tle_max_age_days=None,
+    catalogue_interval_hours=DEFAULT_CATALOGUE_INTERVAL_HOURS,
+    resolution=None,
+):
+
+    tles_df, norad_ids = _resolved_frame(
+        resolution,
+        times_jd,
+        norad_ids,
+        extra_tle_dir,
+        extra_tle_max_age_days,
+        catalogue_interval_hours,
     )
     _require_tles(tles_df, norad_ids)
     tles_df = _pad_rfi_sources(tles_df)
