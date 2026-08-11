@@ -44,6 +44,7 @@ cached already.
 |---|---|---|
 | Historical epoch, catalogue available | Full catalogue downloaded once, stored as `catalogue-<stamp>.json` | Served from cache **forever** — deterministic, never refreshed |
 | Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence over the cached fallback records |
+| Catalogue contains malformed rows or fewer than 99% of the expected rows remain valid | Malformed rows are rejected. An incomplete catalogue is **not cached**, and the requested satellites are fetched individually | The full catalogue is re-attempted on every run |
 | Satellite missing from an existing snapshot | Per-satellite fallback for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
 | Service unreachable, snapshot cached | Cache hit — run proceeds offline | — |
 | Service unreachable, no snapshot | Run fails fast with a clear error (no satellite-by-satellite retry storm) | — |
@@ -63,6 +64,18 @@ Two consequences worth understanding:
   once SatChecker's ingest catches up — improving the priors on a rerun. If you
   need the *original* run's priors instead, use the saved run TLEs (next
   section).
+- **Invalid cache files do not become trusted inputs.** Managed snapshots and
+  per-satellite fallback files are checked for their schema, canonical epoch,
+  record counts, completeness, TLE syntax, and matching satellite identities.
+  A corrupt, incomplete, or wrong-epoch file is treated as a cache miss and the
+  service is consulted again.
+
+In a distributed TABASCAL run, process 0 completes the network and cache work
+before the worker processes read the populated cache. Only process 0 writes the
+shared `used_tles` result, and any synthetic satellite entries added solely for
+device padding are excluded from that file. Cache files are written atomically;
+however, unrelated TABASCAL jobs writing the same per-satellite fallback file at
+the same time are not serialized with each other.
 
 ## Reproducing a run's TLEs exactly
 
@@ -97,10 +110,15 @@ any satellite/epoch it cannot serve, supply TLEs yourself via `--extra-tle-dir`:
 
 2. Save the records as one or more `*.json` files in a directory, as a
    pandas-oriented JSON table (`pandas.DataFrame.to_json(path)`) with at least
-   the columns `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2`. Space-Track's JSON
-   output already uses these column names (the full column set is documented
-   below); orbital-element columns are ignored — TABASCAL parses the elements
-   locally from the two TLE lines.
+   the columns `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2`. Every `*.json` file
+   in the directory is considered; the filename does not need to contain a
+   date. Space-Track's JSON output already uses these column names (the full
+   column set is documented below); orbital-element columns are ignored —
+   TABASCAL parses the elements locally from the two TLE lines. Both lines must
+   form a valid TLE pair and must encode the same satellite as `NORAD_CAT_ID`.
+   Unreadable files, files without the required columns, and invalid records are
+   skipped; an unresolved satellite then falls through to the managed cache and
+   SatChecker.
 
    ```python
    import pandas as pd
