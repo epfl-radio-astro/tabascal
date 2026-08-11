@@ -110,6 +110,47 @@ named; set `TABASCAL_TLE_LOG_DETAIL=1` for the full per-satellite listing.
 Your own `extra_tle_dir` files are exempt from the remote ceiling, so the exact
 replay workflow below keeps working no matter how old the saved run is.
 
+(sec-endpoint-freshness)=
+## Which endpoint answered changes the TLE age
+
+SatChecker's two endpoints do **not** return the same element set for the same
+satellite at the same epoch. `get-nearest-tle` resolves against the full archive;
+`tles-at-epoch` serves a per-epoch catalogue snapshot that can be built from
+materially older elements. Measured over the 32 GNSS satellites of the bundled
+performance benchmark, at observation epoch 2023-02-21T08:03 UTC with both
+endpoints queried at the same canonical bucket (09:00 UTC):
+
+| Path | Median age | Max age | Matched the nearest available record |
+|---|---:|---:|---:|
+| Bulk `tles-at-epoch` | 0.595 d | 2.160 d | 10 / 32 |
+| Per-satellite `get-nearest-tle` | 0.280 d | 1.063 d | **32 / 32** |
+
+For 19 of the 32 objects the bulk catalogue's record was older than the one the
+same service would return on request — by up to **1.9 days** (NORAD 40294: 1.952 d
+from the bulk endpoint, 0.043 d per-satellite, a 45× difference). The
+per-satellite endpoint reproduced the Space-Track `gp_history` record exactly for
+all 32.
+
+This is a property of the service, not of the bucket policy: both figures above
+were taken at the *same* canonical epoch, so bucketing (≤ 1 h) cannot account for
+a multi-day gap. It is under investigation upstream; see
+`investigations/satchecker-endpoint-freshness.md` in the repository.
+
+**What it means for a run.** TABASCAL fetches the bulk catalogue first and falls
+back to per-satellite lookups only for IDs the bulk response *misses* — one
+multi-megabyte download instead of one request per satellite. So a satellite that
+*is* present in the bulk catalogue keeps that record even when a fresher one is
+available, unless the record is old enough to breach `remote_tle_max_age_days`,
+in which case the rejection routes it to the per-satellite endpoint and it is
+upgraded. Records between "staler than available" and the ceiling are kept as-is.
+
+If TLE freshness matters more to you than fetch time, the reliable way to get the
+nearest available elements today is to supply them yourself through
+`extra_tle_dir` (see [below](#sec-manual-tles)),
+which bypasses both endpoints. Lowering `remote_tle_max_age_days` also forces
+more satellites onto the per-satellite path, at the cost of failing the run
+outright for any that path cannot satisfy either.
+
 ## Caching behaviour by scenario
 
 The managed cache lives in the platform user-cache directory (e.g.
@@ -122,7 +163,7 @@ width — never on what happens to be cached already.
 
 | Scenario | What happens | Later runs |
 |---|---|---|
-| Settled epoch (older than `tle_catalogue_settle_days`), catalogue available | Full catalogue downloaded once, stored as `catalogue-<stamp>.json` | Served from cache **forever** — deterministic, never refreshed |
+| Settled epoch (older than `tle_catalogue_settle_days`), catalogue available | Full catalogue downloaded once, stored as `catalogue-<stamp>.json`. Its records may be older than `get-nearest-tle` would return — see [above](#sec-endpoint-freshness) | Served from cache **forever** — deterministic, never refreshed |
 | Unsettled epoch (newer than `tle_catalogue_settle_days`, or in the future) | Catalogue downloaded and stored only as `catalogue-<stamp>-provisional.json` | Reused for `tle_provisional_cache_hours` (default 12 h), then refetched. **Never promoted** to a stable snapshot: once the epoch settles, the next run downloads a fresh one |
 | Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra-provisional.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run, and the fallback records expire after `tle_provisional_cache_hours`; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence |
 | Catalogue contains malformed rows or fewer than 99% of the expected rows remain valid | Malformed rows are rejected. An incomplete catalogue is **not cached**, and the requested satellites are fetched individually | The full catalogue is re-attempted on every run |
@@ -201,6 +242,7 @@ exempt from `remote_tle_max_age_days`: the remote ceiling is a policy about what
 the *service* may hand you, and it must never stop you reproducing a run you
 already have the records for.
 
+(sec-manual-tles)=
 ## Supplying TLEs manually (Space-Track workaround)
 
 SatChecker's archive does not cover all epochs (very recent observations can be
