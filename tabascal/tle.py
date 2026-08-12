@@ -399,7 +399,11 @@ def _accept_remote(
         try:
             epoch_jd = _tle_epoch_jd(record["TLE_LINE1"])
         except (KeyError, ValueError, TypeError) as e:
-            if incumbent is None:
+            # Never displace a rejection that carries a real epoch and offset:
+            # "the best candidate was 4.2 d away" tells the user what to do about
+            # it, "unparseable" does not. The over-age branch below is symmetric
+            # — it replaces an epoch-less rejection when it has a measurable one.
+            if incumbent is None and nid not in rejected:
                 rejected[nid] = RejectedTLE(
                     nid, source, provider, None, None, f"unparseable TLE epoch: {e}"
                 )

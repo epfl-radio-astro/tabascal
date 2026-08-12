@@ -206,7 +206,7 @@ def fetch_nearest_tle(norad_id: int, epoch_jd: float) -> pd.DataFrame:
     url = f"{BASE_URL}/get-nearest-tle/?" + urllib.parse.urlencode(
         {"id": int(norad_id), "id_type": "catalog", "epoch": repr(float(epoch_jd))}
     )
-    payload = _load_json(_http_get(url, timeout=120), url)
+    payload = _load_json(_http_get(url), url)
     if isinstance(payload, list) and not payload:
         return pd.DataFrame()  # empty list == no record for this satellite
     obj = _as_object(payload, url)

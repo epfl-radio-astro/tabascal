@@ -11,7 +11,7 @@ from tabascal.satchecker import client, SatCheckerTransportError
 from tabascal.satchecker.cache import TextTLECache
 from tabascal.satchecker.service import fetch_nearest_batch
 
-from .tle_helpers import block_network, jd, make_catalogue_df  # noqa: F401
+from .tle_helpers import block_network, jd, make_catalogue_df, make_tle  # noqa: F401
 
 
 OBS = jd(2023, 2, 21)
@@ -138,6 +138,29 @@ def test_extra_directory_has_precedence(cache_dir, tmp_path, monkeypatch):
     result = tle.resolve_tles([25544], OBS, extra_tle_dir=str(extra))
     assert result.resolved[25544].source == "extra_tle_dir"
     assert calls == []
+
+
+def test_unparseable_candidate_does_not_erase_a_measurable_rejection():
+    """The coverage error must keep the rejection that can quantify the miss.
+
+    "The best candidate was 4 d away" tells the user which knob to turn;
+    "unparseable TLE epoch" does not. Both validating layers upstream drop
+    unparseable rows, so this is defence in depth exercised directly.
+    """
+    line1, line2 = make_tle(25544, OBS - 4)
+    resolved, rejected = {}, {}
+
+    tle._accept_remote(
+        {25544: {"TLE_LINE1": line1, "TLE_LINE2": line2}},
+        "managed per-satellite cache", OBS, 3.0, resolved, rejected,
+    )
+    assert rejected[25544].age_days == pytest.approx(4.0, abs=2e-8)
+
+    tle._accept_remote(
+        {25544: {"TLE_LINE1": "garbage", "TLE_LINE2": "garbage"}},
+        "SatChecker nearest-TLE", OBS, 3.0, resolved, rejected,
+    )
+    assert rejected[25544].age_days == pytest.approx(4.0, abs=2e-8)
 
 
 def test_batch_uses_bounded_concurrency_and_preserves_input_order():

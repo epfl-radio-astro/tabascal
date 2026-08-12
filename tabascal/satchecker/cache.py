@@ -15,6 +15,7 @@ import tempfile
 from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
@@ -90,8 +91,14 @@ class TextTLECache:
     def path(self, norad_id: int) -> Path:
         return self.cache_dir / f"tle-{int(norad_id)}.json"
 
-    def get(self, norad_id: int) -> pd.DataFrame:
-        """Return all validated cached records for *norad_id*, or an empty frame."""
+    def get(self, norad_id: int, log: Callable[[str], None] = print) -> pd.DataFrame:
+        """Return all validated cached records for *norad_id*, or an empty frame.
+
+        An absent file is an ordinary miss and says nothing. A file that exists
+        but cannot be used is reported: silently treating it as a miss costs a
+        network request on every run with nothing to indicate why, and a cache
+        that never takes hold is otherwise invisible.
+        """
         path = self.path(norad_id)
         if not path.exists():
             return pd.DataFrame()
@@ -107,7 +114,11 @@ class TextTLECache:
             if envelope.get("norad_id") != int(norad_id):
                 raise CacheValidationError("TLE cache envelope has the wrong NORAD ID")
             return _validated_records(envelope.get("records") or [], int(norad_id))
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError) as error:
+            log(
+                f"  warning: cached TLE file {path} is unusable ({error}); "
+                "treating it as a cache miss"
+            )
             return pd.DataFrame()
 
     def store(self, norad_id: int, records: pd.DataFrame) -> None:

@@ -51,6 +51,25 @@ def test_corrupt_or_wrong_schema_file_is_a_cache_miss(tmp_path):
     assert cache.get(25544).empty
 
 
+def test_unusable_file_is_reported_but_an_absent_one_is_not(tmp_path):
+    """A cache that never takes hold must not be invisible.
+
+    Silently re-fetching every run gives the user nothing to debug, so an
+    existing-but-unusable file warns while a plain miss stays quiet.
+    """
+    cache = TextTLECache(tmp_path)
+    messages = []
+
+    assert cache.get(25544, log=messages.append).empty
+    assert messages == []
+
+    cache.path(25544).write_text("not-json")
+    assert cache.get(25544, log=messages.append).empty
+    assert len(messages) == 1
+    assert "unusable" in messages[0]
+    assert str(cache.path(25544)) in messages[0]
+
+
 def test_write_is_an_envelope_not_a_pandas_orientation(tmp_path):
     cache = TextTLECache(tmp_path)
     cache.store(25544, make_catalogue_df([(25544, EPOCH)]))
