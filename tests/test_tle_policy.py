@@ -194,11 +194,18 @@ def test_batch_collects_one_failure_without_losing_other_ids():
     assert isinstance(result.errors[2], SatCheckerTransportError)
 
 
-def test_batch_abandons_queued_requests_once_the_service_is_unreachable():
-    """An outage must cost a bounded number of requests, not one per satellite.
+@pytest.mark.parametrize("workers", [2, 5, 16])
+@pytest.mark.parametrize("latency", [0.0, 0.02])
+def test_outage_costs_at_most_max_workers_requests(workers, latency):
+    """An outage must cost exactly ``max_workers`` requests — no more, ever.
 
-    Only the ``max_workers`` already in flight run; the rest are abandoned rather
-    than each paying the full request timeout to rediscover the same outage.
+    The bound has to hold at *any* worker count and *any* failure latency. That
+    is why requests are submitted incrementally: queueing all of them and
+    cancelling the remainder leaks badly when failures return fast, because the
+    pool's workers drain the queue faster than the cancel catches it.
+
+    ``latency=0`` is the hard case (a refused connection); 20 ms stands in for a
+    429 arriving in one round trip.
     """
     attempted = []
     lock = threading.Lock()
@@ -206,18 +213,49 @@ def test_batch_abandons_queued_requests_once_the_service_is_unreachable():
     def dead_service(norad_id, epoch):
         with lock:
             attempted.append(norad_id)
-        time.sleep(0.05)
+        if latency:
+            time.sleep(latency)
         raise SatCheckerTransportError("connection refused")
 
     result = fetch_nearest_batch(
-        list(range(1, 41)), OBS, fetch_nearest_tle=dead_service, max_workers=2
+        list(range(1, 201)), OBS, fetch_nearest_tle=dead_service,
+        max_workers=workers, log=lambda _m: None,
     )
-    assert len(attempted) < 40
+    assert len(attempted) <= workers
     # Every requested ID still gets an error, so coverage reporting names them all.
-    assert set(result.errors) == set(range(1, 41))
+    assert set(result.errors) == set(range(1, 201))
     assert all(
         isinstance(error, SatCheckerTransportError) for error in result.errors.values()
     )
+
+
+def test_incremental_submission_still_fetches_every_id_when_healthy():
+    """Topping the in-flight set up must not drop IDs off the end of the batch."""
+    result = fetch_nearest_batch(
+        list(range(1, 51)), OBS,
+        fetch_nearest_tle=lambda nid, epoch: make_catalogue_df([(nid, epoch)]),
+        max_workers=4,
+    )
+    assert result.records["NORAD_CAT_ID"].tolist() == list(range(1, 51))
+    assert result.errors == {}
+
+
+def test_rate_limit_stops_the_batch_and_reports_the_wait():
+    """A 429 is the service asking us to stop; the rest of the list must not go out."""
+    attempted = []
+    lock = threading.Lock()
+
+    def limited(norad_id, epoch):
+        with lock:
+            attempted.append(norad_id)
+        raise client.SatCheckerRateLimitError("slow down", retry_after=90.0)
+
+    result = fetch_nearest_batch(
+        list(range(1, 201)), OBS, fetch_nearest_tle=limited, max_workers=3,
+        log=lambda _m: None,
+    )
+    assert len(attempted) <= 3
+    assert set(result.errors) == set(range(1, 201))
 
 
 def test_batch_response_errors_do_not_abandon_the_rest():
