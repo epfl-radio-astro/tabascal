@@ -7,12 +7,12 @@ one-line message instead of a traceback.
 
 The module also owns :func:`ms_observation_epoch_jd`, the single Measurement Set
 observation-epoch derivation. Preflight and execution must agree exactly on the
-epoch: it sets the canonical cache bucket *and* every TLE age comparison, so two
-slightly different means could cache under one key and enforce the age policy
-against another. The helper mirrors :func:`tabascal.tab_tools.read_ms` — one time
+epoch: it sets every TLE age comparison, so two slightly different means could
+make different acceptance decisions. The helper mirrors
+:func:`tabascal.tab_tools.read_ms` — one time
 per integration, with the same seconds-versus-days unit guard.
 
-Three age/interval settings exist and are deliberately kept distinct:
+Three age settings exist and are deliberately kept distinct:
 
 ``extra_tle_max_age_days``
     Acceptance of explicit user/replay files (``extra_tle_dir``). ``null`` by
@@ -20,9 +20,8 @@ Three age/interval settings exist and are deliberately kept distinct:
     service policy must never constrain it.
 ``remote_tle_max_age_days``
     Emergency acceptance ceiling for SatChecker records and its managed cache.
-``tle_catalogue_settle_days``
-    Whether a SatChecker catalogue may be treated as an immutable historical
-    snapshot, as opposed to a still-filling provisional one.
+``tle_cache_reuse_max_age_days``
+    Age below which a cached SatChecker record avoids a new nearest-TLE request.
 """
 
 from __future__ import annotations
@@ -36,7 +35,6 @@ from typing import Optional
 
 import numpy as np
 
-from tabascal.satchecker import DEFAULT_CATALOGUE_INTERVAL_HOURS
 from tabascal.satchecker import SatCheckerError as TLEError
 from tabascal.time import mjd_to_jd
 
@@ -53,26 +51,10 @@ from tabascal.time import mjd_to_jd
 #: observation-specific replacement.
 DEFAULT_REMOTE_TLE_MAX_AGE_DAYS = 3.0
 
-#: Age (days) above which a record taken from the bulk catalogue is re-requested
-#: from the per-satellite endpoint. SatChecker's ``tles-at-epoch`` returns the
-#: newest record at or *before* the requested epoch, so it cannot return a closer
-#: record falling after it; ``get-nearest-tle`` can. Measured over 32 GNSS
-#: satellites, one day is the knee of the trade-off: it upgraded 11 of 32 and
-#: reached a worst-case age of 1.06 d — identical to querying all 32 — where a
-#: lower threshold bought only a better median.
-DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS = 1.0
-
-#: Observed defensive boundary (days) after which a SatChecker full catalogue is
-#: treated as settled. SatChecker's ingest was measured ramping from 9 rows at an
-#: observation age of 16 days to 31,108 at 30 days, so a response can be complete
-#: relative to its own ``total_results`` while the upstream catalogue is still
-#: filling. This is a cache/routing policy, not an API guarantee and not a TLE-age
-#: allowance.
-DEFAULT_TLE_CATALOGUE_SETTLE_DAYS = 45.0
-
-#: Lifetime (hours) of a provisional catalogue snapshot, which exists only to
-#: avoid repeating a multi-megabyte download within one working session.
-DEFAULT_TLE_PROVISIONAL_CACHE_HOURS = 12.0
+#: A cached record this close to the observation is good enough to avoid a new
+#: nearest-TLE request. This is a request/latency trade-off, not the hard safety
+#: ceiling below.
+DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS = 1.0
 
 #: Trajectory components that consume resolved TLEs, so an empty NORAD ID list is
 #: a configuration error rather than a satellite-free model.
@@ -124,27 +106,6 @@ def validate_age_days(value, name: str) -> Optional[float]:
     if out < 0:
         raise TLEConfigurationError(
             f"{name} must be null or a non-negative number of days, got {value!r}"
-        )
-    return out
-
-
-def validate_positive_hours(value, name: str) -> float:
-    """Validate a strictly positive interval in hours."""
-    out = _as_finite_float(value, name)
-    if out <= 0:
-        raise TLEConfigurationError(
-            f"{name} must be a positive number of hours, got {value!r}"
-        )
-    return out
-
-
-def validate_catalogue_interval_hours(value) -> float:
-    """Validate ``tle_catalogue_interval_hours`` (>= 1 second, per the bucket policy)."""
-    out = validate_positive_hours(value, "tle_catalogue_interval_hours")
-    if out < 1.0 / 3600.0:
-        raise TLEConfigurationError(
-            "tle_catalogue_interval_hours must be at least 1/3600 h (1 second), "
-            f"got {value!r}"
         )
     return out
 
@@ -275,10 +236,7 @@ class TLEConfig:
     extra_tle_dir: Optional[str] = None
     extra_tle_max_age_days: Optional[float] = None
     remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS
-    remote_tle_target_age_days: Optional[float] = DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS
-    catalogue_interval_hours: float = DEFAULT_CATALOGUE_INTERVAL_HOURS
-    catalogue_settle_days: Optional[float] = DEFAULT_TLE_CATALOGUE_SETTLE_DAYS
-    provisional_cache_hours: float = DEFAULT_TLE_PROVISIONAL_CACHE_HOURS
+    cache_reuse_max_age_days: Optional[float] = DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS
 
 
 def normalise_tle_config(
@@ -321,19 +279,20 @@ def normalise_tle_config(
         satellites.get("remote_tle_max_age_days", DEFAULT_REMOTE_TLE_MAX_AGE_DAYS),
         "remote_tle_max_age_days",
     )
-    target_age = validate_age_days(
-        satellites.get("remote_tle_target_age_days", DEFAULT_REMOTE_TLE_TARGET_AGE_DAYS),
-        "remote_tle_target_age_days",
+    cache_reuse_age = validate_age_days(
+        satellites.get(
+            "tle_cache_reuse_max_age_days", DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS
+        ),
+        "tle_cache_reuse_max_age_days",
     )
-    # A target above the ceiling can never fire: anything staler than the target
-    # would already have been rejected outright. Almost certainly a mix-up of the
-    # two settings, so say so rather than silently doing nothing.
-    if target_age is not None and remote_max_age is not None and target_age > remote_max_age:
+    if (
+        cache_reuse_age is not None
+        and remote_max_age is not None
+        and cache_reuse_age > remote_max_age
+    ):
         raise TLEConfigurationError(
-            f"remote_tle_target_age_days ({target_age:g}) must not exceed "
-            f"remote_tle_max_age_days ({remote_max_age:g}): a target above the "
-            f"ceiling can never trigger an upgrade, because a record that stale "
-            f"is rejected instead."
+            f"tle_cache_reuse_max_age_days ({cache_reuse_age:g}) must not exceed "
+            f"remote_tle_max_age_days ({remote_max_age:g})"
         )
 
     return TLEConfig(
@@ -343,24 +302,7 @@ def normalise_tle_config(
             satellites.get("extra_tle_max_age_days"), "extra_tle_max_age_days"
         ),
         remote_tle_max_age_days=remote_max_age,
-        remote_tle_target_age_days=target_age,
-        catalogue_interval_hours=validate_catalogue_interval_hours(
-            satellites.get(
-                "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS
-            )
-        ),
-        catalogue_settle_days=validate_age_days(
-            satellites.get(
-                "tle_catalogue_settle_days", DEFAULT_TLE_CATALOGUE_SETTLE_DAYS
-            ),
-            "tle_catalogue_settle_days",
-        ),
-        provisional_cache_hours=validate_positive_hours(
-            satellites.get(
-                "tle_provisional_cache_hours", DEFAULT_TLE_PROVISIONAL_CACHE_HOURS
-            ),
-            "tle_provisional_cache_hours",
-        ),
+        cache_reuse_max_age_days=cache_reuse_age,
     )
 
 

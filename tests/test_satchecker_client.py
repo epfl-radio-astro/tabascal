@@ -1,585 +1,80 @@
-"""Offline tests for the SatChecker HTTP client (transport + normalisation).
+"""Offline contract tests for the single-endpoint SatChecker client."""
 
-The single network choke point ``client._http_get`` is monkeypatched to return
-canned bytes routed by URL, so nothing here touches the network.
-"""
-
-import http.client
 import json
-import ssl
+import socket
 import urllib.error
-import urllib.request
 
-import pandas as pd
 import pytest
 
 from tabascal.satchecker import client
 from tabascal.satchecker.client import (
-    CatalogueResult,
-    EmptyCatalogueError,
-    SatCheckerError,
     SatCheckerResponseError,
     SatCheckerTransportError,
-    fetch_full_catalogue,
     fetch_nearest_tle,
 )
 
-from .tle_helpers import (
-    block_network,  # noqa: F401  autouse fixture: no live SatChecker access
-    jd,
-    make_catalogue_df,
-    make_empty_zip_bytes,
-    make_info_json,
-    make_json_page,
-    make_nearest_json,
-    make_zip_bytes,
+from .tle_helpers import block_network, jd, make_nearest_json  # noqa: F401
+
+
+EPOCH = jd(2023, 1, 1)
+
+
+def test_nearest_response_is_normalised(monkeypatch):
+    monkeypatch.setattr(client, "_http_get", lambda *args, **kwargs: make_nearest_json([(25544, EPOCH)]))
+    frame = fetch_nearest_tle(25544, EPOCH)
+    assert list(frame.columns) == client.TLE_COLUMNS
+    assert frame.loc[0, "NORAD_CAT_ID"] == 25544
+
+
+@pytest.mark.parametrize("payload", [b"[]", b'[{"orbital_data": []}]'])
+def test_no_record_is_an_empty_frame(monkeypatch, payload):
+    monkeypatch.setattr(client, "_http_get", lambda *args, **kwargs: payload)
+    assert fetch_nearest_tle(99999, EPOCH).empty
+
+
+@pytest.mark.parametrize(
+    "rows, message",
+    [
+        ([{"satellite_id": None, "tle_line1": "x", "tle_line2": "y"}], "missing satellite IDs"),
+        ([{"satellite_id": 1.5, "tle_line1": "x", "tle_line2": "y"}], "non-integer"),
+        ([{"satellite_id": 1, "tle_line1": None, "tle_line2": "y"}], "missing TLE_LINE1"),
+    ],
 )
+def test_malformed_rows_raise_response_error(monkeypatch, rows, message):
+    payload = json.dumps({"orbital_data": rows}).encode()
+    monkeypatch.setattr(client, "_http_get", lambda *args, **kwargs: payload)
+    with pytest.raises(SatCheckerResponseError, match=message):
+        fetch_nearest_tle(1, EPOCH)
 
-_EPOCH = jd(2023, 2, 21, 13)
 
+def test_invalid_json_is_a_response_error(monkeypatch):
+    monkeypatch.setattr(client, "_http_get", lambda *args, **kwargs: b"not-json")
+    with pytest.raises(SatCheckerResponseError, match="invalid JSON"):
+        fetch_nearest_tle(25544, EPOCH)
 
-def _route(monkeypatch, handler):
-    """Install a ``_http_get`` that dispatches on the request URL."""
-    monkeypatch.setattr(client, "_http_get", lambda url, timeout=client.REQUEST_TIMEOUT: handler(url))
 
+@pytest.mark.parametrize("status", [400, 403, 404, 422])
+def test_client_statuses_are_response_errors(monkeypatch, status):
+    def fail(*args, **kwargs):
+        raise urllib.error.HTTPError("url", status, "reason", {}, None)
 
-class TestFullCatalogue:
+    monkeypatch.setattr(client.urllib.request, "urlopen", fail)
+    with pytest.raises(SatCheckerResponseError, match=f"HTTP {status}"):
+        fetch_nearest_tle(25544, EPOCH)
 
-    def test_zip_response_is_normalised(self, monkeypatch):
-        pairs = [(25544, _EPOCH), (38833, _EPOCH)]
 
-        def handler(url):
-            if "format=zip" in url:
-                return make_zip_bytes(pairs)
-            return make_info_json(total=2, version="1.6.0")
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_backoff_and_server_statuses_are_transport_errors(monkeypatch, status):
+    def fail(*args, **kwargs):
+        raise urllib.error.HTTPError("url", status, "reason", {}, None)
 
-        _route(monkeypatch, handler)
-        result = fetch_full_catalogue(_EPOCH)
-        assert isinstance(result, CatalogueResult)
-        assert result.source == "zip"
-        assert result.expected_count == 2 and result.actual_count == 2
-        assert result.service_version == "1.6.0"
-        assert sorted(result.records["NORAD_CAT_ID"]) == [25544, 38833]
-        assert list(result.records.columns) == client.CATALOGUE_COLUMNS
+    monkeypatch.setattr(client.urllib.request, "urlopen", fail)
+    with pytest.raises(SatCheckerTransportError, match=f"HTTP {status}"):
+        fetch_nearest_tle(25544, EPOCH)
 
-    def test_truncated_zip_falls_back_to_json(self, monkeypatch):
-        # info says 4 records; the zip only ever yields 1 (< 99%), so after two
-        # zip attempts the client falls back to the paginated JSON endpoint.
-        full = [(1, _EPOCH), (2, _EPOCH), (3, _EPOCH), (4, _EPOCH)]
 
-        def handler(url):
-            if "format=zip" in url:
-                return make_zip_bytes([(1, _EPOCH)])
-            if "per_page=1" in url:
-                return make_info_json(total=4)
-            return make_json_page(full, total=4)
-
-        _route(monkeypatch, handler)
-        result = fetch_full_catalogue(_EPOCH)
-        assert result.source == "json"
-        assert result.actual_count == 4
-        assert sorted(result.records["NORAD_CAT_ID"]) == [1, 2, 3, 4]
-
-    def test_paginated_json_spans_multiple_pages(self, monkeypatch):
-        # Drive _fetch_catalogue_json directly with a small per_page so >1 page is
-        # required (total 3, per_page 2 -> pages 1 and 2).
-        page1 = [(1, _EPOCH), (2, _EPOCH)]
-        page2 = [(3, _EPOCH)]
-
-        def handler(url):
-            return make_json_page(page2 if "&page=2" in url else page1, total=3)
-
-        _route(monkeypatch, handler)
-        df = client._fetch_catalogue_json(_EPOCH, per_page=2)
-        assert sorted(df["NORAD_CAT_ID"]) == [1, 2, 3]
-
-    def test_empty_zip_and_no_json_raises(self, monkeypatch):
-        def handler(url):
-            if "format=zip" in url:
-                return make_empty_zip_bytes()
-            if "per_page=1" in url:
-                return make_info_json(total=5)
-            return make_json_page([], total=0)  # JSON yields nothing either
-
-        _route(monkeypatch, handler)
-        with pytest.raises(SatCheckerError):
-            fetch_full_catalogue(_EPOCH)
-
-    def test_http_error_becomes_satchecker_error(self, monkeypatch):
-        # Patch at the urlopen layer so the real _http_get wrapping is exercised.
-        def boom(req, timeout=None):
-            raise urllib.error.URLError("connection refused")
-
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
-        with pytest.raises(SatCheckerError):
-            fetch_full_catalogue(_EPOCH)
-
-    def test_empty_catalogue_raises_empty_catalogue_error(self, monkeypatch):
-        # Live-observed behaviour: tles-at-epoch reports total_results=0 for
-        # epochs beyond the service's TLE ingest horizon. That must surface as
-        # the distinguishable EmptyCatalogueError so callers can fall back to
-        # per-satellite lookups (a transport failure must NOT — see below).
-        def handler(url):
-            if "format=zip" in url:
-                raise AssertionError("zip must not be attempted for an empty catalogue")
-            return make_json_page([], total=0)
-
-        _route(monkeypatch, handler)
-        with pytest.raises(EmptyCatalogueError):
-            fetch_full_catalogue(_EPOCH)
-
-    def test_transport_failure_is_not_empty_catalogue(self, monkeypatch):
-        def boom(req, timeout=None):
-            raise urllib.error.URLError("connection refused")
-
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
-        with pytest.raises(SatCheckerError) as exc_info:
-            fetch_full_catalogue(_EPOCH)
-        assert not isinstance(exc_info.value, EmptyCatalogueError)
-
-    def test_unavailable_expected_count_skips_unvalidated_zip(self, monkeypatch):
-        calls = {"zip": 0, "json": 0}
-
-        def handler(url):
-            if "format=zip" in url:
-                calls["zip"] += 1
-                return make_zip_bytes([(1, _EPOCH)])
-            if "per_page=1" in url:
-                return b"[]"  # catalogue_info cannot establish completeness
-            calls["json"] += 1
-            return make_json_page([(1, _EPOCH), (2, _EPOCH)], total=2)
-
-        _route(monkeypatch, handler)
-        result = fetch_full_catalogue(_EPOCH)
-        assert result.source == "json"
-        assert sorted(result.records["NORAD_CAT_ID"]) == [1, 2]
-        assert calls == {"zip": 0, "json": 1}
-
-
-class TestFailureTyping:
-    """Transport failures and response failures must be distinguishable.
-
-    The caller routes around them differently: a reachable service that answered
-    unusably is worth a per-satellite retry, an unreachable one is not — retrying
-    per satellite would turn an outage into a request storm.
-    """
-
-    @pytest.mark.parametrize(
-        "error",
-        [
-            urllib.error.URLError("connection refused"),
-            TimeoutError("timed out"),
-            ssl.SSLError("TLS handshake failed"),
-            ConnectionResetError("reset by peer"),
-        ],
-        ids=["urlerror", "timeout", "ssl", "reset"],
-    )
-    def test_connection_failures_are_transport(self, monkeypatch, error):
-        def boom(req, timeout=None):
-            raise error
-
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
-        with pytest.raises(SatCheckerTransportError):
-            fetch_full_catalogue(_EPOCH)
-
-    @pytest.mark.parametrize(
-        "read_error",
-        [
-            http.client.IncompleteRead(b"partial", 100),
-            http.client.RemoteDisconnected("connection closed"),
-            ssl.SSLError("TLS stream failed"),
-        ],
-        ids=["incomplete-read", "remote-disconnected", "ssl-error"],
-    )
-    def test_midstream_failures_are_transport(self, monkeypatch, read_error):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                raise read_error
-
-        monkeypatch.setattr(
-            urllib.request, "urlopen", lambda req, timeout=None: Response()
-        )
-        with pytest.raises(SatCheckerTransportError):
-            fetch_full_catalogue(_EPOCH)
-
-    def _http_error(self, status):
-        return urllib.error.HTTPError(
-            "https://satchecker.cps.iau.org/tools/tles-at-epoch/",
-            status, f"status {status}", {}, None,
-        )
-
-    @pytest.mark.parametrize("status", [400, 403, 404, 410, 422])
-    def test_client_error_statuses_are_response_failures(self, monkeypatch, status):
-        # HTTPError subclasses URLError, so without explicit handling these were
-        # typed as transport and suppressed the per-satellite fallback even though
-        # the service had plainly answered.
-        def boom(req, timeout=None):
-            raise self._http_error(status)
-
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
-        with pytest.raises(SatCheckerResponseError):
-            fetch_full_catalogue(_EPOCH)
-
-    @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
-    def test_backoff_and_server_statuses_stay_transport(self, monkeypatch, status):
-        # Rate limiting and server-side failure both mean "stop asking". Answering
-        # either with one request per satellite is the wrong move.
-        def boom(req, timeout=None):
-            raise self._http_error(status)
-
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
-        with pytest.raises(SatCheckerTransportError):
-            fetch_full_catalogue(_EPOCH)
-
-    def test_status_error_message_names_the_status(self, monkeypatch):
-        def boom(req, timeout=None):
-            raise self._http_error(404)
-
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
-        with pytest.raises(SatCheckerError, match="HTTP 404"):
-            fetch_full_catalogue(_EPOCH)
-
-    def test_transport_failure_is_not_reported_as_a_response_failure(self, monkeypatch):
-        def boom(req, timeout=None):
-            raise urllib.error.URLError("connection refused")
-
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
-        with pytest.raises(SatCheckerError) as exc_info:
-            fetch_full_catalogue(_EPOCH)
-        assert not isinstance(exc_info.value, SatCheckerResponseError)
-
-    def test_malformed_catalogue_is_a_response_failure(self, monkeypatch):
-        def handler(url):
-            if "format=zip" in url:
-                return b"not a zip"
-            if "per_page=1" in url:
-                return make_info_json(total=4)
-            return b"<html>not json</html>"
-
-        _route(monkeypatch, handler)
-        with pytest.raises(SatCheckerResponseError):
-            fetch_full_catalogue(_EPOCH)
-
-    def test_empty_catalogue_is_a_response_failure(self, monkeypatch):
-        _route(monkeypatch, lambda url: make_json_page([], total=0))
-        with pytest.raises(EmptyCatalogueError) as exc_info:
-            fetch_full_catalogue(_EPOCH)
-        assert isinstance(exc_info.value, SatCheckerResponseError)
-
-    def test_transport_failure_during_json_is_not_masked_as_response(self, monkeypatch):
-        # The zip attempt fails on content, then the JSON fallback loses the
-        # connection: the *transport* type must survive the fallback wrapping.
-        state = {"calls": 0}
-
-        def handler(url):
-            state["calls"] += 1
-            if "per_page=1" in url:
-                return make_info_json(total=4)
-            if "format=zip" in url:
-                return b"not a zip"
-            raise SatCheckerTransportError("connection dropped")
-
-        _route(monkeypatch, handler)
-        with pytest.raises(SatCheckerTransportError):
-            fetch_full_catalogue(_EPOCH)
-
-
-class TestNearestTle:
-
-    def test_nearest_response_is_normalised(self, monkeypatch):
-        _route(monkeypatch, lambda url: make_nearest_json([(25544, _EPOCH)]))
-        df = fetch_nearest_tle(25544, _EPOCH)
-        assert list(df["NORAD_CAT_ID"]) == [25544]
-        assert list(df.columns) == client.CATALOGUE_COLUMNS
-
-    def test_no_record_returns_empty(self, monkeypatch):
-        _route(monkeypatch, lambda url: b'{"orbital_data": []}')
-        assert fetch_nearest_tle(99999, _EPOCH).empty
-
-    def test_malformed_json_becomes_satchecker_error(self, monkeypatch):
-        _route(monkeypatch, lambda url: b"<html>not json</html>")
-        with pytest.raises(SatCheckerError):
-            fetch_nearest_tle(25544, _EPOCH)
-
-    def test_timeout_becomes_satchecker_error(self, monkeypatch):
-        def boom(req, timeout=None):
-            raise TimeoutError("timed out")
-
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
-        with pytest.raises(SatCheckerError):
-            fetch_nearest_tle(25544, _EPOCH)
-
-    @pytest.mark.parametrize(
-        "read_error",
-        [
-            http.client.IncompleteRead(b"partial", 100),
-            http.client.RemoteDisconnected("connection closed"),
-            ssl.SSLError("TLS stream failed"),
-        ],
-        ids=["incomplete-read", "remote-disconnected", "ssl-error"],
-    )
-    def test_midstream_transport_errors_become_satchecker_error(
-        self, monkeypatch, read_error
-    ):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                raise read_error
-
-        monkeypatch.setattr(
-            urllib.request, "urlopen", lambda req, timeout=None: Response()
-        )
-        with pytest.raises(SatCheckerError, match="SatChecker request failed"):
-            fetch_nearest_tle(25544, _EPOCH)
-
-    def test_single_dict_record_is_normalised(self, monkeypatch):
-        payload = json.loads(make_nearest_json([(25544, _EPOCH)]))
-        payload["orbital_data"] = payload["orbital_data"][0]
-        _route(monkeypatch, lambda url: json.dumps(payload).encode())
-        df = fetch_nearest_tle(25544, _EPOCH)
-        assert list(df["NORAD_CAT_ID"]) == [25544]
-
-    def test_invalid_row_collection_becomes_satchecker_error(self, monkeypatch):
-        _route(monkeypatch, lambda url: b'{"orbital_data": "not-rows"}')
-        with pytest.raises(SatCheckerError, match="unexpected nearest-TLE rows"):
-            fetch_nearest_tle(25544, _EPOCH)
-
-    def test_missing_satellite_id_becomes_satchecker_error(self, monkeypatch):
-        # A row without satellite_id previously escaped _normalise as a raw
-        # pandas IntCastingNaNError; the module contract is SatCheckerError.
-        import json
-
-        row = {"satellite_name": "MYSTERY", "tle_line1": "1 x", "tle_line2": "2 x"}
-        _route(monkeypatch, lambda url: json.dumps({"orbital_data": [row]}).encode())
-        with pytest.raises(SatCheckerError, match="missing satellite IDs"):
-            fetch_nearest_tle(25544, _EPOCH)
-
-    def test_missing_tle_line_becomes_satchecker_error(self, monkeypatch):
-        import json
-
-        row = {"satellite_id": 25544, "satellite_name": "ISS", "tle_line1": "1 x"}
-        _route(monkeypatch, lambda url: json.dumps({"orbital_data": [row]}).encode())
-        with pytest.raises(SatCheckerError, match="missing TLE_LINE2"):
-            fetch_nearest_tle(25544, _EPOCH)
-
-
-class TestSatelliteIdNormalisation:
-    """Satellite IDs must be finite integers; anything else is a SatCheckerError,
-    never a silent truncation or a raw pandas exception."""
-
-    def _frame(self, sid):
-        return pd.DataFrame([{
-            "satellite_id": sid, "satellite_name": "X",
-            "epoch": "2023-02-21T13:00:00",
-            "tle_line1": "1 25544U", "tle_line2": "2 25544",
-            "data_source": "t", "date_collected": None,
-        }])
-
-    def test_fractional_id_rejected_not_truncated(self):
-        # 25544.5 must not silently become satellite 25544.
-        with pytest.raises(SatCheckerError, match="non-integer satellite IDs"):
-            client._normalise(self._frame(25544.5))
-
-    def test_infinite_id_becomes_satchecker_error(self):
-        # Previously escaped as a raw pandas IntCastingNaNError.
-        with pytest.raises(SatCheckerError, match="non-finite satellite IDs"):
-            client._normalise(self._frame(float("inf")))
-
-    @pytest.mark.parametrize("sid", [25544, "25544", 25544.0])
-    def test_integral_ids_accepted(self, sid):
-        out = client._normalise(self._frame(sid))
-        assert out["NORAD_CAT_ID"].iloc[0] == 25544
-
-
-class TestZipParsing:
-
-    def test_bad_zip_bytes_become_satchecker_error(self, monkeypatch):
-        _route(monkeypatch, lambda url: b"this is not a zip file")
-        with pytest.raises(SatCheckerError):
-            client._fetch_catalogue_zip(_EPOCH)
-
-    def test_identical_repeated_rows_in_zip_are_deduped_not_rejected(
-        self, monkeypatch, capsys
-    ):
-        # A repeated row carries no information the first copy did not, and
-        # rejecting a whole catalogue over one was never reproduced against live
-        # data. The extra copy is dropped, reported, and the catalogue kept.
-        _route(monkeypatch, lambda url: make_zip_bytes([(1, _EPOCH), (1, _EPOCH), (2, _EPOCH)]))
-        df = client._fetch_catalogue_zip(_EPOCH)
-        assert sorted(df["NORAD_CAT_ID"]) == [1, 2]
-        assert "repeated 1 identical TLE row" in capsys.readouterr().out
-
-    def test_duplicate_norad_with_distinct_lines_in_zip_tolerated(self, monkeypatch):
-        rows = [(1, _EPOCH), (1, jd(2023, 2, 21, 15)), (2, _EPOCH)]
-        _route(monkeypatch, lambda url: make_zip_bytes(rows))
-        df = client._fetch_catalogue_zip(_EPOCH)
-        assert sorted(df["NORAD_CAT_ID"]) == [1, 1, 2]
-
-    def test_identical_tle_from_different_sources_is_kept(self):
-        # SatChecker aggregates providers; the same TLE from two of them is
-        # legitimate data, not a repeat.
-        df = make_catalogue_df([(1, _EPOCH), (1, _EPOCH)])
-        df["DATA_SOURCE"] = ["provider-a", "provider-b"]
-        assert len(client._dedupe_repeated_rows(df, "test")) == 2
-
-    def test_repeated_zip_rows_still_produce_a_usable_catalogue(self, monkeypatch):
-        # End-to-end: the zip's duplicate is dropped and, since the surviving row
-        # count still meets the expected total, the zip result is used as-is.
-        def handler(url):
-            if "format=zip" in url:
-                return make_zip_bytes([(1, _EPOCH), (1, _EPOCH), (2, _EPOCH)])
-            return make_info_json(total=2)
-
-        _route(monkeypatch, handler)
-        result = fetch_full_catalogue(_EPOCH)
-        assert result.source == "zip"
-        assert sorted(result.records["NORAD_CAT_ID"]) == [1, 2]
-
-
-class TestJsonPaginationValidation:
-    """Completion is judged by record count, never by ``page * per_page``, and an
-    incomplete/inconsistent JSON response is rejected rather than returned."""
-
-    def test_premature_empty_page_raises(self, monkeypatch):
-        # page 1: 2 rows, total 4; page 2: 0 rows, total 4 -> truncated -> raise.
-        def handler(url):
-            if "&page=2" in url:
-                return make_json_page([], total=4)
-            return make_json_page([(1, _EPOCH), (2, _EPOCH)], total=4)
-
-        _route(monkeypatch, handler)
-        with pytest.raises(SatCheckerError):
-            client._fetch_catalogue_json(_EPOCH, per_page=2)
-
-    def test_short_effective_page_size_is_followed(self, monkeypatch):
-        # Request a large per_page but the service caps each page at 2 rows,
-        # total 5: pages 1, 2 and 3 must all be requested and all 5 rows returned.
-        requested_pages = []
-
-        def handler(url):
-            page = 1
-            for part in url.split("&"):
-                if part.startswith("page="):
-                    page = int(part.split("=")[1])
-            requested_pages.append(page)
-            rows = {1: [(1, _EPOCH), (2, _EPOCH)],
-                    2: [(3, _EPOCH), (4, _EPOCH)],
-                    3: [(5, _EPOCH)]}[page]
-            return make_json_page(rows, total=5)
-
-        _route(monkeypatch, handler)
-        df = client._fetch_catalogue_json(_EPOCH, per_page=100)
-        assert sorted(requested_pages) == [1, 2, 3]
-        assert sorted(df["NORAD_CAT_ID"]) == [1, 2, 3, 4, 5]
-
-    def test_inconsistent_totals_raise(self, monkeypatch):
-        def handler(url):
-            if "&page=2" in url:
-                return make_json_page([(3, _EPOCH), (4, _EPOCH)], total=5)  # total changed
-            return make_json_page([(1, _EPOCH), (2, _EPOCH)], total=4)
-
-        _route(monkeypatch, handler)
-        with pytest.raises(SatCheckerError):
-            client._fetch_catalogue_json(_EPOCH, per_page=2)
-
-    def test_complete_final_short_page_succeeds(self, monkeypatch):
-        # Pages of 2, 2, 1 rows, total 5: accumulated count matches total -> ok.
-        def handler(url):
-            page = 1
-            for part in url.split("&"):
-                if part.startswith("page="):
-                    page = int(part.split("=")[1])
-            rows = {1: [(1, _EPOCH), (2, _EPOCH)],
-                    2: [(3, _EPOCH), (4, _EPOCH)],
-                    3: [(5, _EPOCH)]}[page]
-            return make_json_page(rows, total=5)
-
-        _route(monkeypatch, handler)
-        df = client._fetch_catalogue_json(_EPOCH, per_page=2)
-        assert len(df) == 5
-
-    def test_repeated_page_cannot_satisfy_total(self, monkeypatch):
-        # A count-only check would accept [1, 2, 1, 2] as four complete rows.
-        # Detected on the raw pages, independently of row-level de-duplication.
-        _route(
-            monkeypatch,
-            lambda url: make_json_page([(1, _EPOCH), (2, _EPOCH)], total=4),
-        )
-        with pytest.raises(SatCheckerError, match="pagination loop"):
-            client._fetch_catalogue_json(_EPOCH, per_page=2)
-
-    def test_repeated_page_detected_even_when_rows_differ_by_provider(self, monkeypatch):
-        # Row-level dedup would keep both copies (different providers) and the
-        # count check would then pass; the page fingerprint still catches the loop.
-        import json as _json
-
-        def handler(url):
-            payload = _json.loads(make_json_page([(1, _EPOCH), (2, _EPOCH)], total=4))
-            for i, row in enumerate(payload["data"]):
-                row["data_source"] = f"provider-{i}"
-            return _json.dumps(payload).encode()
-
-        _route(monkeypatch, handler)
-        with pytest.raises(SatCheckerError, match="pagination loop"):
-            client._fetch_catalogue_json(_EPOCH, per_page=2)
-
-    def test_duplicate_norad_with_distinct_lines_is_tolerated(self, monkeypatch):
-        # Two records for one object with *different* TLE lines is legitimate
-        # service data, not corruption — it must not fail the download.
-        rows = [(1, _EPOCH), (1, jd(2023, 2, 21, 15)), (2, _EPOCH)]
-        _route(monkeypatch, lambda url: make_json_page(rows, total=3))
-        df = client._fetch_catalogue_json(_EPOCH, per_page=10)
-        assert sorted(df["NORAD_CAT_ID"]) == [1, 1, 2]
-
-    def test_mismatched_response_page_raises(self, monkeypatch):
-        import json
-
-        def handler(url):
-            payload = json.loads(make_json_page([(1, _EPOCH)], total=2))
-            payload["page"] = 99
-            return json.dumps(payload).encode()
-
-        _route(monkeypatch, handler)
-        with pytest.raises(SatCheckerError, match="when page 1 was requested"):
-            client._fetch_catalogue_json(_EPOCH, per_page=1)
-
-
-class TestResponseShapes:
-    """Empty and scalar top-level payloads must not leak IndexError/AttributeError."""
-
-    def test_catalogue_info_empty_list_raises(self, monkeypatch):
-        _route(monkeypatch, lambda url: b"[]")
-        with pytest.raises(SatCheckerError):
-            client.catalogue_info(_EPOCH)
-
-    def test_catalogue_info_garbage_total_raises_satchecker_error(self, monkeypatch):
-        # The module contract is "errors are SatCheckerError" — a malformed
-        # total_results must not leak a raw ValueError from int().
-        _route(monkeypatch, lambda url: b'{"total_results": "not-a-number"}')
-        with pytest.raises(SatCheckerError, match="invalid total_results"):
-            client.catalogue_info(_EPOCH)
-
-    def test_catalogue_info_scalar_raises(self, monkeypatch):
-        _route(monkeypatch, lambda url: b"42")
-        with pytest.raises(SatCheckerError):
-            client.catalogue_info(_EPOCH)
-
-    def test_nearest_empty_list_is_not_found(self, monkeypatch):
-        _route(monkeypatch, lambda url: b"[]")
-        assert fetch_nearest_tle(25544, _EPOCH).empty
-
-    def test_nearest_scalar_raises(self, monkeypatch):
-        _route(monkeypatch, lambda url: b"42")
-        with pytest.raises(SatCheckerError):
-            fetch_nearest_tle(25544, _EPOCH)
+@pytest.mark.parametrize("error", [socket.timeout("slow"), OSError("dropped")])
+def test_network_failures_are_transport_errors(monkeypatch, error):
+    monkeypatch.setattr(client.urllib.request, "urlopen", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+    with pytest.raises(SatCheckerTransportError, match="request failed"):
+        fetch_nearest_tle(25544, EPOCH)

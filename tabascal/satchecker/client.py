@@ -1,4 +1,4 @@
-"""Client for the IAU CPS SatChecker TLE service (https://satchecker.cps.iau.org/).
+"""Client for the IAU CPS SatChecker nearest-TLE service.
 
 Self-contained transport layer: this module talks to the SatChecker HTTP API and
 returns pandas DataFrames with a normalised column set. No account or credentials
@@ -7,9 +7,8 @@ orbital-element parsing — those live in :mod:`tabascal.satchecker.cache` and
 :mod:`tabascal.tle`. It deliberately imports nothing from tabascal, JAX, or
 casacore so it stays a candidate for extraction into a standalone client.
 
-Endpoints used:
-  - ``GET /tools/tles-at-epoch/``    full TLE catalogue nearest an epoch (zip/json)
-  - ``GET /tools/get-nearest-tle/``  single nearest TLE for one satellite
+Endpoint used: ``GET /tools/get-nearest-tle/`` for the TLE whose epoch is
+closest to the requested epoch for one satellite.
 
 Returned frames use these columns (SatChecker fields mapped to the OMM-style
 names the rest of tabascal expects): ``NORAD_CAT_ID``, ``OBJECT_NAME``,
@@ -19,14 +18,10 @@ names the rest of tabascal expects): ``NORAD_CAT_ID``, ``OBJECT_NAME``,
 from __future__ import annotations
 
 import http.client
-import io
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
-from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -39,11 +34,10 @@ import pandas as pd
 BASE_URL = "https://satchecker.cps.iau.org/tools"
 # Identify ourselves to the SatChecker operators, with a contact URL.
 USER_AGENT = "tabascal-tle/1.0 (+https://github.com/epfl-radio-astro/tabascal)"
-REQUEST_TIMEOUT = 300  # seconds — the full catalogue zip is a few MB
-CATALOGUE_MIN_FRACTION = 0.99  # accept a zip download this complete vs total_results
+REQUEST_TIMEOUT = 120  # seconds
 
 # Columns the normalised TLE frames expose.
-CATALOGUE_COLUMNS = [
+TLE_COLUMNS = [
     "NORAD_CAT_ID",
     "OBJECT_NAME",
     "EPOCH",
@@ -91,42 +85,11 @@ class SatCheckerResponseError(SatCheckerError):
     """
 
 
-class EmptyCatalogueError(SatCheckerResponseError):
-    """The service is reachable but reports *no* catalogue records at the epoch.
-
-    Observed in production: ``tles-at-epoch`` has a data horizon and returns
-    ``total_results: 0`` for epochs newer than its latest ingested TLE set, while
-    ``get-nearest-tle`` still resolves individual satellites. Like every other
-    response failure this is eligible for the per-satellite fallback; a
-    :class:`SatCheckerTransportError` is not.
-    """
-
-
-@dataclass(frozen=True)
-class CatalogueResult:
-    """A full-catalogue download plus the metadata needed to validate/cache it.
-
-    ``records`` carries the normalised TLE frame; the counts let the caller store
-    (and later audit) how complete the download was, and ``service_version`` /
-    ``source`` record where it came from. This is transport-level provenance only
-    — no cache-key or file-format policy lives here.
-    """
-
-    records: pd.DataFrame
-    expected_count: int
-    actual_count: int
-    service_version: Optional[str] = None
-    source: str = "zip"  # "zip" or "json"
-
-
 # ---------------------------------------------------------------------------
 # Low-level HTTP + normalisation
 # ---------------------------------------------------------------------------
 
-# HTTP statuses that mean "stop asking", not "ask somewhere else". A rate limit
-# is the clearest case: the fallback's answer to a failed bulk request is one
-# request per satellite, which is precisely the wrong response to being told we
-# are asking too often.
+# HTTP statuses that mean service-level backoff rather than a bad individual request.
 _BACKOFF_STATUSES = frozenset({429})
 
 
@@ -137,11 +100,8 @@ def _status_error(url: str, error: urllib.error.HTTPError) -> SatCheckerError:
     transport failure — but it is only worth trying a different endpoint when the
     server was rejecting this particular request rather than failing wholesale:
 
-    * 4xx (except 429) — the bulk endpoint refused *this* request. The per-satellite
-      endpoint is a different route with a much cheaper query and may well work.
-    * 429 and 5xx — the service is rate-limiting us or is failing on its own side.
-      Following that with one request per satellite would make it worse and is
-      very unlikely to succeed.
+    * 4xx (except 429) — this individual request was rejected.
+    * 429 and 5xx — the service is rate-limiting or failing server-side.
     """
     status = getattr(error, "code", None)
     detail = f"SatChecker returned HTTP {status} ({url}): {error.reason}"
@@ -194,7 +154,7 @@ def _as_object(payload, url: str) -> dict:
 
 
 def _normalise(records: pd.DataFrame) -> pd.DataFrame:
-    """Rename SatChecker fields to the normalised catalogue columns.
+    """Rename SatChecker fields to the normalised TLE columns.
 
     Response rows are validated here so schema problems surface as
     :class:`SatCheckerError` (the module's error contract) rather than as raw
@@ -202,10 +162,10 @@ def _normalise(records: pd.DataFrame) -> pd.DataFrame:
     lines must be present.
     """
     df = records.rename(columns=_FIELD_RENAME)
-    for col in CATALOGUE_COLUMNS:
+    for col in TLE_COLUMNS:
         if col not in df.columns:
             df[col] = None
-    df = df[CATALOGUE_COLUMNS].copy()
+    df = df[TLE_COLUMNS].copy()
     try:
         ids = pd.to_numeric(df["NORAD_CAT_ID"])
     except (ValueError, TypeError) as e:
@@ -233,269 +193,6 @@ def _normalise(records: pd.DataFrame) -> pd.DataFrame:
         if df[col].isnull().any():
             raise SatCheckerResponseError(f"SatChecker response is missing {col} values")
     return df.reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# Catalogue endpoints
-# ---------------------------------------------------------------------------
-
-def catalogue_info(epoch_jd: float) -> tuple[int, Optional[str]]:
-    """Return ``(total_results, service_version)`` reported at *epoch_jd*.
-
-    A single cheap JSON request (``per_page=1``) used to size and provenance-tag a
-    subsequent full download. ``service_version`` is ``None`` when the service does
-    not report one.
-    """
-    url = f"{BASE_URL}/tles-at-epoch/?" + urllib.parse.urlencode(
-        {"epoch": repr(float(epoch_jd)), "format": "json", "per_page": 1, "page": 1}
-    )
-    payload = _load_json(_http_get(url, timeout=120), url)
-    obj = _as_object(payload, url)
-    version = obj.get("version") or obj.get("service_version") or obj.get("api_version")
-    try:
-        total = int(obj.get("total_results", 0))
-    except (TypeError, ValueError) as e:
-        raise SatCheckerResponseError(
-            f"SatChecker returned invalid total_results ({url}): "
-            f"{obj.get('total_results')!r}"
-        ) from e
-    return total, (str(version) if version else None)
-
-
-def catalogue_total(epoch_jd: float) -> int:
-    """Number of catalogue records reported at *epoch_jd* (JSON ``total_results``)."""
-    return catalogue_info(epoch_jd)[0]
-
-
-def _dedupe_repeated_rows(df: pd.DataFrame, source: str) -> pd.DataFrame:
-    """Drop exact repeats of the same TLE from the same provider, with a warning.
-
-    A repeated row is harmless on its own — it carries no information the first
-    copy did not — and rejecting the whole download over one is a false positive
-    that was never reproduced against live catalogues. So the extra copies are
-    dropped and reported, and the catalogue is kept.
-
-    Repetition that *is* corruption — a paginated response serving the same page
-    twice, which would otherwise satisfy the record count with duplicate data — is
-    detected separately and independently by :func:`_fetch_catalogue_json`, on the
-    raw pages rather than on the merged frame.
-
-    Identical TLEs attributed to different providers are legitimate in
-    SatChecker's aggregated catalogue and are retained. Duplicate NORAD IDs with
-    different TLE lines are likewise tolerated; downstream selection picks the
-    record nearest the canonical epoch per ID.
-    """
-    dup = df.duplicated(
-        subset=["NORAD_CAT_ID", "TLE_LINE1", "TLE_LINE2", "DATA_SOURCE"]
-    )
-    if not dup.any():
-        return df
-    sample = ", ".join(str(int(x)) for x in df.loc[dup, "NORAD_CAT_ID"].unique()[:5])
-    print(
-        f"  warning: SatChecker {source} catalogue repeated {int(dup.sum())} "
-        f"identical TLE row(s) from the same provider (for example NORAD "
-        f"{sample}) — the extra copies were dropped"
-    )
-    return df.loc[~dup].reset_index(drop=True)
-
-
-def _page_fingerprint(rows: list) -> tuple:
-    """Order-sensitive identity of one JSON page, used to detect a pagination loop."""
-    return tuple(
-        (
-            row.get("satellite_id"),
-            row.get("tle_line1"),
-            row.get("tle_line2"),
-            row.get("data_source"),
-        )
-        for row in rows
-        if isinstance(row, dict)
-    )
-
-
-def _fetch_catalogue_zip(epoch_jd: float) -> pd.DataFrame:
-    q = urllib.parse.urlencode({"epoch": repr(float(epoch_jd)), "format": "zip"})
-    raw = _http_get(f"{BASE_URL}/tles-at-epoch/?{q}")
-    try:
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            names = zf.namelist()
-            if not names:
-                raise SatCheckerResponseError("SatChecker returned an empty zip archive.")
-            with zf.open(names[0]) as f:
-                df = pd.read_csv(f)
-    except (zipfile.BadZipFile, ValueError, pd.errors.ParserError, pd.errors.EmptyDataError) as e:
-        raise SatCheckerResponseError(f"SatChecker zip response could not be read: {e}") from e
-    return _dedupe_repeated_rows(_normalise(df), "zip")
-
-
-def _fetch_catalogue_json(epoch_jd: float, per_page: int = 5000) -> pd.DataFrame:
-    """Paginated JSON fallback for the full catalogue at *epoch_jd*.
-
-    Completion is decided by *record count*, never by ``page * per_page``: the
-    service's effective page size may be smaller than the value requested, so the
-    accumulator pages until it has collected ``total_results`` rows. A response is
-    rejected (:class:`SatCheckerResponseError`) — and therefore never cached —
-    when it is incomplete or internally inconsistent:
-
-    * ``total_results`` changes between pages;
-    * a page returns no rows before the total is reached;
-    * a page repeats one already served, which would let duplicate data satisfy
-      the record count; or
-    * the final accumulated count does not equal ``total_results``.
-    """
-    frames: list[pd.DataFrame] = []
-    seen_pages: dict[tuple, int] = {}
-    collected = 0
-    total: Optional[int] = None
-    page = 1
-    while True:
-        q = urllib.parse.urlencode(
-            {
-                "epoch": repr(float(epoch_jd)),
-                "format": "json",
-                "per_page": per_page,
-                "page": page,
-            }
-        )
-        url = f"{BASE_URL}/tles-at-epoch/?{q}"
-        payload = _load_json(_http_get(url), url)
-        obj = _as_object(payload, url)
-
-        try:
-            page_total = int(obj.get("total_results", 0))
-        except (TypeError, ValueError) as e:
-            raise SatCheckerResponseError(
-                f"SatChecker returned invalid total_results at page {page}: "
-                f"{obj.get('total_results')!r}"
-            ) from e
-        if page_total < 0:
-            raise SatCheckerResponseError(
-                f"SatChecker returned negative total_results at page {page}: {page_total}"
-            )
-
-        response_page = obj.get("page")
-        if response_page is not None:
-            try:
-                response_page = int(response_page)
-            except (TypeError, ValueError) as e:
-                raise SatCheckerResponseError(
-                    f"SatChecker returned invalid page metadata: {response_page!r}"
-                ) from e
-            if response_page != page:
-                raise SatCheckerResponseError(
-                    f"SatChecker returned page {response_page} when page {page} was requested"
-                )
-        if total is None:
-            total = page_total
-        elif page_total != total:
-            raise SatCheckerResponseError(
-                f"SatChecker reported inconsistent total_results across pages "
-                f"({total} then {page_total}) at page {page}"
-            )
-
-        rows = obj.get("data") or []
-        if rows:
-            # Pagination-loop detection, independent of row-level de-duplication:
-            # a page identical to one already served carries no new records, so
-            # letting it count towards ``total`` would accept a truncated
-            # catalogue padded out with repeats.
-            fingerprint = _page_fingerprint(rows)
-            if fingerprint in seen_pages:
-                raise SatCheckerResponseError(
-                    f"SatChecker JSON pagination served page {page} identical to "
-                    f"page {seen_pages[fingerprint]} — treating as a pagination "
-                    f"loop, not {total} distinct records"
-                )
-            seen_pages[fingerprint] = page
-            frames.append(pd.DataFrame(rows))
-            collected += len(rows)
-
-        if total <= 0 or collected >= total:
-            break
-        if not rows:
-            raise SatCheckerResponseError(
-                f"SatChecker JSON pagination returned an empty page at page {page} "
-                f"after {collected} of {total} records — treating as truncated"
-            )
-        page += 1
-
-    if not frames:
-        # Reached only when total_results <= 0: a page shortfall against a
-        # positive total raises above. The service answered, but has no
-        # catalogue at this epoch (e.g. beyond its TLE ingest horizon).
-        raise EmptyCatalogueError(
-            f"SatChecker reports no TLE catalogue records at epoch {epoch_jd!r} "
-            f"(total_results={total}) — the epoch may be newer than the service's "
-            f"latest ingested TLE set"
-        )
-    df = _normalise(pd.concat(frames, ignore_index=True))
-    if total is not None and len(df) != total:
-        raise SatCheckerResponseError(
-            f"SatChecker JSON catalogue incomplete: {len(df)} of {total} records"
-        )
-    return _dedupe_repeated_rows(df, "JSON")
-
-
-def fetch_full_catalogue(epoch_jd: float) -> CatalogueResult:
-    """Download the full TLE catalogue nearest *epoch_jd* from SatChecker.
-
-    Uses the efficient ``format=zip`` endpoint, validating the row count against
-    the ``total_results`` reported by the JSON endpoint (the zip response is
-    occasionally truncated). A short download is retried, then falls back to the
-    paginated ``format=json`` endpoint.
-
-    Returns a :class:`CatalogueResult` carrying the normalised frame plus the
-    expected/actual counts and service version, so the caller can decide whether
-    the download is complete enough to cache and can record its provenance.
-
-    The failure *type* is preserved end to end: an unreachable service raises
-    :class:`SatCheckerTransportError` (never worth a per-satellite retry) while a
-    reachable one that answers unusably raises :class:`SatCheckerResponseError`.
-    """
-    info_error: Exception | None = None
-    try:
-        expected, version = catalogue_info(epoch_jd)
-    except SatCheckerTransportError:
-        raise  # the service is unreachable; the other endpoints are on it too
-    except Exception as e:
-        expected, version = None, None
-        info_error = e
-
-    last_err: Exception | None = info_error
-    # A ZIP has no independent completeness metadata. Only use it when the cheap
-    # JSON info request supplied a positive expected count; otherwise go straight
-    # to the self-validating paginated JSON path.
-    if expected is not None and expected > 0:
-        for _ in range(2):
-            try:
-                df = _fetch_catalogue_zip(epoch_jd)  # raises on unreadable zips
-            except SatCheckerTransportError:
-                raise
-            except Exception as e:
-                last_err = e
-                continue
-            if len(df) >= expected * CATALOGUE_MIN_FRACTION:
-                return CatalogueResult(df, expected, len(df), version, "zip")
-            last_err = SatCheckerResponseError(
-                f"SatChecker zip truncated ({len(df)} of {expected} records) — retrying"
-            )
-            print(f"  {last_err}")
-
-    # zip repeatedly short or failing → paginated JSON. _fetch_catalogue_json
-    # guarantees an internally complete result (it raises otherwise), so the JSON
-    # result is exactly complete: expected == actual == len(df).
-    try:
-        df = _fetch_catalogue_json(epoch_jd)
-    except EmptyCatalogueError:
-        raise  # service reachable, no catalogue at this epoch — caller may fall back
-    except SatCheckerTransportError:
-        raise  # fail fast: do not follow an outage with per-satellite requests
-    except Exception as json_err:
-        raise SatCheckerResponseError(
-            f"Failed to fetch TLE catalogue from SatChecker: {json_err} "
-            f"(zip attempt: {last_err})"
-        ) from json_err
-    return CatalogueResult(df, len(df), len(df), version, "json")
 
 
 def fetch_nearest_tle(norad_id: int, epoch_jd: float) -> pd.DataFrame:

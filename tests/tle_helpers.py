@@ -12,9 +12,7 @@ the suite slow, flaky, and dependent on what a third party happens to serve).
 
 from __future__ import annotations
 
-import io
 import urllib.request
-import zipfile
 from datetime import datetime
 
 import pandas as pd
@@ -108,10 +106,6 @@ def write_legacy_tle_file(path, pairs) -> None:
     make_catalogue_df(pairs).to_json(path)
 
 
-# ---------------------------------------------------------------------------
-# Raw SatChecker HTTP payloads (un-normalised field names)
-# ---------------------------------------------------------------------------
-
 def _raw_rows(pairs) -> list[dict]:
     rows = []
     for nid, ep in pairs:
@@ -128,37 +122,6 @@ def _raw_rows(pairs) -> list[dict]:
             }
         )
     return rows
-
-
-def make_zip_bytes(pairs) -> bytes:
-    """A ``format=zip`` response: a single CSV of raw records inside a zip."""
-    df = pd.DataFrame(_raw_rows(pairs))
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("tles.csv", df.to_csv(index=False))
-    return buf.getvalue()
-
-
-def make_empty_zip_bytes() -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w"):
-        pass
-    return buf.getvalue()
-
-
-def make_info_json(total: int, version: str | None = "1.6.0") -> bytes:
-    payload = {"total_results": total}
-    if version is not None:
-        payload["version"] = version
-    import json
-
-    return json.dumps(payload).encode()
-
-
-def make_json_page(pairs, total: int) -> bytes:
-    import json
-
-    return json.dumps({"total_results": total, "data": _raw_rows(pairs)}).encode()
 
 
 def make_nearest_json(pairs) -> bytes:

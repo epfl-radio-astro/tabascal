@@ -1,4 +1,4 @@
-from tabascal.tle import DEFAULT_CATALOGUE_INTERVAL_HOURS, TLEError, get_tles_by_id
+from tabascal.tle import TLEError, get_tles_by_id
 from tabascal.distributed import (
     make_global,
     padded_rfi_count,
@@ -315,9 +315,6 @@ class SGP4LEONoDragOrbit(Component):
                 config.norad_ids,
                 extra_tle_dir=getattr(config, "extra_tle_dir", None),
                 extra_tle_max_age_days=getattr(config, "extra_tle_max_age_days", None),
-                catalogue_interval_hours=getattr(
-                    config, "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS
-                ),
                 resolution=getattr(config, "tle_resolution", None),
             )
             self.bstar = self.elements[:, 0]
@@ -500,9 +497,6 @@ class SGP4LEOOrbit(Component):
                 config.norad_ids,
                 extra_tle_dir=getattr(config, "extra_tle_dir", None),
                 extra_tle_max_age_days=getattr(config, "extra_tle_max_age_days", None),
-                catalogue_interval_hours=getattr(
-                    config, "tle_catalogue_interval_hours", DEFAULT_CATALOGUE_INTERVAL_HOURS
-                ),
                 resolution=getattr(config, "tle_resolution", None),
             )
             self.sat_epoch = epoch_jd - 2433281.5
@@ -727,7 +721,6 @@ def fetch_orbital_elements(
     norad_ids=None,
     extra_tle_dir=None,
     extra_tle_max_age_days=None,
-    catalogue_interval_hours=DEFAULT_CATALOGUE_INTERVAL_HOURS,
     resolution=None,
 ):
     """Orbital elements for the RFI model.
@@ -744,7 +737,6 @@ def fetch_orbital_elements(
         norad_ids,
         extra_tle_dir,
         extra_tle_max_age_days,
-        catalogue_interval_hours,
     )
     _require_tles(tles_df, norad_ids)
     # Real (unpadded) source count is the number of rows the fetch actually returned,
@@ -777,7 +769,6 @@ def _resolved_frame(
     norad_ids,
     extra_tle_dir,
     extra_tle_max_age_days,
-    catalogue_interval_hours,
 ):
     """The element frame plus the ID list it must cover, from either source."""
     if resolution is not None:
@@ -787,7 +778,6 @@ def _resolved_frame(
         times_jd,
         extra_tle_dir=extra_tle_dir,
         extra_tle_max_age_days=extra_tle_max_age_days,
-        catalogue_interval_hours=catalogue_interval_hours,
     )
     return tles_df, norad_ids
 
@@ -797,7 +787,6 @@ def fetch_standard_orbital_elements(
     norad_ids=None,
     extra_tle_dir=None,
     extra_tle_max_age_days=None,
-    catalogue_interval_hours=DEFAULT_CATALOGUE_INTERVAL_HOURS,
     resolution=None,
 ):
 
@@ -807,7 +796,6 @@ def fetch_standard_orbital_elements(
         norad_ids,
         extra_tle_dir,
         extra_tle_max_age_days,
-        catalogue_interval_hours,
     )
     _require_tles(tles_df, norad_ids)
     tles_df = _pad_rfi_sources(tles_df)

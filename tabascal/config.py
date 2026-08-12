@@ -132,7 +132,6 @@ class TabConfig:
         self.tle_config = normalise_tle_config(config)
         self.extra_tle_dir = self.tle_config.extra_tle_dir
         self.extra_tle_max_age_days = self.tle_config.extra_tle_max_age_days
-        self.tle_catalogue_interval_hours = self.tle_config.catalogue_interval_hours
 
         # Authoritative resolution: every configured satellite must have an
         # acceptable TLE here, before the visibilities are even read. Execution

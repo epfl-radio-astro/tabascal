@@ -484,13 +484,12 @@ class TestFetchOrbitalElementsPartial:
         resolution = tle.TLEResolution(
             requested=[25544, 38833],
             obs_epoch_jd=epoch,
-            catalogue_epoch_jd=epoch,
             remote_max_age_days=3.0,
             resolved={
                 int(row["NORAD_CAT_ID"]): tle.ResolvedTLE(
                     norad_id=int(row["NORAD_CAT_ID"]),
                     record=row.to_dict(),
-                    source="managed catalogue",
+                    source="managed per-satellite cache",
                     provider="test",
                     epoch_jd=epoch,
                     offset_days=0.0,
