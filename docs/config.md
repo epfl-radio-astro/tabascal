@@ -128,7 +128,7 @@ ast:
     cutoff: 1e-6
 ```
 
-* `init`: This gives the initialisation of the parameters. In the sample above `prior` is given so then the parameters will be initialised with the mean of the prior distribution. For `ast_vis:FourierTimeFreqGPAst` the other options are `data` to initialise from the observed visibilities, `sample` to draw a sample from the prior distribution, and `truth` to initialise at the true values. `truth` is only possible when running on a dataset simulated with `sim-vis`. The accepted set differs between components and is enforced at load time — see the Validation section below.
+* `init`: This gives the initialisation of the parameters. In the sample above `prior` is given so then the parameters will be initialised with the mean of the prior distribution. For `ast_vis:FourierTimeFreqGPAst` the other options are `data` to initialise from the observed visibilities, `sample` to draw a sample from the prior distribution, and `truth` to initialise at the true values. `truth` is only possible when running on a dataset simulated with `sim-vis`. The accepted set differs between components and is enforced before the run starts — see the Validation section below.
 * `mean`: This is the mean value of the prior distribution. For `ast_vis:FourierTimeFreqGPAst` the options are `0`/`zeros` and `data`.
 * `freq_pad_factor`: This defines the size of the padding used when modelling the signal in the Fourier domain. The signal is modelled in the Fourier domain where periodicity is assumed on some interval. If `freq_pad_factor: 1.0` is given then the interval is the interval of the data itself and will lead to periodic solutions. 
 * `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`.
@@ -226,7 +226,7 @@ The gains model itself is selected in the `model` section: `gains:UnitaryGains` 
 
 ## Validation
 
-The configuration file is validated as soon as it is loaded — before the Measurement Set is read and before any TLEs are fetched — and every problem is reported at once:
+The configuration file is validated before the Measurement Set is read and before any TLEs are fetched, and every problem is reported at once:
 
 ```text
 Error: invalid configuration in tab_target.yaml

@@ -894,7 +894,7 @@ class FourierTimeFreqGPAst(Component):
                 prior_sample, self.sigma_ast_k, self.mu_ast_k
             )
         else:
-            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (data, prior, truth, sample, zeros).")
+            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (data, prior, truth, sample).")
 
         self.init_ast_k_base = self.inv_transform(
             self.init_ast_k, self.sigma_ast_k, self.mu_ast_k

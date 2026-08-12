@@ -16,7 +16,7 @@ from jax import random
 from tabascal.timing import measure_runtime, print_timings, enable_timings
 from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
 from tabascal.config import load_config, TabConfig, Model
-from tabascal.validation import ConfigError
+from tabascal.validation import ConfigError, resolve_components, validate_components
 from tabascal.distributed import (
     barrier,
     is_process_0,
@@ -26,7 +26,6 @@ from tabascal.distributed import (
     sharding_enabled,
     suppress_worker_stdout,
 )
-from tabascal.imports import import_components
 from tabascal.write import write_results_xds
 from tabascal.tle import TLEError
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
@@ -47,19 +46,16 @@ class _Tee:
             w.flush()
 
 
-@measure_runtime
-def assert_precision_supported(config):
+def assert_precision_supported(config, classes):
     """Fail fast if a requested component requires double precision under single.
 
-    Resolves the component list and checks each class's ``requires_double`` flag
-    up front, so an incompatible config errors *before* the expensive
-    ``TabConfig`` setup (MS read, TLE fetch) and names every offending component
-    at once, rather than tripping a single component's own gate deep in the run.
+    Checks each resolved class's ``requires_double`` flag up front, so an
+    incompatible config errors *before* the expensive ``TabConfig`` setup (MS
+    read, TLE fetch) and names every offending component at once, rather than
+    tripping a single component's own gate deep in the run.
     """
-    model_cfg = config.get("model", {})
-    if model_cfg.get("precision", "single") == "double":
+    if config.get("model", {}).get("precision", "single") == "double":
         return
-    classes = import_components(model_cfg.get("components", []) or [])
     offenders = sorted(
         cls.__name__ for cls in classes if getattr(cls, "requires_double", False)
     )
@@ -69,6 +65,27 @@ def assert_precision_supported(config):
             f"precision: {', '.join(offenders)}. "
             "Set model.precision to 'double' to use them."
         )
+
+
+@measure_runtime
+def check_components(config, config_path=None):
+    """Resolve the model components and run every check that needs the classes.
+
+    This is the config-validation layer that ``load_config`` cannot run: it
+    imports the component modules, which pulls in ri_kernels and the rest of the
+    JAX stack, and ``load_config`` runs *before* :func:`set_precision` — whose
+    whole job is to decide ``jax_enable_x64`` relative to those imports. Running
+    it here keeps that ordering intact while still failing before the MS read and
+    TLE fetch, and resolves the classes exactly once for the ``required_config``
+    check, the ``requires_double`` check and ``Model``.
+
+    ``config_path`` only names the file in the error message, as the static
+    layer's errors do.
+    """
+    classes = resolve_components(config, config_path)
+    validate_components(config, classes, config_path)
+    assert_precision_supported(config, classes)
+    return classes
 
 
 def _print_table(headers, rows):
@@ -130,11 +147,11 @@ def print_memory_usage():
     _print_table(("Device", "Peak (GB)", "Limit (GB)"), rows)
 
 
-def build_model(config, ms_path):
-    assert_precision_supported(config)
+def build_model(config, ms_path, config_path=None):
+    classes = check_components(config, config_path)
     require_truth(config)
     tab_config = TabConfig(config, ms_path)
-    model = Model(tab_config, config["model"]["components"])
+    model = Model(tab_config, classes)
     return tab_config, model
 
 
@@ -261,7 +278,7 @@ def _print_model_summary(tab_config, model, start_time):
 
 
 @measure_runtime
-def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir=None, log=True):
+def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir=None, log=True, config_path=None):
     paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir)
     ms_path = paths.ms_path
 
@@ -279,7 +296,7 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
         print_devices()
         print()
 
-        tab_config, model = build_model(config, ms_path)
+        tab_config, model = build_model(config, ms_path, config_path)
         prob_model = model.prob_model
 
         if sharding_enabled():
@@ -416,6 +433,7 @@ def run(args):
                 args.suffix,
                 extra_tle_dir=args.extra_tle_dir,
                 log=getattr(args, "log", True) and is_process_0(),
+                config_path=args.config,
             )
     except (TLEError, TruthError, ConfigError) as e:
         print(f"\nError: {e}", file=sys.stderr)

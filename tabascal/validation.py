@@ -8,26 +8,37 @@ much later as a ``KeyError`` inside a component's ``setup``, re-wrapped as
 ``RuntimeError("<Component> setup failed: ...")`` — after the expensive MS read
 and TLE fetch.
 
-:func:`validate_config` runs immediately after the merge and *before* anything
-expensive, collecting **every** problem and raising a single :class:`ConfigError`.
-That mirrors the fail-fast convention already used by
+Validation runs as early as each check can, and *before* anything expensive,
+collecting **every** problem and raising a single :class:`ConfigError`. That
+mirrors the fail-fast convention already used by
 :func:`tabascal.scripts._run_tabascal_impl.assert_precision_supported` and
 :func:`tabascal.truth.require_truth`.
 
-Three layers of checking:
+Three layers of checking, deliberately run at three different points:
 
 1. **Static schema** (:data:`SCHEMA`) — the set of known keys and their types,
    enums and ranges. Derived from the base config *plus the actual readers*, not
    from ``docs/config.md`` (which has drifted). Unknown keys are an error, with a
-   ``did you mean ...?`` suggestion.
-2. **Per-component requirements** — components declare ``required_config`` and
-   ``config_choices`` (see :class:`tabascal.components.Component`), validated
-   against the selected ``model.components``.
+   ``did you mean ...?`` suggestion. Pure Python: no imports, no JAX. This is the
+   layer :func:`tabascal.config.load_config` runs.
+2. **Per-component requirements** (:func:`validate_components`) — components
+   declare ``required_config`` and ``config_choices`` (see
+   :class:`tabascal.components.Component`), validated against the selected
+   ``model.components``. This layer needs the component *classes*, so it cannot
+   run at load time: importing them pulls in ri_kernels and the rest of the JAX
+   stack, and ``load_config`` runs before
+   :func:`tabascal.scripts._run_tabascal_impl.set_precision`, which must be the
+   thing that decides ``jax_enable_x64``. The run therefore defers it to
+   ``build_model``, where the classes are needed anyway — still before the MS
+   read and TLE fetch, so the fail-fast property is unchanged.
 3. **Data-derived defaults** (:func:`resolve_gains_defaults`,
    :func:`resolve_rfi_defaults`) — resolved at component-setup time rather than
    load time, because they are computed from the MS data (the extent of the
    frequency/time axes, the observed visibility amplitude), which does not exist
    until ``TabConfig`` has read the measurement set.
+
+:func:`validate_config` runs layers 1 and 2 together; that is what
+``tabascal validate-config`` wants, since it has nothing else to do.
 
 Some known keys have no reader anywhere in the package but appear in every
 shipped example config and in the docs (``rfi.pow_spec``, ``satellites.ric_std``,
@@ -78,6 +89,11 @@ class Field:
         Element type for list-valued keys; a tuple to accept several.
     gt, ge
         Exclusive / inclusive lower bounds for numeric keys.
+    required
+        Rejects ``null`` for this key. ``null`` normally means "derive this from
+        the data", and what can be derived is per-component (hence
+        ``required_config``); this is for the few keys read on *every* run, which
+        no component owns.
     inert
         Known key that no code currently reads. Accepted and type-checked, then
         reported once as a note.
@@ -90,6 +106,7 @@ class Field:
     item: Optional[Union[type, Tuple[type, ...]]] = None
     gt: Optional[float] = None
     ge: Optional[float] = None
+    required: bool = False
     inert: bool = False
     help: str = ""
 
@@ -126,7 +143,11 @@ _NUM_LIST = Field(types=(list,), item=(float, int))  # type: ignore[arg-type]
 # accepts ``data``/``prior``/``truth``/``sample`` and raises on anything else,
 # while the older Fourier ast components silently treat anything that is not
 # ``prior``/``truth`` as ``sample``.
-_INIT_CHOICES = ("data", "est", "prior", "truth", "truth_mean", "sample", "zeros", "ones")
+# 0 and 1 are the numeric spellings of "zeros"/"ones" that the RFI signal
+# components accept; a bool cannot reach them, see _is_choice.
+_INIT_CHOICES = (
+    "data", "est", "prior", "truth", "truth_mean", "sample", "zeros", 0, "ones", 1,
+)
 _MEAN_CHOICES = ("data", "est", "prior", "truth", "truth_mean", "zeros")
 
 SCHEMA: Dict[str, Dict[str, Any]] = {
@@ -198,10 +219,16 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "var": Field(types=(int, float), gt=0, help="RFI signal variance in Jy"),
         "corr_time": Field(types=(int, float), gt=0, help="seconds"),
         "corr_freq": Field(types=(int, float), gt=0, help="Hz"),
-        "freq_pad_factor": Field(types=(int, float), ge=1),
-        "time_pad_factor": Field(types=(int, float), ge=1),
+        # required: these three are read on every run, outside any component, so
+        # no `required_config` covers them -- tab_tools.fix_padding compares
+        # freq_pad_factor and freq_int_samples, and TabConfig._set_freqs_times
+        # passes both pad factors to domain_ss. A null reaches those as a
+        # TypeError with no context; fix_padding dropped its own bare
+        # try/except in favour of this check.
+        "freq_pad_factor": Field(types=(int, float), ge=1, required=True),
+        "time_pad_factor": Field(types=(int, float), ge=1, required=True),
         "time_int_factor": _POS_NUM,
-        "freq_int_samples": _POS_INT,
+        "freq_int_samples": Field(types=(int,), ge=1, required=True),
         "n_int_freq": _POS_INT,
         "n_int_time": _POS_INT,
         "min_time_bins": _POS_INT,
@@ -228,6 +255,11 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
     "gains": {
         "amp_mean": Field(types=(int, float), gt=0),
         "phase_mean": _NUM,
+        # ge rather than gt: 0 is allowed and means "no variation about the
+        # mean". It does not produce a singular covariance -- gp.cholesky adds a
+        # 1e-8 jitter, so L becomes 1e-4*I and the resampling kernel 0, leaving
+        # the gains pinned at the mean with those parameters unidentifiable.
+        # (gains:UnitaryGains is the cheaper way to say the same thing.)
         "amp_std": Field(types=(int, float), ge=0, help="percent of amp_mean"),
         "phase_std": Field(types=(int, float), ge=0, help="degrees"),
         "amp_corr_freq": Field(types=(int, float), gt=0, help="Hz"),
@@ -268,9 +300,24 @@ def _describe(value: Any) -> str:
     return repr(value)
 
 
+def _is_choice(value: Any, choices: Sequence[Any]) -> bool:
+    """Membership test that does not let ``True``/``False`` match ``1``/``0``.
+
+    ``True == 1`` in Python, so a plain ``in`` test lets ``rfi.init: true``
+    satisfy a choice list containing the integer ``1`` — and the component would
+    then hit its own ``else: raise``. Require the boolean-ness of the value and
+    the choice to agree, matching the guard :func:`_check_value` already applies
+    on the ``types`` path.
+    """
+    return any(
+        isinstance(value, bool) == isinstance(choice, bool) and value == choice
+        for choice in choices
+    )
+
+
 def _check_value(spec: Field, path: str, value: Any, problems: _Problems) -> None:
     """Type / enum / range checks for one non-null value."""
-    if value in spec.choices:
+    if _is_choice(value, spec.choices):
         # An explicit choice always wins, whatever its type (this is how the
         # numeric 0 in `ast.mean: 0` and the string "zeros" both pass).
         return
@@ -343,9 +390,12 @@ def _walk(node: Any, schema: Dict[str, Any], prefix: str, problems: _Problems) -
             problems.inert.append(path)
 
         # `null` is how the base config spells "derive this from the data", so it
-        # is always allowed here. Keys that genuinely cannot be null are caught
-        # by the per-component `required_config` check below.
+        # is allowed unless the key is read unconditionally. Keys that only a
+        # particular component cannot default are caught by that component's
+        # `required_config` instead.
         if value is None:
+            if spec.required:
+                problems.add(path, "required: cannot be null", spec.help)
             continue
 
         _check_value(spec, path, value, problems)
@@ -366,30 +416,10 @@ def _lookup(config: Dict, dotted: str) -> Tuple[bool, Any]:
     return True, node
 
 
-def _check_components(config: Dict, problems: _Problems) -> None:
-    """Validate the keys the *selected* components require.
-
-    Imports the component classes named in ``model.components`` and checks each
-    class's ``required_config`` (paths that must be set) and ``config_choices``
-    (per-component enums). Import failures are reported here too, so a mistyped
-    component reference is caught at the same time as everything else rather
-    than blowing up in ``Model.__init__``.
-    """
-    from tabascal.imports import import_components
-
-    found, components = _lookup(config, "model.components")
-    if not found or not components:
-        problems.add("model.components", "required: list at least one model component")
-        return
-    if not isinstance(components, list):
-        return  # already reported by the schema walk
-
-    try:
-        classes = import_components(components)
-    except ImportError as e:
-        problems.add("model.components", str(e).replace("\n", "\n      "))
-        return
-
+def _check_component_requirements(
+    config: Dict, classes: Sequence[type], problems: _Problems
+) -> None:
+    """Check ``required_config`` / ``config_choices`` for the resolved classes."""
     for cls in classes:
         for dotted in getattr(cls, "required_config", ()):
             found, value = _lookup(config, dotted)
@@ -398,7 +428,7 @@ def _check_components(config: Dict, problems: _Problems) -> None:
 
         for dotted, choices in getattr(cls, "config_choices", {}).items():
             found, value = _lookup(config, dotted)
-            if found and value is not None and value not in choices:
+            if found and value is not None and not _is_choice(value, choices):
                 allowed = ", ".join(repr(c) for c in choices)
                 problems.add(
                     dotted,
@@ -407,8 +437,47 @@ def _check_components(config: Dict, problems: _Problems) -> None:
                 )
 
 
+def _import_components(config: Dict) -> Tuple[List[type], Optional[str]]:
+    """Import the selected classes, returning ``(classes, error message)``.
+
+    The failure comes back as a message rather than an exception so both callers
+    can render it the same way as every other config problem: a mistyped
+    component reference is a config mistake, not an ``ImportError`` for the user
+    to interpret.
+    """
+    from tabascal.imports import import_components
+
+    try:
+        return import_components(config.get("model", {}).get("components") or []), None
+    except ImportError as e:
+        return [], str(e).replace("\n", "\n      ")
+
+
+def _check_components(config: Dict, problems: _Problems) -> None:
+    """Import the selected components, then check what they require.
+
+    Import failures are collected into ``problems`` too, so a mistyped component
+    reference is listed alongside everything else rather than blowing up in
+    ``Model.__init__``.
+    """
+    _, components = _lookup(config, "model.components")
+    if not isinstance(components, list) or not components:
+        return  # already reported by the schema walk / _check_cross_field
+
+    classes, error = _import_components(config)
+    if error:
+        problems.add("model.components", error)
+        return
+
+    _check_component_requirements(config, classes, problems)
+
+
 def _check_cross_field(config: Dict, problems: _Problems) -> None:
     """Checks that span more than one key."""
+    found, components = _lookup(config, "model.components")
+    if not found or not components:
+        problems.add("model.components", "required: list at least one model component")
+
     _, min_bins = _lookup(config, "rfi.min_time_bins")
     _, max_bins = _lookup(config, "rfi.max_time_bins")
     if isinstance(min_bins, int) and isinstance(max_bins, int) and min_bins > max_bins:
@@ -432,7 +501,10 @@ def _check_cross_field(config: Dict, problems: _Problems) -> None:
 
 
 def validate_config(
-    config: Dict, path: Optional[str] = None, report_inert: bool = False
+    config: Dict,
+    path: Optional[str] = None,
+    report_inert: bool = False,
+    check_components: bool = True,
 ) -> List[str]:
     """Validate a fully-merged config dictionary.
 
@@ -450,6 +522,11 @@ def validate_config(
         Print the recognised-but-unread keys. Off by default: the packaged base
         config carries several of them, so every run would print the note.
         ``tabascal validate-config`` turns it on.
+    check_components : bool, optional
+        Also run the per-component layer, which imports the classes named in
+        ``model.components``. :func:`tabascal.config.load_config` passes False —
+        see the layer-2 note in this module's docstring for why the run defers
+        it; everything else wants the full check.
 
     Returns
     -------
@@ -469,7 +546,8 @@ def validate_config(
         # Only meaningful once the structure is known-good: these read values by
         # path and would otherwise pile confusing errors on top of real ones.
         _check_cross_field(config, problems)
-        _check_components(config, problems)
+        if check_components and not problems.errors:
+            _check_components(config, problems)
 
     if problems.errors:
         problems.errors.sort()
@@ -482,6 +560,39 @@ def validate_config(
             "component:\n  " + "\n  ".join(inert)
         )
     return inert
+
+
+def resolve_components(config: Dict, path: Optional[str] = None) -> List[type]:
+    """Import the classes named in ``model.components``.
+
+    Reports an import failure as a :class:`ConfigError` in the same format as
+    every other config problem, rather than the raw ``ImportError``, so a
+    mistyped component reference reads like the config mistake it is.
+    """
+    classes, error = _import_components(config)
+    if error:
+        problems = _Problems()
+        problems.add("model.components", error)
+        raise ConfigError(problems.render(path))
+    return classes
+
+
+def validate_components(
+    config: Dict, classes: Sequence[type], path: Optional[str] = None
+) -> None:
+    """Run the per-component layer against already-resolved classes.
+
+    Split out from :func:`validate_config` so the run can do this *after*
+    ``set_precision`` — and share the one :func:`resolve_components` call with
+    the ``requires_double`` check and ``Model``, instead of importing the
+    component stack three times.
+    """
+    problems = _Problems()
+    _check_component_requirements(config, classes, problems)
+
+    if problems.errors:
+        problems.errors.sort()
+        raise ConfigError(problems.render(path))
 
 
 # ---------------------------------------------------------------------------

@@ -1,15 +1,22 @@
 """Tests for tabascal.validation — config schema checking.
 
-Validation runs inside :func:`tabascal.config.load_config`, before the MS read
-and TLE fetch, and reports *every* problem in one go. The tests below are split
-into the layers described in the module docstring of ``tabascal/validation.py``:
-the static schema (unknown keys, types, enums, ranges), the cross-field checks,
-and the per-component ``required_config`` / ``config_choices`` declarations.
+Validation happens before the MS read and TLE fetch, and reports *every* problem
+in one go. The tests below are split into the layers described in the module
+docstring of ``tabascal/validation.py``: the static schema (unknown keys, types,
+enums, ranges) and the cross-field checks, which
+:func:`tabascal.config.load_config` runs, then the per-component
+``required_config`` / ``config_choices`` declarations, which the run defers to
+``build_model`` so the component imports stay behind ``set_precision``.
 
-The last test in the file is the important one in the other direction: every
-config shipped in the repository must still load. That is the guard against the
-schema drifting into being stricter than the code actually is.
+The last tests in the file are the important ones in the other direction: every
+config shipped in the repository must still load, and loading one must not drag
+in the component stack. Those are the guards against the schema drifting into
+being stricter than the code actually is, and against the deferred layer
+creeping back into load time.
 """
+
+import subprocess
+import sys
 
 import pytest
 
@@ -161,6 +168,23 @@ def test_null_is_accepted_for_optional_keys():
     validate_config(config)  # does not raise
 
 
+@pytest.mark.parametrize(
+    "key", ["freq_pad_factor", "time_pad_factor", "freq_int_samples"]
+)
+def test_null_is_rejected_for_the_keys_read_on_every_run(key):
+    """These are read by fix_padding / _set_freqs_times, not by a component.
+
+    No ``required_config`` covers them, and ``fix_padding`` no longer has a
+    try/except, so a null would surface as a bare TypeError while TabConfig is
+    being built.
+    """
+    config = base_config(rfi={"freq_pad_factor": 2, "time_pad_factor": 2})
+    config["rfi"][key] = None
+
+    with pytest.raises(ConfigError, match=rf"rfi\.{key}.*cannot be null"):
+        validate_config(config)
+
+
 def test_a_section_that_is_not_a_mapping_is_rejected():
     """`plots:` with nothing under it wipes the merged defaults to None."""
     config = base_config()
@@ -224,6 +248,9 @@ def test_prior_plots_require_prior_samples():
 
 # ---------------------------------------------------------------------------
 # Per-component requirements
+#
+# `validate_config` runs this layer; `load_config` deliberately does not (see
+# the module docstring). The run calls it from `build_model` instead.
 # ---------------------------------------------------------------------------
 
 
@@ -278,6 +305,34 @@ def test_unimportable_component_is_reported():
 
     assert "model.components" in str(excinfo.value)
     assert "NoSuchComponent" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", [0, 1, "ones", "zeros"])
+def test_numeric_init_aliases_are_accepted(value):
+    """ComplexRFI._compute_init_params takes 0/1 as well as 'zeros'/'ones'."""
+    config = base_config(rfi={"init": value})
+
+    validate_config(config)  # does not raise
+
+
+def test_est_init_is_accepted_by_the_fourier_gp_component():
+    """FourierGPRFI reads rfi.est for `init: est`; the enum must not reject it."""
+    config = base_config(
+        model={"components": ["rfi_signal:FourierGPRFI"]},
+        rfi={"init": "est", "mean": "zeros", "est": "rfi_est.zarr",
+             "freq_pad_factor": 1, "time_pad_factor": 1},
+    )
+
+    validate_config(config)  # does not raise
+
+
+def test_a_boolean_does_not_satisfy_a_numeric_choice():
+    """`True == 1` in Python, so `init: true` would otherwise pass the 1 in the
+    choice list and then trip the component's own `else: raise`."""
+    config = base_config(rfi={"init": True})
+
+    with pytest.raises(ConfigError, match=r"rfi\.init"):
+        validate_config(config)
 
 
 # ---------------------------------------------------------------------------
@@ -366,16 +421,49 @@ def test_defaults_alone_fail_only_on_the_genuinely_required_keys(tmp_path):
     """A config that names components but sets nothing else.
 
     The packaged defaults cover everything except ``ast.pow_spec.p0``, which has
-    no sensible static default -- so exactly one thing should be reported.
+    no sensible static default -- so exactly one thing should be reported. This
+    is the `tabascal validate-config` path: load (static layer), then the full
+    check including the components.
     """
     path = write_config(
         tmp_path,
         "model:\n  components:\n" + "".join(f"    - {c}\n" for c in COMPONENTS),
     )
+    config = load_config(path)  # the static layer alone has nothing to report
 
     with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
+        validate_config(config, path)
 
     message = str(excinfo.value)
     assert "ast.pow_spec.p0" in message
     assert message.count(" : ") == 1
+
+
+# ---------------------------------------------------------------------------
+# load_config stays cheap
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_does_not_import_the_component_stack(tmp_path):
+    """The component layer must stay out of load time.
+
+    Resolving ``model.components`` imports ri_kernels and every component
+    module. Doing that inside ``load_config`` puts it *before*
+    ``set_precision``, which is what decides ``jax_enable_x64`` relative to the
+    imports that flip it -- and makes the lightweight CLI paths pay for the
+    whole stack. Checked in a subprocess because the rest of this suite has
+    already imported those modules.
+    """
+    path = write_config(
+        tmp_path,
+        "model:\n  components:\n" + "".join(f"    - {c}\n" for c in COMPONENTS),
+    )
+    code = (
+        "import sys\n"
+        "from tabascal.config import load_config\n"
+        f"load_config({path!r})\n"
+        "leaked = [m for m in ('ri_kernels', 'tabascal.components.rfi_vis',\n"
+        "                      'tabascal.components.rfi_signal') if m in sys.modules]\n"
+        "assert not leaked, leaked\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

@@ -193,7 +193,10 @@ class RealRFI(BaseGPRFI):
         "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
     }
 
-    config_choices = {"rfi.init": ("prior", "zeros", 0, "ones", "truth", "sample")}
+    # The numeric aliases 0/1 are the YAML spellings of "zeros"/"ones" that
+    # _compute_init_params accepts; keep the two in step across all the RFI
+    # signal components so the same config works with any of them.
+    config_choices = {"rfi.init": ("prior", "zeros", 0, "ones", 1, "truth", "sample")}
 
     def setup(self, tab_config: TabConfig):
         """All validation and error-prone operations here"""
@@ -314,7 +317,7 @@ class RealRFI(BaseGPRFI):
         elif init_type in ["zeros", 0] :
             print("Using for zeros for rfi_A")
             self.init_rfi_A_induce = jnp.zeros_like(self.mu_rfi_A)
-        elif init_type == "ones":
+        elif init_type in ["ones", 1]:
             print("Using for ones for rfi_A")
             self.init_rfi_A_induce = jnp.ones_like(self.mu_rfi_A)
         elif init_type == "truth":
@@ -367,7 +370,10 @@ class ComplexRFI(BaseGPRFI):
         "rfi_i_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
     }
 
-    config_choices = {"rfi.init": ("prior", "zeros", 0, "ones", "truth", "sample")}
+    # The numeric aliases 0/1 are the YAML spellings of "zeros"/"ones" that
+    # _compute_init_params accepts; keep the two in step across all the RFI
+    # signal components so the same config works with any of them.
+    config_choices = {"rfi.init": ("prior", "zeros", 0, "ones", 1, "truth", "sample")}
 
     def setup(self, tab_config):
         """All validation and error-prone operations here"""
@@ -561,7 +567,10 @@ class FourierGPRFI(BaseGPRFI):
         "rfi.time_pad_factor",
     )
     config_choices = {
-        "rfi.init": ("prior", "truth", "zeros", 0, "ones", 1, "sample"),
+        # "est" reads a saved estimate from rfi.est -- accepted by both
+        # _compute_init_params and _compute_prior_params here, unlike the
+        # induced-point components above.
+        "rfi.init": ("prior", "est", "truth", "zeros", 0, "ones", 1, "sample"),
         "rfi.mean": ("data", "est", "zeros", 0),
     }
 

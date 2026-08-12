@@ -7,6 +7,14 @@ variables:
   # check (TabascalMultiGpuPerfCheck) unsets this in its own run script to pick
   # up every GPU of the node.
   CUDA_VISIBLE_DEVICES: "0"
+
+# Wall-clock cap for every SLURM step, so a hung child cannot burn the whole
+# allocation. This has to be set in each job's own `variables:` block: the CSCS
+# `.container-runner-*` templates define SLURM_TIMELIMIT themselves, and a
+# variable inherited through `extends` is job-level, which beats anything in the
+# global `variables:` above. Setting it globally silently left every job on the
+# template's 15 minutes.
+.slurm_timelimit: &slurm_timelimit
   SLURM_TIMELIMIT: '00:30:00'
 
 stages:
@@ -50,6 +58,7 @@ test_job:
     - python3 -m pytest tests/ --x64 false   # single precision (fp32)
     - python3 -m pytest tests/ --x64 true    # double precision (fp64)
   variables:
+    <<: *slurm_timelimit
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
     PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
@@ -83,6 +92,7 @@ test_job:
           --file bmf_results.json
       fi
   variables:
+    <<: *slurm_timelimit
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
     PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION

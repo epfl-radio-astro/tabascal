@@ -31,9 +31,11 @@ def _validate_config_cmd(args):
 
     try:
         config = load_config(args.config)
-        # load_config already validated; re-run only to surface the inert-key note,
-        # which is suppressed on the normal run path because the packaged defaults
-        # carry several such keys.
+        # load_config runs only the static layer -- the run defers the
+        # component-driven one until after set_precision. Nothing here needs that
+        # ordering, so check everything, and surface the inert-key note while at
+        # it (suppressed on the run path, where the packaged defaults would make
+        # every run print it).
         validate_config(config, args.config, report_inert=True)
     except ConfigError as e:
         print(f"\nError: {e}", file=sys.stderr)

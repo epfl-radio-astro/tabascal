@@ -1,4 +1,3 @@
-from tabascal.imports import import_components
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
     constrain_rfi_state,
@@ -127,6 +126,12 @@ def load_config(path: str) -> Dict:
     time, so a bad config fails before the measurement-set read and TLE fetch
     rather than as a ``KeyError`` deep inside a component's ``setup``.
 
+    Only the *static* layer runs here (schema and cross-field): it is pure Python
+    and imports nothing. The per-component layer is deferred to ``build_model``,
+    because resolving the component classes imports the JAX stack and this runs
+    before ``set_precision`` has decided ``jax_enable_x64`` — see the module
+    docstring of :mod:`tabascal.validation`.
+
     Parameters
     ----------
     path : str
@@ -147,7 +152,7 @@ def load_config(path: str) -> Dict:
     base_config = yaml_load(tab_base_config_path)
 
     config = deep_update(base_config, yaml_load(path))
-    validate_config(config, path)
+    validate_config(config, path, check_components=False)
 
     return config
 
@@ -364,17 +369,26 @@ class Model:
     def __init__(
         self,
         tab_config: TabConfig,
-        component_list: List[str],
+        component_classes: List[type],
         likelihood: Callable = gaussian,
     ):
-
+        """
+        Parameters
+        ----------
+        component_classes
+            The classes named by ``model.components``, already resolved by
+            :func:`tabascal.validation.resolve_components`. Taking the classes
+            rather than the ``'module:Class'`` strings keeps the run to a single
+            import of the component stack, shared with the config and precision
+            checks that also need them.
+        """
         self.noise = tab_config.noise
         self.n_rfi = tab_config.n_rfi
         self.likelihood = lambda pred, obs_data: likelihood(
             pred, obs_data, {"noise": tab_config.noise, "flags": tab_config.flags}
         )
 
-        components = [C() for C in import_components(component_list)]
+        components = [C() for C in component_classes]
         self.components = components
         for comp in components:
             comp.setup(tab_config)
