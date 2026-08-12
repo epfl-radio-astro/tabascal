@@ -29,14 +29,21 @@ to the local cache so a later run does not ask again.
 If a request fails because the service cannot be reached, or the service returns
 HTTP 429 to say this client should back off, TABASCAL stops the batch there: no
 further requests are sent, so an outage or a rate limit costs at most five
-requests no matter how many satellites are configured. Every configured ID is
-still reported, so the coverage error names them all. When the service supplies a
-`Retry-After` hint, it is included in the error so you know when the run is worth
-repeating — TABASCAL reports the wait rather than sleeping through it, so an
-unattended preflight never blocks for an interval it did not choose.
+requests no matter how many satellites are configured.
 
-A malformed *reply* is different: the service is up and answering, so it is
-treated as that one satellite's problem and the rest of the batch continues.
+A malformed reply, or a 4xx rejection of one request, is different: the service
+is up and answering, so it is treated as that one satellite's problem and the
+rest of the batch continues — an unknown catalogue number legitimately gets a
+404. Should the service reject ten consecutive requests with the same status and
+no success in between, TABASCAL concludes it is facing a wall rather than ten
+absent satellites, and stops there too.
+
+Whatever the cause, every configured ID is reported, and the resulting error
+distinguishes a satellite with no record from one TABASCAL could not ask about.
+When the service supplies a `Retry-After` hint it is carried into that error, so
+you know when the run is worth repeating — TABASCAL reports the wait rather than
+sleeping through it, so an unattended preflight never blocks for an interval it
+did not choose.
 
 Every configured satellite must resolve to an acceptable TLE. The check runs
 during preflight, before the visibilities are read. A missing or over-age record
@@ -126,6 +133,10 @@ JSON tables containing:
   }
 ]
 ```
+
+A directory that does not exist is reported as a warning rather than silently
+searched, so a typo in the path cannot quietly leave you modelling
+SatChecker's satellites instead of your own.
 
 A file may contain multiple records for the same object and records for multiple
 objects. TABASCAL validates both 69-column lines, checks their modulo-10
