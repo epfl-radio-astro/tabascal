@@ -13,6 +13,7 @@ letters I and O are excluded to avoid confusion with 1 and 0).
 
 from __future__ import annotations
 
+import calendar
 import math
 from datetime import datetime, timedelta
 
@@ -65,12 +66,24 @@ def _parse_exp_field(field: str) -> float:
 
 
 def tle_epoch_jd(line1: str) -> float:
-    """UTC Julian Date of a TLE epoch (line 1 columns 19-32)."""
+    """UTC Julian Date of a TLE epoch (line 1 columns 19-32).
+
+    The day-of-year bound depends on the decoded year. A flat ``< 367`` test would
+    let day 366 through for a non-leap year, where ``timedelta`` then rolls it
+    silently into 1 January of the *following* year — a checksum-correct but
+    impossible epoch, modelled a year late without any complaint.
+    """
     epoch_year = int(line1[18:20])
     epoch_day = float(line1[20:32])
-    if not 0.0 < epoch_day < 367.0:
-        raise ValueError(f"TLE epoch day out of range: {epoch_day}")
     year = 2000 + epoch_year if epoch_year < 57 else 1900 + epoch_year
+    # Day-of-year d means "d - 1 days after 1 January", so the first instant of the
+    # next year is d = days_in_year + 1 and the bound is strict.
+    days_in_year = 366 if calendar.isleap(year) else 365
+    if not 0.0 < epoch_day < days_in_year + 1.0:
+        raise ValueError(
+            f"TLE epoch day out of range for {year}: {epoch_day} "
+            f"(must be > 0 and < {days_in_year + 1}; {year} has {days_in_year} days)"
+        )
     dt = datetime(year, 1, 1) + timedelta(days=epoch_day - 1.0)
     return datetime_to_jd(dt)
 

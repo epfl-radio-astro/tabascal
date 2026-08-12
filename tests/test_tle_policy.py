@@ -658,6 +658,68 @@ class TestCatalogueSettling:
         )["records"]
         assert sorted(int(r["NORAD_CAT_ID"]) for r in stored) == [111, 222]
 
+    def test_cached_fallback_survives_an_outage_with_no_snapshot(
+        self, cache_dir, monkeypatch, capsys
+    ):
+        # An epoch beyond SatChecker's horizon has no bulk snapshot to cache, only
+        # per-satellite records. A later outage must not fail a run those records
+        # already cover — the catalogue attempt is what is unavailable, not the data.
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(111, jd(2023, 2, 21, 13)), (222, jd(2023, 2, 21, 13))])
+        assert _resolve([111, 222]).complete
+
+        def down(epoch_jd):
+            raise SatCheckerTransportError("connection refused")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_full_catalogue", down)
+
+        def never(norad_id, epoch_jd):
+            raise AssertionError("the per-satellite endpoint is on the same service")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", never)
+
+        resolution = _resolve([111, 222])
+
+        assert resolution.complete
+        assert all(
+            e.source == "cached per-satellite record"
+            for e in resolution.resolved.values()
+        )
+        assert "continuing offline" in capsys.readouterr().out
+
+    def test_an_outage_still_fails_when_the_cache_falls_short(
+        self, cache_dir, monkeypatch
+    ):
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(111, jd(2023, 2, 21, 13))])
+        _resolve([111])
+
+        def down(epoch_jd):
+            raise SatCheckerTransportError("connection refused")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_full_catalogue", down)
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", down)
+
+        # 222 was never cached, so the outage is the honest cause of the failure.
+        with pytest.raises(SatCheckerTransportError):
+            _resolve([111, 222])
+
+    def test_the_catalogue_is_still_attempted_before_the_fallback_cache(
+        self, cache_dir, monkeypatch
+    ):
+        # The deferred-failure fix must not become "read the cache first": that
+        # would forfeit picking up a real snapshot once SatChecker backfills.
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(111, jd(2023, 2, 21, 11))])
+        _resolve([111])
+
+        counter = {}
+        _serve_catalogue(monkeypatch, [(111, jd(2023, 2, 21, 13))], counter)  # backfilled
+        resolution = _resolve([111])
+
+        assert counter["full"] == 1
+        assert resolution.resolved[111].source == "managed catalogue"
+
     def test_settled_fallback_is_kept_indefinitely(self, cache_dir, monkeypatch):
         # A settled epoch's fallback record is immutable, like its snapshot.
         counter = {}

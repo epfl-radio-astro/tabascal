@@ -834,9 +834,23 @@ def resolve_tles(
         # Stable cache entries are immutable and permanent; provisional ones exist
         # only to avoid refetching within a session, so they carry an expiry.
         extra_max_age_hours = None if state == STABLE else provisional_cache_hours
-        snapshot = _ensure_snapshot(
-            cache, catalogue_epoch, obs_epoch_jd, state, provisional_cache_hours
-        )
+
+        # The catalogue is attempted first even when per-satellite records are
+        # already cached, which is what lets a run that once fell back to the
+        # per-satellite endpoint pick up a proper snapshot as SatChecker's ingest
+        # catches up. An unreachable service must not cost us that behaviour *or*
+        # the ability to run offline, so the failure is deferred rather than
+        # raised: the cached fallback records below may already cover everything.
+        outage: Optional[Exception] = None
+        try:
+            snapshot = _ensure_snapshot(
+                cache, catalogue_epoch, obs_epoch_jd, state, provisional_cache_hours
+            )
+        except satchecker.SatCheckerTransportError as e:
+            snapshot, outage = None, e
+            print(f"  {e}")
+            print("  checking the cached per-satellite records before giving up")
+
         if snapshot is not None:
             _accept_remote(
                 _select_from_records(snapshot.records, remaining, catalogue_epoch),
@@ -875,6 +889,19 @@ def resolve_tles(
             )
             remaining = wanted - set(resolution.resolved)
             wanted_per_satellite = remaining | _stale_catalogue_ids(resolution, target_age)
+
+        if outage is not None:
+            # Now we know whether the service was actually needed. If the cache
+            # covered the run, an unreachable service is not a reason to stop; if
+            # it did not, the outage is the honest cause and the per-satellite
+            # endpoint — on the same unreachable service — is not worth trying.
+            if remaining:
+                raise outage
+            print(
+                "  every configured satellite resolved from cache — continuing "
+                "offline; freshness upgrades are skipped this run"
+            )
+            wanted_per_satellite = set()
 
         if wanted_per_satellite:
             to_fetch = sorted(wanted_per_satellite)

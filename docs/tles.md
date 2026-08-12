@@ -212,7 +212,8 @@ width — never on what happens to be cached already.
 | Service reachable but the catalogue response is unusable (malformed, truncated, or an HTTP 4xx) | The requested satellites are fetched individually instead | The full catalogue is re-attempted on every run |
 | Service rate-limits (HTTP 429) or fails server-side (HTTP 5xx) | Run fails fast — answering either with one request per satellite would make it worse | — |
 | Service unreachable, snapshot cached | Cache hit — run proceeds offline | — |
-| Service unreachable, no snapshot | Run fails fast with a clear error (no satellite-by-satellite retry storm) | — |
+| Service unreachable, no snapshot but the cached per-satellite records cover every configured satellite | Run proceeds offline on those records; freshness upgrades are skipped for that run | — |
+| Service unreachable and the cache falls short | Run fails fast with a clear error naming the unreachable service (no satellite-by-satellite retry storm) | — |
 | Cache directory read-only or out of quota | A warning names the path; the run proceeds on the validated records it already fetched | Nothing is cached, so the next run fetches again |
 
 Several consequences are worth understanding:
@@ -241,7 +242,11 @@ Several consequences are worth understanding:
 - **The empty-catalogue fallback self-heals.** Because an empty catalogue is
   never stored, a recent observation first processed with per-satellite TLEs will
   automatically pick up the proper catalogue snapshot once SatChecker's ingest
-  catches up — improving the priors on a rerun. If you need the *original* run's
+  catches up — improving the priors on a rerun. This is why the catalogue is
+  attempted *before* the cached per-satellite records rather than after: reading
+  the cache first would be faster but would forfeit the upgrade. When the service
+  is unreachable, that attempt's failure is deferred rather than raised, so a run
+  the cache can fully cover still proceeds offline. If you need the *original* run's
   priors instead, use the saved run TLEs (next section).
 - **Invalid cache files do not become trusted inputs.** Managed snapshots and
   per-satellite fallback files are checked for their schema, canonical epoch,
