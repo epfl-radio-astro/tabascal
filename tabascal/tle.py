@@ -485,7 +485,9 @@ def _accept_remote(
         rejected.pop(nid, None)
 
 
-def _fetch_per_satellite(norad_ids: list[int], epoch_jd: float) -> pd.DataFrame:
+def _fetch_per_satellite(
+    norad_ids: list[int], epoch_jd: float, required: set[int] = frozenset()
+) -> pd.DataFrame:
     """Fetch one record per ID from the per-satellite endpoint.
 
     Serves both purposes the endpoint has here: filling IDs the bulk catalogue
@@ -493,10 +495,20 @@ def _fetch_per_satellite(norad_ids: list[int], epoch_jd: float) -> pd.DataFrame:
     endpoint cannot answer for is simply omitted — the caller decides whether that
     is a coverage failure or a declined upgrade.
 
-    A transport failure aborts the whole loop: the service is down, so continuing
-    would issue one doomed request per remaining satellite.
+    *required* names the IDs the run cannot proceed without; everything else in
+    *norad_ids* is an optional freshness upgrade. A transport failure ends the loop
+    either way, since the service is down and continuing would issue one doomed
+    request per remaining satellite — but it is only *re-raised* while some
+    required ID has not yet been asked about. An outage during a batch of pure
+    upgrades must not fail a run whose satellites are all already resolved, and any
+    upgrades obtained before the outage are kept.
     """
     rows: list[pd.DataFrame] = []
+    # IDs the run needs and that we have not yet managed to ask the service about.
+    # A satellite that was asked and simply has no record leaves this set: that is
+    # a coverage failure, reported far better by the coverage check than by a
+    # transport error about a *different* satellite.
+    unasked_required = set(required)
     consecutive_failures = 0
     for i, nid in enumerate(norad_ids):
         if i:
@@ -504,8 +516,16 @@ def _fetch_per_satellite(norad_ids: list[int], epoch_jd: float) -> pd.DataFrame:
         try:
             rec = satchecker.fetch_nearest_tle(nid, epoch_jd)
         except satchecker.SatCheckerTransportError:
-            raise
+            if unasked_required:
+                raise
+            print(
+                f"  per-satellite endpoint unreachable — skipping the remaining "
+                f"{len(norad_ids) - i} freshness upgrade(s); every satellite is "
+                f"already resolved, so the run continues on its catalogue records"
+            )
+            break
         except TLEError as e:
+            unasked_required.discard(nid)  # asked; it failed for this satellite
             print(f"  per-satellite fetch failed for {nid}: {e}")
             consecutive_failures += 1
             if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
@@ -522,6 +542,7 @@ def _fetch_per_satellite(norad_ids: list[int], epoch_jd: float) -> pd.DataFrame:
                 )
                 break
             continue
+        unasked_required.discard(nid)
         consecutive_failures = 0
         if len(rec):
             rec = _validated_service_records(rec, f"per-satellite fetch for {nid}")
@@ -866,7 +887,7 @@ def resolve_tles(
                 f"Fetching {len(to_fetch)} TLE(s) individually from SatChecker "
                 f"({', '.join(reasons)}): {to_fetch}"
             )
-            fetched = _fetch_per_satellite(to_fetch, catalogue_epoch)
+            fetched = _fetch_per_satellite(to_fetch, catalogue_epoch, remaining)
             if len(fetched):
                 _store_or_warn(
                     lambda: cache.store_extra(catalogue_epoch, fetched, state),

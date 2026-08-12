@@ -25,6 +25,7 @@ import pytest
 
 from tabascal import distributed, tle
 from tabascal.satchecker import cache as cache_mod
+from tabascal.satchecker import SatCheckerResponseError, SatCheckerTransportError
 from tabascal.satchecker.client import CatalogueResult
 from tabascal.tle_config import TLEConfig
 
@@ -438,6 +439,88 @@ class TestFreshnessUpgrade:
         assert resolution.complete
         out = capsys.readouterr().out
         assert "1 missing" in out and "1 older than 1 d" in out
+
+    def test_endpoint_outage_during_upgrades_does_not_fail_the_run(
+        self, cache_dir, monkeypatch, capsys
+    ):
+        # Every satellite already has an acceptable catalogue record; the
+        # per-satellite calls are pure optional upgrades. An outage there must not
+        # convert a fully resolved set into a failed run.
+        _serve_catalogue(monkeypatch, [(111, self._STALE), (222, self._STALE)])
+
+        def down(norad_id, epoch_jd):
+            raise SatCheckerTransportError("connection refused")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", down)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        resolution = _resolve([111, 222])
+
+        assert resolution.complete
+        assert all(e.source == "managed catalogue" for e in resolution.resolved.values())
+        assert "per-satellite endpoint unreachable" in capsys.readouterr().out
+
+    def test_endpoint_outage_still_fails_when_a_satellite_is_missing(
+        self, cache_dir, monkeypatch
+    ):
+        # Mixed batch: 222 is absent from the catalogue, so the per-satellite call
+        # is load-bearing rather than optional and the outage is fatal.
+        _serve_catalogue(monkeypatch, [(111, self._STALE)])
+
+        def down(norad_id, epoch_jd):
+            raise SatCheckerTransportError("connection refused")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", down)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(SatCheckerTransportError):
+            _resolve([111, 222])
+
+    def test_upgrades_obtained_before_an_outage_are_kept(self, cache_dir, monkeypatch):
+        _serve_catalogue(
+            monkeypatch, [(111, self._STALE), (222, self._STALE), (333, self._STALE)]
+        )
+        seen = []
+
+        def flaky(norad_id, epoch_jd):
+            seen.append(norad_id)
+            if norad_id == 111:
+                return make_catalogue_df([(111, self._FRESH)])
+            raise SatCheckerTransportError("connection refused")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", flaky)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        resolution = _resolve([111, 222, 333])
+
+        assert resolution.complete
+        assert resolution.resolved[111].source == "SatChecker per-satellite"
+        assert resolution.resolved[111].age_days < 0.1      # the upgrade survived
+        assert resolution.resolved[222].source == "managed catalogue"
+        assert seen == [111, 222]                            # loop stopped at the outage
+
+    def test_a_satellite_asked_about_and_absent_is_not_a_transport_failure(
+        self, cache_dir, monkeypatch
+    ):
+        # 222 is required and the endpoint answered "no record"; a later outage on
+        # an optional upgrade must then surface as the coverage error naming 222,
+        # not as a transport error about a different satellite.
+        _serve_catalogue(monkeypatch, [(333, self._STALE)])
+        order = []
+
+        def flaky(norad_id, epoch_jd):
+            order.append(norad_id)
+            if norad_id == 222:
+                return pd.DataFrame()          # asked; genuinely nothing there
+            raise SatCheckerTransportError("connection refused")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", flaky)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        resolution = _resolve([222, 333])
+
+        assert resolution.missing == [222]
+        assert resolution.resolved[333].source == "managed catalogue"
 
     def test_records_already_from_the_per_id_endpoint_are_not_re_requested(
         self, cache_dir, monkeypatch

@@ -178,9 +178,14 @@ case to 1.06 d, matching what querying every satellite individually would achiev
 
 An upgrade can only improve a record. If the per-satellite endpoint has nothing
 fresher, cannot answer, or offers something beyond `remote_tle_max_age_days`, the
-existing record is kept — a declined upgrade can never turn a complete resolution
-into a failure. Upgraded records are cached alongside the snapshot, so the
-requests are paid once per canonical epoch, not once per run.
+existing record is kept. That holds for an outage too: if the endpoint becomes
+unreachable partway through a batch of upgrades, the upgrades already obtained are
+kept, the rest are skipped with a warning, and the run continues on its catalogue
+records — a declined upgrade can never turn a complete resolution into a failure.
+An unreachable endpoint *is* still fatal when some satellite is missing from the
+catalogue entirely, because that request is load-bearing rather than optional.
+Upgraded records are cached alongside the snapshot, so the requests are paid once
+per canonical epoch, not once per run.
 
 Setting `remote_tle_target_age_days: null` disables the pass and restores
 pure bulk-first behaviour. To bypass both endpoints entirely, supply the elements
