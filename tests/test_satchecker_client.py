@@ -208,6 +208,43 @@ class TestFailureTyping:
         with pytest.raises(SatCheckerTransportError):
             fetch_full_catalogue(_EPOCH)
 
+    def _http_error(self, status):
+        return urllib.error.HTTPError(
+            "https://satchecker.cps.iau.org/tools/tles-at-epoch/",
+            status, f"status {status}", {}, None,
+        )
+
+    @pytest.mark.parametrize("status", [400, 403, 404, 410, 422])
+    def test_client_error_statuses_are_response_failures(self, monkeypatch, status):
+        # HTTPError subclasses URLError, so without explicit handling these were
+        # typed as transport and suppressed the per-satellite fallback even though
+        # the service had plainly answered.
+        def boom(req, timeout=None):
+            raise self._http_error(status)
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        with pytest.raises(SatCheckerResponseError):
+            fetch_full_catalogue(_EPOCH)
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+    def test_backoff_and_server_statuses_stay_transport(self, monkeypatch, status):
+        # Rate limiting and server-side failure both mean "stop asking". Answering
+        # either with one request per satellite is the wrong move.
+        def boom(req, timeout=None):
+            raise self._http_error(status)
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        with pytest.raises(SatCheckerTransportError):
+            fetch_full_catalogue(_EPOCH)
+
+    def test_status_error_message_names_the_status(self, monkeypatch):
+        def boom(req, timeout=None):
+            raise self._http_error(404)
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        with pytest.raises(SatCheckerError, match="HTTP 404"):
+            fetch_full_catalogue(_EPOCH)
+
     def test_transport_failure_is_not_reported_as_a_response_failure(self, monkeypatch):
         def boom(req, timeout=None):
             raise urllib.error.URLError("connection refused")

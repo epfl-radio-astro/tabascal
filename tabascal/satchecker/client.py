@@ -123,11 +123,42 @@ class CatalogueResult:
 # Low-level HTTP + normalisation
 # ---------------------------------------------------------------------------
 
+# HTTP statuses that mean "stop asking", not "ask somewhere else". A rate limit
+# is the clearest case: the fallback's answer to a failed bulk request is one
+# request per satellite, which is precisely the wrong response to being told we
+# are asking too often.
+_BACKOFF_STATUSES = frozenset({429})
+
+
+def _status_error(url: str, error: urllib.error.HTTPError) -> SatCheckerError:
+    """Classify an HTTP status response as a response or a transport failure.
+
+    An HTTP status means the service *answered*, so it is not automatically a
+    transport failure — but it is only worth trying a different endpoint when the
+    server was rejecting this particular request rather than failing wholesale:
+
+    * 4xx (except 429) — the bulk endpoint refused *this* request. The per-satellite
+      endpoint is a different route with a much cheaper query and may well work.
+    * 429 and 5xx — the service is rate-limiting us or is failing on its own side.
+      Following that with one request per satellite would make it worse and is
+      very unlikely to succeed.
+    """
+    status = getattr(error, "code", None)
+    detail = f"SatChecker returned HTTP {status} ({url}): {error.reason}"
+    if status is not None and 400 <= status < 500 and status not in _BACKOFF_STATUSES:
+        return SatCheckerResponseError(detail)
+    return SatCheckerTransportError(detail)
+
+
 def _http_get(url: str, timeout: int = REQUEST_TIMEOUT) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
+    except urllib.error.HTTPError as e:
+        # Must precede URLError: HTTPError subclasses it, and unlike its siblings
+        # it means the service replied rather than that it could not be reached.
+        raise _status_error(url, e) from e
     except (
         urllib.error.URLError,
         TimeoutError,

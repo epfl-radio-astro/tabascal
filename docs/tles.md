@@ -204,7 +204,8 @@ width — never on what happens to be cached already.
 | Catalogue contains malformed rows or fewer than 99% of the expected rows remain valid | Malformed rows are rejected. An incomplete catalogue is **not cached**, and the requested satellites are fetched individually | The full catalogue is re-attempted on every run |
 | Satellite missing from a settled epoch's snapshot | Per-satellite lookup for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
 | Snapshot record older than `remote_tle_target_age_days` | Per-satellite lookup replaces it if the service has something nearer, cached in the same `-extra` file | Reused from cache — the upgrade requests are paid once per canonical epoch, not once per run |
-| Service reachable but the catalogue response is unusable (malformed, truncated) | The requested satellites are fetched individually instead | The full catalogue is re-attempted on every run |
+| Service reachable but the catalogue response is unusable (malformed, truncated, or an HTTP 4xx) | The requested satellites are fetched individually instead | The full catalogue is re-attempted on every run |
+| Service rate-limits (HTTP 429) or fails server-side (HTTP 5xx) | Run fails fast — answering either with one request per satellite would make it worse | — |
 | Service unreachable, snapshot cached | Cache hit — run proceeds offline | — |
 | Service unreachable, no snapshot | Run fails fast with a clear error (no satellite-by-satellite retry storm) | — |
 | Cache directory read-only or out of quota | A warning names the path; the run proceeds on the validated records it already fetched | Nothing is cached, so the next run fetches again |

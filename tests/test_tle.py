@@ -6,6 +6,7 @@ SatChecker transport mocked and the managed cache pointed at a temp directory.
 """
 
 import json
+import urllib.error
 from datetime import datetime
 
 import pytest
@@ -306,6 +307,83 @@ class TestFallback:
         with pytest.raises(SatCheckerTransportError):
             tle.get_tles_by_id(list(range(100, 120)), _OBS)
         assert attempts["n"] == 1  # stopped at the first unreachable request
+
+    def test_bulk_http_client_error_uses_the_per_id_fallback(
+        self, cache_dir, monkeypatch
+    ):
+        # HTTPError subclasses URLError, so without explicit handling a 404 on the
+        # bulk endpoint was typed as transport and suppressed the fallback — even
+        # though the service had plainly answered and the other route still worked.
+        import urllib.request
+
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError("http://x/tles-at-epoch/", 404, "no", {}, None)
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        counter = {"near": 0}
+        _install_nearest(monkeypatch, [(25544, _OBS)], counter)
+
+        df = tle.get_tles_by_id([25544], _OBS)
+
+        assert list(df["NORAD_CAT_ID"]) == [25544]
+        assert counter["near"] == 1
+
+    def test_bulk_http_server_error_still_fails_fast(self, cache_dir, monkeypatch):
+        import urllib.request
+
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError("http://x/tles-at-epoch/", 503, "down", {}, None)
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        counter = {"near": 0}
+        _install_nearest(monkeypatch, [(n, _OBS) for n in range(100, 140)], counter)
+
+        with pytest.raises(SatCheckerTransportError):
+            tle.get_tles_by_id(list(range(100, 140)), _OBS)
+        assert counter["near"] == 0
+
+    def test_repeated_per_id_response_failures_stop_the_loop(
+        self, cache_dir, monkeypatch, capsys
+    ):
+        # Error typing cannot bound a fault in the *request* rather than the
+        # service: a malformed epoch is a response error on every satellite alike.
+        counter = {"full": 0}
+        _install_full_empty(monkeypatch, counter)
+        attempts = {"n": 0}
+
+        def always_bad(norad_id, epoch_jd):
+            attempts["n"] += 1
+            raise SatCheckerResponseError("epoch parameter rejected")
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", always_bad)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(TLEError) as exc_info:
+            tle.get_tles_by_id(list(range(100, 160)), _OBS)
+
+        assert attempts["n"] == 3  # not 60
+        assert "stopping per-satellite fetches" in capsys.readouterr().out
+        assert "60 configured satellites" in str(exc_info.value)
+
+    def test_an_isolated_per_id_failure_does_not_stop_the_loop(
+        self, cache_dir, monkeypatch
+    ):
+        counter = {"full": 0}
+        _install_full_empty(monkeypatch, counter)
+        attempts = {"n": 0}
+
+        def flaky(norad_id, epoch_jd):
+            attempts["n"] += 1
+            if norad_id == 102:
+                raise SatCheckerResponseError("one bad record")
+            return make_catalogue_df([(norad_id, _OBS)])
+
+        monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", flaky)
+        monkeypatch.setattr(tle.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(TLEError, match="102"):
+            tle.get_tles_by_id([100, 101, 102, 103, 104], _OBS)
+        assert attempts["n"] == 5  # the loop ran to completion
 
 
 class TestDuplicateNoradSelection:

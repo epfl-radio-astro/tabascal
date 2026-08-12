@@ -119,6 +119,11 @@ _THROTTLE_SECONDS = 0.2
 # precision while rejecting one several ms away — matching the documented semantics.
 _AGE_TOL_DAYS = 3e-8
 
+# Consecutive per-satellite failures after which the loop gives up. A fault in the
+# request rather than the service surfaces as a response error on every satellite
+# alike, so error typing alone cannot bound that case; this can.
+_MAX_CONSECUTIVE_FAILURES = 3
+
 # Above this many remote records the per-satellite log lines are replaced by a
 # grouped summary; set ``TABASCAL_TLE_LOG_DETAIL=1`` to force the full listing.
 _GROUPED_LOG_THRESHOLD = 12
@@ -492,6 +497,7 @@ def _fetch_per_satellite(norad_ids: list[int], epoch_jd: float) -> pd.DataFrame:
     would issue one doomed request per remaining satellite.
     """
     rows: list[pd.DataFrame] = []
+    consecutive_failures = 0
     for i, nid in enumerate(norad_ids):
         if i:
             time.sleep(_THROTTLE_SECONDS)
@@ -500,10 +506,25 @@ def _fetch_per_satellite(norad_ids: list[int], epoch_jd: float) -> pd.DataFrame:
         except satchecker.SatCheckerTransportError:
             raise
         except TLEError as e:
-            print(f"  fallback fetch failed for {nid}: {e}")
+            print(f"  per-satellite fetch failed for {nid}: {e}")
+            consecutive_failures += 1
+            if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                # Independent of how the failure was typed: a fault affecting the
+                # request itself rather than the service (a malformed epoch, say)
+                # produces a *response* error on every satellite alike, and working
+                # through hundreds of them would learn nothing. Stop rather than
+                # raise, so the IDs simply go unresolved and the coverage check
+                # reports all of them with its usual diagnostics.
+                print(
+                    f"  stopping per-satellite fetches after "
+                    f"{consecutive_failures} consecutive failures — the remaining "
+                    f"{len(norad_ids) - i - 1} would almost certainly fail too"
+                )
+                break
             continue
+        consecutive_failures = 0
         if len(rec):
-            rec = _validated_service_records(rec, f"fallback fetch for {nid}")
+            rec = _validated_service_records(rec, f"per-satellite fetch for {nid}")
             if len(rec):
                 rows.append(rec)
     if not rows:
