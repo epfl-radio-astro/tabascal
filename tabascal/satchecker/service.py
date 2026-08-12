@@ -73,6 +73,19 @@ class NearestBatchResult:
     errors: dict[int, client.SatCheckerError] = field(default_factory=dict)
 
 
+def _abandon_pending(futures: dict) -> list[int]:
+    """Cancel every request that has not started yet; return the IDs given up on.
+
+    ``Future.cancel`` succeeds only for work still queued, so the handful already
+    in flight run to completion and are reported normally. That is enough: the
+    queue holds everything beyond ``max_workers``, which is the part that turns an
+    outage into a long wait.
+    """
+    return sorted(
+        norad_id for future, norad_id in futures.items() if future.cancel()
+    )
+
+
 def fetch_nearest_batch(
     norad_ids: list[int],
     epoch_jd: float,
@@ -81,7 +94,18 @@ def fetch_nearest_batch(
     max_workers: int = MAX_WORKERS,
     log: Callable[[str], None] = print,
 ) -> NearestBatchResult:
-    """Fetch exact-epoch nearest TLEs with at most *max_workers* requests in flight."""
+    """Fetch exact-epoch nearest TLEs with at most *max_workers* requests in flight.
+
+    A transport failure means the service itself is unreachable, and every
+    remaining ID would query that same service. The first one therefore abandons
+    the queued requests instead of working through them: at the 120 s request
+    timeout, a few hundred satellites would otherwise spend hours timing out one
+    batch at a time before preflight could report the outage it already knew
+    about after the first reply.
+
+    A *response* failure is per-request — the service is answering — so it is
+    recorded and the remaining IDs proceed.
+    """
     ids = list(dict.fromkeys(int(value) for value in norad_ids))
     if not ids:
         return NearestBatchResult()
@@ -96,10 +120,31 @@ def fetch_nearest_batch(
             executor.submit(fetch_nearest_tle, norad_id, epoch_jd): norad_id
             for norad_id in ids
         }
+        unreachable = False
         for future in as_completed(futures):
             norad_id = futures[future]
+            if future.cancelled():
+                continue
             try:
                 record = future.result()
+            except client.SatCheckerTransportError as error:
+                errors[norad_id] = error
+                log(f"  nearest-TLE fetch failed for {norad_id}: {error}")
+                if not unreachable:
+                    unreachable = True
+                    abandoned = _abandon_pending(futures)
+                    for pending_id in abandoned:
+                        errors[pending_id] = client.SatCheckerTransportError(
+                            f"SatChecker request for {pending_id} abandoned: the "
+                            f"service is unreachable ({error})"
+                        )
+                    if abandoned:
+                        log(
+                            f"  SatChecker is unreachable; abandoning "
+                            f"{len(abandoned)} queued request(s) rather than "
+                            "waiting for each to time out"
+                        )
+                continue
             except client.SatCheckerError as error:
                 errors[norad_id] = error
                 log(f"  nearest-TLE fetch failed for {norad_id}: {error}")

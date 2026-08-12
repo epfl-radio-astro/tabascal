@@ -71,17 +71,20 @@ class SatCheckerError(RuntimeError):
 class SatCheckerTransportError(SatCheckerError):
     """The service could not be reached: connection, TLS, timeout or mid-read failure.
 
-    Fail fast. The per-satellite endpoint lives on the same unavailable service, so
-    retrying the request once per configured satellite would turn an outage into a
-    request storm without any prospect of succeeding.
+    Whole-service, not per-request: every other satellite's lookup would go to the
+    same unreachable host. :func:`tabascal.satchecker.service.fetch_nearest_batch`
+    treats the first one as the answer for the whole batch and abandons the
+    requests still queued, rather than paying the request timeout once per
+    configured satellite to learn the same thing.
     """
 
 
 class SatCheckerResponseError(SatCheckerError):
     """The service answered, but the response is unusable: malformed or incomplete.
 
-    The service is up, so a *different* endpoint may still work. Callers may fall
-    back to per-satellite lookups (as :mod:`tabascal.tle` does).
+    Per-request, not whole-service: the host is up and answering, so it says
+    nothing about the other satellites. Callers record it against the one ID and
+    carry on with the rest of the batch.
     """
 
 

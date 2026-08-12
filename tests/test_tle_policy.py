@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from tabascal import tle
-from tabascal.satchecker import SatCheckerTransportError
+from tabascal.satchecker import client, SatCheckerTransportError
 from tabascal.satchecker.cache import TextTLECache
 from tabascal.satchecker.service import fetch_nearest_batch
 
@@ -169,3 +169,43 @@ def test_batch_collects_one_failure_without_losing_other_ids():
     result = fetch_nearest_batch([1, 2, 3], OBS, fetch_nearest_tle=fetch)
     assert result.records["NORAD_CAT_ID"].tolist() == [1, 3]
     assert isinstance(result.errors[2], SatCheckerTransportError)
+
+
+def test_batch_abandons_queued_requests_once_the_service_is_unreachable():
+    """An outage must cost a bounded number of requests, not one per satellite.
+
+    Only the ``max_workers`` already in flight run; the rest are abandoned rather
+    than each paying the full request timeout to rediscover the same outage.
+    """
+    attempted = []
+    lock = threading.Lock()
+
+    def dead_service(norad_id, epoch):
+        with lock:
+            attempted.append(norad_id)
+        time.sleep(0.05)
+        raise SatCheckerTransportError("connection refused")
+
+    result = fetch_nearest_batch(
+        list(range(1, 41)), OBS, fetch_nearest_tle=dead_service, max_workers=2
+    )
+    assert len(attempted) < 40
+    # Every requested ID still gets an error, so coverage reporting names them all.
+    assert set(result.errors) == set(range(1, 41))
+    assert all(
+        isinstance(error, SatCheckerTransportError) for error in result.errors.values()
+    )
+
+
+def test_batch_response_errors_do_not_abandon_the_rest():
+    """A malformed reply is one satellite's problem: the service is still up."""
+    def fetch(norad_id, epoch):
+        if norad_id % 2:
+            raise client.SatCheckerResponseError("malformed")
+        return make_catalogue_df([(norad_id, epoch)])
+
+    result = fetch_nearest_batch(
+        list(range(1, 11)), OBS, fetch_nearest_tle=fetch, max_workers=2
+    )
+    assert result.records["NORAD_CAT_ID"].tolist() == [2, 4, 6, 8, 10]
+    assert set(result.errors) == {1, 3, 5, 7, 9}
