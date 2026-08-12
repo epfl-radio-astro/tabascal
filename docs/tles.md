@@ -21,6 +21,12 @@ TABASCAL does not use SatChecker's full-catalogue endpoint. That endpoint select
 the newest TLE at or before the requested epoch, whereas TABASCAL requires the
 TLE whose epoch is closest on either side.
 
+If a request fails because the service cannot be reached at all, TABASCAL
+abandons the requests still queued instead of paying the 120-second timeout once
+per remaining satellite. Every configured ID is still reported, so the coverage
+error names them all. A malformed *reply* is treated as that one satellite's
+problem and the rest of the batch continues.
+
 Every configured satellite must resolve to an acceptable TLE. The check runs
 during preflight, before the visibilities are read. A missing or over-age record
 stops the run rather than silently shrinking the RFI model.
@@ -56,9 +62,11 @@ exceed the ceiling.
 
 Cache reads validate the schema, NORAD identity, TLE line width and checksums,
 embedded line identities, epoch, and all orbital fields consumed downstream. A
-missing, partial, corrupt, or incompatible file is treated as a cache miss.
-Cache-write failures are warnings: TABASCAL continues with validated records in
-memory, but a later run will need to fetch them again.
+missing, partial, corrupt, or incompatible file is treated as a cache miss; a
+file that exists but cannot be used is also reported, so a cache that never
+takes hold does not silently cost a request every run. Cache-write failures are
+warnings: TABASCAL continues with validated records in memory, but a later run
+will need to fetch them again.
 
 ## TLE age and suitability
 
