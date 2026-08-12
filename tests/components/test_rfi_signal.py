@@ -30,9 +30,9 @@ from tabascal.components.rfi_signal import (
     FourierGPRFIConstAnt,
     RealRFI,
     compute_real_space_gp_params,
-    rfi_signal_config_validation,
 )
 from tabascal.gp import base_kernel, get_times
+from tabascal.validation import resolve_rfi_defaults
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
 
@@ -181,7 +181,7 @@ def tol():
 
 
 # ---------------------------------------------------------------------------
-# rfi_signal_config_validation
+# resolve_rfi_defaults
 # ---------------------------------------------------------------------------
 
 class TestRfiSignalConfigValidation:
@@ -199,7 +199,7 @@ class TestRfiSignalConfigValidation:
         vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
         cfg = {"r_seed": None, "var": None, "corr_freq": None, "corr_time": None}
 
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        result = resolve_rfi_defaults(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         assert result["r_seed"] == 1
         assert result["var"] == pytest.approx(3.0)  # max |vis_obs|
@@ -216,7 +216,7 @@ class TestRfiSignalConfigValidation:
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
         cfg = {"r_seed": 1, "var": 1.0, "corr_freq": None, "corr_time": None}
 
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        result = resolve_rfi_defaults(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         freq_extent, time_extent = float(freqs[-1] - freqs[0]), float(times[-1] - times[0])
         assert result["corr_time"] is not None
@@ -231,7 +231,7 @@ class TestRfiSignalConfigValidation:
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
         cfg = {"r_seed": 42, "var": 7, "corr_freq": 5e6, "corr_time": 60}
 
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        result = resolve_rfi_defaults(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         assert result["r_seed"] == 42
         assert isinstance(result["var"], float) and result["var"] == pytest.approx(7.0)
@@ -239,25 +239,22 @@ class TestRfiSignalConfigValidation:
         assert isinstance(result["corr_time"], float)
         assert result["corr_time"] == pytest.approx(60.0)
 
-    def test_missing_key_raises(self):
-        """A config missing one of the four required keys raises ValueError."""
+    def test_explicit_zero_is_not_replaced_by_a_default(self):
+        """An explicitly configured 0 must be honoured, not treated as 'unset'.
+
+        The previous implementation tested ``if not x``, so a deliberate zero was
+        silently overwritten with the estimated default. Type checking for these
+        keys now lives in the schema (see tests/test_validation.py), leaving this
+        function responsible only for filling in nulls.
+        """
         freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": 5e6}  # no corr_time
+        vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
+        cfg = {"r_seed": 0, "var": 0, "corr_freq": 5e6, "corr_time": 60.0}
 
-        with pytest.raises(ValueError):
-            rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        result = resolve_rfi_defaults(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
-    @pytest.mark.parametrize("key", ["r_seed", "var", "corr_freq", "corr_time"])
-    def test_non_numeric_value_raises(self, key):
-        """A non-numeric value for any tunable raises ValueError."""
-        freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": 5e6, "corr_time": 60.0}
-        cfg[key] = "not a number"
-
-        with pytest.raises(ValueError):
-            rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        assert result["r_seed"] == 0
+        assert result["var"] == pytest.approx(0.0)
 
     def test_single_channel_single_integration_defaults(self):
         """With a zero-extent grid the defaults fall back to the step sizes, not zero."""
@@ -265,7 +262,7 @@ class TestRfiSignalConfigValidation:
         vis_obs = jnp.ones((6, 1, 1), dtype=complex)
         cfg = {"r_seed": None, "var": None, "corr_freq": None, "corr_time": None}
 
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        result = resolve_rfi_defaults(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         assert result["corr_freq"] == pytest.approx(1e6 / 2)
         assert result["corr_time"] == pytest.approx(8.0 / 2)

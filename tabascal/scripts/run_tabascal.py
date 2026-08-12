@@ -20,6 +20,29 @@ def _run_cmd(args):
 
 
 # ---------------------------------------------------------------------------
+# 'validate-config' subcommand
+# ---------------------------------------------------------------------------
+
+def _validate_config_cmd(args):
+    """Check a config file and report every problem, without running anything."""
+    import sys
+    from tabascal.config import load_config
+    from tabascal.validation import ConfigError, validate_config
+
+    try:
+        config = load_config(args.config)
+        # load_config already validated; re-run only to surface the inert-key note,
+        # which is suppressed on the normal run path because the packaged defaults
+        # carry several such keys.
+        validate_config(config, args.config, report_inert=True)
+    except ConfigError as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\nOK: {args.config}")
+
+
+# ---------------------------------------------------------------------------
 # 'spacetrack-login' subcommand
 # ---------------------------------------------------------------------------
 
@@ -66,6 +89,15 @@ def main():
         help="Extra directory searched for cached TLEs before the managed cache and Space-Track.",
     )
 
+    # -- validate-config --
+    validate_parser = subparsers.add_parser(
+        "validate-config",
+        help="Check a config file for unknown, missing or invalid entries.",
+    )
+    validate_parser.add_argument(
+        "-c", "--config", required=True, help="Path to the config file."
+    )
+
     # -- spacetrack-login --
     login_parser = subparsers.add_parser(
         "spacetrack-login",
@@ -81,6 +113,8 @@ def main():
 
     if args.command == "run":
         _run_cmd(args)
+    elif args.command == "validate-config":
+        _validate_config_cmd(args)
     elif args.command == "spacetrack-login":
         _spacetrack_login_cmd(args)
 

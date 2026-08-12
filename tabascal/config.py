@@ -16,6 +16,7 @@ from tabascal.interferometry import (
 )
 from tabascal.fft_gp import domain_ss
 from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd, gast_deg
+from tabascal.validation import ConfigError, validate_config
 
 import jax.numpy as jnp
 
@@ -84,31 +85,71 @@ _TabSafeLoader.add_implicit_resolver(
 
 
 def yaml_load(path):
-    with open(path) as f:
-        return yaml.load(f, Loader=_TabSafeLoader)
+    """Load a YAML file, reporting *why* it could not be read.
+
+    A bad config is the most common user error, so the failure modes are
+    separated out here: a missing file, a syntax error (with PyYAML's line and
+    column), and a document that is not a mapping each get their own message
+    rather than a single "could not be loaded".
+    """
+    try:
+        with open(path) as f:
+            config = yaml.load(f, Loader=_TabSafeLoader)
+    except FileNotFoundError as e:
+        raise ConfigError(f"config file not found: {path}") from e
+    except IsADirectoryError as e:
+        raise ConfigError(f"config path is a directory, not a file: {path}") from e
+    except OSError as e:
+        raise ConfigError(f"config file could not be read from {path}: {e}") from e
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        problem = getattr(e, "problem", None) or str(e)
+        raise ConfigError(f"invalid YAML in {path}{where}: {problem}") from e
+
+    if config is None:
+        raise ConfigError(f"config file is empty: {path}")
+    if not isinstance(config, dict):
+        raise ConfigError(
+            f"expected a top-level YAML mapping in {path}, "
+            f"got {type(config).__name__}"
+        )
+
+    return config
 
 
 def load_config(path: str) -> Dict:
-    """Load a configuration file and populate default parameters where needed.
+    """Load a configuration file, populate defaults, and validate the result.
+
+    The user's file is deep-merged over the packaged defaults in
+    ``data/config/tab_config_base.yaml`` and the merged result is checked by
+    :func:`tabascal.validation.validate_config`. Validation happens here, at load
+    time, so a bad config fails before the measurement-set read and TLE fetch
+    rather than as a ``KeyError`` deep inside a component's ``setup``.
 
     Parameters
     ----------
     path : str
         Path to the yaml config file.
-    
+
     Returns
     -------
     dict
         Configuration dictionary.
+
+    Raises
+    ------
+    ConfigError
+        If the file cannot be read, is not valid YAML, or fails validation.
     """
     config_dir = files("tabascal").joinpath("data/config").__str__()
     tab_base_config_path = os.path.join(config_dir, "tab_config_base.yaml")
     base_config = yaml_load(tab_base_config_path)
 
-    try:
-        return deep_update(base_config, yaml_load(path))
-    except Exception as e:
-        raise IOError(f"Configuration file could not be loaded from {path}") from e
+    config = deep_update(base_config, yaml_load(path))
+    validate_config(config, path)
+
+    return config
 
     
 class TabConfig:

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Tuple
 
 from jax import Array
 
@@ -17,6 +17,20 @@ class Component(ABC):
     # Set True on components that only work in double precision (read by the
     # run-time preflight in scripts._run_tabascal_impl and by require_double).
     requires_double: bool = False
+
+    # Config keys this component reads and cannot derive a default for, as dotted
+    # paths into the config dict. Checked up front by tabascal.validation against
+    # the selected model.components, so a config that cannot possibly work fails
+    # before the MS read and TLE fetch rather than as a KeyError inside setup().
+    # Keys that may legitimately be null (the component derives them from the
+    # data) belong in the schema, not here.
+    required_config: Tuple[str, ...] = ()
+
+    # Per-component enums, as {dotted config path: allowed values}. The valid
+    # `init`/`mean` values genuinely differ between components -- some raise on
+    # an unrecognised value, others silently fall through to a default -- so the
+    # schema only checks the union and the exact set is declared here.
+    config_choices: Dict[str, Tuple[Any, ...]] = {}
 
     @abstractmethod
     def setup(self, tab_config: Any) -> None:

@@ -8,11 +8,8 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 
-from tabascal.components.gains import (
-    UnitaryGains,
-    GPGains,
-    gains_config_validation,
-)
+from tabascal.components.gains import UnitaryGains, GPGains
+from tabascal.validation import resolve_gains_defaults
 
 from .conftest import make_constants, assert_transform_roundtrip
 
@@ -86,7 +83,7 @@ def make_vis_state(n_ant, n_freq, n_time, rng_key=0):
 
 
 # ---------------------------------------------------------------------------
-# gains_config_validation
+# resolve_gains_defaults
 # ---------------------------------------------------------------------------
 
 class TestGainsConfigValidation:
@@ -106,7 +103,7 @@ class TestGainsConfigValidation:
             "phase_corr_freq": None,
             "phase_corr_time": None,
         }
-        result = gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+        result = resolve_gains_defaults(cfg, freqs, 1e6, times, 8.0)
 
         assert result["r_seed"] == 2
         assert result["amp_mean"] == pytest.approx(1.0)
@@ -130,7 +127,7 @@ class TestGainsConfigValidation:
             "phase_corr_freq": 5e6,
             "phase_corr_time": 30.0,
         }
-        result = gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+        result = resolve_gains_defaults(cfg, freqs, 1e6, times, 8.0)
 
         assert result["r_seed"] == 42
         assert result["amp_mean"] == pytest.approx(2.0)
@@ -141,41 +138,33 @@ class TestGainsConfigValidation:
         assert result["phase_std"] == pytest.approx(float(jnp.deg2rad(2.0)))
         assert result["phase_corr_time"] == pytest.approx(30.0)
 
-    def test_invalid_amp_mean_type_raises(self):
-        """A non-numeric amp_mean raises ValueError during gains_config_validation."""
-        freqs = jnp.linspace(1.4e9, 1.41e9, 4)
-        times = jnp.linspace(0.0, 120.0, 8)
-        cfg = {
-            "r_seed": 1,
-            "amp_mean": "bad",
-            "amp_std": None,
-            "amp_corr_freq": None,
-            "amp_corr_time": None,
-            "phase_mean": None,
-            "phase_std": None,
-            "phase_corr_freq": None,
-            "phase_corr_time": None,
-        }
-        with pytest.raises(ValueError):
-            gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+    def test_explicit_zero_is_not_replaced_by_a_default(self):
+        """An explicitly configured 0 must be honoured, not treated as 'unset'.
 
-    def test_invalid_phase_std_type_raises(self):
-        """A non-numeric phase_std raises ValueError during gains_config_validation."""
+        The previous implementation tested ``if not x``, so a deliberate zero was
+        silently overwritten with the estimated default. Type checking for these
+        keys now lives in the schema (see tests/test_validation.py), leaving this
+        function responsible only for filling in nulls.
+        """
         freqs = jnp.linspace(1.4e9, 1.41e9, 4)
         times = jnp.linspace(0.0, 120.0, 8)
         cfg = {
-            "r_seed": 1,
+            "r_seed": 0,
             "amp_mean": 1.0,
-            "amp_std": None,
+            "amp_std": 0,
             "amp_corr_freq": None,
             "amp_corr_time": None,
-            "phase_mean": None,
-            "phase_std": "bad",
+            "phase_mean": 0,
+            "phase_std": 0,
             "phase_corr_freq": None,
             "phase_corr_time": None,
         }
-        with pytest.raises(ValueError):
-            gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+        result = resolve_gains_defaults(cfg, freqs, 1e6, times, 8.0)
+
+        assert result["r_seed"] == 0
+        assert result["amp_std"] == pytest.approx(0.0)
+        assert result["phase_std"] == pytest.approx(0.0)
+        assert result["phase_mean"] == pytest.approx(0.0)
 
     def test_single_freq_single_time_defaults(self):
         """Single channel/integration — corr lengths should default to step size."""
@@ -185,7 +174,7 @@ class TestGainsConfigValidation:
             "r_seed", "amp_mean", "amp_std", "amp_corr_freq", "amp_corr_time",
             "phase_mean", "phase_std", "phase_corr_freq", "phase_corr_time",
         ]}
-        result = gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+        result = resolve_gains_defaults(cfg, freqs, 1e6, times, 8.0)
         assert result["amp_corr_freq"] > 0
         assert result["amp_corr_time"] > 0
 

@@ -44,29 +44,35 @@ fisher:
 # Astronomical prior and initialization parameters
 ####################################################
 ast:
-  init: sample          # Optional - The initialization method for the astronomical visibility parameters. Options are 'est', 'prior', 'truth', 'truth_mean'
-  mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'prior', 'truth', 'truth_mean'
+  init: sample          # Optional - The initialization method for the astronomical visibility parameters. Options are 'data', 'prior', 'truth', 'sample'
+  mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'zeros', 'data'
+  time_pad_factor: 2    # Optional - Fourier-domain padding along the time axis. 1.0 assumes the signal is periodic over the observation
+  freq_pad_factor: 2    # Optional - Fourier-domain padding along the frequency axis
   pow_spec:
-    P0: null            # Optional - Power spectrum value at k=0 for the astronomical visibility parameters prior standard deviation 
-    gamma: 1.0          # Optional - Exponential of the power law section of the power spectrum for astronomical visibility parameters
-    k0: 1e-3            # Optional - Position of the knee of the power spectrum
+    p0: null            # Required - Mean power of the astronomical signal. Sets the prior standard deviation
+    gamma: 1.0          # Required by FourierTimeAst / FourierTimeConstFreqAst / FourierTimeFreqAst - Power law exponent
+    gammas: [5, 5]      # Required by FourierTimeFreqGPAst - Power law exponents along (frequency, time)
+    k0_freq: 1          # Required by FourierTimeFreqGPAst - Inverse correlation scale along the frequency axis
+    fov_deg: null       # Optional - Field of view in degrees. Defaults to the value implied by the MS dish diameter
+    cutoff: 1e-6        # Required by FourierTimeFreqGPAst - Relative power spectrum cutoff below which Fourier components are dropped
 ##########################################
 # RFI prior and initialization parameters
 ##########################################
 rfi:
-  est: null
-  init: sample          # Optional - The initialization method for the RFI signal parameters. Options are 'est', 'prior', 'truth'
-  mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'truth'
+  est: null             # Optional - Path to a previously saved RFI estimate, used when mean is 'est'
+  init: sample          # Optional - The initialization method for the RFI signal parameters. Options are 'prior', 'truth', 'zeros', 'ones', 'sample'
+  mean: 0               # Optional - Mean of the prior distribution for the RFI signal parameters. Options are 0, 'zeros', 'data', 'est'
   var: null             # Optional - Variance of the RFI signal in Jy. When null an estimate is made based on the data
   corr_time: 24         # Optional - Correlation time of the RFI signal in seconds
   corr_freq: 1e6        # Optional - Correlation bandwidth of the RFI signal in Hz
   time_pad_factor: 2
   freq_pad_factor: 2
   time_int_factor: 1    # Optional - Factor to increase the number of time integration samples over the predicted value
+  freq_int_samples: 1   # Optional - Number of integration samples per frequency channel, used to model band-smearing
   min_time_bins: 1      # Optional - Minimum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisTimeFreqVariable / +FFI)
   max_time_bins: 30     # Optional - Maximum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisTimeFreqVariable / +FFI)
   n_int_time: null      # Optional - Specify the number of integration samples to use along the time axis
-  n_int_freq: 1         # Optional - Specify the number of integration samples to use along the frequency axis
+  n_int_freq: 1         # Optional - Number of frequency integration samples used to build the fine grid in TabConfig. Kept separate from freq_int_samples, which the components read
   r_seed: 123           # Optional - Random seed to use for sampling
 ############################
 # Satellite path parameters
@@ -79,25 +85,25 @@ satellites:
   tle_offset: 0         # Optional - Time offset (in days) for the TLE that is used in tabascal. Specifically for testing 
   sat_ids: []           # Optional - Satellite IDs of satellites with circular trajectories to include
   ole_path: null        # Optional - Path to the csv '.ole' file containing circular trajectory-based satellite orbit parameters
+  ric_std: null         # Optional - Scale factor on the stored radial/in-track/cross-track TLE error covariance. Not currently read by any component
 ###########################################
 # Gain prior and initialization parameters
 ###########################################
 gains:
-  init: prior           # Optional - The initialization method for the gain parameters. Options are 'prior', 'truth'
-  amp_mean: 1.0         # Optional - Mean of the prior distribution over the gain amplitudes. Options are 'truth' or a value like 1.0
-  phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radiands. Options are 'truth' or a value like 0.0
-  amp_std: null          # Optional - Standard deviation of the prior distribution over the gain amplitudes as a percentage
-  phase_std: null        # Optional - Standard deviation of the prior distribution over the gain phases in degrees
-  amp_corr_freq: null        # Optional - Correlation time of the gains in minutes
-  amp_corr_time: null        # Optional - Correlation time of the gains in minutes
-  phase_corr_freq: null        # Optional - Correlation time of the gains in minutes
-  phase_corr_time: null        # Optional - Correlation time of the gains in minutes
-  r_seed: 123
-# ###################
-# # Model parameters
-# ###################
+  init: prior           # Not currently read by any component
+  amp_mean: 1.0         # Optional - Mean of the prior distribution over the gain amplitudes
+  phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radians
+  amp_std: null         # Optional - Standard deviation of the prior over the gain amplitudes, as a percentage of amp_mean. Defaults to 1 %
+  phase_std: null       # Optional - Standard deviation of the prior over the gain phases, in degrees. Defaults to 1 degree
+  amp_corr_freq: null   # Optional - Correlation bandwidth of the gain amplitudes in Hz. Defaults to the frequency extent of the data
+  amp_corr_time: null   # Optional - Correlation time of the gain amplitudes in seconds. Defaults to the time extent of the data
+  phase_corr_freq: null # Optional - Correlation bandwidth of the gain phases in Hz. Defaults to the frequency extent of the data
+  phase_corr_time: null # Optional - Correlation time of the gain phases in seconds. Defaults to the time extent of the data
+  r_seed: 123           # Optional - Random seed to use for sampling
+###################
+# Model parameters
+###################
 model:
-  precision: single
-#   func: fixed_orbit_rfi_full_fft_standard_model
-#   name: fixed_orbit_rfi
-  
+  components: []        # Required - Ordered list of 'module:Class' component references making up the forward model
+  precision: single     # Optional - 'single' (default) or 'double'
+

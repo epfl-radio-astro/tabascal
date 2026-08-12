@@ -97,8 +97,18 @@ sim-vis -h
 RFI subtraction (TABASCAL) runs are also defined by YAML configuration files and can be run in much the same way. Given the simulation dataset created in the previous step, we can run TABASCAL on it using
 
 ```bash
-tabascal -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI -st spacetrack_login.yaml
+tabascal run -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
 ```
+
+Space-Track credentials are read from the file given by `satellites.spacetrack_path` in the config, or from the user config file written by `tabascal spacetrack-login` (see {doc}`spacetrack`).
+
+Before starting a long run it is worth checking the config on its own:
+
+```bash
+tabascal validate-config -c tab_target.yaml
+```
+
+This reports unknown, missing and invalid entries without reading the Measurement Set or fetching any TLEs. See the Validation section of {doc}`config`.
 
 The output of a successful run with TABASCAL will show lines like
 
@@ -114,11 +124,12 @@ The results of the TABASCAL run are saved in a `.zarr` file and then transferred
 If you have a Measurement Set from another source you can run TABASCAL on that directly with
 
 ```bash
-tabascal -c path/to/config.yaml -ms path/to/ms/file.ms -st spacetrack_login.yaml
+tabascal run -c path/to/config.yaml -ms path/to/ms/file.ms
 ```
 
-The `tabascal` script also has a help context whcih can be accessed with
+The `tabascal` script also has a help context which can be accessed with
 
 ```bash
-tabascal -h
+tabascal -h        # lists the subcommands
+tabascal run -h    # options for a single subcommand
 ```

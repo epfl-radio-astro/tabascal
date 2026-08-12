@@ -12,6 +12,7 @@ from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.tab_tools import get_observation_data_type
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
 from tabascal.timing import measure_runtime
+from tabascal.validation import resolve_rfi_defaults
 
 import xarray as xr
 
@@ -78,80 +79,6 @@ def compute_real_space_gp_params(gp_l: float, gp_var: float, times: Array, times
 #     return B * rfi_amp
 
 
-def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
-    """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
-
-    Parameters
-    ----------
-    rfi_config : Dict
-        RFI configuration dictionary
-
-    Returns
-    -------
-    Dict
-        Validated configuration dictionary with defaults set.
-
-    Raises
-    ------
-    ValueError
-        Raised when an invalid input is provided for one fo the configuration parameters.
-    """
-
-    def extent(x, dx):
-        ext = float(jnp.max(x) - jnp.min(x))
-        if ext == 0.0:
-            return float(dx)
-        else:
-            return ext
-
-    try:
-        r_seed = rfi_config["r_seed"]
-        gp_var = rfi_config["var"]
-        gp_freq_l = rfi_config["corr_freq"]
-        gp_time_l = rfi_config["corr_time"]
-    except Exception as e:
-        raise ValueError(f"RFI signal configuration validation failed.")
-
-    if not r_seed: # Set Default
-        rfi_config["r_seed"] = 1
-    elif isinstance(r_seed, int):
-        pass
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
-
-    if not gp_var: # Set Default
-        est_gp_var = float(jnp.max(jnp.abs(vis_obs)))
-        rfi_config["var"] = est_gp_var
-    elif isinstance(gp_var, (float, int)):
-        rfi_config["var"] = float(gp_var)
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tvar: {gp_var}) is not of type float or int.")
-    
-    if not gp_freq_l: # Set Default
-        est_gp_freq_l = extent(freqs, chan_width) / 2
-        rfi_config["corr_freq"] = est_gp_freq_l
-    elif isinstance(gp_freq_l, (float, int)):
-        rfi_config["corr_freq"] = float(gp_freq_l)
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tcorr_freq: {gp_freq_l}) is not of type float or int.")
-    
-    if not gp_time_l: # Set Default
-        est_gp_time_l = extent(times, int_time) / 2
-        rfi_config["corr_time"] = est_gp_time_l
-    elif isinstance(gp_time_l, (float, int)):
-        rfi_config["corr_time"] = float(gp_time_l)
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tcorr_time: {gp_time_l}) is not of type float or int.")    
-    
-    print()
-    print(f"Using RFI var : {rfi_config['var']:.1e} Jy")
-    print(f"Using RFI corr_freq : {rfi_config['corr_freq']/1e3:.1f} kHz")
-    print(f"Using RFI corr_time : {rfi_config['corr_time']:.1f} s")
-
-    return rfi_config
-
-
-
 class BaseGPRFI(Component):
 
     # The required state parameter needed in the forward model for this component to function
@@ -165,10 +92,14 @@ class BaseGPRFI(Component):
     # The base parameter shapes used to produce the output parameters
     parameter_shapes = {}
 
+    # var / corr_freq / corr_time / r_seed are all filled in from the data by
+    # resolve_rfi_defaults when left null, so none of them are required here.
+    required_config = ("rfi.init",)
+
     def setup(self, tab_config: TabConfig):
 
-        # Validate config and set defaults
-        rfi_config = rfi_signal_config_validation(
+        # Fill in the defaults that can only be derived once the MS is read.
+        rfi_config = resolve_rfi_defaults(
             tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
 
         # Random seed used for random sampling such as initial parameters drawn from the prior
@@ -261,6 +192,8 @@ class RealRFI(BaseGPRFI):
     parameter_shapes = {
         "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
     }
+
+    config_choices = {"rfi.init": ("prior", "zeros", 0, "ones", "truth", "sample")}
 
     def setup(self, tab_config: TabConfig):
         """All validation and error-prone operations here"""
@@ -433,6 +366,8 @@ class ComplexRFI(BaseGPRFI):
         "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
         "rfi_i_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
     }
+
+    config_choices = {"rfi.init": ("prior", "zeros", 0, "ones", "truth", "sample")}
 
     def setup(self, tab_config):
         """All validation and error-prone operations here"""
@@ -618,6 +553,16 @@ class FourierGPRFI(BaseGPRFI):
     parameter_shapes = {
         "rfi_k_r_base": ("n_rfi", "n_ant", "n_k_freq_rfi", "n_k_time_rfi"),
         "rfi_k_i_base": ("n_rfi", "n_ant", "n_k_freq_rfi", "n_k_time_rfi"),
+    }
+
+    required_config = BaseGPRFI.required_config + (
+        "rfi.mean",
+        "rfi.freq_pad_factor",
+        "rfi.time_pad_factor",
+    )
+    config_choices = {
+        "rfi.init": ("prior", "truth", "zeros", 0, "ones", 1, "sample"),
+        "rfi.mean": ("data", "est", "zeros", 0),
     }
 
     def setup(self, tab_config):
@@ -883,6 +828,9 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         "rfi_k_r_base": ("n_rfi", 1, "n_k_freq_rfi", "n_k_time_rfi"),
         "rfi_k_i_base": ("n_rfi", 1, "n_k_freq_rfi", "n_k_time_rfi"),
     }
+
+    required_config = FourierGPRFI.required_config
+    config_choices = FourierGPRFI.config_choices
 
     def setup(self, tab_config):
         """All validation and error-prone operations here"""

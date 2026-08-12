@@ -4,117 +4,12 @@ from tabascal.dist import standard_normal
 from tabascal.config import TabConfig
 from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.transform import affine_transform_full
+from tabascal.validation import resolve_gains_defaults
 
 import jax.numpy as jnp
 from jax import vmap, Array
 
 from typing import Dict
-
-def gains_config_validation(gains_config: Dict, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
-
-    def extent(x, dx):
-        ext = float(jnp.max(x) - jnp.min(x))
-        if ext == 0.0:
-            return float(dx)
-        else:
-            return ext
-
-    try:
-        r_seed = gains_config["r_seed"]
-        gp_amp_mean = gains_config["amp_mean"]
-        gp_amp_std = gains_config["amp_std"]
-        gp_amp_freq_l = gains_config["amp_corr_freq"]
-        gp_amp_time_l = gains_config["amp_corr_time"]
-        gp_phase_mean = gains_config["phase_mean"]
-        gp_phase_std = gains_config["phase_std"]
-        gp_phase_freq_l = gains_config["phase_corr_freq"]
-        gp_phase_time_l = gains_config["phase_corr_time"]
-    except Exception as e:
-        raise ValueError(f"Gains configuration validation failed.")
-
-    if not r_seed: # Set Default
-        gains_config["r_seed"] = 2
-    elif isinstance(r_seed, int):
-        pass
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tr_seed: {r_seed}) is not of type int.")
-
-    if not gp_amp_mean: # Set Default
-        est_gp_amp_mean = 1.0
-        gains_config["amp_mean"] = est_gp_amp_mean
-    elif isinstance(gp_amp_mean, (float, int)):
-        gains_config["amp_mean"] = float(gp_amp_mean)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_mean: {gp_amp_mean}) is not of type float or int.")
-
-    if not gp_amp_std: # Set Default
-        est_gp_amp_std = 1 / 100 * gains_config["amp_mean"] # 1 %
-        gains_config["amp_std"] = est_gp_amp_std
-    elif isinstance(gp_amp_std, (float, int)):
-        gains_config["amp_std"] = float(gp_amp_std) / 100 * gains_config["amp_mean"]
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_std: {gp_amp_std}) is not of type float or int.")
-    
-    if not gp_amp_freq_l: # Set Default
-        est_gp_amp_freq_l = extent(freqs, chan_width)
-        gains_config["amp_corr_freq"] = est_gp_amp_freq_l
-    elif isinstance(gp_amp_freq_l, (float, int)):
-        gains_config["amp_corr_freq"] = float(gp_amp_freq_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_corr_freq: {gp_amp_freq_l}) is not of type float or int.")
-    
-    if not gp_amp_time_l: # Set Default
-        est_gp_amp_time_l = extent(times, int_time)
-        gains_config["amp_corr_time"] = est_gp_amp_time_l
-    elif isinstance(gp_amp_time_l, (float, int)):
-        gains_config["amp_corr_time"] = float(gp_amp_time_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_corr_time: {gp_amp_time_l}) is not of type float or int.")    
-    
-    if not gp_phase_mean: # Set Default
-        est_gp_phase_mean = 0.0
-        gains_config["phase_mean"] = est_gp_phase_mean
-    elif isinstance(gp_phase_mean, (float, int)):
-        gains_config["phase_mean"] = float(gp_phase_mean)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_mean: {gp_phase_mean}) is not of type float or int.")
-
-    if not gp_phase_std: # Set Default
-        est_gp_phase_std = float(jnp.deg2rad(1)) # degrees
-        gains_config["phase_std"] = est_gp_phase_std
-    elif isinstance(gp_phase_std, (float, int)):
-        gains_config["phase_std"] = float(jnp.deg2rad(gp_phase_std))
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_std: {gp_phase_std}) is not of type float or int.")
-    
-    if not gp_phase_freq_l: # Set Default
-        est_gp_phase_freq_l = extent(freqs, chan_width)
-        gains_config["phase_corr_freq"] = est_gp_phase_freq_l
-    elif isinstance(gp_phase_freq_l, (float, int)):
-        gains_config["phase_corr_freq"] = float(gp_phase_freq_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_corr_freq: {gp_phase_freq_l}) is not of type float or int.")
-    
-    if not gp_phase_time_l: # Set Default
-        est_gp_phase_time_l = extent(times, int_time)
-        gains_config["phase_corr_time"] = est_gp_phase_time_l
-    elif isinstance(gp_phase_time_l, (float, int)):
-        gains_config["phase_corr_time"] = float(gp_phase_time_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_corr_time: {gp_phase_time_l}) is not of type float or int.")   
-    
-    print()
-    print(f"Using Gains amplitude mean : {gains_config['amp_mean']:.1f}")
-    print(f"Using Gains amplitude std : {gains_config['amp_std']*100/gains_config['amp_mean']:.1f} %")
-    print(f"Using Gains amplitude corr_freq : {gains_config['amp_corr_freq']/1e3:.1f} kHz")
-    print(f"Using Gains amplitude corr_time : {gains_config['amp_corr_time']:.1f} s")
-    print()
-    print(f"Using Gains phase mean : {jnp.rad2deg(gains_config['phase_mean']):.1f} degrees")
-    print(f"Using Gains phase std : {jnp.rad2deg(gains_config['phase_std']):.1f} degrees")
-    print(f"Using Gains phase corr_freq : {gains_config['phase_corr_freq']/1e3:.1f} kHz")
-    print(f"Using Gains phase corr_time : {gains_config['phase_corr_time']:.1f} s")
-
-    return gains_config
 
 
 class BaseGPGains(Component):
@@ -129,10 +24,14 @@ class BaseGPGains(Component):
     }
     parameter_shapes = {}
 
+    # Every gains key has a default -- either a constant or one derived from the
+    # data by resolve_gains_defaults -- so none of them are required up front.
+    required_config = ()
+
     def setup(self, tab_config: TabConfig):
 
-        # Validate config and set defaults
-        gains_config = gains_config_validation(
+        # Fill in the defaults that can only be derived once the MS is read.
+        gains_config = resolve_gains_defaults(
             tab_config.args["gains"], tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
 
         # Random seed used for random sampling such as initial parameters drawn from the prior

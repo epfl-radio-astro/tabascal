@@ -25,6 +25,15 @@ class FourierTimeAst(Component):
         "ast_k_i_base": ("n_bl", "n_freq", "n_k_ast"),
     }
 
+    # pow_spec.fov_deg is omitted deliberately: null means "derive the field of
+    # view from the dish diameter in the MS" (see _compute_gp_params).
+    required_config = (
+        "ast.init",
+        "ast.time_pad_factor",
+        "ast.pow_spec.p0",
+        "ast.pow_spec.gamma",
+    )
+
     def setup(self, config):
         """All validation and error-prone operations here"""
         try:
@@ -219,6 +228,8 @@ class FourierTimeConstFreqAst(Component):
         "ast_k_i_base": ("n_bl", 1, "n_k_ast"),
     }
 
+    required_config = FourierTimeAst.required_config
+
     def setup(self, config):
         """All validation and error-prone operations here"""
         try:
@@ -407,6 +418,8 @@ class FourierTimeFreqAst(Component):
         "ast_k_r_base": ("n_bl", "n_freq", "n_k_ast"),
         "ast_k_i_base": ("n_bl", "n_freq", "n_k_ast"),
     }
+
+    required_config = FourierTimeAst.required_config
 
     def setup(self, config):
         """All validation and error-prone operations here"""
@@ -633,6 +646,24 @@ class FourierTimeFreqGPAst(Component):
     parameters = {
         "ast_k_r_base": ("n_bl", "n_k_freq_ast", "n_k_time_ast"),
         "ast_k_i_base": ("n_bl", "n_k_freq_ast", "n_k_time_ast"),
+    }
+
+    # This component uses the 2D power spectrum (gammas/k0_freq/cutoff) rather
+    # than the scalar gamma of the older Fourier ast components. fov_deg stays
+    # optional -- null derives it from the dish diameter.
+    required_config = (
+        "ast.init",
+        "ast.mean",
+        "ast.freq_pad_factor",
+        "ast.time_pad_factor",
+        "ast.pow_spec.p0",
+        "ast.pow_spec.k0_freq",
+        "ast.pow_spec.gammas",
+        "ast.pow_spec.cutoff",
+    )
+    config_choices = {
+        "ast.init": ("data", "prior", "truth", "sample"),
+        "ast.mean": ("data", "zeros", 0),
     }
 
     def setup(self, config):

@@ -16,6 +16,7 @@ from jax import random
 from tabascal.timing import measure_runtime, print_timings, enable_timings
 from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
 from tabascal.config import load_config, TabConfig, Model
+from tabascal.validation import ConfigError
 from tabascal.distributed import (
     barrier,
     is_process_0,
@@ -187,8 +188,15 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
 
     if sim_dir:
         sim_dir = os.path.abspath(sim_dir)
-    else:
+    elif config["data"]["sim_dir"]:
         sim_dir = os.path.abspath(config["data"]["sim_dir"])
+    else:
+        # Checked here rather than in validate_config because the -s flag can
+        # satisfy it, and the CLI arguments are not known at config-load time.
+        raise ConfigError(
+            "no simulation directory given: set data.sim_dir in the config "
+            "or pass -s/--sim_dir on the command line"
+        )
     config["data"]["sim_dir"] = sim_dir
     config["model"]["name"] = model_name
 
@@ -392,14 +400,14 @@ def run(args):
     if args.timings:
         enable_timings()
 
-    config = load_config(args.config)
-
-    set_precision(config)
-
     # Workers run the identical program (multi-process collectives require it) but
     # only process 0 talks: stdout, the log file, plots and result writes are all
     # rank-0-gated. Errors still reach stderr on every process.
     try:
+        config = load_config(args.config)
+
+        set_precision(config)
+
         with suppress_worker_stdout():
             tabascal_subtraction(
                 config,
@@ -409,7 +417,7 @@ def run(args):
                 extra_tle_dir=args.extra_tle_dir,
                 log=getattr(args, "log", True) and is_process_0(),
             )
-    except (TLEError, TruthError) as e:
+    except (TLEError, TruthError, ConfigError) as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
 

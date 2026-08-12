@@ -271,16 +271,14 @@ def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
 
 
 def fix_padding(config: dict, n_freq):
-
-    try:
-        if (
-            config["rfi"]["freq_pad_factor"] < 3
-            and n_freq == 1
-            and config["rfi"]["freq_int_samples"] > 1
-        ):
-            config["rfi"]["freq_pad_factor"] = 3
-    except:
-        print("freq_pad_factor is not defined")
+    # Both keys are guaranteed present by the packaged defaults and checked by
+    # tabascal.validation, so this no longer needs a guard.
+    if (
+        config["rfi"]["freq_pad_factor"] < 3
+        and n_freq == 1
+        and config["rfi"]["freq_int_samples"] > 1
+    ):
+        config["rfi"]["freq_pad_factor"] = 3
 
     return config
 

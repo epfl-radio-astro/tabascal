@@ -93,6 +93,8 @@ class RiemannVisTimeFreqCalculation(Component):
 
     parameters = {}
 
+    required_config = ("rfi.freq_int_samples",)
+
     def setup(self, config):
         """All validation and error-prone operations here"""
         try:
@@ -173,6 +175,8 @@ class RiemannVisTimeFreqCalculationFFI(Component):
     output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
+
+    required_config = ("rfi.freq_int_samples",)
 
     def setup(self, config):
         """All validation and error-prone operations here"""
@@ -258,6 +262,8 @@ class RiemannVisTimeFreqVariable(Component):
     output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
+
+    required_config = ("rfi.freq_int_samples",)
 
     def setup(self, config):
         """All validation and error-prone operations here"""
@@ -370,6 +376,8 @@ class RiemannVisTimeFreqVariableFFI(Component):
     output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
+
+    required_config = ("rfi.freq_int_samples",)
 
     def setup(self, config):
         """All validation and error-prone operations here"""

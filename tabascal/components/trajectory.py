@@ -167,6 +167,8 @@ class FixedOrbit(Component):
     # Add parameter specifications
     parameters = {}
 
+    required_config = ("rfi.freq_int_samples",)
+
     def setup(self, config):
         """All validation and error-prone operations here"""
         try:
