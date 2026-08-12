@@ -8,6 +8,7 @@ import pytest
 
 from tabascal import tle
 from tabascal.satchecker import client, SatCheckerTransportError
+from tabascal.satchecker import service
 from tabascal.satchecker.cache import TextTLECache
 from tabascal.satchecker.service import fetch_nearest_batch
 
@@ -256,6 +257,99 @@ def test_rate_limit_stops_the_batch_and_reports_the_wait():
     )
     assert len(attempted) <= 3
     assert set(result.errors) == set(range(1, 201))
+
+
+def test_service_failure_is_not_reported_as_a_missing_satellite(cache_dir, monkeypatch):
+    """An outage and a non-existent satellite are different problems.
+
+    Reporting "no record found" when the service was simply refusing us asserts
+    something untrue about the catalogue and offers remedies — supply local TLEs,
+    relax the ceiling, drop the ID — that all miss the only one that works.
+    """
+    def rate_limited(norad_id, epoch):
+        raise client.SatCheckerRateLimitError(
+            "HTTP 429 — it is rate-limiting this client", retry_after=90.0
+        )
+
+    monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", rate_limited)
+    result = tle.resolve_tles([25544], OBS)
+    assert 25544 in result.service_errors
+
+    with pytest.raises(tle.TLEError) as caught:
+        tle.require_complete_coverage(result)
+    text = str(caught.value)
+    assert "no record found" not in text
+    assert "rate-limiting" in text
+    assert "90 s" in text            # the Retry-After hint reaches the error
+    assert "Re-run when the service is reachable" in text
+
+
+def test_service_failure_is_reported_alongside_an_over_age_candidate(
+    cache_dir, monkeypatch
+):
+    """Both facts matter: how close the best record was, and that it could not be improved."""
+    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 9)]))
+
+    def down(norad_id, epoch):
+        raise SatCheckerTransportError("connection refused")
+
+    monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", down)
+    result = tle.resolve_tles([25544], OBS, remote_tle_max_age_days=3)
+
+    with pytest.raises(tle.TLEError) as caught:
+        tle.require_complete_coverage(result)
+    text = str(caught.value)
+    assert "9.000 d from the observation" in text     # the rejected candidate
+    assert "could not be asked for a closer one" in text  # and why nothing better came
+
+
+def test_uniform_rejection_is_recognised_as_a_wall_not_missing_satellites():
+    """A service answering 4xx to everything must not be asked once per satellite.
+
+    A 4xx is normally per-request — an unknown catalogue ID legitimately 404s —
+    so this can only be inferred from a run of identical statuses with no success
+    in between, not from the first one.
+    """
+    attempted = []
+    lock = threading.Lock()
+
+    def walled(norad_id, epoch):
+        with lock:
+            attempted.append(norad_id)
+        raise client.SatCheckerResponseError("blocked", status=403)
+
+    result = fetch_nearest_batch(
+        list(range(1, 201)), OBS, fetch_nearest_tle=walled, max_workers=5,
+        log=lambda _m: None,
+    )
+    assert len(attempted) <= service.RESPONSE_WALL_THRESHOLD + 5
+    assert set(result.errors) == set(range(1, 201))
+
+
+def test_a_few_missing_satellites_do_not_trip_the_wall_detector():
+    """Genuinely absent catalogue entries must not abort the healthy remainder."""
+    missing = {3, 7, 11}
+
+    def fetch(norad_id, epoch):
+        if norad_id in missing:
+            raise client.SatCheckerResponseError("no such object", status=404)
+        return make_catalogue_df([(norad_id, epoch)])
+
+    result = fetch_nearest_batch(
+        list(range(1, 41)), OBS, fetch_nearest_tle=fetch, max_workers=5,
+        log=lambda _m: None,
+    )
+    assert set(result.errors) == missing
+    assert result.records["NORAD_CAT_ID"].tolist() == [
+        nid for nid in range(1, 41) if nid not in missing
+    ]
+
+
+def test_missing_extra_tle_dir_is_reported(cache_dir, monkeypatch, capsys):
+    """A typo in a replay path must not silently become a different RFI model."""
+    _service(monkeypatch, {25544: OBS})
+    tle.resolve_tles([25544], OBS, extra_tle_dir="/nonexistent/typo-dir")
+    assert "does not exist" in capsys.readouterr().out
 
 
 def test_batch_response_errors_do_not_abandon_the_rest():

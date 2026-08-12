@@ -108,7 +108,16 @@ class SatCheckerResponseError(SatCheckerError):
     Per-request, not whole-service: the host is up and answering, so it says
     nothing about the other satellites. Callers record it against the one ID and
     carry on with the rest of the batch.
+
+    ``status`` is the HTTP status when the failure came from one (``None`` for a
+    malformed body). A run of identical statuses with no success in between is
+    how a caller recognises that "per-request" has stopped being true — a WAF
+    answering 403 to everything, or a renamed endpoint answering 404.
     """
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +184,7 @@ def _status_error(url: str, error: urllib.error.HTTPError) -> SatCheckerError:
             retry_after=retry_after,
         )
     if status is not None and 400 <= status < 500:
-        return SatCheckerResponseError(detail)
+        return SatCheckerResponseError(detail, status=status)
     return SatCheckerTransportError(detail)
 
 

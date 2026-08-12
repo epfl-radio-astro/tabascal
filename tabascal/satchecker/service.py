@@ -19,6 +19,14 @@ from .tle_parse import validate_tle_pair
 
 MAX_WORKERS = 5
 
+#: Identical per-request rejections, with no success in between, before the batch
+#: concludes it is facing a wall rather than that many absent satellites. A 4xx is
+#: normally per-request — "no such catalogue entry" is a legitimate 404 — so this
+#: has to be high enough that a handful of genuinely unknown IDs at the head of a
+#: list cannot trip it, and low enough that a service rejecting everything is not
+#: asked once per configured satellite.
+RESPONSE_WALL_THRESHOLD = 10
+
 
 def validated_records(
     records: pd.DataFrame, context: str, log: Callable[[str], None] = print
@@ -124,6 +132,9 @@ def fetch_nearest_batch(
     worker_count = min(max_workers, len(ids))
     unsent = iter(ids)
     outage: client.SatCheckerError | None = None
+    outage_summary: str | None = None
+    wall_status: int | None = None
+    wall_count = 0
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         in_flight: dict = {}
@@ -148,12 +159,32 @@ def fetch_nearest_batch(
                     errors[norad_id] = error
                     log(f"  nearest-TLE fetch failed for {norad_id}: {error}")
                     if outage is None:
-                        outage = error
+                        outage, outage_summary = error, _outage_summary(error)
                     continue
                 except client.SatCheckerError as error:
                     errors[norad_id] = error
                     log(f"  nearest-TLE fetch failed for {norad_id}: {error}")
+                    status = getattr(error, "status", None)
+                    if status is not None and status == wall_status:
+                        wall_count += 1
+                    else:
+                        wall_status, wall_count = status, 1
+                    if outage is None and wall_count >= RESPONSE_WALL_THRESHOLD:
+                        outage = client.SatCheckerTransportError(
+                            f"SatChecker answered HTTP {wall_status} to "
+                            f"{wall_count} consecutive requests without a single "
+                            "success; treating it as a service-level block rather "
+                            "than that many individually missing satellites"
+                        )
+                        outage_summary = (
+                            f"SatChecker is rejecting every request with "
+                            f"HTTP {wall_status}."
+                        )
+                        log(f"  {outage}")
                     continue
+                # The service answered properly, so any run of rejections was
+                # about those satellites and not about us.
+                wall_status, wall_count = None, 0
                 if not len(record):
                     continue
                 record = validated_records(
@@ -172,7 +203,7 @@ def fetch_nearest_batch(
                 top_up()
 
     if outage is not None:
-        summary = _outage_summary(outage)
+        summary = outage_summary or _outage_summary(outage)
         abandoned = list(unsent)
         for norad_id in abandoned:
             errors[norad_id] = client.SatCheckerTransportError(
