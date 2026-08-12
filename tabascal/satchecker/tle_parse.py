@@ -3,8 +3,8 @@
 One parser, two consumers: :mod:`tabascal.tle` derives OMM-style orbital
 elements through it, and :mod:`tabascal.satchecker.cache` validates envelopes
 through it — so anything the element parser consumes is, by construction,
-exactly what validation exercises. Imports only the standard library and
-:mod:`tabascal.time`.
+exactly what validation exercises. Imports only the standard library and this
+package's small Julian-date helper.
 
 Satellite identifiers use the Alpha-5 scheme where needed: catalogue numbers
 above 99999 encode the leading digits as a letter (``E8493`` -> 148493; the
@@ -17,7 +17,7 @@ import calendar
 import math
 from datetime import datetime, timedelta
 
-from tabascal.time import datetime_to_jd
+from ._time import datetime_to_jd
 
 
 _MU_KM3_S2 = 398600.4418  # Earth gravitational parameter, km^3/s^2

@@ -51,8 +51,8 @@ from typing import Optional
 
 import pandas as pd
 
-from tabascal.satchecker.tle_parse import validate_tle_pair
-from tabascal.time import datetime_to_jd, jd_to_datetime
+from ._time import datetime_to_jd, jd_to_datetime
+from .tle_parse import validate_tle_pair
 
 
 # Schema 2 adds the stable/provisional ``state`` field. The bump is load-bearing:

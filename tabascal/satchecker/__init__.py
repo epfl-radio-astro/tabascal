@@ -4,15 +4,18 @@
   no tabascal/JAX/casacore imports, so it can be extracted later.
 - :mod:`tabascal.satchecker.cache` — deterministic canonical-epoch cache key, the
   :class:`CatalogueCache` interface, and a text (JSON) implementation.
+- :mod:`tabascal.satchecker.service` — endpoint fallback, response validation,
+  throttled per-satellite acquisition, and resilient cache writes.
 
 TABASCAL-specific orchestration (source precedence, ``extra_tle_dir`` age policy,
-local orbital-element parsing) lives in :mod:`tabascal.tle`.
+remote-age acceptance, and complete-coverage enforcement) lives in
+:mod:`tabascal.tle`.
 
 The names most callers need are re-exported here so ``from tabascal import
 satchecker`` and ``satchecker.fetch_full_catalogue(...)`` keep working.
 """
 
-from tabascal.satchecker.client import (
+from .client import (
     BASE_URL,
     CATALOGUE_COLUMNS,
     CatalogueResult,
@@ -25,7 +28,7 @@ from tabascal.satchecker.client import (
     fetch_full_catalogue,
     fetch_nearest_tle,
 )
-from tabascal.satchecker.cache import (
+from .cache import (
     DEFAULT_CATALOGUE_INTERVAL_HOURS,
     PROVISIONAL,
     STABLE,
@@ -39,6 +42,7 @@ from tabascal.satchecker.cache import (
     read_legacy_tle_records,
     utc_now_jd,
 )
+from .service import ensure_snapshot, fetch_nearest_batch, store_or_warn
 
 __all__ = [
     "BASE_URL",
@@ -64,4 +68,7 @@ __all__ = [
     "catalogue_state",
     "read_legacy_tle_records",
     "utc_now_jd",
+    "ensure_snapshot",
+    "fetch_nearest_batch",
+    "store_or_warn",
 ]

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import json
 import os
-import time
+import time  # compatibility/injection seam; throttling policy lives in satchecker.service
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -64,7 +64,6 @@ from tabascal.satchecker import (
     DEFAULT_CATALOGUE_INTERVAL_HOURS,
     PROVISIONAL,
     STABLE,
-    CatalogueSnapshot,
     TextCatalogueCache,
     canonical_epoch_jd,
     canonical_stamp,
@@ -73,7 +72,6 @@ from tabascal.satchecker import (
     utc_now_jd,
 )
 from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-compat alias
-from tabascal.satchecker.cache import CATALOGUE_MIN_FRACTION
 
 # The TLE parser lives in tabascal.satchecker.tle_parse so cache validation and
 # element extraction exercise the *same* code; re-exported here under this
@@ -103,12 +101,6 @@ from tabascal.time import jd_to_datetime
 # Constants
 # ---------------------------------------------------------------------------
 
-# Delay between per-satellite requests. SatChecker publishes "100 per second,
-# 2000 per minute" on these routes, so this is ~6.7x more conservative than the
-# service permits — deliberately, because its rate limiter is configured to fail
-# open and this is a shared public facility run by IAU CPS. It is not a rate the
-# service has asked for; it is us choosing to be a good citizen.
-_THROTTLE_SECONDS = 0.2
 # DEFAULT_CATALOGUE_INTERVAL_HOURS is imported from tabascal.satchecker above —
 # the bucket policy's single source of truth.
 
@@ -118,11 +110,6 @@ _THROTTLE_SECONDS = 0.2
 # ``extra_tle_max_age_days: 0`` accepts a record matching the observation to TLE
 # precision while rejecting one several ms away — matching the documented semantics.
 _AGE_TOL_DAYS = 3e-8
-
-# Consecutive per-satellite failures after which the loop gives up. A fault in the
-# request rather than the service surfaces as a response error on every satellite
-# alike, so error typing alone cannot bound that case; this can.
-_MAX_CONSECUTIVE_FAILURES = 3
 
 # Above this many remote records the per-satellite log lines are replaced by a
 # grouped summary; set ``TABASCAL_TLE_LOG_DETAIL=1`` to force the full listing.
@@ -278,34 +265,6 @@ def _finalise_records(records: list[dict]) -> pd.DataFrame:
     tles = pd.DataFrame(records)
     tles["NORAD_CAT_ID"] = pd.to_numeric(tles["NORAD_CAT_ID"]).astype(int)
     return _add_parsed_elements(tles).reset_index(drop=True)
-
-
-def _validated_service_records(records: pd.DataFrame, context: str) -> pd.DataFrame:
-    """Return service rows whose TLE pair parses and matches its catalogue ID.
-
-    Managed-cache validation intentionally remains strict and all-or-nothing. This
-    boundary is different: a single bad row in a remote bulk response must not make
-    valid, requested satellites unusable. Invalid service rows are reported and
-    omitted before any cache write or downstream selection.
-    """
-    if not len(records):
-        return records.copy()
-
-    valid_indices = []
-    for idx, row in records.iterrows():
-        try:
-            nid = int(row["NORAD_CAT_ID"])
-            embedded_id = validate_tle_pair(row["TLE_LINE1"], row["TLE_LINE2"])
-            if embedded_id != nid:
-                raise ValueError(
-                    f"TLE lines belong to satellite {embedded_id}, not {nid}"
-                )
-        except (KeyError, ValueError, TypeError, OverflowError) as e:
-            shown_id = row.get("NORAD_CAT_ID", "unknown")
-            print(f"  {context}: invalid service record {shown_id!r} rejected — {e}")
-            continue
-        valid_indices.append(idx)
-    return records.loc[valid_indices].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -485,187 +444,6 @@ def _accept_remote(
         rejected.pop(nid, None)
 
 
-def _fetch_per_satellite(
-    norad_ids: list[int], epoch_jd: float, required: set[int] = frozenset()
-) -> pd.DataFrame:
-    """Fetch one record per ID from the per-satellite endpoint.
-
-    Serves both purposes the endpoint has here: filling IDs the bulk catalogue
-    lacks, and upgrading IDs whose bulk record is needlessly old. A satellite the
-    endpoint cannot answer for is simply omitted — the caller decides whether that
-    is a coverage failure or a declined upgrade.
-
-    *required* names the IDs the run cannot proceed without; everything else in
-    *norad_ids* is an optional freshness upgrade. A transport failure ends the loop
-    either way, since the service is down and continuing would issue one doomed
-    request per remaining satellite — but it is only *re-raised* while some
-    required ID has not yet been asked about. An outage during a batch of pure
-    upgrades must not fail a run whose satellites are all already resolved, and any
-    upgrades obtained before the outage are kept.
-    """
-    rows: list[pd.DataFrame] = []
-    # IDs the run needs and that we have not yet managed to ask the service about.
-    # A satellite that was asked and simply has no record leaves this set: that is
-    # a coverage failure, reported far better by the coverage check than by a
-    # transport error about a *different* satellite.
-    unasked_required = set(required)
-    consecutive_failures = 0
-    for i, nid in enumerate(norad_ids):
-        if i:
-            time.sleep(_THROTTLE_SECONDS)
-        try:
-            rec = satchecker.fetch_nearest_tle(nid, epoch_jd)
-        except satchecker.SatCheckerTransportError:
-            if unasked_required:
-                raise
-            print(
-                f"  per-satellite endpoint unreachable — skipping the remaining "
-                f"{len(norad_ids) - i} freshness upgrade(s); every satellite is "
-                f"already resolved, so the run continues on its catalogue records"
-            )
-            break
-        except TLEError as e:
-            unasked_required.discard(nid)  # asked; it failed for this satellite
-            print(f"  per-satellite fetch failed for {nid}: {e}")
-            consecutive_failures += 1
-            if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-                # Independent of how the failure was typed: a fault affecting the
-                # request itself rather than the service (a malformed epoch, say)
-                # produces a *response* error on every satellite alike, and working
-                # through hundreds of them would learn nothing. Stop rather than
-                # raise, so the IDs simply go unresolved and the coverage check
-                # reports all of them with its usual diagnostics.
-                print(
-                    f"  stopping per-satellite fetches after "
-                    f"{consecutive_failures} consecutive failures — the remaining "
-                    f"{len(norad_ids) - i - 1} would almost certainly fail too"
-                )
-                break
-            continue
-        unasked_required.discard(nid)
-        consecutive_failures = 0
-        if len(rec):
-            rec = _validated_service_records(rec, f"per-satellite fetch for {nid}")
-            if len(rec):
-                rows.append(rec)
-    if not rows:
-        return pd.DataFrame()
-    return pd.concat(rows, ignore_index=True)
-
-
-# ---------------------------------------------------------------------------
-# Managed snapshot (stable / provisional)
-# ---------------------------------------------------------------------------
-
-def _store_or_warn(action, target: Path, what: str) -> bool:
-    """Run a cache write, downgrading environmental failures to a warning.
-
-    A read-only filesystem, a full quota or a missing permission must not discard
-    a fetch that already succeeded: the validated in-memory records still serve
-    this run, only the reusable cache state is lost. Validation and programming
-    errors are *not* environmental and keep propagating — a snapshot that fails
-    its own validation is a bug, not a disk problem, and the atomic writer has
-    already removed any partial temporary file.
-    """
-    try:
-        action()
-        return True
-    except OSError as e:
-        print(
-            f"  warning: could not write the {what} to {target} ({e}); continuing "
-            f"with the validated records in memory, without reusable cache state"
-        )
-        return False
-
-
-def _ensure_snapshot(
-    cache: TextCatalogueCache,
-    catalogue_epoch_jd: float,
-    obs_epoch_jd: float,
-    state: str,
-    provisional_cache_hours: float,
-) -> Optional[CatalogueSnapshot]:
-    """Return the canonical snapshot, downloading + caching atomically on a miss.
-
-    *state* decides how the result may be persisted. A :data:`STABLE` epoch (older
-    than ``tle_catalogue_settle_days``) yields the permanent, immutable snapshot.
-    A :data:`PROVISIONAL` one — a recent or future epoch whose upstream catalogue
-    may still be filling — is stored under its own filename with a short expiry,
-    and is never promoted: once the epoch settles, the next successful request
-    writes a fresh stable snapshot instead.
-
-    Returns ``None`` when the service is reachable but its catalogue is unusable
-    at this epoch (empty, malformed, or too incomplete to cache). The caller then
-    resolves satellites through the per-ID fallback instead. Transport failures
-    still raise.
-    """
-    max_age = None if state == STABLE else provisional_cache_hours
-    snapshot = cache.get_snapshot(catalogue_epoch_jd, state, max_age)
-    if snapshot is not None:
-        label = "" if state == STABLE else f" ({state})"
-        print(
-            f"  managed catalogue cached at "
-            f"{canonical_stamp(catalogue_epoch_jd)}{label}"
-        )
-        return snapshot
-
-    print(
-        f"Fetching TLE catalogue from SatChecker for canonical epoch "
-        f"{canonical_stamp(catalogue_epoch_jd)} ..."
-    )
-    if state == PROVISIONAL:
-        print(
-            "  this epoch has not settled — the catalogue may still be filling "
-            f"upstream, so it will be cached provisionally for "
-            f"{provisional_cache_hours:g} h only"
-        )
-    try:
-        result = satchecker.fetch_full_catalogue(catalogue_epoch_jd)
-    except satchecker.SatCheckerTransportError:
-        raise  # service unreachable: per-satellite lookups would only storm it
-    except satchecker.SatCheckerResponseError as e:
-        # The service answered but the catalogue is unusable. get-nearest-tle is a
-        # different endpoint on a service we know is up, so it is worth trying.
-        print(f"  {e}")
-        print("  falling back to per-satellite TLE lookups for all requested IDs")
-        return None
-    records = _validated_service_records(result.records, "managed catalogue")
-    actual_count = len(records)
-    if not actual_count:
-        print(
-            "  managed catalogue has no valid TLE rows — falling back to "
-            "per-satellite lookups"
-        )
-        return None
-    if actual_count < result.expected_count * CATALOGUE_MIN_FRACTION:
-        print(
-            f"  managed catalogue has {actual_count} valid rows of "
-            f"{result.expected_count} expected (< {CATALOGUE_MIN_FRACTION:.0%}) "
-            "— not caching; falling back to per-satellite lookups"
-        )
-        return None
-    snapshot = CatalogueSnapshot(
-        catalogue_epoch_jd=catalogue_epoch_jd,
-        records=records,
-        requested_epoch_jd=obs_epoch_jd,
-        expected_count=result.expected_count,
-        actual_count=actual_count,
-        service_version=result.service_version,
-        state=state,
-    )
-    stored = _store_or_warn(
-        lambda: cache.store_snapshot(snapshot),
-        cache.snapshot_path(catalogue_epoch_jd, state),
-        f"{state} catalogue snapshot",
-    )
-    if stored:
-        print(
-            f"Saved {len(records)} TLEs for {canonical_stamp(catalogue_epoch_jd)}"
-            + ("" if state == STABLE else f" ({state}, expires in {provisional_cache_hours:g} h)")
-        )
-    return snapshot
-
-
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -843,8 +621,13 @@ def resolve_tles(
         # raised: the cached fallback records below may already cover everything.
         outage: Optional[Exception] = None
         try:
-            snapshot = _ensure_snapshot(
-                cache, catalogue_epoch, obs_epoch_jd, state, provisional_cache_hours
+            snapshot = satchecker.ensure_snapshot(
+                cache,
+                catalogue_epoch,
+                obs_epoch_jd,
+                state,
+                provisional_cache_hours,
+                fetch_full_catalogue=satchecker.fetch_full_catalogue,
             )
         except satchecker.SatCheckerTransportError as e:
             snapshot, outage = None, e
@@ -914,9 +697,15 @@ def resolve_tles(
                 f"Fetching {len(to_fetch)} TLE(s) individually from SatChecker "
                 f"({', '.join(reasons)}): {to_fetch}"
             )
-            fetched = _fetch_per_satellite(to_fetch, catalogue_epoch, remaining)
+            fetched = satchecker.fetch_nearest_batch(
+                to_fetch,
+                catalogue_epoch,
+                remaining,
+                fetch_nearest_tle=satchecker.fetch_nearest_tle,
+                sleep=time.sleep,
+            )
             if len(fetched):
-                _store_or_warn(
+                satchecker.store_or_warn(
                     lambda: cache.store_extra(
                         catalogue_epoch, fetched, state, extra_max_age_hours
                     ),
