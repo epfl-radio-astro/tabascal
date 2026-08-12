@@ -429,6 +429,43 @@ class TestFetchOrbitalElementsEmpty:
             fetch_standard_orbital_elements(2460000.0, [99999])
 
 
+class TestFetchOrbitalElementsNoSatellites:
+    """Configuring no satellites is not a resolution failure.
+
+    ``norad_ids: []`` is the shipped default and TabConfig calls the fetcher
+    unconditionally, so a model with no TLE trajectory component must build an
+    empty RFI model. Treating the empty request as "no TLEs could be resolved"
+    made every satellite-free configuration unrunnable.
+    """
+
+    def test_empty_request_yields_an_empty_rfi_model(self):
+        from tabascal.components.trajectory import fetch_orbital_elements
+        from tabascal.tle import TLEResolution
+
+        resolution = TLEResolution(
+            requested=[], obs_epoch_jd=float("nan"), remote_max_age_days=3.0
+        )
+        elements, epoch_jd, norad_ids, tles, n_rfi_real = fetch_orbital_elements(
+            resolution=resolution
+        )
+        assert elements.shape == (0, 6)
+        assert epoch_jd.shape == (0,)
+        assert norad_ids == []
+        assert tles.shape == (0, 2)
+        assert n_rfi_real == 0
+
+    def test_empty_request_without_a_preflight_resolution(self, monkeypatch):
+        import pandas as pd
+        from tabascal.components import trajectory as traj_mod
+
+        monkeypatch.setattr(traj_mod, "get_tles_by_id", lambda *a, **k: pd.DataFrame())
+        _, _, norad_ids, _, n_rfi_real = traj_mod.fetch_orbital_elements(
+            2460000.0, []
+        )
+        assert norad_ids == []
+        assert n_rfi_real == 0
+
+
 class TestFetchOrbitalElementsPartial:
     """A partial resolution must stop the run, naming the excluded NORAD IDs.
 

@@ -687,6 +687,38 @@ def _pad_rfi_sources(tles_df):
     return pd.concat([tles_df, *([tles_df.iloc[[-1]]] * n_pad)], ignore_index=True)
 
 
+#: Element columns the SGP4/Kepler propagators consume, in the order they expect.
+_ELEMENT_COLUMNS = [
+    "SEMIMAJOR_AXIS",
+    "ECCENTRICITY",  # ecco
+    "INCLINATION",  # inclo
+    "RA_OF_ASC_NODE",  # nodeo
+    "ARG_OF_PERICENTER",  # argpo
+    "MEAN_ANOMALY",  # mo
+]
+
+
+def _no_satellites():
+    """Empty element arrays for a model that configures no satellites.
+
+    A satellite-free model is a legitimate configuration — ``norad_ids: []`` is
+    the shipped default, and :func:`tabascal.tle_config.model_requires_tles` is
+    what rejects the case where the *model* needs TLEs but none were given. This
+    path must therefore produce an empty RFI model rather than be reported as a
+    resolution failure.
+    """
+    return (
+        jnp.zeros((0, len(_ELEMENT_COLUMNS))),
+        jnp.zeros((0,)),
+        [],
+        np.empty((0, 2), dtype=object),
+    )
+
+
+def _requested_nothing(norad_ids) -> bool:
+    return norad_ids is None or not len(np.atleast_1d(np.asarray(norad_ids)))
+
+
 def _require_tles(tles_df, norad_ids) -> None:
     """Validate the resolved TLEs against the requested NORAD IDs.
 
@@ -696,6 +728,9 @@ def _require_tles(tles_df, norad_ids) -> None:
     otherwise surface as an opaque pandas ``KeyError`` on the element columns, and
     a partial one would silently shrink the RFI model — degrading subtraction with
     no visible signal.
+
+    Callers screen out the "nothing was requested" case first, so an empty frame
+    reaching here always means a genuine failure to resolve.
     """
     requested = sorted({int(n) for n in np.atleast_1d(np.asarray(norad_ids))})
     if not len(tles_df):
@@ -738,6 +773,8 @@ def fetch_orbital_elements(
         extra_tle_dir,
         extra_tle_max_age_days,
     )
+    if _requested_nothing(norad_ids):
+        return (*_no_satellites(), 0)
     _require_tles(tles_df, norad_ids)
     # Real (unpadded) source count is the number of rows the fetch actually returned,
     # captured before padding. Inferring it from the padded id list (e.g. counting
@@ -745,18 +782,7 @@ def fetch_orbital_elements(
     n_rfi_real = len(tles_df)
     tles_df = _pad_rfi_sources(tles_df)
 
-    elements = jnp.atleast_2d(
-        tles_df[
-            [
-                "SEMIMAJOR_AXIS", #
-                "ECCENTRICITY", # ecco
-                "INCLINATION", # inclo
-                "RA_OF_ASC_NODE", # nodeo
-                "ARG_OF_PERICENTER", # argpo
-                "MEAN_ANOMALY", # mo
-            ]
-        ].values
-    )
+    elements = jnp.atleast_2d(tles_df[_ELEMENT_COLUMNS].values)
     epoch_jd = jnp.atleast_1d(tles_df["EPOCH_JD"].values)  # type: ignore
     norad_ids = list(tles_df["NORAD_CAT_ID"].values)
     tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
@@ -789,7 +815,13 @@ def fetch_standard_orbital_elements(
     extra_tle_max_age_days=None,
     resolution=None,
 ):
+    """Orbital elements for the SGP4 propagators.
 
+    Unlike :func:`fetch_orbital_elements` this deliberately has no empty-request
+    escape: only the SGP4/Kepler trajectory components call it, and those are
+    exactly the components ``model_requires_tles`` refuses to configure without
+    satellites. Reaching here with nothing requested is a real failure.
+    """
     tles_df, norad_ids = _resolved_frame(
         resolution,
         times_jd,
