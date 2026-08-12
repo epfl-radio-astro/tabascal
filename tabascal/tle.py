@@ -194,6 +194,12 @@ class TLEResolution:
     remote_max_age_days: Optional[float]
     resolved: dict[int, ResolvedTLE] = field(default_factory=dict)
     rejected: dict[int, RejectedTLE] = field(default_factory=dict)
+    #: Why the service could not answer for an ID, when it was asked and failed.
+    #: Kept separate from ``rejected``: a rejection is a record we saw and judged,
+    #: whereas this is the absence of an answer. Without it a coverage failure
+    #: during an outage reads as "this satellite does not exist", which is a
+    #: different problem with different remedies.
+    service_errors: dict[int, Exception] = field(default_factory=dict)
 
     @property
     def missing(self) -> list[int]:
@@ -503,12 +509,17 @@ def _coverage_error(resolution: TLEResolution) -> TLEError:
     ]
     for nid in missing:
         bad = resolution.rejected.get(nid)
+        failure = resolution.service_errors.get(nid)
         if bad is None:
-            lines.append(
-                f"  {nid}: no record found in extra_tle_dir, the managed "
-                f"per-satellite cache, or SatChecker"
-            )
-        elif bad.age_days is None:
+            if failure is not None:
+                lines.append(f"  {nid}: SatChecker could not answer — {failure}")
+            else:
+                lines.append(
+                    f"  {nid}: no record found in extra_tle_dir, the managed "
+                    f"per-satellite cache, or SatChecker"
+                )
+            continue
+        if bad.age_days is None:
             lines.append(f"  {nid}: best candidate unusable — {bad.reason}")
         else:
             provider = f", provider {bad.provider}" if bad.provider else ""
@@ -517,11 +528,42 @@ def _coverage_error(resolution: TLEResolution) -> TLEError:
                 f"observation (epoch {jd_to_datetime(bad.epoch_jd).isoformat()} "
                 f"UTC, from {bad.source}{provider}) — rejected by {bad.reason}"
             )
+        if failure is not None:
+            # Both matter: how close the best record was, *and* that a fresher
+            # one could not be requested.
+            lines.append(f"      SatChecker could not be asked for a closer one — {failure}")
+
     limit = resolution.remote_max_age_days
     lines += [
         "",
         f"The remote age ceiling in force is remote_tle_max_age_days="
         f"{'null (disabled)' if limit is None else f'{limit:g}'}. Remedies:",
+    ]
+    # A service failure is not the user's configuration being wrong, so lead with
+    # the remedy that actually applies before the ones that change the model.
+    if resolution.service_errors:
+        retry_after = max(
+            (
+                seconds
+                for seconds in (
+                    getattr(error, "retry_after", None)
+                    for error in resolution.service_errors.values()
+                )
+                if seconds is not None
+            ),
+            default=None,
+        )
+        when = (
+            f" It asked for {retry_after:g} s before the next request."
+            if retry_after is not None
+            else ""
+        )
+        lines.append(
+            f"  - SatChecker did not answer for "
+            f"{len(resolution.service_errors)} of these.{when} Re-run when the "
+            "service is reachable; nothing about the configuration need change"
+        )
+    lines += [
         "  - put an acceptable TLE for these satellites in a directory and pass "
         "--extra-tle-dir <dir> (or set satellites.extra_tle_dir)",
         "  - deliberately change satellites.remote_tle_max_age_days (null removes "
@@ -585,6 +627,16 @@ def resolve_tles(
             f"TLE extra dir          : {Path(extra_tle_dir).resolve()} "
             f"(max age {'unlimited' if extra_max_age is None else f'{extra_max_age:g} d'})"
         )
+        # A directory that is not there was almost certainly meant to be. Staying
+        # silent turns a typo in a replay path into a run that quietly models
+        # different satellites than the ones asked for, while the line above
+        # implies the directory was searched.
+        if not Path(extra_tle_dir).is_dir():
+            print(
+                "  warning: this extra_tle_dir does not exist (or is not a "
+                "directory); no local TLEs will be found there. Check the path "
+                "if you meant to supply your own TLEs."
+            )
         from_extra, extra_rejected = _select_from_extra_dir(
             extra_tle_dir, wanted, obs_epoch_jd, extra_max_age
         )
@@ -656,6 +708,14 @@ def resolve_tles(
                     resolution.resolved,
                     resolution.rejected,
                 )
+
+            # Keep why the service could not answer, for the IDs still without a
+            # TLE. Discarding it makes an outage indistinguishable from a
+            # satellite that genuinely has no record — the same error text, but
+            # remedies that do not include the only one that works: try again.
+            for norad_id, error in batch.errors.items():
+                if norad_id not in resolution.resolved:
+                    resolution.service_errors[norad_id] = error
 
             # A service failure — or a response no fresher than what we hold —
             # does not invalidate a cached record within the hard ceiling. Those
