@@ -21,11 +21,22 @@ TABASCAL does not use SatChecker's full-catalogue endpoint. That endpoint select
 the newest TLE at or before the requested epoch, whereas TABASCAL requires the
 TLE whose epoch is closest on either side.
 
-If a request fails because the service cannot be reached at all, TABASCAL
-abandons the requests still queued instead of paying the 120-second timeout once
-per remaining satellite. Every configured ID is still reported, so the coverage
-error names them all. A malformed *reply* is treated as that one satellite's
-problem and the rest of the batch continues.
+TABASCAL aims to be a considerate client of a free public service. Requests are
+issued at most five at a time, are submitted one at a time as earlier ones land
+rather than queued all at once, and every response that can be reused is written
+to the local cache so a later run does not ask again.
+
+If a request fails because the service cannot be reached, or the service returns
+HTTP 429 to say this client should back off, TABASCAL stops the batch there: no
+further requests are sent, so an outage or a rate limit costs at most five
+requests no matter how many satellites are configured. Every configured ID is
+still reported, so the coverage error names them all. When the service supplies a
+`Retry-After` hint, it is included in the error so you know when the run is worth
+repeating — TABASCAL reports the wait rather than sleeping through it, so an
+unattended preflight never blocks for an interval it did not choose.
+
+A malformed *reply* is different: the service is up and answering, so it is
+treated as that one satellite's problem and the rest of the batch continues.
 
 Every configured satellite must resolve to an acceptable TLE. The check runs
 during preflight, before the visibilities are read. A missing or over-age record

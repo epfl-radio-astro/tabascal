@@ -1,13 +1,16 @@
 """Offline contract tests for the single-endpoint SatChecker client."""
 
+import email.utils
 import json
 import socket
 import urllib.error
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tabascal.satchecker import client
 from tabascal.satchecker.client import (
+    SatCheckerRateLimitError,
     SatCheckerResponseError,
     SatCheckerTransportError,
     fetch_nearest_tle,
@@ -71,6 +74,55 @@ def test_backoff_and_server_statuses_are_transport_errors(monkeypatch, status):
     monkeypatch.setattr(client.urllib.request, "urlopen", fail)
     with pytest.raises(SatCheckerTransportError, match=f"HTTP {status}"):
         fetch_nearest_tle(25544, EPOCH)
+
+
+def _raise_429(monkeypatch, headers):
+    def fail(*args, **kwargs):
+        raise urllib.error.HTTPError("url", 429, "Too Many Requests", headers, None)
+
+    monkeypatch.setattr(client.urllib.request, "urlopen", fail)
+
+
+def test_rate_limit_is_its_own_error_type(monkeypatch):
+    """429 must be distinguishable: it is about this client, not this satellite."""
+    _raise_429(monkeypatch, {})
+    with pytest.raises(SatCheckerRateLimitError) as caught:
+        fetch_nearest_tle(25544, EPOCH)
+    assert caught.value.retry_after is None
+    # Still a transport error, so a batch stops on it rather than working onward.
+    assert isinstance(caught.value, SatCheckerTransportError)
+
+
+def test_retry_after_delta_seconds_is_reported(monkeypatch):
+    _raise_429(monkeypatch, {"Retry-After": "120"})
+    with pytest.raises(SatCheckerRateLimitError, match="120 s before the next request"):
+        fetch_nearest_tle(25544, EPOCH)
+
+
+def test_retry_after_http_date_is_reported(monkeypatch):
+    """RFC 9110 permits an HTTP-date as well as delta-seconds."""
+    when = datetime.now(timezone.utc) + timedelta(seconds=90)
+    _raise_429(monkeypatch, {"Retry-After": email.utils.format_datetime(when)})
+    with pytest.raises(SatCheckerRateLimitError) as caught:
+        fetch_nearest_tle(25544, EPOCH)
+    assert caught.value.retry_after == pytest.approx(90, abs=5)
+
+
+@pytest.mark.parametrize("value", ["", "not-a-date", "Mon, 99 Xxx 9999"])
+def test_unusable_retry_after_does_not_become_a_second_failure(monkeypatch, value):
+    """A bad hint must degrade to 'no hint', never to an exception of its own."""
+    _raise_429(monkeypatch, {"Retry-After": value})
+    with pytest.raises(SatCheckerRateLimitError) as caught:
+        fetch_nearest_tle(25544, EPOCH)
+    assert caught.value.retry_after is None
+
+
+def test_elapsed_retry_after_clamps_to_zero(monkeypatch):
+    when = datetime.now(timezone.utc) - timedelta(hours=1)
+    _raise_429(monkeypatch, {"Retry-After": email.utils.format_datetime(when)})
+    with pytest.raises(SatCheckerRateLimitError) as caught:
+        fetch_nearest_tle(25544, EPOCH)
+    assert caught.value.retry_after == 0.0
 
 
 @pytest.mark.parametrize("error", [socket.timeout("slow"), OSError("dropped")])

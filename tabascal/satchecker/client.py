@@ -17,11 +17,14 @@ names the rest of tabascal expects): ``NORAD_CAT_ID``, ``OBJECT_NAME``,
 
 from __future__ import annotations
 
+import email.utils
 import http.client
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -79,6 +82,26 @@ class SatCheckerTransportError(SatCheckerError):
     """
 
 
+class SatCheckerRateLimitError(SatCheckerTransportError):
+    """The service asked this client to slow down (HTTP 429).
+
+    A *transport* error by classification, because the thing it tells us is about
+    the service and not about the satellite we happened to ask for: the next
+    request is unwelcome too. Being a subclass is what stops a batch dead on the
+    first 429 instead of working through the rest of the list.
+
+    ``retry_after`` carries the service's own ``Retry-After`` hint in seconds when
+    it sends one, so the message can say when the run is worth repeating. TABASCAL
+    reports it rather than sleeping on it: an unattended preflight that quietly
+    blocks for an interval the service chose is worse than one that stops and says
+    why.
+    """
+
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class SatCheckerResponseError(SatCheckerError):
     """The service answered, but the response is unusable: malformed or incomplete.
 
@@ -96,6 +119,35 @@ class SatCheckerResponseError(SatCheckerError):
 _BACKOFF_STATUSES = frozenset({429})
 
 
+def _retry_after_seconds(error: urllib.error.HTTPError) -> Optional[float]:
+    """Seconds to wait, from a ``Retry-After`` header in either permitted form.
+
+    RFC 9110 allows delta-seconds (``120``) or an HTTP-date
+    (``Wed, 21 Oct 2026 07:28:00 GMT``); both appear in the wild. An absent,
+    malformed or already-elapsed value yields ``None`` / ``0.0`` rather than an
+    exception — a bad hint must never turn into a second failure on top of the
+    one being reported.
+    """
+    headers = getattr(error, "headers", None)
+    raw = headers.get("Retry-After") if headers is not None else None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        stamp = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:  # an HTTP-date without a zone is GMT
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return max(0.0, (stamp - datetime.now(timezone.utc)).total_seconds())
+
+
 def _status_error(url: str, error: urllib.error.HTTPError) -> SatCheckerError:
     """Classify an HTTP status response as a response or a transport failure.
 
@@ -104,11 +156,25 @@ def _status_error(url: str, error: urllib.error.HTTPError) -> SatCheckerError:
     server was rejecting this particular request rather than failing wholesale:
 
     * 4xx (except 429) — this individual request was rejected.
-    * 429 and 5xx — the service is rate-limiting or failing server-side.
+    * 429 — the service is asking this client to back off, and says so about the
+      client rather than about the satellite requested.
+    * 5xx — the service is failing server-side.
     """
     status = getattr(error, "code", None)
     detail = f"SatChecker returned HTTP {status} ({url}): {error.reason}"
-    if status is not None and 400 <= status < 500 and status not in _BACKOFF_STATUSES:
+    if status in _BACKOFF_STATUSES:
+        retry_after = _retry_after_seconds(error)
+        hint = (
+            f"; it asks for {retry_after:g} s before the next request"
+            if retry_after is not None
+            else ""
+        )
+        return SatCheckerRateLimitError(
+            f"SatChecker returned HTTP {status} — it is rate-limiting this "
+            f"client{hint} ({url}): {error.reason}",
+            retry_after=retry_after,
+        )
+    if status is not None and 400 <= status < 500:
         return SatCheckerResponseError(detail)
     return SatCheckerTransportError(detail)
 
