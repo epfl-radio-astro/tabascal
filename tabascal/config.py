@@ -234,6 +234,24 @@ class TabConfig:
         max_time_bins: int,
         min_divisors: int = 8,
     ):
+        # A satellite-free model has no RFI trajectory, so there is nothing to
+        # derive a sub-integration sampling rate from: the fringe frequency whose
+        # rate of change sets it is a property of the satellites. Skip the
+        # position and fringe-frequency work rather than let it run on an empty
+        # TLE set, where `fringe_freq` collapses to a 1-D empty array and the
+        # reductions below fail with an opaque AxisError far from the cause.
+        # One sample per integration is the floor, which is what no RFI needs.
+        if self.n_rfi == 0:
+            self.max_rfi_vis = np.max(np.abs(self.vis_obs))
+            self.time_sample_idxs, self.time_strides, self.n_int_time = (
+                get_strides_and_idxs(
+                    np.ones(self.n_bl, dtype=int),
+                    min_time_bins,
+                    max_time_bins,
+                    min_divisors,
+                )
+            )
+            return
 
         jd_minute = 1 / (24 * 60)
         times_jd_coarse = np.arange(
