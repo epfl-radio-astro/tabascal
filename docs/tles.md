@@ -205,7 +205,7 @@ width — never on what happens to be cached already.
 |---|---|---|
 | Settled epoch (older than `tle_catalogue_settle_days`), catalogue available | Full catalogue downloaded once, stored as `catalogue-<stamp>.json`. Its records may be older than `get-nearest-tle` would return — see [above](#sec-endpoint-freshness) | Served from cache **forever** — deterministic, never refreshed |
 | Unsettled epoch (newer than `tle_catalogue_settle_days`, or in the future) | Catalogue downloaded and stored only as `catalogue-<stamp>-provisional.json` | Reused for `tle_provisional_cache_hours` (default 12 h), then refetched. **Never promoted** to a stable snapshot: once the epoch settles, the next run downloads a fresh one |
-| Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra-provisional.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run, and the fallback records expire after `tle_provisional_cache_hours`; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence |
+| Recent epoch beyond SatChecker's data horizon (catalogue empty) | Per-satellite fallback; records stored as `catalogue-<stamp>-extra-provisional.json`; **no snapshot is stored** | The catalogue is re-attempted on **every** run, and the fallback records expire after `tle_provisional_cache_hours` — a refresh discards the expired entries rather than merging them, so a satellite the service stops returning does not linger; once SatChecker backfills the epoch, the snapshot is fetched and takes precedence |
 | Catalogue contains malformed rows or fewer than 99% of the expected rows remain valid | Malformed rows are rejected. An incomplete catalogue is **not cached**, and the requested satellites are fetched individually | The full catalogue is re-attempted on every run |
 | Satellite missing from a settled epoch's snapshot | Per-satellite lookup for that ID, cached in the `-extra` file | Reused from the `-extra` cache; **not refreshed** even if SatChecker later adds the satellite to the catalogue |
 | Snapshot record older than `remote_tle_target_age_days` | Per-satellite lookup replaces it if the service has something nearer, cached in the same `-extra` file | Reused from cache — the upgrade requests are paid once per canonical epoch, not once per run |
@@ -246,7 +246,11 @@ Several consequences are worth understanding:
 - **Invalid cache files do not become trusted inputs.** Managed snapshots and
   per-satellite fallback files are checked for their schema, canonical epoch,
   stable/provisional state, record counts, completeness, TLE syntax, and matching
-  satellite identities. A corrupt, incomplete, wrong-epoch or wrong-state file is
+  satellite identities. Every TLE line must also be 69 columns and carry a correct
+  modulo-10 checksum, wherever it came from — that is what catches a
+  single-character corruption, which would otherwise parse cleanly, stay in range,
+  and silently shift the modelled trajectory. A record failing any of these falls
+  through to the next source. A corrupt, incomplete, wrong-epoch or wrong-state file is
   treated as a cache miss and the service is consulted again. The cache schema
   version was bumped for the provisional policy, so snapshots written by earlier
   builds are ignored rather than becoming trusted by aging in place.

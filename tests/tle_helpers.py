@@ -20,6 +20,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from tabascal.satchecker.tle_parse import tle_checksum
 from tabascal.time import datetime_to_jd, jd_to_datetime
 
 
@@ -44,13 +45,25 @@ _L1 = "1 25544U 98067A   08264.51782528 -.00002182  00000-0 -11606-4 0  2927"
 _L2 = "2 25544  51.6416 247.4627 0006703 130.5360 325.0288 15.72125391563537"
 
 
+def with_checksum(line: str) -> str:
+    """Return *line* with its column-69 modulo-10 checksum recomputed.
+
+    Substituting a NORAD ID or epoch into the template invalidates the original
+    checksum, and the parser rejects a bad one — as it should, since that is how a
+    single-character corruption is caught. Fixtures therefore have to recompute it
+    exactly as a real TLE producer would.
+    """
+    body = line[:68]
+    return body + str(tle_checksum(body))
+
+
 def make_tle(norad_id: int, epoch_jd: float) -> tuple[str, str]:
     """Return a (line1, line2) TLE pair for *norad_id* with the given UTC epoch.
 
     The NORAD ID and the line-1 epoch field are substituted into the ISS template
-    at their fixed columns, so the pair parses and its parsed epoch round-trips to
-    ``epoch_jd`` (to ~ms). Other elements are the template's and are irrelevant to
-    the cache/precedence/age logic under test.
+    at their fixed columns and the checksums are recomputed, so the pair validates
+    and its parsed epoch round-trips to ``epoch_jd`` (to ~ms). Other elements are
+    the template's and are irrelevant to the cache/precedence/age logic under test.
     """
     nid = f"{int(norad_id):05d}"
     dt = jd_to_datetime(epoch_jd)
@@ -59,7 +72,7 @@ def make_tle(norad_id: int, epoch_jd: float) -> tuple[str, str]:
     epoch_field = f"{yy:02d}{doy:012.8f}"  # 2 + 12 = 14 columns (line1[18:32])
     line1 = "1 " + nid + _L1[7:18] + epoch_field + _L1[32:]
     line2 = "2 " + nid + _L2[7:]
-    return line1, line2
+    return with_checksum(line1), with_checksum(line2)
 
 
 def jd(year, month, day, hour=0, minute=0, second=0) -> float:

@@ -615,6 +615,49 @@ class TestCatalogueSettling:
         _resolve([25544], now=_UNSETTLED_NOW + 13 / 24)
         assert counter["near"] == 2
 
+    def test_expired_fallback_records_are_not_resurrected_by_a_refresh(
+        self, cache_dir, monkeypatch
+    ):
+        # A refresh that returns only *some* of the previously cached satellites
+        # must not fold the expired rows back in and stamp the lot fresh: the one
+        # the service no longer returns would then be reused indefinitely, which
+        # is exactly what the provisional expiry exists to prevent.
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(
+            monkeypatch,
+            [(111, jd(2023, 2, 21, 13)), (222, jd(2023, 2, 21, 13))],
+        )
+        _resolve([111, 222], now=_UNSETTLED_NOW)
+        assert len(json.loads(
+            next(cache_dir.glob("*-extra-provisional.json")).read_text()
+        )["records"]) == 2
+
+        # 13 h later the entry has expired, and the service now answers for 111 only.
+        _serve_nearest(monkeypatch, [(111, jd(2023, 2, 21, 14))])
+        later = _UNSETTLED_NOW + 13 / 24
+        resolution = _resolve([111, 222], now=later)
+
+        stored = json.loads(
+            next(cache_dir.glob("*-extra-provisional.json")).read_text()
+        )["records"]
+        assert [int(r["NORAD_CAT_ID"]) for r in stored] == [111]
+        assert resolution.missing == [222]
+
+    def test_unexpired_fallback_records_are_still_merged(self, cache_dir, monkeypatch):
+        # The converse: within the expiry window the existing rows must survive a
+        # refresh, so a second satellite does not cost a re-fetch of the first.
+        _serve_empty_catalogue(monkeypatch)
+        _serve_nearest(monkeypatch, [(111, jd(2023, 2, 21, 13))])
+        _resolve([111], now=_UNSETTLED_NOW)
+
+        _serve_nearest(monkeypatch, [(222, jd(2023, 2, 21, 13))])
+        _resolve([222], now=_UNSETTLED_NOW + 1 / 24)
+
+        stored = json.loads(
+            next(cache_dir.glob("*-extra-provisional.json")).read_text()
+        )["records"]
+        assert sorted(int(r["NORAD_CAT_ID"]) for r in stored) == [111, 222]
+
     def test_settled_fallback_is_kept_indefinitely(self, cache_dir, monkeypatch):
         # A settled epoch's fallback record is immutable, like its snapshot.
         counter = {}

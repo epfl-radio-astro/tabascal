@@ -134,19 +134,70 @@ def parse_tle_elements(line1: str, line2: str) -> dict:
     }
 
 
+#: A TLE line is exactly 69 columns, the last of which is a modulo-10 checksum.
+TLE_LINE_LENGTH = 69
+
+
+def tle_checksum(line: str) -> int:
+    """Modulo-10 checksum over a TLE line's first 68 columns.
+
+    Digits count as themselves and a minus sign counts as 1; everything else
+    (letters, plus signs, decimal points, spaces) counts as zero.
+    """
+    return sum(
+        int(c) if c.isdigit() else (1 if c == "-" else 0) for c in line[:68]
+    ) % 10
+
+
+def validate_tle_line(line: str, number: int) -> str:
+    """Validate one TLE line's marker, width and checksum; return it trimmed.
+
+    The checksum is what makes single-character corruption detectable. Without
+    it, a flipped digit inside a fixed-width numeric field parses cleanly, stays
+    in range, and silently shifts the modelled trajectory — the failure mode that
+    is hardest to notice downstream. Trailing whitespace and newlines are
+    tolerated (files routinely carry them); leading layout is not, because every
+    field is read by column.
+    """
+    if not isinstance(line, str):
+        raise ValueError("TLE lines must be strings")
+    trimmed = line.rstrip()
+    if not trimmed.startswith(f"{number} "):
+        raise ValueError(f"TLE line {number} must start with '{number} '")
+    if len(trimmed) != TLE_LINE_LENGTH:
+        raise ValueError(
+            f"TLE line {number} must be {TLE_LINE_LENGTH} characters, "
+            f"got {len(trimmed)}"
+        )
+    check_digit = trimmed[68]
+    if not check_digit.isdigit():
+        raise ValueError(
+            f"TLE line {number} checksum column is {check_digit!r}, not a digit"
+        )
+    expected = tle_checksum(trimmed)
+    if int(check_digit) != expected:
+        raise ValueError(
+            f"TLE line {number} checksum mismatch: line carries {check_digit}, "
+            f"content gives {expected}"
+        )
+    return trimmed
+
+
 def validate_tle_pair(line1, line2) -> int:
     """Fully validate a TLE pair; return its decoded NORAD catalogue ID.
 
-    Runs the *same* parser downstream element extraction uses, so every consumed
-    field (epoch, inclination, RAAN, eccentricity, argument of pericenter, mean
-    anomaly, mean motion, BSTAR) must parse. Also decodes the satellite
-    identifier embedded in both lines (Alpha-5 aware) and requires them to
-    agree. Raises ``ValueError`` on any problem.
+    Checks each line's width and modulo-10 checksum, then runs the *same* parser
+    downstream element extraction uses, so every consumed field (epoch,
+    inclination, RAAN, eccentricity, argument of pericenter, mean anomaly, mean
+    motion, BSTAR) must parse. Also decodes the satellite identifier embedded in
+    both lines (Alpha-5 aware) and requires them to agree. Raises ``ValueError``
+    on any problem, which callers treat as "reject this record and try another
+    source".
     """
     if not (isinstance(line1, str) and isinstance(line2, str)):
         raise ValueError("TLE lines must be strings")
-    if not line1.startswith("1 ") or not line2.startswith("2 "):
-        raise ValueError("TLE lines must start with '1 ' and '2 '")
+    line1 = validate_tle_line(line1, 1)
+    line2 = validate_tle_line(line2, 2)
     id1 = decode_norad_id(line1[2:7])
     id2 = decode_norad_id(line2[2:7])
     if id1 != id2:

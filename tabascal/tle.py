@@ -890,7 +890,9 @@ def resolve_tles(
             fetched = _fetch_per_satellite(to_fetch, catalogue_epoch, remaining)
             if len(fetched):
                 _store_or_warn(
-                    lambda: cache.store_extra(catalogue_epoch, fetched, state),
+                    lambda: cache.store_extra(
+                        catalogue_epoch, fetched, state, extra_max_age_hours
+                    ),
                     cache.extra_path(catalogue_epoch, state),
                     "per-satellite fallback records",
                 )

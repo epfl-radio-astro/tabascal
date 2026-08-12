@@ -233,9 +233,17 @@ class CatalogueCache(ABC):
 
     @abstractmethod
     def store_extra(
-        self, catalogue_epoch_jd: float, records: pd.DataFrame, state: str = STABLE
+        self,
+        catalogue_epoch_jd: float,
+        records: pd.DataFrame,
+        state: str = STABLE,
+        max_age_hours: Optional[float] = None,
     ) -> None:
-        """Merge fallback records into the epoch's fallback store atomically."""
+        """Merge fallback records into the epoch's fallback store atomically.
+
+        *max_age_hours* must match the value the corresponding read uses, so a
+        refresh cannot resurrect entries that read would have rejected.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +567,11 @@ class TextCatalogueCache(CatalogueCache):
         return records
 
     def store_extra(
-        self, catalogue_epoch_jd: float, records: pd.DataFrame, state: str = STABLE
+        self,
+        catalogue_epoch_jd: float,
+        records: pd.DataFrame,
+        state: str = STABLE,
+        max_age_hours: Optional[float] = None,
     ) -> None:
         """Merge *records* into the epoch's fallback store for *state*, atomically.
 
@@ -571,6 +583,10 @@ class TextCatalogueCache(CatalogueCache):
         measured against the fixed observation epoch, so nothing else would ever
         make it stale.
 
+        Expired provisional contents are discarded rather than merged: the
+        read-back below applies *max_age_hours*, so a refresh writes only records
+        that are still valid plus the ones just fetched.
+
         Note: this is a read-merge-write cycle. Atomic replacement guarantees no
         partial file is ever observed, but it does *not* serialise two processes
         merging concurrently — the later writer can overwrite the earlier one's new
@@ -580,7 +596,12 @@ class TextCatalogueCache(CatalogueCache):
         if not len(records):
             return
         merged = records
-        existing = self.get_extra(catalogue_epoch_jd, state)
+        # Read back under the *same* expiry the caller reads with. Merging
+        # unconditionally would fold expired rows into the new envelope and stamp
+        # the lot fresh, so a satellite the refreshed service no longer returns
+        # would keep its stale record indefinitely — precisely what the expiry
+        # exists to prevent.
+        existing = self.get_extra(catalogue_epoch_jd, state, max_age_hours)
         if len(existing):
             merged = pd.concat([existing, records], ignore_index=True)
         merged = merged.drop_duplicates(

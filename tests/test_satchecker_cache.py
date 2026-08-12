@@ -25,6 +25,7 @@ from .tle_helpers import (
     block_network,  # noqa: F401  autouse fixture: no live SatChecker access
     jd,
     make_catalogue_df,
+    with_checksum,
     write_legacy_tle_file,
 )
 
@@ -305,8 +306,10 @@ class TestEnvelopeValidation:
         env = _snapshot_env(canon, [(25544, jd(2023, 2, 21, 13))])
         rec = env["records"][0]
         rec["NORAD_CAT_ID"] = 148493
-        rec["TLE_LINE1"] = "1 E8493" + rec["TLE_LINE1"][7:]
-        rec["TLE_LINE2"] = "2 E8493" + rec["TLE_LINE2"][7:]
+        # Rewriting the identifier columns changes the checksum, so recompute it
+        # exactly as the producer of a real Alpha-5 TLE would.
+        rec["TLE_LINE1"] = with_checksum("1 E8493" + rec["TLE_LINE1"][7:])
+        rec["TLE_LINE2"] = with_checksum("2 E8493" + rec["TLE_LINE2"][7:])
         _write_env(cache._snapshot_path(canon), env)
         snap = cache.get_snapshot(canon)
         assert snap is not None
