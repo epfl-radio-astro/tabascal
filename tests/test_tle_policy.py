@@ -96,6 +96,40 @@ def test_null_reuse_age_always_reuses_acceptable_cache(cache_dir, monkeypatch):
     assert calls == []
 
 
+def test_null_reuse_age_still_fetches_when_cache_is_over_age(cache_dir, monkeypatch):
+    """`null` reuse must not suppress the request for an *unacceptable* record.
+
+    Reuse is unlimited, so the 10-day-old cached record is "near enough to reuse"
+    — but the hard ceiling rejects it. Suppressing the request on the strength of
+    a record that is then thrown away would fail the run with a fresh TLE sitting
+    on the service.
+    """
+    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 10)]))
+    calls = _service(monkeypatch, {25544: OBS - 0.1})
+    result = tle.resolve_tles(
+        [25544], OBS, cache_reuse_max_age_days=None, remote_tle_max_age_days=3
+    )
+    assert calls == [(25544, OBS)]
+    assert result.complete
+    assert result.resolved[25544].source == "SatChecker nearest-TLE"
+
+
+def test_staler_service_response_does_not_displace_fresher_cache(cache_dir, monkeypatch):
+    """The strictly-fresher rule must govern the cache-vs-service comparison.
+
+    The cached record is too old to suppress the request but closer to the
+    observation than what the service returns, so it has to survive the refresh.
+    """
+    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
+    calls = _service(monkeypatch, {25544: OBS - 2.5})
+    result = tle.resolve_tles(
+        [25544], OBS, cache_reuse_max_age_days=1, remote_tle_max_age_days=3
+    )
+    assert calls == [(25544, OBS)]
+    assert result.resolved[25544].source == "managed per-satellite cache"
+    assert result.resolved[25544].age_days == pytest.approx(2.0, abs=2e-8)
+
+
 def test_extra_directory_has_precedence(cache_dir, tmp_path, monkeypatch):
     extra = tmp_path / "extra"
     extra.mkdir()

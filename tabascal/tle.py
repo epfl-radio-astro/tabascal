@@ -595,22 +595,35 @@ def resolve_tles(
     if remaining:
         cache = TextTLECache(tle_cache_dir())
         cached = _cached_candidates(cache, remaining, obs_epoch_jd)
-        cache_hits = {
-            norad_id: record
-            for norad_id, record in cached.items()
-            if reuse_max_age is None
-            or abs(_tle_epoch_jd(record["TLE_LINE1"]) - obs_epoch_jd)
-            <= reuse_max_age + _AGE_TOL_DAYS
-        }
+
+        # Every acceptable cached record becomes its ID's incumbent *before* any
+        # request goes out. Two things depend on that: it is what gives
+        # _accept_remote's strictly-fresher rule something to compare a response
+        # against (otherwise a staler response would be accepted unopposed), and
+        # it is the offline fallback if the request never comes back.
         _accept_remote(
-            cache_hits,
+            cached,
             _SRC_CACHE,
             obs_epoch_jd,
             remote_max_age,
             resolution.resolved,
             resolution.rejected,
         )
-        to_fetch = sorted(remaining - set(cache_hits))
+
+        # Whether to still ask the service is a *separate* question from whether
+        # we already hold something usable. Only a record that is both within the
+        # reuse threshold and actually accepted suppresses the request: without
+        # the intersection, `tle_cache_reuse_max_age_days: null` would make every
+        # cached record a hit — including ones the hard ceiling then rejects —
+        # and the ID would never be fetched at all.
+        near_enough_to_reuse = {
+            norad_id
+            for norad_id, record in cached.items()
+            if reuse_max_age is None
+            or abs(_tle_epoch_jd(record["TLE_LINE1"]) - obs_epoch_jd)
+            <= reuse_max_age + _AGE_TOL_DAYS
+        }
+        to_fetch = sorted(remaining - (near_enough_to_reuse & set(resolution.resolved)))
 
         # 3. Exact-epoch nearest lookups for cache misses/stale cache candidates.
         if to_fetch:
@@ -640,25 +653,21 @@ def resolve_tles(
                     resolution.rejected,
                 )
 
-            # A service failure does not invalidate a cached record within the hard
-            # ceiling. It was merely too old to suppress a refresh request.
-            unresolved = set(to_fetch) - set(resolution.resolved)
-            offline = {nid: cached[nid] for nid in unresolved if nid in cached}
-            if offline:
-                _accept_remote(
-                    offline,
-                    _SRC_CACHE,
-                    obs_epoch_jd,
-                    remote_max_age,
-                    resolution.resolved,
-                    resolution.rejected,
+            # A service failure — or a response no fresher than what we hold —
+            # does not invalidate a cached record within the hard ceiling. Those
+            # records are already the incumbents, so nothing has to be recovered
+            # here; report the ones the request did not improve on.
+            retained = [
+                nid
+                for nid in to_fetch
+                if nid in resolution.resolved
+                and resolution.resolved[nid].source == _SRC_CACHE
+            ]
+            if retained:
+                print(
+                    f"  SatChecker did not improve {len(retained)} ID(s); "
+                    "continuing with acceptable cached records"
                 )
-                recovered = unresolved & set(resolution.resolved)
-                if recovered:
-                    print(
-                        f"  SatChecker did not improve {len(recovered)} ID(s); "
-                        "continuing with acceptable cached records"
-                    )
 
     _report_remote_selection(resolution)
     return resolution
