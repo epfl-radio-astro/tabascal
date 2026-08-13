@@ -21,13 +21,13 @@ def _empty_resolution() -> TLEResolution:
 
 
 def test_element_fetch_yields_an_empty_rfi_model():
-    elements, epoch_jd, norad_ids, tles, n_rfi_real = fetch_orbital_elements(
+    elements, epoch_jd, norad_ids, orbit_records, n_rfi_real = fetch_orbital_elements(
         resolution=_empty_resolution()
     )
     assert elements.shape == (0, 6)
     assert epoch_jd.shape == (0,)
     assert norad_ids == []
-    assert tles.shape == (0, 2)
+    assert orbit_records == []
     assert n_rfi_real == 0
 
 
@@ -52,7 +52,8 @@ def test_rfi_sampling_estimate_survives_zero_satellites():
 def test_rfi_sampling_estimate_does_not_touch_the_satellite_path():
     """The guard must return before any satellite-dependent attribute is read.
 
-    ``vis_obs`` and ``n_bl`` are all it may use; reaching for ``tles``, ``freqs``
+    ``vis_obs`` and ``n_bl`` are all it may use; reaching for ``orbit_records``,
+    ``freqs``
     or the antenna geometry would mean the empty-model path is still running the
     satellite computation.
     """
@@ -60,7 +61,9 @@ def test_rfi_sampling_estimate_does_not_touch_the_satellite_path():
 
     TabConfig.estimate_rfi_sampling(config, 1.0, 1, 30, min_divisors=1)
 
-    for attribute in ("tles", "freqs", "ants_itrf", "times_jd", "phase_centre"):
+    for attribute in (
+        "orbit_records", "freqs", "ants_itrf", "times_jd", "phase_centre"
+    ):
         assert not hasattr(config, attribute), (
             f"the satellite-free path read {attribute!r}; it should have returned first"
         )

@@ -1,4 +1,5 @@
 from tabascal.tle import TLEError, get_tles_by_id
+from tabascal.satchecker.records import KIND_TLE, record_elements, record_kind
 from tabascal.distributed import (
     make_global,
     padded_rfi_count,
@@ -23,25 +24,71 @@ from jax import vmap, Array
 import numpy as np
 from numpy.typing import NDArray
 
+from sgp4.api import WGS72, Satrec
+
 from skyfield.api import Distance, load
 from skyfield.toposlib import ITRSPosition
 
 from skyfield.api import EarthSatellite
 
-def get_satellite_positions(tles: list, times_jd: list):
-    """Calculate the ICRS positions of satellites by propagating their TLEs over the given times.
+#: Julian Date of 1949 December 31 00:00 UT, the epoch SGP4 counts days from.
+_SGP4_EPOCH_JD = 2433281.5
+
+
+def _earth_satellite(record, ts):
+    """A Skyfield ``EarthSatellite`` for one orbit record, whichever kind it is.
+
+    A TLE goes through Skyfield's line parser exactly as it always has, so
+    nothing about the TLE path changes. An OMM has no lines to parse — that is
+    the whole point of the format — so its element set is loaded straight into an
+    ``sgp4.Satrec`` via ``sgp4init``, which is the entry point the sgp4 library
+    provides for precisely this. Both end up as the same propagator over the same
+    model; only the way the elements are read in differs.
+
+    Units: ``sgp4init`` wants radians and rad/min, while OMM (and tabascal's
+    element columns) use degrees and rev/day.
+
+    ``ndot`` and ``nddot`` are passed as zero. SGP4 models drag through ``bstar``
+    alone and never reads them during propagation — they exist in the TLE format
+    for other consumers — so dropping them in the client costs nothing here.
+    """
+    if record_kind(record) == KIND_TLE:
+        return EarthSatellite(record["TLE_LINE1"], record["TLE_LINE2"], ts=ts)
+
+    elements = record_elements(record)
+    satrec = Satrec()
+    satrec.sgp4init(
+        WGS72,
+        "i",  # improved mode, matching what twoline2rv uses for the TLE path
+        int(record["NORAD_CAT_ID"]),
+        elements["EPOCH_JD"] - _SGP4_EPOCH_JD,
+        float(elements["BSTAR"]),
+        0.0,  # ndot: stored by the TLE format, unused by the propagator
+        0.0,  # nddot: likewise
+        float(elements["ECCENTRICITY"]),
+        np.deg2rad(elements["ARG_OF_PERICENTER"]),
+        np.deg2rad(elements["INCLINATION"]),
+        np.deg2rad(elements["MEAN_ANOMALY"]),
+        elements["MEAN_MOTION"] * 2.0 * np.pi / 1440.0,  # rev/day -> rad/min
+        np.deg2rad(elements["RA_OF_ASC_NODE"]),
+    )
+    return EarthSatellite.from_satrec(satrec, ts)
+
+
+def get_satellite_positions(records: list, times_jd: list):
+    """ICRS positions of satellites, by propagating their orbit records over *times_jd*.
 
     Parameters
     ----------
-    tles : Array (n_sat, 2)
-        TLEs usind to propagate positions.
-    times : Array (n_time,)
-        Times to calculate positions at in Julian date.
+    records : sequence of dict, length n_sat
+        Orbit records — TLE or OMM — as resolved by :mod:`tabascal.tle`.
+    times_jd : Array (n_time,)
+        Times to calculate positions at, in Julian date.
 
     Returns
     -------
     Array (n_sat, n_time, 3)
-        Satellite positions over time
+        Satellite positions over time, in metres.
     """
 
     ts = load.timescale()
@@ -51,8 +98,8 @@ def get_satellite_positions(tles: list, times_jd: list):
 
     sat_pos = np.array(
         [
-            EarthSatellite(tle_line1, tle_line2, ts=ts).at(sf_times).position.km.T * 1e3
-            for tle_line1, tle_line2 in tles
+            _earth_satellite(record, ts).at(sf_times).position.km.T * 1e3
+            for record in records
         ]
     )
 
@@ -171,7 +218,7 @@ class FixedOrbit(Component):
         """All validation and error-prone operations here"""
         try:
             # Store only what's needed for forward computation
-            self.tles = config.tles
+            self.orbit_records = config.orbit_records
             self.elements = config.elements
             self.epoch_jd = config.epoch_jd
             self.n_rfi = config.n_rfi
@@ -234,7 +281,7 @@ class FixedOrbit(Component):
     def _compute_rfi_phase(self):
 
         self.rfi_xyz = np.asarray(
-            get_satellite_positions(self.tles, list(self.times_jd_fine))
+            get_satellite_positions(self.orbit_records, list(self.times_jd_fine))
         )
 
         self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
@@ -687,6 +734,18 @@ def _pad_rfi_sources(tles_df):
     return pd.concat([tles_df, *([tles_df.iloc[[-1]]] * n_pad)], ignore_index=True)
 
 
+def _orbit_records(tles_df) -> list[dict]:
+    """The resolved frame as a list of raw records, one per source, in row order.
+
+    This is what propagation and replay both consume. It used to be an
+    ``(n_sat, 2)`` array of TLE line pairs, which an OMM record cannot fill —
+    it has no lines, only elements. Passing the records themselves lets
+    :func:`_earth_satellite` and
+    :func:`tabascal.tle.save_orbits_for_reuse` each ask the record what it is.
+    """
+    return tles_df.to_dict(orient="records")
+
+
 #: Element columns the SGP4/Kepler propagators consume, in the order they expect.
 _ELEMENT_COLUMNS = [
     "SEMIMAJOR_AXIS",
@@ -711,7 +770,7 @@ def _no_satellites():
         jnp.zeros((0, len(_ELEMENT_COLUMNS))),
         jnp.zeros((0,)),
         [],
-        np.empty((0, 2), dtype=object),
+        [],
     )
 
 
@@ -785,9 +844,9 @@ def fetch_orbital_elements(
     elements = jnp.atleast_2d(tles_df[_ELEMENT_COLUMNS].values)
     epoch_jd = jnp.atleast_1d(tles_df["EPOCH_JD"].values)  # type: ignore
     norad_ids = list(tles_df["NORAD_CAT_ID"].values)
-    tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
+    orbit_records = _orbit_records(tles_df)
 
-    return elements, epoch_jd, norad_ids, tles, n_rfi_real
+    return elements, epoch_jd, norad_ids, orbit_records, n_rfi_real
 
 def _resolved_frame(
     resolution,
@@ -832,9 +891,9 @@ def fetch_standard_orbital_elements(
     _require_tles(tles_df, norad_ids)
     tles_df = _pad_rfi_sources(tles_df)
 
-    # tles_df carries the OMM-style element columns parsed locally from the TLE
-    # lines by tabascal.tle.parse_tle_elements (degrees, rev/day, km), plus
-    # NORAD_CAT_ID, EPOCH_JD, TLE_LINE1 and TLE_LINE2.
+    # tles_df carries the OMM-style element columns derived locally by
+    # tabascal.satchecker.records.record_elements (degrees, rev/day, km), plus
+    # NORAD_CAT_ID, EPOCH_JD, and whichever raw columns the record's kind has.
 
     # SGP4 MINIMUM REQUIREMENTS:
     # To propagate an orbit using SGP4, you need:
@@ -876,6 +935,6 @@ def fetch_standard_orbital_elements(
     )    
     epoch_jd = jnp.atleast_1d(tles_df["EPOCH_JD"].values)  # type: ignore
     norad_ids = list(tles_df["NORAD_CAT_ID"].values)
-    tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
+    orbit_records = _orbit_records(tles_df)
 
-    return elements, epoch_jd, norad_ids, tles
+    return elements, epoch_jd, norad_ids, orbit_records

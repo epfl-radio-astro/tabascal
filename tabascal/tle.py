@@ -1045,34 +1045,64 @@ def _resolution_from_wire(message: dict) -> TLEResolution:
 # Reproducibility: persist the TLEs a run actually used
 # ---------------------------------------------------------------------------
 
-def save_tles_for_reuse(path, norad_ids, tles) -> Optional[str]:
-    """Write the TLE lines a run used to *path* in ``extra_orbit_dir`` format.
+#: What each kind needs written out to be readable back as itself. A TLE needs
+#: only its lines — every element is encoded in them. An OMM needs its epoch and
+#: its seven elements, because nothing else carries them.
+_REPLAY_COLUMNS = {
+    KIND_TLE: (KIND_FIELD, "OBJECT_NAME", "TLE_LINE1", "TLE_LINE2"),
+    KIND_OMM: (KIND_FIELD, "OBJECT_NAME", "OBJECT_ID", "EPOCH", *OMM_ELEMENT_COLUMNS),
+}
 
-    The file is a pandas-oriented JSON with ``NORAD_CAT_ID``, ``TLE_LINE1`` and
-    ``TLE_LINE2`` columns — exactly what :func:`read_legacy_tle_records` reads —
-    so a later run can reproduce this run's trajectory priors by passing the
-    file's directory via ``--extra-orbit-dir`` (with the default unlimited
+
+def _replay_record(norad_id: int, record: dict) -> dict:
+    """One record projected onto the columns a replay file needs.
+
+    Derived columns are dropped: ``EPOCH_JD`` and ``SEMIMAJOR_AXIS`` are computed
+    from the others on every read, so writing them would create a second copy
+    that a later edit could silently contradict.
+    """
+    kind = record_kind(record)
+    out = {"NORAD_CAT_ID": int(norad_id), KIND_FIELD: kind}
+    for column in _REPLAY_COLUMNS[kind]:
+        value = record.get(column)
+        if value is not None and not pd.isna(value):
+            out[column] = value
+    return out
+
+
+def save_orbits_for_reuse(path, norad_ids, records) -> Optional[str]:
+    """Write the orbit records a run used to *path* in ``extra_orbit_dir`` format.
+
+    The file is a pandas-oriented JSON carrying, per record, exactly what
+    :func:`read_legacy_tle_records` needs to read it back as the same record — a
+    TLE's two lines, or an OMM's epoch and elements. A later run reproduces this
+    run's trajectory priors by passing the file's directory via
+    ``--extra-orbit-dir`` (with the default unlimited
     ``extra_orbit_max_age_days``), independent of the shared cache, of what
     SatChecker serves by then, and of the remote age ceiling.
 
-    ``norad_ids`` and ``tles`` are the aligned arrays produced by the element
-    fetchers (one ``(line1, line2)`` pair per ID). Returns the written path, or
-    ``None`` when there is nothing to save.
+    ``RECORD_KIND`` is written explicitly. Inference exists for exports we did
+    not write; for a file tabascal produced itself there is no reason to make a
+    later reader guess.
+
+    ``norad_ids`` and ``records`` are the aligned sequences produced by the
+    element fetchers. Returns the written path, or ``None`` when there is
+    nothing to save.
     """
-    tle_pairs = np.atleast_2d(np.asarray(tles)) if tles is not None else np.empty((0, 2))
     ids = list(norad_ids or [])
-    if not ids or not tle_pairs.size:
+    rows = list(records) if records is not None else []
+    if not ids or not rows:
         return None
-    df = pd.DataFrame(
-        {
-            "NORAD_CAT_ID": [int(n) for n in ids],
-            "TLE_LINE1": tle_pairs[:, 0],
-            "TLE_LINE2": tle_pairs[:, 1],
-        }
+    frame = pd.DataFrame(
+        [_replay_record(nid, record) for nid, record in zip(ids, rows)]
     )
     path = str(path)
-    df.to_json(path)
+    frame.to_json(path)
     return path
+
+
+#: Historical name, from when every record was a TLE.
+save_tles_for_reuse = save_orbits_for_reuse
 
 
 # ---------------------------------------------------------------------------

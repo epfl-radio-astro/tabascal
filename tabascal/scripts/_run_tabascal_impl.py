@@ -27,7 +27,7 @@ from tabascal.distributed import (
 )
 from tabascal.imports import import_components
 from tabascal.write import write_results_xds
-from tabascal.tle import TLEError, save_tles_for_reuse
+from tabascal.tle import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 
 import jax
@@ -287,17 +287,19 @@ def tabascal_subtraction(
         if is_process_0():
             n_rfi_real = getattr(tab_config, "n_rfi_real", None)
             used_ids = getattr(tab_config, "norad_ids", None)
-            used_tles = getattr(tab_config, "tles", None)
+            used_records = getattr(tab_config, "orbit_records", None)
             if n_rfi_real is not None:
                 used_ids = used_ids[:n_rfi_real] if used_ids is not None else None
-                used_tles = used_tles[:n_rfi_real] if used_tles is not None else None
-            saved_tles = save_tles_for_reuse(
+                used_records = (
+                    used_records[:n_rfi_real] if used_records is not None else None
+                )
+            saved_orbits = save_orbits_for_reuse(
                 paths.used_orbits_path,
                 used_ids,
-                used_tles,
+                used_records,
             )
-            if saved_tles:
-                print(f"TLEs used saved to : {saved_tles}")
+            if saved_orbits:
+                print(f"Orbits used saved to : {saved_orbits}")
                 print(
                     "  (reuse via --extra-orbit-dir to reproduce this run's "
                     "trajectory priors)"

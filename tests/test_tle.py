@@ -84,12 +84,10 @@ def test_resolution_wire_round_trip():
     assert restored.resolved[25544].record["TLE_LINE1"] == record["TLE_LINE1"]
 
 
-def test_save_tles_for_reuse(tmp_path):
-    frame = make_catalogue_df([(25544, OBS)])
+def test_save_orbits_for_reuse(tmp_path):
+    records = make_catalogue_df([(25544, OBS)]).to_dict(orient="records")
     path = tmp_path / "used.json"
-    tle.save_tles_for_reuse(
-        path, [25544], frame[["TLE_LINE1", "TLE_LINE2"]].to_numpy()
-    )
+    tle.save_orbits_for_reuse(path, [25544], records)
     loaded = pd.read_json(path)
     assert loaded["NORAD_CAT_ID"].tolist() == [25544]
 
@@ -140,3 +138,92 @@ class TestExtraDirRecordKinds:
         for column in ("EPOCH_JD", "SEMIMAJOR_AXIS", "ECCENTRICITY", "MEAN_MOTION"):
             assert column in frame
         assert frame.loc[0, "SEMIMAJOR_AXIS"] > 6000.0
+
+
+# ---------------------------------------------------------------------------
+# Replay round-trip
+# ---------------------------------------------------------------------------
+
+class TestReplayRoundTrip:
+    """A run's records must be readable back as the same records.
+
+    This is what makes a run reproducible independently of the shared cache, of
+    what SatChecker serves by then, and of the age ceiling. A TLE needs only its
+    two lines written out — every element is encoded in them. An OMM needs its
+    epoch and its seven elements, because nothing else carries them, which is
+    why the file format could not stay a table of line pairs.
+    """
+
+    def _round_trip(self, tmp_path, records):
+        ids = [int(r["NORAD_CAT_ID"]) for r in records]
+        assert tle.save_orbits_for_reuse(tmp_path / "used.json", ids, records)
+        resolved, _ = tle._select_from_extra_dir(str(tmp_path), set(ids), OBS, None)
+        return resolved
+
+    @pytest.mark.parametrize("kind", ["tle", "omm"])
+    def test_a_saved_record_resolves_again(self, tmp_path, kind):
+        from .tle_helpers import make_record
+
+        record = make_record(kind, 25544, OBS - 0.3)
+        resolved = self._round_trip(tmp_path, [record])
+        assert resolved[25544].offset_days == pytest.approx(-0.3, abs=1e-6)
+
+    @pytest.mark.parametrize("kind", ["tle", "omm"])
+    def test_the_replayed_elements_are_identical(self, tmp_path, kind):
+        from tabascal.satchecker.records import record_elements
+
+        from .tle_helpers import make_record
+
+        record = make_record(kind, 25544, OBS)
+        before = record_elements(record)
+        after = record_elements(self._round_trip(tmp_path, [record])[25544].record)
+        assert before == after
+
+    def test_a_mixed_run_replays_both_kinds(self, tmp_path):
+        from .tle_helpers import make_omm, make_tle_record
+
+        records = [make_tle_record(25544, OBS), make_omm(43013, OBS - 0.1)]
+        resolved = self._round_trip(tmp_path, records)
+        assert set(resolved) == {25544, 43013}
+        assert resolved[43013].offset_days == pytest.approx(-0.1, abs=1e-6)
+
+    def test_the_kind_is_written_explicitly(self, tmp_path):
+        from .tle_helpers import make_omm
+
+        record = make_omm(25544, OBS)
+        tle.save_orbits_for_reuse(tmp_path / "used.json", [25544], [record])
+        written = pd.read_json(tmp_path / "used.json")
+        assert written.loc[0, "RECORD_KIND"] == "omm"
+
+    def test_derived_columns_are_not_written(self, tmp_path):
+        # EPOCH_JD and SEMIMAJOR_AXIS are recomputed on every read; a second
+        # stored copy could silently disagree with the elements it came from.
+        from .tle_helpers import make_omm
+
+        record = tle._finalise_records([make_omm(25544, OBS)]).to_dict(
+            orient="records"
+        )[0]
+        tle.save_orbits_for_reuse(tmp_path / "used.json", [25544], [record])
+        written = pd.read_json(tmp_path / "used.json")
+        assert "EPOCH_JD" not in written.columns
+        assert "SEMIMAJOR_AXIS" not in written.columns
+
+    def test_a_tle_replay_file_carries_no_element_columns(self, tmp_path):
+        # _finalise_records adds derived elements to a TLE row too. Writing them
+        # would make the file describe the same orbit twice.
+        record = tle._finalise_records(
+            make_catalogue_df([(25544, OBS)]).to_dict(orient="records")
+        ).to_dict(orient="records")[0]
+        tle.save_orbits_for_reuse(tmp_path / "used.json", [25544], [record])
+        written = pd.read_json(tmp_path / "used.json")
+        assert "MEAN_MOTION" not in written.columns
+        assert written.loc[0, "TLE_LINE1"].startswith("1 25544")
+
+    def test_nothing_to_save_writes_no_file(self, tmp_path):
+        assert tle.save_orbits_for_reuse(tmp_path / "used.json", [], []) is None
+        assert tle.save_orbits_for_reuse(tmp_path / "used.json", [25544], None) is None
+        assert not (tmp_path / "used.json").exists()
+
+    def test_the_historical_name_still_works(self, tmp_path):
+        records = make_catalogue_df([(25544, OBS)]).to_dict(orient="records")
+        assert tle.save_tles_for_reuse(tmp_path / "used.json", [25544], records)

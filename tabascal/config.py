@@ -260,7 +260,9 @@ class TabConfig:
         # Satellite positions, GAST, antenna UVW and fringe frequencies are all
         # one-shot host-side setup, so always compute them in numpy/skyfield (f64):
         # faster than the jax path (no JIT compile) and accurate in both precisions.
-        rfi_xyz = np.asarray(get_satellite_positions(self.tles, times_jd_coarse))
+        rfi_xyz = np.asarray(
+            get_satellite_positions(self.orbit_records, times_jd_coarse)
+        )
 
         gsa = gast_deg(times_jd_coarse)  # GAST in degrees (UTC convention)
         gh0 = (gsa - self.phase_centre["ra"]) % 360  # type: ignore
@@ -322,9 +324,13 @@ class TabConfig:
 
     def get_orbital_elements(self):
         """Build the orbital elements from the resolution preflight already made."""
-        self.elements, self.epoch_jd, self.norad_ids, self.tles, self.n_rfi_real = (
-            fetch_orbital_elements(resolution=self.tle_resolution)
-        )
+        (
+            self.elements,
+            self.epoch_jd,
+            self.norad_ids,
+            self.orbit_records,
+            self.n_rfi_real,
+        ) = fetch_orbital_elements(resolution=self.tle_resolution)
         # Under sharding the fetch pads the source list to a multiple of the device
         # count by duplicating the last satellite. n_rfi_real is the pre-padding row
         # count reported by the fetch (not inferred from the id list, which would be
