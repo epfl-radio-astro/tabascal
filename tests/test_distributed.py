@@ -83,6 +83,28 @@ def test_broadcast_bytes_single_process_is_the_payload():
     assert dist.broadcast_bytes_from_rank0(None, "tle-fetch") == b""
 
 
+def test_broadcast_bytes_casts_a_widened_collective_result(monkeypatch):
+    """JAX implements broadcast as a sum, which widens uint8 reductions."""
+    payload = b'{"ok":true}'
+    calls = 0
+
+    def broadcast(value):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return np.asarray([len(payload)], dtype=np.int64)
+        # This is the dtype returned when JAX reduces the uint8 payload. Calling
+        # .tobytes() on it directly would insert three NULs after every byte.
+        return np.frombuffer(payload, dtype=np.uint8).astype(np.uint32)
+
+    monkeypatch.setattr(dist.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(dist, "is_process_0", lambda: True)
+    from jax.experimental import multihost_utils
+    monkeypatch.setattr(multihost_utils, "broadcast_one_to_all", broadcast)
+
+    assert dist.broadcast_bytes_from_rank0(payload, "tle-fetch") == payload
+
+
 # ---------------------------------------------------------------------------
 # Name/shape matching rules
 # ---------------------------------------------------------------------------

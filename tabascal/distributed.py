@@ -312,7 +312,13 @@ def broadcast_bytes_from_rank0(payload, name: str) -> bytes:
     buffer = np.zeros(int(size[0]), dtype=np.uint8)
     if rank0 and buffer.size:
         buffer[:] = np.frombuffer(payload, dtype=np.uint8)
-    return np.asarray(multihost_utils.broadcast_one_to_all(buffer)).tobytes()
+    # ``broadcast_one_to_all`` is implemented as a sum over the process axis.
+    # JAX widens uint8 reductions (for example to uint32), so serialising the
+    # result's backing storage directly would insert padding NULs between every
+    # payload byte: ``b'{"'`` becomes ``b'{\0\0\0"\0\0\0'``.  Convert the
+    # values back to bytes explicitly before exposing their representation.
+    received = multihost_utils.broadcast_one_to_all(buffer)
+    return np.asarray(received, dtype=np.uint8).tobytes()
 
 
 @contextmanager
