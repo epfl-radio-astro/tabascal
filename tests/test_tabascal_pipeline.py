@@ -129,12 +129,15 @@ class PipelineTestConfig:
             precision string ("double"/"single"). Double-precision values are
             consistent across architectures and tested with 1% relative
             tolerance. Single-precision values are given as ``(lo, hi)`` bounds
-            because the fp32 convergence rate differs across architectures: on the
-            model these cases used before issue #103, ARM converged in ~100
-            iterations (chi2 ~0.92) while x86 needed ~2000 to get there (chi2 ~1.13
-            at 100 iters) and GPU overshot to ~0.91. Only the ARM value has been
-            re-measured on the current model, so the bounds keep a comparable
-            relative width around it until CI records the others.
+            rather than a scalar because fp32 convergence is in principle
+            architecture-dependent: on the model these cases used before issue #103
+            it clearly was, with ARM converging in ~100 iterations (chi2 ~0.92)
+            while x86 needed ~2000 to get there (chi2 ~1.13 at 100 iters). On the
+            current model it is not -- ARM CPU, x86 CPU and GH200 GPU agree to
+            ~1e-7 in fp32, the same as in fp64 -- so the bounds were tightened from
+            the old (0.9, 1.2) to a band that would actually catch a regression.
+            They stay bounds, not scalars, because that cross-arch agreement is an
+            empirical property of this model, not a guarantee.
             ``requires_double`` cases only need the "double" entry.
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
@@ -379,16 +382,17 @@ trajectory_configs = [
             ],
             # requires_double (phase trajectory needs fp64): only the double chi2 is asserted;
             # truth metrics are printed but not asserted. Measured opt-point values, double
-            # precision (gains identity -> RMSE 0). Fill in x86/GPU after running there:
-            #   arch | chi2   | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8768 |     0.306        0.6      |     0.432        0.1
-            #   x86  |  TBD   |      TBD         TBD      |      TBD         TBD
-            #   GPU  |  TBD   |      TBD         TBD      |      TBD         TBD
+            # precision (gains identity -> RMSE 0):
+            #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   ARM  | 0.8768424518784641 |     0.3061       0.6      |     0.4318       0.1
+            #   x86  | 0.8768424504584391 |     0.3061       0.6      |     0.4318       0.1
+            #   GPU  | 0.8768424565006032 |     0.3061       0.6      |     0.4318       0.1
             # (re-recorded for issue #103, which replaced the deleted real-space
-            # rfi_signal:ComplexRFI with the Fourier ComplexRFIVarAnt. Unlike the previous
-            # references these are ARM-measured, not CI/x86; the two arches agreed to ~0.7%
-            # on the old model, inside the 1% tolerance, so CI should still pass -- confirm
-            # on the first CI run and re-anchor to the x86 value if it does not.)
+            # rfi_signal:ComplexRFI with the Fourier ComplexRFIVarAnt. ARM = Apple silicon
+            # CPU, x86 = x86_64 CPU, GPU = GH200 on CSCS Daint. A consumer x86 GPU was also
+            # checked and tracks the GH200 column to <1e-7; it has no row of its own only to
+            # keep these tables to three. Every platform agrees to <1e-7 relative, far inside
+            # the 1% tolerance, so the asserted value being the ARM one is immaterial.)
             chi2_ref={"double": 0.8768424518784641},
             requires_double=True,
         ),
@@ -407,11 +411,12 @@ trajectory_configs = [
             ],
             # requires_double; only double chi2 asserted (MEO satellites, opt max_iter 200).
             # Measured opt-point values, double precision (gains identity -> RMSE 0). Fill in
-            # x86/GPU after running there (ARM-measured, see the note on the FixedOrbit case):
-            #   arch | chi2   | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8546 |     0.365        1.0      |     0.520        1.2
-            #   x86  |  TBD   |      TBD         TBD      |      TBD         TBD
-            #   GPU  |  TBD   |      TBD         TBD      |      TBD         TBD
+            # (see the note on the FixedOrbit case for what ARM/x86/GPU are):
+            #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   ARM  | 0.8546158788536706 |     0.3648       1.0      |     0.5199       1.2
+            #   x86  | 0.8546162445425675 |     0.3648       1.0      |     0.5199       1.2
+            #   GPU  | 0.8546157757462419 |     0.3648       1.0      |     0.5199       1.2
+            # (widest spread of any case, and still only 4e-7 relative.)
             chi2_ref={"double": 0.8546158788536706},
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
@@ -431,12 +436,11 @@ trajectory_configs = [
             ],
             # requires_double; only double chi2 asserted (MEO satellites, opt max_iter 200).
             # Measured opt-point values, double precision (gains identity -> RMSE 0; matches
-            # NoDragOrbit -- same orbit to fp precision). Fill in x86/GPU after running
-            # (ARM-measured, see the note on the FixedOrbit case):
-            #   arch | chi2   | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8546 |     0.365        1.0      |     0.520        1.2
-            #   x86  |  TBD   |      TBD         TBD      |      TBD         TBD
-            #   GPU  |  TBD   |      TBD         TBD      |      TBD         TBD
+            # NoDragOrbit -- same orbit to fp precision):
+            #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   ARM  | 0.8546160082354400 |     0.3648       1.0      |     0.5199       1.2
+            #   x86  | 0.8546160234159469 |     0.3648       1.0      |     0.5199       1.2
+            #   GPU  | 0.8546160141310710 |     0.3648       1.0      |     0.5199       1.2
             chi2_ref={"double": 0.85461600823544},
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
@@ -468,9 +472,8 @@ rfi_vis_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # single: ARM~0.877 (100 iters); x86/GPU not yet re-measured for this model, so the
-            # bounds keep the old band's relative width around the ARM value (see below).
-            chi2_ref={"double": 0.8767134197875864, "single": (0.85, 1.15)},
+            # single (100 iters): ARM 0.8767345548, x86 0.8767347336, GPU 0.8767347336.
+            chi2_ref={"double": 0.8767134197875864, "single": (0.86, 0.89)},
             # Truth-based metrics at the opt point. ast/rfi assert NRMSE(noise) -- the residual
             # against the thermal-noise floor, the science-meaningful yardstick (< 1 means
             # sub-noise) and the most architecture-stable normalisation -- plus
@@ -479,20 +482,19 @@ rfi_vis_configs = [
             # coherent bias" guard, not a tight value: the bias is ~1 sigma here (N_eff ~ 50),
             # so the upper bound only trips on gross RFI->ast leakage.
             #
-            # Measured opt-point values (UnitaryGains -> identity gains, so gains RMSE ~0).
-            # Re-recorded for issue #103 (rfi_signal:ComplexRFI deleted -> ComplexRFIVarAnt);
-            # every row here is ARM-measured, including the asserted chi2_ref, so the x86 rows
-            # are unknown rather than authoritative. Fill them in after running on those arches:
+            # Measured opt-point values (UnitaryGains -> identity gains, so gains RMSE ~0),
+            # re-recorded for issue #103 (rfi_signal:ComplexRFI deleted -> ComplexRFIVarAnt)
+            # on all three platforms in both precisions:
             #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | chi2
-            #   double  ARM    |      0.306         0.6     |      0.432        0.1     | 0.8767
-            #   double  x86    |       TBD          TBD     |       TBD         TBD     |  TBD
-            #   double  GPU    |       TBD          TBD     |       TBD         TBD     |  TBD
-            #   single  ARM    |      0.306         0.6     |      0.432        0.1     | 0.8767
-            #   single  x86    |       TBD          TBD     |       TBD         TBD     |  TBD
-            #   single  GPU    |       TBD          TBD     |       TBD         TBD     |  TBD
-            # (this model converges to the same point in fp32 as in fp64 on ARM -- the old
-            # real-space component did not -- but the fp32 convergence *rate* is still expected
-            # to vary by arch, so the single bounds stay wide until CI values are recorded.)
+            #   double  ARM    |      0.3062        0.6     |      0.4320       0.1     | 0.8767134198
+            #   double  x86    |      0.3062        0.6     |      0.4320       0.1     | 0.8767134197
+            #   double  GPU    |      0.3062        0.6     |      0.4320       0.1     | 0.8767134177
+            #   single  ARM    |      0.3063        0.6     |      0.4320       0.1     | 0.8767345548
+            #   single  x86    |      0.3063        0.6     |      0.4320       0.1     | 0.8767347336
+            #   single  GPU    |      0.3063        0.6     |      0.4320       0.1     | 0.8767347336
+            # This model converges to the same point in fp32 as in fp64, on every platform
+            # tested -- the old real-space component did not -- so the single bounds are no
+            # longer the wide arch-spread band they used to be and now match the double ones.
             metrics_ref={
                 "double": {
                     "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
@@ -500,8 +502,8 @@ rfi_vis_configs = [
                     "gains": {"RMSE": (0.0, 1e-6)},
                 },
                 "single": {
-                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 4.0)},
-                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 4.0)},
+                    "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
+                    "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
                     "gains": {"RMSE": (0.0, 1e-6)},
                 },
             },
@@ -520,15 +522,15 @@ rfi_vis_configs = [
             ],
             # Only chi2 is asserted -- the FFI kernel is the unit under test; truth metrics
             # match the non-FFI RiemannVis case above. Measured opt-point
-            # values (local ARM via the real harness; gains identity -> RMSE 0):
-            #   precision/arch | chi2   | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   double  ARM    | 0.8767 |     0.306        0.6      |     0.432        0.1
-            #   double  x86    |  TBD   |      TBD         TBD      |      TBD         TBD
-            #   double  GPU    |  TBD   |      TBD         TBD      |      TBD         TBD
-            #   single  ARM    | 0.8767 |     0.306        0.6      |     0.432        0.1
-            #   single  x86    |  TBD   |      TBD         TBD      |      TBD         TBD
-            #   single  GPU    |  TBD   |      TBD         TBD      |      TBD         TBD
-            chi2_ref={"double": 0.8767134197875865, "single": (0.85, 1.15)},
+            # values (gains identity -> RMSE 0):
+            #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   double  ARM    | 0.8767134198 |     0.3062       0.6      |     0.4320       0.1
+            #   double  x86    | 0.8767134197 |     0.3062       0.6      |     0.4320       0.1
+            #   double  GPU    | 0.8767134177 |     0.3062       0.6      |     0.4320       0.1
+            #   single  ARM    | 0.8767345548 |     0.3063       0.6      |     0.4320       0.1
+            #   single  x86    | 0.8767346144 |     0.3063       0.6      |     0.4320       0.1
+            #   single  GPU    | 0.8767346740 |     0.3063       0.6      |     0.4320       0.1
+            chi2_ref={"double": 0.8767134197875865, "single": (0.86, 0.89)},
         ),
         id="RiemannVisFFI",
     ),
@@ -577,25 +579,24 @@ gains_configs = [
                     "r_seed": 123,
                 },
             },
-            # single: ARM~0.877 (100 iters); x86/GPU not yet re-measured for this model.
-            chi2_ref={"double": 0.8767019546502159, "single": (0.85, 1.15)},
+            # single (100 iters): 0.8767232299 on ARM, x86 and GPU alike.
+            chi2_ref={"double": 0.8767019546502159, "single": (0.86, 0.89)},
             # Truth-based metrics at the opt point; same scheme as RiemannVis
             # (ast/rfi assert NRMSE(noise) against the noise floor + bias_significance as a
             # "no significant coherent bias" guard). Here GPGains fits the gains and recovers
             # them, so gains keeps an RMSE bound with headroom for the fp32 fit residual.
             #
-            # Measured opt-point values, all ARM (re-recorded for issue #103; the asserted
-            # chi2_ref is now the ARM value, not a CI/x86 one). Fill in the TBD rows after
-            # running on those arches:
+            # Measured opt-point values, re-recorded for issue #103 on all three platforms in
+            # both precisions. Unlike the UnitaryGains cases, GPGains actually fits the gains,
+            # so gains RMSE is a real fitted residual here rather than an exact zero:
             #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | gains RMSE | chi2
-            #   double  ARM    |      0.306         0.6     |      0.432        0.1     |  5.4e-4    | 0.8767
-            #   double  x86    |       TBD          TBD     |       TBD         TBD     |   TBD      |  TBD
-            #   double  GPU    |       TBD          TBD     |       TBD         TBD     |   TBD      |  TBD
-            #   single  ARM    |      0.306         0.6     |      0.432        0.1     |  5.4e-4    | 0.8767
-            #   single  x86    |       TBD          TBD     |       TBD         TBD     |   TBD      |  TBD
-            #   single  GPU    |       TBD          TBD     |       TBD         TBD     |   TBD      |  TBD
-            # (double is architecture-stable to ~+/-5%; the single bounds stay wide until CI
-            # values are recorded. Tighten once canonical CI values exist.)
+            #   double  ARM    |      0.3062        0.6     |      0.4323       0.1     |  5.358e-4  | 0.8767019547
+            #   double  x86    |      0.3062        0.6     |      0.4323       0.1     |  5.358e-4  | 0.8767019546
+            #   double  GPU    |      0.3062        0.6     |      0.4323       0.1     |  5.358e-4  | 0.8767019526
+            #   single  ARM    |      0.3062        0.6     |      0.4323       0.1     |  5.364e-4  | 0.8767232299
+            #   single  x86    |      0.3062        0.6     |      0.4323       0.1     |  5.363e-4  | 0.8767232299
+            #   single  GPU    |      0.3062        0.6     |      0.4323       0.1     |  5.364e-4  | 0.8767232299
+            # The gains RMSE bound keeps ~2x headroom over the measured fp32 residual.
             metrics_ref={
                 "double": {
                     "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
@@ -603,9 +604,9 @@ gains_configs = [
                     "gains": {"RMSE": (0.0, 1e-3)},
                 },
                 "single": {
-                    "ast": {"NRMSE(noise)": (0.20, 0.50), "bias_significance": (0.0, 4.0)},
-                    "rfi": {"NRMSE(noise)": (0.30, 0.90), "bias_significance": (0.0, 4.0)},
-                    "gains": {"RMSE": (0.0, 3e-3)},
+                    "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
+                    "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                    "gains": {"RMSE": (0.0, 1e-3)},
                 },
             },
         ),
@@ -685,7 +686,9 @@ def _sharded_components(rfi_vis: str) -> list[str]:
     ]
 
 
-# Same case as FixedOrbit+PhaseCalculationRFI above (double precision).
+# Same case as FixedOrbit+PhaseCalculationRFI above (double precision), so it shares that
+# case's re-recorded reference. Verified on ARM CPU, x86 CPU and a GH200 node (the sharded
+# child is pinned to CPU by this test either way; the reference run uses whatever is there).
 _SHARDED_CHI2_REF = 0.8768424518784641
 
 
