@@ -1,4 +1,5 @@
-from tabascal.tle import get_tles_by_id
+from tabascal.orbit import TLEError, get_tles_by_id
+from tabascal.satchecker.records import KIND_TLE, record_elements, record_kind
 from tabascal.distributed import (
     make_global,
     padded_rfi_count,
@@ -23,25 +24,71 @@ from jax import vmap, Array
 import numpy as np
 from numpy.typing import NDArray
 
+from sgp4.api import WGS72, Satrec
+
 from skyfield.api import Distance, load
 from skyfield.toposlib import ITRSPosition
 
 from skyfield.api import EarthSatellite
 
-def get_satellite_positions(tles: list, times_jd: list):
-    """Calculate the ICRS positions of satellites by propagating their TLEs over the given times.
+#: Julian Date of 1949 December 31 00:00 UT, the epoch SGP4 counts days from.
+_SGP4_EPOCH_JD = 2433281.5
+
+
+def _earth_satellite(record, ts):
+    """A Skyfield ``EarthSatellite`` for one orbit record, whichever kind it is.
+
+    A TLE goes through Skyfield's line parser exactly as it always has, so
+    nothing about the TLE path changes. An OMM has no lines to parse — that is
+    the whole point of the format — so its element set is loaded straight into an
+    ``sgp4.Satrec`` via ``sgp4init``, which is the entry point the sgp4 library
+    provides for precisely this. Both end up as the same propagator over the same
+    model; only the way the elements are read in differs.
+
+    Units: ``sgp4init`` wants radians and rad/min, while OMM (and tabascal's
+    element columns) use degrees and rev/day.
+
+    ``ndot`` and ``nddot`` are passed as zero. SGP4 models drag through ``bstar``
+    alone and never reads them during propagation — they exist in the TLE format
+    for other consumers — so dropping them in the client costs nothing here.
+    """
+    if record_kind(record) == KIND_TLE:
+        return EarthSatellite(record["TLE_LINE1"], record["TLE_LINE2"], ts=ts)
+
+    elements = record_elements(record)
+    satrec = Satrec()
+    satrec.sgp4init(
+        WGS72,
+        "i",  # improved mode, matching what twoline2rv uses for the TLE path
+        int(record["NORAD_CAT_ID"]),
+        elements["EPOCH_JD"] - _SGP4_EPOCH_JD,
+        float(elements["BSTAR"]),
+        0.0,  # ndot: stored by the TLE format, unused by the propagator
+        0.0,  # nddot: likewise
+        float(elements["ECCENTRICITY"]),
+        np.deg2rad(elements["ARG_OF_PERICENTER"]),
+        np.deg2rad(elements["INCLINATION"]),
+        np.deg2rad(elements["MEAN_ANOMALY"]),
+        elements["MEAN_MOTION"] * 2.0 * np.pi / 1440.0,  # rev/day -> rad/min
+        np.deg2rad(elements["RA_OF_ASC_NODE"]),
+    )
+    return EarthSatellite.from_satrec(satrec, ts)
+
+
+def get_satellite_positions(records: list, times_jd: list):
+    """ICRS positions of satellites, by propagating their orbit records over *times_jd*.
 
     Parameters
     ----------
-    tles : Array (n_sat, 2)
-        TLEs usind to propagate positions.
-    times : Array (n_time,)
-        Times to calculate positions at in Julian date.
+    records : sequence of dict, length n_sat
+        Orbit records — TLE or OMM — as resolved by :mod:`tabascal.orbit`.
+    times_jd : Array (n_time,)
+        Times to calculate positions at, in Julian date.
 
     Returns
     -------
     Array (n_sat, n_time, 3)
-        Satellite positions over time
+        Satellite positions over time, in metres.
     """
 
     ts = load.timescale()
@@ -51,8 +98,8 @@ def get_satellite_positions(tles: list, times_jd: list):
 
     sat_pos = np.array(
         [
-            EarthSatellite(tle_line1, tle_line2, ts=ts).at(sf_times).position.km.T * 1e3
-            for tle_line1, tle_line2 in tles
+            _earth_satellite(record, ts).at(sf_times).position.km.T * 1e3
+            for record in records
         ]
     )
 
@@ -171,7 +218,7 @@ class FixedOrbit(Component):
         """All validation and error-prone operations here"""
         try:
             # Store only what's needed for forward computation
-            self.tles = config.tles
+            self.orbit_records = config.orbit_records
             self.elements = config.elements
             self.epoch_jd = config.epoch_jd
             self.n_rfi = config.n_rfi
@@ -234,7 +281,7 @@ class FixedOrbit(Component):
     def _compute_rfi_phase(self):
 
         self.rfi_xyz = np.asarray(
-            get_satellite_positions(self.tles, list(self.times_jd_fine))
+            get_satellite_positions(self.orbit_records, list(self.times_jd_fine))
         )
 
         self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
@@ -305,8 +352,18 @@ class SGP4LEONoDragOrbit(Component):
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
             # self.ric_std = config.args["satellites"]["ric_std"]
 
-            extra_tle_dir = getattr(config, "extra_tle_dir", None)
-            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(jnp.mean(config.times_jd), config.norad_ids, extra_tle_dir=extra_tle_dir)
+            # Reuse the resolution the preflight check already made and enforced
+            # coverage on: re-resolving here could reach a different satellite set
+            # from the one the run was checked against, and would repeat the
+            # provider work. Falls back to resolving when there is no preflight
+            # (standalone component use and tests).
+            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
+                config.times_jd,
+                config.norad_ids,
+                extra_orbit_dir=getattr(config, "extra_orbit_dir", None),
+                extra_orbit_max_age_days=getattr(config, "extra_orbit_max_age_days", None),
+                resolution=getattr(config, "tle_resolution", None),
+            )
             self.bstar = self.elements[:, 0]
             self.elements = self.elements[:, 1:] # Remove the bstar drag element
             self.sat_epoch = epoch_jd - 2433281.5
@@ -477,8 +534,18 @@ class SGP4LEOOrbit(Component):
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
             # self.ric_std = config.args["satellites"]["ric_std"]
 
-            extra_tle_dir = getattr(config, "extra_tle_dir", None)
-            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(jnp.mean(config.times_jd), config.norad_ids, extra_tle_dir=extra_tle_dir)
+            # Reuse the resolution the preflight check already made and enforced
+            # coverage on: re-resolving here could reach a different satellite set
+            # from the one the run was checked against, and would repeat the
+            # provider work. Falls back to resolving when there is no preflight
+            # (standalone component use and tests).
+            self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
+                config.times_jd,
+                config.norad_ids,
+                extra_orbit_dir=getattr(config, "extra_orbit_dir", None),
+                extra_orbit_max_age_days=getattr(config, "extra_orbit_max_age_days", None),
+                resolution=getattr(config, "tle_resolution", None),
+            )
             self.sat_epoch = epoch_jd - 2433281.5
             self.epoch_jd_whole = jnp.floor(epoch_jd)
             self.epoch_jd_frac = epoch_jd - self.epoch_jd_whole
@@ -667,95 +734,167 @@ def _pad_rfi_sources(tles_df):
     return pd.concat([tles_df, *([tles_df.iloc[[-1]]] * n_pad)], ignore_index=True)
 
 
-def fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
+def _orbit_records(tles_df) -> list[dict]:
+    """The resolved frame as a list of raw records, one per source, in row order.
 
-    tles_df = get_tles_by_id(
-        norad_ids,
-        obs_epoch_jd,
-        extra_tle_dir=extra_tle_dir,
+    This is what propagation and replay both consume. It used to be an
+    ``(n_sat, 2)`` array of TLE line pairs, which an OMM record cannot fill —
+    it has no lines, only elements. Passing the records themselves lets
+    :func:`_earth_satellite` and
+    :func:`tabascal.orbit.save_orbits_for_reuse` each ask the record what it is.
+    """
+    return tles_df.to_dict(orient="records")
+
+
+#: Element columns the SGP4/Kepler propagators consume, in the order they expect.
+_ELEMENT_COLUMNS = [
+    "SEMIMAJOR_AXIS",
+    "ECCENTRICITY",  # ecco
+    "INCLINATION",  # inclo
+    "RA_OF_ASC_NODE",  # nodeo
+    "ARG_OF_PERICENTER",  # argpo
+    "MEAN_ANOMALY",  # mo
+]
+
+
+def _no_satellites():
+    """Empty element arrays for a model that configures no satellites.
+
+    A satellite-free model is a legitimate configuration — ``norad_ids: []`` is
+    the shipped default, and :func:`tabascal.orbit_config.model_requires_tles` is
+    what rejects the case where the *model* needs TLEs but none were given. This
+    path must therefore produce an empty RFI model rather than be reported as a
+    resolution failure.
+    """
+    return (
+        jnp.zeros((0, len(_ELEMENT_COLUMNS))),
+        jnp.zeros((0,)),
+        [],
+        [],
     )
+
+
+def _requested_nothing(norad_ids) -> bool:
+    return norad_ids is None or not len(np.atleast_1d(np.asarray(norad_ids)))
+
+
+def _require_tles(tles_df, norad_ids) -> None:
+    """Validate the resolved TLEs against the requested NORAD IDs.
+
+    Resolution is all-or-nothing, so by the time a frame reaches here every
+    requested ID should be present; this is the defence in depth that stops an
+    incomplete set reaching the model by another route. An empty frame would
+    otherwise surface as an opaque pandas ``KeyError`` on the element columns, and
+    a partial one would silently shrink the RFI model — degrading subtraction with
+    no visible signal.
+
+    Callers screen out the "nothing was requested" case first, so an empty frame
+    reaching here always means a genuine failure to resolve.
+    """
+    requested = sorted({int(n) for n in np.atleast_1d(np.asarray(norad_ids))})
+    if not len(tles_df):
+        raise TLEError(
+            f"No TLEs could be resolved for NORAD IDs {requested}. "
+            "Check that the IDs are valid, and that either the extra TLE "
+            "directory covers them or the SatChecker service is reachable."
+        )
+    resolved = {int(n) for n in tles_df["NORAD_CAT_ID"]}
+    missing = sorted(set(requested) - resolved)
+    if missing:
+        raise TLEError(
+            f"TLEs could not be resolved for {len(missing)} of {len(requested)} "
+            f"requested satellites: NORAD IDs {missing}. TABASCAL does not "
+            f"subtract an incomplete satellite model: supply their TLEs via "
+            f"--extra-orbit-dir, relax satellites.remote_max_age_days "
+            f"deliberately, or remove these IDs from satellites.norad_ids."
+        )
+
+
+def fetch_orbital_elements(
+    times_jd=None,
+    norad_ids=None,
+    extra_orbit_dir=None,
+    extra_orbit_max_age_days=None,
+    resolution=None,
+):
+    """Orbital elements for the RFI model.
+
+    *resolution* is the :class:`~tabascal.orbit.TLEResolution` the preflight check
+    already produced; passing it is the normal path and guarantees the model is
+    built from exactly the records whose coverage and ages were checked. Without
+    it the satellites are resolved here instead, for callers that have no
+    preflight (the components' own re-fetch, and tests).
+    """
+    tles_df, norad_ids = _resolved_frame(
+        resolution,
+        times_jd,
+        norad_ids,
+        extra_orbit_dir,
+        extra_orbit_max_age_days,
+    )
+    if _requested_nothing(norad_ids):
+        return (*_no_satellites(), 0)
+    _require_tles(tles_df, norad_ids)
     # Real (unpadded) source count is the number of rows the fetch actually returned,
     # captured before padding. Inferring it from the padded id list (e.g. counting
     # distinct ids) is wrong when the real sources already contain a repeated NORAD id.
     n_rfi_real = len(tles_df)
     tles_df = _pad_rfi_sources(tles_df)
 
-    elements = jnp.atleast_2d(
-        tles_df[
-            [
-                "SEMIMAJOR_AXIS", #
-                "ECCENTRICITY", # ecco
-                "INCLINATION", # inclo
-                "RA_OF_ASC_NODE", # nodeo
-                "ARG_OF_PERICENTER", # argpo
-                "MEAN_ANOMALY", # mo
-            ]
-        ].values
-    )
+    elements = jnp.atleast_2d(tles_df[_ELEMENT_COLUMNS].values)
     epoch_jd = jnp.atleast_1d(tles_df["EPOCH_JD"].values)  # type: ignore
     norad_ids = list(tles_df["NORAD_CAT_ID"].values)
-    tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
+    orbit_records = _orbit_records(tles_df)
 
-    return elements, epoch_jd, norad_ids, tles, n_rfi_real
+    return elements, epoch_jd, norad_ids, orbit_records, n_rfi_real
 
-def fetch_standard_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None):
-
-    tles_df = _pad_rfi_sources(get_tles_by_id(
+def _resolved_frame(
+    resolution,
+    times_jd,
+    norad_ids,
+    extra_orbit_dir,
+    extra_orbit_max_age_days,
+):
+    """The element frame plus the ID list it must cover, from either source."""
+    if resolution is not None:
+        return resolution.frame(), list(resolution.requested)
+    tles_df = get_tles_by_id(
         norad_ids,
-        obs_epoch_jd,
-        extra_tle_dir=extra_tle_dir,
-    ))
+        times_jd,
+        extra_orbit_dir=extra_orbit_dir,
+        extra_orbit_max_age_days=extra_orbit_max_age_days,
+    )
+    return tles_df, norad_ids
 
-    # tles_df columns
-    # 'CCSDS_OMM_VERS', 'COMMENT', 'CREATION_DATE', 'ORIGINATOR',
-    # 'OBJECT_NAME', 'OBJECT_ID', 'CENTER_NAME', 'REF_FRAME', 'TIME_SYSTEM',
-    # 'MEAN_ELEMENT_THEORY', 'EPOCH', 'MEAN_MOTION', 'ECCENTRICITY',
-    # 'INCLINATION', 'RA_OF_ASC_NODE', 'ARG_OF_PERICENTER', 'MEAN_ANOMALY',
-    # 'EPHEMERIS_TYPE', 'CLASSIFICATION_TYPE', 'NORAD_CAT_ID',
-    # 'ELEMENT_SET_NO', 'REV_AT_EPOCH', 'BSTAR', 'MEAN_MOTION_DOT',
-    # 'MEAN_MOTION_DDOT', 'SEMIMAJOR_AXIS', 'PERIOD', 'APOAPSIS', 'PERIAPSIS',
-    # 'OBJECT_TYPE', 'RCS_SIZE', 'COUNTRY_CODE', 'LAUNCH_DATE', 'SITE',
-    # 'DECAY_DATE', 'FILE', 'GP_ID', 'TLE_LINE0', 'TLE_LINE1', 'TLE_LINE2',
-    # 'Fetch_Timestamp', 'EPOCH_JD', 'time_diff', 'time_diff_abs'
 
-# CCSDS_OMM_VERS                     =3.0                      
-# COMMENT                            =GENERATED VIA SPACE-TRACK.ORG API
-# CREATION_DATE                      =2026-03-13T03:38:44      
-# ORIGINATOR                         =18 SPCS                  
-# OBJECT_NAME                        =ISS (ZARYA)              
-# OBJECT_ID                          =1998-067A                
-# CENTER_NAME                        =EARTH                    
-# REF_FRAME                          =TEME                     
-# TIME_SYSTEM                        =UTC                      
-# MEAN_ELEMENT_THEORY                =SGP4                     
-# EPOCH                              =2026-03-12T20:51:23.157792
-# MEAN_MOTION                        =15.48614629              
-# ECCENTRICITY                       =0.00079238               
-# INCLINATION                        =51.6324                  
-# RA_OF_ASC_NODE                     =56.6367                  
-# ARG_OF_PERICENTER                  =186.1410                 
-# MEAN_ANOMALY                       =173.9482                 
-# EPHEMERIS_TYPE                     =0                        
-# CLASSIFICATION_TYPE                =U                        
-# NORAD_CAT_ID                       =25544                    
-# ELEMENT_SET_NO                     =999                      
-# REV_AT_EPOCH                       =55682                    
-# BSTAR                              =0.00021655360000         
-# MEAN_MOTION_DOT                    =0.00011348               
-# MEAN_MOTION_DDOT                   =0.0000000000000          
-# USER_DEFINED_SEMIMAJOR_AXIS        =6798.915                 
-# USER_DEFINED_PERIOD                =92.986                   
-# USER_DEFINED_APOAPSIS              =426.167                  
-# USER_DEFINED_PERIAPSIS             =415.393                  
-# USER_DEFINED_OBJECT_TYPE           =PAYLOAD                  
-# USER_DEFINED_RCS_SIZE              =LARGE                    
-# USER_DEFINED_COUNTRY_CODE          =CIS                      
-# USER_DEFINED_LAUNCH_DATE           =1998-11-20               
-# USER_DEFINED_SITE                  =TTMTR                    
-# USER_DEFINED_DECAY_DATE            =                         
-# USER_DEFINED_FILE                  =5086888                  
-# USER_DEFINED_GP_ID                 =315816402   
-    
+def fetch_standard_orbital_elements(
+    times_jd=None,
+    norad_ids=None,
+    extra_orbit_dir=None,
+    extra_orbit_max_age_days=None,
+    resolution=None,
+):
+    """Orbital elements for the SGP4 propagators.
+
+    Unlike :func:`fetch_orbital_elements` this deliberately has no empty-request
+    escape: only the SGP4/Kepler trajectory components call it, and those are
+    exactly the components ``model_requires_tles`` refuses to configure without
+    satellites. Reaching here with nothing requested is a real failure.
+    """
+    tles_df, norad_ids = _resolved_frame(
+        resolution,
+        times_jd,
+        norad_ids,
+        extra_orbit_dir,
+        extra_orbit_max_age_days,
+    )
+    _require_tles(tles_df, norad_ids)
+    tles_df = _pad_rfi_sources(tles_df)
+
+    # tles_df carries the OMM-style element columns derived locally by
+    # tabascal.satchecker.records.record_elements (degrees, rev/day, km), plus
+    # NORAD_CAT_ID, EPOCH_JD, and whichever raw columns the record's kind has.
+
     # SGP4 MINIMUM REQUIREMENTS:
     # To propagate an orbit using SGP4, you need:
     # - EPOCH (reference time)
@@ -796,8 +935,6 @@ def fetch_standard_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=None)
     )    
     epoch_jd = jnp.atleast_1d(tles_df["EPOCH_JD"].values)  # type: ignore
     norad_ids = list(tles_df["NORAD_CAT_ID"].values)
-    tles = np.atleast_2d(tles_df[["TLE_LINE1", "TLE_LINE2"]].values)
+    orbit_records = _orbit_records(tles_df)
 
-    return elements, epoch_jd, norad_ids, tles
-
-
+    return elements, epoch_jd, norad_ids, orbit_records

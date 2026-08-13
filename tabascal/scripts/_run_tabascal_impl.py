@@ -27,7 +27,7 @@ from tabascal.distributed import (
 )
 from tabascal.imports import import_components
 from tabascal.write import write_results_xds
-from tabascal.tle import TLEError
+from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 
 import jax
@@ -168,9 +168,10 @@ class _RunPaths:
     map_path: str
     params_path: str
     init_pred_path: str
+    used_orbits_path: str
 
 
-def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
+def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path=None):
     """Resolve the run's directory layout and write derived paths into ``config``.
 
     Creates the plot/results/memory directories and records the sim, zarr and MS
@@ -206,8 +207,12 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
     for directory in (plot_dir, results_dir):
         os.makedirs(directory, exist_ok=True)
 
-    if extra_tle_dir:
-        config["satellites"]["extra_tle_dir"] = extra_tle_dir
+    if extra_orbit_dir:
+        config["satellites"]["extra_orbit_dir"] = extra_orbit_dir
+    if norad_path:
+        # The CLI flag wins over both config keys; TabConfig's normalizer reads
+        # norad_ids_path in preference to norad_ids.
+        config["satellites"]["norad_ids_path"] = norad_path
 
     return _RunPaths(
         run_id=run_id,
@@ -219,6 +224,7 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir):
         map_path=os.path.join(results_dir, f"map_pred_{results_name}.zarr"),
         params_path=os.path.join(results_dir, f"map_params_{results_name}.zarr"),
         init_pred_path=os.path.join(results_dir, f"init_pred_{results_name}.zarr"),
+        used_orbits_path=os.path.join(results_dir, f"used_orbits_{results_name}.json"),
     )
 
 
@@ -253,8 +259,10 @@ def _print_model_summary(tab_config, model, start_time):
 
 
 @measure_runtime
-def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir=None, log=True):
-    paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir)
+def tabascal_subtraction(
+    config, sim_dir, ms_path=None, suffix="", extra_orbit_dir=None, norad_path=None, log=True
+):
+    paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path)
     ms_path = paths.ms_path
 
     with _stdout_logger(paths.log_path, log):
@@ -273,6 +281,29 @@ def tabascal_subtraction(config, sim_dir, ms_path=None, suffix="", extra_tle_dir
 
         tab_config, model = build_model(config, ms_path)
         prob_model = model.prob_model
+
+        # Persist the real TLEs this run resolved so it can be reproduced later.
+        # Only process 0 writes the shared result path in distributed runs.
+        if is_process_0():
+            n_rfi_real = getattr(tab_config, "n_rfi_real", None)
+            used_ids = getattr(tab_config, "norad_ids", None)
+            used_records = getattr(tab_config, "orbit_records", None)
+            if n_rfi_real is not None:
+                used_ids = used_ids[:n_rfi_real] if used_ids is not None else None
+                used_records = (
+                    used_records[:n_rfi_real] if used_records is not None else None
+                )
+            saved_orbits = save_orbits_for_reuse(
+                paths.used_orbits_path,
+                used_ids,
+                used_records,
+            )
+            if saved_orbits:
+                print(f"Orbits used saved to : {saved_orbits}")
+                print(
+                    "  (reuse via --extra-orbit-dir to reproduce this run's "
+                    "trajectory priors)"
+                )
 
         if sharding_enabled():
             # Split every leading-RFI-axis array across the device mesh and replicate
@@ -406,7 +437,8 @@ def run(args):
                 args.sim_dir,
                 args.ms_path,
                 args.suffix,
-                extra_tle_dir=args.extra_tle_dir,
+                extra_orbit_dir=args.extra_orbit_dir,
+                norad_path=getattr(args, "norad_path", None),
                 log=getattr(args, "log", True) and is_process_0(),
             )
     except (TLEError, TruthError) as e:

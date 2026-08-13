@@ -1,8 +1,8 @@
 """Tests for tabascal.components.trajectory — FixedOrbit, PhaseCalculationRFI,
 SGP4LEONoDragOrbit, and SGP4LEOOrbit.
 
-Space-Track-dependent tests are skipped automatically when credentials are
-not configured on the current machine.
+TLEs are sourced from IAU CPS SatChecker (no credentials). The SGP4 orbit tests
+run fully offline against the bundled TLE cache under tabascal/data/tles/.
 """
 
 import pytest
@@ -20,25 +20,6 @@ from .conftest import active_precision, make_constants, assert_transform_roundtr
 
 
 # ---------------------------------------------------------------------------
-# Space-Track credential detection
-# ---------------------------------------------------------------------------
-
-def _has_spacetrack_credentials() -> bool:
-    try:
-        from tabascal.tle import load_spacetrack_credentials
-        load_spacetrack_credentials()
-        return True
-    except Exception:
-        return False
-
-
-requires_spacetrack = pytest.mark.skipif(
-    not _has_spacetrack_credentials(),
-    reason="Space-Track credentials not configured — skipping",
-)
-
-
-# ---------------------------------------------------------------------------
 # Common TLE strings (ISS, epoch 2008-09-20)
 # These are public TLEs that require no Space-Track account to use.
 # ---------------------------------------------------------------------------
@@ -47,6 +28,16 @@ _ISS_TLE1 = "1 25544U 98067A   08264.51782528 -.00002182  00000-0 -11606-4 0  29
 _ISS_TLE2 = "2 25544  51.6416 247.4627 0006703 130.5360 325.0288 15.72125391563537"
 
 # A second LEO TLE for multi-satellite tests (Envisat, epoch ~2008)
+def _tle_record(norad_id, line1, line2):
+    """A TLE orbit record, as the resolver hands one to the components."""
+    return {
+        "RECORD_KIND": "tle",
+        "NORAD_CAT_ID": int(norad_id),
+        "TLE_LINE1": line1,
+        "TLE_LINE2": line2,
+    }
+
+
 _ENVISAT_TLE1 = "1 27386U 02009A   08264.20891862  .00000135  00000-0  87244-4 0  3620"
 _ENVISAT_TLE2 = "2 27386  98.1745 271.4088 0001247  86.4921 273.6404 14.37834818337895"
 
@@ -91,7 +82,7 @@ def make_trajectory_config(
     n_time=4,
     n_int_time=2,
     n_int_freq=1,
-    tles=None,
+    orbit_records=None,
     epoch_jd=None,
     precision=None,
 ):
@@ -107,8 +98,8 @@ def make_trajectory_config(
     times = jnp.linspace(0.0, n_time * 8.0, n_time)
     times_fine = jnp.linspace(0.0, n_time * 8.0, n_time_fine)
 
-    if tles is None:
-        tles = np.array([[_ISS_TLE1, _ISS_TLE2]] * n_rfi)
+    if orbit_records is None:
+        orbit_records = [_tle_record(25544, _ISS_TLE1, _ISS_TLE2)] * n_rfi
 
     return SimpleNamespace(
         n_ant=n_ant,
@@ -119,7 +110,7 @@ def make_trajectory_config(
         n_time_fine=n_time_fine,
         n_int_time=n_int_time,
         n_int_freq=n_int_freq,
-        tles=tles,
+        orbit_records=orbit_records,
         elements=jnp.zeros((n_rfi, 6)),  # placeholder — not used by FixedOrbit forward
         epoch_jd=jnp.full((n_rfi,), ep),
         times_jd=jnp.linspace(ep, ep + n_time * 8.0 / 86400, n_time),
@@ -309,15 +300,15 @@ class TestFixedOrbit:
     def test_two_satellites_shape(self):
         """Two distinct TLEs produce position and phase arrays of the correct shape."""
         n_rfi = 2
-        tles = np.array([
-            [_ISS_TLE1, _ISS_TLE2],
-            [_ENVISAT_TLE1, _ENVISAT_TLE2],
-        ])
+        records = [
+            _tle_record(25544, _ISS_TLE1, _ISS_TLE2),
+            _tle_record(27386, _ENVISAT_TLE1, _ENVISAT_TLE2),
+        ]
         n_ant, n_freq, n_time, n_int_time = 4, 2, 4, 2
         cfg = make_trajectory_config(
             n_rfi=n_rfi, n_ant=n_ant, n_freq=n_freq,
             n_time=n_time, n_int_time=n_int_time,
-            tles=tles,
+            orbit_records=records,
         )
         comp = FixedOrbit()
         comp.setup(cfg)
@@ -327,11 +318,11 @@ class TestFixedOrbit:
 
     def test_two_satellites_have_different_positions(self):
         """Two distinct TLEs must propagate to distinct positions."""
-        tles = np.array([
-            [_ISS_TLE1, _ISS_TLE2],
-            [_ENVISAT_TLE1, _ENVISAT_TLE2],
-        ])
-        cfg = make_trajectory_config(n_rfi=2, tles=tles)
+        records = [
+            _tle_record(25544, _ISS_TLE1, _ISS_TLE2),
+            _tle_record(27386, _ENVISAT_TLE1, _ENVISAT_TLE2),
+        ]
+        cfg = make_trajectory_config(n_rfi=2, orbit_records=records)
         comp = FixedOrbit()
         comp.setup(cfg)
         assert not jnp.allclose(comp.rfi_xyz[0], comp.rfi_xyz[1])
@@ -368,9 +359,10 @@ class TestFixedOrbit:
 
 
 # ---------------------------------------------------------------------------
-# Bundled TLE constants (NAVSTAR 18 / 67, cached 2023-02-21)
-# These match tabascal/data/tles/2023-02-21-navstar.json so no Space-Track
-# call is needed — get_tles_by_id finds the file from cache.
+# Bundled TLE constants (NAVSTAR 18 / 67, epoch 2023-02-21)
+# These match tabascal/data/tles/2023-02-21-navstar.json, which the mock config
+# below passes as extra_orbit_dir — the highest-precedence source — so both IDs
+# resolve locally and no SatChecker call is made.
 # ---------------------------------------------------------------------------
 
 # JD of 2023-02-21 13:55:04.589 UTC — must match the date prefix of the bundled file.
@@ -413,10 +405,149 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
         times=jnp.linspace(0.0, n_time * 8.0, n_time),
         times_fine=jnp.linspace(0.0, n_time_fine * 8.0, n_time_fine),
         norad_ids=_BUNDLED_NORAD_IDS,
-        extra_tle_dir=_bundled_tle_dir,
+        extra_orbit_dir=_bundled_tle_dir,
         precision=precision,
         args={"rfi": {"freq_int_samples": n_int_freq}},
     )
+
+
+# ---------------------------------------------------------------------------
+# Element fetchers — clear error when no TLE resolves
+# ---------------------------------------------------------------------------
+
+class TestFetchOrbitalElementsEmpty:
+    """When no requested NORAD ID resolves to a TLE, the fetchers must raise a
+    clear TLEError naming the IDs — not an opaque pandas KeyError."""
+
+    def _patch_empty(self, monkeypatch):
+        import pandas as pd
+        from tabascal.components import trajectory as traj_mod
+        monkeypatch.setattr(traj_mod, "get_tles_by_id", lambda *a, **k: pd.DataFrame())
+
+    def test_fetch_orbital_elements_raises_tle_error(self, monkeypatch):
+        from tabascal.components.trajectory import fetch_orbital_elements
+        from tabascal.orbit import TLEError
+        self._patch_empty(monkeypatch)
+        with pytest.raises(TLEError, match=r"No TLEs could be resolved.*99999"):
+            fetch_orbital_elements(2460000.0, [99999])
+
+    def test_fetch_standard_orbital_elements_raises_tle_error(self, monkeypatch):
+        from tabascal.components.trajectory import fetch_standard_orbital_elements
+        from tabascal.orbit import TLEError
+        self._patch_empty(monkeypatch)
+        with pytest.raises(TLEError, match="No TLEs could be resolved"):
+            fetch_standard_orbital_elements(2460000.0, [99999])
+
+
+class TestFetchOrbitalElementsNoSatellites:
+    """Configuring no satellites is not a resolution failure.
+
+    ``norad_ids: []`` is the shipped default and TabConfig calls the fetcher
+    unconditionally, so a model with no TLE trajectory component must build an
+    empty RFI model. Treating the empty request as "no TLEs could be resolved"
+    made every satellite-free configuration unrunnable.
+    """
+
+    def test_empty_request_yields_an_empty_rfi_model(self):
+        from tabascal.components.trajectory import fetch_orbital_elements
+        from tabascal.orbit import TLEResolution
+
+        resolution = TLEResolution(
+            requested=[], obs_epoch_jd=float("nan"), remote_max_age_days=3.0
+        )
+        elements, epoch_jd, norad_ids, orbit_records, n_rfi_real = (
+            fetch_orbital_elements(resolution=resolution)
+        )
+        assert elements.shape == (0, 6)
+        assert epoch_jd.shape == (0,)
+        assert norad_ids == []
+        assert orbit_records == []
+        assert n_rfi_real == 0
+
+    def test_empty_request_without_a_preflight_resolution(self, monkeypatch):
+        import pandas as pd
+        from tabascal.components import trajectory as traj_mod
+
+        monkeypatch.setattr(traj_mod, "get_tles_by_id", lambda *a, **k: pd.DataFrame())
+        _, _, norad_ids, _, n_rfi_real = traj_mod.fetch_orbital_elements(
+            2460000.0, []
+        )
+        assert norad_ids == []
+        assert n_rfi_real == 0
+
+
+class TestFetchOrbitalElementsPartial:
+    """A partial resolution must stop the run, naming the excluded NORAD IDs.
+
+    A satellite quietly dropped from the RFI model degrades subtraction with no
+    signal in the output, so the element fetchers refuse to build a model from a
+    subset of what was configured — even though resolution itself already
+    enforces complete coverage upstream.
+    """
+
+    def _patch_partial(self, monkeypatch, resolved_ids):
+        from tabascal.components import trajectory as traj_mod
+        from tabascal.orbit import _add_parsed_elements
+        from ..tle_helpers import jd, make_catalogue_df
+
+        df = _add_parsed_elements(
+            make_catalogue_df([(nid, jd(2023, 2, 21, 13)) for nid in resolved_ids])
+        )
+        monkeypatch.setattr(traj_mod, "get_tles_by_id", lambda *a, **k: df)
+
+    def test_partial_resolution_raises_and_names_missing_ids(self, monkeypatch):
+        from tabascal.components.trajectory import fetch_orbital_elements
+        from tabascal.orbit import TLEError
+
+        self._patch_partial(monkeypatch, [25544])
+        with pytest.raises(TLEError, match=r"NORAD IDs \[99999\]"):
+            fetch_orbital_elements(2460000.0, [25544, 99999])
+
+    def test_full_resolution_proceeds(self, monkeypatch):
+        from tabascal.components.trajectory import fetch_orbital_elements
+
+        self._patch_partial(monkeypatch, [25544, 38833])
+        _, _, norad_ids, _, n_rfi_real = fetch_orbital_elements(
+            2460000.0, [25544, 38833]
+        )
+        assert sorted(int(n) for n in norad_ids) == [25544, 38833]
+        assert n_rfi_real == 2
+
+    def test_preflight_resolution_is_reused_without_refetching(self, monkeypatch):
+        # The normal path: TabConfig hands the fetchers the resolution preflight
+        # already made, so no provider work happens here at all.
+        from tabascal.components import trajectory as traj_mod
+        from tabascal.components.trajectory import fetch_orbital_elements
+        from tabascal import orbit as tle
+        from ..tle_helpers import jd, make_catalogue_df
+
+        def boom(*args, **kwargs):
+            raise AssertionError("the preflight resolution must be reused as-is")
+
+        monkeypatch.setattr(traj_mod, "get_tles_by_id", boom)
+
+        epoch = jd(2023, 2, 21, 13)
+        records = make_catalogue_df([(25544, epoch), (38833, epoch)])
+        resolution = tle.TLEResolution(
+            requested=[25544, 38833],
+            obs_epoch_jd=epoch,
+            remote_max_age_days=3.0,
+            resolved={
+                int(row["NORAD_CAT_ID"]): tle.ResolvedTLE(
+                    norad_id=int(row["NORAD_CAT_ID"]),
+                    record=row.to_dict(),
+                    source="managed per-satellite cache",
+                    provider="test",
+                    epoch_jd=epoch,
+                    offset_days=0.0,
+                )
+                for _, row in records.iterrows()
+            },
+        )
+
+        _, _, norad_ids, _, n_rfi_real = fetch_orbital_elements(resolution=resolution)
+        assert [int(n) for n in norad_ids] == [25544, 38833]
+        assert n_rfi_real == 2
 
 
 # ---------------------------------------------------------------------------
@@ -559,3 +690,89 @@ def test_require_double_gate():
         positions, _ = sgp4jax.gcrf_positions_multi_leo(sats, comp.times_jd_fine)
         assert positions.shape == (cfg.n_rfi, cfg.n_time_fine, 3)
         assert jnp.all(jnp.isfinite(positions))
+
+
+class TestOmmPropagation:
+    """An OMM record must propagate to the same orbit its TLE form would.
+
+    FixedOrbit propagates through Skyfield, which reads TLE *lines*. An OMM has
+    none — that is the whole point of the format — so its elements go straight
+    into an sgp4 Satrec via sgp4init. Nothing in that path is checked by a
+    checksum or a parser, so a wrong unit (degrees for radians, rev/day for
+    rad/min) would produce a plausible-looking orbit that is simply the wrong
+    one. Comparing against the TLE path for the same satellite is what catches
+    it: the fixture derives the OMM elements from the very TLE it is compared
+    with, so the two must agree to numerical noise.
+    """
+
+    def _epoch(self):
+        from tests.tle_helpers import jd
+
+        return jd(2026, 8, 1)
+
+    def _times(self, epoch):
+        return [epoch + minutes / 1440.0 for minutes in (0, 7, 23, 61)]
+
+    def test_an_omm_propagates_identically_to_its_tle_form(self):
+        from tabascal.components.trajectory import get_satellite_positions
+        from tests.tle_helpers import make_omm, make_tle_record
+
+        epoch = self._epoch()
+        times = self._times(epoch)
+        from_tle = get_satellite_positions([make_tle_record(25544, epoch)], times)
+        from_omm = get_satellite_positions([make_omm(25544, epoch)], times)
+
+        # Sub-millimetre over a 6800 km orbit. Any unit error is kilometres.
+        assert np.max(np.abs(from_tle - from_omm)) < 1e-3
+
+    def test_a_mixed_set_propagates_each_record_by_its_own_kind(self):
+        from tabascal.components.trajectory import get_satellite_positions
+        from tests.tle_helpers import make_omm, make_tle_record
+
+        epoch = self._epoch()
+        times = self._times(epoch)
+        positions = get_satellite_positions(
+            [make_tle_record(25544, epoch), make_omm(27386, epoch)], times
+        )
+        assert positions.shape == (2, len(times), 3)
+        assert np.all(np.isfinite(positions))
+
+    def test_an_omm_orbit_has_a_plausible_altitude(self):
+        from tabascal.components.trajectory import get_satellite_positions
+        from tests.tle_helpers import make_omm
+
+        epoch = self._epoch()
+        radius = np.linalg.norm(
+            get_satellite_positions([make_omm(25544, epoch)], self._times(epoch)),
+            axis=-1,
+        )
+        assert np.all((6.6e6 < radius) & (radius < 7.0e6))
+
+    def test_fixed_orbit_runs_on_an_omm_record(self):
+        from tests.tle_helpers import jd, make_omm
+
+        epoch = jd(2026, 8, 1)
+        cfg = make_trajectory_config(
+            n_rfi=1, epoch_jd=epoch, orbit_records=[make_omm(25544, epoch)]
+        )
+        comp = FixedOrbit()
+        comp.setup(cfg)
+        assert comp.rfi_xyz.shape == (1, cfg.n_time_fine, 3)
+        assert jnp.all(jnp.isfinite(comp.rfi_xyz))
+
+    def test_fixed_orbit_agrees_across_kinds(self):
+        from tests.tle_helpers import jd, make_omm, make_tle_record
+
+        epoch = jd(2026, 8, 1)
+        by_kind = {}
+        for kind, record in (
+            ("tle", make_tle_record(25544, epoch)),
+            ("omm", make_omm(25544, epoch)),
+        ):
+            cfg = make_trajectory_config(
+                n_rfi=1, epoch_jd=epoch, orbit_records=[record]
+            )
+            comp = FixedOrbit()
+            comp.setup(cfg)
+            by_kind[kind] = np.asarray(comp.rfi_xyz)
+        assert np.max(np.abs(by_kind["tle"] - by_kind["omm"])) < 1e-3

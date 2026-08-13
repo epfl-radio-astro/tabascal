@@ -101,6 +101,11 @@ def is_process_0() -> bool:
     """True on the single process responsible for logging and writing results."""
     return jax.process_index() == 0
 
+
+def process_count() -> int:
+    """Number of processes in this run; 1 outside a multi-process launch."""
+    return jax.process_count()
+
 # ---------------------------------------------------------------------------
 # RFI-axis sharding
 # ---------------------------------------------------------------------------
@@ -280,17 +285,57 @@ def barrier(name: str) -> None:
     multihost_utils.sync_global_devices(name)
 
 
+def broadcast_bytes_from_rank0(payload, name: str) -> bytes:
+    """Broadcast process 0's *payload* bytes to every process, verbatim.
+
+    Used to share a result that only process 0 may compute -- the resolved TLE set
+    -- so workers never repeat the work. Sharing the *result* rather than merely
+    ordering the processes is what makes the outcome coherent when the shared
+    filesystem cache cannot be written: there is then nothing on disk for a worker
+    to read, and re-deriving it would mean one provider request per process.
+
+    ``broadcast_one_to_all`` requires identical shapes on every process, so the
+    length is broadcast first and the payload second. Non-zero processes pass
+    ``None``. Single-process: the payload straight back.
+    """
+    if jax.process_count() == 1:
+        return bytes(payload or b"")
+
+    from jax.experimental import multihost_utils
+
+    rank0 = is_process_0()
+    size = np.asarray(
+        multihost_utils.broadcast_one_to_all(
+            np.array([len(payload) if rank0 else 0], dtype=np.int64)
+        )
+    )
+    buffer = np.zeros(int(size[0]), dtype=np.uint8)
+    if rank0 and buffer.size:
+        buffer[:] = np.frombuffer(payload, dtype=np.uint8)
+    # ``broadcast_one_to_all`` is implemented as a sum over the process axis.
+    # JAX widens uint8 reductions (for example to uint32), so serialising the
+    # result's backing storage directly would insert padding NULs between every
+    # payload byte: ``b'{"'`` becomes ``b'{\0\0\0"\0\0\0'``.  Convert the
+    # values back to bytes explicitly before exposing their representation.
+    received = multihost_utils.broadcast_one_to_all(buffer)
+    return np.asarray(received, dtype=np.uint8).tobytes()
+
+
 @contextmanager
 def rank0_first(name: str):
     """Run the block on process 0 first, then on all other processes.
 
-    Serializes shared-resource setup (e.g. the Space-Track TLE fetch writing the file
-    cache) so workers find the resource already in place. Single-process: plain yield.
+    Serializes shared-resource setup so workers find the resource already in place.
+    Single-process: plain yield.
+
+    Not used for the TLE fetch: sharing only the *ordering* leaves workers to
+    re-derive the result from the cache, which is exactly what fails when the cache
+    is unwritable. :func:`broadcast_bytes_from_rank0` shares the result itself.
 
     Process 0 releases the barrier from a ``finally``, so if its block raises (e.g. a
-    ``TLEError`` from missing credentials or a network failure) the workers are woken
-    instead of blocking until the coordinator timeout; they then fail independently on
-    the missing resource. Turns a multi-process hang into a fast, symmetric error.
+    network failure) the workers are woken instead of blocking until the coordinator
+    timeout; they then fail independently on the missing resource. Turns a
+    multi-process hang into a fast, symmetric error.
     """
     if jax.process_count() == 1:
         yield
