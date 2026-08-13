@@ -308,7 +308,7 @@ class TestResolutionWireRoundTrip:
     def _round_trip(self, record, obs_epoch_jd):
         import json
 
-        from tabascal import tle
+        from tabascal import orbit as tle
 
         resolution = tle.TLEResolution([int(record["NORAD_CAT_ID"])], obs_epoch_jd, 3)
         tle._accept_remote(
@@ -364,7 +364,7 @@ class TestResolutionWireRoundTrip:
     def test_omm_elements_cross_the_wire_as_numbers_not_strings(self):
         # A string projection would round-trip today and mislead the next reader
         # into extending it to a field where it does not. Pin the types.
-        from tabascal import tle
+        from tabascal import orbit as tle
 
         from .tle_helpers import jd, make_omm
 
@@ -385,7 +385,7 @@ class TestResolutionWireRoundTrip:
 
     def test_tle_projection_is_unchanged(self):
         # The TLE path predates this and must not have been disturbed.
-        from tabascal import tle
+        from tabascal import orbit as tle
 
         from .tle_helpers import jd, make_tle_record
 
@@ -403,7 +403,7 @@ class TestResolutionWireRoundTrip:
         # whose decimal expansion is long.
         import json
 
-        from tabascal import tle
+        from tabascal import orbit as tle
 
         from .tle_helpers import jd, make_omm
 

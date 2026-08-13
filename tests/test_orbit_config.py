@@ -1,4 +1,4 @@
-"""Offline tests for :mod:`tabascal.tle_config`.
+"""Offline tests for :mod:`tabascal.orbit_config`.
 
 Two responsibilities, tested separately:
 
@@ -15,8 +15,8 @@ Two responsibilities, tested separately:
 import numpy as np
 import pytest
 
-from tabascal import tle_config
-from tabascal.tle_config import TLEConfigurationError
+from tabascal import orbit_config as tle_config
+from tabascal.orbit_config import TLEConfigurationError
 from tabascal.time import mjd_to_jd
 
 from .tle_helpers import (

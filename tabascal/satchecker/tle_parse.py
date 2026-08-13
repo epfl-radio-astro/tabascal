@@ -1,6 +1,6 @@
 """TLE line parsing shared by cache validation and element extraction.
 
-One parser, two consumers: :mod:`tabascal.tle` derives OMM-style orbital
+One parser, two consumers: :mod:`tabascal.orbit` derives OMM-style orbital
 elements through it, and :mod:`tabascal.satchecker.cache` validates envelopes
 through it — so anything the element parser consumes is, by construction,
 exactly what validation exercises. Imports only the standard library and this

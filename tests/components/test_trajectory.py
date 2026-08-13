@@ -426,14 +426,14 @@ class TestFetchOrbitalElementsEmpty:
 
     def test_fetch_orbital_elements_raises_tle_error(self, monkeypatch):
         from tabascal.components.trajectory import fetch_orbital_elements
-        from tabascal.tle import TLEError
+        from tabascal.orbit import TLEError
         self._patch_empty(monkeypatch)
         with pytest.raises(TLEError, match=r"No TLEs could be resolved.*99999"):
             fetch_orbital_elements(2460000.0, [99999])
 
     def test_fetch_standard_orbital_elements_raises_tle_error(self, monkeypatch):
         from tabascal.components.trajectory import fetch_standard_orbital_elements
-        from tabascal.tle import TLEError
+        from tabascal.orbit import TLEError
         self._patch_empty(monkeypatch)
         with pytest.raises(TLEError, match="No TLEs could be resolved"):
             fetch_standard_orbital_elements(2460000.0, [99999])
@@ -450,7 +450,7 @@ class TestFetchOrbitalElementsNoSatellites:
 
     def test_empty_request_yields_an_empty_rfi_model(self):
         from tabascal.components.trajectory import fetch_orbital_elements
-        from tabascal.tle import TLEResolution
+        from tabascal.orbit import TLEResolution
 
         resolution = TLEResolution(
             requested=[], obs_epoch_jd=float("nan"), remote_max_age_days=3.0
@@ -487,7 +487,7 @@ class TestFetchOrbitalElementsPartial:
 
     def _patch_partial(self, monkeypatch, resolved_ids):
         from tabascal.components import trajectory as traj_mod
-        from tabascal.tle import _add_parsed_elements
+        from tabascal.orbit import _add_parsed_elements
         from ..tle_helpers import jd, make_catalogue_df
 
         df = _add_parsed_elements(
@@ -497,7 +497,7 @@ class TestFetchOrbitalElementsPartial:
 
     def test_partial_resolution_raises_and_names_missing_ids(self, monkeypatch):
         from tabascal.components.trajectory import fetch_orbital_elements
-        from tabascal.tle import TLEError
+        from tabascal.orbit import TLEError
 
         self._patch_partial(monkeypatch, [25544])
         with pytest.raises(TLEError, match=r"NORAD IDs \[99999\]"):
@@ -518,7 +518,7 @@ class TestFetchOrbitalElementsPartial:
         # already made, so no provider work happens here at all.
         from tabascal.components import trajectory as traj_mod
         from tabascal.components.trajectory import fetch_orbital_elements
-        from tabascal import tle
+        from tabascal import orbit as tle
         from ..tle_helpers import jd, make_catalogue_df
 
         def boom(*args, **kwargs):

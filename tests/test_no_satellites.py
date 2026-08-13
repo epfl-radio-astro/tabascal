@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from tabascal.components.trajectory import fetch_orbital_elements
 from tabascal.config import TabConfig
-from tabascal.tle import TLEResolution
+from tabascal.orbit import TLEResolution
 
 
 def _empty_resolution() -> TLEResolution:

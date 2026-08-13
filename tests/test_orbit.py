@@ -5,7 +5,18 @@ import json
 import pandas as pd
 import pytest
 
-from tabascal import tle
+from tabascal import orbit
+
+tle = orbit
+
+
+def test_historical_tle_module_forwards_to_orbit():
+    """Existing imports keep working while new code uses the neutral module name."""
+    from tabascal import tle as legacy_tle
+
+    assert legacy_tle.TLEError is orbit.TLEError
+    assert legacy_tle.get_tles_by_id is orbit.get_tles_by_id
+    assert legacy_tle._add_parsed_elements is orbit._add_parsed_elements
 
 from .tle_helpers import (  # noqa: F401
     block_network,

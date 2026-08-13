@@ -27,7 +27,7 @@ from tabascal.distributed import (
 )
 from tabascal.imports import import_components
 from tabascal.write import write_results_xds
-from tabascal.tle import TLEError, save_orbits_for_reuse
+from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 
 import jax

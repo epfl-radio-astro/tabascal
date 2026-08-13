@@ -1,4 +1,4 @@
-"""One normalisation path for the ``satellites`` TLE configuration.
+"""One normalisation path for the ``satellites`` orbit configuration.
 
 Both the preflight check and the actual resolution build their inputs here, so a
 configuration can never be interpreted two different ways, and every malformed
@@ -67,7 +67,7 @@ class TLEConfigurationError(TLEError, ValueError):
     """A TLE-related configuration value is missing, malformed or out of range.
 
     Subclasses :class:`~tabascal.satchecker.client.SatCheckerError` (aliased as
-    ``tabascal.tle.TLEError``) so the CLI's existing handler prints it without a
+    ``tabascal.orbit.TLEError``) so the CLI's existing handler prints it without a
     traceback, and :class:`ValueError` because that is what a bad argument to
     these helpers has always raised.
     """

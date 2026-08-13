@@ -8,8 +8,8 @@ from tabascal.distributed import (
 )
 from tabascal.tab_tools import read_ms, fix_padding
 from tabascal.components.trajectory import fetch_orbital_elements, get_satellite_positions
-from tabascal.tle import check_epoch_agreement, preflight_tle_check
-from tabascal.tle_config import normalise_tle_config
+from tabascal.orbit import check_epoch_agreement, preflight_tle_check
+from tabascal.orbit_config import normalise_tle_config
 from tabascal.interferometry import (
     calculate_fringe_frequency_numpy,
     get_strides_and_idxs,

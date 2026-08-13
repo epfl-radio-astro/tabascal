@@ -4,7 +4,7 @@ Self-contained transport layer: this module talks to the SatChecker HTTP API and
 returns pandas DataFrames with a normalised column set. No account or credentials
 are required. It knows nothing about tabascal's caching, cache-key policy, or
 source-precedence policy — those live in :mod:`tabascal.satchecker.cache` and
-:mod:`tabascal.tle`. It deliberately imports nothing from tabascal, JAX, or
+:mod:`tabascal.orbit`. It deliberately imports nothing from tabascal, JAX, or
 casacore so it stays a candidate for extraction into a standalone client.
 
 Two endpoints, because SatChecker keeps two archives:
@@ -469,7 +469,7 @@ def fetch_nearest_omm(norad_id: int, epoch_jd: float) -> pd.DataFrame:
     The OMM archive begins at the 2026-07-12 handover, and a request for an
     earlier epoch is answered with its *earliest* record rather than with
     nothing — so a pre-handover caller gets a confident-looking element set that
-    may be years off. The age ceiling in :mod:`tabascal.tle` is what rejects it.
+    may be years off. The age ceiling in :mod:`tabascal.orbit` is what rejects it.
     """
     rows, url = _fetch_nearest_rows("get-nearest-omm", norad_id, epoch_jd)
     if rows is None:

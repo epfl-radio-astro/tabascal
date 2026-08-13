@@ -1,4 +1,4 @@
-from tabascal.tle import TLEError, get_tles_by_id
+from tabascal.orbit import TLEError, get_tles_by_id
 from tabascal.satchecker.records import KIND_TLE, record_elements, record_kind
 from tabascal.distributed import (
     make_global,
@@ -81,7 +81,7 @@ def get_satellite_positions(records: list, times_jd: list):
     Parameters
     ----------
     records : sequence of dict, length n_sat
-        Orbit records — TLE or OMM — as resolved by :mod:`tabascal.tle`.
+        Orbit records — TLE or OMM — as resolved by :mod:`tabascal.orbit`.
     times_jd : Array (n_time,)
         Times to calculate positions at, in Julian date.
 
@@ -741,7 +741,7 @@ def _orbit_records(tles_df) -> list[dict]:
     ``(n_sat, 2)`` array of TLE line pairs, which an OMM record cannot fill —
     it has no lines, only elements. Passing the records themselves lets
     :func:`_earth_satellite` and
-    :func:`tabascal.tle.save_orbits_for_reuse` each ask the record what it is.
+    :func:`tabascal.orbit.save_orbits_for_reuse` each ask the record what it is.
     """
     return tles_df.to_dict(orient="records")
 
@@ -761,7 +761,7 @@ def _no_satellites():
     """Empty element arrays for a model that configures no satellites.
 
     A satellite-free model is a legitimate configuration — ``norad_ids: []`` is
-    the shipped default, and :func:`tabascal.tle_config.model_requires_tles` is
+    the shipped default, and :func:`tabascal.orbit_config.model_requires_tles` is
     what rejects the case where the *model* needs TLEs but none were given. This
     path must therefore produce an empty RFI model rather than be reported as a
     resolution failure.
@@ -819,7 +819,7 @@ def fetch_orbital_elements(
 ):
     """Orbital elements for the RFI model.
 
-    *resolution* is the :class:`~tabascal.tle.TLEResolution` the preflight check
+    *resolution* is the :class:`~tabascal.orbit.TLEResolution` the preflight check
     already produced; passing it is the normal path and guarantees the model is
     built from exactly the records whose coverage and ages were checked. Without
     it the satellites are resolved here instead, for callers that have no

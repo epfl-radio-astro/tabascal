@@ -6,7 +6,9 @@ import time
 import pandas as pd
 import pytest
 
-from tabascal import tle
+from tabascal import orbit
+
+tle = orbit
 from tabascal.satchecker import client, SatCheckerTransportError
 from tabascal.satchecker import service
 from tabascal.satchecker.cache import TextOrbitCache

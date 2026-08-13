@@ -1,7 +1,7 @@
 """Shared builders for the offline SatChecker / TLE tests.
 
 Everything here is synthetic and offline: TLE lines are derived from a real ISS
-template (so they parse through :func:`tabascal.tle.parse_tle_elements`), with
+template (so they parse through :func:`tabascal.orbit.parse_tle_elements`), with
 only the NORAD ID and epoch varied. No network access is involved.
 
 :func:`block_network` enforces that. Import it into a test module and it becomes

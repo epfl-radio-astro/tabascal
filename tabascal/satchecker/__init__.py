@@ -13,7 +13,7 @@
 
 TABASCAL-specific orchestration (source precedence, ``extra_orbit_dir`` age policy,
 remote-age acceptance, and complete-coverage enforcement) lives in
-:mod:`tabascal.tle`.
+:mod:`tabascal.orbit`.
 
 The names most callers need are re-exported here.
 """

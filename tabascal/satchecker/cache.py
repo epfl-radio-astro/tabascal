@@ -8,7 +8,7 @@ cache-reuse age. There are no catalogue buckets, snapshots, or settling states.
 A single satellite's file may hold both record kinds at once, and around the
 2026-07-12 archive handover it usually will: the last TLEs SatChecker ever
 published for it, and the OMM element sets that follow. Which one a given
-observation gets is decided by epoch distance in :mod:`tabascal.tle`, not here.
+observation gets is decided by epoch distance in :mod:`tabascal.orbit`, not here.
 Everything below that has to be kind-aware is: what columns a record must have,
 what makes two records duplicates, and what "valid" means.
 """
