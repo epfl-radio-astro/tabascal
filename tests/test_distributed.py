@@ -416,3 +416,57 @@ class TestResolutionWireRoundTrip:
         wired = json.loads(json.dumps(tle._wire_record(record)))
         for column, value in awkward.items():
             assert wired[column] == value
+
+
+class TestResolveSharedFailure:
+    """Process 0 must always enter the collective, however it failed.
+
+    Every other rank is already blocked in ``broadcast_one_to_all`` waiting for
+    it. A failure that escapes before the broadcast does not fail the run — it
+    hangs it, until the coordinator times out.
+    """
+
+    def _rank0_of_two(self, monkeypatch):
+        monkeypatch.setattr(dist, "process_count", lambda: 2)
+        monkeypatch.setattr(dist, "is_process_0", lambda: True)
+        sent = []
+
+        def broadcast(payload, label):
+            sent.append(payload)
+            return payload
+
+        monkeypatch.setattr(dist, "broadcast_bytes_from_rank0", broadcast)
+        return sent
+
+    def test_a_resolution_failure_is_broadcast_not_raised_early(self, monkeypatch):
+        import json
+
+        from tabascal import orbit as tle
+
+        sent = self._rank0_of_two(monkeypatch)
+
+        def resolve():
+            raise tle.TLEError("no coverage")
+
+        with pytest.raises(tle.TLEError, match="no coverage"):
+            tle.resolve_shared(resolve)
+        assert sent, "process 0 skipped the broadcast every other rank waits on"
+        assert json.loads(sent[0])["ok"] is False
+
+    def test_a_serialisation_failure_is_broadcast_too(self, monkeypatch):
+        import json
+
+        from tabascal import orbit as tle
+
+        sent = self._rank0_of_two(monkeypatch)
+        # A value that resolves fine and then cannot be encoded: the failure
+        # lands on json.dumps, which must be inside the guard with everything
+        # else, not after it.
+        monkeypatch.setattr(
+            tle, "_resolution_to_wire", lambda resolution: {"ok": True, "x": object()}
+        )
+
+        with pytest.raises(tle.TLEError, match="TypeError"):
+            tle.resolve_shared(lambda: None)
+        assert sent, "process 0 skipped the broadcast every other rank waits on"
+        assert json.loads(sent[0])["ok"] is False

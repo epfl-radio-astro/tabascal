@@ -958,10 +958,14 @@ def resolve_shared(resolve) -> TLEResolution:
     payload = None
     if distributed.is_process_0():
         try:
-            message = _resolution_to_wire(resolve())
+            # Serialisation stays inside the guard: an exception escaping here
+            # would skip the broadcast below and leave every other process
+            # blocked in the collective until it times out.
+            payload = json.dumps(_resolution_to_wire(resolve())).encode()
         except Exception as e:  # reported identically on every process below
-            message = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-        payload = json.dumps(message).encode()
+            payload = json.dumps(
+                {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            ).encode()
 
     message = json.loads(distributed.broadcast_bytes_from_rank0(payload, "tle-fetch"))
     if not message.get("ok"):
