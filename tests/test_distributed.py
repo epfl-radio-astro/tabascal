@@ -264,3 +264,133 @@ def test_rank0_first_worker_waits_before_body(monkeypatch):
         order.append("body")
 
     assert order == ["body"]
+
+
+# ---------------------------------------------------------------------------
+# Resolution broadcast: elements must be identical on every rank
+# ---------------------------------------------------------------------------
+
+class TestResolutionWireRoundTrip:
+    """The single guard on the wire-format hazard.
+
+    Process 0 resolves the satellites and broadcasts the accepted records; every
+    other rank rebuilds the element frame from what it receives. A TLE survives
+    that hop trivially — the two lines are text, and every rank re-parses the
+    same 69 characters with the same parser. An OMM record has no lines, so the
+    element *values* themselves make the trip, and a lossy projection would
+    leave the ranks holding subtly different trajectory priors. Nothing would
+    raise; the run would just be wrong. Hence exact equality below, never
+    ``approx``.
+    """
+
+    def _round_trip(self, record, obs_epoch_jd):
+        import json
+
+        from tabascal import tle
+
+        resolution = tle.TLEResolution([int(record["NORAD_CAT_ID"])], obs_epoch_jd, 3)
+        tle._accept_remote(
+            {int(record["NORAD_CAT_ID"]): dict(record)},
+            "test",
+            obs_epoch_jd,
+            3,
+            resolution.resolved,
+            resolution.rejected,
+        )
+        assert resolution.complete, "the fixture record was not accepted"
+        wire = json.loads(json.dumps(tle._resolution_to_wire(resolution)))
+        return resolution, tle._resolution_from_wire(wire)
+
+    @pytest.mark.parametrize("kind", ["tle", "omm"])
+    def test_elements_survive_the_broadcast_exactly(self, kind):
+        from .tle_helpers import jd, make_record
+
+        obs = jd(2026, 8, 1)
+        record = make_record(kind, 25544, obs)
+        rank0, worker = self._round_trip(record, obs)
+
+        # The wire deliberately carries a subset of the columns — workers need
+        # what the elements are derived from, not the provenance. What must not
+        # differ is any number the model is built from.
+        before, after = rank0.frame(), worker.frame()
+        for column in (
+            "SEMIMAJOR_AXIS",
+            "ECCENTRICITY",
+            "INCLINATION",
+            "RA_OF_ASC_NODE",
+            "ARG_OF_PERICENTER",
+            "MEAN_ANOMALY",
+            "MEAN_MOTION",
+            "BSTAR",
+            "EPOCH_JD",
+        ):
+            assert before[column].tolist() == after[column].tolist(), (
+                f"{kind}: {column} diverged between rank 0 and the worker"
+            )
+
+    @pytest.mark.parametrize("kind", ["tle", "omm"])
+    def test_epochs_and_offsets_survive_the_broadcast_exactly(self, kind):
+        from .tle_helpers import jd, make_record
+
+        obs = jd(2026, 8, 1)
+        rank0, worker = self._round_trip(make_record(kind, 25544, obs), obs)
+
+        assert worker.obs_epoch_jd == rank0.obs_epoch_jd
+        assert worker.resolved[25544].epoch_jd == rank0.resolved[25544].epoch_jd
+        assert worker.resolved[25544].offset_days == rank0.resolved[25544].offset_days
+
+    def test_omm_elements_cross_the_wire_as_numbers_not_strings(self):
+        # A string projection would round-trip today and mislead the next reader
+        # into extending it to a field where it does not. Pin the types.
+        from tabascal import tle
+
+        from .tle_helpers import jd, make_omm
+
+        wired = tle._wire_record(make_omm(25544, jd(2026, 8, 1)))
+        assert wired["RECORD_KIND"] == "omm"
+        for column in (
+            "INCLINATION",
+            "RA_OF_ASC_NODE",
+            "ECCENTRICITY",
+            "ARG_OF_PERICENTER",
+            "MEAN_ANOMALY",
+            "MEAN_MOTION",
+            "BSTAR",
+        ):
+            assert isinstance(wired[column], float), column
+        assert isinstance(wired["EPOCH"], str)
+        assert "TLE_LINE1" not in wired
+
+    def test_tle_projection_is_unchanged(self):
+        # The TLE path predates this and must not have been disturbed.
+        from tabascal import tle
+
+        from .tle_helpers import jd, make_tle_record
+
+        record = make_tle_record(25544, jd(2026, 8, 1))
+        wired = tle._wire_record(record)
+        assert wired["RECORD_KIND"] == "tle"
+        assert wired["TLE_LINE1"] == record["TLE_LINE1"]
+        assert wired["TLE_LINE2"] == record["TLE_LINE2"]
+        assert wired["NORAD_CAT_ID"] == 25544
+        assert not any(column.startswith("MEAN_") for column in wired)
+
+    def test_a_worst_case_float_survives_the_hop(self):
+        # repr() is the shortest round-tripping representation in Python 3, but
+        # only if the value goes through the float path. Prove it with values
+        # whose decimal expansion is long.
+        import json
+
+        from tabascal import tle
+
+        from .tle_helpers import jd, make_omm
+
+        awkward = {
+            "INCLINATION": 51.641600000000004,
+            "MEAN_MOTION": 15.721253910000001,
+            "ECCENTRICITY": 0.0006703000000000001,
+        }
+        record = make_omm(25544, jd(2026, 8, 1), **awkward)
+        wired = json.loads(json.dumps(tle._wire_record(record)))
+        for column, value in awkward.items():
+            assert wired[column] == value

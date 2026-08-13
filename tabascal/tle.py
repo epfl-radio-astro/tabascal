@@ -68,8 +68,13 @@ from tabascal.satchecker.tle_parse import (
 # OMM: it asks for its epoch, its elements, or whether it is valid, and these
 # three answer for either kind.
 from tabascal.satchecker.records import (
+    KIND_FIELD,
+    KIND_OMM,
+    KIND_TLE,
+    OMM_ELEMENT_COLUMNS,
     record_elements,
     record_epoch_jd,
+    record_kind,
     validate_record,
 )
 from tabascal.tle_config import (  # noqa: F401  re-exported for callers
@@ -828,11 +833,14 @@ def resolve_shared(resolve) -> TLEResolution:
     Workers therefore never call the provider themselves: whatever process 0
     decided — the accepted records or the failure — is what every process acts
     on, so the run either proceeds from one identical satellite set or fails
-    coherently everywhere. Only the raw identity/TLE-line columns and the epochs
-    cross the wire; every process re-derives the orbital elements locally, so the
-    parsed values are bit-identical rather than serialisation-rounded. Rejection
-    diagnostics stay on process 0, which has already formatted them into the
-    error text being shared.
+    coherently everywhere. Only raw record columns and the epochs cross the
+    wire; every process re-derives the orbital elements locally, so the parsed
+    values are bit-identical rather than serialisation-rounded. For a TLE that
+    means re-parsing the two lines; for an OMM, whose elements have no line
+    encoding to re-parse, it means the element values themselves must survive
+    the hop exactly — see :func:`_wire_record`. Rejection diagnostics stay on
+    process 0, which has already formatted them into the error text being
+    shared.
 
     Single-process runs call *resolve* directly and are unaffected.
     """
@@ -858,15 +866,50 @@ def resolve_shared(resolve) -> TLEResolution:
     return _resolution_from_wire(message)
 
 
-_WIRE_COLUMNS = ("NORAD_CAT_ID", "OBJECT_NAME", "TLE_LINE1", "TLE_LINE2", "DATA_SOURCE")
+#: Identity and provenance, carried whatever the kind.
+_WIRE_COMMON_COLUMNS = ("OBJECT_NAME", "DATA_SOURCE")
+
+#: Per-kind text payload — everything the worker re-derives its elements from,
+#: for the kind that encodes them as text.
+_WIRE_TEXT_COLUMNS = {
+    KIND_TLE: ("TLE_LINE1", "TLE_LINE2"),
+    KIND_OMM: ("EPOCH", "OBJECT_ID"),
+}
+
+#: Per-kind numeric payload. These cross the wire as JSON *numbers*; see
+#: :func:`_wire_record`.
+_WIRE_NUMBER_COLUMNS = {
+    KIND_TLE: (),
+    KIND_OMM: OMM_ELEMENT_COLUMNS,
+}
 
 
 def _wire_record(record: dict) -> dict:
-    """JSON-safe projection of one record onto the columns workers actually need."""
-    out = {"NORAD_CAT_ID": int(record["NORAD_CAT_ID"])}
-    for col in _WIRE_COLUMNS[1:]:
+    """JSON-safe projection of one record onto the columns workers actually need.
+
+    A TLE crosses as its two lines and every rank re-parses them, so the ranks
+    compute independently and still agree bit for bit — they are running the
+    same parser over the same 69 characters. An OMM record has no lines: the
+    element values *themselves* have to survive the hop, and if they do not, the
+    ranks diverge in their trajectory priors with no error anywhere. That is
+    wrong science rather than a crash, so the two kinds are projected
+    differently on purpose.
+
+    OMM elements are therefore emitted as JSON **numbers**, not strings.
+    ``json.dump`` writes a float through ``repr``, which in Python 3 is the
+    shortest representation that round-trips exactly, so ``json.loads`` returns
+    the identical float. Routing them through the ``str(value)`` path would
+    happen to round-trip too, but a mixed-type projection — some numbers as
+    text, some as numbers — is what a later reader gets wrong, so it is avoided
+    rather than relied on.
+    """
+    kind = record_kind(record)
+    out = {"NORAD_CAT_ID": int(record["NORAD_CAT_ID"]), KIND_FIELD: kind}
+    for col in _WIRE_COMMON_COLUMNS + _WIRE_TEXT_COLUMNS[kind]:
         value = record.get(col)
         out[col] = None if value is None or pd.isna(value) else str(value)
+    for col in _WIRE_NUMBER_COLUMNS[kind]:
+        out[col] = float(record[col])
     return out
 
 
