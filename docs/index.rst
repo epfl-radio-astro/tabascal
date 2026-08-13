@@ -11,7 +11,7 @@ Welcome to tabscal documentation
    config
    components
    concepts
-   spacetrack
+   orbits
 
 .. toctree::
    :maxdepth: 2
@@ -20,6 +20,7 @@ Welcome to tabscal documentation
    installation
    pipeline_tests
    api
+   readthedocs
 
 
 Indices and tables

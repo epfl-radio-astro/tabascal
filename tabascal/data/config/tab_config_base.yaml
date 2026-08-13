@@ -72,11 +72,12 @@ rfi:
 # Satellite path parameters
 ############################
 satellites:
-  norad_ids_path: null  # Optional - Path to text file containing NORAD IDs of astellits to include. File should have one NORAD ID per line
-  norad_ids: []         # Optional - NORAD IDs of satellites to include
-  spacetrack_path: null # Required if any TLE satellites are included - Path to the Space-Track login config file
-  tle_dir: null         # Optional - Path of the directory where TLEs will be saved for future runs
-  tle_offset: 0         # Optional - Time offset (in days) for the TLE that is used in tabascal. Specifically for testing 
+  norad_ids_path: null  # Optional - Path to a text file of NORAD IDs to include, one per line ('#' comments and blank lines ignored). Takes precedence over norad_ids; the -np/--norad-path CLI flag takes precedence over both
+  norad_ids: []         # Optional - NORAD IDs of satellites to include. Orbital records (TLE or OMM) are fetched from IAU CPS SatChecker (no credentials required). Every listed ID must resolve to an acceptable record or the run stops before subtraction. Empty is valid only for a model with no satellite trajectory component
+  extra_orbit_dir: null           # Optional - Extra directory of local orbit files (TLE or OMM) searched (per NORAD ID) before the managed cache and SatChecker
+  extra_orbit_max_age_days: null  # Optional - Max |record epoch - observation epoch| (days) to accept an extra_orbit_dir record. null = unlimited (keeps exact used_orbits replay working); 0 = exact-epoch only; negative is an error
+  remote_max_age_days: 3          # Optional - PROVISIONAL hard ceiling on the age of a record accepted from SatChecker or the managed cache. Not a claim of 3-day accuracy - an emergency backstop, revisited by issue #101. null is an expert opt-out that removes the ceiling
+  cache_reuse_max_age_days: 1     # Optional - A cached SatChecker record this close to the observation avoids a new nearest-record request. Older cached records within remote_max_age_days remain offline fallbacks. null always reuses the nearest acceptable cached record
   sat_ids: []           # Optional - Satellite IDs of satellites with circular trajectories to include
   ole_path: null        # Optional - Path to the csv '.ole' file containing circular trajectory-based satellite orbit parameters
 ###########################################
