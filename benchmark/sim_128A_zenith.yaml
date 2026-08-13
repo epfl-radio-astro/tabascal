@@ -67,7 +67,11 @@ rfi_sources:
     # satellites are silently dropped and lower passes take their place.
     norad_spec_model: norad_satellite_augmented.rfimodel
     spacetrack_path: spacetrack_login.yaml
-    power_scale: 1e-2
+    # Calibrated by calibrate_power_scale.py so a satellite crossing the main beam
+    # is ~1000 Jy on-axis. The 32 selected passes span 549-648 km range, giving
+    # 813-1133 Jy (median 1000). For scale, the per-visibility noise is
+    # SEFD/sqrt(2*209kHz*10s) = 1.22 Jy, so this is a strong-RFI regime.
+    power_scale: 1.818e-07
     max_ang_sep: 180  # degrees; accept the whole visible sky, ranking is done on elevation
     min_alt: 0        # degrees
     vis_step: 1       # minutes
