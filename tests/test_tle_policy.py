@@ -9,7 +9,7 @@ import pytest
 from tabascal import tle
 from tabascal.satchecker import client, SatCheckerTransportError
 from tabascal.satchecker import service
-from tabascal.satchecker.cache import TextTLECache
+from tabascal.satchecker.cache import TextOrbitCache
 from tabascal.satchecker.service import fetch_nearest_batch
 
 from .tle_helpers import block_network, jd, make_catalogue_df, make_tle  # noqa: F401
@@ -20,7 +20,7 @@ OBS = jd(2023, 2, 21)
 
 @pytest.fixture
 def cache_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("TLE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path))
     return tmp_path
 
 
@@ -41,11 +41,11 @@ def test_cache_miss_fetches_exact_observation_epoch_and_caches(cache_dir, monkey
     result = tle.resolve_tles([25544], OBS)
     assert calls == [(25544, OBS)]
     assert result.resolved[25544].source == "SatChecker nearest-TLE"
-    assert len(TextTLECache(cache_dir).get(25544)) == 1
+    assert len(TextOrbitCache(cache_dir).get(25544)) == 1
 
 
 def test_close_cache_hit_makes_no_request(cache_dir, monkeypatch):
-    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 0.5)]))
+    TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 0.5)]))
     calls = _service(monkeypatch, {25544: OBS})
     result = tle.resolve_tles([25544], OBS, cache_reuse_max_age_days=1)
     assert calls == []
@@ -53,35 +53,35 @@ def test_close_cache_hit_makes_no_request(cache_dir, monkeypatch):
 
 
 def test_old_acceptable_cache_is_refreshed(cache_dir, monkeypatch):
-    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
+    TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
     calls = _service(monkeypatch, {25544: OBS - 0.1})
     result = tle.resolve_tles(
-        [25544], OBS, cache_reuse_max_age_days=1, remote_tle_max_age_days=3
+        [25544], OBS, cache_reuse_max_age_days=1, remote_max_age_days=3
     )
     assert calls == [(25544, OBS)]
     assert result.resolved[25544].age_days == pytest.approx(0.1, abs=2e-8)
-    assert len(TextTLECache(cache_dir).get(25544)) == 2
+    assert len(TextOrbitCache(cache_dir).get(25544)) == 2
 
 
 def test_old_acceptable_cache_is_offline_fallback(cache_dir, monkeypatch):
-    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
+    TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
 
     def down(*args):
         raise SatCheckerTransportError("offline")
 
     monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", down)
     result = tle.resolve_tles(
-        [25544], OBS, cache_reuse_max_age_days=1, remote_tle_max_age_days=3
+        [25544], OBS, cache_reuse_max_age_days=1, remote_max_age_days=3
     )
     assert result.complete
     assert result.resolved[25544].source == "managed per-satellite cache"
 
 
 def test_record_beyond_hard_ceiling_is_not_recovered(cache_dir, monkeypatch):
-    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 4)]))
+    TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 4)]))
     _service(monkeypatch, {25544: OBS - 4})
     result = tle.resolve_tles(
-        [25544], OBS, cache_reuse_max_age_days=1, remote_tle_max_age_days=3
+        [25544], OBS, cache_reuse_max_age_days=1, remote_max_age_days=3
     )
     assert not result.complete
     with pytest.raises(tle.TLEError, match="4.000 d"):
@@ -89,10 +89,10 @@ def test_record_beyond_hard_ceiling_is_not_recovered(cache_dir, monkeypatch):
 
 
 def test_null_reuse_age_always_reuses_acceptable_cache(cache_dir, monkeypatch):
-    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
+    TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
     calls = _service(monkeypatch, {25544: OBS})
     assert tle.resolve_tles(
-        [25544], OBS, cache_reuse_max_age_days=None, remote_tle_max_age_days=3
+        [25544], OBS, cache_reuse_max_age_days=None, remote_max_age_days=3
     ).complete
     assert calls == []
 
@@ -105,10 +105,10 @@ def test_null_reuse_age_still_fetches_when_cache_is_over_age(cache_dir, monkeypa
     a record that is then thrown away would fail the run with a fresh TLE sitting
     on the service.
     """
-    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 10)]))
+    TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 10)]))
     calls = _service(monkeypatch, {25544: OBS - 0.1})
     result = tle.resolve_tles(
-        [25544], OBS, cache_reuse_max_age_days=None, remote_tle_max_age_days=3
+        [25544], OBS, cache_reuse_max_age_days=None, remote_max_age_days=3
     )
     assert calls == [(25544, OBS)]
     assert result.complete
@@ -121,10 +121,10 @@ def test_staler_service_response_does_not_displace_fresher_cache(cache_dir, monk
     The cached record is too old to suppress the request but closer to the
     observation than what the service returns, so it has to survive the refresh.
     """
-    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
+    TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
     calls = _service(monkeypatch, {25544: OBS - 2.5})
     result = tle.resolve_tles(
-        [25544], OBS, cache_reuse_max_age_days=1, remote_tle_max_age_days=3
+        [25544], OBS, cache_reuse_max_age_days=1, remote_max_age_days=3
     )
     assert calls == [(25544, OBS)]
     assert result.resolved[25544].source == "managed per-satellite cache"
@@ -136,8 +136,8 @@ def test_extra_directory_has_precedence(cache_dir, tmp_path, monkeypatch):
     extra.mkdir()
     make_catalogue_df([(25544, OBS - 0.2)]).to_json(extra / "manual.json")
     calls = _service(monkeypatch, {25544: OBS})
-    result = tle.resolve_tles([25544], OBS, extra_tle_dir=str(extra))
-    assert result.resolved[25544].source == "extra_tle_dir"
+    result = tle.resolve_tles([25544], OBS, extra_orbit_dir=str(extra))
+    assert result.resolved[25544].source == "extra_orbit_dir"
     assert calls == []
 
 
@@ -288,13 +288,13 @@ def test_service_failure_is_reported_alongside_an_over_age_candidate(
     cache_dir, monkeypatch
 ):
     """Both facts matter: how close the best record was, and that it could not be improved."""
-    TextTLECache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 9)]))
+    TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 9)]))
 
     def down(norad_id, epoch):
         raise SatCheckerTransportError("connection refused")
 
     monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", down)
-    result = tle.resolve_tles([25544], OBS, remote_tle_max_age_days=3)
+    result = tle.resolve_tles([25544], OBS, remote_max_age_days=3)
 
     with pytest.raises(tle.TLEError) as caught:
         tle.require_complete_coverage(result)
@@ -348,7 +348,7 @@ def test_a_few_missing_satellites_do_not_trip_the_wall_detector():
 def test_missing_extra_tle_dir_is_reported(cache_dir, monkeypatch, capsys):
     """A typo in a replay path must not silently become a different RFI model."""
     _service(monkeypatch, {25544: OBS})
-    tle.resolve_tles([25544], OBS, extra_tle_dir="/nonexistent/typo-dir")
+    tle.resolve_tles([25544], OBS, extra_orbit_dir="/nonexistent/typo-dir")
     assert "does not exist" in capsys.readouterr().out
 
 

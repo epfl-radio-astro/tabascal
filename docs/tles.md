@@ -8,11 +8,11 @@ credentials are required.
 
 Each configured NORAD ID is resolved independently, in this order:
 
-1. `extra_tle_dir`: explicit user or replay files. The valid record closest to
-   the observation is selected and checked against `extra_tle_max_age_days`.
+1. `extra_orbit_dir`: explicit user or replay files. The valid record closest to
+   the observation is selected and checked against `extra_orbit_max_age_days`.
 2. Managed per-NORAD cache: the validated cached record closest to the
    observation is selected. If its age is within
-   `tle_cache_reuse_max_age_days`, no network request is made.
+   `cache_reuse_max_age_days`, no network request is made.
 3. SatChecker `get-nearest-tle`: TABASCAL requests the nearest record at the
    exact observation epoch. Cache misses run with at most five requests in
    flight, and valid responses are added to the per-NORAD cache.
@@ -52,11 +52,11 @@ stops the run rather than silently shrinking the RFI model.
 ## Cache policy
 
 The managed cache normally lives in the platform user-cache directory, such as
-`~/.cache/tle-cache` on Linux or `~/Library/Caches/tle-cache` on macOS. Set
-`TLE_CACHE_DIR` to relocate it. This variable controls managed storage; it is not
-an additional source like `--extra-tle-dir`.
+`~/.cache/orbit-cache` on Linux or `~/Library/Caches/orbit-cache` on macOS. Set
+`ORBIT_CACHE_DIR` to relocate it. This variable controls managed storage; it is not
+an additional source like `--extra-orbit-dir`.
 
-Each `tle-<NORAD ID>.json` file is an atomically written, versioned envelope
+Each `orbit-<NORAD ID>.json` file is an atomically written, versioned envelope
 containing the validated immutable TLE records already learned for that object.
 Records are keyed by their contents and TLE epoch rather than by the observation
 that originally requested them, so one record can serve multiple nearby runs.
@@ -65,16 +65,16 @@ Two age settings have intentionally different jobs:
 
 | Setting | Purpose | Default |
 |---|---|---:|
-| `tle_cache_reuse_max_age_days` | Avoid a request when the nearest cached record is already this close to the observation | 1 day |
-| `remote_tle_max_age_days` | Hard safety ceiling for every SatChecker or managed-cache record | 3 days |
+| `cache_reuse_max_age_days` | Avoid a request when the nearest cached record is already this close to the observation | 1 day |
+| `remote_max_age_days` | Hard safety ceiling for every SatChecker or managed-cache record | 3 days |
 
 If a cached record is older than the reuse threshold but still inside the hard
 ceiling, TABASCAL asks SatChecker for something closer. If that request fails or
 returns nothing usable, the acceptable cached record is used as an offline
 fallback. Records outside the hard ceiling are never accepted automatically.
 
-`tle_cache_reuse_max_age_days: null` means always reuse the nearest acceptable
-cached record. `remote_tle_max_age_days: null` is a separate expert opt-out that
+`cache_reuse_max_age_days: null` means always reuse the nearest acceptable
+cached record. `remote_max_age_days: null` is a separate expert opt-out that
 removes the safety ceiling. When both are numeric, the reuse threshold must not
 exceed the ceiling.
 
@@ -101,19 +101,19 @@ observation-specific replacement is tracked in
 ## Exact replay
 
 Every run saves the exact TLE pairs it used to
-`<sim_dir>/results/used_tles_<name>.json`. To reproduce those trajectory priors,
+`<sim_dir>/results/used_orbits_<name>.json`. To reproduce those trajectory priors,
 copy or retain that file and pass its directory to a later run:
 
 ```bash
-tabascal run -c path/to/config.yaml -ms path/to/data.ms --extra-tle-dir /path/to/saved-run
+tabascal run -c path/to/config.yaml -ms path/to/data.ms --extra-orbit-dir /path/to/saved-run
 ```
 
-The default `extra_tle_max_age_days: null` deliberately exempts explicit replay
+The default `extra_orbit_max_age_days: null` deliberately exempts explicit replay
 files from the remote age ceiling.
 
 ## Supplying TLEs manually
 
-Use `--extra-tle-dir` when SatChecker lacks an object or an acceptable historical
+Use `--extra-orbit-dir` when SatChecker lacks an object or an acceptable historical
 record. Every `*.json` file in the directory is considered. Files must be
 JSON tables containing:
 
@@ -147,15 +147,15 @@ Invalid rows do not poison unrelated satellites; the unresolved ID falls
 through to the managed cache and SatChecker.
 
 The column-oriented JSON written by `pandas.DataFrame.to_json()` is also
-accepted. In particular, TABASCAL's `used_tles_<name>.json` replay files can be
+accepted. In particular, TABASCAL's `used_orbits_<name>.json` replay files can be
 placed directly in this directory. Other files and subdirectories are ignored;
-only `*.json` files immediately inside `extra_tle_dir` are read.
+only `*.json` files immediately inside `extra_orbit_dir` are read.
 
 ### Obtaining compatible JSON from Space-Track
 
 Space-Track's `gp` and `gp_history` JSON responses include `NORAD_CAT_ID`,
 `OBJECT_NAME`, `TLE_LINE1`, and `TLE_LINE2`, so their response bodies can be
-saved directly in `extra_tle_dir` without conversion. Use `gp` for the current
+saved directly in `extra_orbit_dir` without conversion. Use `gp` for the current
 element set and `gp_history` for historical element sets. Space-Track requires a
 free account and authenticated requests; see its
 [API documentation](https://www.space-track.org/documentation#api) and
@@ -189,7 +189,7 @@ rm -f "$cookie_jar"
 unset SPACETRACK_PASSWORD
 ```
 
-Put `iss-history.json` in the directory passed to `--extra-tle-dir`. To obtain
+Put `iss-history.json` in the directory passed to `--extra-orbit-dir`. To obtain
 the current element set instead, replace the query URL with:
 
 ```text

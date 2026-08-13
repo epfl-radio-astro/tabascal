@@ -194,7 +194,7 @@ def _run_pipeline(
             str(config_path),
             "-s",
             str(input_src_dir),
-            "--extra-tle-dir",
+            "--extra-orbit-dir",
             bundled_tle_dir,
         ],
         capture_output=True,
@@ -716,7 +716,7 @@ def _prepare_sharded_run(
         sys.executable, str(script), "run",
         "-c", str(config_path),
         "-s", str(sim_dir),
-        "--extra-tle-dir", tle_dir,
+        "--extra-orbit-dir", tle_dir,
         "-nl",
     ]
     return cmd, sim_dir

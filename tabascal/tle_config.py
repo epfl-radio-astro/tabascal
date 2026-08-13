@@ -14,13 +14,13 @@ per integration, with the same seconds-versus-days unit guard.
 
 Three age settings exist and are deliberately kept distinct:
 
-``extra_tle_max_age_days``
-    Acceptance of explicit user/replay files (``extra_tle_dir``). ``null`` by
-    default so exact ``used_tles_*.json`` replay is always possible; remote
+``extra_orbit_max_age_days``
+    Acceptance of explicit user/replay files (``extra_orbit_dir``). ``null`` by
+    default so exact ``used_orbits_*.json`` replay is always possible; remote
     service policy must never constrain it.
-``remote_tle_max_age_days``
+``remote_max_age_days``
     Emergency acceptance ceiling for SatChecker records and its managed cache.
-``tle_cache_reuse_max_age_days``
+``cache_reuse_max_age_days``
     Age below which a cached SatChecker record avoids a new nearest-TLE request.
 """
 
@@ -49,12 +49,12 @@ from tabascal.time import mjd_to_jd
 #: emergency backstop against obviously unsuitable remote records, *not* a promise
 #: of three-day positional accuracy — see issue #101 for the calibrated,
 #: observation-specific replacement.
-DEFAULT_REMOTE_TLE_MAX_AGE_DAYS = 3.0
+DEFAULT_REMOTE_MAX_AGE_DAYS = 3.0
 
 #: A cached record this close to the observation is good enough to avoid a new
 #: nearest-TLE request. This is a request/latency trade-off, not the hard safety
 #: ceiling below.
-DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS = 1.0
+DEFAULT_CACHE_REUSE_MAX_AGE_DAYS = 1.0
 
 #: Trajectory components that consume resolved TLEs, so an empty NORAD ID list is
 #: a configuration error rather than a satellite-free model.
@@ -233,10 +233,10 @@ class TLEConfig:
     """Fully validated TLE configuration shared by preflight and resolution."""
 
     norad_ids: list[int] = field(default_factory=list)
-    extra_tle_dir: Optional[str] = None
-    extra_tle_max_age_days: Optional[float] = None
-    remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS
-    cache_reuse_max_age_days: Optional[float] = DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS
+    extra_orbit_dir: Optional[str] = None
+    extra_orbit_max_age_days: Optional[float] = None
+    remote_max_age_days: Optional[float] = DEFAULT_REMOTE_MAX_AGE_DAYS
+    cache_reuse_max_age_days: Optional[float] = DEFAULT_CACHE_REUSE_MAX_AGE_DAYS
 
 
 def normalise_tle_config(
@@ -273,17 +273,17 @@ def normalise_tle_config(
             "component."
         )
 
-    extra_tle_dir = satellites.get("extra_tle_dir") or None
+    extra_orbit_dir = satellites.get("extra_orbit_dir") or None
 
     remote_max_age = validate_age_days(
-        satellites.get("remote_tle_max_age_days", DEFAULT_REMOTE_TLE_MAX_AGE_DAYS),
-        "remote_tle_max_age_days",
+        satellites.get("remote_max_age_days", DEFAULT_REMOTE_MAX_AGE_DAYS),
+        "remote_max_age_days",
     )
     cache_reuse_age = validate_age_days(
         satellites.get(
-            "tle_cache_reuse_max_age_days", DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS
+            "cache_reuse_max_age_days", DEFAULT_CACHE_REUSE_MAX_AGE_DAYS
         ),
-        "tle_cache_reuse_max_age_days",
+        "cache_reuse_max_age_days",
     )
     if (
         cache_reuse_age is not None
@@ -291,17 +291,17 @@ def normalise_tle_config(
         and cache_reuse_age > remote_max_age
     ):
         raise TLEConfigurationError(
-            f"tle_cache_reuse_max_age_days ({cache_reuse_age:g}) must not exceed "
-            f"remote_tle_max_age_days ({remote_max_age:g})"
+            f"cache_reuse_max_age_days ({cache_reuse_age:g}) must not exceed "
+            f"remote_max_age_days ({remote_max_age:g})"
         )
 
     return TLEConfig(
         norad_ids=norad_ids,
-        extra_tle_dir=str(extra_tle_dir) if extra_tle_dir else None,
-        extra_tle_max_age_days=validate_age_days(
-            satellites.get("extra_tle_max_age_days"), "extra_tle_max_age_days"
+        extra_orbit_dir=str(extra_orbit_dir) if extra_orbit_dir else None,
+        extra_orbit_max_age_days=validate_age_days(
+            satellites.get("extra_orbit_max_age_days"), "extra_orbit_max_age_days"
         ),
-        remote_tle_max_age_days=remote_max_age,
+        remote_max_age_days=remote_max_age,
         cache_reuse_max_age_days=cache_reuse_age,
     )
 

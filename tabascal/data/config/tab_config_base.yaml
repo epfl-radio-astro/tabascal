@@ -74,10 +74,10 @@ rfi:
 satellites:
   norad_ids_path: null  # Optional - Path to a text file of NORAD IDs to include, one per line ('#' comments and blank lines ignored). Takes precedence over norad_ids; the -np/--norad-path CLI flag takes precedence over both
   norad_ids: []         # Optional - NORAD IDs of satellites to include. TLEs are fetched from IAU CPS SatChecker (no credentials required). Every listed ID must resolve to an acceptable TLE or the run stops before subtraction
-  extra_tle_dir: null   # Optional - Extra directory of local TLE files searched (per NORAD ID) before the managed cache and SatChecker
-  extra_tle_max_age_days: null      # Optional - Max |TLE epoch - observation epoch| (days) to accept an extra_tle_dir TLE. null = unlimited (keeps exact used_tles replay working); 0 = exact-epoch only; negative is an error
-  remote_tle_max_age_days: 3        # Optional - PROVISIONAL hard ceiling on the age of a TLE accepted from SatChecker or the managed cache. Not a claim of 3-day accuracy - an emergency backstop, revisited by issue #101. null is an expert opt-out that removes the ceiling
-  tle_cache_reuse_max_age_days: 1   # Optional - A cached SatChecker TLE this close to the observation avoids a new nearest-TLE request. Older cached records within remote_tle_max_age_days remain offline fallbacks. null always reuses the nearest acceptable cached record
+  extra_orbit_dir: null           # Optional - Extra directory of local orbit files (TLE or OMM) searched (per NORAD ID) before the managed cache and SatChecker
+  extra_orbit_max_age_days: null  # Optional - Max |record epoch - observation epoch| (days) to accept an extra_orbit_dir record. null = unlimited (keeps exact used_orbits replay working); 0 = exact-epoch only; negative is an error
+  remote_max_age_days: 3          # Optional - PROVISIONAL hard ceiling on the age of a record accepted from SatChecker or the managed cache. Not a claim of 3-day accuracy - an emergency backstop, revisited by issue #101. null is an expert opt-out that removes the ceiling
+  cache_reuse_max_age_days: 1     # Optional - A cached SatChecker record this close to the observation avoids a new nearest-record request. Older cached records within remote_max_age_days remain offline fallbacks. null always reuses the nearest acceptable cached record
   sat_ids: []           # Optional - Satellite IDs of satellites with circular trajectories to include
   ole_path: null        # Optional - Path to the csv '.ole' file containing circular trajectory-based satellite orbit parameters
 ###########################################

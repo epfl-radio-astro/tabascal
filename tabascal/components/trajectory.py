@@ -313,8 +313,8 @@ class SGP4LEONoDragOrbit(Component):
             self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
                 config.times_jd,
                 config.norad_ids,
-                extra_tle_dir=getattr(config, "extra_tle_dir", None),
-                extra_tle_max_age_days=getattr(config, "extra_tle_max_age_days", None),
+                extra_orbit_dir=getattr(config, "extra_orbit_dir", None),
+                extra_orbit_max_age_days=getattr(config, "extra_orbit_max_age_days", None),
                 resolution=getattr(config, "tle_resolution", None),
             )
             self.bstar = self.elements[:, 0]
@@ -495,8 +495,8 @@ class SGP4LEOOrbit(Component):
             self.elements, epoch_jd, self.norad_ids, tles = fetch_standard_orbital_elements(
                 config.times_jd,
                 config.norad_ids,
-                extra_tle_dir=getattr(config, "extra_tle_dir", None),
-                extra_tle_max_age_days=getattr(config, "extra_tle_max_age_days", None),
+                extra_orbit_dir=getattr(config, "extra_orbit_dir", None),
+                extra_orbit_max_age_days=getattr(config, "extra_orbit_max_age_days", None),
                 resolution=getattr(config, "tle_resolution", None),
             )
             self.sat_epoch = epoch_jd - 2433281.5
@@ -746,7 +746,7 @@ def _require_tles(tles_df, norad_ids) -> None:
             f"TLEs could not be resolved for {len(missing)} of {len(requested)} "
             f"requested satellites: NORAD IDs {missing}. TABASCAL does not "
             f"subtract an incomplete satellite model: supply their TLEs via "
-            f"--extra-tle-dir, relax satellites.remote_tle_max_age_days "
+            f"--extra-orbit-dir, relax satellites.remote_max_age_days "
             f"deliberately, or remove these IDs from satellites.norad_ids."
         )
 
@@ -754,8 +754,8 @@ def _require_tles(tles_df, norad_ids) -> None:
 def fetch_orbital_elements(
     times_jd=None,
     norad_ids=None,
-    extra_tle_dir=None,
-    extra_tle_max_age_days=None,
+    extra_orbit_dir=None,
+    extra_orbit_max_age_days=None,
     resolution=None,
 ):
     """Orbital elements for the RFI model.
@@ -770,8 +770,8 @@ def fetch_orbital_elements(
         resolution,
         times_jd,
         norad_ids,
-        extra_tle_dir,
-        extra_tle_max_age_days,
+        extra_orbit_dir,
+        extra_orbit_max_age_days,
     )
     if _requested_nothing(norad_ids):
         return (*_no_satellites(), 0)
@@ -793,8 +793,8 @@ def _resolved_frame(
     resolution,
     times_jd,
     norad_ids,
-    extra_tle_dir,
-    extra_tle_max_age_days,
+    extra_orbit_dir,
+    extra_orbit_max_age_days,
 ):
     """The element frame plus the ID list it must cover, from either source."""
     if resolution is not None:
@@ -802,8 +802,8 @@ def _resolved_frame(
     tles_df = get_tles_by_id(
         norad_ids,
         times_jd,
-        extra_tle_dir=extra_tle_dir,
-        extra_tle_max_age_days=extra_tle_max_age_days,
+        extra_orbit_dir=extra_orbit_dir,
+        extra_orbit_max_age_days=extra_orbit_max_age_days,
     )
     return tles_df, norad_ids
 
@@ -811,8 +811,8 @@ def _resolved_frame(
 def fetch_standard_orbital_elements(
     times_jd=None,
     norad_ids=None,
-    extra_tle_dir=None,
-    extra_tle_max_age_days=None,
+    extra_orbit_dir=None,
+    extra_orbit_max_age_days=None,
     resolution=None,
 ):
     """Orbital elements for the SGP4 propagators.
@@ -826,8 +826,8 @@ def fetch_standard_orbital_elements(
         resolution,
         times_jd,
         norad_ids,
-        extra_tle_dir,
-        extra_tle_max_age_days,
+        extra_orbit_dir,
+        extra_orbit_max_age_days,
     )
     _require_tles(tles_df, norad_ids)
     tles_df = _pad_rfi_sources(tles_df)

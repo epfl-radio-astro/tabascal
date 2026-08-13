@@ -6,7 +6,7 @@
 - :mod:`tabascal.satchecker.service` — bounded concurrent acquisition, response
   validation, and resilient cache writes.
 
-TABASCAL-specific orchestration (source precedence, ``extra_tle_dir`` age policy,
+TABASCAL-specific orchestration (source precedence, ``extra_orbit_dir`` age policy,
 remote-age acceptance, and complete-coverage enforcement) lives in
 :mod:`tabascal.tle`.
 
@@ -24,7 +24,7 @@ from .client import (
 )
 from .cache import (
     CacheValidationError,
-    TextTLECache,
+    TextOrbitCache,
     read_legacy_tle_records,
 )
 from .service import MAX_WORKERS, NearestBatchResult, fetch_nearest_batch, store_or_warn
@@ -38,7 +38,7 @@ __all__ = [
     "SatCheckerTransportError",
     "fetch_nearest_tle",
     "CacheValidationError",
-    "TextTLECache",
+    "TextOrbitCache",
     "read_legacy_tle_records",
     "MAX_WORKERS",
     "NearestBatchResult",

@@ -9,14 +9,14 @@ lines. All filtering and element computation is done locally.
 
 Source precedence is resolved **independently per NORAD ID**:
 
-  1. ``extra_tle_dir`` — user-supplied local TLE files. The record whose TLE-line
+  1. ``extra_orbit_dir`` — user-supplied local TLE files. The record whose TLE-line
      epoch is closest to the observation epoch is chosen; it is accepted only if
-     within ``extra_tle_max_age_days`` (``None`` = unlimited). An accepted record
+     within ``extra_orbit_max_age_days`` (``None`` = unlimited). An accepted record
      wins outright — later sources are not consulted for that ID. This is *your*
      data: the remote service's age policy never applies to it, so exact replay
-     of a previous run's ``used_tles_*.json`` is always possible.
+     of a previous run's ``used_orbits_*.json`` is always possible.
   2. Per-satellite cache — the cached record whose TLE epoch is closest to the
-     observation. If it is within ``tle_cache_reuse_max_age_days``, it avoids a
+     observation. If it is within ``cache_reuse_max_age_days``, it avoids a
      network request. An older record within the hard ceiling remains an offline
      fallback while TABASCAL asks SatChecker for something closer.
   3. SatChecker ``get-nearest-tle`` — exact-epoch lookups run with bounded
@@ -26,7 +26,7 @@ Source precedence is resolved **independently per NORAD ID**:
 Two rules govern what is then accepted:
 
 * **Age ceiling.** Every record from source 2 or 3 must lie within
-  ``remote_tle_max_age_days`` of the observation epoch. The epoch is parsed
+  ``remote_max_age_days`` of the observation epoch. The epoch is parsed
   locally from TLE line 1 — never taken from a provider field — and every
   accepted record's provider, epoch, signed offset and absolute age is logged.
 * **Complete coverage.** Every configured NORAD ID must end up with an accepted
@@ -51,7 +51,7 @@ import pandas as pd
 
 from tabascal import satchecker
 from tabascal.satchecker import (
-    TextTLECache,
+    TextOrbitCache,
     read_legacy_tle_records,
 )
 from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-compat alias
@@ -65,8 +65,8 @@ from tabascal.satchecker.tle_parse import (
     validate_tle_pair,
 )
 from tabascal.tle_config import (  # noqa: F401  re-exported for callers
-    DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
-    DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS,
+    DEFAULT_REMOTE_MAX_AGE_DAYS,
+    DEFAULT_CACHE_REUSE_MAX_AGE_DAYS,
     TLEConfig,
     TLEConfigurationError,
     ms_observation_epoch_jd,
@@ -85,7 +85,7 @@ from tabascal.time import jd_to_datetime
 # A TLE line-1 epoch is quantised to ~1e-8 day (8 decimal places of a day, ~0.9 ms),
 # and the datetime<->JD round-trip adds only sub-microsecond-day noise (measured
 # ~3.7e-9 day). This tolerance covers one epoch quantum plus that slack (~2.6 ms), so
-# ``extra_tle_max_age_days: 0`` accepts a record matching the observation to TLE
+# ``extra_orbit_max_age_days: 0`` accepts a record matching the observation to TLE
 # precision while rejecting one several ms away — matching the documented semantics.
 _AGE_TOL_DAYS = 3e-8
 
@@ -100,7 +100,7 @@ _LOG_DETAIL_ENV = "TABASCAL_TLE_LOG_DETAIL"
 _EPOCH_AGREEMENT_TOL_DAYS = 1e-6
 
 # Source labels used in logs, errors and provenance.
-_SRC_EXTRA = "extra_tle_dir"
+_SRC_EXTRA = "extra_orbit_dir"
 _SRC_CACHE = "managed per-satellite cache"
 _SRC_SATCHECKER = "SatChecker nearest-TLE"
 
@@ -109,20 +109,20 @@ _SRC_SATCHECKER = "SatChecker nearest-TLE"
 # TLE cache directory helpers
 # ---------------------------------------------------------------------------
 
-def tle_cache_dir() -> Path:
+def orbit_cache_dir() -> Path:
     """Return the managed TLE cache directory, creating it if possible.
 
     The directory is resolved in priority order:
-    1. ``TLE_CACHE_DIR`` environment variable (if set).
-    2. The platform user-cache directory (e.g. ``~/.cache/tle-cache`` on Linux,
-       ``~/Library/Caches/tle-cache`` on macOS).
+    1. ``ORBIT_CACHE_DIR`` environment variable (if set).
+    2. The platform user-cache directory (e.g. ``~/.cache/orbit-cache`` on Linux,
+       ``~/Library/Caches/orbit-cache`` on macOS).
 
     A directory that cannot be created (read-only filesystem, no permission,
     quota) is *not* an error here: the path is returned regardless, reads then
     miss and writes are reported and skipped, so a run with a valid fetch is
     never lost to an unusable cache location.
     """
-    p = Path(os.environ.get("TLE_CACHE_DIR") or user_cache_path("tle-cache"))
+    p = Path(os.environ.get("ORBIT_CACHE_DIR") or user_cache_path("orbit-cache"))
     try:
         p.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -134,9 +134,9 @@ def tle_cache_dir() -> Path:
 # Configuration validation (back-compat shim over tabascal.tle_config)
 # ---------------------------------------------------------------------------
 
-def _validate_max_age(extra_tle_max_age_days) -> Optional[float]:
-    """Validate ``extra_tle_max_age_days``: ``None`` or a non-negative number."""
-    return validate_age_days(extra_tle_max_age_days, "extra_tle_max_age_days")
+def _validate_max_age(extra_orbit_max_age_days) -> Optional[float]:
+    """Validate ``extra_orbit_max_age_days``: ``None`` or a non-negative number."""
+    return validate_age_days(extra_orbit_max_age_days, "extra_orbit_max_age_days")
 
 
 # ---------------------------------------------------------------------------
@@ -254,12 +254,12 @@ def _finalise_records(records: list[dict]) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _select_from_extra_dir(
-    extra_tle_dir: str,
+    extra_orbit_dir: str,
     wanted: set[int],
     obs_epoch_jd: float,
     max_age_days: Optional[float],
 ) -> tuple[dict[int, ResolvedTLE], dict[int, RejectedTLE]]:
-    """Resolve IDs from ``extra_tle_dir`` with per-ID nearest + age policy.
+    """Resolve IDs from ``extra_orbit_dir`` with per-ID nearest + age policy.
 
     Returns the IDs whose nearest local TLE is within ``max_age_days`` of
     *obs_epoch_jd* (``None`` = unlimited), plus the rejected near-misses. The age
@@ -268,7 +268,7 @@ def _select_from_extra_dir(
     """
     resolved: dict[int, ResolvedTLE] = {}
     rejected: dict[int, RejectedTLE] = {}
-    records = read_legacy_tle_records(extra_tle_dir)
+    records = read_legacy_tle_records(extra_orbit_dir)
     if not len(records):
         return resolved, rejected
     records = records.copy()
@@ -292,7 +292,7 @@ def _select_from_extra_dir(
                 )
             epoch_jd = _tle_epoch_jd(row["TLE_LINE1"])
         except (ValueError, TypeError) as e:
-            print(f"  {nid}: invalid extra_tle_dir record rejected — {e}")
+            print(f"  {nid}: invalid extra_orbit_dir record rejected — {e}")
             continue
         valid_row = row.copy()
         valid_row["EPOCH_JD"] = epoch_jd
@@ -316,7 +316,7 @@ def _select_from_extra_dir(
                 offset_days=offset,
             )
             print(
-                f"  {nid}: from extra_tle_dir "
+                f"  {nid}: from extra_orbit_dir "
                 f"(epoch {abs(offset):.3f} d from observation)"
             )
         else:
@@ -326,11 +326,11 @@ def _select_from_extra_dir(
                 provider=None,
                 epoch_jd=epoch_jd,
                 offset_days=offset,
-                reason=f"extra_tle_max_age_days={max_age_days}",
+                reason=f"extra_orbit_max_age_days={max_age_days}",
             )
             print(
-                f"  {nid}: extra_tle_dir record rejected — {abs(offset):.3f} d old "
-                f"> extra_tle_max_age_days={max_age_days}; trying managed cache"
+                f"  {nid}: extra_orbit_dir record rejected — {abs(offset):.3f} d old "
+                f"> extra_orbit_max_age_days={max_age_days}; trying managed cache"
             )
     return resolved, rejected
 
@@ -363,7 +363,7 @@ def _select_from_records(
 
 
 def _cached_candidates(
-    cache: TextTLECache, wanted: set[int], obs_epoch_jd: float
+    cache: TextOrbitCache, wanted: set[int], obs_epoch_jd: float
 ) -> dict[int, dict]:
     """Select the nearest validated cached record independently for each ID."""
     selected: dict[int, dict] = {}
@@ -427,7 +427,7 @@ def _accept_remote(
                         provider=provider,
                         epoch_jd=epoch_jd,
                         offset_days=offset,
-                        reason=f"remote_tle_max_age_days={max_age_days:g}",
+                        reason=f"remote_max_age_days={max_age_days:g}",
                     )
             continue
         if incumbent is not None and incumbent.age_days <= abs(offset):
@@ -515,7 +515,7 @@ def _coverage_error(resolution: TLEResolution) -> TLEError:
                 lines.append(f"  {nid}: SatChecker could not answer — {failure}")
             else:
                 lines.append(
-                    f"  {nid}: no record found in extra_tle_dir, the managed "
+                    f"  {nid}: no record found in extra_orbit_dir, the managed "
                     f"per-satellite cache, or SatChecker"
                 )
             continue
@@ -536,7 +536,7 @@ def _coverage_error(resolution: TLEResolution) -> TLEError:
     limit = resolution.remote_max_age_days
     lines += [
         "",
-        f"The remote age ceiling in force is remote_tle_max_age_days="
+        f"The remote age ceiling in force is remote_max_age_days="
         f"{'null (disabled)' if limit is None else f'{limit:g}'}. Remedies:",
     ]
     # A service failure is not the user's configuration being wrong, so lead with
@@ -565,8 +565,8 @@ def _coverage_error(resolution: TLEResolution) -> TLEError:
         )
     lines += [
         "  - put an acceptable TLE for these satellites in a directory and pass "
-        "--extra-tle-dir <dir> (or set satellites.extra_tle_dir)",
-        "  - deliberately change satellites.remote_tle_max_age_days (null removes "
+        "--extra-orbit-dir <dir> (or set satellites.extra_orbit_dir)",
+        "  - deliberately change satellites.remote_max_age_days (null removes "
         "the ceiling entirely; this is an expert opt-out, not a default)",
         "  - remove these NORAD IDs from satellites.norad_ids",
         "",
@@ -583,10 +583,10 @@ def _coverage_error(resolution: TLEResolution) -> TLEError:
 def resolve_tles(
     norad_ids,
     obs_epoch_jd: float,
-    extra_tle_dir: Optional[str] = None,
-    extra_tle_max_age_days: Optional[float] = None,
-    remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
-    cache_reuse_max_age_days: Optional[float] = DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS,
+    extra_orbit_dir: Optional[str] = None,
+    extra_orbit_max_age_days: Optional[float] = None,
+    remote_max_age_days: Optional[float] = DEFAULT_REMOTE_MAX_AGE_DAYS,
+    cache_reuse_max_age_days: Optional[float] = DEFAULT_CACHE_REUSE_MAX_AGE_DAYS,
     max_workers: int = satchecker.MAX_WORKERS,
 ) -> TLEResolution:
     """Resolve every requested NORAD ID at *obs_epoch_jd*, without raising on gaps.
@@ -597,15 +597,15 @@ def resolve_tles(
     TABASCAL runs use.
     """
     requested = normalise_norad_ids(norad_ids)
-    extra_max_age = validate_age_days(extra_tle_max_age_days, "extra_tle_max_age_days")
-    remote_max_age = validate_age_days(remote_tle_max_age_days, "remote_tle_max_age_days")
+    extra_max_age = validate_age_days(extra_orbit_max_age_days, "extra_orbit_max_age_days")
+    remote_max_age = validate_age_days(remote_max_age_days, "remote_max_age_days")
     reuse_max_age = validate_age_days(
-        cache_reuse_max_age_days, "tle_cache_reuse_max_age_days"
+        cache_reuse_max_age_days, "cache_reuse_max_age_days"
     )
     if reuse_max_age is not None and remote_max_age is not None and reuse_max_age > remote_max_age:
         raise TLEConfigurationError(
-            f"tle_cache_reuse_max_age_days ({reuse_max_age:g}) must not exceed "
-            f"remote_tle_max_age_days ({remote_max_age:g})"
+            f"cache_reuse_max_age_days ({reuse_max_age:g}) must not exceed "
+            f"remote_max_age_days ({remote_max_age:g})"
         )
     obs_epoch_jd = float(obs_epoch_jd)
 
@@ -621,24 +621,24 @@ def resolve_tles(
 
     wanted = set(requested)
 
-    # 1. extra_tle_dir (per-ID precedence + its own age policy)
-    if extra_tle_dir:
+    # 1. extra_orbit_dir (per-ID precedence + its own age policy)
+    if extra_orbit_dir:
         print(
-            f"TLE extra dir          : {Path(extra_tle_dir).resolve()} "
+            f"TLE extra dir          : {Path(extra_orbit_dir).resolve()} "
             f"(max age {'unlimited' if extra_max_age is None else f'{extra_max_age:g} d'})"
         )
         # A directory that is not there was almost certainly meant to be. Staying
         # silent turns a typo in a replay path into a run that quietly models
         # different satellites than the ones asked for, while the line above
         # implies the directory was searched.
-        if not Path(extra_tle_dir).is_dir():
+        if not Path(extra_orbit_dir).is_dir():
             print(
-                "  warning: this extra_tle_dir does not exist (or is not a "
+                "  warning: this extra_orbit_dir does not exist (or is not a "
                 "directory); no local TLEs will be found there. Check the path "
                 "if you meant to supply your own TLEs."
             )
         from_extra, extra_rejected = _select_from_extra_dir(
-            extra_tle_dir, wanted, obs_epoch_jd, extra_max_age
+            extra_orbit_dir, wanted, obs_epoch_jd, extra_max_age
         )
         resolution.resolved.update(from_extra)
         resolution.rejected.update(extra_rejected)
@@ -649,7 +649,7 @@ def resolve_tles(
     # older but still acceptable record is retained as an offline fallback while
     # the service is asked whether it now has something closer.
     if remaining:
-        cache = TextTLECache(tle_cache_dir())
+        cache = TextOrbitCache(orbit_cache_dir())
         cached = _cached_candidates(cache, remaining, obs_epoch_jd)
 
         # Every acceptable cached record becomes its ID's incumbent *before* any
@@ -669,7 +669,7 @@ def resolve_tles(
         # Whether to still ask the service is a *separate* question from whether
         # we already hold something usable. Only a record that is both within the
         # reuse threshold and actually accepted suppresses the request: without
-        # the intersection, `tle_cache_reuse_max_age_days: null` would make every
+        # the intersection, `cache_reuse_max_age_days: null` would make every
         # cached record a hit — including ones the hard ceiling then rejects —
         # and the ID would never be fetched at all.
         near_enough_to_reuse = {
@@ -756,10 +756,10 @@ def require_complete_coverage(resolution: TLEResolution) -> TLEResolution:
 def get_tles_by_id(
     norad_ids,
     times_jd,
-    extra_tle_dir: Optional[str] = None,
-    extra_tle_max_age_days: Optional[float] = None,
-    remote_tle_max_age_days: Optional[float] = DEFAULT_REMOTE_TLE_MAX_AGE_DAYS,
-    cache_reuse_max_age_days: Optional[float] = DEFAULT_TLE_CACHE_REUSE_MAX_AGE_DAYS,
+    extra_orbit_dir: Optional[str] = None,
+    extra_orbit_max_age_days: Optional[float] = None,
+    remote_max_age_days: Optional[float] = DEFAULT_REMOTE_MAX_AGE_DAYS,
+    cache_reuse_max_age_days: Optional[float] = DEFAULT_CACHE_REUSE_MAX_AGE_DAYS,
     max_workers: int = satchecker.MAX_WORKERS,
 ) -> pd.DataFrame:
     """Resolve TLEs for *norad_ids*, sharing one resolution across all processes.
@@ -778,9 +778,9 @@ def get_tles_by_id(
             resolve_tles(
                 norad_ids,
                 observation_epoch_jd(times_jd),
-                extra_tle_dir=extra_tle_dir,
-                extra_tle_max_age_days=extra_tle_max_age_days,
-                remote_tle_max_age_days=remote_tle_max_age_days,
+                extra_orbit_dir=extra_orbit_dir,
+                extra_orbit_max_age_days=extra_orbit_max_age_days,
+                remote_max_age_days=remote_max_age_days,
                 cache_reuse_max_age_days=cache_reuse_max_age_days,
                 max_workers=max_workers,
             )
@@ -903,13 +903,13 @@ def _resolution_from_wire(message: dict) -> TLEResolution:
 # ---------------------------------------------------------------------------
 
 def save_tles_for_reuse(path, norad_ids, tles) -> Optional[str]:
-    """Write the TLE lines a run used to *path* in ``extra_tle_dir`` format.
+    """Write the TLE lines a run used to *path* in ``extra_orbit_dir`` format.
 
     The file is a pandas-oriented JSON with ``NORAD_CAT_ID``, ``TLE_LINE1`` and
     ``TLE_LINE2`` columns — exactly what :func:`read_legacy_tle_records` reads —
     so a later run can reproduce this run's trajectory priors by passing the
-    file's directory via ``--extra-tle-dir`` (with the default unlimited
-    ``extra_tle_max_age_days``), independent of the shared cache, of what
+    file's directory via ``--extra-orbit-dir`` (with the default unlimited
+    ``extra_orbit_max_age_days``), independent of the shared cache, of what
     SatChecker serves by then, and of the remote age ceiling.
 
     ``norad_ids`` and ``tles`` are the aligned arrays produced by the element
@@ -971,7 +971,7 @@ def preflight_tle_check(
         return TLEResolution(
             requested=[],
             obs_epoch_jd=float("nan"),
-            remote_max_age_days=tle_config.remote_tle_max_age_days,
+            remote_max_age_days=tle_config.remote_max_age_days,
         )
 
     print(f"Preflight TLE check    : NORAD IDs {tle_config.norad_ids}")
@@ -981,9 +981,9 @@ def preflight_tle_check(
             resolve_tles(
                 tle_config.norad_ids,
                 _ms_mean_epoch_jd(ms_path),
-                extra_tle_dir=tle_config.extra_tle_dir,
-                extra_tle_max_age_days=tle_config.extra_tle_max_age_days,
-                remote_tle_max_age_days=tle_config.remote_tle_max_age_days,
+                extra_orbit_dir=tle_config.extra_orbit_dir,
+                extra_orbit_max_age_days=tle_config.extra_orbit_max_age_days,
+                remote_max_age_days=tle_config.remote_max_age_days,
                 cache_reuse_max_age_days=tle_config.cache_reuse_max_age_days,
             )
         )
@@ -993,12 +993,12 @@ def preflight_tle_check(
     print(
         f"TLE preflight OK       : {len(resolution.resolved)} of "
         f"{len(resolution.requested)} satellites resolved "
-        f"({n_extra} from extra_tle_dir, "
+        f"({n_extra} from extra_orbit_dir, "
         f"{len(resolution.resolved) - n_extra} from SatChecker/managed cache)"
     )
     print(
-        "  Local TLE files are searched with --extra-tle-dir <dir>; "
-        "TLE_CACHE_DIR=<dir> relocates the managed cache and is not an "
+        "  Local TLE files are searched with --extra-orbit-dir <dir>; "
+        "ORBIT_CACHE_DIR=<dir> relocates the managed cache and is not an "
         "additional source."
     )
     return resolution

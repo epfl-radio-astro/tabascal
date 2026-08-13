@@ -60,15 +60,15 @@ def build_parser():
         help="Do not write the stdout output to a log file (enabled by default).",
     )
     run_parser.add_argument(
-        "--extra-tle-dir",
-        dest="extra_tle_dir",
+        "--extra-orbit-dir",
+        dest="extra_orbit_dir",
         default=None,
         metavar="DIR",
         help=(
-            "Directory of local TLE files searched, per NORAD ID, before the "
-            "managed cache and SatChecker. (To relocate the managed cache "
-            "instead, set the TLE_CACHE_DIR environment variable — that is "
-            "storage, not an additional TLE source.)"
+            "Directory of local orbit files (TLE or OMM) searched, per NORAD "
+            "ID, before the managed cache and SatChecker. (To relocate the "
+            "managed cache instead, set the ORBIT_CACHE_DIR environment "
+            "variable — that is storage, not an additional orbit source.)"
         ),
     )
 

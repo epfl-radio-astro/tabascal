@@ -351,7 +351,7 @@ class TestFixedOrbit:
 # ---------------------------------------------------------------------------
 # Bundled TLE constants (NAVSTAR 18 / 67, epoch 2023-02-21)
 # These match tabascal/data/tles/2023-02-21-navstar.json, which the mock config
-# below passes as extra_tle_dir — the highest-precedence source — so both IDs
+# below passes as extra_orbit_dir — the highest-precedence source — so both IDs
 # resolve locally and no SatChecker call is made.
 # ---------------------------------------------------------------------------
 
@@ -395,7 +395,7 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
         times=jnp.linspace(0.0, n_time * 8.0, n_time),
         times_fine=jnp.linspace(0.0, n_time_fine * 8.0, n_time_fine),
         norad_ids=_BUNDLED_NORAD_IDS,
-        extra_tle_dir=_bundled_tle_dir,
+        extra_orbit_dir=_bundled_tle_dir,
         precision=precision,
         args={"rfi": {"freq_int_samples": n_int_freq}},
     )

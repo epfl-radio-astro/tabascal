@@ -130,8 +130,8 @@ class TabConfig:
         # model build, so a malformed value is a clean error and the two can never
         # disagree about what was configured.
         self.tle_config = normalise_tle_config(config)
-        self.extra_tle_dir = self.tle_config.extra_tle_dir
-        self.extra_tle_max_age_days = self.tle_config.extra_tle_max_age_days
+        self.extra_orbit_dir = self.tle_config.extra_orbit_dir
+        self.extra_orbit_max_age_days = self.tle_config.extra_orbit_max_age_days
 
         # Authoritative resolution: every configured satellite must have an
         # acceptable TLE here, before the visibilities are even read. Execution

@@ -48,12 +48,12 @@ Every configured satellite must resolve to an acceptable TLE. TABASCAL checks
 this during preflight — before the visibilities are read — and stops with an
 error naming each failing satellite rather than quietly subtracting an
 incomplete RFI model. The remedies are to supply the missing TLEs via
-`--extra-tle-dir`, to change `satellites.remote_tle_max_age_days` deliberately,
+`--extra-orbit-dir`, to change `satellites.remote_max_age_days` deliberately,
 or to remove the satellite from `satellites.norad_ids`.
 
 Every run also saves the TLEs it actually used to
-`<sim_dir>/results/used_tles_<name>.json`; passing that file's directory back
-via `--extra-tle-dir` reproduces the run's trajectory priors exactly. For the
+`<sim_dir>/results/used_orbits_<name>.json`; passing that file's directory back
+via `--extra-orbit-dir` reproduces the run's trajectory priors exactly. For the
 full caching behaviour, the age policies, and for supplying TLEs manually (e.g.
 from Space-Track) when SatChecker cannot provide them, see
 [Two-Line Elements (TLEs)](tles.md).

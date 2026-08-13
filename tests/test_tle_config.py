@@ -69,9 +69,9 @@ class TestConfigNormalisation:
     @pytest.mark.parametrize(
         "field",
         [
-            "extra_tle_max_age_days",
-            "remote_tle_max_age_days",
-            "tle_cache_reuse_max_age_days",
+            "extra_orbit_max_age_days",
+            "remote_max_age_days",
+            "cache_reuse_max_age_days",
         ],
     )
     @pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), "soon", []])
@@ -82,32 +82,32 @@ class TestConfigNormalisation:
     def test_cache_reuse_age_above_the_ceiling_is_a_configuration_error(self):
         with pytest.raises(TLEConfigurationError, match="must not exceed"):
             tle_config.normalise_tle_config(
-                _config(remote_tle_max_age_days=1, tle_cache_reuse_max_age_days=2)
+                _config(remote_max_age_days=1, cache_reuse_max_age_days=2)
             )
 
     def test_cache_reuse_age_equal_to_the_ceiling_is_allowed(self):
         cfg = tle_config.normalise_tle_config(
-            _config(remote_tle_max_age_days=2, tle_cache_reuse_max_age_days=2)
+            _config(remote_max_age_days=2, cache_reuse_max_age_days=2)
         )
         assert cfg.cache_reuse_max_age_days == 2.0
 
     def test_cache_reuse_age_with_a_null_ceiling_is_allowed(self):
         cfg = tle_config.normalise_tle_config(
-            _config(remote_tle_max_age_days=None, tle_cache_reuse_max_age_days=5)
+            _config(remote_max_age_days=None, cache_reuse_max_age_days=5)
         )
         assert cfg.cache_reuse_max_age_days == 5.0
 
     def test_defaults_are_the_documented_ones(self):
         cfg = tle_config.normalise_tle_config(_config(norad_ids=[25544]))
-        assert cfg.extra_tle_max_age_days is None      # exact replay stays possible
-        assert cfg.remote_tle_max_age_days == 3.0
+        assert cfg.extra_orbit_max_age_days is None      # exact replay stays possible
+        assert cfg.remote_max_age_days == 3.0
         assert cfg.cache_reuse_max_age_days == 1.0
 
     def test_null_ages_are_explicit_opt_outs(self):
         cfg = tle_config.normalise_tle_config(
-            _config(remote_tle_max_age_days=None, tle_cache_reuse_max_age_days=None)
+            _config(remote_max_age_days=None, cache_reuse_max_age_days=None)
         )
-        assert cfg.remote_tle_max_age_days is None
+        assert cfg.remote_max_age_days is None
         assert cfg.cache_reuse_max_age_days is None
 
     def test_configuration_error_is_reported_without_a_traceback_by_the_cli(self):

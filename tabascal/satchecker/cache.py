@@ -82,14 +82,14 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         raise
 
 
-class TextTLECache:
+class TextOrbitCache:
     """Human-readable, per-NORAD JSON cache under one directory."""
 
     def __init__(self, cache_dir):
         self.cache_dir = Path(cache_dir)
 
     def path(self, norad_id: int) -> Path:
-        return self.cache_dir / f"tle-{int(norad_id)}.json"
+        return self.cache_dir / f"orbit-{int(norad_id)}.json"
 
     def get(self, norad_id: int, log: Callable[[str], None] = print) -> pd.DataFrame:
         """Return all validated cached records for *norad_id*, or an empty frame.
@@ -155,7 +155,7 @@ class TextTLECache:
 def read_legacy_tle_records(directory) -> pd.DataFrame:
     """Read explicit user/replay ``*.json`` TLE tables from *directory*.
 
-    Managed ``tle-<NORAD>.json`` envelopes are intentionally not interpreted as
+    Managed ``orbit-<NORAD>.json`` envelopes are intentionally not interpreted as
     explicit input. Only pandas-oriented files exposing the three required columns
     are collected.
     """

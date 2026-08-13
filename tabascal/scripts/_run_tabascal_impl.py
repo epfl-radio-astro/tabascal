@@ -168,10 +168,10 @@ class _RunPaths:
     map_path: str
     params_path: str
     init_pred_path: str
-    used_tles_path: str
+    used_orbits_path: str
 
 
-def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir, norad_path=None):
+def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path=None):
     """Resolve the run's directory layout and write derived paths into ``config``.
 
     Creates the plot/results/memory directories and records the sim, zarr and MS
@@ -207,8 +207,8 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir, norad_path=N
     for directory in (plot_dir, results_dir):
         os.makedirs(directory, exist_ok=True)
 
-    if extra_tle_dir:
-        config["satellites"]["extra_tle_dir"] = extra_tle_dir
+    if extra_orbit_dir:
+        config["satellites"]["extra_orbit_dir"] = extra_orbit_dir
     if norad_path:
         # The CLI flag wins over both config keys; TabConfig's normalizer reads
         # norad_ids_path in preference to norad_ids.
@@ -224,7 +224,7 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir, norad_path=N
         map_path=os.path.join(results_dir, f"map_pred_{results_name}.zarr"),
         params_path=os.path.join(results_dir, f"map_params_{results_name}.zarr"),
         init_pred_path=os.path.join(results_dir, f"init_pred_{results_name}.zarr"),
-        used_tles_path=os.path.join(results_dir, f"used_tles_{results_name}.json"),
+        used_orbits_path=os.path.join(results_dir, f"used_orbits_{results_name}.json"),
     )
 
 
@@ -260,9 +260,9 @@ def _print_model_summary(tab_config, model, start_time):
 
 @measure_runtime
 def tabascal_subtraction(
-    config, sim_dir, ms_path=None, suffix="", extra_tle_dir=None, norad_path=None, log=True
+    config, sim_dir, ms_path=None, suffix="", extra_orbit_dir=None, norad_path=None, log=True
 ):
-    paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_tle_dir, norad_path)
+    paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path)
     ms_path = paths.ms_path
 
     with _stdout_logger(paths.log_path, log):
@@ -292,14 +292,14 @@ def tabascal_subtraction(
                 used_ids = used_ids[:n_rfi_real] if used_ids is not None else None
                 used_tles = used_tles[:n_rfi_real] if used_tles is not None else None
             saved_tles = save_tles_for_reuse(
-                paths.used_tles_path,
+                paths.used_orbits_path,
                 used_ids,
                 used_tles,
             )
             if saved_tles:
                 print(f"TLEs used saved to : {saved_tles}")
                 print(
-                    "  (reuse via --extra-tle-dir to reproduce this run's "
+                    "  (reuse via --extra-orbit-dir to reproduce this run's "
                     "trajectory priors)"
                 )
 
@@ -435,7 +435,7 @@ def run(args):
                 args.sim_dir,
                 args.ms_path,
                 args.suffix,
-                extra_tle_dir=args.extra_tle_dir,
+                extra_orbit_dir=args.extra_orbit_dir,
                 norad_path=getattr(args, "norad_path", None),
                 log=getattr(args, "log", True) and is_process_0(),
             )
