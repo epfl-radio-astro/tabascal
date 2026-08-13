@@ -372,7 +372,7 @@ def test_a_few_missing_satellites_do_not_trip_the_wall_detector():
     ]
 
 
-def test_missing_extra_tle_dir_is_reported(cache_dir, monkeypatch, capsys):
+def test_missing_extra_orbit_dir_is_reported(cache_dir, monkeypatch, capsys):
     """A typo in a replay path must not silently become a different RFI model."""
     _service(monkeypatch, {25544: OBS})
     tle.resolve_tles([25544], OBS, extra_orbit_dir="/nonexistent/typo-dir")

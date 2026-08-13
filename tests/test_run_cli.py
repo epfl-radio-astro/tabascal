@@ -31,7 +31,7 @@ class TestRunSubcommand:
         args = _parse("run", "-c", "config.yaml", "-ms", "file.ms")
         assert args.ms_path == "file.ms"
 
-    def test_extra_tle_dir(self):
+    def test_extra_orbit_dir(self):
         assert _parse("run", "-c", "c.yaml", "--extra-orbit-dir", "d").extra_orbit_dir == "d"
 
     @pytest.mark.parametrize("flag", ["-np", "--norad-path"])
