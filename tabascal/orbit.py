@@ -418,7 +418,7 @@ def _accept_remote(
     max_age_days: Optional[float],
     resolved: dict[int, ResolvedTLE],
     rejected: dict[int, RejectedTLE],
-) -> None:
+) -> set[int]:
     """Apply the remote age ceiling to *candidates*, updating accept/reject maps.
 
     The epoch comes from :func:`~tabascal.satchecker.records.record_epoch_jd`
@@ -436,7 +436,14 @@ def _accept_remote(
     refresh safe by construction — a failed or staler response leaves the existing
     record untouched — and it also stops a later source from
     quietly downgrading an earlier one.
+
+    Returns the IDs *candidates* answered with a record inside the age ceiling,
+    whether it was accepted or discarded as no improvement on the incumbent. That
+    is the question "did this source have something usable for the ID", which a
+    lookup in *resolved* cannot answer once an earlier source has put an
+    incumbent there.
     """
+    within_ceiling: set[int] = set()
     for nid, record in candidates.items():
         provider = record.get("DATA_SOURCE") or None
         incumbent = resolved.get(nid)
@@ -468,6 +475,7 @@ def _accept_remote(
                         reason=f"remote_max_age_days={max_age_days:g}",
                     )
             continue
+        within_ceiling.add(nid)
         if incumbent is not None and incumbent.age_days <= abs(offset):
             continue  # no improvement — keep what we have
         resolved[nid] = ResolvedTLE(
@@ -479,6 +487,7 @@ def _accept_remote(
             offset_days=offset,
         )
         rejected.pop(nid, None)
+    return within_ceiling
 
 
 # ---------------------------------------------------------------------------
@@ -641,9 +650,15 @@ def _fetch_from_service(
     record wanted lives in the *other* archive. Within a few days either side of
     the handover that is the normal case, not an exceptional one.
 
-    An unresolved ID after the first pass therefore earns one more request. What
-    does **not** earn one is an outage: a transport failure, an HTTP 429, or a
-    uniform wall of rejections means the service cannot serve us, and asking a
+    An ID the first pass produced no in-ceiling record for therefore earns one
+    more request. Note that this is *not* the same as an unresolved ID: an ID
+    whose stale-but-acceptable cached record is already the incumbent stays
+    resolved throughout, and would never reach the second archive if the loop
+    filtered on ``resolution.resolved``. Those IDs are exactly the ones in
+    ``to_fetch`` for whom the nearer record is the point of the request.
+
+    What does **not** earn one is an outage: a transport failure, an HTTP 429, or
+    a uniform wall of rejections means the service cannot serve us, and asking a
     down service a different question is still asking a down service. So the
     batch's ``outage`` stops the loop, while a per-ID response failure or an
     over-age record does not.
@@ -679,6 +694,7 @@ def _fetch_from_service(
             endpoint=endpoint,
             max_workers=max_workers,
         )
+        served: set[int] = set()
         if not batch.records.empty:
             for norad_id, records in batch.records.groupby("NORAD_CAT_ID"):
                 satchecker.store_or_warn(
@@ -686,7 +702,7 @@ def _fetch_from_service(
                     cache.path(int(norad_id)),
                     f"orbit cache for NORAD {int(norad_id)}",
                 )
-            _accept_remote(
+            served = _accept_remote(
                 _select_from_records(batch.records, set(remaining), obs_epoch_jd),
                 f"{_SRC_SATCHECKER} ({endpoint})",
                 obs_epoch_jd,
@@ -705,7 +721,10 @@ def _fetch_from_service(
 
         if batch.outage is not None:
             return
-        remaining = [nid for nid in remaining if nid not in resolution.resolved]
+        # Filter on what this archive actually served, not on what is resolved:
+        # an ID riding a stale cached incumbent is resolved from the start, and
+        # dropping it here would deny it the fallback archive it was fetched for.
+        remaining = [nid for nid in remaining if nid not in served]
         # An ID the fallback resolved is no longer a service failure, whatever
         # the first pass recorded against it.
         for norad_id in list(resolution.service_errors):

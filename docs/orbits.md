@@ -55,8 +55,12 @@ case that is the whole story: one request per satellite, answered from the right
 archive.
 
 If that request yields nothing acceptable, the other endpoint is asked for the
-IDs still unresolved. The fallback exists because **neither endpoint reports
-that it has nothing near the epoch you asked for**. Ask `get-nearest-omm` for a
+IDs the first archive did not answer with an acceptable record. Note that this
+is not the same as the IDs left *unresolved*: a satellite whose cached record is
+stale but still inside the hard ceiling is already resolved from the cache
+before any request goes out, and something closer is the entire point of asking.
+It reaches the fallback too. The fallback exists because **neither endpoint
+reports that it has nothing near the epoch you asked for**. Ask `get-nearest-omm` for a
 2021 epoch and it returns its earliest 2026 record — years off, with nothing in
 the response to say so. Ask `get-nearest-tle` for a 2027 epoch and it returns
 the last TLE ever published. TABASCAL's age ceiling rejects both, and that
@@ -131,7 +135,10 @@ Two age settings have intentionally different jobs:
 | `remote_max_age_days` | Hard safety ceiling for every SatChecker or managed-cache record | 3 days |
 
 If a cached record is older than the reuse threshold but still inside the hard
-ceiling, TABASCAL asks SatChecker for something closer. If that request fails or
+ceiling, TABASCAL asks SatChecker for something closer — including the fallback
+archive, if the first one has nothing to offer for that satellite. A response
+replaces the cached record only when it is strictly closer to the observation,
+so a refresh can never downgrade what you already hold. If the request fails or
 returns nothing usable, the acceptable cached record is used as an offline
 fallback. Records outside the hard ceiling are never accepted automatically.
 

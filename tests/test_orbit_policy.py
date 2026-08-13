@@ -547,6 +547,39 @@ class TestBoundaryFailover:
             (25544, AFTER_HANDOVER),
         ]
 
+    def test_a_stale_cached_record_still_reaches_the_fallback_archive(
+        self, cache_dir, monkeypatch
+    ):
+        # The ID is fetched *because* its cached record is stale, so it is
+        # already resolved — from the cache — before the first request goes out.
+        # Filtering the retry list on "resolved" would therefore skip it, and the
+        # run would silently keep the stale record while the archive holding the
+        # near one was never asked.
+        obs = client.HANDOVER_JD + 0.5
+        TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, obs - 2.9)]))
+        calls = _service(monkeypatch, {25544: obs - 0.1}, omm_epochs={})
+        result = tle.resolve_tles(
+            [25544], obs, cache_reuse_max_age_days=1, remote_max_age_days=3
+        )
+        assert len(calls) == 2  # OMM had nothing; TLE was still asked
+        assert result.resolved[25544].source == "SatChecker (nearest-TLE)"
+        assert result.resolved[25544].age_days == pytest.approx(0.1, abs=2e-8)
+
+    def test_no_failover_when_the_primary_answered_but_did_not_improve(
+        self, cache_dir, monkeypatch
+    ):
+        # The other half of the rule: the primary archive *did* have an
+        # in-ceiling record, it simply was no fresher than the cached one. The
+        # archive answered, so there is nothing for the fallback to find and no
+        # second request is spent on it every run.
+        TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
+        calls = _service(monkeypatch, {25544: OBS - 2.5}, omm_epochs={25544: OBS})
+        result = tle.resolve_tles(
+            [25544], OBS, cache_reuse_max_age_days=1, remote_max_age_days=3
+        )
+        assert len(calls) == 1
+        assert result.resolved[25544].source == "managed per-satellite cache"
+
     def test_a_failover_resolution_clears_the_first_passs_service_error(
         self, cache_dir, monkeypatch
     ):
