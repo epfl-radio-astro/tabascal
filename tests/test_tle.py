@@ -7,7 +7,14 @@ import pytest
 
 from tabascal import tle
 
-from .tle_helpers import block_network, jd, make_catalogue_df, write_legacy_tle_file  # noqa: F401
+from .tle_helpers import (  # noqa: F401
+    block_network,
+    jd,
+    make_catalogue_df,
+    make_omm_catalogue_df,
+    write_legacy_omm_file,
+    write_legacy_tle_file,
+)
 
 
 OBS = jd(2023, 2, 21)
@@ -85,3 +92,51 @@ def test_save_tles_for_reuse(tmp_path):
     )
     loaded = pd.read_json(path)
     assert loaded["NORAD_CAT_ID"].tolist() == [25544]
+
+
+# ---------------------------------------------------------------------------
+# extra_orbit_dir accepts either kind
+# ---------------------------------------------------------------------------
+
+class TestExtraDirRecordKinds:
+    """``extra_orbit_dir`` is the user's own data, in whichever format they have.
+
+    Space-Track publishes OMM as well as TLEs and its OMM history runs years
+    deep, so an archival run whose epoch predates SatChecker's OMM archive can
+    still be served from a local file. Neither format carries a kind field in
+    those exports, so both are inferred.
+    """
+
+    def test_an_omm_file_resolves(self, tmp_path):
+        write_legacy_omm_file(tmp_path / "omm.json", [(25544, OBS + 0.25)])
+        resolved, rejected = tle._select_from_extra_dir(str(tmp_path), {25544}, OBS, 1)
+        assert rejected == {}
+        assert resolved[25544].offset_days == pytest.approx(0.25, abs=1e-6)
+
+    def test_the_nearest_record_wins_across_kinds(self, tmp_path):
+        # Precedence is by epoch distance, not by format.
+        write_legacy_tle_file(tmp_path / "a-tle.json", [(25544, OBS - 2)])
+        write_legacy_omm_file(tmp_path / "b-omm.json", [(25544, OBS + 0.25)])
+        resolved, _ = tle._select_from_extra_dir(str(tmp_path), {25544}, OBS, 1)
+        assert resolved[25544].offset_days == pytest.approx(0.25, abs=1e-6)
+
+    def test_a_tle_still_wins_when_it_is_the_nearer_one(self, tmp_path):
+        write_legacy_tle_file(tmp_path / "a-tle.json", [(25544, OBS - 0.1)])
+        write_legacy_omm_file(tmp_path / "b-omm.json", [(25544, OBS + 2)])
+        resolved, _ = tle._select_from_extra_dir(str(tmp_path), {25544}, OBS, 1)
+        assert resolved[25544].offset_days == pytest.approx(-0.1, abs=1e-6)
+
+    def test_an_omm_file_with_a_corrupt_element_is_rejected(self, tmp_path):
+        frame = make_omm_catalogue_df([(25544, OBS)]).drop(columns=["RECORD_KIND"])
+        frame.loc[0, "INCLINATION"] = 999.0
+        frame.to_json(tmp_path / "omm.json")
+        resolved, rejected = tle._select_from_extra_dir(str(tmp_path), {25544}, OBS, 1)
+        assert resolved == {}
+
+    def test_an_omm_element_frame_is_finalised(self, tmp_path):
+        write_legacy_omm_file(tmp_path / "omm.json", [(25544, OBS)])
+        resolved, _ = tle._select_from_extra_dir(str(tmp_path), {25544}, OBS, 1)
+        frame = tle._finalise_records([resolved[25544].record])
+        for column in ("EPOCH_JD", "SEMIMAJOR_AXIS", "ECCENTRICITY", "MEAN_MOTION"):
+            assert column in frame
+        assert frame.loc[0, "SEMIMAJOR_AXIS"] > 6000.0

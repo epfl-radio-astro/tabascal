@@ -152,7 +152,11 @@ def make_record(kind: str, norad_id: int, epoch_jd: float, **overrides) -> dict:
 # ---------------------------------------------------------------------------
 
 def make_catalogue_df(pairs) -> pd.DataFrame:
-    """Normalised catalogue frame from ``[(norad_id, epoch_jd), ...]``."""
+    """Normalised TLE frame from ``[(norad_id, epoch_jd), ...]``.
+
+    Shaped as the client returns it, ``RECORD_KIND`` included — a response we
+    parsed ourselves knows what kind it is and says so.
+    """
     rows = []
     for nid, ep in pairs:
         l1, l2 = make_tle(nid, ep)
@@ -165,14 +169,26 @@ def make_catalogue_df(pairs) -> pd.DataFrame:
                 "TLE_LINE2": l2,
                 "DATA_SOURCE": "test",
                 "DATE_COLLECTED": None,
+                "RECORD_KIND": KIND_TLE,
             }
         )
     return pd.DataFrame(rows)
 
 
 def write_legacy_tle_file(path, pairs) -> None:
-    """Write a legacy pandas-oriented ``*.json`` TLE file (Space-Track style)."""
-    make_catalogue_df(pairs).to_json(path)
+    """Write a legacy pandas-oriented ``*.json`` TLE file (Space-Track style).
+
+    Deliberately *without* ``RECORD_KIND``: a Space-Track ``gp`` export carries
+    no such field, and the promise that one can be dropped into
+    ``extra_orbit_dir`` unconverted rests on the kind being inferable. Writing
+    the field here would retire that path from the suite.
+    """
+    make_catalogue_df(pairs).drop(columns=["RECORD_KIND"]).to_json(path)
+
+
+def write_legacy_omm_file(path, pairs) -> None:
+    """Write a legacy pandas-oriented ``*.json`` OMM file, with no kind field."""
+    make_omm_catalogue_df(pairs).drop(columns=["RECORD_KIND"]).to_json(path)
 
 
 def _raw_rows(pairs) -> list[dict]:
