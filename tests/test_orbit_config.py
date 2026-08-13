@@ -43,9 +43,15 @@ class TestConfigNormalisation:
     def test_null_norad_ids_is_an_empty_list_not_a_traceback(self):
         assert tle_config.normalise_tle_config(_config(norad_ids=None)).norad_ids == []
 
-    def test_null_norad_ids_with_a_tle_model_is_a_clean_error(self):
+    @pytest.mark.parametrize(
+        "component", ["trajectory:FixedOrbit", "trajectory.FixedOrbit"]
+    )
+    def test_null_norad_ids_with_a_tle_model_is_a_clean_error(self, component):
+        # import_components accepts both separators, so the guard has to see
+        # both. A dotted reference that slipped past it would leave the run
+        # modelling no satellites at all instead of stopping here.
         config = {
-            "model": {"components": ["trajectory:FixedOrbit"]},
+            "model": {"components": [component]},
             "satellites": {"norad_ids": None},
         }
         with pytest.raises(TLEConfigurationError, match="no NORAD catalogue IDs"):

@@ -218,7 +218,10 @@ def model_requires_tles(config: dict) -> bool:
     """True when the configured model includes a TLE-consuming trajectory component."""
     components = (config.get("model") or {}).get("components") or []
     for component in components:
-        name = str(component).rsplit(":", 1)[-1].strip()
+        # import_components accepts both "module:Class" and "module.Class", so
+        # both have to reach the guard — a dotted reference that slipped past it
+        # would build a silently satellite-free model instead of erroring.
+        name = str(component).replace(":", ".").rsplit(".", 1)[-1].strip()
         if name in _TLE_TRAJECTORY_COMPONENTS:
             return True
     return False

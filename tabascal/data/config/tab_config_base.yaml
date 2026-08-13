@@ -73,7 +73,7 @@ rfi:
 ############################
 satellites:
   norad_ids_path: null  # Optional - Path to a text file of NORAD IDs to include, one per line ('#' comments and blank lines ignored). Takes precedence over norad_ids; the -np/--norad-path CLI flag takes precedence over both
-  norad_ids: []         # Optional - NORAD IDs of satellites to include. TLEs are fetched from IAU CPS SatChecker (no credentials required). Every listed ID must resolve to an acceptable TLE or the run stops before subtraction
+  norad_ids: []         # Optional - NORAD IDs of satellites to include. Orbital records (TLE or OMM) are fetched from IAU CPS SatChecker (no credentials required). Every listed ID must resolve to an acceptable record or the run stops before subtraction. Empty is valid only for a model with no satellite trajectory component
   extra_orbit_dir: null           # Optional - Extra directory of local orbit files (TLE or OMM) searched (per NORAD ID) before the managed cache and SatChecker
   extra_orbit_max_age_days: null  # Optional - Max |record epoch - observation epoch| (days) to accept an extra_orbit_dir record. null = unlimited (keeps exact used_orbits replay working); 0 = exact-epoch only; negative is an error
   remote_max_age_days: 3          # Optional - PROVISIONAL hard ceiling on the age of a record accepted from SatChecker or the managed cache. Not a claim of 3-day accuracy - an emergency backstop, revisited by issue #101. null is an expert opt-out that removes the ceiling
