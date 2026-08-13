@@ -23,6 +23,7 @@ Usage
 """
 
 import argparse
+import re
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +53,12 @@ def main() -> None:
     parser.add_argument("--ids", default="selected_norad_ids.txt")
     parser.add_argument("--target-jy", type=float, default=1000.0)
     parser.add_argument("--tle-dir", default=None)
+    parser.add_argument(
+        "--write-back", action="store_true",
+        help="Write the calibrated power_scale into the sim config. Without this the "
+             "value has to be copied by hand, which is exactly how a stale config "
+             "silently produced a simulation 5e4x too bright once already.",
+    )
     args = parser.parse_args()
 
     sim_config = load_config(args.sim_config, config_type="sim")
@@ -118,11 +125,26 @@ def main() -> None:
         f"median={median:.4g} Jy  max={df['on_axis_Jy'].max():.4g} Jy"
     )
     print(f"\nTo put the median at {args.target_jy:g} Jy:")
-    print(f"  power_scale: {new_scale:.4g}")
+    print(f"  power_scale: {new_scale:.6g}")
     print(
         f"  -> min {df['on_axis_Jy'].min() * new_scale / current_scale:.4g} Jy, "
         f"max {df['on_axis_Jy'].max() * new_scale / current_scale:.4g} Jy"
     )
+
+    if args.write_back:
+        path = Path(args.sim_config)
+        text = path.read_text()
+        new_text, n = re.subn(
+            r"^(\s*power_scale:\s*)\S+(.*)$",
+            lambda m: f"{m.group(1)}{new_scale:.6g}{m.group(2)}",
+            text,
+            count=1,
+            flags=re.M,
+        )
+        if n != 1:
+            raise SystemExit(f"Could not find a power_scale line to update in {path}")
+        path.write_text(new_text)
+        print(f"\nWrote power_scale={new_scale:.6g} into {path}")
 
 
 if __name__ == "__main__":

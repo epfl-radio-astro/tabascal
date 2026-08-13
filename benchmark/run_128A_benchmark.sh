@@ -46,10 +46,11 @@ echo "selected: $(tr '\n' ' ' < selected_norad_ids.txt)"
 
 echo
 echo "########## stage 1b: calibrate power_scale to ~1000 Jy on-axis"
+# --write-back so the generated simulation cannot disagree with the calibration.
 $PIXI run --manifest-path "$REPO/pyproject.toml" -e "$ENVNAME" python3 \
     "$REPO/benchmark/calibrate_power_scale.py" \
-    --sim-config sim_128A_zenith.yaml --ids selected_norad_ids.txt --target-jy 1000
-echo "(update power_scale in sim_128A_zenith.yaml before stage 2 if it differs)"
+    --sim-config sim_128A_zenith.yaml --ids selected_norad_ids.txt \
+    --target-jy 1000 --write-back
 
 echo
 echo "########## stage 2: generate the simulation"
