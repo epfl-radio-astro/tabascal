@@ -282,7 +282,32 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
 
     _expected_gpus = 4
 
+    # The three references added here are the measurements from PR #92's final
+    # successful CSCS run (commit 7a41e4c, Daint node nid005553).  They use the
+    # same tolerances as the established RiemannFFI/double check so every
+    # multi-GPU variant now participates in performance regression checking.
     _reference_by_variant: dict = {
+        ("Riemann", "single"): {
+            "daint:gpu": {
+                "total_runtime": (52.27, -0.25, 0.15, "s"),
+                "optimizer_runtime": (29.63, -0.20, 0.15, "s"),
+                "memory_usage": (3.268, -0.15, 0.15, "GB"),
+            },
+        },
+        ("Riemann", "double"): {
+            "daint:gpu": {
+                "total_runtime": (54.29, -0.25, 0.15, "s"),
+                "optimizer_runtime": (31.27, -0.20, 0.15, "s"),
+                "memory_usage": (7.019, -0.15, 0.15, "GB"),
+            },
+        },
+        ("RiemannFFI", "single"): {
+            "daint:gpu": {
+                "total_runtime": (24.06, -0.25, 0.15, "s"),
+                "optimizer_runtime": (9.06, -0.20, 0.15, "s"),
+                "memory_usage": (0.238, -0.15, 0.15, "GB"),
+            },
+        },
         ("RiemannFFI", "double"): {
             "daint:gpu": {
                 "total_runtime": (27.4, -0.25, 0.15, "s"),
