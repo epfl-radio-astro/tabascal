@@ -59,7 +59,7 @@ DEFAULT_CACHE_REUSE_MAX_AGE_DAYS = 1.0
 #: Trajectory components that consume resolved TLEs, so an empty NORAD ID list is
 #: a configuration error rather than a satellite-free model.
 _TLE_TRAJECTORY_COMPONENTS = frozenset(
-    {"FixedOrbit", "SGP4LEOOrbit", "SGP4LEONoDragOrbit", "KeplerOrbit"}
+    {"FixedOrbit", "Orbit", "NoDragOrbit", "KeplerOrbit"}
 )
 
 

@@ -90,8 +90,8 @@ On macOS and linux-aarch64 this conda route is the recommended way to install ta
 
 # RFI-visibility kernels
 
-The `RiemannVisTimeFreqCalculationFFI` and `RiemannVisTimeFreqVariableFFI`
-components call compiled kernels that ship in the separate
+The `RiemannVisFFI` and `RiemannVisVariableFFI` components call compiled
+kernels that ship in the separate
 [`ri-kernels`](https://github.com/epfl-radio-astro/ri-kernels) package, a plain
 runtime dependency of tabascal — nothing is built from this repository. The CPU
 kernel comes with `ri_kernels` itself; the GPU kernel ships as an add-on wheel
@@ -107,7 +107,7 @@ whichever the config selects. Enable them in the config with:
 
 ```yaml
 components:
-  - rfi_vis: RiemannVisTimeFreqCalculationFFI
+  - rfi_vis: RiemannVisFFI
 ```
 
 Note: AMD GPUs using ROCm are supported, but may require the "ri-kernels" package
@@ -133,12 +133,11 @@ The following components run in **double precision only** and raise a clear erro
 under `single` (set `model.precision: double` to use them):
 
 - `trajectory:PhaseCalculationRFI`
-- `trajectory:SGP4LEONoDragOrbit`
-- `trajectory:SGP4LEOOrbit`
+- `trajectory:NoDragOrbit`
+- `trajectory:Orbit`
 
-Both `rfi_vis` kernels (`RiemannVisTimeFreqCalculation` and the FFI
-`RiemannVisTimeFreqCalculationFFI`) and the GP astronomical/gains components run
-in either precision.
+Both `rfi_vis` kernels (`RiemannVis` and the FFI `RiemannVisFFI`) and the GP
+astronomical/gains components run in either precision.
 
 # Developer
 

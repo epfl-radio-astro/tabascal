@@ -61,14 +61,14 @@ def test_single_disables_x64_after_sgp4jax_enabled_it():
 # double-only ones (two, so the "every offender" test can prove it lists all).
 # The FFI RFI-vis kernel is built for both precisions, so it is the single-ok
 # representative here — which also guards against it regressing to double-only.
-_DOUBLE_ONLY = ["trajectory:SGP4LEOOrbit", "trajectory:PhaseCalculationRFI"]
-_SINGLE_OK = ["rfi_vis:RiemannVisTimeFreqCalculationFFI"]
+_DOUBLE_ONLY = ["trajectory:Orbit", "trajectory:PhaseCalculationRFI"]
+_SINGLE_OK = ["rfi_vis:RiemannVisFFI"]
 
 
 def test_preflight_single_rejects_double_only_component():
     """A single-precision config using a double-only component raises, naming it."""
     config = {"model": {"precision": "single", "components": _DOUBLE_ONLY[:1] + _SINGLE_OK}}
-    with pytest.raises(ValueError, match="SGP4LEOOrbit"):
+    with pytest.raises(ValueError, match="Orbit"):
         assert_precision_supported(config)
 
 
@@ -78,7 +78,7 @@ def test_preflight_reports_every_offender():
     with pytest.raises(ValueError) as exc:
         assert_precision_supported(config)
     msg = str(exc.value)
-    assert "SGP4LEOOrbit" in msg and "PhaseCalculationRFI" in msg
+    assert "Orbit" in msg and "PhaseCalculationRFI" in msg
 
 
 def test_preflight_single_allows_single_capable_components():

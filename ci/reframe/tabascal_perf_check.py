@@ -57,6 +57,11 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     # measured on, so sanity requires the run to have used exactly this many GPUs
     # of exactly this kind; anything else fails rather than being compared against
     # timings it cannot be compared against.
+    #
+    # NOTE: every reference here was measured with the deleted real-space
+    # `rfi_signal:ComplexRFI`; the Fourier `ComplexRFIVarAnt` that replaced it in
+    # `_components_map` is a different workload, so these need re-measuring on
+    # CSCS before they mean anything again (issue #103).
     _expected_gpus = 1
     _expected_device_kind = "GH200"
 
@@ -67,16 +72,16 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     _components_map = {
         "Riemann": [
             "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFI",
-            "rfi_vis:RiemannVisTimeFreqCalculation",
-            "ast_vis:FourierTimeFreqGPAst",
+            "rfi_signal:ComplexRFIVarAnt",
+            "rfi_vis:RiemannVis",
+            "ast_vis:GPVisAst",
             "gains:UnitaryGains",
         ],
         "RiemannFFI": [
             "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFI",
-            "rfi_vis:RiemannVisTimeFreqCalculationFFI",
-            "ast_vis:FourierTimeFreqGPAst",
+            "rfi_signal:ComplexRFIVarAnt",
+            "rfi_vis:RiemannVisFFI",
+            "ast_vis:GPVisAst",
             "gains:UnitaryGains",
         ],
     }

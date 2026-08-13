@@ -250,7 +250,7 @@ class BaseGPRFI(Component):
         return self._mask_dummy_rfi(self.forward_transform(base_params, L, mu))
 
 
-class RealRFI(BaseGPRFI):
+class RealRFIVarAnt(BaseGPRFI):
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -421,193 +421,7 @@ class RealRFI(BaseGPRFI):
         assert_attr_shape(self, "init_rfi_A_induce_base", rfi_shape)
 
 
-class ComplexRFI(BaseGPRFI):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-    }
-
-    # Add parameter specifications
-    parameter_shapes = {
-        "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
-        "rfi_i_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
-    }
-
-    def setup(self, tab_config):
-        """All validation and error-prone operations here"""
-        try:
-            super().setup(tab_config)
-            self.vis_obs = tab_config.vis_obs
-
-            # Do expensive setup operations once
-            self._compute_gp_params()
-            self._compute_prior_params()
-            self._set_outputs()
-
-            if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
-                self._compute_true_params(
-                    tab_config.args["data"]["zarr_path"], tab_config.args["data"]["data_col"]
-                )
-
-            # if tab_config.args["rfi"]["init"] == "est":
-            #     self._estimate_params(tab_config.fringe_freqs)
-
-            self._compute_init_params(tab_config.args["rfi"]["init"])
-
-            # Validate dimensions
-            self._validate_dimensions()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def build_set_params(self) -> Callable:
-
-        def set_params(params: Dict) -> Dict:
-
-            shape = (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
-
-            params["rfi_r_induce_base"] = standard_normal(
-                "rfi_r_induce_base", shape
-            )
-            params["rfi_i_induce_base"] = standard_normal(
-                "rfi_i_induce_base", shape
-            )
-
-            return params
-
-        return set_params
-
-    def build_constants(self):
-        return {
-            "L_rfi_A": self.L_rfi_A,
-            "mu_rfi_A": self.mu_rfi_A,
-            "resample_rfi": self.resample_rfi,
-        }
-
-    def build_forward(self):
-        """Return pure, JIT-compatible function"""
-        prefix = self.prefix
-        forward_transform = self.masked_forward_transform
-
-        def forward(params: dict, state: dict, constants: dict):
-            # Pure JAX operations only
-            L_rfi_A = constants[f"{prefix}/L_rfi_A"]
-            mu_rfi_A = constants[f"{prefix}/mu_rfi_A"]
-            resample_rfi = constants[f"{prefix}/resample_rfi"]
-
-            rfi_A_induce_base = (
-                params["rfi_r_induce_base"] + 1.0j * params["rfi_i_induce_base"]
-            )
-
-            rfi_A_induce = forward_transform(rfi_A_induce_base, L_rfi_A, mu_rfi_A)
-
-            rfi_A = vmap(vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1), (None, 2), 2)(
-                resample_rfi, rfi_A_induce
-            )
-            state = {**state, "rfi_A": rfi_A}
-
-            return state
-
-        return forward
-
-    def validate_and_test(self):
-        """Call this before using in JIT context"""
-        pass
-
-    def _compute_gp_params(self):
-
-        self.n_rfi_times, self.rfi_times, self.resample_rfi = compute_real_space_gp_params(self.corr_time, self.gp_var, self.times, self.times_fine)
-
-    def _compute_prior_params(self):
-
-        self.L_rfi_A = cholesky(self.rfi_times, self.gp_var, self.corr_time, 1e-8)
-        self.mu_rfi_A = jnp.zeros(
-            (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times), dtype=complex
-        )
-
-    def _compute_true_params(self, sim_zarr_path, data_col):
-
-        # The zarr only knows the real satellites; zero-pad to the sharded count.
-        self.true_rfi_A_induce = self._zero_pad_rfi(
-            read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times)
-        )
-        self.true_rfi_A_induce_base = self.inv_transform(self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
-
-    def forward_transform(self, base_params, L, mu):
-
-        params = vmap(
-            vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1),
-            (2, None, 2),
-            2,
-        )(base_params, L, mu)
-
-        return params
-
-    def inv_transform(self, params, L, mu):
-
-        base_params = vmap(
-            vmap(vmap(jnp.linalg.solve, (None, 0), 0), (None, 1), 1), (None, 2), 2
-        )(L, params - mu)
-
-        return base_params
-
-    def _compute_init_params(self, init_type):
-
-        if init_type == "prior":
-            print("Using prior mean for rfi_A")
-            self.init_rfi_A_induce = self.mu_rfi_A
-        elif init_type in ["zeros", 0]:
-            print("Using for zeros for rfi_A")
-            self.init_rfi_A_induce = jnp.zeros_like(self.mu_rfi_A)
-        elif init_type in ["ones", 1]:
-            print("Using for ones for rfi_A")
-            self.init_rfi_A_induce = jnp.ones_like(self.mu_rfi_A)
-        elif init_type == "truth":
-            print("Using truth for rfi_A")
-            self.init_rfi_A_induce = self.true_rfi_A_induce
-        elif init_type == "sample":
-            print("Drawing sample from prior for rfi_A")
-            base_sample = random.normal(
-                random.PRNGKey(self.r_seed),
-                (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times),
-            )
-            self.init_rfi_A_induce = self.masked_forward_transform(
-                base_sample, self.L_rfi_A, self.mu_rfi_A
-            )
-        else:
-            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
-
-        # Darkness of the padded dummy sources is enforced in the forward, by
-        # masked_forward_transform -- not here. So init_rfi_A_induce (and the prior mean it
-        # may come from) can carry non-zero padded rows for e.g. init="ones"; they contribute
-        # exactly zero amplitude and zero gradient regardless.
-        self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
-
-        self.init_params = {
-            "rfi_r_induce": self.init_rfi_A_induce.real,
-            "rfi_i_induce": self.init_rfi_A_induce.imag,
-        }
-        self.init_params_base = {
-            "rfi_r_induce_base": self.init_rfi_A_induce_base.real,
-            "rfi_i_induce_base": self.init_rfi_A_induce_base.imag,
-        }
-
-    def _validate_dimensions(self):
-        """Ensure all setup operations completed successfully"""
-
-        rfi_shape = (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
-
-        assert_attr_shape(self, "mu_rfi_A", rfi_shape)
-        assert_attr_shape(self, "L_rfi_A", (self.n_rfi_times, self.n_rfi_times))
-        assert_attr_shape(self, "init_rfi_A_induce", rfi_shape)
-        assert_attr_shape(self, "init_rfi_A_induce_base", rfi_shape)
-
-
-##############################################################################################################
-
-
-class FourierGPRFI(BaseGPRFI):
+class ComplexRFIVarAnt(BaseGPRFI):
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -871,7 +685,7 @@ class FourierGPRFI(BaseGPRFI):
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
 
-class FourierGPRFIConstAnt(BaseGPRFI):
+class ComplexRFIConstAnt(BaseGPRFI):
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
