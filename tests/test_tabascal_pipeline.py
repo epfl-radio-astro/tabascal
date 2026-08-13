@@ -757,24 +757,44 @@ def test_pipeline_sharded_equivalence(
 
     Exact in double precision up to summation reduction order, hence the requires-
     double skip and the tight (but not bitwise) tolerance on the optimized chi^2.
+
+    Both legs are pinned to CPU, and the device count of each is set explicitly, so
+    the comparison does not depend on what hardware the test happens to run on. That
+    matters in both directions: without pinning, the reference leg picks up every
+    visible accelerator and shards itself (breaking the "single device" assertions on
+    a multi-GPU node), and on a single-GPU machine it runs on the GPU while the
+    sharded leg runs on the CPU -- an accelerator-vs-CPU comparison that misses the
+    1e-8 init tolerance by ~1e-8 purely through differing float reduction order. The
+    property under test is that sharding does not change the answer, which is a
+    property of the sharding logic rather than of any device; single-device
+    accelerator execution is covered by ``test_pipeline`` above.
     """
     if precision != "double":
         pytest.skip("equivalence is asserted exactly; components require double")
 
     import os
 
+    def _cpu_env(n_devices: int) -> dict:
+        env = dict(os.environ)
+        env["JAX_PLATFORMS"] = "cpu"
+        env["XLA_FLAGS"] = (
+            env.get("XLA_FLAGS", "")
+            + f" --xla_force_host_platform_device_count={n_devices}"
+        ).strip()
+        # Pinning to CPU is only half of it: a stale CUDA_VISIBLE_DEVICES in the
+        # parent environment would still be inherited by the child.
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        return env
+
     ref_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "ref", rfi_vis)
-    ref = subprocess.run(ref_cmd, capture_output=True, text=True, cwd=tmp_path / "ref")
+    ref = subprocess.run(
+        ref_cmd, capture_output=True, text=True, cwd=tmp_path / "ref", env=_cpu_env(1)
+    )
     assert ref.returncode == 0, f"single-device run failed: {ref.stderr}"
 
     shard_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "shard", rfi_vis)
-    shard_env = dict(os.environ)
-    shard_env["XLA_FLAGS"] = (
-        shard_env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=2"
-    ).strip()
-    shard_env["JAX_PLATFORMS"] = "cpu"
     shard = subprocess.run(
-        shard_cmd, capture_output=True, text=True, cwd=tmp_path / "shard", env=shard_env
+        shard_cmd, capture_output=True, text=True, cwd=tmp_path / "shard", env=_cpu_env(2)
     )
     assert shard.returncode == 0, f"sharded run failed: {shard.stderr}"
 
