@@ -37,26 +37,33 @@ pip install -e ./tabascal/
 pip install -e ./tabascal/[gpu]
 ```
 
-## Satellite Orbital Elements (TLEs)
+## Satellite orbital elements
 
-TABASCAL retrieves the historical orbital elements (TLEs) needed to predict
-satellite positions from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/)
-service. **No account or credentials are required** — the TLEs are fetched
-automatically for the requested NORAD IDs and cached locally for reuse.
+TABASCAL retrieves the orbital elements needed to predict satellite positions
+from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service. **No
+account or credentials are required** — records are fetched automatically for
+the requested NORAD IDs and cached locally for reuse.
 
-Every configured satellite must resolve to an acceptable TLE. TABASCAL checks
+SatChecker serves two formats: TLEs for epochs up to 2026-07-11, and OMM
+(Orbit Mean-Elements Message) records from 2026-07-12 onwards. TABASCAL asks
+whichever archive your observation epoch falls in and falls back to the other if
+that one has nothing usable, so this is not something you configure or need to
+think about.
+
+Every configured satellite must resolve to an acceptable record. TABASCAL checks
 this during preflight — before the visibilities are read — and stops with an
 error naming each failing satellite rather than quietly subtracting an
-incomplete RFI model. The remedies are to supply the missing TLEs via
+incomplete RFI model. The remedies are to supply the missing records via
 `--extra-orbit-dir`, to change `satellites.remote_max_age_days` deliberately,
 or to remove the satellite from `satellites.norad_ids`.
 
-Every run also saves the TLEs it actually used to
+Every run also saves the records it actually used to
 `<sim_dir>/results/used_orbits_<name>.json`; passing that file's directory back
 via `--extra-orbit-dir` reproduces the run's trajectory priors exactly. For the
-full caching behaviour, the age policies, and for supplying TLEs manually (e.g.
-from Space-Track) when SatChecker cannot provide them, see
-[Two-Line Elements (TLEs)](tles.md).
+two archives and the handover between them, the full caching behaviour, the age
+policies, what validation each format does and does not give you, and how to
+supply records manually (e.g. from Space-Track) when SatChecker cannot provide
+them, see [Satellite orbit records](orbits.md).
 
 Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
 Space-Track and requires a `spacetrack_login.yaml`. That requirement applies only

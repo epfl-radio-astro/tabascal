@@ -1,38 +1,47 @@
-"""TABASCAL TLE orchestration and local orbital-element parsing.
+"""TABASCAL orbit-record orchestration and local orbital-element derivation.
 
-TLEs are sourced from the IAU CPS SatChecker service via
+Records are sourced from the IAU CPS SatChecker service via
 :mod:`tabascal.satchecker` — no account or credentials are required. This module
 is the TABASCAL adapter: it resolves each requested NORAD ID against an ordered
 set of sources, applies the configurable age policies, drives the per-satellite
-cache, and parses OMM-style orbital elements locally from the two TLE
-lines. All filtering and element computation is done locally.
+cache, and derives the orbital elements locally. All filtering and element
+computation is done locally.
+
+SatChecker serves two record formats from two non-overlapping archives — TLEs up
+to 2026-07-11, OMM from 2026-07-12 — and a run near that boundary may need
+either. Nothing in this module branches on which: every format question is
+answered by :mod:`tabascal.satchecker.records`, so the policy below works off an
+epoch and an opaque record.
 
 Source precedence is resolved **independently per NORAD ID**:
 
-  1. ``extra_orbit_dir`` — user-supplied local TLE files. The record whose TLE-line
-     epoch is closest to the observation epoch is chosen; it is accepted only if
-     within ``extra_orbit_max_age_days`` (``None`` = unlimited). An accepted record
-     wins outright — later sources are not consulted for that ID. This is *your*
-     data: the remote service's age policy never applies to it, so exact replay
-     of a previous run's ``used_orbits_*.json`` is always possible.
-  2. Per-satellite cache — the cached record whose TLE epoch is closest to the
+  1. ``extra_orbit_dir`` — user-supplied local files, of either kind. The record
+     whose epoch is closest to the observation epoch is chosen; it is accepted
+     only if within ``extra_orbit_max_age_days`` (``None`` = unlimited). An
+     accepted record wins outright — later sources are not consulted for that ID.
+     This is *your* data: the remote service's age policy never applies to it, so
+     exact replay of a previous run's ``used_orbits_*.json`` is always possible.
+  2. Per-satellite cache — the cached record whose epoch is closest to the
      observation. If it is within ``cache_reuse_max_age_days``, it avoids a
      network request. An older record within the hard ceiling remains an offline
      fallback while TABASCAL asks SatChecker for something closer.
-  3. SatChecker ``get-nearest-tle`` — exact-epoch lookups run with bounded
-     concurrency for the remaining IDs. Valid responses are merged into the
-     per-NORAD cache and may serve nearby observations later.
+  3. SatChecker — exact-epoch lookups run with bounded concurrency for the
+     remaining IDs, against the archive the observation epoch falls in, with the
+     other archive as a fallback (see :func:`_fetch_from_service`). Valid
+     responses are merged into the per-NORAD cache and may serve nearby
+     observations later.
 
 Two rules govern what is then accepted:
 
 * **Age ceiling.** Every record from source 2 or 3 must lie within
-  ``remote_max_age_days`` of the observation epoch. The epoch is parsed
-  locally from TLE line 1 — never taken from a provider field — and every
-  accepted record's provider, epoch, signed offset and absolute age is logged.
+  ``remote_max_age_days`` of the observation epoch, and every accepted record's
+  provider, epoch, signed offset and absolute age is logged. A TLE's epoch is
+  re-derived from line 1 and never taken from a provider field; an OMM has no
+  lines to re-derive from, so its ``EPOCH`` is parsed and range-checked instead.
 * **Complete coverage.** Every configured NORAD ID must end up with an accepted
-  TLE. If even one does not, resolution raises :class:`TLEError` during preflight,
-  before the expensive subtraction begins, naming every failing ID and the
-  remedies. TABASCAL never silently shrinks the requested satellite model.
+  record. If even one does not, resolution raises :class:`TLEError` during
+  preflight, before the expensive subtraction begins, naming every failing ID and
+  the remedies. TABASCAL never silently shrinks the requested satellite model.
 
 """
 

@@ -11,7 +11,7 @@ Welcome to tabscal documentation
    config
    components
    concepts
-   tles
+   orbits
 
 .. toctree::
    :maxdepth: 2

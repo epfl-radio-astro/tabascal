@@ -1,10 +1,15 @@
 """IAU CPS SatChecker access for tabascal, split by responsibility.
 
-- :mod:`tabascal.satchecker.client` — HTTP transport and response normalisation;
-  no tabascal/JAX/casacore imports, so it can be extracted later.
-- :mod:`tabascal.satchecker.cache` — validated per-NORAD TLE storage.
-- :mod:`tabascal.satchecker.service` — bounded concurrent acquisition, response
-  validation, and resilient cache writes.
+- :mod:`tabascal.satchecker.client` — HTTP transport and response normalisation
+  for both nearest-record endpoints; no tabascal/JAX/casacore imports, so it can
+  be extracted later.
+- :mod:`tabascal.satchecker.tle_parse` — TLE line parsing, and the element range
+  checks both record kinds share.
+- :mod:`tabascal.satchecker.records` — what a record is, when it is valid, and
+  what it means; the only place either format is named.
+- :mod:`tabascal.satchecker.cache` — validated per-NORAD record storage.
+- :mod:`tabascal.satchecker.service` — endpoint selection, bounded concurrent
+  acquisition, response validation, and resilient cache writes.
 
 TABASCAL-specific orchestration (source precedence, ``extra_orbit_dir`` age policy,
 remote-age acceptance, and complete-coverage enforcement) lives in
