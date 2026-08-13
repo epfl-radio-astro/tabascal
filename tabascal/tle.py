@@ -115,7 +115,9 @@ _EPOCH_AGREEMENT_TOL_DAYS = 1e-6
 # Source labels used in logs, errors and provenance.
 _SRC_EXTRA = "extra_orbit_dir"
 _SRC_CACHE = "managed per-satellite cache"
-_SRC_SATCHECKER = "SatChecker nearest-TLE"
+# Qualified with the endpoint that answered, so a log or a coverage error says
+# which of the two archives a record came from.
+_SRC_SATCHECKER = "SatChecker"
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +606,105 @@ def _coverage_error(resolution: TLEResolution) -> TLEError:
 
 
 # ---------------------------------------------------------------------------
+# Service acquisition
+# ---------------------------------------------------------------------------
+
+def _fetch_from_service(
+    to_fetch: list[int],
+    obs_epoch_jd: float,
+    remote_max_age: Optional[float],
+    cache,
+    resolution: TLEResolution,
+    max_workers: int,
+) -> None:
+    """Ask SatChecker for *to_fetch*, falling back to its other archive.
+
+    SatChecker keeps two archives that do not overlap — TLEs up to 2026-07-11,
+    OMM from 2026-07-12 — so the observation epoch decides which endpoint to ask
+    first. In the common case that is the whole story: one request per satellite,
+    answered from the right archive.
+
+    The fallback exists because neither endpoint reports "I have nothing that
+    near". Ask ``get-nearest-omm`` for a 2021 epoch and it returns its earliest
+    2026 record with nothing to flag the 4.6-year gap; ask ``get-nearest-tle``
+    for a 2027 epoch and it returns the last TLE ever published. Both are
+    rejected here by the age ceiling, which is exactly the signal that the
+    record wanted lives in the *other* archive. Within a few days either side of
+    the handover that is the normal case, not an exceptional one.
+
+    An unresolved ID after the first pass therefore earns one more request. What
+    does **not** earn one is an outage: a transport failure, an HTTP 429, or a
+    uniform wall of rejections means the service cannot serve us, and asking a
+    down service a different question is still asking a down service. So the
+    batch's ``outage`` stops the loop, while a per-ID response failure or an
+    over-age record does not.
+
+    Each pass merges its valid records into the cache before they are judged, so
+    a record rejected on age is still available offline to a later run whose
+    epoch it does suit.
+    """
+    remaining = list(to_fetch)
+    endpoints = satchecker.nearest_endpoints_for(obs_epoch_jd)
+
+    for attempt, (endpoint, fetch_nearest) in enumerate(endpoints):
+        if not remaining:
+            return
+        if attempt:
+            print(
+                f"  {len(remaining)} ID(s) unresolved from {endpoints[0][0]}; "
+                f"trying {endpoint} — the archives meet at "
+                f"{jd_to_datetime(satchecker.HANDOVER_JD).date()} and an "
+                "observation near that boundary can fall either side of it"
+            )
+        else:
+            print(
+                f"Fetching {len(remaining)} nearest record(s) from SatChecker "
+                f"{endpoint} with up to {min(max_workers, len(remaining))} "
+                f"concurrent requests: {remaining}"
+            )
+
+        batch = satchecker.fetch_nearest_batch(
+            remaining,
+            obs_epoch_jd,
+            fetch_nearest=fetch_nearest,
+            endpoint=endpoint,
+            max_workers=max_workers,
+        )
+        if not batch.records.empty:
+            for norad_id, records in batch.records.groupby("NORAD_CAT_ID"):
+                satchecker.store_or_warn(
+                    lambda nid=int(norad_id), rows=records: cache.store(nid, rows),
+                    cache.path(int(norad_id)),
+                    f"orbit cache for NORAD {int(norad_id)}",
+                )
+            _accept_remote(
+                _select_from_records(batch.records, set(remaining), obs_epoch_jd),
+                f"{_SRC_SATCHECKER} ({endpoint})",
+                obs_epoch_jd,
+                remote_max_age,
+                resolution.resolved,
+                resolution.rejected,
+            )
+
+        # Keep why the service could not answer, for the IDs still without a
+        # record. Discarding it makes an outage indistinguishable from a
+        # satellite that genuinely has no record — the same error text, but
+        # remedies that do not include the only one that works: try again.
+        for norad_id, error in batch.errors.items():
+            if norad_id not in resolution.resolved:
+                resolution.service_errors[norad_id] = error
+
+        if batch.outage is not None:
+            return
+        remaining = [nid for nid in remaining if nid not in resolution.resolved]
+        # An ID the fallback resolved is no longer a service failure, whatever
+        # the first pass recorded against it.
+        for norad_id in list(resolution.service_errors):
+            if norad_id in resolution.resolved:
+                del resolution.service_errors[norad_id]
+
+
+# ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
 
@@ -708,41 +809,18 @@ def resolve_tles(
         }
         to_fetch = sorted(remaining - (near_enough_to_reuse & set(resolution.resolved)))
 
-        # 3. Exact-epoch nearest lookups for cache misses/stale cache candidates.
+        # 3. Exact-epoch nearest lookups for cache misses/stale cache candidates,
+        # against whichever archive the observation epoch falls in — with the
+        # other one as a fallback. See _fetch_from_service.
         if to_fetch:
-            print(
-                f"Fetching {len(to_fetch)} nearest TLE(s) from SatChecker with "
-                f"up to {min(max_workers, len(to_fetch))} concurrent requests: {to_fetch}"
-            )
-            batch = satchecker.fetch_nearest_batch(
+            _fetch_from_service(
                 to_fetch,
                 obs_epoch_jd,
-                fetch_nearest_tle=satchecker.fetch_nearest_tle,
-                max_workers=max_workers,
+                remote_max_age,
+                cache,
+                resolution,
+                max_workers,
             )
-            if not batch.records.empty:
-                for norad_id, records in batch.records.groupby("NORAD_CAT_ID"):
-                    satchecker.store_or_warn(
-                        lambda nid=int(norad_id), rows=records: cache.store(nid, rows),
-                        cache.path(int(norad_id)),
-                        f"TLE cache for NORAD {int(norad_id)}",
-                    )
-                _accept_remote(
-                    _select_from_records(batch.records, set(to_fetch), obs_epoch_jd),
-                    _SRC_SATCHECKER,
-                    obs_epoch_jd,
-                    remote_max_age,
-                    resolution.resolved,
-                    resolution.rejected,
-                )
-
-            # Keep why the service could not answer, for the IDs still without a
-            # TLE. Discarding it makes an outage indistinguishable from a
-            # satellite that genuinely has no record — the same error text, but
-            # remedies that do not include the only one that works: try again.
-            for norad_id, error in batch.errors.items():
-                if norad_id not in resolution.resolved:
-                    resolution.service_errors[norad_id] = error
 
             # A service failure — or a response no fresher than what we hold —
             # does not invalidate a cached record within the hard ceiling. Those

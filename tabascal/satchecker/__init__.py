@@ -15,6 +15,7 @@ The names most callers need are re-exported here.
 
 from .client import (
     BASE_URL,
+    HANDOVER_JD,
     OMM_COLUMNS,
     TLE_COLUMNS,
     SatCheckerError,
@@ -39,13 +40,21 @@ from .records import (
     record_kind,
     validate_record,
 )
-from .service import MAX_WORKERS, NearestBatchResult, fetch_nearest_batch, store_or_warn
+from .service import (
+    MAX_WORKERS,
+    NearestBatchResult,
+    fetch_nearest_batch,
+    nearest_endpoints_for,
+    store_or_warn,
+)
 
 __all__ = [
     "BASE_URL",
+    "HANDOVER_JD",
     "OMM_COLUMNS",
     "TLE_COLUMNS",
     "fetch_nearest_omm",
+    "nearest_endpoints_for",
     "SatCheckerError",
     "SatCheckerRateLimitError",
     "SatCheckerResponseError",

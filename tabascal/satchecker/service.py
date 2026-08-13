@@ -9,15 +9,54 @@ from __future__ import annotations
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import pandas as pd
 
 from . import client
-from .records import validate_record
+from .records import KIND_OMM, KIND_TLE, validate_record
 
 
 MAX_WORKERS = 5
+
+#: The two nearest-record endpoints: log label, and the name of the client
+#: function that calls it. Held by *name* rather than by reference so the
+#: transport is resolved on each call — that keeps ``client.fetch_nearest_*`` the
+#: single seam a test (or a caller wanting a different transport) patches, which
+#: binding the functions at import time would quietly break.
+_ENDPOINTS = {
+    KIND_TLE: ("nearest-TLE", "fetch_nearest_tle"),
+    KIND_OMM: ("nearest-OMM", "fetch_nearest_omm"),
+}
+
+
+def nearest_endpoints_for(epoch_jd: float) -> list[tuple[str, Callable]]:
+    """The endpoints to try for *epoch_jd*, best first.
+
+    SatChecker's two archives do not overlap: the TLE one is frozen at
+    2026-07-11 and the OMM one begins twelve hours later. So the observation
+    epoch decides which to ask, and :data:`client.HANDOVER_JD` is the dividing
+    line.
+
+    Both are always returned, in order, because neither endpoint reports "I have
+    nothing that near". ``get-nearest-omm`` answers a 2021 request with its
+    earliest 2026 record; ``get-nearest-tle`` answers a 2027 request with the
+    last TLE ever published. The caller cannot tell a good answer from a clamped
+    one without checking the epoch it got, and when the answer turns out to be
+    unusable the *other* endpoint is where the record actually lives. Trying it
+    costs one request and is what makes the handover date a hint rather than a
+    cutoff — including if SatChecker ever backfills OMM history, which would
+    otherwise leave us silently preferring TLEs for periods with better OMM.
+    """
+    order = (
+        (KIND_OMM, KIND_TLE)
+        if float(epoch_jd) >= client.HANDOVER_JD
+        else (KIND_TLE, KIND_OMM)
+    )
+    return [
+        (label, getattr(client, function))
+        for label, function in (_ENDPOINTS[kind] for kind in order)
+    ]
 
 #: Identical per-request rejections, with no success in between, before the batch
 #: concludes it is facing a wall rather than that many absent satellites. A 4xx is
@@ -81,10 +120,17 @@ def store_or_warn(
 
 @dataclass
 class NearestBatchResult:
-    """Validated nearest-TLE rows and per-ID request failures."""
+    """Validated nearest-record rows and per-ID request failures."""
 
     records: pd.DataFrame = field(default_factory=pd.DataFrame)
     errors: dict[int, client.SatCheckerError] = field(default_factory=dict)
+    #: Set when the batch stopped early because the service itself was the
+    #: problem — unreachable, rate-limiting, or answering every request alike.
+    #: Distinct from ``errors``, which is per-ID and says nothing about whether
+    #: another request is worth making. A caller that would otherwise retry
+    #: against a different endpoint must check this first: the service being
+    #: down is not a reason to ask it a different question.
+    outage: Optional[client.SatCheckerError] = None
 
 
 def _outage_summary(cause: client.SatCheckerError) -> str:
@@ -104,11 +150,17 @@ def fetch_nearest_batch(
     norad_ids: list[int],
     epoch_jd: float,
     *,
-    fetch_nearest_tle: Callable[[int, float], pd.DataFrame] = client.fetch_nearest_tle,
+    fetch_nearest: Callable[[int, float], pd.DataFrame] = client.fetch_nearest_tle,
+    endpoint: str = "nearest-TLE",
     max_workers: int = MAX_WORKERS,
     log: Callable[[str], None] = print,
 ) -> NearestBatchResult:
-    """Fetch exact-epoch nearest TLEs with at most *max_workers* requests in flight.
+    """Fetch exact-epoch nearest records with at most *max_workers* in flight.
+
+    *fetch_nearest* is one of the client's two endpoint functions and *endpoint*
+    is its label for logs; :func:`nearest_endpoints_for` pairs them. Everything
+    below is identical for either, because the two endpoints differ only in what
+    they return, never in how they fail.
 
     Requests are submitted incrementally — the in-flight set is topped back up as
     each one lands — rather than queued all at once. That is what makes the
@@ -151,7 +203,7 @@ def fetch_nearest_batch(
                 norad_id = next(unsent, None)
                 if norad_id is None:
                     return
-                future = executor.submit(fetch_nearest_tle, norad_id, epoch_jd)
+                future = executor.submit(fetch_nearest, norad_id, epoch_jd)
                 in_flight[future] = norad_id
 
         top_up()
@@ -163,13 +215,13 @@ def fetch_nearest_batch(
                     record = future.result()
                 except client.SatCheckerTransportError as error:
                     errors[norad_id] = error
-                    log(f"  nearest-TLE fetch failed for {norad_id}: {error}")
+                    log(f"  {endpoint} fetch failed for {norad_id}: {error}")
                     if outage is None:
                         outage, outage_summary = error, _outage_summary(error)
                     continue
                 except client.SatCheckerError as error:
                     errors[norad_id] = error
-                    log(f"  nearest-TLE fetch failed for {norad_id}: {error}")
+                    log(f"  {endpoint} fetch failed for {norad_id}: {error}")
                     status = getattr(error, "status", None)
                     if status is not None and status == wall_status:
                         wall_count += 1
@@ -194,7 +246,7 @@ def fetch_nearest_batch(
                 if not len(record):
                     continue
                 record = validated_records(
-                    record, f"nearest-TLE fetch for {norad_id}", log
+                    record, f"{endpoint} fetch for {norad_id}", log
                 )
                 record = record[record["NORAD_CAT_ID"] == norad_id].reset_index(drop=True)
                 if len(record):
@@ -228,4 +280,4 @@ def fetch_nearest_batch(
         if rows
         else pd.DataFrame()
     )
-    return NearestBatchResult(records=records, errors=errors)
+    return NearestBatchResult(records=records, errors=errors, outage=outage)

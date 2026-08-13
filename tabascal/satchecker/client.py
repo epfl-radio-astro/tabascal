@@ -47,6 +47,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from ._time import datetime_to_jd
 from .records import KIND_FIELD, KIND_OMM, KIND_TLE, OMM_ELEMENT_COLUMNS
 
 
@@ -58,6 +59,22 @@ BASE_URL = "https://satchecker.cps.iau.org/tools"
 # Identify ourselves to the SatChecker operators, with a contact URL.
 USER_AGENT = "tabascal-tle/1.0 (+https://github.com/epfl-radio-astro/tabascal)"
 REQUEST_TIMEOUT = 120  # seconds
+
+#: Where SatChecker stopped publishing TLEs and started publishing OMM. Its
+#: 1.7.0 changelog: "TLEs for dates before 2026-07-12 will continue to be used as
+#: is with no changes to any of the related endpoints, but OMM will be used for
+#: everything going forward."
+#:
+#: A *hint*, not a contract. It picks which endpoint to ask first and nothing
+#: else; being wrong about it costs one extra request, because the caller falls
+#: back to the other endpoint when the first yields nothing acceptable. That
+#: matters because the boundary can move: SatChecker now sources OMM from
+#: Space-Track as well as Celestrak, and Space-Track's OMM history runs years
+#: deep, so a backfill is plausible. A hardcoded permanent cutoff would keep
+#: silently preferring TLEs for periods where better OMM had appeared.
+#:
+#: Deliberately not a config key: it is a property of the service, not of a run.
+HANDOVER_JD = datetime_to_jd(datetime(2026, 7, 12))
 
 # Columns the normalised TLE frames expose.
 TLE_COLUMNS = [

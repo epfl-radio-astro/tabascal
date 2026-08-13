@@ -12,7 +12,13 @@ from tabascal.satchecker import service
 from tabascal.satchecker.cache import TextOrbitCache
 from tabascal.satchecker.service import fetch_nearest_batch
 
-from .tle_helpers import block_network, jd, make_catalogue_df, make_tle  # noqa: F401
+from .tle_helpers import (  # noqa: F401
+    block_network,
+    jd,
+    make_catalogue_df,
+    make_omm_catalogue_df,
+    make_tle,
+)
 
 
 OBS = jd(2023, 2, 21)
@@ -24,23 +30,50 @@ def cache_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _service(monkeypatch, epochs):
+def _service(monkeypatch, epochs, omm_epochs=None):
+    """Stub both nearest endpoints and record every request made.
+
+    ``epochs`` maps NORAD ID to the epoch the TLE archive holds for it and
+    ``omm_epochs`` does the same for the OMM archive; an absent entry means that
+    archive has no record for that satellite. Both are stubbed even when a test
+    cares about only one, because an ID the first endpoint cannot resolve is
+    retried against the other — leaving the second live would reach the network.
+    """
     calls = []
 
-    def fetch(norad_id, epoch):
-        calls.append((norad_id, epoch))
-        value = epochs.get(norad_id)
-        return pd.DataFrame() if value is None else make_catalogue_df([(norad_id, value)])
+    def endpoint(archive, builder):
+        def fetch(norad_id, epoch):
+            calls.append((norad_id, epoch))
+            value = archive.get(norad_id)
+            return pd.DataFrame() if value is None else builder([(norad_id, value)])
 
-    monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", fetch)
+        return fetch
+
+    monkeypatch.setattr(client, "fetch_nearest_tle", endpoint(epochs, make_catalogue_df))
+    monkeypatch.setattr(
+        client, "fetch_nearest_omm", endpoint(omm_epochs or {}, make_omm_catalogue_df)
+    )
     return calls
+
+
+def _service_down(monkeypatch, error):
+    """Make both endpoints fail the same way, and count the attempts."""
+    attempts = []
+
+    def down(norad_id, epoch):
+        attempts.append(norad_id)
+        raise error
+
+    monkeypatch.setattr(client, "fetch_nearest_tle", down)
+    monkeypatch.setattr(client, "fetch_nearest_omm", down)
+    return attempts
 
 
 def test_cache_miss_fetches_exact_observation_epoch_and_caches(cache_dir, monkeypatch):
     calls = _service(monkeypatch, {25544: OBS - 0.1})
     result = tle.resolve_tles([25544], OBS)
     assert calls == [(25544, OBS)]
-    assert result.resolved[25544].source == "SatChecker nearest-TLE"
+    assert result.resolved[25544].source == "SatChecker (nearest-TLE)"
     assert len(TextOrbitCache(cache_dir).get(25544)) == 1
 
 
@@ -66,10 +99,7 @@ def test_old_acceptable_cache_is_refreshed(cache_dir, monkeypatch):
 def test_old_acceptable_cache_is_offline_fallback(cache_dir, monkeypatch):
     TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 2)]))
 
-    def down(*args):
-        raise SatCheckerTransportError("offline")
-
-    monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", down)
+    _service_down(monkeypatch, SatCheckerTransportError("offline"))
     result = tle.resolve_tles(
         [25544], OBS, cache_reuse_max_age_days=1, remote_max_age_days=3
     )
@@ -112,7 +142,7 @@ def test_null_reuse_age_still_fetches_when_cache_is_over_age(cache_dir, monkeypa
     )
     assert calls == [(25544, OBS)]
     assert result.complete
-    assert result.resolved[25544].source == "SatChecker nearest-TLE"
+    assert result.resolved[25544].source == "SatChecker (nearest-TLE)"
 
 
 def test_staler_service_response_does_not_displace_fresher_cache(cache_dir, monkeypatch):
@@ -159,7 +189,7 @@ def test_unparseable_candidate_does_not_erase_a_measurable_rejection():
 
     tle._accept_remote(
         {25544: {"TLE_LINE1": "garbage", "TLE_LINE2": "garbage"}},
-        "SatChecker nearest-TLE", OBS, 3.0, resolved, rejected,
+        "SatChecker (nearest-TLE)", OBS, 3.0, resolved, rejected,
     )
     assert rejected[25544].age_days == pytest.approx(4.0, abs=2e-8)
 
@@ -179,7 +209,7 @@ def test_batch_uses_bounded_concurrency_and_preserves_input_order():
             active -= 1
         return make_catalogue_df([(norad_id, epoch)])
 
-    result = fetch_nearest_batch([5, 4, 3, 2, 1], OBS, fetch_nearest_tle=fetch, max_workers=2)
+    result = fetch_nearest_batch([5, 4, 3, 2, 1], OBS, fetch_nearest=fetch, max_workers=2)
     assert maximum == 2
     assert result.records["NORAD_CAT_ID"].tolist() == [5, 4, 3, 2, 1]
 
@@ -190,7 +220,7 @@ def test_batch_collects_one_failure_without_losing_other_ids():
             raise SatCheckerTransportError("offline")
         return make_catalogue_df([(norad_id, epoch)])
 
-    result = fetch_nearest_batch([1, 2, 3], OBS, fetch_nearest_tle=fetch)
+    result = fetch_nearest_batch([1, 2, 3], OBS, fetch_nearest=fetch)
     assert result.records["NORAD_CAT_ID"].tolist() == [1, 3]
     assert isinstance(result.errors[2], SatCheckerTransportError)
 
@@ -219,7 +249,7 @@ def test_outage_costs_at_most_max_workers_requests(workers, latency):
         raise SatCheckerTransportError("connection refused")
 
     result = fetch_nearest_batch(
-        list(range(1, 201)), OBS, fetch_nearest_tle=dead_service,
+        list(range(1, 201)), OBS, fetch_nearest=dead_service,
         max_workers=workers, log=lambda _m: None,
     )
     assert len(attempted) <= workers
@@ -234,7 +264,7 @@ def test_incremental_submission_still_fetches_every_id_when_healthy():
     """Topping the in-flight set up must not drop IDs off the end of the batch."""
     result = fetch_nearest_batch(
         list(range(1, 51)), OBS,
-        fetch_nearest_tle=lambda nid, epoch: make_catalogue_df([(nid, epoch)]),
+        fetch_nearest=lambda nid, epoch: make_catalogue_df([(nid, epoch)]),
         max_workers=4,
     )
     assert result.records["NORAD_CAT_ID"].tolist() == list(range(1, 51))
@@ -252,7 +282,7 @@ def test_rate_limit_stops_the_batch_and_reports_the_wait():
         raise client.SatCheckerRateLimitError("slow down", retry_after=90.0)
 
     result = fetch_nearest_batch(
-        list(range(1, 201)), OBS, fetch_nearest_tle=limited, max_workers=3,
+        list(range(1, 201)), OBS, fetch_nearest=limited, max_workers=3,
         log=lambda _m: None,
     )
     assert len(attempted) <= 3
@@ -266,12 +296,12 @@ def test_service_failure_is_not_reported_as_a_missing_satellite(cache_dir, monke
     something untrue about the catalogue and offers remedies — supply local TLEs,
     relax the ceiling, drop the ID — that all miss the only one that works.
     """
-    def rate_limited(norad_id, epoch):
-        raise client.SatCheckerRateLimitError(
+    _service_down(
+        monkeypatch,
+        client.SatCheckerRateLimitError(
             "HTTP 429 — it is rate-limiting this client", retry_after=90.0
-        )
-
-    monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", rate_limited)
+        ),
+    )
     result = tle.resolve_tles([25544], OBS)
     assert 25544 in result.service_errors
 
@@ -290,10 +320,7 @@ def test_service_failure_is_reported_alongside_an_over_age_candidate(
     """Both facts matter: how close the best record was, and that it could not be improved."""
     TextOrbitCache(cache_dir).store(25544, make_catalogue_df([(25544, OBS - 9)]))
 
-    def down(norad_id, epoch):
-        raise SatCheckerTransportError("connection refused")
-
-    monkeypatch.setattr(tle.satchecker, "fetch_nearest_tle", down)
+    _service_down(monkeypatch, SatCheckerTransportError("connection refused"))
     result = tle.resolve_tles([25544], OBS, remote_max_age_days=3)
 
     with pytest.raises(tle.TLEError) as caught:
@@ -319,7 +346,7 @@ def test_uniform_rejection_is_recognised_as_a_wall_not_missing_satellites():
         raise client.SatCheckerResponseError("blocked", status=403)
 
     result = fetch_nearest_batch(
-        list(range(1, 201)), OBS, fetch_nearest_tle=walled, max_workers=5,
+        list(range(1, 201)), OBS, fetch_nearest=walled, max_workers=5,
         log=lambda _m: None,
     )
     assert len(attempted) <= service.RESPONSE_WALL_THRESHOLD + 5
@@ -336,7 +363,7 @@ def test_a_few_missing_satellites_do_not_trip_the_wall_detector():
         return make_catalogue_df([(norad_id, epoch)])
 
     result = fetch_nearest_batch(
-        list(range(1, 41)), OBS, fetch_nearest_tle=fetch, max_workers=5,
+        list(range(1, 41)), OBS, fetch_nearest=fetch, max_workers=5,
         log=lambda _m: None,
     )
     assert set(result.errors) == missing
@@ -360,7 +387,246 @@ def test_batch_response_errors_do_not_abandon_the_rest():
         return make_catalogue_df([(norad_id, epoch)])
 
     result = fetch_nearest_batch(
-        list(range(1, 11)), OBS, fetch_nearest_tle=fetch, max_workers=2
+        list(range(1, 11)), OBS, fetch_nearest=fetch, max_workers=2
     )
     assert result.records["NORAD_CAT_ID"].tolist() == [2, 4, 6, 8, 10]
     assert set(result.errors) == {1, 3, 5, 7, 9}
+
+
+# ---------------------------------------------------------------------------
+# Endpoint selection and boundary failover
+# ---------------------------------------------------------------------------
+
+BEFORE_HANDOVER = jd(2026, 6, 1)
+AFTER_HANDOVER = jd(2026, 8, 1)
+#: The last TLE SatChecker ever published, and the first OMM, twelve hours later.
+LAST_TLE = jd(2026, 7, 11, 7, 33)
+FIRST_OMM = jd(2026, 7, 11, 19, 56)
+
+
+class TestEndpointSelection:
+    """Which archive to ask, given when the observation was.
+
+    The two archives do not overlap: TLEs stop at 2026-07-11 and OMM starts
+    twelve hours later. So the observation epoch alone decides which endpoint is
+    worth asking first, and asking the wrong one first costs a request rather
+    than a wrong answer.
+    """
+
+    def _labels(self, epoch_jd):
+        return [label for label, _ in service.nearest_endpoints_for(epoch_jd)]
+
+    def test_a_pre_handover_epoch_asks_the_tle_archive_first(self):
+        assert self._labels(BEFORE_HANDOVER)[0] == "nearest-TLE"
+
+    def test_a_post_handover_epoch_asks_the_omm_archive_first(self):
+        assert self._labels(AFTER_HANDOVER)[0] == "nearest-OMM"
+
+    def test_the_boundary_itself_belongs_to_the_omm_archive(self):
+        assert self._labels(client.HANDOVER_JD)[0] == "nearest-OMM"
+        assert self._labels(client.HANDOVER_JD - 1e-6)[0] == "nearest-TLE"
+
+    def test_both_endpoints_are_always_offered(self):
+        # Neither endpoint reports "nothing that near", so the other is always
+        # worth a try before concluding a satellite cannot be resolved.
+        for epoch in (BEFORE_HANDOVER, AFTER_HANDOVER):
+            assert len(self._labels(epoch)) == 2
+            assert set(self._labels(epoch)) == {"nearest-TLE", "nearest-OMM"}
+
+    def test_the_handover_matches_satcheckers_changelog(self):
+        from tabascal.time import jd_to_datetime
+
+        assert jd_to_datetime(client.HANDOVER_JD).date().isoformat() == "2026-07-12"
+
+
+class TestBoundaryFailover:
+
+    def test_a_post_handover_run_resolves_from_omm(self, cache_dir, monkeypatch):
+        calls = _service(
+            monkeypatch, {}, omm_epochs={25544: AFTER_HANDOVER - 0.1}
+        )
+        result = tle.resolve_tles([25544], AFTER_HANDOVER)
+        assert result.complete
+        assert result.resolved[25544].source == "SatChecker (nearest-OMM)"
+        assert calls == [(25544, AFTER_HANDOVER)]  # one request, right archive
+
+    def test_a_pre_handover_run_resolves_from_tle(self, cache_dir, monkeypatch):
+        calls = _service(monkeypatch, {25544: BEFORE_HANDOVER - 0.1})
+        result = tle.resolve_tles([25544], BEFORE_HANDOVER)
+        assert result.complete
+        assert result.resolved[25544].source == "SatChecker (nearest-TLE)"
+        assert calls == [(25544, BEFORE_HANDOVER)]
+
+    def test_an_empty_primary_response_falls_over_to_the_other_archive(
+        self, cache_dir, monkeypatch
+    ):
+        # The OMM archive has nothing for this satellite at all; the TLE archive
+        # does. Without the failover the run would fail with a usable record
+        # sitting on the service.
+        calls = _service(
+            monkeypatch, {25544: AFTER_HANDOVER - 0.1}, omm_epochs={}
+        )
+        result = tle.resolve_tles([25544], AFTER_HANDOVER)
+        assert result.complete
+        assert result.resolved[25544].source == "SatChecker (nearest-TLE)"
+        assert len(calls) == 2
+
+    def test_an_over_age_primary_response_falls_over(self, cache_dir, monkeypatch):
+        # The real boundary case. An observation just after the handover asks
+        # OMM first; if the OMM archive has nothing near it, the last TLE — a
+        # day the other side of the boundary — is the better answer.
+        obs = client.HANDOVER_JD + 0.5
+        calls = _service(
+            monkeypatch,
+            {25544: LAST_TLE},
+            omm_epochs={25544: obs + 30},  # far outside the ceiling
+        )
+        result = tle.resolve_tles([25544], obs, remote_max_age_days=3)
+        assert result.complete
+        assert result.resolved[25544].source == "SatChecker (nearest-TLE)"
+        assert len(calls) == 2
+
+    def test_the_failover_works_in_the_other_direction_too(
+        self, cache_dir, monkeypatch
+    ):
+        # The backfill case. SatChecker now sources OMM from Space-Track as well
+        # as Celestrak, and Space-Track's OMM history runs years deep, so OMM
+        # may appear for pre-handover epochs. A hardcoded cutoff would keep
+        # preferring a stale TLE; the failover picks the record up instead.
+        obs = jd(2026, 3, 1)
+        calls = _service(
+            monkeypatch,
+            {25544: obs - 40},          # TLE archive has only something stale
+            omm_epochs={25544: obs - 0.1},   # backfilled OMM is right there
+        )
+        result = tle.resolve_tles([25544], obs, remote_max_age_days=3)
+        assert result.complete
+        assert result.resolved[25544].source == "SatChecker (nearest-OMM)"
+        assert len(calls) == 2
+
+    def test_a_clamped_pre_handover_omm_response_is_rejected_with_its_true_offset(
+        self, cache_dir, monkeypatch
+    ):
+        # get-nearest-omm answers a 2021 request with its earliest 2026 record.
+        # Confirmed live: the response looks entirely healthy. The age ceiling
+        # is the only thing between it and a 4.6-year-stale trajectory.
+        archival = jd(2021, 11, 1)
+        _service(monkeypatch, {}, omm_epochs={25544: FIRST_OMM})
+        result = tle.resolve_tles([25544], archival, remote_max_age_days=3)
+        assert not result.complete
+        rejected = result.rejected[25544]
+        assert rejected.age_days == pytest.approx(FIRST_OMM - archival, abs=1e-3)
+        with pytest.raises(tle.TLEError, match="best candidate is 17"):
+            tle.require_complete_coverage(result)
+
+    def test_no_failover_when_the_primary_already_resolved_everything(
+        self, cache_dir, monkeypatch
+    ):
+        calls = _service(
+            monkeypatch,
+            {25544: AFTER_HANDOVER},
+            omm_epochs={25544: AFTER_HANDOVER - 0.1},
+        )
+        tle.resolve_tles([25544], AFTER_HANDOVER)
+        assert len(calls) == 1
+
+    def test_only_the_unresolved_ids_are_retried(self, cache_dir, monkeypatch):
+        calls = _service(
+            monkeypatch,
+            {25544: AFTER_HANDOVER - 0.1, 43013: AFTER_HANDOVER - 0.1},
+            omm_epochs={43013: AFTER_HANDOVER - 0.1},
+        )
+        result = tle.resolve_tles([25544, 43013], AFTER_HANDOVER)
+        assert result.complete
+        # Both asked once on OMM; only the unresolved one asked again on TLE.
+        assert calls == [
+            (25544, AFTER_HANDOVER),
+            (43013, AFTER_HANDOVER),
+            (25544, AFTER_HANDOVER),
+        ]
+
+    def test_a_failover_resolution_clears_the_first_passs_service_error(
+        self, cache_dir, monkeypatch
+    ):
+        def omm_rejects(norad_id, epoch):
+            raise client.SatCheckerResponseError("no such record", status=404)
+
+        monkeypatch.setattr(client, "fetch_nearest_omm", omm_rejects)
+        monkeypatch.setattr(
+            client,
+            "fetch_nearest_tle",
+            lambda nid, epoch: make_catalogue_df([(nid, AFTER_HANDOVER - 0.1)]),
+        )
+        result = tle.resolve_tles([25544], AFTER_HANDOVER)
+        assert result.complete
+        assert result.service_errors == {}
+
+
+class TestFailoverIsNotForOutages:
+    """A service that cannot serve us is not asked a different question.
+
+    This is the distinction the whole failover rests on. A response-level miss
+    means the service answered and this archive has nothing usable — so the
+    other archive is worth a request. A transport failure, a 429, or a uniform
+    wall of rejections means the service itself is unavailable, and a second
+    round of requests would add load to something already failing while
+    learning nothing.
+    """
+
+    def test_a_transport_failure_does_not_trigger_the_failover(
+        self, cache_dir, monkeypatch
+    ):
+        attempts = _service_down(monkeypatch, SatCheckerTransportError("offline"))
+        result = tle.resolve_tles([25544], AFTER_HANDOVER)
+        assert not result.complete
+        assert attempts == [25544]  # asked once, not once per archive
+
+    def test_a_rate_limit_does_not_trigger_the_failover(self, cache_dir, monkeypatch):
+        attempts = _service_down(
+            monkeypatch,
+            client.SatCheckerRateLimitError(
+                "SatChecker returned HTTP 429 — it is rate-limiting this client",
+                retry_after=60.0,
+            ),
+        )
+        result = tle.resolve_tles([25544], AFTER_HANDOVER)
+        assert attempts == [25544]
+        with pytest.raises(tle.TLEError, match="rate-limiting"):
+            tle.require_complete_coverage(result)
+
+    def test_an_outage_mid_batch_abandons_both_archives(self, cache_dir, monkeypatch):
+        attempts = _service_down(monkeypatch, SatCheckerTransportError("offline"))
+        ids = list(range(1, 51))
+        tle.resolve_tles(ids, AFTER_HANDOVER, max_workers=2)
+        # Bounded by max_workers on the first archive, and never retried on the
+        # second: 50 IDs must not become 100 requests to a service that is down.
+        assert len(attempts) <= 2
+
+    def test_a_uniform_wall_does_not_trigger_the_failover(self, cache_dir, monkeypatch):
+        attempts = _service_down(
+            monkeypatch, client.SatCheckerResponseError("forbidden", status=403)
+        )
+        ids = list(range(1, 61))
+        tle.resolve_tles(ids, AFTER_HANDOVER, max_workers=2)
+        # The wall detector converts a run of identical 4xx into an outage, which
+        # then stops the second archive being asked at all.
+        assert len(attempts) < 2 * len(ids)
+        assert len(attempts) <= service.RESPONSE_WALL_THRESHOLD + 2
+
+    def test_a_per_id_response_failure_still_allows_the_failover(
+        self, cache_dir, monkeypatch
+    ):
+        # One 404 is per-request, not a wall: the service is up and says it has
+        # no OMM for this satellite. The TLE archive is worth asking.
+        def omm_404(norad_id, epoch):
+            raise client.SatCheckerResponseError("not found", status=404)
+
+        monkeypatch.setattr(client, "fetch_nearest_omm", omm_404)
+        monkeypatch.setattr(
+            client,
+            "fetch_nearest_tle",
+            lambda nid, epoch: make_catalogue_df([(nid, AFTER_HANDOVER - 0.1)]),
+        )
+        result = tle.resolve_tles([25544], AFTER_HANDOVER)
+        assert result.complete
+        assert result.resolved[25544].source == "SatChecker (nearest-TLE)"
