@@ -1,0 +1,77 @@
+# Benchmark simulation for issue #107 (RFI-signal component comparison).
+#
+# 128 SKA-Low antennas, 32 channels around 150 MHz, 32 Starlink satellites over a
+# 15-minute zenith-pointed observation at 10 s integration.
+#
+# Zenith pointing: dec is set to the telescope latitude and the observation is
+# centred on transit (start_time_lha = -1.875 deg = half of 15 min in hour angle),
+# so the target sits at the zenith through the middle of the run.
+#
+# The satellites are chosen by select_top_satellites.py, which ranks visible passes
+# by peak elevation and writes norad_ids_path below. tabsim's own max_n_sat cut
+# keeps the *lowest NORAD IDs* rather than the highest passes, which is not what we
+# want here -- hence sat_names is left empty and the IDs are supplied explicitly.
+
+telescope:
+  name: SKA-Low
+  latitude: -26.82472208
+  longitude: 116.7644482
+  elevation: 377
+  dish_d: 40
+  itrf_path: SKA-Low-512.itrf.txt
+  n_ant: 128
+
+observation:
+  target_name: zenith
+  ra: 27.0                  # with dec = latitude and lha = 0, this only picks the time of day
+  dec: -26.82472208         # = telescope latitude -> transits through the zenith
+  start_time_lha: -1.875    # degrees; half of 15 min, so transit falls mid-observation
+  int_time: 10.0
+  n_time: 90                # 90 x 10 s = 15 minutes
+  n_int: 1
+  start_freq: 1.46656e8     # 32 x 209 kHz centred on 150 MHz
+  chan_width: 209e3
+  n_freq: 32
+  SEFD: 420
+  auto_corrs: False
+  no_w: False
+  random_seed: 12345
+
+ast_sources:
+  point:
+    random:
+      n_src: 50
+      min_I: 10sigma
+      max_I: 1.0
+      I_pow_law: 1.6
+      si_mean: 0.7
+      si_std: 0.2
+      n_beam: 5.0
+      max_sep: 200.0 # arcseconds
+      random_seed: 123456
+
+rfi_sources:
+  tle_satellite:
+    sat_names: []                              # see note above: IDs are supplied explicitly
+    norad_ids_path: selected_norad_ids.txt     # written by select_top_satellites.py
+    max_n_sat: 32
+    spacetrack_path: spacetrack_login.yaml
+    power_scale: 1e-2
+    max_ang_sep: 180  # degrees; accept the whole visible sky, ranking is done on elevation
+    min_alt: 0        # degrees
+    vis_step: 1       # minutes
+
+output:
+  path: ./data
+  prefix: pnt_src
+  overwrite: True
+  zarr: True
+  ms: True
+
+diagnostics:
+  uv_cov: True
+  src_alt: True
+  rfi_seps: True
+
+dask:
+  max_chunk_MB: 100.0
