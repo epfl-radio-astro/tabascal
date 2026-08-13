@@ -17,7 +17,7 @@ telescope:
   latitude: -26.82472208
   longitude: 116.7644482
   elevation: 377
-  dish_d: 40
+  dish_d: 35          # SKA-Low station diameter; sets the Airy primary beam
   itrf_path: SKA-Low-512.itrf.txt
   n_ant: 128
 
@@ -32,7 +32,14 @@ observation:
   start_freq: 1.46656e8     # 32 x 209 kHz centred on 150 MHz
   chan_width: 209e3
   n_freq: 32
-  SEFD: 420
+  # Per-station SEFD. The sim's "antenna" is an SKA-Low station (256 elements), not
+  # a dish, so this is a station value: EDA2 -- a 256-element SKA-Low prototype
+  # station -- measures ~2500 Jy at zenith near 160 MHz (Sokolowski et al.).
+  # An independent estimate agrees to within a factor ~1.5: with A_eff ~ 270 m^2 and
+  # T_sys ~ 390 K at 150 MHz, SEFD = 2k_B T_sys / A_eff ~ 3900 Jy. The measured
+  # zenith value is used since this observation points at the zenith.
+  # (The previous 420 Jy here was a MeerKAT-like dish value, not an SKA-Low one.)
+  SEFD: 2500
   auto_corrs: False
   no_w: False
   random_seed: 12345
