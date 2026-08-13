@@ -19,7 +19,7 @@ from typing import Callable
 
 import pandas as pd
 
-from .tle_parse import validate_tle_pair
+from .records import validate_record
 
 
 SCHEMA_VERSION = 1
@@ -50,14 +50,16 @@ def _validated_records(records, expected_norad_id: int) -> pd.DataFrame:
             f"TLE cache for {expected_norad_id} contains records for another satellite"
         )
 
-    for line1, line2 in zip(frame["TLE_LINE1"], frame["TLE_LINE2"]):
+    for _, row in frame.iterrows():
         try:
-            embedded_id = validate_tle_pair(line1, line2)
+            embedded_id = validate_record(row)
         except (TypeError, ValueError) as error:
-            raise CacheValidationError(f"invalid TLE for {expected_norad_id}: {error}") from error
+            raise CacheValidationError(
+                f"invalid record for {expected_norad_id}: {error}"
+            ) from error
         if embedded_id != int(expected_norad_id):
             raise CacheValidationError(
-                f"TLE lines belong to satellite {embedded_id}, not {expected_norad_id}"
+                f"record belongs to satellite {embedded_id}, not {expected_norad_id}"
             )
     return frame.reset_index(drop=True)
 

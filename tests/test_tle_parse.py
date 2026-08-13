@@ -8,13 +8,16 @@ Alpha-5) and the guarantee that validation and parsing agree.
 import pytest
 
 from tabascal.satchecker.tle_parse import (
+    ELEMENT_FIELDS,
     decode_norad_id,
     parse_tle_elements,
+    semimajor_axis_km,
     tle_checksum,
+    validate_elements,
     validate_tle_pair,
 )
 
-from .tle_helpers import jd, make_tle, with_checksum
+from .tle_helpers import jd, make_omm, make_tle, with_checksum
 
 _EPOCH = jd(2023, 2, 21, 13)
 # Letters used by Alpha-5, in value order: I and O are excluded to avoid
@@ -190,3 +193,74 @@ class TestLineIntegrity:
         assert len(df) > 200
         for _, row in df.iterrows():
             validate_tle_pair(row["TLE_LINE1"], row["TLE_LINE2"])
+
+
+# ---------------------------------------------------------------------------
+# Shared element validation
+# ---------------------------------------------------------------------------
+
+class TestValidateElements:
+    """The range and finiteness checks both record kinds go through.
+
+    These used to live inline in :func:`parse_tle_elements`, where a TLE's
+    checksum was the primary defence and they were a second line. For OMM they
+    are the *only* line — there is no checksum and no second copy of the
+    satellite identifier — so what they cover matters much more than it did.
+    """
+
+    def _elements(self):
+        l1, l2 = make_tle(25544, _EPOCH)
+        return {column: parse_tle_elements(l1, l2)[column] for column, _ in ELEMENT_FIELDS}
+
+    def test_a_real_element_set_passes(self):
+        validate_elements(self._elements())
+
+    def test_an_omm_records_elements_pass(self):
+        record = make_omm(25544, _EPOCH)
+        validate_elements({column: record[column] for column, _ in ELEMENT_FIELDS})
+
+    @pytest.mark.parametrize("column,_name", ELEMENT_FIELDS)
+    def test_every_element_must_be_present(self, column, _name):
+        elements = self._elements()
+        del elements[column]
+        with pytest.raises(ValueError, match=f"missing {column}"):
+            validate_elements(elements)
+
+    @pytest.mark.parametrize("column,_name", ELEMENT_FIELDS)
+    def test_every_element_must_be_finite(self, column, _name):
+        elements = self._elements()
+        elements[column] = float("nan")
+        with pytest.raises(ValueError, match="non-finite"):
+            validate_elements(elements)
+
+    @pytest.mark.parametrize(
+        "column,value",
+        [
+            ("INCLINATION", -0.1),
+            ("INCLINATION", 180.1),
+            ("RA_OF_ASC_NODE", 360.0),
+            ("ARG_OF_PERICENTER", -0.1),
+            ("MEAN_ANOMALY", 360.0),
+            ("ECCENTRICITY", 1.0),
+            ("ECCENTRICITY", -0.1),
+            ("MEAN_MOTION", 0.0),
+        ],
+    )
+    def test_out_of_range_values_are_rejected(self, column, value):
+        elements = self._elements()
+        elements[column] = value
+        with pytest.raises(ValueError):
+            validate_elements(elements)
+
+    def test_the_context_names_the_kind_in_the_message(self):
+        elements = self._elements()
+        elements["INCLINATION"] = 999.0
+        with pytest.raises(ValueError, match="^OMM inclination out of range"):
+            validate_elements(elements, "OMM")
+        with pytest.raises(ValueError, match="^TLE inclination out of range"):
+            validate_elements(elements, "TLE")
+
+    def test_semimajor_axis_matches_the_parsers_own_value(self):
+        l1, l2 = make_tle(25544, _EPOCH)
+        parsed = parse_tle_elements(l1, l2)
+        assert semimajor_axis_km(parsed["MEAN_MOTION"]) == parsed["SEMIMAJOR_AXIS"]

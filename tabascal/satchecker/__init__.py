@@ -27,6 +27,16 @@ from .cache import (
     TextOrbitCache,
     read_legacy_tle_records,
 )
+from .records import (
+    KIND_OMM,
+    KIND_TLE,
+    KIND_FIELD,
+    RecordKindError,
+    record_elements,
+    record_epoch_jd,
+    record_kind,
+    validate_record,
+)
 from .service import MAX_WORKERS, NearestBatchResult, fetch_nearest_batch, store_or_warn
 
 __all__ = [
@@ -40,6 +50,14 @@ __all__ = [
     "CacheValidationError",
     "TextOrbitCache",
     "read_legacy_tle_records",
+    "KIND_OMM",
+    "KIND_TLE",
+    "KIND_FIELD",
+    "RecordKindError",
+    "record_elements",
+    "record_epoch_jd",
+    "record_kind",
+    "validate_record",
     "MAX_WORKERS",
     "NearestBatchResult",
     "fetch_nearest_batch",

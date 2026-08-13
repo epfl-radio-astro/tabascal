@@ -61,8 +61,16 @@ from tabascal.satchecker import SatCheckerError as TLEError  # noqa: F401  back-
 # module's historical names.
 from tabascal.satchecker.tle_parse import (
     parse_tle_elements,  # noqa: F401  re-export
-    tle_epoch_jd as _tle_epoch_jd,
-    validate_tle_pair,
+    tle_epoch_jd as _tle_epoch_jd,  # noqa: F401  re-export
+    validate_tle_pair,  # noqa: F401  re-export
+)
+# Format dispatch. Nothing below this line asks whether a record is a TLE or an
+# OMM: it asks for its epoch, its elements, or whether it is valid, and these
+# three answer for either kind.
+from tabascal.satchecker.records import (
+    record_elements,
+    record_epoch_jd,
+    validate_record,
 )
 from tabascal.tle_config import (  # noqa: F401  re-exported for callers
     DEFAULT_REMOTE_MAX_AGE_DAYS,
@@ -224,15 +232,17 @@ class TLEResolution:
 # ---------------------------------------------------------------------------
 
 def _add_parsed_elements(tles: pd.DataFrame) -> pd.DataFrame:
-    """Populate OMM-style element columns by parsing each row's TLE lines.
+    """Populate OMM-style element columns by deriving them from each row.
 
-    Columns are assigned (overwriting any element columns already present in a
-    legacy Space-Track cache file) so the locally parsed values always win and
-    no duplicate columns are produced.
+    A TLE row is parsed from its two lines; an OMM row's element columns are
+    read directly, with the semi-major axis recomputed from the mean motion so
+    both kinds agree. Columns are assigned (overwriting any element columns
+    already present in a legacy Space-Track cache file) so the locally derived
+    values always win and no duplicate columns are produced.
     """
     tles = tles.copy()
     parsed = pd.DataFrame(
-        [parse_tle_elements(r["TLE_LINE1"], r["TLE_LINE2"]) for _, r in tles.iterrows()],
+        [record_elements(r) for _, r in tles.iterrows()],
         index=tles.index,
     )
     for col in parsed.columns:
@@ -285,12 +295,12 @@ def _select_from_extra_dir(
     for _, row in records.iterrows():
         nid = int(row["NORAD_CAT_ID"])
         try:
-            embedded_id = validate_tle_pair(row["TLE_LINE1"], row["TLE_LINE2"])
+            embedded_id = validate_record(row)
             if embedded_id != nid:
                 raise ValueError(
-                    f"TLE lines belong to satellite {embedded_id}, not {nid}"
+                    f"record belongs to satellite {embedded_id}, not {nid}"
                 )
-            epoch_jd = _tle_epoch_jd(row["TLE_LINE1"])
+            epoch_jd = record_epoch_jd(row)
         except (ValueError, TypeError) as e:
             print(f"  {nid}: invalid extra_orbit_dir record rejected — {e}")
             continue
@@ -342,9 +352,12 @@ def _select_from_records(
 ) -> dict[int, dict]:
     """One record per wanted ID from a normalised record frame.
 
-    The service may legitimately carry several distinct TLEs for one NORAD ID.
-    When it does, the record whose line-1 epoch is nearest *reference_epoch_jd*
-    is chosen, so the selection is deterministic and independent of row order.
+    The service may legitimately carry several distinct records for one NORAD
+    ID. When it does, the one whose epoch is nearest *reference_epoch_jd* is
+    chosen, so the selection is deterministic and independent of row order. The
+    epoch comes from :func:`~tabascal.satchecker.records.record_epoch_jd`, which
+    is a row-wise call rather than a column map because a frame may mix kinds
+    for one satellite around the archive handover.
     """
     resolved: dict[int, dict] = {}
     if not len(records):
@@ -354,7 +367,12 @@ def _select_from_records(
     match = records[records["NORAD_CAT_ID"].isin(wanted)]
     for nid, group in match.groupby("NORAD_CAT_ID"):
         if len(group) > 1:
-            offsets = (group["TLE_LINE1"].map(_tle_epoch_jd) - reference_epoch_jd).abs()
+            epochs = pd.Series(
+                [record_epoch_jd(row) for _, row in group.iterrows()],
+                index=group.index,
+                dtype=float,
+            )
+            offsets = (epochs - reference_epoch_jd).abs()
             best = group.loc[offsets.idxmin()]
         else:
             best = group.iloc[0]
@@ -387,8 +405,12 @@ def _accept_remote(
 ) -> None:
     """Apply the remote age ceiling to *candidates*, updating accept/reject maps.
 
-    The epoch is parsed locally from TLE line 1 — a provider's own ``epoch`` field
-    is never trusted — and compared against the actual mean observation epoch.
+    The epoch comes from :func:`~tabascal.satchecker.records.record_epoch_jd`
+    and is compared against the actual mean observation epoch. For a TLE that
+    means re-deriving it from line 1 — a provider's own ``epoch`` field is never
+    trusted. An OMM record has no lines to re-derive from, so its ``EPOCH`` is
+    parsed and range-checked instead; that is a real reduction in what can be
+    caught here, and is why the plausibility window exists.
     A rejected candidate is remembered (nearest one wins) so the coverage error can
     report exactly how close the best available record was; it is never silently
     re-admitted once the remaining sources are exhausted.
@@ -403,7 +425,7 @@ def _accept_remote(
         provider = record.get("DATA_SOURCE") or None
         incumbent = resolved.get(nid)
         try:
-            epoch_jd = _tle_epoch_jd(record["TLE_LINE1"])
+            epoch_jd = record_epoch_jd(record)
         except (KeyError, ValueError, TypeError) as e:
             # Never displace a rejection that carries a real epoch and offset:
             # "the best candidate was 4.2 d away" tells the user what to do about
@@ -411,7 +433,7 @@ def _accept_remote(
             # — it replaces an epoch-less rejection when it has a measurable one.
             if incumbent is None and nid not in rejected:
                 rejected[nid] = RejectedTLE(
-                    nid, source, provider, None, None, f"unparseable TLE epoch: {e}"
+                    nid, source, provider, None, None, f"unparseable epoch: {e}"
                 )
             continue
         offset = epoch_jd - obs_epoch_jd
@@ -676,7 +698,7 @@ def resolve_tles(
             norad_id
             for norad_id, record in cached.items()
             if reuse_max_age is None
-            or abs(_tle_epoch_jd(record["TLE_LINE1"]) - obs_epoch_jd)
+            or abs(record_epoch_jd(record) - obs_epoch_jd)
             <= reuse_max_age + _AGE_TOL_DAYS
         }
         to_fetch = sorted(remaining - (near_enough_to_reuse & set(resolution.resolved)))

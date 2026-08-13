@@ -88,6 +88,70 @@ def tle_epoch_jd(line1: str) -> float:
     return datetime_to_jd(dt)
 
 
+#: OMM-style element columns every record kind must supply, paired with the
+#: human-readable names the range errors use.
+ELEMENT_FIELDS = (
+    ("INCLINATION", "inclination"),
+    ("RA_OF_ASC_NODE", "RAAN"),
+    ("ECCENTRICITY", "eccentricity"),
+    ("ARG_OF_PERICENTER", "argument of pericenter"),
+    ("MEAN_ANOMALY", "mean anomaly"),
+    ("MEAN_MOTION", "mean motion"),
+    ("BSTAR", "BSTAR"),
+)
+
+
+def validate_elements(elements: dict, context: str = "orbital element set") -> None:
+    """Check finiteness and physical range on a set of OMM-style elements.
+
+    Shared by both record kinds. A TLE reaches it through
+    :func:`parse_tle_elements` after the fields have been read out of the two
+    lines; an OMM record reaches it with the provider's own numbers. That
+    matters more for OMM than for TLE: OMM has no modulo-10 checksum and no
+    second copy of the satellite identifier to cross-check, so these bounds are
+    the *only* thing standing between a corrupted element and a silently wrong
+    trajectory. See :mod:`tabascal.satchecker.records` for what else is done to
+    narrow that gap.
+
+    *context* names the kind in the error text, so the messages a TLE produces
+    are unchanged from when these checks lived inline. Raises ``ValueError``.
+    """
+    values = {}
+    for column, name in ELEMENT_FIELDS:
+        if column not in elements:
+            raise ValueError(f"{context} is missing {column}")
+        try:
+            values[name] = float(elements[column])
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{context} has an unreadable {column}: {e}") from e
+
+    non_finite = [name for name, value in values.items() if not math.isfinite(value)]
+    if non_finite:
+        raise ValueError(f"{context} has non-finite fields: {', '.join(non_finite)}")
+    if not 0.0 <= values["inclination"] <= 180.0:
+        raise ValueError(f"{context} inclination out of range: {values['inclination']}")
+    for name in ("RAAN", "argument of pericenter", "mean anomaly"):
+        if not 0.0 <= values[name] < 360.0:
+            raise ValueError(f"{context} {name} out of range: {values[name]}")
+    if not 0.0 <= values["eccentricity"] < 1.0:
+        raise ValueError(f"{context} eccentricity out of range: {values['eccentricity']}")
+    if values["mean motion"] <= 0.0:
+        raise ValueError(
+            f"{context} mean motion must be positive, got {values['mean motion']}"
+        )
+
+
+def semimajor_axis_km(mean_motion_rev_day: float) -> float:
+    """Semi-major axis in km from a mean motion in rev/day, via Kepler's third law.
+
+    Reproduces the value Space-Track's OMM reported, so downstream consumers see
+    the same number whichever kind the elements came from. Raises
+    ``ZeroDivisionError`` for a zero mean motion, which callers translate.
+    """
+    n_rad_s = float(mean_motion_rev_day) * 2.0 * math.pi / 86400.0
+    return (_MU_KM3_S2 / n_rad_s ** 2) ** (1.0 / 3.0)
+
+
 def parse_tle_elements(line1: str, line2: str) -> dict:
     """Derive OMM-style orbital elements from a TLE pair.
 
@@ -97,54 +161,19 @@ def parse_tle_elements(line1: str, line2: str) -> dict:
     third law (reproduces the Space-Track OMM value). Raises ``ValueError`` (or
     ``ZeroDivisionError`` for a zero mean motion) on malformed fields.
     """
-    inclination = float(line2[8:16])
-    raan = float(line2[17:25])
-    eccentricity = float("0." + line2[26:33].strip())
-    arg_pericenter = float(line2[34:42])
-    mean_anomaly = float(line2[43:51])
-    mean_motion = float(line2[52:63])  # rev/day
-    bstar = _parse_exp_field(line1[53:61])
-
-    parsed_fields = {
-        "inclination": inclination,
-        "RAAN": raan,
-        "eccentricity": eccentricity,
-        "argument of pericenter": arg_pericenter,
-        "mean anomaly": mean_anomaly,
-        "mean motion": mean_motion,
-        "BSTAR": bstar,
+    elements = {
+        "INCLINATION": float(line2[8:16]),
+        "RA_OF_ASC_NODE": float(line2[17:25]),
+        "ECCENTRICITY": float("0." + line2[26:33].strip()),
+        "ARG_OF_PERICENTER": float(line2[34:42]),
+        "MEAN_ANOMALY": float(line2[43:51]),
+        "MEAN_MOTION": float(line2[52:63]),  # rev/day
+        "BSTAR": _parse_exp_field(line1[53:61]),
     }
-    non_finite = [name for name, value in parsed_fields.items() if not math.isfinite(value)]
-    if non_finite:
-        raise ValueError(f"TLE has non-finite fields: {', '.join(non_finite)}")
-    if not 0.0 <= inclination <= 180.0:
-        raise ValueError(f"TLE inclination out of range: {inclination}")
-    for name, value in (
-        ("RAAN", raan),
-        ("argument of pericenter", arg_pericenter),
-        ("mean anomaly", mean_anomaly),
-    ):
-        if not 0.0 <= value < 360.0:
-            raise ValueError(f"TLE {name} out of range: {value}")
-    if not 0.0 <= eccentricity < 1.0:
-        raise ValueError(f"TLE eccentricity out of range: {eccentricity}")
-    if mean_motion <= 0.0:
-        raise ValueError(f"TLE mean motion must be positive, got {mean_motion}")
-
-    n_rad_s = mean_motion * 2.0 * math.pi / 86400.0
-    semimajor_axis = (_MU_KM3_S2 / n_rad_s ** 2) ** (1.0 / 3.0)
-
-    return {
-        "INCLINATION": inclination,
-        "RA_OF_ASC_NODE": raan,
-        "ECCENTRICITY": eccentricity,
-        "ARG_OF_PERICENTER": arg_pericenter,
-        "MEAN_ANOMALY": mean_anomaly,
-        "MEAN_MOTION": mean_motion,
-        "BSTAR": bstar,
-        "SEMIMAJOR_AXIS": semimajor_axis,
-        "EPOCH_JD": tle_epoch_jd(line1),
-    }
+    validate_elements(elements, "TLE")
+    elements["SEMIMAJOR_AXIS"] = semimajor_axis_km(elements["MEAN_MOTION"])
+    elements["EPOCH_JD"] = tle_epoch_jd(line1)
+    return elements
 
 
 #: A TLE line is exactly 69 columns, the last of which is a modulo-10 checksum.

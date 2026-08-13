@@ -14,7 +14,7 @@ from typing import Callable
 import pandas as pd
 
 from . import client
-from .tle_parse import validate_tle_pair
+from .records import validate_record
 
 
 MAX_WORKERS = 5
@@ -31,7 +31,13 @@ RESPONSE_WALL_THRESHOLD = 10
 def validated_records(
     records: pd.DataFrame, context: str, log: Callable[[str], None] = print
 ) -> pd.DataFrame:
-    """Return SatChecker rows whose TLE pair parses and matches its row ID."""
+    """Return SatChecker rows that validate and belong to the ID they claim.
+
+    Kind-agnostic: a TLE row must parse, checksum and carry the same satellite
+    identifier in both lines *and* in the row; an OMM row must carry finite,
+    in-range elements and a plausible epoch. The identifier cross-check is
+    vacuous for OMM — see :func:`tabascal.satchecker.records.validate_record`.
+    """
     if not len(records):
         return records.copy()
 
@@ -39,10 +45,10 @@ def validated_records(
     for index, row in records.iterrows():
         try:
             norad_id = int(row["NORAD_CAT_ID"])
-            embedded_id = validate_tle_pair(row["TLE_LINE1"], row["TLE_LINE2"])
+            embedded_id = validate_record(row)
             if embedded_id != norad_id:
                 raise ValueError(
-                    f"TLE lines belong to satellite {embedded_id}, not {norad_id}"
+                    f"record belongs to satellite {embedded_id}, not {norad_id}"
                 )
         except (KeyError, ValueError, TypeError, OverflowError) as error:
             log(

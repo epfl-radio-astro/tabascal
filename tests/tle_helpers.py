@@ -18,8 +18,14 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from tabascal.satchecker.tle_parse import tle_checksum
+from tabascal.satchecker.records import KIND_OMM, KIND_TLE
+from tabascal.satchecker.tle_parse import parse_tle_elements, tle_checksum
 from tabascal.time import datetime_to_jd, jd_to_datetime
+
+
+#: Parametrisation for tests that must hold for both record formats. Use with
+#: :func:`make_record`, which builds either kind for the same satellite.
+both_kinds = pytest.mark.parametrize("kind", [KIND_TLE, KIND_OMM])
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +82,69 @@ def make_tle(norad_id: int, epoch_jd: float) -> tuple[str, str]:
 def jd(year, month, day, hour=0, minute=0, second=0) -> float:
     """UTC calendar time -> Julian Date."""
     return datetime_to_jd(datetime(year, month, day, hour, minute, second))
+
+
+# ---------------------------------------------------------------------------
+# OMM records
+# ---------------------------------------------------------------------------
+
+def make_omm(norad_id: int, epoch_jd: float, **overrides) -> dict:
+    """Return an OMM record for *norad_id* with the given UTC epoch.
+
+    The elements are the ones :func:`make_tle` encodes for the same satellite,
+    read back through the TLE parser, so a test can build either kind for one
+    satellite and expect the same trajectory out of both. The epoch is written
+    exactly rather than quantised to the TLE line's 8-decimal day field, which
+    is the one place the two kinds legitimately differ (by under a millisecond).
+
+    *overrides* replace or add fields, for the malformed-record cases.
+    """
+    line1, line2 = make_tle(norad_id, epoch_jd)
+    elements = parse_tle_elements(line1, line2)
+    record = {
+        "RECORD_KIND": KIND_OMM,
+        "NORAD_CAT_ID": int(norad_id),
+        "OBJECT_NAME": f"SAT-{norad_id}",
+        "OBJECT_ID": "1998-067A",
+        "EPOCH": jd_to_datetime(epoch_jd).isoformat(),
+        "DATA_SOURCE": "test",
+        "DATE_COLLECTED": None,
+    }
+    for column in (
+        "INCLINATION",
+        "RA_OF_ASC_NODE",
+        "ECCENTRICITY",
+        "ARG_OF_PERICENTER",
+        "MEAN_ANOMALY",
+        "MEAN_MOTION",
+        "BSTAR",
+    ):
+        record[column] = elements[column]
+    record.update(overrides)
+    return record
+
+
+def make_tle_record(norad_id: int, epoch_jd: float, **overrides) -> dict:
+    """Return a TLE record for *norad_id*, shaped like the client's output."""
+    line1, line2 = make_tle(norad_id, epoch_jd)
+    record = {
+        "RECORD_KIND": KIND_TLE,
+        "NORAD_CAT_ID": int(norad_id),
+        "OBJECT_NAME": f"SAT-{norad_id}",
+        "EPOCH": jd_to_datetime(epoch_jd).isoformat(),
+        "TLE_LINE1": line1,
+        "TLE_LINE2": line2,
+        "DATA_SOURCE": "test",
+        "DATE_COLLECTED": None,
+    }
+    record.update(overrides)
+    return record
+
+
+def make_record(kind: str, norad_id: int, epoch_jd: float, **overrides) -> dict:
+    """Build either kind of record, for the ``both_kinds`` parametrisation."""
+    builder = make_tle_record if kind == KIND_TLE else make_omm
+    return builder(norad_id, epoch_jd, **overrides)
 
 
 # ---------------------------------------------------------------------------
