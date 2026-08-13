@@ -153,6 +153,7 @@ are reported as unusable and replaced by the next fetch. Nothing needs
 converting; you may see one warning per satellite on the first run after
 upgrading.
 
+(validation)=
 ## Validation
 
 The two formats do not offer the same guarantees, and it is worth being explicit
