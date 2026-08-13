@@ -62,6 +62,10 @@ rfi_sources:
     sat_names: []                              # see note above: IDs are supplied explicitly
     norad_ids_path: selected_norad_ids.txt     # written by select_top_satellites.py
     max_n_sat: 32
+    # Written by select_top_satellites.py: the bundled model plus synthesised rows
+    # for any selected satellite tabsim has no spectrum for. Without this, those
+    # satellites are silently dropped and lower passes take their place.
+    norad_spec_model: norad_satellite_augmented.rfimodel
     spacetrack_path: spacetrack_login.yaml
     power_scale: 1e-2
     max_ang_sep: 180  # degrees; accept the whole visible sky, ranking is done on elevation

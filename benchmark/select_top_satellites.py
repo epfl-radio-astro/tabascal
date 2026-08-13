@@ -7,9 +7,14 @@ actually dominate the observation, so this script ranks the visible passes by pe
 elevation and writes out the top N NORAD IDs to paste into the sim config's
 ``norad_ids``.
 
-Only satellites that also carry an entry in the ``norad_spec_model`` spectral model
-file are eligible: tabsim silently drops the rest when building RFI sources, so
-selecting one without a spectrum would quietly shrink the source count.
+Satellites in the field that have no entry in the ``norad_spec_model`` spectral
+model file are *not* dropped -- tabsim would silently discard them when building RFI
+sources, quietly shrinking the source count and letting lower passes take their
+place. Instead an augmented spectral model file is written, with rows synthesised
+for the missing IDs from the parameters shared by the rest of that satellite family.
+For Starlink this is exact rather than an approximation: every one of the 7161
+Starlink entries in the bundled model carries identical parameters
+(``gauss, power=0.001, freq=1e9, band_width=1e9``).
 
 Usage
 -----
@@ -63,6 +68,16 @@ def main() -> None:
     parser.add_argument("--step-minutes", type=float, default=1.0)
     parser.add_argument("--tle-dir", default=None)
     parser.add_argument("-o", "--output", default="selected_norad_ids.txt")
+    parser.add_argument(
+        "--spec-out", default="norad_satellite_augmented.rfimodel",
+        help="Where to write the spectral model augmented with synthesised rows.",
+    )
+    parser.add_argument(
+        "--base-spec-model", default=None,
+        help="Spectral model to augment. Defaults to the one bundled with tabsim -- "
+             "deliberately not the config's norad_spec_model, which points at this "
+             "script's own output.",
+    )
     args = parser.parse_args()
 
     sim_config = load_config(args.sim_config, config_type="sim")
@@ -118,15 +133,10 @@ def main() -> None:
         .reset_index()
     )
 
-    spec = pd.read_csv(sat["norad_spec_model"])
-    have_spectrum = set(spec["norad_id"].unique())
-    eligible = per_sat[per_sat["norad_id"].isin(have_spectrum)]
-    print(
-        f"{len(per_sat)} satellites above the horizon; "
-        f"{len(eligible)} of them have a spectral model"
-    )
-
-    top = eligible.sort_values("max_elevation", ascending=False).head(args.n_sat)
+    # Rank on elevation alone. Spectral models are filled in afterwards, so a
+    # missing model never demotes a satellite that is genuinely in the field.
+    top = per_sat.sort_values("max_elevation", ascending=False).head(args.n_sat)
+    print(f"{len(per_sat)} satellites above the horizon during the observation")
     if len(top) < args.n_sat:
         print(
             f"WARNING: only {len(top)} satellites available, fewer than the "
@@ -139,7 +149,68 @@ def main() -> None:
     ids = sorted(int(i) for i in top["norad_id"])
     Path(args.output).write_text("\n".join(str(i) for i in ids) + "\n")
     print(f"\nWrote {len(ids)} NORAD IDs to {args.output}")
-    print(f"norad_ids: [{', '.join(str(i) for i in ids)}]")
+
+    # ------------------------------------------------------------------
+    # Spectral models: synthesise rows for any selected satellite missing one.
+    # ------------------------------------------------------------------
+    base_model = args.base_spec_model
+    if base_model is None:
+        from importlib.resources import files
+
+        base_model = str(
+            files("tabsim.data").joinpath("rfi/norad_satellite.rfimodel")
+        )
+    print(f"\nBase spectral model: {base_model}")
+    spec = pd.read_csv(base_model)
+    missing = [i for i in ids if i not in set(spec["norad_id"].unique())]
+
+    if not missing:
+        # Still write it: the sim config points at this path unconditionally.
+        print("\nAll selected satellites already have a spectral model.")
+        spec.to_csv(args.spec_out, index=False)
+        print(f"Copied the base model to {args.spec_out} unchanged.")
+        return
+
+    # Template from the family being simulated (e.g. every Starlink row), falling
+    # back to the whole file. Uses the modal parameter set, so a family with a
+    # single consistent model reproduces it exactly.
+    pattern = "|".join(names)
+    family = spec[spec["sat_name"].str.contains(pattern, case=False, na=False)]
+    source = family if len(family) else spec
+    cols = ["sig_type", "power", "freq", "band_width"]
+    template = source[cols].mode().iloc[0]
+    print(
+        f"\n{len(missing)} of the selected satellites have no spectral model. "
+        f"Synthesising from {len(source)} '{pattern}' rows: "
+        + ", ".join(f"{c}={template[c]}" for c in cols)
+    )
+    if len(source[cols].drop_duplicates()) > 1:
+        print(
+            "  NOTE: that family has more than one distinct parameter set, so the "
+            "modal set is an approximation for the synthesised rows."
+        )
+
+    names_by_id = {}
+    if "OBJECT_NAME" in tles.columns:
+        names_by_id = dict(zip(tles["NORAD_CAT_ID"], tles["OBJECT_NAME"]))
+
+    new_rows = pd.DataFrame(
+        [
+            {
+                "norad_id": i,
+                "sat_name": names_by_id.get(i, f"SYNTHETIC-{i}"),
+                "object_id": "SYNTHETIC",
+                **{c: template[c] for c in cols},
+            }
+            for i in missing
+        ]
+    )
+    print(new_rows.to_string(index=False))
+
+    augmented = Path(args.spec_out)
+    pd.concat([spec, new_rows], ignore_index=True).to_csv(augmented, index=False)
+    print(f"\nWrote augmented spectral model to {augmented}")
+    print("Point the sim config's rfi_sources.tle_satellite.norad_spec_model at it.")
 
 
 if __name__ == "__main__":
