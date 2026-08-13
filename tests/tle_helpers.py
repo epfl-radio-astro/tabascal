@@ -197,3 +197,65 @@ def make_nearest_json(pairs) -> bytes:
     import json
 
     return json.dumps({"orbital_data": _raw_rows(pairs)}).encode()
+
+
+def _raw_omm_rows(pairs) -> list[dict]:
+    """Raw ``get-nearest-omm`` rows, shaped as the live service returns them.
+
+    Two details are copied deliberately from a real 1.7.0 response. The elements
+    sit one level down in an ``orbital_elements`` object, already in OMM naming.
+    And the epoch appears *twice* in different spellings: the row-level ``epoch``
+    is ``"2026-08-13 03:34:14 UTC"`` — not ISO 8601, truncated to the second —
+    while the nested ``EPOCH`` is ``"2026-08-13T03:34:14.082240"``. The client
+    lifts the nested one; a fixture that only carried the tidy spelling would let
+    a regression through.
+    """
+    rows = []
+    for nid, ep in pairs:
+        l1, l2 = make_tle(nid, ep)
+        elements = parse_tle_elements(l1, l2)
+        stamp = jd_to_datetime(ep)
+        rows.append(
+            {
+                "satellite_id": int(nid),
+                "satellite_name": f"SAT-{nid}",
+                "data_source": "test",
+                "date_collected": stamp.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "epoch": stamp.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "orbital_elements": {
+                    "EPOCH": stamp.isoformat(),
+                    "NORAD_CAT_ID": int(nid),
+                    "OBJECT_ID": "1998-067A",
+                    "OBJECT_NAME": f"SAT-{nid}",
+                    "CLASSIFICATION_TYPE": "U",
+                    "ELEMENT_SET_NO": 999,
+                    "EPHEMERIS_TYPE": 0,
+                    "MEAN_MOTION_DOT": 3.778e-05,
+                    "MEAN_MOTION_DDOT": 0.0,
+                    "REV_AT_EPOCH": 58058,
+                    "INCLINATION": elements["INCLINATION"],
+                    "RA_OF_ASC_NODE": elements["RA_OF_ASC_NODE"],
+                    "ECCENTRICITY": elements["ECCENTRICITY"],
+                    "ARG_OF_PERICENTER": elements["ARG_OF_PERICENTER"],
+                    "MEAN_ANOMALY": elements["MEAN_ANOMALY"],
+                    "MEAN_MOTION": elements["MEAN_MOTION"],
+                    "BSTAR": elements["BSTAR"],
+                },
+            }
+        )
+    return rows
+
+
+def make_nearest_omm_json(pairs) -> bytes:
+    """A ``get-nearest-omm`` payload, in the single-element-list wrapping the
+    live service uses."""
+    import json
+
+    return json.dumps(
+        [{"orbital_data": _raw_omm_rows(pairs), "version": "1.7.0"}]
+    ).encode()
+
+
+def make_omm_catalogue_df(pairs) -> pd.DataFrame:
+    """Normalised OMM frame, as the client returns it."""
+    return pd.DataFrame([make_omm(nid, ep) for nid, ep in pairs])

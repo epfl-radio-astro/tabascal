@@ -15,11 +15,13 @@ The names most callers need are re-exported here.
 
 from .client import (
     BASE_URL,
+    OMM_COLUMNS,
     TLE_COLUMNS,
     SatCheckerError,
     SatCheckerRateLimitError,
     SatCheckerResponseError,
     SatCheckerTransportError,
+    fetch_nearest_omm,
     fetch_nearest_tle,
 )
 from .cache import (
@@ -41,7 +43,9 @@ from .service import MAX_WORKERS, NearestBatchResult, fetch_nearest_batch, store
 
 __all__ = [
     "BASE_URL",
+    "OMM_COLUMNS",
     "TLE_COLUMNS",
+    "fetch_nearest_omm",
     "SatCheckerError",
     "SatCheckerRateLimitError",
     "SatCheckerResponseError",
