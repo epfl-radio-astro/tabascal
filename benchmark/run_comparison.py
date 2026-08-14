@@ -11,7 +11,7 @@ non-FFI kernel instead would change two variables at once.
 
 Usage
 -----
-    python run_comparison.py --tab-config tab_128A.yaml --sim-dir <path> \
+    python run_comparison.py --tab-config tab_64A.yaml --sim-dir <path> \
         --workdir results/
 """
 

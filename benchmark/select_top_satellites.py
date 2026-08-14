@@ -18,7 +18,7 @@ Starlink entries in the bundled model carries identical parameters
 
 Usage
 -----
-    python select_top_satellites.py --sim-config sim_128A_zenith.yaml -n 32
+    python select_top_satellites.py --sim-config sim_64A_zenith.yaml -n 32
 """
 
 import argparse

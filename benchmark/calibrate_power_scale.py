@@ -18,7 +18,7 @@ so the choice can be revisited.
 
 Usage
 -----
-    python calibrate_power_scale.py --sim-config sim_128A_zenith.yaml \
+    python calibrate_power_scale.py --sim-config sim_64A_zenith.yaml \
         --ids selected_norad_ids.txt --target-jy 1000
 """
 
@@ -52,6 +52,14 @@ def main() -> None:
     parser.add_argument("--sim-config", required=True)
     parser.add_argument("--ids", default="selected_norad_ids.txt")
     parser.add_argument("--target-jy", type=float, default=1000.0)
+    parser.add_argument(
+        "--target-snr", type=float, default=None,
+        help="Target on-axis flux as a multiple of the visibility noise instead of an "
+             "absolute Jy value. Overrides --target-jy. The noise is derived from the "
+             "config as SEFD/sqrt(chan_width * int_time), which is what tabsim reports "
+             "as noise_std -- note that is the complex-visibility sigma, sqrt(2) larger "
+             "than the per-component one.",
+    )
     parser.add_argument("--tle-dir", default=None)
     parser.add_argument(
         "--write-back", action="store_true",
@@ -114,17 +122,27 @@ def main() -> None:
             }
         )
 
+    target_jy = args.target_jy
+    noise_std = obs["SEFD"] / np.sqrt(obs["chan_width"] * obs["int_time"])
+    if args.target_snr is not None:
+        target_jy = args.target_snr * noise_std
+        print(
+            f"Visibility noise: SEFD {obs['SEFD']:g} Jy over "
+            f"{obs['chan_width']:g} Hz x {obs['int_time']:g} s -> {noise_std:.4g} Jy"
+        )
+        print(f"Target SNR {args.target_snr:g} -> {target_jy:.4g} Jy on-axis")
+
     df = pd.DataFrame(rows).sort_values("on_axis_Jy", ascending=False)
     print(f"\nOn-axis apparent flux at closest approach (power_scale={current_scale:g}):")
     print(df.to_string(index=False, float_format=lambda v: f"{v:.4g}"))
 
     median = df["on_axis_Jy"].median()
-    new_scale = current_scale * args.target_jy / median
+    new_scale = current_scale * target_jy / median
     print(
         f"\nmin={df['on_axis_Jy'].min():.4g} Jy  "
         f"median={median:.4g} Jy  max={df['on_axis_Jy'].max():.4g} Jy"
     )
-    print(f"\nTo put the median at {args.target_jy:g} Jy:")
+    print(f"\nTo put the median at {target_jy:.4g} Jy (SNR {target_jy / noise_std:.1f}):")
     print(f"  power_scale: {new_scale:.6g}")
     print(
         f"  -> min {df['on_axis_Jy'].min() * new_scale / current_scale:.4g} Jy, "

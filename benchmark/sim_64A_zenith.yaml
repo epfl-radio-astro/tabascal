@@ -1,7 +1,13 @@
 # Benchmark simulation for issue #107 (RFI-signal component comparison).
 #
-# 128 SKA-Low antennas, 32 channels around 150 MHz, 32 Starlink satellites over a
+# 64 SKA-Low antennas, 32 channels around 150 MHz, 4 Starlink satellites over a
 # 15-minute zenith-pointed observation at 10 s integration.
+#
+# Sized down from 128 antennas / 32 satellites: at that size the RFI fine grid
+# (n_rfi x n_ant x n_freq x n_time x n_int_time) needed 292 GiB and every run died
+# in FixedOrbit.setup before any rfi_signal component was reached. 64x4 cuts that
+# by 16x. The cost is shared by all rfi_signal components, so it bounds the
+# problem size the comparison can address rather than favouring either one.
 #
 # Zenith pointing: dec is set to the telescope latitude and the observation is
 # centred on transit (start_time_lha = -1.875 deg = half of 15 min in hour angle),
@@ -19,7 +25,7 @@ telescope:
   elevation: 377
   dish_d: 35          # SKA-Low station diameter; sets the Airy primary beam
   itrf_path: SKA-Low-512.itrf.txt
-  n_ant: 128
+  n_ant: 64
 
 observation:
   target_name: zenith
@@ -63,7 +69,7 @@ rfi_sources:
   tle_satellite:
     sat_names: []                              # see note above: IDs are supplied explicitly
     norad_ids_path: selected_norad_ids.txt     # written by select_top_satellites.py
-    max_n_sat: 32
+    max_n_sat: 4
     # Written by select_top_satellites.py: the bundled model plus synthesised rows
     # for any selected satellite tabsim has no spectrum for. Without this, those
     # satellites are silently dropped and lower passes take their place.
