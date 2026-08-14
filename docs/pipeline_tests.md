@@ -118,18 +118,62 @@ Then:
 4. **Record in the commit message why the values moved**, with the before/after
    numbers. A reference change is indistinguishable from a regression without it.
 
+### Filling in the GPU and x86 arch rows
+
+The `dev` environment is CPU-only; the CUDA jaxlib lives in `cuda12-dev`. To fill
+in a GPU row, and to pin the CPU row to the CPU backend on a machine that also
+has a GPU:
+
+```bash
+# GPU rows
+pixi run -e cuda12-dev pytest tests/test_tabascal_pipeline.py::test_pipeline \
+    --record-refs -s
+pixi run -e cuda12-dev pytest tests/test_tabascal_pipeline.py::test_pipeline \
+    --record-refs -s --x64 false
+
+# CPU rows on a GPU machine — otherwise jax picks the GPU
+JAX_PLATFORMS=cpu pixi run -e dev pytest tests/test_tabascal_pipeline.py::test_pipeline \
+    --record-refs -s
+```
+
+Target `::test_pipeline` explicitly rather than `-k test_pipeline`: the latter
+also selects `test_pipeline_sharded_equivalence` and `test_pipeline_multiprocess`,
+which `--record-refs` does not apply to and which take several minutes.
+
+`conftest.py` pins `CUDA_VISIBLE_DEVICES=0`, so a GPU run is single-device and
+does not exercise the sharded solve. Three cases are `requires_double` and are
+skipped under `--x64 false`, so a single-precision run records three cases, not
+six.
+
 ### Which architecture to record on
 
-Double-precision values are architecture-stable: measured ARM (Apple silicon) and
-CI/x86 values agree to better than 1e-8 relative, so a double reference recorded
-on either is canonical for both. Prefer the CI/x86 value when you have it, since
-that is what gates the PR.
+Double-precision values are architecture-stable. Measured across ARM (Apple
+silicon), x86 CPU and an NVIDIA GPU, the double `chi2` agrees to better than
+6e-7 relative on every case, and the printed truth metrics agree to every digit
+shown. So a double reference recorded on any of the three is canonical for all
+three. Prefer the CI/x86 value when you have it, since that is what gates the PR.
+
+That worst case belongs to the two SGP4 orbit cases, where the propagation
+amplifies rounding; the non-orbit cases agree to ~3e-11. Everything here is still
+four to nine orders inside the 1% tolerance.
 
 Single precision is **not** architecture-stable — fp32 convergence rate differs
 markedly between ARM, x86 and GPU — which is why those references are wide
-`(lo, hi)` bounds rather than scalars.
+`(lo, hi)` bounds rather than scalars. On the `RiemannVisTimeFreqCalculation`
+case at a fixed 100 iterations, the same inputs give:
 
-If a double value differs between two machines by much more than 1e-8, suspect a
+| | ARM | x86 | GPU |
+|---|---|---|---|
+| chi2 | 0.933 | 1.102 | 0.921 |
+| ast NRMSE(noise) | 0.252 | 0.247 | 0.251 |
+| rfi NRMSE(noise) | 0.405 | 0.736 | 0.389 |
+
+The rfi residual very nearly doubles between GPU and x86 — and the architecture
+with the worst rfi residual has the *best* ast residual, so there is no single
+"slow" architecture to normalise against. Do not tighten an fp32 bound towards
+whichever machine you happen to have run on.
+
+If a double value differs between two machines by much more than 1e-6, suspect a
 stale reference rather than an architecture difference. That is what the earlier
 "ARM runs ~0.7% high" comments in this file turned out to be: the references had
 drifted while staying inside the 1% tolerance, so nothing failed until a real
