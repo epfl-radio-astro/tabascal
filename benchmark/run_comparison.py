@@ -63,8 +63,11 @@ def parse_run(stdout: str) -> dict:
     ):
         out["opt_s"] = float(m.group(1))
 
-    if m := re.search(r"Reduced Chi\^2 @ opt params : ([\d.eE+-]+)", stdout):
-        out["chi2"] = float(m.group(1))
+    for point in ("init", "opt"):
+        if m := re.search(
+            rf"Reduced Chi\^2 @ {point} params : ([\d.eE+-]+)", stdout
+        ):
+            out[f"chi2_{point}"] = float(m.group(1))
 
     # Truth metrics block: two rows per quantity, the label only on the first.
     if (start := stdout.find("Truth metrics @ opt params:")) != -1:
@@ -99,6 +102,11 @@ def main() -> None:
     parser.add_argument("--max-iter", type=int, default=None)
     parser.add_argument("--repo-root", default=".")
     parser.add_argument(
+        "--precision", choices=["single", "double"], default=None,
+        help="Override model.precision. Single halves every RFI array, which is the "
+             "main lever on the memory ceiling these components run into.",
+    )
+    parser.add_argument(
         "--variants", nargs="+", default=None,
         help="Class names to run (e.g. FourierGPRFIScan). Defaults to all. Memory is "
              "deterministic for a fixed simulation, so re-running variants already "
@@ -132,6 +140,8 @@ def main() -> None:
         config["satellites"] = {**base["satellites"], "norad_ids_path": str(ids_path)}
         if args.max_iter is not None:
             config["opt"] = {**base["opt"], "max_iter": args.max_iter}
+        if args.precision is not None:
+            config["model"] = {**config["model"], "precision": args.precision}
 
         run_dir = workdir / slug
         run_dir.mkdir(exist_ok=True)
@@ -165,7 +175,8 @@ def main() -> None:
     # Summary table
     cols = [
         ("peak_GB", "peak GB"), ("total_s", "total s"), ("opt_s", "opt s"),
-        ("chi2", "chi2"), ("ast_NRMSE_noise", "ast NRMSE"),
+        ("chi2_init", "chi2 init"), ("chi2_opt", "chi2 opt"),
+        ("ast_NRMSE_noise", "ast NRMSE"),
         ("rfi_NRMSE_noise", "rfi NRMSE"), ("rfi_bias_sigma", "rfi bias"),
     ]
     print(f"\n\n{'=' * 100}\nSUMMARY\n{'=' * 100}")
