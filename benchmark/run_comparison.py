@@ -97,6 +97,12 @@ def main() -> None:
     parser.add_argument("--tle-dir", default=None, help="--extra-orbit-dir for tabascal")
     parser.add_argument("--max-iter", type=int, default=None)
     parser.add_argument("--repo-root", default=".")
+    parser.add_argument(
+        "--variants", nargs="+", default=None,
+        help="Class names to run (e.g. FourierGPRFIScan). Defaults to all. Memory is "
+             "deterministic for a fixed simulation, so re-running variants already "
+             "measured on the same sim just burns GPU time.",
+    )
     args = parser.parse_args()
 
     workdir = Path(args.workdir).resolve()
@@ -105,8 +111,17 @@ def main() -> None:
     base = yaml.safe_load(Path(args.tab_config).read_text())
     ids_path = Path(base["satellites"]["norad_ids_path"]).resolve()
 
+    variants = VARIANTS
+    if args.variants:
+        variants = {
+            k: v for k, v in VARIANTS.items() if v.split(":")[1] in args.variants
+        }
+        unknown = set(args.variants) - {v.split(":")[1] for v in VARIANTS.values()}
+        if unknown:
+            raise SystemExit(f"Unknown variant(s): {sorted(unknown)}")
+
     results = {}
-    for label, component in VARIANTS.items():
+    for label, component in variants.items():
         slug = component.split(":")[1]
         print(f"\n{'=' * 70}\n{label}\n{'=' * 70}", flush=True)
 
