@@ -38,9 +38,10 @@ FIXED_COMPONENTS = [
     "trajectory:FixedOrbit",
     None,  # rfi_signal slot
     "rfi_vis:RiemannVisTimeFreqCalculationFFI",
-    "ast_vis:FourierTimeFreqGPAst",
+    None,  # ast_vis slot (--ast-vis)
     "gains:UnitaryGains",
 ]
+DEFAULT_AST_VIS = "ast_vis:FourierTimeFreqGPAst"
 
 
 def parse_run(stdout: str) -> dict:
@@ -103,6 +104,11 @@ def main() -> None:
     parser.add_argument("--max-iter", type=int, default=None)
     parser.add_argument("--repo-root", default=".")
     parser.add_argument(
+        "--ast-vis", default="FourierTimeFreqGPAst",
+        help="ast_vis class. Held fixed across rfi_signal variants, but varying it "
+             "isolates how much of peak memory the astronomical GP accounts for.",
+    )
+    parser.add_argument(
         "--precision", choices=["single", "double"], default=None,
         help="Override model.precision. Single halves every RFI array, which is the "
              "main lever on the memory ceiling these components run into.",
@@ -136,7 +142,8 @@ def main() -> None:
         print(f"\n{'=' * 70}\n{label}\n{'=' * 70}", flush=True)
 
         config = dict(base)
-        components = [c if c else component for c in FIXED_COMPONENTS]
+        slots = iter([component, f"ast_vis:{args.ast_vis}"])
+        components = [c if c else next(slots) for c in FIXED_COMPONENTS]
         config["model"] = {**base["model"], "components": components}
         config["satellites"] = {**base["satellites"], "norad_ids_path": str(ids_path)}
         if args.max_iter is not None:
@@ -144,7 +151,8 @@ def main() -> None:
         if args.precision is not None:
             config["model"] = {**config["model"], "precision": args.precision}
 
-        run_dir = workdir / slug
+        run_dir = workdir / (slug if args.ast_vis == "FourierTimeFreqGPAst"
+                             else f"{slug}+{args.ast_vis}")
         run_dir.mkdir(exist_ok=True)
         config_path = run_dir / "tab.yaml"
         config_path.write_text(yaml.safe_dump(config))

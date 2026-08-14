@@ -1,4 +1,4 @@
-from jax import vmap, random, jit
+from jax import vmap, random, jit, lax, checkpoint
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -887,3 +887,78 @@ class FourierTimeFreqGPAst(Component):
         assert_attr_shape(self, "sigma_ast_k", ast_shape)
         assert_attr_shape(self, "init_ast_k", ast_shape)
         assert_attr_shape(self, "init_ast_k_base", ast_shape)
+
+
+def _largest_divisor_at_most(n: int, limit: int) -> int:
+    """Largest divisor of ``n`` not exceeding ``limit`` (at least 1)."""
+    for d in range(min(limit, n), 0, -1):
+        if n % d == 0:
+            return d
+    return 1
+
+
+class FourierTimeFreqGPAstScan(FourierTimeFreqGPAst):
+    """``FourierTimeFreqGPAst`` with the baseline axis scanned instead of vmapped.
+
+    Same prototype as ``rfi_signal.FourierGPRFIScan``, applied to the astronomical
+    GP. The model and parameters are inherited unchanged -- only ``build_forward``
+    differs -- so the two must agree and any difference is a bug.
+
+    ``vmap`` over baselines lowers to one batched cuFFT of ``n_bl`` transforms on the
+    zero-padded grid and keeps every padded intermediate live for the backward pass.
+    Scanning bounds both to one block at a time; ``checkpoint`` on the body is what
+    makes the second half of that true, since ``lax.scan`` otherwise stacks the body's
+    residuals across iterations.
+
+    Unlike the RFI case this needs no transpose: ``lax.scan`` stacks along axis 0 and
+    the baseline axis is already axis 0.
+
+    The scan is *blocked* rather than one baseline per step -- a 2016-baseline array
+    would otherwise become 2016 sequential tiny FFTs, trading a memory problem for a
+    kernel-launch one. ``block_size`` is rounded down to a divisor of ``n_bl`` so the
+    reshape is exact.
+    """
+
+    #: Upper bound on baselines per scan step; the actual block is the largest
+    #: divisor of n_bl not exceeding this.
+    max_block_size = 64
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        pads = self.pads
+        ss_idxs = self.ss_idxs
+        forward_transform = self.forward_transform
+
+        n_bl = self.n_bl
+        block = _largest_divisor_at_most(n_bl, self.max_block_size)
+        n_blocks = n_bl // block
+        print(f"AST scan: {n_blocks} blocks of {block} baselines")
+
+        @checkpoint
+        def baseline_block(ast_k_block):
+            return vmap(latent_to_signal, (0, None, None), 0)(
+                ast_k_block, pads, ss_idxs
+            )
+
+        def forward(params, state, constants):
+            sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
+            mu_ast_k = constants[f"{prefix}/mu_ast_k"]
+
+            ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
+
+            ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
+
+            # (n_bl, ...) -> (n_blocks, block, ...); scan stacks results back onto
+            # axis 0, so a plain reshape recovers the baseline-major output.
+            blocked = ast_k.reshape((n_blocks, block) + ast_k.shape[1:])
+            _, vis_ast = lax.scan(
+                lambda carry, k_block: (carry, baseline_block(k_block)), None, blocked
+            )
+            vis_ast = vis_ast.reshape((n_bl,) + vis_ast.shape[2:])
+
+            state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
+
+            return state
+
+        return forward
