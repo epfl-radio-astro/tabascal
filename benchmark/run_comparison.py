@@ -52,16 +52,17 @@ def parse_run(stdout: str) -> dict:
     if m := re.search(r"^\s*(cuda:\d+|cpu:\d+)\s+([\d.]+)\s+([\d.]+)\s*$", stdout, re.M):
         out["peak_GB"] = float(m.group(2))
 
-    if m := re.search(
-        r"^tabascal_subtraction\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+([\d.]+)\s+s\s",
-        stdout, re.M,
-    ):
-        out["total_s"] = float(m.group(1))
-    if m := re.search(
-        r"^\s{2}run_opt\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+([\d.]+)\s+s\s",
-        stdout, re.M,
-    ):
-        out["opt_s"] = float(m.group(1))
+    # The Mean column carries an SI prefix, so a long run reports "1.96 ks" rather
+    # than seconds -- matching only " s " silently dropped every runtime once the
+    # iteration count went up.
+    scale = {"n": 1e-9, "u": 1e-6, "m": 1e-3, "": 1.0, "k": 1e3, "M": 1e6}
+    for key, row in (("total_s", r"tabascal_subtraction"), ("opt_s", r"\s{2}run_opt")):
+        if m := re.search(
+            rf"^{row}\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+"
+            rf"([\d.]+)\s+([numkM]?)s\s",
+            stdout, re.M,
+        ):
+            out[key] = float(m.group(1)) * scale[m.group(2)]
 
     for point in ("init", "opt"):
         if m := re.search(
