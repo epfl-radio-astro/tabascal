@@ -1,6 +1,6 @@
 from abc import abstractmethod
 
-from jax import vmap, random, Array
+from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -674,11 +674,37 @@ class FourierGPRFI(BaseGPRFI):
         }
 
     def build_forward(self):
-        """Return pure, JIT-compatible function"""
+        """Return pure, JIT-compatible function
+
+        The latent-to-signal transform is scanned over antennas rather than vmapped.
+        A double vmap over ``(n_rfi, n_ant)`` lowers to a single batched cuFFT of
+        ``n_rfi * n_ant`` transforms on the zero-padded grid, and cuFFT sizes its plan
+        work area for the whole batch. At 32 channels that reached a 12.6 GiB request
+        which aborted the process from inside XLA -- a ``Check failure``, not a
+        catchable Python OOM, so there was no graceful degradation. Scanning the
+        antenna axis reduces that batch by ``n_ant``.
+
+        ``checkpoint`` on the body is load-bearing rather than decorative:
+        ``lax.scan`` stacks the body's residuals across iterations for reverse-mode
+        AD, which would rebuild much of what the vmap was holding, so without it the
+        scan fixes the cuFFT plan and not the autodiff tape.
+
+        Measured on a 64-antenna / 32-channel / 4-satellite problem, single
+        precision: peak device memory 35.80 -> 14.62 GB (2.45x) for a 4% runtime
+        cost, with the optimised chi^2 unchanged to ~6 significant figures.
+        """
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
         pads = self.pads
         ss_idxs = self.ss_idxs
+
+        # One antenna's sources at a time, so the cuFFT batch is n_rfi rather than
+        # n_rfi * n_ant.
+        @checkpoint
+        def antenna_block(rfi_k_A_ant):
+            return vmap(latent_to_signal, (0, None, None), 0)(
+                rfi_k_A_ant, pads, ss_idxs
+            )
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -689,9 +715,15 @@ class FourierGPRFI(BaseGPRFI):
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
 
-            rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
-                rfi_k_A, pads, ss_idxs
+            # lax.scan stacks along axis 0, so the antenna axis is moved there and
+            # back. The leading swap is on the small latent grid; the trailing one is
+            # full size and is part of the 4% measured above.
+            _, rfi_A_ant_major = lax.scan(
+                lambda carry, k_ant: (carry, antenna_block(k_ant)),
+                None,
+                jnp.swapaxes(rfi_k_A, 0, 1),
             )
+            rfi_A = jnp.swapaxes(rfi_A_ant_major, 0, 1)
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -957,7 +989,13 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
                 rfi_k_A, pads, ss_idxs
             )
-            rfi_A = rfi_A * jnp.ones((n_rfi, n_ant, n_freq_fine, n_time_fine))
+            # Broadcast the shared-antenna signal up to the full grid. Multiplying by
+            # ones allocated a second full-size array purely to broadcast;
+            # broadcast_to is equivalent (broadcasting is linear, so the gradient
+            # still sums over the antenna axis) without the allocation.
+            rfi_A = jnp.broadcast_to(
+                rfi_A, (n_rfi, n_ant, n_freq_fine, n_time_fine)
+            )
 
             state = {**state, "rfi_A": rfi_A}
 

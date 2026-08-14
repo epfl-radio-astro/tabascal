@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 import jax
+from jax import vmap
 import jax.numpy as jnp
 import numpy as np
 import numpyro
@@ -32,6 +33,7 @@ from tabascal.components.rfi_signal import (
     compute_real_space_gp_params,
     rfi_signal_config_validation,
 )
+from tabascal.fft_gp import latent_to_signal
 from tabascal.gp import base_kernel, get_times
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
@@ -653,6 +655,73 @@ class TestTransforms:
         comp = setup_component(cls)
         assert comp.sigma_rfi_k.shape == (1, 1, comp.n_k_freq_rfi, comp.n_k_time_rfi)
         assert jnp.all(comp.sigma_rfi_k > 0)
+
+
+# ---------------------------------------------------------------------------
+# Scanned latent-to-signal transform
+# ---------------------------------------------------------------------------
+
+class TestFourierScanTransform:
+    """FourierGPRFI scans the antenna axis instead of vmapping it.
+
+    That is a pure implementation change made to bound the cuFFT plan work area (a
+    batched transform over n_rfi * n_ant asked for 12.6 GiB at 32 channels and
+    aborted inside XLA). These pin the result to the vmap semantics it replaced, in
+    both value and gradient -- ``checkpoint`` alters how the tape is built, so a bug
+    there would surface only in reverse mode.
+    """
+
+    @staticmethod
+    def _vmap_reference(comp, params):
+        """rfi_A computed the way the pre-scan implementation did."""
+        rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
+        rfi_k_A = comp.masked_forward_transform(
+            rfi_k_A_base, comp.sigma_rfi_k, comp.mu_rfi_k
+        )
+        return vmap(
+            vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1
+        )(rfi_k_A, comp.pads, comp.ss_idxs)
+
+    def test_matches_vmap_reference(self):
+        comp = setup_component(FourierGPRFI)
+        params = random_params(comp)
+
+        got = run_forward(comp, params)
+        expected = self._vmap_reference(comp, params)
+
+        assert got.shape == expected.shape
+        assert jnp.allclose(got, expected, atol=tol(), rtol=tol())
+
+    def test_gradients_match_vmap_reference(self):
+        comp = setup_component(FourierGPRFI)
+        params = random_params(comp)
+        constants = make_constants(comp)
+
+        def scanned(p):
+            out = comp.build_forward()(p, {}, constants)["rfi_A"]
+            return jnp.sum(jnp.abs(out) ** 2)
+
+        def reference(p):
+            return jnp.sum(jnp.abs(self._vmap_reference(comp, p)) ** 2)
+
+        g_scan = jax.grad(scanned)(params)
+        g_ref = jax.grad(reference)(params)
+
+        for name in g_ref:
+            assert jnp.allclose(g_scan[name], g_ref[name], atol=tol(), rtol=tol()), (
+                f"gradient mismatch for {name}"
+            )
+
+    def test_const_ant_broadcast_matches_full_grid(self):
+        """The shared-antenna signal is identical across antennas after broadcast."""
+        comp = setup_component(FourierGPRFIConstAnt)
+        rfi_A = run_forward(comp, random_params(comp))
+
+        assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
+        # Every antenna carries the same signal -- that is what "ConstAnt" means, and
+        # it is the property the broadcast has to preserve.
+        for ant in range(1, N_ANT):
+            assert jnp.array_equal(rfi_A[:, 0], rfi_A[:, ant])
 
 
 # ---------------------------------------------------------------------------
