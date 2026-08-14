@@ -6,8 +6,10 @@ ECI position is rotated by the Greenwich apparent sidereal angle to ECEF
 internally, so synthetic sources here are constructed in that same frame.
 """
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax import jit
 
 from tabascal.interferometry import (
     C,
@@ -393,8 +395,8 @@ class TestMaxAstFringeRate:
         np.testing.assert_allclose(band, hi, rtol=1e-12)
 
     def test_baselines_are_independent(self):
-        # Each entry of the (n_bl,) result must equal that baseline computed alone,
-        # i.e. the baseline vmap does not mix baselines.
+        # Each entry of the (n_bl,) result must equal that baseline computed
+        # alone, i.e. the reduction does not mix baselines.
         rng = np.random.default_rng(3)
         uvw = rng.normal(scale=800.0, size=(5, 4, 3))
         freqs = np.array([1.0e9, 1.5e9])
@@ -404,6 +406,34 @@ class TestMaxAstFringeRate:
                 max_ast_fringe_rate(uvw[:, b : b + 1, :], DEC, freqs, self.D)
             )
             np.testing.assert_allclose(together[b], alone[0], rtol=1e-12)
+
+    def test_working_memory_is_independent_of_the_number_of_channels(self):
+        # The frequency axis is consumed by a scan, so the working set is one
+        # (n_time, n_bl) slice however many channels there are. A vectorised max
+        # would instead materialise (n_time, n_bl, n_freq) -- 13 GB for a real
+        # MeerKAT band -- which is the whole reason for the scan. Compare the
+        # compiled temporary allocation at two channel counts rather than
+        # measuring the host RSS, so the guard is exact and not flaky.
+        n_time, n_bl = 64, 128
+        uvw = jnp.zeros((n_time, n_bl, 3))
+
+        def temp_bytes(n_freq):
+            freqs = jnp.linspace(1.0e9, 2.0e9, n_freq)
+            fn = jit(lambda u, f: max_ast_fringe_rate(u, DEC, f, self.D))
+            compiled = fn.lower(uvw, freqs).compile()
+            try:
+                return compiled.memory_analysis().temp_size_in_bytes
+            except (AttributeError, NotImplementedError) as e:  # backend-dependent
+                pytest.skip(f"no compiled memory analysis on this backend: {e}")
+
+        few, many = temp_bytes(8), temp_bytes(512)
+        assert few == many, (
+            f"working memory grew with the channel count ({few} -> {many} bytes); "
+            "the frequency axis is being materialised rather than scanned over"
+        )
+        # And that common size is a small multiple of one slice, not of the block.
+        slice_bytes = n_time * n_bl * jnp.zeros(1).dtype.itemsize
+        assert many < 8 * slice_bytes
 
     # --- agreement with independent brute-force maximisation ---
 

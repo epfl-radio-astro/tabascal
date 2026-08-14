@@ -1,6 +1,6 @@
 from tabascal.time import mjd_to_jd, gast_deg
 
-from jax import jit, vmap, Array
+from jax import jit, lax, Array
 import jax.numpy as jnp
 from functools import partial
 import numpy as np
@@ -223,19 +223,14 @@ def fov_to_eff_diameter(fov_deg: float, freq: float) -> Array:
     return 2.44 * C / (freq * jnp.deg2rad(fov_deg))
 
 
-def _max_fringe_rate_single(uvw: Array, d: float, freq: float, D: float) -> Array:
-    """Maximum fringe rate over the beam for one UVW sample at one frequency.
+def _pole_projections(uvw: Array, d: Array) -> tuple[Array, Array]:
+    """Baseline projections the two beam offsets couple to.
 
-    Scalar core of :func:`max_ast_fringe_rate`; see that function for the
-    derivation and for the meaning of the two terms. ``uvw`` is a single
-    ``(3,)`` baseline sample and ``d`` is the declination in *radians*.
+    Frequency-independent half of :func:`max_ast_fringe_rate`; see that function
+    for the derivation. ``d`` is the declination in *radians*. Both outputs have
+    the shape of ``uvw`` with its trailing length-3 axis dropped.
     """
-    lam = C / freq
-    # Beam radius: the largest angular offset of a source from the phase centre,
-    # taken to the first null of a uniformly illuminated aperture.
-    rho = 1.22 * lam / D
-
-    u, v, w = uvw[0], uvw[1], uvw[2]
+    u, v, w = uvw[..., 0], uvw[..., 1], uvw[..., 2]
 
     # A: baseline component perpendicular to the celestial pole, which the
     # transverse (l, m) offset couples to.
@@ -243,16 +238,55 @@ def _max_fringe_rate_single(uvw: Array, d: float, freq: float, D: float) -> Arra
     # B: the component the radial (n - 1) offset couples to.
     B = jnp.abs(u * jnp.cos(d))
 
+    return A, B
+
+
+def _beam_couplings(freq: Array, D: float) -> tuple[Array, Array]:
+    """Coefficients of the transverse and radial terms at one frequency.
+
+    Baseline-independent half of :func:`max_ast_fringe_rate`: the rate at the
+    beam edge is ``A * g_transverse + B * g_radial`` with ``A, B`` from
+    :func:`_pole_projections`.
+    """
+    lam = C / freq
+    # Beam radius: the largest angular offset of a source from the phase centre,
+    # taken to the first null of a uniformly illuminated aperture.
+    rho = 1.22 * lam / D
+
     # 1 - cos(rho) is evaluated as the equivalent 2 sin^2(rho / 2): for the small
     # rho of a typical beam, cos(rho) is within rounding of 1, so the subtraction
     # cancels catastrophically (~1e-3 relative error in fp32 at rho = 0.25 deg,
     # against ~1e-7 for the half-angle form). tabascal defaults to fp32, so the
     # stable form matters here.
-    return Omega_e * (A * jnp.sin(rho) + B * 2 * jnp.sin(rho / 2) ** 2) / lam
+    return Omega_e * jnp.sin(rho) / lam, Omega_e * 2 * jnp.sin(rho / 2) ** 2 / lam
+
+
+@jit
+def _max_over_time_and_freq(uvw: Array, d: Array, freqs: Array, D: float) -> Array:
+    """Max fringe rate per baseline over time and frequency, without a 3D temporary.
+
+    ``uvw`` is ``(n_time, n_bl, 3)``, ``d`` the declination in radians and
+    ``freqs`` a ``(n_freq,)`` array; the result is ``(n_bl,)``. The frequency
+    axis is consumed by a :func:`~jax.lax.scan` whose carry is the per-baseline
+    running maximum, so the largest array ever formed is the ``(n_time, n_bl)``
+    slice for one channel, rather than the ``(n_time, n_bl, n_freq)`` block a
+    vectorised max would materialise -- 13 GB for a full MeerKAT band.
+    """
+    A, B = _pole_projections(uvw, d)  # both (n_time, n_bl)
+
+    def step(best: Array, freq: Array) -> tuple[Array, None]:
+        g_transverse, g_radial = _beam_couplings(freq, D)
+        rate = A * g_transverse + B * g_radial  # (n_time, n_bl)
+        return jnp.maximum(best, jnp.max(rate, axis=0)), None
+
+    n_bl = uvw.shape[1]
+    best, _ = lax.scan(step, jnp.full((n_bl,), -jnp.inf, A.dtype), freqs)
+
+    return best
 
 
 def max_ast_fringe_rate(
-    uvw: Array, dec: float, freq: float | Array = 1.227e9, D: float = 13.5
+    uvw: Array, dec: float, freq: float | Array, D: float
 ) -> Array:
     """Maximum astronomical fringe rate of a source within the primary beam.
 
@@ -318,33 +352,26 @@ def max_ast_fringe_rate(
     Array
         A scalar for ``(3,)`` input, or one maximum fringe rate per baseline,
         shape ``(n_bl,)``, for ``(n_time, n_bl, 3)`` input. Time and frequency
-        are reduced away, so no (n_time, n_freq, n_bl) result is ever formed.
+        are reduced away as they are traversed, so neither the returned array nor
+        any temporary is ever ``(n_time, n_bl, n_freq)``.
     """
     uvw = jnp.asarray(uvw)
     freqs = jnp.atleast_1d(jnp.asarray(freq))
     d = jnp.deg2rad(dec)
 
-    # Max over frequency for one UVW sample.
-    def over_freq(uvw_sample: Array) -> Array:
-        rates = vmap(_max_fringe_rate_single, (None, None, 0, None))(
-            uvw_sample, d, freqs, D
-        )
-        return jnp.max(rates)
-
+    # A single sample is the degenerate n_time = n_bl = 1 observation, so it goes
+    # through the same reduction rather than a second implementation of it.
     if uvw.ndim == 1 and uvw.shape[0] == 3:
-        return over_freq(uvw)
+        return _max_over_time_and_freq(uvw[None, None, :], d, freqs, D)[0]
 
     if uvw.ndim == 3 and uvw.shape[-1] == 3:
-        # Max over time and frequency for one baseline, then map over baselines.
-        def over_time_freq(uvw_bl: Array) -> Array:  # (n_time, 3)
-            return jnp.max(vmap(over_freq)(uvw_bl))
-
-        return vmap(over_time_freq, in_axes=1)(uvw)
+        return _max_over_time_and_freq(uvw, d, freqs, D)
 
     raise ValueError(
         "uvw must have shape (3,) for a single sample or (n_time, n_bl, 3) for "
         f"an observation, got {uvw.shape}"
     )
+
 
 def get_rfi_phase(
     rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array
