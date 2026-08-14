@@ -29,6 +29,7 @@ import yaml
 VARIANTS = {
     "ComplexRFI (matrix GP, per-ant)": "rfi_signal:ComplexRFI",
     "FourierGPRFI (Fourier, per-ant)": "rfi_signal:FourierGPRFI",
+    "FourierGPRFIScan (Fourier, per-ant, scan+remat)": "rfi_signal:FourierGPRFIScan",
     "FourierGPRFIConstAnt (Fourier, shared ant)": "rfi_signal:FourierGPRFIConstAnt",
 }
 

@@ -1,6 +1,6 @@
 from abc import abstractmethod
 
-from jax import vmap, random, Array
+from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -869,6 +869,70 @@ class FourierGPRFI(BaseGPRFI):
         )
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
+
+
+class FourierGPRFIScan(FourierGPRFI):
+    """``FourierGPRFI`` with the antenna axis scanned instead of vmapped.
+
+    Prototype for issue #107. The model, parameters and priors are inherited
+    unchanged -- only ``build_forward`` differs -- so the two classes must produce
+    identical ``rfi_A`` and any difference is a bug, not a modelling choice.
+
+    ``FourierGPRFI`` maps latent modes to signal with a double ``vmap`` over
+    ``(n_rfi, n_ant)``, which XLA lowers to a single batched cuFFT of
+    ``n_rfi * n_ant`` transforms on the zero-padded grid (``pad_factor`` in each
+    axis, so 4x the fine grid in 2-D). cuFFT sizes its plan work area for the whole
+    batch; at 32 channels that request was 12.6 GiB and aborted the process from
+    inside XLA -- a ``Check failure``, not a catchable Python OOM.
+
+    Scanning the antenna axis reduces that batch by ``n_ant``. ``checkpoint`` on the
+    body is not optional: ``lax.scan`` stacks the body's residuals across iterations
+    for reverse-mode AD, which would rebuild much of what the ``vmap`` held, so
+    without it the scan fixes the cuFFT plan but not the autodiff tape.
+
+    This does not reduce the persistent arrays: ``rfi_A`` is still materialised in
+    full, and the FFI vis kernel needs it and ``rfi_phase`` for its VJP. The aim is
+    to remove the allocation spike that makes the component unrunnable, not to make
+    it cheaper than the real-space alternative.
+    """
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        forward_transform = self.masked_forward_transform
+        pads = self.pads
+        ss_idxs = self.ss_idxs
+
+        # One antenna's sources at a time: the vmap stays over n_rfi, so the cuFFT
+        # batch is n_rfi rather than n_rfi * n_ant.
+        @checkpoint
+        def antenna_block(rfi_k_A_ant):
+            return vmap(latent_to_signal, (0, None, None), 0)(
+                rfi_k_A_ant, pads, ss_idxs
+            )
+
+        def forward(params: dict, state: dict, constants: dict):
+            sigma_rfi_k = constants[f"{prefix}/sigma_rfi_k"]
+            mu_rfi_k = constants[f"{prefix}/mu_rfi_k"]
+
+            rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
+            rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
+
+            # lax.scan stacks along axis 0, so the antenna axis is moved there and
+            # back. The trailing swap transposes the full-size output; that cost is
+            # part of what this prototype is measuring.
+            _, rfi_A_ant_major = lax.scan(
+                lambda carry, k_ant: (carry, antenna_block(k_ant)),
+                None,
+                jnp.swapaxes(rfi_k_A, 0, 1),
+            )
+            rfi_A = jnp.swapaxes(rfi_A_ant_major, 0, 1)
+
+            state = {**state, "rfi_A": rfi_A}
+
+            return state
+
+        return forward
 
 
 class FourierGPRFIConstAnt(BaseGPRFI):
