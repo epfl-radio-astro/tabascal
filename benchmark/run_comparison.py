@@ -27,7 +27,8 @@ import yaml
 # rfi_signal components under test, with the rest of the model held fixed.
 # Names are as on `main` (this branch predates the issue #103 renames).
 VARIANTS = {
-    "ComplexRFI (matrix GP, per-ant)": "rfi_signal:ComplexRFI",
+    "ComplexRFI (matrix GP, time only)": "rfi_signal:ComplexRFI",
+    "ComplexRFITimeFreq (matrix GP, time+freq)": "rfi_signal:ComplexRFITimeFreq",
     "FourierGPRFI (Fourier, per-ant)": "rfi_signal:FourierGPRFI",
     "FourierGPRFIScan (Fourier, per-ant, scan+remat)": "rfi_signal:FourierGPRFIScan",
     "FourierGPRFIConstAnt (Fourier, shared ant)": "rfi_signal:FourierGPRFIConstAnt",

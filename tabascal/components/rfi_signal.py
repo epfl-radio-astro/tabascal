@@ -434,6 +434,11 @@ class ComplexRFI(BaseGPRFI):
         "rfi_i_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
     }
 
+    @property
+    def _induce_shape(self):
+        """Shape of the inducing-point arrays; subclasses may reduce an axis."""
+        return (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
+
     def setup(self, tab_config):
         """All validation and error-prone operations here"""
         try:
@@ -465,7 +470,7 @@ class ComplexRFI(BaseGPRFI):
 
         def set_params(params: Dict) -> Dict:
 
-            shape = (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
+            shape = self._induce_shape
 
             params["rfi_r_induce_base"] = standard_normal(
                 "rfi_r_induce_base", shape
@@ -523,7 +528,7 @@ class ComplexRFI(BaseGPRFI):
 
         self.L_rfi_A = cholesky(self.rfi_times, self.gp_var, self.corr_time, 1e-8)
         self.mu_rfi_A = jnp.zeros(
-            (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times), dtype=complex
+            self._induce_shape, dtype=complex
         )
 
     def _compute_true_params(self, sim_zarr_path, data_col):
@@ -570,7 +575,7 @@ class ComplexRFI(BaseGPRFI):
             print("Drawing sample from prior for rfi_A")
             base_sample = random.normal(
                 random.PRNGKey(self.r_seed),
-                (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times),
+                self._induce_shape,
             )
             self.init_rfi_A_induce = self.masked_forward_transform(
                 base_sample, self.L_rfi_A, self.mu_rfi_A
@@ -596,12 +601,151 @@ class ComplexRFI(BaseGPRFI):
     def _validate_dimensions(self):
         """Ensure all setup operations completed successfully"""
 
-        rfi_shape = (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
+        rfi_shape = self._induce_shape
 
         assert_attr_shape(self, "mu_rfi_A", rfi_shape)
         assert_attr_shape(self, "L_rfi_A", (self.n_rfi_times, self.n_rfi_times))
         assert_attr_shape(self, "init_rfi_A_induce", rfi_shape)
         assert_attr_shape(self, "init_rfi_A_induce_base", rfi_shape)
+
+
+class ComplexRFITimeFreq(ComplexRFI):
+    """``ComplexRFI`` with a matrix-based GP over frequency as well as time.
+
+    ``ComplexRFI`` treats every frequency channel independently: its Cholesky is over
+    the inducing *times* only, so the prior imposes no correlation across frequency.
+    LEO constellations such as Starlink show strong frequency correlation, so
+    modelling it is a science requirement rather than an optimisation -- and it also
+    makes the runtime comparison against the Fourier components fair, since those
+    have always modelled both axes.
+
+    The prior is separable, with covariance ``K_freq (x) K_time``, so a draw is
+    ``L_freq Z L_time^T`` for standard-normal ``Z`` on the inducing grid. Frequency is
+    therefore treated exactly like time: same kernel, same inducing-point selection
+    (``rfi.corr_freq`` in place of ``corr_time``) and same resampling operator, which
+    is why this reuses ``compute_real_space_gp_params`` unchanged.
+
+    The total variance is carried entirely by the time factor -- the frequency
+    Cholesky is built with unit variance -- so the marginal prior variance stays
+    ``gp_var`` rather than becoming ``gp_var**2``. Without that, this would not be
+    comparable to ``ComplexRFI`` at the same config.
+
+    Parameters shrink from ``(n_rfi, n_ant, n_freq, n_rfi_time)`` to
+    ``(n_rfi, n_ant, n_rfi_freq, n_rfi_time)``: frequency gains inducing points on the
+    same footing as time, so a strongly correlated band costs far fewer parameters
+    than one per channel.
+    """
+
+    parameter_shapes = {
+        "rfi_r_induce_base": ("n_rfi", "n_ant", "n_rfi_freq", "n_rfi_time"),
+        "rfi_i_induce_base": ("n_rfi", "n_ant", "n_rfi_freq", "n_rfi_time"),
+    }
+
+    @property
+    def _induce_shape(self):
+        return (self.n_rfi, self.n_ant, self.n_rfi_freqs, self.n_rfi_times)
+
+    def _compute_gp_params(self):
+        super()._compute_gp_params()
+        # Unit variance here: the amplitude lives in the time factor so the Kronecker
+        # product keeps a marginal variance of gp_var.
+        self.n_rfi_freqs, self.rfi_freqs, self.resample_rfi_freq = (
+            compute_real_space_gp_params(self.corr_freq, 1.0, self.freqs, self.freqs)
+        )
+
+    def _compute_prior_params(self):
+        self.L_rfi_A_time = cholesky(self.rfi_times, self.gp_var, self.corr_time, 1e-8)
+        self.L_rfi_A_freq = cholesky(self.rfi_freqs, 1.0, self.corr_freq, 1e-8)
+        # Kept as a pair so the inherited setup-time calls -- which pass self.L_rfi_A
+        # straight into forward/inv_transform -- keep working unchanged.
+        self.L_rfi_A = (self.L_rfi_A_freq, self.L_rfi_A_time)
+        self.mu_rfi_A = jnp.zeros(self._induce_shape, dtype=complex)
+
+    def forward_transform(self, base_params, L, mu):
+        """``L_freq Z L_time^T + mu`` over the trailing (freq, time) axes."""
+        L_freq, L_time = L
+        x = jnp.einsum("fg,...gt->...ft", L_freq, base_params)
+        x = jnp.einsum("th,...fh->...ft", L_time, x)
+
+        return x + mu
+
+    def inv_transform(self, params, L, mu):
+        L_freq, L_time = L
+        y = params - mu
+        # solve() batches over leading axes and treats the last two as the matrix, so
+        # frequency solves directly and time needs the trailing pair swapped.
+        z = jnp.linalg.solve(L_freq, y)
+        z = jnp.swapaxes(jnp.linalg.solve(L_time, jnp.swapaxes(z, -1, -2)), -1, -2)
+
+        return z
+
+    def build_constants(self):
+        return {
+            "L_rfi_A": self.L_rfi_A_time,
+            "L_rfi_A_freq": self.L_rfi_A_freq,
+            "mu_rfi_A": self.mu_rfi_A,
+            "resample_rfi": self.resample_rfi,
+            "resample_rfi_freq": self.resample_rfi_freq,
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        forward_transform = self.masked_forward_transform
+
+        def forward(params: dict, state: dict, constants: dict):
+            L_time = constants[f"{prefix}/L_rfi_A"]
+            L_freq = constants[f"{prefix}/L_rfi_A_freq"]
+            mu_rfi_A = constants[f"{prefix}/mu_rfi_A"]
+            resample_time = constants[f"{prefix}/resample_rfi"]
+            resample_freq = constants[f"{prefix}/resample_rfi_freq"]
+
+            rfi_A_induce_base = (
+                params["rfi_r_induce_base"] + 1.0j * params["rfi_i_induce_base"]
+            )
+
+            rfi_A_induce = forward_transform(
+                rfi_A_induce_base, (L_freq, L_time), mu_rfi_A
+            )
+
+            # Resample both axes off the inducing grid: frequency to n_freq, time to
+            # n_time_fine, giving the same rfi_A shape ComplexRFI produces.
+            x = jnp.einsum("Ff,...ft->...Ft", resample_freq, rfi_A_induce)
+            rfi_A = jnp.einsum("Tt,...ft->...fT", resample_time, x)
+
+            state = {**state, "rfi_A": rfi_A}
+
+            return state
+
+        return forward
+
+    def _compute_true_params(self, sim_zarr_path, data_col):
+        # read_true_rfi_A interpolates the time axis onto the inducing times but
+        # leaves frequency at full resolution, so reduce that axis the same way.
+        true_full = self._zero_pad_rfi(
+            read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times)
+        )
+        interp = lambda a: jnp.interp(self.rfi_freqs, self.freqs, a)
+        # Move frequency last to interpolate over it, then put it back.
+        self.true_rfi_A_induce = jnp.swapaxes(
+            vmap(vmap(vmap(interp)))(jnp.swapaxes(true_full, -1, -2)), -1, -2
+        )
+        self.true_rfi_A_induce_base = self.inv_transform(
+            self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A
+        )
+
+    def _validate_dimensions(self):
+        """Ensure all setup operations completed successfully"""
+
+        assert_attr_shape(self, "mu_rfi_A", self._induce_shape)
+        assert_attr_shape(
+            self, "L_rfi_A_time", (self.n_rfi_times, self.n_rfi_times)
+        )
+        assert_attr_shape(
+            self, "L_rfi_A_freq", (self.n_rfi_freqs, self.n_rfi_freqs)
+        )
+        assert_attr_shape(self, "init_rfi_A_induce", self._induce_shape)
+        assert_attr_shape(self, "init_rfi_A_induce_base", self._induce_shape)
 
 
 ##############################################################################################################
