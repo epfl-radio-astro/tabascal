@@ -143,6 +143,7 @@ The `rfi` section defines the prior distribution over the RFI signal. An example
 rfi:
   init: sample
   mean: 0
+  min_elevation: null
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   freq_int_samples: 1
@@ -155,6 +156,12 @@ rfi:
 ```
 
 All parameters in this section that overlap with those of the `ast` section have the same definition. The only additional parameters are
+
+* `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. `null` (the default) disables masking and models every satellite over the whole observation.
+
+  Near the horizon a satellite moves slowly, so its RFI model has a low fringe rate and becomes degenerate with the static sky. Left unmasked, the fit can exploit that: the RFI model grows a bright spurious source at the horizon while genuine RFI along the low-elevation tracks is absorbed into the sky model. Masking removes those degenerate parameters rather than letting the fit misuse them.
+
+  Each satellite gets its own in-view window, evaluated on the observation time grid and expanded over each integration, so an integration is never partially masked. Setup fails if a satellite is never above the cut, since it would be modelled nowhere. `10` is a reasonable starting value; the benefit saturates around `20`. Note that this does **not** improve the residual RFI subtraction, and reduced $\chi^2$ is insensitive to it — judge the effect on the recovered sky model.
 
 * `freq_int_samples`: This is the amount of over-sampling in the frequency domain that is used and then averaged back down to the data sampling rate. It therefore determines the number of samples per frequency channel that are used in the averaging to correctly calculate the fringe-winding loss (band-smearing). Band-smearing can be caused by both the phase variation over the channel width due to the geometric phase as well as the intrinsic signal of the RFI sources.
 * `time_int_factor`: In the time axis the number of integration samples needed to accurately model fringe-winding loss (time-smearing) is calculated based solely on the fringe rate due to the movement of the RFI source as well as the signal to noise ratio with
