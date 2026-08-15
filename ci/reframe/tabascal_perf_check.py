@@ -58,13 +58,12 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     # of exactly this kind; anything else fails rather than being compared against
     # timings it cannot be compared against.
     #
-    # NOTE: every reference here was measured with the deleted real-space
-    # `rfi_signal:ComplexRFI`; the Fourier `ComplexRFIVarAnt` that replaced it in
-    # `_components_map` is a different workload, so these need re-measuring on
-    # CSCS before they mean anything again (issue #103). That component also now
-    # scans the antenna axis under `checkpoint` (#108), which trades a few percent
-    # of runtime for a large drop in peak memory, so the memory metrics in
-    # particular will not resemble the old ones.
+    # The references below were re-measured on Daint after #103 swapped the
+    # RFI-signal component in `_components_map` from the real-space
+    # `ComplexRFI` to the scanned Fourier `ComplexRFIVarAnt`. That is a
+    # deliberate accuracy-for-runtime trade, not a bug: see issue #107. Do not
+    # "restore" the older, faster numbers -- they belong to a component that no
+    # longer exists.
     _expected_gpus = 1
     _expected_device_kind = "GH200"
 
@@ -211,35 +210,45 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
 
     descr = "tabascal pipeline performance (single GPU)"
 
-    # References are keyed by (variant, precision). Single precision timings
-    # are placeholders to be measured and updated later.
+    # References are keyed by (variant, precision).
+    #
+    # Re-measured on Daint nid005989 (commit 46b6153, JAX 0.6.0) after #103
+    # replaced the real-space `rfi_signal:ComplexRFI` with the scanned Fourier
+    # `ComplexRFIVarAnt`. The previous values described the deleted component,
+    # so they are superseded rather than adjusted. Tolerances are unchanged.
+    #
+    # The optimiser got slower where the RFI-signal component is a large share
+    # of the step (RiemannFFI: +58% single, +26% double) and slightly faster
+    # where RFI-vis still dominates (Riemann: -10% single, -6% double). Setup
+    # time is unchanged, so total_runtime moves with optimizer_runtime alone.
+    # Memory is flat. See issue #107 for why the slower component is preferred.
     _reference_by_variant = {
         ("Riemann", "single"): {
             "daint:gpu": {
-                "total_runtime": (86.0, -0.25, 0.15, "s"),
-                "optimizer_runtime": (74.0, -0.20, 0.15, "s"),
-                "memory_usage": (8.391, -0.1, 0.1, "GB"),
+                "total_runtime": (79.91, -0.25, 0.15, "s"),
+                "optimizer_runtime": (66.28, -0.20, 0.15, "s"),
+                "memory_usage": (8.679, -0.1, 0.1, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
-                "total_runtime": (84.0, -0.25, 0.15, "s"),
-                "optimizer_runtime": (71.0, -0.20, 0.15, "s"),
-                "memory_usage": (16.901, -0.1, 0.1, "GB"),
+                "total_runtime": (80.66, -0.25, 0.15, "s"),
+                "optimizer_runtime": (66.60, -0.20, 0.15, "s"),
+                "memory_usage": (16.887, -0.1, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
             "daint:gpu": {
-                "total_runtime": (24.1, -0.25, 0.15, "s"),
-                "optimizer_runtime": (12.1, -0.20, 0.15, "s"),
-                "memory_usage": (0.566, -0.15, 0.15, "GB"),
+                "total_runtime": (31.33, -0.25, 0.15, "s"),
+                "optimizer_runtime": (19.16, -0.20, 0.15, "s"),
+                "memory_usage": (0.606, -0.15, 0.15, "GB"),
             },
         },
         ("RiemannFFI", "double"): {
             "daint:gpu": {
-                "total_runtime": (35.4, -0.25, 0.15, "s"),
-                "optimizer_runtime": (22.1, -0.20, 0.15, "s"),
-                "memory_usage": (1.252, -0.15, 0.15, "GB"),
+                "total_runtime": (41.13, -0.25, 0.15, "s"),
+                "optimizer_runtime": (27.84, -0.20, 0.15, "s"),
+                "memory_usage": (1.239, -0.15, 0.15, "GB"),
             },
         },
     }
@@ -290,37 +299,44 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
 
     _expected_gpus = 4
 
-    # The three references added here are the measurements from PR #92's final
-    # successful CSCS run (commit 7a41e4c, Daint node nid005553).  They use the
-    # same tolerances as the established RiemannFFI/double check so every
-    # multi-GPU variant now participates in performance regression checking.
+    # Re-measured on Daint nid005989 (commit 46b6153, JAX 0.6.0) alongside the
+    # single-GPU references above, for the same reason: these described the
+    # deleted `ComplexRFI`. The previous set came from PR #92's final CSCS run
+    # (commit 7a41e4c, node nid005553). Tolerances are unchanged.
+    #
+    # The optimiser regression is largest here (+146% / +132% on RiemannFFI):
+    # sharding the RFI-source axis over 4 GPUs divides the RFI-vis work but the
+    # per-source signal transform stays on each device, so the component under
+    # test is the dominant remaining term. Memory rises 0.238 -> 0.306 GB
+    # (single) and 0.477 -> 0.614 GB (double); both are sub-GB totals where the
+    # signal component's absolute cost is a large fraction.
     _reference_by_variant: dict = {
         ("Riemann", "single"): {
             "daint:gpu": {
-                "total_runtime": (52.27, -0.25, 0.15, "s"),
-                "optimizer_runtime": (29.63, -0.20, 0.15, "s"),
-                "memory_usage": (3.268, -0.15, 0.15, "GB"),
+                "total_runtime": (64.59, -0.25, 0.15, "s"),
+                "optimizer_runtime": (41.69, -0.20, 0.15, "s"),
+                "memory_usage": (3.294, -0.15, 0.15, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
-                "total_runtime": (54.29, -0.25, 0.15, "s"),
-                "optimizer_runtime": (31.27, -0.20, 0.15, "s"),
-                "memory_usage": (7.019, -0.15, 0.15, "GB"),
+                "total_runtime": (70.65, -0.25, 0.15, "s"),
+                "optimizer_runtime": (46.88, -0.20, 0.15, "s"),
+                "memory_usage": (7.058, -0.15, 0.15, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
             "daint:gpu": {
-                "total_runtime": (24.06, -0.25, 0.15, "s"),
-                "optimizer_runtime": (9.06, -0.20, 0.15, "s"),
-                "memory_usage": (0.238, -0.15, 0.15, "GB"),
+                "total_runtime": (37.19, -0.25, 0.15, "s"),
+                "optimizer_runtime": (22.26, -0.20, 0.15, "s"),
+                "memory_usage": (0.306, -0.15, 0.15, "GB"),
             },
         },
         ("RiemannFFI", "double"): {
             "daint:gpu": {
-                "total_runtime": (27.4, -0.25, 0.15, "s"),
-                "optimizer_runtime": (11.9, -0.20, 0.15, "s"),
-                "memory_usage": (0.477, -0.15, 0.15, "GB"),
+                "total_runtime": (43.55, -0.25, 0.15, "s"),
+                "optimizer_runtime": (27.61, -0.20, 0.15, "s"),
+                "memory_usage": (0.614, -0.15, 0.15, "GB"),
             },
         },
     }
