@@ -125,25 +125,22 @@ class PipelineTestConfig:
     Attributes:
         sim_file_name: Name of the simulation YAML configuration file
         components: List of component module specifications for the pipeline
-        chi2_ref: Expected reduced chi-squared per precision, keyed by the
-            precision string ("double"/"single"). Double-precision values are
-            consistent across architectures and tested with 1% relative
-            tolerance. Single-precision values are given as ``(lo, hi)`` bounds
-            rather than a scalar because fp32 convergence is in principle
-            architecture-dependent: on the model these cases used before issue #103
-            it clearly was, with ARM converging in ~100 iterations (chi2 ~0.92)
-            while x86 needed ~2000 to get there (chi2 ~1.13 at 100 iters). On the
-            current model it is not -- ARM CPU, x86 CPU and GH200 GPU agree to
-            ~1e-7 in fp32, the same as in fp64 -- so the bounds were tightened from
-            the old (0.9, 1.2) to a band that would actually catch a regression.
-            They stay bounds, not scalars, because that cross-arch agreement is an
-            empirical property of this model, not a guarantee.
-            ``requires_double`` cases only need the "double" entry.
+        chi2_ref: Expected reduced chi-squared, tested with 1% relative tolerance.
+            One value covers both precisions. The pre-#103 real-space model needed
+            separate per-precision references because its fp32 convergence was
+            architecture-dependent (ARM reached chi2 ~0.92 in ~100 iterations while
+            x86 was still at ~1.13 there), which forced wide ``(lo, hi)`` bounds for
+            single. The current Fourier model converges to the same point in fp32 as
+            in fp64 -- measured agreement is 2.4e-5 relative, ~400x inside the 1%
+            tolerance, and ARM/x86/GPU agree with each other to ~1e-7 in both
+            precisions -- so the split bought nothing and was removed.
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
         config_overrides: Dictionary of overrides to the tabascal config file
-        metrics_ref: Optional truth-based error references, keyed by precision then by
-            quantity (``ast``/``rfi``/``gains``) then by metric name. Available metrics are
+        metrics_ref: Optional truth-based error references, keyed by quantity
+            (``ast``/``rfi``/``gains``) then by metric name. Like ``chi2_ref`` these are
+            precision-independent: every case measured identical values in fp32 and fp64
+            to the printed precision. Available metrics are
             the RMSE family (``RMSE``, ``NRMSE(noise)``, ``NRMSE(signal)``), the
             mean-error / bias family (``|ME|``, ``NME(noise)``, ``NME(signal)``) and
             ``bias_significance`` (the bias in units of sigma). Each value follows the same
@@ -153,10 +150,10 @@ class PipelineTestConfig:
     """
     sim_file_name: str
     components: list[str]
-    chi2_ref: dict[str, float | tuple[float, float]]
+    chi2_ref: float | tuple[float, float]
     requires_double: bool = False
     config_overrides: dict = field(default_factory=dict)
-    metrics_ref: dict[str, dict[str, dict[str, float | tuple[float, float]]]] = field(
+    metrics_ref: dict[str, dict[str, float | tuple[float, float]]] = field(
         default_factory=dict
     )
 
@@ -380,9 +377,8 @@ trajectory_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # requires_double (phase trajectory needs fp64): only the double chi2 is asserted;
-            # truth metrics are printed but not asserted. Measured opt-point values, double
-            # precision (gains identity -> RMSE 0):
+            # requires_double (phase trajectory needs fp64), so this runs in fp64 only.
+            # Measured opt-point values, double precision (gains identity -> RMSE 0):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   ARM  | 0.8768424518784641 |     0.3061       0.6      |     0.4318       0.1
             #   x86  | 0.8768424504584391 |     0.3061       0.6      |     0.4318       0.1
@@ -393,8 +389,13 @@ trajectory_configs = [
             # checked and tracks the GH200 column to <1e-7; it has no row of its own only to
             # keep these tables to three. Every platform agrees to <1e-7 relative, far inside
             # the 1% tolerance, so the asserted value being the ARM one is immaterial.)
-            chi2_ref={"double": 0.8768424518784641},
+            chi2_ref=0.8768424518784641,
             requires_double=True,
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
         ),
         id="FixedOrbit+PhaseCalculationRFI",
     ),
@@ -409,17 +410,24 @@ trajectory_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # requires_double; only double chi2 asserted (MEO satellites, opt max_iter 200).
-            # Measured opt-point values, double precision (gains identity -> RMSE 0). Fill in
-            # (see the note on the FixedOrbit case for what ARM/x86/GPU are):
+            # requires_double, so this runs in fp64 only. max_iter 200: these MEO cases are
+            # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
+            # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
+            # Measured opt-point values, double precision (gains identity -> RMSE 0); see the
+            # note on the FixedOrbit case for what ARM/x86/GPU are:
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   ARM  | 0.8546158788536706 |     0.3648       1.0      |     0.5199       1.2
             #   x86  | 0.8546162445425675 |     0.3648       1.0      |     0.5199       1.2
             #   GPU  | 0.8546157757462419 |     0.3648       1.0      |     0.5199       1.2
             # (widest spread of any case, and still only 4e-7 relative.)
-            chi2_ref={"double": 0.8546158788536706},
+            chi2_ref=0.8546158788536706,
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.34, 0.39), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.48, 0.56), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
         ),
         id="NoDragOrbit+PhaseCalculationRFI",
     ),
@@ -434,16 +442,23 @@ trajectory_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # requires_double; only double chi2 asserted (MEO satellites, opt max_iter 200).
+            # requires_double, so this runs in fp64 only. max_iter 200: these MEO cases are
+            # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
+            # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
             # Measured opt-point values, double precision (gains identity -> RMSE 0; matches
             # NoDragOrbit -- same orbit to fp precision):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   ARM  | 0.8546160082354400 |     0.3648       1.0      |     0.5199       1.2
             #   x86  | 0.8546160234159469 |     0.3648       1.0      |     0.5199       1.2
             #   GPU  | 0.8546160141310710 |     0.3648       1.0      |     0.5199       1.2
-            chi2_ref={"double": 0.85461600823544},
+            chi2_ref=0.85461600823544,
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.34, 0.39), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.48, 0.56), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
         ),
         id="Orbit+PhaseCalculationRFI",
     ),
@@ -472,8 +487,7 @@ rfi_vis_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # single (100 iters): ARM 0.8767345548, x86 0.8767347336, GPU 0.8767347336.
-            chi2_ref={"double": 0.8767134197875864, "single": (0.86, 0.89)},
+            chi2_ref=0.8767134197875864,
             # Truth-based metrics at the opt point. ast/rfi assert NRMSE(noise) -- the residual
             # against the thermal-noise floor, the science-meaningful yardstick (< 1 means
             # sub-noise) and the most architecture-stable normalisation -- plus
@@ -489,23 +503,16 @@ rfi_vis_configs = [
             #   double  ARM    |      0.3062        0.6     |      0.4320       0.1     | 0.8767134198
             #   double  x86    |      0.3062        0.6     |      0.4320       0.1     | 0.8767134197
             #   double  GPU    |      0.3062        0.6     |      0.4320       0.1     | 0.8767134177
-            #   single  ARM    |      0.3063        0.6     |      0.4320       0.1     | 0.8767345548
+            #   single  ARM    |      0.3063        0.6     |      0.4320       0.1     | 0.8767347336
             #   single  x86    |      0.3063        0.6     |      0.4320       0.1     | 0.8767347336
             #   single  GPU    |      0.3063        0.6     |      0.4320       0.1     | 0.8767347336
-            # This model converges to the same point in fp32 as in fp64, on every platform
-            # tested -- the old real-space component did not -- so the single bounds are no
-            # longer the wide arch-spread band they used to be and now match the double ones.
+            # fp32 and fp64 agree to 2.4e-5 on chi2 and to the printed precision on the
+            # metrics, on every platform tested -- the old real-space component did not --
+            # so a single set of references covers both and there is no per-precision split.
             metrics_ref={
-                "double": {
-                    "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
-                    "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
-                    "gains": {"RMSE": (0.0, 1e-6)},
-                },
-                "single": {
-                    "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
-                    "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
-                    "gains": {"RMSE": (0.0, 1e-6)},
-                },
+                "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
         id="RiemannVis",
@@ -530,7 +537,7 @@ rfi_vis_configs = [
             #   single  ARM    | 0.8767345548 |     0.3063       0.6      |     0.4320       0.1
             #   single  x86    | 0.8767346144 |     0.3063       0.6      |     0.4320       0.1
             #   single  GPU    | 0.8767346740 |     0.3063       0.6      |     0.4320       0.1
-            chi2_ref={"double": 0.8767134197875865, "single": (0.86, 0.89)},
+            chi2_ref=0.8767134197875865,
         ),
         id="RiemannVisFFI",
     ),
@@ -579,8 +586,7 @@ gains_configs = [
                     "r_seed": 123,
                 },
             },
-            # single (100 iters): 0.8767232299 on ARM, x86 and GPU alike.
-            chi2_ref={"double": 0.8767019546502159, "single": (0.86, 0.89)},
+            chi2_ref=0.8767019546502159,
             # Truth-based metrics at the opt point; same scheme as RiemannVis
             # (ast/rfi assert NRMSE(noise) against the noise floor + bias_significance as a
             # "no significant coherent bias" guard). Here GPGains fits the gains and recovers
@@ -596,18 +602,12 @@ gains_configs = [
             #   single  ARM    |      0.3062        0.6     |      0.4323       0.1     |  5.364e-4  | 0.8767232299
             #   single  x86    |      0.3062        0.6     |      0.4323       0.1     |  5.363e-4  | 0.8767232299
             #   single  GPU    |      0.3062        0.6     |      0.4323       0.1     |  5.364e-4  | 0.8767232299
-            # The gains RMSE bound keeps ~2x headroom over the measured fp32 residual.
+            # The gains RMSE bound keeps ~2x headroom over the measured fp32 residual, which
+            # is why one bound covers both precisions (fp64 5.358e-4, fp32 5.364e-4).
             metrics_ref={
-                "double": {
-                    "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
-                    "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
-                    "gains": {"RMSE": (0.0, 1e-3)},
-                },
-                "single": {
-                    "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
-                    "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
-                    "gains": {"RMSE": (0.0, 1e-3)},
-                },
+                "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-3)},
             },
         ),
         id="GPGains",
@@ -651,18 +651,12 @@ def test_pipeline(
             "uses a component that requires double precision; not run under --x64 false"
         )
 
-    chi2_ref = t_config.chi2_ref[precision]
-    assert chi2_ref is not None, (
-        f"No {precision}-precision chi^2 reference recorded for this case"
-    )
-
     returncode, stdout, stderr = _run_pipeline(provide_test_data, tmp_path, t_config, precision)
     assert returncode == 0, f"Tabascal failed: {stderr}"
-    _assert_chi2(stdout, chi2_ref)
+    _assert_chi2(stdout, t_config.chi2_ref)
 
-    metrics_ref = t_config.metrics_ref.get(precision)
-    if metrics_ref:
-        _assert_truth_metrics(stdout, "opt", metrics_ref)
+    if t_config.metrics_ref:
+        _assert_truth_metrics(stdout, "opt", t_config.metrics_ref)
 
 
 # ---------------------------------------------------------------------------
