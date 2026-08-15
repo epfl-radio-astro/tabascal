@@ -74,6 +74,37 @@ def test_is_process_0_single_process():
     dist.print0("", end="")  # rank-0 print; must not raise
 
 
+def test_process_count_single_process():
+    assert dist.process_count() == 1
+
+
+def test_broadcast_bytes_single_process_is_the_payload():
+    assert dist.broadcast_bytes_from_rank0(b"resolved-tles", "tle-fetch") == b"resolved-tles"
+    assert dist.broadcast_bytes_from_rank0(None, "tle-fetch") == b""
+
+
+def test_broadcast_bytes_casts_a_widened_collective_result(monkeypatch):
+    """JAX implements broadcast as a sum, which widens uint8 reductions."""
+    payload = b'{"ok":true}'
+    calls = 0
+
+    def broadcast(value):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return np.asarray([len(payload)], dtype=np.int64)
+        # This is the dtype returned when JAX reduces the uint8 payload. Calling
+        # .tobytes() on it directly would insert three NULs after every byte.
+        return np.frombuffer(payload, dtype=np.uint8).astype(np.uint32)
+
+    monkeypatch.setattr(dist.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(dist, "is_process_0", lambda: True)
+    from jax.experimental import multihost_utils
+    monkeypatch.setattr(multihost_utils, "broadcast_one_to_all", broadcast)
+
+    assert dist.broadcast_bytes_from_rank0(payload, "tle-fetch") == payload
+
+
 # ---------------------------------------------------------------------------
 # Name/shape matching rules
 # ---------------------------------------------------------------------------
@@ -83,12 +114,12 @@ def test_wants_rfi_axis_matching():
     # plain param key
     assert dist._wants_rfi_axis("rfi_k_r_base", np.zeros((3, 4)), n_rfi)
     # prefixed constant key matches on the segment after the last "/"
-    assert dist._wants_rfi_axis("_c/FourierGPRFI/mu_rfi_k", np.zeros((3, 4)), n_rfi)
+    assert dist._wants_rfi_axis("_c/ComplexRFIVarAnt/mu_rfi_k", np.zeros((3, 4)), n_rfi)
     # right name, wrong leading dim -> replicated
     assert not dist._wants_rfi_axis("rfi_A", np.zeros((5, 4)), n_rfi)
-    # L_rfi_A is (n_rfi_times, n_rfi_times) and deliberately not in the name list,
-    # even when n_rfi_times happens to equal n_rfi
-    assert not dist._wants_rfi_axis("_c/ComplexRFI/L_rfi_A", np.zeros((3, 3)), n_rfi)
+    # A GP operator is square in its own basis size and deliberately not in the name
+    # list, even when that size happens to equal n_rfi
+    assert not dist._wants_rfi_axis("_c/GPGains/L_gains_amp", np.zeros((3, 3)), n_rfi)
     # non-RFI names never shard
     assert not dist._wants_rfi_axis("ast_k_r_base", np.zeros((3, 4)), n_rfi)
     # scalars never shard
@@ -124,16 +155,16 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     rng = np.random.default_rng(0)
     tree = {
         "rfi_k_r_base": rng.normal(size=(n_rfi, 2, 3)),
-        "_c/FourierGPRFI/mu_rfi_k": rng.normal(size=(n_rfi, 2, 3)),
-        "_c/ComplexRFI/L_rfi_A": rng.normal(size=(4, 4)),   # name-excluded
+        "_c/ComplexRFIVarAnt/mu_rfi_k": rng.normal(size=(n_rfi, 2, 3)),
+        "_c/GPGains/L_gains_amp": rng.normal(size=(4, 4)),   # name-excluded
         "ast_k_r_base": rng.normal(size=(6, 3)),
     }
     sharded = dist.shard_pytree(tree, n_rfi)
     for key, val in tree.items():
         np.testing.assert_array_equal(np.asarray(sharded[key]), val)
     assert sharded["rfi_k_r_base"].sharding.spec == P("rfi")
-    assert sharded["_c/FourierGPRFI/mu_rfi_k"].sharding.spec == P("rfi")
-    assert sharded["_c/ComplexRFI/L_rfi_A"].sharding.spec == P()
+    assert sharded["_c/ComplexRFIVarAnt/mu_rfi_k"].sharding.spec == P("rfi")
+    assert sharded["_c/GPGains/L_gains_amp"].sharding.spec == P()
     assert sharded["ast_k_r_base"].sharding.spec == P()
 
     # pre-sharded leaves pass through untouched
@@ -255,3 +286,187 @@ def test_rank0_first_worker_waits_before_body(monkeypatch):
         order.append("body")
 
     assert order == ["body"]
+
+
+# ---------------------------------------------------------------------------
+# Resolution broadcast: elements must be identical on every rank
+# ---------------------------------------------------------------------------
+
+class TestResolutionWireRoundTrip:
+    """The single guard on the wire-format hazard.
+
+    Process 0 resolves the satellites and broadcasts the accepted records; every
+    other rank rebuilds the element frame from what it receives. A TLE survives
+    that hop trivially — the two lines are text, and every rank re-parses the
+    same 69 characters with the same parser. An OMM record has no lines, so the
+    element *values* themselves make the trip, and a lossy projection would
+    leave the ranks holding subtly different trajectory priors. Nothing would
+    raise; the run would just be wrong. Hence exact equality below, never
+    ``approx``.
+    """
+
+    def _round_trip(self, record, obs_epoch_jd):
+        import json
+
+        from tabascal import orbit as tle
+
+        resolution = tle.TLEResolution([int(record["NORAD_CAT_ID"])], obs_epoch_jd, 3)
+        tle._accept_remote(
+            {int(record["NORAD_CAT_ID"]): dict(record)},
+            "test",
+            obs_epoch_jd,
+            3,
+            resolution.resolved,
+            resolution.rejected,
+        )
+        assert resolution.complete, "the fixture record was not accepted"
+        wire = json.loads(json.dumps(tle._resolution_to_wire(resolution)))
+        return resolution, tle._resolution_from_wire(wire)
+
+    @pytest.mark.parametrize("kind", ["tle", "omm"])
+    def test_elements_survive_the_broadcast_exactly(self, kind):
+        from .tle_helpers import jd, make_record
+
+        obs = jd(2026, 8, 1)
+        record = make_record(kind, 25544, obs)
+        rank0, worker = self._round_trip(record, obs)
+
+        # The wire deliberately carries a subset of the columns — workers need
+        # what the elements are derived from, not the provenance. What must not
+        # differ is any number the model is built from.
+        before, after = rank0.frame(), worker.frame()
+        for column in (
+            "SEMIMAJOR_AXIS",
+            "ECCENTRICITY",
+            "INCLINATION",
+            "RA_OF_ASC_NODE",
+            "ARG_OF_PERICENTER",
+            "MEAN_ANOMALY",
+            "MEAN_MOTION",
+            "BSTAR",
+            "EPOCH_JD",
+        ):
+            assert before[column].tolist() == after[column].tolist(), (
+                f"{kind}: {column} diverged between rank 0 and the worker"
+            )
+
+    @pytest.mark.parametrize("kind", ["tle", "omm"])
+    def test_epochs_and_offsets_survive_the_broadcast_exactly(self, kind):
+        from .tle_helpers import jd, make_record
+
+        obs = jd(2026, 8, 1)
+        rank0, worker = self._round_trip(make_record(kind, 25544, obs), obs)
+
+        assert worker.obs_epoch_jd == rank0.obs_epoch_jd
+        assert worker.resolved[25544].epoch_jd == rank0.resolved[25544].epoch_jd
+        assert worker.resolved[25544].offset_days == rank0.resolved[25544].offset_days
+
+    def test_omm_elements_cross_the_wire_as_numbers_not_strings(self):
+        # A string projection would round-trip today and mislead the next reader
+        # into extending it to a field where it does not. Pin the types.
+        from tabascal import orbit as tle
+
+        from .tle_helpers import jd, make_omm
+
+        wired = tle._wire_record(make_omm(25544, jd(2026, 8, 1)))
+        assert wired["RECORD_KIND"] == "omm"
+        for column in (
+            "INCLINATION",
+            "RA_OF_ASC_NODE",
+            "ECCENTRICITY",
+            "ARG_OF_PERICENTER",
+            "MEAN_ANOMALY",
+            "MEAN_MOTION",
+            "BSTAR",
+        ):
+            assert isinstance(wired[column], float), column
+        assert isinstance(wired["EPOCH"], str)
+        assert "TLE_LINE1" not in wired
+
+    def test_tle_projection_is_unchanged(self):
+        # The TLE path predates this and must not have been disturbed.
+        from tabascal import orbit as tle
+
+        from .tle_helpers import jd, make_tle_record
+
+        record = make_tle_record(25544, jd(2026, 8, 1))
+        wired = tle._wire_record(record)
+        assert wired["RECORD_KIND"] == "tle"
+        assert wired["TLE_LINE1"] == record["TLE_LINE1"]
+        assert wired["TLE_LINE2"] == record["TLE_LINE2"]
+        assert wired["NORAD_CAT_ID"] == 25544
+        assert not any(column.startswith("MEAN_") for column in wired)
+
+    def test_a_worst_case_float_survives_the_hop(self):
+        # repr() is the shortest round-tripping representation in Python 3, but
+        # only if the value goes through the float path. Prove it with values
+        # whose decimal expansion is long.
+        import json
+
+        from tabascal import orbit as tle
+
+        from .tle_helpers import jd, make_omm
+
+        awkward = {
+            "INCLINATION": 51.641600000000004,
+            "MEAN_MOTION": 15.721253910000001,
+            "ECCENTRICITY": 0.0006703000000000001,
+        }
+        record = make_omm(25544, jd(2026, 8, 1), **awkward)
+        wired = json.loads(json.dumps(tle._wire_record(record)))
+        for column, value in awkward.items():
+            assert wired[column] == value
+
+
+class TestResolveSharedFailure:
+    """Process 0 must always enter the collective, however it failed.
+
+    Every other rank is already blocked in ``broadcast_one_to_all`` waiting for
+    it. A failure that escapes before the broadcast does not fail the run — it
+    hangs it, until the coordinator times out.
+    """
+
+    def _rank0_of_two(self, monkeypatch):
+        monkeypatch.setattr(dist, "process_count", lambda: 2)
+        monkeypatch.setattr(dist, "is_process_0", lambda: True)
+        sent = []
+
+        def broadcast(payload, label):
+            sent.append(payload)
+            return payload
+
+        monkeypatch.setattr(dist, "broadcast_bytes_from_rank0", broadcast)
+        return sent
+
+    def test_a_resolution_failure_is_broadcast_not_raised_early(self, monkeypatch):
+        import json
+
+        from tabascal import orbit as tle
+
+        sent = self._rank0_of_two(monkeypatch)
+
+        def resolve():
+            raise tle.TLEError("no coverage")
+
+        with pytest.raises(tle.TLEError, match="no coverage"):
+            tle.resolve_shared(resolve)
+        assert sent, "process 0 skipped the broadcast every other rank waits on"
+        assert json.loads(sent[0])["ok"] is False
+
+    def test_a_serialisation_failure_is_broadcast_too(self, monkeypatch):
+        import json
+
+        from tabascal import orbit as tle
+
+        sent = self._rank0_of_two(monkeypatch)
+        # A value that resolves fine and then cannot be encoded: the failure
+        # lands on json.dumps, which must be inside the guard with everything
+        # else, not after it.
+        monkeypatch.setattr(
+            tle, "_resolution_to_wire", lambda resolution: {"ok": True, "x": object()}
+        )
+
+        with pytest.raises(tle.TLEError, match="TypeError"):
+            tle.resolve_shared(lambda: None)
+        assert sent, "process 0 skipped the broadcast every other rank waits on"
+        assert json.loads(sent[0])["ok"] is False

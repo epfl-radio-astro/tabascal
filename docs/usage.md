@@ -37,18 +37,37 @@ pip install -e ./tabascal/
 pip install -e ./tabascal/[gpu]
 ```
 
-## Space-Track Login
+## Satellite orbital elements
 
-To get historical orbital elements to predict the positions of satellites in an observation, a [Space-Track](https://www.space-track.org/auth/login) account is needed. Currently, Space-Track login details are required both for simulating a dataset and for applying TABASCAL to a dataset.
+TABASCAL retrieves the orbital elements needed to predict satellite positions
+from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service. **No
+account or credentials are required** — records are fetched automatically for
+the requested NORAD IDs and cached locally for reuse.
 
-Your login details should then be saved in a YAML file that is formatted as follows:
+SatChecker serves two formats: TLEs for epochs up to 2026-07-11, and OMM
+(Orbit Mean-Elements Message) records from 2026-07-12 onwards. TABASCAL asks
+whichever archive your observation epoch falls in and falls back to the other if
+that one has nothing usable, so this is not something you configure or need to
+think about.
 
-```yaml
-username: user@email.com
-password: password1234
-```
+Every configured satellite must resolve to an acceptable record. TABASCAL checks
+this during preflight — before the visibilities are read — and stops with an
+error naming each failing satellite rather than quietly subtracting an
+incomplete RFI model. The remedies are to supply the missing records via
+`--extra-orbit-dir`, to change `satellites.remote_max_age_days` deliberately,
+or to remove the satellite from `satellites.norad_ids`.
 
-The rest of the example below assumes you have a Space-Track account with your login details saved in a file named `spacetrack_login.yaml`.
+Every run also saves the records it actually used to
+`<sim_dir>/results/used_orbits_<name>.json`; passing that file's directory back
+via `--extra-orbit-dir` reproduces the run's trajectory priors exactly. For the
+two archives and the handover between them, the full caching behaviour, the age
+policies, what validation each format does and does not give you, and how to
+supply records manually (e.g. from Space-Track) when SatChecker cannot provide
+them, see [Satellite orbit records](orbits.md).
+
+Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
+Space-Track and requires a `spacetrack_login.yaml`. That requirement applies only
+to the simulation step below, not to running TABASCAL.
 
 # Example Simulation and RFI Subtraction
 
@@ -57,7 +76,6 @@ Assuming you have cloned the repository, navigate to the `tabascal/examples` dir
 ``` 
 tabascal/
     ├── examples/
-|       └── ex_spacetrack_login.yaml    # Space-Track login details template
 |       └── sim_target_8A.yaml          # Simulation configuration file
 |       └── tab_target.yaml             # TABASCAL configuration file
 ```
@@ -97,7 +115,7 @@ sim-vis -h
 RFI subtraction (TABASCAL) runs are also defined by YAML configuration files and can be run in much the same way. Given the simulation dataset created in the previous step, we can run TABASCAL on it using
 
 ```bash
-tabascal -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI -st spacetrack_login.yaml
+tabascal run -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
 ```
 
 The output of a successful run with TABASCAL will show lines like
@@ -114,11 +132,12 @@ The results of the TABASCAL run are saved in a `.zarr` file and then transferred
 If you have a Measurement Set from another source you can run TABASCAL on that directly with
 
 ```bash
-tabascal -c path/to/config.yaml -ms path/to/ms/file.ms -st spacetrack_login.yaml
+tabascal run -c path/to/config.yaml -ms path/to/ms/file.ms
 ```
 
-The `tabascal` script also has a help context whcih can be accessed with
+The `tabascal` script also has a help context which can be accessed with
 
 ```bash
-tabascal -h
+tabascal -h        # top-level: lists the subcommands
+tabascal run -h    # every option of the run subcommand
 ```

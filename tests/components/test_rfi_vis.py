@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 
+from ri_kernels.jax_api import RFIVisOp
 from tabascal.interferometry import get_divisors
 from .conftest import active_precision, make_constants
 
@@ -82,8 +83,8 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisTimeFreqCalculation())
-    ffi_result = compute_vis_rfi(RiemannVisTimeFreqCalculationFFI())
+    ref_result = compute_vis_rfi(RiemannVis())
+    ffi_result = compute_vis_rfi(RiemannVisFFI())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -107,8 +108,8 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         )
         return tangents["vis_rfi"]
 
-    ref_result = compue_jvp(RiemannVisTimeFreqCalculation())
-    ffi_result = compue_jvp(RiemannVisTimeFreqCalculationFFI())
+    ref_result = compue_jvp(RiemannVis())
+    ffi_result = compue_jvp(RiemannVisFFI())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -136,8 +137,8 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
 
 
-    ref_state = compue_vjp(RiemannVisTimeFreqCalculation())
-    ffi_state = compue_vjp(RiemannVisTimeFreqCalculationFFI())
+    ref_state = compue_vjp(RiemannVis())
+    ffi_state = compue_vjp(RiemannVisFFI())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_state["rfi_A"].dtype == ref_state["rfi_A"].dtype
@@ -175,8 +176,8 @@ def test_mixed_precision_rejected():
 # ---------------------------------------------------------------------------
 # Variable (per-baseline) time sampling
 #
-# RiemannVisTimeFreqVariable and RiemannVisTimeFreqVariableFFI split the
-# baselines into groups, each integrated over a coarser time stride. The config
+# RiemannVisVariable and RiemannVisVariableFFI split the baselines into groups,
+# each integrated over a coarser time stride. The config
 # carries this grouping as ``time_sample_idxs`` (the baseline indices in each
 # group) and ``time_strides`` (the matching integration-time stride per group).
 # ---------------------------------------------------------------------------
@@ -219,8 +220,8 @@ def test_variable_single_group_matches_reference(
     """One group spanning all baselines at stride 1 == full-resolution reference.
 
     With a single stride-1 group every integration sample is kept and averaged,
-    so the variable kernel must reproduce the dense RiemannVisTimeFreqCalculation
-    exactly (up to floating-point rounding).
+    so the variable kernel must reproduce the dense RiemannVis exactly
+    (up to floating-point rounding).
     """
     config = make_variable_config(
         n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, strides=[1]
@@ -232,8 +233,8 @@ def test_variable_single_group_matches_reference(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisTimeFreqCalculation())
-    var_result = compute_vis_rfi(RiemannVisTimeFreqVariable())
+    ref_result = compute_vis_rfi(RiemannVis())
+    var_result = compute_vis_rfi(RiemannVisVariable())
 
     atol, rtol = _tols(real_dtype)
     assert var_result.shape == ref_result.shape
@@ -256,8 +257,8 @@ def test_variable_ffi_single_group_matches_reference(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisTimeFreqCalculationFFI())
-    var_result = compute_vis_rfi(RiemannVisTimeFreqVariableFFI())
+    ref_result = compute_vis_rfi(RiemannVisFFI())
+    var_result = compute_vis_rfi(RiemannVisVariableFFI())
 
     atol, rtol = _tols(real_dtype)
     assert var_result.shape == ref_result.shape
@@ -286,8 +287,8 @@ def test_variable_ffi_matches_variable(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisTimeFreqVariable())
-    ffi_result = compute_vis_rfi(RiemannVisTimeFreqVariableFFI())
+    ref_result = compute_vis_rfi(RiemannVisVariable())
+    ffi_result = compute_vis_rfi(RiemannVisVariableFFI())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.shape == (config.n_bl, config.n_freq, config.n_time)
@@ -317,8 +318,8 @@ def test_variable_ffi_matches_variable_jvp(
         )
         return tangents["vis_rfi"]
 
-    ref_result = compute_jvp(RiemannVisTimeFreqVariable())
-    ffi_result = compute_jvp(RiemannVisTimeFreqVariableFFI())
+    ref_result = compute_jvp(RiemannVisVariable())
+    ffi_result = compute_jvp(RiemannVisVariableFFI())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -347,8 +348,8 @@ def test_variable_ffi_matches_variable_vjp(
         (output_state,) = vjp_func(vjp_state)
         return output_state
 
-    ref_state = compute_vjp(RiemannVisTimeFreqVariable())
-    ffi_state = compute_vjp(RiemannVisTimeFreqVariableFFI())
+    ref_state = compute_vjp(RiemannVisVariable())
+    ffi_state = compute_vjp(RiemannVisVariableFFI())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_state["rfi_A"].dtype == ref_state["rfi_A"].dtype
@@ -358,7 +359,7 @@ def test_variable_ffi_matches_variable_vjp(
 
 
 @pytest.mark.parametrize(
-    "Impl", [RiemannVisTimeFreqVariable, RiemannVisTimeFreqVariableFFI]
+    "Impl", [RiemannVisVariable, RiemannVisVariableFFI]
 )
 def test_variable_accumulates_into_state(Impl):
     """forward adds vis_rfi onto the incoming state rather than overwriting it."""

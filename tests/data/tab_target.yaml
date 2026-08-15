@@ -3,10 +3,10 @@ model:
   # RFI Phase from trajectory
     - trajectory:FixedOrbit
   # RFI signal model
-    - rfi_signal:ComplexRFI
-    - rfi_vis:RiemannVisTimeFreqCalculation
+    - rfi_signal:ComplexRFIVarAnt
+    - rfi_vis:RiemannVis
   # Astronomical signal model
-    - ast_vis:FourierTimeFreqGPAst
+    - ast_vis:GPVisAst
   # Antenna Gain model 
     - gains:UnitaryGains
 
@@ -61,8 +61,6 @@ rfi:
 
 satellites:
   norad_ids: [20452, 38833, 45854]
-  spacetrack_path: spacetrack_login.yaml
-  tle_offset: 0
   ric_std: 1e2
 
 

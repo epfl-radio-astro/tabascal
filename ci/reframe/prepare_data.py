@@ -22,6 +22,29 @@ def compute_sha256(file_path: Path) -> str:
     return sha256_hash.hexdigest()
 
 
+def prepare_legacy_tabsim_credentials(target_dir: Path) -> Path:
+    """Create credentials only for tabsim's legacy local-generation fallback.
+
+    Downloaded benchmark snapshots and TABASCAL itself are credential-free. The
+    installed tabsim release still queries Space-Track when it must regenerate
+    the simulation; keep that external limitation isolated to this branch until
+    tabsim exposes SatChecker or accepts pre-resolved TLEs.
+    """
+    username = os.environ.get("SPACETRACK_LOGIN")
+    password = os.environ.get("SPACETRACK_PASSWORD")
+    if not username or not password:
+        raise RuntimeError(
+            "The cached benchmark simulation is unavailable and the installed "
+            "tabsim release needs Space-Track to regenerate it. Set "
+            "SPACETRACK_LOGIN and SPACETRACK_PASSWORD, or provide the matching "
+            "epfl-radio-astro/rfi-simulations snapshot. TABASCAL's SatChecker "
+            "integration itself requires no credentials."
+        )
+    path = target_dir / "spacetrack_login.yaml"
+    path.write_text(yaml.safe_dump({"username": username, "password": password}))
+    return path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Download/generate test data and prepare config for ReFrame check."
@@ -61,20 +84,6 @@ def main():
     sim_config = data_dir / "sim_target_96A.yaml"
     tab_template = data_dir / "tab_target.yaml"
 
-    # Step 0: Create spacetrack_login.yaml from environment variables
-    # TLE files are now bundled in tabascal with required code
-    # This step can be removed when tabsim also bundles these TLEs
-    st_user = os.environ.get("SPACETRACK_LOGIN")
-    st_pass = os.environ.get("SPACETRACK_PASSWORD")
-    if not st_user or not st_pass:
-        raise RuntimeError(
-            "SPACETRACK_LOGIN and SPACETRACK_PASSWORD environment variables must be set"
-        )
-    spacetrack_path = workdir / "spacetrack_login.yaml"
-    spacetrack_path.write_text(
-        yaml.dump({"username": st_user, "password": st_pass})
-    )
-
     # Step 1: Download or generate simulation data
     branch = f"tabsim_v{tabsim.__version__}"
     input_hash = compute_sha256(sim_config)
@@ -107,12 +116,14 @@ def main():
                 f"Simulation output {input_dir} already exists. Skipping generation."
             )
         else:
+            # This is the only remaining Space-Track dependency: it belongs to
+            # tabsim's simulation generator, not TABASCAL's TLE resolution.
+            prepare_legacy_tabsim_credentials(local_dir)
             # Copy ancillary files referenced by relative paths in sim_config
             # into the working directory so sim_vis.py can find them.
             for ancillary in data_dir.glob("*"):
                 if ancillary.is_file() and ancillary.suffix != ".yaml":
                     shutil.copy2(ancillary, local_dir / ancillary.name)
-            shutil.copy2(spacetrack_path, local_dir / spacetrack_path.name)
             tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
             subprocess.run(
                 [

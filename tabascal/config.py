@@ -12,7 +12,8 @@ from tabascal.components.trajectory import (
     get_satellite_elevations,
     get_satellite_positions,
 )
-from tabascal.tle import print_spacetrack_status, preflight_tle_check
+from tabascal.orbit import check_epoch_agreement, preflight_tle_check
+from tabascal.orbit_config import normalise_tle_config
 from tabascal.interferometry import (
     calculate_fringe_frequency_numpy,
     get_strides_and_idxs,
@@ -129,15 +130,17 @@ class TabConfig:
         self.args = config
         self.precision = config.get("model", {}).get("precision", "single")
         self.ms_path = ms_path
-        self.spacetrack_path = config["satellites"].get("spacetrack_path")
-        self.extra_tle_dir = config["satellites"].get("extra_tle_dir")
+        # One normalisation of the satellites section, shared by preflight and the
+        # model build, so a malformed value is a clean error and the two can never
+        # disagree about what was configured.
+        self.tle_config = normalise_tle_config(config)
+        self.extra_orbit_dir = self.tle_config.extra_orbit_dir
+        self.extra_orbit_max_age_days = self.tle_config.extra_orbit_max_age_days
 
-        print_spacetrack_status()
-        preflight_tle_check(
-            config["satellites"].get("norad_ids") or [],
-            ms_path,
-            extra_tle_dir=self.extra_tle_dir,
-        )
+        # Authoritative resolution: every configured satellite must have an
+        # acceptable TLE here, before the visibilities are even read. Execution
+        # below consumes this exact result and never re-resolves.
+        self.tle_resolution = preflight_tle_check(self.tle_config, ms_path)
 
         self.read_ms_params(
             config["data"]["freq"],
@@ -150,16 +153,17 @@ class TabConfig:
             config, self.n_freq
         )  # Bad solution, should be fixed in fft_gp. Issue when using a single frequency channel.
 
-        self.get_orbital_elements(
-            config["satellites"].get("norad_ids"),
-            extra_tle_dir=config["satellites"].get("extra_tle_dir"),
-        )
+        # The MS read must land on the same observation epoch preflight resolved
+        # against, or the model would be built from TLEs checked at another time.
+        check_epoch_agreement(self.tle_resolution, self.times_jd)
+
+        self.get_orbital_elements()
 
         self.n_int_time = config["rfi"]["n_int_time"]
         self.n_int_freq = config["rfi"]["n_int_freq"]
 
         # The divisor-rich fine grid (min_divisors > 1) is only needed by the
-        # RiemannVisTimeFreqVariable / +FFI components, which split baselines into
+        # RiemannVisVariable / +FFI components, which split baselines into
         # multiple stride groups. For every other rfi_vis component it just
         # inflates n_int_time (the fine-grid time dimension) and slows the run,
         # so only request it when a Variable component is actually selected.
@@ -206,7 +210,7 @@ class TabConfig:
             return
 
         self.rfi_elevation = get_satellite_elevations(
-            self.tles, self.times_jd, self.ants_itrf
+            self.orbit_records, self.times_jd, self.ants_itrf
         )
         self.rfi_mask = self.rfi_elevation > min_elevation
         self.rfi_mask_fine = np.repeat(self.rfi_mask, self.n_int_time, axis=-1)
@@ -271,6 +275,24 @@ class TabConfig:
         max_time_bins: int,
         min_divisors: int = 8,
     ):
+        # A satellite-free model has no RFI trajectory, so there is nothing to
+        # derive a sub-integration sampling rate from: the fringe frequency whose
+        # rate of change sets it is a property of the satellites. Skip the
+        # position and fringe-frequency work rather than let it run on an empty
+        # TLE set, where `fringe_freq` collapses to a 1-D empty array and the
+        # reductions below fail with an opaque AxisError far from the cause.
+        # One sample per integration is the floor, which is what no RFI needs.
+        if self.n_rfi == 0:
+            self.max_rfi_vis = np.max(np.abs(self.vis_obs))
+            self.time_sample_idxs, self.time_strides, self.n_int_time = (
+                get_strides_and_idxs(
+                    np.ones(self.n_bl, dtype=int),
+                    min_time_bins,
+                    max_time_bins,
+                    min_divisors,
+                )
+            )
+            return
 
         jd_minute = 1 / (24 * 60)
         times_jd_coarse = np.arange(
@@ -279,7 +301,9 @@ class TabConfig:
         # Satellite positions, GAST, antenna UVW and fringe frequencies are all
         # one-shot host-side setup, so always compute them in numpy/skyfield (f64):
         # faster than the jax path (no JIT compile) and accurate in both precisions.
-        rfi_xyz = np.asarray(get_satellite_positions(self.tles, times_jd_coarse))
+        rfi_xyz = np.asarray(
+            get_satellite_positions(self.orbit_records, times_jd_coarse)
+        )
 
         gsa = gast_deg(times_jd_coarse)  # GAST in degrees (UTC convention)
         gh0 = (gsa - self.phase_centre["ra"]) % 360  # type: ignore
@@ -305,7 +329,7 @@ class TabConfig:
         )
         n_int_times = np.ceil(time_int_factor * self.int_time * sample_freq_bl).astype(int)
 
-        # time_sample_idxs and time_strides are only used in RiemannVisTimeFreqVariable
+        # time_sample_idxs and time_strides are only used in RiemannVisVariable
         self.time_sample_idxs, self.time_strides, self.n_int_time = (
             get_strides_and_idxs(
                 n_int_times, min_time_bins, max_time_bins, min_divisors
@@ -339,13 +363,15 @@ class TabConfig:
         self.n_time_fine = len(self.times_fine)
         self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
 
-    def get_orbital_elements(self, norad_ids: List[int], extra_tle_dir: Optional[str] = None):
-
-        obs_epoch_jd = float(self.times_jd.mean())
-
-        self.elements, self.epoch_jd, self.norad_ids, self.tles, self.n_rfi_real = (
-            fetch_orbital_elements(obs_epoch_jd, norad_ids, extra_tle_dir=extra_tle_dir)
-        )
+    def get_orbital_elements(self):
+        """Build the orbital elements from the resolution preflight already made."""
+        (
+            self.elements,
+            self.epoch_jd,
+            self.norad_ids,
+            self.orbit_records,
+            self.n_rfi_real,
+        ) = fetch_orbital_elements(resolution=self.tle_resolution)
         # Under sharding the fetch pads the source list to a multiple of the device
         # count by duplicating the last satellite. n_rfi_real is the pre-padding row
         # count reported by the fetch (not inferred from the id list, which would be

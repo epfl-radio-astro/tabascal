@@ -5,17 +5,13 @@ model:
     # - trajectory:KeplerOrbit
     # - trajectory:PhaseCalculationRFI
   # RFI signal model
-    # - rfi_signal:RealRFI
-    - rfi_signal:ComplexRFI
-    # - rfi_signal:FourierGPRFI
+    - rfi_signal:ComplexRFIVarAnt
+    # - rfi_signal:ComplexRFIConstAnt
   # RFI visibility calculation
-    # - rfi_vis:RiemannVisCalculation
-    # - rfi_vis:RiemannVisTimeFreqCalculation
-    - rfi_vis:RiemannVisTimeFreqVariableFFI
+    # - rfi_vis:RiemannVis
+    - rfi_vis:RiemannVisVariableFFI
   # Astronomical signal model
-    # - ast_vis:FourierTimeAst
-    # - ast_vis:FourierTimeFreqAst
-    - ast_vis:FourierTimeFreqGPAst
+    - ast_vis:GPVisAst
   # Antenna Gain model 
     - gains:UnitaryGains
 
@@ -90,9 +86,6 @@ rfi:
 
 satellites:
   norad_ids: [20452, 38833, 45854]
-  spacetrack_path: spacetrack_login.yaml
-  # tle_offset: -2
-  tle_offset: 0
   # n_int_samples: 3
   ric_std: 1e2
 

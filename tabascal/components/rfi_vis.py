@@ -3,87 +3,10 @@ import jax.numpy as jnp
 from tabascal.distributed import psum_over_rfi, sharding_enabled
 from tabascal.interferometry import calculate_rfi_vis_fine, calculate_rfi_vis_variable
 from tabascal.components import Component
-from tabascal.components.ffi.rfi_vis_op import RFIVisOp
+from ri_kernels.jax_api import RFIVisOp
 
 
-class RiemannVisCalculation(Component):
-
-    required_inputs = {
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-    }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
-
-    parameters = {}
-
-    def setup(self, config):
-        """All validation and error-prone operations here"""
-        try:
-            self.a1 = config.a1
-            self.a2 = config.a2
-            self.n_int_time = config.n_int_time
-            self.n_time = config.n_time
-            self.n_bl = config.n_bl
-            self.n_freq = config.n_freq
-
-            # Validate dimensions
-            self._set_outputs()
-            # self._validate_dimensions()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    # def _validate_dimensions(self):
-    #     """Ensure all setup operations completed successfully"""
-
-    #     assert hasattr(self, "")
-
-    def build_set_params(self):
-
-        def set_params(params):
-            return params
-
-        return set_params
-
-    def build_constants(self):
-        return {"a1": self.a1, "a2": self.a2}
-
-    def build_forward(self):
-        """Return pure, JIT-compatible function"""
-        prefix = self.prefix
-        n_int_time = self.n_int_time
-        n_time = self.n_time
-        n_bl = self.n_bl
-        n_freq = self.n_freq
-
-        def forward(params, state, constants):
-            # Pure JAX operations only
-            a1 = constants[f"{prefix}/a1"]
-            a2 = constants[f"{prefix}/a2"]
-
-            # Works on any leading RFI count: under sharding it runs per device on
-            # the local RFI shard (a1/a2 are replicated closures) and the coarse
-            # results are psum-ed; unsharded it is called directly.
-            def local_vis(rfi_A, rfi_phase):
-                vis_rfi_fine = calculate_rfi_vis_fine(rfi_A, rfi_phase, a1, a2)
-                new_shape = (n_bl, n_freq, n_time, n_int_time)
-                return jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=-1)
-
-            vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
-            state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
-
-            return state
-
-        return forward
-
-    def _set_outputs(self):
-
-        self.state_outputs = {
-            "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
-        }
-
-
-class RiemannVisTimeFreqCalculation(Component):
+class RiemannVis(Component):
 
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -164,7 +87,7 @@ class RiemannVisTimeFreqCalculation(Component):
             "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
 
-class RiemannVisTimeFreqCalculationFFI(Component):
+class RiemannVisFFI(Component):
 
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -249,7 +172,7 @@ class RiemannVisTimeFreqCalculationFFI(Component):
 
 
 
-class RiemannVisTimeFreqVariable(Component):
+class RiemannVisVariable(Component):
 
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -361,7 +284,7 @@ class RiemannVisTimeFreqVariable(Component):
         }
 
 
-class RiemannVisTimeFreqVariableFFI(Component):
+class RiemannVisVariableFFI(Component):
 
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -420,9 +343,9 @@ class RiemannVisTimeFreqVariableFFI(Component):
 
         if sharding_enabled():
             print(
-                "\n!!! WARNING !!!  RiemannVisTimeFreqVariableFFI scales poorly "
+                "\n!!! WARNING !!!  RiemannVisVariableFFI scales poorly "
                 "across multiple devices. Consider using "
-                "RiemannVisTimeFreqCalculationFFI instead for multi-device runs.\n"
+                "RiemannVisFFI instead for multi-device runs.\n"
             )
 
 

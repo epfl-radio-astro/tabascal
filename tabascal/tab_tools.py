@@ -245,21 +245,6 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
         print(f"  {' ' * len(label)} | " + row("bias", me, sig))
 
 
-def get_ast_fringe_rate(uv, freq=1.227e9, D=13.5):
-
-    omega = 2 * np.pi / (24 * 3600)
-    lam = 3e8 / freq
-
-    U = jnp.max(jnp.linalg.norm(uv, axis=-1), axis=0)
-
-    bw = 1.22 * lam / D
-    max_l = jnp.sin(bw / 2)
-
-    max_fr = omega * U * max_l / lam
-
-    return max_fr
-
-
 def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
 
     k_ = k / k0

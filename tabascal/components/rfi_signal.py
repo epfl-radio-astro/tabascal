@@ -1,6 +1,6 @@
 from abc import abstractmethod
 
-from jax import vmap, random, Array
+from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -8,7 +8,6 @@ from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
-from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.tab_tools import get_observation_data_type
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
 from tabascal.timing import measure_runtime
@@ -76,47 +75,6 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
         return rfi_A
     else:
         return jnp.zeros((xds.tle_sat_src.data[0], xds.n_ant, xds.n_freq, xds.n_time), dtype=complex)
-
-
-def compute_real_space_gp_params(gp_l: float, gp_var: float, times: Array, times_fine: Array) -> Tuple[int, Array, Array]:
-
-    gp_times = get_times(times, gp_l)
-    n_gp_times = len(gp_times)
-
-    # resample op is shape (n_time_fine, n_gp_time)
-    resample_op = resampling_kernel(
-        gp_times,
-        times_fine,
-        gp_var,
-        gp_l,
-        1e-8,
-    )
-
-    return n_gp_times, gp_times, resample_op
-
-
-# def estimate_rfi_A(fringe_freqs):
-
-#     # rfi_xyz is shape (n_rfi, n_time, 3)
-#     # ants_xyz is shape (n_time, n_ant, 3)
-#     theta = angular_separation(
-#         rfi_xyz,
-#         jnp.mean(ants_xyz, axis=1, keepdims=True),
-#         ms_params["ra"],
-#         ms_params["dec"],
-#     )
-#     # theta is shape (n_rfi, n_time, n_ant)
-#     B = airy_beam(theta, ms_params["freqs"], ms_params["dish_d"])[:, :, 0, 0]
-#     # B is shape (n_rfi, n_time, n_ant, n_freq) -> (n_rfi, n_time)
-#     # fringe_freqs is shape (n_time, n_bl)
-#     bl = jnp.argmin(jnp.max(jnp.abs(fringe_freqs), axis=0))
-#     # vis_obs is shape (n_time, n_bl)
-#     rfi_amp = jnp.sqrt(
-#         jnp.max(jnp.abs(ms_params["vis_obs"][:, bl]))
-#         / jnp.max(jnp.sum(B**2, axis=0))
-#     )
-
-#     return B * rfi_amp
 
 
 def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
@@ -247,19 +205,65 @@ class BaseGPRFI(Component):
         # horizon. None when disabled. Shape (n_rfi, n_time_fine), i.e. it covers the
         # padded dummy rows too -- they duplicate the last real satellite, so they
         # inherit its mask and are zeroed independently by masked_forward_transform.
+        # Stored in the working float dtype so the multiply in the forward is a real
+        # scaling of a complex array rather than a complex-complex multiply.
         rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None)
-        self.rfi_mask_fine = None if rfi_mask_fine is None else jnp.array(rfi_mask_fine)
+        self.rfi_mask_fine = (
+            None
+            if rfi_mask_fine is None
+            else jnp.asarray(rfi_mask_fine, dtype=jnp.zeros(()).dtype)
+        )
 
         # NORAD IDs, ordered as the n_rfi axis of every RFI array. Under sharding the
         # tail entries are padding duplicates, so consumers that look ids up in an
         # external file slice to [:n_rfi_real] and zero-pad the result instead.
         self.norad_ids = tab_config.norad_ids
 
-    @staticmethod
-    def mask_signal(rfi_A: Array, mask: Array) -> Array:
-        """Zero the RFI signal (n_rfi, n_ant, n_freq_fine, n_time_fine) outside the mask."""
+    def build_mask_constants(self) -> dict:
+        """Constants the signal mask needs, or ``{}`` when nothing is masked.
 
-        return rfi_A * mask[:, None, None, :]
+        Kept separate from each component's own ``build_constants`` so the
+        None-check lives in one place. The mask is a constant rather than a
+        closed-over array because it is indexed by ``n_rfi``: ``distributed.py``
+        shards constants named in ``RFI_AXIS_NAMES`` along the source axis, and a
+        captured array would instead be replicated, pulling ``rfi_A`` back to a
+        full copy on every device.
+        """
+        if self.rfi_mask_fine is None:
+            return {}
+        return {"rfi_mask_fine": self.rfi_mask_fine}
+
+    def build_masked_signal(self) -> Callable:
+        """Return the signal-domain mask to apply at the end of a forward.
+
+        Sibling of :meth:`masked_forward_transform`, which zeroes the padded dummy
+        *sources* in the latent k-space. A time window cannot be expressed there:
+        zeroing global Fourier modes cannot produce a time-limited signal, so the
+        elevation mask has to be applied to ``rfi_A`` after ``latent_to_signal``.
+
+        Both follow the same contract -- a base-class hook every component applies
+        unconditionally, which degrades to the identity when there is nothing to
+        mask (no elevation cut here, a single device there). Resolving the branch
+        here rather than inside the traced function means a run without an
+        elevation cut emits no mask op at all and pays nothing.
+
+        The returned function takes any array whose leading axis is ``n_rfi`` and
+        whose trailing axis is ``n_time_fine``, so a component that keeps the
+        antenna axis broadcast rather than materialised can mask the smaller
+        ``(n_rfi, n_freq_fine, n_time_fine)`` array before expanding it.
+        """
+        if self.rfi_mask_fine is None:
+            return lambda rfi_A, constants: rfi_A
+
+        prefix = self.prefix
+
+        def masked_signal(rfi_A: Array, constants: dict) -> Array:
+            mask = constants[f"{prefix}/rfi_mask_fine"]
+            # (n_rfi, n_time_fine) -> (n_rfi, 1, ..., 1, n_time_fine)
+            shape = (mask.shape[0], *(1,) * (rfi_A.ndim - 2), mask.shape[1])
+            return rfi_A * mask.reshape(shape)
+
+        return masked_signal
 
     def _mask_dummy_rfi(self, arr: Array) -> Array:
         """Zero the padded (dark dummy) rows of an (n_rfi, ...) array; no-op unpadded."""
@@ -307,386 +311,7 @@ class BaseGPRFI(Component):
     # helper function to set dummy rfi values to 0 for padding. Required for multi-device.
     def masked_forward_transform(self, base_params, L, mu):
         return self._mask_dummy_rfi(self.forward_transform(base_params, L, mu))
-
-
-class RealRFI(BaseGPRFI):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-    }
-
-    # Add parameter specifications
-    parameter_shapes = {
-        "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
-    }
-
-    def setup(self, tab_config: TabConfig):
-        """All validation and error-prone operations here"""
-        try:
-            super().setup(tab_config)
-            self.vis_obs = tab_config.vis_obs
-
-            # Do expensive setup operations once
-            self._compute_gp_params()
-            self._compute_prior_params()
-            self._set_outputs()
-
-            if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
-                self._compute_true_params(
-                    tab_config.args["data"]["zarr_path"], tab_config.args["data"]["data_col"]
-                )
-
-            # if config.args["rfi"]["init"] == "est":
-            #     self._estimate_params(tab_config.fringe_freqs)
-
-            self._compute_init_params(tab_config.args["rfi"]["init"])
-
-            # Validate dimensions
-            self._validate_dimensions()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def build_set_params(self) -> Callable:
-
-        def set_params(params: Dict) -> Dict:
-
-            params["rfi_r_induce_base"] = standard_normal(
-                "rfi_r_induce_base", (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
-            )
-
-            return params
-
-        return set_params
-
-    def build_constants(self):
-        constants = {
-            "L_rfi_A": self.L_rfi_A,
-            "mu_rfi_A": self.mu_rfi_A,
-            "resample_rfi": self.resample_rfi,
-        }
-        if self.rfi_mask_fine is not None:
-            constants["rfi_mask_fine"] = self.rfi_mask_fine.astype(self.mu_rfi_A.dtype)
-
-        return constants
-
-    def build_forward(self):
-        """Return pure, JIT-compatible function"""
-        prefix = self.prefix
-        forward_transform = self.masked_forward_transform
-        mask_signal = self.mask_signal
-        masked = self.rfi_mask_fine is not None
-
-        def forward(params: dict, state: dict, constants: dict):
-            # Pure JAX operations only
-            L_rfi_A = constants[f"{prefix}/L_rfi_A"]
-            mu_rfi_A = constants[f"{prefix}/mu_rfi_A"]
-            resample_rfi = constants[f"{prefix}/resample_rfi"]
-
-            rfi_A_induce_base = params["rfi_r_induce_base"]
-
-            rfi_A_induce = forward_transform(rfi_A_induce_base, L_rfi_A, mu_rfi_A)
-
-            rfi_A = vmap(vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1), (None, 2), 2)(
-                resample_rfi, rfi_A_induce
-            )
-
-            if masked:
-                rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])
-
-            state = {**state, "rfi_A": rfi_A}
-
-            return state
-
-        return forward
-
-    def validate_and_test(self):
-        """Call this before using in JIT context"""
-        pass
-
-    def _compute_gp_params(self):
-
-        self.n_rfi_times, self.rfi_times, self.resample_rfi = compute_real_space_gp_params(self.corr_time, self.gp_var, self.times, self.times_fine)
-
-    def _compute_prior_params(self):
-
-        self.L_rfi_A = cholesky(self.rfi_times, self.gp_var, self.corr_time, 1e-8)
-        self.mu_rfi_A = jnp.zeros(
-            (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
-        )
-
-    def _compute_true_params(self, sim_zarr_path: str, data_col: str):
-
-        # The zarr only knows the real satellites; zero-pad to the sharded count.
-        self.true_rfi_A_induce = self._zero_pad_rfi(
-            read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times).real
-        )
-        self.true_rfi_A_induce_base = self.inv_transform(self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
-
-    def forward_transform(self, base_params, L, mu):
-
-        params = vmap(
-            vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1),
-            (2, None, 2),
-            2,
-        )(base_params, L, mu)
-
-        return params
-
-    def inv_transform(self, params, L, mu):
-
-        base_params = vmap(
-            vmap(vmap(jnp.linalg.solve, (None, 0), 0), (None, 1), 1), (None, 2), 2
-        )(L, params - mu)
-
-        return base_params
-
-    def _compute_init_params(self, init_type: str):
-
-        if init_type == "prior":
-            print("Using prior mean for rfi_A")
-            self.init_rfi_A_induce = self.mu_rfi_A
-        elif init_type in ["zeros", 0] :
-            print("Using for zeros for rfi_A")
-            self.init_rfi_A_induce = jnp.zeros_like(self.mu_rfi_A)
-        elif init_type == "ones":
-            print("Using for ones for rfi_A")
-            self.init_rfi_A_induce = jnp.ones_like(self.mu_rfi_A)
-        elif init_type == "truth":
-            print("Using truth for rfi_A")
-            self.init_rfi_A_induce = self.true_rfi_A_induce
-        elif init_type == "sample":
-            print("Drawing sample from prior for rfi_A")
-            base_sample = random.normal(
-                random.PRNGKey(self.r_seed),
-                (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times),
-            )
-            self.init_rfi_A_induce = self.masked_forward_transform(base_sample, self.L_rfi_A, self.mu_rfi_A)
-        else:
-            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
-
-        # Darkness of the padded dummy sources is enforced in the forward, by
-        # masked_forward_transform -- not here. So init_rfi_A_induce (and the prior mean it
-        # may come from) can carry non-zero padded rows for e.g. init="ones"; they contribute
-        # exactly zero amplitude and zero gradient regardless.
-        self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
-
-        self.init_params = {
-            "rfi_r_induce": self.init_rfi_A_induce,
-        }
-        self.init_params_base = {
-            "rfi_r_induce_base": self.init_rfi_A_induce_base,
-        }
-
-    def _validate_dimensions(self):
-        """Ensure all setup operations completed successfully"""
-
-        rfi_shape = (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
-
-        assert_attr_shape(self, "mu_rfi_A", rfi_shape)
-        assert_attr_shape(self, "L_rfi_A", (self.n_rfi_times, self.n_rfi_times))
-        assert_attr_shape(self, "init_rfi_A_induce", rfi_shape)
-        assert_attr_shape(self, "init_rfi_A_induce_base", rfi_shape)
-
-
-class ComplexRFI(BaseGPRFI):
-
-    required_inputs = {}  # No inputs needed
-    output_shapes = {
-        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
-    }
-
-    # Add parameter specifications
-    parameter_shapes = {
-        "rfi_r_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
-        "rfi_i_induce_base": ("n_rfi", "n_ant", "n_freq", "n_rfi_time"),
-    }
-
-    def setup(self, tab_config):
-        """All validation and error-prone operations here"""
-        try:
-            super().setup(tab_config)
-            self.vis_obs = tab_config.vis_obs
-
-            # Do expensive setup operations once
-            self._compute_gp_params()
-            self._compute_prior_params()
-            self._set_outputs()
-
-            if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
-                self._compute_true_params(
-                    tab_config.args["data"]["zarr_path"], tab_config.args["data"]["data_col"]
-                )
-
-            # if tab_config.args["rfi"]["init"] == "est":
-            #     self._estimate_params(tab_config.fringe_freqs)
-
-            self._compute_init_params(tab_config.args["rfi"]["init"])
-
-            # Validate dimensions
-            self._validate_dimensions()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def build_set_params(self) -> Callable:
-
-        def set_params(params: Dict) -> Dict:
-
-            shape = (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
-
-            params["rfi_r_induce_base"] = standard_normal(
-                "rfi_r_induce_base", shape
-            )
-            params["rfi_i_induce_base"] = standard_normal(
-                "rfi_i_induce_base", shape
-            )
-
-            return params
-
-        return set_params
-
-    def build_constants(self):
-        constants = {
-            "L_rfi_A": self.L_rfi_A,
-            "mu_rfi_A": self.mu_rfi_A,
-            "resample_rfi": self.resample_rfi,
-        }
-        if self.rfi_mask_fine is not None:
-            constants["rfi_mask_fine"] = self.rfi_mask_fine.astype(self.resample_rfi.dtype)
-
-        return constants
-
-    def build_forward(self):
-        """Return pure, JIT-compatible function"""
-        prefix = self.prefix
-        forward_transform = self.masked_forward_transform
-        mask_signal = self.mask_signal
-        masked = self.rfi_mask_fine is not None
-
-        def forward(params: dict, state: dict, constants: dict):
-            # Pure JAX operations only
-            L_rfi_A = constants[f"{prefix}/L_rfi_A"]
-            mu_rfi_A = constants[f"{prefix}/mu_rfi_A"]
-            resample_rfi = constants[f"{prefix}/resample_rfi"]
-
-            rfi_A_induce_base = (
-                params["rfi_r_induce_base"] + 1.0j * params["rfi_i_induce_base"]
-            )
-
-            rfi_A_induce = forward_transform(rfi_A_induce_base, L_rfi_A, mu_rfi_A)
-
-            rfi_A = vmap(vmap(vmap(jnp.dot, (None, 0), 0), (None, 1), 1), (None, 2), 2)(
-                resample_rfi, rfi_A_induce
-            )
-
-            if masked:
-                rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])
-
-            state = {**state, "rfi_A": rfi_A}
-
-            return state
-
-        return forward
-
-    def validate_and_test(self):
-        """Call this before using in JIT context"""
-        pass
-
-    def _compute_gp_params(self):
-
-        self.n_rfi_times, self.rfi_times, self.resample_rfi = compute_real_space_gp_params(self.corr_time, self.gp_var, self.times, self.times_fine)
-
-    def _compute_prior_params(self):
-
-        self.L_rfi_A = cholesky(self.rfi_times, self.gp_var, self.corr_time, 1e-8)
-        self.mu_rfi_A = jnp.zeros(
-            (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times), dtype=complex
-        )
-
-    def _compute_true_params(self, sim_zarr_path, data_col):
-
-        # The zarr only knows the real satellites; zero-pad to the sharded count.
-        self.true_rfi_A_induce = self._zero_pad_rfi(
-            read_true_rfi_A(sim_zarr_path, data_col, self.rfi_times)
-        )
-        self.true_rfi_A_induce_base = self.inv_transform(self.true_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
-
-    def forward_transform(self, base_params, L, mu):
-
-        params = vmap(
-            vmap(vmap(affine_transform_full, (0, None, 0), 0), (1, None, 1), 1),
-            (2, None, 2),
-            2,
-        )(base_params, L, mu)
-
-        return params
-
-    def inv_transform(self, params, L, mu):
-
-        base_params = vmap(
-            vmap(vmap(jnp.linalg.solve, (None, 0), 0), (None, 1), 1), (None, 2), 2
-        )(L, params - mu)
-
-        return base_params
-
-    def _compute_init_params(self, init_type):
-
-        if init_type == "prior":
-            print("Using prior mean for rfi_A")
-            self.init_rfi_A_induce = self.mu_rfi_A
-        elif init_type in ["zeros", 0]:
-            print("Using for zeros for rfi_A")
-            self.init_rfi_A_induce = jnp.zeros_like(self.mu_rfi_A)
-        elif init_type in ["ones", 1]:
-            print("Using for ones for rfi_A")
-            self.init_rfi_A_induce = jnp.ones_like(self.mu_rfi_A)
-        elif init_type == "truth":
-            print("Using truth for rfi_A")
-            self.init_rfi_A_induce = self.true_rfi_A_induce
-        elif init_type == "sample":
-            print("Drawing sample from prior for rfi_A")
-            base_sample = random.normal(
-                random.PRNGKey(self.r_seed),
-                (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times),
-            )
-            self.init_rfi_A_induce = self.masked_forward_transform(
-                base_sample, self.L_rfi_A, self.mu_rfi_A
-            )
-        else:
-            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, zeros, ones, truth, sample).")
-
-        # Darkness of the padded dummy sources is enforced in the forward, by
-        # masked_forward_transform -- not here. So init_rfi_A_induce (and the prior mean it
-        # may come from) can carry non-zero padded rows for e.g. init="ones"; they contribute
-        # exactly zero amplitude and zero gradient regardless.
-        self.init_rfi_A_induce_base = self.inv_transform(self.init_rfi_A_induce, self.L_rfi_A, self.mu_rfi_A)
-
-        self.init_params = {
-            "rfi_r_induce": self.init_rfi_A_induce.real,
-            "rfi_i_induce": self.init_rfi_A_induce.imag,
-        }
-        self.init_params_base = {
-            "rfi_r_induce_base": self.init_rfi_A_induce_base.real,
-            "rfi_i_induce_base": self.init_rfi_A_induce_base.imag,
-        }
-
-    def _validate_dimensions(self):
-        """Ensure all setup operations completed successfully"""
-
-        rfi_shape = (self.n_rfi, self.n_ant, self.n_freq, self.n_rfi_times)
-
-        assert_attr_shape(self, "mu_rfi_A", rfi_shape)
-        assert_attr_shape(self, "L_rfi_A", (self.n_rfi_times, self.n_rfi_times))
-        assert_attr_shape(self, "init_rfi_A_induce", rfi_shape)
-        assert_attr_shape(self, "init_rfi_A_induce_base", rfi_shape)
-
-
-##############################################################################################################
-
-
-class FourierGPRFI(BaseGPRFI):
+class ComplexRFIVarAnt(BaseGPRFI):
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -747,25 +372,45 @@ class FourierGPRFI(BaseGPRFI):
         return set_params
 
     def build_constants(self):
-        constants = {
+        return {
             "sigma_rfi_k": self.sigma_rfi_k,
             "mu_rfi_k": self.mu_rfi_k,
+            **self.build_mask_constants(),
         }
-        if self.rfi_mask_fine is not None:
-            constants["rfi_mask_fine"] = self.rfi_mask_fine.astype(
-                self.sigma_rfi_k.dtype
-            )
-
-        return constants
 
     def build_forward(self):
-        """Return pure, JIT-compatible function"""
+        """Return pure, JIT-compatible function
+
+        The latent-to-signal transform is scanned over antennas rather than vmapped.
+        A double vmap over ``(n_rfi, n_ant)`` lowers to a single batched cuFFT of
+        ``n_rfi * n_ant`` transforms on the zero-padded grid, and cuFFT sizes its plan
+        work area for the whole batch. At 32 channels that reached a 12.6 GiB request
+        which aborted the process from inside XLA -- a ``Check failure``, not a
+        catchable Python OOM, so there was no graceful degradation. Scanning the
+        antenna axis reduces that batch by ``n_ant``.
+
+        ``checkpoint`` on the body is load-bearing rather than decorative:
+        ``lax.scan`` stacks the body's residuals across iterations for reverse-mode
+        AD, which would rebuild much of what the vmap was holding, so without it the
+        scan fixes the cuFFT plan and not the autodiff tape.
+
+        Measured on a 64-antenna / 32-channel / 4-satellite problem, single
+        precision: peak device memory 35.80 -> 14.62 GB (2.45x) for a 4% runtime
+        cost, with the optimised chi^2 unchanged to ~6 significant figures.
+        """
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
-        mask_signal = self.mask_signal
-        masked = self.rfi_mask_fine is not None
+        masked_signal = self.build_masked_signal()
         pads = self.pads
         ss_idxs = self.ss_idxs
+
+        # One antenna's sources at a time, so the cuFFT batch is n_rfi rather than
+        # n_rfi * n_ant.
+        @checkpoint
+        def antenna_block(rfi_k_A_ant):
+            return vmap(latent_to_signal, (0, None, None), 0)(
+                rfi_k_A_ant, pads, ss_idxs
+            )
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -776,12 +421,16 @@ class FourierGPRFI(BaseGPRFI):
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
 
-            rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
-                rfi_k_A, pads, ss_idxs
+            # lax.scan stacks along axis 0, so the antenna axis is moved there and
+            # back. The leading swap is on the small latent grid; the trailing one is
+            # full size and is part of the 4% measured above.
+            _, rfi_A_ant_major = lax.scan(
+                lambda carry, k_ant: (carry, antenna_block(k_ant)),
+                None,
+                jnp.swapaxes(rfi_k_A, 0, 1),
             )
-
-            if masked:
-                rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])
+            rfi_A = jnp.swapaxes(rfi_A_ant_major, 0, 1)
+            rfi_A = masked_signal(rfi_A, constants)
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -964,7 +613,7 @@ class FourierGPRFI(BaseGPRFI):
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
 
-class FourierGPRFIConstAnt(BaseGPRFI):
+class ComplexRFIConstAnt(BaseGPRFI):
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -1023,21 +672,17 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         return set_params
 
     def build_constants(self):
-        constants = {
+        return {
             "sigma_rfi_k": self.sigma_rfi_k,
             "mu_rfi_k": self.mu_rfi_k,
+            **self.build_mask_constants(),
         }
-        if self.rfi_mask_fine is not None:
-            constants["rfi_mask_fine"] = self.rfi_mask_fine.astype(self.sigma_rfi_k.dtype)
-
-        return constants
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
-        mask_signal = self.mask_signal
-        masked = self.rfi_mask_fine is not None
+        masked_signal = self.build_masked_signal()
         pads = self.pads
         ss_idxs = self.ss_idxs
         n_rfi = self.n_rfi
@@ -1053,13 +698,18 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
-            rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
-                rfi_k_A, pads, ss_idxs
+            # The antenna axis is a singleton, so map over n_rfi only.
+            rfi_A = vmap(latent_to_signal, (0, None, None), 0)(
+                rfi_k_A[:, 0], pads, ss_idxs
             )
-            rfi_A = rfi_A * jnp.ones((n_rfi, n_ant, n_freq_fine, n_time_fine))
-
-            if masked:
-                rfi_A = mask_signal(rfi_A, constants[f"{prefix}/rfi_mask_fine"])
+            # Masked before the broadcast: the mask does not vary over antennas, so
+            # applying it here scales (n_rfi, n_freq_fine, n_time_fine) rather than
+            # forcing the broadcast view below to materialise n_ant copies.
+            rfi_A = masked_signal(rfi_A, constants)
+            # Avoids allocating a full grid of ones and a multiply.
+            rfi_A = jnp.broadcast_to(
+                rfi_A[:, None], (n_rfi, n_ant, n_freq_fine, n_time_fine)
+            )
 
             state = {**state, "rfi_A": rfi_A}
 
