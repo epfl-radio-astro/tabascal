@@ -14,11 +14,11 @@ model:
     - trajectory:KeplerOrbit
     - trajectory:PhaseCalculationRFI
     # RFI Signal
-    - rfi_signal:FourierGPRFI
+    - rfi_signal:ComplexRFIVarAnt
     # RFI Visibilty
-    - rfi_vis:RiemannVisTimeFreqCalculation
+    - rfi_vis:RiemannVis
     # Astronomical Visibility
-    - ast_vis:FourierTimeFreqGPAst
+    - ast_vis:GPVisAst
     # Gains
     - gains:UnitaryGains
 ```
@@ -180,7 +180,7 @@ satellites:
 
 * `norad_ids`: List of the NORAD IDs of the satellites to include. TABASCAL requests the record whose epoch is closest to the observation from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service — its `get-nearest-omm` endpoint for observations from 2026-07-12 onwards and `get-nearest-tle` before that, falling back to the other archive if the first has nothing acceptable. Cache misses run concurrently with a bounded five-worker pool; no account or credentials are required. **Every ID listed here must resolve to an acceptable record**: otherwise preflight stops before reading the visibilities and names each failure. TABASCAL never silently drops a configured satellite from the RFI model.
 
-  An empty list (or `null`) is valid only for a model that does not use a satellite trajectory component — a stationary-RFI or astronomical-only run. If the `model.components` list includes one that consumes orbital records (`FixedOrbit`, `KeplerOrbit`, `SGP4LEOOrbit`, `SGP4LEONoDragOrbit`), configuring no IDs is a configuration error rather than a run that models nothing. Either separator form of a component reference is recognised, so `trajectory:FixedOrbit` and `trajectory.FixedOrbit` behave identically here.
+  An empty list (or `null`) is valid only for a model that does not use a satellite trajectory component — a stationary-RFI or astronomical-only run. If the `model.components` list includes one that consumes orbital records (`FixedOrbit`, `KeplerOrbit`, `Orbit`, `NoDragOrbit`), configuring no IDs is a configuration error rather than a run that models nothing. Either separator form of a component reference is recognised, so `trajectory:FixedOrbit` and `trajectory.FixedOrbit` behave identically here.
 * `norad_ids_path`: Optional path to a text file of NORAD IDs, one per line; blank lines and `#` comments are ignored and malformed lines are reported with their line number. When set it takes precedence over `norad_ids`, and the `-np/--norad-path` CLI flag takes precedence over both.
 * `extra_orbit_dir`: Optional path to an additional directory of local orbit files, searched **per NORAD ID before** the managed cache and SatChecker. Every `*.json` file in the directory is considered; files must be pandas-oriented JSON tables carrying either `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2`, or `NORAD_CAT_ID`, `EPOCH` and the seven OMM element columns. The kind is inferred, so a Space-Track `gp`/`gp_history` export drops in unconverted. For each requested satellite the valid record whose epoch is closest to the observation is chosen — by epoch distance, regardless of format — and, if it is accepted (see `extra_orbit_max_age_days`), it wins outright and no service call is made for that satellite. Files that cannot be read or lack either required column set are skipped. Records that fail validation are rejected, allowing that satellite to fall through to the managed cache and SatChecker. Legacy date-named files and the bundled Space-Track fixtures remain supported. This directory can be given at runtime with the `--extra-orbit-dir` flag. (The `ORBIT_CACHE_DIR` environment variable is a different thing: it relocates where the *managed cache* is stored, and is not an additional source of records.)
 * `extra_orbit_max_age_days`: Maximum allowed absolute difference, in days, between an `extra_orbit_dir` record's epoch and the observation epoch. `null` (default) applies no age limit, preserving exact replay of `used_orbits_*.json`; `0` accepts an epoch match within TLE precision. A rejected local record falls through to the managed cache and SatChecker. The age comes from the record itself — line 1 for a TLE, the `EPOCH` field for an OMM — not from the filename or modification time.

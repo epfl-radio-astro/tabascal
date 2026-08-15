@@ -114,12 +114,12 @@ def test_wants_rfi_axis_matching():
     # plain param key
     assert dist._wants_rfi_axis("rfi_k_r_base", np.zeros((3, 4)), n_rfi)
     # prefixed constant key matches on the segment after the last "/"
-    assert dist._wants_rfi_axis("_c/FourierGPRFI/mu_rfi_k", np.zeros((3, 4)), n_rfi)
+    assert dist._wants_rfi_axis("_c/ComplexRFIVarAnt/mu_rfi_k", np.zeros((3, 4)), n_rfi)
     # right name, wrong leading dim -> replicated
     assert not dist._wants_rfi_axis("rfi_A", np.zeros((5, 4)), n_rfi)
-    # L_rfi_A is (n_rfi_times, n_rfi_times) and deliberately not in the name list,
-    # even when n_rfi_times happens to equal n_rfi
-    assert not dist._wants_rfi_axis("_c/ComplexRFI/L_rfi_A", np.zeros((3, 3)), n_rfi)
+    # A GP operator is square in its own basis size and deliberately not in the name
+    # list, even when that size happens to equal n_rfi
+    assert not dist._wants_rfi_axis("_c/GPGains/L_gains_amp", np.zeros((3, 3)), n_rfi)
     # non-RFI names never shard
     assert not dist._wants_rfi_axis("ast_k_r_base", np.zeros((3, 4)), n_rfi)
     # scalars never shard
@@ -155,16 +155,16 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     rng = np.random.default_rng(0)
     tree = {
         "rfi_k_r_base": rng.normal(size=(n_rfi, 2, 3)),
-        "_c/FourierGPRFI/mu_rfi_k": rng.normal(size=(n_rfi, 2, 3)),
-        "_c/ComplexRFI/L_rfi_A": rng.normal(size=(4, 4)),   # name-excluded
+        "_c/ComplexRFIVarAnt/mu_rfi_k": rng.normal(size=(n_rfi, 2, 3)),
+        "_c/GPGains/L_gains_amp": rng.normal(size=(4, 4)),   # name-excluded
         "ast_k_r_base": rng.normal(size=(6, 3)),
     }
     sharded = dist.shard_pytree(tree, n_rfi)
     for key, val in tree.items():
         np.testing.assert_array_equal(np.asarray(sharded[key]), val)
     assert sharded["rfi_k_r_base"].sharding.spec == P("rfi")
-    assert sharded["_c/FourierGPRFI/mu_rfi_k"].sharding.spec == P("rfi")
-    assert sharded["_c/ComplexRFI/L_rfi_A"].sharding.spec == P()
+    assert sharded["_c/ComplexRFIVarAnt/mu_rfi_k"].sharding.spec == P("rfi")
+    assert sharded["_c/GPGains/L_gains_amp"].sharding.spec == P()
     assert sharded["ast_k_r_base"].sharding.spec == P()
 
     # pre-sharded leaves pass through untouched

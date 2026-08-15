@@ -5,18 +5,14 @@ model:
     # - trajectory:KeplerOrbit
     # - trajectory:PhaseCalculationRFI
   # RFI signal model
-    # - rfi_signal:RealRFI
-    - rfi_signal:ComplexRFI
-    # - rfi_signal:FourierGPRFI
+    - rfi_signal:ComplexRFIVarAnt
+    # - rfi_signal:ComplexRFIConstAnt
   # RFI visibility calculation
-    # - rfi_vis:RiemannVisCalculation
-    #- rfi_vis:RiemannVisTimeFreqCalculation
-    - rfi_vis:RiemannVisTimeFreqCalculationFFI
-    # - rfi_vis:RiemannVisTimeFreqVariable
+    #- rfi_vis:RiemannVis
+    - rfi_vis:RiemannVisFFI
+    # - rfi_vis:RiemannVisVariable
   # Astronomical signal model
-    # - ast_vis:FourierTimeAst
-    # - ast_vis:FourierTimeFreqAst
-    - ast_vis:FourierTimeFreqGPAst
+    - ast_vis:GPVisAst
   # Antenna Gain model 
     - gains:UnitaryGains
 

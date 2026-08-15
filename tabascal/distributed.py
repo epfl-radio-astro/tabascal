@@ -115,17 +115,16 @@ def process_count() -> int:
 # params, GP operators) is replicated. Constants are keyed "<prefix>/<name>" in the
 # model, so matching happens on the part after the last "/". Membership here is not
 # sufficient on its own: shard_pytree additionally requires leaf.shape[0] == n_rfi, so
-# e.g. L_rfi_A -- deliberately absent, its leading dim is n_rfi_times -- could not be
-# sharded even if a future rename made it match.
+# a GP operator whose leading dim is an inducing-point count could not be sharded even
+# if a future rename made its name match.
 RFI_AXIS_NAMES = frozenset({
     # latent params (optimized)
     "rfi_k_r_base", "rfi_k_i_base",
-    "rfi_r_induce_base", "rfi_i_induce_base",
     "rfi_orbit_base",
     # state buffers
     "rfi_A", "rfi_phase", "rfi_xyz", "elements",
     # constants
-    "mu_rfi_k", "mu_rfi_A", "mu_rfi_orbit", "L_rfi_orbit",
+    "mu_rfi_k", "mu_rfi_orbit", "L_rfi_orbit",
 })
 
 
