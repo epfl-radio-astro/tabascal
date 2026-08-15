@@ -17,7 +17,9 @@ from tabascal.write import write_results_ms, write_results_xds
 
 import numpy as np
 
+import os
 from datetime import datetime
+from time import perf_counter
 
 from typing import Callable, Optional
 from functools import reduce, partial
@@ -434,6 +436,25 @@ def run_svi(
     return svi_results, guide
 
 
+def _write_loss_trace(losses: list, step_times: list, obs_size: int) -> None:
+    """Dump the loss/time trace to ``$TAB_LOSS_TRACE``, if that is set.
+
+    Losses are divided by ``obs_size`` to match the normalisation the pipeline
+    reports elsewhere, so the values line up with the printed reduced chi^2
+    rather than being raw sums.
+    """
+    path = os.environ.get("TAB_LOSS_TRACE")
+    if not path or not is_process_0():
+        return
+
+    np.savez(
+        path,
+        loss=np.asarray(losses, dtype=float) / obs_size,
+        time_s=np.asarray(step_times, dtype=float),
+    )
+    print(f"Wrote loss trace ({len(losses)} iterations) to {path}")
+
+
 @measure_runtime
 def run_custom_svi(
     prob_model: Callable,
@@ -454,8 +475,22 @@ def run_custom_svi(
 
     Optimizes log p(obs | params) + log p(params) directly, equivalent to
     AutoDelta SVI for MAP estimation.
+
+    Set ``TAB_LOSS_TRACE`` to a path to dump the per-iteration loss and the
+    wall-clock time it was reached, for loss-versus-time comparisons between
+    models (issue #107). Off by default and free when unset.
     """
+    # Wall-clock elapsed at the end of each iteration, measured from the first
+    # step of the first phase. Comparing two models by loss-per-iteration hides
+    # any difference in cost per iteration, so a model that converges in fewer
+    # but more expensive steps looks better than it is; the honest axis is time.
+    # `float(loss)` above already forces a device sync, so the timestamp taken
+    # after it bounds completed work rather than dispatched work.
+    step_times = []
+    trace_t0 = None
+
     def _run_phase(params, epsilon, max_iter):
+        nonlocal trace_t0
         optimizer = optax.adabelief(epsilon)
         opt_state = optimizer.init(params)
         losses = []
@@ -463,10 +498,13 @@ def run_custom_svi(
         init_loss = None
         pbar = trange(max_iter, disable=not is_process_0())
         for i in pbar:
+            if trace_t0 is None:
+                trace_t0 = perf_counter()
             params, opt_state, loss = _map_step(
                 prob_model, optimizer, params, opt_state, state, constants, obs_data
             )
             loss_val = float(loss)
+            step_times.append(perf_counter() - trace_t0)
             losses.append(loss_val)
             if init_loss is None:
                 init_loss = loss_val
@@ -486,6 +524,8 @@ def run_custom_svi(
     if dual_run:
         params, losses2 = _run_phase(params, epsilon / 10, max_iter)
         losses = losses + losses2
+
+    _write_loss_trace(losses, step_times, obs_data.size)
 
     # Add _auto_loc suffix to match AutoDelta convention expected by downstream code
     params_out = {k + "_auto_loc": v for k, v in params.items()}
