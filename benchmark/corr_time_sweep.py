@@ -64,10 +64,14 @@ def parse(stdout: str) -> dict:
             if m:
                 out[f"{key}_nrmse_{point}"] = float(m.group(1))
 
-    # Deliberately not parsed from stdout: both rfi_signal:FourierGPRFI and
-    # ast_vis:FourierTimeFreqGPAst print "(n_k_fq, n_k_tm)", so a regex cannot
-    # tell which component a line belongs to. The matrix GP's basis size is
-    # computed directly from corr_time instead (see main).
+    # Both rfi_signal:FourierGPRFI and ast_vis:FourierTimeFreqGPAst print
+    # "(n_k_fq, n_k_tm)", so a single regex cannot say which is which. Capture
+    # all of them; only the RFI one varies with rfi.corr_time, which is what
+    # identifies it once the sweep is done.
+    out["k_grids"] = [
+        (int(a), int(b))
+        for a, b in re.findall(r"\(n_k_fq, n_k_tm\): \((\d+), (\d+)\)", stdout)
+    ]
     if m := re.search(r"^\s{2}run_opt\s+\d+\s+[\d.]+\s+\S+\s+[\d.]+%\s+[\d.]+%\s+([\d.]+)\s+([numkM]?)s\s",
                       stdout, re.M):
         scale = {"n": 1e-9, "u": 1e-6, "m": 1e-3, "": 1.0, "k": 1e3}[m.group(2)]
@@ -120,6 +124,8 @@ def main():
     p.add_argument("--corr-times", type=float, nargs="+", default=[24, 12, 6, 3])
     p.add_argument("--max-iter", type=int, default=25)
     p.add_argument("--precision", default="single", choices=["single", "double"])
+    p.add_argument("--components", default="both",
+                   choices=["both", "matrix", "fourier"])
     args = p.parse_args()
 
     args.workdir.mkdir(parents=True, exist_ok=True)
@@ -137,31 +143,30 @@ def main():
     sim_dir = (stage / "sim_dir.txt").read_text().strip()
     baseline_corr = yaml.safe_load(base_cfg.read_text())["rfi"]["corr_time"]
 
-    results = []
-    for ct in args.corr_times:
-        tag = f"matrix_ct{ct:g}"
-        print(f"=== matrix GP, corr_time={ct:g} s ===", flush=True)
-        results.append(run_case(args.workdir, base_cfg, sim_dir,
-                                "rfi_signal:ComplexRFI", ct, args.max_iter, tag))
-        print(results[-1], flush=True)
+    specs = {"matrix": "rfi_signal:ComplexRFI", "fourier": "rfi_signal:FourierGPRFI"}
+    if args.components != "both":
+        specs = {args.components: specs[args.components]}
 
-    print(f"=== Fourier, corr_time={baseline_corr:g} s (reference) ===", flush=True)
-    results.append(run_case(args.workdir, base_cfg, sim_dir,
-                            "rfi_signal:FourierGPRFI", baseline_corr,
-                            args.max_iter, "fourier_baseline"))
-    print(results[-1], flush=True)
+    results = []
+    for name, spec in specs.items():
+        for ct in args.corr_times:
+            print(f"=== {name}, corr_time={ct:g} s ===", flush=True)
+            results.append(run_case(args.workdir, base_cfg, sim_dir, spec, ct,
+                                    args.max_iter, f"{name}_ct{ct:g}"))
+            print(results[-1], flush=True)
 
     (args.workdir / "results.json").write_text(json.dumps(results, indent=2))
 
-    hdr = f"{'component':16s} {'corr_t':>7s} {'basis':>7s} {'chi2_init':>10s} {'chi2_opt':>9s} {'rfi_nrmse_init':>15s} {'rfi_nrmse_opt':>14s} {'opt_s':>7s}"
+    hdr = f"{'component':14s} {'corr_t':>7s} {'basis':>7s} {'k_grids':>16s} {'chi2_init':>10s} {'rfi_nrmse_init':>15s} {'ast_nrmse_init':>15s}"
     print("\n" + hdr)
     print("-" * len(hdr))
     for r in results:
         name = r["component"].split(":")[1]
-        print(f"{name:16s} {r['corr_time']:7.1f} {r.get('basis','-'):>7} "
-              f"{r.get('chi2_init',float('nan')):10.4f} {r.get('chi2_opt',float('nan')):9.4f} "
-              f"{r.get('rfi_nrmse_init',float('nan')):15.4f} {r.get('rfi_nrmse_opt',float('nan')):14.4f} "
-              f"{r.get('opt_s',float('nan')):7.1f}")
+        print(f"{name:14s} {r['corr_time']:7.1f} {str(r.get('basis','-')):>7} "
+              f"{str(r.get('k_grids','-')):>16s} "
+              f"{r.get('chi2_init',float('nan')):10.4f} "
+              f"{r.get('rfi_nrmse_init',float('nan')):15.4f} "
+              f"{r.get('ast_nrmse_init',float('nan')):15.5f}")
 
 
 if __name__ == "__main__":
