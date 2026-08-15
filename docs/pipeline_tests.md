@@ -25,8 +25,8 @@ Each case is a `PipelineTestConfig` carrying its references:
 
 - **`chi2_ref`** — the reduced chi² at the optimisation point. A scalar is
   asserted at 1% relative tolerance; a `(lo, hi)` tuple is asserted as inclusive
-  bounds. One value covers **both** precisions — see
-  [Which architecture to record on](#which-architecture-to-record-on).
+  bounds. One value covers **both** precisions — see "Which architecture to
+  record on" below.
 - **`metrics_ref`** — optional truth-based metrics at the `opt` point, as
   `{quantity: {metric: ref}}` where quantity is `ast`, `rfi` or `gains`. Only the
   metrics listed are checked, so a case can assert just what it cares about. Each
@@ -161,8 +161,10 @@ than a per-precision split.
 Measured across ARM (Apple silicon), x86 CPU and an NVIDIA GPU, in both
 precisions:
 
-- **Double is architecture-stable** to ARCH_DOUBLE_SPREAD relative, and the
-  printed truth metrics agree to every digit shown.
+- **Double is architecture-stable** to 5.5e-8 relative in the worst case (the
+  two SGP4 orbit cases, where the propagation amplifies rounding; the non-orbit
+  cases agree to ~1.7e-10), and the printed truth metrics agree to every digit
+  shown.
 - **fp32 agrees with fp64** to 2.4e-5 relative on `chi2`, and to the printed
   precision on every truth metric. The offset is the *same* 2.4e-5 on ARM, x86
   and CUDA alike — a precision effect, not an architecture one.

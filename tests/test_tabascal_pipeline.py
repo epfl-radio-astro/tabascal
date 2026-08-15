@@ -381,11 +381,12 @@ trajectory_configs = [
             # Measured opt-point values, double precision (gains identity -> RMSE 0):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   ARM  | 0.8875838768982116 |     0.2615       1.1      |     0.4274       0.2
-            #   x86  | ARCH_X86_FIXED     |     0.2615       1.1      |     0.4274       0.2
-            #   GPU  | ARCH_GPU_FIXED     |     0.2615       1.1      |     0.4274       0.2
+            #   x86  | 0.8875838755053758 |     0.2615       1.1      |     0.4274       0.2
+            #   GPU  | 0.8875838811609812 |     0.2615       1.1      |     0.4274       0.2
             # (re-recorded for the exact astronomical fringe rate, which sets the k0 knee of
             # the ast power-spectrum prior. ARM = Apple silicon CPU, x86 = x86_64 CPU,
-            # GPU = NVIDIA.)
+            # GPU = NVIDIA. The three agree to 6e-9 relative, far inside the 1% tolerance,
+            # so the asserted value being the ARM one is immaterial.)
             chi2_ref=0.8875838768982116,
             requires_double=True,
             metrics_ref={
@@ -414,8 +415,8 @@ trajectory_configs = [
             # note on the FixedOrbit case for what ARM/x86/GPU are:
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   ARM  | 0.8686239283739090 |     0.2874       0.9      |     0.4916       0.7
-            #   x86  | ARCH_X86_NODRAG    |     0.2874       0.9      |     0.4916       0.7
-            #   GPU  | ARCH_GPU_NODRAG    |     0.2874       0.9      |     0.4916       0.7
+            #   x86  | 0.8686239181926775 |     0.2874       0.9      |     0.4916       0.7
+            #   GPU  | 0.8686239279264559 |     0.2874       0.9      |     0.4916       0.7
             chi2_ref=0.868623928373909,
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
@@ -445,8 +446,9 @@ trajectory_configs = [
             # NoDragOrbit -- same orbit to fp precision):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   ARM  | 0.8686239149667875 |     0.2874       0.9      |     0.4916       0.7
-            #   x86  | ARCH_X86_ORBIT     |     0.2874       0.9      |     0.4916       0.7
-            #   GPU  | ARCH_GPU_ORBIT     |     0.2874       0.9      |     0.4916       0.7
+            #   x86  | 0.8686238995457578 |     0.2874       0.9      |     0.4916       0.7
+            #   GPU  | 0.8686239471235949 |     0.2874       0.9      |     0.4916       0.7
+            # (widest spread of any case, and still only 5.5e-8 relative.)
             chi2_ref=0.8686239149667875,
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
@@ -497,16 +499,17 @@ rfi_vis_configs = [
             # both precisions:
             #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | chi2
             #   double  ARM    |      0.2617        1.1     |      0.4277       0.2     | 0.8874370376
-            #   double  x86    |      0.2617        1.1     |      0.4277       0.2     | ARCH_X86_RIEMANN_D
-            #   double  GPU    |      0.2617        1.1     |      0.4277       0.2     | ARCH_GPU_RIEMANN_D
+            #   double  x86    |      0.2617        1.1     |      0.4277       0.2     | 0.8874370374
+            #   double  GPU    |      0.2617        1.1     |      0.4277       0.2     | 0.8874370374
             #   single  ARM    |      0.2617        1.1     |      0.4277       0.2     | 0.8874580860
-            #   single  x86    |      0.2617        1.1     |      0.4277       0.2     | ARCH_X86_RIEMANN_S
-            #   single  GPU    |      0.2617        1.1     |      0.4277       0.2     | ARCH_GPU_RIEMANN_S
+            #   single  x86    |      0.2617        1.1     |      0.4277       0.2     | 0.8874580860
+            #   single  GPU    |      0.2617        1.1     |      0.4277       0.2     | 0.8874580264
             # fp32 and fp64 agree to 2.4e-5 on chi2 and to the printed precision on the
             # metrics, on every platform tested, so a single set of references covers both
-            # and there is no per-precision split. The fp32 offset is a precision effect
-            # rather than an architecture one. That is what makes one scalar at 1%
-            # tolerance safe for both.
+            # and there is no per-precision split. The fp32 offset is the same 2.4e-5 on
+            # ARM, x86 and CUDA alike, i.e. a precision effect rather than an architecture
+            # one; the cross-architecture spread is <=1.7e-10 in double and <=6.7e-8 in
+            # single. That is what makes one scalar at 1% tolerance safe for both.
             metrics_ref={
                 "ast": {"NRMSE(noise)": (0.24, 0.28), "bias_significance": (0.0, 2.0)},
                 "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
@@ -530,11 +533,11 @@ rfi_vis_configs = [
             # values (gains identity -> RMSE 0):
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   double  ARM    | 0.8874370376 |     0.2617       1.1      |     0.4277       0.2
-            #   double  x86    | ARCH_X86_FFI_D |   0.2617       1.1      |     0.4277       0.2
-            #   double  GPU    | ARCH_GPU_FFI_D |   0.2617       1.1      |     0.4277       0.2
+            #   double  x86    | 0.8874370374 |     0.2617       1.1      |     0.4277       0.2
+            #   double  GPU    | 0.8874370374 |     0.2617       1.1      |     0.4277       0.2
             #   single  ARM    | 0.8874580264 |     0.2617       1.1      |     0.4277       0.2
-            #   single  x86    | ARCH_X86_FFI_S |   0.2617       1.1      |     0.4277       0.2
-            #   single  GPU    | ARCH_GPU_FFI_S |   0.2617       1.1      |     0.4277       0.2
+            #   single  x86    | 0.8874580860 |     0.2617       1.1      |     0.4277       0.2
+            #   single  GPU    | 0.8874580264 |     0.2617       1.1      |     0.4277       0.2
             chi2_ref=0.8874370375849675,
         ),
         id="RiemannVisFFI",
@@ -596,13 +599,14 @@ gains_configs = [
             # than an exact zero:
             #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | gains RMSE | chi2
             #   double  ARM    |      0.2617        1.1     |      0.4279       0.2     |  5.328e-4  | 0.8874142592
-            #   double  x86    |      0.2617        1.1     |      0.4279       0.2     | ARCH_X86_GAINS_RMSE_D | ARCH_X86_GAINS_D
-            #   double  GPU    |      0.2617        1.1     |      0.4279       0.2     | ARCH_GPU_GAINS_RMSE_D | ARCH_GPU_GAINS_D
+            #   double  x86    |      0.2617        1.1     |      0.4279       0.2     |  5.328e-4  | 0.8874142591
+            #   double  GPU    |      0.2617        1.1     |      0.4279       0.2     |  5.328e-4  | 0.8874142591
             #   single  ARM    |      0.2617        1.1     |      0.4279       0.2     |  5.334e-4  | 0.8874352574
-            #   single  x86    |      0.2617        1.1     |      0.4279       0.2     | ARCH_X86_GAINS_RMSE_S | ARCH_X86_GAINS_S
-            #   single  GPU    |      0.2617        1.1     |      0.4279       0.2     | ARCH_GPU_GAINS_RMSE_S | ARCH_GPU_GAINS_S
+            #   single  x86    |      0.2617        1.1     |      0.4279       0.2     |  5.333e-4  | 0.8874352574
+            #   single  GPU    |      0.2617        1.1     |      0.4279       0.2     |  5.334e-4  | 0.8874353170
             # The gains RMSE bound keeps ~2x headroom over the measured fp32 residual, which
             # is why one bound covers both precisions (fp64 5.328e-4, fp32 5.334e-4).
+            # Widest chi2 spread across the three platforms: 1.6e-10 double, 6.7e-8 single.
             metrics_ref={
                 "ast": {"NRMSE(noise)": (0.24, 0.28), "bias_significance": (0.0, 2.0)},
                 "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
