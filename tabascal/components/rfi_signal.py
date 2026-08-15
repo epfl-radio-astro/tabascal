@@ -15,129 +15,7 @@ from tabascal.timing import measure_runtime
 import numpy as np
 import xarray as xr
 
-from typing import Tuple, Dict, Callable, List, Optional
-
-
-#: Keys a light-curve ``.npz`` may use to label its sources by NORAD id. ``titles``
-#: is what nufft-gif writes; ``norad_ids`` is accepted as the more explicit name.
-_LIGHT_CURVE_ID_KEYS = ("norad_ids", "titles")
-
-
-def _light_curve_ids(npz) -> Optional[List[int]]:
-    """NORAD ids labelling each row of ``light_curves``, or None if unlabelled.
-
-    Entries that are not integer ids (nufft-gif also plots named sources such as
-    "Fornax A") map to None so they can never match a satellite.
-    """
-    for key in _LIGHT_CURVE_ID_KEYS:
-        if key in npz.files:
-            ids = []
-            for label in npz[key]:
-                text = str(label).strip()
-                ids.append(int(text) if text.lstrip("-").isdigit() else None)
-            return ids
-    return None
-
-
-def read_light_curves(est_path: str, norad_ids: List[int]) -> Array:
-    """Read an RFI light curve estimate, ordered to match `norad_ids`.
-
-    File structure
-    --------------
-    A ``.npz`` holding
-
-    ``light_curves``
-        ``(n_src, n_time, n_freq)`` array of light curves, one row per source.
-    ``norad_ids`` (or ``titles``, which is what nufft-gif writes)
-        ``(n_src,)`` array of labels, one per row of ``light_curves``. Rows are
-        matched to satellites through these, so the row order in the file does
-        not have to match the configured satellite order. Labels that are not
-        integer NORAD ids (nufft-gif also plots named sources such as
-        "Fornax A") never match a satellite and are dropped.
-
-    A ``.npz`` **must** carry one of the id keys: a light curve attached to the
-    wrong satellite still has the right shape and still optimises, so positional
-    matching fails silently. A bare ``.npy`` array cannot carry labels at all;
-    it is accepted as a legacy format, matched positionally, and warns.
-
-    Partial coverage
-    ----------------
-    Satellites with no light curve in the file are initialised at zero, so an
-    estimate only has to cover the satellites it was actually measured for
-    rather than every satellite in the fit. Those are named in a warning. It is
-    an error for *no* configured satellite to be found, which otherwise silently
-    degrades the whole estimate to zeros.
-
-    Returns
-    -------
-    Array (n_rfi, n_time, n_freq)
-        Light curves in `norad_ids` order, with unmatched satellites zero and
-        out-of-view NaNs replaced by a zero RFI estimate.
-    """
-
-    est = np.load(est_path)
-    ids = None
-    # Detected from what np.load returned rather than the file extension: a .npz
-    # saved under another name would otherwise be indexed as if it were an array.
-    if isinstance(est, np.lib.npyio.NpzFile):
-        if "light_curves" not in est.files:
-            raise ValueError(
-                f"{est_path} is a .npz without a 'light_curves' array. "
-                f"It contains {sorted(est.files)}."
-            )
-        ids = _light_curve_ids(est)
-        if ids is None:
-            raise ValueError(
-                f"{est_path} carries no source labels. A light-curve .npz must "
-                f"have one of {list(_LIGHT_CURVE_ID_KEYS)} giving the NORAD id of "
-                "each row of 'light_curves', so rows are matched to satellites by "
-                "id rather than by position. "
-                f"It contains {sorted(est.files)}."
-            )
-        est = est["light_curves"]
-
-    est = np.asarray(est)
-
-    if ids is None:
-        # Bare .npy: there is nowhere in the format to put labels.
-        print(
-            f"Warning: {est_path} is a bare .npy with no source labels, so its "
-            f"first {len(norad_ids)} light curves are taken as the satellites in "
-            "file order. Save a .npz with 'norad_ids' to match by id instead."
-        )
-        if len(est) < len(norad_ids):
-            raise ValueError(
-                f"{est_path} has {len(est)} light curves but {len(norad_ids)} "
-                "satellites are configured, and it carries no labels to match "
-                "them by."
-            )
-        return jnp.nan_to_num(jnp.asarray(est[: len(norad_ids)]))
-
-    lc_idx = {n_id: i for i, n_id in enumerate(ids) if n_id is not None}
-    rows = [lc_idx.get(int(n_id)) for n_id in norad_ids]
-
-    if all(row is None for row in rows):
-        raise ValueError(
-            f"No light curve in {est_path} matches any configured satellite. "
-            f"Configured NORAD IDs are {sorted(set(int(n) for n in norad_ids))} "
-            f"and the file contains {sorted(lc_idx)}."
-        )
-
-    missing = [int(n_id) for n_id, row in zip(norad_ids, rows) if row is None]
-    if missing:
-        print(
-            f"Warning: no light curve in {est_path} for NORAD IDs "
-            f"{sorted(set(missing))}; initialising those satellites at zero. "
-            f"The file contains {sorted(lc_idx)}."
-        )
-
-    # NaN (satellite out of view) -> 0 RFI estimate; keeps the init finite.
-    matched = jnp.nan_to_num(jnp.asarray(est[[r for r in rows if r is not None]]))
-
-    out = jnp.zeros((len(norad_ids),) + matched.shape[1:], dtype=matched.dtype)
-    kept = [i for i, row in enumerate(rows) if row is not None]
-
-    return out.at[jnp.asarray(kept)].set(matched)
+from typing import Tuple, Dict, Callable
 
 
 def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
@@ -295,11 +173,6 @@ class BaseGPRFI(Component):
             if rfi_mask_fine is None
             else jnp.asarray(rfi_mask_fine, dtype=jnp.zeros(()).dtype)
         )
-
-        # NORAD IDs, ordered as the n_rfi axis of every RFI array. Under sharding the
-        # tail entries are padding duplicates, so consumers that look ids up in an
-        # external file slice to [:n_rfi_real] and zero-pad the result instead.
-        self.norad_ids = tab_config.norad_ids
 
     def build_mask_constants(self) -> dict:
         """Constants the signal mask needs, or ``{}`` when nothing is masked.
@@ -627,12 +500,9 @@ class ComplexRFIVarAnt(BaseGPRFI):
 
     def _read_estimate(self, est_path):
 
-        # Only the real satellites have a light curve; the padded rows are restored as
-        # zeros by _zero_pad_rfi below, so a padding duplicate is never looked up (and
-        # read_light_curves' missing-id error stays about genuinely missing sources).
-        light_curves = read_light_curves(est_path, self.norad_ids[:self.n_rfi_real])
+        from numpy import load
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(light_curves)), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi_real]))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
         est_rfi_k_A = vmap(vmap(self.signal_to_latent))(est_rfi_A)
 
         return self._zero_pad_rfi(est_rfi_k_A)
@@ -914,10 +784,9 @@ class ComplexRFIConstAnt(BaseGPRFI):
 
     def _read_estimate(self, est_path):
 
-        # Real satellites only; _zero_pad_rfi below restores the padded rows as zeros.
-        light_curves = read_light_curves(est_path, self.norad_ids[:self.n_rfi_real])
+        from numpy import load
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(light_curves)), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
+        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi_real]))), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
 
         return self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(est_rfi_A))
 

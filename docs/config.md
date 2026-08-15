@@ -172,25 +172,6 @@ $$N^T_\text{int} \geq  \pi \nu_F \Delta t \sqrt{\frac{\lvert V^\text{RFI}_\text{
 
 where $N^T_\text{int}$ is the number of integration samples used per time step, $\Delta t$ is the integration time for a single sample, $\nu_F$ is the fringe frequency of the source due to its movement, $\lvert V^\text{RFI}_\text{inst} \rvert$ is the instantaneous RFI visibility amplitude, and $\sigma_n$ is the visibility noise of a single data point. This parameter (`time_int_factor`) determines the factor by which to increase this oversampling.
 
-### RFI light curve estimates
-
-`rfi.est` points at a measured light curve file, used by `init: est` and `mean: est` to seed the RFI signal. It must be a `.npz` containing
-
-| key | shape | contents |
-|---|---|---|
-| `light_curves` | `(n_src, n_time, n_freq)` | one light curve per source |
-| `norad_ids` | `(n_src,)` | the NORAD id of each row of `light_curves` |
-
-`titles` is accepted in place of `norad_ids`, since that is the key `nufft-gif` writes.
-
-**Rows are matched to satellites by NORAD id, not by position**, so the order of sources in the file does not have to match `satellites.norad_ids`. This matters because the failure mode of positional matching is silent: a light curve attached to the wrong satellite still has the right shape and still optimises, it just seeds the prior from another satellite. For that reason a `.npz` without an id key is rejected rather than matched positionally.
-
-Labels that are not integer NORAD ids never match a satellite and are simply dropped, so a file may carry named sources (e.g. `Fornax A`) alongside the satellites without any filtering beforehand.
-
-**The file does not have to cover every satellite in the fit.** Satellites with no light curve in it are initialised at zero and named in a warning, so light curves can be measured for a subset — say the bright or well-characterised sources — while the rest are still modelled and fitted, just without an informative starting point. It is an error only if *no* configured satellite is found in the file, which would otherwise silently reduce the whole estimate to zeros.
-
-A bare `.npy` array is still accepted for backwards compatibility. It has nowhere to put labels, so it is matched positionally against the leading `n_rfi` rows and warns; prefer a `.npz`.
-
 ## Satellites
 
 The `satellites` section determines which satelites to include in the model and the prior distribution to use for there trajectories. An example is given below.
