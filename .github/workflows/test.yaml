@@ -17,7 +17,7 @@ jobs:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     # Without this a hung child rides the 6-hour default: on 2026-08-10 all three
-    # jobs sat at test_pipeline_sharded_equivalence[RiemannVisTimeFreqCalculationFFI]
+    # jobs sat at test_pipeline_sharded_equivalence[RiemannVisFFI]
     # until that limit, burning a runner each. Re-running the same commit unchanged
     # passed, so the trigger is runner contention rather than the code. Deliberately
     # a CI-only limit -- the suite runs in ~15 min here, but a slow dev machine is

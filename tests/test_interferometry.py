@@ -148,7 +148,7 @@ class TestCalculateFringeFrequencyNumpy:
 # get_strides_and_idxs
 #
 # Groups per-baseline sampling rates into stride bins for
-# RiemannVisTimeFreqVariable. The hard downstream invariant is that every
+# RiemannVisVariable. The hard downstream invariant is that every
 # returned stride divides max_sampling (= n_int_time, the fine-grid size), since
 # each group slices the fine grid as slice(stride//2, None, stride). The binning
 # must also partition every baseline into exactly one non-empty group, and must

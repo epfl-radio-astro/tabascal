@@ -23,13 +23,14 @@ skipped under `--x64 false`.
 
 Each case is a `PipelineTestConfig` carrying its references:
 
-- **`chi2_ref`** — the reduced chi² at the optimisation point, per precision.
-  A scalar is asserted at 1% relative tolerance; a `(lo, hi)` tuple is asserted
-  as inclusive bounds.
+- **`chi2_ref`** — the reduced chi² at the optimisation point. A scalar is
+  asserted at 1% relative tolerance; a `(lo, hi)` tuple is asserted as inclusive
+  bounds. One value covers **both** precisions — see
+  [Which architecture to record on](#which-architecture-to-record-on).
 - **`metrics_ref`** — optional truth-based metrics at the `opt` point, as
-  `{precision: {quantity: {metric: ref}}}` where quantity is `ast`, `rfi` or
-  `gains`. Only the metrics listed are checked, so a case can assert just what it
-  cares about.
+  `{quantity: {metric: ref}}` where quantity is `ast`, `rfi` or `gains`. Only the
+  metrics listed are checked, so a case can assert just what it cares about. Each
+  value takes the same scalar-or-`(lo, hi)` form as `chi2_ref`.
 
 The truth metrics come from `print_truth_metrics` (`tabascal/tab_tools.py`). The
 two normally worth asserting are:
@@ -102,14 +103,16 @@ its arch table:
 
 ```
 --- measured: GPGains [double] ---
-    chi2_ref={"double": 0.9150190232947091},
-    arch table:  ast NRMSE(noise) 0.251 ast sig 1.1 | rfi NRMSE(noise) 0.386 rfi sig 0.2 | gains RMSE 3.9e-04 | chi2 0.915
-    ast: {'NRMSE(noise)': 0.2514, ...}
+    chi2_ref=0.8874142592424018,
+    ast: {'NRMSE(noise)': 0.2617, 'NRMSE(signal)': 0.09797, 'RMSE': 0.17, 'bias_significance': 1.1}
+    rfi: {'NRMSE(noise)': 0.4279, 'NRMSE(signal)': 0.0253, 'RMSE': 0.278, 'bias_significance': 0.2}
+    gains: {'NRMSE(signal)': 0.0005328, 'RMSE': 0.0005328, 'bias_significance': 1.1}
 ```
 
 Then:
 
-1. Paste the `chi2_ref` scalar for the precision you ran.
+1. Paste the `chi2_ref` scalar. Record both precisions and check they agree
+   before pasting either — see below.
 2. Move any `metrics_ref` bound whose measured value now falls outside it, keeping
    roughly the existing relative width. Leave the bounds that still hold — a
    change that only moves some of them is more credible than one that moves all.
@@ -147,31 +150,31 @@ six.
 
 ### Which architecture to record on
 
-Double-precision values are architecture-stable. Measured across ARM (Apple
-silicon), x86 CPU and an NVIDIA GPU, the double `chi2` agrees to better than
-6e-7 relative on every case, and the printed truth metrics agree to every digit
-shown. So a double reference recorded on any of the three is canonical for all
-three. Prefer the CI/x86 value when you have it, since that is what gates the PR.
+Any of them. Both precisions and all three architectures currently agree well
+inside the 1% tolerance, which is why each case carries **one** scalar rather
+than a per-precision split.
 
-That worst case belongs to the two SGP4 orbit cases, where the propagation
-amplifies rounding; the non-orbit cases agree to ~3e-11. Everything here is still
-four to nine orders inside the 1% tolerance.
+Measured across ARM (Apple silicon), x86 CPU and an NVIDIA GPU, in both
+precisions:
 
-Single precision is **not** architecture-stable — fp32 convergence rate differs
-markedly between ARM, x86 and GPU — which is why those references are wide
-`(lo, hi)` bounds rather than scalars. On the `RiemannVisTimeFreqCalculation`
-case at a fixed 100 iterations, the same inputs give:
+- **Double is architecture-stable** to ARCH_DOUBLE_SPREAD relative, and the
+  printed truth metrics agree to every digit shown.
+- **fp32 agrees with fp64** to 2.4e-5 relative on `chi2`, and to the printed
+  precision on every truth metric. The offset is the *same* 2.4e-5 on ARM, x86
+  and CUDA alike — a precision effect, not an architecture one.
 
-| | ARM | x86 | GPU |
-|---|---|---|---|
-| chi2 | 0.933 | 1.102 | 0.921 |
-| ast NRMSE(noise) | 0.252 | 0.247 | 0.251 |
-| rfi NRMSE(noise) | 0.405 | 0.736 | 0.389 |
+So a reference recorded on any platform in either precision is canonical for all
+of them. Prefer the CI/x86 value when you have it, since that is what gates the
+PR.
 
-The rfi residual very nearly doubles between GPU and x86 — and the architecture
-with the worst rfi residual has the *best* ast residual, so there is no single
-"slow" architecture to normalise against. Do not tighten an fp32 bound towards
-whichever machine you happen to have run on.
+This was **not** true of the pre-#103 real-space GP model, where fp32
+convergence rate differed markedly between architectures (ARM reached chi2 ~0.92
+in 100 iterations while x86 was still at ~1.13, and the rfi residual nearly
+doubled between GPU and x86). That is what the per-precision `(lo, hi)` bounds
+existed to absorb. The Fourier model removed the need for them. If you
+reintroduce a component whose fp32 convergence is architecture-dependent, that
+split has to come back — measure both precisions on at least two architectures
+before collapsing a reference to a scalar.
 
 If a double value differs between two machines by much more than 1e-6, suspect a
 stale reference rather than an architecture difference. That is what the earlier

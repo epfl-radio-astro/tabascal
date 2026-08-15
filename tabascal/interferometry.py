@@ -558,7 +558,7 @@ def get_strides_and_idxs(
 ) -> tuple[list, list[int], int]:
     """Calculate the binned indices, strides, and maximum sampling from an array of random sampling rates.
 
-    The sampling rates are grouped into stride bins for ``RiemannVisTimeFreqVariable``.
+    The sampling rates are grouped into stride bins for ``RiemannVisVariable``.
     Each returned stride must divide ``max_sampling`` (which becomes ``n_int_time``,
     the fine-grid size) so that the per-group fine-grid slicing stays uniform.
 

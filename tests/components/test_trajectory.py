@@ -1,5 +1,5 @@
 """Tests for tabascal.components.trajectory — FixedOrbit, PhaseCalculationRFI,
-SGP4LEONoDragOrbit, and SGP4LEOOrbit.
+NoDragOrbit, and Orbit.
 
 TLEs are sourced from IAU CPS SatChecker (no credentials). The SGP4 orbit tests
 run fully offline against the bundled TLE cache under tabascal/data/tles/.
@@ -551,17 +551,17 @@ class TestFetchOrbitalElementsPartial:
 
 
 # ---------------------------------------------------------------------------
-# SGP4LEONoDragOrbit and SGP4LEOOrbit — merged parametrized class
-# SGP4LEONoDragOrbit: n_params=6 (bstar excluded from learnable params)
-# SGP4LEOOrbit:       n_params=7 (bstar included)
+# NoDragOrbit and Orbit — merged parametrized class
+# NoDragOrbit: n_params=6 (bstar excluded from learnable params)
+# Orbit:       n_params=7 (bstar included)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.requires_double
 @pytest.mark.parametrize("orbit_cls,n_params", [
-    pytest.param("SGP4LEONoDragOrbit", 6, id="SGP4LEONoDragOrbit"),
-    pytest.param("SGP4LEOOrbit", 7, id="SGP4LEOOrbit"),
+    pytest.param("NoDragOrbit", 6, id="NoDragOrbit"),
+    pytest.param("Orbit", 7, id="Orbit"),
 ])
-class TestSGP4LEOOrbit:
+class TestSGP4Orbits:
 
     def _get_cls(self, orbit_cls):
         from tabascal.components import trajectory as traj_mod

@@ -3,10 +3,10 @@ model:
   # RFI Phase from trajectory
     - trajectory:FixedOrbit
   # RFI signal model
-    - rfi_signal:ComplexRFI
-    - rfi_vis:RiemannVisTimeFreqCalculation
+    - rfi_signal:ComplexRFIVarAnt
+    - rfi_vis:RiemannVis
   # Astronomical signal model
-    - ast_vis:FourierTimeFreqGPAst
+    - ast_vis:GPVisAst
   # Antenna Gain model 
     - gains:UnitaryGains
 

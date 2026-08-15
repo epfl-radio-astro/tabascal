@@ -20,18 +20,17 @@ from types import SimpleNamespace
 import pytest
 
 import jax
+from jax import vmap
 import jax.numpy as jnp
 import numpy as np
 import numpyro
 
 from tabascal.components.rfi_signal import (
-    ComplexRFI,
-    FourierGPRFI,
-    FourierGPRFIConstAnt,
-    RealRFI,
-    compute_real_space_gp_params,
+    ComplexRFIVarAnt,
+    ComplexRFIConstAnt,
     rfi_signal_config_validation,
 )
+from tabascal.fft_gp import latent_to_signal
 from tabascal.gp import base_kernel, get_times
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
@@ -43,9 +42,8 @@ from .conftest import active_precision, assert_transform_roundtrip, make_constan
 
 N_RFI, N_RFI_REAL, N_ANT, N_FREQ, N_TIME = 4, 3, 3, 4, 8
 
-ALL_CLASSES = [RealRFI, ComplexRFI, FourierGPRFI, FourierGPRFIConstAnt]
-REAL_SPACE_CLASSES = [RealRFI, ComplexRFI]
-FOURIER_CLASSES = [FourierGPRFI, FourierGPRFIConstAnt]
+ALL_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
+FOURIER_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
 
 # Init modes every class accepts. "truth" is excluded throughout: it goes through
 # read_true_rfi_A, which needs a real simulation .zarr store.
@@ -272,51 +270,6 @@ class TestRfiSignalConfigValidation:
 
 
 # ---------------------------------------------------------------------------
-# compute_real_space_gp_params
-# ---------------------------------------------------------------------------
-
-class TestComputeRealSpaceGPParams:
-
-    def test_shapes_and_count(self):
-        """n_gp_times follows get_times, and the resample operator maps GP -> fine grid."""
-        times = jnp.linspace(0.0, 120.0, 8)
-        times_fine = jnp.linspace(0.0, 120.0, 16)
-        corr_time = 24.0
-
-        n_gp_times, gp_times, resample_op = compute_real_space_gp_params(
-            corr_time, 1.0, times, times_fine
-        )
-
-        assert n_gp_times == len(get_times(times, corr_time))
-        assert gp_times.shape == (n_gp_times,)
-        assert resample_op.shape == (len(times_fine), n_gp_times)
-
-    @pytest.mark.requires_double
-    @pytest.mark.parametrize("signal_fn", [jnp.ones_like, lambda t: jnp.sin(t / 24.0)])
-    def test_resampling_interpolates_onto_the_fine_grid(self, signal_fn):
-        """The operator interpolates a GP-grid signal onto the fine grid.
-
-        Loose tolerance on purpose: this is GP interpolation with a 1e-8 nugget, not an
-        exact reconstruction, and the assertion only needs to catch a broken operator.
-
-        Double precision only: ``resampling_kernel`` inverts the GP covariance with a
-        1e-8 nugget, which in fp32 is ill-conditioned enough that the operator picks up
-        O(0.5) ripples and interpolates visibly badly.
-        """
-        times = jnp.linspace(0.0, 120.0, 8)
-        times_fine = jnp.linspace(0.0, 120.0, 16)
-        corr_time = 24.0
-
-        _, gp_times, resample_op = compute_real_space_gp_params(
-            corr_time, 1.0, times, times_fine
-        )
-
-        assert jnp.allclose(
-            resample_op @ signal_fn(gp_times), signal_fn(times_fine), atol=1e-2
-        )
-
-
-# ---------------------------------------------------------------------------
 # BaseGPRFI padding helpers
 # ---------------------------------------------------------------------------
 
@@ -324,7 +277,7 @@ class TestPaddingHelpers:
     """The device-sharding helpers on BaseGPRFI, driven through a concrete subclass."""
 
     def test_mask_dummy_rfi_zeroes_only_padded_rows(self):
-        comp = setup_component(ComplexRFI)
+        comp = setup_component(ComplexRFIVarAnt)
         arr = jnp.arange(N_RFI * 2 * 3, dtype=float).reshape(N_RFI, 2, 3) + 1.0
 
         masked = comp._mask_dummy_rfi(arr)
@@ -333,7 +286,7 @@ class TestPaddingHelpers:
         assert jnp.all(masked[N_RFI_REAL:] == 0)
 
     def test_mask_dummy_rfi_is_noop_when_unpadded(self):
-        comp = setup_component(ComplexRFI, n_rfi=N_RFI, n_rfi_real=N_RFI)
+        comp = setup_component(ComplexRFIVarAnt, n_rfi=N_RFI, n_rfi_real=N_RFI)
         arr = jnp.ones((N_RFI, 2, 3))
 
         assert jnp.array_equal(comp._mask_dummy_rfi(arr), arr)
@@ -341,7 +294,7 @@ class TestPaddingHelpers:
     @pytest.mark.parametrize("dtype", [float, complex])
     def test_zero_pad_rfi_grows_and_zeroes(self, dtype):
         """A truth/estimate array with only the real sources is padded with exact zeros."""
-        comp = setup_component(ComplexRFI)
+        comp = setup_component(ComplexRFIVarAnt)
         arr = jnp.ones((N_RFI_REAL, 2, 3), dtype=dtype)
 
         padded = comp._zero_pad_rfi(arr)
@@ -352,14 +305,14 @@ class TestPaddingHelpers:
         assert jnp.all(padded[N_RFI_REAL:] == 0)
 
     def test_zero_pad_rfi_is_identity_when_already_full(self):
-        comp = setup_component(ComplexRFI)
+        comp = setup_component(ComplexRFIVarAnt)
         arr = jnp.ones((N_RFI, 2, 3))
 
         assert comp._zero_pad_rfi(arr) is arr
 
     def test_n_rfi_real_defaults_to_n_rfi_when_config_lacks_it(self):
         """An unpadded TabConfig has no n_rfi_real; the mask must then be a no-op."""
-        comp = setup_component(ComplexRFI, with_n_rfi_real=False)
+        comp = setup_component(ComplexRFIVarAnt, with_n_rfi_real=False)
 
         assert comp.n_rfi_real == comp.n_rfi
         arr = jnp.ones((N_RFI, 2, 3))
@@ -408,10 +361,8 @@ class TestComponentContract:
     @pytest.mark.parametrize(
         "cls,expected",
         [
-            (RealRFI, {"L_rfi_A", "mu_rfi_A", "resample_rfi"}),
-            (ComplexRFI, {"L_rfi_A", "mu_rfi_A", "resample_rfi"}),
-            (FourierGPRFI, {"sigma_rfi_k", "mu_rfi_k"}),
-            (FourierGPRFIConstAnt, {"sigma_rfi_k", "mu_rfi_k"}),
+            (ComplexRFIVarAnt, {"sigma_rfi_k", "mu_rfi_k"}),
+            (ComplexRFIConstAnt, {"sigma_rfi_k", "mu_rfi_k"}),
         ],
     )
     def test_build_constants_keys(self, cls, expected):
@@ -450,13 +401,10 @@ class TestComponentContract:
     @pytest.mark.parametrize(
         "cls,complex_valued",
         [
-            # RealRFI models a real-valued amplitude; the others are complex. Note the
-            # state_outputs placeholder is always complex, so for RealRFI the forward
+            # All surviving components model a complex amplitude. Note the
             # narrows the dtype when it overwrites it.
-            (RealRFI, False),
-            (ComplexRFI, True),
-            (FourierGPRFI, True),
-            (FourierGPRFIConstAnt, True),
+            (ComplexRFIVarAnt, True),
+            (ComplexRFIConstAnt, True),
         ],
     )
     def test_forward_output_dtype(self, cls, complex_valued):
@@ -593,9 +541,9 @@ class TestDummySourcesStayDark:
 
     def test_data_estimate_splits_over_real_sources_only(self):
         """The data-derived prior mean divides by n_rfi_real, not the padded n_rfi."""
-        padded = setup_component(FourierGPRFI, n_rfi=N_RFI, n_rfi_real=N_RFI_REAL, mean="data")
+        padded = setup_component(ComplexRFIVarAnt, n_rfi=N_RFI, n_rfi_real=N_RFI_REAL, mean="data")
         unpadded = setup_component(
-            FourierGPRFI, n_rfi=N_RFI_REAL, n_rfi_real=N_RFI_REAL, mean="data"
+            ComplexRFIVarAnt, n_rfi=N_RFI_REAL, n_rfi_real=N_RFI_REAL, mean="data"
         )
 
         # Same per-source share regardless of how many dummies were appended.
@@ -608,21 +556,6 @@ class TestDummySourcesStayDark:
 
 class TestTransforms:
 
-    def test_real_rfi_roundtrip(self):
-        comp = setup_component(RealRFI)
-        shape = comp.init_params_base["rfi_r_induce_base"].shape
-        base = jax.random.normal(jax.random.PRNGKey(42), shape)
-
-        assert_transform_roundtrip(comp, base, comp.L_rfi_A, comp.mu_rfi_A)
-
-    def test_complex_rfi_roundtrip(self):
-        comp = setup_component(ComplexRFI)
-        shape = comp.init_params_base["rfi_r_induce_base"].shape
-        k1, k2 = jax.random.split(jax.random.PRNGKey(42))
-        base = jax.random.normal(k1, shape) + 1j * jax.random.normal(k2, shape)
-
-        assert_transform_roundtrip(comp, base, comp.L_rfi_A, comp.mu_rfi_A)
-
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_fourier_roundtrip(self, cls):
         """The Fourier transform pair is a plain scale-and-shift, so it inverts exactly."""
@@ -633,26 +566,72 @@ class TestTransforms:
 
         assert_transform_roundtrip(comp, base, comp.sigma_rfi_k, comp.mu_rfi_k, atol=tol())
 
-    @pytest.mark.parametrize("cls", REAL_SPACE_CLASSES)
-    def test_cholesky_factor_reconstructs_the_kernel(self, cls):
-        """L is lower-triangular and L @ L.T recovers the GP covariance."""
-        comp = setup_component(cls)
-        L = comp.L_rfi_A
 
-        assert L.shape == (comp.n_rfi_times, comp.n_rfi_times)
-        assert jnp.allclose(L, jnp.tril(L))
+# ---------------------------------------------------------------------------
+# Scanned latent-to-signal transform
+# ---------------------------------------------------------------------------
 
-        expected = base_kernel(
-            comp.rfi_times, comp.rfi_times, comp.gp_var, comp.corr_time
-        ) + 1e-8 * jnp.eye(comp.n_rfi_times)
-        assert jnp.allclose(L @ L.T, expected, atol=1e-5)
+class TestFourierScanTransform:
+    """ComplexRFIVarAnt scans the antenna axis instead of vmapping it.
 
-    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
-    def test_sigma_is_broadcastable_over_sources_and_antennas(self, cls):
-        """The Fourier scale is shared by every source and antenna."""
-        comp = setup_component(cls)
-        assert comp.sigma_rfi_k.shape == (1, 1, comp.n_k_freq_rfi, comp.n_k_time_rfi)
-        assert jnp.all(comp.sigma_rfi_k > 0)
+    That is a pure implementation change made to bound the cuFFT plan work area (a
+    batched transform over n_rfi * n_ant asked for 12.6 GiB at 32 channels and
+    aborted inside XLA). These pin the result to the vmap semantics it replaced, in
+    both value and gradient -- ``checkpoint`` alters how the tape is built, so a bug
+    there would surface only in reverse mode.
+    """
+
+    @staticmethod
+    def _vmap_reference(comp, params):
+        """rfi_A computed the way the pre-scan implementation did."""
+        rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
+        rfi_k_A = comp.masked_forward_transform(
+            rfi_k_A_base, comp.sigma_rfi_k, comp.mu_rfi_k
+        )
+        return vmap(
+            vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1
+        )(rfi_k_A, comp.pads, comp.ss_idxs)
+
+    def test_matches_vmap_reference(self):
+        comp = setup_component(ComplexRFIVarAnt)
+        params = random_params(comp)
+
+        got = run_forward(comp, params)
+        expected = self._vmap_reference(comp, params)
+
+        assert got.shape == expected.shape
+        assert jnp.allclose(got, expected, atol=tol(), rtol=tol())
+
+    def test_gradients_match_vmap_reference(self):
+        comp = setup_component(ComplexRFIVarAnt)
+        params = random_params(comp)
+        constants = make_constants(comp)
+
+        def scanned(p):
+            out = comp.build_forward()(p, {}, constants)["rfi_A"]
+            return jnp.sum(jnp.abs(out) ** 2)
+
+        def reference(p):
+            return jnp.sum(jnp.abs(self._vmap_reference(comp, p)) ** 2)
+
+        g_scan = jax.grad(scanned)(params)
+        g_ref = jax.grad(reference)(params)
+
+        for name in g_ref:
+            assert jnp.allclose(g_scan[name], g_ref[name], atol=tol(), rtol=tol()), (
+                f"gradient mismatch for {name}"
+            )
+
+    def test_const_ant_broadcast_matches_full_grid(self):
+        """The shared-antenna signal is identical across antennas after broadcast."""
+        comp = setup_component(ComplexRFIConstAnt)
+        rfi_A = run_forward(comp, random_params(comp))
+
+        assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
+        # Every antenna carries the same signal -- that is what "ConstAnt" means, and
+        # it is the property the broadcast has to preserve.
+        for ant in range(1, N_ANT):
+            assert jnp.array_equal(rfi_A[:, 0], rfi_A[:, ant])
 
 
 # ---------------------------------------------------------------------------
@@ -661,22 +640,14 @@ class TestTransforms:
 
 class TestClassSpecifics:
 
-    def test_real_rfi_init_params_are_real_only(self):
-        comp = setup_component(RealRFI)
-        assert set(comp.init_params) == {"rfi_r_induce"}
-
-    def test_complex_rfi_init_params_split_real_and_imaginary(self):
-        comp = setup_component(ComplexRFI)
-        assert set(comp.init_params) == {"rfi_r_induce", "rfi_i_induce"}
-
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_fourier_init_params_split_real_and_imaginary(self, cls):
         comp = setup_component(cls)
         assert set(comp.init_params) == {"rfi_k_r", "rfi_k_i"}
 
     def test_const_ant_has_singleton_antenna_axis(self):
-        """FourierGPRFIConstAnt shares one latent across antennas."""
-        comp = setup_component(FourierGPRFIConstAnt, init="sample")
+        """ComplexRFIConstAnt shares one latent across antennas."""
+        comp = setup_component(ComplexRFIConstAnt, init="sample")
 
         assert comp.mu_rfi_k.shape == (N_RFI, 1, comp.n_k_freq_rfi, comp.n_k_time_rfi)
         for value in comp.init_params_base.values():
@@ -685,26 +656,18 @@ class TestClassSpecifics:
     @pytest.mark.parametrize("init", COMMON_INITS)
     def test_const_ant_forward_is_identical_across_antennas(self, init):
         """The defining property: every antenna sees the same RFI amplitude."""
-        comp = setup_component(FourierGPRFIConstAnt, init=init)
+        comp = setup_component(ComplexRFIConstAnt, init=init)
         rfi_A = run_forward(comp, random_params(comp))
 
         assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
         assert jnp.allclose(rfi_A, rfi_A[:, :1], atol=tol())
 
     def test_variable_ant_forward_differs_across_antennas(self):
-        """FourierGPRFI, by contrast, gives each antenna its own amplitude."""
-        comp = setup_component(FourierGPRFI, init="sample")
+        """ComplexRFIVarAnt, by contrast, gives each antenna its own amplitude."""
+        comp = setup_component(ComplexRFIVarAnt, init="sample")
         rfi_A = run_forward(comp, random_params(comp))
 
         assert not jnp.allclose(rfi_A[:N_RFI_REAL], rfi_A[:N_RFI_REAL, :1])
-
-    @pytest.mark.parametrize("cls", REAL_SPACE_CLASSES)
-    def test_real_space_gp_grid_attributes(self, cls):
-        comp = setup_component(cls)
-
-        assert comp.rfi_times.shape == (comp.n_rfi_times,)
-        assert comp.resample_rfi.shape == (N_TIME, comp.n_rfi_times)
-        assert comp.mu_rfi_A.shape == (N_RFI, N_ANT, N_FREQ, comp.n_rfi_times)
 
 
 # ---------------------------------------------------------------------------
@@ -717,7 +680,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     import jax.numpy as jnp
     from types import SimpleNamespace
 
-    from tabascal.components.rfi_signal import ComplexRFI
+    from tabascal.components.rfi_signal import ComplexRFIVarAnt
 
     assert jax.device_count() == 2, jax.device_count()
 
@@ -740,7 +703,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
         },
     )
 
-    comp = ComplexRFI()
+    comp = ComplexRFIVarAnt()
     comp.setup(config)
 
     # The placeholder is allocated per-shard, never as a full single-device array.

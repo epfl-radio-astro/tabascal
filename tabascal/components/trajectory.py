@@ -325,7 +325,7 @@ class FixedOrbit(Component):
         )
 
 
-class SGP4LEONoDragOrbit(Component):
+class NoDragOrbit(Component):
 
     requires_double = True
     required_inputs = {}  # No inputs needed
@@ -507,7 +507,7 @@ class SGP4LEONoDragOrbit(Component):
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
 
 
-class SGP4LEOOrbit(Component):
+class Orbit(Component):
 
     requires_double = True
     required_inputs = {}  # No inputs needed
