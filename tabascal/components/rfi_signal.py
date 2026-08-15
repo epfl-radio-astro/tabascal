@@ -24,7 +24,7 @@ def read_light_curves(est_path: str, norad_ids: List[int]) -> Array:
     Light curve files written by `nufft-gif` label each source in `titles`, so the
     satellites are matched by NORAD ID and any non-satellite sources (e.g. Fornax A)
     are dropped. Files without `titles` fall back to the leading `n_rfi` sources,
-    which is only correct when `norad_ids` is ascending.
+    which is only correct when the file's source order matches `norad_ids`.
 
     Returns
     -------
@@ -34,8 +34,15 @@ def read_light_curves(est_path: str, norad_ids: List[int]) -> Array:
 
     est = np.load(est_path)
     titles = None
-    if est_path.endswith(".npz"):
+    # Detected from what np.load returned rather than the file extension: a .npz
+    # saved under another name would otherwise be indexed as if it were an array.
+    if isinstance(est, np.lib.npyio.NpzFile):
         titles = [str(t) for t in est["titles"]] if "titles" in est.files else None
+        if "light_curves" not in est.files:
+            raise ValueError(
+                f"{est_path} is a .npz without a 'light_curves' array. "
+                f"It contains {sorted(est.files)}."
+            )
         est = est["light_curves"]
 
     if titles is None:
@@ -43,6 +50,12 @@ def read_light_curves(est_path: str, norad_ids: List[int]) -> Array:
             f"Warning: {est_path} has no source labels. Taking the first "
             f"{len(norad_ids)} light curves as the satellites, in file order."
         )
+        if len(est) < len(norad_ids):
+            raise ValueError(
+                f"{est_path} has {len(est)} light curves but {len(norad_ids)} "
+                "satellites are configured, and it carries no 'titles' to match "
+                "them by."
+            )
         idxs = list(range(len(norad_ids)))
     else:
         lc_idx = {int(t): i for i, t in enumerate(titles) if t.strip().isdigit()}

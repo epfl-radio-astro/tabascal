@@ -28,6 +28,7 @@ import numpyro
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
     ComplexRFIConstAnt,
+    read_light_curves,
     rfi_signal_config_validation,
 )
 from tabascal.fft_gp import latent_to_signal
@@ -841,3 +842,97 @@ def test_multi_device_padded_sources_dark():
     assert "MULTI_DEVICE_OK" in result.stdout, (
         f"returncode={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# read_light_curves
+# ---------------------------------------------------------------------------
+
+class TestReadLightCurves:
+    """Light curves are matched to satellites by NORAD id, not by file order.
+
+    The failure this guards against is silent: a light curve attached to the
+    wrong satellite still has the right shape and still optimises, it just seeds
+    the prior with another satellite's brightness. Only the ordering assertions
+    below distinguish that from correct behaviour.
+    """
+
+    @staticmethod
+    def _npz(tmp_path, titles, n_time=5, n_freq=2, name="est.npz"):
+        path = tmp_path / name
+        n_src = len(titles)
+        # Source i is a constant i+1, so a row identifies the source it came from.
+        curves = np.stack(
+            [np.full((n_time, n_freq), i + 1.0) for i in range(n_src)]
+        )
+        np.savez(path, light_curves=curves, titles=np.array(titles))
+        return str(path)
+
+    def test_rows_are_reordered_to_match_norad_ids(self, tmp_path):
+        # File order is 300, 100, 200; ask for them in a different order again.
+        path = self._npz(tmp_path, ["300", "100", "200"])
+        out = np.asarray(read_light_curves(path, [200, 300, 100]))
+
+        assert out.shape[0] == 3
+        # value i+1 identifies the file row, so 200 -> row 2 -> 3.0, etc.
+        assert out[0].max() == 3.0
+        assert out[1].max() == 1.0
+        assert out[2].max() == 2.0
+
+    def test_non_satellite_sources_are_dropped(self, tmp_path):
+        path = self._npz(tmp_path, ["100", "Fornax A", "200"])
+        out = np.asarray(read_light_curves(path, [100, 200]))
+
+        assert out.shape[0] == 2
+        assert out[0].max() == 1.0   # row 0
+        assert out[1].max() == 3.0   # row 2, skipping the named source
+
+    def test_a_missing_id_raises_and_lists_what_is_there(self, tmp_path):
+        path = self._npz(tmp_path, ["100", "200"])
+        with pytest.raises(ValueError, match="No light curve found") as excinfo:
+            read_light_curves(path, [100, 999])
+        assert "999" in str(excinfo.value)
+        assert "100" in str(excinfo.value)
+
+    def test_nans_become_a_zero_estimate(self, tmp_path):
+        path = tmp_path / "est.npz"
+        curves = np.ones((2, 4, 2))
+        curves[0, :2] = np.nan  # satellite out of view for the first two samples
+        np.savez(path, light_curves=curves, titles=np.array(["100", "200"]))
+
+        out = np.asarray(read_light_curves(str(path), [100, 200]))
+        assert np.all(np.isfinite(out))
+        assert np.all(out[0, :2] == 0.0)
+
+    def test_a_file_without_titles_falls_back_to_file_order(self, tmp_path, capsys):
+        path = tmp_path / "est.npy"
+        np.save(path, np.stack([np.full((4, 2), i + 1.0) for i in range(3)]))
+
+        out = np.asarray(read_light_curves(str(path), [100, 200]))
+        assert out.shape[0] == 2
+        assert out[0].max() == 1.0 and out[1].max() == 2.0
+        assert "no source labels" in capsys.readouterr().out
+
+    def test_the_fallback_refuses_a_file_with_too_few_curves(self, tmp_path):
+        path = tmp_path / "est.npy"
+        np.save(path, np.ones((1, 4, 2)))
+        with pytest.raises(ValueError, match="carries no 'titles'"):
+            read_light_curves(str(path), [100, 200])
+
+    def test_an_npz_without_light_curves_raises(self, tmp_path):
+        path = tmp_path / "est.npz"
+        np.savez(path, something_else=np.ones((2, 4)), titles=np.array(["100", "200"]))
+        with pytest.raises(ValueError, match="without a 'light_curves' array"):
+            read_light_curves(str(path), [100, 200])
+
+    def test_an_npz_named_npy_is_still_read_as_an_npz(self, tmp_path):
+        """Detection is by what np.load returned, not by the file extension."""
+        import os
+
+        # np.savez forces a .npz suffix, so rename it afterwards.
+        written = self._npz(tmp_path, ["100", "200"])
+        path = str(tmp_path / "est.npy")
+        os.rename(written, path)
+
+        out = np.asarray(read_light_curves(path, [200, 100]))
+        assert out[0].max() == 2.0 and out[1].max() == 1.0
