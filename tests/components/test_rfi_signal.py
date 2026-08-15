@@ -854,23 +854,26 @@ class TestReadLightCurves:
     The failure this guards against is silent: a light curve attached to the
     wrong satellite still has the right shape and still optimises, it just seeds
     the prior with another satellite's brightness. Only the ordering assertions
-    below distinguish that from correct behaviour.
+    below distinguish that from correct behaviour, which is why an id-carrying
+    .npz is required rather than merely preferred.
     """
 
     @staticmethod
-    def _npz(tmp_path, titles, n_time=5, n_freq=2, name="est.npz"):
+    def _npz(tmp_path, labels, key="norad_ids", n_time=5, n_freq=2, name="est.npz"):
         path = tmp_path / name
-        n_src = len(titles)
-        # Source i is a constant i+1, so a row identifies the source it came from.
+        # Source i is a constant i+1, so a row's value identifies the row it came from.
         curves = np.stack(
-            [np.full((n_time, n_freq), i + 1.0) for i in range(n_src)]
+            [np.full((n_time, n_freq), i + 1.0) for i in range(len(labels))]
         )
-        np.savez(path, light_curves=curves, titles=np.array(titles))
+        np.savez(path, light_curves=curves, **{key: np.array(labels)})
         return str(path)
 
-    def test_rows_are_reordered_to_match_norad_ids(self, tmp_path):
+    # --- id matching ---
+
+    @pytest.mark.parametrize("key", ["norad_ids", "titles"])
+    def test_rows_are_reordered_to_match_norad_ids(self, tmp_path, key):
         # File order is 300, 100, 200; ask for them in a different order again.
-        path = self._npz(tmp_path, ["300", "100", "200"])
+        path = self._npz(tmp_path, ["300", "100", "200"], key=key)
         out = np.asarray(read_light_curves(path, [200, 300, 100]))
 
         assert out.shape[0] == 3
@@ -887,41 +890,64 @@ class TestReadLightCurves:
         assert out[0].max() == 1.0   # row 0
         assert out[1].max() == 3.0   # row 2, skipping the named source
 
-    def test_a_missing_id_raises_and_lists_what_is_there(self, tmp_path):
-        path = self._npz(tmp_path, ["100", "200"])
-        with pytest.raises(ValueError, match="No light curve found") as excinfo:
-            read_light_curves(path, [100, 999])
-        assert "999" in str(excinfo.value)
-        assert "100" in str(excinfo.value)
+    def test_integer_labels_match_as_well_as_strings(self, tmp_path):
+        path = self._npz(tmp_path, [300, 100, 200])
+        out = np.asarray(read_light_curves(path, [100, 300]))
+        assert out[0].max() == 2.0 and out[1].max() == 1.0
 
     def test_nans_become_a_zero_estimate(self, tmp_path):
         path = tmp_path / "est.npz"
         curves = np.ones((2, 4, 2))
         curves[0, :2] = np.nan  # satellite out of view for the first two samples
-        np.savez(path, light_curves=curves, titles=np.array(["100", "200"]))
+        np.savez(path, light_curves=curves, norad_ids=np.array(["100", "200"]))
 
         out = np.asarray(read_light_curves(str(path), [100, 200]))
         assert np.all(np.isfinite(out))
         assert np.all(out[0, :2] == 0.0)
 
-    def test_a_file_without_titles_falls_back_to_file_order(self, tmp_path, capsys):
-        path = tmp_path / "est.npy"
-        np.save(path, np.stack([np.full((4, 2), i + 1.0) for i in range(3)]))
+    # --- partial coverage ---
 
-        out = np.asarray(read_light_curves(str(path), [100, 200]))
-        assert out.shape[0] == 2
-        assert out[0].max() == 1.0 and out[1].max() == 2.0
-        assert "no source labels" in capsys.readouterr().out
+    def test_unmatched_satellites_are_initialised_at_zero(self, tmp_path, capsys):
+        """An estimate need only cover the satellites it was measured for."""
+        path = self._npz(tmp_path, ["100", "300"])
+        out = np.asarray(read_light_curves(path, [100, 200, 300]))
 
-    def test_the_fallback_refuses_a_file_with_too_few_curves(self, tmp_path):
-        path = tmp_path / "est.npy"
-        np.save(path, np.ones((1, 4, 2)))
-        with pytest.raises(ValueError, match="carries no 'titles'"):
+        assert out.shape[0] == 3
+        assert out[0].max() == 1.0          # measured
+        assert np.all(out[1] == 0.0)        # not in the file -> zero
+        assert out[2].max() == 2.0          # measured
+
+        warning = capsys.readouterr().out
+        assert "200" in warning and "zero" in warning
+
+    def test_a_partial_file_keeps_the_measured_rows_intact(self, tmp_path):
+        """Zero-filling the gaps must not disturb the rows that were matched."""
+        path = self._npz(tmp_path, ["300", "100"])
+        full = np.asarray(read_light_curves(path, [100, 300]))
+        partial = np.asarray(read_light_curves(path, [100, 999, 300]))
+
+        np.testing.assert_array_equal(partial[0], full[0])
+        np.testing.assert_array_equal(partial[2], full[1])
+        assert np.all(partial[1] == 0.0)
+
+    def test_a_file_matching_nothing_raises(self, tmp_path):
+        """All-zero would silently degrade `est` to the `zeros` mode."""
+        path = self._npz(tmp_path, ["100", "200"])
+        with pytest.raises(ValueError, match="matches any configured satellite"):
+            read_light_curves(path, [900, 901])
+
+    # --- required structure ---
+
+    def test_an_npz_without_labels_raises(self, tmp_path):
+        path = tmp_path / "est.npz"
+        np.savez(path, light_curves=np.ones((2, 4, 2)))
+        with pytest.raises(ValueError, match="carries no source labels") as excinfo:
             read_light_curves(str(path), [100, 200])
+        assert "norad_ids" in str(excinfo.value)
 
     def test_an_npz_without_light_curves_raises(self, tmp_path):
         path = tmp_path / "est.npz"
-        np.savez(path, something_else=np.ones((2, 4)), titles=np.array(["100", "200"]))
+        np.savez(path, something_else=np.ones((2, 4)), norad_ids=np.array(["100"]))
         with pytest.raises(ValueError, match="without a 'light_curves' array"):
             read_light_curves(str(path), [100, 200])
 
@@ -936,3 +962,20 @@ class TestReadLightCurves:
 
         out = np.asarray(read_light_curves(path, [200, 100]))
         assert out[0].max() == 2.0 and out[1].max() == 1.0
+
+    # --- legacy bare .npy ---
+
+    def test_a_bare_npy_falls_back_to_file_order(self, tmp_path, capsys):
+        path = tmp_path / "est.npy"
+        np.save(path, np.stack([np.full((4, 2), i + 1.0) for i in range(3)]))
+
+        out = np.asarray(read_light_curves(str(path), [100, 200]))
+        assert out.shape[0] == 2
+        assert out[0].max() == 1.0 and out[1].max() == 2.0
+        assert "no source labels" in capsys.readouterr().out
+
+    def test_the_fallback_refuses_a_file_with_too_few_curves(self, tmp_path):
+        path = tmp_path / "est.npy"
+        np.save(path, np.ones((1, 4, 2)))
+        with pytest.raises(ValueError, match="no labels to match"):
+            read_light_curves(str(path), [100, 200])

@@ -15,60 +15,129 @@ from tabascal.timing import measure_runtime
 import numpy as np
 import xarray as xr
 
-from typing import Tuple, Dict, Callable, List
+from typing import Tuple, Dict, Callable, List, Optional
+
+
+#: Keys a light-curve ``.npz`` may use to label its sources by NORAD id. ``titles``
+#: is what nufft-gif writes; ``norad_ids`` is accepted as the more explicit name.
+_LIGHT_CURVE_ID_KEYS = ("norad_ids", "titles")
+
+
+def _light_curve_ids(npz) -> Optional[List[int]]:
+    """NORAD ids labelling each row of ``light_curves``, or None if unlabelled.
+
+    Entries that are not integer ids (nufft-gif also plots named sources such as
+    "Fornax A") map to None so they can never match a satellite.
+    """
+    for key in _LIGHT_CURVE_ID_KEYS:
+        if key in npz.files:
+            ids = []
+            for label in npz[key]:
+                text = str(label).strip()
+                ids.append(int(text) if text.lstrip("-").isdigit() else None)
+            return ids
+    return None
 
 
 def read_light_curves(est_path: str, norad_ids: List[int]) -> Array:
     """Read an RFI light curve estimate, ordered to match `norad_ids`.
 
-    Light curve files written by `nufft-gif` label each source in `titles`, so the
-    satellites are matched by NORAD ID and any non-satellite sources (e.g. Fornax A)
-    are dropped. Files without `titles` fall back to the leading `n_rfi` sources,
-    which is only correct when the file's source order matches `norad_ids`.
+    File structure
+    --------------
+    A ``.npz`` holding
+
+    ``light_curves``
+        ``(n_src, n_time, n_freq)`` array of light curves, one row per source.
+    ``norad_ids`` (or ``titles``, which is what nufft-gif writes)
+        ``(n_src,)`` array of labels, one per row of ``light_curves``. Rows are
+        matched to satellites through these, so the row order in the file does
+        not have to match the configured satellite order. Labels that are not
+        integer NORAD ids (nufft-gif also plots named sources such as
+        "Fornax A") never match a satellite and are dropped.
+
+    A ``.npz`` **must** carry one of the id keys: a light curve attached to the
+    wrong satellite still has the right shape and still optimises, so positional
+    matching fails silently. A bare ``.npy`` array cannot carry labels at all;
+    it is accepted as a legacy format, matched positionally, and warns.
+
+    Partial coverage
+    ----------------
+    Satellites with no light curve in the file are initialised at zero, so an
+    estimate only has to cover the satellites it was actually measured for
+    rather than every satellite in the fit. Those are named in a warning. It is
+    an error for *no* configured satellite to be found, which otherwise silently
+    degrades the whole estimate to zeros.
 
     Returns
     -------
     Array (n_rfi, n_time, n_freq)
-        Light curves, with out-of-view NaNs replaced by a zero RFI estimate.
+        Light curves in `norad_ids` order, with unmatched satellites zero and
+        out-of-view NaNs replaced by a zero RFI estimate.
     """
 
     est = np.load(est_path)
-    titles = None
+    ids = None
     # Detected from what np.load returned rather than the file extension: a .npz
     # saved under another name would otherwise be indexed as if it were an array.
     if isinstance(est, np.lib.npyio.NpzFile):
-        titles = [str(t) for t in est["titles"]] if "titles" in est.files else None
         if "light_curves" not in est.files:
             raise ValueError(
                 f"{est_path} is a .npz without a 'light_curves' array. "
                 f"It contains {sorted(est.files)}."
             )
+        ids = _light_curve_ids(est)
+        if ids is None:
+            raise ValueError(
+                f"{est_path} carries no source labels. A light-curve .npz must "
+                f"have one of {list(_LIGHT_CURVE_ID_KEYS)} giving the NORAD id of "
+                "each row of 'light_curves', so rows are matched to satellites by "
+                "id rather than by position. "
+                f"It contains {sorted(est.files)}."
+            )
         est = est["light_curves"]
 
-    if titles is None:
+    est = np.asarray(est)
+
+    if ids is None:
+        # Bare .npy: there is nowhere in the format to put labels.
         print(
-            f"Warning: {est_path} has no source labels. Taking the first "
-            f"{len(norad_ids)} light curves as the satellites, in file order."
+            f"Warning: {est_path} is a bare .npy with no source labels, so its "
+            f"first {len(norad_ids)} light curves are taken as the satellites in "
+            "file order. Save a .npz with 'norad_ids' to match by id instead."
         )
         if len(est) < len(norad_ids):
             raise ValueError(
                 f"{est_path} has {len(est)} light curves but {len(norad_ids)} "
-                "satellites are configured, and it carries no 'titles' to match "
+                "satellites are configured, and it carries no labels to match "
                 "them by."
             )
-        idxs = list(range(len(norad_ids)))
-    else:
-        lc_idx = {int(t): i for i, t in enumerate(titles) if t.strip().isdigit()}
-        missing = [n_id for n_id in norad_ids if int(n_id) not in lc_idx]
-        if missing:
-            raise ValueError(
-                f"No light curve found in {est_path} for NORAD IDs {missing}. "
-                f"It contains {sorted(lc_idx)}."
-            )
-        idxs = [lc_idx[int(n_id)] for n_id in norad_ids]
+        return jnp.nan_to_num(jnp.asarray(est[: len(norad_ids)]))
+
+    lc_idx = {n_id: i for i, n_id in enumerate(ids) if n_id is not None}
+    rows = [lc_idx.get(int(n_id)) for n_id in norad_ids]
+
+    if all(row is None for row in rows):
+        raise ValueError(
+            f"No light curve in {est_path} matches any configured satellite. "
+            f"Configured NORAD IDs are {sorted(set(int(n) for n in norad_ids))} "
+            f"and the file contains {sorted(lc_idx)}."
+        )
+
+    missing = [int(n_id) for n_id, row in zip(norad_ids, rows) if row is None]
+    if missing:
+        print(
+            f"Warning: no light curve in {est_path} for NORAD IDs "
+            f"{sorted(set(missing))}; initialising those satellites at zero. "
+            f"The file contains {sorted(lc_idx)}."
+        )
 
     # NaN (satellite out of view) -> 0 RFI estimate; keeps the init finite.
-    return jnp.nan_to_num(jnp.asarray(est[idxs]))
+    matched = jnp.nan_to_num(jnp.asarray(est[[r for r in rows if r is not None]]))
+
+    out = jnp.zeros((len(norad_ids),) + matched.shape[1:], dtype=matched.dtype)
+    kept = [i for i, row in enumerate(rows) if row is not None]
+
+    return out.at[jnp.asarray(kept)].set(matched)
 
 
 def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:

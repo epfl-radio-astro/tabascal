@@ -143,7 +143,7 @@ The `rfi` section defines the prior distribution over the RFI signal. An example
 rfi:
   init: sample
   mean: 0
-  min_elevation: null
+  min_elevation: 0
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   freq_int_samples: 1
@@ -157,13 +157,13 @@ rfi:
 
 All parameters in this section that overlap with those of the `ast` section have the same definition. The only additional parameters are
 
-* `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. `null` (the default) disables masking and models every satellite over the whole observation.
+* `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
-  While a satellite is below the horizon it contributes no signal, but the unmasked model still carries a full set of free parameters for it over those times. Those parameters have no signal of their own to constrain them, so they are free to absorb signal that belongs elsewhere — the astronomical sky, or another RFI source — to the extent that the RFI signal prior admits it and the fringe rates overlap. Masking removes the parameters rather than relying on the fit to leave them alone.
+  While a satellite is below the horizon it contributes no signal, but an unmasked model still carries a full set of free parameters for it over those times. Those parameters have no signal of their own to constrain them, so they are free to absorb signal that belongs elsewhere — the astronomical sky, or another RFI source — to the extent that the RFI signal prior admits it and the fringe rates overlap. Masking removes the parameters rather than relying on the fit to leave them alone. This is why `0` rather than `null` is the default: a satellite below the horizon is not a modelling choice, it is simply not there.
 
   Each satellite gets its own in-view window, evaluated on the observation time grid and expanded over each integration, so an integration is never partially masked. Setup fails if a satellite is never above the cut, since it would then be modelled nowhere.
 
-  The appropriate cut is observation-dependent and is not currently calibrated: `0` restricts the model to the geometric horizon, and a larger value additionally excludes the low-elevation part of each pass, where the fringe rate is lowest and the overlap with other components is therefore greatest. Note that masking is about which parameters exist, not about subtraction quality, and reduced $\chi^2$ is largely insensitive to it — judge the effect on the recovered sky model.
+  Raising the cut above `0` additionally excludes the low-elevation part of each pass, where the fringe rate is lowest and the overlap with other components is therefore greatest. How far to raise it is observation-dependent and is not currently calibrated, so no value above `0` is recommended here. Note that masking is about which parameters exist, not about subtraction quality, and reduced $\chi^2$ is largely insensitive to it — judge the effect on the recovered sky model.
 
 * `freq_int_samples`: This is the amount of over-sampling in the frequency domain that is used and then averaged back down to the data sampling rate. It therefore determines the number of samples per frequency channel that are used in the averaging to correctly calculate the fringe-winding loss (band-smearing). Band-smearing can be caused by both the phase variation over the channel width due to the geometric phase as well as the intrinsic signal of the RFI sources.
 * `time_int_factor`: In the time axis the number of integration samples needed to accurately model fringe-winding loss (time-smearing) is calculated based solely on the fringe rate due to the movement of the RFI source as well as the signal to noise ratio with
@@ -171,6 +171,25 @@ All parameters in this section that overlap with those of the `ast` section have
 $$N^T_\text{int} \geq  \pi \nu_F \Delta t \sqrt{\frac{\lvert V^\text{RFI}_\text{inst} \rvert}{6 \sigma_n}}$$
 
 where $N^T_\text{int}$ is the number of integration samples used per time step, $\Delta t$ is the integration time for a single sample, $\nu_F$ is the fringe frequency of the source due to its movement, $\lvert V^\text{RFI}_\text{inst} \rvert$ is the instantaneous RFI visibility amplitude, and $\sigma_n$ is the visibility noise of a single data point. This parameter (`time_int_factor`) determines the factor by which to increase this oversampling.
+
+### RFI light curve estimates
+
+`rfi.est` points at a measured light curve file, used by `init: est` and `mean: est` to seed the RFI signal. It must be a `.npz` containing
+
+| key | shape | contents |
+|---|---|---|
+| `light_curves` | `(n_src, n_time, n_freq)` | one light curve per source |
+| `norad_ids` | `(n_src,)` | the NORAD id of each row of `light_curves` |
+
+`titles` is accepted in place of `norad_ids`, since that is the key `nufft-gif` writes.
+
+**Rows are matched to satellites by NORAD id, not by position**, so the order of sources in the file does not have to match `satellites.norad_ids`. This matters because the failure mode of positional matching is silent: a light curve attached to the wrong satellite still has the right shape and still optimises, it just seeds the prior from another satellite. For that reason a `.npz` without an id key is rejected rather than matched positionally.
+
+Labels that are not integer NORAD ids never match a satellite and are simply dropped, so a file may carry named sources (e.g. `Fornax A`) alongside the satellites without any filtering beforehand.
+
+**The file does not have to cover every satellite in the fit.** Satellites with no light curve in it are initialised at zero and named in a warning, so light curves can be measured for a subset — say the bright or well-characterised sources — while the rest are still modelled and fitted, just without an informative starting point. It is an error only if *no* configured satellite is found in the file, which would otherwise silently reduce the whole estimate to zeros.
+
+A bare `.npy` array is still accepted for backwards compatibility. It has nowhere to put labels, so it is matched positionally against the leading `n_rfi` rows and warns; prefer a `.npz`.
 
 ## Satellites
 
