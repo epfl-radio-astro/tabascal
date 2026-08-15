@@ -28,8 +28,6 @@ import numpyro
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
     ComplexRFIConstAnt,
-    RealRFIVarAnt,
-    compute_real_space_gp_params,
     rfi_signal_config_validation,
 )
 from tabascal.fft_gp import latent_to_signal
@@ -44,8 +42,7 @@ from .conftest import active_precision, assert_transform_roundtrip, make_constan
 
 N_RFI, N_RFI_REAL, N_ANT, N_FREQ, N_TIME = 4, 3, 3, 4, 8
 
-ALL_CLASSES = [RealRFIVarAnt, ComplexRFIVarAnt, ComplexRFIConstAnt]
-REAL_SPACE_CLASSES = [RealRFIVarAnt]
+ALL_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
 FOURIER_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
 
 # Init modes every class accepts. "truth" is excluded throughout: it goes through
@@ -273,51 +270,6 @@ class TestRfiSignalConfigValidation:
 
 
 # ---------------------------------------------------------------------------
-# compute_real_space_gp_params
-# ---------------------------------------------------------------------------
-
-class TestComputeRealSpaceGPParams:
-
-    def test_shapes_and_count(self):
-        """n_gp_times follows get_times, and the resample operator maps GP -> fine grid."""
-        times = jnp.linspace(0.0, 120.0, 8)
-        times_fine = jnp.linspace(0.0, 120.0, 16)
-        corr_time = 24.0
-
-        n_gp_times, gp_times, resample_op = compute_real_space_gp_params(
-            corr_time, 1.0, times, times_fine
-        )
-
-        assert n_gp_times == len(get_times(times, corr_time))
-        assert gp_times.shape == (n_gp_times,)
-        assert resample_op.shape == (len(times_fine), n_gp_times)
-
-    @pytest.mark.requires_double
-    @pytest.mark.parametrize("signal_fn", [jnp.ones_like, lambda t: jnp.sin(t / 24.0)])
-    def test_resampling_interpolates_onto_the_fine_grid(self, signal_fn):
-        """The operator interpolates a GP-grid signal onto the fine grid.
-
-        Loose tolerance on purpose: this is GP interpolation with a 1e-8 nugget, not an
-        exact reconstruction, and the assertion only needs to catch a broken operator.
-
-        Double precision only: ``resampling_kernel`` inverts the GP covariance with a
-        1e-8 nugget, which in fp32 is ill-conditioned enough that the operator picks up
-        O(0.5) ripples and interpolates visibly badly.
-        """
-        times = jnp.linspace(0.0, 120.0, 8)
-        times_fine = jnp.linspace(0.0, 120.0, 16)
-        corr_time = 24.0
-
-        _, gp_times, resample_op = compute_real_space_gp_params(
-            corr_time, 1.0, times, times_fine
-        )
-
-        assert jnp.allclose(
-            resample_op @ signal_fn(gp_times), signal_fn(times_fine), atol=1e-2
-        )
-
-
-# ---------------------------------------------------------------------------
 # BaseGPRFI padding helpers
 # ---------------------------------------------------------------------------
 
@@ -325,7 +277,7 @@ class TestPaddingHelpers:
     """The device-sharding helpers on BaseGPRFI, driven through a concrete subclass."""
 
     def test_mask_dummy_rfi_zeroes_only_padded_rows(self):
-        comp = setup_component(RealRFIVarAnt)
+        comp = setup_component(ComplexRFIVarAnt)
         arr = jnp.arange(N_RFI * 2 * 3, dtype=float).reshape(N_RFI, 2, 3) + 1.0
 
         masked = comp._mask_dummy_rfi(arr)
@@ -334,7 +286,7 @@ class TestPaddingHelpers:
         assert jnp.all(masked[N_RFI_REAL:] == 0)
 
     def test_mask_dummy_rfi_is_noop_when_unpadded(self):
-        comp = setup_component(RealRFIVarAnt, n_rfi=N_RFI, n_rfi_real=N_RFI)
+        comp = setup_component(ComplexRFIVarAnt, n_rfi=N_RFI, n_rfi_real=N_RFI)
         arr = jnp.ones((N_RFI, 2, 3))
 
         assert jnp.array_equal(comp._mask_dummy_rfi(arr), arr)
@@ -342,7 +294,7 @@ class TestPaddingHelpers:
     @pytest.mark.parametrize("dtype", [float, complex])
     def test_zero_pad_rfi_grows_and_zeroes(self, dtype):
         """A truth/estimate array with only the real sources is padded with exact zeros."""
-        comp = setup_component(RealRFIVarAnt)
+        comp = setup_component(ComplexRFIVarAnt)
         arr = jnp.ones((N_RFI_REAL, 2, 3), dtype=dtype)
 
         padded = comp._zero_pad_rfi(arr)
@@ -353,14 +305,14 @@ class TestPaddingHelpers:
         assert jnp.all(padded[N_RFI_REAL:] == 0)
 
     def test_zero_pad_rfi_is_identity_when_already_full(self):
-        comp = setup_component(RealRFIVarAnt)
+        comp = setup_component(ComplexRFIVarAnt)
         arr = jnp.ones((N_RFI, 2, 3))
 
         assert comp._zero_pad_rfi(arr) is arr
 
     def test_n_rfi_real_defaults_to_n_rfi_when_config_lacks_it(self):
         """An unpadded TabConfig has no n_rfi_real; the mask must then be a no-op."""
-        comp = setup_component(RealRFIVarAnt, with_n_rfi_real=False)
+        comp = setup_component(ComplexRFIVarAnt, with_n_rfi_real=False)
 
         assert comp.n_rfi_real == comp.n_rfi
         arr = jnp.ones((N_RFI, 2, 3))
@@ -409,7 +361,6 @@ class TestComponentContract:
     @pytest.mark.parametrize(
         "cls,expected",
         [
-            (RealRFIVarAnt, {"L_rfi_A", "mu_rfi_A", "resample_rfi"}),
             (ComplexRFIVarAnt, {"sigma_rfi_k", "mu_rfi_k"}),
             (ComplexRFIConstAnt, {"sigma_rfi_k", "mu_rfi_k"}),
         ],
@@ -450,10 +401,8 @@ class TestComponentContract:
     @pytest.mark.parametrize(
         "cls,complex_valued",
         [
-            # RealRFIVarAnt models a real-valued amplitude; the others are complex. Note the
-            # state_outputs placeholder is always complex, so for RealRFIVarAnt the forward
+            # All surviving components model a complex amplitude. Note the
             # narrows the dtype when it overwrites it.
-            (RealRFIVarAnt, False),
             (ComplexRFIVarAnt, True),
             (ComplexRFIConstAnt, True),
         ],
@@ -607,13 +556,6 @@ class TestDummySourcesStayDark:
 
 class TestTransforms:
 
-    def test_real_rfi_roundtrip(self):
-        comp = setup_component(RealRFIVarAnt)
-        shape = comp.init_params_base["rfi_r_induce_base"].shape
-        base = jax.random.normal(jax.random.PRNGKey(42), shape)
-
-        assert_transform_roundtrip(comp, base, comp.L_rfi_A, comp.mu_rfi_A)
-
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_fourier_roundtrip(self, cls):
         """The Fourier transform pair is a plain scale-and-shift, so it inverts exactly."""
@@ -623,27 +565,6 @@ class TestTransforms:
         base = jax.random.normal(k1, shape) + 1j * jax.random.normal(k2, shape)
 
         assert_transform_roundtrip(comp, base, comp.sigma_rfi_k, comp.mu_rfi_k, atol=tol())
-
-    @pytest.mark.parametrize("cls", REAL_SPACE_CLASSES)
-    def test_cholesky_factor_reconstructs_the_kernel(self, cls):
-        """L is lower-triangular and L @ L.T recovers the GP covariance."""
-        comp = setup_component(cls)
-        L = comp.L_rfi_A
-
-        assert L.shape == (comp.n_rfi_times, comp.n_rfi_times)
-        assert jnp.allclose(L, jnp.tril(L))
-
-        expected = base_kernel(
-            comp.rfi_times, comp.rfi_times, comp.gp_var, comp.corr_time
-        ) + 1e-8 * jnp.eye(comp.n_rfi_times)
-        assert jnp.allclose(L @ L.T, expected, atol=1e-5)
-
-    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
-    def test_sigma_is_broadcastable_over_sources_and_antennas(self, cls):
-        """The Fourier scale is shared by every source and antenna."""
-        comp = setup_component(cls)
-        assert comp.sigma_rfi_k.shape == (1, 1, comp.n_k_freq_rfi, comp.n_k_time_rfi)
-        assert jnp.all(comp.sigma_rfi_k > 0)
 
 
 # ---------------------------------------------------------------------------
@@ -719,10 +640,6 @@ class TestFourierScanTransform:
 
 class TestClassSpecifics:
 
-    def test_real_rfi_init_params_are_real_only(self):
-        comp = setup_component(RealRFIVarAnt)
-        assert set(comp.init_params) == {"rfi_r_induce"}
-
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_fourier_init_params_split_real_and_imaginary(self, cls):
         comp = setup_component(cls)
@@ -751,14 +668,6 @@ class TestClassSpecifics:
         rfi_A = run_forward(comp, random_params(comp))
 
         assert not jnp.allclose(rfi_A[:N_RFI_REAL], rfi_A[:N_RFI_REAL, :1])
-
-    @pytest.mark.parametrize("cls", REAL_SPACE_CLASSES)
-    def test_real_space_gp_grid_attributes(self, cls):
-        comp = setup_component(cls)
-
-        assert comp.rfi_times.shape == (comp.n_rfi_times,)
-        assert comp.resample_rfi.shape == (N_TIME, comp.n_rfi_times)
-        assert comp.mu_rfi_A.shape == (N_RFI, N_ANT, N_FREQ, comp.n_rfi_times)
 
 
 # ---------------------------------------------------------------------------

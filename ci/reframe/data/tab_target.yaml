@@ -5,7 +5,6 @@ model:
     # - trajectory:KeplerOrbit
     # - trajectory:PhaseCalculationRFI
   # RFI signal model
-    # - rfi_signal:RealRFIVarAnt
     - rfi_signal:ComplexRFIVarAnt
     # - rfi_signal:ComplexRFIConstAnt
   # RFI visibility calculation
