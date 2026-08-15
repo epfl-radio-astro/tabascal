@@ -3,7 +3,7 @@ import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
-from tabascal.tab_tools import get_ast_fringe_rate
+from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
@@ -33,6 +33,7 @@ class GPVisAst(Component):
             self.chan_width = config.chan_width
             self.dish_d = config.dish_d
             self.uvw = config.uvw
+            self.dec = config.phase_centre["dec"]
             self.freqs = config.freqs
             self.times = config.times
 
@@ -123,17 +124,17 @@ class GPVisAst(Component):
     def _compute_gp_params(self):
 
         if self.fov_deg:
-            eff_dish_d = float(
-                1.22 * 3e8 / (jnp.min(self.freqs) * jnp.deg2rad(self.fov_deg))
-            )
+            # fov_deg is the full field of view (diameter) out to the first null;
+            # the effective diameter makes the beam radius in
+            # max_ast_fringe_rate equal to fov_deg / 2.
+            eff_dish_d = float(fov_to_eff_diameter(self.fov_deg, jnp.min(self.freqs)))
         else:
             eff_dish_d = self.dish_d
 
-        # self.ast_fr = vmap(get_ast_fringe_rate, (None, 0, None), (1))(
-        #     self.uvw[:, :, :2], self.freqs, eff_dish_d
-        # ) # Separate Fringe Rate for each baseline and frequency
-        self.ast_fr = get_ast_fringe_rate(
-            self.uvw[:, :, :2], self.freqs.max(), eff_dish_d
+        # One maximum fringe rate per baseline; time and frequency are reduced
+        # inside max_ast_fringe_rate.
+        self.ast_fr = max_ast_fringe_rate(
+            self.uvw, self.dec, self.freqs, eff_dish_d
         )
 
         self.k0_time = self.ast_fr

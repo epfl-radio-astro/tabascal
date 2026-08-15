@@ -18,6 +18,7 @@ Welcome to tabscal documentation
    :caption: Developer
 
    installation
+   pipeline_tests
    api
    readthedocs
 
