@@ -135,40 +135,52 @@ def plot(workdir: Path, meta: dict, precision: str, max_iter: int, device: str) 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), sharey=True)
     colours = {"matrix": "#B45309", "fourier": "#1D4ED8"}
-
     traces = {k: np.load(workdir / f"trace_{k}.npz") for k in VARIANTS}
 
-    # The loss is a negative log posterior and carries a large additive
-    # constant, so plotted raw it is a flat line at ~0.2183 and shows nothing.
-    # Plot the excess over the best value either model reached, which is the
-    # part that actually moves; the offset keeps the final points on a log axis.
-    floor = min(t["loss"].min() for t in traces.values())
-    span = max(t["loss"].max() for t in traces.values()) - floor
-    eps = 0.01 * span
+    # Only quantities fixed by the data are plotted. The optimiser loss is a
+    # negative log joint whose prior term has a different latent dimension for
+    # each model, so the two loss curves are not on a common scale; chi^2 and
+    # the truth NRMSEs are.
+    METRICS = [
+        ("chi2", "Reduced $\\chi^2$", 1.0),
+        ("vis_ast_nrmse", "Ast. vis RMSE / noise", None),
+        ("vis_rfi_nrmse", "RFI vis RMSE / noise", None),
+    ]
+    present = [m for m in METRICS if m[0] in traces["matrix"]]
+    if not present:
+        raise SystemExit(
+            "traces carry no chi2/NRMSE metrics -- they predate metric tracing, "
+            "or the run had no truth available (rfi.init/ast.init must be 'truth', "
+            "or plots.truth set, for the NRMSEs). Re-run to regenerate."
+        )
 
-    for key, (_, label) in VARIANTS.items():
-        d = traces[key]
-        excess = d["loss"] - floor + eps
-        axes[0].plot(np.arange(1, len(excess) + 1), excess, color=colours[key], label=label)
-        axes[1].plot(d["time_s"], excess, color=colours[key], label=label)
+    fig, axes = plt.subplots(2, len(present), figsize=(4.6 * len(present), 8.4), squeeze=False)
 
-    axes[0].set_xlabel("Iteration")
-    axes[0].set_title("By iteration — hides cost per step")
-    axes[1].set_xlabel("Wall-clock time (s)")
-    axes[1].set_title("By wall-clock time — the honest axis")
-    for ax in axes:
-        ax.set_yscale("log")
-        ax.grid(alpha=0.3)
-        ax.legend()
-    axes[0].set_ylabel("Loss above best reached (neg. log posterior / obs size)")
+    for col, (name, label, target) in enumerate(present):
+        for key, (_, series) in VARIANTS.items():
+            d = traces[key]
+            axes[0][col].plot(np.arange(1, len(d[name]) + 1), d[name], color=colours[key], label=series)
+            axes[1][col].plot(d["time_s"], d[name], color=colours[key], label=series)
+        for row, xlabel in ((0, "Iteration"), (1, "Wall-clock time (s)")):
+            ax = axes[row][col]
+            if target is not None:
+                ax.axhline(target, color="0.4", ls=":", lw=1, label="$\\chi^2=1$")
+            ax.set_yscale("log")
+            ax.set_xlabel(xlabel)
+            ax.grid(alpha=0.3)
+            if col == 0:
+                ax.legend(fontsize=8)
+        axes[0][col].set_title(label)
+
+    axes[0][0].set_ylabel("by iteration — hides cost per step")
+    axes[1][0].set_ylabel("by wall-clock time — the honest axis")
 
     n_iter = 2 * max_iter
     fig.suptitle(
         f"RFI-signal component convergence — {meta['workload']}, "
         f"{precision} precision, {n_iter} iterations, {device}",
-        fontsize=12,
+        fontsize=13,
     )
     fig.tight_layout()
     out = workdir / "loss_vs_time.png"

@@ -47,6 +47,29 @@ def _map_step(model, optimizer, params, opt_state, state, constants, obs_data):
     return new_params, new_opt_state, loss
 
 
+@partial(jax.jit, static_argnums=(0, 1, 2))
+def _map_step_metrics(
+    model, optimizer, metrics_fn, params, opt_state, state, constants, obs_data
+):
+    """``_map_step`` that also returns per-iteration diagnostic metrics.
+
+    The metrics come out of the same ``log_density`` trace as the loss, so this
+    costs a few elementwise reductions over the visibility array rather than a
+    second forward pass. Kept separate from ``_map_step`` so the production
+    path is untouched.
+    """
+    def neg_log_post(params):
+        lp, model_trace = log_density(
+            model, (obs_data,), {"state": state, "constants": constants}, params
+        )
+        return -lp / obs_data.size, metrics_fn(model_trace)
+
+    (loss, metrics), grads = jax.value_and_grad(neg_log_post, has_aux=True)(params)
+    updates, new_opt_state = optimizer.update(grads, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+    return new_params, new_opt_state, loss, metrics
+
+
 @measure_runtime
 def nlog_like(prob_model, params, obs_data, state=None, constants=None):
 
@@ -436,23 +459,86 @@ def run_svi(
     return svi_results, guide
 
 
-def _write_loss_trace(losses: list, step_times: list, obs_size: int) -> None:
-    """Dump the loss/time trace to ``$TAB_LOSS_TRACE``, if that is set.
+def loss_trace_path() -> Optional[str]:
+    """Path to dump the optimiser trace to, or None when tracing is off."""
+    path = os.environ.get("TAB_LOSS_TRACE")
+    return path if (path and is_process_0()) else None
+
+
+def build_trace_metrics(tab_config, truth: Optional[dict]) -> Callable:
+    """Per-iteration metrics defined by the data, not by the parameterisation.
+
+    The optimiser loss is a negative log *joint*, so its prior term depends on
+    the latent dimension of whichever model is running -- 123 Fourier k-modes
+    against 76 inducing times for the same GP, say. Two models' loss curves are
+    therefore not on a common scale and cannot be compared directly. These
+    quantities can: reduced chi^2 is fixed by the data, and the ast/rfi RMSE is
+    measured against the simulation truth. Both use the same flag masking and
+    noise normalisation as the values printed at init/opt.
+    """
+    noise = tab_config.noise
+    flags = tab_config.flags
+    vis_obs = tab_config.vis_obs
+    truth = truth or {}
+
+    available = [
+        key
+        for key in ("vis_ast", "vis_rfi")
+        if truth.get(key) is not None and not bool(jnp.all(jnp.isnan(truth[key])))
+    ]
+
+    # reduced_chi2/rmse select with ``x[~flags]``, whose output shape depends on
+    # the mask -- fine eagerly, not traceable. Weight by the mask instead and
+    # divide by a statically known count, which is numerically the same thing.
+    keep = ~flags if flags is not None and flags.shape == vis_obs.shape else None
+    n_keep = float(keep.sum()) if keep is not None else float(vis_obs.size)
+
+    def _masked_mean_sq(diff):
+        sq = jnp.abs(diff) ** 2
+        return jnp.sum(sq if keep is None else jnp.where(keep, sq, 0.0)) / n_keep
+
+    def metrics(model_trace: dict) -> dict:
+        # chi^2 normalises by 2*N for complex data (real and imaginary parts),
+        # matching reduced_chi2.
+        out = {
+            "chi2": _masked_mean_sq(
+                (model_trace["vis_obs"]["value"] - vis_obs) / noise
+            ) / 2.0
+        }
+        for key in available:
+            out[f"{key}_nrmse"] = (
+                jnp.sqrt(_masked_mean_sq(model_trace[key]["value"] - truth[key])) / noise
+            )
+        return out
+
+    return metrics
+
+
+def _write_loss_trace(
+    losses: list, step_times: list, obs_size: int, metrics: Optional[dict] = None
+) -> None:
+    """Dump the optimiser trace to ``$TAB_LOSS_TRACE``, if that is set.
 
     Losses are divided by ``obs_size`` to match the normalisation the pipeline
-    reports elsewhere, so the values line up with the printed reduced chi^2
-    rather than being raw sums.
+    reports elsewhere. ``metrics`` holds the per-iteration model-independent
+    quantities from :func:`build_trace_metrics`.
     """
-    path = os.environ.get("TAB_LOSS_TRACE")
-    if not path or not is_process_0():
+    path = loss_trace_path()
+    if not path:
         return
 
-    np.savez(
-        path,
-        loss=np.asarray(losses, dtype=float) / obs_size,
-        time_s=np.asarray(step_times, dtype=float),
+    arrays = {
+        "loss": np.asarray(losses, dtype=float) / obs_size,
+        "time_s": np.asarray(step_times, dtype=float),
+    }
+    for name, values in (metrics or {}).items():
+        arrays[name] = np.asarray(values, dtype=float)
+
+    np.savez(path, **arrays)
+    print(
+        f"Wrote trace ({len(losses)} iterations, "
+        f"{sorted(arrays)}) to {path}"
     )
-    print(f"Wrote loss trace ({len(losses)} iterations) to {path}")
 
 
 @measure_runtime
@@ -465,6 +551,7 @@ def run_custom_svi(
     dual_run: bool = True,
     state: dict = None,
     constants: dict = None,
+    metrics_fn: Callable = None,
 ) -> SVIRunResult:
     """MAP optimization that avoids capturing large state arrays as JAX constants.
 
@@ -488,6 +575,9 @@ def run_custom_svi(
     # after it bounds completed work rather than dispatched work.
     step_times = []
     trace_t0 = None
+    # Only traced when a metrics function is supplied, so the production path
+    # keeps its original per-iteration cost.
+    traced_metrics: dict = {}
 
     def _run_phase(params, epsilon, max_iter):
         nonlocal trace_t0
@@ -500,9 +590,17 @@ def run_custom_svi(
         for i in pbar:
             if trace_t0 is None:
                 trace_t0 = perf_counter()
-            params, opt_state, loss = _map_step(
-                prob_model, optimizer, params, opt_state, state, constants, obs_data
-            )
+            if metrics_fn is None:
+                params, opt_state, loss = _map_step(
+                    prob_model, optimizer, params, opt_state, state, constants, obs_data
+                )
+            else:
+                params, opt_state, loss, step_metrics = _map_step_metrics(
+                    prob_model, optimizer, metrics_fn, params, opt_state,
+                    state, constants, obs_data,
+                )
+                for name, value in step_metrics.items():
+                    traced_metrics.setdefault(name, []).append(float(value))
             loss_val = float(loss)
             step_times.append(perf_counter() - trace_t0)
             losses.append(loss_val)
@@ -525,7 +623,7 @@ def run_custom_svi(
         params, losses2 = _run_phase(params, epsilon / 10, max_iter)
         losses = losses + losses2
 
-    _write_loss_trace(losses, step_times, obs_data.size)
+    _write_loss_trace(losses, step_times, obs_data.size, traced_metrics)
 
     # Add _auto_loc suffix to match AutoDelta convention expected by downstream code
     params_out = {k + "_auto_loc": v for k, v in params.items()}
@@ -602,6 +700,9 @@ def run_opt(
         dual_run=tab_config.args["opt"]["dual_run"],
         state=state,
         constants=constants,
+        metrics_fn=(
+            build_trace_metrics(tab_config, truth) if loss_trace_path() else None
+        ),
     )
     vi_params = vi_results.params
     # Strip _auto_loc suffix to get raw param names for Predictive
