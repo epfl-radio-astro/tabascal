@@ -509,6 +509,9 @@ rfi_vis_configs = [
             # fp32 and fp64 agree to 2.4e-5 on chi2 and to the printed precision on the
             # metrics, on every platform tested -- the old real-space component did not --
             # so a single set of references covers both and there is no per-precision split.
+            # The fp32 offset is 2.4e-5 on ARM, x86 and CUDA alike, i.e. a precision effect
+            # rather than an architecture one; the cross-architecture spread in double is
+            # <=4.3e-7. That is what makes one scalar at 1% tolerance safe for both.
             metrics_ref={
                 "ast": {"NRMSE(noise)": (0.28, 0.33), "bias_significance": (0.0, 2.0)},
                 "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
