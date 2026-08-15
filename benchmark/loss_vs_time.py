@@ -96,7 +96,10 @@ def prepare(workdir: Path, spec: str, precision: str, max_iter: int) -> Path:
     return wd
 
 
-def run(wd: Path, trace_path: Path) -> str:
+def run(wd: Path, trace_path: Path, cwd: Path | None = None) -> str:
+    """Run one variant. ``cwd`` is the directory relative paths in the config
+    resolve against -- staged configs carry relative paths such as
+    ``norad_ids_path``, which only resolve next to the original config."""
     sim_dir = (wd / "sim_dir.txt").read_text().strip()
     env = {**os.environ, "TAB_LOSS_TRACE": str(trace_path)}
     proc = subprocess.run(
@@ -109,7 +112,8 @@ def run(wd: Path, trace_path: Path) -> str:
             "--extra-orbit-dir", str(SRC_ROOT / "tabascal" / "data" / "tles"),
             "-t",
         ],
-        env=env, capture_output=True, text=True, check=False,
+        env=env, cwd=str(cwd) if cwd else None,
+        capture_output=True, text=True, check=False,
     )
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout[-4000:] + proc.stderr[-4000:])
@@ -126,7 +130,7 @@ def parse_chi2(stdout: str) -> dict:
     return out
 
 
-def plot(workdir: Path, meta: dict, precision: str, max_iter: int) -> Path:
+def plot(workdir: Path, meta: dict, precision: str, max_iter: int, device: str) -> Path:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -163,7 +167,7 @@ def plot(workdir: Path, meta: dict, precision: str, max_iter: int) -> Path:
     n_iter = 2 * max_iter
     fig.suptitle(
         f"RFI-signal component convergence — {meta['workload']}, "
-        f"{precision} precision, {n_iter} iterations, CPU",
+        f"{precision} precision, {n_iter} iterations, {device}",
         fontsize=12,
     )
     fig.tight_layout()
@@ -181,6 +185,7 @@ def main():
     p.add_argument("--config", type=Path, help="Existing tab config to use instead of building the perf workload")
     p.add_argument("--sim-dir", help="Simulation directory matching --config")
     p.add_argument("--workload", default="96 ant / 90 times / 1 chan / 32 sat")
+    p.add_argument("--device", default="CPU", help="Device label for the plot title")
     args = p.parse_args()
     if bool(args.config) != bool(args.sim_dir):
         p.error("--config and --sim-dir must be given together")
@@ -200,13 +205,17 @@ def main():
                 )
             else:
                 wd = prepare(args.workdir, spec, args.precision, args.max_iter)
-            stdout = run(wd, args.workdir / f"trace_{key}.npz")
+            stdout = run(
+                wd,
+                args.workdir / f"trace_{key}.npz",
+                cwd=args.config.parent if args.config else None,
+            )
             (args.workdir / f"stdout_{key}.txt").write_text(stdout)
             meta["runs"][key] = {"label": label, "chi2": parse_chi2(stdout)}
             print(meta["runs"][key], flush=True)
         meta_path.write_text(json.dumps(meta, indent=2))
 
-    out = plot(args.workdir, meta, args.precision, args.max_iter)
+    out = plot(args.workdir, meta, args.precision, args.max_iter, args.device)
     print(f"Wrote {out}")
 
 
