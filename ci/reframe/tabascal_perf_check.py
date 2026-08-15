@@ -61,7 +61,10 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     # NOTE: every reference here was measured with the deleted real-space
     # `rfi_signal:ComplexRFI`; the Fourier `ComplexRFIVarAnt` that replaced it in
     # `_components_map` is a different workload, so these need re-measuring on
-    # CSCS before they mean anything again (issue #103).
+    # CSCS before they mean anything again (issue #103). That component also now
+    # scans the antenna axis under `checkpoint` (#108), which trades a few percent
+    # of runtime for a large drop in peak memory, so the memory metrics in
+    # particular will not resemble the old ones.
     _expected_gpus = 1
     _expected_device_kind = "GH200"
 
