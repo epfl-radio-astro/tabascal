@@ -986,15 +986,13 @@ class FourierGPRFIConstAnt(BaseGPRFI):
             rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
-            rfi_A = vmap(vmap(latent_to_signal, (0, None, None), 0), (1, None, None), 1)(
-                rfi_k_A, pads, ss_idxs
+            # The antenna axis is a singleton, so map over n_rfi only.
+            rfi_A = vmap(latent_to_signal, (0, None, None), 0)(
+                rfi_k_A[:, 0], pads, ss_idxs
             )
-            # Broadcast the shared-antenna signal up to the full grid. Multiplying by
-            # ones allocated a second full-size array purely to broadcast;
-            # broadcast_to is equivalent (broadcasting is linear, so the gradient
-            # still sums over the antenna axis) without the allocation.
+            # Avoids allocating a full grid of ones and a multiply.
             rfi_A = jnp.broadcast_to(
-                rfi_A, (n_rfi, n_ant, n_freq_fine, n_time_fine)
+                rfi_A[:, None], (n_rfi, n_ant, n_freq_fine, n_time_fine)
             )
 
             state = {**state, "rfi_A": rfi_A}
