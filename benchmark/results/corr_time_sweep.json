@@ -1,0 +1,67 @@
+[
+  {
+    "chi2_init": 2.3530828952789307,
+    "chi2_opt": 1.0296061038970947,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 1.645,
+    "ast_nrmse_opt": 0.3923,
+    "rfi_nrmse_opt": 1.012,
+    "basis": 17,
+    "basis_kind": "k-modes",
+    "opt_s": 16.44,
+    "component": "rfi_signal:ComplexRFI",
+    "corr_time": 24.0
+  },
+  {
+    "chi2_init": 2.5265953540802,
+    "chi2_opt": 0.7788751721382141,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 1.748,
+    "ast_nrmse_opt": 0.3841,
+    "rfi_nrmse_opt": 1.06,
+    "basis": 17,
+    "basis_kind": "k-modes",
+    "opt_s": 18.44,
+    "component": "rfi_signal:ComplexRFI",
+    "corr_time": 12.0
+  },
+  {
+    "chi2_init": 2.912477493286133,
+    "chi2_opt": 0.5003470182418823,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 1.956,
+    "ast_nrmse_opt": 0.3949,
+    "rfi_nrmse_opt": 1.141,
+    "basis": 17,
+    "basis_kind": "k-modes",
+    "opt_s": 21.27,
+    "component": "rfi_signal:ComplexRFI",
+    "corr_time": 6.0
+  },
+  {
+    "chi2_init": 2.0152807235717773,
+    "chi2_opt": 0.35999441146850586,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 1.424,
+    "ast_nrmse_opt": 0.3888,
+    "rfi_nrmse_opt": 1.152,
+    "basis": 17,
+    "basis_kind": "k-modes",
+    "opt_s": 26.1,
+    "component": "rfi_signal:ComplexRFI",
+    "corr_time": 3.0
+  },
+  {
+    "chi2_init": 1.2677820920944214,
+    "chi2_opt": 0.7426331043243408,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7334,
+    "ast_nrmse_opt": 0.3766,
+    "rfi_nrmse_opt": 0.8037,
+    "basis": 180,
+    "basis_kind": "k-modes",
+    "opt_s": 23.39,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 24
+  }
+]

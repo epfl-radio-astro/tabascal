@@ -1,0 +1,19 @@
+{
+  "workload": "96 ant / 90 times / 1 chan / 32 sat",
+  "runs": {
+    "matrix": {
+      "label": "matrix GP (ComplexRFI)",
+      "chi2": {
+        "init": 2.3530828952789307,
+        "opt": 0.5681421160697937
+      }
+    },
+    "fourier": {
+      "label": "Fourier, scan+remat (FourierGPRFI)",
+      "chi2": {
+        "init": 1.2677820920944214,
+        "opt": 0.49193641543388367
+      }
+    }
+  }
+}
