@@ -56,24 +56,28 @@ does not move with `NRMSE(noise)`. Note that `RMSE` is in the *denominator* and
 `N_eff` is inside the square root, so the significance can rise while the fit
 strictly improves.
 
-This happened when the astronomical fringe rate was corrected:
+This happened when the astronomical fringe rate was corrected (`RiemannVis` case,
+double precision):
 
 | | before | after | |
 |---|---|---|---|
-| ast RMSE | 1.902e-01 | 1.631e-01 | −14% (better) |
-| ast \|ME\| (bias) | 1.280e-02 | 1.171e-02 | −8.5% (better) |
-| ast `N_eff` | 51 | 112 | +120% |
-| ast `bias_significance` | 0.7 | 1.1 | +57% |
+| ast RMSE | 1.989e-01 | 1.700e-01 | −14.5% (better) |
+| ast \|ME\| (bias) | 1.205e-02 | 1.217e-02 | +1.0% (flat) |
+| ast `N_eff` | 54 | 113 | +109% |
+| ast `bias_significance` | 0.6 | 1.1 | +83% |
 
-Both the total error and the coherent bias got *smaller*; the significance rose
-because `N_eff` more than doubled, so `sqrt(2 * N_eff)` grew ~48% and dominated.
-A smaller residual measured over more effectively-independent samples resolves
-the same bias more sharply. A rising significance is only a problem if `|ME|`
-itself is growing, or if it approaches the bound — check the absolute bias before
+The total error dropped 14.5% and the coherent bias barely moved, yet the
+significance nearly doubled. Both surviving factors push the same way: `N_eff`
+more than doubled, so `sqrt(2 * N_eff)` grew ~44%, and the shrinking `RMSE` in
+the denominator added another ~17%. The same bias measured over more
+effectively-independent samples, against a smaller residual, is simply resolved
+more sharply. A rising significance is only a problem if `|ME|` itself is
+growing, or if it approaches the bound — check the absolute bias before
 concluding anything from the sigma value alone.
 
 Beware of rounding too: the significance is printed to one decimal, so the `rfi`
-value "increasing" from 0.2 to 0.3 in that same change was really 0.249 → 0.260.
+value in that same change reads as a jump from 0.1 to 0.2 when the underlying
+values are 0.106 → 0.232.
 
 ## Re-recording the references
 
