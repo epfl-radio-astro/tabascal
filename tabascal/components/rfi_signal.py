@@ -202,6 +202,15 @@ class BaseGPRFI(Component):
         # amplitude and zero gradient (the vis contribution is quadratic in rfi_A).
         self.n_rfi_real = getattr(tab_config, "n_rfi_real", tab_config.n_rfi)
 
+        # Experimental override of the Fourier power-spectrum shape, for the
+        # issue #107 sweeps. Deliberately NOT `rfi.pow_spec`: that block exists
+        # in every shipped config carrying cutoff/gammas/k0s/p0 and is read by
+        # nothing, and its values differ from the hard-coded ones, so honouring
+        # it would silently change the model for every existing run. Keyed
+        # separately so a sweep is a controlled change against current
+        # behaviour; absent, each class keeps its own hard-coded defaults.
+        self.pow_spec_cfg = tab_config.args["rfi"].get("pow_spec_override") or {}
+
     def _mask_dummy_rfi(self, arr: Array) -> Array:
         """Zero the padded (dark dummy) rows of an (n_rfi, ...) array; no-op unpadded."""
         return arr.at[self.n_rfi_real:].set(0)
@@ -743,10 +752,13 @@ class FourierGPRFI(BaseGPRFI):
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
         k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
         p0 = self.gp_var #* self.n_time * self.n_freq
-        # gammas = [1e2, 1e2]
-        # gammas = [5, 5]
-        gammas = [3, 3]
-        pk_cutoff = 1e-9
+        # Overridable via rfi.pow_spec; defaults reproduce the previous values.
+        # gamma sets how heavy the spectrum's tail is (3 carries ~47% more power
+        # than the Gaussian limit) and cutoff sets how many k-modes survive
+        # truncation -- at 1e-9 none are cut, so this is the widest prior the
+        # grid allows. See issue #107.
+        gammas = [float(g) for g in self.pow_spec_cfg.get("gammas", [3, 3])]
+        pk_cutoff = float(self.pow_spec_cfg.get("cutoff", 1e-9))
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,
@@ -1013,8 +1025,11 @@ class FourierGPRFIConstAnt(BaseGPRFI):
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
         k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
         p0 = self.gp_var
-        gammas = [1e2, 1e2]
-        pk_cutoff = 1e-6
+        # Overridable via rfi.pow_spec; defaults reproduce the previous values.
+        # Note these differ from FourierGPRFI's, which is historical rather than
+        # intentional (issue #107).
+        gammas = [float(g) for g in self.pow_spec_cfg.get("gammas", [1e2, 1e2])]
+        pk_cutoff = float(self.pow_spec_cfg.get("cutoff", 1e-6))
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,

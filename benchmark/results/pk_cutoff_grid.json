@@ -1,0 +1,278 @@
+[
+  {
+    "chi2_init": 1.2677820920944214,
+    "chi2_opt": 1.1580756902694702,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7334,
+    "ast_nrmse_opt": 0.1012,
+    "rfi_nrmse_opt": 0.6715,
+    "k_grids": [
+      [
+        1,
+        180
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.74,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 24.0,
+    "cutoff": 1e-09,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.2677820920944214,
+    "chi2_opt": 1.1580756902694702,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7334,
+    "ast_nrmse_opt": 0.1012,
+    "rfi_nrmse_opt": 0.6715,
+    "k_grids": [
+      [
+        1,
+        180
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.73,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 24.0,
+    "cutoff": 1e-06,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.2679860591888428,
+    "chi2_opt": 1.1587013006210327,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7338,
+    "ast_nrmse_opt": 0.1012,
+    "rfi_nrmse_opt": 0.6719,
+    "k_grids": [
+      [
+        1,
+        105
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.7,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 24.0,
+    "cutoff": 0.0001,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.2683581113815308,
+    "chi2_opt": 1.161795735359192,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7343,
+    "ast_nrmse_opt": 0.1012,
+    "rfi_nrmse_opt": 0.673,
+    "k_grids": [
+      [
+        1,
+        67
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.89,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 24.0,
+    "cutoff": 0.01,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.267812967300415,
+    "chi2_opt": 1.1800529956817627,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7335,
+    "ast_nrmse_opt": 0.1014,
+    "rfi_nrmse_opt": 0.6567,
+    "k_grids": [
+      [
+        1,
+        169
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.76,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 96.0,
+    "cutoff": 1e-09,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.2687605619430542,
+    "chi2_opt": 1.1809402704238892,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7349,
+    "ast_nrmse_opt": 0.1014,
+    "rfi_nrmse_opt": 0.6582,
+    "k_grids": [
+      [
+        1,
+        53
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.74,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 96.0,
+    "cutoff": 1e-06,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.2724909782409668,
+    "chi2_opt": 1.1847485303878784,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.74,
+    "ast_nrmse_opt": 0.1013,
+    "rfi_nrmse_opt": 0.6637,
+    "k_grids": [
+      [
+        1,
+        27
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.73,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 96.0,
+    "cutoff": 0.0001,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.2858994007110596,
+    "chi2_opt": 1.1976925134658813,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.758,
+    "ast_nrmse_opt": 0.1014,
+    "rfi_nrmse_opt": 0.681,
+    "k_grids": [
+      [
+        1,
+        17
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.77,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 96.0,
+    "cutoff": 0.01,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.2693161964416504,
+    "chi2_opt": 1.2031546831130981,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7356,
+    "ast_nrmse_opt": 0.1015,
+    "rfi_nrmse_opt": 0.6725,
+    "k_grids": [
+      [
+        1,
+        43
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.74,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 384.0,
+    "cutoff": 1e-09,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.3075275421142578,
+    "chi2_opt": 1.2401103973388672,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 0.7862,
+    "ast_nrmse_opt": 0.1015,
+    "rfi_nrmse_opt": 0.7267,
+    "k_grids": [
+      [
+        1,
+        13
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.88,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 384.0,
+    "cutoff": 1e-06,
+    "gammas": null
+  },
+  {
+    "chi2_init": 1.6034926176071167,
+    "chi2_opt": 1.5114092826843262,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 1.101,
+    "ast_nrmse_opt": 0.102,
+    "rfi_nrmse_opt": 1.038,
+    "k_grids": [
+      [
+        1,
+        7
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.65,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 384.0,
+    "cutoff": 0.0001,
+    "gammas": null
+  },
+  {
+    "chi2_init": 3.1419413089752197,
+    "chi2_opt": 2.980956792831421,
+    "ast_nrmse_init": 0.00468,
+    "rfi_nrmse_init": 2.071,
+    "ast_nrmse_opt": 0.1027,
+    "rfi_nrmse_opt": 2.009,
+    "k_grids": [
+      [
+        1,
+        5
+      ],
+      [
+        1,
+        17
+      ]
+    ],
+    "opt_s": 1.81,
+    "component": "rfi_signal:FourierGPRFI",
+    "corr_time": 384.0,
+    "cutoff": 0.01,
+    "gammas": null
+  }
+]

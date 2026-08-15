@@ -80,7 +80,8 @@ def parse(stdout: str) -> dict:
 
 
 def run_case(workdir: Path, base_cfg: Path, sim_dir: str, spec: str,
-             corr_time: float, max_iter: int, tag: str) -> dict:
+             corr_time: float, max_iter: int, tag: str,
+             cutoff: float = None, gammas: list = None) -> dict:
     wd = workdir / tag
     wd.mkdir(parents=True, exist_ok=True)
 
@@ -88,6 +89,13 @@ def run_case(workdir: Path, base_cfg: Path, sim_dir: str, spec: str,
     cfg["model"]["components"] = components_for(spec)
     cfg["rfi"]["corr_time"] = corr_time
     cfg["opt"]["max_iter"] = max_iter
+    if cutoff is not None or gammas is not None:
+        ps = cfg["rfi"].setdefault("pow_spec_override", {}) or {}
+        if cutoff is not None:
+            ps["cutoff"] = float(cutoff)
+        if gammas is not None:
+            ps["gammas"] = [float(g) for g in gammas]
+        cfg["rfi"]["pow_spec_override"] = ps
     (wd / "tab_target.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
 
     proc = subprocess.run(
@@ -102,7 +110,7 @@ def run_case(workdir: Path, base_cfg: Path, sim_dir: str, spec: str,
         raise RuntimeError(f"run failed: {tag}")
 
     res = parse(proc.stdout)
-    res.update(component=spec, corr_time=corr_time)
+    res.update(component=spec, corr_time=corr_time, cutoff=cutoff, gammas=gammas)
     if spec.endswith("ComplexRFI"):
         # Inducing times are exactly what get_times selects at this spacing.
         from tabascal.gp import get_times
@@ -126,6 +134,10 @@ def main():
     p.add_argument("--precision", default="single", choices=["single", "double"])
     p.add_argument("--components", default="both",
                    choices=["both", "matrix", "fourier"])
+    p.add_argument("--cutoffs", type=float, nargs="*", default=None,
+                   help="pk_cutoff grid; combined with --corr-times as a full grid")
+    p.add_argument("--gammas", type=float, nargs="*", default=None,
+                   help="single gammas pair applied to every case")
     args = p.parse_args()
 
     args.workdir.mkdir(parents=True, exist_ok=True)
@@ -147,22 +159,29 @@ def main():
     if args.components != "both":
         specs = {args.components: specs[args.components]}
 
+    cutoffs = args.cutoffs if args.cutoffs else [None]
+    gam = args.gammas if args.gammas else None
+
     results = []
     for name, spec in specs.items():
         for ct in args.corr_times:
-            print(f"=== {name}, corr_time={ct:g} s ===", flush=True)
-            results.append(run_case(args.workdir, base_cfg, sim_dir, spec, ct,
-                                    args.max_iter, f"{name}_ct{ct:g}"))
-            print(results[-1], flush=True)
+            for cut in cutoffs:
+                lbl = f"{name}, corr_time={ct:g} s" + (f", cutoff={cut:.0e}" if cut else "")
+                print(f"=== {lbl} ===", flush=True)
+                tag = f"{name}_ct{ct:g}" + (f"_cut{cut:.0e}" if cut else "")
+                results.append(run_case(args.workdir, base_cfg, sim_dir, spec, ct,
+                                        args.max_iter, tag, cutoff=cut, gammas=gam))
+                print(results[-1], flush=True)
 
     (args.workdir / "results.json").write_text(json.dumps(results, indent=2))
 
-    hdr = f"{'component':14s} {'corr_t':>7s} {'basis':>7s} {'k_grids':>16s} {'chi2_init':>10s} {'rfi_nrmse_init':>15s} {'ast_nrmse_init':>15s}"
+    hdr = f"{'component':14s} {'corr_t':>7s} {'cutoff':>8s} {'k_grids':>16s} {'chi2_init':>10s} {'rfi_nrmse_init':>15s} {'ast_nrmse_init':>15s}"
     print("\n" + hdr)
     print("-" * len(hdr))
     for r in results:
         name = r["component"].split(":")[1]
-        print(f"{name:14s} {r['corr_time']:7.1f} {str(r.get('basis','-')):>7} "
+        cut = r.get('cutoff')
+        print(f"{name:14s} {r['corr_time']:7.1f} {(f'{cut:.0e}' if cut else '-'):>8} "
               f"{str(r.get('k_grids','-')):>16s} "
               f"{r.get('chi2_init',float('nan')):10.4f} "
               f"{r.get('rfi_nrmse_init',float('nan')):15.4f} "
