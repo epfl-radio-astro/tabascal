@@ -56,6 +56,29 @@ def components_for(spec: str) -> str:
     return ",".join(parts)
 
 
+def prepare_existing(
+    workdir: Path, spec: str, config: Path, sim_dir: str, max_iter: int
+) -> Path:
+    """Point a variant at an already-staged config and simulation.
+
+    The perf-check workload is single-channel, so it cannot show any difference
+    between a model with frequency structure and one without. Comparing on a
+    multi-channel simulation needs this path, since prepare_data.py only knows
+    how to build the perf workload.
+    """
+    import yaml
+
+    wd = workdir / f"wd_{spec.split(':')[1]}"
+    wd.mkdir(parents=True, exist_ok=True)
+
+    cfg = yaml.safe_load(config.read_text())
+    cfg["model"]["components"] = components_for(spec).split(",")
+    cfg.setdefault("opt", {})["max_iter"] = max_iter
+    (wd / "tab_target.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
+    (wd / "sim_dir.txt").write_text(sim_dir)
+    return wd
+
+
 def prepare(workdir: Path, spec: str, precision: str, max_iter: int) -> Path:
     wd = workdir / f"wd_{spec.split(':')[1]}"
     subprocess.run(
@@ -111,11 +134,21 @@ def plot(workdir: Path, meta: dict, precision: str, max_iter: int) -> Path:
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), sharey=True)
     colours = {"matrix": "#B45309", "fourier": "#1D4ED8"}
 
+    traces = {k: np.load(workdir / f"trace_{k}.npz") for k in VARIANTS}
+
+    # The loss is a negative log posterior and carries a large additive
+    # constant, so plotted raw it is a flat line at ~0.2183 and shows nothing.
+    # Plot the excess over the best value either model reached, which is the
+    # part that actually moves; the offset keeps the final points on a log axis.
+    floor = min(t["loss"].min() for t in traces.values())
+    span = max(t["loss"].max() for t in traces.values()) - floor
+    eps = 0.01 * span
+
     for key, (_, label) in VARIANTS.items():
-        d = np.load(workdir / f"trace_{key}.npz")
-        loss, t = d["loss"], d["time_s"]
-        axes[0].plot(np.arange(1, len(loss) + 1), loss, color=colours[key], label=label)
-        axes[1].plot(t, loss, color=colours[key], label=label)
+        d = traces[key]
+        excess = d["loss"] - floor + eps
+        axes[0].plot(np.arange(1, len(excess) + 1), excess, color=colours[key], label=label)
+        axes[1].plot(d["time_s"], excess, color=colours[key], label=label)
 
     axes[0].set_xlabel("Iteration")
     axes[0].set_title("By iteration — hides cost per step")
@@ -125,7 +158,7 @@ def plot(workdir: Path, meta: dict, precision: str, max_iter: int) -> Path:
         ax.set_yscale("log")
         ax.grid(alpha=0.3)
         ax.legend()
-    axes[0].set_ylabel("Loss (neg. log posterior / obs size)")
+    axes[0].set_ylabel("Loss above best reached (neg. log posterior / obs size)")
 
     n_iter = 2 * max_iter
     fig.suptitle(
@@ -145,7 +178,12 @@ def main():
     p.add_argument("--precision", default="single", choices=["single", "double"])
     p.add_argument("--max-iter", type=int, default=1000)
     p.add_argument("--plot-only", action="store_true")
+    p.add_argument("--config", type=Path, help="Existing tab config to use instead of building the perf workload")
+    p.add_argument("--sim-dir", help="Simulation directory matching --config")
+    p.add_argument("--workload", default="96 ant / 90 times / 1 chan / 32 sat")
     args = p.parse_args()
+    if bool(args.config) != bool(args.sim_dir):
+        p.error("--config and --sim-dir must be given together")
 
     args.workdir.mkdir(parents=True, exist_ok=True)
     meta_path = args.workdir / "meta.json"
@@ -153,10 +191,15 @@ def main():
     if args.plot_only:
         meta = json.loads(meta_path.read_text())
     else:
-        meta = {"workload": "96 ant / 90 times / 1 chan / 32 sat", "runs": {}}
+        meta = {"workload": args.workload, "runs": {}}
         for key, (spec, label) in VARIANTS.items():
             print(f"=== {label} ===", flush=True)
-            wd = prepare(args.workdir, spec, args.precision, args.max_iter)
+            if args.config:
+                wd = prepare_existing(
+                    args.workdir, spec, args.config, args.sim_dir, args.max_iter
+                )
+            else:
+                wd = prepare(args.workdir, spec, args.precision, args.max_iter)
             stdout = run(wd, args.workdir / f"trace_{key}.npz")
             (args.workdir / f"stdout_{key}.txt").write_text(stdout)
             meta["runs"][key] = {"label": label, "chi2": parse_chi2(stdout)}
