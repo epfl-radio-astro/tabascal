@@ -22,8 +22,7 @@ from typing import Tuple, Dict, Callable, List, Optional
 #: Required contents of a light-curve file. See :func:`read_light_curves`.
 _LIGHT_CURVE_VARS = ("light_curves", "norad_ids", "times", "freqs")
 
-#: Dimensions of ``light_curves`` in a zarr store, in the order this module wants
-#: them. A store may declare them in any order; it is transposed on read.
+#: Dimensions of ``light_curves``. A store may declare them in any order.
 _LIGHT_CURVE_DIMS = ("norad_ids", "times", "freqs")
 
 
@@ -48,11 +47,8 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
                 f"{list(_LIGHT_CURVE_VARS)}, with light_curves dimensioned "
                 f"(norad_ids, times, freqs). It contains {available}."
             )
-        # Transpose by dimension name rather than trusting the stored order. Going
-        # straight to .data would read a differently-ordered store along the wrong
-        # axes, and the shape check below cannot catch it whenever the swapped
-        # dimensions happen to be the same length. Naming the axes is the reason
-        # to use xarray here at all, so any order is accepted and normalised.
+        # By name, not stored order: a swapped store with equal-length dims would
+        # otherwise pass the shape check below and be read along the wrong axes.
         dims = tuple(xds["light_curves"].dims)
         if set(dims) != set(_LIGHT_CURVE_DIMS):
             raise ValueError(
@@ -103,19 +99,12 @@ def _as_norad_ids(labels: NDArray) -> List[Optional[int]]:
 def _interp_axis(values: NDArray, src: NDArray, dst: NDArray, axis: int) -> NDArray:
     """Linearly interpolate ``values`` along ``axis`` from ``src`` onto ``dst``.
 
-    Samples beyond the ends of ``src`` are zero: the light curve says nothing
-    there, and zero is the same "no signal known" convention the elevation mask
-    uses. A length-1 ``src`` is held constant across ``dst`` instead -- a single
-    sample carries no gradient to interpolate along, so treating it as a band or
-    an instant of zero width would throw the measurement away.
+    Samples beyond the ends of ``src`` are zero, matching the elevation mask's
+    "no signal known" convention. A length-1 ``src`` is held constant instead.
 
-    Deliberately numpy rather than jax, and in f64: MJD carries a large offset
-    (~6e4 days) against sample spacings of order a second (~1e-5 days), which f32
-    cannot resolve at all -- every sample of a normal observation collapses onto
-    the same coordinate and the interpolation returns a constant. This is host
-    setup code that runs once, so there is nothing to gain from tracing it and a
-    silently wrong estimate to lose. The result is cast to the working precision
-    by the caller.
+    numpy in f64, not jax: MJD's ~6e4 day offset against ~1e-5 day spacings is
+    unresolvable in f32, which collapses every sample onto one coordinate. The
+    caller casts back to the working precision.
     """
     if len(src) == 1:
         return np.repeat(values, len(dst), axis=axis)
@@ -129,12 +118,8 @@ def _interp_axis(values: NDArray, src: NDArray, dst: NDArray, axis: int) -> NDAr
     src = np.asarray(src, dtype=np.float64)
     dst = np.asarray(dst, dtype=np.float64)
 
-    # Snap destination samples that sit a hair outside the source range back onto
-    # its endpoints. Two grids meant to be identical rarely are to the last bit --
-    # a different writer, a unit conversion, an epoch offset -- and without this a
-    # first or last sample would be zeroed rather than interpolated, silently
-    # dropping a measured endpoint. The tolerance is a thousandth of the smallest
-    # sample spacing, far below any real gap and far above float noise.
+    # Snap near-coincident endpoints inward, so a grid that differs from src only
+    # in the last bits keeps its end samples interpolated rather than zeroed.
     tol = 1e-3 * float(np.min(np.diff(src)))
     dst = np.where((dst < src[0]) & (dst > src[0] - tol), src[0], dst)
     dst = np.where((dst > src[-1]) & (dst < src[-1] + tol), src[-1], dst)
@@ -216,10 +201,8 @@ def read_light_curves(
 
     file_ids = _as_norad_ids(labels)
 
-    # A repeated id has no single answer to "which row is this satellite?", and
-    # taking the last one would decide it by file order -- the very thing matching
-    # by id exists to avoid. Two passes of the same satellite have to be merged, or
-    # one of them dropped, before they can seed a prior.
+    # Rejected rather than resolved: keeping one of a repeated id would decide it
+    # by file order, which is what matching by id exists to avoid.
     seen, duplicates = set(), set()
     for n_id in file_ids:
         if n_id is None:
@@ -252,14 +235,8 @@ def read_light_curves(
 
     matched = np.asarray(curves[[r for r in rows if r is not None]], dtype=np.float64)
 
-    # Any non-finite sample -> 0 estimate. NaN is the documented out-of-view
-    # marker; an infinity is not a measurement either, usually an upstream
-    # divide-by-zero. Both are zeroed explicitly rather than through
-    # nan_to_num's defaults, which map +/-inf onto the f64 extrema: those
-    # overflow back to inf in f32 (the default working precision) and survive
-    # the later sqrt, so an estimate meant to be finite poisons the prior mean
-    # or the init with inf. Infinities are called out because, unlike NaN, they
-    # are not part of the format and point at a problem upstream.
+    # Any non-finite sample -> 0. posinf/neginf are set explicitly: nan_to_num's
+    # defaults map them to the f64 extrema, which overflow back to inf in f32.
     n_inf = int(np.isinf(matched).sum())
     if n_inf:
         print(
@@ -411,11 +388,8 @@ class BaseGPRFI(Component):
         self.chan_width = tab_config.chan_width
         self.times = tab_config.times
         self.times_fine = tab_config.times_fine
-        # Absolute observation times, for resampling external estimates whose own
-        # sampling is expressed in MJD rather than seconds from this run's start.
-        # Taken as read rather than converted back from times_jd: the round trip
-        # loses ~1e-10 days, enough to push an endpoint outside a source range it
-        # is nominally identical to. See TabConfig.read_ms_params.
+        # Absolute times, for resampling estimates sampled in MJD. Taken as read,
+        # not recovered from times_jd, which loses ~1e-10 days on the round trip.
         self.times_mjd = np.asarray(tab_config.times_mjd)
         self.int_time = tab_config.int_time
 
@@ -440,9 +414,8 @@ class BaseGPRFI(Component):
             None if rfi_mask_fine is None else jnp.asarray(rfi_mask_fine, dtype=bool)
         )
 
-        # NORAD IDs, ordered as the n_rfi axis of every RFI array. Under sharding the
-        # tail entries are padding duplicates, so consumers that look ids up in an
-        # external file slice to [:n_rfi_real] and zero-pad the result instead.
+        # Ordered as the n_rfi axis. The tail entries are sharding duplicates, so
+        # consumers matching against a file slice to [:n_rfi_real] first.
         self.norad_ids = tab_config.norad_ids
 
     def build_mask_constants(self) -> dict:
@@ -777,16 +750,13 @@ class ComplexRFIVarAnt(BaseGPRFI):
 
     def _read_estimate(self, est_path):
 
-        # Only the real satellites have a light curve; the padded rows are restored as
-        # zeros by _zero_pad_rfi below, so a padding duplicate is never looked up (and
-        # read_light_curves' missing-id error stays about genuinely missing sources).
-        # Already on the observation grid, so no reduction over frequency is needed.
+        # Real satellites only; _zero_pad_rfi below restores the padded rows as
+        # zeros, so a duplicate is never reported as a missing id.
         light_curves = read_light_curves(
             est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
         )
 
-        # (n_rfi, n_freq, n_time) -> (n_rfi, n_ant, n_freq, n_time); the estimate is
-        # per source, so every antenna sees the same light curve.
+        # Per source, so every antenna sees the same light curve.
         est_rfi_A = jnp.broadcast_to(
             jnp.sqrt(jnp.abs(light_curves))[:, None],
             (light_curves.shape[0], self.n_ant, self.n_freq, self.n_time),
@@ -1072,14 +1042,12 @@ class ComplexRFIConstAnt(BaseGPRFI):
 
     def _read_estimate(self, est_path):
 
-        # Real satellites only; _zero_pad_rfi below restores the padded rows as zeros.
-        # Already on the observation grid, so no reduction over frequency is needed.
+        # Real satellites only; _zero_pad_rfi below restores the padded rows.
         light_curves = read_light_curves(
             est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
         )
 
-        # This variant carries a singleton antenna axis; the latent is shared by
-        # every antenna and only broadcast to n_ant inside the forward.
+        # Singleton antenna axis: the latent is shared and broadcast in the forward.
         est_rfi_A = jnp.sqrt(jnp.abs(light_curves))[:, None]
 
         return self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(est_rfi_A))

@@ -41,12 +41,7 @@ dependencies = [
     "skyfield>=1.49,<2",  # uses skyfield's _utc_jd(whole, fraction); see tabascal/time.py
     "tqdm",
     "xarray",
-    # Declared explicitly: nothing in the runtime set pulls zarr in. dask-ms is
-    # depended on without an extra and only constrains zarr under its zarr/
-    # complete/katdal extras, and xarray only requires it under its io extra. It
-    # reached the test environment through tabsim, which is why a bare install
-    # having no zarr never surfaced. Bounded below 3.0 to match dask-ms, which
-    # caps there wherever it expresses an opinion; see #120 to lift it.
+    # Explicit: no other runtime dependency pulls zarr in. See #120 for the bound.
     "zarr>=2.12.0,<3.0.0",
 ]
 
