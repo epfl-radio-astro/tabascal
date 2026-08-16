@@ -319,7 +319,11 @@ def test_truth_metric_capture_roundtrips_printed_output(capsys):
     from tabascal.tab_tools import print_truth_metrics
 
     n_bl, n_freq, n_time, n_ant = 3, 2, 4, 5
-    tab_config = SimpleNamespace(noise=2.0, flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool))
+    tab_config = SimpleNamespace(
+        noise=2.0,
+        noise_scalar=2.0,   # the representative scalar the metrics normalise by
+        flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
+    )
 
     true_ast = jnp.ones((n_bl, n_freq, n_time), dtype=complex)
     truth = {
