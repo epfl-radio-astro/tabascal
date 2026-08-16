@@ -1,6 +1,16 @@
 # tabascal
 
+[![Documentation Status](https://readthedocs.org/projects/tabascal/badge/?version=latest)](https://tabascal.readthedocs.io/en/latest/)
+[![codecov](https://codecov.io/gh/epfl-radio-astro/tabascal/branch/main/graph/badge.svg)](https://codecov.io/gh/epfl-radio-astro/tabascal)
+[![MNRAS 2023](https://img.shields.io/badge/MNRAS%202023-10.1093%2Fmnras%2Fstad1979-blue)](https://doi.org/10.1093/mnras/stad1979)
+[![A&A 2025](https://img.shields.io/badge/A%26A%202025-10.1051%2F0004--6361%2F202554596-blue)](https://doi.org/10.1051/0004-6361/202554596)
+
 Trajectory-based RFI subtraction for radio interferometric data.
+
+## Citing tabascal
+
+- Finlay, Bassett & Kunz (2023), *Trajectory-based RFI subtraction and calibration for radio interferometry*, MNRAS — [10.1093/mnras/stad1979](https://doi.org/10.1093/mnras/stad1979)
+- Finlay, Bassett & Kunz (2025), *TABASCAL: Removing multi-satellite interference from radio interferometry observations*, A&A — [10.1051/0004-6361/202554596](https://doi.org/10.1051/0004-6361/202554596)
 
 # Getting started with pixi
 
