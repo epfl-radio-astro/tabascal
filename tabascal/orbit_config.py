@@ -9,7 +9,7 @@ The module also owns :func:`ms_observation_epoch_jd`, the single Measurement Set
 observation-epoch derivation. Preflight and execution must agree exactly on the
 epoch: it sets every TLE age comparison, so two slightly different means could
 make different acceptance decisions. The helper mirrors
-:func:`tabascal.tab_tools.read_ms` — one time
+:func:`tabascal.ms.read_ms` — one time
 per integration, with the same seconds-versus-days unit guard.
 
 Three age settings exist and are deliberately kept distinct:
@@ -328,7 +328,7 @@ def _ms_time_column(ms_path: str) -> np.ndarray:
 def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
     """One observation time per integration, in MJD days.
 
-    Mirrors :func:`tabascal.tab_tools.read_ms`, which takes a single timestamp per
+    Mirrors :func:`tabascal.ms.read_ms`, which takes a single timestamp per
     integration (not one per visibility row) and divides by 86400 when consecutive
     timestamps are more than 0.5 apart — the signature of a ``TIME`` column stored
     in seconds rather than days. The unique-times form used here equals
@@ -363,7 +363,7 @@ def ms_observation_epoch_jd(ms_path: str) -> float:
 def observation_epoch_jd(times_jd) -> float:
     """Mean observation epoch (UTC JD) of an already-read time array.
 
-    Execution reaches the epoch through the times :func:`tabascal.tab_tools.read_ms`
+    Execution reaches the epoch through the times :func:`tabascal.ms.read_ms`
     returned rather than by re-reading the MS; going through this one helper keeps
     the reduction identical to :func:`ms_observation_epoch_jd`.
     """

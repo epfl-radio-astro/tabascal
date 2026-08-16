@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 import jax.numpy as jnp
 import xarray as xr
 
-from tabascal.tab_tools import get_observation_data_type
+from tabascal.ms import get_observation_data_type
 
 
 class TruthError(Exception):
