@@ -65,20 +65,43 @@ def timescale():
 
 #: Time scales that can be named in a Measurement Set's ``TIME`` column
 #: ``MEASINFO`` record, mapped to the :class:`skyfield.timelib.Timescale`
-#: constructor that interprets a Julian Date on that scale. ``ET`` is CASA's
-#: legacy spelling of ``TT``.
+#: constructor that interprets a Julian Date on that scale.
+#:
+#: casacore names several of these more than once, and the name it writes is not
+#: always the one an outsider would reach for: its canonical spelling of
+#: Terrestrial Time is ``TDT``, with ``TT`` and ``ET`` as synonyms, and TAI is
+#: also spelled ``IAT``. All spellings are accepted, since the point is to
+#: forward whatever the MS declares.
 TIME_SCALES = {
     "utc": "_utc_jd",
     "tai": "tai_jd",
+    "iat": "tai_jd",
+    "tdt": "tt_jd",
     "tt": "tt_jd",
     "et": "tt_jd",
     "tdb": "tdb_jd",
     "ut1": "ut1_jd",
+    "ut": "ut1_jd",
+}
+
+#: Epoch references casacore can name that tabascal deliberately does not accept:
+#: the sidereal angles, which are not a scale an observation timestamp is on, and
+#: the relativistic scales, for which skyfield offers no constructor. Named so the
+#: error can say "not supported" rather than implying a typo.
+_UNSUPPORTED_SCALES = {
+    "last": "local apparent sidereal time",
+    "lmst": "local mean sidereal time",
+    "gmst1": "Greenwich mean sidereal time",
+    "gmst": "Greenwich mean sidereal time",
+    "gast": "Greenwich apparent sidereal time",
+    "ut2": "UT2",
+    "tcg": "geocentric coordinate time",
+    "tcb": "barycentric coordinate time",
 }
 
 #: Scales whose skyfield constructor takes only a single Julian Date, so the
 #: whole/fraction split cannot be carried through to it.
-_UNSPLIT_SCALES = frozenset({"ut1"})
+_UNSPLIT_SCALES = frozenset({"ut1", "ut"})
 
 
 def skyfield_time(times_jd, scale: str = "utc"):
@@ -131,6 +154,13 @@ def skyfield_time(times_jd, scale: str = "utc"):
 
     key = str(scale).strip().lower()
     if key not in TIME_SCALES:
+        if key in _UNSUPPORTED_SCALES:
+            raise ValueError(
+                f"Time scale {scale!r} ({_UNSUPPORTED_SCALES[key]}) is a valid "
+                "Measurement Set epoch reference, but tabascal cannot interpret "
+                "observation times on it. Supported: "
+                f"{sorted(TIME_SCALES)}."
+            )
         raise ValueError(
             f"Unsupported time scale {scale!r}. Supported: {sorted(TIME_SCALES)}."
         )

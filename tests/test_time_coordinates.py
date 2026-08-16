@@ -222,8 +222,8 @@ class TestTimeScale:
         assert self._tt_seconds("TAI") == self._tt_seconds("tai")
 
     def test_unsupported_scale_is_rejected(self):
-        with pytest.raises(ValueError, match="Unsupported time scale 'gmst'"):
-            skyfield_time(self.JD, "gmst")
+        with pytest.raises(ValueError, match="Unsupported time scale 'nonsense'"):
+            skyfield_time(self.JD, "nonsense")
 
     def test_reading_utc_as_tai_shifts_by_the_leap_seconds(self):
         """The whole point: the same JD on a different scale is a different instant.
@@ -288,3 +288,56 @@ def test_skyfield_utc_jd_whole_fraction_available():
     assert float(np.asarray(t_split.gast)) == pytest.approx(
         float(np.asarray(t_whole.gast)), abs=1e-9
     )
+
+
+class TestCasacoreScaleNames:
+    """casacore names several scales more than once; all spellings are accepted.
+
+    The point of ``scale`` is to forward whatever an MS declares, so rejecting
+    the spelling casacore actually writes would defeat it. Verified against
+    casacore's own epoch code list, which reports:
+
+        LAST LMST GMST1 GAST UT1 UT2 UTC TAI TDT TCG TDB TCB IAT GMST TT ET UT
+
+    with TDT listed before its TT/ET synonyms, IAT alongside TAI, and UT
+    alongside UT1.
+    """
+
+    JD = 2451545.3
+
+    def _tt(self, scale):
+        return float(np.asarray(skyfield_time(self.JD, scale).tt))
+
+    @pytest.mark.parametrize("alias", ["tdt", "tt", "et"])
+    def test_terrestrial_time_spellings_agree(self, alias):
+        """TDT is casacore's canonical name; TT and ET are its synonyms."""
+        assert self._tt(alias) == self._tt("tt")
+
+    def test_tdt_is_accepted(self):
+        """The canonical spelling an MS is most likely to carry."""
+        assert "tdt" in TIME_SCALES
+
+    @pytest.mark.parametrize("alias", ["tai", "iat"])
+    def test_atomic_time_spellings_agree(self, alias):
+        assert self._tt(alias) == self._tt("tai")
+
+    @pytest.mark.parametrize("alias", ["ut1", "ut"])
+    def test_universal_time_spellings_agree(self, alias):
+        assert self._tt(alias) == self._tt("ut1")
+
+    @pytest.mark.parametrize(
+        "scale", ["gast", "gmst1", "gmst", "last", "lmst", "ut2", "tcg", "tcb"]
+    )
+    def test_scales_we_cannot_interpret_say_so(self, scale):
+        """Rejected as unsupported, not as a typo.
+
+        These are real MS epoch references -- sidereal angles, and relativistic
+        scales skyfield offers no constructor for -- so the error should not
+        imply the name is wrong.
+        """
+        with pytest.raises(ValueError, match="valid Measurement Set epoch reference"):
+            skyfield_time(self.JD, scale)
+
+    def test_a_genuine_typo_still_reads_as_one(self):
+        with pytest.raises(ValueError, match="Unsupported time scale 'utcc'"):
+            skyfield_time(self.JD, "utcc")
