@@ -10,4 +10,5 @@ API Reference
    api/rfi_vis
    api/ast_vis
    api/gains
+   api/time
    

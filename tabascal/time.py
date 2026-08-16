@@ -63,46 +63,91 @@ def timescale():
     return load.timescale()
 
 
-def skyfield_time(times_jd):
-    """UTC Julian Dates → :class:`skyfield.timelib.Time`.
+#: Time scales that can be named in a Measurement Set's ``TIME`` column
+#: ``MEASINFO`` record, mapped to the :class:`skyfield.timelib.Timescale`
+#: constructor that interprets a Julian Date on that scale. ``ET`` is CASA's
+#: legacy spelling of ``TT``.
+TIME_SCALES = {
+    "utc": "_utc_jd",
+    "tai": "tai_jd",
+    "tt": "tt_jd",
+    "et": "tt_jd",
+    "tdb": "tdb_jd",
+    "ut1": "ut1_jd",
+}
+
+#: Scales whose skyfield constructor takes only a single Julian Date, so the
+#: whole/fraction split cannot be carried through to it.
+_UNSPLIT_SCALES = frozenset({"ut1"})
+
+
+def skyfield_time(times_jd, scale: str = "utc"):
+    """Julian Dates on a named time scale → :class:`skyfield.timelib.Time`.
 
     The single entry point for turning observation times into skyfield times, so
-    the two decisions below are made once rather than at each call site.
+    the decisions below are made once rather than at each call site.
 
-    Measurement Set times follow the UTC convention (the ``TIME`` column carries
-    ``MEASINFO Ref: UTC``), so the Julian Dates are interpreted as UTC — skyfield
-    then applies the UT1-UTC offset internally. Reading them as UT1 instead (i.e.
-    ``ts.ut1_jd``) shifts every epoch by DUT1, dragging satellite positions along
-    their track by up to ~0.9 s of motion.
+    **The scale is not cosmetic.** A Julian Date is a number until a scale says
+    what it counts. Reading a UTC epoch as UT1 shifts it by DUT1 (up to ~0.9 s),
+    dragging a satellite along its track by the distance it covers in that time;
+    reading it as TAI shifts it by the accumulated leap seconds, currently 37 s.
+    Neither produces an error — only a wrong position.
+
+    ``scale`` defaults to ``"utc"`` because that is what a Measurement Set's
+    ``TIME`` column almost always declares (``MEASINFO Ref: UTC``). It is a
+    default, not an assumption: an MS may declare ``TAI`` or another scale, and
+    callers reading one should pass what it says rather than relying on this.
 
     The Julian Date is split into whole and fractional parts before being handed
-    to skyfield to preserve full f64 precision: a JD's ~2.5e6 day magnitude
-    leaves f64 only ~5e-10 days of resolution on the value as a whole.
+    to skyfield, to preserve full f64 precision: a JD's ~2.5e6 day magnitude
+    leaves f64 only ~5e-10 days of resolution on the value as a whole. ``ut1`` is
+    the exception — skyfield's ``ut1_jd`` takes no fraction argument, so that one
+    scale is passed the recombined Julian Date and keeps only ~5e-10 days
+    (~40 us) of resolution.
 
-    Uses skyfield's private ``_utc_jd``, which is why ``pyproject.toml`` pins
-    ``skyfield>=1.49,<2``. Keeping it to this one call site means the pin
-    protects a single line.
+    For ``utc`` this uses skyfield's private ``_utc_jd``, which is why
+    ``pyproject.toml`` pins ``skyfield>=1.49,<2``. Keeping it to this one call
+    site means the pin protects a single line.
 
     Parameters
     ----------
     times_jd : array_like
-        Observation times as UTC Julian Dates.
+        Observation times as Julian Dates on ``scale``.
+    scale : str, optional
+        Time scale the Julian Dates are on, as named in an MS ``MEASINFO``
+        record. One of :data:`TIME_SCALES`; case-insensitive. Defaults to
+        ``"utc"``.
 
     Returns
     -------
     skyfield.timelib.Time
-        The same times, on the UTC scale.
+        The same times, read on ``scale``.
+
+    Raises
+    ------
+    ValueError
+        If ``scale`` is not one tabascal can interpret.
     """
+
+    key = str(scale).strip().lower()
+    if key not in TIME_SCALES:
+        raise ValueError(
+            f"Unsupported time scale {scale!r}. Supported: {sorted(TIME_SCALES)}."
+        )
 
     times_jd = np.asarray(times_jd, dtype=float)
     jd_whole = np.floor(times_jd)
     jd_frac = times_jd - jd_whole
 
-    return timescale()._utc_jd(jd_whole, jd_frac)
+    constructor = getattr(timescale(), TIME_SCALES[key])
+    if key in _UNSPLIT_SCALES:
+        return constructor(times_jd)
+
+    return constructor(jd_whole, jd_frac)
 
 
-def gast_deg(times_jd):
-    """Greenwich Apparent Sidereal Time, in degrees, for UTC Julian Dates.
+def gast_deg(times_jd, scale: str = "utc"):
+    """Greenwich Apparent Sidereal Time, in degrees, for Julian Dates.
 
     The *apparent* (not mean) sidereal angle is returned, i.e. it includes the
     equation of the equinoxes, so this is GAST and not GMST.
@@ -110,7 +155,9 @@ def gast_deg(times_jd):
     Parameters
     ----------
     times_jd : array_like
-        Observation times as UTC Julian Dates.
+        Observation times as Julian Dates on ``scale``.
+    scale : str, optional
+        Time scale the Julian Dates are on; see :func:`skyfield_time`.
 
     Returns
     -------
@@ -118,4 +165,6 @@ def gast_deg(times_jd):
         GAST in degrees.
     """
 
-    return np.asarray(skyfield_time(times_jd).gast) * 15.0  # GAST hours → degrees
+    gast = skyfield_time(times_jd, scale).gast
+
+    return np.asarray(gast) * 15.0  # GAST hours → degrees

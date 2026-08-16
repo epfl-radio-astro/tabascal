@@ -14,6 +14,7 @@ from tabascal.time import (
     jd_to_datetime,
     datetime_to_jd,
     skyfield_time,
+    TIME_SCALES,
     timescale,
 )
 
@@ -140,11 +141,11 @@ class TestGastDeg:
 
 
 # ---------------------------------------------------------------------------
-# skyfield private-API smoke test
+# tabascal.time — skyfield_time
 # ---------------------------------------------------------------------------
 
 class TestSkyfieldTime:
-    """The single entry point from UTC Julian Dates to skyfield times."""
+    """The single entry point from Julian Dates to skyfield times."""
 
     JD = 2451545.3
 
@@ -192,6 +193,74 @@ class TestSkyfieldTime:
         direct = np.asarray(skyfield_time(times).gast) * 15.0
 
         np.testing.assert_allclose(gast_deg(times), direct, rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# tabascal.time — time scales
+# ---------------------------------------------------------------------------
+
+class TestTimeScale:
+    """``scale`` selects how a Julian Date is interpreted, not how it prints."""
+
+    JD = 2451545.3
+
+    def _tt_seconds(self, scale):
+        t = skyfield_time(self.JD, scale)
+        return float(np.asarray(t.tt)) * 86400.0
+
+    def test_utc_is_the_default(self):
+        """Omitting the scale reads UTC, so existing callers are unchanged."""
+        assert float(np.asarray(skyfield_time(self.JD).tt)) == float(
+            np.asarray(skyfield_time(self.JD, "utc").tt)
+        )
+
+    @pytest.mark.parametrize("scale", sorted(TIME_SCALES))
+    def test_every_supported_scale_constructs(self, scale):
+        assert skyfield_time(self.JD, scale) is not None
+
+    def test_scale_is_case_insensitive(self):
+        assert self._tt_seconds("TAI") == self._tt_seconds("tai")
+
+    def test_unsupported_scale_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported time scale 'gmst'"):
+            skyfield_time(self.JD, "gmst")
+
+    def test_reading_utc_as_tai_shifts_by_the_leap_seconds(self):
+        """The whole point: the same JD on a different scale is a different instant.
+
+        At J2000 the TAI-UTC offset was 32 leap seconds. A satellite at a typical
+        LEO ground-track speed of ~7.5 km/s moves ~240 km in that time, so this
+        is a wrong position rather than a rounding difference -- and nothing
+        raises to say so.
+        """
+        offset = self._tt_seconds("utc") - self._tt_seconds("tai")
+
+        assert offset == pytest.approx(32.0, abs=1e-6)
+
+    def test_reading_utc_as_tt_shifts_by_leap_seconds_plus_32_184(self):
+        offset = self._tt_seconds("utc") - self._tt_seconds("tt")
+
+        assert offset == pytest.approx(32.0 + 32.184, abs=1e-3)
+
+    def test_et_is_an_alias_for_tt(self):
+        """CASA's legacy spelling of TT."""
+        assert self._tt_seconds("et") == self._tt_seconds("tt")
+
+    def test_reading_utc_as_ut1_shifts_by_dut1(self):
+        """Sub-second, but still ~2.7 km of LEO track."""
+        offset = abs(self._tt_seconds("utc") - self._tt_seconds("ut1"))
+
+        assert 0.0 < offset < 0.9
+
+    def test_gast_deg_accepts_a_scale(self):
+        direct = np.asarray(skyfield_time(self.JD, "tai").gast) * 15.0
+
+        np.testing.assert_allclose(gast_deg(self.JD, "tai"), direct, rtol=0, atol=0)
+
+    def test_gast_deg_differs_between_scales(self):
+        assert gast_deg(self.JD, "utc") != pytest.approx(
+            float(gast_deg(self.JD, "tai")), abs=1e-9
+        )
 
 
 # ---------------------------------------------------------------------------
