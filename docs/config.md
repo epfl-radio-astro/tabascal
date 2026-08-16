@@ -180,7 +180,7 @@ The file is either a **`.zarr` store** (read with `xarray.open_zarr`) or a **`.n
 
 | name | shape | contents |
 |---|---|---|
-| `light_curves` | `(n_src, n_time, n_freq)` | one light curve per source |
+| `light_curves` | `(n_src, n_time, n_freq)` | apparent flux per source, in **Jy** |
 | `norad_ids` | `(n_src,)` | NORAD id of each row of `light_curves` |
 | `times` | `(n_time,)` | Modified Julian Date, in **days**, strictly increasing |
 | `freqs` | `(n_freq,)` | frequency in **Hz**, strictly increasing |
@@ -201,6 +201,8 @@ xr.Dataset(
 Both are strict because their failure modes are silent. A light curve attached to the wrong satellite still has the right shape and still optimises — it just seeds the prior from another satellite. A file whose sampling is assumed rather than declared is resampled wrongly by an unknown amount. Neither surfaces as an error, only as a worse fit, so a file that cannot state which satellite and which sample times it describes is rejected rather than guessed at.
 
 Times are absolute (MJD) rather than seconds from the start of a particular observation, so a light curve is interpretable on its own and can be reused across measurement sets covering the same pass.
+
+`light_curves` is a **flux in Jy**, not the modelled amplitude `rfi_A`. The RFI visibility is quadratic in `rfi_A` ($V^\text{RFI}_{pq} = A_p A_q^* e^{i\Delta\phi}$), so `rfi_A` carries units of $\sqrt{\text{Jy}}$ and the estimate is seeded with $\sqrt{\lvert \text{light\_curves} \rvert}$. Supplying an amplitude where a flux is expected is squared away silently, so the value is wrong rather than the shape — give the flux the source would show in the visibilities, on the same scale as `rfi.var`.
 
 Some further details:
 
