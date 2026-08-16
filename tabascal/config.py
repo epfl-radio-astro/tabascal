@@ -6,7 +6,8 @@ from tabascal.distributed import (
     replicated_sharding,
     sharding_enabled,
 )
-from tabascal.tab_tools import read_ms, fix_padding
+from tabascal.ms import read_ms
+from tabascal.tab_tools import fix_padding
 from tabascal.components.trajectory import (
     fetch_orbital_elements,
     get_satellite_elevations,

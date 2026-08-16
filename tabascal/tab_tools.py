@@ -22,7 +22,6 @@ from datetime import datetime
 from typing import Callable, Optional
 from functools import reduce, partial
 
-from daskms import xds_from_ms, xds_from_table
 
 from numpyro.infer import log_likelihood
 from numpyro.infer.util import log_density
@@ -271,99 +270,6 @@ def fix_padding(config: dict, n_freq):
 
 
 @measure_runtime
-def read_ms(
-    ms_path,
-    freq: Optional[float] = None,
-    chans: Optional[jax.Array] = None,
-    corr: str = "xx",
-    data_col: str = "DATA",
-):
-
-    correlations = {"xx": 0, "xy": 1, "yx": 2, "yy": 3}
-    corr_idx = correlations[corr]
-
-    xds = xds_from_ms(ms_path)[0]
-    xds_ant = xds_from_table(ms_path + "::ANTENNA")[0]
-    xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
-    xds_src = xds_from_table(ms_path + "::SOURCE")[0]
-
-    ants_itrf = np.array(xds_ant.POSITION.data.compute())
-
-    n_ant = ants_itrf.shape[0]
-    n_time = len(np.unique(xds.TIME.data.compute()))
-    n_bl = xds[data_col].data.shape[0] // n_time
-    n_freq, n_corr = xds[data_col].data.shape[1:]
-
-    freqs = np.array(xds_spec.CHAN_FREQ.data[0].compute())
-    chan_width = np.array(xds_spec.CHAN_WIDTH.data[0, 0].compute())
-    int_time = xds.INTERVAL.data[0].compute()
-
-    times_mjd = np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
-    if times_mjd[1] - times_mjd[0] > 0.5:
-        times_mjd = times_mjd / (24 * 3600)
-
-    # times_mjd = jnp.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()) / (
-    #     24 * 3600
-    # )
-    from tabascal.time import jd_to_datetime, mjd_to_jd
-
-    print(jd_to_datetime(mjd_to_jd(times_mjd[0])).isoformat())
-
-    times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
-
-    if chans is None:
-        if freq:
-            chans = jnp.argmin(jnp.abs(freq - freqs))
-        else:
-            chans = jnp.arange(n_freq)
-
-    n_freq = len(chans)
-
-    print(n_freq, chans)
-
-    read_data = lambda col_name: jnp.transpose(
-        jnp.array(
-            xds[col_name]
-            # .data[:, chans, corr_idx].reshape(n_time, n_bl, n_freq)
-            .data[:, :, corr_idx].reshape(n_time, n_bl, n_freq)
-            .compute()
-        ),
-        (1, 2, 0),
-    )
-
-    data = {
-        **{
-            key: val
-            for key, val in zip(
-                ["ra", "dec"], jnp.rad2deg(xds_src.DIRECTION.data[0].compute())
-            )
-        },
-        "n_freq": n_freq,
-        "n_corr": n_corr,
-        "n_time": n_time,
-        "n_ant": n_ant,
-        "n_bl": n_bl,
-        "dish_d": xds_ant.DISH_DIAMETER.data[0].compute(),
-        "times_mjd": times_mjd,
-        "times": times,
-        "int_time": int_time,
-        "freqs": freqs[chans],
-        "chan_width": chan_width,
-        "ants_itrf": ants_itrf,
-        "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),
-        "vis_obs": read_data(data_col),
-        "flags": read_data("FLAG"),
-        "noise": jnp.array(xds.SIGMA.data.mean().compute()),
-        "a1": jnp.array(xds.ANTENNA1.data.reshape(n_time, n_bl)[0, :].compute()),
-        "a2": jnp.array(xds.ANTENNA2.data.reshape(n_time, n_bl)[0, :].compute()),
-        "a1": jnp.array(xds.ANTENNA1.data[:n_bl].compute()),
-        "a2": jnp.array(xds.ANTENNA2.data[:n_bl].compute()),
-    }
-
-    return data
-
-
-@measure_runtime
 def run_svi(
     prob_model: Callable,
     obs_data: jax.Array,
@@ -583,18 +489,3 @@ def run_opt(
     write_results_ms(ms_path, map_path, tab_config.args["data"]["data_col"])
 
     return vi_pred, vi_results.losses, vi_params, rchi2
-
-
-def get_observation_data_type(data_col: str):
-
-    ast = ["DATA", "CAL_DATA", "AST_DATA", "AST_MODEL_DATA"]
-    rfi = ["DATA", "CAL_DATA", "RFI_DATA", "RFI_MODEL_DATA"]
-    gains = ["DATA"]
-
-    data_type = {
-        "ast": data_col in ast,
-        "rfi": data_col in rfi,
-        "gains": data_col in gains,
-    }
-
-    return data_type

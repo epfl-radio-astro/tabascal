@@ -1214,7 +1214,7 @@ def check_epoch_agreement(resolution: TLEResolution, times_jd) -> None:
 
     The epoch sets every age comparison, so a divergence between the preflight MS
     read and the times
-    :func:`tabascal.tab_tools.read_ms` returned would mean the run was checked
+    :func:`tabascal.ms.read_ms` returned would mean the run was checked
     against one epoch and modelled at another. Raise rather than silently
     re-resolving: a second resolution could reach a different coverage decision.
     """
