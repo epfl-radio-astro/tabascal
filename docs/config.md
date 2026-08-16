@@ -44,7 +44,16 @@ data:
 * `data_col`: The data column within the MS file to use as the observed data. Default is `DATA` but can be any column that exists in the MS file.
 * `freq`: This is the frequency channel to run on. Default is to run on all frequency channels.
 * `corr`: This is the correlation product to run on, default `xx`. It is matched against the MS's `POLARIZATION::CORR_TYPE` **by identity, not by position**, so it names the correlation you want rather than an axis index: `yy` selects YY whether the MS holds all four correlations or only that one. Linear (`xx`, `xy`, `yx`, `yy`), circular (`rr`, `rl`, `lr`, `ll`) and Stokes (`i`, `q`, `u`, `v`) names are accepted. Requesting a correlation the MS does not hold is an error naming what it does hold.
-* `noise`: This is the per visibility data point noise in Jy. It is assumed that the data is independent and identitically distributed with Gaussian noise.
+* `noise`: The per-visibility noise in Jy. **Leave it null to use the MS's own `SIGMA` column**, which is read *per baseline* rather than averaged to one number: the antennas of a real array differ in sensitivity, and a single value mis-weights every visibility. On EDA2 the per-baseline `SIGMA` spans a factor of ~30, so a scalar under-weights the quietest baselines by up to ~200x. It matters most when fitting gains, because the per-antenna noise correlates with the per-antenna gain (measured `sigma_a ~ amplitude_a^0.76`, R = 0.96) — a uniform-noise likelihood cannot tell a loud antenna from a noisy one, so the fitted gain absorbs the noise structure.
+
+  A scalar may still be given, applying to every baseline. A path to an `.npz` is also accepted, for a noise measured out of band; it must carry one of:
+
+  | key | shape | meaning |
+  |---|---|---|
+  | `sigma_bl` | `(n_bl,)` | per-baseline noise, used as given |
+  | `s_ant` | `(n_ant,)` | per-antenna noise, combined as `sqrt(s_p^2 + s_q^2) / sqrt(2)` |
+
+  Baselines whose `SIGMA` is non-positive or non-finite — the dead ones — take the median of the rest rather than a zero that would divide the likelihood by nothing. They are flagged out of it anyway.
 
 ## Plots
 
