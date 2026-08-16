@@ -59,6 +59,10 @@ jobs:
     name: Test Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Lifted to the job so the upload step can be gated on whether it is set;
+      # the secrets context is not available in a step-level `if`.
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -82,15 +86,25 @@ jobs:
             htmlcov/
           retention-days: 30
 
-      # Feeds the README's codecov badge, which reads "unknown" without this.
-      # Tokenless works for a public repo; CODECOV_TOKEN is used when set.
-      # Never fails the build: coverage reporting going down is not a test failure.
+      # Feeds the README's codecov badge. Codecov rejects tokenless uploads even
+      # for public repos ("Token required - not valid tokenless upload"), so the
+      # step is skipped without CODECOV_TOKEN rather than run and fail: with
+      # fail_ci_if_error off, a failed upload still reports success, which is how
+      # the badge sat at "unknown" while CI stayed green.
       - name: Upload coverage to Codecov
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          token: ${{ env.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+      - name: Note missing Codecov token
+        if: env.CODECOV_TOKEN == ''
+        run: |
+          echo "::warning::CODECOV_TOKEN is not set, so coverage was not uploaded" \
+               "and the README badge will read 'unknown'. Add the repository" \
+               "secret from https://app.codecov.io/gh/epfl-radio-astro/tabascal."
 
       - name: Coverage summary
         run: |
