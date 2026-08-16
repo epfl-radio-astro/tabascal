@@ -306,13 +306,26 @@ This is the practical route to a pre-handover epoch that SatChecker's OMM
 archive cannot serve, and to a post-handover object with no TLE representation.
 
 For example, the following logs in, downloads ISS element sets whose epochs fall
-between 20 and 22 February 2023, and logs out. Credentials are read from
-environment variables rather than written into the command or output file:
+between 20 and 22 February 2023, and logs out. The object, epoch range and
+output file are set once at the top so the rest can be reused unchanged. The
+password is prompted for at run time and cleared afterwards rather than being
+hard-coded or written into the output file:
 
 ```bash
-export SPACETRACK_USER='your-email@example.com'
-read -r -s -p 'Space-Track password: ' SPACETRACK_PASSWORD
-export SPACETRACK_PASSWORD
+# --- parameters -------------------------------------------------------------
+NORAD_ID='25544'              # numeric NORAD catalogue ID (25544 = ISS)
+EPOCH_START='2023-02-20'      # UTC
+EPOCH_STOP='2023-02-22'       # UTC
+OUTPUT='iss-history.json'
+SPACETRACK_USER='your-email@example.com'
+# ----------------------------------------------------------------------------
+
+BASE='https://www.space-track.org/basicspacedata/query'
+QUERY_URL="${BASE}/class/gp_history/norad_cat_id/${NORAD_ID}/EPOCH/${EPOCH_START}--${EPOCH_STOP}/orderby/EPOCH%20asc/format/json"
+
+printf 'Space-Track password: '
+read -r -s SPACETRACK_PASSWORD
+printf '\n'
 
 cookie_jar=$(mktemp)
 curl --fail --silent --show-error \
@@ -323,8 +336,8 @@ curl --fail --silent --show-error \
 
 curl --fail --silent --show-error \
   --cookie "$cookie_jar" \
-  'https://www.space-track.org/basicspacedata/query/class/gp_history/norad_cat_id/25544/EPOCH/2023-02-20--2023-02-22/orderby/EPOCH%20asc/format/json' \
-  --output iss-history.json
+  "$QUERY_URL" \
+  --output "$OUTPUT"
 
 curl --fail --silent --show-error \
   --cookie "$cookie_jar" \
@@ -333,18 +346,33 @@ rm -f "$cookie_jar"
 unset SPACETRACK_PASSWORD
 ```
 
-Put `iss-history.json` in the directory passed to `--extra-orbit-dir`. To obtain
-the current element set instead, replace the query URL with:
+Put `iss-history.json` in the directory passed to `--extra-orbit-dir`.
 
-```text
-https://www.space-track.org/basicspacedata/query/class/gp/norad_cat_id/25544/format/json
-```
+Notes for adapting this into a script of your own:
 
-Replace `25544` with the required numeric NORAD catalogue ID. Space-Track's
-published usage policy says not to use `gp_history` for current ephemerides and
-to download a historical object or range once and retain it locally. For many
-objects or large date ranges, use the historical bulk files Space-Track provides
-rather than repeatedly querying `gp_history`.
+- `EPOCH_START` and `EPOCH_STOP` are UTC and both ends are inclusive. A bare
+  date means midnight, so the window above ends at `2023-02-22 00:00:00`; append
+  a time as `2023-02-22%2012:00:00` for finer control, keeping the `%20`
+  encoding since the value sits in the URL path.
+- `NORAD_ID` also accepts a comma-separated list — `'25544,48274'` — to fetch
+  several objects into one file. TABASCAL reads multi-object files, and
+  `OUTPUT` is set independently so the filename need not track the IDs.
+- To obtain the current element set instead of a historical range, leave
+  everything else alone and use the `gp` class, which takes no epoch range:
+
+  ```bash
+  QUERY_URL="${BASE}/class/gp/norad_cat_id/${NORAD_ID}/format/json"
+  ```
+
+- If you save this as a script rather than pasting it into a shell, add
+  `set -eu` at the top so a failed login does not fall through to the query.
+  It is deliberately absent above, because `set -e` in an interactive shell
+  closes the terminal on the first error.
+
+Space-Track's published usage policy says not to use `gp_history` for current
+ephemerides and to download a historical object or range once and retain it
+locally. For many objects or large date ranges, use the historical bulk files
+Space-Track provides rather than repeatedly querying `gp_history`.
 
 This is a manual interoperability path only; TABASCAL does not store
 Space-Track credentials or query Space-Track itself.
