@@ -489,3 +489,28 @@ def run_opt(
     write_results_ms(ms_path, map_path, tab_config.args["data"]["data_col"])
 
     return vi_pred, vi_results.losses, vi_params, rchi2
+
+
+#: Names that moved to :mod:`tabascal.ms`. Kept importable from here so an
+#: existing ``from tabascal.tab_tools import read_ms`` keeps working, with a
+#: warning pointing at the new home. Resolved lazily through ``__getattr__`` so
+#: nothing is imported until one is actually used, which also avoids a cycle.
+_MOVED_TO_MS = ("read_ms", "get_observation_data_type")
+
+
+def __getattr__(name: str):
+    if name in _MOVED_TO_MS:
+        import warnings
+
+        from tabascal import ms
+
+        warnings.warn(
+            f"tabascal.tab_tools.{name} has moved to tabascal.ms.{name}. The alias "
+            "here will be removed in a future release; import from tabascal.ms.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return getattr(ms, name)
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

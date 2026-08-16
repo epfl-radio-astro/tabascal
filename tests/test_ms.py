@@ -326,3 +326,38 @@ class TestHeterogeneousPolarizationRows:
         assert resolve_correlation("fake.ms", "yy", pol_id=1) == 1
         with pytest.raises(ValueError, match="does not contain correlation 'xy'"):
             resolve_correlation("fake.ms", "xy", pol_id=1)
+
+
+# ---------------------------------------------------------------------------
+# Backwards compatibility for the move out of tab_tools
+# ---------------------------------------------------------------------------
+
+class TestMovedNamesStayImportable:
+    """read_ms and get_observation_data_type moved to tabascal.ms.
+
+    The old import path keeps working so the move does not break callers that
+    predate it, but warns so it does not become the permanent home.
+    """
+
+    @pytest.mark.parametrize("name", ["read_ms", "get_observation_data_type"])
+    def test_old_import_path_still_resolves(self, name):
+        import tabascal.ms
+        import tabascal.tab_tools
+
+        with pytest.warns(DeprecationWarning, match="moved to tabascal.ms"):
+            moved = getattr(tabascal.tab_tools, name)
+
+        assert moved is getattr(tabascal.ms, name)
+
+    def test_unknown_attribute_still_raises_attribute_error(self):
+        import tabascal.tab_tools
+
+        with pytest.raises(AttributeError, match="has no attribute 'nonexistent'"):
+            tabascal.tab_tools.nonexistent
+
+    def test_no_warning_when_importing_from_the_new_home(self, recwarn):
+        import importlib
+
+        importlib.reload(importlib.import_module("tabascal.ms"))
+
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
