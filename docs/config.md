@@ -172,6 +172,43 @@ $$N^T_\text{int} \geq  \pi \nu_F \Delta t \sqrt{\frac{\lvert V^\text{RFI}_\text{
 
 where $N^T_\text{int}$ is the number of integration samples used per time step, $\Delta t$ is the integration time for a single sample, $\nu_F$ is the fringe frequency of the source due to its movement, $\lvert V^\text{RFI}_\text{inst} \rvert$ is the instantaneous RFI visibility amplitude, and $\sigma_n$ is the visibility noise of a single data point. This parameter (`time_int_factor`) determines the factor by which to increase this oversampling.
 
+### RFI light curve estimates
+
+`rfi.est` points at a measured light curve file, used by `init: est` and `mean: est` to seed the RFI signal. This is the interchange format between tabascal and whatever measures the light curves, so it is deliberately strict.
+
+The file is either a **`.zarr` store** (read with `xarray.open_zarr`) or a **`.npz`**, and must contain all four of
+
+| name | shape | contents |
+|---|---|---|
+| `light_curves` | `(n_src, n_time, n_freq)` | one light curve per source |
+| `norad_ids` | `(n_src,)` | NORAD id of each row of `light_curves` |
+| `times` | `(n_time,)` | Modified Julian Date, in **days**, strictly increasing |
+| `freqs` | `(n_freq,)` | frequency in **Hz**, strictly increasing |
+
+In the zarr form the last three are coordinates of `light_curves`, whose dimensions must be exactly `norad_ids`, `times` and `freqs` — declared in any order, since they are identified by name and transposed on read. A minimal writer:
+
+```python
+import numpy as np, xarray as xr
+
+xr.Dataset(
+    {"light_curves": (("norad_ids", "times", "freqs"), curves)},
+    coords={"norad_ids": np.array([25544, 27386]), "times": times_mjd, "freqs": freqs_hz},
+).to_zarr("light_curves.zarr")
+```
+
+**Rows are matched to satellites by NORAD id, never by position**, so the order of sources in the file does not have to match `satellites.norad_ids`. **Samples are interpolated onto the observation's own time and frequency grid**, so the file's sampling does not have to match the observation either.
+
+Both are strict because their failure modes are silent. A light curve attached to the wrong satellite still has the right shape and still optimises — it just seeds the prior from another satellite. A file whose sampling is assumed rather than declared is resampled wrongly by an unknown amount. Neither surfaces as an error, only as a worse fit, so a file that cannot state which satellite and which sample times it describes is rejected rather than guessed at.
+
+Times are absolute (MJD) rather than seconds from the start of a particular observation, so a light curve is interpretable on its own and can be reused across measurement sets covering the same pass.
+
+Some further details:
+
+* Each satellite must appear **exactly once**. A repeated NORAD id has no single answer to which row belongs to it, and resolving that by file order is the thing id-matching exists to avoid, so it is rejected — merge the passes or drop one before using the file as an estimate.
+* Labels that are not integer NORAD ids never match a satellite and are dropped, so a file may carry named sources (e.g. `Fornax A`) alongside the satellites without filtering beforehand, and those may repeat freely.
+* **Samples outside the file's coverage are zero**, on either axis — the file says nothing there, which is the same "no signal known" convention the elevation mask uses. An axis of length 1 is held constant instead, since a single sample carries no gradient to interpolate along; a single-frequency light curve therefore applies across the whole band rather than being zeroed outside it.
+* **The file does not have to cover every satellite in the fit.** Satellites with no light curve are initialised at zero and named in a warning, so light curves can be measured for a subset — the bright or well-characterised sources — while the rest are still modelled and fitted, just without an informative starting point. It is an error only if *no* configured satellite is found, which would otherwise silently reduce the whole estimate to zeros.
+
 ## Satellites
 
 The `satellites` section determines which satelites to include in the model and the prior distribution to use for there trajectories. An example is given below.

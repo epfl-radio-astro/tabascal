@@ -263,6 +263,12 @@ class TabConfig:
 
         self.int_time = ms_params["int_time"]
         self.times = np.asarray(ms_params["times"])
+        # Kept as read, not recovered from times_jd. JD's ~2.5e6 day magnitude
+        # leaves f64 about 5e-10 days of resolution, so an MJD -> JD -> MJD round
+        # trip shifts samples by ~1e-10 days. That is enough to push the first or
+        # last sample of an estimate written on this very grid just outside it,
+        # where interpolation would silently replace a measured endpoint with zero.
+        self.times_mjd = np.asarray(ms_params["times_mjd"])
         self.times_jd = mjd_to_jd(ms_params["times_mjd"])
 
         self.chan_width = ms_params["chan_width"]

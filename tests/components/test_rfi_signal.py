@@ -28,6 +28,7 @@ import numpyro
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
     ComplexRFIConstAnt,
+    read_light_curves,
     rfi_signal_config_validation,
 )
 from tabascal.fft_gp import latent_to_signal
@@ -41,6 +42,10 @@ from .conftest import active_precision, assert_transform_roundtrip, make_constan
 # ---------------------------------------------------------------------------
 
 N_RFI, N_RFI_REAL, N_ANT, N_FREQ, N_TIME = 4, 3, 3, 4, 8
+
+# Arbitrary but fixed epoch for the mock observation's absolute time grid.
+_TEST_EPOCH_JD = 2460000.5
+_TEST_EPOCH_MJD = _TEST_EPOCH_JD - 2400000.5
 
 ALL_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
 FOURIER_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
@@ -112,6 +117,11 @@ def make_rfi_config(
         freqs_fine=jnp.linspace(freqs[0], freqs[-1], n_freq_fine),
         chan_width=chan_width,
         times=times,
+        # Absolute grid the light-curve estimate is interpolated against.
+        # Absolute grid the light-curve estimate is interpolated against. MJD is
+        # carried alongside JD rather than derived from it; see read_ms_params.
+        times_mjd=_TEST_EPOCH_MJD + np.linspace(0.0, 120.0, n_time, dtype=np.float64) / 86400.0,
+        times_jd=_TEST_EPOCH_JD + np.linspace(0.0, 120.0, n_time, dtype=np.float64) / 86400.0,
         times_fine=jnp.linspace(times[0], times[-1], n_time_fine),
         int_time=int_time,
         vis_obs=jnp.ones((n_bl, n_freq, n_time), dtype=complex),
@@ -168,11 +178,25 @@ def run_forward(comp, params=None, state=None):
     return forward(params, {} if state is None else state, make_constants(comp))["rfi_A"]
 
 
-def make_est_file(tmp_path, n_rfi_real=N_RFI_REAL, n_time=N_TIME):
-    """Write the .npy RFI estimate that the `est` prior/init modes read."""
-    path = tmp_path / "rfi_est.npy"
+def make_est_file(tmp_path, n_rfi_real=N_RFI_REAL, n_time=N_TIME, n_freq=N_FREQ):
+    """Write the light-curve .npz that the `est` prior/init modes read.
+
+    Covers the mock observation's own time and frequency span, so the
+    interpolation in read_light_curves is an identity rather than an edge case.
+    """
+    path = tmp_path / "rfi_est.npz"
     rng = np.random.RandomState(0)
-    np.save(path, np.abs(rng.randn(n_rfi_real, n_time, 2)))
+    # f64 throughout: MJD's ~6e4 day offset against second-scale spacing is below
+    # f32 resolution, and jnp under --x64 false would collapse every sample onto
+    # the same coordinate. The helper has to be as careful as the reader.
+    times = np.linspace(0.0, 120.0, N_TIME, dtype=np.float64)
+    np.savez(
+        path,
+        light_curves=np.abs(rng.randn(n_rfi_real, n_time, n_freq)),
+        norad_ids=np.array(_norad_ids(n_rfi_real, n_rfi_real)),
+        times=_TEST_EPOCH_MJD + times / 86400.0,
+        freqs=np.linspace(1.4e9, 1.41e9, n_freq, dtype=np.float64),
+    )
     return str(path)
 
 
@@ -788,6 +812,8 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
         n_freq_fine=n_freq, n_time_fine=n_time, n_int_freq=1, n_int_time=1,
         freqs=freqs, freqs_fine=freqs, chan_width=float(freqs[1] - freqs[0]),
         times=times, times_fine=times, int_time=float(times[1] - times[0]),
+    times_jd=2460000.5 + times / 86400.0,
+    times_mjd=60000.0 + times / 86400.0,
         vis_obs=jnp.ones((3, n_freq, n_time), dtype=complex),
         args={
             "rfi": {"r_seed": 1, "var": 1.0, "corr_freq": 5e6, "corr_time": 60.0,
@@ -841,6 +867,422 @@ def test_multi_device_padded_sources_dark():
     assert "MULTI_DEVICE_OK" in result.stdout, (
         f"returncode={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# read_light_curves
+# ---------------------------------------------------------------------------
+
+class TestReadLightCurves:
+    """The light-curve interchange format: strict, id-matched, and resampled.
+
+    Every loose alternative this could accept instead fails silently. Matching
+    rows by position attaches a curve to the wrong satellite without changing its
+    shape; assuming the file's sampling matches the observation resamples it
+    wrongly by an unknown amount. Neither shows up as an error, only as a worse
+    fit — so the assertions here are what distinguish correct from plausible.
+    """
+
+    MJD0 = 60000.0
+    F0, F1 = 1.0e9, 1.1e9
+
+    def _times(self, n=5):
+        return self.MJD0 + np.arange(n) / 86400.0
+
+    def _freqs(self, n=3):
+        return np.linspace(self.F0, self.F1, n)
+
+    def _npz(self, tmp_path, labels, times=None, freqs=None, curves=None,
+             name="est.npz", **extra):
+        times = self._times() if times is None else times
+        freqs = self._freqs() if freqs is None else freqs
+        if curves is None:
+            # Source i is a constant i+1, so a row's value identifies its source.
+            curves = np.stack(
+                [np.full((len(times), len(freqs)), i + 1.0) for i in range(len(labels))]
+            )
+        path = tmp_path / name
+        fields = {"light_curves": curves, "norad_ids": np.array(labels),
+                  "times": np.asarray(times), "freqs": np.asarray(freqs)}
+        fields.update(extra)
+        np.savez(path, **fields)
+        return str(path)
+
+    def _zarr(self, tmp_path, labels, times=None, freqs=None, curves=None):
+        import xarray as xr
+
+        times = self._times() if times is None else times
+        freqs = self._freqs() if freqs is None else freqs
+        if curves is None:
+            curves = np.stack(
+                [np.full((len(times), len(freqs)), i + 1.0) for i in range(len(labels))]
+            )
+        path = str(tmp_path / "est.zarr")
+        xr.Dataset(
+            {"light_curves": (("norad_ids", "times", "freqs"), curves)},
+            coords={"norad_ids": np.array(labels), "times": np.asarray(times),
+                    "freqs": np.asarray(freqs)},
+        ).to_zarr(path)
+        return path
+
+    # --- id matching ---
+
+    def test_rows_are_reordered_to_match_norad_ids(self, tmp_path):
+        path = self._npz(tmp_path, [300, 100, 200])
+        out = np.asarray(
+            read_light_curves(path, [200, 300, 100], self._times(), self._freqs())
+        )
+        assert out.shape == (3, 3, 5)          # (n_rfi, n_freq, n_time)
+        assert out[0].max() == 3.0             # 200 -> file row 2
+        assert out[1].max() == 1.0             # 300 -> file row 0
+        assert out[2].max() == 2.0             # 100 -> file row 1
+
+    def test_non_satellite_labels_are_dropped(self, tmp_path):
+        path = self._npz(tmp_path, ["100", "Fornax A", "200"])
+        out = np.asarray(
+            read_light_curves(path, [100, 200], self._times(), self._freqs())
+        )
+        assert out[0].max() == 1.0 and out[1].max() == 3.0
+
+    def test_a_file_matching_nothing_raises(self, tmp_path):
+        path = self._npz(tmp_path, [100, 200])
+        with pytest.raises(ValueError, match="matches any configured satellite"):
+            read_light_curves(path, [900, 901], self._times(), self._freqs())
+
+    # --- partial coverage ---
+
+    def test_unmatched_satellites_are_zero(self, tmp_path, capsys):
+        path = self._npz(tmp_path, [100, 300])
+        out = np.asarray(
+            read_light_curves(path, [100, 200, 300], self._times(), self._freqs())
+        )
+        assert out[0].max() == 1.0
+        assert np.all(out[1] == 0.0)
+        assert out[2].max() == 2.0
+        warning = capsys.readouterr().out
+        assert "200" in warning and "zero" in warning
+
+    def test_zero_filling_leaves_the_matched_rows_intact(self, tmp_path):
+        path = self._npz(tmp_path, [300, 100])
+        full = np.asarray(
+            read_light_curves(path, [100, 300], self._times(), self._freqs())
+        )
+        partial = np.asarray(
+            read_light_curves(path, [100, 999, 300], self._times(), self._freqs())
+        )
+        np.testing.assert_array_equal(partial[0], full[0])
+        np.testing.assert_array_equal(partial[2], full[1])
+        assert np.all(partial[1] == 0.0)
+
+    # --- resampling ---
+
+    def test_an_exact_grid_is_returned_unchanged(self, tmp_path):
+        times, freqs = self._times(), self._freqs()
+        curves = np.arange(1 * 5 * 3, dtype=float).reshape(1, 5, 3)
+        path = self._npz(tmp_path, [100], curves=curves)
+
+        out = np.asarray(read_light_curves(path, [100], times, freqs))
+        # Returned as (n_rfi, n_freq, n_time), so the source is transposed.
+        np.testing.assert_allclose(out[0], curves[0].T, rtol=1e-6)
+
+    def test_time_is_interpolated_onto_the_observation_grid(self, tmp_path):
+        # A ramp in time: interpolating halfway between samples must give halves.
+        src_times = self.MJD0 + np.arange(3) / 86400.0
+        curves = np.array([[[0.0], [10.0], [20.0]]])          # (1, 3, 1)
+        path = self._npz(tmp_path, [100], times=src_times, freqs=[self.F0],
+                         curves=curves)
+
+        dst = self.MJD0 + np.array([0.0, 0.5, 1.0, 1.5, 2.0]) / 86400.0
+        out = np.asarray(read_light_curves(path, [100], dst, [self.F0]))
+        np.testing.assert_allclose(out[0, 0], [0.0, 5.0, 10.0, 15.0, 20.0], rtol=1e-5)
+
+    def test_frequency_is_interpolated_too(self, tmp_path):
+        curves = np.array([[[0.0, 20.0]]])                    # (1, 1, 2)
+        path = self._npz(tmp_path, [100], times=[self.MJD0],
+                         freqs=[1.0e9, 1.2e9], curves=curves)
+
+        out = np.asarray(
+            read_light_curves(path, [100], [self.MJD0], [1.0e9, 1.1e9, 1.2e9])
+        )
+        np.testing.assert_allclose(out[0, :, 0], [0.0, 10.0, 20.0], rtol=1e-5)
+
+    def test_samples_outside_the_files_coverage_are_zero(self, tmp_path):
+        src_times = self.MJD0 + np.arange(3) / 86400.0
+        path = self._npz(tmp_path, [100], times=src_times, freqs=[self.F0],
+                         curves=np.full((1, 3, 1), 7.0))
+
+        # Ask either side of the measured window as well as inside it.
+        dst = self.MJD0 + np.array([-5.0, 1.0, 9.0]) / 86400.0
+        out = np.asarray(read_light_curves(path, [100], dst, [self.F0]))
+        assert out[0, 0, 0] == 0.0        # before the file starts
+        assert out[0, 0, 1] == 7.0        # inside
+        assert out[0, 0, 2] == 0.0        # after it ends
+
+    def test_out_of_band_frequencies_are_zero(self, tmp_path):
+        path = self._npz(tmp_path, [100], freqs=[1.0e9, 1.1e9],
+                         curves=np.full((1, 5, 2), 4.0))
+        out = np.asarray(
+            read_light_curves(path, [100], self._times(), [0.5e9, 1.05e9, 2.0e9])
+        )
+        assert np.all(out[0, 0] == 0.0)
+        assert np.all(out[0, 1] == 4.0)
+        assert np.all(out[0, 2] == 0.0)
+
+    def test_a_single_sample_axis_is_held_constant(self, tmp_path):
+        """One sample carries no gradient, so it is a value, not a zero-width band."""
+        path = self._npz(tmp_path, [100], freqs=[1.05e9],
+                         curves=np.full((1, 5, 1), 3.0))
+        out = np.asarray(
+            read_light_curves(path, [100], self._times(), [0.5e9, 1.05e9, 2.0e9])
+        )
+        assert np.all(out[0] == 3.0), "a single-frequency curve was zeroed out of band"
+
+    def test_nans_become_a_zero_estimate(self, tmp_path):
+        curves = np.ones((1, 5, 3))
+        curves[0, :2] = np.nan
+        path = self._npz(tmp_path, [100], curves=curves)
+
+        out = np.asarray(read_light_curves(path, [100], self._times(), self._freqs()))
+        assert np.all(np.isfinite(out))
+        assert np.all(out[0, :, :2] == 0.0)
+
+    def test_non_monotonic_sampling_raises(self, tmp_path):
+        times = self.MJD0 + np.array([0.0, 2.0, 1.0]) / 86400.0
+        path = self._npz(tmp_path, [100], times=times,
+                         curves=np.ones((1, 3, 3)))
+        with pytest.raises(ValueError, match="strictly increasing"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    # --- zarr ---
+
+    def test_a_zarr_store_reads_like_an_npz(self, tmp_path):
+        curves = np.arange(2 * 5 * 3, dtype=float).reshape(2, 5, 3)
+        zarr_path = self._zarr(tmp_path, [100, 200], curves=curves)
+        npz_path = self._npz(tmp_path, [100, 200], curves=curves)
+
+        args = ([200, 100], self._times(), self._freqs())
+        np.testing.assert_allclose(
+            np.asarray(read_light_curves(zarr_path, *args)),
+            np.asarray(read_light_curves(npz_path, *args)),
+            rtol=1e-6,
+        )
+
+    def test_a_zarr_missing_a_variable_raises(self, tmp_path):
+        import xarray as xr
+
+        path = str(tmp_path / "bad.zarr")
+        xr.Dataset(
+            {"light_curves": (("norad_ids", "times"), np.ones((2, 5)))},
+            coords={"norad_ids": np.array([100, 200]), "times": self._times()},
+        ).to_zarr(path)
+        with pytest.raises(ValueError, match="missing"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    # --- strictness ---
+
+    @pytest.mark.parametrize("drop", ["norad_ids", "times", "freqs"])
+    def test_an_npz_missing_a_required_array_raises(self, tmp_path, drop):
+        fields = {
+            "light_curves": np.ones((2, 5, 3)),
+            "norad_ids": np.array([100, 200]),
+            "times": self._times(),
+            "freqs": self._freqs(),
+        }
+        del fields[drop]
+        path = tmp_path / "est.npz"
+        np.savez(path, **fields)
+
+        with pytest.raises(ValueError, match="missing") as excinfo:
+            read_light_curves(str(path), [100], self._times(), self._freqs())
+        assert drop in str(excinfo.value)
+
+    def test_a_bare_npy_is_rejected(self, tmp_path):
+        """The old positional format is no longer accepted."""
+        path = tmp_path / "est.npy"
+        np.save(path, np.ones((2, 5, 3)))
+        with pytest.raises(ValueError, match="bare .npy"):
+            read_light_curves(str(path), [100, 200], self._times(), self._freqs())
+
+    def test_a_shape_disagreement_raises(self, tmp_path):
+        path = self._npz(tmp_path, [100, 200], curves=np.ones((2, 4, 3)))
+        with pytest.raises(ValueError, match="imply"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    def test_an_npz_named_npy_is_still_read_as_an_npz(self, tmp_path):
+        """Detection is by what np.load returned, not by the file extension."""
+        import os
+
+        written = self._npz(tmp_path, [100, 200])
+        path = str(tmp_path / "est.npy")
+        os.rename(written, path)
+
+        out = np.asarray(
+            read_light_curves(path, [200, 100], self._times(), self._freqs())
+        )
+        assert out[0].max() == 2.0 and out[1].max() == 1.0
+
+    def test_realistic_mjd_sampling_survives_single_precision(self, tmp_path):
+        """MJD spacing is far below f32 resolution, so interpolation must be f64.
+
+        A real observation samples seconds (~1e-5 days) against an MJD offset of
+        ~6e4 days. In f32 every sample collapses onto the same coordinate and the
+        interpolation silently returns a constant instead of the light curve —
+        which looks entirely plausible downstream. tabascal defaults to f32, so
+        this is the configuration that matters.
+        """
+        n = 64
+        src_times = 60123.45 + np.arange(n) * 2.0 / 86400.0   # 2 s cadence
+        ramp = np.linspace(0.0, 100.0, n)
+        path = self._npz(tmp_path, [100], times=src_times, freqs=[self.F0],
+                         curves=ramp.reshape(1, n, 1))
+
+        out = np.asarray(read_light_curves(path, [100], src_times, [self.F0]))
+        np.testing.assert_allclose(out[0, 0], ramp, rtol=1e-5)
+        assert np.ptp(out[0, 0]) > 99.0, "the time axis collapsed to a constant"
+
+    # --- boundary precision and axis order (from Codex review of #116) ---
+
+    def test_an_mjd_grid_keeps_its_endpoints(self, tmp_path):
+        """Endpoints must survive a grid that is only bit-for-bit *nearly* the same.
+
+        Two grids meant to be identical rarely are to the last bit. Without a
+        boundary tolerance the first or last destination sample falls just
+        outside the source range and np.interp replaces a measured endpoint with
+        zero — silently, since every other sample is fine.
+        """
+        n = 64
+        src = 60123.45 + np.arange(n) * 2.0 / 86400.0
+        path = self._npz(tmp_path, [100], times=src, freqs=[self.F0],
+                         curves=np.full((1, n, 1), 5.0))
+
+        # Perturb by ~1e-10 days, the scale of a JD round trip, outwards at both ends.
+        dst = src.copy()
+        dst[0] -= 2.5e-10
+        dst[-1] += 2.5e-10
+
+        out = np.asarray(read_light_curves(path, [100], dst, [self.F0]))
+        assert out[0, 0, 0] == 5.0, "first sample was zeroed by a sub-microsecond shift"
+        assert out[0, 0, -1] == 5.0, "last sample was zeroed by a sub-microsecond shift"
+
+    def test_a_genuinely_out_of_range_sample_is_still_zero(self, tmp_path):
+        """The tolerance must not swallow a sample that is really outside."""
+        n = 8
+        src = 60123.45 + np.arange(n) * 2.0 / 86400.0
+        path = self._npz(tmp_path, [100], times=src, freqs=[self.F0],
+                         curves=np.full((1, n, 1), 5.0))
+
+        # One full sample beyond each end, far outside any tolerance.
+        dst = np.array([src[0] - 2.0 / 86400.0, src[3], src[-1] + 2.0 / 86400.0])
+        out = np.asarray(read_light_curves(path, [100], dst, [self.F0]))
+        assert out[0, 0, 0] == 0.0 and out[0, 0, 2] == 0.0
+        assert out[0, 0, 1] == 5.0
+
+    def test_a_zarr_with_reordered_dimensions_is_transposed(self, tmp_path):
+        """Axes are identified by name, so a differently-ordered store still reads.
+
+        With equal-length axes a raw .data read would pass the shape check and
+        silently interpret time as frequency.
+        """
+        import xarray as xr
+
+        n = 3  # every axis the same length, so shape checking cannot catch a swap
+        labels = [100, 200, 300]
+        times = self.MJD0 + np.arange(n) / 86400.0
+        freqs = np.linspace(self.F0, self.F1, n)
+        curves = np.arange(n ** 3, dtype=float).reshape(n, n, n)
+
+        canonical = str(tmp_path / "canonical.zarr")
+        xr.Dataset(
+            {"light_curves": (("norad_ids", "times", "freqs"), curves)},
+            coords={"norad_ids": np.array(labels), "times": times, "freqs": freqs},
+        ).to_zarr(canonical)
+
+        swapped = str(tmp_path / "swapped.zarr")
+        xr.Dataset(
+            {"light_curves": (("times", "freqs", "norad_ids"),
+                              np.transpose(curves, (1, 2, 0)))},
+            coords={"norad_ids": np.array(labels), "times": times, "freqs": freqs},
+        ).to_zarr(swapped)
+
+        args = (labels, times, freqs)
+        np.testing.assert_allclose(
+            np.asarray(read_light_curves(swapped, *args)),
+            np.asarray(read_light_curves(canonical, *args)),
+            rtol=1e-9,
+        )
+
+    def test_a_zarr_with_wrong_dimension_names_raises(self, tmp_path):
+        import xarray as xr
+
+        path = str(tmp_path / "bad_dims.zarr")
+        xr.Dataset(
+            {"light_curves": (("norad_ids", "times", "channel"), np.ones((2, 5, 3)))},
+            coords={"norad_ids": np.array([100, 200]), "times": self._times(),
+                    "freqs": ("channel", self._freqs())},
+        ).to_zarr(path)
+        with pytest.raises(ValueError, match="dimensioned"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    def test_duplicate_ids_in_the_file_raise(self, tmp_path):
+        """Two rows for one satellite has no answer that is not file order."""
+        path = self._npz(tmp_path, [100, 200, 100])
+        with pytest.raises(ValueError, match="more than one light curve") as excinfo:
+            read_light_curves(path, [100, 200], self._times(), self._freqs())
+        assert "100" in str(excinfo.value)
+
+    def test_repeated_non_satellite_labels_are_still_fine(self, tmp_path):
+        """Only integer ids identify a row, so named sources may repeat freely."""
+        path = self._npz(tmp_path, ["Fornax A", "100", "Fornax A"])
+        out = np.asarray(
+            read_light_curves(path, [100], self._times(), self._freqs())
+        )
+        assert out[0].max() == 2.0
+
+    def test_a_duplicated_configured_satellite_is_not_a_file_error(self, tmp_path):
+        """Sharding pads the satellite list by repeating one; the file is still valid."""
+        path = self._npz(tmp_path, [100, 200])
+        out = np.asarray(
+            read_light_curves(path, [100, 200, 200], self._times(), self._freqs())
+        )
+        assert out.shape[0] == 3
+        np.testing.assert_array_equal(out[1], out[2])
+
+    def test_infinite_samples_become_zero_not_float_max(self, tmp_path, capsys):
+        """nan_to_num's default maps inf onto the f64 extrema, which is not finite.
+
+        1.8e308 overflows back to inf in f32 — the default working precision —
+        and survives the later sqrt, so an estimate meant to be finite would
+        poison the prior mean or the init with inf.
+        """
+        curves = np.ones((1, 5, 3))
+        curves[0, 1, 0] = np.inf
+        curves[0, 2, 1] = -np.inf
+        path = self._npz(tmp_path, [100], curves=curves)
+
+        out = np.asarray(read_light_curves(path, [100], self._times(), self._freqs()))
+        assert np.all(np.isfinite(out))
+        # Well below f32 max, i.e. genuinely zeroed rather than clipped to a huge float.
+        assert np.abs(out).max() <= 1.0
+        assert np.isfinite(np.sqrt(np.abs(out))).all()
+        assert "infinite" in capsys.readouterr().out
+
+    def test_infinities_survive_the_single_precision_cast(self, tmp_path):
+        """The end-to-end shape of the bug: inf in the file -> inf in the estimate."""
+        curves = np.ones((1, 5, 3))
+        curves[0, 0, 0] = np.inf
+        path = self._npz(tmp_path, [100], curves=curves)
+
+        out = read_light_curves(path, [100], self._times(), self._freqs())
+        assert jnp.isfinite(jnp.sqrt(jnp.abs(out))).all()
+
+    def test_nan_is_not_reported_as_an_infinity(self, tmp_path, capsys):
+        """NaN is the documented out-of-view marker, so it must not warn."""
+        curves = np.ones((1, 5, 3))
+        curves[0, :2] = np.nan
+        path = self._npz(tmp_path, [100], curves=curves)
+
+        read_light_curves(path, [100], self._times(), self._freqs())
+        assert "infinite" not in capsys.readouterr().out
 
 class TestMaskIsolatesNonFiniteSamples:
     """A masked sample must be exactly zero, whatever rfi_A holds there.

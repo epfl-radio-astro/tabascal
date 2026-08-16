@@ -13,9 +13,271 @@ from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_l
 from tabascal.timing import measure_runtime
 
 import numpy as np
+from numpy.typing import NDArray
 import xarray as xr
 
-from typing import Tuple, Dict, Callable
+from typing import Tuple, Dict, Callable, List, Optional
+
+
+#: Required contents of a light-curve file. See :func:`read_light_curves`.
+_LIGHT_CURVE_VARS = ("light_curves", "norad_ids", "times", "freqs")
+
+#: Dimensions of ``light_curves`` in a zarr store, in the order this module wants
+#: them. A store may declare them in any order; it is transposed on read.
+_LIGHT_CURVE_DIMS = ("norad_ids", "times", "freqs")
+
+
+def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDArray]:
+    """Load a light-curve file into (light_curves, norad_ids, times, freqs).
+
+    Accepts a ``.zarr`` store (read with :func:`xarray.open_zarr`) or a ``.npz``.
+    Both carry the same four arrays under the same names; the zarr form keeps
+    ``norad_ids``/``times``/``freqs`` as coordinates of ``light_curves``.
+    """
+    if str(est_path).rstrip("/").endswith(".zarr"):
+        xds = xr.open_zarr(est_path)
+        available = sorted(set(xds.variables))
+        missing = [
+            name
+            for name in _LIGHT_CURVE_VARS
+            if name not in xds.variables and name not in xds.coords
+        ]
+        if missing:
+            raise ValueError(
+                f"{est_path} is missing {missing}. A light-curve zarr must hold "
+                f"{list(_LIGHT_CURVE_VARS)}, with light_curves dimensioned "
+                f"(norad_ids, times, freqs). It contains {available}."
+            )
+        # Transpose by dimension name rather than trusting the stored order. Going
+        # straight to .data would read a differently-ordered store along the wrong
+        # axes, and the shape check below cannot catch it whenever the swapped
+        # dimensions happen to be the same length. Naming the axes is the reason
+        # to use xarray here at all, so any order is accepted and normalised.
+        dims = tuple(xds["light_curves"].dims)
+        if set(dims) != set(_LIGHT_CURVE_DIMS):
+            raise ValueError(
+                f"{est_path}: light_curves is dimensioned {dims}, but a "
+                f"light-curve zarr must use exactly {_LIGHT_CURVE_DIMS} (in any "
+                "order)."
+            )
+        curves = xds["light_curves"].transpose(*_LIGHT_CURVE_DIMS)
+
+        return (
+            np.asarray(curves.data),
+            np.asarray(xds["norad_ids"].data),
+            np.asarray(xds["times"].data),
+            np.asarray(xds["freqs"].data),
+        )
+
+    npz = np.load(est_path)
+    if not isinstance(npz, np.lib.npyio.NpzFile):
+        raise ValueError(
+            f"{est_path} is a bare .npy array. A light-curve file must be a .zarr "
+            f"or a .npz holding {list(_LIGHT_CURVE_VARS)}, so that its rows can be "
+            "matched to satellites by NORAD id and its samples interpolated onto "
+            "the observation grid. A bare array carries none of that."
+        )
+
+    missing = [name for name in _LIGHT_CURVE_VARS if name not in npz.files]
+    if missing:
+        raise ValueError(
+            f"{est_path} is missing {missing}. A light-curve .npz must hold "
+            f"{list(_LIGHT_CURVE_VARS)}. It contains {sorted(npz.files)}."
+        )
+    return tuple(np.asarray(npz[name]) for name in _LIGHT_CURVE_VARS)  # type: ignore
+
+
+def _as_norad_ids(labels: NDArray) -> List[Optional[int]]:
+    """Labels as integer NORAD ids, with anything non-integer mapped to None.
+
+    A file may legitimately carry named sources (nufft-gif plots e.g. "Fornax A"
+    alongside the satellites); those can never match and are dropped.
+    """
+    ids: List[Optional[int]] = []
+    for label in labels:
+        text = str(label).strip()
+        ids.append(int(text) if text.lstrip("-").isdigit() else None)
+    return ids
+
+
+def _interp_axis(values: NDArray, src: NDArray, dst: NDArray, axis: int) -> NDArray:
+    """Linearly interpolate ``values`` along ``axis`` from ``src`` onto ``dst``.
+
+    Samples beyond the ends of ``src`` are zero: the light curve says nothing
+    there, and zero is the same "no signal known" convention the elevation mask
+    uses. A length-1 ``src`` is held constant across ``dst`` instead -- a single
+    sample carries no gradient to interpolate along, so treating it as a band or
+    an instant of zero width would throw the measurement away.
+
+    Deliberately numpy rather than jax, and in f64: MJD carries a large offset
+    (~6e4 days) against sample spacings of order a second (~1e-5 days), which f32
+    cannot resolve at all -- every sample of a normal observation collapses onto
+    the same coordinate and the interpolation returns a constant. This is host
+    setup code that runs once, so there is nothing to gain from tracing it and a
+    silently wrong estimate to lose. The result is cast to the working precision
+    by the caller.
+    """
+    if len(src) == 1:
+        return np.repeat(values, len(dst), axis=axis)
+
+    if not np.all(np.diff(src) > 0):
+        raise ValueError(
+            "light-curve times and freqs must be strictly increasing; got "
+            f"{src[:4]}{'...' if len(src) > 4 else ''}"
+        )
+
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+
+    # Snap destination samples that sit a hair outside the source range back onto
+    # its endpoints. Two grids meant to be identical rarely are to the last bit --
+    # a different writer, a unit conversion, an epoch offset -- and without this a
+    # first or last sample would be zeroed rather than interpolated, silently
+    # dropping a measured endpoint. The tolerance is a thousandth of the smallest
+    # sample spacing, far below any real gap and far above float noise.
+    tol = 1e-3 * float(np.min(np.diff(src)))
+    dst = np.where((dst < src[0]) & (dst > src[0] - tol), src[0], dst)
+    dst = np.where((dst > src[-1]) & (dst < src[-1] + tol), src[-1], dst)
+
+    return np.apply_along_axis(
+        lambda v: np.interp(dst, src, v, left=0.0, right=0.0), axis, values
+    )
+
+
+def read_light_curves(
+    est_path: str, norad_ids: List[int], times_mjd: NDArray, freqs: NDArray
+) -> Array:
+    """Read an RFI light curve estimate onto the observation grid.
+
+    File structure
+    --------------
+    A ``.zarr`` store (read with :func:`xarray.open_zarr`) or a ``.npz``, holding
+
+    ``light_curves``
+        ``(n_src, n_time, n_freq)``. One light curve per source, in the same
+        units the RFI visibility amplitude is squared from.
+    ``norad_ids``
+        ``(n_src,)``. NORAD id labelling each row of ``light_curves``.
+    ``times``
+        ``(n_time,)``. Modified Julian Date, in **days**, strictly increasing.
+    ``freqs``
+        ``(n_freq,)``. Frequency in **Hz**, strictly increasing.
+
+    In the zarr form the last three are coordinates of ``light_curves``.
+
+    All four are required. The format is deliberately strict: this is the
+    interchange standard between tabascal and whatever measures the light curves,
+    and every loose alternative it could accept instead fails silently. Matching
+    rows by position rather than by id attaches a curve to the wrong satellite
+    without changing its shape; assuming the file's sampling matches the
+    observation's resamples it wrongly by an unknown amount. Neither shows up as
+    an error, only as a worse fit.
+
+    Times are absolute (MJD) rather than seconds from the start of a particular
+    observation, so a light curve is interpretable on its own and can be reused
+    across measurement sets covering the same pass.
+
+    Resampling
+    ----------
+    Light curves are interpolated linearly onto ``times_mjd`` and ``freqs``.
+    Samples outside the file's coverage are zero, on either axis -- the file
+    says nothing there, which is the same "no signal known" convention the
+    elevation mask uses. An axis of length 1 is held constant instead, since a
+    single sample carries no gradient to interpolate along.
+
+    Partial coverage
+    ----------------
+    Satellites with no light curve in the file are zero, so an estimate only has
+    to cover the satellites it was actually measured for rather than every
+    satellite in the fit. Those are named in a warning. It is an error for *no*
+    configured satellite to be found, which otherwise silently degrades the whole
+    estimate to zeros.
+
+    Returns
+    -------
+    Array (n_rfi, n_freq, n_time)
+        Light curves on the observation grid, in ``norad_ids`` order, with
+        unmatched satellites zero and NaNs replaced by zero.
+    """
+
+    curves, labels, src_times, src_freqs = _light_curve_contents(est_path)
+
+    if curves.ndim != 3:
+        raise ValueError(
+            f"{est_path}: light_curves must be (n_src, n_time, n_freq), got shape "
+            f"{curves.shape}."
+        )
+    expected = (len(labels), len(src_times), len(src_freqs))
+    if curves.shape != expected:
+        raise ValueError(
+            f"{est_path}: light_curves has shape {curves.shape} but norad_ids, "
+            f"times and freqs imply {expected}."
+        )
+
+    file_ids = _as_norad_ids(labels)
+
+    # A repeated id has no single answer to "which row is this satellite?", and
+    # taking the last one would decide it by file order -- the very thing matching
+    # by id exists to avoid. Two passes of the same satellite have to be merged, or
+    # one of them dropped, before they can seed a prior.
+    seen, duplicates = set(), set()
+    for n_id in file_ids:
+        if n_id is None:
+            continue
+        (duplicates if n_id in seen else seen).add(n_id)
+    if duplicates:
+        raise ValueError(
+            f"{est_path} has more than one light curve for NORAD IDs "
+            f"{sorted(duplicates)}. Each satellite must appear exactly once, so "
+            "that a row is identified by its id rather than by its position."
+        )
+
+    lc_idx = {n_id: i for i, n_id in enumerate(file_ids) if n_id is not None}
+    rows = [lc_idx.get(int(n_id)) for n_id in norad_ids]
+
+    if all(row is None for row in rows):
+        raise ValueError(
+            f"No light curve in {est_path} matches any configured satellite. "
+            f"Configured NORAD IDs are {sorted(set(int(n) for n in norad_ids))} "
+            f"and the file contains {sorted(lc_idx)}."
+        )
+
+    missing = [int(n_id) for n_id, row in zip(norad_ids, rows) if row is None]
+    if missing:
+        print(
+            f"Warning: no light curve in {est_path} for NORAD IDs "
+            f"{sorted(set(missing))}; initialising those satellites at zero. "
+            f"The file contains {sorted(lc_idx)}."
+        )
+
+    matched = np.asarray(curves[[r for r in rows if r is not None]], dtype=np.float64)
+
+    # Any non-finite sample -> 0 estimate. NaN is the documented out-of-view
+    # marker; an infinity is not a measurement either, usually an upstream
+    # divide-by-zero. Both are zeroed explicitly rather than through
+    # nan_to_num's defaults, which map +/-inf onto the f64 extrema: those
+    # overflow back to inf in f32 (the default working precision) and survive
+    # the later sqrt, so an estimate meant to be finite poisons the prior mean
+    # or the init with inf. Infinities are called out because, unlike NaN, they
+    # are not part of the format and point at a problem upstream.
+    n_inf = int(np.isinf(matched).sum())
+    if n_inf:
+        print(
+            f"Warning: {est_path} has {n_inf} infinite light-curve samples; "
+            "treating them as unmeasured (zero). Check the measurement for a "
+            "divide-by-zero."
+        )
+    matched = np.nan_to_num(matched, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # (n_matched, n_time, n_freq) -> observation grid -> (n_matched, n_freq, n_time)
+    matched = _interp_axis(matched, src_times, np.asarray(times_mjd), axis=1)
+    matched = _interp_axis(matched, src_freqs, np.asarray(freqs), axis=2)
+    matched = np.swapaxes(matched, 1, 2)
+
+    out = np.zeros((len(norad_ids),) + matched.shape[1:], dtype=matched.dtype)
+    out[[i for i, row in enumerate(rows) if row is not None]] = matched
+
+    return jnp.asarray(out)
 
 
 def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
@@ -149,6 +411,12 @@ class BaseGPRFI(Component):
         self.chan_width = tab_config.chan_width
         self.times = tab_config.times
         self.times_fine = tab_config.times_fine
+        # Absolute observation times, for resampling external estimates whose own
+        # sampling is expressed in MJD rather than seconds from this run's start.
+        # Taken as read rather than converted back from times_jd: the round trip
+        # loses ~1e-10 days, enough to push an endpoint outside a source range it
+        # is nominally identical to. See TabConfig.read_ms_params.
+        self.times_mjd = np.asarray(tab_config.times_mjd)
         self.int_time = tab_config.int_time
 
         self.gp_var = rfi_config["var"]
@@ -171,6 +439,11 @@ class BaseGPRFI(Component):
         self.rfi_mask_fine = (
             None if rfi_mask_fine is None else jnp.asarray(rfi_mask_fine, dtype=bool)
         )
+
+        # NORAD IDs, ordered as the n_rfi axis of every RFI array. Under sharding the
+        # tail entries are padding duplicates, so consumers that look ids up in an
+        # external file slice to [:n_rfi_real] and zero-pad the result instead.
+        self.norad_ids = tab_config.norad_ids
 
     def build_mask_constants(self) -> dict:
         """Constants the signal mask needs, or ``{}`` when nothing is masked.
@@ -504,9 +777,20 @@ class ComplexRFIVarAnt(BaseGPRFI):
 
     def _read_estimate(self, est_path):
 
-        from numpy import load
+        # Only the real satellites have a light curve; the padded rows are restored as
+        # zeros by _zero_pad_rfi below, so a padding duplicate is never looked up (and
+        # read_light_curves' missing-id error stays about genuinely missing sources).
+        # Already on the observation grid, so no reduction over frequency is needed.
+        light_curves = read_light_curves(
+            est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
+        )
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi_real]))), axis=-1)[:, None, None, :] * jnp.ones((1, self.n_ant, self.n_freq, 1))
+        # (n_rfi, n_freq, n_time) -> (n_rfi, n_ant, n_freq, n_time); the estimate is
+        # per source, so every antenna sees the same light curve.
+        est_rfi_A = jnp.broadcast_to(
+            jnp.sqrt(jnp.abs(light_curves))[:, None],
+            (light_curves.shape[0], self.n_ant, self.n_freq, self.n_time),
+        )
         est_rfi_k_A = vmap(vmap(self.signal_to_latent))(est_rfi_A)
 
         return self._zero_pad_rfi(est_rfi_k_A)
@@ -788,9 +1072,15 @@ class ComplexRFIConstAnt(BaseGPRFI):
 
     def _read_estimate(self, est_path):
 
-        from numpy import load
+        # Real satellites only; _zero_pad_rfi below restores the padded rows as zeros.
+        # Already on the observation grid, so no reduction over frequency is needed.
+        light_curves = read_light_curves(
+            est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
+        )
 
-        est_rfi_A = jnp.max(jnp.sqrt(jnp.abs(jnp.array(load(est_path)[:self.n_rfi_real]))), axis=-1)[:, None, None, :] * jnp.ones((1, 1, self.n_freq, 1))
+        # This variant carries a singleton antenna axis; the latent is shared by
+        # every antenna and only broadcast to n_ant inside the forward.
+        est_rfi_A = jnp.sqrt(jnp.abs(light_curves))[:, None]
 
         return self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(est_rfi_A))
 
