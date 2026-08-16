@@ -36,7 +36,42 @@ def _corr_name(code: int) -> str:
     return _CORR_NAMES.get(int(code), f"<code {int(code)}>")
 
 
-def resolve_correlation(ms_path: str, corr: str) -> int:
+def resolve_data_description(ms_path: str, data_desc_id: int = 0):
+    """``(spectral_window_id, polarization_id)`` for a ``DATA_DESC_ID``.
+
+    An MS does not tie its data to row 0 of ``SPECTRAL_WINDOW`` and
+    ``POLARIZATION``. It carries a ``DATA_DESC_ID`` per row, and the
+    ``DATA_DESCRIPTION`` subtable maps that to the spectral window and
+    polarization setups the data actually uses. Those ids are 0 in the common
+    single-setup case, which is why assuming 0 usually works -- and why an MS
+    with several setups would silently read another one's channel frequencies or
+    correlation layout.
+
+    ``xds_from_ms`` partitions by ``(FIELD_ID, DATA_DESC_ID)`` and records the id
+    in each partition's attrs, so the caller can say which partition it is
+    reading.
+
+    Falls back to ``(0, 0)`` with a warning if ``DATA_DESCRIPTION`` cannot be
+    read, which keeps a malformed store loadable.
+    """
+
+    try:
+        dd = xds_from_table(ms_path + "::DATA_DESCRIPTION")[0]
+        spw_ids = np.atleast_1d(np.asarray(dd.SPECTRAL_WINDOW_ID.data.compute()))
+        pol_ids = np.atleast_1d(np.asarray(dd.POLARIZATION_ID.data.compute()))
+
+        return int(spw_ids[data_desc_id]), int(pol_ids[data_desc_id])
+    except Exception as err:  # pragma: no cover - depends on the MS on disk
+        print(
+            f"Warning: could not resolve DATA_DESC_ID {data_desc_id} through "
+            f"{ms_path}::DATA_DESCRIPTION ({err}); assuming spectral window 0 and "
+            "polarization 0."
+        )
+
+        return 0, 0
+
+
+def resolve_correlation(ms_path: str, corr: str, pol_id: int = 0) -> int:
     """Index of ``corr`` on the MS's correlation axis.
 
     Resolved **by identity, not by position**: the requested correlation is
@@ -57,6 +92,9 @@ def resolve_correlation(ms_path: str, corr: str) -> int:
         Path to the Measurement Set.
     corr : str
         Correlation name, e.g. ``"xx"``. Case-insensitive.
+    pol_id : int, optional
+        Row of ``POLARIZATION`` describing the data being read, from
+        :func:`resolve_data_description`. Defaults to 0.
 
     Returns
     -------
@@ -77,7 +115,9 @@ def resolve_correlation(ms_path: str, corr: str) -> int:
 
     try:
         pol = xds_from_table(ms_path + "::POLARIZATION")[0]
-        corr_type = np.atleast_1d(np.asarray(pol.CORR_TYPE.data[0].compute())).ravel()
+        corr_type = np.atleast_1d(
+            np.asarray(pol.CORR_TYPE.data[pol_id].compute())
+        ).ravel()
     except Exception as err:  # pragma: no cover - depends on the MS on disk
         # POLARIZATION is mandatory in the MS v2 spec, so this is a malformed or
         # unusual store rather than a normal case. Fall back to the conventional
@@ -152,10 +192,16 @@ def read_ms(
     data_col: str = "DATA",
 ):
 
-    corr_idx = resolve_correlation(ms_path, corr)
-
     xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True)
     xds = xds_list[0]
+
+    # Which spectral window and polarization setup this partition actually uses.
+    # xds_from_ms partitions by (FIELD_ID, DATA_DESC_ID) and records the id in the
+    # partition attrs; DATA_DESCRIPTION maps it to the subtable rows.
+    data_desc_id = int(xds.attrs.get("DATA_DESC_ID", 0))
+    spw_id, pol_id = resolve_data_description(ms_path, data_desc_id)
+
+    corr_idx = resolve_correlation(ms_path, corr, pol_id)
 
     time_scale = read_time_scale(column_keywords)
     if time_scale != DEFAULT_TIME_SCALE:
@@ -178,8 +224,8 @@ def read_ms(
     n_bl = xds[data_col].data.shape[0] // n_time
     n_freq, n_corr = xds[data_col].data.shape[1:]
 
-    freqs = np.array(xds_spec.CHAN_FREQ.data[0].compute())
-    chan_width = np.array(xds_spec.CHAN_WIDTH.data[0, 0].compute())
+    freqs = np.array(xds_spec.CHAN_FREQ.data[spw_id].compute())
+    chan_width = np.array(xds_spec.CHAN_WIDTH.data[spw_id, 0].compute())
     int_time = xds.INTERVAL.data[0].compute()
 
     times_mjd = np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
