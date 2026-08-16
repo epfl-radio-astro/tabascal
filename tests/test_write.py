@@ -10,7 +10,9 @@ import numpy as np
 import pytest
 
 from tabascal.write import (
+    _unity_gains_or_raise,
     baseline_gains,
+    mean_baseline_gains,
     data_frame_residuals,
     read_antenna_pairs,
 )
@@ -215,3 +217,134 @@ class TestReadAntennaPairs:
 
         assert len(a1) == n_bl and len(a2) == n_bl
         np.testing.assert_array_equal(a2, a2_col)
+
+
+# ---------------------------------------------------------------------------
+# Sample-axis handling
+# ---------------------------------------------------------------------------
+
+class TestSampleAxis:
+    """E[g_p conj(g_q)] is not E[g_p] conj(E[g_q]) once the gains vary.
+
+    Every current writer of the results zarr stores exactly one sample, so this
+    is latent rather than live -- but forming the product before reducing costs
+    nothing and removes the trap.
+    """
+
+    def test_ant_axis_selects_the_antenna_axis(self):
+        """With a leading sample axis, axis 0 is samples, not antennas."""
+        rng = np.random.default_rng(1)
+        gains = rng.normal(size=(2, 4, 3, 1)) + 1j * rng.normal(size=(2, 4, 3, 1))
+        a1, a2 = np.triu_indices(4, k=1)
+
+        out = baseline_gains(gains, a1, a2, ant_axis=1)
+
+        assert out.shape == (2, len(a1), 3, 1)
+        np.testing.assert_allclose(out, gains[:, a1] * np.conj(gains[:, a2]))
+
+    def test_product_before_mean_differs_from_mean_before_product(self):
+        """The distinction the reduction order makes, made concrete.
+
+        E[XY] equals E[X]E[Y] only when X and Y are uncorrelated, so the two
+        antennas have to vary *together* for the difference to appear -- both
+        gains rise from 1 to 2 across the two samples here.
+        """
+        gains = np.array(
+            [
+                [1.0 + 0.0j, 1.0 + 0.0j],
+                [2.0 + 0.0j, 2.0 + 0.0j],
+            ]
+        )[:, :, None, None]
+        a1, a2 = np.array([0]), np.array([1])
+
+        correct = baseline_gains(gains, a1, a2, ant_axis=1).mean(axis=0)
+        naive = baseline_gains(gains.mean(axis=0), a1, a2)
+
+        # E[g^2] = (1 + 4) / 2 = 2.5, but E[g]^2 = 1.5^2 = 2.25
+        np.testing.assert_allclose(correct.ravel(), [2.5])
+        np.testing.assert_allclose(naive.ravel(), [2.25])
+        assert not np.allclose(correct, naive)
+
+    def test_single_sample_is_unaffected(self):
+        """Which is why current results are unchanged."""
+        rng = np.random.default_rng(2)
+        gains = rng.normal(size=(1, 4, 2, 1)) + 1j * rng.normal(size=(1, 4, 2, 1))
+        a1, a2 = np.triu_indices(4, k=1)
+
+        before = baseline_gains(gains, a1, a2, ant_axis=1).mean(axis=0)
+        after = baseline_gains(gains.mean(axis=0), a1, a2)
+
+        np.testing.assert_allclose(before, after)
+
+
+# ---------------------------------------------------------------------------
+# The legacy-layout unity guard
+# ---------------------------------------------------------------------------
+
+class _FakeZarr(dict):
+    def __init__(self, gains=None):
+        super().__init__()
+        if gains is not None:
+            self["gains"] = True
+            self.gains = type("V", (), {"data": np.asarray(gains)})()
+
+
+class TestUnityGainsGuard:
+
+    def test_unity_gains_pass(self):
+        assert _unity_gains_or_raise(_FakeZarr(np.ones((2, 4, 1, 1)))) == 1
+
+    def test_absent_gains_pass(self):
+        assert _unity_gains_or_raise(_FakeZarr()) == 1
+
+    def test_non_unity_gains_raise(self):
+        with pytest.raises(NotImplementedError, match="3-d ast_vis layout"):
+            _unity_gains_or_raise(_FakeZarr(np.full((2, 4, 1, 1), 1.5)))
+
+    def test_samples_averaging_to_unity_still_raise(self):
+        """The guard tests every sample, not their mean.
+
+        Samples of 0.9 and 1.1 average to exactly 1, so a mean-based check would
+        wave through precisely the case this exists to catch.
+        """
+        gains = np.stack(
+            [np.full((4, 1, 1), 0.9), np.full((4, 1, 1), 1.1)]
+        )
+        assert np.allclose(gains.mean(axis=0), 1.0)
+
+        with pytest.raises(NotImplementedError, match="3-d ast_vis layout"):
+            _unity_gains_or_raise(_FakeZarr(gains))
+
+
+class TestMeanBaselineGains:
+    """The reduction order, pinned where write_results_ms actually uses it."""
+
+    def test_forms_the_product_before_reducing(self):
+        gains = np.array(
+            [
+                [1.0 + 0.0j, 1.0 + 0.0j],
+                [2.0 + 0.0j, 2.0 + 0.0j],
+            ]
+        )[:, :, None, None]
+        a1, a2 = np.array([0]), np.array([1])
+
+        out = mean_baseline_gains(gains, a1, a2)
+
+        np.testing.assert_allclose(out.ravel(), [2.5])          # E[g^2]
+        assert not np.allclose(out.ravel(), [2.25])             # not E[g]^2
+
+    def test_single_sample_matches_the_naive_order(self):
+        rng = np.random.default_rng(3)
+        gains = rng.normal(size=(1, 4, 2, 1)) + 1j * rng.normal(size=(1, 4, 2, 1))
+        a1, a2 = np.triu_indices(4, k=1)
+
+        np.testing.assert_allclose(
+            mean_baseline_gains(gains, a1, a2),
+            baseline_gains(gains.mean(axis=0), a1, a2),
+        )
+
+    def test_drops_the_sample_axis(self):
+        gains = np.ones((3, 4, 2, 5), dtype=complex)
+        a1, a2 = np.triu_indices(4, k=1)
+
+        assert mean_baseline_gains(gains, a1, a2).shape == (len(a1), 2, 5)

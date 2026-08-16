@@ -11,12 +11,17 @@ import dask
 
 
 def _unity_gains_or_raise(xds_tab, tol: float = 1e-6):
-    """``1`` if the stored gains are unity, else an error naming the limitation."""
+    """``1`` if the stored gains are unity, else an error naming the limitation.
+
+    Every stored sample is tested, not their mean: a mean of 1 is not evidence of
+    unity, since samples of 0.9 and 1.1 average to it. Testing the mean would let
+    exactly the case this guard exists to catch pass through.
+    """
 
     if "gains" not in xds_tab:
         return 1
 
-    gains = np.asarray(xds_tab.gains.data.mean(axis=0))
+    gains = np.asarray(xds_tab.gains.data)
     if np.allclose(gains, 1.0, atol=tol):
         return 1
 
@@ -42,7 +47,7 @@ def read_antenna_pairs(xds_ms, n_bl: int):
     return a1, a2
 
 
-def baseline_gains(gains, a1, a2):
+def baseline_gains(gains, a1, a2, ant_axis: int = 0):
     """Per-baseline gain ``g_p conj(g_q)`` from per-antenna gains.
 
     Both antenna indices are needed. Building this from ``ANTENNA1`` twice gives
@@ -51,11 +56,29 @@ def baseline_gains(gains, a1, a2):
     i.e. all of them. It is invisible under unitary gains, where the answer is 1
     either way.
 
-    Works on numpy or dask arrays; ``gains`` is indexed on its leading (antenna)
-    axis, so any trailing shape is carried through.
+    Works on numpy or dask arrays. ``ant_axis`` says which axis carries the
+    antenna, so a stored array with a leading sample axis can have its baseline
+    product formed *before* the samples are reduced -- ``E[g_p conj(g_q)]`` is
+    not ``E[g_p] conj(E[g_q])`` once the gains vary.
     """
 
-    return gains[a1] * gains[a2].conj()
+    lead = (slice(None),) * ant_axis
+
+    return gains[lead + (a1,)] * gains[lead + (a2,)].conj()
+
+
+def mean_baseline_gains(gains, a1, a2, sample_axis: int = 0, ant_axis: int = 1):
+    """Sample-mean of the per-baseline gain, formed **per sample**.
+
+    The order matters: ``E[g_p conj(g_q)]`` is not ``E[g_p] conj(E[g_q])`` unless
+    the two antennas' gains are uncorrelated across samples. Reducing first and
+    multiplying after is the cheaper-looking expression and the wrong one.
+
+    Exists as a named function so that reduction order is a testable choice
+    rather than an inline expression nothing can pin.
+    """
+
+    return baseline_gains(gains, a1, a2, ant_axis=ant_axis).mean(axis=sample_axis)
 
 
 def data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl):
@@ -134,11 +157,25 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
 
         a1, a2 = read_antenna_pairs(xds_ms, n_bl)
 
-        gains = xds_tab.gains.data.astype(np.complex64).mean(axis=0)
-        gains_bl = da.transpose(
-            baseline_gains(gains, a1, a2), (2, 0, 1)
-        ).reshape(-1, n_freq, n_corr)
+        # Form the baseline product per sample, then reduce: E[g_p conj(g_q)] is
+        # not E[g_p] conj(E[g_q]) once the gains vary across samples. Free here,
+        # since every writer of this zarr stores exactly one sample.
+        gains = xds_tab.gains.data.astype(np.complex64)
+        gains_bl = mean_baseline_gains(gains, a1, a2)
+        gains_bl = da.transpose(gains_bl, (2, 0, 1)).reshape(-1, n_freq, n_corr)
         gains_bl = xr.DataArray(gains_bl, dims=dims).chunk(chunks)
+
+        if n_sample > 1:
+            # The model visibilities above are averaged independently, so the
+            # residuals below form E[g] E[m] rather than E[g m]. Equal only when
+            # the gains and the model are uncorrelated across samples. Every
+            # current writer stores one sample, so this is unreachable today.
+            print(
+                f"Warning: this results zarr holds {n_sample} samples. The gain and "
+                "model visibilities are averaged separately, so the residual columns "
+                "are E[g]E[model], not E[g*model]. Form the residual per sample "
+                "before averaging if that difference matters."
+            )
 
     else:
         raise ValueError(
