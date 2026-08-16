@@ -81,12 +81,25 @@ def mean_baseline_gains(gains, a1, a2, sample_axis: int = 0, ant_axis: int = 1):
     return baseline_gains(gains, a1, a2, ant_axis=ant_axis).mean(axis=sample_axis)
 
 
-def data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl):
+def _to_ms_column(arr, dims, chunks, n_freq, n_corr):
+    """``(bl, freq, time)`` array to an MS ``(row, chan, corr)`` DataArray."""
+
+    return xr.DataArray(
+        da.transpose(arr, (2, 0, 1)).reshape(-1, n_freq, n_corr), dims=dims
+    ).chunk(chunks)
+
+
+def data_frame_residuals(vis_obs, gained_ast, gained_rfi):
     """Model residuals in the frame of the observed data.
 
+    Takes the model visibilities **already multiplied by the baseline gain**.
     The forward model is ``gains_bl * (vis_ast + vis_rfi)``, so a residual has to
-    subtract the *gained* model. Subtracting the raw model visibilities, as the
+    subtract the gained model; subtracting the raw model visibilities, as the
     results zarr stores them, leaves the gains in the residual.
+
+    Gaining the model is the caller's job because it has to happen *per sample*:
+    ``E[g m]`` is not ``E[g] E[m]`` once the gains and the model covary across
+    samples, and only the caller still has the sample axis.
 
     Formed in the **data** frame (``vis_obs - gains_bl * model``) rather than the
     calibrated one (``vis_obs / gains_bl - model``): dividing by the gain
@@ -102,10 +115,22 @@ def data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl):
     """
 
     return {
-        "ast": vis_obs - vis_ast * gains_bl,
-        "rfi": vis_obs - vis_rfi * gains_bl,
-        "total": vis_obs - (vis_ast + vis_rfi) * gains_bl,
+        "ast": vis_obs - gained_ast,
+        "rfi": vis_obs - gained_rfi,
+        "total": vis_obs - (gained_ast + gained_rfi),
     }
+
+
+def gained_model_mean(gains_bl, model, sample_axis: int = 0):
+    """Sample-mean of ``gains_bl * model``, formed per sample.
+
+    Separate from the residual so the reduction order is pinnable: multiplying
+    sample-averaged gains by sample-averaged models gives ``E[g] E[m]``, which
+    equals ``E[g m]`` only when the two are uncorrelated. Posterior draws from a
+    joint fit generally are not.
+    """
+
+    return (gains_bl * model).mean(axis=sample_axis)
 
 
 @measure_runtime
@@ -141,6 +166,9 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         # it has ever handled correctly.
         gains_bl = _unity_gains_or_raise(xds_tab)
 
+        # Unity by the guard above, so the gained model is the model.
+        gained_ast, gained_rfi = vis_ast * gains_bl, vis_rfi * gains_bl
+
     elif xds_tab.ast_vis.data.ndim == 4:
         n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
         n_corr = 1
@@ -157,25 +185,25 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
 
         a1, a2 = read_antenna_pairs(xds_ms, n_bl)
 
-        # Form the baseline product per sample, then reduce: E[g_p conj(g_q)] is
-        # not E[g_p] conj(E[g_q]) once the gains vary across samples. Free here,
-        # since every writer of this zarr stores exactly one sample.
+        # Everything the residuals need is formed PER SAMPLE and reduced after.
+        # E[g m] is not E[g] E[m] once the gains and the model covary across
+        # samples, which posterior draws from a joint fit generally do.
         gains = xds_tab.gains.data.astype(np.complex64)
-        gains_bl = mean_baseline_gains(gains, a1, a2)
-        gains_bl = da.transpose(gains_bl, (2, 0, 1)).reshape(-1, n_freq, n_corr)
-        gains_bl = xr.DataArray(gains_bl, dims=dims).chunk(chunks)
+        gains_bl_s = baseline_gains(gains, a1, a2, ant_axis=1)
 
-        if n_sample > 1:
-            # The model visibilities above are averaged independently, so the
-            # residuals below form E[g] E[m] rather than E[g m]. Equal only when
-            # the gains and the model are uncorrelated across samples. Every
-            # current writer stores one sample, so this is unreachable today.
-            print(
-                f"Warning: this results zarr holds {n_sample} samples. The gain and "
-                "model visibilities are averaged separately, so the residual columns "
-                "are E[g]E[model], not E[g*model]. Form the residual per sample "
-                "before averaging if that difference matters."
-            )
+        gained_ast = _to_ms_column(
+            gained_model_mean(gains_bl_s, xds_tab.ast_vis.data.astype(np.complex64)),
+            dims, chunks, n_freq, n_corr,
+        )
+        gained_rfi = _to_ms_column(
+            gained_model_mean(gains_bl_s, xds_tab.rfi_vis.data.astype(np.complex64)),
+            dims, chunks, n_freq, n_corr,
+        )
+
+        # For CORRECTED_DATA, which divides rather than multiplies.
+        gains_bl = _to_ms_column(
+            gains_bl_s.mean(axis=0), dims, chunks, n_freq, n_corr
+        )
 
     else:
         raise ValueError(
@@ -188,7 +216,7 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
 
     vis_cal = vis_obs / gains_bl
 
-    residuals = data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl)
+    residuals = data_frame_residuals(vis_obs, gained_ast, gained_rfi)
     vis_ast_res = residuals["ast"]
     vis_rfi_res = residuals["rfi"]
     vis_res = residuals["total"]

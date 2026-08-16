@@ -12,8 +12,9 @@ import pytest
 from tabascal.write import (
     _unity_gains_or_raise,
     baseline_gains,
-    mean_baseline_gains,
     data_frame_residuals,
+    gained_model_mean,
+    mean_baseline_gains,
     read_antenna_pairs,
 )
 
@@ -121,7 +122,7 @@ class TestDataFrameResiduals:
 
         vis_obs = gains_bl * (vis_ast + vis_rfi) + 0.01
 
-        res = data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl)
+        res = data_frame_residuals(vis_obs, gains_bl * vis_ast, gains_bl * vis_rfi)
 
         np.testing.assert_allclose(
             gains_bl * (vis_ast + vis_rfi) + res["total"], vis_obs, atol=1e-12
@@ -133,7 +134,7 @@ class TestDataFrameResiduals:
         gains_bl = baseline_gains(gains, a1, a2)
 
         vis_obs = gains_bl * (vis_ast + vis_rfi)
-        res = data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl)
+        res = data_frame_residuals(vis_obs, gains_bl * vis_ast, gains_bl * vis_rfi)
 
         np.testing.assert_allclose(res["total"], 0.0, atol=1e-12)
 
@@ -152,7 +153,7 @@ class TestDataFrameResiduals:
         """No change for existing UnitaryGains results, so no refs move."""
         vis_ast, vis_rfi = model
 
-        res = data_frame_residuals(vis_ast * 0 + 5.0, vis_ast, vis_rfi, 1)
+        res = data_frame_residuals(vis_ast * 0 + 5.0, vis_ast, vis_rfi)
 
         np.testing.assert_allclose(res["ast"], 5.0 - vis_ast)
         np.testing.assert_allclose(res["rfi"], 5.0 - vis_rfi)
@@ -164,7 +165,7 @@ class TestDataFrameResiduals:
         gains_bl = baseline_gains(gains, a1, a2)
         vis_obs = gains_bl * (vis_ast + vis_rfi)
 
-        res = data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl)
+        res = data_frame_residuals(vis_obs, gains_bl * vis_ast, gains_bl * vis_rfi)
 
         # Removing only the astronomical model leaves exactly the gained RFI.
         np.testing.assert_allclose(res["ast"], gains_bl * vis_rfi, atol=1e-12)
@@ -348,3 +349,50 @@ class TestMeanBaselineGains:
         a1, a2 = np.triu_indices(4, k=1)
 
         assert mean_baseline_gains(gains, a1, a2).shape == (len(a1), 2, 5)
+
+
+class TestGainedModelMean:
+    """E[g*m] is not E[g]E[m] once the gains and the model covary."""
+
+    def test_forms_the_gained_model_before_reducing(self):
+        # Both gain and model rise across the two samples, i.e. they covary --
+        # which posterior draws from a joint fit generally do.
+        gains_bl = np.array([1.0 + 0j, 2.0 + 0j])[:, None, None, None]
+        model = np.array([1.0 + 0j, 3.0 + 0j])[:, None, None, None]
+
+        correct = gained_model_mean(gains_bl, model)
+        naive = gains_bl.mean(axis=0) * model.mean(axis=0)
+
+        # E[gm] = (1*1 + 2*3) / 2 = 3.5;  E[g]E[m] = 1.5 * 2.0 = 3.0
+        np.testing.assert_allclose(correct.ravel(), [3.5])
+        np.testing.assert_allclose(naive.ravel(), [3.0])
+        assert not np.allclose(correct, naive)
+
+    def test_single_sample_matches_the_naive_order(self):
+        rng = np.random.default_rng(4)
+        shape = (1, 6, 2, 3)
+        gains_bl = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+        model = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+
+        np.testing.assert_allclose(
+            gained_model_mean(gains_bl, model),
+            gains_bl.mean(axis=0) * model.mean(axis=0),
+        )
+
+    def test_residuals_close_against_the_gained_model(self):
+        """The identity the whole change exists to preserve, multi-sample."""
+        rng = np.random.default_rng(5)
+        shape = (3, 6, 2, 4)
+        gains_bl = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+        ast = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+        rfi = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+
+        gained_ast = gained_model_mean(gains_bl, ast)
+        gained_rfi = gained_model_mean(gains_bl, rfi)
+        vis_obs = gained_ast + gained_rfi + 0.5
+
+        res = data_frame_residuals(vis_obs, gained_ast, gained_rfi)
+
+        np.testing.assert_allclose(
+            gained_ast + gained_rfi + res["total"], vis_obs, atol=1e-12
+        )
