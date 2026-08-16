@@ -10,39 +10,23 @@ import dask.array as da
 import dask
 
 
-def _unity_gains_or_raise(xds_tab, tol: float = 1e-6):
-    """``1`` if the stored gains are unity, else an error naming the limitation.
-
-    Every stored sample is tested, not their mean: a mean of 1 is not evidence of
-    unity, since samples of 0.9 and 1.1 average to it. Testing the mean would let
-    exactly the case this guard exists to catch pass through.
-    """
-
-    if "gains" not in xds_tab:
-        return 1
-
-    gains = np.asarray(xds_tab.gains.data)
-    if np.allclose(gains, 1.0, atol=tol):
-        return 1
-
-    raise NotImplementedError(
-        "This results zarr uses the 3-d ast_vis layout, which carries no baseline "
-        "axis, so the per-baseline gain cannot be reconstructed and the residual "
-        "columns would be written in the wrong frame. Re-run to produce the "
-        "current 4-d layout, which handles fitted gains correctly."
-    )
-
-
 def read_antenna_pairs(xds_ms, n_bl: int):
-    """The two antenna indices of each baseline, from one full set of rows.
+    """The two antenna indices of each baseline, from one timestep's rows.
 
-    Read through a named function so that reading the same column twice -- which
-    silently degrades the per-baseline gain to ``|g_p|^2`` -- is a testable
-    mistake rather than a two-line typo.
+    Assumes the time-major row order the reader relies on throughout
+    (``reshape(n_time, n_bl)``). Checked rather than assumed: a baseline-major
+    store would return ``n_bl`` rows of the same pair.
     """
 
     a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
     a2 = xds_ms.ANTENNA2.data[:n_bl].compute()
+
+    if len(set(zip(np.asarray(a1).tolist(), np.asarray(a2).tolist()))) != n_bl:
+        raise ValueError(
+            f"The first {n_bl} rows do not hold {n_bl} distinct antenna pairs, so "
+            "the MS is not ordered time-major. tabascal reads visibilities as "
+            "(n_time, n_bl); sort the MS by TIME before running."
+        )
 
     return a1, a2
 
@@ -50,16 +34,8 @@ def read_antenna_pairs(xds_ms, n_bl: int):
 def baseline_gains(gains, a1, a2, ant_axis: int = 0):
     """Per-baseline gain ``g_p conj(g_q)`` from per-antenna gains.
 
-    Both antenna indices are needed. Building this from ``ANTENNA1`` twice gives
-    ``|g_p|^2`` -- real, positive, and blind to the second antenna -- which
-    discards all phase and is wrong on every baseline whose two antennas differ,
-    i.e. all of them. It is invisible under unitary gains, where the answer is 1
-    either way.
-
-    Works on numpy or dask arrays. ``ant_axis`` says which axis carries the
-    antenna, so a stored array with a leading sample axis can have its baseline
-    product formed *before* the samples are reduced -- ``E[g_p conj(g_q)]`` is
-    not ``E[g_p] conj(E[g_q])`` once the gains vary.
+    ``ant_axis`` names the antenna axis, so an array with a leading sample axis
+    can have its product formed before the samples are reduced.
     """
 
     lead = (slice(None),) * ant_axis
@@ -68,14 +44,10 @@ def baseline_gains(gains, a1, a2, ant_axis: int = 0):
 
 
 def mean_baseline_gains(gains, a1, a2, sample_axis: int = 0, ant_axis: int = 1):
-    """Sample-mean of the per-baseline gain, formed **per sample**.
+    """Sample-mean of the per-baseline gain, formed per sample.
 
-    The order matters: ``E[g_p conj(g_q)]`` is not ``E[g_p] conj(E[g_q])`` unless
-    the two antennas' gains are uncorrelated across samples. Reducing first and
-    multiplying after is the cheaper-looking expression and the wrong one.
-
-    Exists as a named function so that reduction order is a testable choice
-    rather than an inline expression nothing can pin.
+    ``E[g_p conj(g_q)]`` is not ``E[g_p] conj(E[g_q])`` unless the two antennas
+    are uncorrelated across samples.
     """
 
     return baseline_gains(gains, a1, a2, ant_axis=ant_axis).mean(axis=sample_axis)
@@ -90,28 +62,14 @@ def _to_ms_column(arr, dims, chunks, n_freq, n_corr):
 
 
 def data_frame_residuals(vis_obs, gained_ast, gained_rfi):
-    """Model residuals in the frame of the observed data.
+    """``TAB_*_RES`` residuals, in the frame of the observed data.
 
-    Takes the model visibilities **already multiplied by the baseline gain**.
-    The forward model is ``gains_bl * (vis_ast + vis_rfi)``, so a residual has to
-    subtract the gained model; subtracting the raw model visibilities, as the
-    results zarr stores them, leaves the gains in the residual.
+    Takes models already multiplied by the baseline gain, since that has to
+    happen per sample and only the caller still holds the sample axis.
 
-    Gaining the model is the caller's job because it has to happen *per sample*:
-    ``E[g m]`` is not ``E[g] E[m]`` once the gains and the model covary across
-    samples, and only the caller still has the sample axis.
-
-    Formed in the **data** frame (``vis_obs - gains_bl * model``) rather than the
-    calibrated one (``vis_obs / gains_bl - model``): dividing by the gain
-    inflates the noise on low-gain baselines and distorts any noise-referenced
-    residual metric. Moving every column to a single calibrated frame, with the
-    weights that belong to it, is issue #123.
-
-    Returns
-    -------
-    dict
-        ``ast``, ``rfi`` and ``total`` residuals, keyed for the ``TAB_*_RES``
-        columns.
+    Data frame rather than calibrated: dividing by the gain inflates the noise on
+    low-gain baselines and distorts noise-referenced metrics. Moving every column
+    to one calibrated frame is #123.
     """
 
     return {
@@ -124,10 +82,7 @@ def data_frame_residuals(vis_obs, gained_ast, gained_rfi):
 def gained_model_mean(gains_bl, model, sample_axis: int = 0):
     """Sample-mean of ``gains_bl * model``, formed per sample.
 
-    Separate from the residual so the reduction order is pinnable: multiplying
-    sample-averaged gains by sample-averaged models gives ``E[g] E[m]``, which
-    equals ``E[g m]`` only when the two are uncorrelated. Posterior draws from a
-    joint fit generally are not.
+    Separate from the residual so the reduction order is pinnable.
     """
 
     return (gains_bl * model).mean(axis=sample_axis)
@@ -147,69 +102,36 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     dims = ["row", "chan", "corr"]
     chunks = {k: v for k, v in xds_ms.chunks.items() if k in dims}
 
-    if xds_tab.ast_vis.data.ndim == 3:
-        vis_ast = xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
-        vis_ast = xr.DataArray(da.expand_dims(vis_ast, axis=(1, 2)), dims=dims).chunk(
-            chunks
-        )
-
-        vis_rfi = xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
-        vis_rfi = xr.DataArray(da.expand_dims(vis_rfi, axis=(1, 2)), dims=dims).chunk(
-            chunks
-        )
-
-        # This layout carries no baseline count, so the antenna pairs cannot be
-        # sliced out of the MS and the per-baseline gain cannot be formed. The
-        # results writer has produced the 4-d layout since #93, so this branch is
-        # only reachable for an older zarr. Rather than silently write columns in
-        # the wrong frame, require the gains to be unity -- which is the only case
-        # it has ever handled correctly.
-        gains_bl = _unity_gains_or_raise(xds_tab)
-
-        # Unity by the guard above, so the gained model is the model.
-        gained_ast, gained_rfi = vis_ast * gains_bl, vis_rfi * gains_bl
-
-    elif xds_tab.ast_vis.data.ndim == 4:
-        n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
-        n_corr = 1
-
-        vis_ast = da.transpose(
-            xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0), (2, 0, 1)
-        ).reshape(-1, n_freq, n_corr)
-        vis_ast = xr.DataArray(vis_ast, dims=dims).chunk(chunks)
-
-        vis_rfi = da.transpose(
-            xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0), (2, 0, 1)
-        ).reshape(-1, n_freq, n_corr)
-        vis_rfi = xr.DataArray(vis_rfi, dims=dims).chunk(chunks)
-
-        a1, a2 = read_antenna_pairs(xds_ms, n_bl)
-
-        # Everything the residuals need is formed PER SAMPLE and reduced after.
-        # E[g m] is not E[g] E[m] once the gains and the model covary across
-        # samples, which posterior draws from a joint fit generally do.
-        gains = xds_tab.gains.data.astype(np.complex64)
-        gains_bl_s = baseline_gains(gains, a1, a2, ant_axis=1)
-
-        gained_ast = _to_ms_column(
-            gained_model_mean(gains_bl_s, xds_tab.ast_vis.data.astype(np.complex64)),
-            dims, chunks, n_freq, n_corr,
-        )
-        gained_rfi = _to_ms_column(
-            gained_model_mean(gains_bl_s, xds_tab.rfi_vis.data.astype(np.complex64)),
-            dims, chunks, n_freq, n_corr,
-        )
-
-        # For CORRECTED_DATA, which divides rather than multiplies.
-        gains_bl = _to_ms_column(
-            gains_bl_s.mean(axis=0), dims, chunks, n_freq, n_corr
-        )
-
-    else:
+    if xds_tab.ast_vis.data.ndim != 4:
         raise ValueError(
-            f"Unknown data dimensions. Expected 3 or 4 but got {xds_tab.ast_vis.data.ndim}"
+            f"ast_vis has {xds_tab.ast_vis.data.ndim} dimensions; expected 4, "
+            "(sample, bl, freq, time)."
         )
-    
+
+    n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
+    n_corr = 1
+
+    ast_vis = xds_tab.ast_vis.data.astype(np.complex64)
+    rfi_vis = xds_tab.rfi_vis.data.astype(np.complex64)
+
+    vis_ast = _to_ms_column(ast_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
+    vis_rfi = _to_ms_column(rfi_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
+
+    a1, a2 = read_antenna_pairs(xds_ms, n_bl)
+    gains_bl_s = baseline_gains(
+        xds_tab.gains.data.astype(np.complex64), a1, a2, ant_axis=1
+    )
+
+    gained_ast = _to_ms_column(
+        gained_model_mean(gains_bl_s, ast_vis), dims, chunks, n_freq, n_corr
+    )
+    gained_rfi = _to_ms_column(
+        gained_model_mean(gains_bl_s, rfi_vis), dims, chunks, n_freq, n_corr
+    )
+    gains_bl = _to_ms_column(
+        gains_bl_s.mean(axis=0), dims, chunks, n_freq, n_corr
+    )
+
     
 
     vis_obs = xds_ms[data_col]

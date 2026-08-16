@@ -1,8 +1,6 @@
 """Tests for tabascal.write — per-baseline gains and residual framing.
 
-Both behaviours here are exactly right under ``UnitaryGains`` and wrong under any
-fitted gain, which is why every case uses a **non-unit, non-uniform** gain with
-distinct amplitudes and phases per antenna. A unity gain cannot distinguish
+Every case uses a non-unit, non-uniform gain: a unity gain cannot distinguish
 ``g_p conj(g_q)`` from ``|g_p|^2``, nor a gained model from a raw one.
 """
 
@@ -10,7 +8,6 @@ import numpy as np
 import pytest
 
 from tabascal.write import (
-    _unity_gains_or_raise,
     baseline_gains,
     data_frame_residuals,
     gained_model_mean,
@@ -278,45 +275,6 @@ class TestSampleAxis:
         np.testing.assert_allclose(before, after)
 
 
-# ---------------------------------------------------------------------------
-# The legacy-layout unity guard
-# ---------------------------------------------------------------------------
-
-class _FakeZarr(dict):
-    def __init__(self, gains=None):
-        super().__init__()
-        if gains is not None:
-            self["gains"] = True
-            self.gains = type("V", (), {"data": np.asarray(gains)})()
-
-
-class TestUnityGainsGuard:
-
-    def test_unity_gains_pass(self):
-        assert _unity_gains_or_raise(_FakeZarr(np.ones((2, 4, 1, 1)))) == 1
-
-    def test_absent_gains_pass(self):
-        assert _unity_gains_or_raise(_FakeZarr()) == 1
-
-    def test_non_unity_gains_raise(self):
-        with pytest.raises(NotImplementedError, match="3-d ast_vis layout"):
-            _unity_gains_or_raise(_FakeZarr(np.full((2, 4, 1, 1), 1.5)))
-
-    def test_samples_averaging_to_unity_still_raise(self):
-        """The guard tests every sample, not their mean.
-
-        Samples of 0.9 and 1.1 average to exactly 1, so a mean-based check would
-        wave through precisely the case this exists to catch.
-        """
-        gains = np.stack(
-            [np.full((4, 1, 1), 0.9), np.full((4, 1, 1), 1.1)]
-        )
-        assert np.allclose(gains.mean(axis=0), 1.0)
-
-        with pytest.raises(NotImplementedError, match="3-d ast_vis layout"):
-            _unity_gains_or_raise(_FakeZarr(gains))
-
-
 class TestMeanBaselineGains:
     """The reduction order, pinned where write_results_ms actually uses it."""
 
@@ -396,3 +354,23 @@ class TestGainedModelMean:
         np.testing.assert_allclose(
             gained_ast + gained_rfi + res["total"], vis_obs, atol=1e-12
         )
+
+
+class TestRowOrderIsChecked:
+    """Reviewer's point: `[:n_bl]` assumes a time-major MS."""
+
+    def test_baseline_major_ordering_is_rejected(self):
+        """All times of one baseline first would give n_bl copies of one pair."""
+        n_bl = 6
+        xds = _FakeMS(np.zeros(n_bl, dtype=int), np.ones(n_bl, dtype=int))
+
+        with pytest.raises(ValueError, match="not ordered time-major"):
+            read_antenna_pairs(xds, n_bl)
+
+    def test_partially_repeated_pairs_are_rejected(self):
+        a1_col, a2_col = np.triu_indices(4, k=1)
+        a1_col, a2_col = a1_col.copy(), a2_col.copy()
+        a1_col[-1], a2_col[-1] = a1_col[0], a2_col[0]   # one duplicate pair
+
+        with pytest.raises(ValueError, match="distinct antenna pairs"):
+            read_antenna_pairs(_FakeMS(a1_col, a2_col), len(a1_col))
