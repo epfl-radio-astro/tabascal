@@ -263,6 +263,9 @@ class TabConfig:
 
         self.int_time = ms_params["int_time"]
         self.times = np.asarray(ms_params["times"])
+        # Kept as read: an MJD -> JD -> MJD round trip shifts samples by ~1e-10
+        # days, enough to push an endpoint outside a range it was written on.
+        self.times_mjd = np.asarray(ms_params["times_mjd"])
         self.times_jd = mjd_to_jd(ms_params["times_mjd"])
 
         self.chan_width = ms_params["chan_width"]

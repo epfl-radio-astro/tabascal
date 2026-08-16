@@ -41,6 +41,8 @@ dependencies = [
     "skyfield>=1.49,<2",  # uses skyfield's _utc_jd(whole, fraction); see tabascal/time.py
     "tqdm",
     "xarray",
+    # Explicit: no other runtime dependency pulls zarr in. See #120 for the bound.
+    "zarr>=2.12.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
