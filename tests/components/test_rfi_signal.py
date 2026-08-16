@@ -841,3 +841,39 @@ def test_multi_device_padded_sources_dark():
     assert "MULTI_DEVICE_OK" in result.stdout, (
         f"returncode={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+class TestMaskIsolatesNonFiniteSamples:
+    """A masked sample must be exactly zero, whatever rfi_A holds there.
+
+    The mask is a select, not a multiply by 0/1: ``0 * inf`` and ``0 * nan`` are
+    both nan, so a multiply lets a non-finite value leak straight back through
+    the mask it is supposed to remove. The optimiser can put rfi_A somewhere
+    non-finite transiently, and one nan in the state poisons every gradient
+    downstream of it.
+    """
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_masked_samples_are_zero_even_when_the_signal_is_not_finite(self, cls):
+        comp = setup_component(cls, rfi_mask_fine=elevation_mask())
+        constants = make_constants(comp)
+        mask = np.asarray(comp.rfi_mask_fine)
+
+        # Stand in for a forward that has wandered somewhere non-finite.
+        rfi_A = jnp.full((N_RFI, N_ANT, N_FREQ, N_TIME), jnp.inf, dtype=complex)
+        masked = np.asarray(comp.build_masked_signal()(rfi_A, constants))
+
+        out_of_view = ~mask[:, None, None, :] & np.ones_like(masked, dtype=bool)
+        assert np.all(masked[out_of_view] == 0), "a masked sample is not exactly zero"
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_a_nan_outside_the_window_does_not_reach_the_kept_samples(self, cls):
+        comp = setup_component(cls, rfi_mask_fine=elevation_mask())
+        constants = make_constants(comp)
+        mask = np.asarray(comp.rfi_mask_fine)
+
+        rfi_A = jnp.ones((N_RFI, N_ANT, N_FREQ, N_TIME), dtype=complex)
+        rfi_A = rfi_A.at[0, :, :, ~mask[0]].set(jnp.nan)
+
+        masked = np.asarray(comp.build_masked_signal()(rfi_A, constants))
+        assert np.all(np.isfinite(masked)), "a masked nan survived the mask"
+        assert np.all(masked[0, :, :, mask[0]] == 1.0)

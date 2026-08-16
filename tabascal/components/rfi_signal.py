@@ -165,13 +165,11 @@ class BaseGPRFI(Component):
         # horizon. None when disabled. Shape (n_rfi, n_time_fine), i.e. it covers the
         # padded dummy rows too -- they duplicate the last real satellite, so they
         # inherit its mask and are zeroed independently by masked_forward_transform.
-        # Stored in the working float dtype so the multiply in the forward is a real
-        # scaling of a complex array rather than a complex-complex multiply.
+        # Stored as a boolean, which is what jnp.where in the forward wants and is
+        # the smallest thing to shard.
         rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None)
         self.rfi_mask_fine = (
-            None
-            if rfi_mask_fine is None
-            else jnp.asarray(rfi_mask_fine, dtype=jnp.zeros(()).dtype)
+            None if rfi_mask_fine is None else jnp.asarray(rfi_mask_fine, dtype=bool)
         )
 
     def build_mask_constants(self) -> dict:
@@ -216,7 +214,13 @@ class BaseGPRFI(Component):
             mask = constants[f"{prefix}/rfi_mask_fine"]
             # (n_rfi, n_time_fine) -> (n_rfi, 1, ..., 1, n_time_fine)
             shape = (mask.shape[0], *(1,) * (rfi_A.ndim - 2), mask.shape[1])
-            return rfi_A * mask.reshape(shape)
+            # where, not a multiply by 0/1: a masked sample is then exactly zero
+            # even where rfi_A is non-finite, since 0 * inf and 0 * nan are nan and
+            # would leak straight back through the mask. The optimiser can put
+            # rfi_A somewhere non-finite transiently, and a masked sample must
+            # contribute nothing regardless. Measured no more expensive than the
+            # multiply, and identical in temporary allocation.
+            return jnp.where(mask.reshape(shape), rfi_A, 0)
 
         return masked_signal
 
