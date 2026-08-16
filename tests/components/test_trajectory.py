@@ -776,3 +776,128 @@ class TestOmmPropagation:
             comp.setup(cfg)
             by_kind[kind] = np.asarray(comp.rfi_xyz)
         assert np.max(np.abs(by_kind["tle"] - by_kind["omm"])) < 1e-3
+
+
+class TestSatelliteElevations:
+    """``get_satellite_elevations`` drives the ``rfi.min_elevation`` mask.
+
+    It consumes resolved orbit records rather than raw TLE line pairs, so an OMM
+    record -- which has no lines for a line parser to read -- works here exactly
+    as a TLE does. That is the same record abstraction the propagators use, and
+    the OMM case is the one a line-pair signature silently broke.
+    """
+
+    def _epoch(self):
+        from tests.tle_helpers import jd
+
+        return jd(2026, 8, 1)
+
+    def _times(self, epoch, n=6):
+        return np.array([epoch + minutes / 1440.0 for minutes in range(0, 6 * n, 6)])
+
+    def test_elevation_is_bounded_and_shaped(self):
+        from tabascal.components.trajectory import get_satellite_elevations
+        from tests.tle_helpers import make_tle_record
+
+        epoch = self._epoch()
+        times = self._times(epoch)
+        el = get_satellite_elevations(
+            [make_tle_record(25544, epoch)], times, _build_ants_itrf(4)
+        )
+
+        assert el.shape == (1, len(times))
+        assert np.all(np.isfinite(el))
+        # Elevation is an angle above the horizon, so it cannot leave [-90, 90].
+        assert np.all(el >= -90.0) and np.all(el <= 90.0)
+
+    def test_an_omm_gives_the_same_elevations_as_its_tle_form(self):
+        from tabascal.components.trajectory import get_satellite_elevations
+        from tests.tle_helpers import make_omm, make_tle_record
+
+        epoch = self._epoch()
+        times = self._times(epoch)
+        ants_itrf = _build_ants_itrf(4)
+
+        from_tle = get_satellite_elevations(
+            [make_tle_record(25544, epoch)], times, ants_itrf
+        )
+        from_omm = get_satellite_elevations([make_omm(25544, epoch)], times, ants_itrf)
+
+        # Same orbit by two routes: the residual is propagation noise, not geometry.
+        assert np.max(np.abs(from_tle - from_omm)) < 1e-6
+
+    def test_each_record_gets_its_own_row(self):
+        from tabascal.components.trajectory import get_satellite_elevations
+        from tests.tle_helpers import make_omm, make_tle_record
+
+        epoch = self._epoch()
+        times = self._times(epoch)
+        ants_itrf = _build_ants_itrf(4)
+
+        both = get_satellite_elevations(
+            [make_tle_record(25544, epoch), make_omm(27386, epoch)], times, ants_itrf
+        )
+        assert both.shape == (2, len(times))
+
+        for i, record in enumerate(
+            [make_tle_record(25544, epoch), make_omm(27386, epoch)]
+        ):
+            alone = get_satellite_elevations([record], times, ants_itrf)
+            np.testing.assert_allclose(both[i], alone[0], rtol=1e-10)
+
+    def test_site_is_geodetic_not_geocentric(self):
+        """The site must be the WGS84 geodetic position, not the geocentric one.
+
+        The two latitudes differ by up to ~0.19 deg at mid-latitudes, which lands
+        directly on the elevation and so on which integrations a cut keeps. This
+        pins the geodetic choice by comparing against an explicitly geocentric
+        site, which must differ.
+        """
+        from tabascal.components.trajectory import get_satellite_elevations
+        from tests.tle_helpers import make_tle_record
+        from skyfield.api import load, wgs84
+        from skyfield.positionlib import Geocentric
+        from skyfield.toposlib import ITRSPosition
+        from skyfield.units import Distance
+
+        epoch = self._epoch()
+        times = self._times(epoch)
+        ants_itrf = _build_ants_itrf(4)
+        centre = np.mean(np.asarray(ants_itrf), axis=0)
+
+        geodetic = get_satellite_elevations(
+            [make_tle_record(25544, epoch)], times, ants_itrf
+        )
+
+        ts = load.timescale()
+        sf_times = ts._utc_jd(np.floor(times), times - np.floor(times))
+        icrf = ITRSPosition(Distance(m=centre)).at(sf_times[0])
+        geodetic_site = wgs84.geographic_position_of(icrf)
+
+        # Geocentric latitude of the same point, at the same radius.
+        x, y, z = centre
+        geocentric_lat = np.rad2deg(np.arctan2(z, np.hypot(x, y)))
+
+        assert abs(geodetic_site.latitude.degrees - geocentric_lat) > 0.01, (
+            "test site is too close to the equator/pole to distinguish the two "
+            "latitude conventions"
+        )
+
+        geocentric_site = wgs84.latlon(
+            geocentric_lat,
+            geodetic_site.longitude.degrees,
+            elevation_m=geodetic_site.elevation.m,
+        )
+        from skyfield.api import EarthSatellite
+
+        sat = EarthSatellite(
+            make_tle_record(25544, epoch)["TLE_LINE1"],
+            make_tle_record(25544, epoch)["TLE_LINE2"],
+            ts=ts,
+        )
+        geocentric = (sat - geocentric_site).at(sf_times).altaz()[0].degrees
+
+        assert np.max(np.abs(geodetic[0] - geocentric)) > 1e-3, (
+            "elevations are identical under both latitude conventions; the "
+            "geodetic site is not being used"
+        )

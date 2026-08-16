@@ -26,7 +26,7 @@ from numpy.typing import NDArray
 
 from sgp4.api import WGS72, Satrec
 
-from skyfield.api import Distance, load
+from skyfield.api import Distance, load, wgs84
 from skyfield.toposlib import ITRSPosition
 
 from skyfield.api import EarthSatellite
@@ -104,6 +104,47 @@ def get_satellite_positions(records: list, times_jd: list):
     )
 
     return sat_pos
+
+
+def get_satellite_elevations(orbit_records: list, times_jd, ants_itrf) -> NDArray:
+    """Topocentric elevation of each satellite, as seen from the array centre.
+
+    Parameters
+    ----------
+    orbit_records : list of dict (n_sat,)
+        Resolved orbit records, as returned by :func:`fetch_orbital_elements`.
+        Built into propagators by :func:`_earth_satellite`, so OMM records work
+        here exactly as TLE ones do -- an OMM has no lines to hand a line parser.
+    times_jd : Array (n_time,)
+        Times to calculate elevations at in Julian date.
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in ITRF, in metres. The mean is taken as the site.
+
+    Returns
+    -------
+    Array (n_sat, n_time)
+        Satellite elevation above the horizon, in degrees.
+    """
+
+    times_jd = np.asarray(times_jd)
+    ts = load.timescale()
+    sf_times = ts._utc_jd(np.floor(times_jd), times_jd - np.floor(times_jd))
+
+    # geographic_position_of needs an ICRF position, so evaluate the (time-independent)
+    # geodetic site position of the array centre at an arbitrary time
+    centre_itrf = np.mean(np.asarray(ants_itrf), axis=0)
+    site = wgs84.geographic_position_of(
+        ITRSPosition(Distance(m=centre_itrf)).at(sf_times[0])
+    )
+
+    elevation = np.stack(
+        [
+            (_earth_satellite(record, ts) - site).at(sf_times).altaz()[0].degrees
+            for record in orbit_records
+        ]
+    )
+
+    return elevation
 
 
 class PhaseCalculationRFI(Component):

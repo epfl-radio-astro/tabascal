@@ -125,6 +125,10 @@ RFI_AXIS_NAMES = frozenset({
     "rfi_A", "rfi_phase", "rfi_xyz", "elements",
     # constants
     "mu_rfi_k", "mu_rfi_orbit", "L_rfi_orbit",
+    # (n_rfi, n_time_fine) elevation mask, multiplied into rfi_A in the signal
+    # forwards. Sharded rather than replicated so that multiply stays elementwise
+    # within each shard -- replicated, it would pull rfi_A back to a full copy.
+    "rfi_mask_fine",
 })
 
 

@@ -12,6 +12,7 @@ from tabascal.tab_tools import get_observation_data_type
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
 from tabascal.timing import measure_runtime
 
+import numpy as np
 import xarray as xr
 
 from typing import Tuple, Dict, Callable
@@ -160,6 +161,69 @@ class BaseGPRFI(Component):
         # amplitude and zero gradient (the vis contribution is quadratic in rfi_A).
         self.n_rfi_real = getattr(tab_config, "n_rfi_real", tab_config.n_rfi)
 
+        # Elevation mask, zeroing the RFI signal while a satellite is below the
+        # horizon. None when disabled. Shape (n_rfi, n_time_fine), i.e. it covers the
+        # padded dummy rows too -- they duplicate the last real satellite, so they
+        # inherit its mask and are zeroed independently by masked_forward_transform.
+        # Stored as a boolean, which is what jnp.where in the forward wants and is
+        # the smallest thing to shard.
+        rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None)
+        self.rfi_mask_fine = (
+            None if rfi_mask_fine is None else jnp.asarray(rfi_mask_fine, dtype=bool)
+        )
+
+    def build_mask_constants(self) -> dict:
+        """Constants the signal mask needs, or ``{}`` when nothing is masked.
+
+        Kept separate from each component's own ``build_constants`` so the
+        None-check lives in one place. The mask is a constant rather than a
+        closed-over array because it is indexed by ``n_rfi``: ``distributed.py``
+        shards constants named in ``RFI_AXIS_NAMES`` along the source axis, and a
+        captured array would instead be replicated, pulling ``rfi_A`` back to a
+        full copy on every device.
+        """
+        if self.rfi_mask_fine is None:
+            return {}
+        return {"rfi_mask_fine": self.rfi_mask_fine}
+
+    def build_masked_signal(self) -> Callable:
+        """Return the signal-domain mask to apply at the end of a forward.
+
+        Sibling of :meth:`masked_forward_transform`, which zeroes the padded dummy
+        *sources* in the latent k-space. A time window cannot be expressed there:
+        zeroing global Fourier modes cannot produce a time-limited signal, so the
+        elevation mask has to be applied to ``rfi_A`` after ``latent_to_signal``.
+
+        Both follow the same contract -- a base-class hook every component applies
+        unconditionally, which degrades to the identity when there is nothing to
+        mask (no elevation cut here, a single device there). Resolving the branch
+        here rather than inside the traced function means a run without an
+        elevation cut emits no mask op at all and pays nothing.
+
+        The returned function takes any array whose leading axis is ``n_rfi`` and
+        whose trailing axis is ``n_time_fine``, so a component that keeps the
+        antenna axis broadcast rather than materialised can mask the smaller
+        ``(n_rfi, n_freq_fine, n_time_fine)`` array before expanding it.
+        """
+        if self.rfi_mask_fine is None:
+            return lambda rfi_A, constants: rfi_A
+
+        prefix = self.prefix
+
+        def masked_signal(rfi_A: Array, constants: dict) -> Array:
+            mask = constants[f"{prefix}/rfi_mask_fine"]
+            # (n_rfi, n_time_fine) -> (n_rfi, 1, ..., 1, n_time_fine)
+            shape = (mask.shape[0], *(1,) * (rfi_A.ndim - 2), mask.shape[1])
+            # where, not a multiply by 0/1: a masked sample is then exactly zero
+            # even where rfi_A is non-finite, since 0 * inf and 0 * nan are nan and
+            # would leak straight back through the mask. The optimiser can put
+            # rfi_A somewhere non-finite transiently, and a masked sample must
+            # contribute nothing regardless. Measured no more expensive than the
+            # multiply, and identical in temporary allocation.
+            return jnp.where(mask.reshape(shape), rfi_A, 0)
+
+        return masked_signal
+
     def _mask_dummy_rfi(self, arr: Array) -> Array:
         """Zero the padded (dark dummy) rows of an (n_rfi, ...) array; no-op unpadded."""
         return arr.at[self.n_rfi_real:].set(0)
@@ -270,6 +334,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
         return {
             "sigma_rfi_k": self.sigma_rfi_k,
             "mu_rfi_k": self.mu_rfi_k,
+            **self.build_mask_constants(),
         }
 
     def build_forward(self):
@@ -294,6 +359,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
         """
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
+        masked_signal = self.build_masked_signal()
         pads = self.pads
         ss_idxs = self.ss_idxs
 
@@ -323,6 +389,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
                 jnp.swapaxes(rfi_k_A, 0, 1),
             )
             rfi_A = jnp.swapaxes(rfi_A_ant_major, 0, 1)
+            rfi_A = masked_signal(rfi_A, constants)
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -564,12 +631,14 @@ class ComplexRFIConstAnt(BaseGPRFI):
         return {
             "sigma_rfi_k": self.sigma_rfi_k,
             "mu_rfi_k": self.mu_rfi_k,
+            **self.build_mask_constants(),
         }
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
+        masked_signal = self.build_masked_signal()
         pads = self.pads
         ss_idxs = self.ss_idxs
         n_rfi = self.n_rfi
@@ -589,6 +658,10 @@ class ComplexRFIConstAnt(BaseGPRFI):
             rfi_A = vmap(latent_to_signal, (0, None, None), 0)(
                 rfi_k_A[:, 0], pads, ss_idxs
             )
+            # Masked before the broadcast: the mask does not vary over antennas, so
+            # applying it here scales (n_rfi, n_freq_fine, n_time_fine) rather than
+            # forcing the broadcast view below to materialise n_ant copies.
+            rfi_A = masked_signal(rfi_A, constants)
             # Avoids allocating a full grid of ones and a multiply.
             rfi_A = jnp.broadcast_to(
                 rfi_A[:, None], (n_rfi, n_ant, n_freq_fine, n_time_fine)
