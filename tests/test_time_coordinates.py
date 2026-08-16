@@ -13,6 +13,9 @@ from tabascal.time import (
     gast_deg,
     jd_to_datetime,
     datetime_to_jd,
+    skyfield_time,
+    TIME_SCALES,
+    timescale,
 )
 
 
@@ -138,17 +141,141 @@ class TestGastDeg:
 
 
 # ---------------------------------------------------------------------------
+# tabascal.time — skyfield_time
+# ---------------------------------------------------------------------------
+
+class TestSkyfieldTime:
+    """The single entry point from Julian Dates to skyfield times."""
+
+    JD = 2451545.3
+
+    def test_timescale_is_memoised(self):
+        """One timescale, reused -- so every call site shares the same one."""
+        assert timescale() is timescale()
+
+    def test_matches_the_explicit_whole_fraction_split(self):
+        """Equivalent to the inline ``ts._utc_jd(floor, frac)`` it replaced.
+
+        Pins the refactor: this is the expression that was duplicated across
+        time.py and the three trajectory.py call sites.
+        """
+        ts = timescale()
+        expected = ts._utc_jd(np.floor(self.JD), self.JD - np.floor(self.JD))
+
+        assert float(np.asarray(skyfield_time(self.JD).tt)) == float(
+            np.asarray(expected.tt)
+        )
+
+    def test_preserves_the_whole_fraction_split(self):
+        """The integer day is carried separately, not folded into one float."""
+        t = skyfield_time(np.array([self.JD]))
+        assert float(np.asarray(t.whole)[0]) == np.floor(self.JD)
+
+    def test_fraction_is_the_exact_remainder(self):
+        """Nothing is lost between the input JD and what skyfield receives.
+
+        The split cannot recover precision the input f64 never had -- a JD of
+        ~2.5e6 is already quantised to ~5e-10 days before it arrives. What it
+        does guarantee is that no *further* precision is dropped on the way in:
+        the fraction handed over is exactly ``jd - floor(jd)``.
+        """
+        jd = np.array([self.JD, self.JD + 0.25])
+        t = skyfield_time(jd)
+
+        # TT runs ahead of UTC by the leap seconds + 32.184 s, constant here, so
+        # the UTC fraction is recovered by removing that same offset from both.
+        offset = np.asarray(t.tt_fraction) - (jd - np.floor(jd))
+        assert offset[0] == pytest.approx(offset[1], abs=1e-15)
+
+    def test_gast_deg_is_consistent_with_it(self):
+        """gast_deg reads its time through the same entry point."""
+        times = np.array([self.JD, self.JD + 0.25])
+        direct = np.asarray(skyfield_time(times).gast) * 15.0
+
+        np.testing.assert_allclose(gast_deg(times), direct, rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# tabascal.time — time scales
+# ---------------------------------------------------------------------------
+
+class TestTimeScale:
+    """``scale`` selects how a Julian Date is interpreted, not how it prints."""
+
+    JD = 2451545.3
+
+    def _tt_seconds(self, scale):
+        t = skyfield_time(self.JD, scale)
+        return float(np.asarray(t.tt)) * 86400.0
+
+    def test_utc_is_the_default(self):
+        """Omitting the scale reads UTC, so existing callers are unchanged."""
+        assert float(np.asarray(skyfield_time(self.JD).tt)) == float(
+            np.asarray(skyfield_time(self.JD, "utc").tt)
+        )
+
+    @pytest.mark.parametrize("scale", sorted(TIME_SCALES))
+    def test_every_supported_scale_constructs(self, scale):
+        assert skyfield_time(self.JD, scale) is not None
+
+    def test_scale_is_case_insensitive(self):
+        assert self._tt_seconds("TAI") == self._tt_seconds("tai")
+
+    def test_unsupported_scale_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported time scale 'nonsense'"):
+            skyfield_time(self.JD, "nonsense")
+
+    def test_reading_utc_as_tai_shifts_by_the_leap_seconds(self):
+        """The whole point: the same JD on a different scale is a different instant.
+
+        At J2000 the TAI-UTC offset was 32 leap seconds. A satellite at a typical
+        LEO ground-track speed of ~7.5 km/s moves ~240 km in that time, so this
+        is a wrong position rather than a rounding difference -- and nothing
+        raises to say so.
+        """
+        offset = self._tt_seconds("utc") - self._tt_seconds("tai")
+
+        assert offset == pytest.approx(32.0, abs=1e-6)
+
+    def test_reading_utc_as_tt_shifts_by_leap_seconds_plus_32_184(self):
+        offset = self._tt_seconds("utc") - self._tt_seconds("tt")
+
+        assert offset == pytest.approx(32.0 + 32.184, abs=1e-3)
+
+    def test_et_is_an_alias_for_tt(self):
+        """CASA's legacy spelling of TT."""
+        assert self._tt_seconds("et") == self._tt_seconds("tt")
+
+    def test_reading_utc_as_ut1_shifts_by_dut1(self):
+        """Sub-second, but still ~2.7 km of LEO track."""
+        offset = abs(self._tt_seconds("utc") - self._tt_seconds("ut1"))
+
+        assert 0.0 < offset < 0.9
+
+    def test_gast_deg_accepts_a_scale(self):
+        direct = np.asarray(skyfield_time(self.JD, "tai").gast) * 15.0
+
+        np.testing.assert_allclose(gast_deg(self.JD, "tai"), direct, rtol=0, atol=0)
+
+    def test_gast_deg_differs_between_scales(self):
+        assert gast_deg(self.JD, "utc") != pytest.approx(
+            float(gast_deg(self.JD, "tai")), abs=1e-9
+        )
+
+
+# ---------------------------------------------------------------------------
 # skyfield private-API smoke test
 # ---------------------------------------------------------------------------
 
 def test_skyfield_utc_jd_whole_fraction_available():
-    """Guard the private skyfield API that gast_deg / itrs_to_gcrs_sf depend on.
+    """Guard the private skyfield API that ``skyfield_time`` depends on.
 
-    Both call ``ts._utc_jd(whole, fraction)`` (a private method, used to feed UTC
-    Julian Dates split into whole + fractional parts for full f64 precision). The
-    skyfield pin in pyproject.toml is bounded for exactly this reason; if a
-    resolved version drops or changes the method, fail loudly here in CI instead
-    of deep inside a run.
+    ``skyfield_time`` calls ``ts._utc_jd(whole, fraction)`` (a private method,
+    used to feed UTC Julian Dates split into whole + fractional parts for full
+    f64 precision), and is now the only caller in the package. The skyfield pin
+    in pyproject.toml is bounded for exactly this reason; if a resolved version
+    drops or changes the method, fail loudly here in CI instead of deep inside
+    a run.
     """
     from skyfield.api import load
 
@@ -161,3 +288,56 @@ def test_skyfield_utc_jd_whole_fraction_available():
     assert float(np.asarray(t_split.gast)) == pytest.approx(
         float(np.asarray(t_whole.gast)), abs=1e-9
     )
+
+
+class TestCasacoreScaleNames:
+    """casacore names several scales more than once; all spellings are accepted.
+
+    The point of ``scale`` is to forward whatever an MS declares, so rejecting
+    the spelling casacore actually writes would defeat it. Verified against
+    casacore's own epoch code list, which reports:
+
+        LAST LMST GMST1 GAST UT1 UT2 UTC TAI TDT TCG TDB TCB IAT GMST TT ET UT
+
+    with TDT listed before its TT/ET synonyms, IAT alongside TAI, and UT
+    alongside UT1.
+    """
+
+    JD = 2451545.3
+
+    def _tt(self, scale):
+        return float(np.asarray(skyfield_time(self.JD, scale).tt))
+
+    @pytest.mark.parametrize("alias", ["tdt", "tt", "et"])
+    def test_terrestrial_time_spellings_agree(self, alias):
+        """TDT is casacore's canonical name; TT and ET are its synonyms."""
+        assert self._tt(alias) == self._tt("tt")
+
+    def test_tdt_is_accepted(self):
+        """The canonical spelling an MS is most likely to carry."""
+        assert "tdt" in TIME_SCALES
+
+    @pytest.mark.parametrize("alias", ["tai", "iat"])
+    def test_atomic_time_spellings_agree(self, alias):
+        assert self._tt(alias) == self._tt("tai")
+
+    @pytest.mark.parametrize("alias", ["ut1", "ut"])
+    def test_universal_time_spellings_agree(self, alias):
+        assert self._tt(alias) == self._tt("ut1")
+
+    @pytest.mark.parametrize(
+        "scale", ["gast", "gmst1", "gmst", "last", "lmst", "ut2", "tcg", "tcb"]
+    )
+    def test_scales_we_cannot_interpret_say_so(self, scale):
+        """Rejected as unsupported, not as a typo.
+
+        These are real MS epoch references -- sidereal angles, and relativistic
+        scales skyfield offers no constructor for -- so the error should not
+        imply the name is wrong.
+        """
+        with pytest.raises(ValueError, match="valid Measurement Set epoch reference"):
+            skyfield_time(self.JD, scale)
+
+    def test_a_genuine_typo_still_reads_as_one(self):
+        with pytest.raises(ValueError, match="Unsupported time scale 'utcc'"):
+            skyfield_time(self.JD, "utcc")
