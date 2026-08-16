@@ -11,6 +11,7 @@ from jax import random, Array
 from jax.tree_util import tree_map
 
 from tabascal.distributed import is_process_0
+from tabascal.noise import broadcast_to_vis
 from tabascal.opt import SVIRunResult
 from tabascal.timing import measure_runtime
 from tabascal.write import write_results_ms, write_results_xds
@@ -87,7 +88,12 @@ def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
     else:
         norm = true[~flags].size
 
-    rchi2 = jnp.sum((jnp.abs(pred[~flags] - true[~flags]) / noise) ** 2) / norm
+    # Broadcast the noise onto the data BEFORE masking. `x[~flags]` flattens, so
+    # a per-baseline noise applied afterwards would no longer line up with the
+    # samples it belongs to -- it would be silently recycled across baselines.
+    noise = jnp.broadcast_to(broadcast_to_vis(noise, true.shape), true.shape)
+
+    rchi2 = jnp.sum((jnp.abs(pred[~flags] - true[~flags]) / noise[~flags]) ** 2) / norm
 
     return rchi2
 
@@ -199,7 +205,10 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
     ``/noise`` and ``/signal`` columns are dimensionless ratios. Noise normalisation is
     omitted for gains. ``point`` is e.g. ``"init"`` or ``"opt"``.
     """
-    noise = tab_config.noise
+    # Aggregate metrics (RMSE, bias) are already reduced over every baseline, so
+    # they normalise against the one representative noise rather than the
+    # per-baseline array -- there is no baseline axis left to align with.
+    noise = getattr(tab_config, "noise_scalar", tab_config.noise)
     flags = tab_config.flags
 
     printed_header = False

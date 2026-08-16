@@ -7,6 +7,11 @@ from tabascal.distributed import (
     sharding_enabled,
 )
 from tabascal.ms import read_ms
+from tabascal.noise import (
+    broadcast_to_vis,
+    read_noise_file,
+    representative_sigma,
+)
 from tabascal.tab_tools import fix_padding
 from tabascal.components.trajectory import (
     fetch_orbital_elements,
@@ -188,11 +193,15 @@ class TabConfig:
             # These are captured in closures during Model setup (likelihood) and used
             # eagerly against globally-sharded arrays; process-local device arrays
             # cannot mix with global ones in multi-process, so globalize them here,
-            # before any component sees them. noise becomes a plain float (a closure
-            # literal has no device placement to conflict).
+            # before any component sees them.
             self.vis_obs = make_global(self.vis_obs, replicated_sharding())
             self.flags = make_global(self.flags, replicated_sharding())
-            self.noise = float(self.noise)
+            # Was float(self.noise), which a per-baseline array cannot survive.
+            # Replicated rather than sharded: it is one small vector indexed by
+            # baseline, and every process needs all of it.
+            self.noise = make_global(
+                jnp.asarray(self.noise), replicated_sharding()
+            )
 
     def set_elevation_mask(self, min_elevation: Optional[float]):
         """Mask the RFI signal to zero whenever a satellite is below `min_elevation`.
@@ -233,10 +242,26 @@ class TabConfig:
                 f"(elevation {el.min():.1f} to {el.max():.1f} deg)"
             )
 
-    def set_noise(self, noise: float):
+    def set_noise(self, noise):
+        """Override the noise read from the MS ``SIGMA`` column.
 
-        if noise:
+        Accepts a scalar, which applies to every baseline, or a path to an
+        ``.npz`` carrying ``sigma_bl`` (per baseline) or ``s_ant`` (per antenna)
+        -- for a noise measured out of band. ``None`` keeps the MS estimate.
+        """
+
+        if not noise:
+            return
+
+        if isinstance(noise, str):
+            sigma_bl = read_noise_file(
+                noise, self.n_bl, np.asarray(self.a1), np.asarray(self.a2)
+            )
+            self.noise = jnp.asarray(sigma_bl)
+            self.noise_scalar = representative_sigma(sigma_bl)
+        else:
             self.noise = noise
+            self.noise_scalar = float(noise)
 
     def set_flags(self, include_flags: bool):
 
@@ -272,7 +297,11 @@ class TabConfig:
         self.chan_width = ms_params["chan_width"]
         self.freqs = np.asarray(ms_params["freqs"])
 
+        # Per baseline, shape (n_bl,). noise_scalar is the one representative
+        # value for the heuristics that genuinely need a single number; the
+        # likelihood and chi^2 use the per-baseline array.
         self.noise = ms_params["noise"]
+        self.noise_scalar = ms_params["noise_scalar"]
         self.a1 = ms_params["a1"]
         self.a2 = ms_params["a2"]
 
@@ -333,7 +362,7 @@ class TabConfig:
         sample_freq_bl = (
             np.pi
             * np.max(np.abs(fringe_freq), axis=(0, 1))
-            * np.sqrt(self.max_rfi_vis / (6 * self.noise))
+            * np.sqrt(self.max_rfi_vis / (6 * self.noise_scalar))
         )
         n_int_times = np.ceil(time_int_factor * self.int_time * sample_freq_bl).astype(int)
 
@@ -405,7 +434,12 @@ class Model:
         self.noise = tab_config.noise
         self.n_rfi = tab_config.n_rfi
         self.likelihood = lambda pred, obs_data: likelihood(
-            pred, obs_data, {"noise": tab_config.noise, "flags": tab_config.flags}
+            pred,
+            obs_data,
+            {
+                "noise": broadcast_to_vis(tab_config.noise, tab_config.vis_obs.shape),
+                "flags": tab_config.flags,
+            },
         )
 
         components = [C() for C in import_components(component_list)]

@@ -14,6 +14,7 @@ import numpy as np
 
 from daskms import xds_from_ms, xds_from_table
 
+from tabascal.noise import per_baseline_sigma, representative_sigma
 from tabascal.timing import measure_runtime
 
 
@@ -257,6 +258,10 @@ def read_ms(
 
     print(n_freq, chans)
 
+    sigma_bl = per_baseline_sigma(
+        np.asarray(xds.SIGMA.data.compute()), n_time, n_bl, corr_idx
+    )
+
     read_data = lambda col_name: jnp.transpose(
         jnp.array(
             xds[col_name]
@@ -290,7 +295,11 @@ def read_ms(
         "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),
         "vis_obs": read_data(data_col),
         "flags": read_data("FLAG"),
-        "noise": jnp.array(xds.SIGMA.data.mean().compute()),
+        # Per baseline, not collapsed to a scalar: the antennas differ in
+        # sensitivity, so a single number mis-weights every visibility. See
+        # tabascal.noise.
+        "noise": jnp.asarray(sigma_bl),
+        "noise_scalar": representative_sigma(sigma_bl),
         "a1": jnp.array(xds.ANTENNA1.data[:n_bl].compute()),
         "a2": jnp.array(xds.ANTENNA2.data[:n_bl].compute()),
     }
