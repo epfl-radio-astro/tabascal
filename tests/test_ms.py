@@ -13,13 +13,15 @@ from tabascal.ms import (
 
 
 class _FakePol:
-    """Stand-in for the POLARIZATION subtable's xarray dataset.
+    """One grouped POLARIZATION row.
 
-    ``rows`` is one CORR_TYPE list per POLARIZATION row.
+    dask-ms with ``group_cols="__row__"`` yields one dataset per row, each
+    keeping a leading row axis of length 1 -- so CORR_TYPE is (1, n_corr) and
+    rows of differing width never have to share a shape.
     """
 
-    def __init__(self, *rows):
-        self.CORR_TYPE = _FakeVar(np.asarray(rows, dtype=object))
+    def __init__(self, corr_type):
+        self.CORR_TYPE = _FakeVar(np.asarray([corr_type]))
 
 
 class _FakeVar:
@@ -43,9 +45,10 @@ def polarization(monkeypatch):
     """Patch the POLARIZATION read with a chosen CORR_TYPE row."""
 
     def _install(*rows):
-        def fake_xds_from_table(path):
+        def fake_xds_from_table(path, group_cols=None):
             assert path.endswith("::POLARIZATION")
-            return [_FakePol(*rows)]
+            assert group_cols == "__row__", "rows must be grouped, see variable shapes"
+            return [_FakePol(r) for r in rows]
 
         monkeypatch.setattr("tabascal.ms.xds_from_table", fake_xds_from_table)
 
@@ -138,16 +141,21 @@ def test_unknown_correlation_name_is_rejected(polarization):
         resolve_correlation("fake.ms", "zz")
 
 
-def test_unreadable_polarization_falls_back_with_a_warning(monkeypatch, capsys):
-    """POLARIZATION is mandatory, so a failure is unusual -- but stay readable."""
+def test_unreadable_polarization_raises(monkeypatch):
+    """No positional fallback: guessing is the bug this function removes.
 
-    def broken(path):
+    POLARIZATION is a required subtable. Falling back to the conventional
+    {xx: 0, ..., yy: 3} ordering would return 3 for a single-correlation MS --
+    off the end of its axis, and exactly the failure #128 is about.
+    """
+
+    def broken(path, group_cols=None):
         raise RuntimeError("no such table")
 
     monkeypatch.setattr("tabascal.ms.xds_from_table", broken)
 
-    assert resolve_correlation("fake.ms", "yy") == 3
-    assert "Warning" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="correlation layout is unknown"):
+        resolve_correlation("fake.ms", "yy")
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +221,7 @@ def data_description(monkeypatch):
     """Patch the DATA_DESCRIPTION read with a chosen id mapping."""
 
     def _install(spw_ids, pol_ids):
-        def fake_xds_from_table(path):
+        def fake_xds_from_table(path, group_cols=None):
             assert path.endswith("::DATA_DESCRIPTION")
             return [_FakeDataDesc(spw_ids, pol_ids)]
 
@@ -246,7 +254,7 @@ class TestResolveDataDescription:
         assert resolve_data_description("fake.ms", 1) == (4, 1)
 
     def test_unreadable_table_falls_back_with_a_warning(self, monkeypatch, capsys):
-        def broken(path):
+        def broken(path, group_cols=None):
             raise RuntimeError("no such table")
 
         monkeypatch.setattr("tabascal.ms.xds_from_table", broken)
@@ -279,3 +287,42 @@ class TestCorrelationUsesTheRightPolarizationRow:
         polarization([CORR_TYPES["xx"]], [CORR_TYPES["yy"]])
 
         assert resolve_correlation("fake.ms", "xx") == 0
+
+
+class TestHeterogeneousPolarizationRows:
+    """Rows of differing NUM_CORR: the case an ungrouped read cannot represent.
+
+    CORR_TYPE is a variable-shaped CASA column. Read ungrouped, dask-ms describes
+    the whole subtable with one exemplar row's width and fails on any row that
+    differs -- so a four-correlation setup beside a YY-only one breaks precisely
+    the single-correlation support #128 adds.
+    """
+
+    def test_wide_row_beside_narrow_row(self, polarization):
+        polarization(
+            [CORR_TYPES[c] for c in ("xx", "xy", "yx", "yy")],   # 4 wide
+            [CORR_TYPES["yy"]],                                   # 1 wide
+        )
+
+        assert resolve_correlation("fake.ms", "yy", pol_id=0) == 3
+        assert resolve_correlation("fake.ms", "yy", pol_id=1) == 0
+
+    def test_narrow_row_first(self, polarization):
+        """Order must not matter; neither row is the exemplar."""
+        polarization(
+            [CORR_TYPES["yy"]],
+            [CORR_TYPES[c] for c in ("xx", "xy", "yx", "yy")],
+        )
+
+        assert resolve_correlation("fake.ms", "yy", pol_id=0) == 0
+        assert resolve_correlation("fake.ms", "yy", pol_id=1) == 3
+
+    def test_two_correlation_row_beside_four(self, polarization):
+        polarization(
+            [CORR_TYPES[c] for c in ("xx", "xy", "yx", "yy")],
+            [CORR_TYPES["xx"], CORR_TYPES["yy"]],
+        )
+
+        assert resolve_correlation("fake.ms", "yy", pol_id=1) == 1
+        with pytest.raises(ValueError, match="does not contain correlation 'xy'"):
+            resolve_correlation("fake.ms", "xy", pol_id=1)

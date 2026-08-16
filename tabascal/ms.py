@@ -113,22 +113,27 @@ def resolve_correlation(ms_path: str, corr: str, pol_id: int = 0) -> int:
             f"Unknown correlation {corr!r}. Supported: {sorted(CORR_TYPES)}."
         )
 
+    # Grouped per row: CORR_TYPE is a variable-shaped CASA column, so setups with
+    # different NUM_CORR (a four-correlation row beside a YY-only one) cannot be
+    # represented as one ungrouped dataset -- dask-ms would describe the whole
+    # subtable with one exemplar row's shape and fail on any row that differs.
+    # Grouping gives one dataset per row, each with its own width.
     try:
-        pol = xds_from_table(ms_path + "::POLARIZATION")[0]
+        pol_rows = xds_from_table(ms_path + "::POLARIZATION", group_cols="__row__")
         corr_type = np.atleast_1d(
-            np.asarray(pol.CORR_TYPE.data[pol_id].compute())
+            np.asarray(pol_rows[pol_id].CORR_TYPE.data.compute())
         ).ravel()
     except Exception as err:  # pragma: no cover - depends on the MS on disk
-        # POLARIZATION is mandatory in the MS v2 spec, so this is a malformed or
-        # unusual store rather than a normal case. Fall back to the conventional
-        # ordering so such an MS stays readable, but say so: on anything other
-        # than a full 4-correlation MS the fallback can select the wrong axis.
-        print(
-            f"Warning: could not read {ms_path}::POLARIZATION ({err}); assuming the "
-            "conventional 4-correlation ordering. Verify the correlation is the one "
-            "you expect."
-        )
-        return CORR_TYPES[key] - CORR_TYPES["xx"]
+        # POLARIZATION is mandatory in the MS v2 spec, so an unreadable one means
+        # a broken store. Deliberately not falling back to the conventional
+        # {xx: 0, ..., yy: 3} ordering: that guess is the very thing this function
+        # exists to remove, and on a single-correlation MS it returns an index off
+        # the end of the axis. Better to stop than to read an unknown correlation.
+        raise ValueError(
+            f"Could not read {ms_path}::POLARIZATION ({err}), so the correlation "
+            f"layout is unknown and {key!r} cannot be resolved. POLARIZATION is a "
+            "required subtable; the MS looks incomplete."
+        ) from err
 
     wanted = CORR_TYPES[key]
     matches = np.flatnonzero(corr_type == wanted)
@@ -214,7 +219,10 @@ def read_ms(
         )
 
     xds_ant = xds_from_table(ms_path + "::ANTENNA")[0]
-    xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
+    # Grouped per row for the same reason as POLARIZATION above: CHAN_FREQ and
+    # CHAN_WIDTH are variable-shaped, so windows with different channel counts
+    # cannot share one ungrouped dataset.
+    xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW", group_cols="__row__")
     xds_src = xds_from_table(ms_path + "::SOURCE")[0]
 
     ants_itrf = np.array(xds_ant.POSITION.data.compute())
@@ -224,8 +232,9 @@ def read_ms(
     n_bl = xds[data_col].data.shape[0] // n_time
     n_freq, n_corr = xds[data_col].data.shape[1:]
 
-    freqs = np.array(xds_spec.CHAN_FREQ.data[spw_id].compute())
-    chan_width = np.array(xds_spec.CHAN_WIDTH.data[spw_id, 0].compute())
+    spec_row = xds_spec[spw_id]
+    freqs = np.array(spec_row.CHAN_FREQ.data[0].compute())
+    chan_width = np.array(spec_row.CHAN_WIDTH.data[0, 0].compute())
     int_time = xds.INTERVAL.data[0].compute()
 
     times_mjd = np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
