@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 import numpy as np
 from skyfield.api import load
@@ -55,16 +56,56 @@ def datetime_to_jd(dt):
     return _UNIX_EPOCH_JD + (dt - _UNIX_EPOCH).total_seconds() / DAY_SECS
 
 
+@lru_cache(maxsize=1)
+def timescale():
+    """The skyfield timescale, built once and reused."""
+
+    return load.timescale()
+
+
+def skyfield_time(times_jd):
+    """UTC Julian Dates → :class:`skyfield.timelib.Time`.
+
+    The single entry point for turning observation times into skyfield times, so
+    the two decisions below are made once rather than at each call site.
+
+    Measurement Set times follow the UTC convention (the ``TIME`` column carries
+    ``MEASINFO Ref: UTC``), so the Julian Dates are interpreted as UTC — skyfield
+    then applies the UT1-UTC offset internally. Reading them as UT1 instead (i.e.
+    ``ts.ut1_jd``) shifts every epoch by DUT1, dragging satellite positions along
+    their track by up to ~0.9 s of motion.
+
+    The Julian Date is split into whole and fractional parts before being handed
+    to skyfield to preserve full f64 precision: a JD's ~2.5e6 day magnitude
+    leaves f64 only ~5e-10 days of resolution on the value as a whole.
+
+    Uses skyfield's private ``_utc_jd``, which is why ``pyproject.toml`` pins
+    ``skyfield>=1.49,<2``. Keeping it to this one call site means the pin
+    protects a single line.
+
+    Parameters
+    ----------
+    times_jd : array_like
+        Observation times as UTC Julian Dates.
+
+    Returns
+    -------
+    skyfield.timelib.Time
+        The same times, on the UTC scale.
+    """
+
+    times_jd = np.asarray(times_jd, dtype=float)
+    jd_whole = np.floor(times_jd)
+    jd_frac = times_jd - jd_whole
+
+    return timescale()._utc_jd(jd_whole, jd_frac)
+
+
 def gast_deg(times_jd):
     """Greenwich Apparent Sidereal Time, in degrees, for UTC Julian Dates.
 
-    Measurement Set times follow the UTC convention, so the input Julian Dates
-    are interpreted as UTC (not UT1) — skyfield then applies the UT1-UTC offset
-    internally. The *apparent* (not mean) sidereal angle is returned, i.e. it
-    includes the equation of the equinoxes, so this is GAST and not GMST.
-
-    The Julian Date is split into whole and fractional parts before being
-    handed to skyfield to preserve full f64 precision.
+    The *apparent* (not mean) sidereal angle is returned, i.e. it includes the
+    equation of the equinoxes, so this is GAST and not GMST.
 
     Parameters
     ----------
@@ -77,11 +118,4 @@ def gast_deg(times_jd):
         GAST in degrees.
     """
 
-    times_jd = np.asarray(times_jd, dtype=float)
-    jd_whole = np.floor(times_jd)
-    jd_frac = times_jd - jd_whole
-
-    ts = load.timescale()
-    t_sf = ts._utc_jd(jd_whole, jd_frac)
-
-    return np.asarray(t_sf.gast) * 15.0  # GAST hours → degrees
+    return np.asarray(skyfield_time(times_jd).gast) * 15.0  # GAST hours → degrees

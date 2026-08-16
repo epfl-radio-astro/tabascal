@@ -13,6 +13,8 @@ from tabascal.time import (
     gast_deg,
     jd_to_datetime,
     datetime_to_jd,
+    skyfield_time,
+    timescale,
 )
 
 
@@ -141,14 +143,70 @@ class TestGastDeg:
 # skyfield private-API smoke test
 # ---------------------------------------------------------------------------
 
-def test_skyfield_utc_jd_whole_fraction_available():
-    """Guard the private skyfield API that gast_deg / itrs_to_gcrs_sf depend on.
+class TestSkyfieldTime:
+    """The single entry point from UTC Julian Dates to skyfield times."""
 
-    Both call ``ts._utc_jd(whole, fraction)`` (a private method, used to feed UTC
-    Julian Dates split into whole + fractional parts for full f64 precision). The
-    skyfield pin in pyproject.toml is bounded for exactly this reason; if a
-    resolved version drops or changes the method, fail loudly here in CI instead
-    of deep inside a run.
+    JD = 2451545.3
+
+    def test_timescale_is_memoised(self):
+        """One timescale, reused -- so every call site shares the same one."""
+        assert timescale() is timescale()
+
+    def test_matches_the_explicit_whole_fraction_split(self):
+        """Equivalent to the inline ``ts._utc_jd(floor, frac)`` it replaced.
+
+        Pins the refactor: this is the expression that was duplicated across
+        time.py and the three trajectory.py call sites.
+        """
+        ts = timescale()
+        expected = ts._utc_jd(np.floor(self.JD), self.JD - np.floor(self.JD))
+
+        assert float(np.asarray(skyfield_time(self.JD).tt)) == float(
+            np.asarray(expected.tt)
+        )
+
+    def test_preserves_the_whole_fraction_split(self):
+        """The integer day is carried separately, not folded into one float."""
+        t = skyfield_time(np.array([self.JD]))
+        assert float(np.asarray(t.whole)[0]) == np.floor(self.JD)
+
+    def test_fraction_is_the_exact_remainder(self):
+        """Nothing is lost between the input JD and what skyfield receives.
+
+        The split cannot recover precision the input f64 never had -- a JD of
+        ~2.5e6 is already quantised to ~5e-10 days before it arrives. What it
+        does guarantee is that no *further* precision is dropped on the way in:
+        the fraction handed over is exactly ``jd - floor(jd)``.
+        """
+        jd = np.array([self.JD, self.JD + 0.25])
+        t = skyfield_time(jd)
+
+        # TT runs ahead of UTC by the leap seconds + 32.184 s, constant here, so
+        # the UTC fraction is recovered by removing that same offset from both.
+        offset = np.asarray(t.tt_fraction) - (jd - np.floor(jd))
+        assert offset[0] == pytest.approx(offset[1], abs=1e-15)
+
+    def test_gast_deg_is_consistent_with_it(self):
+        """gast_deg reads its time through the same entry point."""
+        times = np.array([self.JD, self.JD + 0.25])
+        direct = np.asarray(skyfield_time(times).gast) * 15.0
+
+        np.testing.assert_allclose(gast_deg(times), direct, rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# skyfield private-API smoke test
+# ---------------------------------------------------------------------------
+
+def test_skyfield_utc_jd_whole_fraction_available():
+    """Guard the private skyfield API that ``skyfield_time`` depends on.
+
+    ``skyfield_time`` calls ``ts._utc_jd(whole, fraction)`` (a private method,
+    used to feed UTC Julian Dates split into whole + fractional parts for full
+    f64 precision), and is now the only caller in the package. The skyfield pin
+    in pyproject.toml is bounded for exactly this reason; if a resolved version
+    drops or changes the method, fail loudly here in CI instead of deep inside
+    a run.
     """
     from skyfield.api import load
 

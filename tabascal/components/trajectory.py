@@ -13,7 +13,7 @@ from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_
 from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
-from tabascal.time import gast_deg
+from tabascal.time import gast_deg, skyfield_time, timescale
 
 import sgp4jax
 from sgp4jax import WGS72 as gravity
@@ -26,7 +26,7 @@ from numpy.typing import NDArray
 
 from sgp4.api import WGS72, Satrec
 
-from skyfield.api import Distance, load, wgs84
+from skyfield.api import Distance, wgs84
 from skyfield.toposlib import ITRSPosition
 
 from skyfield.api import EarthSatellite
@@ -91,10 +91,8 @@ def get_satellite_positions(records: list, times_jd: list):
         Satellite positions over time, in metres.
     """
 
-    ts = load.timescale()
-    times_jd_whole = np.floor(times_jd)
-    times_jd_frac = np.array(times_jd) - times_jd_whole
-    sf_times = ts._utc_jd(times_jd_whole, times_jd_frac)
+    ts = timescale()
+    sf_times = skyfield_time(times_jd)
 
     sat_pos = np.array(
         [
@@ -127,8 +125,8 @@ def get_satellite_elevations(orbit_records: list, times_jd, ants_itrf) -> NDArra
     """
 
     times_jd = np.asarray(times_jd)
-    ts = load.timescale()
-    sf_times = ts._utc_jd(np.floor(times_jd), times_jd - np.floor(times_jd))
+    ts = timescale()
+    sf_times = skyfield_time(times_jd)
 
     # geographic_position_of needs an ICRF position, so evaluate the (time-independent)
     # geodetic site position of the array centre at an arbitrary time
@@ -746,8 +744,7 @@ def itrs_to_gcrs_sf(pos_itrs: NDArray, times_jd: NDArray) -> NDArray:
     pos_itrs = np.asarray(pos_itrs)
     times_jd = np.asarray(times_jd)
 
-    ts = load.timescale()
-    t_sf = ts._utc_jd(np.floor(times_jd), times_jd - np.floor(times_jd))
+    t_sf = skyfield_time(times_jd)
 
     pos_gcrs = np.stack(
         [ITRSPosition(Distance(m=pos)).at(t_sf).position.m.T for pos in pos_itrs]
