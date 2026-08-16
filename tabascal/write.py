@@ -10,6 +10,81 @@ import dask.array as da
 import dask
 
 
+def _unity_gains_or_raise(xds_tab, tol: float = 1e-6):
+    """``1`` if the stored gains are unity, else an error naming the limitation."""
+
+    if "gains" not in xds_tab:
+        return 1
+
+    gains = np.asarray(xds_tab.gains.data.mean(axis=0))
+    if np.allclose(gains, 1.0, atol=tol):
+        return 1
+
+    raise NotImplementedError(
+        "This results zarr uses the 3-d ast_vis layout, which carries no baseline "
+        "axis, so the per-baseline gain cannot be reconstructed and the residual "
+        "columns would be written in the wrong frame. Re-run to produce the "
+        "current 4-d layout, which handles fitted gains correctly."
+    )
+
+
+def read_antenna_pairs(xds_ms, n_bl: int):
+    """The two antenna indices of each baseline, from one full set of rows.
+
+    Read through a named function so that reading the same column twice -- which
+    silently degrades the per-baseline gain to ``|g_p|^2`` -- is a testable
+    mistake rather than a two-line typo.
+    """
+
+    a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
+    a2 = xds_ms.ANTENNA2.data[:n_bl].compute()
+
+    return a1, a2
+
+
+def baseline_gains(gains, a1, a2):
+    """Per-baseline gain ``g_p conj(g_q)`` from per-antenna gains.
+
+    Both antenna indices are needed. Building this from ``ANTENNA1`` twice gives
+    ``|g_p|^2`` -- real, positive, and blind to the second antenna -- which
+    discards all phase and is wrong on every baseline whose two antennas differ,
+    i.e. all of them. It is invisible under unitary gains, where the answer is 1
+    either way.
+
+    Works on numpy or dask arrays; ``gains`` is indexed on its leading (antenna)
+    axis, so any trailing shape is carried through.
+    """
+
+    return gains[a1] * gains[a2].conj()
+
+
+def data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl):
+    """Model residuals in the frame of the observed data.
+
+    The forward model is ``gains_bl * (vis_ast + vis_rfi)``, so a residual has to
+    subtract the *gained* model. Subtracting the raw model visibilities, as the
+    results zarr stores them, leaves the gains in the residual.
+
+    Formed in the **data** frame (``vis_obs - gains_bl * model``) rather than the
+    calibrated one (``vis_obs / gains_bl - model``): dividing by the gain
+    inflates the noise on low-gain baselines and distorts any noise-referenced
+    residual metric. Moving every column to a single calibrated frame, with the
+    weights that belong to it, is issue #123.
+
+    Returns
+    -------
+    dict
+        ``ast``, ``rfi`` and ``total`` residuals, keyed for the ``TAB_*_RES``
+        columns.
+    """
+
+    return {
+        "ast": vis_obs - vis_ast * gains_bl,
+        "rfi": vis_obs - vis_rfi * gains_bl,
+        "total": vis_obs - (vis_ast + vis_rfi) * gains_bl,
+    }
+
+
 @measure_runtime
 def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
 
@@ -35,6 +110,14 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
             chunks
         )
 
+        # This layout carries no baseline count, so the antenna pairs cannot be
+        # sliced out of the MS and the per-baseline gain cannot be formed. The
+        # results writer has produced the 4-d layout since #93, so this branch is
+        # only reachable for an older zarr. Rather than silently write columns in
+        # the wrong frame, require the gains to be unity -- which is the only case
+        # it has ever handled correctly.
+        gains_bl = _unity_gains_or_raise(xds_tab)
+
     elif xds_tab.ast_vis.data.ndim == 4:
         n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
         n_corr = 1
@@ -49,11 +132,12 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         ).reshape(-1, n_freq, n_corr)
         vis_rfi = xr.DataArray(vis_rfi, dims=dims).chunk(chunks)
 
-        a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
-        a2 = xds_ms.ANTENNA1.data[:n_bl].compute()
+        a1, a2 = read_antenna_pairs(xds_ms, n_bl)
 
         gains = xds_tab.gains.data.astype(np.complex64).mean(axis=0)
-        gains_bl = da.transpose(gains[a1] * da.conj(gains[a2]), (2, 0, 1)).reshape(-1, n_freq, n_corr)
+        gains_bl = da.transpose(
+            baseline_gains(gains, a1, a2), (2, 0, 1)
+        ).reshape(-1, n_freq, n_corr)
         gains_bl = xr.DataArray(gains_bl, dims=dims).chunk(chunks)
 
     else:
@@ -64,16 +148,13 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     
 
     vis_obs = xds_ms[data_col]
-    vis_cal = vis_obs
 
-    vis_ast_res = vis_obs - vis_ast
-    vis_rfi_res = vis_obs - vis_rfi
-    vis_res = vis_obs - (vis_ast + vis_rfi)
-    # vis_cal = vis_obs / gains_bl
+    vis_cal = vis_obs / gains_bl
 
-    # vis_ast_res = vis_obs - vis_ast * gains_bl
-    # vis_rfi_res = vis_obs - vis_rfi * gains_bl
-    # vis_res = vis_obs - (vis_ast + vis_rfi) * gains_bl
+    residuals = data_frame_residuals(vis_obs, vis_ast, vis_rfi, gains_bl)
+    vis_ast_res = residuals["ast"]
+    vis_rfi_res = residuals["rfi"]
+    vis_res = residuals["total"]
 
     xds_ms = xds_ms.assign(CORRECTED_DATA=vis_cal)
     xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)
