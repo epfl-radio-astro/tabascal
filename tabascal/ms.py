@@ -101,6 +101,48 @@ def resolve_correlation(ms_path: str, corr: str) -> int:
     return int(matches[0])
 
 
+#: Time scale assumed when an MS does not say which one its ``TIME`` column uses.
+DEFAULT_TIME_SCALE = "utc"
+
+
+def read_time_scale(column_keywords: dict, column: str = "TIME") -> str:
+    """Time scale declared by an MS column, from its ``MEASINFO`` record.
+
+    A Measurement Set records the scale its times are on rather than leaving it
+    to convention: the ``TIME`` column carries ``MEASINFO {'type': 'epoch',
+    'Ref': 'UTC'}``. ``UTC`` is overwhelmingly the common case, but it is a
+    declaration to be read, not a property to be assumed -- an MS may legitimately
+    declare ``TAI`` or another scale, and the difference is 32 s of leap seconds,
+    which is ~240 km along a LEO satellite's ground track.
+
+    Parameters
+    ----------
+    column_keywords : dict
+        Per-column keyword mapping, as returned by
+        ``xds_from_ms(path, column_keywords=True)[1]``.
+    column : str, optional
+        Column to read the scale from. Defaults to ``"TIME"``.
+
+    Returns
+    -------
+    str
+        The declared scale, lower-cased, or :data:`DEFAULT_TIME_SCALE` when the
+        MS does not declare one.
+    """
+
+    measinfo = (column_keywords or {}).get(column, {}).get("MEASINFO", {})
+    ref = measinfo.get("Ref")
+
+    if not ref:
+        print(
+            f"Warning: {column} carries no MEASINFO Ref; assuming "
+            f"{DEFAULT_TIME_SCALE.upper()} times."
+        )
+        return DEFAULT_TIME_SCALE
+
+    return str(ref).strip().lower()
+
+
 @measure_runtime
 def read_ms(
     ms_path,
@@ -112,7 +154,19 @@ def read_ms(
 
     corr_idx = resolve_correlation(ms_path, corr)
 
-    xds = xds_from_ms(ms_path)[0]
+    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True)
+    xds = xds_list[0]
+
+    time_scale = read_time_scale(column_keywords)
+    if time_scale != DEFAULT_TIME_SCALE:
+        # Surfaced rather than silently honoured: nothing downstream consumes
+        # this yet, so the trajectory maths still reads the times as UTC.
+        print(
+            f"Warning: {ms_path} declares {time_scale.upper()} times, but satellite "
+            f"trajectories are currently computed as if they were "
+            f"{DEFAULT_TIME_SCALE.upper()}. See issue #133."
+        )
+
     xds_ant = xds_from_table(ms_path + "::ANTENNA")[0]
     xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
     xds_src = xds_from_table(ms_path + "::SOURCE")[0]
@@ -173,6 +227,7 @@ def read_ms(
         "dish_d": xds_ant.DISH_DIAMETER.data[0].compute(),
         "times_mjd": times_mjd,
         "times": times,
+        "time_scale": time_scale,
         "int_time": int_time,
         "freqs": freqs[chans],
         "chan_width": chan_width,

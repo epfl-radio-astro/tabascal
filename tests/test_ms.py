@@ -1,9 +1,14 @@
-"""Tests for tabascal.ms — correlation resolution."""
+"""Tests for tabascal.ms — correlation resolution and time-scale reading."""
 
 import numpy as np
 import pytest
 
-from tabascal.ms import CORR_TYPES, resolve_correlation
+from tabascal.ms import (
+    CORR_TYPES,
+    DEFAULT_TIME_SCALE,
+    read_time_scale,
+    resolve_correlation,
+)
 
 
 class _FakePol:
@@ -139,3 +144,51 @@ def test_unreadable_polarization_falls_back_with_a_warning(monkeypatch, capsys):
 
     assert resolve_correlation("fake.ms", "yy") == 3
     assert "Warning" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Time scale, from the TIME column's MEASINFO record
+# ---------------------------------------------------------------------------
+
+def _keywords(ref=None, column="TIME"):
+    """Column keywords as dask-ms returns them, optionally declaring a scale."""
+
+    measinfo = {"type": "epoch"}
+    if ref is not None:
+        measinfo["Ref"] = ref
+
+    return {column: {"QuantumUnits": ["s"], "MEASINFO": measinfo}}
+
+
+def test_reads_the_declared_scale():
+    assert read_time_scale(_keywords("UTC")) == "utc"
+
+
+@pytest.mark.parametrize("ref", ["UTC", "TAI", "TT", "UT1", "TDB"])
+def test_every_declared_scale_is_returned_lowercased(ref):
+    assert read_time_scale(_keywords(ref)) == ref.lower()
+
+
+def test_a_non_utc_scale_is_reported_as_declared():
+    """Not silently coerced to UTC -- the caller decides what to do about it."""
+    assert read_time_scale(_keywords("TAI")) == "tai"
+
+
+def test_missing_measinfo_ref_falls_back_with_a_warning(capsys):
+    assert read_time_scale(_keywords(None)) == DEFAULT_TIME_SCALE
+    assert "no MEASINFO Ref" in capsys.readouterr().out
+
+
+def test_missing_column_falls_back_with_a_warning(capsys):
+    assert read_time_scale({}) == DEFAULT_TIME_SCALE
+    assert "no MEASINFO Ref" in capsys.readouterr().out
+
+
+def test_none_keywords_fall_back():
+    assert read_time_scale(None) == DEFAULT_TIME_SCALE
+
+
+def test_a_different_column_can_be_read():
+    keywords = _keywords("TAI", column="TIME_CENTROID")
+
+    assert read_time_scale(keywords, column="TIME_CENTROID") == "tai"
