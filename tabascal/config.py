@@ -212,7 +212,11 @@ class TabConfig:
         self.rfi_elevation = get_satellite_elevations(
             self.orbit_records, self.times_jd, self.ants_itrf
         )
-        self.rfi_mask = self.rfi_elevation > min_elevation
+        # Inclusive: min_elevation is the lowest elevation still modelled, and the
+        # option masks elevations *below* it. With a strict >, a sample sitting
+        # exactly on the cut would be masked, and a pass whose maximum is exactly
+        # the cut would be rejected as never in view.
+        self.rfi_mask = self.rfi_elevation >= min_elevation
         self.rfi_mask_fine = np.repeat(self.rfi_mask, self.n_int_time, axis=-1)
 
         print(f"\nRFI signal masked below {min_elevation} deg elevation")
