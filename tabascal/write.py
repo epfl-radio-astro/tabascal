@@ -10,6 +10,84 @@ import dask.array as da
 import dask
 
 
+def read_antenna_pairs(xds_ms, n_bl: int):
+    """The two antenna indices of each baseline, from one timestep's rows.
+
+    Assumes the time-major row order the reader relies on throughout
+    (``reshape(n_time, n_bl)``). Checked rather than assumed: a baseline-major
+    store would return ``n_bl`` rows of the same pair.
+    """
+
+    a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
+    a2 = xds_ms.ANTENNA2.data[:n_bl].compute()
+
+    if len(set(zip(np.asarray(a1).tolist(), np.asarray(a2).tolist()))) != n_bl:
+        raise ValueError(
+            f"The first {n_bl} rows do not hold {n_bl} distinct antenna pairs, so "
+            "the MS is not ordered time-major. tabascal reads visibilities as "
+            "(n_time, n_bl); sort the MS by TIME before running."
+        )
+
+    return a1, a2
+
+
+def baseline_gains(gains, a1, a2, ant_axis: int = 0):
+    """Per-baseline gain ``g_p conj(g_q)`` from per-antenna gains.
+
+    ``ant_axis`` names the antenna axis, so an array with a leading sample axis
+    can have its product formed before the samples are reduced.
+    """
+
+    lead = (slice(None),) * ant_axis
+
+    return gains[lead + (a1,)] * gains[lead + (a2,)].conj()
+
+
+def mean_baseline_gains(gains, a1, a2, sample_axis: int = 0, ant_axis: int = 1):
+    """Sample-mean of the per-baseline gain, formed per sample.
+
+    ``E[g_p conj(g_q)]`` is not ``E[g_p] conj(E[g_q])`` unless the two antennas
+    are uncorrelated across samples.
+    """
+
+    return baseline_gains(gains, a1, a2, ant_axis=ant_axis).mean(axis=sample_axis)
+
+
+def _to_ms_column(arr, dims, chunks, n_freq, n_corr):
+    """``(bl, freq, time)`` array to an MS ``(row, chan, corr)`` DataArray."""
+
+    return xr.DataArray(
+        da.transpose(arr, (2, 0, 1)).reshape(-1, n_freq, n_corr), dims=dims
+    ).chunk(chunks)
+
+
+def data_frame_residuals(vis_obs, gained_ast, gained_rfi):
+    """``TAB_*_RES`` residuals, in the frame of the observed data.
+
+    Takes models already multiplied by the baseline gain, since that has to
+    happen per sample and only the caller still holds the sample axis.
+
+    Data frame rather than calibrated: dividing by the gain inflates the noise on
+    low-gain baselines and distorts noise-referenced metrics. Moving every column
+    to one calibrated frame is #123.
+    """
+
+    return {
+        "ast": vis_obs - gained_ast,
+        "rfi": vis_obs - gained_rfi,
+        "total": vis_obs - (gained_ast + gained_rfi),
+    }
+
+
+def gained_model_mean(gains_bl, model, sample_axis: int = 0):
+    """Sample-mean of ``gains_bl * model``, formed per sample.
+
+    Separate from the residual so the reduction order is pinnable.
+    """
+
+    return (gains_bl * model).mean(axis=sample_axis)
+
+
 @measure_runtime
 def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
 
@@ -24,56 +102,46 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     dims = ["row", "chan", "corr"]
     chunks = {k: v for k, v in xds_ms.chunks.items() if k in dims}
 
-    if xds_tab.ast_vis.data.ndim == 3:
-        vis_ast = xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
-        vis_ast = xr.DataArray(da.expand_dims(vis_ast, axis=(1, 2)), dims=dims).chunk(
-            chunks
-        )
-
-        vis_rfi = xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
-        vis_rfi = xr.DataArray(da.expand_dims(vis_rfi, axis=(1, 2)), dims=dims).chunk(
-            chunks
-        )
-
-    elif xds_tab.ast_vis.data.ndim == 4:
-        n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
-        n_corr = 1
-
-        vis_ast = da.transpose(
-            xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0), (2, 0, 1)
-        ).reshape(-1, n_freq, n_corr)
-        vis_ast = xr.DataArray(vis_ast, dims=dims).chunk(chunks)
-
-        vis_rfi = da.transpose(
-            xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0), (2, 0, 1)
-        ).reshape(-1, n_freq, n_corr)
-        vis_rfi = xr.DataArray(vis_rfi, dims=dims).chunk(chunks)
-
-        a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
-        a2 = xds_ms.ANTENNA1.data[:n_bl].compute()
-
-        gains = xds_tab.gains.data.astype(np.complex64).mean(axis=0)
-        gains_bl = da.transpose(gains[a1] * da.conj(gains[a2]), (2, 0, 1)).reshape(-1, n_freq, n_corr)
-        gains_bl = xr.DataArray(gains_bl, dims=dims).chunk(chunks)
-
-    else:
+    if xds_tab.ast_vis.data.ndim != 4:
         raise ValueError(
-            f"Unknown data dimensions. Expected 3 or 4 but got {xds_tab.ast_vis.data.ndim}"
+            f"ast_vis has {xds_tab.ast_vis.data.ndim} dimensions; expected 4, "
+            "(sample, bl, freq, time)."
         )
-    
+
+    n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
+    n_corr = 1
+
+    ast_vis = xds_tab.ast_vis.data.astype(np.complex64)
+    rfi_vis = xds_tab.rfi_vis.data.astype(np.complex64)
+
+    vis_ast = _to_ms_column(ast_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
+    vis_rfi = _to_ms_column(rfi_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
+
+    a1, a2 = read_antenna_pairs(xds_ms, n_bl)
+    gains_bl_s = baseline_gains(
+        xds_tab.gains.data.astype(np.complex64), a1, a2, ant_axis=1
+    )
+
+    gained_ast = _to_ms_column(
+        gained_model_mean(gains_bl_s, ast_vis), dims, chunks, n_freq, n_corr
+    )
+    gained_rfi = _to_ms_column(
+        gained_model_mean(gains_bl_s, rfi_vis), dims, chunks, n_freq, n_corr
+    )
+    gains_bl = _to_ms_column(
+        gains_bl_s.mean(axis=0), dims, chunks, n_freq, n_corr
+    )
+
     
 
     vis_obs = xds_ms[data_col]
-    vis_cal = vis_obs
 
-    vis_ast_res = vis_obs - vis_ast
-    vis_rfi_res = vis_obs - vis_rfi
-    vis_res = vis_obs - (vis_ast + vis_rfi)
-    # vis_cal = vis_obs / gains_bl
+    vis_cal = vis_obs / gains_bl
 
-    # vis_ast_res = vis_obs - vis_ast * gains_bl
-    # vis_rfi_res = vis_obs - vis_rfi * gains_bl
-    # vis_res = vis_obs - (vis_ast + vis_rfi) * gains_bl
+    residuals = data_frame_residuals(vis_obs, gained_ast, gained_rfi)
+    vis_ast_res = residuals["ast"]
+    vis_rfi_res = residuals["rfi"]
+    vis_res = residuals["total"]
 
     xds_ms = xds_ms.assign(CORRECTED_DATA=vis_cal)
     xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)
