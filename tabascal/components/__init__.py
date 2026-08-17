@@ -1,7 +1,11 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Callable
 
+import jax.numpy as jnp
 from jax import Array
+
+from tabascal.config_schema import Param
+
 
 class Component(ABC):
     """Base class for all tabascal components"""
@@ -13,6 +17,15 @@ class Component(ABC):
     outputs: Dict[str, Array] = {}
     init_params: Dict[str, Array] = {}
     init_params_base: Dict[str, Array] = {}
+
+    #: Config parameters this component reads, keyed by their dotted path in the
+    #: config file. Declared here, next to the code that reads them, so a
+    #: component and its requirements can never drift apart. Only the components
+    #: named in ``model.components`` contribute to a run's schema -- see
+    #: :func:`tabascal.config_schema.collect_params`. Subclasses extend (and may
+    #: override) what their base declared; the parameters read outside any
+    #: component live on :class:`tabascal.config.TabConfig`.
+    config_params: Dict[str, Param] = {}
 
     # Set True on components that only work in double precision (read by the
     # run-time preflight in scripts._run_tabascal_impl and by require_double).
@@ -77,6 +90,18 @@ class Component(ABC):
 
     def _set_outputs(self):
         pass
+
+
+def axis_extent(x, dx) -> float:
+    """The span of a sampled axis, falling back to its sample spacing.
+
+    The default correlation length of a Gaussian-process prior is the extent of
+    the axis it is defined on. A single-sample axis has zero extent, which is not
+    a usable length scale, so the sample spacing (one channel / one integration)
+    stands in for it.
+    """
+    span = float(jnp.max(x) - jnp.min(x))
+    return span if span != 0.0 else float(dx)
 
 
 def assert_attr_shape(obj, attr, shape):

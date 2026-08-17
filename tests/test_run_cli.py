@@ -51,6 +51,18 @@ class TestRunSubcommand:
             _parse("-c", "config.yaml")
 
 
+class TestCheckConfigSubcommand:
+
+    def test_config_flag(self):
+        args = _parse("check-config", "-c", "tab_target.yaml")
+        assert args.command == "check-config"
+        assert args.config == "tab_target.yaml"
+
+    def test_config_is_required(self):
+        with pytest.raises(SystemExit):
+            _parse("check-config")
+
+
 class TestDocumentedCommands:
     """Every ``tabascal ...`` invocation in the docs must parse."""
 

@@ -7,12 +7,12 @@ model:
     - rfi_vis:RiemannVis
   # Astronomical signal model
     - ast_vis:GPVisAst
-  # Antenna Gain model 
+  # Antenna Gain model
     - gains:UnitaryGains
 
 data:
   data_col: DATA
-  noise: 
+  noise:
 
 plots:
   init: False
@@ -21,9 +21,7 @@ plots:
   prior_samples: 100
 
 inference:
-  mcmc: False
   opt: True
-  fisher: False
 
 opt:
   epsilon: 1e-3
@@ -48,20 +46,13 @@ rfi:
   init: truth
   mean: 0
   corr_time: 24   # seconds
-  n_int_time:
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   freq_int_samples: 1
   time_int_factor: 5
-  pow_spec:
-    p0: 1e3
-    k0s: [1e0, 1e-2]
-    gammas: [5, 5]
-    cutoff: 1e-6
 
 satellites:
   norad_ids: [20452, 38833, 45854]
-  ric_std: 1e2
 
 
 # True gains
@@ -70,4 +61,3 @@ gains:
   phase_mean: 0.0
   amp_std: 1.0      # %
   phase_std: 1.0    # degrees
-  corr_time: 180    # minutes

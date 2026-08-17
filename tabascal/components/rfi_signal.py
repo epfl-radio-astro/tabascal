@@ -3,8 +3,9 @@ from abc import abstractmethod
 from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
 
-from tabascal.components import Component, assert_attr_shape
+from tabascal.components import Component, assert_attr_shape, axis_extent
 from tabascal.config import TabConfig
+from tabascal.config_schema import FROM_DATA, Param
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
@@ -276,80 +277,6 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
         return jnp.zeros((xds.tle_sat_src.data[0], xds.n_ant, xds.n_freq, xds.n_time), dtype=complex)
 
 
-def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
-    """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
-
-    Parameters
-    ----------
-    rfi_config : Dict
-        RFI configuration dictionary
-
-    Returns
-    -------
-    Dict
-        Validated configuration dictionary with defaults set.
-
-    Raises
-    ------
-    ValueError
-        Raised when an invalid input is provided for one fo the configuration parameters.
-    """
-
-    def extent(x, dx):
-        ext = float(jnp.max(x) - jnp.min(x))
-        if ext == 0.0:
-            return float(dx)
-        else:
-            return ext
-
-    try:
-        r_seed = rfi_config["r_seed"]
-        gp_var = rfi_config["var"]
-        gp_freq_l = rfi_config["corr_freq"]
-        gp_time_l = rfi_config["corr_time"]
-    except Exception as e:
-        raise ValueError(f"RFI signal configuration validation failed.")
-
-    if not r_seed: # Set Default
-        rfi_config["r_seed"] = 1
-    elif isinstance(r_seed, int):
-        pass
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
-
-    if not gp_var: # Set Default
-        est_gp_var = float(jnp.max(jnp.abs(vis_obs)))
-        rfi_config["var"] = est_gp_var
-    elif isinstance(gp_var, (float, int)):
-        rfi_config["var"] = float(gp_var)
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tvar: {gp_var}) is not of type float or int.")
-    
-    if not gp_freq_l: # Set Default
-        est_gp_freq_l = extent(freqs, chan_width) / 2
-        rfi_config["corr_freq"] = est_gp_freq_l
-    elif isinstance(gp_freq_l, (float, int)):
-        rfi_config["corr_freq"] = float(gp_freq_l)
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tcorr_freq: {gp_freq_l}) is not of type float or int.")
-    
-    if not gp_time_l: # Set Default
-        est_gp_time_l = extent(times, int_time) / 2
-        rfi_config["corr_time"] = est_gp_time_l
-    elif isinstance(gp_time_l, (float, int)):
-        rfi_config["corr_time"] = float(gp_time_l)
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tcorr_time: {gp_time_l}) is not of type float or int.")    
-    
-    print()
-    print(f"Using RFI var : {rfi_config['var']:.1e} Jy")
-    print(f"Using RFI corr_freq : {rfi_config['corr_freq']/1e3:.1f} kHz")
-    print(f"Using RFI corr_time : {rfi_config['corr_time']:.1f} s")
-
-    return rfi_config
-
-
-
 class BaseGPRFI(Component):
 
     # The required state parameter needed in the forward model for this component to function
@@ -363,11 +290,81 @@ class BaseGPRFI(Component):
     # The base parameter shapes used to produce the output parameters
     parameter_shapes = {}
 
+    config_params = {
+        "rfi.init": Param(
+            choices=("prior", "est", "truth", "sample", "zeros", 0, "ones", 1),
+            default="sample", doc="how the RFI signal parameters are initialised",
+        ),
+        "rfi.mean": Param(
+            choices=("data", "est", "zeros", 0), default=0,
+            doc="mean of the prior over the RFI signal",
+        ),
+        "rfi.est": Param(
+            types=(str,), default=None,
+            doc="light-curve file used by init/mean 'est'; see docs/config.md",
+        ),
+        # The two correlation lengths carry a concrete default but accept an
+        # explicit null, which asks for the data-derived estimate instead: half
+        # the extent of the observation's own frequency/time axis. var has no
+        # sensible fixed value, so it is estimated from the data by default.
+        "rfi.var": Param(
+            types=(int, float), default=FROM_DATA, gt=0,
+            doc="variance of the RFI signal in Jy; null estimates it from the data",
+        ),
+        "rfi.corr_freq": Param(
+            types=(int, float), default=1e6, gt=0, null_ok=True,
+            doc="correlation bandwidth of the RFI signal in Hz; null derives it",
+        ),
+        "rfi.corr_time": Param(
+            types=(int, float), default=24, gt=0, null_ok=True,
+            doc="correlation time of the RFI signal in seconds; null derives it",
+        ),
+        "rfi.r_seed": Param(
+            types=(int,), default=123, doc="seed for RFI samples drawn from the prior",
+        ),
+    }
+
+    def resolve_data_params(self, tab_config: TabConfig) -> Dict:
+        """Resolve the ``rfi`` parameters that are derived from the data.
+
+        The schema has already checked everything it can; what is left is the
+        parameters declared ``FROM_DATA``, whose defaults come from the observed
+        visibility amplitude and the extent of the observation's own axes.
+
+        Returns the resolved values rather than writing them back into
+        ``tab_config.args``, so a second component reading the same section still
+        sees what was configured.
+        """
+        config = tab_config.args["rfi"]
+
+        def or_default(key, default):
+            # `is None` rather than a falsy test, so a configured 0 is honoured
+            # (and then rejected by the schema's `gt=0`, rather than silently
+            # replaced by an estimate).
+            value = config[key]
+            return default if value is None else float(value)
+
+        resolved = {
+            "r_seed": config["r_seed"],
+            "var": or_default("var", float(jnp.max(jnp.abs(tab_config.vis_obs)))),
+            "corr_freq": or_default(
+                "corr_freq", axis_extent(tab_config.freqs, tab_config.chan_width) / 2
+            ),
+            "corr_time": or_default(
+                "corr_time", axis_extent(tab_config.times, tab_config.int_time) / 2
+            ),
+        }
+
+        print()
+        print(f"Using RFI var : {resolved['var']:.1e} Jy")
+        print(f"Using RFI corr_freq : {resolved['corr_freq']/1e3:.1f} kHz")
+        print(f"Using RFI corr_time : {resolved['corr_time']:.1f} s")
+
+        return resolved
+
     def setup(self, tab_config: TabConfig):
 
-        # Validate config and set defaults
-        rfi_config = rfi_signal_config_validation(
-            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
+        rfi_config = self.resolve_data_params(tab_config)
 
         # Random seed used for random sampling such as initial parameters drawn from the prior
         self.r_seed = rfi_config["r_seed"]

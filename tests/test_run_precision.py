@@ -8,6 +8,7 @@
 import jax
 import pytest
 
+from tabascal.imports import import_components
 from tabascal.scripts._run_tabascal_impl import (
     assert_precision_supported,
     set_precision,
@@ -65,36 +66,45 @@ _DOUBLE_ONLY = ["trajectory:Orbit", "trajectory:PhaseCalculationRFI"]
 _SINGLE_OK = ["rfi_vis:RiemannVisFFI"]
 
 
+def preflight(config):
+    """Resolve the config's components and run the preflight over them.
+
+    The run resolves the classes once and hands them to both the preflight and
+    the config validation, so the helper mirrors that rather than letting the
+    preflight import them itself.
+    """
+    components = config.get("model", {}).get("components", []) or []
+    return assert_precision_supported(config, import_components(components))
+
+
 def test_preflight_single_rejects_double_only_component():
     """A single-precision config using a double-only component raises, naming it."""
     config = {"model": {"precision": "single", "components": _DOUBLE_ONLY[:1] + _SINGLE_OK}}
     with pytest.raises(ValueError, match="Orbit"):
-        assert_precision_supported(config)
+        preflight(config)
 
 
 def test_preflight_reports_every_offender():
     """The error lists all offending components, not just the first."""
     config = {"model": {"precision": "single", "components": _DOUBLE_ONLY}}
     with pytest.raises(ValueError) as exc:
-        assert_precision_supported(config)
+        preflight(config)
     msg = str(exc.value)
     assert "Orbit" in msg and "PhaseCalculationRFI" in msg
 
 
 def test_preflight_single_allows_single_capable_components():
     """Single precision with only single-capable components passes."""
-    assert_precision_supported({"model": {"precision": "single", "components": _SINGLE_OK}})
+    preflight({"model": {"precision": "single", "components": _SINGLE_OK}})
 
 
 def test_preflight_double_allows_double_only_component():
     """Double precision allows the double-only components."""
-    assert_precision_supported(
-        {"model": {"precision": "double", "components": _DOUBLE_ONLY}}
-    )
+    preflight({"model": {"precision": "double", "components": _DOUBLE_ONLY}})
 
 
 def test_preflight_defaults_and_empty_components_are_noops():
     """Missing precision defaults to single; empty/absent components never raise."""
-    assert_precision_supported({"model": {"components": _SINGLE_OK}})
-    assert_precision_supported({"model": {}})
-    assert_precision_supported({})
+    preflight({"model": {"components": _SINGLE_OK}})
+    preflight({"model": {}})
+    preflight({})

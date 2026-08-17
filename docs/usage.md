@@ -159,6 +159,34 @@ If you have a Measurement Set from another source you can run TABASCAL on that d
 tabascal run -c path/to/config.yaml -ms path/to/ms/file.ms
 ```
 
+## Checking a configuration file
+
+The configuration file is validated at the start of every run, before the
+Measurement Set is read or any orbital records are fetched, and every problem in
+it is reported at once. You can run just that check, without running anything
+else, with
+
+```bash
+tabascal check-config -c tab_target.yaml
+```
+
+It prints the model it resolved and the configuration TABASCAL would actually
+use, with every default filled in — which is the quickest way to see what a
+parameter you did not set is going to be. If the file is not usable it prints the
+same report the run would have, and exits non-zero:
+
+```text
+Error: invalid configuration in tab_target.yaml: 2 problems found
+
+  gains.corr_time: unknown key (did you mean 'gains.amp_corr_time'?)
+  opt.max_iter: expected an integer >= 0, got 'many'
+```
+
+Which parameters exist is determined by the components in `model.components`:
+each one declares what it reads, so a key that belongs to a component you have
+not selected is reported as such rather than silently ignored. See
+[the configuration file](config.md).
+
 The `tabascal` script also has a help context which can be accessed with
 
 ```bash

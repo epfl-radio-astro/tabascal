@@ -1,4 +1,5 @@
-from tabascal.components import Component, assert_attr_shape
+from tabascal.components import Component, assert_attr_shape, axis_extent
+from tabascal.config_schema import FROM_DATA, Param
 from tabascal.interferometry import apply_gains
 from tabascal.dist import standard_normal
 from tabascal.config import TabConfig
@@ -10,130 +11,116 @@ from jax import vmap, Array
 
 from typing import Dict
 
-def gains_config_validation(gains_config: Dict, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
-
-    def extent(x, dx):
-        ext = float(jnp.max(x) - jnp.min(x))
-        if ext == 0.0:
-            return float(dx)
-        else:
-            return ext
-
-    try:
-        r_seed = gains_config["r_seed"]
-        gp_amp_mean = gains_config["amp_mean"]
-        gp_amp_std = gains_config["amp_std"]
-        gp_amp_freq_l = gains_config["amp_corr_freq"]
-        gp_amp_time_l = gains_config["amp_corr_time"]
-        gp_phase_mean = gains_config["phase_mean"]
-        gp_phase_std = gains_config["phase_std"]
-        gp_phase_freq_l = gains_config["phase_corr_freq"]
-        gp_phase_time_l = gains_config["phase_corr_time"]
-    except Exception as e:
-        raise ValueError(f"Gains configuration validation failed.")
-
-    if not r_seed: # Set Default
-        gains_config["r_seed"] = 2
-    elif isinstance(r_seed, int):
-        pass
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tr_seed: {r_seed}) is not of type int.")
-
-    if not gp_amp_mean: # Set Default
-        est_gp_amp_mean = 1.0
-        gains_config["amp_mean"] = est_gp_amp_mean
-    elif isinstance(gp_amp_mean, (float, int)):
-        gains_config["amp_mean"] = float(gp_amp_mean)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_mean: {gp_amp_mean}) is not of type float or int.")
-
-    if not gp_amp_std: # Set Default
-        est_gp_amp_std = 1 / 100 * gains_config["amp_mean"] # 1 %
-        gains_config["amp_std"] = est_gp_amp_std
-    elif isinstance(gp_amp_std, (float, int)):
-        gains_config["amp_std"] = float(gp_amp_std) / 100 * gains_config["amp_mean"]
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_std: {gp_amp_std}) is not of type float or int.")
-    
-    if not gp_amp_freq_l: # Set Default
-        est_gp_amp_freq_l = extent(freqs, chan_width)
-        gains_config["amp_corr_freq"] = est_gp_amp_freq_l
-    elif isinstance(gp_amp_freq_l, (float, int)):
-        gains_config["amp_corr_freq"] = float(gp_amp_freq_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_corr_freq: {gp_amp_freq_l}) is not of type float or int.")
-    
-    if not gp_amp_time_l: # Set Default
-        est_gp_amp_time_l = extent(times, int_time)
-        gains_config["amp_corr_time"] = est_gp_amp_time_l
-    elif isinstance(gp_amp_time_l, (float, int)):
-        gains_config["amp_corr_time"] = float(gp_amp_time_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_corr_time: {gp_amp_time_l}) is not of type float or int.")    
-    
-    if not gp_phase_mean: # Set Default
-        est_gp_phase_mean = 0.0
-        gains_config["phase_mean"] = est_gp_phase_mean
-    elif isinstance(gp_phase_mean, (float, int)):
-        gains_config["phase_mean"] = float(gp_phase_mean)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_mean: {gp_phase_mean}) is not of type float or int.")
-
-    if not gp_phase_std: # Set Default
-        est_gp_phase_std = float(jnp.deg2rad(1)) # degrees
-        gains_config["phase_std"] = est_gp_phase_std
-    elif isinstance(gp_phase_std, (float, int)):
-        gains_config["phase_std"] = float(jnp.deg2rad(gp_phase_std))
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_std: {gp_phase_std}) is not of type float or int.")
-    
-    if not gp_phase_freq_l: # Set Default
-        est_gp_phase_freq_l = extent(freqs, chan_width)
-        gains_config["phase_corr_freq"] = est_gp_phase_freq_l
-    elif isinstance(gp_phase_freq_l, (float, int)):
-        gains_config["phase_corr_freq"] = float(gp_phase_freq_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_corr_freq: {gp_phase_freq_l}) is not of type float or int.")
-    
-    if not gp_phase_time_l: # Set Default
-        est_gp_phase_time_l = extent(times, int_time)
-        gains_config["phase_corr_time"] = est_gp_phase_time_l
-    elif isinstance(gp_phase_time_l, (float, int)):
-        gains_config["phase_corr_time"] = float(gp_phase_time_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_corr_time: {gp_phase_time_l}) is not of type float or int.")   
-    
-    print()
-    print(f"Using Gains amplitude mean : {gains_config['amp_mean']:.1f}")
-    print(f"Using Gains amplitude std : {gains_config['amp_std']*100/gains_config['amp_mean']:.1f} %")
-    print(f"Using Gains amplitude corr_freq : {gains_config['amp_corr_freq']/1e3:.1f} kHz")
-    print(f"Using Gains amplitude corr_time : {gains_config['amp_corr_time']:.1f} s")
-    print()
-    print(f"Using Gains phase mean : {jnp.rad2deg(gains_config['phase_mean']):.1f} degrees")
-    print(f"Using Gains phase std : {jnp.rad2deg(gains_config['phase_std']):.1f} degrees")
-    print(f"Using Gains phase corr_freq : {gains_config['phase_corr_freq']/1e3:.1f} kHz")
-    print(f"Using Gains phase corr_time : {gains_config['phase_corr_time']:.1f} s")
-
-    return gains_config
-
 
 class BaseGPGains(Component):
 
     required_inputs = {
-        "vis_rfi": ("n_bl", "n_freq", "n_time"), 
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
         "vis_ast": ("n_bl", "n_freq", "n_time")
     }
     output_shapes = {
-        "gains": ("n_ant", "n_freq", "n_time"), 
+        "gains": ("n_ant", "n_freq", "n_time"),
         "vis_obs": ("n_bl", "n_freq", "n_time")
     }
     parameter_shapes = {}
 
+    config_params = {
+        "gains.r_seed": Param(
+            types=(int,), default=123, doc="seed for gain samples drawn from the prior",
+        ),
+        "gains.amp_mean": Param(
+            types=(int, float), default=1.0, doc="mean of the prior over the gain amplitudes",
+        ),
+        "gains.phase_mean": Param(
+            types=(int, float), default=0.0,
+            doc="mean of the prior over the gain phases, in radians",
+        ),
+        # The four correlation lengths default to the extent of the observation's
+        # own frequency/time axes, and the two standard deviations to 1 %/1 deg,
+        # so all six are FROM_DATA rather than fixed numbers.
+        "gains.amp_std": Param(
+            types=(int, float), default=FROM_DATA, ge=0,
+            doc="prior std of the gain amplitudes, as a percentage of amp_mean",
+        ),
+        "gains.phase_std": Param(
+            types=(int, float), default=FROM_DATA, ge=0,
+            doc="prior std of the gain phases, in degrees",
+        ),
+        "gains.amp_corr_freq": Param(
+            types=(int, float), default=FROM_DATA, gt=0,
+            doc="correlation bandwidth of the gain amplitudes in Hz",
+        ),
+        "gains.amp_corr_time": Param(
+            types=(int, float), default=FROM_DATA, gt=0,
+            doc="correlation time of the gain amplitudes in seconds",
+        ),
+        "gains.phase_corr_freq": Param(
+            types=(int, float), default=FROM_DATA, gt=0,
+            doc="correlation bandwidth of the gain phases in Hz",
+        ),
+        "gains.phase_corr_time": Param(
+            types=(int, float), default=FROM_DATA, gt=0,
+            doc="correlation time of the gain phases in seconds",
+        ),
+    }
+
+    def resolve_data_params(self, tab_config: TabConfig) -> Dict:
+        """Resolve the ``gains`` parameters that are derived from the data.
+
+        Everything the schema could check has been checked already; what is left
+        is the handful of parameters declared ``FROM_DATA``, whose defaults are
+        the extent of the observation's own frequency and time axes. Also applies
+        the two unit conventions the config uses: ``amp_std`` is a percentage of
+        ``amp_mean`` and ``phase_std`` is in degrees.
+
+        Returns the resolved values rather than writing them back into
+        ``tab_config.args``: the conversions are not idempotent, so a second
+        component reading the same section must see the configured values, not
+        these.
+        """
+        config = tab_config.args["gains"]
+        freq_extent = axis_extent(tab_config.freqs, tab_config.chan_width)
+        time_extent = axis_extent(tab_config.times, tab_config.int_time)
+
+        amp_mean = float(config["amp_mean"])
+        # `is None` rather than a falsy test: 0 is a legitimate value for the
+        # means and standard deviations (no variation about the mean), and must
+        # not be read as "unset".
+        amp_std = 1.0 if config["amp_std"] is None else float(config["amp_std"])
+        phase_std = 1.0 if config["phase_std"] is None else float(config["phase_std"])
+
+        def or_default(key, default):
+            value = config[key]
+            return default if value is None else float(value)
+
+        resolved = {
+            "r_seed": config["r_seed"],
+            "amp_mean": amp_mean,
+            "amp_std": amp_std / 100 * amp_mean,           # config is a percentage
+            "phase_mean": float(config["phase_mean"]),
+            "phase_std": float(jnp.deg2rad(phase_std)),    # config is in degrees
+            "amp_corr_freq": or_default("amp_corr_freq", freq_extent),
+            "amp_corr_time": or_default("amp_corr_time", time_extent),
+            "phase_corr_freq": or_default("phase_corr_freq", freq_extent),
+            "phase_corr_time": or_default("phase_corr_time", time_extent),
+        }
+
+        print()
+        print(f"Using Gains amplitude mean : {resolved['amp_mean']:.1f}")
+        print(f"Using Gains amplitude std : {resolved['amp_std']*100/resolved['amp_mean']:.1f} %")
+        print(f"Using Gains amplitude corr_freq : {resolved['amp_corr_freq']/1e3:.1f} kHz")
+        print(f"Using Gains amplitude corr_time : {resolved['amp_corr_time']:.1f} s")
+        print()
+        print(f"Using Gains phase mean : {jnp.rad2deg(resolved['phase_mean']):.1f} degrees")
+        print(f"Using Gains phase std : {jnp.rad2deg(resolved['phase_std']):.1f} degrees")
+        print(f"Using Gains phase corr_freq : {resolved['phase_corr_freq']/1e3:.1f} kHz")
+        print(f"Using Gains phase corr_time : {resolved['phase_corr_time']:.1f} s")
+
+        return resolved
+
     def setup(self, tab_config: TabConfig):
 
-        # Validate config and set defaults
-        gains_config = gains_config_validation(
-            tab_config.args["gains"], tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
+        gains_config = self.resolve_data_params(tab_config)
 
         # Random seed used for random sampling such as initial parameters drawn from the prior
         self.r_seed = gains_config["r_seed"]
