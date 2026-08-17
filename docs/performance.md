@@ -39,9 +39,7 @@ GH200 access to bisect the cause:
 sim-vis -c ci/reframe/data/sim_target_96A.yaml -a 8
 
 # Run tabascal with timing output against the generated dataset
-tabascal run -c ci/reframe/data/tab_target.yaml \
-         -s ci/reframe/data/data/pnt_src_obs_08A_090T-0000-0890_001I_001F-1.500e+08-1.500e+08_050PAST_000GAST_000EAST_32SAT_0GRD_1.0e+00RFI \
-         -t
+tabascal run -c ci/reframe/data/tab_target.yaml -s ci/reframe/data/data/pnt_src_obs_08A_090T-0000-0890_001I_001F-1.500e+08-1.500e+08_050PAST_000GAST_000EAST_32SAT_0GRD_1.0e+00RFI -t
 ```
 
 The `-t` flag prints a per-function timing table identical to the CI output.
