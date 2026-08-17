@@ -279,6 +279,7 @@ def component_param_owners() -> Dict[str, str]:
     """
     import importlib
     import pkgutil
+    import types
 
     import tabascal.components as package
     from tabascal.components import Component
@@ -287,6 +288,11 @@ def component_param_owners() -> Dict[str, str]:
     for info in pkgutil.iter_modules(package.__path__):
         module = importlib.import_module(f"{package.__name__}.{info.name}")
         for name, obj in vars(module).items():
+            # Generic aliases such as numpy's ``NDArray`` are imported into the
+            # component modules, and on Python < 3.11 they pass ``isinstance(obj,
+            # type)`` while still blowing up ``issubclass``, so skip them first.
+            if isinstance(obj, types.GenericAlias):
+                continue
             if (
                 isinstance(obj, type)
                 and issubclass(obj, Component)
