@@ -1,5 +1,5 @@
-Welcome to tabscal documentation
-================================
+Welcome to tabascal documentation
+=================================
 
 .. toctree::
    :maxdepth: 2
@@ -10,6 +10,7 @@ Welcome to tabscal documentation
    output
    sim-vis_output
    config
+   kernels
    components
    concepts
    orbits
@@ -20,6 +21,7 @@ Welcome to tabscal documentation
 
    installation
    pipeline_tests
+   performance
    api
    readthedocs
 

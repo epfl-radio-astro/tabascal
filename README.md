@@ -20,194 +20,81 @@ archived and no longer maintained. Documentation is published at
 
 A result on real **EDA2** data: a 151 MHz observation (XX) crossed by several Starlink satellites. The satellite trails dominating the field (a) are gone after subtraction (b), leaving the inferred sky (c). Reversing the split shows what was removed — subtracting the sky instead (e) isolates the trails, which the model reconstructs as the satellite signal (f). The final residual (d) is noise-like apart from the marked features. Note the two rows use different flux scales: the satellite signal is a few hundred Jy/beam against a sky spanning roughly -400 to 1000 Jy/beam.
 
+## Installation
+
+TABASCAL is pure Python — no compiler or CUDA toolkit is needed to install it.
+It requires **Python 3.10–3.13**.
+
+TABASCAL reads and writes Measurement Sets and therefore needs
+**`python-casacore`**, which is *not* a pip dependency. Install it with conda
+first, then pip-install TABASCAL into the same environment:
+
+```bash
+conda create -n tab-env -c conda-forge "python>=3.10,<3.14" python-casacore
+conda activate tab-env
+```
+
+TABASCAL is not on PyPI yet, so install it from the repository:
+
+```bash
+pip install git+https://github.com/epfl-radio-astro/tabascal.git
+```
+
+For NVIDIA GPU support (Linux only), use the `cuda12` extra (or `cuda13`):
+
+```bash
+pip install "tabascal[cuda12] @ git+https://github.com/epfl-radio-astro/tabascal.git"
+```
+
+`python-casacore` is pip-installable on **linux-x86_64**, so the conda step can
+be skipped there. On **macOS and linux-aarch64** the conda route is strongly
+recommended, as `python-casacore` is difficult to build from source on those
+platforms.
+
+See the [installation guide](https://tabascal.readthedocs.io/en/latest/usage.html#installation)
+for the full details.
+
+## Basic usage
+
+TABASCAL runs are defined by a YAML configuration file. To run it on a
+Measurement Set:
+
+```bash
+tabascal run -c path/to/config.yaml -ms path/to/file.ms
+```
+
+The results are written to a `.zarr` file and then transferred into the
+Measurement Set as the `TAB_AST_DATA`, `TAB_RFI_DATA`, `TAB_AST_RES`,
+`TAB_RFI_RES` and `TAB_RES_DATA` columns.
+
+Every option is listed by the help context:
+
+```bash
+tabascal -h        # top-level: lists the subcommands
+tabascal run -h    # every option of the run subcommand
+```
+
+The satellite orbital elements TABASCAL needs are fetched automatically from the
+[IAU CPS SatChecker](https://satchecker.cps.iau.org/) service — no account or
+credentials are required.
+
+For a complete worked example, from simulating a dataset with `sim-vis` through
+to subtracting the satellite RFI, see the
+[usage guide](https://tabascal.readthedocs.io/en/latest/usage.html).
+
+## Documentation
+
+Full documentation is at
+[tabascal.readthedocs.io](https://tabascal.readthedocs.io/), including:
+
+- [Usage guide](https://tabascal.readthedocs.io/en/latest/usage.html) — installation and a worked example
+- [Configuration file](https://tabascal.readthedocs.io/en/latest/config.html) — every config option, including model precision
+- [RFI-visibility kernels](https://tabascal.readthedocs.io/en/latest/kernels.html) — the optional compiled CPU/GPU kernels
+- [Components](https://tabascal.readthedocs.io/en/latest/components.html) — the modular forward model
+- [Satellite orbit records](https://tabascal.readthedocs.io/en/latest/orbits.html) — where orbital elements come from
+- [Developer install](https://tabascal.readthedocs.io/en/latest/installation.html) — pixi environments, tests and docs builds
+
 ## Citing tabascal
 
 - Finlay, Bassett & Kunz (2023), *Trajectory-based RFI subtraction and calibration for radio interferometry*, MNRAS — [10.1093/mnras/stad1979](https://doi.org/10.1093/mnras/stad1979)
 - Finlay, Bassett & Kunz (2025), *TABASCAL: Removing multi-satellite interference from radio interferometry observations*, A&A — [10.1051/0004-6361/202554596](https://doi.org/10.1051/0004-6361/202554596)
-
-# Getting started with pixi
-
-[pixi](https://pixi.sh) is the recommended way to install and develop tabascal. It manages both conda and PyPI dependencies and creates isolated environments automatically.
-
-## Install pixi
-
-```bash
-curl -fsSL https://pixi.sh/install.sh | sh
-```
-
-## Available environments
-
-| Environment  | Platform          | Description                           |
-|--------------|-------------------|---------------------------------------|
-| `default`    | linux-*, macos-*  | CPU-only runtime environment          |
-| `dev`        | linux-*, macos-*  | CPU + testing and documentation tools |
-| `cuda12`     | linux-*           | NVIDIA GPU (CUDA 12) runtime          |
-| `cuda12-dev` | linux-*           | NVIDIA GPU + testing and docs         |
-
-## Install an environment
-
-```bash
-# CPU (default)
-pixi install
-
-# Development (includes pytest, sphinx, etc.)
-pixi install -e dev
-
-# NVIDIA GPU
-pixi install -e cuda12
-```
-
-## Open a shell in the environment
-
-```bash
-pixi shell          # default environment
-pixi shell -e dev   # dev environment
-```
-
-# Installing without pixi
-
-pixi is recommended, but tabascal can also be installed with plain `pip` or into
-a conda/mamba environment.
-
-tabascal is pure Python — no compiler or CUDA toolkit is needed to install it.
-
-Prerequisites:
-- **Python 3.10–3.13.** 3.14 has not been validated against the pinned
-  jax/jaxlib versions.
-- **`python-casacore`** is required at runtime but is *not* a pip dependency.
-  It is pip-installable on **linux-x86_64**; on **macOS and linux-aarch64**,
-  installing via conda is strongly recommended because `python-casacore` is
-  difficult to build from source on those platforms (see the conda/mamba
-  section).
-
-## pip
-
-Run these from a clone of the repository (`pip install .`), or replace `.` with
-`git+https://github.com/epfl-radio-astro/tabascal.git`.
-
-```bash
-# CPU
-pip install .
-
-# NVIDIA GPU (Linux only)
-pip install ".[cuda12]"     # or ".[cuda13]" for CUDA 13
-```
-
-## conda / mamba
-
-Use conda to provide `python-casacore`, then pip-install tabascal into the
-activated environment:
-
-```bash
-mamba create -n tabascal -c conda-forge "python>=3.10,<3.14" python-casacore
-mamba activate tabascal
-
-# CPU
-pip install .
-
-# NVIDIA GPU (Linux only)
-pip install ".[cuda12]"
-```
-
-On macOS and linux-aarch64 this conda route is the recommended way to install tabascal.
-
-# RFI-visibility kernels
-
-The `RiemannVisFFI` and `RiemannVisVariableFFI` components call compiled
-kernels that ship in the separate
-[`ri-kernels`](https://github.com/epfl-radio-astro/ri-kernels) package, a plain
-runtime dependency of tabascal — nothing is built from this repository. The CPU
-kernel comes with `ri_kernels` itself; the GPU kernel ships as an add-on wheel
-(`ri_kernels_cuda12` / `ri_kernels_cuda13`, Linux only) pulled in by tabascal's
-`cuda12` / `cuda13` extras, or installable on its own:
-
-```bash
-pip install "ri_kernels[cuda12]"
-```
-
-The kernels are compiled for both single and double precision and run in
-whichever the config selects. Enable them in the config with:
-
-```yaml
-components:
-  - rfi_vis: RiemannVisFFI
-```
-
-Note: AMD GPUs using ROCm are supported, but may require the "ri-kernels" package
-to be compiled from source.
-
-# Precision
-
-tabascal runs in **single precision (fp32) by default**. Set it in the config:
-
-```yaml
-model:
-  precision: single   # default; or "double" for fp64
-```
-
-- **`single` (default).** Halves device-memory use (~2×), which raises the
-  largest problem size that fits on a GPU. On GPUs with first-class fp64 (e.g.
-  Hopper/GH200) it is **not** faster in wall-clock — the win is memory capacity,
-  not speed.
-- **`double`.** Required by some components, and recommended when fitting
-  satellite trajectories (the differentiable orbit models need fp64 accuracy).
-
-The following components run in **double precision only** and raise a clear error
-under `single` (set `model.precision: double` to use them):
-
-- `trajectory:PhaseCalculationRFI`
-- `trajectory:NoDragOrbit`
-- `trajectory:Orbit`
-
-Both `rfi_vis` kernels (`RiemannVis` and the FFI `RiemannVisFFI`) and the GP
-astronomical/gains components run in either precision.
-
-# Developer
-
-## Running tests
-
-```bash
-pixi run -e dev test               # all tests
-pixi run -e dev test-components    # component tests only
-```
-
-To run a single file or test, open a dev shell first:
-
-```bash
-pixi shell -e dev
-pytest tests/components/test_gains.py
-pytest tests/components/test_gains.py::TestGPGains::test_forward_output_shapes
-```
-
-SGP4 component tests use a bundled TLE cache (`tabascal/data/tles/`) and run without Space-Track credentials. 
-
-## Build the documentation
-
-```bash
-pixi run -e dev docs-build
-```
-
-After building, open `docs/_build/html/index.html` in a browser.
-
-The documentation is also published on Read the Docs, one version per release tag
-plus `latest` from `main`, selectable from the version flyout on every page.
-`docs/readthedocs.md` covers the version scheme, how to publish a
-release or an extra branch, and the warnings-as-errors build that CI and Read the
-Docs both run.
-
-## Debugging a performance regression locally
-
-When a performance regression is detected in CI, reproduce it on a smaller dataset with 8
-antennas (faster to simulate, runs on any dev machine):
-
-```bash
-# Generate an 8-antenna simulation from the standard 96A config
-sim-vis -c ci/reframe/data/sim_target_96A.yaml -a 8
-
-# Run tabascal with timing output against the generated dataset
-tabascal -c ci/reframe/data/tab_target.yaml \
-         -s ci/reframe/data/data/pnt_src_obs_08A_090T-0000-0890_001I_001F-1.500e+08-1.500e+08_050PAST_000GAST_000EAST_32SAT_0GRD_1.0e+00RFI \
-         -t
-```
-
-The `-t` flag prints a per-function timing table identical to the CI output.
