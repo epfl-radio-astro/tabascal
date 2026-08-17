@@ -20,6 +20,17 @@ def _run_cmd(args):
 
 
 # ---------------------------------------------------------------------------
+# 'check-config' subcommand
+# ---------------------------------------------------------------------------
+
+def _check_config_cmd(args):
+    # Same lazy import as the run path: resolving the component classes is what
+    # pulls in JAX, and --help must not pay for it.
+    from tabascal.scripts._run_tabascal_impl import check_config
+    check_config(args)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -72,6 +83,13 @@ def build_parser():
         ),
     )
 
+    # -- check-config --
+    check_parser = subparsers.add_parser(
+        "check-config",
+        help="Validate a config file and print it with defaults filled in.",
+    )
+    check_parser.add_argument("-c", "--config", required=True, help="Path to the config file.")
+
     return parser
 
 
@@ -80,6 +98,8 @@ def main():
 
     if args.command == "run":
         _run_cmd(args)
+    elif args.command == "check-config":
+        _check_config_cmd(args)
 
 
 if __name__ == "__main__":

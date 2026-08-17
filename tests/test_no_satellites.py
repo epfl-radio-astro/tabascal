@@ -1,8 +1,8 @@
 """A model that configures no satellites must build, not fail somewhere downstream.
 
-``norad_ids: []`` is the shipped default in ``tab_config_base.yaml``, and
-``TabConfig`` runs the RFI setup unconditionally, so every step it touches has to
-cope with an empty satellite set. Returning empty element arrays from the fetch
+An empty ``satellites.norad_ids`` is the declared default, and ``TabConfig`` runs
+the RFI setup unconditionally, so every step it touches has to cope with an empty
+satellite set. Returning empty element arrays from the fetch
 is only half of it: the RFI sampling estimate then has to survive them too.
 """
 

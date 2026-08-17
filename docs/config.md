@@ -2,6 +2,38 @@
 
 TABASCAL makes use of a configuration file to fully define the model used, what satellites to include and what inference to do. The configuration file is in YAML format using only the most basic constructs and types. The configuration file is broken up into multiple sections. Each section will be described below.
 
+## Validation
+
+Every parameter is declared in the code that reads it — the model components in
+their own `config_params`, and the parameters read outside any component (`model`,
+`data`, `plots`, `inference`, `opt`, `satellites`, and the RFI sampling grid) on
+{class}`~tabascal.config.TabConfig`. Those declarations are the schema: there is
+no separate list of key names to fall out of sync with them, and the defaults
+below come from them rather than from a packaged base config.
+
+The file is checked against the declarations at the start of every run, before
+the Measurement Set is read or any orbital records are fetched. Every problem is
+reported together, so a config with four mistakes takes one run to fix:
+
+```text
+Error: invalid configuration in tab_target.yaml: 3 problems found
+
+  ast.pow_spec.p0: required, but not set (mean power of the astronomical signal)
+  gains.corr_time: unknown key (did you mean 'gains.amp_corr_time'?)
+  opt.max_iter: expected an integer >= 0, got 'many'
+```
+
+Because only the components you selected contribute, **an unrecognised key is an
+error**, not something quietly ignored — including one that belongs to a
+component you have not put in `model.components`, which is reported as such.
+Anything you leave out takes the default given below, and writing a key with no
+value (`corr:` with nothing after it) is the same as leaving it out. The
+exceptions are the few parameters where `null` means "off" rather than "unset",
+noted where they appear.
+
+Run `tabascal check-config -c your_config.yaml` to check a file and print the
+resolved configuration, defaults included, without running anything.
+
 ## Model
 
 The forward model used by TABASCAL is modular and configurable directly in the `model` section of the configuration file. An example of this section is shown below.
@@ -34,17 +66,19 @@ data:
   sim_dir:
   ms_path: path/to/ms_file.ms
   data_col: DATA
-  freq: 0
+  freq:
   corr: xx
   noise:
+  flags: False
 ```
 
 * `sim_dir`: Simulation directory created when using `sim-vis` to simulate a dataset. This can also be given at runtime of `tabascal` with the `-s` flag.
 * `ms_path`: Path to the Measurement Set (MS) to run on. This can also be given at runtime of `tabascal` with the `-ms` flag.
 * `data_col`: The data column within the MS file to use as the observed data. Default is `DATA` but can be any column that exists in the MS file.
-* `freq`: This is the frequency channel to run on. Default is to run on all frequency channels.
+* `freq`: A frequency in Hz. The single nearest channel to it is modelled; leaving it unset (the default) models every frequency channel.
 * `corr`: This is the correlation product to run on, default `xx`. It is matched against the MS's `POLARIZATION::CORR_TYPE` **by identity, not by position**, so it names the correlation you want rather than an axis index: `yy` selects YY whether the MS holds all four correlations or only that one. Linear (`xx`, `xy`, `yx`, `yy`), circular (`rr`, `rl`, `lr`, `ll`) and Stokes (`i`, `q`, `u`, `v`) names are accepted. Requesting a correlation the MS does not hold is an error naming what it does hold.
-* `noise`: This is the per visibility data point noise in Jy. It is assumed that the data is independent and identitically distributed with Gaussian noise.
+* `noise`: This is the per visibility data point noise in Jy. It is assumed that the data is independent and identitically distributed with Gaussian noise. Unset (the default) reads it from the Measurement Set.
+* `flags`: Whether to include the Measurement Set's flags in the likelihood. Default `False`.
 
 ## Plots
 
@@ -67,13 +101,13 @@ The `inference` section defines the type of inference that will be done. An exam
 ```yaml
 inference:
   opt: True
-  mcmc: False
-  fisher: False
 ```
 
-* `opt`: Optimisation will be done to find the maximum a posteriori (MAP) point.
-* `mcmc`: Markov Chain Monte Carlo (MCMC) will be run to draw samples from the posterior after some number of warmup iterations. If `opt` is `True` then the MCMC chains will be initialised from the MAP point, otherwise initialisation will be done according to the definitions in the appropriate sections.
-* `fisher`: A Laplace approximation of the covariance will be performed about the MAP point.
+* `opt`: Optimisation will be done to find the maximum a posteriori (MAP) point. Default `True`. With `opt: False` (or `opt.max_iter: 0`) TABASCAL writes the prediction from the initial parameters instead of fitting.
+
+MCMC sampling and the Fisher/Laplace covariance approximation are not currently
+implemented, so `inference.mcmc`, `inference.fisher` and the `fisher` section are
+no longer accepted.
 
 ## Optimisation
 
@@ -86,21 +120,10 @@ opt:
   dual_run: True
 ```
 
-* `epsilon`: This is the optimiser step size
-* `max_iter`: This is the number of iterations to run the optimiser for in each optimisation run.
-* `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller.
-
-## Fisher
-
-This section gives the parameters for the Laplace approximation. An example is given below.
-
-```yaml
-fisher:
-  n_samples: 1
-  max_cg_iter: 10_000
-```
-
-The covariance approximation is not performed in the traditional way of evaluating the negastive inverse Hessian. Rather, the Gaussian approximation of the posterior is sampled around the MAP point. The inverse of the posterior covariance is implicitly defined and then applied to samples from $\mathcal{N}(\boldsymbol{0}, \boldsymbol{\Sigma}^{-1})$. Therefore, the number of samples is defined in `n_samples` and when applying the inverse covariance to the samples the conjugate gradient method is used when `max_cg_iter` defines the number of iteration used in the conjugate gradient method. Increasing both of these values leads to a greater computational load but also improves the accuracy of the resulting posterior samples.
+* `epsilon`: This is the optimiser step size. Default `1e-2`.
+* `max_iter`: This is the number of iterations to run the optimiser for in each optimisation run. Default `500`.
+* `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller. Default `True`.
+* `guide`: The type of optimisation to run. Only `map` is implemented, which is the default.
 
 ## Astronomical Signal
 
@@ -120,19 +143,19 @@ ast:
     cutoff: 1e-6
 ```
 
-* `init`: This gives the initialisation of the parameters. In the sample above `prior` is given so then the parameters will be initialised with the mean of the prior distribution. Other options include `est` to estimate the best initialisation, `sample` to draw a sample from the prior distribution, and `truth` to initialise at the true values. `truth` is only possible when running on a dataset simulated with `sim-vis`.
-* `mean`: This is the mean value of the prior distribution.
-* `freq_pad_factor`: This defines the size of the padding used when modelling the signal in the Fourier domain. The signal is modelled in the Fourier domain where periodicity is assumed on some interval. If `freq_pad_factor: 1.0` is given then the interval is the interval of the data itself and will lead to periodic solutions.
-* `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`.
+* `init`: This gives the initialisation of the parameters. In the sample above `prior` is given so then the parameters will be initialised with the mean of the prior distribution. Other options are `data` to estimate the initialisation from the observed visibilities, `sample` to draw a sample from the prior distribution (the default), and `truth` to initialise at the true values. `truth` is only possible when running on a dataset simulated with `sim-vis`.
+* `mean`: This is the mean value of the prior distribution: `0` (the default, equivalently `zeros`) or `data` to estimate it from the observed visibilities.
+* `freq_pad_factor`: This defines the size of the padding used when modelling the signal in the Fourier domain. The signal is modelled in the Fourier domain where periodicity is assumed on some interval. If `freq_pad_factor: 1.0` is given then the interval is the interval of the data itself and will lead to periodic solutions. Default `2`.
+* `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`. Default `2`.
 * `pow_spec`: This is the section that defines the prior covariance of the signal. The signal is modelled in the Fourier domain so the prior covariance is given by the power spectrum of the signal.
 
 The parameters for the power spectrum are defined as
 
-* `p0`: Mean power of the signal.
-* `k0_freq`: Inverse correlation scale along the frequency axis.
+* `p0`: Mean power of the signal. Required.
+* `k0_freq`: Inverse correlation scale along the frequency axis. Required.
 * `fov_deg`: The field of view in degrees used to set the maximum astronomical fringe rate (the knee `k0` of the time-axis power spectrum). It is the *full* field of view, i.e. the angular diameter out to the first null of the primary beam; the maximum source offset from the phase centre is `fov_deg / 2`. When omitted, it defaults to the primary-beam field of view of the telescope, `2 * 1.22 * lambda / D` (null-to-null), from the dish diameter `D` and frequency read from the MS file.
-* `gammas`: The rate of drop off in the power spectrum. As $\gamma \rightarrow \infty$, the power spectrum tends to a Gaussian with width given by `k0_freq` in the frequency axis and inferred from `fov_deg` in the time axis.
-* `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and then Fourier components, where the power spectrum value is less than `p0 * cutoff`, are removed and not modelled. This reduces the number of parameters to fit.
+* `gammas`: The rate of drop off in the power spectrum, one per axis as `[freq, time]`. As $\gamma \rightarrow \infty$, the power spectrum tends to a Gaussian with width given by `k0_freq` in the frequency axis and inferred from `fov_deg` in the time axis. Required.
+* `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and then Fourier components, where the power spectrum value is less than `p0 * cutoff`, are removed and not modelled. This reduces the number of parameters to fit. Default `1e-6`.
 
 
 ## RFI signal
@@ -143,19 +166,26 @@ The `rfi` section defines the prior distribution over the RFI signal. An example
 rfi:
   init: sample
   mean: 0
+  var:
+  corr_freq: 1e6
+  corr_time: 24
   min_elevation: 0
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   freq_int_samples: 1
   time_int_factor: 1
-  pow_spec:
-    p0: 1e3
-    k0s: [1e0, 1e-2]
-    gammas: [5, 5]
-    cutoff: 1e-6
 ```
 
-All parameters in this section that overlap with those of the `ast` section have the same definition. The only additional parameters are
+The `init`, `mean` and padding parameters have the same meaning as in the `ast`
+section, except that `init` also accepts `est` (seed from a measured light curve,
+see below), `zeros` and `ones`, and `mean` also accepts `est`. The RFI prior is a
+Gaussian process specified by a variance and two correlation lengths rather than
+by a power spectrum, so the additional parameters are
+
+* `var`: Variance of the RFI signal in Jy. Unset (the default) estimates it from the data, as the largest observed visibility amplitude.
+* `corr_freq`: Correlation bandwidth of the RFI signal in Hz, default `1e6`. Set it to `null` to derive it from the data instead, as half the bandwidth of the observation.
+* `corr_time`: Correlation time of the RFI signal in seconds, default `24`. `null` derives it from the data, as half the duration of the observation.
+* `r_seed`: Seed for the prior samples drawn by `init: sample`. Default `123`.
 
 * `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
@@ -170,7 +200,9 @@ All parameters in this section that overlap with those of the `ast` section have
 
 $$N^T_\text{int} \geq  \pi \nu_F \Delta t \sqrt{\frac{\lvert V^\text{RFI}_\text{inst} \rvert}{6 \sigma_n}}$$
 
-where $N^T_\text{int}$ is the number of integration samples used per time step, $\Delta t$ is the integration time for a single sample, $\nu_F$ is the fringe frequency of the source due to its movement, $\lvert V^\text{RFI}_\text{inst} \rvert$ is the instantaneous RFI visibility amplitude, and $\sigma_n$ is the visibility noise of a single data point. This parameter (`time_int_factor`) determines the factor by which to increase this oversampling.
+where $N^T_\text{int}$ is the number of integration samples used per time step, $\Delta t$ is the integration time for a single sample, $\nu_F$ is the fringe frequency of the source due to its movement, $\lvert V^\text{RFI}_\text{inst} \rvert$ is the instantaneous RFI visibility amplitude, and $\sigma_n$ is the visibility noise of a single data point. This parameter (`time_int_factor`) determines the factor by which to increase this oversampling. Default `1`.
+
+* `min_time_bins`, `max_time_bins`: Bounds on the number of stride groups used when the per-baseline sampling rates above are binned, which only the variable-sampling RFI visibility components (`RiemannVisVariable`, `RiemannVisVariableFFI`) use. Defaults `1` and `30`.
 
 ### RFI light curve estimates
 
@@ -223,7 +255,6 @@ satellites:
   extra_orbit_max_age_days: null
   remote_max_age_days: 3
   cache_reuse_max_age_days: 1
-  ric_std: 1e2
 ```
 
 * `norad_ids`: List of the NORAD IDs of the satellites to include. TABASCAL requests the record whose epoch is closest to the observation from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service — its `get-nearest-omm` endpoint for observations from 2026-07-12 onwards and `get-nearest-tle` before that, falling back to the other archive if the first has nothing acceptable. Cache misses run concurrently with a bounded five-worker pool; no account or credentials are required. **Every ID listed here must resolve to an acceptable record**: otherwise preflight stops before reading the visibilities and names each failure. TABASCAL never silently drops a configured satellite from the RFI model.
@@ -238,6 +269,38 @@ satellites:
 
   **The default of `3` is provisional.** It is a hard backstop against obviously unsuitable remote records — for one observation, SatChecker's per-satellite fallback silently returned records ~31 days old, worth ~9,663 km of ISS position error — and *not* a claim that a three-day-old element set gives adequate positional accuracy. The calibrated, observation-specific suitability policy that should replace it is tracked in [issue #101](https://github.com/epfl-radio-astro/tabascal/issues/101); it may end up rejecting records younger than three days for some orbits and baselines, or accepting older ones where independently justified.
 * `cache_reuse_max_age_days`: Request-avoidance threshold for the per-NORAD cache (default `1`). A cached record this close to the observation avoids a request. An older cached record triggers an exact-epoch nearest lookup — including against the fallback archive, since holding a stale record is not the same as the archive having answered — but remains an offline fallback if it is within `remote_max_age_days`. A response replaces it only when strictly closer to the observation. `null` always reuses the nearest acceptable cached record. When both limits are set, this value must not exceed the hard ceiling.
-* `ric_std`: The error in the orbital elements is not provided as part of the element sets. When estimated positions are analysed the error is calculated in a local reference frame of the satellite. This is the radial, in-track, and cross-track (RIC) frame. This parameter gives a factor by which to scale the RIC covariance that is stored internally which is taken from a paper where the average errors are calculated.
 
 ## Gains
+
+The `gains` section defines the prior distribution over the antenna gains. It is
+read by the gain components (`gains:UnitaryGains`, `gains:GPGains`); with
+`UnitaryGains` the gains are held at unity and the priors below are not fitted.
+An example is given below.
+
+```yaml
+gains:
+  amp_mean: 1.0
+  phase_mean: 0.0
+  amp_std: 1.0        # %
+  phase_std: 1.0      # degrees
+  amp_corr_freq:
+  amp_corr_time:
+  phase_corr_freq:
+  phase_corr_time:
+  r_seed: 123
+```
+
+The amplitude and phase of the gains are each modelled as a Gaussian process over
+frequency and time, so each has a mean, a standard deviation and a correlation
+length per axis.
+
+* `amp_mean`: Mean of the prior over the gain amplitudes. Default `1.0`.
+* `phase_mean`: Mean of the prior over the gain phases, **in radians**. Default `0.0`.
+* `amp_std`: Standard deviation of the prior over the gain amplitudes, **as a percentage** of `amp_mean`. Unset defaults to 1 %.
+* `phase_std`: Standard deviation of the prior over the gain phases, **in degrees**. Unset defaults to 1 degree.
+* `amp_corr_freq`, `phase_corr_freq`: Correlation bandwidth in Hz. Unset defaults to the bandwidth of the observation, i.e. no variation across the band beyond the mean. A single-channel observation has no bandwidth to measure, so the channel width is used instead.
+* `amp_corr_time`, `phase_corr_time`: Correlation time in seconds. Unset defaults to the duration of the observation, with the integration time standing in for a single-integration observation.
+* `r_seed`: Seed for the prior samples used to initialise the gains. Default `123`.
+
+`0` is a legitimate value for the means and standard deviations and is honoured
+as given — it means no variation about the mean, not "use the default".

@@ -14,7 +14,18 @@ from tabascal.components.trajectory import (
     get_satellite_positions,
 )
 from tabascal.orbit import check_epoch_agreement, preflight_tle_check
-from tabascal.orbit_config import normalise_tle_config
+from tabascal.orbit_config import (
+    DEFAULT_CACHE_REUSE_MAX_AGE_DAYS,
+    DEFAULT_REMOTE_MAX_AGE_DAYS,
+    normalise_tle_config,
+)
+from tabascal.config_schema import (
+    FROM_DATA,
+    REQUIRED,
+    ConfigError,
+    Param,
+    validate_config,
+)
 from tabascal.interferometry import (
     calculate_fringe_frequency_numpy,
     get_strides_and_idxs,
@@ -31,34 +42,8 @@ import numpyro
 
 from typing import Optional, Callable, Dict, List
 
-from importlib.resources import files
-import os
 import re
 import yaml
-import collections.abc
-
-    
-def deep_update(d: Dict, u: Dict) -> Dict:
-    """Recursively update a dictionary which includes subdictionaries.
-
-    Parameters
-    ----------
-    d : Dict
-        Base dictionary to update.
-    u : Dict
-        Update dictionary.
-
-    Returns
-    -------
-    Dict
-        Updated dictionary.
-    """
-    for k, v in u.items():
-        if isinstance(v, collections.abc.Mapping):
-            d[k] = deep_update(d.get(k, {}), v)
-        else:
-            d[k] = v
-    return d
 
 
 class _TabSafeLoader(yaml.SafeLoader):
@@ -95,28 +80,50 @@ def yaml_load(path):
 
 
 def load_config(path: str) -> Dict:
-    """Load a configuration file and populate default parameters where needed.
+    """Read the config file and validate the keys needed to bootstrap the run.
+
+    Only ``model.components`` and ``model.precision`` are checked here: the run
+    has to resolve the component classes and set the JAX precision before the
+    rest of the configuration can be validated, since the components are what
+    declare the rest of the schema (see
+    :func:`tabascal.config_schema.collect_params`). Deferring the full check also
+    keeps this function free of any JAX import, so the lightweight CLI paths do
+    not pay for it.
+
+    The full validation runs in :func:`tabascal.scripts._run_tabascal_impl.run`,
+    immediately afterwards and still well before anything expensive.
 
     Parameters
     ----------
     path : str
         Path to the yaml config file.
-    
+
     Returns
     -------
     dict
-        Configuration dictionary.
+        Configuration dictionary, exactly as written apart from the bootstrap
+        defaults.
+
+    Raises
+    ------
+    ConfigError
+        The file cannot be read or parsed, or the bootstrap keys are malformed.
     """
-    config_dir = files("tabascal").joinpath("data/config").__str__()
-    tab_base_config_path = os.path.join(config_dir, "tab_config_base.yaml")
-    base_config = yaml_load(tab_base_config_path)
-
     try:
-        return deep_update(base_config, yaml_load(path))
-    except Exception as e:
-        raise IOError(f"Configuration file could not be loaded from {path}") from e
+        config = yaml_load(path)
+    except OSError as e:
+        raise ConfigError(f"config file could not be read ({path}): {e}") from e
+    except yaml.YAMLError as e:
+        raise ConfigError(f"config file could not be parsed ({path}):\n{e}") from e
 
-    
+    return validate_config(
+        config,
+        {key: TabConfig.config_params[key] for key in ("model.components", "model.precision")},
+        source=path,
+        strict=False,
+    )
+
+
 class TabConfig:
     """Configuration parameters for tabascal method"""
 
@@ -125,11 +132,143 @@ class TabConfig:
     # Internal tuning parameter, intentionally not exposed in the config.
     _MIN_DIVISORS_VARIABLE = 8
 
+    #: The config parameters read outside any model component -- what selects the
+    #: data, what the run does with it, and the sampling grid every component is
+    #: built on. Present on every run, whatever the model, which is why they live
+    #: here rather than on a component. Everything else is declared by the
+    #: component that reads it (``Component.config_params``), and the two sets are
+    #: merged per run by :func:`tabascal.config_schema.collect_params`.
+    config_params: Dict[str, Param] = {
+        # -- model ----------------------------------------------------------
+        "model.components": Param(
+            types=(list,), item=(str,), default=REQUIRED,
+            doc="'module:Class' component references, in dependency order",
+        ),
+        "model.precision": Param(
+            choices=("single", "double"), default="single",
+            doc="floating point precision of the whole run",
+        ),
+        "model.name": Param(
+            types=(str,), default="Custom", doc="name used in result and plot filenames",
+        ),
+        # -- data -----------------------------------------------------------
+        "data.sim_dir": Param(
+            types=(str,), default=None,
+            doc="simulation directory; or pass -s/--sim_dir on the command line",
+        ),
+        "data.ms_path": Param(
+            types=(str,), default=None,
+            doc="or pass -ms/--ms_path; defaults to the MS inside data.sim_dir",
+        ),
+        "data.zarr_path": Param(
+            types=(str,), default=None, doc="tab-sim truth store; derived from data.sim_dir",
+        ),
+        "data.freq": Param(
+            types=(int, float), default=None, gt=0,
+            doc="Hz; selects the nearest single channel, null models every channel",
+        ),
+        "data.data_col": Param(
+            types=(str,), default="DATA", doc="MS column holding the observed visibilities",
+        ),
+        "data.corr": Param(
+            types=(str,), default="xx",
+            doc="correlation to model, matched against the MS's CORR_TYPE by identity",
+        ),
+        "data.noise": Param(
+            types=(int, float), default=FROM_DATA, gt=0,
+            doc="per-visibility noise in Jy; null reads it from the MS",
+        ),
+        "data.flags": Param(
+            types=(bool,), default=False, doc="include the MS flags in the likelihood",
+        ),
+        # -- plots ----------------------------------------------------------
+        "plots.init": Param(types=(bool,), default=False, doc="plot the initial parameter estimate"),
+        "plots.truth": Param(types=(bool,), default=False, doc="plot the true (simulated) signals"),
+        "plots.prior": Param(types=(bool,), default=False, doc="plot samples from the prior"),
+        "plots.opt": Param(types=(bool,), default=False, doc="plot the optimised estimate"),
+        "plots.losses": Param(types=(bool,), default=False, doc="plot the optimisation loss curve"),
+        "plots.prior_samples": Param(
+            types=(int,), default=100, ge=1, doc="prior samples drawn for the prior plot",
+        ),
+        # -- inference ------------------------------------------------------
+        "inference.opt": Param(
+            types=(bool,), default=True, doc="optimise to the maximum a posteriori point",
+        ),
+        # -- optimisation ---------------------------------------------------
+        "opt.epsilon": Param(types=(int, float), default=1e-2, gt=0, doc="optimiser step size"),
+        "opt.max_iter": Param(
+            types=(int,), default=500, ge=0, doc="optimiser iterations per run; 0 skips the fit",
+        ),
+        "opt.guide": Param(choices=("map",), default="map", doc="only 'map' is implemented"),
+        "opt.dual_run": Param(
+            types=(bool,), default=True,
+            doc="follow the fit with a second run at a 10x smaller step size",
+        ),
+        # -- satellites -----------------------------------------------------
+        # Values here are type-checked only; normalise_tle_config owns the
+        # semantics (id parsing, the file form, the cross-field age rules).
+        "satellites.norad_ids": Param(
+            types=(list,), item=(int,), default=None, doc="NORAD catalogue IDs to model",
+        ),
+        "satellites.norad_ids_path": Param(
+            types=(str,), default=None,
+            doc="file of NORAD IDs, one per line; takes precedence over norad_ids",
+        ),
+        "satellites.extra_orbit_dir": Param(
+            types=(str,), default=None,
+            doc="local orbit files searched before the cache and SatChecker",
+        ),
+        "satellites.extra_orbit_max_age_days": Param(
+            types=(int, float), default=None, ge=0,
+            doc="age limit for an extra_orbit_dir record; null is unlimited",
+        ),
+        "satellites.remote_max_age_days": Param(
+            types=(int, float), default=DEFAULT_REMOTE_MAX_AGE_DAYS, ge=0, null_ok=True,
+            doc="age ceiling for a SatChecker/cache record; null removes the ceiling",
+        ),
+        "satellites.cache_reuse_max_age_days": Param(
+            types=(int, float), default=DEFAULT_CACHE_REUSE_MAX_AGE_DAYS, ge=0, null_ok=True,
+            doc="cached record this close avoids a request; null always reuses",
+        ),
+        # -- RFI sampling grid ----------------------------------------------
+        # Read here rather than by a component: they size the fine grid that
+        # _set_freqs_times builds and every RFI component is then defined on.
+        "rfi.freq_int_samples": Param(
+            types=(int,), default=1, ge=1,
+            doc="samples per channel used to model band smearing",
+        ),
+        "rfi.time_int_factor": Param(
+            types=(int, float), default=1, gt=0,
+            doc="factor on the predicted number of samples per integration",
+        ),
+        "rfi.min_time_bins": Param(
+            types=(int,), default=1, ge=1,
+            doc="minimum stride groups when binning per-baseline sampling rates",
+        ),
+        "rfi.max_time_bins": Param(
+            types=(int,), default=30, ge=1,
+            doc="maximum stride groups when binning per-baseline sampling rates",
+        ),
+        "rfi.min_elevation": Param(
+            types=(int, float), default=0, ge=-90, le=90, null_ok=True,
+            doc="degrees below which a satellite's RFI is masked; null disables masking",
+        ),
+        "rfi.freq_pad_factor": Param(
+            types=(int, float), default=2, ge=1,
+            doc="padding of the modelled frequency interval, to avoid periodicity",
+        ),
+        "rfi.time_pad_factor": Param(
+            types=(int, float), default=2, ge=1,
+            doc="padding of the modelled time interval, to avoid periodicity",
+        ),
+    }
+
     def __init__(self, config: Dict, ms_path: str):
 
-        # self.config = config
+        # config has been through validate_config, so every declared parameter is
+        # present and of the declared type -- no .get() defaults needed here.
         self.args = config
-        self.precision = config.get("model", {}).get("precision", "single")
+        self.precision = config["model"]["precision"]
         self.ms_path = ms_path
         # One normalisation of the satellites section, shared by preflight and the
         # model build, so a malformed value is a clean error and the two can never
@@ -160,8 +299,9 @@ class TabConfig:
 
         self.get_orbital_elements()
 
-        self.n_int_time = config["rfi"]["n_int_time"]
-        self.n_int_freq = config["rfi"]["n_int_freq"]
+        # n_int_time is not read from the config: estimate_rfi_sampling derives it
+        # below from the fringe rate and sets it unconditionally.
+        self.n_int_freq = config["rfi"]["freq_int_samples"]
 
         # The divisor-rich fine grid (min_divisors > 1) is only needed by the
         # RiemannVisVariable / +FFI components, which split baselines into
@@ -175,14 +315,14 @@ class TabConfig:
 
         self.estimate_rfi_sampling(
             config["rfi"]["time_int_factor"],
-            config["rfi"].get("min_time_bins", 1),
-            config["rfi"].get("max_time_bins", 30),
+            config["rfi"]["min_time_bins"],
+            config["rfi"]["max_time_bins"],
             min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
         )
 
         self._set_freqs_times()
 
-        self.set_elevation_mask(config["rfi"].get("min_elevation"))
+        self.set_elevation_mask(config["rfi"]["min_elevation"])
 
         if sharding_enabled():
             # These are captured in closures during Model setup (likelihood) and used

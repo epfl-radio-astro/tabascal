@@ -268,6 +268,9 @@ class FixedOrbit(Component):
             self.n_time_fine = config.n_time_fine
 
             self.n_int_time = config.n_int_time
+            # rfi.freq_int_samples is declared on TabConfig rather than here: it
+            # sizes the fine frequency grid every component is defined on, so
+            # TabConfig needs it whatever the model.
             self.n_int_freq = config.args["rfi"]["freq_int_samples"]
 
             self.ants_itrf = config.ants_itrf

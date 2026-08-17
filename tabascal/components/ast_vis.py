@@ -2,6 +2,7 @@ from jax import vmap, random
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
+from tabascal.config_schema import FROM_DATA, Param
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
@@ -20,6 +21,43 @@ class GPVisAst(Component):
     parameters = {
         "ast_k_r_base": ("n_bl", "n_k_freq_ast", "n_k_time_ast"),
         "ast_k_i_base": ("n_bl", "n_k_freq_ast", "n_k_time_ast"),
+    }
+
+    config_params = {
+        "ast.init": Param(
+            choices=("data", "prior", "truth", "sample"), default="sample",
+            doc="how the astronomical visibility parameters are initialised",
+        ),
+        "ast.mean": Param(
+            choices=("data", "zeros", 0), default=0,
+            doc="mean of the prior over the astronomical visibilities",
+        ),
+        "ast.freq_pad_factor": Param(
+            types=(int, float), default=2, ge=1,
+            doc="padding of the modelled frequency interval, to avoid periodicity",
+        ),
+        "ast.time_pad_factor": Param(
+            types=(int, float), default=2, ge=1,
+            doc="padding of the modelled time interval, to avoid periodicity",
+        ),
+        "ast.pow_spec.p0": Param(
+            types=(int, float), gt=0, doc="mean power of the astronomical signal",
+        ),
+        "ast.pow_spec.k0_freq": Param(
+            types=(int, float), gt=0,
+            doc="inverse correlation scale along the frequency axis",
+        ),
+        "ast.pow_spec.fov_deg": Param(
+            types=(int, float), default=FROM_DATA, gt=0,
+            doc="full field of view in degrees; null uses the MS dish diameter",
+        ),
+        "ast.pow_spec.gammas": Param(
+            types=(list,), item=(int, float), doc="power-law drop-off per axis, [freq, time]",
+        ),
+        "ast.pow_spec.cutoff": Param(
+            types=(int, float), default=1e-6, gt=0,
+            doc="relative power below which a Fourier component is not modelled",
+        ),
     }
 
     def setup(self, config):

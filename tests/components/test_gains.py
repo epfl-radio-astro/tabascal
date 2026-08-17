@@ -11,7 +11,6 @@ import numpyro
 from tabascal.components.gains import (
     UnitaryGains,
     GPGains,
-    gains_config_validation,
 )
 
 from .conftest import make_constants, assert_transform_roundtrip
@@ -86,108 +85,104 @@ def make_vis_state(n_ant, n_freq, n_time, rng_key=0):
 
 
 # ---------------------------------------------------------------------------
-# gains_config_validation
+# BaseGPGains.resolve_data_params
 # ---------------------------------------------------------------------------
 
-class TestGainsConfigValidation:
+class TestResolveDataParams:
+    """The gains parameters that can only be resolved once the data is read.
 
-    def test_null_values_get_defaults(self):
-        """None corr_time / corr_freq values are replaced with defaults derived from the observation grid."""
-        freqs = jnp.linspace(1.4e9, 1.41e9, 4)
-        times = jnp.linspace(0.0, 120.0, 8)
-        cfg = {
-            "r_seed": None,
-            "amp_mean": None,
-            "amp_std": None,
-            "amp_corr_freq": None,
-            "amp_corr_time": None,
-            "phase_mean": None,
-            "phase_std": None,
-            "phase_corr_freq": None,
-            "phase_corr_time": None,
-        }
-        result = gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+    Type, range and unknown-key checking is the config schema's job now (see
+    tests/test_config_schema.py); what is left here is the data-derived defaults
+    and the two unit conventions the config uses.
+    """
 
-        assert result["r_seed"] == 2
+    def resolve(self, **kwargs):
+        return UnitaryGains().resolve_data_params(make_gains_config(**kwargs))
+
+    def test_null_values_get_data_derived_defaults(self):
+        """Null correlation lengths fall back to the extent of the observation."""
+        result = self.resolve(
+            amp_std=None,
+            phase_std=None,
+            amp_corr_freq=None,
+            amp_corr_time=None,
+            phase_corr_freq=None,
+            phase_corr_time=None,
+        )
+
+        assert result["r_seed"] == 123
         assert result["amp_mean"] == pytest.approx(1.0)
-        assert result["amp_std"] == pytest.approx(0.01)  # 1% of amp_mean=1.0
-        assert result["phase_mean"] == pytest.approx(0.0)
-        assert result["amp_corr_time"] > 0
-        assert result["phase_corr_time"] > 0
+        assert result["amp_std"] == pytest.approx(0.01)  # 1 % of amp_mean=1.0
+        assert result["phase_std"] == pytest.approx(float(jnp.deg2rad(1.0)))
+        # 4 channels spanning 1.4-1.41 GHz, 8 samples spanning 120 s.
+        assert result["amp_corr_freq"] == pytest.approx(1e7)
+        assert result["amp_corr_time"] == pytest.approx(120.0)
+        assert result["phase_corr_freq"] == pytest.approx(1e7)
+        assert result["phase_corr_time"] == pytest.approx(120.0)
 
-    def test_explicit_values_stored_correctly(self):
-        """Non-null correlation times and frequencies are stored unchanged on the component."""
-        freqs = jnp.linspace(1.4e9, 1.41e9, 4)
-        times = jnp.linspace(0.0, 120.0, 8)
-        cfg = {
-            "r_seed": 42,
-            "amp_mean": 2.0,
-            "amp_std": 5.0,   # percent
-            "amp_corr_freq": 5e6,
-            "amp_corr_time": 60.0,
-            "phase_mean": 0.1,
-            "phase_std": 2.0,  # degrees
-            "phase_corr_freq": 5e6,
-            "phase_corr_time": 30.0,
-        }
-        result = gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+    def test_explicit_values_converted_and_kept(self):
+        """Configured values are kept, with the percentage and degree conversions."""
+        result = self.resolve(
+            amp_mean=2.0,
+            amp_std=5.0,      # percent
+            phase_mean=0.1,
+            phase_std=2.0,    # degrees
+            amp_corr_freq=5e6,
+            amp_corr_time=60.0,
+            phase_corr_freq=5e6,
+            phase_corr_time=30.0,
+        )
 
-        assert result["r_seed"] == 42
         assert result["amp_mean"] == pytest.approx(2.0)
         assert result["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
         assert result["amp_corr_freq"] == pytest.approx(5e6)
         assert result["amp_corr_time"] == pytest.approx(60.0)
         assert result["phase_mean"] == pytest.approx(0.1)
         assert result["phase_std"] == pytest.approx(float(jnp.deg2rad(2.0)))
+        assert result["phase_corr_freq"] == pytest.approx(5e6)
         assert result["phase_corr_time"] == pytest.approx(30.0)
 
-    def test_invalid_amp_mean_type_raises(self):
-        """A non-numeric amp_mean raises ValueError during gains_config_validation."""
-        freqs = jnp.linspace(1.4e9, 1.41e9, 4)
-        times = jnp.linspace(0.0, 120.0, 8)
-        cfg = {
-            "r_seed": 1,
-            "amp_mean": "bad",
-            "amp_std": None,
-            "amp_corr_freq": None,
-            "amp_corr_time": None,
-            "phase_mean": None,
-            "phase_std": None,
-            "phase_corr_freq": None,
-            "phase_corr_time": None,
-        }
-        with pytest.raises(ValueError):
-            gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+    def test_zero_is_honoured_not_treated_as_unset(self):
+        """0 means "no variation about the mean", not "derive a default".
 
-    def test_invalid_phase_std_type_raises(self):
-        """A non-numeric phase_std raises ValueError during gains_config_validation."""
-        freqs = jnp.linspace(1.4e9, 1.41e9, 4)
-        times = jnp.linspace(0.0, 120.0, 8)
-        cfg = {
-            "r_seed": 1,
-            "amp_mean": 1.0,
-            "amp_std": None,
-            "amp_corr_freq": None,
-            "amp_corr_time": None,
-            "phase_mean": None,
-            "phase_std": "bad",
-            "phase_corr_freq": None,
-            "phase_corr_time": None,
-        }
-        with pytest.raises(ValueError):
-            gains_config_validation(cfg, freqs, 1e6, times, 8.0)
+        The falsy test this replaced silently substituted an estimate for a
+        configured 0, so a deliberately noise-free prior became a 1 % one.
+        """
+        result = self.resolve(amp_std=0, phase_mean=0.0, phase_std=0)
+
+        assert result["amp_std"] == 0.0
+        assert result["phase_mean"] == 0.0
+        assert result["phase_std"] == 0.0
+
+    def test_config_is_not_mutated(self):
+        """Resolution must not write back: the conversions are not idempotent.
+
+        phase_std is converted deg -> rad and amp_std scaled by amp_mean, so a
+        second component reading the same section has to see the configured
+        values, not the converted ones.
+        """
+        config = make_gains_config(amp_std=5.0, phase_std=2.0)
+        before = dict(config.args["gains"])
+
+        first = UnitaryGains().resolve_data_params(config)
+        second = UnitaryGains().resolve_data_params(config)
+
+        assert config.args["gains"] == before
+        assert first == second
 
     def test_single_freq_single_time_defaults(self):
-        """Single channel/integration — corr lengths should default to step size."""
-        freqs = jnp.array([1.4e9])
-        times = jnp.array([0.0])
-        cfg = {k: None for k in [
-            "r_seed", "amp_mean", "amp_std", "amp_corr_freq", "amp_corr_time",
-            "phase_mean", "phase_std", "phase_corr_freq", "phase_corr_time",
-        ]}
-        result = gains_config_validation(cfg, freqs, 1e6, times, 8.0)
-        assert result["amp_corr_freq"] > 0
-        assert result["amp_corr_time"] > 0
+        """A single channel/integration has no extent; the spacing stands in."""
+        result = self.resolve(
+            n_freq=1,
+            n_time=1,
+            amp_corr_freq=None,
+            amp_corr_time=None,
+            phase_corr_freq=None,
+            phase_corr_time=None,
+        )
+
+        assert result["amp_corr_freq"] == pytest.approx(1e6)   # chan_width
+        assert result["amp_corr_time"] == pytest.approx(8.0)   # int_time
 
 
 # ---------------------------------------------------------------------------

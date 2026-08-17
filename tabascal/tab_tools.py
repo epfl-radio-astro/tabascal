@@ -255,16 +255,17 @@ def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
 
 
 def fix_padding(config: dict, n_freq):
+    """Raise the frequency padding for a single-channel, over-sampled model.
 
-    try:
-        if (
-            config["rfi"]["freq_pad_factor"] < 3
-            and n_freq == 1
-            and config["rfi"]["freq_int_samples"] > 1
-        ):
-            config["rfi"]["freq_pad_factor"] = 3
-    except:
-        print("freq_pad_factor is not defined")
+    Both keys are guaranteed present and numeric by the config validation, so
+    this is a plain condition rather than a guarded lookup.
+    """
+    if (
+        config["rfi"]["freq_pad_factor"] < 3
+        and n_freq == 1
+        and config["rfi"]["freq_int_samples"] > 1
+    ):
+        config["rfi"]["freq_pad_factor"] = 3
 
     return config
 
