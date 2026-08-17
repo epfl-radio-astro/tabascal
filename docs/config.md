@@ -25,6 +25,34 @@ model:
 
 The components should be given in order of dependency. For example, `trajectory:KeplerOrbit` is specified before `trajectory:PhaseCalculationRFI` because the later depends on the output of the former. Each component is a class which defines the parameters (if any), their initialisation, their prior distribution, and its own forward model for the component. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the module name and then the class name. For example the component `trajectory:KeplerOrbit` is a class named {class}`~tabascal.components.trajectory.KeplerOrbit` that resides in the module file [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)
 
+### Precision
+
+TABASCAL runs in **single precision (fp32) by default**. It is set in the same
+`model` section:
+
+```yaml
+model:
+  precision: single   # default; or "double" for fp64
+```
+
+* `single` (default). Halves device-memory use (~2×), which raises the largest
+  problem size that fits on a GPU. On GPUs with first-class fp64 (e.g.
+  Hopper/GH200) it is **not** faster in wall-clock — the win is memory capacity,
+  not speed.
+* `double`. Required by some components, and recommended when fitting satellite
+  trajectories, as the differentiable orbit models need fp64 accuracy.
+
+The following components run in **double precision only** and raise a clear
+error under `single`, so set `model.precision: double` to use them:
+
+* `trajectory:PhaseCalculationRFI`
+* `trajectory:NoDragOrbit`
+* `trajectory:Orbit`
+
+Both `rfi_vis` kernels (`RiemannVis` and the FFI `RiemannVisFFI`, see [RFI-visibility
+kernels](kernels.md)) and the GP astronomical and gains components run in either
+precision.
+
 ## Data
 
 The `data` section of the configuration file includes only a few options to select the data to use. An exhaustive example is given below.

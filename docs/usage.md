@@ -2,19 +2,54 @@
 
 ## Installation
 
-TABASCAL interacts with Measurement Sets and therefore depends on `python-casacore`. As such, on Mac OS we highly recommend using conda environments to install `python-casacore` first. 
+TABASCAL is pure Python — no compiler or CUDA toolkit is needed to install it —
+and requires **Python 3.10–3.13**. Python 3.14 has not been validated against
+the pinned jax/jaxlib versions.
 
-### Create conda environment with `python-casacore` installed
+### Create a conda environment with `python-casacore` installed
+
+TABASCAL interacts with Measurement Sets and therefore depends on
+`python-casacore`, which is *not* a pip dependency of TABASCAL. Install it with
+conda first:
 
 ```bash
-conda create -n tab-env -c conda-forge python=3.11 python-casacore
+conda create -n tab-env -c conda-forge "python>=3.10,<3.14" python-casacore
 conda activate tab-env
 ```
 
-Currently TABASCAL is not on PyPI so you need to clone the repository:
+`python-casacore` is pip-installable on **linux-x86_64**, so this step can be
+skipped there. On **macOS and linux-aarch64** the conda route is strongly
+recommended, as `python-casacore` is difficult to build from source on those
+platforms.
+
+### Install via pip (CPU-only)
+
+TABASCAL is not on PyPI yet, so install it from the repository:
+
+```bash
+pip install git+https://github.com/epfl-radio-astro/tabascal.git
+```
+
+### Or with GPU support
+
+For NVIDIA GPUs on Linux, use the `cuda12` extra (or `cuda13` for CUDA 13):
+
+```bash
+pip install "tabascal[cuda12] @ git+https://github.com/epfl-radio-astro/tabascal.git"
+```
+
+The GPU extras also pull in the compiled GPU kernel used by the FFI
+`rfi_vis` components — see [RFI-visibility kernels](kernels.md).
+
+### Installing from a clone
+
+To work from a checkout instead, clone the repository and install it in place.
+This is also what you want for the example below, which uses the config files
+that ship in `examples/`:
 
 ```bash
 git clone https://github.com/epfl-radio-astro/tabascal.git
+pip install -e ./tabascal/
 ```
 
 or if you have repository access
@@ -23,19 +58,8 @@ or if you have repository access
 git clone git@github.com:epfl-radio-astro/tabascal.git
 ```
 
-### Install via pip (CPU-only):
-
-From here you can install TABASCAL with pip using either
-
-```bash
-pip install -e ./tabascal/
-```
-
-### Or with GPU support:
-
-```bash
-pip install -e ./tabascal/[gpu]
-```
+If you intend to develop TABASCAL, use the pixi-based setup described in
+[Developer install](installation.md) instead.
 
 ## Satellite orbital elements
 

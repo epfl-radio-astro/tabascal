@@ -51,6 +51,10 @@ myst_enable_extensions = [
     "dollarmath",
     "amsmath",
 ]
+# Generate anchors for headings up to level 3 so cross-page links of the form
+# `[text](other.md#a-heading)` resolve. Without this they build as broken
+# references, which fails the -W builds that CI and Read the Docs both run.
+myst_heading_anchors = 3
 templates_path = ["_templates"]
 exclude_patterns = ["_build"]
 html_theme = "sphinx_rtd_theme"
