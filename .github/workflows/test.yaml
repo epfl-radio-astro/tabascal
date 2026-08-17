@@ -59,6 +59,13 @@ jobs:
     name: Test Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      # Only to push the badge payload to the orphan `badges` branch below.
+      contents: write
+    env:
+      # Lifted to the job so the upload step can be gated on whether it is set;
+      # the secrets context is not available in a step-level `if`.
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -82,15 +89,57 @@ jobs:
             htmlcov/
           retention-days: 30
 
-      # Feeds the README's codecov badge, which reads "unknown" without this.
-      # Tokenless works for a public repo; CODECOV_TOKEN is used when set.
-      # Never fails the build: coverage reporting going down is not a test failure.
+      # Feeds the README's codecov badge. Codecov rejects tokenless uploads even
+      # for public repos ("Token required - not valid tokenless upload"), so the
+      # step is skipped without CODECOV_TOKEN rather than run and fail: with
+      # fail_ci_if_error off, a failed upload still reports success, which is how
+      # the badge sat at "unknown" while CI stayed green.
       - name: Upload coverage to Codecov
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          token: ${{ env.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+      # The README badge is served from this repo rather than a third party:
+      # Codecov cannot see an org until its app is approved there, which is not
+      # ours to grant. Writes a shields.io endpoint payload to an orphan `badges`
+      # branch, so main's history stays free of per-run commits.
+      - name: Publish coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          python - <<'PY'
+          import json, xml.etree.ElementTree as ET
+
+          rate = float(ET.parse("coverage.xml").getroot().get("line-rate")) * 100
+          color = next(
+              c for limit, c in [
+                  (50, "red"), (70, "orange"), (80, "yellow"),
+                  (90, "yellowgreen"), (101, "brightgreen"),
+              ] if rate < limit
+          )
+          json.dump(
+              {"schemaVersion": 1, "label": "coverage",
+               "message": f"{rate:.0f}%", "color": color},
+              open("coverage.json", "w"),
+          )
+          print(f"coverage {rate:.1f}% -> {color}")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Create the branch from an empty tree the first time round.
+          git fetch origin badges:badges 2>/dev/null \
+            || git branch badges "$(git commit-tree "$(git hash-object -t tree /dev/null)" -m 'init badges')"
+
+          git worktree add ../badges badges
+          cp coverage.json ../badges/
+          git -C ../badges add coverage.json
+          git -C ../badges diff --cached --quiet \
+            || git -C ../badges commit -m "coverage badge for ${GITHUB_SHA::7}"
+          git -C ../badges push origin badges
 
       - name: Coverage summary
         run: |

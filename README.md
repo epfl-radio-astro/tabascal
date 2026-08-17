@@ -1,11 +1,18 @@
 # tabascal
 
+[![Tests](https://github.com/epfl-radio-astro/tabascal/actions/workflows/test.yaml/badge.svg?branch=main)](https://github.com/epfl-radio-astro/tabascal/actions/workflows/test.yaml)
 [![Documentation Status](https://readthedocs.org/projects/tabascal/badge/?version=latest)](https://tabascal.readthedocs.io/en/latest/)
-[![codecov](https://codecov.io/gh/epfl-radio-astro/tabascal/branch/main/graph/badge.svg)](https://codecov.io/gh/epfl-radio-astro/tabascal)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/epfl-radio-astro/tabascal/badges/coverage.json)](https://github.com/epfl-radio-astro/tabascal/actions/workflows/test.yaml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/epfl-radio-astro/tabascal/blob/main/pyproject.toml)
 [![MNRAS 2023](https://img.shields.io/badge/MNRAS%202023-10.1093%2Fmnras%2Fstad1979-blue)](https://doi.org/10.1093/mnras/stad1979)
 [![A&A 2025](https://img.shields.io/badge/A%26A%202025-10.1051%2F0004--6361%2F202554596-blue)](https://doi.org/10.1051/0004-6361/202554596)
 
 Trajectory-based RFI subtraction for radio interferometric data.
+
+![Starlink subtraction on EDA2 data](docs/images/eda2_starlink_subtraction.svg)
+
+A result on real **EDA2** data: a 151 MHz observation (XX) crossed by several Starlink satellites. The satellite trails dominating the field (a) are gone after subtraction (b), leaving the inferred sky (c). Reversing the split shows what was removed — subtracting the sky instead (e) isolates the trails, which the model reconstructs as the satellite signal (f). The final residual (d) is noise-like apart from the marked features. Note the two rows use different flux scales: the satellite signal is a few hundred Jy/beam against a sky spanning roughly -400 to 1000 Jy/beam.
 
 ## Citing tabascal
 

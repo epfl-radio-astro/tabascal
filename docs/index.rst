@@ -6,6 +6,7 @@ Welcome to tabscal documentation
    :caption: General
 
    usage
+   example
    output
    sim-vis_output
    config
