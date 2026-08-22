@@ -14,7 +14,7 @@ import numpy as np
 import numpyro
 
 from tabascal.components.trajectory import FixedOrbit, PhaseCalculationRFI
-from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy
+from tabascal.interferometry import get_rfi_delay_us, get_rfi_delay_us_numpy
 
 from .conftest import active_precision, make_constants, assert_transform_roundtrip
 
@@ -151,7 +151,11 @@ class TestPhaseCalculationRFI:
         assert out is sentinel
 
     def test_forward_output_shape(self):
-        """Forward pass produces rfi_phase with shape (n_rfi, n_ant, n_freq_fine, n_time_fine)."""
+        """Forward pass produces rfi_delay_us with shape (n_rfi, n_ant, n_time_fine).
+
+        No frequency axis: the delay is expanded to a phase per fine frequency
+        sample inside the RFI visibility components.
+        """
         n_ant, n_rfi, n_freq, n_time, n_int_time = 4, 2, 3, 5, 2
         cfg = make_trajectory_config(
             n_ant=n_ant, n_rfi=n_rfi, n_freq=n_freq,
@@ -161,17 +165,17 @@ class TestPhaseCalculationRFI:
         comp.setup(cfg)
 
         n_time_fine = n_time * n_int_time
-        n_freq_fine = n_freq
         rfi_xyz = jnp.zeros((n_rfi, n_time_fine, 3)) + jnp.array([7e6, 0.0, 0.0])
         state = {"rfi_xyz": rfi_xyz}
 
         out = comp.build_forward()({}, state, make_constants(comp))
 
-        assert "rfi_phase" in out
-        assert out["rfi_phase"].shape == (n_rfi, n_ant, n_freq_fine, n_time_fine)
+        assert "rfi_delay_us" in out
+        assert "rfi_phase" not in out
+        assert out["rfi_delay_us"].shape == (n_rfi, n_ant, n_time_fine)
 
-    def test_forward_phase_varies_across_antennas(self):
-        """Different antennas should see different phase delays."""
+    def test_forward_delay_varies_across_antennas(self):
+        """Different antennas should see different delays."""
         n_ant, n_rfi = 4, 1
         cfg = make_trajectory_config(n_ant=n_ant, n_rfi=n_rfi)
         comp = PhaseCalculationRFI()
@@ -182,8 +186,48 @@ class TestPhaseCalculationRFI:
             (n_rfi, cfg.n_time_fine, 3),
         )
         out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz}, make_constants(comp))
-        phase = out["rfi_phase"]  # (n_rfi, n_ant, n_freq_fine, n_time_fine)
-        assert not jnp.allclose(phase[0, 0], phase[0, 1])
+        delay = out["rfi_delay_us"]  # (n_rfi, n_ant, n_time_fine)
+        assert not jnp.allclose(delay[0, 0], delay[0, 1])
+
+    def test_forward_delay_is_centred_and_baseline_scale(self):
+        """Delays are centred over antennas and of order the array size.
+
+        The absolute satellite range (~1e5 us) must not survive into the state:
+        only delay differences enter a baseline, and the single-precision delay
+        kernel relies on the values being at baseline scale.
+        """
+        n_ant, n_rfi = 6, 2
+        cfg = make_trajectory_config(n_ant=n_ant, n_rfi=n_rfi)
+        comp = PhaseCalculationRFI()
+        comp.setup(cfg)
+
+        rfi_xyz = jnp.broadcast_to(
+            jnp.array([[6.8e6, 0.0, 0.0]]),
+            (n_rfi, cfg.n_time_fine, 3),
+        )
+        out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz}, make_constants(comp))
+        delay = out["rfi_delay_us"]
+        assert jnp.allclose(delay.mean(axis=1), 0.0, atol=1e-9)
+        # The mock array spans < 1 km, i.e. < 3.3 us of light travel time.
+        assert jnp.max(jnp.abs(delay)) < 3.4
+
+    def test_forward_is_differentiable_wrt_rfi_xyz(self):
+        """The delay is a differentiable function of the trajectory (learnable orbits)."""
+        cfg = make_trajectory_config(n_ant=4, n_rfi=1)
+        comp = PhaseCalculationRFI()
+        comp.setup(cfg)
+        constants = make_constants(comp)
+        forward = comp.build_forward()
+
+        rfi_xyz = jnp.broadcast_to(
+            jnp.array([[6.8e6, 0.0, 0.0]]), (1, cfg.n_time_fine, 3)
+        )
+        grad = jax.grad(
+            lambda x: jnp.sum(forward({}, {"rfi_xyz": x}, constants)["rfi_delay_us"] ** 2)
+        )(rfi_xyz)
+        assert grad.shape == rfi_xyz.shape
+        assert jnp.all(jnp.isfinite(grad))
+        assert not jnp.allclose(grad, 0.0)
 
     def test_forward_preserves_rfi_xyz_in_state(self):
         """Forward pass copies rfi_xyz through to the output state unchanged."""
@@ -216,8 +260,8 @@ class TestPhaseCalculationRFI:
         rfi_xyz = jnp.zeros((n_rfi, n_time_fine, 3)) + jnp.array([6.8e6, 0.0, 0.0])
         out = comp.build_forward()({}, {"rfi_xyz": rfi_xyz}, make_constants(comp))
 
-        assert out["rfi_phase"].shape == (n_rfi, n_ant, n_freq, n_time_fine)
-        assert jnp.all(jnp.isfinite(out["rfi_phase"]))
+        assert out["rfi_delay_us"].shape == (n_rfi, n_ant, n_time_fine)
+        assert jnp.all(jnp.isfinite(out["rfi_delay_us"]))
 
     def test_compute_ant_pos_xyz_earth_radius(self):
         """ants_xyz (GCRF) should be at Earth's surface radius (~6.37e6 m)."""
@@ -251,8 +295,8 @@ class TestFixedOrbit:
         n_time_fine = n_time * n_int_time
         assert comp.rfi_xyz.shape == (n_rfi, n_time_fine, 3)
 
-    def test_rfi_phase_shape(self):
-        """Pre-computed phase stored at setup has shape (n_rfi, n_ant, n_freq, n_time_fine)."""
+    def test_rfi_delay_shape(self):
+        """Pre-computed delay stored at setup has shape (n_rfi, n_ant, n_time_fine)."""
         n_rfi, n_ant, n_freq, n_time, n_int_time = 1, 4, 2, 4, 2
         cfg = make_trajectory_config(
             n_rfi=n_rfi, n_ant=n_ant, n_freq=n_freq,
@@ -261,7 +305,7 @@ class TestFixedOrbit:
         comp = FixedOrbit()
         comp.setup(cfg)
         n_time_fine = n_time * n_int_time
-        assert comp.rfi_phase.shape == (n_rfi, n_ant, n_freq, n_time_fine)
+        assert comp.rfi_delay_us.shape == (n_rfi, n_ant, n_time_fine)
 
     def test_rfi_xyz_altitude_reasonable(self):
         """ISS is at ~400 km altitude — distance from Earth's centre ≈ 6.8e6 m."""
@@ -272,21 +316,30 @@ class TestFixedOrbit:
         assert jnp.all(radii > 6.0e6)
         assert jnp.all(radii < 8.0e6)
 
-    def test_rfi_phase_finite(self):
-        """All pre-computed phase values are finite."""
+    def test_rfi_delay_finite(self):
+        """All pre-computed delay values are finite."""
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
-        assert jnp.all(jnp.isfinite(comp.rfi_phase))
+        assert jnp.all(jnp.isfinite(comp.rfi_delay_us))
 
-    def test_forward_adds_rfi_xyz_and_phase_to_state(self):
-        """Forward pass inserts rfi_xyz and rfi_phase into the state dict."""
+    def test_rfi_delay_centred(self):
+        """The stored delay is centred over antennas (per source and time)."""
+        cfg = make_trajectory_config(n_rfi=1, n_ant=6)
+        comp = FixedOrbit()
+        comp.setup(cfg)
+        tol = 1e-9 if active_precision() == "double" else 1e-5
+        assert jnp.allclose(comp.rfi_delay_us.mean(axis=1), 0.0, atol=tol)
+
+    def test_forward_adds_rfi_xyz_and_delay_to_state(self):
+        """Forward pass inserts rfi_xyz and rfi_delay_us into the state dict."""
         cfg = make_trajectory_config(n_rfi=1)
         comp = FixedOrbit()
         comp.setup(cfg)
         out = comp.build_forward()({}, {}, make_constants(comp))
         assert "rfi_xyz" in out
-        assert "rfi_phase" in out
+        assert "rfi_delay_us" in out
+        assert "rfi_phase" not in out
 
     def test_forward_output_matches_precomputed(self):
         """Forward pass must return the same pre-computed arrays stored at setup time."""
@@ -295,10 +348,10 @@ class TestFixedOrbit:
         comp.setup(cfg)
         out = comp.build_forward()({}, {}, make_constants(comp))
         assert jnp.array_equal(out["rfi_xyz"], comp.rfi_xyz)
-        assert jnp.array_equal(out["rfi_phase"], comp.rfi_phase)
+        assert jnp.array_equal(out["rfi_delay_us"], comp.rfi_delay_us)
 
     def test_two_satellites_shape(self):
-        """Two distinct TLEs produce position and phase arrays of the correct shape."""
+        """Two distinct TLEs produce position and delay arrays of the correct shape."""
         n_rfi = 2
         records = [
             _tle_record(25544, _ISS_TLE1, _ISS_TLE2),
@@ -314,7 +367,7 @@ class TestFixedOrbit:
         comp.setup(cfg)
         n_time_fine = n_time * n_int_time
         assert comp.rfi_xyz.shape == (n_rfi, n_time_fine, 3)
-        assert comp.rfi_phase.shape == (n_rfi, n_ant, n_freq, n_time_fine)
+        assert comp.rfi_delay_us.shape == (n_rfi, n_ant, n_time_fine)
 
     def test_two_satellites_have_different_positions(self):
         """Two distinct TLEs must propagate to distinct positions."""
@@ -335,27 +388,67 @@ class TestFixedOrbit:
         sentinel = {"foo": jnp.array(1.0)}
         assert comp.build_set_params()(sentinel) is sentinel
 
-    def test_compute_rfi_phase_consistent_with_get_rfi_phase(self):
-        """Phase stored at setup must equal get_rfi_phase called with the same arrays."""
+    @pytest.mark.requires_double
+    def test_compute_rfi_delay_consistent_with_get_rfi_delay_us(self):
+        """Delay stored at setup must equal the jax get_rfi_delay_us on the same arrays.
+
+        This is the numpy/jax twin check; the jax twin needs f64 for the ~7e6 m
+        magnitudes, hence requires_double.
+        """
         cfg = make_trajectory_config(n_rfi=1, n_ant=4, n_freq=2, n_time=4, n_int_time=2)
         comp = FixedOrbit()
         comp.setup(cfg)
-        expected = get_rfi_phase(comp.rfi_xyz, comp.ants_uvw, comp.ants_xyz, comp.freqs_fine)
-        assert jnp.allclose(comp.rfi_phase, expected)
+        expected = get_rfi_delay_us(comp.rfi_xyz, comp.ants_uvw, comp.ants_xyz)
+        assert jnp.allclose(comp.rfi_delay_us, expected, atol=1e-9)
 
-    def test_single_precision_uses_numpy_phase(self):
-        """Under single precision, rfi_phase is precomputed in numpy and matches get_rfi_phase_numpy."""
-        cfg = make_trajectory_config(
-            n_rfi=1, n_ant=4, n_freq=2, n_time=4, n_int_time=2, precision="single"
-        )
+    def test_setup_uses_numpy_delay(self):
+        """In either precision, rfi_delay_us is precomputed in numpy and matches get_rfi_delay_us_numpy."""
+        cfg = make_trajectory_config(n_rfi=1, n_ant=4, n_freq=2, n_time=4, n_int_time=2)
         comp = FixedOrbit()
         comp.setup(cfg)
-        assert comp.rfi_phase.shape == (cfg.n_rfi, cfg.n_ant, cfg.n_freq_fine, cfg.n_time_fine)
-        assert jnp.all(jnp.isfinite(comp.rfi_phase))
-        expected = get_rfi_phase_numpy(
-            comp.rfi_xyz, comp.ants_uvw, comp.ants_xyz, comp.freqs_fine
+        assert comp.rfi_delay_us.shape == (cfg.n_rfi, cfg.n_ant, cfg.n_time_fine)
+        assert jnp.all(jnp.isfinite(comp.rfi_delay_us))
+        expected = get_rfi_delay_us_numpy(comp.rfi_xyz, comp.ants_uvw, comp.ants_xyz)
+        tol = 1e-9 if active_precision() == "double" else 1e-5
+        assert jnp.allclose(comp.rfi_delay_us, expected, atol=tol)
+
+    def test_delay_reproduces_legacy_phase_on_baselines(self):
+        """2*pi*f*(tau[a1] - tau[a2]) equals the former per-frequency phase difference.
+
+        The phase array this replaced was ``-2 pi ((|x_s - x_p| + w_p) / lambda mod 1)``
+        per antenna; its baseline differences must be reproduced (mod 2 pi) by the
+        compact delay times the frequency, for every fine frequency sample. The
+        comparison is done in f64 on the host arrays so it checks the definition,
+        not the active precision.
+        """
+        cfg = make_trajectory_config(n_rfi=2, n_ant=6, n_freq=3, n_time=4, n_int_time=2)
+        comp = FixedOrbit()
+        comp.setup(cfg)
+
+        rfi_xyz = np.asarray(comp.rfi_xyz, dtype=np.float64)
+        ants_xyz = np.asarray(comp.ants_xyz, dtype=np.float64)
+        ants_uvw = np.asarray(comp.ants_uvw, dtype=np.float64)
+        freqs = np.asarray(cfg.freqs_fine, dtype=np.float64)
+
+        c = 299792458.0
+        lamda = c / freqs[None, None, :, None]
+        distances = np.linalg.norm(
+            ants_xyz[None, :, None, :, :] - rfi_xyz[:, None, None, :, :], axis=-1
         )
-        assert jnp.allclose(comp.rfi_phase, expected)
+        legacy_phase = -2.0 * np.pi * (
+            ((distances + ants_uvw[None, :, None, :, -1]) / lamda) % 1
+        )  # (n_rfi, n_ant, n_freq_fine, n_time_fine)
+
+        delay = get_rfi_delay_us_numpy(rfi_xyz, ants_uvw, ants_xyz)
+        phase = 2.0 * np.pi * (freqs / 1e6)[None, None, :, None] * delay[:, :, None, :]
+
+        a1, a2 = np.triu_indices(cfg.n_ant, 1)
+        legacy_diff = legacy_phase[:, a1] - legacy_phase[:, a2]
+        diff = phase[:, a1] - phase[:, a2]
+        # Compare on the unit circle: the two differ by multiples of 2 pi.
+        np.testing.assert_allclose(
+            np.exp(1j * diff), np.exp(1j * legacy_diff), atol=1e-8
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -442,9 +442,9 @@ class Model:
 
             for sub_forward in forwards:
                 state = sub_forward(params, state, constants)
-                # Keep the per-RFI fine grids (rfi_A/rfi_phase -- the memory hogs)
-                # pinned to the RFI sharding between components, so XLA never
-                # materializes a replicated copy. No-op on a single device.
+                # Keep the per-RFI fine grids (rfi_A/rfi_delay_us -- rfi_A being
+                # the memory hog) pinned to the RFI sharding between components, so
+                # XLA never materializes a replicated copy. No-op on a single device.
                 state = constrain_rfi_state(state, n_rfi)
 
             return state
@@ -476,7 +476,7 @@ class Model:
 
             state = forward(params, state, constants)
 
-            numpyro.deterministic("rfi_phase", state["rfi_phase"])
+            numpyro.deterministic("rfi_delay_us", state["rfi_delay_us"])
             numpyro.deterministic("rfi_A", state["rfi_A"])
 
             numpyro.deterministic("vis_rfi", state["vis_rfi"])

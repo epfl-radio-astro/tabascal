@@ -122,7 +122,7 @@ RFI_AXIS_NAMES = frozenset({
     "rfi_k_r_base", "rfi_k_i_base",
     "rfi_orbit_base",
     # state buffers
-    "rfi_A", "rfi_phase", "rfi_xyz", "elements",
+    "rfi_A", "rfi_delay_us", "rfi_xyz", "elements",
     # constants
     "mu_rfi_k", "mu_rfi_orbit", "L_rfi_orbit",
     # (n_rfi, n_time_fine) elevation mask, multiplied into rfi_A in the signal
@@ -209,9 +209,9 @@ def shard_pytree(tree: dict, n_rfi: int) -> dict:
 def sharded_rfi_zeros(shape: tuple, dtype) -> jax.Array:
     """Zeros with the leading (RFI) axis sharded, without a full single-device copy.
 
-    Used for the big ``rfi_A``/``rfi_phase`` state placeholders: each device only ever
-    allocates its own shard, which is what lets a run hold more RFI sources than one
-    GPU fits. Plain ``jnp.zeros`` when sharding is off.
+    Used for the big ``rfi_A`` (and the smaller ``rfi_delay_us``) state placeholders:
+    each device only ever allocates its own shard, which is what lets a run hold more
+    RFI sources than one GPU fits. Plain ``jnp.zeros`` when sharding is off.
     """
     if not sharding_enabled():
         return jnp.zeros(shape, dtype=dtype)
@@ -235,8 +235,8 @@ def _index_shape(shape, idx) -> tuple:
 def constrain_rfi_state(state: dict, n_rfi: int) -> dict:
     """Pin per-RFI state entries to the RFI sharding inside traced code.
 
-    Called between component forwards so XLA keeps ``rfi_A``/``rfi_phase`` (the
-    fine-grid memory hogs) split across devices instead of ever materializing a
+    Called between component forwards so XLA keeps ``rfi_A``/``rfi_delay_us`` (the
+    per-RFI fine grids) split across devices instead of ever materializing a
     replicated copy. No-op when sharding is off.
     """
     if not sharding_enabled():
@@ -252,8 +252,8 @@ def constrain_rfi_state(state: dict, n_rfi: int) -> dict:
 def psum_over_rfi(local_fn: Callable) -> Callable:
     """Map a per-RFI-shard visibility function over the mesh and sum across shards.
 
-    ``local_fn(rfi_A, rfi_phase) -> vis`` must accept any leading RFI count and return
-    an array with **no** RFI axis (its local sources already summed). Under sharding it
+    ``local_fn(rfi_A, rfi_delay_us) -> vis`` must accept any leading RFI count and
+    return an array with **no** RFI axis (its local sources already summed). Under sharding it
     runs per device on the local shard via ``shard_map`` -- which is also what lets the
     FFI custom op participate, since GSPMD cannot partition a custom call -- and the
     small coarse-grid results are ``psum``-ed into a replicated total. Unsharded it is
@@ -262,8 +262,8 @@ def psum_over_rfi(local_fn: Callable) -> Callable:
     if not sharding_enabled():
         return local_fn
 
-    def summed(rfi_A, rfi_phase):
-        return lax.psum(local_fn(rfi_A, rfi_phase), "rfi")
+    def summed(rfi_A, rfi_delay_us):
+        return lax.psum(local_fn(rfi_A, rfi_delay_us), "rfi")
 
     # Varying-axis type checking must be off: the FFI kernel's custom JVP/transpose
     # rules produce cotangents without the {V:rfi} annotation, which trips the check

@@ -103,7 +103,7 @@ def write_results_xds(
 ):
 
     # Only process 0 writes. Everything written below is replicated on every
-    # process; per-RFI arrays (rfi_A/rfi_phase) are sharded and must not be
+    # process; per-RFI arrays (rfi_A/rfi_delay_us) are sharded and must not be
     # materialized here without a process_allgather.
     if not is_process_0():
         return None
@@ -117,7 +117,7 @@ def write_results_xds(
     # print(da.asarray(vi_pred["rfi_vis"]))
     # print(da.asarray(vi_pred["vis_obs"]))
     # print(da.asarray(vi_pred["rfi_A"]))
-    # print(da.asarray(args["rfi_phase"]))
+    # print(da.asarray(args["rfi_delay_us"]))
 
     map_xds = xr.Dataset(
         data_vars={
@@ -129,9 +129,9 @@ def write_results_xds(
             #     ["sample", "src", "ant", "rfi_time"],
             #     da.asarray(vi_pred["rfi_A"]),
             # ),
-            # "rfi_phase": (
+            # "rfi_delay_us": (
             #     ["src", "ant", "time_mjd_fine"],
-            #     da.asarray(args["rfi_phase"]),
+            #     da.asarray(args["rfi_delay_us"]),
             # ),
         },
         coords={

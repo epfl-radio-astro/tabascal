@@ -5,15 +5,29 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 
-from ri_kernels.jax_api import RFIVisOp
+from ri_kernels.jax_api import RFIDelayVisOp
 from tabascal.interferometry import get_divisors
 from .conftest import active_precision, make_constants
+
+
+# A MeerKAT-like L-band grid: 1.227 GHz start, 209 kHz channels, with the
+# n_int_freq fine samples of a channel stored consecutively (as TabConfig's
+# domain_ss grid does), which is the (n_freq, n_int_freq) split the kernels use.
+_START_FREQ_HZ = 1.227e9
+_CHAN_WIDTH_HZ = 209e3
+
+# Centred per-antenna delays are at baseline scale: +-16.7 us is a 5 km radius,
+# half the 10 km the single-precision delay kernel is specified for.
+_MAX_DELAY_US = 16.7
 
 
 def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, precision=None):
     a1, a2 = jnp.triu_indices(n_ant, 1)
     a1 = a1.astype('int32')
     a2 = a2.astype('int32')
+    freqs_fine = _START_FREQ_HZ + _CHAN_WIDTH_HZ * (
+        np.arange(n_freq * n_int_freq, dtype=np.float64) / n_int_freq
+    )
     return SimpleNamespace(
         n_ant=n_ant,
         n_rfi=n_rfi,
@@ -23,6 +37,7 @@ def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, precisio
         n_bl=a1.shape[0],
         a1=a1,
         a2=a2,
+        freqs_fine=freqs_fine,
         precision=precision or active_precision(),
         args={"rfi": {"freq_int_samples": n_int_freq}},
     )
@@ -32,14 +47,17 @@ def create_state(config, rand_vis_rfi=False, r_key=42, real_dtype=jnp.float64):
     complex_dtype = jnp.complex64 if real_dtype == jnp.float32 else jnp.complex128
     n_int_freq = config.args["rfi"]["freq_int_samples"]
     input_shape = (config.n_rfi, config.n_ant, config.n_freq * n_int_freq, config.n_time * config.n_int_time)
+    delay_shape = (config.n_rfi, config.n_ant, config.n_time * config.n_int_time)
     output_shape = (config.n_bl, config.n_freq, config.n_time)
-    rfi_phase = jax.random.uniform(jax.random.PRNGKey(r_key), input_shape).astype(real_dtype)
+    rfi_delay_us = jax.random.uniform(
+        jax.random.PRNGKey(r_key), delay_shape, minval=-_MAX_DELAY_US, maxval=_MAX_DELAY_US
+    ).astype(real_dtype)
     rfi_amp = (
         jax.random.normal(jax.random.PRNGKey(r_key + 2), input_shape)
         + 1.0j * jax.random.normal(jax.random.PRNGKey(r_key + 3), input_shape)
     ).astype(complex_dtype)
 
-    state = {"rfi_A": rfi_amp, "rfi_phase": rfi_phase, "vis_rfi": jnp.zeros(output_shape, dtype=complex_dtype)}
+    state = {"rfi_A": rfi_amp, "rfi_delay_us": rfi_delay_us, "vis_rfi": jnp.zeros(output_shape, dtype=complex_dtype)}
     if rand_vis_rfi:
         state["vis_rfi"] = (
             jax.random.normal(jax.random.PRNGKey(r_key + 4), output_shape)
@@ -72,6 +90,21 @@ def _tols(dtype):
     return (1e-4, 1e-4) if dtype == jnp.float32 else (1e-8, 1e-8)
 
 
+def _assert_close(ref, got, dtype):
+    """Elementwise closeness with the absolute tolerance scaled to the array.
+
+    The RFI visibility and its tangents are sums over sources and fine samples
+    of terms that are individually large (the delay enters through an angular
+    frequency of ~7.7e3 rad/us), so an element can be much smaller than the
+    terms that cancel to produce it. An absolute tolerance fixed at ``rtol`` of
+    the *largest* element, rather than of the element itself, is the right
+    yardstick for that rounding; it is what ri_kernels' own tests use too.
+    """
+    atol, rtol = _tols(dtype)
+    scale = max(float(jnp.max(jnp.abs(ref))), 1.0)
+    assert jnp.allclose(ref, got, atol=atol * scale, rtol=rtol)
+
+
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
     """FFI and reference Riemann kernels produce identical vis_rfi outputs."""
@@ -85,10 +118,8 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
     ref_result = compute_vis_rfi(RiemannVis())
     ffi_result = compute_vis_rfi(RiemannVisFFI())
-
-    atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
-    assert jnp.allclose(ref_result, ffi_result, atol=atol, rtol=rtol)
+    _assert_close(ref_result, ffi_result, real_dtype)
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
@@ -110,15 +141,13 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
     ref_result = compue_jvp(RiemannVis())
     ffi_result = compue_jvp(RiemannVisFFI())
-
-    atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
-    assert jnp.allclose(ref_result, ffi_result, atol=atol, rtol=rtol)
+    _assert_close(ref_result, ffi_result, real_dtype)
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
-    """Reverse-mode VJP gradients w.r.t. rfi_A and rfi_phase match between FFI and reference."""
+    """Reverse-mode VJP gradients w.r.t. rfi_A and rfi_delay_us match between FFI and reference."""
     config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
     real_dtype = _session_dtype()
 
@@ -139,38 +168,39 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
     ref_state = compue_vjp(RiemannVis())
     ffi_state = compue_vjp(RiemannVisFFI())
-
-    atol, rtol = _tols(real_dtype)
     assert ffi_state["rfi_A"].dtype == ref_state["rfi_A"].dtype
-    assert ffi_state["rfi_phase"].dtype == ref_state["rfi_phase"].dtype
-    assert jnp.allclose(ref_state["rfi_A"], ffi_state["rfi_A"], atol=atol, rtol=rtol)
-    assert jnp.allclose(ref_state["rfi_phase"], ffi_state["rfi_phase"], atol=atol, rtol=rtol)
+    assert ffi_state["rfi_delay_us"].dtype == ref_state["rfi_delay_us"].dtype
+    _assert_close(ref_state["rfi_A"], ffi_state["rfi_A"], real_dtype)
+    _assert_close(ref_state["rfi_delay_us"], ffi_state["rfi_delay_us"], real_dtype)
 
 
 @pytest.mark.requires_double
 def test_mixed_precision_rejected():
-    """Mismatched amp/phase precision is rejected at the lowering boundary.
+    """Mismatched amp/delay precision is rejected at the lowering boundary.
 
-    Needs x64 enabled to construct a genuine float64 phase array; under
+    Needs x64 enabled to construct a genuine float64 delay array; under
     ``--x64 false`` the float64 request downcasts to float32 and there is no
     mismatch to reject.
     """
     config = create_config(4, 2, 3, 3, 2, 2)
     n_int_freq = config.args["rfi"]["freq_int_samples"]
     input_shape = (config.n_rfi, config.n_ant, config.n_freq * n_int_freq, config.n_time * config.n_int_time)
+    delay_shape = (config.n_rfi, config.n_ant, config.n_time * config.n_int_time)
     rfi_amp = (
         jax.random.normal(jax.random.PRNGKey(0), input_shape)
         + 1.0j * jax.random.normal(jax.random.PRNGKey(1), input_shape)
     ).astype(jnp.complex64)
-    rfi_phase = jax.random.uniform(jax.random.PRNGKey(2), input_shape).astype(jnp.float64)
+    rfi_delay_us = jax.random.uniform(jax.random.PRNGKey(2), delay_shape).astype(jnp.float64)
+    freqs_mhz = jnp.asarray(config.freqs_fine / 1e6, dtype=jnp.float64).reshape(config.n_freq, n_int_freq)
 
-    new_shape = (config.n_rfi, config.n_ant, config.n_freq, n_int_freq, config.n_time, config.n_int_time)
-    rfi_amp = jnp.transpose(rfi_amp.reshape(new_shape), (1, 2, 4, 0, 3, 5))
-    rfi_phase = jnp.transpose(rfi_phase.reshape(new_shape), (1, 2, 4, 0, 3, 5))
+    amp_shape = (config.n_rfi, config.n_ant, config.n_freq, n_int_freq, config.n_time, config.n_int_time)
+    rfi_amp = jnp.transpose(rfi_amp.reshape(amp_shape), (1, 2, 4, 0, 3, 5))
+    delay_shape = (config.n_rfi, config.n_ant, config.n_time, config.n_int_time)
+    rfi_delay_us = jnp.transpose(rfi_delay_us.reshape(delay_shape), (1, 2, 0, 3))
 
-    op = RFIVisOp(config.n_ant, config.a1, config.a2)
+    op = RFIDelayVisOp(config.n_ant, config.a1, config.a2)
     with pytest.raises(TypeError):
-        op.eval(rfi_amp, rfi_phase)
+        op.eval(rfi_amp, rfi_delay_us, freqs_mhz)
 
 
 # ---------------------------------------------------------------------------
@@ -235,11 +265,9 @@ def test_variable_single_group_matches_reference(
 
     ref_result = compute_vis_rfi(RiemannVis())
     var_result = compute_vis_rfi(RiemannVisVariable())
-
-    atol, rtol = _tols(real_dtype)
     assert var_result.shape == ref_result.shape
     assert var_result.dtype == ref_result.dtype
-    assert jnp.allclose(ref_result, var_result, atol=atol, rtol=rtol)
+    _assert_close(ref_result, var_result, real_dtype)
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
@@ -259,11 +287,9 @@ def test_variable_ffi_single_group_matches_reference(
 
     ref_result = compute_vis_rfi(RiemannVisFFI())
     var_result = compute_vis_rfi(RiemannVisVariableFFI())
-
-    atol, rtol = _tols(real_dtype)
     assert var_result.shape == ref_result.shape
     assert var_result.dtype == ref_result.dtype
-    assert jnp.allclose(ref_result, var_result, atol=atol, rtol=rtol)
+    _assert_close(ref_result, var_result, real_dtype)
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
@@ -289,11 +315,9 @@ def test_variable_ffi_matches_variable(
 
     ref_result = compute_vis_rfi(RiemannVisVariable())
     ffi_result = compute_vis_rfi(RiemannVisVariableFFI())
-
-    atol, rtol = _tols(real_dtype)
     assert ffi_result.shape == (config.n_bl, config.n_freq, config.n_time)
     assert ffi_result.dtype == ref_result.dtype
-    assert jnp.allclose(ref_result, ffi_result, atol=atol, rtol=rtol)
+    _assert_close(ref_result, ffi_result, real_dtype)
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
@@ -320,17 +344,15 @@ def test_variable_ffi_matches_variable_jvp(
 
     ref_result = compute_jvp(RiemannVisVariable())
     ffi_result = compute_jvp(RiemannVisVariableFFI())
-
-    atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
-    assert jnp.allclose(ref_result, ffi_result, atol=atol, rtol=rtol)
+    _assert_close(ref_result, ffi_result, real_dtype)
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
 def test_variable_ffi_matches_variable_vjp(
     n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq
 ):
-    """Reverse-mode VJP gradients w.r.t. rfi_A and rfi_phase match between kernels."""
+    """Reverse-mode VJP gradients w.r.t. rfi_A and rfi_delay_us match between kernels."""
     strides = [int(s) for s in get_divisors(n_int_time)]
     config = make_variable_config(
         n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, strides=strides
@@ -350,12 +372,10 @@ def test_variable_ffi_matches_variable_vjp(
 
     ref_state = compute_vjp(RiemannVisVariable())
     ffi_state = compute_vjp(RiemannVisVariableFFI())
-
-    atol, rtol = _tols(real_dtype)
     assert ffi_state["rfi_A"].dtype == ref_state["rfi_A"].dtype
-    assert ffi_state["rfi_phase"].dtype == ref_state["rfi_phase"].dtype
-    assert jnp.allclose(ref_state["rfi_A"], ffi_state["rfi_A"], atol=atol, rtol=rtol)
-    assert jnp.allclose(ref_state["rfi_phase"], ffi_state["rfi_phase"], atol=atol, rtol=rtol)
+    assert ffi_state["rfi_delay_us"].dtype == ref_state["rfi_delay_us"].dtype
+    _assert_close(ref_state["rfi_A"], ffi_state["rfi_A"], real_dtype)
+    _assert_close(ref_state["rfi_delay_us"], ffi_state["rfi_delay_us"], real_dtype)
 
 
 @pytest.mark.parametrize(
@@ -365,7 +385,6 @@ def test_variable_accumulates_into_state(Impl):
     """forward adds vis_rfi onto the incoming state rather than overwriting it."""
     config = make_variable_config(64, 20, 16, 12, 4, 2, strides=[1, 2, 4])
     real_dtype = _session_dtype()
-    atol, rtol = _tols(real_dtype)
 
     impl = Impl()
     impl.setup(config)
@@ -378,7 +397,7 @@ def test_variable_accumulates_into_state(Impl):
     from_zero = forward({}, zero_state, constants)["vis_rfi"]
     from_seed = forward({}, seeded_state, constants)["vis_rfi"]
 
-    # The two runs share rfi_A/rfi_phase (same r_key), so the only difference is
+    # The two runs share rfi_A/rfi_delay_us (same r_key), so the only difference is
     # the pre-existing vis_rfi that forward should add on top.
     expected = from_zero + seeded_state["vis_rfi"]
-    assert jnp.allclose(from_seed, expected, atol=atol, rtol=rtol)
+    _assert_close(from_seed, expected, real_dtype)
