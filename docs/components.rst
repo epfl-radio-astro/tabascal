@@ -30,7 +30,7 @@ TABASCAL uses a component-based model description. This means that various diffe
        Gain [label="Gain\nComponent", shape=box];
 
        // Data nodes
-       rfi_xyz [label="• rfi_xyz\l• rfi_phase", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
+       rfi_xyz [label="• rfi_xyz\l• rfi_delay_us", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        rfi_A [label="rfi_A", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        vis_rfi [label="vis_rfi", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        ast_radec [label="ast_radec", shape=ellipse, fillcolor=lightgray, fontname="Courier"];

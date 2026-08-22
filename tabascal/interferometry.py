@@ -11,15 +11,31 @@ T_s = 86164.0905  # Sidereal day in seconds
 Omega_e = 2 * jnp.pi / T_s  # Earth rotation rate in rad/s
 C = 299792458.0  # Speed of light in m/s
 
-def get_rfi_phase_numpy(
-    rfi_xyz: NDArray, ants_uvw: NDArray, ants_xyz: NDArray, freqs: NDArray
-) -> NDArray:
-    """Calculate phase at each antenna for each RFI source
+#: Path length in metres -> delay in microseconds. MHz x us = cycles, so a
+#: delay in us pairs with a frequency in MHz to give a phase of 2*pi*f*tau.
+M_TO_US = 1e6 / C
 
-    numpy twin of the jax :func:`get_rfi_phase` — same formula, kept in numpy/f64
+
+def get_rfi_delay_us_numpy(
+    rfi_xyz: NDArray, ants_uvw: NDArray, ants_xyz: NDArray
+) -> NDArray:
+    """Centred, direction-corrected delay at each antenna for each RFI source, in us.
+
+    numpy twin of the jax :func:`get_rfi_delay_us` — same formula, kept in numpy/f64
     for the host-side one-shot setup in ``FixedOrbit`` (large magnitudes need f64).
     The two must stay in sync; their equivalence is checked by
-    ``tests/components/test_trajectory.py::TestFixedOrbit::test_compute_rfi_phase_consistent_with_get_rfi_phase``.
+    ``tests/components/test_trajectory.py::TestFixedOrbit::test_compute_rfi_delay_consistent_with_get_rfi_delay_us``.
+
+    The delay is defined (issue #75) so that the phase at antenna ``p`` for source
+    ``s`` at frequency ``nu`` is ``phi = 2 pi nu tau``, i.e.::
+
+        tau_ps(t) = -(|x_s(t) - x_p(t)| + w_p(t)) / c
+
+    which includes the phase-tracking delay ``w_p / c`` of a fringe-stopping
+    interferometer. Only delay *differences* enter a baseline, so a delay common to
+    all antennas is removed per (source, time): it keeps the values at baseline
+    scale (|tau| ~ 10 us for a 10 km array rather than the ~1e5 us absolute
+    satellite range), which is what makes a single-precision cast safe.
 
     Parameters
     ----------
@@ -29,25 +45,18 @@ def get_rfi_phase_numpy(
         UVW coordinates of the antennas in metres. Only the w-coordinate is used as this is the phase delay for a fringe-stopping interferometer.
     ants_xyz: Array (n_ant, n_time, 3)
         Positions of the antennas over time in the ECI frame in metres.
-    freqs: Array (n_freq,)
-        Observation frequencies in Hz.
 
     Returns
     -------
-    phase: Array (n_src, n_ant, n_freq, n_time)
-        Phase at each antenna for each source over time.
+    delay: Array (n_src, n_ant, n_time)
+        Centred delay at each antenna for each source over time, in microseconds.
     """
-    c = 299792458.0
-    lamda = c / freqs[None, None, :, None]
-
     distances = np.linalg.norm(
-        ants_xyz[None, :, None, :, :] - rfi_xyz[:, None, None, :, :], axis=-1
+        ants_xyz[None, :, :, :] - rfi_xyz[:, None, :, :], axis=-1
     )
-    fringe_dist = ((distances + ants_uvw[None, :, None, :, -1]) / lamda) % 1
+    delay = -(distances + ants_uvw[None, :, :, -1]) * M_TO_US
 
-    phases = -2.0 * np.pi * fringe_dist
-
-    return phases
+    return delay - np.mean(delay, axis=1, keepdims=True)
 
 
 def itrf_to_uvw_numpy(itrf: NDArray, h0: NDArray, dec: float) -> NDArray:
@@ -373,14 +382,12 @@ def max_ast_fringe_rate(
     )
 
 
-def get_rfi_phase(
-    rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array, freqs: Array
-) -> Array:
-    """Calculate phase at each antenna for each RFI source
+def get_rfi_delay_us(rfi_xyz: Array, ants_uvw: Array, ants_xyz: Array) -> Array:
+    """Centred, direction-corrected delay at each antenna for each RFI source, in us.
 
     jax (differentiable) version, used by ``PhaseCalculationRFI`` (double-only).
-    Keep in sync with the numpy twin :func:`get_rfi_phase_numpy`.
-
+    Keep in sync with the numpy twin :func:`get_rfi_delay_us_numpy`, which also
+    documents the definition and sign convention.
 
     Parameters
     ----------
@@ -390,38 +397,63 @@ def get_rfi_phase(
         UVW coordinates of the antennas in metres. Only the w-coordinate is used as this is the phase delay for a fringe-stopping interferometer.
     ants_xyz: Array (n_ant, n_time, 3)
         Positions of the antennas over time in the ECI frame in metres.
-    freqs: Array (n_freq,)
-        Observation frequencies in Hz.
 
     Returns
     -------
-    phase: Array (n_src, n_ant, n_freq, n_time)
-        Phase at each antenna for each source over time.
+    delay: Array (n_src, n_ant, n_time)
+        Centred delay at each antenna for each source over time, in microseconds.
     """
-    c = 299792458.0
-    lamda = c / freqs[None, None, :, None]
-
     distances = jnp.linalg.norm(
-        ants_xyz[None, :, None, :, :] - rfi_xyz[:, None, None, :, :], axis=-1
+        ants_xyz[None, :, :, :] - rfi_xyz[:, None, :, :], axis=-1
     )
-    fringe_dist = ((distances + ants_uvw[None, :, None, :, -1]) / lamda) % 1
+    delay = -(distances + ants_uvw[None, :, :, -1]) * M_TO_US
 
-    phases = -2.0 * jnp.pi * fringe_dist
-
-    return phases
+    return delay - jnp.mean(delay, axis=1, keepdims=True)
 
 
-def calculate_rfi_vis_fine(
-    rfi_A: Array, rfi_phase: Array, a1: Array, a2: Array
+def rfi_baseline_phase(
+    rfi_delay_us: Array, freqs_mhz: Array, a1: Array, a2: Array
 ) -> Array:
-    """Calculates the visibility across baselines from the complex antenna signals and geometric phase delays at each antenna.
+    """Baseline phase ``2 pi f (tau[a1] - tau[a2])`` from per-antenna delays.
+
+    The delay *difference* is formed first and only then scaled by the angular
+    frequency, which is the order the ``ri_kernels`` delay kernels use. Doing it
+    the other way round (per-antenna phases of ~1e5 rad, then a difference) would
+    lose most of the single-precision mantissa before the subtraction.
 
     Parameters
     ----------
-    rfi_A : Array (n_rfi, n_ant, ...)
+    rfi_delay_us : Array (n_ant, ..., n_time)
+        Centred delays in microseconds; the antenna axis leads, time trails.
+    freqs_mhz : Array (n_freq,)
+        Frequencies in MHz.
+    a1, a2 : Array (n_bl,)
+        Antenna indices of each baseline.
+
+    Returns
+    -------
+    Array (n_bl, ..., n_freq, n_time)
+        Baseline phase in radians, with the frequency axis inserted before time.
+    """
+    delay_diff = rfi_delay_us[a1] - rfi_delay_us[a2]
+    omega = 2.0 * jnp.pi * freqs_mhz
+    return omega[:, None] * delay_diff[..., None, :]
+
+
+def calculate_rfi_vis_fine(
+    rfi_A: Array, rfi_delay_us: Array, freqs_mhz: Array, a1: Array, a2: Array
+) -> Array:
+    """Calculates the visibility across baselines from the complex antenna signals and geometric delays at each antenna.
+
+    Parameters
+    ----------
+    rfi_A : Array (n_rfi, n_ant, n_freq, n_time)
         The complex-valued signal at each antennna.
-    rfi_phase : Array (n_rfi, n_ant, ...)
-        The geometric phase delay at each antenna.
+    rfi_delay_us : Array (n_rfi, n_ant, n_time)
+        The centred geometric delay at each antenna in microseconds, signed such
+        that the phase is ``2 pi f tau`` (see :func:`get_rfi_delay_us_numpy`).
+    freqs_mhz : Array (n_freq,)
+        Frequencies in MHz.
     a1 : Array (n_bl,)
         The antenna index for antenna 1 in a baseline.
     a2 : Array (n_bl,)
@@ -429,23 +461,19 @@ def calculate_rfi_vis_fine(
 
     Returns
     -------
-    Array (n_bl, ...)
+    Array (n_bl, n_freq, n_time)
         The visibilities on each baseline.
     """
 
-    # rfi_A is shape (n_rfi, n_ant, ...)
-    # rfi_phase is shape (n_rfi, n_ant, ...)
-    # a1 and a2 are shape (n_bl,)
-    # rfi_vis_fine is shape (n_bl, ...)
-
     # Workaround for bug in jax>=0.5.3
-    rfi_A_ = jnp.swapaxes(rfi_A, 0, 1)
-    rfi_phase_ = jnp.swapaxes(rfi_phase, 0, 1)
+    rfi_A_ = jnp.swapaxes(rfi_A, 0, 1)  # (n_ant, n_rfi, n_freq, n_time)
+    rfi_delay_ = jnp.swapaxes(rfi_delay_us, 0, 1)  # (n_ant, n_rfi, n_time)
+
+    # (n_bl, n_rfi, n_freq, n_time)
+    phase = rfi_baseline_phase(rfi_delay_, freqs_mhz, a1, a2)
 
     vis_rfi_fine = jnp.sum(
-        rfi_A_[a1]
-        * jnp.conjugate(rfi_A_[a2])
-        * jnp.exp(1.0j * (rfi_phase_[a1] - rfi_phase_[a2])),
+        rfi_A_[a1] * jnp.conjugate(rfi_A_[a2]) * jnp.exp(1.0j * phase),
         axis=1,
     )
 
@@ -455,35 +483,36 @@ def calculate_rfi_vis_fine(
 @partial(jit, static_argnames=("freq_stride", "time_stride"))
 def calculate_rfi_vis_variable(
     rfi_A: Array,
-    rfi_phase: Array,
+    rfi_delay_us: Array,
+    freqs_mhz: Array,
     a1: Array,
     a2: Array,
     freq_stride: int,
     time_stride: int,
 ) -> Array:
 
-    # rfi_A is shape (n_ant, n_freq, n_int_freq, n_time, n_int_time)
-    # rfi_phase is shape (n_ant, n_freq, n_int_freq, n_time, n_int_time)
+    # rfi_A is shape (n_ant, n_rfi, n_freq, n_int_freq, n_time, n_int_time)
+    # rfi_delay_us is shape (n_ant, n_rfi, n_time, n_int_time)
+    # freqs_mhz is shape (n_freq, n_int_freq)
     # a1 and a2 are shape (n_bl_grp,)
     # vis_rfi is shape (n_bl_grp, n_freq, n_time)
 
-    idx = [
-        slice(None),  # all antennas
-        slice(None),  # all rfi sources
-        slice(None),  # all frequency channels
-        slice(freq_stride // 2, None, freq_stride),  # limited frequency samples
-        slice(None),  # all time steps
-        slice(time_stride // 2, None, time_stride),  # limited time samples
-    ]
+    f_idx = slice(freq_stride // 2, None, freq_stride)  # limited frequency samples
+    t_idx = slice(time_stride // 2, None, time_stride)  # limited time samples
 
-    rfi_A = rfi_A[tuple(idx)]
-    rfi_phase = rfi_phase[tuple(idx)]
+    rfi_A = rfi_A[:, :, :, f_idx, :, t_idx]
+    rfi_delay_us = rfi_delay_us[..., t_idx]
+    freqs_mhz = freqs_mhz[:, f_idx]
+
+    # (n_bl_grp, n_rfi, n_time, n_int_time)
+    delay_diff = rfi_delay_us[a1] - rfi_delay_us[a2]
+    omega = 2.0 * jnp.pi * freqs_mhz
+    # (n_bl_grp, n_rfi, n_freq, n_int_freq, n_time, n_int_time)
+    phase = omega[None, None, :, :, None, None] * delay_diff[:, :, None, None, :, :]
 
     vis_rfi = jnp.sum(
         jnp.mean(
-            rfi_A[a1]
-            * jnp.conjugate(rfi_A[a2])
-            * jnp.exp(1.0j * (rfi_phase[a1] - rfi_phase[a2])),
+            rfi_A[a1] * jnp.conjugate(rfi_A[a2]) * jnp.exp(1.0j * phase),
             axis=(3, 5),
         ),
         axis=1,

@@ -9,7 +9,7 @@ from tabascal.distributed import (
 )
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
-from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
+from tabascal.interferometry import get_rfi_delay_us, get_rfi_delay_us_numpy, itrf_to_uvw_numpy
 from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
@@ -146,10 +146,18 @@ def get_satellite_elevations(orbit_records: list, times_jd, ants_itrf) -> NDArra
 
 
 class PhaseCalculationRFI(Component):
+    """Differentiable geometric delays from the (possibly learnable) RFI trajectory.
+
+    Turns ``rfi_xyz`` into ``rfi_delay_us``, the centred direction-corrected delay
+    at each antenna (see :func:`tabascal.interferometry.get_rfi_delay_us`). The
+    delay carries no frequency axis -- the RFI visibility components expand it to
+    a phase per fine frequency sample themselves -- so it is smaller than the
+    former ``rfi_phase`` by a factor of ``n_freq_fine``.
+    """
 
     requires_double = True
     required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
-    output_shapes = {"rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine")}
+    output_shapes = {"rfi_delay_us": ("n_rfi", "n_ant", "n_time_fine")}
 
     parameters = {}
 
@@ -160,8 +168,6 @@ class PhaseCalculationRFI(Component):
             self.times_jd_fine = config.times_jd_fine
             self.ants_itrf = config.ants_itrf
             self.phase_centre = config.phase_centre
-            self.freqs_fine = config.freqs_fine
-            self.n_freq_fine = config.n_freq_fine
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
             self.n_time_fine = config.n_time_fine
@@ -198,7 +204,6 @@ class PhaseCalculationRFI(Component):
 
         assert_attr_shape(self, "ants_uvw", ant_shape)
         assert_attr_shape(self, "ants_xyz", ant_shape)
-        assert_attr_shape(self, "freqs_fine", (self.n_freq_fine,))
 
     def build_set_params(self):
 
@@ -211,7 +216,6 @@ class PhaseCalculationRFI(Component):
         return {
             "ants_uvw": self.ants_uvw,
             "ants_xyz": self.ants_xyz,
-            "freqs_fine": self.freqs_fine,
         }
 
     def build_forward(self):
@@ -220,24 +224,23 @@ class PhaseCalculationRFI(Component):
 
         def forward(params, state, constants):
             # Pure JAX operations only
-            rfi_phase = get_rfi_phase(
+            rfi_delay_us = get_rfi_delay_us(
                 state["rfi_xyz"],
                 constants[f"{prefix}/ants_uvw"],
                 constants[f"{prefix}/ants_xyz"],
-                constants[f"{prefix}/freqs_fine"],
             )
-            state = {**state, "rfi_phase": rfi_phase}
+            state = {**state, "rfi_delay_us": rfi_delay_us}
 
             return state
 
         return forward
-    
+
     def _set_outputs(self):
 
-        # Fine-grid memory hog; under sharding each device only allocates its RFI shard.
+        # Per-RFI fine-time grid; under sharding each device only allocates its RFI shard.
         self.state_outputs = {
-            "rfi_phase": sharded_rfi_zeros(
-                (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine), None
+            "rfi_delay_us": sharded_rfi_zeros(
+                (self.n_rfi, self.n_ant, self.n_time_fine), None
             ),
         }
 
@@ -245,9 +248,9 @@ class PhaseCalculationRFI(Component):
 class FixedOrbit(Component):
 
     required_inputs = {}  # No inputs needed
-    outputs_shapes = {
+    output_shapes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
+        "rfi_delay_us": ("n_rfi", "n_ant", "n_time_fine"),
     }
 
     # Add parameter specifications
@@ -262,24 +265,19 @@ class FixedOrbit(Component):
             self.epoch_jd = config.epoch_jd
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
-            self.n_freq = config.n_freq
             self.n_time = config.n_time
-            self.n_freq_fine = config.n_freq_fine
             self.n_time_fine = config.n_time_fine
 
             self.n_int_time = config.n_int_time
-            self.n_int_freq = config.args["rfi"]["freq_int_samples"]
 
             self.ants_itrf = config.ants_itrf
             self.phase_centre = config.phase_centre
-            self.freqs = config.freqs
             self.times = config.times
-            self.freqs_fine = config.freqs_fine
             self.times_fine = config.times_fine
             self.times_jd_fine = config.times_jd_fine
 
             # Do expensive setup operations once
-            self._compute_rfi_phase()
+            self._compute_rfi_delay()
             self._set_outputs()
 
             # Validate dimensions
@@ -298,7 +296,7 @@ class FixedOrbit(Component):
     def build_constants(self):
         return {
             "rfi_xyz": self.rfi_xyz,
-            "rfi_phase": self.rfi_phase,
+            "rfi_delay_us": self.rfi_delay_us,
         }
 
     def build_forward(self):
@@ -307,8 +305,8 @@ class FixedOrbit(Component):
 
         def forward(params, state, constants):
             rfi_xyz = constants[f"{prefix}/rfi_xyz"]
-            rfi_phase = constants[f"{prefix}/rfi_phase"]
-            return {**state, "rfi_xyz": rfi_xyz, "rfi_phase": rfi_phase}
+            rfi_delay_us = constants[f"{prefix}/rfi_delay_us"]
+            return {**state, "rfi_xyz": rfi_xyz, "rfi_delay_us": rfi_delay_us}
 
         return forward
 
@@ -317,7 +315,7 @@ class FixedOrbit(Component):
         pass
 
     @measure_runtime
-    def _compute_rfi_phase(self):
+    def _compute_rfi_delay(self):
 
         self.rfi_xyz = np.asarray(
             get_satellite_positions(self.orbit_records, list(self.times_jd_fine))
@@ -325,32 +323,34 @@ class FixedOrbit(Component):
 
         self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
 
-        # rfi_phase is one-shot setup producing a forward constant, so compute it in
-        # numpy/skyfield (f64) in both precisions — faster than the jax path (no JIT
-        # compile) and accurate. jnp.array casts to the active precision (f64/f32).
+        # rfi_delay_us is one-shot setup producing a forward constant, so compute it
+        # in numpy/skyfield (f64) in both precisions — faster than the jax path (no
+        # JIT compile) and accurate. The delay is centred across antennas while still
+        # in f64 (see get_rfi_delay_us_numpy), which is what makes the cast to the
+        # active precision (f64/f32) by jnp.array safe.
         gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
         self.ants_uvw = np.transpose(
             itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
-        # Fine-grid constant and the biggest array of this component: under sharding
-        # it is created directly with the RFI-axis sharding so the full array only
-        # ever exists in host numpy, never on a single device.
-        rfi_phase_np = get_rfi_phase_numpy(
-            self.rfi_xyz, self.ants_uvw, self.ants_xyz, self.freqs_fine
+        # Per-RFI fine-time constant and the biggest array of this component: under
+        # sharding it is created directly with the RFI-axis sharding so the full
+        # array only ever exists in host numpy, never on a single device.
+        rfi_delay_np = get_rfi_delay_us_numpy(
+            self.rfi_xyz, self.ants_uvw, self.ants_xyz
         )
         if sharding_enabled():
             dtype = jnp.zeros((), dtype=None).dtype  # match the active precision
-            self.rfi_phase = make_global(rfi_phase_np.astype(dtype), rfi_sharding())
+            self.rfi_delay_us = make_global(rfi_delay_np.astype(dtype), rfi_sharding())
         else:
-            self.rfi_phase = jnp.array(rfi_phase_np)
+            self.rfi_delay_us = jnp.array(rfi_delay_np)
 
     def _set_outputs(self):
 
         self.state_outputs = {
             "rfi_xyz": self.rfi_xyz,
-            "rfi_phase": self.rfi_phase,
+            "rfi_delay_us": self.rfi_delay_us,
         }
 
     def _validate_dimensions(self):
@@ -359,8 +359,8 @@ class FixedOrbit(Component):
         assert_attr_shape(self, "rfi_xyz", (self.n_rfi, self.n_time_fine, 3))
         assert_attr_shape(
             self,
-            "rfi_phase",
-            (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine),
+            "rfi_delay_us",
+            (self.n_rfi, self.n_ant, self.n_time_fine),
         )
 
 

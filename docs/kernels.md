@@ -11,10 +11,31 @@ runtime dependency of TABASCAL — **nothing is built from the TABASCAL
 repository**, and no compiler or CUDA toolkit is needed to install TABASCAL
 itself.
 
+## What they compute
+
+Both components call the *delay* kernel, `RFIDelayVisOp`. It takes the
+per-antenna RFI amplitudes on the fine time/frequency grid together with the
+compact geometric delays `rfi_delay_us` — shaped `(n_rfi, n_ant, n_time_fine)`,
+with no frequency axis — and the fine frequency grid in MHz, and forms the
+baseline phase `2π f (τ₁ − τ₂)` inside the kernel. Nothing the size of the
+former per-frequency phase array, `(n_rfi, n_ant, n_freq_fine, n_time_fine)`,
+is ever materialised; the delay input is smaller than it by a factor of
+`n_freq × freq_int_samples`.
+
+The delays are computed once, in double precision, by the trajectory
+component and centred across antennas per source and time sample before
+being cast to the run's precision. Only delay differences enter a baseline,
+so this is exact, and it is what keeps single precision usable: the kernel's
+float32 path is specified for arrays up to about 10 km across (`|Δτ| ≲ 33 μs`),
+where the worst-case phase resolution at 1 GHz is about 0.025 rad. Use double
+precision for arrays approaching 100 km.
+
 ## Installation
 
 The CPU kernel comes with `ri_kernels` itself, so it is already present in a
-standard install.
+standard install. The delay kernels need `ri_kernels >= 0.3.0`; with an older
+release the FFI components fail at setup with a message saying so, while the
+pure-JAX `RiemannVis` keeps working.
 
 The GPU kernel ships as an add-on wheel (`ri_kernels_cuda12` /
 `ri_kernels_cuda13`, Linux only). It is pulled in by TABASCAL's `cuda12` /
