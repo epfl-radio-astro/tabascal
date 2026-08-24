@@ -72,7 +72,10 @@ SatChecker serves two formats: TLEs for epochs up to 2026-07-11, and OMM
 (Orbit Mean-Elements Message) records from 2026-07-12 onwards. TABASCAL asks
 whichever archive your observation epoch falls in and falls back to the other if
 that one has nothing usable, so this is not something you configure or need to
-think about.
+think about. The client itself is the
+[satchecker-client](https://satchecker-client.readthedocs.io/) package; how
+TABASCAL uses it — source precedence, record age limits, and coverage
+enforcement — is documented in [Satellite orbit records](orbits.md).
 
 Every configured satellite must resolve to an acceptable record. TABASCAL checks
 this during preflight — before the visibilities are read — and stops with an

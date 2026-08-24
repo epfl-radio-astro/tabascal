@@ -4,6 +4,12 @@ TABASCAL obtains satellite orbital elements from the
 [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service. No account or
 credentials are required.
 
+The transport, record parsing, validation, and cache storage live in the
+[satchecker-client](https://satchecker-client.readthedocs.io/) package,
+extracted from TABASCAL and documented on its own. This page documents what
+TABASCAL decides on top of it: which source a satellite resolves from, how
+stale a record may be, and what happens when coverage is incomplete.
+
 ## Two archives, one handover
 
 SatChecker keeps satellite orbits in two formats, and which one you get depends
@@ -15,16 +21,14 @@ on when your observation was.
 | OMM | `get-nearest-omm` | from **2026-07-12** onwards, growing |
 
 The two do not overlap: the last TLE and the first OMM are about twelve hours
-apart, and the TLE archive will never gain another record. SatChecker 1.7.0
-made the split because Celestrak is dropping Alpha-5 notation in order to
-preserve the original TLE format — which means catalogue numbers above 99999
-cease to be representable as TLEs at all.
-
-A **TLE** (Two-Line Element set) encodes an orbit in two fixed-width 69-column
-lines. An **OMM** (Orbit Mean-Elements Message) carries the same orbital
-elements as named numeric fields. Both describe the same SGP4 model, and
-TABASCAL derives the same element set from either, so nothing downstream of
-resolution cares which one a satellite resolved to.
+apart, and the TLE archive will never gain another record. A **TLE** (Two-Line
+Element set) encodes an orbit in two fixed-width 69-column lines; an **OMM**
+(Orbit Mean-Elements Message) carries the same orbital elements as named
+numeric fields. Both describe the same SGP4 model, and TABASCAL derives the
+same element set from either, so nothing downstream of resolution cares which
+one a satellite resolved to. The
+[satchecker-client guide](https://satchecker-client.readthedocs.io/en/latest/usage.html#two-archives-one-handover)
+covers the split, and why it happened, in more detail.
 
 You do not choose between them. TABASCAL asks the archive your observation
 epoch falls in, and falls back to the other if that one has nothing usable.
@@ -82,23 +86,18 @@ question is still asking a down service.
 
 ## Being a considerate client
 
-TABASCAL aims to be a considerate client of a free public service. Requests are
-issued at most five at a time, are submitted one at a time as earlier ones land
-rather than queued all at once, and every response that can be reused is written
-to the local cache so a later run does not ask again.
-
-If a request fails because the service cannot be reached, or the service returns
-HTTP 429 to say this client should back off, TABASCAL stops the batch there: no
-further requests are sent, so an outage or a rate limit costs at most five
-requests no matter how many satellites are configured — and, as above, no
-second round against the other endpoint.
-
-A malformed reply, or a 4xx rejection of one request, is different: the service
-is up and answering, so it is treated as that one satellite's problem and the
-rest of the batch continues — an unknown catalogue number legitimately gets an
-empty response. Should the service reject ten consecutive requests with the same
-status and no success in between, TABASCAL concludes it is facing a wall rather
-than ten absent satellites, and stops there too.
+TABASCAL talks to SatChecker through satchecker-client, whose
+[batching](https://satchecker-client.readthedocs.io/en/latest/usage.html#batches)
+is written to be considerate of a free public service: requests go out at most
+five at a time, submitted incrementally as earlier ones land; an unreachable
+service or an HTTP 429 stops the batch at a cost of at most five requests no
+matter how many satellites are configured; a malformed reply or a 4xx rejection
+of one request is one satellite's problem rather than the batch's; and ten
+identical consecutive rejections with no success in between are recognised as a
+service-level wall rather than ten absent satellites. TABASCAL adds its own
+restraint on top: after any such service-level failure there is no second round
+against the other endpoint (as above), and every response that can be reused is
+written to the local cache so a later run does not ask again.
 
 Whatever the cause, every configured ID is reported, and the resulting error
 distinguishes a satellite with no record from one TABASCAL could not ask about.
@@ -118,8 +117,9 @@ The managed cache normally lives in the platform user-cache directory, such as
 `ORBIT_CACHE_DIR` to relocate it. This variable controls managed storage; it is
 not an additional source like `--extra-orbit-dir`.
 
-Each `orbit-<NORAD ID>.json` file is an atomically written, versioned envelope
-containing the validated immutable records already learned for that object.
+The store itself — an atomically written, versioned `orbit-<NORAD ID>.json`
+envelope per satellite, validated on every read — is satchecker-client's
+[`TextOrbitCache`](https://satchecker-client.readthedocs.io/en/latest/usage.html#caching).
 Records are keyed by their contents and epoch rather than by the observation
 that originally requested them, so one record can serve multiple nearby runs.
 
@@ -163,37 +163,21 @@ upgrading.
 (validation)=
 ## Validation
 
-The two formats do not offer the same guarantees, and it is worth being explicit
-about what is lost rather than letting the difference pass silently.
+Record validation is satchecker-client's job, and its guide spells out
+[what is guaranteed per kind](https://satchecker-client.readthedocs.io/en/latest/usage.html#what-validation-guarantees-per-kind):
+the element range and finiteness checks both kinds share, a TLE's modulo-10
+checksums and embedded-identity cross-check, and the epoch plausibility window
+that partly stands in for both on a checksum-less OMM. The short version is
+that the two formats do not offer the same guarantees, an OMM's are weaker,
+and that is a property of the format rather than of the handling.
 
-Both kinds are checked for:
-
-- a present, numeric, finite, whole-number `NORAD_CAT_ID`;
-- finiteness on all seven orbital elements;
-- inclination in [0, 180]; RAAN, argument of pericenter and mean anomaly in
-  [0, 360); eccentricity in [0, 1); mean motion strictly positive.
-
-A **TLE** additionally gets two checks that have no OMM equivalent:
-
-- **The modulo-10 checksum** on each 69-column line. This is what makes
-  single-character corruption detectable — a flipped digit inside a fixed-width
-  numeric field otherwise parses cleanly, stays in range, and silently shifts
-  the modelled trajectory.
-- **The embedded identity cross-check.** Both lines carry the satellite
-  identifier, and TABASCAL requires them to agree with each other and with the
-  row. A record filed under the wrong satellite is caught.
-
-There is a third, subtler difference. A TLE's epoch is always re-derived from
-line 1; a provider's own epoch field is never trusted for acceptance. An OMM has
-no lines to re-derive from, so its `EPOCH` field must be taken at face value —
-and, as described above, a clamped `get-nearest-omm` response is precisely the
-case where a wrong epoch would otherwise be invisible. To partly close that gap,
-an OMM epoch must parse as ISO 8601 and fall inside an absolute plausibility
-window (not before 1957, not more than a year in the future).
-
-**An OMM record has no checksum.** There is no way to add one. The range checks
-and the epoch window are what stands in for it, and they are weaker. This is a
-property of the format, not of TABASCAL's handling of it.
+One consequence matters enough to repeat here. A TLE's epoch is always
+re-derived from line 1; a provider's own epoch field is never trusted for
+acceptance. An OMM has no lines to re-derive from, so its `EPOCH` field must be
+taken at face value — and, as described above, a clamped `get-nearest-omm`
+response is precisely the case where a wrong epoch would otherwise be
+invisible. The age ceiling is therefore doing more work for OMM records than it
+ever did for TLEs.
 
 Logs report each selected provider, epoch, signed offset, absolute age, and
 which endpoint answered.
