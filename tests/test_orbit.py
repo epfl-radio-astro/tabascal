@@ -172,7 +172,7 @@ class TestReplayRoundTrip:
 
     @pytest.mark.parametrize("kind", ["tle", "omm"])
     def test_the_replayed_elements_are_identical(self, tmp_path, kind):
-        from tabascal.satchecker.records import record_elements
+        from satchecker_client.records import record_elements
 
         from .tle_helpers import make_record
 

@@ -18,8 +18,8 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from tabascal.satchecker.records import KIND_OMM, KIND_TLE
-from tabascal.satchecker.tle_parse import parse_tle_elements, tle_checksum
+from satchecker_client.records import KIND_OMM, KIND_TLE
+from satchecker_client.tle_parse import parse_tle_elements, tle_checksum
 from tabascal.time import datetime_to_jd, jd_to_datetime
 
 
@@ -39,7 +39,7 @@ def block_network(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError(
             "this test attempted a live network request; stub "
-            "tabascal.satchecker.client._http_get (or urlopen) instead"
+            "satchecker_client.client._http_get (or urlopen) instead"
         )
 
     monkeypatch.setattr(urllib.request, "urlopen", forbidden)
