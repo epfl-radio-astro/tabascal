@@ -4,6 +4,8 @@ Every case uses a non-unit, non-uniform gain: a unity gain cannot distinguish
 ``g_p conj(g_q)`` from ``|g_p|^2``, nor a gained model from a raw one.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -12,6 +14,8 @@ from tabascal.write import (
     data_frame_residuals,
     gained_model_mean,
     read_antenna_pairs,
+    unit_bad_gains,
+    warn_bad_gains,
 )
 
 
@@ -423,3 +427,108 @@ class TestRowOrderIsChecked:
 
         with pytest.raises(ValueError, match="distinct antenna pairs"):
             read_antenna_pairs(_FakeMS(a1_col, a2_col), len(a1_col))
+
+
+# ---------------------------------------------------------------------------
+# unit_bad_gains / warn_bad_gains
+# ---------------------------------------------------------------------------
+
+class TestUnitBadGains:
+    """A zero or non-finite antenna gain is replaced by 1, not blanked."""
+
+    @pytest.fixture
+    def gain_array(self):
+        """Gains shaped as the zarr stores them: (sample, ant, freq, time)."""
+        rng = np.random.default_rng(7)
+        shape = (2, 4, 3, 5)
+
+        return (
+            rng.normal(size=shape) + 1j * rng.normal(size=shape)
+        ).astype(np.complex64)
+
+    def test_finite_gains_are_untouched(self, gain_array):
+        out, bad = unit_bad_gains(gain_array)
+
+        np.testing.assert_array_equal(out, gain_array)
+        assert not np.any(bad)
+
+    @pytest.mark.parametrize("value", [0.0, np.nan, np.inf, -np.inf])
+    def test_bad_values_become_unity(self, gain_array, value):
+        gain_array = gain_array.copy()
+        gain_array[1, 2, 0, 3] = value
+
+        out, bad = unit_bad_gains(gain_array)
+
+        assert out[1, 2, 0, 3] == 1.0
+        assert bad[1, 2, 0, 3]
+        assert np.count_nonzero(bad) == 1
+
+    def test_a_nan_imaginary_part_counts_as_bad(self, gain_array):
+        """isfinite on a complex value covers both parts."""
+        gain_array = gain_array.copy()
+        gain_array[0, 0, 0, 0] = complex(1.0, np.nan)
+
+        out, bad = unit_bad_gains(gain_array)
+
+        assert bad[0, 0, 0, 0] and out[0, 0, 0, 0] == 1.0
+
+    def test_everything_stays_finite(self, gain_array):
+        """The point of the substitution: nothing downstream can divide by zero."""
+        gain_array = gain_array.copy()
+        gain_array[:, 1] = 0.0
+
+        out, _ = unit_bad_gains(gain_array)
+
+        assert np.all(np.isfinite(out))
+        assert not np.any(out == 0.0)
+
+    def test_only_the_dead_antenna_is_substituted(self, gain_array):
+        gain_array = gain_array.copy()
+        gain_array[:, 1] = 0.0
+
+        out, bad = unit_bad_gains(gain_array)
+
+        assert np.all(bad[:, 1]) and not np.any(bad[:, [0, 2, 3]])
+        np.testing.assert_array_equal(out[:, [0, 2, 3]], gain_array[:, [0, 2, 3]])
+
+    def test_the_dtype_is_preserved(self, gain_array):
+        gain_array = gain_array.copy()
+        gain_array[0, 0, 0, 0] = 0.0
+
+        out, _ = unit_bad_gains(gain_array)
+
+        assert out.dtype == np.complex64
+
+    def test_works_on_dask_arrays(self, gain_array):
+        """write_results_ms passes the zarr's dask array straight in."""
+        da = pytest.importorskip("dask.array")
+        gain_array = gain_array.copy()
+        gain_array[0, 3] = 0.0
+
+        out, bad = unit_bad_gains(da.from_array(gain_array, chunks=(1, 2, 3, 5)))
+
+        out, bad = np.asarray(out), np.asarray(bad)
+        assert np.all(out[0, 3] == 1.0)
+        assert np.count_nonzero(bad) == gain_array[0, 3].size
+
+
+class TestWarnBadGains:
+
+    def test_warns_with_the_count_and_the_antennas(self):
+        bad = np.zeros((2, 4, 3, 5), dtype=bool)
+        bad[0, 1] = True
+        bad[1, 3, 0, 0] = True
+
+        with pytest.warns(RuntimeWarning) as record:
+            n_bad = warn_bad_gains(bad)
+
+        message = str(record[0].message)
+        assert n_bad == 16
+        assert "16 of 120" in message
+        assert "[1, 3]" in message                  # the antennas, not the samples
+        assert "set to 1" in message
+
+    def test_silent_when_nothing_was_substituted(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert warn_bad_gains(np.zeros((1, 4, 2, 3), dtype=bool)) == 0

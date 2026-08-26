@@ -3,6 +3,8 @@ from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_to_table
 
+import warnings
+
 import numpy as np
 
 import xarray as xr
@@ -112,6 +114,53 @@ def data_frame_residuals(vis_obs, gained_ast, gained_rfi):
     }
 
 
+def unit_bad_gains(gains):
+    """Replace zero and non-finite antenna gains with 1, elementwise.
+
+    ``GPGains`` fits an unconstrained affine GP amplitude with no positivity
+    transform, and the SVI loop never checks ``isfinite``, so an unflagged dead
+    antenna can be driven to zero -- and dividing ``DATA`` by a zero or NaN
+    baseline gain poisons ``CORRECTED_DATA`` and every residual column that
+    touches the antenna.
+
+    Unity rather than a blank: the affected baselines are then simply
+    *uncalibrated* on that antenna, which stays finite and imageable, where NaN
+    would drop the data and zero would read as a real, well-calibrated value.
+    Substituting on the antenna gains rather than the baseline product means
+    everything derived downstream follows automatically.
+
+    Returns ``(gains, bad)`` with ``bad`` the mask that was substituted.
+    """
+
+    bad = ~np.isfinite(gains) | (gains == 0)
+
+    return np.where(bad, np.array(1, dtype=gains.dtype), gains), bad
+
+
+def warn_bad_gains(bad) -> int:
+    """Warn, naming the antennas, when any gain was substituted. Returns the count.
+
+    Silent substitution would look like a calibration failure downstream, so the
+    count and the antennas it touched are reported where they are known.
+    """
+
+    bad = np.asarray(bad)
+    n_bad = int(np.count_nonzero(bad))
+
+    if n_bad:
+        ants = np.flatnonzero(bad.any(axis=(0, 2, 3))).tolist()
+        warnings.warn(
+            f"{n_bad} of {bad.size} antenna gain samples "
+            f"({100 * n_bad / bad.size:.3g}%) were zero or non-finite and have "
+            f"been set to 1. Affected antennas: {ants}. Baselines touching them "
+            "are written uncalibrated on that antenna.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return n_bad
+
+
 def gained_model_mean(gains_bl, model, sample_axis: int = 0):
     """Sample-mean of ``gains_bl * model``, formed per sample.
 
@@ -154,9 +203,10 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     vis_ast = _to_ms_column(ast_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
     vis_rfi = _to_ms_column(rfi_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
 
-    gains_bl_s = baseline_gains(
-        xds_tab.gains.data.astype(np.complex64), a1, a2, ant_axis=1
-    )
+    gains, bad = unit_bad_gains(xds_tab.gains.data.astype(np.complex64))
+    warn_bad_gains(bad)
+
+    gains_bl_s = baseline_gains(gains, a1, a2, ant_axis=1)
 
     gained_ast = _to_ms_column(
         gained_model_mean(gains_bl_s, ast_vis), dims, chunks, n_freq, n_corr
@@ -167,8 +217,6 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     gains_bl = _to_ms_column(
         gains_bl_s.mean(axis=0), dims, chunks, n_freq, n_corr
     )
-
-    
 
     vis_obs = xds_ms[data_col]
 
