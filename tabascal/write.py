@@ -43,16 +43,6 @@ def baseline_gains(gains, a1, a2, ant_axis: int = 0):
     return gains[lead + (a1,)] * gains[lead + (a2,)].conj()
 
 
-def mean_baseline_gains(gains, a1, a2, sample_axis: int = 0, ant_axis: int = 1):
-    """Sample-mean of the per-baseline gain, formed per sample.
-
-    ``E[g_p conj(g_q)]`` is not ``E[g_p] conj(E[g_q])`` unless the two antennas
-    are uncorrelated across samples.
-    """
-
-    return baseline_gains(gains, a1, a2, ant_axis=ant_axis).mean(axis=sample_axis)
-
-
 def _to_ms_column(arr, dims, chunks, n_freq, n_corr):
     """``(bl, freq, time)`` array to an MS ``(row, chan, corr)`` DataArray."""
 

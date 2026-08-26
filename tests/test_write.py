@@ -11,7 +11,6 @@ from tabascal.write import (
     baseline_gains,
     data_frame_residuals,
     gained_model_mean,
-    mean_baseline_gains,
     read_antenna_pairs,
 )
 
@@ -273,40 +272,6 @@ class TestSampleAxis:
         after = baseline_gains(gains.mean(axis=0), a1, a2)
 
         np.testing.assert_allclose(before, after)
-
-
-class TestMeanBaselineGains:
-    """The reduction order, pinned where write_results_ms actually uses it."""
-
-    def test_forms_the_product_before_reducing(self):
-        gains = np.array(
-            [
-                [1.0 + 0.0j, 1.0 + 0.0j],
-                [2.0 + 0.0j, 2.0 + 0.0j],
-            ]
-        )[:, :, None, None]
-        a1, a2 = np.array([0]), np.array([1])
-
-        out = mean_baseline_gains(gains, a1, a2)
-
-        np.testing.assert_allclose(out.ravel(), [2.5])          # E[g^2]
-        assert not np.allclose(out.ravel(), [2.25])             # not E[g]^2
-
-    def test_single_sample_matches_the_naive_order(self):
-        rng = np.random.default_rng(3)
-        gains = rng.normal(size=(1, 4, 2, 1)) + 1j * rng.normal(size=(1, 4, 2, 1))
-        a1, a2 = np.triu_indices(4, k=1)
-
-        np.testing.assert_allclose(
-            mean_baseline_gains(gains, a1, a2),
-            baseline_gains(gains.mean(axis=0), a1, a2),
-        )
-
-    def test_drops_the_sample_axis(self):
-        gains = np.ones((3, 4, 2, 5), dtype=complex)
-        a1, a2 = np.triu_indices(4, k=1)
-
-        assert mean_baseline_gains(gains, a1, a2).shape == (len(a1), 2, 5)
 
 
 class TestGainedModelMean:
