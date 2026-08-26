@@ -345,7 +345,10 @@ def write_results_ms(
 
     print(f"Writing tabascal results to {cols} columns in MS file.")
 
-    # One compute for the write and for the warning counts. The masks feed the
+    # One compute for the write and for the warning counts, so the warnings
+    # follow the write: the substitution is the designed behaviour and the
+    # warning a report of it, not a precondition. Warning first would cost a
+    # second pass over the mask graph. The masks feed the
     # columns, so evaluating everything in one graph runs them once, chunk by
     # chunk, and nothing full-size is ever held in memory for the warnings.
     n_bad, bad_ants, n_bad_bl, _ = dask.compute(

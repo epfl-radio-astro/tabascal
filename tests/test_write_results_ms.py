@@ -783,6 +783,38 @@ class TestBadGainsAreSubstituted:
             rtol=1e-3,
         )
 
+    def test_the_columns_are_written_before_the_warning(self, tmp_path, monkeypatch):
+        """The counts come out of the write's own compute, so the warning follows it.
+
+        Pinned because it is observable: promoting RuntimeWarning to an error
+        raises after the MS has been written, not instead of writing it. Wired
+        by hand rather than through run_writer so the write call itself can be
+        seen even though the warning escapes as an exception.
+        """
+        import tabascal.ms as ms_mod
+
+        gains, ast, rfi = _model(1)
+        gains[0, 2] = 0.0
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(_substitute(gains)) * (ast + rfi)).mean(axis=0)))
+        xds_ms = _fake_ms(data)
+
+        written = []
+        monkeypatch.setattr(write_mod, "xds_from_ms", lambda path: [xds_ms])
+        monkeypatch.setattr(
+            write_mod, "xds_to_table",
+            lambda datasets, path, cols, column_keywords=None: written.append(cols) or [],
+        )
+        monkeypatch.setattr(ms_mod, "resolve_data_description", lambda ms_path, ddid=0: (0, 0))
+        monkeypatch.setattr(ms_mod, "resolve_correlation", lambda ms_path, name, pol_id=0: 0)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            with pytest.raises(RuntimeWarning, match="Affected antennas"):
+                write_results_ms("unused.ms", zarr_path)
+
+        assert written, "the columns were handed to xds_to_table before the warning was raised"
+
     def test_finite_gains_raise_no_warning(self, tmp_path, run_writer):
         gains, ast, rfi = _model(1)
         zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
