@@ -21,6 +21,7 @@ import pytest
 import dask.array as da
 import xarray as xr
 
+import tabascal.ms as ms_mod
 import tabascal.write as write_mod
 from tabascal.write import write_results_ms, write_results_xds
 
@@ -122,15 +123,20 @@ def _write_zarr(
     return path
 
 
-def _fake_ms(data):
+def _fake_ms(data, a1=None, a2=None, times=None):
     """An MS-like dataset: dask-backed, time-major rows.
 
     The correlation axis is however wide the ``DATA`` given here is, so the same
-    fake covers a single-correlation MS and a full four-correlation one.
+    fake covers a single-correlation MS and a full four-correlation one. The row
+    columns default to the standard four-antenna layout.
     """
 
     row_chunk = N_BL
     n_corr = data.shape[2]
+    a1 = np.tile(A1_BL, N_TIME) if a1 is None else np.asarray(a1)
+    a2 = np.tile(A2_BL, N_TIME) if a2 is None else np.asarray(a2)
+    if times is None:
+        times = np.repeat(np.arange(N_TIME, dtype=float), N_BL)
 
     return xr.Dataset(
         data_vars={
@@ -138,18 +144,9 @@ def _fake_ms(data):
                 ["row", "chan", "corr"],
                 da.from_array(data, chunks=(row_chunk, N_FREQ, n_corr)),
             ),
-            "ANTENNA1": (
-                ["row"], da.from_array(np.tile(A1_BL, N_TIME), chunks=row_chunk)
-            ),
-            "ANTENNA2": (
-                ["row"], da.from_array(np.tile(A2_BL, N_TIME), chunks=row_chunk)
-            ),
-            "TIME": (
-                ["row"],
-                da.from_array(
-                    np.repeat(np.arange(N_TIME, dtype=float), N_BL), chunks=row_chunk
-                ),
-            ),
+            "ANTENNA1": (["row"], da.from_array(a1, chunks=row_chunk)),
+            "ANTENNA2": (["row"], da.from_array(a2, chunks=row_chunk)),
+            "TIME": (["row"], da.from_array(np.asarray(times), chunks=row_chunk)),
         }
     )
 
@@ -240,7 +237,7 @@ def run_writer(monkeypatch):
             captured["data_desc_id"] = data_desc_id
             return 0, pol_id
 
-        monkeypatch.setattr(write_mod, "resolve_data_description", _describe)
+        monkeypatch.setattr(ms_mod, "resolve_data_description", _describe)
 
         def _capture(datasets, path, cols, column_keywords=None):
             captured["xds"] = datasets[0]
@@ -589,8 +586,13 @@ class TestMultipleCorrelations:
 # ---------------------------------------------------------------------------
 
 class TestBaselineCountGuard:
+    """Whether the results describe *this* MS is the writer's question.
 
-    def test_a_zarr_from_another_ms_is_rejected(self, tmp_path, run_writer):
+    The MS's own layout is validated in ``tabascal.ms``; only the comparison
+    against the results lives here.
+    """
+
+    def test_fewer_baselines_in_the_results_than_the_ms(self, tmp_path, run_writer):
         """Three baselines in the results, six in the MS."""
         gains, ast, rfi = _model(1)
         gains = gains[:, :3]
@@ -602,6 +604,31 @@ class TestBaselineCountGuard:
 
         with pytest.raises(ValueError, match="does not belong"):
             run_writer(xds_ms, zarr_path)
+
+    def test_more_baselines_in_the_results_than_the_ms(self, tmp_path, run_writer):
+        """The MS is perfectly time-major; it is simply a different array."""
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+
+        # Three antennas, so three baselines against the results' six.
+        keep = np.flatnonzero((A1_BL < 3) & (A2_BL < 3))
+        rows = np.concatenate([keep + t * N_BL for t in range(N_TIME)])
+        xds_ms = _fake_ms(
+            np.zeros((len(rows), N_FREQ, N_CORR), np.complex64),
+            a1=np.tile(A1_BL[keep], N_TIME),
+            a2=np.tile(A2_BL[keep], N_TIME),
+            times=np.repeat(np.arange(N_TIME, dtype=float), len(keep)),
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            run_writer(xds_ms, zarr_path)
+
+        message = str(excinfo.value)
+        # The guard's own diagnosis, naming both counts -- not dask's downstream
+        # "chunks do not add up to shape", which this would otherwise reach.
+        assert "does not belong" in message
+        assert "6 baselines" in message and "has 3" in message
+        assert "time-major" not in message
 
 
 def _substitute(gains):

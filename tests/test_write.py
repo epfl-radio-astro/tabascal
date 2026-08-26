@@ -16,7 +16,6 @@ from tabascal.write import (
     fitted_correlation,
     gained_model_mean,
     into_corr,
-    read_antenna_pairs,
     total_model,
     unit_bad_gains,
     warn_bad_baseline_gains,
@@ -232,165 +231,6 @@ class TestDataFrameResiduals:
 
 
 # ---------------------------------------------------------------------------
-# read_antenna_pairs
-# ---------------------------------------------------------------------------
-
-class _FakeCol:
-    def __init__(self, values):
-        self._values = np.asarray(values)
-
-    def __getitem__(self, idx):
-        return _FakeCol(self._values[idx])
-
-    def compute(self):
-        return self._values
-
-
-class _FakeMS:
-    """Stand-in for the MS dataset, with distinct ANTENNA1/ANTENNA2 columns.
-
-    Carries TIME too: the MS's own baseline count is derived from it, so the
-    layout checks need a whole column rather than one timestep's worth.
-    """
-
-    def __init__(self, a1, a2, times=None):
-        if times is None:
-            times = np.zeros(len(np.asarray(a1)))
-        self.ANTENNA1 = type("V", (), {"data": _FakeCol(a1)})()
-        self.ANTENNA2 = type("V", (), {"data": _FakeCol(a2)})()
-        self.TIME = type("V", (), {"data": _FakeCol(times)})()
-
-
-def _time_major_ms(n_ant: int = 4, n_time: int = 3):
-    """A well-formed time-major fake MS and its one timestep of pairs."""
-
-    a1_bl, a2_bl = np.triu_indices(n_ant, k=1)
-    n_bl = len(a1_bl)
-    times = np.repeat(np.arange(n_time, dtype=float), n_bl)
-
-    xds = _FakeMS(np.tile(a1_bl, n_time), np.tile(a2_bl, n_time), times)
-
-    return xds, a1_bl, a2_bl
-
-
-class TestReadAntennaPairs:
-
-    def test_reads_both_antenna_columns(self):
-        """The regression guard: reading ANTENNA1 twice is the original bug."""
-        a1_col, a2_col = np.triu_indices(4, k=1)
-        xds = _FakeMS(a1_col, a2_col)
-
-        a1, a2 = read_antenna_pairs(xds, len(a1_col))
-
-        np.testing.assert_array_equal(a1, a1_col)
-        np.testing.assert_array_equal(a2, a2_col)
-        assert not np.array_equal(a1, a2)
-
-    def test_takes_only_the_first_baseline_set(self):
-        """The columns repeat per timestep; one set of baselines is wanted."""
-        xds, a1_bl, a2_bl = _time_major_ms()
-        n_bl = len(a1_bl)
-
-        a1, a2 = read_antenna_pairs(xds, n_bl)
-
-        assert len(a1) == n_bl and len(a2) == n_bl
-        np.testing.assert_array_equal(a2, a2_bl)
-
-
-class TestBaselineCountsMustMatch:
-    """The results zarr and the MS have to describe the same array.
-
-    The count is taken from the zarr, so a mismatch used to surface as an
-    ordering complaint, an opaque dask chunk error, or -- when the row counts
-    coincided -- silently misplaced gains.
-    """
-
-    def test_more_baselines_in_the_results_than_the_ms(self):
-        xds, _, _ = _time_major_ms(n_ant=3, n_time=2)   # 3 baselines
-
-        with pytest.raises(ValueError) as excinfo:
-            read_antenna_pairs(xds, 6)
-
-        message = str(excinfo.value)
-        assert "6" in message and "3" in message
-        # Not an ordering problem: this MS is perfectly time-major.
-        assert "time-major" not in message
-
-    def test_fewer_baselines_in_the_results_than_the_ms(self):
-        """The case the old check passed silently."""
-        xds, _, _ = _time_major_ms(n_ant=4, n_time=2)   # 6 baselines
-
-        with pytest.raises(ValueError, match="does not belong"):
-            read_antenna_pairs(xds, 3)
-
-    def test_ragged_row_counts_are_rejected(self):
-        """Rows that do not divide into whole timesteps break the reshape."""
-        a1_bl, a2_bl = np.triu_indices(4, k=1)
-        xds = _FakeMS(
-            np.tile(a1_bl, 2)[:-1],
-            np.tile(a2_bl, 2)[:-1],
-            np.repeat([0.0, 1.0], 6)[:-1],
-        )
-
-        with pytest.raises(ValueError, match="whole number of baselines"):
-            read_antenna_pairs(xds, 6)
-
-
-class TestEachBlockIsOneTimestep:
-    """A block of ``n_bl`` rows must hold one TIME, not a cycle of them."""
-
-    def test_interleaved_timesteps_are_rejected(self):
-        """Pairs repeat per block and rows reshape cleanly -- and every
-        visibility still lands on the wrong timestamp."""
-        a1_bl, a2_bl = np.triu_indices(3, k=1)          # 3 baselines
-        xds = _FakeMS(
-            np.tile(a1_bl, 2),
-            np.tile(a2_bl, 2),
-            np.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
-        )
-
-        with pytest.raises(ValueError, match="interleave timesteps"):
-            read_antenna_pairs(xds, 3)
-
-    def test_blocks_out_of_ascending_time_order_are_accepted(self):
-        """Only block-constancy matters: the zarr time axis follows the blocks."""
-        a1_bl, a2_bl = np.triu_indices(4, k=1)
-        n_bl = len(a1_bl)
-        xds = _FakeMS(
-            np.tile(a1_bl, 3),
-            np.tile(a2_bl, 3),
-            np.repeat([2.0, 0.0, 1.0], n_bl),
-        )
-
-        a1, a2 = read_antenna_pairs(xds, n_bl)
-
-        np.testing.assert_array_equal(a1, a1_bl)
-        np.testing.assert_array_equal(a2, a2_bl)
-
-
-class TestBaselineOrderIsFixedAcrossTimesteps:
-    """The (n_time, n_bl) reshape needs the same pair sequence every timestep."""
-
-    def test_a_permuted_timestep_is_rejected(self):
-        a1_bl, a2_bl = np.triu_indices(4, k=1)
-        perm = np.array([3, 1, 0, 5, 4, 2])
-        a1_col = np.concatenate([a1_bl, a1_bl[perm]])
-        a2_col = np.concatenate([a2_bl, a2_bl[perm]])
-        xds = _FakeMS(a1_col, a2_col, np.repeat([0.0, 1.0], 6))
-
-        with pytest.raises(ValueError, match="differs between timesteps"):
-            read_antenna_pairs(xds, 6)
-
-    def test_a_consistent_order_is_accepted(self):
-        xds, a1_bl, a2_bl = _time_major_ms(n_time=4)
-
-        a1, a2 = read_antenna_pairs(xds, len(a1_bl))
-
-        np.testing.assert_array_equal(a1, a1_bl)
-        np.testing.assert_array_equal(a2, a2_bl)
-
-
-# ---------------------------------------------------------------------------
 # Sample-axis handling
 # ---------------------------------------------------------------------------
 
@@ -495,31 +335,6 @@ class TestGainedModelMean:
         np.testing.assert_allclose(
             gained_ast + gained_rfi + res["total"], vis_obs, atol=1e-12
         )
-
-
-class TestRowOrderIsChecked:
-    """Reviewer's point: `[:n_bl]` assumes a time-major MS."""
-
-    def test_baseline_major_ordering_is_rejected(self):
-        """All times of one baseline first repeats each pair across the rows."""
-        a1_bl, a2_bl = np.triu_indices(4, k=1)
-        n_time = 3
-        xds = _FakeMS(
-            np.repeat(a1_bl, n_time),
-            np.repeat(a2_bl, n_time),
-            np.tile(np.arange(n_time, dtype=float), len(a1_bl)),
-        )
-
-        with pytest.raises(ValueError, match="not ordered time-major"):
-            read_antenna_pairs(xds, len(a1_bl))
-
-    def test_partially_repeated_pairs_are_rejected(self):
-        a1_col, a2_col = np.triu_indices(4, k=1)
-        a1_col, a2_col = a1_col.copy(), a2_col.copy()
-        a1_col[-1], a2_col[-1] = a1_col[0], a2_col[0]   # one duplicate pair
-
-        with pytest.raises(ValueError, match="distinct antenna pairs"):
-            read_antenna_pairs(_FakeMS(a1_col, a2_col), len(a1_col))
 
 
 # ---------------------------------------------------------------------------

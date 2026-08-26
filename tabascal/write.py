@@ -1,5 +1,5 @@
 from tabascal.distributed import is_process_0
-from tabascal.ms import resolve_correlation, resolve_data_description
+from tabascal.ms import ms_layout, partition_polarization, resolve_correlation
 from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_to_table
@@ -11,88 +11,6 @@ import numpy as np
 import xarray as xr
 import dask.array as da
 import dask
-
-
-def read_antenna_pairs(xds_ms, n_bl: int):
-    """The two antenna indices of each baseline, from one timestep's rows.
-
-    ``n_bl`` comes from the results zarr; the MS's own baseline count is derived
-    the way the reader derives it (``n_row // n_unique_time``) so that a zarr
-    belonging to a different MS is named as such, rather than reported as a row
-    ordering problem or -- when the two row counts happen to coincide -- written
-    out with every baseline's gain on the wrong rows.
-
-    Assumes the time-major row order the reader relies on throughout
-    (``reshape(n_time, n_bl)``). Checked rather than assumed: a baseline-major
-    store repeats one pair across the first rows, a per-timestep reshuffle keeps
-    the row count right while breaking the reshape, and rows that interleave
-    timesteps within a block satisfy both of those while still landing every
-    visibility on the wrong timestamp.
-    """
-
-    times = np.asarray(xds_ms.TIME.data.compute())
-    a1_col = np.asarray(xds_ms.ANTENNA1.data.compute())
-    a2_col = np.asarray(xds_ms.ANTENNA2.data.compute())
-
-    n_row = times.shape[0]
-    n_time_ms = len(np.unique(times))
-    n_bl_ms, remainder = divmod(n_row, n_time_ms)
-
-    if remainder:
-        raise ValueError(
-            f"The MS holds {n_row} rows over {n_time_ms} timesteps, which is not "
-            "a whole number of baselines per timestep. tabascal reads "
-            "visibilities as (n_time, n_bl) and cannot use this MS."
-        )
-
-    if n_bl_ms != n_bl:
-        raise ValueError(
-            f"The results hold {n_bl} baselines but the MS has {n_bl_ms} "
-            f"({n_row} rows over {n_time_ms} timesteps). The results zarr does "
-            "not belong to this measurement set, or an antenna was dropped "
-            "between the run and the write."
-        )
-
-    a1 = a1_col[:n_bl]
-    a2 = a2_col[:n_bl]
-
-    if len(set(zip(a1.tolist(), a2.tolist()))) != n_bl:
-        raise ValueError(
-            f"The first {n_bl} rows do not hold {n_bl} distinct antenna pairs, so "
-            "the MS is not ordered time-major. tabascal reads visibilities as "
-            "(n_time, n_bl); sort the MS by TIME before running."
-        )
-
-    same_order = np.array_equal(
-        a1_col.reshape(n_time_ms, n_bl), np.broadcast_to(a1, (n_time_ms, n_bl))
-    ) and np.array_equal(
-        a2_col.reshape(n_time_ms, n_bl), np.broadcast_to(a2, (n_time_ms, n_bl))
-    )
-
-    if not same_order:
-        raise ValueError(
-            "The baseline order differs between timesteps. tabascal reads "
-            "visibilities as (n_time, n_bl) with one fixed baseline order per "
-            "timestep; sort the MS by TIME, ANTENNA1, ANTENNA2 before running."
-        )
-
-    # The pair sequence repeating per block is not enough: rows can cycle through
-    # the baselines while also cycling through the times, which reshapes cleanly
-    # and puts every visibility on the wrong timestamp. Each block must hold one
-    # time. Only constancy within a block is required -- the zarr's time axis
-    # follows the block order, whatever that order is.
-    times_2d = times.reshape(n_time_ms, n_bl)
-
-    if not np.all(times_2d == times_2d[:, :1]):
-        raise ValueError(
-            "The MS rows interleave timesteps within a baseline block: a block "
-            f"of {n_bl} consecutive rows holds more than one TIME. tabascal "
-            "reads visibilities as (n_time, n_bl), so each block must be a "
-            "single timestep; sort the MS by TIME, ANTENNA1, ANTENNA2 before "
-            "running."
-        )
-
-    return a1, a2
 
 
 def baseline_gains(gains, a1, a2, ant_axis: int = 0):
@@ -343,19 +261,31 @@ def write_results_ms(
     n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
     n_corr = xds_ms.sizes["corr"]
 
-    # The polarization setup this partition actually uses, resolved the way
-    # read_ms resolves it: xds_from_ms records the partition's DATA_DESC_ID and
-    # DATA_DESCRIPTION maps it to a POLARIZATION row, which need not be row 0.
-    data_desc_id = int(xds_ms.attrs.get("DATA_DESC_ID", 0))
-    _, pol_id = resolve_data_description(ms_path, data_desc_id)
-
+    # The polarization setup this partition actually uses, which need not be
+    # row 0 of POLARIZATION -- resolved the way read_ms resolves it.
     corr_idx = fitted_correlation(
-        ms_path, xds_tab.attrs.get("corr"), corr, n_corr, pol_id
+        ms_path,
+        xds_tab.attrs.get("corr"),
+        corr,
+        n_corr,
+        partition_polarization(ms_path, xds_ms),
     )
 
-    # Before any column is built: a zarr from a different MS otherwise surfaces
-    # as a dask "chunks do not add up to shape" error from the first reshape.
-    a1, a2 = read_antenna_pairs(xds_ms, n_bl)
+    # Derived and validated in one place, shared with the reader. Before any
+    # column is built: a zarr from a different MS otherwise surfaces as a dask
+    # "chunks do not add up to shape" error from the first reshape.
+    layout = ms_layout(xds_ms)
+    a1, a2 = layout.a1, layout.a2
+
+    # The MS's layout is the MS's business; whether the results describe *this*
+    # MS is the writer's.
+    if layout.n_bl != n_bl:
+        raise ValueError(
+            f"The results hold {n_bl} baselines but the MS has {layout.n_bl} "
+            f"({layout.n_time * layout.n_bl} rows over {layout.n_time} "
+            "timesteps). The results zarr does not belong to this measurement "
+            "set, or an antenna was dropped between the run and the write."
+        )
 
     ast_vis = xds_tab.ast_vis.data.astype(np.complex64)
     rfi_vis = xds_tab.rfi_vis.data.astype(np.complex64)

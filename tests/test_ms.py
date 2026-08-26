@@ -1,4 +1,4 @@
-"""Tests for tabascal.ms — correlation resolution and time-scale reading."""
+"""Tests for tabascal.ms — row layout, correlation resolution, time scales."""
 
 import numpy as np
 import pytest
@@ -6,6 +6,9 @@ import pytest
 from tabascal.ms import (
     CORR_TYPES,
     DEFAULT_TIME_SCALE,
+    ms_layout,
+    partition_polarization,
+    partition_setup,
     read_time_scale,
     resolve_correlation,
     resolve_data_description,
@@ -326,6 +329,162 @@ class TestHeterogeneousPolarizationRows:
         assert resolve_correlation("fake.ms", "yy", pol_id=1) == 1
         with pytest.raises(ValueError, match="does not contain correlation 'xy'"):
             resolve_correlation("fake.ms", "xy", pol_id=1)
+
+
+# ---------------------------------------------------------------------------
+# Row layout: the (n_time, n_bl) reshape every reader and writer relies on
+# ---------------------------------------------------------------------------
+
+class _FakeRows:
+    """An MS partition stripped to the three columns ms_layout reads."""
+
+    def __init__(self, a1, a2, times=None, attrs=None):
+        a1, a2 = np.asarray(a1), np.asarray(a2)
+        if times is None:
+            times = np.zeros(len(a1))
+
+        self.ANTENNA1 = _FakeVar(a1)
+        self.ANTENNA2 = _FakeVar(a2)
+        self.TIME = _FakeVar(np.asarray(times))
+        self.attrs = {} if attrs is None else attrs
+
+
+def _time_major(n_ant: int = 4, n_time: int = 3):
+    """A well-formed time-major partition and its one block of pairs."""
+
+    a1_bl, a2_bl = np.triu_indices(n_ant, k=1)
+    n_bl = len(a1_bl)
+    times = np.repeat(np.arange(n_time, dtype=float), n_bl)
+
+    return _FakeRows(np.tile(a1_bl, n_time), np.tile(a2_bl, n_time), times), a1_bl, a2_bl
+
+
+class TestMSLayout:
+    """The four facts the reshape needs, derived once for reader and writer."""
+
+    def test_derives_the_grid_and_the_antenna_pairs(self):
+        xds, a1_bl, a2_bl = _time_major(n_ant=4, n_time=3)
+
+        layout = ms_layout(xds)
+
+        assert (layout.n_time, layout.n_bl) == (3, 6)
+        np.testing.assert_array_equal(layout.a1, a1_bl)
+        np.testing.assert_array_equal(layout.a2, a2_bl)
+
+    def test_reads_both_antenna_columns(self):
+        """The regression guard: reading ANTENNA1 twice was the original bug."""
+        a1_col, a2_col = np.triu_indices(4, k=1)
+
+        layout = ms_layout(_FakeRows(a1_col, a2_col))
+
+        np.testing.assert_array_equal(layout.a1, a1_col)
+        np.testing.assert_array_equal(layout.a2, a2_col)
+        assert not np.array_equal(layout.a1, layout.a2)
+
+    def test_takes_only_the_first_baseline_block(self):
+        """The columns repeat per timestep; one block of baselines is wanted."""
+        xds, a1_bl, a2_bl = _time_major(n_time=3)
+
+        layout = ms_layout(xds)
+
+        assert len(layout.a1) == len(a1_bl) and len(layout.a2) == len(a2_bl)
+        np.testing.assert_array_equal(layout.a2, a2_bl)
+
+    def test_ragged_row_counts_are_rejected(self):
+        """Rows that do not divide into whole timesteps break the reshape."""
+        a1_bl, a2_bl = np.triu_indices(4, k=1)
+        xds = _FakeRows(
+            np.tile(a1_bl, 2)[:-1],
+            np.tile(a2_bl, 2)[:-1],
+            np.repeat([0.0, 1.0], 6)[:-1],
+        )
+
+        with pytest.raises(ValueError, match="whole number of baselines"):
+            ms_layout(xds)
+
+    def test_baseline_major_ordering_is_rejected(self):
+        """All times of one baseline first repeats each pair down the rows."""
+        a1_bl, a2_bl = np.triu_indices(4, k=1)
+        n_time = 3
+        xds = _FakeRows(
+            np.repeat(a1_bl, n_time),
+            np.repeat(a2_bl, n_time),
+            np.tile(np.arange(n_time, dtype=float), len(a1_bl)),
+        )
+
+        with pytest.raises(ValueError, match="not ordered time-major"):
+            ms_layout(xds)
+
+    def test_partially_repeated_pairs_are_rejected(self):
+        a1_col, a2_col = np.triu_indices(4, k=1)
+        a1_col, a2_col = a1_col.copy(), a2_col.copy()
+        a1_col[-1], a2_col[-1] = a1_col[0], a2_col[0]   # one duplicate pair
+
+        with pytest.raises(ValueError, match="distinct antenna pairs"):
+            ms_layout(_FakeRows(a1_col, a2_col))
+
+    def test_a_permuted_timestep_is_rejected(self):
+        a1_bl, a2_bl = np.triu_indices(4, k=1)
+        perm = np.array([3, 1, 0, 5, 4, 2])
+        xds = _FakeRows(
+            np.concatenate([a1_bl, a1_bl[perm]]),
+            np.concatenate([a2_bl, a2_bl[perm]]),
+            np.repeat([0.0, 1.0], 6),
+        )
+
+        with pytest.raises(ValueError, match="differs between timesteps"):
+            ms_layout(xds)
+
+    def test_interleaved_timesteps_are_rejected(self):
+        """Pairs repeat per block and the rows reshape cleanly -- and every
+        visibility still lands on the wrong timestamp."""
+        a1_bl, a2_bl = np.triu_indices(3, k=1)          # 3 baselines
+        xds = _FakeRows(
+            np.tile(a1_bl, 2),
+            np.tile(a2_bl, 2),
+            np.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
+        )
+
+        with pytest.raises(ValueError, match="interleave timesteps"):
+            ms_layout(xds)
+
+    def test_blocks_out_of_ascending_time_order_are_accepted(self):
+        """Only block-constancy matters: the time axis follows the blocks."""
+        a1_bl, a2_bl = np.triu_indices(4, k=1)
+        n_bl = len(a1_bl)
+        xds = _FakeRows(
+            np.tile(a1_bl, 3), np.tile(a2_bl, 3), np.repeat([2.0, 0.0, 1.0], n_bl)
+        )
+
+        layout = ms_layout(xds)
+
+        assert layout.n_time == 3
+        np.testing.assert_array_equal(layout.a1, a1_bl)
+
+
+# ---------------------------------------------------------------------------
+# Which subtable rows a partition uses
+# ---------------------------------------------------------------------------
+
+class TestPartitionSetup:
+    """The partition names its own DATA_DESC_ID; row 0 is only a convention."""
+
+    def test_the_partitions_id_is_resolved(self, data_description):
+        data_description([0, 1], [0, 2])
+        xds, _, _ = _time_major()
+        xds.attrs = {"DATA_DESC_ID": 1}
+
+        assert partition_setup("fake.ms", xds) == (1, 2)
+        assert partition_polarization("fake.ms", xds) == 2
+
+    def test_a_partition_without_the_attribute_falls_back_to_zero(
+        self, data_description
+    ):
+        data_description([3], [4])
+        xds, _, _ = _time_major()
+
+        assert partition_setup("fake.ms", xds) == (3, 4)
+        assert partition_polarization("fake.ms", xds) == 4
 
 
 # ---------------------------------------------------------------------------
