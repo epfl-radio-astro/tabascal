@@ -23,8 +23,10 @@ def read_antenna_pairs(xds_ms, n_bl: int):
 
     Assumes the time-major row order the reader relies on throughout
     (``reshape(n_time, n_bl)``). Checked rather than assumed: a baseline-major
-    store repeats one pair across the first rows, and a per-timestep reshuffle
-    keeps the row count right while breaking the reshape.
+    store repeats one pair across the first rows, a per-timestep reshuffle keeps
+    the row count right while breaking the reshape, and rows that interleave
+    timesteps within a block satisfy both of those while still landing every
+    visibility on the wrong timestamp.
     """
 
     times = np.asarray(xds_ms.TIME.data.compute())
@@ -71,6 +73,22 @@ def read_antenna_pairs(xds_ms, n_bl: int):
             "The baseline order differs between timesteps. tabascal reads "
             "visibilities as (n_time, n_bl) with one fixed baseline order per "
             "timestep; sort the MS by TIME, ANTENNA1, ANTENNA2 before running."
+        )
+
+    # The pair sequence repeating per block is not enough: rows can cycle through
+    # the baselines while also cycling through the times, which reshapes cleanly
+    # and puts every visibility on the wrong timestamp. Each block must hold one
+    # time. Only constancy within a block is required -- the zarr's time axis
+    # follows the block order, whatever that order is.
+    times_2d = times.reshape(n_time_ms, n_bl)
+
+    if not np.all(times_2d == times_2d[:, :1]):
+        raise ValueError(
+            "The MS rows interleave timesteps within a baseline block: a block "
+            f"of {n_bl} consecutive rows holds more than one TIME. tabascal "
+            "reads visibilities as (n_time, n_bl), so each block must be a "
+            "single timestep; sort the MS by TIME, ANTENNA1, ANTENNA2 before "
+            "running."
         )
 
     return a1, a2

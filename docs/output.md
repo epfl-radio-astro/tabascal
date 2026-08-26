@@ -90,6 +90,7 @@ Writing raises a `ValueError`, before any column is built, if:
 
 * the results `.zarr` holds a different number of baselines than the MS — the results belong to another MS, or an antenna was dropped between the run and the write;
 * the MS rows are not ordered time-major, so the first `n_bl` rows do not hold `n_bl` distinct antenna pairs;
-* the baseline order differs between timesteps, which the `(n_time, n_bl)` reshape tabascal reads visibilities with cannot represent.
+* the baseline order differs between timesteps, which the `(n_time, n_bl)` reshape tabascal reads visibilities with cannot represent;
+* the rows interleave timesteps within a block of `n_bl` rows, which reshapes cleanly but puts every visibility on the wrong timestamp.
 
-Sorting the MS by `TIME`, `ANTENNA1`, `ANTENNA2` resolves the last two.
+Sorting the MS by `TIME`, `ANTENNA1`, `ANTENNA2` resolves the last three.

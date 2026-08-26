@@ -332,6 +332,38 @@ class TestBaselineCountsMustMatch:
             read_antenna_pairs(xds, 6)
 
 
+class TestEachBlockIsOneTimestep:
+    """A block of ``n_bl`` rows must hold one TIME, not a cycle of them."""
+
+    def test_interleaved_timesteps_are_rejected(self):
+        """Pairs repeat per block and rows reshape cleanly -- and every
+        visibility still lands on the wrong timestamp."""
+        a1_bl, a2_bl = np.triu_indices(3, k=1)          # 3 baselines
+        xds = _FakeMS(
+            np.tile(a1_bl, 2),
+            np.tile(a2_bl, 2),
+            np.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
+        )
+
+        with pytest.raises(ValueError, match="interleave timesteps"):
+            read_antenna_pairs(xds, 3)
+
+    def test_blocks_out_of_ascending_time_order_are_accepted(self):
+        """Only block-constancy matters: the zarr time axis follows the blocks."""
+        a1_bl, a2_bl = np.triu_indices(4, k=1)
+        n_bl = len(a1_bl)
+        xds = _FakeMS(
+            np.tile(a1_bl, 3),
+            np.tile(a2_bl, 3),
+            np.repeat([2.0, 0.0, 1.0], n_bl),
+        )
+
+        a1, a2 = read_antenna_pairs(xds, n_bl)
+
+        np.testing.assert_array_equal(a1, a1_bl)
+        np.testing.assert_array_equal(a2, a2_bl)
+
+
 class TestBaselineOrderIsFixedAcrossTimesteps:
     """The (n_time, n_bl) reshape needs the same pair sequence every timestep."""
 
