@@ -13,19 +13,62 @@ import dask
 def read_antenna_pairs(xds_ms, n_bl: int):
     """The two antenna indices of each baseline, from one timestep's rows.
 
+    ``n_bl`` comes from the results zarr; the MS's own baseline count is derived
+    the way the reader derives it (``n_row // n_unique_time``) so that a zarr
+    belonging to a different MS is named as such, rather than reported as a row
+    ordering problem or -- when the two row counts happen to coincide -- written
+    out with every baseline's gain on the wrong rows.
+
     Assumes the time-major row order the reader relies on throughout
     (``reshape(n_time, n_bl)``). Checked rather than assumed: a baseline-major
-    store would return ``n_bl`` rows of the same pair.
+    store repeats one pair across the first rows, and a per-timestep reshuffle
+    keeps the row count right while breaking the reshape.
     """
 
-    a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
-    a2 = xds_ms.ANTENNA2.data[:n_bl].compute()
+    times = np.asarray(xds_ms.TIME.data.compute())
+    a1_col = np.asarray(xds_ms.ANTENNA1.data.compute())
+    a2_col = np.asarray(xds_ms.ANTENNA2.data.compute())
 
-    if len(set(zip(np.asarray(a1).tolist(), np.asarray(a2).tolist()))) != n_bl:
+    n_row = times.shape[0]
+    n_time_ms = len(np.unique(times))
+    n_bl_ms, remainder = divmod(n_row, n_time_ms)
+
+    if remainder:
+        raise ValueError(
+            f"The MS holds {n_row} rows over {n_time_ms} timesteps, which is not "
+            "a whole number of baselines per timestep. tabascal reads "
+            "visibilities as (n_time, n_bl) and cannot use this MS."
+        )
+
+    if n_bl_ms != n_bl:
+        raise ValueError(
+            f"The results hold {n_bl} baselines but the MS has {n_bl_ms} "
+            f"({n_row} rows over {n_time_ms} timesteps). The results zarr does "
+            "not belong to this measurement set, or an antenna was dropped "
+            "between the run and the write."
+        )
+
+    a1 = a1_col[:n_bl]
+    a2 = a2_col[:n_bl]
+
+    if len(set(zip(a1.tolist(), a2.tolist()))) != n_bl:
         raise ValueError(
             f"The first {n_bl} rows do not hold {n_bl} distinct antenna pairs, so "
             "the MS is not ordered time-major. tabascal reads visibilities as "
             "(n_time, n_bl); sort the MS by TIME before running."
+        )
+
+    same_order = np.array_equal(
+        a1_col.reshape(n_time_ms, n_bl), np.broadcast_to(a1, (n_time_ms, n_bl))
+    ) and np.array_equal(
+        a2_col.reshape(n_time_ms, n_bl), np.broadcast_to(a2, (n_time_ms, n_bl))
+    )
+
+    if not same_order:
+        raise ValueError(
+            "The baseline order differs between timesteps. tabascal reads "
+            "visibilities as (n_time, n_bl) with one fixed baseline order per "
+            "timestep; sort the MS by TIME, ANTENNA1, ANTENNA2 before running."
         )
 
     return a1, a2
@@ -101,13 +144,16 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
     n_corr = 1
 
+    # Before any column is built: a zarr from a different MS otherwise surfaces
+    # as a dask "chunks do not add up to shape" error from the first reshape.
+    a1, a2 = read_antenna_pairs(xds_ms, n_bl)
+
     ast_vis = xds_tab.ast_vis.data.astype(np.complex64)
     rfi_vis = xds_tab.rfi_vis.data.astype(np.complex64)
 
     vis_ast = _to_ms_column(ast_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
     vis_rfi = _to_ms_column(rfi_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
 
-    a1, a2 = read_antenna_pairs(xds_ms, n_bl)
     gains_bl_s = baseline_gains(
         xds_tab.gains.data.astype(np.complex64), a1, a2, ant_axis=1
     )
