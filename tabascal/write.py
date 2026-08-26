@@ -76,6 +76,28 @@ def unit_bad_gains(gains):
     return np.where(bad, np.array(1, dtype=gains.dtype), gains), bad
 
 
+def _warn_substituted(bad, what: str, detail: str) -> int:
+    """Count ``bad``, warn about it if there is any, and return the count.
+
+    The two public warnings below say different things about different arrays;
+    what they share is how a mask becomes a count, a percentage and a
+    ``RuntimeWarning``, which is the part worth having once.
+    """
+
+    bad = np.asarray(bad)
+    n_bad = int(np.count_nonzero(bad))
+
+    if n_bad:
+        warnings.warn(
+            f"{n_bad} of {bad.size} {what} ({100 * n_bad / bad.size:.3g}%) were "
+            f"zero or non-finite and have been set to 1{detail}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    return n_bad
+
+
 def warn_bad_gains(bad) -> int:
     """Warn, naming the antennas, when any gain was substituted. Returns the count.
 
@@ -83,21 +105,14 @@ def warn_bad_gains(bad) -> int:
     count and the antennas it touched are reported where they are known.
     """
 
-    bad = np.asarray(bad)
-    n_bad = int(np.count_nonzero(bad))
+    ants = np.flatnonzero(np.asarray(bad).any(axis=(0, 2, 3))).tolist()
 
-    if n_bad:
-        ants = np.flatnonzero(bad.any(axis=(0, 2, 3))).tolist()
-        warnings.warn(
-            f"{n_bad} of {bad.size} antenna gain values "
-            f"({100 * n_bad / bad.size:.3g}%) were zero or non-finite and have "
-            f"been set to 1. Affected antennas: {ants}. Baselines touching them "
-            "are written uncalibrated on that antenna.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-    return n_bad
+    return _warn_substituted(
+        bad,
+        "antenna gain values",
+        f". Affected antennas: {ants}. Baselines touching them are written "
+        "uncalibrated on that antenna.",
+    )
 
 
 def total_model(stored, gained_ast, gained_rfi, bad_bl):
@@ -131,21 +146,12 @@ def warn_bad_baseline_gains(bad) -> int:
     name: the substitution happens after the product and after the reduction.
     """
 
-    bad = np.asarray(bad)
-    n_bad = int(np.count_nonzero(bad))
-
-    if n_bad:
-        warnings.warn(
-            f"{n_bad} of {bad.size} mean baseline gains "
-            f"({100 * n_bad / bad.size:.3g}%) were zero or non-finite and have "
-            "been set to 1, even though the per-sample gains were not. "
-            "CORRECTED_DATA equals the data in those (baseline, channel, time) "
-            "cells.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-    return n_bad
+    return _warn_substituted(
+        bad,
+        "mean baseline gains",
+        ", even though the per-sample gains were not. CORRECTED_DATA equals the "
+        "data in those (baseline, channel, time) cells.",
+    )
 
 
 def gained_model_mean(gains_bl, model, sample_axis: int = 0):
