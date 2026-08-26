@@ -13,6 +13,8 @@ from jax import jit
 
 from tabascal.interferometry import (
     C,
+    apply_gains,
+    baseline_gains,
     Omega_e,
     Rotz_numpy,
     calculate_fringe_frequency_numpy,
@@ -561,3 +563,183 @@ class TestMaxAstFringeRate:
         D = float(fov_to_eff_diameter(fov_deg, self.FREQ))
         fr = max_ast_fringe_rate(uvw, dec_deg, self.FREQ, D)
         np.testing.assert_allclose(np.asarray(fr), [expected], rtol=exact_rtol)
+
+
+# ---------------------------------------------------------------------------
+# baseline_gains / apply_gains
+#
+# The one definition of the gain product, shared by the forward model and the
+# results writer. Every case uses a non-unit, non-uniform gain: unity cannot
+# distinguish ``g_p conj(g_q)`` from ``|g_p|^2``, which is how indexing the same
+# antenna column twice stayed latent for so long.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def gains():
+    """Per-antenna gains with distinct amplitude and phase, shape (n_ant, 1, 1)."""
+
+    amp = np.array([0.5, 1.0, 2.0, 1.5])
+    phase = np.array([0.0, 0.3, -0.7, 1.1])
+
+    return (amp * np.exp(1j * phase)).astype(np.complex128)[:, None, None]
+
+
+@pytest.fixture
+def pairs():
+    """Antenna pairs for a 4-antenna array, all 6 cross baselines."""
+
+    a1, a2 = np.triu_indices(4, k=1)
+
+    return a1, a2
+
+
+class TestBaselineGains:
+
+    def test_matches_the_definition(self, gains, pairs):
+        a1, a2 = pairs
+        expected = gains[a1] * np.conj(gains[a2])
+
+        np.testing.assert_allclose(baseline_gains(gains, a1, a2), expected)
+
+    def test_uses_both_antennas(self, gains, pairs):
+        """The regression: ANTENNA1 twice gives |g_p|^2 on every baseline."""
+        a1, a2 = pairs
+
+        wrong = gains[a1] * np.conj(gains[a1])
+
+        assert not np.allclose(baseline_gains(gains, a1, a2), wrong)
+
+    def test_the_wrong_form_is_real_and_positive(self, gains, pairs):
+        """Why it matters: indexing a1 twice discards all phase information."""
+        a1, a2 = pairs
+
+        wrong = gains[a1] * np.conj(gains[a1])
+        assert np.allclose(wrong.imag, 0.0)
+        assert np.all(wrong.real > 0.0)
+
+        # The correct gain carries a non-zero phase on these baselines.
+        assert not np.allclose(baseline_gains(gains, a1, a2).imag, 0.0)
+
+    def test_is_hermitian_under_baseline_reversal(self, gains, pairs):
+        """Swapping the antenna order conjugates the baseline gain."""
+        a1, a2 = pairs
+
+        forward = baseline_gains(gains, a1, a2)
+        reversed_ = baseline_gains(gains, a2, a1)
+
+        np.testing.assert_allclose(forward, np.conj(reversed_))
+
+    def test_unity_gains_give_unity(self, pairs):
+        """Which is exactly why the bug stayed latent."""
+        a1, a2 = pairs
+        ones = np.ones((4, 1, 1), dtype=np.complex128)
+
+        np.testing.assert_allclose(baseline_gains(ones, a1, a2), 1.0)
+
+    def test_works_on_dask_arrays(self, gains, pairs):
+        """write_results_ms passes dask arrays through this."""
+        da = pytest.importorskip("dask.array")
+        a1, a2 = pairs
+
+        out = baseline_gains(da.from_array(gains, chunks=-1), a1, a2)
+
+        np.testing.assert_allclose(np.asarray(out), gains[a1] * np.conj(gains[a2]))
+
+
+# ---------------------------------------------------------------------------
+# Sample-axis handling
+# ---------------------------------------------------------------------------
+
+class TestSampleAxis:
+    """E[g_p conj(g_q)] is not E[g_p] conj(E[g_q]) once the gains vary.
+
+    Every current writer of the results zarr stores exactly one sample, so this
+    is latent rather than live -- but forming the product before reducing costs
+    nothing and removes the trap.
+    """
+
+    def test_ant_axis_selects_the_antenna_axis(self):
+        """With a leading sample axis, axis 0 is samples, not antennas."""
+        rng = np.random.default_rng(1)
+        gains = rng.normal(size=(2, 4, 3, 1)) + 1j * rng.normal(size=(2, 4, 3, 1))
+        a1, a2 = np.triu_indices(4, k=1)
+
+        out = baseline_gains(gains, a1, a2, ant_axis=1)
+
+        assert out.shape == (2, len(a1), 3, 1)
+        np.testing.assert_allclose(out, gains[:, a1] * np.conj(gains[:, a2]))
+
+    def test_product_before_mean_differs_from_mean_before_product(self):
+        """The distinction the reduction order makes, made concrete.
+
+        E[XY] equals E[X]E[Y] only when X and Y are uncorrelated, so the two
+        antennas have to vary *together* for the difference to appear -- both
+        gains rise from 1 to 2 across the two samples here.
+        """
+        gains = np.array(
+            [
+                [1.0 + 0.0j, 1.0 + 0.0j],
+                [2.0 + 0.0j, 2.0 + 0.0j],
+            ]
+        )[:, :, None, None]
+        a1, a2 = np.array([0]), np.array([1])
+
+        correct = baseline_gains(gains, a1, a2, ant_axis=1).mean(axis=0)
+        naive = baseline_gains(gains.mean(axis=0), a1, a2)
+
+        # E[g^2] = (1 + 4) / 2 = 2.5, but E[g]^2 = 1.5^2 = 2.25
+        np.testing.assert_allclose(correct.ravel(), [2.5])
+        np.testing.assert_allclose(naive.ravel(), [2.25])
+        assert not np.allclose(correct, naive)
+
+    def test_single_sample_is_unaffected(self):
+        """Which is why current results are unchanged."""
+        rng = np.random.default_rng(2)
+        gains = rng.normal(size=(1, 4, 2, 1)) + 1j * rng.normal(size=(1, 4, 2, 1))
+        a1, a2 = np.triu_indices(4, k=1)
+
+        before = baseline_gains(gains, a1, a2, ant_axis=1).mean(axis=0)
+        after = baseline_gains(gains.mean(axis=0), a1, a2)
+
+        np.testing.assert_allclose(before, after)
+
+
+
+class TestApplyGains:
+    """The forward model's entry point is the same product, times the model."""
+
+    def test_matches_baseline_gains_times_the_visibilities(self, gains, pairs):
+        rng = np.random.default_rng(11)
+        a1, a2 = pairs
+        shape = (len(a1), 3, 4)
+        vis = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+
+        np.testing.assert_allclose(
+            apply_gains(gains, vis, a1, a2),
+            baseline_gains(gains, a1, a2) * vis,
+            rtol=1e-12,
+        )
+
+    def test_matches_the_original_expression(self, gains, pairs):
+        """The formula it replaced, kept as a guard against drift."""
+        rng = np.random.default_rng(12)
+        a1, a2 = pairs
+        shape = (len(a1), 2, 2)
+        vis = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+
+        np.testing.assert_allclose(
+            apply_gains(gains, vis, a1, a2),
+            gains[a1] * vis * jnp.conjugate(gains)[a2],
+            rtol=1e-12,
+        )
+
+    def test_is_jittable(self, gains, pairs):
+        """It is on the model's jit path, so it must stay traceable."""
+        a1, a2 = pairs
+        vis = jnp.ones((len(a1), 1, 1), dtype=jnp.complex128)
+
+        out = jit(apply_gains)(jnp.asarray(gains), vis, jnp.asarray(a1), jnp.asarray(a2))
+
+        np.testing.assert_allclose(
+            np.asarray(out), baseline_gains(gains, a1, a2), rtol=1e-6
+        )

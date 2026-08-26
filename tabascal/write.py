@@ -1,4 +1,5 @@
 from tabascal.distributed import is_process_0
+from tabascal.interferometry import baseline_gains
 from tabascal.ms import ms_layout, partition_polarization, resolve_correlation
 from tabascal.timing import measure_runtime
 
@@ -11,18 +12,6 @@ import numpy as np
 import xarray as xr
 import dask.array as da
 import dask
-
-
-def baseline_gains(gains, a1, a2, ant_axis: int = 0):
-    """Per-baseline gain ``g_p conj(g_q)`` from per-antenna gains.
-
-    ``ant_axis`` names the antenna axis, so an array with a leading sample axis
-    can have its product formed before the samples are reduced.
-    """
-
-    lead = (slice(None),) * ant_axis
-
-    return gains[lead + (a1,)] * gains[lead + (a2,)].conj()
 
 
 def _to_ms_column(arr, dims, chunks, n_freq, n_corr=1):

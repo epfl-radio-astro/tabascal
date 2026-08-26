@@ -492,11 +492,27 @@ def calculate_rfi_vis_variable(
     return vis_rfi
 
 
+def baseline_gains(gains: Array, a1: Array, a2: Array, ant_axis: int = 0) -> Array:
+    """Per-baseline gain ``g_p conj(g_q)`` from per-antenna gains.
+
+    ``ant_axis`` names the antenna axis, so an array carrying a leading sample
+    axis can have the product formed per sample, before the samples are reduced:
+    ``E[g_p conj(g_q)]`` is not ``E[g_p] conj(E[g_q])`` once the two antennas
+    covary.
+
+    Written with plain indexing and ``.conj()`` rather than ``jnp`` calls so that
+    the one definition serves both users -- the model jits it on jax arrays, and
+    the results writer applies it to dask arrays straight out of a zarr.
+    """
+
+    lead = (slice(None),) * ant_axis
+
+    return gains[lead + (a1,)] * gains[lead + (a2,)].conj()
+
+
 def apply_gains(gains: Array, vis: Array, a1: Array, a2: Array) -> Array:
 
-    vis_obs = gains[a1] * vis * jnp.conjugate(gains)[a2]
-
-    return vis_obs
+    return baseline_gains(gains, a1, a2) * vis
 
 
 #########################################################################

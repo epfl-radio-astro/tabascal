@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 import tabascal.write as write_mod
+from tabascal.interferometry import baseline_gains
 from tabascal.write import (
-    baseline_gains,
     data_frame_residuals,
     fitted_correlation,
     gained_model_mean,
@@ -40,63 +40,6 @@ def pairs():
     a1, a2 = np.triu_indices(4, k=1)
 
     return a1, a2
-
-
-# ---------------------------------------------------------------------------
-# baseline_gains
-# ---------------------------------------------------------------------------
-
-class TestBaselineGains:
-
-    def test_matches_the_definition(self, gains, pairs):
-        a1, a2 = pairs
-        expected = gains[a1] * np.conj(gains[a2])
-
-        np.testing.assert_allclose(baseline_gains(gains, a1, a2), expected)
-
-    def test_uses_both_antennas(self, gains, pairs):
-        """The regression: ANTENNA1 twice gives |g_p|^2 on every baseline."""
-        a1, a2 = pairs
-
-        wrong = gains[a1] * np.conj(gains[a1])
-
-        assert not np.allclose(baseline_gains(gains, a1, a2), wrong)
-
-    def test_the_wrong_form_is_real_and_positive(self, gains, pairs):
-        """Why it matters: indexing a1 twice discards all phase information."""
-        a1, a2 = pairs
-
-        wrong = gains[a1] * np.conj(gains[a1])
-        assert np.allclose(wrong.imag, 0.0)
-        assert np.all(wrong.real > 0.0)
-
-        # The correct gain carries a non-zero phase on these baselines.
-        assert not np.allclose(baseline_gains(gains, a1, a2).imag, 0.0)
-
-    def test_is_hermitian_under_baseline_reversal(self, gains, pairs):
-        """Swapping the antenna order conjugates the baseline gain."""
-        a1, a2 = pairs
-
-        forward = baseline_gains(gains, a1, a2)
-        reversed_ = baseline_gains(gains, a2, a1)
-
-        np.testing.assert_allclose(forward, np.conj(reversed_))
-
-    def test_unity_gains_give_unity(self, pairs):
-        """Which is exactly why the bug stayed latent."""
-        a1, a2 = pairs
-        ones = np.ones((4, 1, 1), dtype=np.complex128)
-
-        np.testing.assert_allclose(baseline_gains(ones, a1, a2), 1.0)
-
-    def test_works_on_dask_arrays(self, gains, pairs):
-        """write_results_ms passes dask arrays through this."""
-        da = pytest.importorskip("dask.array")
-        a1, a2 = pairs
-
-        out = baseline_gains(da.from_array(gains, chunks=-1), a1, a2)
-
-        np.testing.assert_allclose(np.asarray(out), gains[a1] * np.conj(gains[a2]))
 
 
 # ---------------------------------------------------------------------------
@@ -228,64 +171,6 @@ class TestDataFrameResiduals:
             vis_obs - (gained_ast + gained_rfi), 0.0, atol=1e-8
         )
 
-
-
-# ---------------------------------------------------------------------------
-# Sample-axis handling
-# ---------------------------------------------------------------------------
-
-class TestSampleAxis:
-    """E[g_p conj(g_q)] is not E[g_p] conj(E[g_q]) once the gains vary.
-
-    Every current writer of the results zarr stores exactly one sample, so this
-    is latent rather than live -- but forming the product before reducing costs
-    nothing and removes the trap.
-    """
-
-    def test_ant_axis_selects_the_antenna_axis(self):
-        """With a leading sample axis, axis 0 is samples, not antennas."""
-        rng = np.random.default_rng(1)
-        gains = rng.normal(size=(2, 4, 3, 1)) + 1j * rng.normal(size=(2, 4, 3, 1))
-        a1, a2 = np.triu_indices(4, k=1)
-
-        out = baseline_gains(gains, a1, a2, ant_axis=1)
-
-        assert out.shape == (2, len(a1), 3, 1)
-        np.testing.assert_allclose(out, gains[:, a1] * np.conj(gains[:, a2]))
-
-    def test_product_before_mean_differs_from_mean_before_product(self):
-        """The distinction the reduction order makes, made concrete.
-
-        E[XY] equals E[X]E[Y] only when X and Y are uncorrelated, so the two
-        antennas have to vary *together* for the difference to appear -- both
-        gains rise from 1 to 2 across the two samples here.
-        """
-        gains = np.array(
-            [
-                [1.0 + 0.0j, 1.0 + 0.0j],
-                [2.0 + 0.0j, 2.0 + 0.0j],
-            ]
-        )[:, :, None, None]
-        a1, a2 = np.array([0]), np.array([1])
-
-        correct = baseline_gains(gains, a1, a2, ant_axis=1).mean(axis=0)
-        naive = baseline_gains(gains.mean(axis=0), a1, a2)
-
-        # E[g^2] = (1 + 4) / 2 = 2.5, but E[g]^2 = 1.5^2 = 2.25
-        np.testing.assert_allclose(correct.ravel(), [2.5])
-        np.testing.assert_allclose(naive.ravel(), [2.25])
-        assert not np.allclose(correct, naive)
-
-    def test_single_sample_is_unaffected(self):
-        """Which is why current results are unchanged."""
-        rng = np.random.default_rng(2)
-        gains = rng.normal(size=(1, 4, 2, 1)) + 1j * rng.normal(size=(1, 4, 2, 1))
-        a1, a2 = np.triu_indices(4, k=1)
-
-        before = baseline_gains(gains, a1, a2, ant_axis=1).mean(axis=0)
-        after = baseline_gains(gains.mean(axis=0), a1, a2)
-
-        np.testing.assert_allclose(before, after)
 
 
 class TestGainedModelMean:
