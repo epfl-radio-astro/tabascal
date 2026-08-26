@@ -204,6 +204,32 @@ def total_model(stored, gained_ast, gained_rfi, bad_bl):
     return np.where(bad_bl, gained_ast + gained_rfi, stored)
 
 
+def warn_bad_baseline_gains(bad) -> int:
+    """Warn when a *mean* baseline gain was substituted. Returns the count.
+
+    Separate from the per-antenna warning because it is a separate failure. The
+    per-sample gains can every one of them be finite and non-zero and still
+    average to zero -- ``g_q = +1`` on one sample and ``-1`` on the next -- and
+    it is the mean that ``CORRECTED_DATA`` is divided by. There is no antenna to
+    name: the substitution happens after the product and after the reduction.
+    """
+
+    bad = np.asarray(bad)
+    n_bad = int(np.count_nonzero(bad))
+
+    if n_bad:
+        warnings.warn(
+            f"{n_bad} of {bad.size} mean baseline gains "
+            f"({100 * n_bad / bad.size:.3g}%) were zero or non-finite and have "
+            "been set to 1, even though the per-sample gains were not. "
+            "CORRECTED_DATA equals the data on those samples.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return n_bad
+
+
 def gained_model_mean(gains_bl, model, sample_axis: int = 0):
     """Sample-mean of ``gains_bl * model``, formed per sample.
 
@@ -257,9 +283,13 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     gained_rfi = _to_ms_column(
         gained_model_mean(gains_bl_s, rfi_vis), dims, chunks, n_freq, n_corr
     )
-    gains_bl = _to_ms_column(
-        gains_bl_s.mean(axis=0), dims, chunks, n_freq, n_corr
-    )
+    # Guarded again after the reduction: per-sample gains that are all finite
+    # and non-zero can still average to zero, and it is the mean that the data
+    # is divided by.
+    gains_bl_mean, bad_bl_mean = unit_bad_gains(gains_bl_s.mean(axis=0))
+    warn_bad_baseline_gains(bad_bl_mean)
+
+    gains_bl = _to_ms_column(gains_bl_mean, dims, chunks, n_freq, n_corr)
 
     # The zarr's vis_obs is the gained total the forward model produced, so the
     # total residual need not re-derive it from the two parts -- except on the

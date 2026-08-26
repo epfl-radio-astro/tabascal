@@ -337,6 +337,71 @@ class TestTheStoredModelIsPreferred:
         assert not np.allclose(values["TAB_RES_DATA"], data - summed, rtol=1e-3)
 
 
+class TestTheMeanBaselineGainIsGuarded:
+    """Every per-sample gain can be healthy and their mean still be zero."""
+
+    @pytest.fixture
+    def flipped_gains(self):
+        """Antenna 3's gain flips sign between the two samples.
+
+        Every baseline touching it then averages to exactly zero, while every
+        individual sample is finite and non-zero -- so the per-antenna guard
+        sees nothing to do.
+        """
+        amp = np.array([0.5, 1.0, 2.0, 1.0])
+        phase = np.array([0.0, 0.3, -0.7, 0.0])
+        one = (amp * np.exp(1j * phase))[:, None, None] * np.ones((1, N_FREQ, N_TIME))
+
+        gains = np.stack([one, one.copy()])
+        gains[1, 3] *= -1
+
+        return gains
+
+    def test_the_calibrated_data_stays_finite(
+        self, tmp_path, run_writer, flipped_gains
+    ):
+        gains = flipped_gains
+        _, ast, rfi = _model(2)
+
+        assert np.all(np.isfinite(gains)) and not np.any(gains == 0)
+
+        stored = _baseline_gains(gains) * (ast + rfi)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored)
+        data = _observed(_to_ms(stored.mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning, match="mean baseline gains") as record:
+            values, _ = run_writer(_fake_ms(data), zarr_path)
+
+        # The per-antenna guard has nothing to say here.
+        assert not any("Affected antennas" in str(w.message) for w in record)
+
+        for col in COLS:
+            assert np.all(np.isfinite(values[col])), col
+
+        kw = _tolerances(data)
+        touched = np.tile((A1_BL == 3) | (A2_BL == 3), N_TIME)
+
+        # Divided by 1 there: CORRECTED_DATA is the data, uncalibrated.
+        np.testing.assert_allclose(
+            values["CORRECTED_DATA"][touched], data[touched], **kw
+        )
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            calibrated = data / _to_ms(_baseline_gains(gains).mean(axis=0))
+
+        np.testing.assert_allclose(
+            values["CORRECTED_DATA"][~touched], calibrated[~touched], **kw
+        )
+
+    def test_without_the_guard_the_column_would_be_infinite(self, flipped_gains):
+        """Why it matters: the mean divisor is exactly zero on those baselines."""
+        gains_bl = _baseline_gains(flipped_gains).mean(axis=0)
+        touched = (A1_BL == 3) | (A2_BL == 3)
+
+        assert np.all(gains_bl[touched] == 0)
+        assert np.all(gains_bl[~touched] != 0)
+
+
 # ---------------------------------------------------------------------------
 # Guards
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from tabascal.write import (
     read_antenna_pairs,
     total_model,
     unit_bad_gains,
+    warn_bad_baseline_gains,
     warn_bad_gains,
 )
 
@@ -599,6 +600,56 @@ class TestUnitBadGains:
         out, bad = np.asarray(out), np.asarray(bad)
         assert np.all(out[0, 3] == 1.0)
         assert np.count_nonzero(bad) == gain_array[0, 3].size
+
+
+class TestUnitBadGainsOnBaselineGains:
+    """The same helper guards the mean baseline gain, which has no antenna axis."""
+
+    def test_a_mean_that_averages_to_zero_is_substituted(self):
+        """Both samples are finite and non-zero; their mean is not."""
+        gains_bl_s = np.array([1.0 + 0j, -1.0 + 0j])[:, None, None, None] * np.ones(
+            (1, 6, 2, 3)
+        )
+        assert np.all(np.isfinite(gains_bl_s)) and not np.any(gains_bl_s == 0)
+
+        out, bad = unit_bad_gains(gains_bl_s.mean(axis=0))
+
+        assert out.shape == (6, 2, 3)
+        assert np.all(bad) and np.all(out == 1.0)
+
+    def test_a_healthy_mean_is_untouched(self):
+        rng = np.random.default_rng(9)
+        shape = (6, 2, 3)
+        gains_bl = (
+            rng.normal(size=shape) + 1j * rng.normal(size=shape)
+        ).astype(np.complex64)
+
+        out, bad = unit_bad_gains(gains_bl)
+
+        np.testing.assert_array_equal(out, gains_bl)
+        assert not np.any(bad)
+
+
+class TestWarnBadBaselineGains:
+
+    def test_warns_with_the_count_and_fraction(self):
+        bad = np.zeros((6, 2, 1), dtype=bool)
+        bad[0] = True
+
+        with pytest.warns(RuntimeWarning) as record:
+            n_bad = warn_bad_baseline_gains(bad)
+
+        message = str(record[0].message)
+        assert n_bad == 2
+        assert "2 of 12" in message
+        assert "mean baseline gains" in message
+        # No antenna axis to name once the product has been formed.
+        assert "Affected antennas" not in message
+
+    def test_silent_when_the_mean_is_healthy(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert warn_bad_baseline_gains(np.zeros((6, 2, 1), dtype=bool)) == 0
 
 
 class TestWarnBadGains:
