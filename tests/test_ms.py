@@ -33,7 +33,7 @@ class _FakePol:
 
 class _FakeVar:
     def __init__(self, values):
-        self.data = _FakeData(values)
+        self.data = values if hasattr(values, "compute") else _FakeData(values)
 
 
 class _FakeData:
@@ -340,16 +340,26 @@ class TestHeterogeneousPolarizationRows:
 # ---------------------------------------------------------------------------
 
 class _FakeRows:
-    """An MS partition stripped to the three columns ms_layout reads."""
+    """An MS partition stripped to the three columns ms_layout reads.
+
+    dask-backed, as the daskms dataset is, in row chunks that deliberately do
+    not divide the baseline count: the layout checks must reshape across chunk
+    boundaries the way they will on a real MS.
+    """
+
+    ROW_CHUNK = 5
 
     def __init__(self, a1, a2, times=None, attrs=None):
+        import dask.array as da
+
         a1, a2 = np.asarray(a1), np.asarray(a2)
         if times is None:
             times = np.zeros(len(a1))
 
-        self.ANTENNA1 = _FakeVar(a1)
-        self.ANTENNA2 = _FakeVar(a2)
-        self.TIME = _FakeVar(np.asarray(times))
+        column = lambda values: _FakeVar(da.from_array(values, chunks=self.ROW_CHUNK))
+        self.ANTENNA1 = column(a1)
+        self.ANTENNA2 = column(a2)
+        self.TIME = column(np.asarray(times))
         self.attrs = {} if attrs is None else attrs
 
 
@@ -465,6 +475,28 @@ class TestMSLayout:
         assert layout.n_time == 3
         np.testing.assert_array_equal(layout.a1, a1_bl)
 
+
+    def test_never_holds_a_full_column_in_memory(self):
+        """Nothing larger than a chunk, or the n_time unique times, is ever a
+        task result: the checks over the full columns are reductions.
+        """
+        import dask
+        from dask.callbacks import Callback
+
+        xds, _, _ = _time_major(n_ant=6, n_time=4)   # 60 rows, chunks of 5
+        n_row = xds.TIME.data.shape[0]
+        largest = []
+
+        class Largest(Callback):
+            def _posttask(self, key, result, dsk, state, worker_id):
+                largest.append(int(getattr(result, "size", 0)))
+
+        with dask.config.set(scheduler="synchronous"), Largest():
+            layout = ms_layout(xds)
+
+        assert layout.n_bl == 15 and layout.n_time == 4
+        assert max(largest) < n_row
+        assert max(largest) <= max(_FakeRows.ROW_CHUNK, layout.n_bl, layout.n_time) * 2
 
 # ---------------------------------------------------------------------------
 # Which subtable rows a partition uses

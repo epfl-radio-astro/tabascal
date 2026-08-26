@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import dask
 from daskms import xds_from_ms, xds_from_table
 
 from tabascal.timing import measure_runtime
@@ -204,6 +205,20 @@ class MSLayout(NamedTuple):
     a2: np.ndarray
 
 
+def _materialise(*arrays):
+    """Numpy values of ``arrays``, computing the dask ones in a single pass."""
+
+    lazy = [i for i, a in enumerate(arrays) if hasattr(a, "compute")]
+    values = list(arrays)
+
+    if lazy:
+        computed = dask.compute(*(arrays[i] for i in lazy))
+        for i, value in zip(lazy, computed):
+            values[i] = value
+
+    return tuple(np.asarray(v) for v in values)
+
+
 def ms_layout(xds) -> MSLayout:
     """Derive and validate the row layout of one MS partition.
 
@@ -219,16 +234,19 @@ def ms_layout(xds) -> MSLayout:
     rows that cycle through baselines *and* times together satisfy both of those
     while landing every visibility on the wrong timestamp.
 
-    ``TIME``, ``ANTENNA1`` and ``ANTENNA2`` are small integer/float columns, so
-    reading them whole costs little next to the visibilities.
+    Nothing the size of a column is ever held in memory. The only values read
+    whole are the ``n_time`` distinct times and the first block's ``n_bl``
+    antenna pairs; the checks over the full columns are reductions, computed
+    together in one pass, chunk by chunk, on dask-backed input.
     """
 
-    times = np.asarray(xds.TIME.data.compute())
-    a1_col = np.asarray(xds.ANTENNA1.data.compute())
-    a2_col = np.asarray(xds.ANTENNA2.data.compute())
+    times = xds.TIME.data
+    a1_col = xds.ANTENNA1.data
+    a2_col = xds.ANTENNA2.data
 
-    n_row = times.shape[0]
-    n_time = len(np.unique(times))
+    n_row = int(times.shape[0])
+    (unique_times,) = _materialise(np.unique(times))
+    n_time = int(unique_times.size)
     n_bl, remainder = divmod(n_row, n_time)
 
     if remainder:
@@ -238,8 +256,7 @@ def ms_layout(xds) -> MSLayout:
             "visibilities as (n_time, n_bl) and cannot use this MS."
         )
 
-    a1 = a1_col[:n_bl]
-    a2 = a2_col[:n_bl]
+    a1, a2 = _materialise(a1_col[:n_bl], a2_col[:n_bl])
 
     if len(set(zip(a1.tolist(), a2.tolist()))) != n_bl:
         raise ValueError(
@@ -248,10 +265,18 @@ def ms_layout(xds) -> MSLayout:
             "(n_time, n_bl); sort the MS by TIME before running."
         )
 
-    same_order = np.array_equal(
-        a1_col.reshape(n_time, n_bl), np.broadcast_to(a1, (n_time, n_bl))
-    ) and np.array_equal(
-        a2_col.reshape(n_time, n_bl), np.broadcast_to(a2, (n_time, n_bl))
+    # The first block's pairs broadcast down the block axis; each block's own
+    # first time broadcasts along it. Only constancy within a block is
+    # required, not ascending block order: the time axis of everything tabascal
+    # writes follows the same block order.
+    times_2d = times.reshape(n_time, n_bl)
+    same_order = (a1_col.reshape(n_time, n_bl) == a1).all() & (
+        a2_col.reshape(n_time, n_bl) == a2
+    ).all()
+    one_time_per_block = (times_2d == times_2d[:, :1]).all()
+
+    same_order, one_time_per_block = (
+        bool(flag) for flag in _materialise(same_order, one_time_per_block)
     )
 
     if not same_order:
@@ -261,11 +286,7 @@ def ms_layout(xds) -> MSLayout:
             "timestep; sort the MS by TIME, ANTENNA1, ANTENNA2 before running."
         )
 
-    # Only constancy within a block is required, not ascending block order: the
-    # time axis of everything tabascal writes follows the same block order.
-    times_2d = times.reshape(n_time, n_bl)
-
-    if not np.all(times_2d == times_2d[:, :1]):
+    if not one_time_per_block:
         raise ValueError(
             "The MS rows interleave timesteps within a baseline block: a block "
             f"of {n_bl} consecutive rows holds more than one TIME. tabascal "
