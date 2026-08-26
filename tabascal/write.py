@@ -243,7 +243,7 @@ def warn_bad_gains(bad) -> int:
     if n_bad:
         ants = np.flatnonzero(bad.any(axis=(0, 2, 3))).tolist()
         warnings.warn(
-            f"{n_bad} of {bad.size} antenna gain samples "
+            f"{n_bad} of {bad.size} antenna gain values "
             f"({100 * n_bad / bad.size:.3g}%) were zero or non-finite and have "
             f"been set to 1. Affected antennas: {ants}. Baselines touching them "
             "are written uncalibrated on that antenna.",
@@ -293,7 +293,8 @@ def warn_bad_baseline_gains(bad) -> int:
             f"{n_bad} of {bad.size} mean baseline gains "
             f"({100 * n_bad / bad.size:.3g}%) were zero or non-finite and have "
             "been set to 1, even though the per-sample gains were not. "
-            "CORRECTED_DATA equals the data on those samples.",
+            "CORRECTED_DATA equals the data in those (baseline, channel, time) "
+            "cells.",
             RuntimeWarning,
             stacklevel=2,
         )
