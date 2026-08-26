@@ -232,8 +232,15 @@ def run_writer(monkeypatch):
 
     captured = {}
 
-    def _run(xds_ms, zarr_path, *, corr=None, corr_idx=0):
+    def _run(xds_ms, zarr_path, *, corr=None, corr_idx=0, pol_id=0):
         monkeypatch.setattr(write_mod, "xds_from_ms", lambda path: [xds_ms])
+
+        def _describe(ms_path, data_desc_id=0):
+            """Stand in for DATA_DESCRIPTION: records the id, returns pol_id."""
+            captured["data_desc_id"] = data_desc_id
+            return 0, pol_id
+
+        monkeypatch.setattr(write_mod, "resolve_data_description", _describe)
 
         def _capture(datasets, path, cols, column_keywords=None):
             captured["xds"] = datasets[0]
@@ -244,6 +251,7 @@ def run_writer(monkeypatch):
         def _resolve(ms_path, name, pol_id=0):
             """Stand in for the casacore-backed resolver in tabascal.ms."""
             captured["resolved"] = name
+            captured["pol_id"] = pol_id
             return corr_idx
 
         monkeypatch.setattr(write_mod, "xds_to_table", _capture)
@@ -540,6 +548,22 @@ class TestMultipleCorrelations:
         _, captured = run_writer(xds_ms, zarr_path, corr="yy", corr_idx=idx)
 
         assert captured["resolved"] == "yy"
+
+    def test_the_name_is_resolved_on_the_partition_polarization_row(self, run):
+        """The partition's DATA_DESC_ID picks the POLARIZATION row, not row 0.
+
+        Resolving against row 0 would place the results in the wrong
+        polarisation on any MS whose partition uses another row.
+        """
+        xds_ms, zarr_path, _, run_writer, corr, idx = run()
+        xds_ms = xds_ms.assign_attrs(DATA_DESC_ID=1)
+
+        _, captured = run_writer(
+            xds_ms, zarr_path, corr=corr, corr_idx=idx, pol_id=2
+        )
+
+        assert captured["data_desc_id"] == 1
+        assert captured["pol_id"] == 2
 
     def test_a_zarr_without_the_attribute_is_rejected(self, run):
         """An older zarr does not say which correlation it belongs to."""

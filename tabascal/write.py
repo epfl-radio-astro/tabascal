@@ -1,5 +1,5 @@
 from tabascal.distributed import is_process_0
-from tabascal.ms import resolve_correlation
+from tabascal.ms import resolve_correlation, resolve_data_description
 from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_to_table
@@ -120,7 +120,9 @@ def _to_ms_column(arr, dims, chunks, n_freq, n_corr=1):
     ).chunk(chunks)
 
 
-def fitted_correlation(ms_path: str, zarr_corr, corr, n_corr: int) -> int:
+def fitted_correlation(
+    ms_path: str, zarr_corr, corr, n_corr: int, pol_id: int = 0
+) -> int:
     """Index on the MS's correlation axis that the results belong to.
 
     tabascal fits one correlation. Its name comes from the ``corr`` argument if
@@ -128,6 +130,12 @@ def fitted_correlation(ms_path: str, zarr_corr, corr, n_corr: int) -> int:
     zarr, and is resolved to an index **by identity, not by position** -- a
     single-polarisation MS holds one correlation whatever it is, so ``yy`` is
     index 0 there.
+
+    ``pol_id`` is the ``POLARIZATION`` row the data partition actually uses,
+    the same one ``read_ms`` resolved through ``DATA_DESCRIPTION``. Row 0 is
+    only a convention: a partition on another row may order its correlations
+    differently, or hold fewer of them, and resolving against the wrong row
+    would put the results in the wrong polarisation without a word.
 
     A zarr written before that attribute existed carries no name. With one
     correlation there is only one answer; with more, guessing would silently
@@ -147,7 +155,16 @@ def fitted_correlation(ms_path: str, zarr_corr, corr, n_corr: int) -> int:
             "tab2MS -c xx."
         )
 
-    return resolve_correlation(ms_path, name)
+    corr_idx = resolve_correlation(ms_path, name, pol_id)
+
+    if not 0 <= corr_idx < n_corr:
+        raise ValueError(
+            f"Correlation {name!r} resolves to index {corr_idx} on POLARIZATION "
+            f"row {pol_id}, but the data partition has {n_corr} correlations. "
+            "The MS's DATA_DESCRIPTION and POLARIZATION subtables disagree."
+        )
+
+    return corr_idx
 
 
 def into_corr(col, corr_idx: int, n_corr: int, fill):
@@ -324,7 +341,16 @@ def write_results_ms(
 
     n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
     n_corr = xds_ms.sizes["corr"]
-    corr_idx = fitted_correlation(ms_path, xds_tab.attrs.get("corr"), corr, n_corr)
+
+    # The polarization setup this partition actually uses, resolved the way
+    # read_ms resolves it: xds_from_ms records the partition's DATA_DESC_ID and
+    # DATA_DESCRIPTION maps it to a POLARIZATION row, which need not be row 0.
+    data_desc_id = int(xds_ms.attrs.get("DATA_DESC_ID", 0))
+    _, pol_id = resolve_data_description(ms_path, data_desc_id)
+
+    corr_idx = fitted_correlation(
+        ms_path, xds_tab.attrs.get("corr"), corr, n_corr, pol_id
+    )
 
     # Before any column is built: a zarr from a different MS otherwise surfaces
     # as a dask "chunks do not add up to shape" error from the first reshape.

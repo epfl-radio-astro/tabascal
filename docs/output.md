@@ -74,7 +74,7 @@ Below, `g_p` and `g_q` are the gain predictions for the two antennas of a baseli
 
 ### Correlations
 
-TABASCAL fits a single correlation, named by `data.corr` in the configuration (default `xx`) and recorded in the results `.zarr`. The results are written into that correlation of the MS only, resolved by identity against `POLARIZATION::CORR_TYPE` rather than by position — a single-polarisation MS holds one correlation whatever it is, so `yy` is index 0 there.
+TABASCAL fits a single correlation, named by `data.corr` in the configuration (default `xx`) and recorded in the results `.zarr`. The results are written into that correlation of the MS only, resolved by identity against `POLARIZATION::CORR_TYPE` rather than by position — on the `POLARIZATION` row that the data partition's `DATA_DESC_ID` points to, exactly as the run resolved it when reading — a single-polarisation MS holds one correlation whatever it is, so `yy` is index 0 there.
 
 On the other correlations of a multi-correlation MS:
 

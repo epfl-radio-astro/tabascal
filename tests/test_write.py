@@ -850,6 +850,7 @@ class TestFittedCorrelation:
 
         def _resolve(ms_path, name, pol_id=0):
             seen["name"] = name
+            seen["pol_id"] = pol_id
             return 3
 
         monkeypatch.setattr(write_mod, "resolve_correlation", _resolve)
@@ -882,3 +883,23 @@ class TestFittedCorrelation:
     def test_the_error_says_how_to_fix_it(self, resolver):
         with pytest.raises(ValueError, match="tab2MS -c xx"):
             fitted_correlation("ms", None, None, 2)
+
+    def test_the_partition_polarization_row_is_forwarded(self, resolver):
+        """Row 0 is a convention, not where this partition's data lives."""
+        fitted_correlation("ms", None, "yy", 4, pol_id=2)
+
+        assert resolver["pol_id"] == 2
+
+    def test_the_row_defaults_to_zero(self, resolver):
+        fitted_correlation("ms", None, "yy", 4)
+
+        assert resolver["pol_id"] == 0
+
+    def test_an_index_off_the_partition_axis_is_rejected(self, resolver):
+        """A wider POLARIZATION row than the data: index 3 on a 2-corr axis.
+
+        Without this, into_corr would match nothing and silently write zero
+        models and untouched data everywhere.
+        """
+        with pytest.raises(ValueError, match="resolves to index 3"):
+            fitted_correlation("ms", None, "yy", 2)
