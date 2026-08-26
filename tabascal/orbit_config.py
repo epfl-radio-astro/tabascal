@@ -35,7 +35,7 @@ from typing import Optional
 
 import numpy as np
 
-from tabascal.satchecker import SatCheckerError as TLEError
+from satchecker_client import SatCheckerError as TLEError
 from tabascal.time import mjd_to_jd
 
 
@@ -66,7 +66,7 @@ _TLE_TRAJECTORY_COMPONENTS = frozenset(
 class TLEConfigurationError(TLEError, ValueError):
     """A TLE-related configuration value is missing, malformed or out of range.
 
-    Subclasses :class:`~tabascal.satchecker.client.SatCheckerError` (aliased as
+    Subclasses :class:`~satchecker_client.client.SatCheckerError` (aliased as
     ``tabascal.orbit.TLEError``) so the CLI's existing handler prints it without a
     traceback, and :class:`ValueError` because that is what a bad argument to
     these helpers has always raised.

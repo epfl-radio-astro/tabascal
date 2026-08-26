@@ -1,5 +1,5 @@
 from tabascal.orbit import TLEError, get_tles_by_id
-from tabascal.satchecker.records import KIND_TLE, record_elements, record_kind
+from satchecker_client.records import KIND_TLE, record_elements, record_kind
 from tabascal.distributed import (
     make_global,
     padded_rfi_count,
@@ -930,7 +930,7 @@ def fetch_standard_orbital_elements(
     tles_df = _pad_rfi_sources(tles_df)
 
     # tles_df carries the OMM-style element columns derived locally by
-    # tabascal.satchecker.records.record_elements (degrees, rev/day, km), plus
+    # satchecker_client.records.record_elements (degrees, rev/day, km), plus
     # NORAD_CAT_ID, EPOCH_JD, and whichever raw columns the record's kind has.
 
     # SGP4 MINIMUM REQUIREMENTS:

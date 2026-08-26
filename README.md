@@ -75,8 +75,9 @@ tabascal run -h    # every option of the run subcommand
 ```
 
 The satellite orbital elements TABASCAL needs are fetched automatically from the
-[IAU CPS SatChecker](https://satchecker.cps.iau.org/) service — no account or
-credentials are required.
+[IAU CPS SatChecker](https://satchecker.cps.iau.org/) service, via the
+[satchecker-client](https://github.com/epfl-radio-astro/satchecker-client)
+package — no account or credentials are required.
 
 For a complete worked example, from simulating a dataset with `sim-vis` through
 to subtracting the satellite RFI, see the
