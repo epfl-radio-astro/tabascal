@@ -122,7 +122,7 @@ The output of a successful run with TABASCAL will show lines like
 
 ```text
 Copying tabascal results to MS file from data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI/results/map_pred_Custom.zarr
-Writing tabascal results to ['TAB_AST_DATA', 'TAB_RFI_DATA', 'TAB_AST_RES', 'TAB_RFI_RES', 'TAB_RES_DATA'] columns in MS file.
+Writing tabascal results to ['CORRECTED_DATA', 'TAB_AST_DATA', 'TAB_RFI_DATA', 'TAB_AST_RES', 'TAB_RFI_RES', 'TAB_RES_DATA'] columns in MS file.
 Data type: 24, SORT_COLUMNSnot handled
 Data type: 24, SORT_ORDERnot handled
 ```
