@@ -76,20 +76,46 @@ def unit_bad_gains(gains):
     return np.where(bad, np.array(1, dtype=gains.dtype), gains), bad
 
 
-def _warn_substituted(bad, what: str, detail: str) -> int:
-    """Count ``bad``, warn about it if there is any, and return the count.
+def count_substituted(bad, ant_axis=None):
+    """Lazy reductions of a substitution mask: the count, and which antennas.
 
-    The two public warnings below say different things about different arrays;
-    what they share is how a mask becomes a count, a percentage and a
-    ``RuntimeWarning``, which is the part worth having once.
+    Reductions rather than the mask itself. The masks are the size of the gains
+    -- ``(sample, ant, freq, time)`` -- or of the baseline product --
+    ``(bl, freq, time)`` -- and materialising either just to count it would
+    hold a full-size boolean array in memory for the sake of a number. A
+    reduction on a dask array runs chunk by chunk and leaves nothing resident;
+    on numpy it is simply the count.
+
+    Returns ``bad.sum()`` alone, or ``(bad.sum(), bad.any(over every axis but
+    ant_axis))`` when there is an antenna axis to name antennas from. Both are
+    still lazy for dask input; the caller computes them, ideally in the same
+    ``dask.compute`` as the arrays the mask feeds, so the graph runs once.
     """
 
-    bad = np.asarray(bad)
-    n_bad = int(np.count_nonzero(bad))
+    n_bad = bad.sum()
+
+    if ant_axis is None:
+        return n_bad
+
+    axes = tuple(axis for axis in range(bad.ndim) if axis != ant_axis)
+
+    return n_bad, bad.any(axis=axes)
+
+
+def _warn_substituted(n_bad: int, size: int, what: str, detail: str) -> int:
+    """Warn about ``n_bad`` of ``size`` substitutions, if any. Returns ``n_bad``.
+
+    The two public warnings below say different things about different arrays;
+    what they share is how a count becomes a percentage and a
+    ``RuntimeWarning``, which is the part worth having once. Takes the computed
+    numbers, not the mask: see :func:`count_substituted`.
+    """
+
+    n_bad = int(n_bad)
 
     if n_bad:
         warnings.warn(
-            f"{n_bad} of {bad.size} {what} ({100 * n_bad / bad.size:.3g}%) were "
+            f"{n_bad} of {size} {what} ({100 * n_bad / size:.3g}%) were "
             f"zero or non-finite and have been set to 1{detail}",
             RuntimeWarning,
             stacklevel=3,
@@ -98,17 +124,19 @@ def _warn_substituted(bad, what: str, detail: str) -> int:
     return n_bad
 
 
-def warn_bad_gains(bad) -> int:
+def warn_bad_gains(n_bad: int, size: int, bad_ants) -> int:
     """Warn, naming the antennas, when any gain was substituted. Returns the count.
 
     Silent substitution would look like a calibration failure downstream, so the
     count and the antennas it touched are reported where they are known.
+    ``bad_ants`` is the per-antenna boolean from :func:`count_substituted`.
     """
 
-    ants = np.flatnonzero(np.asarray(bad).any(axis=(0, 2, 3))).tolist()
+    ants = np.flatnonzero(np.asarray(bad_ants)).tolist()
 
     return _warn_substituted(
-        bad,
+        n_bad,
+        size,
         "antenna gain values",
         f". Affected antennas: {ants}. Baselines touching them are written "
         "uncalibrated on that antenna.",
@@ -136,7 +164,7 @@ def total_model(stored, gained_ast, gained_rfi, bad_bl):
     return np.where(bad_bl, gained_ast + gained_rfi, stored)
 
 
-def warn_bad_baseline_gains(bad) -> int:
+def warn_bad_baseline_gains(n_bad: int, size: int) -> int:
     """Warn when a *mean* baseline gain was substituted. Returns the count.
 
     Separate from the per-antenna warning because it is a separate failure. The
@@ -147,7 +175,8 @@ def warn_bad_baseline_gains(bad) -> int:
     """
 
     return _warn_substituted(
-        bad,
+        n_bad,
+        size,
         "mean baseline gains",
         ", even though the per-sample gains were not. CORRECTED_DATA equals the "
         "data in those (baseline, channel, time) cells.",
@@ -236,7 +265,7 @@ def write_results_ms(
     vis_rfi = _to_ms_column(rfi_vis.mean(axis=0), dims, fit_chunks, n_freq)
 
     gains, bad = unit_bad_gains(xds_tab.gains.data.astype(np.complex64))
-    warn_bad_gains(bad)
+    n_bad, bad_ants = count_substituted(bad, ant_axis=1)
 
     gains_bl_s = baseline_gains(gains, a1, a2, ant_axis=1)
 
@@ -250,7 +279,7 @@ def write_results_ms(
     # and non-zero can still average to zero, and it is the mean that the data
     # is divided by.
     gains_bl_mean, bad_bl_mean = unit_bad_gains(gains_bl_s.mean(axis=0))
-    warn_bad_baseline_gains(bad_bl_mean)
+    n_bad_bl = count_substituted(bad_bl_mean)
 
     gains_bl = _to_ms_column(gains_bl_mean, dims, fit_chunks, n_freq)
 
@@ -316,7 +345,18 @@ def write_results_ms(
 
     print(f"Writing tabascal results to {cols} columns in MS file.")
 
-    dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
+    # One compute for the write and for the warning counts. The masks feed the
+    # columns, so evaluating everything in one graph runs them once, chunk by
+    # chunk, and nothing full-size is ever held in memory for the warnings.
+    n_bad, bad_ants, n_bad_bl, _ = dask.compute(
+        n_bad,
+        bad_ants,
+        n_bad_bl,
+        xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords),
+    )
+
+    warn_bad_gains(n_bad, bad.size, bad_ants)
+    warn_bad_baseline_gains(n_bad_bl, bad_bl_mean.size)
 
 
 @measure_runtime

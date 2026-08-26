@@ -15,6 +15,7 @@ from tabascal.write import (
     gained_model_mean,
     total_model,
     unit_bad_gains,
+    count_substituted,
     warn_bad_baseline_gains,
     warn_bad_gains,
 )
@@ -330,6 +331,39 @@ class TestUnitBadGainsOnBaselineGains:
         assert not np.any(bad)
 
 
+class TestCountSubstituted:
+    """The warnings need numbers, not the mask -- and lazily on dask."""
+
+    def test_counts_and_names_antennas_on_numpy(self):
+        bad = np.zeros((2, 4, 3, 5), dtype=bool)
+        bad[0, 1] = True
+        bad[1, 3, 0, 0] = True
+
+        n_bad, bad_ants = count_substituted(bad, ant_axis=1)
+
+        assert int(n_bad) == 16
+        np.testing.assert_array_equal(bad_ants, [False, True, False, True])
+
+    def test_count_alone_without_an_antenna_axis(self):
+        bad = np.zeros((6, 2, 1), dtype=bool)
+        bad[0] = True
+
+        assert int(count_substituted(bad)) == 2
+
+    def test_stays_lazy_on_dask(self):
+        """Nothing full-size is materialised: the reductions are still graphs."""
+        da = pytest.importorskip("dask.array")
+        bad = np.zeros((2, 4, 3, 5), dtype=bool)
+        bad[0, 1] = True
+        lazy = da.from_array(bad, chunks=(1, 2, 3, 5))
+
+        n_bad, bad_ants = count_substituted(lazy, ant_axis=1)
+
+        assert hasattr(n_bad, "compute") and hasattr(bad_ants, "compute")
+        assert int(n_bad.compute()) == 15
+        np.testing.assert_array_equal(bad_ants.compute(), [False, True, False, False])
+
+
 class TestWarnBadBaselineGains:
 
     def test_warns_with_the_count_and_fraction(self):
@@ -337,7 +371,7 @@ class TestWarnBadBaselineGains:
         bad[0] = True
 
         with pytest.warns(RuntimeWarning) as record:
-            n_bad = warn_bad_baseline_gains(bad)
+            n_bad = warn_bad_baseline_gains(count_substituted(bad), bad.size)
 
         message = str(record[0].message)
         assert n_bad == 2
@@ -349,7 +383,7 @@ class TestWarnBadBaselineGains:
     def test_silent_when_the_mean_is_healthy(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert warn_bad_baseline_gains(np.zeros((6, 2, 1), dtype=bool)) == 0
+            assert warn_bad_baseline_gains(0, 12) == 0
 
 
 class TestWarnBadGains:
@@ -360,7 +394,8 @@ class TestWarnBadGains:
         bad[1, 3, 0, 0] = True
 
         with pytest.warns(RuntimeWarning) as record:
-            n_bad = warn_bad_gains(bad)
+            count, bad_ants = count_substituted(bad, ant_axis=1)
+            n_bad = warn_bad_gains(count, bad.size, bad_ants)
 
         message = str(record[0].message)
         assert n_bad == 16
@@ -371,7 +406,7 @@ class TestWarnBadGains:
     def test_silent_when_nothing_was_substituted(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert warn_bad_gains(np.zeros((1, 4, 2, 3), dtype=bool)) == 0
+            assert warn_bad_gains(0, 24, np.zeros(4, dtype=bool)) == 0
 
 
 # ---------------------------------------------------------------------------
