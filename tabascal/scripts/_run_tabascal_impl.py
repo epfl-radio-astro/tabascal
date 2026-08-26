@@ -16,6 +16,12 @@ from jax import random
 from tabascal.timing import measure_runtime, print_timings, enable_timings
 from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
 from tabascal.config import load_config, TabConfig, Model
+from tabascal.config_schema import (
+    ConfigError,
+    collect_params,
+    format_config,
+    validate_config,
+)
 from tabascal.distributed import (
     barrier,
     is_process_0,
@@ -47,18 +53,16 @@ class _Tee:
 
 
 @measure_runtime
-def assert_precision_supported(config):
+def assert_precision_supported(config, classes):
     """Fail fast if a requested component requires double precision under single.
 
-    Resolves the component list and checks each class's ``requires_double`` flag
-    up front, so an incompatible config errors *before* the expensive
-    ``TabConfig`` setup (MS read, TLE fetch) and names every offending component
-    at once, rather than tripping a single component's own gate deep in the run.
+    Checks each already-resolved component class's ``requires_double`` flag up
+    front, so an incompatible config errors *before* the expensive ``TabConfig``
+    setup (MS read, TLE fetch) and names every offending component at once,
+    rather than tripping a single component's own gate deep in the run.
     """
-    model_cfg = config.get("model", {})
-    if model_cfg.get("precision", "single") == "double":
+    if config.get("model", {}).get("precision", "single") == "double":
         return
-    classes = import_components(model_cfg.get("components", []) or [])
     offenders = sorted(
         cls.__name__ for cls in classes if getattr(cls, "requires_double", False)
     )
@@ -130,7 +134,6 @@ def print_memory_usage():
 
 
 def build_model(config, ms_path):
-    assert_precision_supported(config)
     require_truth(config)
     tab_config = TabConfig(config, ms_path)
     model = Model(tab_config, config["model"]["components"])
@@ -188,8 +191,13 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
 
     if sim_dir:
         sim_dir = os.path.abspath(sim_dir)
-    else:
+    elif config["data"]["sim_dir"]:
         sim_dir = os.path.abspath(config["data"]["sim_dir"])
+    else:
+        raise ConfigError(
+            "no simulation directory given: set data.sim_dir in the config file "
+            "or pass -s/--sim_dir on the command line"
+        )
     config["data"]["sim_dir"] = sim_dir
     config["model"]["name"] = model_name
 
@@ -419,13 +427,41 @@ def set_precision(config):
     return x64
 
 
+def resolve_config(path):
+    """Load, validate and complete the config file at *path*.
+
+    Two stages, because the components are what declare most of the schema:
+    :func:`~tabascal.config.load_config` checks the keys needed to resolve them
+    (and to set the precision, which has to happen before any JAX work), and the
+    full check runs here once the classes are in hand. Both stages come well
+    before the MS read and the TLE preflight, so a bad config costs nothing.
+
+    Returns the resolved ``(config, component classes)``, with every declared
+    parameter present and its default applied.
+    """
+    config = load_config(path)
+
+    set_precision(config)
+
+    classes = import_components(config["model"]["components"])
+    assert_precision_supported(config, classes)
+
+    # No `elsewhere`: validate_config works out which unselected component owns an
+    # unrecognised key only if it finds one, so the modules behind the components
+    # this model does not use are never imported on a good config.
+    config = validate_config(config, collect_params(TabConfig, *classes), source=path)
+    return config, classes
+
+
 def run(args):
     if args.timings:
         enable_timings()
 
-    config = load_config(args.config)
-
-    set_precision(config)
+    try:
+        config, _ = resolve_config(args.config)
+    except (ConfigError, ImportError) as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Workers run the identical program (multi-process collectives require it) but
     # only process 0 talks: stdout, the log file, plots and result writes are all
@@ -441,7 +477,7 @@ def run(args):
                 norad_path=getattr(args, "norad_path", None),
                 log=getattr(args, "log", True) and is_process_0(),
             )
-    except (TLEError, TruthError) as e:
+    except (TLEError, TruthError, ConfigError) as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -449,3 +485,23 @@ def run(args):
         print_memory_usage()
         if args.timings:
             print_timings()
+
+
+def check_config(args):
+    """``tabascal check-config``: validate a config file and print the result.
+
+    Everything the run does before it touches the data, and nothing else -- no MS
+    read, no TLE fetch, no model build. Exits 1 with the same message the run
+    would have printed if the config is not usable.
+    """
+    try:
+        config, classes = resolve_config(args.config)
+    except (ConfigError, ImportError) as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"{args.config} is valid for the model:")
+    for cls in classes:
+        print(f"  {cls.__module__.rsplit('.', 1)[-1]}:{cls.__name__}")
+    print("\nResolved configuration (defaults filled in):\n")
+    print(format_config(config))

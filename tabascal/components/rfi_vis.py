@@ -22,7 +22,9 @@ class RiemannVis(Component):
             self.a1 = config.a1
             self.a2 = config.a2
             self.n_int_time = config.n_int_time
-            # self.n_int_freq = config.n_int_freq
+            # rfi.freq_int_samples is declared on TabConfig rather than here: it
+            # sizes the fine frequency grid every component is defined on, so
+            # TabConfig needs it whatever the model.
             self.n_int_freq = config.args["rfi"]["freq_int_samples"]
             self.n_time = config.n_time
             self.n_bl = config.n_bl
@@ -103,7 +105,9 @@ class RiemannVisFFI(Component):
             self.a1 = config.a1
             self.a2 = config.a2
             self.n_int_time = config.n_int_time
-            # self.n_int_freq = config.n_int_freq
+            # rfi.freq_int_samples is declared on TabConfig rather than here: it
+            # sizes the fine frequency grid every component is defined on, so
+            # TabConfig needs it whatever the model.
             self.n_int_freq = config.args["rfi"]["freq_int_samples"]
             self.n_time = config.n_time
             self.n_bl = config.n_bl

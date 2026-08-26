@@ -29,7 +29,6 @@ from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
     ComplexRFIConstAnt,
     read_light_curves,
-    rfi_signal_config_validation,
 )
 from tabascal.fft_gp import latent_to_signal
 from tabascal.gp import base_kernel, get_times
@@ -91,7 +90,7 @@ def make_rfi_config(
     A real TabConfig needs a Measurement Set, Space-Track credentials and skyfield, so
     the component tests in this package stub it with a SimpleNamespace instead.
 
-    ``pad_factor`` defaults to 2 to match ``tab_config_base.yaml`` — small pad factors
+    ``pad_factor`` defaults to 2 to match the declared default — small pad factors
     combined with supersampling crop the fine grid down to a zero-sized axis.
     """
     freqs = jnp.linspace(1.4e9, 1.41e9, n_freq)
@@ -218,57 +217,49 @@ def tol():
 
 
 # ---------------------------------------------------------------------------
-# rfi_signal_config_validation
+# BaseGPRFI.resolve_data_params
 # ---------------------------------------------------------------------------
 
-class TestRfiSignalConfigValidation:
+class TestResolveDataParams:
+    """The RFI parameters that can only be resolved once the data is read.
 
-    @staticmethod
-    def _grid(n_freq=4, n_time=8):
-        return (
-            jnp.linspace(1.4e9, 1.41e9, n_freq),
-            jnp.linspace(0.0, 120.0, n_time),
-        )
+    Type and range checking is the config schema's job now (see
+    tests/test_config_schema.py); what is left here is the data-derived defaults.
+    """
 
-    def test_null_values_get_defaults(self):
-        """All-None config picks up defaults derived from the data and the observation grid."""
-        freqs, times = self._grid()
-        vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": None, "var": None, "corr_freq": None, "corr_time": None}
+    def resolve(self, **kwargs):
+        return ComplexRFIVarAnt().resolve_data_params(make_rfi_config(**kwargs))
 
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+    def test_null_values_get_data_derived_defaults(self):
+        """Null var / correlation lengths are derived from the data."""
+        config = make_rfi_config(var=None, corr_freq=None, corr_time=None)
+        config.vis_obs = 3.0 * jnp.ones_like(config.vis_obs)
+
+        result = ComplexRFIVarAnt().resolve_data_params(config)
 
         assert result["r_seed"] == 1
         assert result["var"] == pytest.approx(3.0)  # max |vis_obs|
+        freqs, times = config.freqs, config.times
         assert result["corr_freq"] == pytest.approx(float(freqs[-1] - freqs[0]) / 2)
         assert result["corr_time"] == pytest.approx(float(times[-1] - times[0]) / 2)
 
     def test_null_corr_time_does_not_clobber_corr_freq(self):
-        """A defaulted corr_time must be written to corr_time, not over corr_freq.
+        """A defaulted corr_time must land on corr_time, not over corr_freq.
 
-        Regression test: the defaulting branch used to assign the *time* extent to the
-        corr_freq key, wiping out the frequency default and leaving corr_time as None.
+        Regression test: the defaulting branch this replaced used to assign the
+        *time* extent to the corr_freq key, wiping out the frequency default and
+        leaving corr_time as None.
         """
-        freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": None, "corr_time": None}
+        result = self.resolve(corr_freq=None, corr_time=None)
 
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
-
-        freq_extent, time_extent = float(freqs[-1] - freqs[0]), float(times[-1] - times[0])
         assert result["corr_time"] is not None
-        assert result["corr_time"] == pytest.approx(time_extent / 2)
-        assert result["corr_freq"] == pytest.approx(freq_extent / 2)
         # The two defaults live on wildly different scales; catching a swap matters.
         assert result["corr_freq"] != pytest.approx(result["corr_time"])
+        assert result["corr_freq"] > result["corr_time"]
 
     def test_explicit_values_preserved_as_floats(self):
-        """Explicit numeric values survive validation and are coerced to float."""
-        freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 42, "var": 7, "corr_freq": 5e6, "corr_time": 60}
-
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        """Configured numeric values survive resolution, coerced to float."""
+        result = self.resolve(r_seed=42, var=7, corr_freq=5e6, corr_time=60)
 
         assert result["r_seed"] == 42
         assert isinstance(result["var"], float) and result["var"] == pytest.approx(7.0)
@@ -276,36 +267,25 @@ class TestRfiSignalConfigValidation:
         assert isinstance(result["corr_time"], float)
         assert result["corr_time"] == pytest.approx(60.0)
 
-    def test_missing_key_raises(self):
-        """A config missing one of the four required keys raises ValueError."""
-        freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": 5e6}  # no corr_time
+    def test_config_is_not_mutated(self):
+        """Resolution reports its result rather than writing it back."""
+        config = make_rfi_config(var=None, corr_freq=None, corr_time=None)
+        before = dict(config.args["rfi"])
 
-        with pytest.raises(ValueError):
-            rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        first = ComplexRFIVarAnt().resolve_data_params(config)
+        second = ComplexRFIVarAnt().resolve_data_params(config)
 
-    @pytest.mark.parametrize("key", ["r_seed", "var", "corr_freq", "corr_time"])
-    def test_non_numeric_value_raises(self, key):
-        """A non-numeric value for any tunable raises ValueError."""
-        freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": 5e6, "corr_time": 60.0}
-        cfg[key] = "not a number"
-
-        with pytest.raises(ValueError):
-            rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        assert config.args["rfi"] == before
+        assert first == second
 
     def test_single_channel_single_integration_defaults(self):
         """With a zero-extent grid the defaults fall back to the step sizes, not zero."""
-        freqs, times = jnp.array([1.4e9]), jnp.array([0.0])
-        vis_obs = jnp.ones((6, 1, 1), dtype=complex)
-        cfg = {"r_seed": None, "var": None, "corr_freq": None, "corr_time": None}
+        result = self.resolve(
+            n_freq=1, n_time=1, corr_freq=None, corr_time=None,
+        )
 
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
-
-        assert result["corr_freq"] == pytest.approx(1e6 / 2)
-        assert result["corr_time"] == pytest.approx(8.0 / 2)
+        assert result["corr_freq"] == pytest.approx(1e6 / 2)   # chan_width / 2
+        assert result["corr_time"] == pytest.approx(8.0 / 2)   # int_time / 2
 
 
 # ---------------------------------------------------------------------------
