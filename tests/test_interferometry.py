@@ -721,7 +721,12 @@ class TestApplyGains:
         )
 
     def test_matches_the_original_expression(self, gains, pairs):
-        """The formula it replaced, kept as a guard against drift."""
+        """The formula it replaced, kept as a guard against drift.
+
+        Written in numpy: it is the formula being pinned, not jax's arithmetic,
+        and under ``--x64 false`` a ``jnp`` reference would be complex64 while
+        the numpy-evaluated call stays complex128.
+        """
         rng = np.random.default_rng(12)
         a1, a2 = pairs
         shape = (len(a1), 2, 2)
@@ -729,7 +734,7 @@ class TestApplyGains:
 
         np.testing.assert_allclose(
             apply_gains(gains, vis, a1, a2),
-            gains[a1] * vis * jnp.conjugate(gains)[a2],
+            gains[a1] * vis * np.conjugate(gains)[a2],
             rtol=1e-12,
         )
 
