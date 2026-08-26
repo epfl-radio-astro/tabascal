@@ -706,36 +706,39 @@ class TestSampleAxis:
 
 
 class TestApplyGains:
-    """The forward model's entry point is the same product, times the model."""
+    """The forward model's entry point is the same product, times the model.
 
-    def test_matches_baseline_gains_times_the_visibilities(self, gains, pairs):
+    Evaluated through jax on both sides, so under ``--x64 false`` the whole
+    test runs in complex64, and bounded by ``exact_rtol`` -- the session's
+    precision-aware tolerance for identities that are exact in exact
+    arithmetic. A numpy reference would only ever be checked in float64.
+    """
+
+    def test_matches_baseline_gains_times_the_visibilities(self, gains, pairs, exact_rtol):
         rng = np.random.default_rng(11)
         a1, a2 = pairs
         shape = (len(a1), 3, 4)
-        vis = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+        vis = jnp.asarray(rng.normal(size=shape) + 1j * rng.normal(size=shape))
+        g = jnp.asarray(gains)
 
         np.testing.assert_allclose(
-            apply_gains(gains, vis, a1, a2),
-            baseline_gains(gains, a1, a2) * vis,
-            rtol=1e-12,
+            np.asarray(apply_gains(g, vis, a1, a2)),
+            np.asarray(baseline_gains(g, a1, a2) * vis),
+            rtol=exact_rtol,
         )
 
-    def test_matches_the_original_expression(self, gains, pairs):
-        """The formula it replaced, kept as a guard against drift.
-
-        Written in numpy: it is the formula being pinned, not jax's arithmetic,
-        and under ``--x64 false`` a ``jnp`` reference would be complex64 while
-        the numpy-evaluated call stays complex128.
-        """
+    def test_matches_the_original_expression(self, gains, pairs, exact_rtol):
+        """The formula it replaced, kept as a guard against drift."""
         rng = np.random.default_rng(12)
         a1, a2 = pairs
         shape = (len(a1), 2, 2)
-        vis = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+        vis = jnp.asarray(rng.normal(size=shape) + 1j * rng.normal(size=shape))
+        g = jnp.asarray(gains)
 
         np.testing.assert_allclose(
-            apply_gains(gains, vis, a1, a2),
-            gains[a1] * vis * np.conjugate(gains)[a2],
-            rtol=1e-12,
+            np.asarray(apply_gains(g, vis, a1, a2)),
+            np.asarray(g[a1] * vis * jnp.conjugate(g)[a2]),
+            rtol=exact_rtol,
         )
 
     def test_keeps_the_original_multiplication_order(self):
@@ -744,18 +747,20 @@ class TestApplyGains:
         ``(g_p conj(g_q)) * vis`` forms ``1e40`` in complex64 and overflows to
         inf before ``vis`` can bring it back; ``g_p * vis * conj(g_q)`` stays at
         ``1e20`` throughout. The forward model has always used the latter.
+        complex64 is forced explicitly so the case is exercised in both
+        precision sessions -- which is why the bound is the fp32 one
+        (``exact_rtol``'s single-precision value) rather than the session's.
         """
-        gains = np.full((2, 1, 1), 1e20, dtype=np.complex64)
-        vis = np.full((1, 1, 1), 1e-20, dtype=np.complex64)
-        a1, a2 = np.array([0]), np.array([1])
+        gains = jnp.full((2, 1, 1), 1e20, dtype=jnp.complex64)
+        vis = jnp.full((1, 1, 1), 1e-20, dtype=jnp.complex64)
+        a1, a2 = jnp.array([0]), jnp.array([1])
 
         out = apply_gains(gains, vis, a1, a2)
 
-        assert np.all(np.isfinite(out))
-        np.testing.assert_allclose(out.real, 1e20, rtol=1e-6)
+        assert bool(jnp.all(jnp.isfinite(out)))
+        np.testing.assert_allclose(np.asarray(out.real), 1e20, rtol=1e-5)
         # The reassociated form is what would have gone wrong.
-        with np.errstate(over="ignore", invalid="ignore"):
-            assert not np.all(np.isfinite(baseline_gains(gains, a1, a2) * vis))
+        assert not bool(jnp.all(jnp.isfinite(baseline_gains(gains, a1, a2) * vis)))
 
     def test_the_original_order_holds_under_jit(self):
         gains = jnp.full((2, 1, 1), 1e20, dtype=jnp.complex64)
@@ -766,13 +771,14 @@ class TestApplyGains:
 
         assert bool(jnp.all(jnp.isfinite(out)))
 
-    def test_is_jittable(self, gains, pairs):
+    def test_is_jittable(self, gains, pairs, exact_rtol):
         """It is on the model's jit path, so it must stay traceable."""
         a1, a2 = pairs
-        vis = jnp.ones((len(a1), 1, 1), dtype=jnp.complex128)
+        g = jnp.asarray(gains)
+        vis = jnp.ones((len(a1), 1, 1), dtype=g.dtype)
 
-        out = jit(apply_gains)(jnp.asarray(gains), vis, jnp.asarray(a1), jnp.asarray(a2))
+        out = jit(apply_gains)(g, vis, jnp.asarray(a1), jnp.asarray(a2))
 
         np.testing.assert_allclose(
-            np.asarray(out), baseline_gains(gains, a1, a2), rtol=1e-6
+            np.asarray(out), np.asarray(baseline_gains(g, a1, a2)), rtol=exact_rtol
         )

@@ -580,7 +580,7 @@ class TestRowGridMapping:
 
         assert grid_to_rows(grid, n_freq, n_corr=1).shape[2] == 1
 
-    def test_works_on_dask_and_jax_arrays(self, grid):
+    def test_works_on_dask_and_jax_arrays(self, grid, exact_rtol):
         """One mapping for the writer's dask arrays and the reader's jax ones."""
         da = pytest.importorskip("dask.array")
         jnp = pytest.importorskip("jax.numpy")
@@ -593,7 +593,7 @@ class TestRowGridMapping:
             expected,
         )
         np.testing.assert_allclose(
-            np.asarray(grid_to_rows(jnp.asarray(grid), n_freq)), expected, rtol=1e-6
+            np.asarray(grid_to_rows(jnp.asarray(grid), n_freq)), expected, rtol=exact_rtol
         )
 
 
