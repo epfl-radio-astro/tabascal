@@ -9,10 +9,13 @@ import warnings
 import numpy as np
 import pytest
 
+import tabascal.write as write_mod
 from tabascal.write import (
     baseline_gains,
     data_frame_residuals,
+    fitted_correlation,
     gained_model_mean,
+    into_corr,
     read_antenna_pairs,
     total_model,
     unit_bad_gains,
@@ -778,3 +781,104 @@ class TestTotalModel:
         )
 
         np.testing.assert_allclose(out, gained_ast + gained_rfi)
+
+
+# ---------------------------------------------------------------------------
+# Correlations
+# ---------------------------------------------------------------------------
+
+class TestIntoCorr:
+    """One fitted correlation placed on a wider MS correlation axis."""
+
+    @pytest.fixture
+    def col(self):
+        """A result on a length-1 correlation axis, as the writer builds it."""
+        return np.arange(6, dtype=np.complex64).reshape(3, 2, 1) + 1.0
+
+    def test_a_single_correlation_ms_is_left_alone(self, col):
+        out = into_corr(col, 0, 1, 0)
+
+        assert out is col
+
+    def test_the_result_lands_on_the_fitted_correlation(self, col):
+        out = into_corr(col, 2, 4, 0)
+
+        assert out.shape == (3, 2, 4)
+        np.testing.assert_array_equal(out[:, :, 2:3], col)
+
+    def test_a_scalar_fill_covers_the_others(self, col):
+        out = into_corr(col, 2, 4, 0)
+
+        np.testing.assert_array_equal(out[:, :, [0, 1, 3]], 0.0)
+
+    def test_an_array_fill_passes_its_own_values_through(self, col):
+        """The data-frame columns keep the data on the correlations not fitted."""
+        fill = (100 + np.arange(24)).astype(np.complex64).reshape(3, 2, 4)
+
+        out = into_corr(col, 2, 4, fill)
+
+        np.testing.assert_array_equal(out[:, :, [0, 1, 3]], fill[:, :, [0, 1, 3]])
+        np.testing.assert_array_equal(out[:, :, 2:3], col)
+
+    def test_the_dtype_is_preserved(self, col):
+        assert into_corr(col, 2, 4, 0).dtype == np.complex64
+
+    def test_works_on_dask_arrays(self, col):
+        """write_results_ms passes dask arrays through this."""
+        da = pytest.importorskip("dask.array")
+        fill = (100 + np.arange(24)).astype(np.complex64).reshape(3, 2, 4)
+
+        out = into_corr(
+            da.from_array(col, chunks=(3, 2, 1)),
+            2,
+            4,
+            da.from_array(fill, chunks=(3, 2, 4)),
+        )
+
+        np.testing.assert_array_equal(
+            np.asarray(out), into_corr(col, 2, 4, fill)
+        )
+
+
+class TestFittedCorrelation:
+    """Which correlation the results belong to, resolved by name."""
+
+    @pytest.fixture
+    def resolver(self, monkeypatch):
+        """Stand in for the casacore-backed resolver, recording the name."""
+        seen = {}
+
+        def _resolve(ms_path, name, pol_id=0):
+            seen["name"] = name
+            return 3
+
+        monkeypatch.setattr(write_mod, "resolve_correlation", _resolve)
+
+        return seen
+
+    def test_the_argument_is_resolved_by_name(self, resolver):
+        assert fitted_correlation("ms", None, "yy", 4) == 3
+        assert resolver["name"] == "yy"
+
+    def test_the_zarr_attribute_is_used_when_no_argument_is_given(self, resolver):
+        assert fitted_correlation("ms", "xy", None, 4) == 3
+        assert resolver["name"] == "xy"
+
+    def test_the_argument_wins_over_the_attribute(self, resolver):
+        fitted_correlation("ms", "xx", "yy", 4)
+
+        assert resolver["name"] == "yy"
+
+    def test_a_single_correlation_ms_needs_no_name(self, resolver):
+        """One correlation, one answer -- and nothing to resolve."""
+        assert fitted_correlation("ms", None, None, 1) == 0
+        assert "name" not in resolver
+
+    def test_a_nameless_zarr_on_a_wide_ms_is_rejected(self, resolver):
+        """Guessing would write the results into the wrong polarisation."""
+        with pytest.raises(ValueError, match="does not record which one"):
+            fitted_correlation("ms", None, None, 4)
+
+    def test_the_error_says_how_to_fix_it(self, resolver):
+        with pytest.raises(ValueError, match="tab2MS -c xx"):
+            fitted_correlation("ms", None, None, 2)

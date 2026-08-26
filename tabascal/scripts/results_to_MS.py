@@ -20,12 +20,24 @@ def main():
     parser.add_argument(
         "-d", "--data_col", default="DATA", help="Data column name. Default is DATA"
     )
+    parser.add_argument(
+        "-c",
+        "--corr",
+        default=None,
+        help=(
+            "Correlation the results were fitted on, e.g. 'xx'. Defaults to the "
+            "correlation recorded in the results zarr; required for a zarr "
+            "written before that was recorded, unless the MS holds a single "
+            "correlation."
+        ),
+    )
 
     args = parser.parse_args()
     write_results_ms(
         ms_path=args.ms_path,
         results_zarr_path=args.results_zarr_path,
         data_col=args.data_col,
+        corr=args.corr,
     )
 
 

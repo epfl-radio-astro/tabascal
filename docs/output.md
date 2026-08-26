@@ -53,7 +53,7 @@ Data variables:
 
 This shows that we have a dataset with 1 sample, 28 baselines, 1 frequency channel, 120 time steps and 8 antennas. We have just 1 sample because this is the prediction from the maximum a posteriori (MAP) estimate which is a single point. The same prediction datasets are also available for the initial parameters and the prior distribution.
 
-The dataset contains the predictions for the astronomical visibilities, `ast_vis`, the gains, `gains`, the RFI visibilities, `rfi_vis`, and finally the observed visibility prediction, `vis_obs`. 
+The dataset contains the predictions for the astronomical visibilities, `ast_vis`, the gains, `gains`, the RFI visibilities, `rfi_vis`, and finally the observed visibility prediction, `vis_obs`. It also carries a `corr` attribute naming the correlation the run fitted, which is what tells the MS writer where the results belong.
 
 ## MS file columns
 
@@ -71,6 +71,21 @@ Below, `g_p` and `g_q` are the gain predictions for the two antennas of a baseli
 | `TAB_RES_DATA` | `DATA - vis_obs` — should contain only noise | Data |
 
 `TAB_RES_DATA` subtracts the `vis_obs` prediction stored in the results `.zarr`, which is the full forward model the gains component produced, rather than re-deriving it as `g_p g_q* × (ast + rfi)`.
+
+### Correlations
+
+TABASCAL fits a single correlation, named by `data.corr` in the configuration (default `xx`) and recorded in the results `.zarr`. The results are written into that correlation of the MS only, resolved by identity against `POLARIZATION::CORR_TYPE` rather than by position — a single-polarisation MS holds one correlation whatever it is, so `yy` is index 0 there.
+
+On the other correlations of a multi-correlation MS:
+
+* `TAB_AST_DATA` and `TAB_RFI_DATA` — the model columns — are **0**;
+* `CORRECTED_DATA`, `TAB_AST_RES`, `TAB_RFI_RES` and `TAB_RES_DATA` — the data-frame columns — carry the **data column passed through unchanged**: no gain applied and nothing subtracted, which is the honest value for a correlation that was never modelled.
+
+A results `.zarr` written before the correlation was recorded does not say where it belongs. On a single-correlation MS there is only one answer; on a wider one, writing raises a `ValueError` rather than guessing. Pass the correlation explicitly in that case:
+
+```bash
+tab2MS -m path/to/file.ms -z path/to/results.zarr -c xx
+```
 
 ### Why the residuals are in the data frame
 

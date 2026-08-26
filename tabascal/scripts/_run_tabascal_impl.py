@@ -375,7 +375,12 @@ def tabascal_subtraction(
         else:
             from tabascal.write import write_results_ms
             print(f"Copying tabascal initial values to MS file from {paths.init_pred_path}")
-            write_results_ms(ms_path, paths.init_pred_path, tab_config.args["data"]["data_col"])
+            write_results_ms(
+                ms_path,
+                paths.init_pred_path,
+                tab_config.args["data"]["data_col"],
+                corr=tab_config.args["data"]["corr"],
+            )
 
     if log:
         shutil.copy(paths.log_path, paths.plot_dir)

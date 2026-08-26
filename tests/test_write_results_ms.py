@@ -8,6 +8,9 @@ every written column against an independent numpy reference.
 
 Every case uses non-unit, non-uniform complex gains: unity gains cannot tell
 ``g_p conj(g_q)`` from ``|g_p|^2``, nor a gained model from a raw one.
+
+``write_results_xds`` is covered here too, for the one thing the writer reads
+back out of it: which correlation the run fitted.
 """
 
 import warnings
@@ -19,7 +22,7 @@ import dask.array as da
 import xarray as xr
 
 import tabascal.write as write_mod
-from tabascal.write import write_results_ms
+from tabascal.write import write_results_ms, write_results_xds
 
 
 N_ANT = 4
@@ -43,7 +46,7 @@ def _to_ms(arr):
     """
 
     arr = np.asarray(arr)
-    out = np.empty((N_TIME * N_BL, N_FREQ, N_CORR), dtype=arr.dtype)
+    out = np.empty((N_TIME * N_BL, N_FREQ, 1), dtype=arr.dtype)
 
     for t in range(N_TIME):
         for b in range(N_BL):
@@ -84,8 +87,14 @@ def _baseline_gains(gains):
     return gains[:, A1_BL] * np.conj(gains[:, A2_BL])
 
 
-def _write_zarr(tmp_path, gains, ast, rfi, name="results.zarr", vis_obs=None):
-    """A results zarr in the layout ``write_results_xds`` produces."""
+def _write_zarr(
+    tmp_path, gains, ast, rfi, name="results.zarr", vis_obs=None, corr=None
+):
+    """A results zarr in the layout ``write_results_xds`` produces.
+
+    ``corr`` is the fitted-correlation attribute; ``None`` leaves it off, which
+    is what a zarr written before the attribute existed looks like.
+    """
 
     if vis_obs is None:
         vis_obs = _baseline_gains(gains) * (ast + rfi)
@@ -104,6 +113,7 @@ def _write_zarr(tmp_path, gains, ast, rfi, name="results.zarr", vis_obs=None):
             "freq": np.linspace(1.0e9, 1.1e9, N_FREQ),
             "bl": np.arange(n_bl),
         },
+        attrs={} if corr is None else {"corr": corr},
     )
 
     path = str(tmp_path / name)
@@ -113,15 +123,20 @@ def _write_zarr(tmp_path, gains, ast, rfi, name="results.zarr", vis_obs=None):
 
 
 def _fake_ms(data):
-    """An MS-like dataset: dask-backed, time-major rows, one correlation."""
+    """An MS-like dataset: dask-backed, time-major rows.
+
+    The correlation axis is however wide the ``DATA`` given here is, so the same
+    fake covers a single-correlation MS and a full four-correlation one.
+    """
 
     row_chunk = N_BL
+    n_corr = data.shape[2]
 
     return xr.Dataset(
         data_vars={
             "DATA": (
                 ["row", "chan", "corr"],
-                da.from_array(data, chunks=(row_chunk, N_FREQ, N_CORR)),
+                da.from_array(data, chunks=(row_chunk, N_FREQ, n_corr)),
             ),
             "ANTENNA1": (
                 ["row"], da.from_array(np.tile(A1_BL, N_TIME), chunks=row_chunk)
@@ -156,6 +171,41 @@ def _observed(model_ms, seed: int = 7, noise_frac: float = 0.05):
     return (model_ms + noise).astype(np.complex64)
 
 
+def _spread(fit, n_corr: int, corr_idx: int, seed: int = 11):
+    """A full MS ``DATA`` column: the fitted correlation, junk on the others.
+
+    The other correlations carry values of their own so that "passed through
+    unchanged" is a real assertion rather than a comparison of zeros.
+    """
+
+    if n_corr == 1:
+        return fit
+
+    rng = np.random.default_rng(seed)
+    shape = (fit.shape[0], fit.shape[1], n_corr)
+    scale = float(np.abs(fit).max())
+    other = scale * (rng.normal(size=shape) + 1j * rng.normal(size=shape))
+
+    data = other.astype(fit.dtype)
+    data[:, :, corr_idx] = fit[:, :, 0]
+
+    return data
+
+
+def _fit(col, corr_idx: int = 0):
+    """The fitted correlation's slice of a written column, as ``(row, chan, 1)``."""
+
+    return col[:, :, corr_idx : corr_idx + 1]
+
+
+def _others(col, corr_idx: int):
+    """Every correlation of a written column except the fitted one."""
+
+    keep = [c for c in range(col.shape[2]) if c != corr_idx]
+
+    return col[:, :, keep]
+
+
 def _tolerances(data):
     """complex64 round-off, referenced to the magnitude being differenced."""
 
@@ -182,7 +232,7 @@ def run_writer(monkeypatch):
 
     captured = {}
 
-    def _run(xds_ms, zarr_path):
+    def _run(xds_ms, zarr_path, *, corr=None, corr_idx=0):
         monkeypatch.setattr(write_mod, "xds_from_ms", lambda path: [xds_ms])
 
         def _capture(datasets, path, cols, column_keywords=None):
@@ -191,9 +241,15 @@ def run_writer(monkeypatch):
             captured["keywords"] = column_keywords
             return []
 
-        monkeypatch.setattr(write_mod, "xds_to_table", _capture)
+        def _resolve(ms_path, name, pol_id=0):
+            """Stand in for the casacore-backed resolver in tabascal.ms."""
+            captured["resolved"] = name
+            return corr_idx
 
-        write_results_ms("unused.ms", zarr_path)
+        monkeypatch.setattr(write_mod, "xds_to_table", _capture)
+        monkeypatch.setattr(write_mod, "resolve_correlation", _resolve)
+
+        write_results_ms("unused.ms", zarr_path, corr=corr)
 
         values = {
             col: np.asarray(captured["xds"][col].data) for col in captured["cols"]
@@ -211,32 +267,42 @@ def run_writer(monkeypatch):
 class TestWrittenColumns:
 
     @pytest.mark.parametrize("n_sample", [1, 2])
-    def test_every_column_matches_the_reference(self, tmp_path, run_writer, n_sample):
+    @pytest.mark.parametrize(
+        "n_corr, corr_idx", [(1, 0), (4, 2)], ids=["one_corr", "four_corr"]
+    )
+    def test_every_column_matches_the_reference(
+        self, tmp_path, run_writer, n_sample, n_corr, corr_idx
+    ):
         gains, ast, rfi = _model(n_sample)
         gains_bl = _baseline_gains(gains)
         vis_obs_zarr = gains_bl * (ast + rfi)
 
-        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
-        data = _observed(_to_ms(vis_obs_zarr.mean(axis=0)))
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, corr="yx")
+        fit = _observed(_to_ms(vis_obs_zarr.mean(axis=0)))
+        data = _spread(fit, n_corr, corr_idx)
 
-        values, captured = run_writer(_fake_ms(data), zarr_path)
+        values, captured = run_writer(_fake_ms(data), zarr_path, corr_idx=corr_idx)
 
         assert captured["cols"] == COLS
+        assert captured["resolved"] == "yx"          # resolved by name, not index
 
         mean_gains_bl = _to_ms(gains_bl.mean(axis=0))
         gained_ast = _to_ms((gains_bl * ast).mean(axis=0))
         gained_rfi = _to_ms((gains_bl * rfi).mean(axis=0))
         gained_total = _to_ms(vis_obs_zarr.mean(axis=0))
 
-        kw = _tolerances(data)
-        np.testing.assert_allclose(
-            values["CORRECTED_DATA"], data / mean_gains_bl, **kw
-        )
-        np.testing.assert_allclose(values["TAB_AST_DATA"], _to_ms(ast.mean(0)), **kw)
-        np.testing.assert_allclose(values["TAB_RFI_DATA"], _to_ms(rfi.mean(0)), **kw)
-        np.testing.assert_allclose(values["TAB_AST_RES"], data - gained_ast, **kw)
-        np.testing.assert_allclose(values["TAB_RFI_RES"], data - gained_rfi, **kw)
-        np.testing.assert_allclose(values["TAB_RES_DATA"], data - gained_total, **kw)
+        kw = _tolerances(fit)
+        got = {col: _fit(values[col], corr_idx) for col in COLS}
+
+        np.testing.assert_allclose(got["CORRECTED_DATA"], fit / mean_gains_bl, **kw)
+        np.testing.assert_allclose(got["TAB_AST_DATA"], _to_ms(ast.mean(0)), **kw)
+        np.testing.assert_allclose(got["TAB_RFI_DATA"], _to_ms(rfi.mean(0)), **kw)
+        np.testing.assert_allclose(got["TAB_AST_RES"], fit - gained_ast, **kw)
+        np.testing.assert_allclose(got["TAB_RFI_RES"], fit - gained_rfi, **kw)
+        np.testing.assert_allclose(got["TAB_RES_DATA"], fit - gained_total, **kw)
+
+        for col in COLS:
+            assert values[col].shape == (N_TIME * N_BL, N_FREQ, n_corr)
 
     def test_the_columns_are_written_in_the_ms_frame(self, tmp_path, run_writer):
         """Shape and dims, not just values: the transpose is easy to get wrong."""
@@ -400,6 +466,98 @@ class TestTheMeanBaselineGainIsGuarded:
 
         assert np.all(gains_bl[touched] == 0)
         assert np.all(gains_bl[~touched] != 0)
+
+
+class TestMultipleCorrelations:
+    """tabascal fits one correlation; the others must survive untouched."""
+
+    N_CORR = 4
+    CORR_IDX = 2
+
+    @pytest.fixture
+    def run(self, tmp_path, run_writer):
+        """A four-correlation MS whose fitted correlation sits at index 2."""
+
+        gains, ast, rfi = _model(1)
+        gains_bl = _baseline_gains(gains)
+        stored = gains_bl * (ast + rfi)
+
+        fit = _observed(_to_ms(stored.mean(axis=0)))
+        data = _spread(fit, self.N_CORR, self.CORR_IDX)
+
+        def _go(*, corr=None, zarr_corr="yx", n_corr=None, corr_idx=None):
+            n = self.N_CORR if n_corr is None else n_corr
+            idx = self.CORR_IDX if corr_idx is None else corr_idx
+            zarr_path = _write_zarr(tmp_path, gains, ast, rfi, corr=zarr_corr)
+            ms_data = data if n == self.N_CORR else _spread(fit, n, idx)
+
+            return _fake_ms(ms_data), zarr_path, ms_data, run_writer, corr, idx
+
+        return _go
+
+    def test_model_columns_are_zero_on_the_other_correlations(self, run):
+        xds_ms, zarr_path, _, run_writer, corr, idx = run()
+
+        values, _ = run_writer(xds_ms, zarr_path, corr=corr, corr_idx=idx)
+
+        for col in ["TAB_AST_DATA", "TAB_RFI_DATA"]:
+            np.testing.assert_array_equal(_others(values[col], idx), 0.0)
+            assert not np.allclose(_fit(values[col], idx), 0.0)
+
+    def test_data_frame_columns_pass_the_data_through(self, run):
+        """Ungained and unsubtracted, which is what those columns mean there."""
+        xds_ms, zarr_path, ms_data, run_writer, corr, idx = run()
+
+        values, _ = run_writer(xds_ms, zarr_path, corr=corr, corr_idx=idx)
+
+        for col in ["CORRECTED_DATA", "TAB_AST_RES", "TAB_RFI_RES", "TAB_RES_DATA"]:
+            np.testing.assert_array_equal(
+                _others(values[col], idx), _others(ms_data, idx)
+            )
+            # And the fitted correlation is *not* the raw data.
+            assert not np.allclose(
+                _fit(values[col], idx), _fit(ms_data, idx), rtol=1e-3
+            )
+
+    def test_the_dtype_of_the_written_columns_is_unchanged(self, run):
+        xds_ms, zarr_path, ms_data, run_writer, corr, idx = run()
+
+        values, _ = run_writer(xds_ms, zarr_path, corr=corr, corr_idx=idx)
+
+        for col in COLS:
+            assert values[col].dtype == ms_data.dtype
+
+    def test_the_correlation_comes_from_the_zarr_attribute(self, run):
+        xds_ms, zarr_path, _, run_writer, corr, idx = run()
+
+        _, captured = run_writer(xds_ms, zarr_path, corr=corr, corr_idx=idx)
+
+        assert captured["resolved"] == "yx"
+
+    def test_an_explicit_argument_overrides_the_zarr(self, run):
+        xds_ms, zarr_path, _, run_writer, _, idx = run(zarr_corr="xx")
+
+        _, captured = run_writer(xds_ms, zarr_path, corr="yy", corr_idx=idx)
+
+        assert captured["resolved"] == "yy"
+
+    def test_a_zarr_without_the_attribute_is_rejected(self, run):
+        """An older zarr does not say which correlation it belongs to."""
+        xds_ms, zarr_path, _, run_writer, _, idx = run(zarr_corr=None)
+
+        with pytest.raises(ValueError, match="does not record which one"):
+            run_writer(xds_ms, zarr_path, corr_idx=idx)
+
+    def test_a_zarr_without_the_attribute_is_fine_on_a_one_corr_ms(self, run):
+        """There is only one answer, so nothing has to be guessed."""
+        xds_ms, zarr_path, _, run_writer, _, idx = run(
+            zarr_corr=None, n_corr=1, corr_idx=0
+        )
+
+        values, captured = run_writer(xds_ms, zarr_path, corr_idx=0)
+
+        assert "resolved" not in captured        # never had to resolve a name
+        assert values["CORRECTED_DATA"].shape[2] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -584,3 +742,58 @@ class TestBadGainsAreSubstituted:
             values, _ = run_writer(_fake_ms(data), zarr_path)
 
         assert np.all(np.isfinite(values["CORRECTED_DATA"]))
+
+
+# ---------------------------------------------------------------------------
+# The other end of the round trip
+# ---------------------------------------------------------------------------
+
+class TestWriteResultsXdsRecordsTheCorrelation:
+    """The writer can only place the results if the run said where they go."""
+
+    @pytest.fixture
+    def tab_config(self):
+        """The three attributes write_results_xds reads off the config."""
+
+        class _Config:
+            args = {"data": {"corr": "yx"}}
+            times = np.arange(N_TIME, dtype=float)
+            freqs = np.linspace(1.0e9, 1.1e9, N_FREQ)
+
+        return _Config()
+
+    @pytest.fixture
+    def vi_pred(self):
+        gains, ast, rfi = _model(1)
+
+        return {
+            "vis_ast": ast,
+            "vis_rfi": rfi,
+            "gains": gains,
+            "vis_obs": _baseline_gains(gains) * (ast + rfi),
+        }
+
+    def test_the_correlation_is_recorded_as_an_attribute(
+        self, tmp_path, monkeypatch, tab_config, vi_pred
+    ):
+        monkeypatch.setattr(write_mod, "is_process_0", lambda: True)
+        path = str(tmp_path / "map_pred.zarr")
+
+        write_results_xds(vi_pred, tab_config, path)
+
+        assert xr.open_zarr(path).attrs["corr"] == "yx"
+
+    def test_the_writer_reads_it_back(
+        self, tmp_path, monkeypatch, run_writer, tab_config, vi_pred
+    ):
+        """The round trip: no corr argument needed on a four-correlation MS."""
+        monkeypatch.setattr(write_mod, "is_process_0", lambda: True)
+        path = str(tmp_path / "map_pred.zarr")
+        write_results_xds(vi_pred, tab_config, path)
+
+        fit = _observed(_to_ms(vi_pred["vis_obs"].mean(axis=0)))
+        data = _spread(fit, 4, 2)
+
+        _, captured = run_writer(_fake_ms(data), path, corr_idx=2)
+
+        assert captured["resolved"] == "yx"

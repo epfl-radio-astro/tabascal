@@ -1,4 +1,5 @@
 from tabascal.distributed import is_process_0
+from tabascal.ms import resolve_correlation
 from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_to_table
@@ -106,12 +107,65 @@ def baseline_gains(gains, a1, a2, ant_axis: int = 0):
     return gains[lead + (a1,)] * gains[lead + (a2,)].conj()
 
 
-def _to_ms_column(arr, dims, chunks, n_freq, n_corr):
-    """``(bl, freq, time)`` array to an MS ``(row, chan, corr)`` DataArray."""
+def _to_ms_column(arr, dims, chunks, n_freq, n_corr=1):
+    """``(bl, freq, time)`` array to an MS ``(row, chan, corr)`` DataArray.
+
+    ``n_corr`` is 1 here: tabascal fits one correlation, so every result starts
+    life on a length-1 correlation axis and :func:`into_corr` places it on the
+    MS's axis afterwards.
+    """
 
     return xr.DataArray(
         da.transpose(arr, (2, 0, 1)).reshape(-1, n_freq, n_corr), dims=dims
     ).chunk(chunks)
+
+
+def fitted_correlation(ms_path: str, zarr_corr, corr, n_corr: int) -> int:
+    """Index on the MS's correlation axis that the results belong to.
+
+    tabascal fits one correlation. Its name comes from the ``corr`` argument if
+    given, else from the ``corr`` attribute the run recorded on the results
+    zarr, and is resolved to an index **by identity, not by position** -- a
+    single-polarisation MS holds one correlation whatever it is, so ``yy`` is
+    index 0 there.
+
+    A zarr written before that attribute existed carries no name. With one
+    correlation there is only one answer; with more, guessing would silently
+    write the results into the wrong polarisation, so it is an error.
+    """
+
+    name = corr if corr is not None else zarr_corr
+
+    if name is None:
+        if n_corr == 1:
+            return 0
+
+        raise ValueError(
+            f"The MS has {n_corr} correlations and the results zarr does not "
+            "record which one was fitted -- it predates that attribute. Pass "
+            "the correlation explicitly: write_results_ms(..., corr='xx'), or "
+            "tab2MS -c xx."
+        )
+
+    return resolve_correlation(ms_path, name)
+
+
+def into_corr(col, corr_idx: int, n_corr: int, fill):
+    """Place a one-correlation result on the MS's correlation axis.
+
+    Results are ``(row, chan, 1)`` while the MS column may be ``(row, chan, 4)``.
+    The fitted correlation takes the result; the others take ``fill`` -- zero for
+    the model columns, and the data column itself for the data-frame columns,
+    which is what "no gain applied and nothing subtracted" means there.
+
+    Works on the raw arrays because xarray will not broadcast a length-1 ``corr``
+    dimension against a length-4 one; the caller re-wraps.
+    """
+
+    if n_corr == 1:
+        return col
+
+    return np.where(np.arange(n_corr) == corr_idx, col, fill)
 
 
 def data_frame_residuals(vis_obs, gained_ast, gained_rfi, gained_total):
@@ -240,7 +294,12 @@ def gained_model_mean(gains_bl, model, sample_axis: int = 0):
 
 
 @measure_runtime
-def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
+def write_results_ms(
+    ms_path: str,
+    results_zarr_path: str,
+    data_col: str = "DATA",
+    corr: str | None = None,
+):
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
     # so no other rank needs to participate.
@@ -253,6 +312,10 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     dims = ["row", "chan", "corr"]
     chunks = {k: v for k, v in xds_ms.chunks.items() if k in dims}
 
+    # The results live on a length-1 correlation axis until they are placed on
+    # the MS's, so they must not be chunked with the MS's correlation chunk.
+    fit_chunks = {k: v for k, v in chunks.items() if k != "corr"}
+
     if xds_tab.ast_vis.data.ndim != 4:
         raise ValueError(
             f"ast_vis has {xds_tab.ast_vis.data.ndim} dimensions; expected 4, "
@@ -260,7 +323,8 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         )
 
     n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
-    n_corr = 1
+    n_corr = xds_ms.sizes["corr"]
+    corr_idx = fitted_correlation(ms_path, xds_tab.attrs.get("corr"), corr, n_corr)
 
     # Before any column is built: a zarr from a different MS otherwise surfaces
     # as a dask "chunks do not add up to shape" error from the first reshape.
@@ -269,8 +333,8 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     ast_vis = xds_tab.ast_vis.data.astype(np.complex64)
     rfi_vis = xds_tab.rfi_vis.data.astype(np.complex64)
 
-    vis_ast = _to_ms_column(ast_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
-    vis_rfi = _to_ms_column(rfi_vis.mean(axis=0), dims, chunks, n_freq, n_corr)
+    vis_ast = _to_ms_column(ast_vis.mean(axis=0), dims, fit_chunks, n_freq)
+    vis_rfi = _to_ms_column(rfi_vis.mean(axis=0), dims, fit_chunks, n_freq)
 
     gains, bad = unit_bad_gains(xds_tab.gains.data.astype(np.complex64))
     warn_bad_gains(bad)
@@ -278,10 +342,10 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     gains_bl_s = baseline_gains(gains, a1, a2, ant_axis=1)
 
     gained_ast = _to_ms_column(
-        gained_model_mean(gains_bl_s, ast_vis), dims, chunks, n_freq, n_corr
+        gained_model_mean(gains_bl_s, ast_vis), dims, fit_chunks, n_freq
     )
     gained_rfi = _to_ms_column(
-        gained_model_mean(gains_bl_s, rfi_vis), dims, chunks, n_freq, n_corr
+        gained_model_mean(gains_bl_s, rfi_vis), dims, fit_chunks, n_freq
     )
     # Guarded again after the reduction: per-sample gains that are all finite
     # and non-zero can still average to zero, and it is the mean that the data
@@ -289,7 +353,7 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     gains_bl_mean, bad_bl_mean = unit_bad_gains(gains_bl_s.mean(axis=0))
     warn_bad_baseline_gains(bad_bl_mean)
 
-    gains_bl = _to_ms_column(gains_bl_mean, dims, chunks, n_freq, n_corr)
+    gains_bl = _to_ms_column(gains_bl_mean, dims, fit_chunks, n_freq)
 
     # The zarr's vis_obs is the gained total the forward model produced, so the
     # total residual need not re-derive it from the two parts -- except on the
@@ -307,25 +371,39 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         # Defensive: every current producer stores it beside the split.
         total_s = gains_bl_s * (ast_vis + rfi_vis)
 
-    gained_total = _to_ms_column(
-        total_s.mean(axis=0), dims, chunks, n_freq, n_corr
-    )
+    gained_total = _to_ms_column(total_s.mean(axis=0), dims, fit_chunks, n_freq)
 
     vis_obs = xds_ms[data_col]
 
-    vis_cal = vis_obs / gains_bl
+    # Sliced by position rather than with .isel so no correlation coordinate can
+    # come along and misalign the arithmetic below.
+    vis_obs_fit = xr.DataArray(
+        vis_obs.data[:, :, corr_idx : corr_idx + 1], dims=dims
+    ).chunk(fit_chunks)
 
-    residuals = data_frame_residuals(vis_obs, gained_ast, gained_rfi, gained_total)
-    vis_ast_res = residuals["ast"]
-    vis_rfi_res = residuals["rfi"]
-    vis_res = residuals["total"]
+    vis_cal = vis_obs_fit / gains_bl
 
-    xds_ms = xds_ms.assign(CORRECTED_DATA=vis_cal)
-    xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)
-    xds_ms = xds_ms.assign(TAB_RFI_DATA=vis_rfi)
-    xds_ms = xds_ms.assign(TAB_AST_RES=vis_ast_res)
-    xds_ms = xds_ms.assign(TAB_RFI_RES=vis_rfi_res)
-    xds_ms = xds_ms.assign(TAB_RES_DATA=vis_res)
+    residuals = data_frame_residuals(
+        vis_obs_fit, gained_ast, gained_rfi, gained_total
+    )
+
+    def column(col, fill):
+        """One result placed on the MS's correlation axis, ready to assign."""
+
+        return xr.DataArray(
+            into_corr(col.data, corr_idx, n_corr, fill), dims=dims
+        ).chunk(chunks)
+
+    # Model columns are zero on the correlations that were not fitted; the
+    # data-frame columns pass the data through there, ungained and unsubtracted.
+    passthrough = vis_obs.data
+
+    xds_ms = xds_ms.assign(CORRECTED_DATA=column(vis_cal, passthrough))
+    xds_ms = xds_ms.assign(TAB_AST_DATA=column(vis_ast, 0))
+    xds_ms = xds_ms.assign(TAB_RFI_DATA=column(vis_rfi, 0))
+    xds_ms = xds_ms.assign(TAB_AST_RES=column(residuals["ast"], passthrough))
+    xds_ms = xds_ms.assign(TAB_RFI_RES=column(residuals["rfi"], passthrough))
+    xds_ms = xds_ms.assign(TAB_RES_DATA=column(residuals["total"], passthrough))
 
     cols = [
         "CORRECTED_DATA",
@@ -385,6 +463,9 @@ def write_results_xds(
             # "rfi_time": da.asarray(args["rfi_times"]),
             # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
         },
+        # Which correlation was fitted, by name. Without it the writer cannot
+        # tell where the results belong on a multi-correlation MS.
+        attrs={"corr": tab_config.args["data"]["corr"]},
     )
     # print(map_xds)
 
