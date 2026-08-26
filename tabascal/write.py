@@ -164,6 +164,14 @@ def write_results_ms(
     data_col: str = "DATA",
     corr: str | None = None,
 ):
+    """Copy a results zarr into the Measurement Set it was fitted from.
+
+    ``corr`` names the correlation the results belong to. It is an override, not
+    the normal route: ``write_results_xds`` records the fitted correlation on the
+    zarr, and results carrying it need nothing here. Pass it only for a zarr
+    written before that attribute existed, where a multi-correlation MS has no
+    other way to know.
+    """
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
     # so no other rank needs to participate.

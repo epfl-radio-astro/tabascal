@@ -486,12 +486,9 @@ def run_opt(
 
     print()
     print(f"Copying tabascal results to MS file from {map_path}")
-    write_results_ms(
-        ms_path,
-        map_path,
-        tab_config.args["data"]["data_col"],
-        corr=tab_config.args["data"]["corr"],
-    )
+    # No corr= here: write_results_xds recorded the fitted correlation on the
+    # zarr, so the results carry it themselves.
+    write_results_ms(ms_path, map_path, tab_config.args["data"]["data_col"])
 
     return vi_pred, vi_results.losses, vi_params, rchi2
 

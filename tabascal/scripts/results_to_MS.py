@@ -25,10 +25,10 @@ def main():
         "--corr",
         default=None,
         help=(
-            "Correlation the results were fitted on, e.g. 'xx'. Defaults to the "
-            "correlation recorded in the results zarr; required for a zarr "
-            "written before that was recorded, unless the MS holds a single "
-            "correlation."
+            "Override the correlation the results were fitted on, e.g. 'xx'. "
+            "Not normally needed: the zarr records it. Required only for a zarr "
+            "written before it was recorded, and then only if the MS holds more "
+            "than one correlation."
         ),
     )
 

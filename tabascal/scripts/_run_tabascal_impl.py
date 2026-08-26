@@ -375,11 +375,9 @@ def tabascal_subtraction(
         else:
             from tabascal.write import write_results_ms
             print(f"Copying tabascal initial values to MS file from {paths.init_pred_path}")
+            # The correlation comes off the zarr the line above just wrote.
             write_results_ms(
-                ms_path,
-                paths.init_pred_path,
-                tab_config.args["data"]["data_col"],
-                corr=tab_config.args["data"]["corr"],
+                ms_path, paths.init_pred_path, tab_config.args["data"]["data_col"]
             )
 
     if log:
