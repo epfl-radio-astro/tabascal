@@ -733,6 +733,34 @@ class TestApplyGains:
             rtol=1e-12,
         )
 
+    def test_keeps_the_original_multiplication_order(self):
+        """``g_p * vis`` first: a large single-precision gain must not overflow.
+
+        ``(g_p conj(g_q)) * vis`` forms ``1e40`` in complex64 and overflows to
+        inf before ``vis`` can bring it back; ``g_p * vis * conj(g_q)`` stays at
+        ``1e20`` throughout. The forward model has always used the latter.
+        """
+        gains = np.full((2, 1, 1), 1e20, dtype=np.complex64)
+        vis = np.full((1, 1, 1), 1e-20, dtype=np.complex64)
+        a1, a2 = np.array([0]), np.array([1])
+
+        out = apply_gains(gains, vis, a1, a2)
+
+        assert np.all(np.isfinite(out))
+        np.testing.assert_allclose(out.real, 1e20, rtol=1e-6)
+        # The reassociated form is what would have gone wrong.
+        with np.errstate(over="ignore", invalid="ignore"):
+            assert not np.all(np.isfinite(baseline_gains(gains, a1, a2) * vis))
+
+    def test_the_original_order_holds_under_jit(self):
+        gains = jnp.full((2, 1, 1), 1e20, dtype=jnp.complex64)
+        vis = jnp.full((1, 1, 1), 1e-20, dtype=jnp.complex64)
+        a1, a2 = jnp.array([0]), jnp.array([1])
+
+        out = jit(apply_gains)(gains, vis, a1, a2)
+
+        assert bool(jnp.all(jnp.isfinite(out)))
+
     def test_is_jittable(self, gains, pairs):
         """It is on the model's jit path, so it must stay traceable."""
         a1, a2 = pairs

@@ -511,8 +511,18 @@ def baseline_gains(gains: Array, a1: Array, a2: Array, ant_axis: int = 0) -> Arr
 
 
 def apply_gains(gains: Array, vis: Array, a1: Array, a2: Array) -> Array:
+    """Apply per-antenna gains to per-baseline visibilities.
 
-    return baseline_gains(gains, a1, a2) * vis
+    The same product as :func:`baseline_gains`, which is the one definition of
+    the convention and what the tests hold this to. It is multiplied in the
+    order ``g_p * vis * conj(g_q)`` rather than ``(g_p conj(g_q)) * vis``,
+    though: floating point is not associative, and with ``complex64`` gains far
+    from unity the baseline product can overflow where ``g_p * vis`` first
+    does not. This order is also the one every reference result was produced
+    with, so the model's output is unchanged to the bit.
+    """
+
+    return gains[a1] * vis * gains[a2].conj()
 
 
 #########################################################################
