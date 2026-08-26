@@ -14,6 +14,7 @@ from tabascal.write import (
     data_frame_residuals,
     gained_model_mean,
     read_antenna_pairs,
+    total_model,
     unit_bad_gains,
     warn_bad_gains,
 )
@@ -122,7 +123,12 @@ class TestDataFrameResiduals:
 
         vis_obs = gains_bl * (vis_ast + vis_rfi) + 0.01
 
-        res = data_frame_residuals(vis_obs, gains_bl * vis_ast, gains_bl * vis_rfi)
+        res = data_frame_residuals(
+            vis_obs,
+            gains_bl * vis_ast,
+            gains_bl * vis_rfi,
+            gains_bl * (vis_ast + vis_rfi),
+        )
 
         np.testing.assert_allclose(
             gains_bl * (vis_ast + vis_rfi) + res["total"], vis_obs, atol=1e-12
@@ -134,7 +140,12 @@ class TestDataFrameResiduals:
         gains_bl = baseline_gains(gains, a1, a2)
 
         vis_obs = gains_bl * (vis_ast + vis_rfi)
-        res = data_frame_residuals(vis_obs, gains_bl * vis_ast, gains_bl * vis_rfi)
+        res = data_frame_residuals(
+            vis_obs,
+            gains_bl * vis_ast,
+            gains_bl * vis_rfi,
+            gains_bl * (vis_ast + vis_rfi),
+        )
 
         np.testing.assert_allclose(res["total"], 0.0, atol=1e-12)
 
@@ -153,7 +164,9 @@ class TestDataFrameResiduals:
         """No change for existing UnitaryGains results, so no refs move."""
         vis_ast, vis_rfi = model
 
-        res = data_frame_residuals(vis_ast * 0 + 5.0, vis_ast, vis_rfi)
+        res = data_frame_residuals(
+            vis_ast * 0 + 5.0, vis_ast, vis_rfi, vis_ast + vis_rfi
+        )
 
         np.testing.assert_allclose(res["ast"], 5.0 - vis_ast)
         np.testing.assert_allclose(res["rfi"], 5.0 - vis_rfi)
@@ -165,11 +178,53 @@ class TestDataFrameResiduals:
         gains_bl = baseline_gains(gains, a1, a2)
         vis_obs = gains_bl * (vis_ast + vis_rfi)
 
-        res = data_frame_residuals(vis_obs, gains_bl * vis_ast, gains_bl * vis_rfi)
+        res = data_frame_residuals(
+            vis_obs,
+            gains_bl * vis_ast,
+            gains_bl * vis_rfi,
+            gains_bl * (vis_ast + vis_rfi),
+        )
 
         # Removing only the astronomical model leaves exactly the gained RFI.
         np.testing.assert_allclose(res["ast"], gains_bl * vis_rfi, atol=1e-12)
         np.testing.assert_allclose(res["rfi"], gains_bl * vis_ast, atol=1e-12)
+
+    def test_summing_the_parts_reproduces_the_old_total(self, model, gains, pairs):
+        """Passing the total explicitly changes nothing for the usual case."""
+        vis_ast, vis_rfi = model
+        a1, a2 = pairs
+        gains_bl = baseline_gains(gains, a1, a2)
+        vis_obs = gains_bl * (vis_ast + vis_rfi) + 0.01
+        gained_ast, gained_rfi = gains_bl * vis_ast, gains_bl * vis_rfi
+
+        res = data_frame_residuals(
+            vis_obs, gained_ast, gained_rfi, gained_ast + gained_rfi
+        )
+
+        np.testing.assert_allclose(
+            res["total"], vis_obs - (gained_ast + gained_rfi), atol=1e-12
+        )
+
+    def test_the_given_total_is_used_not_the_sum(self, model, gains, pairs):
+        """The stored forward model wins: a component may gain only one term.
+
+        See the commented-out variant in components/gains.py, where the
+        astronomical term alone carries the gain.
+        """
+        vis_ast, vis_rfi = model
+        a1, a2 = pairs
+        gains_bl = baseline_gains(gains, a1, a2)
+        gained_ast, gained_rfi = gains_bl * vis_ast, gains_bl * vis_rfi
+        stored_total = gained_ast + vis_rfi          # RFI left un-gained
+        vis_obs = stored_total
+
+        res = data_frame_residuals(vis_obs, gained_ast, gained_rfi, stored_total)
+
+        np.testing.assert_allclose(res["total"], 0.0, atol=1e-12)
+        assert not np.allclose(
+            vis_obs - (gained_ast + gained_rfi), 0.0, atol=1e-8
+        )
+
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +452,9 @@ class TestGainedModelMean:
         gained_rfi = gained_model_mean(gains_bl, rfi)
         vis_obs = gained_ast + gained_rfi + 0.5
 
-        res = data_frame_residuals(vis_obs, gained_ast, gained_rfi)
+        res = data_frame_residuals(
+            vis_obs, gained_ast, gained_rfi, gained_ast + gained_rfi
+        )
 
         np.testing.assert_allclose(
             gained_ast + gained_rfi + res["total"], vis_obs, atol=1e-12
@@ -532,3 +589,63 @@ class TestWarnBadGains:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             assert warn_bad_gains(np.zeros((1, 4, 2, 3), dtype=bool)) == 0
+
+
+# ---------------------------------------------------------------------------
+# total_model
+# ---------------------------------------------------------------------------
+
+class TestTotalModel:
+    """The stored forward model wins, except where the gains were substituted."""
+
+    @pytest.fixture
+    def parts(self):
+        rng = np.random.default_rng(8)
+        shape = (6, 2, 1)
+        gained_ast = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+        gained_rfi = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+
+        return gained_ast, gained_rfi
+
+    def test_the_stored_model_is_used_where_the_gains_were_good(self, parts):
+        gained_ast, gained_rfi = parts
+        stored = gained_ast + gained_rfi + 7.0        # deliberately not the sum
+        bad_bl = np.zeros(gained_ast.shape, dtype=bool)
+
+        out = total_model(stored, gained_ast, gained_rfi, bad_bl)
+
+        np.testing.assert_allclose(out, stored)
+
+    def test_substituted_baselines_fall_back_to_the_sum(self, parts):
+        """The stored value predates the substitution and still carries the zero."""
+        gained_ast, gained_rfi = parts
+        stored = gained_ast + gained_rfi
+        stored[2] = 0.0                               # the dead antenna's baseline
+        bad_bl = np.zeros(gained_ast.shape, dtype=bool)
+        bad_bl[2] = True
+
+        out = total_model(stored, gained_ast, gained_rfi, bad_bl)
+
+        np.testing.assert_allclose(out[2], (gained_ast + gained_rfi)[2])
+        np.testing.assert_allclose(out[[0, 1, 3, 4, 5]], stored[[0, 1, 3, 4, 5]])
+
+    def test_a_non_finite_stored_value_does_not_survive(self, parts):
+        gained_ast, gained_rfi = parts
+        stored = gained_ast + gained_rfi
+        stored[4] = np.nan
+        bad_bl = np.zeros(gained_ast.shape, dtype=bool)
+        bad_bl[4] = True
+
+        out = total_model(stored, gained_ast, gained_rfi, bad_bl)
+
+        assert np.all(np.isfinite(out))
+
+    def test_nothing_bad_means_nothing_changes(self, parts):
+        gained_ast, gained_rfi = parts
+        stored = gained_ast + gained_rfi
+
+        out = total_model(
+            stored, gained_ast, gained_rfi, np.zeros(stored.shape, dtype=bool)
+        )
+
+        np.testing.assert_allclose(out, gained_ast + gained_rfi)

@@ -96,11 +96,15 @@ def _to_ms_column(arr, dims, chunks, n_freq, n_corr):
     ).chunk(chunks)
 
 
-def data_frame_residuals(vis_obs, gained_ast, gained_rfi):
+def data_frame_residuals(vis_obs, gained_ast, gained_rfi, gained_total):
     """``TAB_*_RES`` residuals, in the frame of the observed data.
 
     Takes models already multiplied by the baseline gain, since that has to
     happen per sample and only the caller still holds the sample axis.
+
+    ``gained_total`` is passed rather than summed from the two parts: the results
+    zarr stores the forward model the gains component actually produced, and a
+    component is free to gain only one of the two terms.
 
     Data frame rather than calibrated: dividing by the gain inflates the noise on
     low-gain baselines and distorts noise-referenced metrics. Moving every column
@@ -110,7 +114,7 @@ def data_frame_residuals(vis_obs, gained_ast, gained_rfi):
     return {
         "ast": vis_obs - gained_ast,
         "rfi": vis_obs - gained_rfi,
-        "total": vis_obs - (gained_ast + gained_rfi),
+        "total": vis_obs - gained_total,
     }
 
 
@@ -159,6 +163,22 @@ def warn_bad_gains(bad) -> int:
         )
 
     return n_bad
+
+
+def total_model(stored, gained_ast, gained_rfi, bad_bl):
+    """The gained total model, preferring the forward model the run stored.
+
+    The zarr's ``vis_obs`` is what the gains component actually produced, so it
+    is right even where a component gains only one of the two terms -- see the
+    commented-out variant in ``components/gains.py``.
+
+    It was formed with the *original* gains, though, so on any baseline whose
+    antenna gain was pushed to unity it still carries the zero or non-finite
+    value. There the model is re-derived from the two substituted parts, which
+    is the same quantity everywhere the substitution did not bite.
+    """
+
+    return xr.where(bad_bl, gained_ast + gained_rfi, stored)
 
 
 def gained_model_mean(gains_bl, model, sample_axis: int = 0):
@@ -218,11 +238,34 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
         gains_bl_s.mean(axis=0), dims, chunks, n_freq, n_corr
     )
 
+    # The zarr's vis_obs is the gained total the forward model produced, so the
+    # total residual need not re-derive it from the two parts -- except on the
+    # baselines whose gains were substituted, where the stored value predates it.
+    if "vis_obs" in xds_tab:
+        bad_bl = _to_ms_column(
+            (bad[:, a1] | bad[:, a2]).any(axis=0), dims, chunks, n_freq, n_corr
+        )
+        gained_total = total_model(
+            _to_ms_column(
+                xds_tab.vis_obs.data.astype(np.complex64).mean(axis=0),
+                dims,
+                chunks,
+                n_freq,
+                n_corr,
+            ),
+            gained_ast,
+            gained_rfi,
+            bad_bl,
+        )
+    else:
+        # Defensive: every current producer stores it beside the split.
+        gained_total = gained_ast + gained_rfi
+
     vis_obs = xds_ms[data_col]
 
     vis_cal = vis_obs / gains_bl
 
-    residuals = data_frame_residuals(vis_obs, gained_ast, gained_rfi)
+    residuals = data_frame_residuals(vis_obs, gained_ast, gained_rfi, gained_total)
     vis_ast_res = residuals["ast"]
     vis_rfi_res = residuals["rfi"]
     vis_res = residuals["total"]
