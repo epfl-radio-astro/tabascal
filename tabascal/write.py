@@ -1,6 +1,12 @@
 from tabascal.distributed import is_process_0
 from tabascal.interferometry import baseline_gains
-from tabascal.ms import ms_layout, partition_polarization, resolve_correlation
+from tabascal.ms import (
+    fitted_correlation,
+    grid_to_rows,
+    into_corr,
+    ms_layout,
+    partition_polarization,
+)
 from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_to_table
@@ -22,74 +28,7 @@ def _to_ms_column(arr, dims, chunks, n_freq, n_corr=1):
     MS's axis afterwards.
     """
 
-    return xr.DataArray(
-        da.transpose(arr, (2, 0, 1)).reshape(-1, n_freq, n_corr), dims=dims
-    ).chunk(chunks)
-
-
-def fitted_correlation(
-    ms_path: str, zarr_corr, corr, n_corr: int, pol_id: int = 0
-) -> int:
-    """Index on the MS's correlation axis that the results belong to.
-
-    tabascal fits one correlation. Its name comes from the ``corr`` argument if
-    given, else from the ``corr`` attribute the run recorded on the results
-    zarr, and is resolved to an index **by identity, not by position** -- a
-    single-polarisation MS holds one correlation whatever it is, so ``yy`` is
-    index 0 there.
-
-    ``pol_id`` is the ``POLARIZATION`` row the data partition actually uses,
-    the same one ``read_ms`` resolved through ``DATA_DESCRIPTION``. Row 0 is
-    only a convention: a partition on another row may order its correlations
-    differently, or hold fewer of them, and resolving against the wrong row
-    would put the results in the wrong polarisation without a word.
-
-    A zarr written before that attribute existed carries no name. With one
-    correlation there is only one answer; with more, guessing would silently
-    write the results into the wrong polarisation, so it is an error.
-    """
-
-    name = corr if corr is not None else zarr_corr
-
-    if name is None:
-        if n_corr == 1:
-            return 0
-
-        raise ValueError(
-            f"The MS has {n_corr} correlations and the results zarr does not "
-            "record which one was fitted -- it predates that attribute. Pass "
-            "the correlation explicitly: write_results_ms(..., corr='xx'), or "
-            "tab2MS -c xx."
-        )
-
-    corr_idx = resolve_correlation(ms_path, name, pol_id)
-
-    if not 0 <= corr_idx < n_corr:
-        raise ValueError(
-            f"Correlation {name!r} resolves to index {corr_idx} on POLARIZATION "
-            f"row {pol_id}, but the data partition has {n_corr} correlations. "
-            "The MS's DATA_DESCRIPTION and POLARIZATION subtables disagree."
-        )
-
-    return corr_idx
-
-
-def into_corr(col, corr_idx: int, n_corr: int, fill):
-    """Place a one-correlation result on the MS's correlation axis.
-
-    Results are ``(row, chan, 1)`` while the MS column may be ``(row, chan, 4)``.
-    The fitted correlation takes the result; the others take ``fill`` -- zero for
-    the model columns, and the data column itself for the data-frame columns,
-    which is what "no gain applied and nothing subtracted" means there.
-
-    Works on the raw arrays because xarray will not broadcast a length-1 ``corr``
-    dimension against a length-4 one; the caller re-wraps.
-    """
-
-    if n_corr == 1:
-        return col
-
-    return np.where(np.arange(n_corr) == corr_idx, col, fill)
+    return xr.DataArray(grid_to_rows(arr, n_freq, n_corr), dims=dims).chunk(chunks)
 
 
 def data_frame_residuals(vis_obs, gained_ast, gained_rfi, gained_total):

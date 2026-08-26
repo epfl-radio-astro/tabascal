@@ -6,10 +6,14 @@ import pytest
 from tabascal.ms import (
     CORR_TYPES,
     DEFAULT_TIME_SCALE,
+    fitted_correlation,
+    grid_to_rows,
+    into_corr,
     ms_layout,
     partition_polarization,
     partition_setup,
     read_time_scale,
+    rows_to_grid,
     resolve_correlation,
     resolve_data_description,
 )
@@ -485,6 +489,202 @@ class TestPartitionSetup:
 
         assert partition_setup("fake.ms", xds) == (3, 4)
         assert partition_polarization("fake.ms", xds) == 4
+
+
+# ---------------------------------------------------------------------------
+# Row/channel <-> (bl, freq, time)
+# ---------------------------------------------------------------------------
+
+class TestRowGridMapping:
+    """The reshape the reader and the writer each used to spell out."""
+
+    @pytest.fixture
+    def grid(self):
+        """A ``(bl, freq, time)`` array with every element distinguishable."""
+        rng = np.random.default_rng(21)
+        shape = (6, 3, 4)                       # 6 baselines, 3 chans, 4 times
+
+        return rng.normal(size=shape) + 1j * rng.normal(size=shape)
+
+    def test_round_trips(self, grid):
+        n_bl, n_freq, n_time = grid.shape
+
+        rows = grid_to_rows(grid, n_freq)
+        back = rows_to_grid(rows[:, :, 0], n_time, n_bl, n_freq)
+
+        np.testing.assert_array_equal(back, grid)
+
+    def test_rows_are_time_major(self, grid):
+        """Row ``t * n_bl + b`` holds baseline ``b`` at time ``t``."""
+        n_bl, n_freq, n_time = grid.shape
+        rows = grid_to_rows(grid, n_freq)
+
+        assert rows.shape == (n_time * n_bl, n_freq, 1)
+        for t in range(n_time):
+            for b in range(n_bl):
+                np.testing.assert_array_equal(
+                    rows[t * n_bl + b, :, 0], grid[b, :, t]
+                )
+
+    def test_rows_to_grid_reproduces_the_readers_old_expression(self, grid):
+        """The inline reshape/transpose read_ms used to carry."""
+        n_bl, n_freq, n_time = grid.shape
+        col = grid_to_rows(grid, n_freq)[:, :, 0]
+
+        expected = np.transpose(col.reshape(n_time, n_bl, n_freq), (1, 2, 0))
+
+        np.testing.assert_array_equal(rows_to_grid(col, n_time, n_bl, n_freq), expected)
+
+    def test_grid_to_rows_reproduces_the_writers_old_expression(self, grid):
+        """The inline transpose/reshape _to_ms_column used to carry."""
+        n_freq = grid.shape[1]
+
+        expected = np.transpose(grid, (2, 0, 1)).reshape(-1, n_freq, 1)
+
+        np.testing.assert_array_equal(grid_to_rows(grid, n_freq), expected)
+
+    def test_a_wider_correlation_axis_is_kept(self, grid):
+        n_freq = grid.shape[1]
+
+        assert grid_to_rows(grid, n_freq, n_corr=1).shape[2] == 1
+
+    def test_works_on_dask_and_jax_arrays(self, grid):
+        """One mapping for the writer's dask arrays and the reader's jax ones."""
+        da = pytest.importorskip("dask.array")
+        jnp = pytest.importorskip("jax.numpy")
+        n_bl, n_freq, n_time = grid.shape
+
+        expected = grid_to_rows(grid, n_freq)
+
+        np.testing.assert_allclose(
+            np.asarray(grid_to_rows(da.from_array(grid, chunks=(3, 3, 2)), n_freq)),
+            expected,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grid_to_rows(jnp.asarray(grid), n_freq)), expected, rtol=1e-6
+        )
+
+
+# ---------------------------------------------------------------------------
+# Placing one fitted correlation on the MS's correlation axis
+# ---------------------------------------------------------------------------
+
+class TestIntoCorr:
+    """One fitted correlation placed on a wider MS correlation axis."""
+
+    @pytest.fixture
+    def col(self):
+        """A result on a length-1 correlation axis, as the writer builds it."""
+        return np.arange(6, dtype=np.complex64).reshape(3, 2, 1) + 1.0
+
+    def test_a_single_correlation_ms_is_left_alone(self, col):
+        out = into_corr(col, 0, 1, 0)
+
+        assert out is col
+
+    def test_the_result_lands_on_the_fitted_correlation(self, col):
+        out = into_corr(col, 2, 4, 0)
+
+        assert out.shape == (3, 2, 4)
+        np.testing.assert_array_equal(out[:, :, 2:3], col)
+
+    def test_a_scalar_fill_covers_the_others(self, col):
+        out = into_corr(col, 2, 4, 0)
+
+        np.testing.assert_array_equal(out[:, :, [0, 1, 3]], 0.0)
+
+    def test_an_array_fill_passes_its_own_values_through(self, col):
+        """The data-frame columns keep the data on the correlations not fitted."""
+        fill = (100 + np.arange(24)).astype(np.complex64).reshape(3, 2, 4)
+
+        out = into_corr(col, 2, 4, fill)
+
+        np.testing.assert_array_equal(out[:, :, [0, 1, 3]], fill[:, :, [0, 1, 3]])
+        np.testing.assert_array_equal(out[:, :, 2:3], col)
+
+    def test_the_dtype_is_preserved(self, col):
+        assert into_corr(col, 2, 4, 0).dtype == np.complex64
+
+    def test_works_on_dask_arrays(self, col):
+        """write_results_ms passes dask arrays through this."""
+        da = pytest.importorskip("dask.array")
+        fill = (100 + np.arange(24)).astype(np.complex64).reshape(3, 2, 4)
+
+        out = into_corr(
+            da.from_array(col, chunks=(3, 2, 1)),
+            2,
+            4,
+            da.from_array(fill, chunks=(3, 2, 4)),
+        )
+
+        np.testing.assert_array_equal(
+            np.asarray(out), into_corr(col, 2, 4, fill)
+        )
+
+
+class TestFittedCorrelation:
+    """Which correlation the results belong to, resolved by name."""
+
+    @pytest.fixture
+    def resolver(self, monkeypatch):
+        """Stand in for the casacore-backed resolver, recording the name."""
+        seen = {}
+
+        def _resolve(ms_path, name, pol_id=0):
+            seen["name"] = name
+            seen["pol_id"] = pol_id
+            return 3
+
+        monkeypatch.setattr("tabascal.ms.resolve_correlation", _resolve)
+
+        return seen
+
+    def test_the_argument_is_resolved_by_name(self, resolver):
+        assert fitted_correlation("ms", None, "yy", 4) == 3
+        assert resolver["name"] == "yy"
+
+    def test_the_zarr_attribute_is_used_when_no_argument_is_given(self, resolver):
+        assert fitted_correlation("ms", "xy", None, 4) == 3
+        assert resolver["name"] == "xy"
+
+    def test_the_argument_wins_over_the_attribute(self, resolver):
+        fitted_correlation("ms", "xx", "yy", 4)
+
+        assert resolver["name"] == "yy"
+
+    def test_a_single_correlation_ms_needs_no_name(self, resolver):
+        """One correlation, one answer -- and nothing to resolve."""
+        assert fitted_correlation("ms", None, None, 1) == 0
+        assert "name" not in resolver
+
+    def test_a_nameless_zarr_on_a_wide_ms_is_rejected(self, resolver):
+        """Guessing would write the results into the wrong polarisation."""
+        with pytest.raises(ValueError, match="does not record which one"):
+            fitted_correlation("ms", None, None, 4)
+
+    def test_the_error_says_how_to_fix_it(self, resolver):
+        with pytest.raises(ValueError, match="tab2MS -c xx"):
+            fitted_correlation("ms", None, None, 2)
+
+    def test_the_partition_polarization_row_is_forwarded(self, resolver):
+        """Row 0 is a convention, not where this partition's data lives."""
+        fitted_correlation("ms", None, "yy", 4, pol_id=2)
+
+        assert resolver["pol_id"] == 2
+
+    def test_the_row_defaults_to_zero(self, resolver):
+        fitted_correlation("ms", None, "yy", 4)
+
+        assert resolver["pol_id"] == 0
+
+    def test_an_index_off_the_partition_axis_is_rejected(self, resolver):
+        """A wider POLARIZATION row than the data: index 3 on a 2-corr axis.
+
+        Without this, into_corr would match nothing and silently write zero
+        models and untouched data everywhere.
+        """
+        with pytest.raises(ValueError, match="resolves to index 3"):
+            fitted_correlation("ms", None, "yy", 2)
 
 
 # ---------------------------------------------------------------------------

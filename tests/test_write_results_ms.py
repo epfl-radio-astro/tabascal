@@ -252,7 +252,7 @@ def run_writer(monkeypatch):
             return corr_idx
 
         monkeypatch.setattr(write_mod, "xds_to_table", _capture)
-        monkeypatch.setattr(write_mod, "resolve_correlation", _resolve)
+        monkeypatch.setattr(ms_mod, "resolve_correlation", _resolve)
 
         write_results_ms("unused.ms", zarr_path, corr=corr)
 
