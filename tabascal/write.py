@@ -194,9 +194,14 @@ def total_model(stored, gained_ast, gained_rfi, bad_bl):
     antenna gain was pushed to unity it still carries the zero or non-finite
     value. There the model is re-derived from the two substituted parts, which
     is the same quantity everywhere the substitution did not bite.
+
+    Every argument keeps its sample axis, so the choice is made per sample and
+    the caller averages afterwards. Reducing ``bad_bl`` over samples first would
+    throw away the stored model on *every* sample of a cell because one sample
+    happened to have a bad gain.
     """
 
-    return xr.where(bad_bl, gained_ast + gained_rfi, stored)
+    return np.where(bad_bl, gained_ast + gained_rfi, stored)
 
 
 def gained_model_mean(gains_bl, model, sample_axis: int = 0):
@@ -258,26 +263,23 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
 
     # The zarr's vis_obs is the gained total the forward model produced, so the
     # total residual need not re-derive it from the two parts -- except on the
-    # baselines whose gains were substituted, where the stored value predates it.
+    # samples whose gains were substituted, where the stored value predates it.
+    # Chosen per sample, then averaged; dask shares the two products below with
+    # the ones formed for the per-component columns above.
     if "vis_obs" in xds_tab:
-        bad_bl = _to_ms_column(
-            (bad[:, a1] | bad[:, a2]).any(axis=0), dims, chunks, n_freq, n_corr
-        )
-        gained_total = total_model(
-            _to_ms_column(
-                xds_tab.vis_obs.data.astype(np.complex64).mean(axis=0),
-                dims,
-                chunks,
-                n_freq,
-                n_corr,
-            ),
-            gained_ast,
-            gained_rfi,
-            bad_bl,
+        total_s = total_model(
+            xds_tab.vis_obs.data.astype(np.complex64),
+            gains_bl_s * ast_vis,
+            gains_bl_s * rfi_vis,
+            bad[:, a1] | bad[:, a2],
         )
     else:
         # Defensive: every current producer stores it beside the split.
-        gained_total = gained_ast + gained_rfi
+        total_s = gains_bl_s * (ast_vis + rfi_vis)
+
+    gained_total = _to_ms_column(
+        total_s.mean(axis=0), dims, chunks, n_freq, n_corr
+    )
 
     vis_obs = xds_ms[data_col]
 

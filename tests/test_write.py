@@ -672,6 +672,52 @@ class TestTotalModel:
 
         assert np.all(np.isfinite(out))
 
+    def test_the_choice_is_made_per_sample(self, parts):
+        """One bad sample must not discard the stored model on the other.
+
+        Reducing the mask over samples first -- the bug -- rebuilds the total
+        from the two parts on every sample of the cell.
+        """
+        gained_ast, gained_rfi = parts
+        gained_ast = np.stack([gained_ast, 2 * gained_ast])
+        gained_rfi = np.stack([gained_rfi, 2 * gained_rfi])
+
+        stored = gained_ast + gained_rfi + 5.0        # deliberately not the sum
+        stored[0] = 0.0                               # sample 0 had a bad gain
+
+        bad_bl = np.zeros(stored.shape, dtype=bool)
+        bad_bl[0] = True
+
+        out = total_model(stored, gained_ast, gained_rfi, bad_bl)
+
+        np.testing.assert_allclose(out[0], (gained_ast + gained_rfi)[0])
+        np.testing.assert_allclose(out[1], stored[1])
+
+        # What reducing over samples first would have given.
+        any_sample = np.where(
+            bad_bl.any(axis=0), gained_ast + gained_rfi, stored
+        )
+        assert not np.allclose(out[1], any_sample[1])
+
+    def test_works_on_dask_arrays(self, parts):
+        """write_results_ms passes the zarr's dask arrays straight in."""
+        da = pytest.importorskip("dask.array")
+        gained_ast, gained_rfi = parts
+        stored = gained_ast + gained_rfi + 3.0
+        bad_bl = np.zeros(stored.shape, dtype=bool)
+        bad_bl[1] = True
+
+        out = total_model(
+            da.from_array(stored, chunks=(2, 2, 1)),
+            da.from_array(gained_ast, chunks=(2, 2, 1)),
+            da.from_array(gained_rfi, chunks=(2, 2, 1)),
+            da.from_array(bad_bl, chunks=(2, 2, 1)),
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(out), np.where(bad_bl, gained_ast + gained_rfi, stored)
+        )
+
     def test_nothing_bad_means_nothing_changes(self, parts):
         gained_ast, gained_rfi = parts
         stored = gained_ast + gained_rfi

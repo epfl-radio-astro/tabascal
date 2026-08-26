@@ -467,6 +467,48 @@ class TestBadGainsAreSubstituted:
         # just the data -- an obviously wrong, and obviously different, answer.
         assert not np.allclose(values["TAB_RES_DATA"][touched], naive, rtol=1e-3)
 
+    def test_one_bad_sample_does_not_discard_the_stored_model_on_the_other(
+        self, tmp_path, run_writer
+    ):
+        """The fallback is per sample, not per cell."""
+        gains, ast, rfi = _model(2)
+        gains = gains.copy()
+        gains[0, 2] = 0.0                    # antenna 2 dead on sample 0 only
+
+        gains_bl = _baseline_gains(_substitute(gains))
+
+        # A one-term-gained forward model, so the stored total differs from the
+        # sum of the two gained parts and which one was used is visible.
+        stored = _baseline_gains(gains) * ast + rfi
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored)
+        data = _observed(_to_ms((gains_bl * (ast + rfi)).mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning):
+            values, _ = run_writer(_fake_ms(data), zarr_path)
+
+        touched = (A1_BL == 2) | (A2_BL == 2)
+        bad_bl_s = np.zeros(ast.shape, dtype=bool)
+        bad_bl_s[0, touched] = True
+
+        expected = np.where(bad_bl_s, gains_bl * (ast + rfi), stored).mean(axis=0)
+        np.testing.assert_allclose(
+            values["TAB_RES_DATA"],
+            data - _to_ms(expected),
+            **_tolerances(data),
+        )
+
+        # Reducing the mask over samples first rebuilds the total on *both*
+        # samples of the touched cells, throwing away the stored sample 1.
+        any_sample = np.where(
+            bad_bl_s.any(axis=0), gains_bl * (ast + rfi), stored
+        ).mean(axis=0)
+        rows = np.tile(touched, N_TIME)
+        assert not np.allclose(
+            values["TAB_RES_DATA"][rows],
+            (data - _to_ms(any_sample))[rows],
+            rtol=1e-3,
+        )
+
     def test_finite_gains_raise_no_warning(self, tmp_path, run_writer):
         gains, ast, rfi = _model(1)
         zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
