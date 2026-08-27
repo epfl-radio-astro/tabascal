@@ -291,7 +291,10 @@ def radec_to_lmn(ra, dec, ra0, dec0):
     negative ``n`` it has.
 
     ``n - 1`` uses the haversine identity ``n - 1 = -2 h`` with
-    ``h = sin^2((d - d0)/2) + cos(d) cos(d0) sin^2(da/2)``. Subtracting a nearby ``n``
+    ``h = sin^2((d - d0)/2) + cos(d) cos(d0) sin^2(da/2)``, the haversine of the angular
+    distance. ``h`` runs over ``[0, 1]`` across the whole sphere — 0 at the phase centre,
+    1 at the antipode — so ``n - 1`` runs over ``[-2, 0]`` and ``n < 0`` exactly when
+    ``h > 1/2``. Subtracting a nearby ``n``
     from 1 cancels catastrophically: at a 40 arcsec offset ``1 - n ~ 2e-8``, which in
     single precision is below the spacing of the floats either expression lands on, so
     the difference comes out as exactly zero and the w term disappears. The haversine

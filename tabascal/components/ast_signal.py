@@ -46,6 +46,26 @@ OSKAR_LEGACY_COLUMNS = OSKAR_COLUMNS[:8] + OSKAR_COLUMNS[9:]
 #: Parsed but not modelled. See :func:`_check_unpolarised`.
 POLARISATION_COLUMNS = ("Q", "U", "V", "rm")
 
+#: The inline-YAML source fields: the OSKAR column each maps to, and a description of
+#: the value used when reporting a bad one. ``ra``, ``dec`` and ``I`` are required; the
+#: rest default to zero. ``name`` is handled separately, as it is not a number.
+INLINE_FIELDS = {
+    "ra": ("ra_deg", "right ascension in degrees"),
+    "dec": ("dec_deg", "declination in degrees"),
+    "I": ("I", "Stokes I flux in Jy"),
+    "ref_freq_mhz": ("ref_freq_hz", "reference frequency in MHz"),
+    "alpha": ("alpha", "spectral index, dimensionless"),
+    "Q": ("Q", "Stokes Q flux in Jy"),
+    "U": ("U", "Stokes U flux in Jy"),
+    "V": ("V", "Stokes V flux in Jy"),
+    "rm": ("rm", "rotation measure in rad/m^2"),
+    "fwhm_major_arcsec": ("fwhm_major_arcsec", "major-axis FWHM in arcsec"),
+    "fwhm_minor_arcsec": ("fwhm_minor_arcsec", "minor-axis FWHM in arcsec"),
+    "position_angle_deg": ("position_angle_deg", "position angle in degrees"),
+}
+
+INLINE_REQUIRED = ("ra", "dec", "I")
+
 ARCSEC_TO_RAD = np.pi / (180 * 3600)
 
 
@@ -122,29 +142,41 @@ def _inline_row(source, idx: int) -> dict:
             f"Got {source!r}."
         )
 
-    label = source.get("name", f"entry {idx}")
+    name = source.get("name")
+    # The index goes in even when the source is named: it is what locates the entry in
+    # the file, and two sources may share a name.
+    where = f"ast.point_sources entry {idx}" + (f" ({name!r})" if name else "")
 
-    def required(key, units):
+    def value_of(key):
+        units = INLINE_FIELDS[key][1]
+
+        # An absent key and an explicit YAML null both mean "unset" -- null is how these
+        # config files spell a default throughout. Anything else that is present has to
+        # parse: `alpha: ""` is malformed catalogue data, not a request for a flat
+        # spectrum, and quietly reading it as the default hides a broken source.
         if source.get(key) is None:
-            raise ValueError(
-                f"ast.point_sources source {label!r} has no {key!r}, which is required "
-                f"({units}). Given fields: {sorted(source)}."
-            )
-        return float(source[key])
+            if key in INLINE_REQUIRED:
+                raise ValueError(
+                    f"{where} has no {key!r}, which is required ({units}). "
+                    f"Given fields: {sorted(source)}."
+                )
+            return 0.0
 
-    get = lambda key, default=0.0: float(source.get(key, default) or default)
+        value = source[key]
+        # bool is an int in Python, so float(False) would pass silently as 0.
+        if not isinstance(value, bool):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
 
-    row = {
-        "ra_deg": required("ra", "right ascension in degrees"),
-        "dec_deg": required("dec", "declination in degrees"),
-        "I": required("I", "Stokes I flux in Jy"),
-        "ref_freq_hz": get("ref_freq_mhz") * 1e6,
-        "alpha": get("alpha"),
-        "name": str(label),
-    }
-    for key in ("Q", "U", "V", "rm", "fwhm_major_arcsec", "fwhm_minor_arcsec",
-                "position_angle_deg"):
-        row[key] = get(key)
+        raise ValueError(
+            f"{where} has {key!r} = {value!r}, which is not a number ({units})."
+        )
+
+    row = {column: value_of(key) for key, (column, _) in INLINE_FIELDS.items()}
+    row["ref_freq_hz"] *= 1e6
+    row["name"] = str(name) if name else f"src{idx}"
 
     return row
 

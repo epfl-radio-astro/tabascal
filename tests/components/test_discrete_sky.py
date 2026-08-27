@@ -97,8 +97,13 @@ def single_baseline_config(uvw_m, freq=1.4e9, **kwargs):
 def test_source_at_phase_centre_gives_flat_visibility(exact_rtol):
     """l=m=0, n=1 -> zero delay on every baseline, so V == I exactly.
 
-    This is the check that catches a transposed uvw or a flipped sign: both still
-    produce a plausible-looking array, but neither gives a constant V = I here.
+    This pins two things: the flux normalisation (a source at the centre contributes its
+    catalogue flux, undivided) and the output shape, which is what catches a transposed
+    uvw -- baseline-first and time-first uvw give arrays of different shapes here.
+
+    It cannot see the sign of the exponent: the delay is zero, so conjugating the phase
+    changes nothing. That is
+    :func:`test_the_phase_convention_matches_a_hand_computed_visibility`.
     """
     cfg = make_sky_config([{"name": "at centre", "ra": 30.0, "dec": -26.7, "I": 7.0}])
     vis = sky_vis(cfg)
@@ -622,13 +627,75 @@ def test_w_term_matters_for_a_source_far_from_the_phase_centre():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("missing", ["ra", "dec", "I"])
-def test_a_missing_inline_field_names_the_source_and_the_field(missing):
+@pytest.mark.parametrize("missing, units", [
+    ("ra", "degrees"), ("dec", "degrees"), ("I", "Jy"),
+])
+def test_a_missing_inline_field_names_the_entry_the_field_and_the_units(missing, units):
     source = {"name": "Fornax A", "ra": 30.0, "dec": -26.7, "I": 5.0}
     del source[missing]
 
-    with pytest.raises(RuntimeError, match=f"Fornax A.*{missing}"):
+    with pytest.raises(RuntimeError) as excinfo:
         FixedDiscreteSky().setup(make_sky_config([source]))
+
+    message = str(excinfo.value)
+    assert "entry 0" in message  # the index, even though the source is named
+    assert "Fornax A" in message
+    assert repr(missing) in message
+    assert units in message
+
+
+@pytest.mark.parametrize("field, value, units", [
+    ("ra", "oops", "degrees"),
+    ("dec", [1, 2], "degrees"),
+    ("I", "lots", "Jy"),
+    ("alpha", "oops", "spectral index"),
+    ("ref_freq_mhz", "soon", "MHz"),
+    ("fwhm_major_arcsec", "big", "arcsec"),
+    ("position_angle_deg", "sideways", "degrees"),
+])
+def test_a_malformed_inline_value_names_the_entry_the_field_and_the_units(
+    field, value, units
+):
+    """A present-but-unreadable value must not surface as a bare float() failure."""
+    source = {"name": "Fornax A", "ra": 30.0, "dec": -26.7, "I": 5.0, field: value}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        FixedDiscreteSky().setup(make_sky_config([source]))
+
+    message = str(excinfo.value)
+    assert "entry 0" in message
+    assert "Fornax A" in message
+    assert repr(field) in message
+    assert repr(value) in message
+    assert units in message
+
+
+@pytest.mark.parametrize("field, value", [
+    ("alpha", ""),
+    ("ref_freq_mhz", False),
+    ("fwhm_minor_arcsec", ""),
+    ("I", False),
+])
+def test_a_falsy_but_present_inline_value_is_an_error_not_a_default(field, value):
+    """`alpha: ""` is malformed catalogue data, not a request for a flat spectrum."""
+    source = {"name": "Fornax A", "ra": 30.0, "dec": -26.7, "I": 5.0, field: value}
+
+    with pytest.raises(RuntimeError, match=repr(field)):
+        FixedDiscreteSky().setup(make_sky_config([source]))
+
+
+def test_an_explicitly_null_optional_field_takes_the_default(exact_rtol):
+    """`alpha:` with no value is how YAML says "unset", so it is absent, not malformed."""
+    cfg = make_sky_config(
+        [{"ra": 30.0, "dec": -26.7, "I": 5.0, "alpha": None, "ref_freq_mhz": None,
+          "fwhm_major_arcsec": None}],
+        freqs=(1.0e8, 2.0e8),
+    )
+    sky = FixedDiscreteSky()
+    sky.setup(cfg)
+
+    assert np.allclose(np.asarray(sky.ast_I), 5.0, rtol=exact_rtol)  # flat spectrum
+    assert np.all(np.asarray(sky.ast_shape) == 0.0)  # a point
 
 
 def test_a_non_dict_inline_entry_is_reported_as_such():
@@ -648,15 +715,48 @@ def test_a_source_block_size_that_is_not_a_positive_whole_number_is_rejected(blo
         DiscreteSkyVis().setup(cfg)
 
 
-def test_a_source_below_the_phase_centre_horizon_warns_but_is_still_modelled():
+def test_a_source_beyond_ninety_degrees_warns_and_names_the_source():
     """More than 90 degrees out is almost always a catalogue error, but not our call."""
-    cfg = make_sky_config([{"ra": 180.0, "dec": -26.7, "I": 1.0}])
+    cfg = make_sky_config(
+        [{"name": "Fornax A", "ra": 30.0, "dec": -26.7, "I": 1.0},
+         {"name": "wrong hemisphere", "ra": 180.0, "dec": -26.7, "I": 1.0}]
+    )
 
-    with pytest.warns(UserWarning, match="90 degrees"):
+    with pytest.warns(UserWarning, match="90 degrees") as record:
         sky = FixedDiscreteSky()
         sky.setup(cfg)
 
-    assert sky.n_src == 1  # warned, not dropped
+    message = str(record[0].message)
+    assert "wrong hemisphere" in message  # the offender is named
+    assert "Fornax A" not in message  # and the innocent source is not
+    assert sky.n_src == 2  # warned, not dropped
+
+
+def test_a_source_beyond_ninety_degrees_keeps_its_negative_n(exact_rtol):
+    """The far-side visibility must use the signed n - 1, not a folded or clipped one.
+
+    ``sqrt(1 - l^2 - m^2)`` would give this source ``n = +0.866`` instead of ``-0.866``,
+    an ``n - 1`` of ``-0.134`` rather than ``-1.866``: a completely different w phase,
+    which this pins to the analytic value.
+    """
+    ra, dec, ra0, dec0 = 150.0, 0.0, 0.0, 0.0
+    u, v, w, freq = 10.0, 4.0, 5.0, 1.0e8
+
+    l, m, n, n_minus_1 = (float(x) for x in radec_to_lmn(
+        np.deg2rad(ra), np.deg2rad(dec), np.deg2rad(ra0), np.deg2rad(dec0)))
+    assert n < 0 and np.isclose(n_minus_1, np.cos(np.deg2rad(150.0)) - 1, atol=1e-5)
+
+    cfg = single_baseline_config(
+        (u, v, w), freq=freq, ra0=ra0, dec0=dec0,
+        sources=[{"ra": ra, "dec": dec, "I": 2.0}],
+    )
+    with pytest.warns(UserWarning, match="90 degrees"):
+        vis = complex(sky_vis(cfg).ravel()[0])
+
+    tau = u * l + v * m + w * n_minus_1
+    expected = 2.0 * np.exp(-2j * np.pi * (-tau) * freq / C)
+
+    assert np.isclose(vis, expected, rtol=1000 * exact_rtol)
 
 
 def test_components_are_parameter_free():
