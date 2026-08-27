@@ -277,6 +277,39 @@ class GPVisAst(Component):
         assert_attr_shape(self, "init_ast_k_base", ast_shape)
 
 
+def radec_to_lmn(ra, dec, ra0, dec0):
+    """Direction cosines of sources at ``(ra, dec)`` about a phase centre, in radians.
+
+    Returns ``(l, m, n, n - 1)``. ``n - 1`` is returned alongside ``n`` because it is the
+    quantity the w term actually needs and the two cannot both be computed accurately
+    from one expression.
+
+    ``n`` is the exact spherical form ``sin(d) sin(d0) + cos(d) cos(d0) cos(da)`` rather
+    than ``sqrt(1 - l^2 - m^2)``. The square root is the cosine of the angular distance
+    only on the near hemisphere: it is unsigned, so it folds a source more than 90
+    degrees from the phase centre back onto the near side instead of giving it the
+    negative ``n`` it has.
+
+    ``n - 1`` uses the haversine identity ``n - 1 = -2 h`` with
+    ``h = sin^2((d - d0)/2) + cos(d) cos(d0) sin^2(da/2)``. Subtracting a nearby ``n``
+    from 1 cancels catastrophically: at a 40 arcsec offset ``1 - n ~ 2e-8``, which in
+    single precision is below the spacing of the floats either expression lands on, so
+    the difference comes out as exactly zero and the w term disappears. The haversine
+    form never forms the difference, so it keeps full relative accuracy at any offset.
+    """
+    dra = ra - ra0
+    l = jnp.cos(dec) * jnp.sin(dra)
+    m = jnp.sin(dec) * jnp.cos(dec0) - jnp.cos(dec) * jnp.sin(dec0) * jnp.cos(dra)
+    n = jnp.sin(dec) * jnp.sin(dec0) + jnp.cos(dec) * jnp.cos(dec0) * jnp.cos(dra)
+
+    hav = (
+        jnp.sin((dec - dec0) / 2) ** 2
+        + jnp.cos(dec) * jnp.cos(dec0) * jnp.sin(dra / 2) ** 2
+    )
+
+    return l, m, n, -2.0 * hav
+
+
 class DiscreteSkyVis(Component):
     """Visibilities of a discrete sky by direct DFT, with the full w term.
 
@@ -286,11 +319,18 @@ class DiscreteSkyVis(Component):
     before this component — and ACCUMULATES into ``vis_ast`` using the visibility
     equation
 
-        V(u,v,w) = sum_k (I_k / n_k) G_k(u,v) exp(-2i pi (u l_k + v m_k + w (n_k - 1)) / lambda)
+        V(u,v,w) = sum_k I_k G_k(u,v) exp(-2i pi (u l_k + v m_k + w (n_k - 1)) / lambda)
 
     For a discrete sky the direct sum is exact, gridless, differentiable, and unaffected
     by field of view or baseline length; "discrete" is the set of sources, not their
     size, so ``ImageSkyVis`` is reserved for a sky carried as an image.
+
+    ``I_k`` enters undivided: there is no ``1 / n``. The RIME integrand carries ``B / n``
+    because ``dOmega = dl dm / n``, but a source of integrated flux ``S`` is
+    ``B = S delta_Omega`` and ``delta_Omega = n delta(l) delta(m)``, so the Jacobian
+    cancels and a source contributes its catalogue flux exactly, in every direction.
+    ``(u, v, w)`` is the ANTENNA2 - ANTENNA1 baseline the equation above is written for,
+    which is ``uvw_sign`` times the UVW column — see ``setup``.
 
     ``G_k`` is the uv-plane envelope of an elliptical Gaussian source,
 
@@ -317,6 +357,13 @@ class DiscreteSkyVis(Component):
     and blocking replaces ``n_src`` in that shape with the block size at the cost of
     recomputing each block in the backward pass.
 
+    Sources more than 90 degrees from the phase centre are modelled, not rejected: only
+    ``n - 1`` enters the phase and :func:`radec_to_lmn` computes it exactly over the
+    whole sphere, so nothing here breaks down at ``n <= 0``. Such a source is almost
+    always a catalogue mistake rather than a real one, so
+    :class:`~tabascal.components.ast_signal.FixedDiscreteSky` warns about it at setup
+    and leaves the decision to the caller.
+
     A fixed sky exists to make a per-antenna gain identifiable (see issue #124); the flux
     scale it fixes the gain against is only physical if the data are calibrated to Jy.
     """
@@ -342,18 +389,33 @@ class DiscreteSkyVis(Component):
             self.freqs = jnp.asarray(config.freqs)
             self.phase_centre_ra = jnp.deg2rad(config.phase_centre["ra"])
             self.phase_centre_dec = jnp.deg2rad(config.phase_centre["dec"])
-            # Per-term uvw sign toggles (u, v, w); (1,1,1) is the CASA
-            # measurement-equation convention, which is what read_ms gives us.
-            self.uvw_sign = jnp.asarray((1.0, 1.0, 1.0))
+            # Per-term uvw sign toggles (u, v, w), applied before the exponent below.
+            #
+            # The measurement equation's exp(-2i pi b.(s - s0) / lambda) is written for
+            # b = ANTENNA2 - ANTENNA1. The UVW column read_ms gives us is the other
+            # baseline: tab-sim writes bl_uvw = ants_uvw[a1] - ants_uvw[a2], and
+            # tabascal forms its own baselines the same way throughout
+            # (interferometry.py: bl_u = ants_u[:, a1] - ants_u[:, a2]). Negating turns
+            # one into the other, which is what makes this agree with tab-sim's
+            # astro_vis on the very visibilities the model is fit to -- a sign error
+            # here is a sky mirrored through the phase centre, which is exactly the
+            # corruption a gain solved against a fixed sky would absorb.
+            self.uvw_sign = jnp.asarray((-1.0, -1.0, -1.0))
 
-            self.source_block_size = int(
-                config.args["ast"].get("source_block_size", 128)
-            )
-            if self.source_block_size < 1:
+            # int() alone would turn 1.9 into 1 without a word, which is a hundredfold
+            # slowdown dressed up as a valid setting.
+            block_size = config.args["ast"].get("source_block_size", 128)
+            if (
+                isinstance(block_size, bool)
+                or not isinstance(block_size, (int, float))
+                or block_size != int(block_size)
+                or block_size < 1
+            ):
                 raise ValueError(
                     "ast.source_block_size is the number of sources handled per scan "
-                    f"step and must be at least 1, got {self.source_block_size}."
+                    f"step: a whole number of at least 1, got {block_size!r}."
                 )
+            self.source_block_size = int(block_size)
 
             self._set_outputs()
         except Exception as e:
@@ -384,16 +446,17 @@ class DiscreteSkyVis(Component):
 
             ra = state["ast_radec"][:, 0]  # (n_src,)
             dec = state["ast_radec"][:, 1]
-            I = state["ast_I"]  # (n_src, n_freq)
             shape = state["ast_shape"]  # (n_src, 3)
 
-            dra = ra - ra0
-            l = jnp.cos(dec) * jnp.sin(dra)
-            m = jnp.sin(dec) * jnp.cos(dec0) - jnp.cos(dec) * jnp.sin(dec0) * jnp.cos(dra)
-            n = jnp.sqrt(1.0 - l**2 - m**2)  # (n_src,)
+            l, m, _, n_minus_1 = radec_to_lmn(ra, dec, ra0, dec0)  # (n_src,)
 
-            lmn = jnp.stack([l, m, n - 1.0], axis=-1)  # (n_src, 3)
-            weights = I / n[:, None]  # (n_src, n_freq)
+            lmn = jnp.stack([l, m, n_minus_1], axis=-1)  # (n_src, 3)
+            # No 1 / n. The RIME integrand carries B / n because dOmega = dl dm / n, but
+            # a source of integrated flux S is B = S delta_Omega with
+            # delta_Omega = n delta(l) delta(m), so the Jacobian cancels and the source
+            # contributes S exactly, in any direction. Catalogue fluxes -- OSKAR's
+            # included -- are integrated fluxes, so ast_I goes in as it stands.
+            weights = state["ast_I"]  # (n_src, n_freq)
 
             u = uvw[..., 0, None]  # (n_bl, n_time, 1)
             v = uvw[..., 1, None]

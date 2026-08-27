@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import jax.numpy as jnp
 
 from tabascal.components.ast_signal import FixedDiscreteSky, read_oskar_sky_model
-from tabascal.components.ast_vis import DiscreteSkyVis
+from tabascal.components.ast_vis import DiscreteSkyVis, radec_to_lmn
 
 
 ARCSEC = np.pi / (180 * 3600)
@@ -109,11 +109,10 @@ def test_source_at_phase_centre_gives_flat_visibility(exact_rtol):
 
 
 def test_offset_source_has_unit_amplitude_and_varying_phase(exact_rtol):
-    """Off centre the amplitude is still I/n, but the phase must vary with baseline."""
+    """Off centre the amplitude is still I, but the phase must vary with baseline."""
     vis = sky_vis(make_sky_config([{"ra": 34.0, "dec": -30.0, "I": 3.0}]))
 
-    amp = np.abs(vis)
-    assert np.allclose(amp, amp.mean(), rtol=10 * exact_rtol)
+    assert np.allclose(np.abs(vis), 3.0, rtol=10 * exact_rtol)
     assert np.ptp(np.angle(vis)) > 0.1
 
 
@@ -152,12 +151,132 @@ def test_empty_catalogue_is_an_error():
 
 
 # ---------------------------------------------------------------------------
+# Flux scale, direction cosines and the phase convention
+# ---------------------------------------------------------------------------
+
+
+def test_zero_baseline_amplitude_is_the_catalogue_flux(exact_rtol):
+    """A catalogue flux is the INTEGRATED flux, so |V(0,0,0)| == I in any direction.
+
+    The RIME carries the sky brightness as ``B / n`` because ``dOmega = dl dm / n``,
+    but a source of integrated flux S is ``B = S delta_Omega`` and
+    ``delta_Omega = n delta(l) delta(m)``, so the Jacobian cancels exactly and no
+    ``1 / n`` survives. Dividing by ``n`` would inflate an off-axis source, by 1.5% at
+    10 degrees and without bound towards the horizon.
+    """
+    for dec in (-26.7, -16.7, 3.3):  # 0, 10 and 30 degrees off the phase centre
+        cfg = single_baseline_config(
+            (0.0, 0.0, 0.0), sources=[{"ra": 30.0, "dec": dec, "I": 4.0}]
+        )
+        assert np.allclose(np.abs(sky_vis(cfg)), 4.0, rtol=10 * exact_rtol)
+
+
+def test_n_is_exact_over_the_whole_sphere():
+    """``n = sqrt(1 - l^2 - m^2)`` cannot see past 90 degrees; the spherical form can."""
+    _, _, n, _ = radec_to_lmn(np.deg2rad(150.0), 0.0, 0.0, 0.0)
+
+    # 150 degrees away in right ascension, so n = cos(150 deg) < 0.
+    assert float(n) < 0
+    assert np.isclose(float(n), np.cos(np.deg2rad(150.0)), atol=1e-5)
+
+
+def test_n_minus_one_keeps_its_precision_for_a_small_offset(exact_rtol):
+    """The w term must survive the cancellation in ``1 - n`` at small offsets.
+
+    At a 40 arcsec offset ``l^2 + m^2 ~ 4e-8``, so in single precision ``1 - l^2 - m^2``
+    rounds to exactly 1 and the square-root form loses the w term completely. The
+    haversine identity computes ``n - 1`` directly and keeps full relative accuracy.
+    """
+    offset = 40 * ARCSEC
+    dec0 = np.deg2rad(-26.7)
+    _, _, _, n_minus_1 = radec_to_lmn(0.0, dec0 + offset, 0.0, dec0)
+
+    expected = -2 * np.sin(offset / 2) ** 2  # = cos(offset) - 1
+    assert np.isclose(float(n_minus_1), expected, rtol=100 * exact_rtol)
+
+    # And through the component: a w-only baseline isolates the w term. With uvw_sign
+    # negating the UVW column, the phase is +2 pi w (n - 1) f / c in terms of the w
+    # given here.
+    w, freq = 1.0e5, 1.4e9
+    cfg = single_baseline_config(
+        (0.0, 0.0, w),
+        freq=freq,
+        dec0=-26.7,
+        sources=[{"ra": 0.0, "dec": np.rad2deg(dec0 + offset), "I": 1.0}],
+        ra0=0.0,
+    )
+    phase = float(np.angle(sky_vis(cfg).ravel()[0]))
+    expected_phase = 2 * np.pi * w * expected * freq / C
+
+    assert abs(expected_phase) > 0.01  # the term is actually resolvable here
+    assert np.isclose(phase, expected_phase, rtol=1000 * exact_rtol)
+
+
+def test_the_phase_convention_matches_a_hand_computed_visibility(exact_rtol):
+    """Pin the sign of the exponent, which |V| and "the phase varies" both miss.
+
+    Every amplitude-only assertion in this file passes just as well under complex
+    conjugation, which is a mirrored sky.
+    """
+    u, v, w, freq, flux = 120.0, -80.0, 45.0, 1.0e8, 3.0
+    ra, dec, ra0, dec0 = 34.0, -30.0, 30.0, -26.7
+
+    cfg = single_baseline_config(
+        (u, v, w), freq=freq, ra0=ra0, dec0=dec0,
+        sources=[{"ra": ra, "dec": dec, "I": flux}],
+    )
+    vis = complex(sky_vis(cfg).ravel()[0])
+
+    l, m, _, n_minus_1 = (float(x) for x in radec_to_lmn(
+        np.deg2rad(ra), np.deg2rad(dec), np.deg2rad(ra0), np.deg2rad(dec0)))
+    tau = u * l + v * m + w * n_minus_1
+    # uvw_sign turns read_ms's ANTENNA1 - ANTENNA2 baseline into the ANTENNA2 -
+    # ANTENNA1 baseline the measurement equation is written for.
+    expected = flux * np.exp(-2j * np.pi * (-tau) * freq / C)
+
+    assert np.isclose(vis, expected, rtol=100 * exact_rtol)
+    assert not np.isclose(vis, np.conj(expected), rtol=1e-3)  # not the mirrored sky
+
+
+def test_matches_tabsim_astro_vis(exact_rtol):
+    """Anchor the convention to the simulator whose output the pipeline is fit to.
+
+    tabsim writes ``bl_uvw = ants_uvw[a1] - ants_uvw[a2]`` into the MS UVW column and
+    computes the visibilities against that same array, so matching it here is what makes
+    a fixed sky land on top of the simulated sources rather than mirrored through the
+    phase centre.
+    """
+    pytest.importorskip("tabsim")
+    from tabsim.jax.coordinates import radec_to_lmn as tabsim_lmn
+    from tabsim.jax.interferometry import astro_vis
+
+    ra, dec, flux = 34.0, -30.0, 3.0
+    ra0, dec0 = 30.0, -26.7
+    freqs = np.array([1.0e8])
+    uvw = np.array([[[120.0, -80.0, 45.0], [-30.0, 200.0, -60.0]]])  # (n_time, n_bl, 3)
+
+    lmn = tabsim_lmn(np.array([ra]), np.array([dec]), np.array([ra0, dec0]))
+    expected = np.asarray(
+        astro_vis(jnp.array([[[flux]]]), jnp.array(uvw), lmn, jnp.array(freqs))
+    )  # (n_time, n_bl, n_freq)
+
+    cfg = make_sky_config(
+        [{"ra": ra, "dec": dec, "I": flux}], uvw=uvw, freqs=freqs, ra0=ra0, dec0=dec0
+    )
+    ours = sky_vis(cfg)  # (n_bl, n_freq, n_time)
+
+    assert np.allclose(
+        ours, expected.transpose(1, 2, 0), rtol=100 * exact_rtol, atol=100 * exact_rtol
+    )
+
+
+# ---------------------------------------------------------------------------
 # OSKAR sky model files
 # ---------------------------------------------------------------------------
 
 
-def write_sky_file(tmp_path, text):
-    path = tmp_path / "sky.osm"
+def write_sky_file(tmp_path, text, name="sky.osm"):
+    path = tmp_path / name
     path.write_text(text)
     return str(path)
 
@@ -217,6 +336,52 @@ def test_oskar_and_inline_catalogues_agree(exact_rtol, tmp_path):
     from_yaml = sky_vis(make_sky_config(inline))
 
     assert np.allclose(from_file, from_yaml, rtol=10 * exact_rtol, atol=10 * exact_rtol)
+
+
+def test_oskar_rows_may_be_comma_separated(exact_rtol, tmp_path):
+    """OSKAR's fixed-format reader takes spaces and/or commas as field separators."""
+    commas = write_sky_file(tmp_path, "30.0, -26.7, 5.0, 0, 0, 0, 1.0e8, -0.7\n", "a")
+    spaces = write_sky_file(tmp_path, "30.0 -26.7 5.0 0 0 0 1.0e8 -0.7\n", "b")
+    mixed = write_sky_file(tmp_path, "30.0,-26.7 5.0,0 0,0 1.0e8,-0.7\n", "c")
+
+    fields = lambda rows: [
+        {k: v for k, v in row.items() if k != "name"} for row in rows
+    ]
+    assert fields(read_oskar_sky_model(commas)) == fields(read_oskar_sky_model(spaces))
+    assert fields(read_oskar_sky_model(mixed)) == fields(read_oskar_sky_model(spaces))
+
+
+def test_oskar_eleven_columns_is_the_legacy_gaussian_layout(exact_rtol, tmp_path):
+    """11 columns is the legacy layout: the first 8 modern columns, then the shape.
+
+    The rotation measure is absent, not zero-in-position-9 — reading an 11-column row as
+    if it were modern puts the major axis in the RM column, which then trips the
+    polarisation rejection on a perfectly ordinary Gaussian.
+    """
+    path = write_sky_file(tmp_path, "30.0 -26.7 5.0 0 0 0 1.0e8 -0.7 20.0 10.0 45.0\n")
+    (row,) = read_oskar_sky_model(path)
+
+    assert row["rm"] == 0.0
+    assert row["fwhm_major_arcsec"] == 20.0
+    assert row["fwhm_minor_arcsec"] == 10.0
+    assert row["position_angle_deg"] == 45.0
+
+    # And it is a Gaussian, not a rejected polarised source.
+    sky = FixedDiscreteSky()
+    sky.setup(make_sky_config(path))
+    assert np.allclose(
+        np.asarray(sky.ast_shape)[0],
+        [20.0 * ARCSEC, 10.0 * ARCSEC, np.deg2rad(45.0)],
+        rtol=10 * exact_rtol,
+    )
+
+
+@pytest.mark.parametrize("n_col", [10, 13, 14])
+def test_oskar_invalid_column_counts_are_rejected(n_col, tmp_path):
+    """10 columns is a half-specified shape and 13+ is not the format at all."""
+    path = write_sky_file(tmp_path, " ".join(["1.0"] * n_col) + "\n")
+    with pytest.raises(RuntimeError, match="line 1"):
+        FixedDiscreteSky().setup(make_sky_config(path))
 
 
 def test_oskar_short_row_is_an_error(tmp_path):
@@ -455,6 +620,43 @@ def test_w_term_matters_for_a_source_far_from_the_phase_centre():
 # ---------------------------------------------------------------------------
 # Component plumbing
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("missing", ["ra", "dec", "I"])
+def test_a_missing_inline_field_names_the_source_and_the_field(missing):
+    source = {"name": "Fornax A", "ra": 30.0, "dec": -26.7, "I": 5.0}
+    del source[missing]
+
+    with pytest.raises(RuntimeError, match=f"Fornax A.*{missing}"):
+        FixedDiscreteSky().setup(make_sky_config([source]))
+
+
+def test_a_non_dict_inline_entry_is_reported_as_such():
+    with pytest.raises(RuntimeError, match="entry 1"):
+        FixedDiscreteSky().setup(
+            make_sky_config([{"ra": 30.0, "dec": -26.7, "I": 5.0}, "Fornax A"])
+        )
+
+
+@pytest.mark.parametrize("block_size", [1.9, 0, -4, "many"])
+def test_a_source_block_size_that_is_not_a_positive_whole_number_is_rejected(block_size):
+    """1.9 used to truncate to 1 in silence, which is a 128x slowdown, not an error."""
+    cfg = make_sky_config(
+        [{"ra": 30.0, "dec": -26.7, "I": 1.0}], source_block_size=block_size
+    )
+    with pytest.raises(RuntimeError, match="source_block_size"):
+        DiscreteSkyVis().setup(cfg)
+
+
+def test_a_source_below_the_phase_centre_horizon_warns_but_is_still_modelled():
+    """More than 90 degrees out is almost always a catalogue error, but not our call."""
+    cfg = make_sky_config([{"ra": 180.0, "dec": -26.7, "I": 1.0}])
+
+    with pytest.warns(UserWarning, match="90 degrees"):
+        sky = FixedDiscreteSky()
+        sky.setup(cfg)
+
+    assert sky.n_src == 1  # warned, not dropped
 
 
 def test_components_are_parameter_free():

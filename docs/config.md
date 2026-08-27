@@ -212,7 +212,9 @@ ast:
   point_sources: /path/to/sky.osm
 ```
 
-The inline form takes `ra` and `dec` in degrees, `I` in Jy, and optionally `name`, `ref_freq_mhz`, `alpha`, `fwhm_major_arcsec`, `fwhm_minor_arcsec` and `position_angle_deg`. The file form is the 12-column OSKAR sky model, which is what [Karabo](https://github.com/i4Ds/Karabo-Pipeline) emits: one source per line, whitespace-separated, `#` starts a comment, and blank lines are skipped. A row may stop after any column from Stokes I onwards, and the omitted trailing columns default to zero, so `ra dec I` is a valid flat-spectrum point source.
+The inline form takes `ra` and `dec` in degrees, `I` in Jy, and optionally `name`, `ref_freq_mhz`, `alpha`, `fwhm_major_arcsec`, `fwhm_minor_arcsec` and `position_angle_deg`. The file form is the OSKAR sky model, which is what [Karabo](https://github.com/i4Ds/Karabo-Pipeline) emits: one source per line, fields separated by whitespace and/or commas, `#` starts a comment, and blank lines are skipped.
+
+`I` is the *integrated* flux of the source, and that is what appears on a zero-length baseline in any direction — there is no `1/n` applied to it. (The measurement equation carries the sky *brightness* as `B/n`, because the solid-angle element is `dl dm / n`; for a discrete source of integrated flux `S` the brightness is `S` times a delta function of solid angle, and the two factors of `n` cancel exactly.)
 
 | # | Column | Units | Meaning |
 |---|---|---|---|
@@ -229,7 +231,15 @@ The inline form takes `ra` and `dec` in degrees, `I` in Jy, and optionally `name
 | 11 | FWHM minor | arcsec | Gaussian minor axis; `0` for a point source |
 | 12 | Position angle | deg | Major-axis position angle, north through east |
 
-Two points about the columns:
+A row need not carry all twelve fields, but only three lengths are meaningful, and they follow OSKAR's own fixed-format reader:
+
+* **3 to 9 columns** — the leading columns above, with the rest defaulting to zero. `ra dec I` is a valid flat-spectrum point source.
+* **11 columns** — the *legacy* layout: columns 1-8 as above, then FWHM major, FWHM minor and position angle, with no rotation measure (it defaults to zero). This is not the 12-column layout with one field missing; read as though it were, the major axis lands in the rotation-measure column and a perfectly ordinary Gaussian is rejected as polarised.
+* **12 columns** — the full modern layout.
+
+**10 columns, or 13 and more, are rejected**: 10 is a half-specified shape (a major axis with no minor axis or position angle) and 13+ is not the format.
+
+Two points about the columns themselves:
 
 * **Polarisation is parsed but not modelled.** A non-zero Stokes Q, U or V, or a non-zero rotation measure, is *rejected* with an error naming the source, rather than being silently dropped. The whole format is accepted so that modelling polarisation later ([issue #151](https://github.com/epfl-radio-astro/tabascal/issues/151)) widens what these values mean rather than changing what the file may contain.
 * **A spectral index needs a reference frequency.** A non-zero spectral index with no positive reference frequency is an error, since falling back to a flat spectrum would put the source at the wrong flux in every channel with nothing in the output to say so. A zero spectral index is a flat spectrum and needs no reference frequency.
@@ -240,7 +250,9 @@ $$G(u,v) = \exp\left(-\frac{\pi^2}{4\ln 2}\left(a^2 u'^2 + b^2 v'^2\right)\right
 
 for FWHM $a$ (major) and $b$ (minor) in radians, where $(u', v')$ is the baseline in wavelengths rotated into the source frame, $u' = u\sin\phi + v\cos\phi$ along the major axis and $v' = u\cos\phi - v\sin\phi$ along the minor axis. The position angle $\phi$ follows the radio convention, measured from north (the $m$ axis) through east (the $l$ axis), so `position_angle_deg: 0` puts the major axis north-south and a north-south baseline is the one that resolves the source out. A zero FWHM gives $G = 1$ exactly, so points and Gaussians are the same code path and the same component.
 
-* `source_block_size`: The number of sources `DiscreteSkyVis` handles per step of its scan over the catalogue, defaulting to `128`. The geometric delay array is `(n_bl, n_time, n_src)`, which for a large catalogue is the biggest array in the model; the scan replaces `n_src` in that shape with `source_block_size`, at the cost of recomputing each block in the backward pass. It is purely a memory strategy — the result does not depend on it.
+A source more than 90 degrees from the phase centre is modelled as given, not rejected — the w term is computed exactly over the whole sphere — but it raises a warning naming the sources, since in practice it means a swapped or mis-signed coordinate rather than a real field.
+
+* `source_block_size`: The number of sources `DiscreteSkyVis` handles per step of its scan over the catalogue, a whole number defaulting to `128`. The geometric delay array is `(n_bl, n_time, n_src)`, which for a large catalogue is the biggest array in the model; the scan replaces `n_src` in that shape with `source_block_size`, at the cost of recomputing each block in the backward pass. It is purely a memory strategy — the result does not depend on it.
 
 Note that the catalogue fluxes are in the same scale as the data the model is fit to. With data calibrated to Jy these are physical Jy; without that, the data are in raw correlator units and a Jy catalogue flux is meaningless.
 

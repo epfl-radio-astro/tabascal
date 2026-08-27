@@ -10,11 +10,13 @@ pair would carry.
 """
 
 import os
+import warnings
 
 import jax.numpy as jnp
 import numpy as np
 
 from tabascal.components import Component
+from tabascal.components.ast_vis import radec_to_lmn
 
 
 #: The OSKAR sky model columns, in file order. Whitespace-separated text with ``#``
@@ -35,19 +37,43 @@ OSKAR_COLUMNS = (
     "position_angle_deg",   # Major-axis position angle, degrees, north through east
 )
 
+#: The legacy 11-column OSKAR layout: the first eight modern columns followed by the
+#: Gaussian shape, with no rotation measure. It is not the modern layout truncated, so
+#: an 11-column row read as a modern one puts the major axis in the rotation-measure
+#: column and the shape one place left of where it belongs.
+OSKAR_LEGACY_COLUMNS = OSKAR_COLUMNS[:8] + OSKAR_COLUMNS[9:]
+
 #: Parsed but not modelled. See :func:`_check_unpolarised`.
 POLARISATION_COLUMNS = ("Q", "U", "V", "rm")
 
 ARCSEC_TO_RAD = np.pi / (180 * 3600)
 
 
-def read_oskar_sky_model(path: str) -> list:
-    """Read an OSKAR 12-column sky model file into a list of row dicts.
+def _oskar_columns(n_field: int):
+    """The column names an OSKAR row of ``n_field`` fields carries, or None.
 
-    One source per line, whitespace-separated, ``#`` starts a comment; blank lines are
-    skipped. The columns are :data:`OSKAR_COLUMNS`; a row may stop after any column from
-    Stokes I onwards and the rest default to zero, so ``ra dec I`` is a valid
-    flat-spectrum point source.
+    OSKAR's fixed-format reader accepts three lengths: 3 to 9 fields are the leading
+    modern columns with the rest defaulted, 11 is the legacy layout, and 12 is the full
+    modern one. 10 is a half-specified Gaussian (a major axis with no minor axis or
+    position angle) and 13 or more is not the format at all.
+    """
+    if 3 <= n_field <= 9:
+        return OSKAR_COLUMNS[:n_field]
+    if n_field == len(OSKAR_LEGACY_COLUMNS):
+        return OSKAR_LEGACY_COLUMNS
+    if n_field == len(OSKAR_COLUMNS):
+        return OSKAR_COLUMNS
+    return None
+
+
+def read_oskar_sky_model(path: str) -> list:
+    """Read an OSKAR sky model file into a list of row dicts.
+
+    One source per line, fields separated by whitespace and/or commas, ``#`` starts a
+    comment and blank lines are skipped. The columns are :data:`OSKAR_COLUMNS`; a row may
+    stop after any column from Stokes I onwards and the rest default to zero, so
+    ``ra dec I`` is a valid flat-spectrum point source. An 11-column row is the legacy
+    layout, :data:`OSKAR_LEGACY_COLUMNS`.
     """
     rows = []
     name = os.path.basename(path)
@@ -58,12 +84,12 @@ def read_oskar_sky_model(path: str) -> list:
             if not line:
                 continue
 
-            fields = line.split()
-            if not 3 <= len(fields) <= len(OSKAR_COLUMNS):
+            fields = line.replace(",", " ").split()
+            columns = _oskar_columns(len(fields))
+            if columns is None:
                 raise ValueError(
-                    f"{path} line {lineno}: an OSKAR sky model row has between 3 and "
-                    f"{len(OSKAR_COLUMNS)} whitespace-separated columns, got "
-                    f"{len(fields)}: {line!r}."
+                    f"{path} line {lineno}: an OSKAR sky model row has 3 to 9, 11 "
+                    f"(legacy) or 12 columns, got {len(fields)}: {line!r}."
                 )
 
             try:
@@ -74,29 +100,47 @@ def read_oskar_sky_model(path: str) -> list:
                     f"but {line!r} is not ({e})."
                 ) from e
 
-            values += [0.0] * (len(OSKAR_COLUMNS) - len(values))
-            row = dict(zip(OSKAR_COLUMNS, values))
+            row = {column: 0.0 for column in OSKAR_COLUMNS}
+            row.update(zip(columns, values))
             row["name"] = f"{name} line {lineno}"
             rows.append(row)
 
     return rows
 
 
-def _inline_row(source: dict, idx: int) -> dict:
+def _inline_row(source, idx: int) -> dict:
     """Normalise one inline-YAML source onto the OSKAR column names.
 
     The YAML form names the reference frequency in MHz (``ref_freq_mhz``) because that is
     how catalogue fluxes are usually quoted; every other field maps straight across.
     """
+    if not isinstance(source, dict):
+        raise ValueError(
+            f"ast.point_sources entry {idx} is a {type(source).__name__}, not a source: "
+            "each entry is a mapping of fields, e.g. {name: Fornax A, ra: 50.7, "
+            "dec: -37.2, I: 750.0}. "
+            f"Got {source!r}."
+        )
+
+    label = source.get("name", f"entry {idx}")
+
+    def required(key, units):
+        if source.get(key) is None:
+            raise ValueError(
+                f"ast.point_sources source {label!r} has no {key!r}, which is required "
+                f"({units}). Given fields: {sorted(source)}."
+            )
+        return float(source[key])
+
     get = lambda key, default=0.0: float(source.get(key, default) or default)
 
     row = {
-        "ra_deg": float(source["ra"]),
-        "dec_deg": float(source["dec"]),
-        "I": float(source["I"]),
+        "ra_deg": required("ra", "right ascension in degrees"),
+        "dec_deg": required("dec", "declination in degrees"),
+        "I": required("I", "Stokes I flux in Jy"),
         "ref_freq_hz": get("ref_freq_mhz") * 1e6,
         "alpha": get("alpha"),
-        "name": str(source.get("name", f"src{idx}")),
+        "name": str(label),
     }
     for key in ("Q", "U", "V", "rm", "fwhm_major_arcsec", "fwhm_minor_arcsec",
                 "position_angle_deg"):
@@ -213,6 +257,7 @@ class FixedDiscreteSky(Component):
                 dtype=float,
             )
             self.n_src = int(self.ast_radec.shape[0])
+            self._warn_beyond_the_horizon(rows, config.phase_centre)
 
             band = jnp.mean(self.ast_I, axis=1)
             print(
@@ -223,6 +268,31 @@ class FixedDiscreteSky(Component):
             self._set_outputs()
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def _warn_beyond_the_horizon(self, rows, phase_centre):
+        """Warn about sources more than 90 degrees from the phase centre.
+
+        ``DiscreteSkyVis`` models these correctly -- only ``n - 1`` enters the phase and
+        it is exact over the whole sphere -- so they are not rejected. But no real
+        observation has a source on the far side of the sky in its field, so in practice
+        this is a swapped or mis-signed coordinate in the catalogue, and silently
+        modelling a mirrored sky is what a fixed sky exists to prevent.
+        """
+        _, _, n, _ = radec_to_lmn(
+            self.ast_radec[:, 0],
+            self.ast_radec[:, 1],
+            jnp.deg2rad(phase_centre["ra"]),
+            jnp.deg2rad(phase_centre["dec"]),
+        )
+        far = [row["name"] for row, n_k in zip(rows, np.asarray(n)) if n_k <= 0]
+        if far:
+            warnings.warn(
+                f"{len(far)} source(s) are more than 90 degrees from the phase centre "
+                f"and so behind the sky plane: {', '.join(far)}. They are modelled as "
+                "given; check the catalogue coordinates and the phase centre.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _spectrum(self, row):
         """The (n_freq,) flux of one source, ``I(nu) = I (nu / nu_ref)**alpha``."""
