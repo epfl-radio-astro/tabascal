@@ -76,10 +76,35 @@ belong to without being handed the MS again.
 The convention is CASA's: ``V_obs = g_p conj(g_q) V_true``, so calibrating
 divides that out and the noise follows the data,
 ``sigma_cal = sigma / |g_p conj(g_q)|``.
-:func:`~tabascal.ms.apply_gains_to_data` is that one statement in code. Gains
-that are zero or non-finite are written FLAGged and read back as NaN — a
-baseline with one is a division by zero, and its visibilities must be flagged by
-the caller.
+:func:`~tabascal.ms.apply_gains_to_data` is that one statement in code.
+
+A gain that is zero or non-finite carries no solution, and both halves of that
+are written: ``FLAG`` is set *and* ``CPARAM`` is NaN, so a reader going by the
+flag and one going by the value reach the same conclusion. Calibrating with one
+gives NaN rather than an infinity — every kind of dead gain arrives as the same
+NaN, so a caller flagging on ``isnan`` catches all of them.
+
+Scope: one spectral window, one correlation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+That is what TABASCAL fits, and it is checked rather than assumed. Every row is
+written with ``SPECTRAL_WINDOW_ID = 0`` and the frequencies are read back from
+window 0, so an MS or caltable describing more than one spectral window is
+rejected instead of having one window's gains labelled with another's channels.
+
+``write_caltable`` duplicates its single solution across the polarisation axis,
+so collapsing that axis on the way back in is a no-op for TABASCAL's own tables.
+A caltable from CASA can hold a genuinely different Jones term per polarisation,
+and averaging those would return a gain that calibrates neither — so
+:func:`~tabascal.ms.read_caltable` requires the unflagged polarisations to agree
+and raises otherwise. Per-polarisation reading is tracked by issue #151. A
+flagged polarisation is treated as *missing* rather than as zero: where one
+polarisation holds a solution and the other does not, the surviving one is
+returned.
+
+Argument checking in ``write_caltable`` happens before anything on disk is
+touched, since ``overwrite=True`` removes a calibration that took a run to
+produce.
 
 .. warning::
 

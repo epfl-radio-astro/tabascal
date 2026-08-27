@@ -12,6 +12,9 @@ either session; the pure-numpy identities are float64 in both.
 """
 
 import os
+import shutil
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -35,6 +38,7 @@ from tabascal.ms import (  # noqa: E402
 
 
 N_ANT, N_FREQ, N_TIME = 6, 4, 3
+N_ROW = N_ANT * N_TIME
 
 #: Channel frequencies the minimal MS below declares, in Hz.
 FREQS = 1e9 + 1e6 * np.arange(N_FREQ, dtype=float)
@@ -55,13 +59,42 @@ def gains():
     return (amp * np.exp(1j * phase)).astype(complex)
 
 
-def _minimal_ms(path: str, n_ant: int = N_ANT, freqs=FREQS) -> str:
+# ---------------------------------------------------------------------------
+# A minimal MS to copy subtables out of
+# ---------------------------------------------------------------------------
+
+def _write_spw(path: str, freq_rows) -> None:
+    """A ``SPECTRAL_WINDOW`` subtable with one row per entry of *freq_rows*."""
+
+    freq_rows = np.asarray(freq_rows, dtype=float)
+    spw = table(
+        path,
+        maketabdesc(
+            [
+                makearrcoldesc("CHAN_FREQ", 0.0, ndim=1, valuetype="double"),
+                makescacoldesc("NUM_CHAN", 0, valuetype="int"),
+            ]
+        ),
+        nrow=len(freq_rows),
+        ack=False,
+    )
+    spw.putcol("CHAN_FREQ", freq_rows)
+    spw.putcol("NUM_CHAN", np.full(len(freq_rows), freq_rows.shape[1], dtype=np.int32))
+    spw.close()
+
+
+def _minimal_ms(path: str, n_ant: int = N_ANT, n_spw: int = 1) -> str:
     """An MS carrying only the subtables a caltable copies out of one.
 
     Enough of an MS for :func:`write_caltable`: it reads no main-table column,
-    only ``tablecopy``s the subtables it finds. Written here rather than taken
-    from the other MS tests because those build in-memory xarray stand-ins, and
-    ``tablecopy`` needs a real table on disk.
+    only the spectral window count, and ``tablecopy``s the subtables it finds.
+    Written here rather than taken from the other MS tests because those build
+    in-memory xarray stand-ins, and copying a subtable needs a real table on
+    disk.
+
+    All five subtables a caltable carries are present, so their copy and
+    keyword registration are exercised; ``FIELD``/``OBSERVATION``/``HISTORY``
+    are as small as a valid table can be, since nothing reads their contents.
     """
 
     main = table(
@@ -80,20 +113,23 @@ def _minimal_ms(path: str, n_ant: int = N_ANT, freqs=FREQS) -> str:
     ant.putcol("POSITION", np.arange(3 * n_ant, dtype=float).reshape(n_ant, 3))
     ant.close()
 
-    spw = table(
+    _write_spw(
         os.path.join(path, "SPECTRAL_WINDOW"),
-        maketabdesc(
-            [
-                makearrcoldesc("CHAN_FREQ", 0.0, ndim=1, valuetype="double"),
-                makescacoldesc("NUM_CHAN", 0, valuetype="int"),
-            ]
-        ),
-        nrow=1,
-        ack=False,
+        np.tile(FREQS, (n_spw, 1)) + 1e8 * np.arange(n_spw)[:, None],
     )
-    spw.putcol("CHAN_FREQ", np.asarray(freqs, dtype=float)[None])
-    spw.putcol("NUM_CHAN", np.array([len(freqs)], dtype=np.int32))
-    spw.close()
+
+    for sub, column, nrow in (
+        ("FIELD", "NAME", 1),
+        ("OBSERVATION", "TELESCOPE_NAME", 1),
+        ("HISTORY", "MESSAGE", 0),
+    ):
+        sub_tb = table(
+            os.path.join(path, sub),
+            maketabdesc([makescacoldesc(column, "", valuetype="string")]),
+            nrow=nrow,
+            ack=False,
+        )
+        sub_tb.close()
 
     main.close()
 
@@ -105,6 +141,26 @@ def ms_path(tmp_path):
     """A minimal on-disk MS to copy subtables from."""
 
     return _minimal_ms(str(tmp_path / "minimal.ms"))
+
+
+def _raw(path: str, column: str):
+    """A column straight out of the caltable, with no interpretation applied."""
+
+    with table(path, ack=False) as tb:
+        return tb.getcol(column)
+
+
+def _overwrite_pols(path: str, cparam, flag) -> None:
+    """Replace a caltable's per-polarisation values, standing in for CASA.
+
+    ``write_caltable`` only ever duplicates one solution across the pol axis, so
+    a table whose polarisations genuinely differ has to be built by hand.
+    """
+
+    with table(path, readonly=False, ack=False) as tb:
+        tb.putcol("CPARAM", np.asarray(cparam, dtype=np.complex64))
+        tb.putcol("FLAG", np.asarray(flag, dtype=bool))
+        tb.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -120,18 +176,45 @@ class TestCasaFormat:
         times = np.arange(N_TIME, dtype=float)
         write_caltable(path, gains, times, ms_path=ms_path)
 
-        tb = table(path, ack=False)
-        assert tb.info()["type"] == "Calibration"
-        assert tb.info()["subType"] == "B Jones"
-        assert tb.getkeyword("ParType") == "Complex"
+        with table(path, ack=False) as tb:
+            assert tb.info()["type"] == "Calibration"
+            assert tb.info()["subType"] == "B Jones"
+            assert tb.getkeyword("ParType") == "Complex"
+            assert tb.getkeyword("VisCal") == "B Jones"
+            assert tb.getkeyword("PolBasis") == "unknown"
 
-        assert tb.nrows() == N_ANT * N_TIME
-        # CASA writes 2 pols even for a single-correlation MS.
-        assert tb.getcell("CPARAM", 0).shape == (N_FREQ, 2)
-        # One row per (time, antenna), with no second antenna.
-        assert set(np.unique(tb.getcol("ANTENNA2"))) == {-1}
-        assert sorted(np.unique(tb.getcol("ANTENNA1"))) == list(range(N_ANT))
-        tb.close()
+            assert tb.nrows() == N_ROW
+            # CASA writes 2 pols even for a single-correlation MS.
+            assert tb.getcell("CPARAM", 0).shape == (N_FREQ, 2)
+            # One row per (time, antenna), with no second antenna.
+            assert set(np.unique(tb.getcol("ANTENNA2"))) == {-1}
+            assert sorted(np.unique(tb.getcol("ANTENNA1"))) == list(range(N_ANT))
+
+    def test_cparam_is_complex64(self, tmp_path, gains, ms_path):
+        """The format's own dtype, whatever precision the gains were solved in."""
+
+        path = str(tmp_path / "test.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        assert _raw(path, "CPARAM").dtype == np.complex64
+
+    def test_the_solution_columns_are_present_and_shaped(
+        self, tmp_path, gains, ms_path
+    ):
+        """CPARAM/PARAMERR/FLAG/SNR are filled; WEIGHT is declared and left empty."""
+
+        path = str(tmp_path / "test.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        with table(path, ack=False) as tb:
+            for column in ("CPARAM", "PARAMERR", "FLAG", "SNR", "WEIGHT"):
+                assert column in tb.colnames()
+
+            for column in ("CPARAM", "PARAMERR", "FLAG", "SNR"):
+                assert tb.getcol(column).shape == (N_ROW, N_FREQ, 2)
+
+            # CASA declares WEIGHT but leaves it unfilled; mirror that.
+            assert not tb.iscelldefined("WEIGHT", 0)
 
     def test_the_subtables_are_copied_from_the_ms(self, tmp_path, gains, ms_path):
         """A caltable carries its own copy of the MS's description subtables."""
@@ -139,20 +222,18 @@ class TestCasaFormat:
         path = str(tmp_path / "test.B")
         write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
 
-        tb = table(path, ack=False)
-        for sub in ("ANTENNA", "SPECTRAL_WINDOW"):
-            assert os.path.exists(os.path.join(path, sub))
-            # Registered by absolute path, as CASA registers them.
-            assert tb.getkeyword(sub) == "Table: " + os.path.abspath(
-                os.path.join(path, sub)
-            )
+        with table(path, ack=False) as tb:
+            for sub in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW", "OBSERVATION", "HISTORY"):
+                assert os.path.exists(os.path.join(path, sub))
+                # Registered by absolute path, as CASA registers them.
+                assert tb.getkeyword(sub) == "Table: " + os.path.abspath(
+                    os.path.join(path, sub)
+                )
 
-        assert tb.getkeyword("MSName") == "minimal.ms"
-        tb.close()
+            assert tb.getkeyword("MSName") == "minimal.ms"
 
-        ant = table(os.path.join(path, "ANTENNA"), ack=False)
-        assert ant.nrows() == N_ANT
-        ant.close()
+        with table(os.path.join(path, "ANTENNA"), ack=False) as ant:
+            assert ant.nrows() == N_ANT
 
     def test_a_missing_subtable_is_not_an_error(self, tmp_path, gains):
         """The subtables are copied if they are there; none of them is required."""
@@ -173,10 +254,218 @@ class TestCasaFormat:
         times = np.array([10.0, 20.0, 30.0])
         write_caltable(path, gains, times, ms_path=ms_path)
 
-        tb = table(path, ack=False)
-        assert np.array_equal(tb.getcol("ANTENNA1"), np.tile(np.arange(N_ANT), N_TIME))
-        assert np.array_equal(tb.getcol("TIME"), np.repeat(times, N_ANT))
-        tb.close()
+        assert np.array_equal(
+            _raw(path, "ANTENNA1"), np.tile(np.arange(N_ANT), N_TIME)
+        )
+        assert np.array_equal(_raw(path, "TIME"), np.repeat(times, N_ANT))
+
+
+# ---------------------------------------------------------------------------
+# Dead solutions
+# ---------------------------------------------------------------------------
+
+class TestFlagging:
+    """A gain that is zero or non-finite carries no solution.
+
+    The contract is both halves at once: ``CPARAM`` NaN *and* ``FLAG`` true. A
+    reader that trusts the flag and a reader that trusts the value have to reach
+    the same conclusion -- a zero left in CPARAM reads as a real solution that
+    calibrates to infinity, and an Inf left there reads as a real one too.
+    """
+
+    @pytest.mark.parametrize("bad_value", [0.0, np.inf, -np.inf, np.nan])
+    def test_a_dead_gain_is_written_as_nan_and_flagged(
+        self, tmp_path, gains, ms_path, bad_value
+    ):
+        g = gains.copy()
+        g[2, 1, 0] = bad_value
+        path = str(tmp_path / "dead.B")
+        write_caltable(path, g, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        # Row 2 is (t0, a2) in the time-major layout; channel 1, both pols.
+        cparam, flag = _raw(path, "CPARAM"), _raw(path, "FLAG")
+
+        assert flag[2, 1].all()
+        assert np.all(np.isnan(cparam[2, 1]))
+        # The raw value is gone, not merely flagged.
+        assert not np.any(cparam[2, 1] == np.complex64(bad_value))
+
+        # Its neighbours are untouched.
+        assert not flag[2, 0].any()
+        assert np.all(np.isfinite(cparam[2, 0]))
+
+    def test_flagged_gains_roundtrip_as_nan(self, tmp_path, gains, ms_path):
+        g = gains.copy()
+        g[2, :, 1] = 0.0  # a dead antenna at one time
+        path = str(tmp_path / "flagged.B")
+        write_caltable(path, g, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        out = read_caltable(path)["gains"]
+        assert np.all(np.isnan(out[2, :, 1]))
+        assert np.allclose(out[0], g[0], rtol=1e-5, atol=1e-6)
+
+    def test_non_finite_gains_are_flagged(self, tmp_path, gains, ms_path):
+        """A gain that is not finite carries no solution either."""
+
+        g = gains.copy()
+        g[3, 1, 0] = np.nan
+        path = str(tmp_path / "nonfinite.B")
+        write_caltable(path, g, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        flag = _raw(path, "FLAG")  # (n_row, n_freq, n_pol), time-major rows
+
+        assert flag[3, 1].all()  # antenna 3, channel 1, first timestep
+        assert not flag[3, 0].any()
+        assert np.all(np.isnan(read_caltable(path)["gains"][3, 1, 0]))
+
+
+# ---------------------------------------------------------------------------
+# Polarisation
+# ---------------------------------------------------------------------------
+
+class TestPolarisations:
+    """tabascal solves one correlation; a caltable has room for two.
+
+    ``write_caltable`` duplicates its single solution across the pol axis, so
+    collapsing that axis on the way back in is a no-op for our own tables. A
+    table from CASA can hold genuinely different Jones terms per polarisation,
+    and averaging those would return a gain that calibrates neither.
+    """
+
+    def _cal(self, tmp_path, gains, ms_path):
+        path = str(tmp_path / "pol.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        return path
+
+    def test_duplicated_polarisations_collapse_silently(
+        self, tmp_path, gains, ms_path
+    ):
+        """Our own tables: the two pols are the same number, so this is a no-op."""
+
+        path = self._cal(tmp_path, gains, ms_path)
+
+        assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
+
+    def test_disagreeing_polarisations_are_rejected(self, tmp_path, gains, ms_path):
+        """The bug: averaging XX and YY returns a gain that calibrates neither."""
+
+        path = self._cal(tmp_path, gains, ms_path)
+        cparam = _raw(path, "CPARAM")
+        cparam[:, :, 1] *= 2.0  # a genuinely different second Jones term
+
+        _overwrite_pols(path, cparam, np.zeros_like(cparam, dtype=bool))
+
+        with pytest.raises(ValueError, match="polarisation"):
+            read_caltable(path)
+
+    def test_the_rejection_points_at_the_polarisation_issue(
+        self, tmp_path, gains, ms_path
+    ):
+        """Said as a limitation with somewhere to go, not as a corrupt-table error."""
+
+        path = self._cal(tmp_path, gains, ms_path)
+        cparam = _raw(path, "CPARAM")
+        cparam[0, 0, 1] *= 3.0
+
+        _overwrite_pols(path, cparam, np.zeros_like(cparam, dtype=bool))
+
+        with pytest.raises(ValueError, match="#151"):
+            read_caltable(path)
+
+    def test_a_flagged_polarisation_falls_back_to_the_other(
+        self, tmp_path, gains, ms_path
+    ):
+        """A flagged pol is missing, not zero: the surviving solution is the answer."""
+
+        path = self._cal(tmp_path, gains, ms_path)
+        cparam = _raw(path, "CPARAM")
+        flag = np.zeros_like(cparam, dtype=bool)
+
+        # Pol 1 is dead at (row 0, chan 0); pol 0 still has the solution.
+        flag[0, 0, 1] = True
+        cparam[0, 0, 1] = np.nan
+        _overwrite_pols(path, cparam, flag)
+
+        out = read_caltable(path)["gains"]
+
+        # Row 0 is (t0, a0). The surviving pol is returned, not NaN.
+        assert np.isfinite(out[0, 0, 0])
+        assert np.allclose(out[0, 0, 0], gains[0, 0, 0], rtol=1e-5, atol=1e-6)
+
+    def test_both_polarisations_flagged_is_still_nan(self, tmp_path, gains, ms_path):
+        """No surviving solution means no solution."""
+
+        path = self._cal(tmp_path, gains, ms_path)
+        cparam = _raw(path, "CPARAM")
+        flag = np.zeros_like(cparam, dtype=bool)
+        flag[0, 0, :] = True
+        cparam[0, 0, :] = np.nan
+        _overwrite_pols(path, cparam, flag)
+
+        assert np.isnan(read_caltable(path)["gains"][0, 0, 0])
+
+    def test_a_disagreement_under_a_flag_is_not_a_disagreement(
+        self, tmp_path, gains, ms_path
+    ):
+        """Only unflagged polarisations have to agree; a dead one holds anything."""
+
+        path = self._cal(tmp_path, gains, ms_path)
+        cparam = _raw(path, "CPARAM")
+        flag = np.zeros_like(cparam, dtype=bool)
+        flag[0, 0, 1] = True
+        cparam[0, 0, 1] = 12345.0  # junk, but flagged, so it says nothing
+        _overwrite_pols(path, cparam, flag)
+
+        assert np.allclose(
+            read_caltable(path)["gains"][0, 0, 0], gains[0, 0, 0],
+            rtol=1e-5, atol=1e-6,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Spectral windows
+# ---------------------------------------------------------------------------
+
+class TestSingleSpectralWindow:
+    """One spectral window is the supported scope, and it is checked.
+
+    Every row is written with ``SPECTRAL_WINDOW_ID = 0`` and the frequencies are
+    read from row 0, so a multi-window MS would silently get one window's gains
+    labelled with another window's channels.
+    """
+
+    def test_write_rejects_a_multi_window_ms(self, tmp_path, gains):
+        ms = _minimal_ms(str(tmp_path / "two_spw.ms"), n_spw=2)
+
+        with pytest.raises(ValueError, match="spectral window"):
+            write_caltable(
+                str(tmp_path / "test.B"), gains,
+                np.arange(N_TIME, dtype=float), ms_path=ms,
+            )
+
+    def test_the_rejection_happens_before_anything_is_written(self, tmp_path, gains):
+        ms = _minimal_ms(str(tmp_path / "two_spw.ms"), n_spw=2)
+        path = str(tmp_path / "test.B")
+
+        with pytest.raises(ValueError):
+            write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms)
+
+        assert not os.path.exists(path)
+
+    def test_read_rejects_a_multi_window_caltable(self, tmp_path, gains, ms_path):
+        """A CASA table can carry several windows even though ours cannot."""
+
+        path = str(tmp_path / "test.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        # Swap the copied one-window subtable for a two-window one.
+        spw_path = os.path.join(path, "SPECTRAL_WINDOW")
+        shutil.rmtree(spw_path)
+        _write_spw(spw_path, np.tile(FREQS, (2, 1)))
+
+        with pytest.raises(ValueError, match="spectral window"):
+            read_caltable(path)
 
 
 # ---------------------------------------------------------------------------
@@ -206,32 +495,6 @@ class TestRoundtrip:
 
         assert np.allclose(read_caltable(path)["freqs"], FREQS)
 
-    def test_flagged_gains_roundtrip_as_nan(self, tmp_path, gains, ms_path):
-        g = gains.copy()
-        g[2, :, 1] = 0.0  # a dead antenna at one time
-        path = str(tmp_path / "flagged.B")
-        write_caltable(path, g, np.arange(N_TIME, dtype=float), ms_path=ms_path)
-
-        out = read_caltable(path)["gains"]
-        assert np.all(np.isnan(out[2, :, 1]))
-        assert np.allclose(out[0], g[0], rtol=1e-5, atol=1e-6)
-
-    def test_non_finite_gains_are_flagged(self, tmp_path, gains, ms_path):
-        """A gain that is not finite carries no solution either."""
-
-        g = gains.copy()
-        g[3, 1, 0] = np.nan
-        path = str(tmp_path / "nonfinite.B")
-        write_caltable(path, g, np.arange(N_TIME, dtype=float), ms_path=ms_path)
-
-        tb = table(path, ack=False)
-        flag = tb.getcol("FLAG")  # (n_row, n_freq, n_pol), time-major rows
-        tb.close()
-
-        assert flag[3, 1].all()  # antenna 3, channel 1, first timestep
-        assert not flag[3, 0].any()
-        assert np.all(np.isnan(read_caltable(path)["gains"][3, 1, 0]))
-
     def test_write_read_write_is_idempotent(self, tmp_path, gains, ms_path):
         """A second pass through the format changes nothing: complex64 is a fixpoint."""
 
@@ -249,6 +512,18 @@ class TestRoundtrip:
         np.testing.assert_array_equal(out_2["freqs"], out_1["freqs"])
         assert out_2["viscal"] == out_1["viscal"]
 
+
+# ---------------------------------------------------------------------------
+# Validation, and what a rejected call leaves behind
+# ---------------------------------------------------------------------------
+
+class TestValidation:
+    """Nothing is deleted until the arguments are known to be good.
+
+    ``overwrite=True`` removes the existing table, so validation that runs after
+    it turns a caller's mistake into the loss of a good calibration.
+    """
+
     def test_an_existing_table_is_not_overwritten_unasked(
         self, tmp_path, gains, ms_path
     ):
@@ -263,14 +538,10 @@ class TestRoundtrip:
         assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
 
     @pytest.mark.parametrize(
-        "shape, message",
-        [
-            ((N_ANT, N_FREQ), "n_ant, n_freq, n_time"),
-            ((N_ANT, N_FREQ, N_TIME, 1), "n_ant, n_freq, n_time"),
-        ],
+        "shape", [(N_ANT, N_FREQ), (N_ANT, N_FREQ, N_TIME, 1)]
     )
-    def test_gains_must_carry_all_three_axes(self, tmp_path, shape, message):
-        with pytest.raises(ValueError, match=message):
+    def test_gains_must_carry_all_three_axes(self, tmp_path, shape):
+        with pytest.raises(ValueError, match="n_ant, n_freq, n_time"):
             write_caltable(
                 str(tmp_path / "test.B"),
                 np.ones(shape, dtype=complex),
@@ -286,6 +557,55 @@ class TestRoundtrip:
                 np.arange(N_TIME + 1, dtype=float),
                 ms_path=str(tmp_path / "fake.ms"),
             )
+
+    def test_times_must_be_one_dimensional(self, tmp_path, gains):
+        """(n_time, 2) has the right length and the wrong shape."""
+
+        with pytest.raises(ValueError, match="times"):
+            write_caltable(
+                str(tmp_path / "test.B"),
+                gains,
+                np.zeros((N_TIME, 2), dtype=float),
+                ms_path=str(tmp_path / "fake.ms"),
+            )
+
+    @pytest.mark.parametrize("n_pol", [0, -1, 2.5, "2", None])
+    def test_n_pol_must_be_a_positive_integer(self, tmp_path, gains, n_pol):
+        with pytest.raises(ValueError, match="n_pol"):
+            write_caltable(
+                str(tmp_path / "test.B"),
+                gains,
+                np.arange(N_TIME, dtype=float),
+                ms_path=str(tmp_path / "fake.ms"),
+                n_pol=n_pol,
+            )
+
+    @pytest.mark.parametrize(
+        "kwargs, bad",
+        [
+            ({"n_pol": 0}, "n_pol"),
+            ({}, "times"),
+        ],
+    )
+    def test_a_rejected_call_leaves_the_existing_table_intact(
+        self, tmp_path, gains, ms_path, kwargs, bad
+    ):
+        """The whole point of validating first: overwrite=True must not destroy
+        a good table on the way to raising."""
+
+        path = str(tmp_path / "test.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        times = (
+            np.arange(N_TIME, dtype=float)
+            if bad == "n_pol"
+            else np.zeros((N_TIME, 2), dtype=float)
+        )
+
+        with pytest.raises(ValueError, match=bad):
+            write_caltable(path, gains, times, ms_path=ms_path, overwrite=True, **kwargs)
+
+        assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -342,19 +662,27 @@ class TestGainConvention:
 
         assert sigma_cal is None
 
-    def test_a_flagged_gain_calibrates_to_nan(self, gains):
-        """Dividing by a dead antenna's gain is a NaN for the caller to flag."""
+    @pytest.mark.parametrize("dead", [0.0, np.nan, np.inf])
+    def test_a_dead_gain_calibrates_to_nan(self, gains, dead):
+        """Zero divides to Inf, which reads as a real number downstream.
+
+        The docstring promises NaN for every dead gain, so all of them have to
+        arrive as NaN -- a caller flagging on ``isnan`` would keep the Inf.
+        """
 
         g = gains.copy()
-        g[1] = np.nan
+        g[1] = dead
         a1, a2 = np.array([0, 0]), np.array([1, 2])
+        sigma = np.array([2.0, 5.0])[:, None, None]
 
-        vis_cal, _ = apply_gains_to_data(
-            np.ones((2, N_FREQ, N_TIME), complex), g, a1, a2
+        vis_cal, sigma_cal = apply_gains_to_data(
+            np.ones((2, N_FREQ, N_TIME), complex), g, a1, a2, sigma
         )
 
         assert np.all(np.isnan(vis_cal[0]))
+        assert np.all(np.isnan(sigma_cal[0]))
         assert np.all(np.isfinite(vis_cal[1]))
+        assert np.all(np.isfinite(sigma_cal[1]))
 
     def test_scalar_flux_scale_is_g_k_minus_half(self):
         """flux-calibrate's V_cal = k V_obs is the antenna-independent gain g = k**-0.5."""
@@ -367,3 +695,27 @@ class TestGainConvention:
         vis_cal, _ = apply_gains_to_data(vis, g, a1, a2)
 
         assert np.allclose(vis_cal, k * vis)
+
+
+# ---------------------------------------------------------------------------
+# Import cost
+# ---------------------------------------------------------------------------
+
+def test_importing_ms_does_not_pull_casacore_in():
+    """``ms.py``'s module level stays dask-ms only; casacore is function-local.
+
+    In a subprocess because this session has already imported casacore.tables at
+    the top of this file, so ``sys.modules`` here says nothing.
+    """
+
+    code = (
+        "import sys; import tabascal.ms; "
+        "sys.exit(1 if 'casacore.tables' in sys.modules else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, (
+        f"importing tabascal.ms pulled casacore.tables in\n{result.stderr}"
+    )

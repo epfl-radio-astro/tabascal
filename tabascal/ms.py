@@ -11,6 +11,12 @@ CASA/CARAcal/stimela) instead of ad-hoc ``.npz`` files. It sits here because a
 caltable is an MS-shaped thing that only means anything beside its MS, and is
 kept a self-contained block so it can become its own module unchanged.
 
+Its scope is the scope tabascal solves for: one spectral window and one
+correlation. Both are checked rather than assumed -- a multi-window table would
+label one window's gains with another's channels, and a table holding a
+different Jones term per polarisation cannot be collapsed to the single gain
+tabascal fits.
+
 Gain convention (CASA's, and the only one used here)
 ----------------------------------------------------
 The gain multiplies the *model* to give the *observed* visibility::
@@ -872,6 +878,16 @@ def write_caltable(
     therefore computes ``WEIGHT_SPECTRUM = 1 / sigma_cal**2`` per channel itself
     when it writes results.
 
+    A gain that is zero or non-finite carries no solution, and *both* halves of
+    that are written: ``FLAG`` is set and ``CPARAM`` is NaN. A reader going by
+    the flag and one going by the value have to reach the same conclusion --
+    a zero left in ``CPARAM`` reads as a solution that calibrates to infinity,
+    and an Inf reads as a number too.
+
+    One spectral window only. Every row is written with
+    ``SPECTRAL_WINDOW_ID = 0``, so an MS with more than one window is rejected
+    rather than having one window's gains filed under another's id.
+
     Parameters
     ----------
     path : str
@@ -893,25 +909,49 @@ def write_caltable(
     -------
     str
         The caltable path.
+
+    Raises
+    ------
+    ValueError
+        If the arguments do not describe one single-spectral-window solution set.
+        Every check runs *before* an existing table is removed: ``overwrite=True``
+        deletes a calibration that took a run to produce, and a caller's mistake
+        must not cost them that.
+    FileExistsError
+        If ``path`` exists and ``overwrite`` is false.
     """
 
-    from casacore.tables import table, tablecopy
+    from casacore.tables import table
 
     gains = np.asarray(gains)
     if gains.ndim != 3:
         raise ValueError(f"gains must be (n_ant, n_freq, n_time), got {gains.shape}")
     n_ant, n_freq, n_time = gains.shape
-    times = np.asarray(times, dtype=float)
-    if len(times) != n_time:
-        raise ValueError(f"times has {len(times)} entries but gains has {n_time} times")
 
+    times = np.asarray(times, dtype=float)
+    if times.ndim != 1 or times.size != n_time:
+        raise ValueError(
+            f"times must be one-dimensional of length n_time = {n_time} to match "
+            f"the gains, got shape {times.shape}"
+        )
+
+    if not isinstance(n_pol, (int, np.integer)) or n_pol < 1:
+        raise ValueError(
+            f"n_pol must be a positive integer, got {n_pol!r}. CASA writes 2 "
+            "polarisations even for a single-correlation MS."
+        )
+
+    ms_spw = os.path.join(ms_path, "SPECTRAL_WINDOW")
+    if os.path.exists(ms_spw):
+        _single_spw_chan_freq(ms_spw, f"{ms_path}::SPECTRAL_WINDOW")
+
+    # Everything above is validation; only now is anything on disk touched.
     if os.path.exists(path):
         if not overwrite:
             raise FileExistsError(f"{path} already exists. Use overwrite=True.")
         shutil.rmtree(path)
 
     n_row = n_time * n_ant
-    tb = table(path, _caltable_desc(), nrow=n_row, ack=False)
 
     # Row order is time-major: (t0,a0), (t0,a1), ... -- matching gaincal.
     ant_idx = np.tile(np.arange(n_ant, dtype=np.int32), n_time)
@@ -919,45 +959,77 @@ def write_caltable(
 
     # (n_ant, n_freq, n_time) -> (n_row, n_freq), then duplicated across pol.
     g_rows = np.transpose(gains, (2, 0, 1)).reshape(n_row, n_freq)
-    cparam = np.repeat(g_rows[:, :, None], n_pol, axis=2).astype(np.complex64)
-    # A gain that is zero or non-finite carries no solution.
     bad = ~np.isfinite(g_rows) | (g_rows == 0)
+    solved = np.where(bad, complex(np.nan, np.nan), g_rows)
+    cparam = np.repeat(solved[:, :, None], n_pol, axis=2).astype(np.complex64)
     flag = np.repeat(bad[:, :, None], n_pol, axis=2)
 
-    tb.putcol("TIME", time_col)
-    tb.putcol("ANTENNA1", ant_idx)
-    tb.putcol("ANTENNA2", np.full(n_row, -1, dtype=np.int32))
-    tb.putcol("FIELD_ID", np.zeros(n_row, dtype=np.int32))
-    tb.putcol("SPECTRAL_WINDOW_ID", np.zeros(n_row, dtype=np.int32))
-    tb.putcol("SCAN_NUMBER", np.zeros(n_row, dtype=np.int32))
-    tb.putcol("OBSERVATION_ID", np.zeros(n_row, dtype=np.int32))
-    tb.putcol("INTERVAL", np.full(n_row, float(interval)))
-    tb.putcol("CPARAM", cparam)
-    tb.putcol("FLAG", flag)
-    tb.putcol("PARAMERR", np.zeros((n_row, n_freq, n_pol), dtype=np.float32))
-    tb.putcol("SNR", np.ones((n_row, n_freq, n_pol), dtype=np.float32))
+    with table(path, _caltable_desc(), nrow=n_row, ack=False) as tb:
+        tb.putcol("TIME", time_col)
+        tb.putcol("ANTENNA1", ant_idx)
+        tb.putcol("ANTENNA2", np.full(n_row, -1, dtype=np.int32))
+        tb.putcol("FIELD_ID", np.zeros(n_row, dtype=np.int32))
+        tb.putcol("SPECTRAL_WINDOW_ID", np.zeros(n_row, dtype=np.int32))
+        tb.putcol("SCAN_NUMBER", np.zeros(n_row, dtype=np.int32))
+        tb.putcol("OBSERVATION_ID", np.zeros(n_row, dtype=np.int32))
+        tb.putcol("INTERVAL", np.full(n_row, float(interval)))
+        tb.putcol("CPARAM", cparam)
+        tb.putcol("FLAG", flag)
+        tb.putcol("PARAMERR", np.zeros((n_row, n_freq, n_pol), dtype=np.float32))
+        tb.putcol("SNR", np.ones((n_row, n_freq, n_pol), dtype=np.float32))
 
-    # CASA identifies a caltable by its table INFO record, not by its keywords --
-    # without this, applycal rejects the table with 'is not a valid Calibration table'.
-    tb.putinfo({"type": "Calibration", "subType": viscal, "readme": ""})
+        # CASA identifies a caltable by its table INFO record, not by its keywords
+        # -- without this, applycal rejects the table with 'is not a valid
+        # Calibration table'.
+        tb.putinfo({"type": "Calibration", "subType": viscal, "readme": ""})
 
-    tb.putkeyword("VisCal", viscal)
-    tb.putkeyword("ParType", "Complex")
-    tb.putkeyword("MSName", os.path.basename(os.path.normpath(ms_path)))
-    tb.putkeyword("PolBasis", "unknown")
+        tb.putkeyword("VisCal", viscal)
+        tb.putkeyword("ParType", "Complex")
+        tb.putkeyword("MSName", os.path.basename(os.path.normpath(ms_path)))
+        tb.putkeyword("PolBasis", "unknown")
 
-    for sub in _SUBTABLES:
-        src = os.path.join(ms_path, sub)
-        if not os.path.exists(src):
-            continue
-        dst = os.path.join(path, sub)
-        tablecopy(src, dst)
-        tb.putkeyword(sub, "Table: " + os.path.abspath(dst))
+        for sub in _SUBTABLES:
+            src = os.path.join(ms_path, sub)
+            if not os.path.exists(src):
+                continue
+            dst = os.path.join(path, sub)
+            # Not casacore's tablecopy(): that opens the source table and never
+            # closes it. Same copy, with both handles released.
+            with table(src, ack=False) as source:
+                source.copy(dst).close()
+            tb.putkeyword(sub, "Table: " + os.path.abspath(dst))
 
-    tb.flush()
-    tb.close()
+        tb.flush()
 
     return path
+
+
+def _single_spw_chan_freq(spw_path: str, described: str) -> NDArray:
+    """``CHAN_FREQ`` of the one spectral window in the table at *spw_path*.
+
+    A single spectral window is the supported scope, and it is checked rather
+    than assumed. A caltable's rows all carry ``SPECTRAL_WINDOW_ID = 0`` and its
+    frequencies are read back from row 0, so a second window has nowhere to go:
+    its gains would be filed under the first window's id, and read out against
+    the first window's channels, with nothing to say they were wrong.
+    """
+
+    from casacore.tables import table
+
+    with table(spw_path, ack=False) as spw:
+        n_spw = spw.nrows()
+
+        if n_spw != 1:
+            raise ValueError(
+                f"{described} holds {n_spw} spectral windows. tabascal writes and "
+                "reads single-spectral-window calibration tables -- every row "
+                "carries SPECTRAL_WINDOW_ID 0 and the channel frequencies come "
+                "from window 0 -- so a multi-window table would silently label "
+                "one window's gains with another window's channels. Split by "
+                "spectral window first."
+            )
+
+        return np.asarray(spw.getcell("CHAN_FREQ", 0), dtype=float)
 
 
 def _caltable_freqs(path: str) -> Optional[NDArray]:
@@ -969,18 +1041,52 @@ def _caltable_freqs(path: str) -> Optional[NDArray]:
     written for an MS that had none is still a valid caltable.
     """
 
-    from casacore.tables import table
-
     spw_path = os.path.join(path, "SPECTRAL_WINDOW")
     if not os.path.exists(spw_path):
         return None
 
-    spw = table(spw_path, ack=False)
-    try:
-        # Row 0: a caltable holds one spectral window's solutions.
-        return np.asarray(spw.getcell("CHAN_FREQ", 0), dtype=float)
-    finally:
-        spw.close()
+    return _single_spw_chan_freq(spw_path, f"{path}::SPECTRAL_WINDOW")
+
+
+def _collapse_pols(cparam: NDArray, flag: NDArray) -> NDArray:
+    """One gain per ``(row, channel)`` from a caltable's polarisation axis.
+
+    tabascal fits one correlation and :func:`write_caltable` duplicates that one
+    solution across the pol axis, so collapsing it again is a no-op for our own
+    tables. A caltable from CASA can hold a genuinely different Jones term per
+    polarisation, though, and averaging those would return a gain that calibrates
+    neither -- so the unflagged polarisations are *required to agree* rather than
+    quietly reduced. Reading per-polarisation gains is issue #151.
+
+    A flagged polarisation is missing, not zero: where one pol holds a solution
+    and the other does not, the surviving one is the answer. Only an entry with
+    no unflagged polarisation left is NaN.
+    """
+
+    valid = ~np.asarray(flag, dtype=bool)
+    n_valid = valid.sum(axis=-1)
+
+    # Every unflagged pol is compared against the first unflagged one. Where only
+    # one is valid that compares it with itself; where none is, the comparison is
+    # masked out entirely, so junk under a flag says nothing.
+    first = np.argmax(valid, axis=-1)[..., None]
+    reference = np.take_along_axis(cparam, first, axis=-1)
+    disagrees = valid & ~np.isclose(cparam, reference)
+
+    if disagrees.any():
+        n_entry = int(disagrees.any(axis=-1).sum())
+        raise ValueError(
+            f"The caltable holds different solutions per polarisation at {n_entry} "
+            "(row, channel) entries. tabascal fits a single correlation, so "
+            "reading per-polarisation gains is not yet supported -- see issue "
+            "#151. Select one polarisation, or split the table, before reading."
+        )
+
+    # Summed over the valid pols only. A flagged cell's CPARAM is NaN, so
+    # averaging it in would erase the solution the other polarisation still holds.
+    total = np.where(valid, cparam, 0).sum(axis=-1)
+
+    return np.where(n_valid > 0, total / np.maximum(n_valid, 1), np.nan)
 
 
 def read_caltable(path: str) -> dict:
@@ -989,21 +1095,23 @@ def read_caltable(path: str) -> dict:
     Returns a dict with ``gains`` ``(n_ant, n_freq, n_time)`` complex -- flagged
     solutions set to NaN -- plus ``times``, ``ant_idx``, ``freqs`` (``None`` if
     the table carries no ``SPECTRAL_WINDOW``) and ``viscal``.
+
+    Reads the single-correlation, single-spectral-window tables tabascal fits.
+    A table whose polarisations carry genuinely different solutions, or which
+    describes more than one spectral window, is an error rather than a silent
+    collapse -- see :func:`_collapse_pols` and :func:`_single_spw_chan_freq`.
     """
 
     from casacore.tables import table
 
-    tb = table(path, ack=False)
-    time_col = tb.getcol("TIME")
-    ant1 = tb.getcol("ANTENNA1")
-    cparam = tb.getcol("CPARAM")  # (n_row, n_freq, n_pol)
-    flag = tb.getcol("FLAG")
-    viscal = tb.getkeyword("VisCal") if "VisCal" in tb.keywordnames() else ""
-    tb.close()
+    with table(path, ack=False) as tb:
+        time_col = tb.getcol("TIME")
+        ant1 = tb.getcol("ANTENNA1")
+        cparam = tb.getcol("CPARAM")  # (n_row, n_freq, n_pol)
+        flag = tb.getcol("FLAG")
+        viscal = tb.getkeyword("VisCal") if "VisCal" in tb.keywordnames() else ""
 
-    # Average the pol axis: tabascal is single-correlation, and write_caltable
-    # duplicates the gain across pols, so this is a no-op for our own tables.
-    g = np.where(flag, np.nan, cparam).mean(axis=-1)  # (n_row, n_freq)
+    g = _collapse_pols(cparam, flag)  # (n_row, n_freq)
 
     times = np.unique(time_col)
     n_ant = int(ant1.max()) + 1
@@ -1038,11 +1146,20 @@ def apply_gains_to_data(
     ``(n_bl, 1, 1)``).
 
     Returns ``(vis_cal, sigma_cal)``; ``sigma_cal`` is ``None`` if no ``sigma``
-    was given. A baseline with a flagged/zero gain would divide by zero, so it is
-    returned as NaN -- such visibilities must be flagged by the caller.
+    was given. A baseline whose gain is dead -- flagged, zero or non-finite --
+    has no calibrated value, and comes back as NaN in both; such visibilities
+    must be flagged by the caller.
     """
 
     g_bl = baseline_gains(np.asarray(gains), np.asarray(a1), np.asarray(a2))
+
+    # Every kind of dead gain is made the one NaN the caller is told to expect.
+    # Left alone, a zero gain divides to Inf and an Inf gain divides to zero, and
+    # both of those read downstream as ordinary numbers -- so a caller flagging
+    # on isnan would keep them.
+    dead = ~np.isfinite(g_bl) | (g_bl == 0)
+    g_bl = np.where(dead, np.nan, g_bl)
+
     with np.errstate(divide="ignore", invalid="ignore"):
         vis_cal = np.asarray(vis) / g_bl
         sigma_cal = None if sigma is None else np.asarray(sigma) / np.abs(g_bl)
