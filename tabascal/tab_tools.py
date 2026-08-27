@@ -18,7 +18,9 @@ from tabascal.write import write_results_ms, write_results_xds
 
 import numpy as np
 
+import os
 from datetime import datetime
+from time import perf_counter
 
 from typing import Callable, Optional
 from functools import reduce, partial
@@ -43,6 +45,36 @@ def _map_step(model, optimizer, params, opt_state, state, constants, obs_data):
     updates, new_opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
     return new_params, new_opt_state, loss
+
+
+@partial(jax.jit, static_argnums=(0, 1, 2))
+def _map_step_metrics(
+    model, optimizer, metrics_fn, params, opt_state, state, constants, obs_data,
+    metrics_data,
+):
+    """``_map_step`` that also returns per-iteration diagnostic metrics.
+
+    The metrics come out of the same ``log_density`` trace as the loss, so this
+    costs a few elementwise reductions over the visibility array rather than a
+    second forward pass. Kept separate from ``_map_step`` so the production
+    path is untouched.
+
+    ``metrics_data`` holds the arrays the metrics are measured against -- the
+    observed visibilities, the noise, the flag mask and the truth. It is a
+    traced argument for the same reason ``state`` and ``obs_data`` are: closing
+    over them instead would lower each one as an XLA constant, which is several
+    copies of the visibility array baked into every compiled step.
+    """
+    def neg_log_post(params):
+        lp, model_trace = log_density(
+            model, (obs_data,), {"state": state, "constants": constants}, params
+        )
+        return -lp / obs_data.size, metrics_fn(model_trace, metrics_data)
+
+    (loss, metrics), grads = jax.value_and_grad(neg_log_post, has_aux=True)(params)
+    updates, new_opt_state = optimizer.update(grads, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+    return new_params, new_opt_state, loss, metrics
 
 
 @measure_runtime
@@ -335,6 +367,157 @@ def run_svi(
     return svi_results, guide
 
 
+def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
+    """Path to dump the optimiser trace to, or None when tracing is off.
+
+    ``opt.trace_path`` is the supported way to ask for a trace, so a run that is
+    meant to be compared against another records itself without anyone having to
+    remember an environment variable. ``TAB_LOSS_TRACE`` still overrides it, for
+    tracing a one-off run of a config that must not be edited -- a shared
+    benchmark config, or one under version control. An empty value is no value,
+    so it falls through to the config rather than silently disabling the trace.
+
+    Resolves env against config and *nothing else*. In particular it must not
+    consult the process rank: this answer decides which of ``_map_step`` and
+    ``_map_step_metrics`` the optimiser runs, and under sharding the model
+    evaluation contains collectives, so every process has to execute the same
+    compiled program. A rank-dependent path would put rank 0 in the traced step
+    and the others in the plain one, and the first collective inside it would
+    hang the job -- a deadlock nobody sees until the day a distributed run is
+    traced. Every rank traces; only the *write* is rank 0's, and that gate lives
+    in :func:`_write_loss_trace` where it cannot change what is computed.
+    """
+    return os.environ.get("TAB_LOSS_TRACE") or config_path or None
+
+
+def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
+    """Per-iteration metrics defined by the data, not by the parameterisation.
+
+    The optimiser loss is a negative log *joint*, so its prior term depends on
+    the latent dimension of whichever model is running -- 123 Fourier k-modes
+    against 76 inducing times for the same GP, say. Two models' loss curves are
+    therefore not on a common scale and cannot be compared directly. These
+    quantities can: reduced chi^2 is fixed by the data, and the ast/rfi RMSE is
+    measured against the simulation truth. Both use the same flag masking and
+    noise normalisation as the values printed at init/opt.
+
+    Returns
+    -------
+    (metrics, data)
+        ``metrics(model_trace, data)``, a pure function of the model trace and
+        the arrays it scores against, and ``data``, those arrays as a pytree.
+        They are returned separately so ``data`` can be passed to
+        :func:`_map_step_metrics` as a *traced* argument: closing over it would
+        lower several copies of the visibility array into every compiled step,
+        which is exactly what :func:`run_custom_svi` exists to avoid.
+    """
+    flags = tab_config.flags
+    vis_obs = tab_config.vis_obs
+    truth = truth or {}
+
+    available = tuple(
+        key
+        for key in ("vis_ast", "vis_rfi")
+        if truth.get(key) is not None and not bool(jnp.all(jnp.isnan(truth[key])))
+    )
+
+    # Broadcast onto the visibilities before anything masks or divides, exactly
+    # as reduced_chi2 does: a (n_bl,) or (n_bl, n_freq) noise otherwise lines its
+    # leading axis up with the *trailing* axis of (n_bl, n_freq, n_time) and
+    # weights every visibility by another baseline's noise, without an error.
+    noise = jnp.broadcast_to(
+        broadcast_to_vis(tab_config.noise, vis_obs.shape), vis_obs.shape
+    )
+    # The RMSE is already reduced over every baseline, channel and timestep, so
+    # it normalises against the one representative noise -- there is no axis left
+    # to align the resolved array with. Same choice as print_truth_metrics.
+    noise_scalar = tab_config.noise_scalar
+
+    # reduced_chi2/rmse select with ``x[~flags]``, whose output shape depends on
+    # the mask -- fine eagerly, not traceable. Weight by the mask instead and
+    # divide by a statically known count, which is numerically the same thing.
+    keep = ~flags if flags is not None and flags.shape == vis_obs.shape else None
+    n_keep = float(keep.sum()) if keep is not None else float(vis_obs.size)
+
+    data = {
+        "vis_obs": vis_obs,
+        "noise": noise,
+        "keep": keep,
+        "truth": {key: truth[key] for key in available},
+    }
+
+    # ``mask`` is taken as an argument rather than closed over, so that every
+    # array this reduces over arrives through ``data`` and none can be picked up
+    # from the enclosing scope by accident, which is how they get baked in.
+    def _masked_mean_sq(diff, mask):
+        sq = jnp.abs(diff) ** 2
+        return jnp.sum(sq if mask is None else jnp.where(mask, sq, 0.0)) / n_keep
+
+    def metrics(model_trace: dict, data: dict) -> dict:
+        mask = data["keep"]
+        # chi^2 normalises by 2*N for complex data (real and imaginary parts),
+        # matching reduced_chi2.
+        out = {
+            "chi2": _masked_mean_sq(
+                (model_trace["vis_obs"]["value"] - data["vis_obs"]) / data["noise"],
+                mask,
+            ) / 2.0
+        }
+        for key in available:
+            out[f"{key}_nrmse"] = (
+                jnp.sqrt(
+                    _masked_mean_sq(
+                        model_trace[key]["value"] - data["truth"][key], mask
+                    )
+                )
+                / noise_scalar
+            )
+        return out
+
+    return metrics, data
+
+
+def _write_loss_trace(
+    path: Optional[str], losses: list, step_times: list,
+    metrics: Optional[dict] = None,
+) -> None:
+    """Dump the optimiser trace to ``path``, if there is one, from rank 0 only.
+
+    The losses are written exactly as the optimiser produced them -- already
+    normalised by ``obs_data.size`` in the step itself -- so the trace and the
+    loss curve the run returns are the same numbers. ``metrics`` holds the
+    per-iteration model-independent quantities from :func:`build_trace_metrics`.
+
+    This is the *only* place the process rank is allowed to matter: every rank
+    ran the same traced program and so holds the same numbers, and all of them
+    would otherwise race each other to the same file. Deciding it any earlier
+    would make the ranks disagree about what to compute -- see
+    :func:`loss_trace_path`.
+    """
+    if not path or not is_process_0():
+        return
+
+    arrays = {
+        "loss": np.asarray(losses, dtype=float),
+        "time_s": np.asarray(step_times, dtype=float),
+    }
+    for name, values in (metrics or {}).items():
+        arrays[name] = np.asarray(values, dtype=float)
+
+    # This runs after the whole optimisation, so a trace pointed into a results
+    # directory that does not exist yet would otherwise throw the finished run
+    # away over a missing folder.
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    np.savez(path, **arrays)
+    print(
+        f"Wrote trace ({len(losses)} iterations, "
+        f"{sorted(arrays)}) to {path}"
+    )
+
+
 @measure_runtime
 def run_custom_svi(
     prob_model: Callable,
@@ -345,6 +528,8 @@ def run_custom_svi(
     dual_run: bool = True,
     state: dict = None,
     constants: dict = None,
+    trace_path: Optional[str] = None,
+    metrics: Optional[tuple] = None,
 ) -> SVIRunResult:
     """MAP optimization that avoids capturing large state arrays as JAX constants.
 
@@ -355,8 +540,54 @@ def run_custom_svi(
 
     Optimizes log p(obs | params) + log p(params) directly, equivalent to
     AutoDelta SVI for MAP estimation.
+
+    ``trace_path`` dumps the per-iteration loss and the wall-clock time it was
+    reached to an ``.npz``, for loss-versus-time comparisons between models
+    (issue #107), together with the ``metrics`` from
+    :func:`build_trace_metrics` -- a ``(function, data)`` pair, which the path
+    requires because the documented schema always carries a reduced chi^2.
+    ``trace_path`` alone decides: without one, nothing is timed, no metrics are
+    computed and the optimiser takes the original :func:`_map_step`, so the
+    trace is genuinely free when it is off.
+
+    The path must be the same on every process. It selects which of
+    :func:`_map_step` and :func:`_map_step_metrics` runs, and under sharding the
+    model evaluation contains collectives, so the ranks disagreeing about that
+    would deadlock the optimisation. Every rank traces; only the write at the
+    end is rank 0's, gated inside :func:`_write_loss_trace`.
     """
+    # The path is the switch. Metrics without one would compile and run the
+    # traced step for a production run and then discard every number it cost;
+    # a path without metrics would write a file missing the keys the schema
+    # promises. Refused here rather than at the writer, which only runs once
+    # the whole optimisation is already done.
+    if trace_path is None:
+        metrics = None
+    elif metrics is None:
+        raise ValueError(
+            "run_custom_svi was given trace_path but no metrics, so the trace "
+            "would carry no reduced chi^2 and not be the documented file. Pass "
+            "metrics=build_trace_metrics(tab_config, truth), or leave "
+            "trace_path unset."
+        )
+
+    metrics_fn, metrics_data = metrics if metrics is not None else (None, None)
+
+    # Wall-clock elapsed at the end of each iteration, measured from the first
+    # step of the first phase. Comparing two models by loss-per-iteration hides
+    # any difference in cost per iteration, so a model that converges in fewer
+    # but more expensive steps looks better than it is; the honest axis is time.
+    # `float(loss)` below already forces a device sync, so the timestamp taken
+    # after it bounds completed work rather than dispatched work. Every read of
+    # the clock is guarded on the trace being on, so an untraced run does not
+    # pay for a measurement nobody asked for.
+    tracing = trace_path is not None
+    step_times = []
+    trace_t0 = None
+    traced_metrics: dict = {}
+
     def _run_phase(params, epsilon, max_iter):
+        nonlocal trace_t0
         optimizer = optax.adabelief(epsilon)
         opt_state = optimizer.init(params)
         losses = []
@@ -364,10 +595,22 @@ def run_custom_svi(
         init_loss = None
         pbar = trange(max_iter, disable=not is_process_0())
         for i in pbar:
-            params, opt_state, loss = _map_step(
-                prob_model, optimizer, params, opt_state, state, constants, obs_data
-            )
+            if tracing and trace_t0 is None:
+                trace_t0 = perf_counter()
+            if metrics_fn is None:
+                params, opt_state, loss = _map_step(
+                    prob_model, optimizer, params, opt_state, state, constants, obs_data
+                )
+            else:
+                params, opt_state, loss, step_metrics = _map_step_metrics(
+                    prob_model, optimizer, metrics_fn, params, opt_state,
+                    state, constants, obs_data, metrics_data,
+                )
+                for name, value in step_metrics.items():
+                    traced_metrics.setdefault(name, []).append(float(value))
             loss_val = float(loss)
+            if tracing:
+                step_times.append(perf_counter() - trace_t0)
             losses.append(loss_val)
             if init_loss is None:
                 init_loss = loss_val
@@ -387,6 +630,8 @@ def run_custom_svi(
     if dual_run:
         params, losses2 = _run_phase(params, epsilon / 10, max_iter)
         losses = losses + losses2
+
+    _write_loss_trace(trace_path, losses, step_times, traced_metrics)
 
     # Add _auto_loc suffix to match AutoDelta convention expected by downstream code
     params_out = {k + "_auto_loc": v for k, v in params.items()}
@@ -454,6 +699,7 @@ def run_opt(
     start = datetime.now()
     print()
     print("Running Optimization ...")
+    trace_path = loss_trace_path(tab_config.args["opt"].get("trace_path"))
     vi_results = run_custom_svi(
         prob_model=prob_model,
         obs_data=tab_config.vis_obs,
@@ -463,6 +709,8 @@ def run_opt(
         dual_run=tab_config.args["opt"]["dual_run"],
         state=state,
         constants=constants,
+        trace_path=trace_path,
+        metrics=build_trace_metrics(tab_config, truth) if trace_path else None,
     )
     vi_params = vi_results.params
     # Strip _auto_loc suffix to get raw param names for Predictive
