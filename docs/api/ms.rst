@@ -35,5 +35,25 @@ these mismatches raise.
    trajectories are computed as if every observation were UTC, and a non-UTC MS
    produces a warning. Wiring it through is tracked by issue #133.
 
+**Time unit.** The same column's ``QuantumUnits`` keyword declares whether its
+values are seconds or days; TABASCAL works in MJD days.
+:func:`~tabascal.ms.read_time_unit` returns the declaration and
+:func:`~tabascal.ms.times_to_mjd` applies it, falling back — for the columns
+that carry no declaration — on the spacing of consecutive samples: an
+integration is seconds long, so a gap above half a day can only be seconds. A
+single-integration MS has no spacing to read and its unit comes from magnitude
+instead, an MJD day number being at most ~1e5 in any plausible observing era
+against ~1e9 for the same instant in seconds. Both thresholds are strict: a
+spacing of exactly 0.5, or a magnitude of exactly 1e5, reads as days.
+
+Both :func:`~tabascal.ms.read_ms` and the preflight observation-epoch helper
+convert here, so the heuristic cannot classify one MS two ways — including for
+an MS whose timestep blocks do not ascend, since the classification sorts. What
+they can still differ on is a *declared* unit: the preflight helper reads the
+``TIME`` column through casacore directly and does not read its keywords, so an
+MS whose ``QuantumUnits`` contradicts the spacing of the times it stores is read
+on the declared unit by ``read_ms`` and on the inferred one by the TLE age
+checks.
+
 .. automodule:: tabascal.ms
     :members:
