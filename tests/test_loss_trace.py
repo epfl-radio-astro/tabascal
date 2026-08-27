@@ -410,6 +410,29 @@ class TestTraceEnabled:
         with np.load(_run(toy, tmp_path, with_truth=False)) as npz:
             assert set(npz.files) == {"loss", "time_s", "chi2"}
 
+    def test_loss_matches_the_returned_loss_curve(self, tmp_path, exact_rtol):
+        """The traced loss is the optimiser's own loss, not another normalisation."""
+
+        toy = _toy_problem(0.1)
+        path = str(tmp_path / "trace.npz")
+        results = run_custom_svi(
+            prob_model=toy.prob_model,
+            obs_data=toy.vis_obs,
+            max_iter=3,
+            init_params=toy.init_params,
+            epsilon=1e-2,
+            dual_run=False,
+            state=toy.state,
+            constants=toy.constants,
+            trace_path=path,
+            metrics=build_trace_metrics(toy.tab_config, toy.truth),
+        )
+
+        with np.load(path) as npz:
+            traced = npz["loss"]
+
+        np.testing.assert_allclose(traced, np.asarray(results.losses), rtol=exact_rtol)
+
     def test_chi2_at_init_matches_reduced_chi2(self, tmp_path, exact_rtol):
         toy = _toy_problem(0.1)
         expected = reduced_chi2(

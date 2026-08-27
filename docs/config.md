@@ -155,7 +155,7 @@ The file is written once, at the end of the run, and holds one array per key, ea
 
 | Key | Present | Meaning |
 |---|---|---|
-| `loss` | always | The optimiser's per-iteration loss |
+| `loss` | always | The optimiser's own loss, the negative log joint divided by `vis_obs.size` |
 | `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched |
 | `chi2` | always | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
 | `vis_ast_nrmse` | with truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |

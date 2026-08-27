@@ -478,14 +478,15 @@ def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
 
 
 def _write_loss_trace(
-    path: Optional[str], losses: list, step_times: list, obs_size: int,
+    path: Optional[str], losses: list, step_times: list,
     metrics: Optional[dict] = None,
 ) -> None:
     """Dump the optimiser trace to ``path``, if there is one, from rank 0 only.
 
-    Losses are divided by ``obs_size`` to match the normalisation the pipeline
-    reports elsewhere. ``metrics`` holds the per-iteration model-independent
-    quantities from :func:`build_trace_metrics`.
+    The losses are written exactly as the optimiser produced them -- already
+    normalised by ``obs_data.size`` in the step itself -- so the trace and the
+    loss curve the run returns are the same numbers. ``metrics`` holds the
+    per-iteration model-independent quantities from :func:`build_trace_metrics`.
 
     This is the *only* place the process rank is allowed to matter: every rank
     ran the same traced program and so holds the same numbers, and all of them
@@ -497,7 +498,7 @@ def _write_loss_trace(
         return
 
     arrays = {
-        "loss": np.asarray(losses, dtype=float) / obs_size,
+        "loss": np.asarray(losses, dtype=float),
         "time_s": np.asarray(step_times, dtype=float),
     }
     for name, values in (metrics or {}).items():
@@ -630,7 +631,7 @@ def run_custom_svi(
         params, losses2 = _run_phase(params, epsilon / 10, max_iter)
         losses = losses + losses2
 
-    _write_loss_trace(trace_path, losses, step_times, obs_data.size, traced_metrics)
+    _write_loss_trace(trace_path, losses, step_times, traced_metrics)
 
     # Add _auto_loc suffix to match AutoDelta convention expected by downstream code
     params_out = {k + "_auto_loc": v for k, v in params.items()}
