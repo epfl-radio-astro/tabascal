@@ -62,14 +62,19 @@ def build_parser(parser=None):
         "from the MS, which every tabascal run overwrites. With -z, -dc is the "
         "*reference* column the residual is formed against.",
     )
+    # No parser default: a default is indistinguishable from a value the user
+    # typed, and with -c that would silently overwrite the config's own
+    # data.data_col / data.corr on every run. See resolve_data_col.
     parser.add_argument(
-        "-dc", "--data-col", dest="data_col", default="DATA",
+        "-dc", "--data-col", dest="data_col", default=None,
         help="MS data column to matched-filter, or (with -z) the reference "
-        "column the residual is formed against (default: DATA).",
+        "column the residual is formed against. Defaults to the config's "
+        "data.data_col with -c, and to DATA otherwise.",
     )
     parser.add_argument(
-        "-cr", "--corr", default="xx", choices=["xx", "xy", "yx", "yy"],
-        help="Correlation to read (default: xx).",
+        "-cr", "--corr", default=None, choices=["xx", "xy", "yx", "yy"],
+        help="Correlation to read. Defaults to the config's data.corr with -c, "
+        "and to xx otherwise.",
     )
     parser.add_argument(
         "-f", "--freq", type=float, default=None,
@@ -93,14 +98,17 @@ def build_parser(parser=None):
         help="z (residual/floor) threshold for the coverage statistic and band "
         "(default: 3.0).",
     )
-    parser.add_argument(
+    # A cut and no cut at all: given together one has to lose silently, so
+    # neither is allowed to.
+    elevation = parser.add_mutually_exclusive_group()
+    elevation.add_argument(
         "--min-elevation", dest="min_elevation", type=float, default=None,
         metavar="DEG",
         help="Elevation in degrees below which a satellite is not filtered for. "
         "Defaults to the config's rfi.min_elevation with -c, and to 0 (the "
         "geometric horizon) otherwise.",
     )
-    parser.add_argument(
+    elevation.add_argument(
         "--no-elevation-cut", dest="elevation_cut", action="store_false",
         default=True,
         help="Filter for every satellite at every timestep, however far below "
@@ -166,6 +174,26 @@ def resolve_ms_path(args, config):
     )
 
 
+def resolve_data_col(args, config):
+    """The column to filter: the flag, else the config's, else ``DATA``."""
+    if args.data_col is not None:
+        return args.data_col
+    if config is not None:
+        return config.get("data", {}).get("data_col") or "DATA"
+
+    return "DATA"
+
+
+def resolve_corr(args, config):
+    """The correlation to read: the flag, else the config's, else ``xx``."""
+    if args.corr is not None:
+        return args.corr
+    if config is not None:
+        return config.get("data", {}).get("corr") or "xx"
+
+    return "xx"
+
+
 def resolve_min_elevation(args, config):
     """The elevation cut: the flag, else the config's, else the horizon."""
     if not args.elevation_cut:
@@ -178,15 +206,21 @@ def resolve_min_elevation(args, config):
     return 0.0
 
 
-def resolve_output(args, ms_path):
-    """Where to write, defaulting beside the MS under ``light_curves/``."""
-    if args.output:
-        return args.output
+def resolve_output(args, ms_path, data_col):
+    """Where to write, defaulting beside the MS under ``light_curves/``.
 
-    label = args.tag or args.data_col
+    Named for the column actually filtered rather than for the flag, so a ``-c``
+    run whose config selects ``TAB_RES_DATA`` does not write ``DATA.npz``.
+
+    The suffix is normalised because ``np.savez`` appends ``.npz`` itself: told
+    to write ``curves`` it writes ``curves.npz``, and a path reported without it
+    names a file that is not there.
+    """
+    label = args.tag or data_col
     ms_dir = os.path.dirname(os.path.abspath(str(ms_path).rstrip("/")))
+    path = args.output or os.path.join(ms_dir, "light_curves", f"{label}.npz")
 
-    return os.path.join(ms_dir, "light_curves", f"{label}.npz")
+    return path if path.endswith(".npz") else path + ".npz"
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +228,16 @@ def resolve_output(args, ms_path):
 # ---------------------------------------------------------------------------
 
 def _print_coverage(result, z_crit):
-    from tabascal.rfi_estimate import coverage_stats
+    from tabascal.rfi_estimate import coverage_stats, has_noise_scale
+
+    if not has_noise_scale(result):
+        print(
+            "\n  No noise floor, so no coverage statistic: the MS carried no "
+            "usable\n  noise column and none was given, so the light curves are "
+            "unscaled and\n  the z statistic is nan. The curves themselves are "
+            "still in the output."
+        )
+        return
 
     cov = coverage_stats(result, z_crit=z_crit)
     print(f"\n  Coverage within {z_crit:g} sigma. Judge against the NULL column, not")
@@ -217,8 +260,13 @@ def _print_coverage(result, z_crit):
     )
 
 
-def _from_config(args, min_elevation_override):
-    """The in-process path: one MS read, through the run's own TabConfig."""
+def _from_config(args):
+    """The in-process path: one MS read, through the run's own TabConfig.
+
+    The config is the default for everything it names -- the column, the
+    correlation, the elevation cut -- and a flag overrides it only when one was
+    actually given.
+    """
     from tabascal.config import TabConfig, load_config
     from tabascal.rfi_estimate import light_curves_from_config
     from tabascal.scripts._run_tabascal_impl import set_precision
@@ -228,15 +276,15 @@ def _from_config(args, min_elevation_override):
 
     ms_path = resolve_ms_path(args, config)
     config["data"]["ms_path"] = ms_path
-    config["data"]["data_col"] = args.data_col
-    config["data"]["corr"] = args.corr
+    config["data"]["data_col"] = resolve_data_col(args, config)
+    config["data"]["corr"] = resolve_corr(args, config)
     if args.freq is not None:
         config["data"]["freq"] = args.freq
     if args.extra_orbit_dir:
         config["satellites"]["extra_orbit_dir"] = args.extra_orbit_dir
     # The satellites are the config's own: -n/-np are refused alongside -c, since
     # both name them and there is no rule for which would win.
-    config["rfi"]["min_elevation"] = min_elevation_override(config)
+    config["rfi"]["min_elevation"] = resolve_min_elevation(args, config)
 
     tab_config = TabConfig(config, ms_path)
 
@@ -258,13 +306,14 @@ def _from_config(args, min_elevation_override):
     )
     if args.zarr:
         result["data_col"] = (
-            f"{args.data_col} - {os.path.basename(str(args.zarr).rstrip('/'))}"
+            f"{config['data']['data_col']} - "
+            f"{os.path.basename(str(args.zarr).rstrip('/'))}"
         )
 
-    return ms_path, result
+    return ms_path, result, config["data"]["data_col"]
 
 
-def _from_ms(args, min_elevation):
+def _from_ms(args):
     """The standalone path: an MS and an explicit satellite list."""
     from tabascal.rfi_estimate import (
         extract_light_curves_from_ms,
@@ -273,45 +322,46 @@ def _from_ms(args, min_elevation):
 
     ms_path = resolve_ms_path(args, None)
     norad_ids = resolve_norad_ids(args)
+    data_col = resolve_data_col(args, None)
 
     common = dict(
         norad_ids=norad_ids,
-        corr=args.corr,
-        data_col=args.data_col,
+        corr=resolve_corr(args, None),
+        data_col=data_col,
         freq=args.freq,
         exclude_autos=args.exclude_autos,
         extra_orbit_dir=args.extra_orbit_dir,
-        min_elevation=min_elevation,
+        min_elevation=resolve_min_elevation(args, None),
         max_mem_gb=args.max_mem_gb,
     )
     if args.zarr:
-        return ms_path, extract_light_curves_from_zarr(ms_path, args.zarr, **common)
+        return (
+            ms_path,
+            extract_light_curves_from_zarr(ms_path, args.zarr, **common),
+            data_col,
+        )
 
-    if args.data_col.startswith("TAB_"):
+    if data_col.startswith("TAB_"):
         print(
-            f"  WARNING  : reading '{args.data_col}' from the MS. Those columns "
+            f"  WARNING  : reading '{data_col}' from the MS. Those columns "
             "are overwritten by every tabascal run -- pass -z <map_pred_*.zarr> "
             "to score the run you actually mean."
         )
 
-    return ms_path, extract_light_curves_from_ms(ms_path, **common)
+    return ms_path, extract_light_curves_from_ms(ms_path, **common), data_col
 
 
 def run(args):
     from tabascal.rfi_estimate import save_light_curves_npz
 
+    # Printed after the resolution rather than before it: with -c the column and
+    # correlation are the config's, and this is what was actually read.
+    ms_path, result, data_col = _from_config(args) if args.config else _from_ms(args)
     print(
-        f"Matched-filter light curves from column '{args.data_col}' ({args.corr})"
+        f"Matched-filter light curves from column '{data_col}' ({result['corr']})"
     )
 
-    if args.config:
-        ms_path, result = _from_config(
-            args, lambda config: resolve_min_elevation(args, config)
-        )
-    else:
-        ms_path, result = _from_ms(args, resolve_min_elevation(args, None))
-
-    out_path = resolve_output(args, ms_path)
+    out_path = resolve_output(args, ms_path, data_col)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     save_light_curves_npz(out_path, result)
 

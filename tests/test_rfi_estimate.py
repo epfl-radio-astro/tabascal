@@ -130,7 +130,8 @@ def reference(vis, rfi_phase, a1, a2, noise=None, flags=None, exclude_autos=True
     for s in range(rfi_phase.shape[0]):
         num = np.sum(w * vis * np.conj(template(rfi_phase, a1, a2, s)), axis=0)
         out.append(num / den)
-        err.append(1.0 / np.sqrt(den))
+        # Without a sigma there is no scale to report, only a shape.
+        err.append(np.full(den.shape, np.nan) if noise is None else 1.0 / np.sqrt(den))
     return np.array(out), np.array(err)
 
 
@@ -228,15 +229,33 @@ class TestMatchedFilter:
         assert uniform[0, 0].real.std() > 2.0 * weighted[0, 0].real.std()
 
     def test_uniform_weights_when_no_noise_is_given(self, exact_rtol):
+        """The estimate is still the plain de-rotated average of the baselines."""
+        rfi_phase = phases()
+        a1, a2 = pairs()
+        vis = observe(rfi_phase, a1, a2, [source(), source(seed=3)])
+
+        lc, _ = matched_filter_light_curves(vis, rfi_phase, a1, a2)
+        ref_lc, _ = reference(vis, rfi_phase, a1, a2)
+
+        np.testing.assert_allclose(lc, ref_lc, rtol=exact_rtol, atol=exact_rtol)
+
+    def test_without_a_noise_there_is_no_error_to_report(self):
+        """1/sqrt(N) would be asserting sigma = 1 Jy, which nobody said.
+
+        The weights are then a shape, not a variance: they still say which
+        baselines to average, but nothing about the scale of what is left. An
+        error bar invented from them would be off by whatever the real noise is,
+        and a z built on it would look like a detection at any flux -- so both
+        come back nan and the coverage statistic has nothing to report.
+        """
         rfi_phase = phases()
         a1, a2 = pairs()
         vis = observe(rfi_phase, a1, a2, [source(), source(seed=3)])
 
         lc, err = matched_filter_light_curves(vis, rfi_phase, a1, a2)
-        ref_lc, ref_err = reference(vis, rfi_phase, a1, a2)
 
-        np.testing.assert_allclose(lc, ref_lc, rtol=exact_rtol, atol=exact_rtol)
-        np.testing.assert_allclose(err, ref_err, rtol=exact_rtol)
+        assert np.isfinite(lc).all()
+        assert np.isnan(err).all()
 
     def test_autocorrelations_are_excluded(self, exact_rtol):
         """An autocorrelation carries no fringe, so it only adds its own power."""
@@ -274,8 +293,10 @@ class TestMatchedFilter:
         clean = vis.copy()
         vis[flags] = 1e6  # a flagged sample must not reach the average at all
 
-        lc, err = matched_filter_light_curves(vis, rfi_phase, a1, a2, flags=flags)
-        ref_lc, ref_err = reference(clean, rfi_phase, a1, a2, flags=flags)
+        lc, err = matched_filter_light_curves(
+            vis, rfi_phase, a1, a2, noise=0.5, flags=flags
+        )
+        ref_lc, ref_err = reference(clean, rfi_phase, a1, a2, noise=0.5, flags=flags)
 
         np.testing.assert_allclose(lc, ref_lc, rtol=exact_rtol, atol=exact_rtol)
         np.testing.assert_allclose(err, ref_err, rtol=exact_rtol)
@@ -288,7 +309,9 @@ class TestMatchedFilter:
         flags = np.zeros(vis.shape, dtype=bool)
         flags[:, 0, 1] = True
 
-        lc, err = matched_filter_light_curves(vis, rfi_phase, a1, a2, flags=flags)
+        lc, err = matched_filter_light_curves(
+            vis, rfi_phase, a1, a2, noise=0.5, flags=flags
+        )
 
         assert np.isnan(lc[:, 0, 1]).all()
         assert np.isnan(err[:, 0, 1]).all()
@@ -356,11 +379,12 @@ class TestElevationMask:
         rfi_phase, a1, a2, vis, in_view = self._setup()
 
         lc, err = matched_filter_light_curves(
-            vis, rfi_phase, a1, a2, in_view=in_view
+            vis, rfi_phase, a1, a2, noise=0.5, in_view=in_view
         )
 
         assert np.all(lc[0, :, 4:] == 0)
         assert np.isnan(err[0, :, 4:]).all()
+        assert np.isfinite(err[0, :, :4]).all()
         ref, _ = reference(vis, rfi_phase, a1, a2)
         np.testing.assert_allclose(
             lc[0, :, :4], ref[0, :, :4], rtol=exact_rtol, atol=exact_rtol
@@ -373,7 +397,7 @@ class TestElevationMask:
         vis[:, :, 4:] = np.nan
 
         lc, err = matched_filter_light_curves(
-            vis, rfi_phase, a1, a2, in_view=in_view
+            vis, rfi_phase, a1, a2, noise=0.5, in_view=in_view
         )
 
         assert np.isfinite(lc[0, :, :4]).all()
@@ -477,7 +501,7 @@ def make_result(n_src=N_SRC, n_freq=N_FREQ, n_time=N_TIME, norad_ids=None,
     curves = [source(n_freq, n_time, seed=seed + i) for i in range(n_src)]
     vis = observe(rfi_phase, a1, a2, curves)
     lc, err = matched_filter_light_curves(
-        vis, rfi_phase, a1, a2, in_view=in_view
+        vis, rfi_phase, a1, a2, noise=0.5, in_view=in_view
     )
     ids = [40000 + i for i in range(n_src)] if norad_ids is None else norad_ids
     times_mjd = MJD0 + np.arange(n_time) / 86400.0
@@ -737,18 +761,24 @@ class TestLightCurvesFromConfig:
 def stub_ms(monkeypatch):
     """Stand in for ``tabascal.ms.read_ms`` with an in-memory observation."""
 
-    def _install(noise=0.1, n_time=N_TIME, vis=None, flags=None):
+    def _install(noise=0.1, n_time=N_TIME, vis=None, flags=None, chans=None):
         a1, a2 = pairs()
         times_mjd = MJD0 + np.arange(n_time) / 86400.0
+        band = np.linspace(1.4e9, 1.41e9, N_FREQ)
+        # `chans` stands in for a `-f` read: the MS comes back on a subset of the
+        # band, which anything it is differenced against has to be matched to.
+        freqs = band if chans is None else band[np.asarray(chans)]
+        n_freq = len(freqs)
         data = {
             "ra": CENTRE["ra"],
             "dec": CENTRE["dec"],
             "ants_itrf": ANTS,
             "times_mjd": times_mjd,
-            "freqs": np.linspace(1.4e9, 1.41e9, N_FREQ),
-            "vis_obs": (np.ones((len(a1), N_FREQ, n_time), dtype=complex)
+            "freqs": freqs,
+            "chan_width": float(band[1] - band[0]),
+            "vis_obs": (np.ones((len(a1), n_freq, n_time), dtype=complex)
                         if vis is None else vis),
-            "flags": (np.zeros((len(a1), N_FREQ, n_time), dtype=bool)
+            "flags": (np.zeros((len(a1), n_freq, n_time), dtype=bool)
                       if flags is None else flags),
             "noise": noise,
             "a1": a1,
@@ -810,17 +840,19 @@ class TestExtractFromMS:
         expected = 1.0 / np.sqrt(np.sum(1.0 / noise**2))
         np.testing.assert_allclose(result["error"], expected, rtol=exact_rtol)
 
-    def test_an_ms_with_no_noise_falls_back_to_uniform_with_a_warning(
+    def test_an_ms_with_no_noise_gives_an_unscaled_estimate(
         self, stub_ms, stub_orbits, capsys
     ):
-        """Uniform weights are a real loss of information, so they are said out loud."""
+        """No sigma anywhere, so the curve has no error bar and says so."""
         stub_ms(noise=None)
 
         result = extract_light_curves_from_ms("obs.ms", norad_ids=[25544])
 
-        assert "uniform" in capsys.readouterr().out.lower()
-        n_bl = len(pairs()[0])
-        np.testing.assert_allclose(result["error"], 1.0 / np.sqrt(n_bl))
+        out = capsys.readouterr().out.lower()
+        assert "unweighted" in out and "unscaled" in out
+        assert np.isfinite(result["light_curves"]).all()
+        assert np.isnan(result["error"]).all()
+        assert np.isnan(result["z"]).all()
 
     def test_the_elevation_cut_is_applied(self, stub_ms, stub_orbits, monkeypatch):
         import tabascal.rfi_estimate as mod
@@ -859,12 +891,16 @@ class TestExtractFromZarr:
     """Scoring a run off its own results zarr, which no later run can overwrite."""
 
     @staticmethod
-    def _zarr(tmp_path, model):
+    def _zarr(tmp_path, model, freqs=None, name="map_pred.zarr"):
+        """A results zarr, with the ``freq`` coordinate write_results_xds writes."""
         import xarray as xr
 
-        path = str(tmp_path / "map_pred.zarr")
+        path = str(tmp_path / name)
+        coords = {}
+        if freqs is not None:
+            coords["freq"] = np.asarray(freqs, dtype=float)
         xr.Dataset(
-            {"vis_obs": (("sample", "bl", "freq", "time"), model[None])}
+            {"vis_obs": (("sample", "bl", "freq", "time"), model[None])}, coords=coords
         ).to_zarr(path)
         return path
 
@@ -911,6 +947,79 @@ class TestExtractFromZarr:
         np.testing.assert_allclose(
             result["light_curves"][0], leftover, rtol=exact_rtol, atol=1e-9
         )
+
+    def test_a_narrowed_ms_takes_the_matching_zarr_channel(
+        self, tmp_path, stub_ms, stub_orbits, exact_rtol
+    ):
+        """`-f` reads one channel; the model must be differenced on that channel.
+
+        Subtracting positionally would take the zarr's channel 0 from the MS's
+        channel 2 -- same shape, no error, and a residual that is mostly the
+        difference between two channels of the model.
+        """
+        a1, a2 = pairs()
+        chan = 2
+        ms = stub_ms(chans=[chan])
+        band = np.linspace(1.4e9, 1.41e9, N_FREQ)
+        # A model whose channels differ, so taking the wrong one cannot pass.
+        model = observe(phases(n_src=1, seed=21), a1, a2, [source(seed=22)])
+        model = model * (1.0 + np.arange(N_FREQ)[None, :, None])
+        rfi_phase = rfi_phase_from_records(
+            [make_tle_record(25544, JD0)], ANTS, mjd_to_jd(ms["times_mjd"]),
+            CENTRE, ms["freqs"],
+        )
+        leftover = source(n_freq=1)
+        ms["vis_obs"] = (
+            model[:, chan : chan + 1] + template(rfi_phase, a1, a2) * leftover
+        )
+        zarr_path = self._zarr(tmp_path, model, freqs=band)
+
+        result = extract_light_curves_from_zarr(
+            "obs.ms", zarr_path, norad_ids=[25544]
+        )
+
+        np.testing.assert_allclose(
+            result["light_curves"][0], leftover, rtol=exact_rtol, atol=1e-9
+        )
+
+    def test_a_zarr_that_does_not_cover_the_band_is_refused(
+        self, tmp_path, stub_ms, stub_orbits
+    ):
+        """Silently differencing the nearest far-away channel is the worse failure."""
+        a1, _ = pairs()
+        ms = stub_ms()
+        model = np.zeros((len(a1), N_FREQ, N_TIME), dtype=complex)
+        elsewhere = np.linspace(2.4e9, 2.41e9, N_FREQ)
+        zarr_path = self._zarr(tmp_path, model, freqs=elsewhere)
+
+        with pytest.raises(ValueError, match="frequenc"):
+            extract_light_curves_from_zarr("obs.ms", zarr_path, norad_ids=[25544])
+
+    def test_a_zarr_without_frequencies_is_matched_by_position(
+        self, tmp_path, stub_ms, stub_orbits
+    ):
+        """Older stores carry no freq coordinate; the counts then have to agree."""
+        a1, _ = pairs()
+        stub_ms()
+        model = np.zeros((len(a1), N_FREQ, N_TIME), dtype=complex)
+
+        result = extract_light_curves_from_zarr(
+            "obs.ms", self._zarr(tmp_path, model), norad_ids=[25544]
+        )
+
+        assert result["light_curves"].shape == (1, N_FREQ, N_TIME)
+
+    def test_a_zarr_without_frequencies_that_cannot_line_up_is_refused(
+        self, tmp_path, stub_ms, stub_orbits
+    ):
+        a1, _ = pairs()
+        stub_ms(chans=[1])
+        model = np.zeros((len(a1), N_FREQ, N_TIME), dtype=complex)
+
+        with pytest.raises(ValueError, match="channel"):
+            extract_light_curves_from_zarr(
+                "obs.ms", self._zarr(tmp_path, model), norad_ids=[25544]
+            )
 
     def test_the_column_records_what_was_subtracted(
         self, tmp_path, stub_ms, stub_orbits
@@ -1038,6 +1147,67 @@ class TestCommandLine:
             np.testing.assert_array_equal(
                 npz["norad_ids"], tab_config.norad_ids[:tab_config.n_rfi_real]
             )
+
+    def test_the_config_mode_keeps_the_configs_column_and_correlation(
+        self, tmp_path, monkeypatch
+    ):
+        """Without -dc/-cr the config decides. A parser default must not overrule it.
+
+        The bug this pins: `-dc` defaulting to DATA in the parser made every
+        `tabascal light-curve -c config.yaml` filter DATA/xx, whatever the config
+        said, and name the output DATA.npz.
+        """
+        import tabascal.config
+        import tabascal.scripts._run_tabascal_impl as impl
+        from tabascal.scripts.rfi_estimate import run
+
+        config = {
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+                     "data_col": "TAB_RES_DATA", "corr": "yy", "freq": None},
+            "rfi": {"min_elevation": None},
+            "satellites": {},
+        }
+        monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
+        monkeypatch.setattr(
+            tabascal.config, "TabConfig", lambda cfg, ms_path: make_tab_config()
+        )
+        monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
+
+        run(_cli("-c", "tab.yaml"))
+
+        assert config["data"]["data_col"] == "TAB_RES_DATA"
+        assert config["data"]["corr"] == "yy"
+        # And the output is named for what was actually filtered.
+        assert (tmp_path / "light_curves" / "TAB_RES_DATA.npz").exists()
+
+    def test_an_output_without_a_suffix_is_saved_and_reported_as_npz(
+        self, tmp_path, stub_ms, stub_orbits, capsys
+    ):
+        """np.savez appends .npz, so the path printed has to have it too."""
+        from tabascal.scripts.rfi_estimate import run
+
+        stub_ms()
+        out = str(tmp_path / "curves")
+
+        run(_cli("-ms", str(tmp_path / "obs.ms"), "-n", "25544", "-o", out))
+
+        assert (tmp_path / "curves.npz").exists()
+        assert f"{out}.npz" in capsys.readouterr().out
+
+    def test_coverage_is_suppressed_when_there_is_no_noise(
+        self, tmp_path, stub_ms, stub_orbits, capsys
+    ):
+        """A coverage table built on nan z is a row of nans pretending to be a result."""
+        from tabascal.scripts.rfi_estimate import run
+
+        stub_ms(noise=None)
+
+        run(_cli("-ms", str(tmp_path / "obs.ms"), "-n", "25544",
+                 "-o", str(tmp_path / "c.npz")))
+
+        out = capsys.readouterr().out
+        assert "OVERALL" not in out
+        assert "no coverage statistic" in out.lower()
 
     def test_the_config_mode_honours_the_elevation_flag(self, tmp_path, monkeypatch):
         import tabascal.config

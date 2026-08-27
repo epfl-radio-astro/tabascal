@@ -142,6 +142,17 @@ class TestLightCurveSubcommand:
         assert args.corr == "yy"
         assert args.freq == 1.4e9
 
+    def test_the_column_and_correlation_are_unset_when_not_given(self):
+        """Not defaulted in the parser: a config names them, and must win.
+
+        A parser default is indistinguishable from a value the user typed, so
+        defaulting here would silently overwrite `data.data_col` on every
+        `-c` run.
+        """
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1")
+        assert args.data_col is None
+        assert args.corr is None
+
     def test_an_unknown_correlation_is_refused(self):
         with pytest.raises(SystemExit):
             _parse("light-curve", "-ms", "o.ms", "-n", "1", "-cr", "rr")
@@ -166,10 +177,14 @@ class TestLightCurveSubcommand:
         args = _parse("light-curve", "-ms", "o.ms", "-n", "1", "--no-elevation-cut")
         assert args.elevation_cut is False
 
+    def test_a_cut_and_no_cut_together_are_refused(self):
+        """They contradict each other, and silently letting one win is worse."""
+        with pytest.raises(SystemExit):
+            _parse("light-curve", "-ms", "o.ms", "-n", "1",
+                   "--min-elevation", "15", "--no-elevation-cut")
+
     def test_the_defaults(self):
         args = _parse("light-curve", "-ms", "o.ms", "-n", "1")
-        assert args.data_col == "DATA"
-        assert args.corr == "xx"
         assert args.freq is None
         assert args.output is None and args.tag is None
         assert args.plot is False
@@ -248,19 +263,58 @@ class TestLightCurveInputs:
 
     def test_the_output_defaults_beside_the_measurement_set(self):
         args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1")
-        path = self._mod().resolve_output(args, "/data/obs.ms")
+        path = self._mod().resolve_output(args, "/data/obs.ms", "DATA")
         assert path == "/data/light_curves/DATA.npz"
+
+    def test_the_output_is_named_for_the_resolved_column(self):
+        """Not the parser default: with -c the config names the column."""
+        args = _parse("light-curve", "-c", "c.yaml")
+        path = self._mod().resolve_output(args, "/data/obs.ms", "TAB_RES_DATA")
+        assert path.endswith("light_curves/TAB_RES_DATA.npz")
 
     def test_the_tag_names_the_output(self):
         args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-sx", "runA")
-        assert self._mod().resolve_output(args, "/data/obs.ms").endswith(
+        assert self._mod().resolve_output(args, "/data/obs.ms", "DATA").endswith(
             "light_curves/runA.npz"
         )
 
     def test_an_explicit_output_wins(self, tmp_path):
         out = str(tmp_path / "curves.npz")
         args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-o", out)
-        assert self._mod().resolve_output(args, "/data/obs.ms") == out
+        assert self._mod().resolve_output(args, "/data/obs.ms", "DATA") == out
+
+    def test_an_output_without_a_suffix_gets_one(self):
+        """`-o curves` writes curves.npz, so it must also say curves.npz."""
+        args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-o", "curves")
+        assert self._mod().resolve_output(args, "/data/obs.ms", "DATA") == "curves.npz"
+
+    def test_an_output_that_already_ends_in_npz_is_left_alone(self):
+        args = _parse("light-curve", "-ms", "/o.ms", "-n", "1", "-o", "a/b.npz")
+        assert self._mod().resolve_output(args, "/o.ms", "DATA") == "a/b.npz"
+
+    # --- the column and the correlation: the config wins unless overridden ---
+
+    def test_the_config_column_is_used_when_the_flag_is_absent(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+        config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
+        assert self._mod().resolve_data_col(args, config) == "TAB_RES_DATA"
+        assert self._mod().resolve_corr(args, config) == "yy"
+
+    def test_the_flag_beats_the_config_column(self):
+        args = _parse("light-curve", "-c", "c.yaml", "-dc", "DATA", "-cr", "xx")
+        config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
+        assert self._mod().resolve_data_col(args, config) == "DATA"
+        assert self._mod().resolve_corr(args, config) == "xx"
+
+    def test_the_manual_defaults_apply_without_a_config(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1")
+        assert self._mod().resolve_data_col(args, None) == "DATA"
+        assert self._mod().resolve_corr(args, None) == "xx"
+
+    def test_a_config_that_names_neither_falls_back_to_the_defaults(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+        assert self._mod().resolve_data_col(args, {"data": {}}) == "DATA"
+        assert self._mod().resolve_corr(args, {"data": {}}) == "xx"
 
 
 class TestRunReporting:

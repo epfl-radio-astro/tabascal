@@ -552,7 +552,7 @@ def _column_values(xds, name: str) -> Optional[np.ndarray]:
 
 
 def partition_noise(
-    xds, n_time: int, n_bl: int, n_freq: int, corr_idx: int = 0
+    xds, n_time: int, n_bl: int, n_freq: int, corr_idx: int = 0, chans=None
 ) -> Optional[np.ndarray]:
     """The noise on one MS partition's visibilities, as resolved as the MS allows.
 
@@ -582,11 +582,23 @@ def partition_noise(
     MS -- an override is exactly the answer to an MS with no noise in it, and
     raising here would take its turn away. :meth:`TabConfig.set_noise` is where a
     still-unset noise becomes the error that stops the run.
+
+    ``chans`` narrows ``SIGMA_SPECTRUM`` to the channels being read, and must be
+    the same selection the data went through: the noise divides those
+    visibilities cell by cell, so a noise left on the full band would weight
+    every channel by another channel's. ``SIGMA`` has no channel axis to narrow.
     """
 
     values = _column_values(xds, "SIGMA_SPECTRUM")
 
     if values is not None:
+        # Narrowed before the count is taken, so a selected column is compared
+        # against the channels actually being read rather than the whole band.
+        if chans is not None and values.ndim > 1:
+            chans = np.asarray(chans)
+            if chans.size and int(chans.max()) < values.shape[1]:
+                values = values[:, chans]
+
         n_chan = values.shape[1] if values.ndim > 1 else 0
 
         # Channels are handled exactly as read_data handles them -- every channel,
@@ -707,7 +719,7 @@ def read_ms(
     n_ant = ants_itrf.shape[0]
     layout = ms_layout(xds)
     n_time, n_bl = layout.n_time, layout.n_bl
-    n_freq, n_corr = xds[data_col].data.shape[1:]
+    n_chan_ms, n_corr = xds[data_col].data.shape[1:]
 
     spec_row = xds_spec[spw_id]
     freqs = np.array(spec_row.CHAN_FREQ.data[0].compute())
@@ -733,25 +745,44 @@ def read_ms(
 
     times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
 
-    if chans is None:
-        if freq:
-            chans = jnp.argmin(jnp.abs(freq - freqs))
-        else:
-            chans = jnp.arange(n_freq)
+    # Which channels to read: an explicit list wins, then `freq` picks the single
+    # channel nearest it, and otherwise the whole band. Held as a numpy index
+    # array rather than a jax one -- it indexes dask columns, and a scalar index
+    # would silently drop the channel axis it is meant to narrow.
+    if chans is None and freq is not None:
+        chans = np.argmin(np.abs(freq - freqs))
 
-    n_freq = len(chans)
+    chan_sel = None if chans is None else np.atleast_1d(np.asarray(chans)).astype(int)
 
-    print(n_freq, chans)
+    if chan_sel is not None:
+        if chan_sel.size == 0 or chan_sel.min() < 0 or chan_sel.max() >= n_chan_ms:
+            raise ValueError(
+                f"Channel selection {np.asarray(chans)} is off the {n_chan_ms} "
+                f"channels of {ms_path}."
+            )
+        # The whole band in order is no selection at all; skipping the indexing
+        # keeps the default read on the contiguous path daskms is happiest with.
+        if chan_sel.size == n_chan_ms and (chan_sel == np.arange(n_chan_ms)).all():
+            chan_sel = None
 
-    sigma = partition_noise(xds, n_time, n_bl, n_freq, corr_idx)
+    if chan_sel is not None:
+        freqs = freqs[chan_sel]
+        print(
+            f"Reading {len(freqs)} of {n_chan_ms} channels "
+            f"({freqs[0] / 1e6:.3f} - {freqs[-1] / 1e6:.3f} MHz)"
+        )
 
-    # .data[:, chans, corr_idx] once channel selection is wired through.
-    read_data = lambda col_name: rows_to_grid(
-        jnp.array(xds[col_name].data[:, :, corr_idx].compute()),
-        n_time,
-        n_bl,
-        n_freq,
-    )
+    n_freq = len(freqs)
+
+    # The same selection the data goes through: a noise on the full band would
+    # weight every visibility by a channel it did not come from.
+    sigma = partition_noise(xds, n_time, n_bl, n_freq, corr_idx, chans=chan_sel)
+
+    def read_data(col_name):
+        col = xds[col_name].data[:, :, corr_idx]
+        if chan_sel is not None:
+            col = col[:, chan_sel]
+        return rows_to_grid(jnp.array(col.compute()), n_time, n_bl, n_freq)
 
     data = {
         **{
@@ -773,7 +804,7 @@ def read_ms(
         "times": times,
         "time_scale": time_scale,
         "int_time": int_time,
-        "freqs": freqs[chans],
+        "freqs": freqs,
         "chan_width": chan_width,
         "ants_itrf": ants_itrf,
         "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),

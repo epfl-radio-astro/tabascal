@@ -79,11 +79,14 @@ from tabascal.time import gast_deg, mjd_to_jd
 
 #: Bytes of working array per (baseline, channel, timestep) inside the
 #: matched-filter loop, used to size the time chunk against ``max_mem_gb``.
-#: The concurrent arrays are the conjugated template, the zeroed visibility
-#: chunk, the weight chunk and the two temporaries of ``w * v * conj(T)``:
-#: four complex128 (16 B each) and one float64 (8 B). The weights are counted
-#: even though a per-baseline noise broadcasts from a much smaller array --
-#: ``np.where`` against the flags materialises them at the chunk's full shape.
+#: Counts the per-baseline arrays that dominate it: the conjugated template, the
+#: zeroed visibility chunk and the two temporaries of ``w * v * conj(T)`` (four
+#: complex128), plus the weight chunk (one float64). The weights are counted even
+#: though a per-baseline noise broadcasts from a much smaller array -- ``np.where``
+#: against the flags materialises them at the chunk's full shape.
+#:
+#: It is a sizing heuristic for the loop, not a cap on the function: see
+#: :func:`matched_filter_light_curves` for what it does not cover.
 _BYTES_PER_SAMPLE = 4 * 16 + 8
 
 
@@ -212,8 +215,17 @@ def matched_filter_light_curves(
 
     The estimator and its noise floor are the ones this module's docstring
     derives. Evaluated in numpy/f64 (a one-shot host-side estimate) with an outer
-    time-chunk loop, so the ``(n_bl, n_freq, chunk)`` template and its
-    temporaries never exceed ``max_mem_gb``.
+    time-chunk loop sized so the ``(n_bl, n_freq, chunk)`` per-baseline arrays --
+    the template, the masked visibilities, the weights and their products -- stay
+    within ``max_mem_gb``.
+
+    ``max_mem_gb`` bounds those arrays, not the function's peak. It does not
+    count the per-antenna ``exp(-i phi)`` chunk or the copies fancy indexing
+    makes of a partly-masked block, and it says nothing about the arrays held for
+    the whole call: ``vis`` and ``rfi_phase`` as given, and the
+    ``(n_src, n_freq, n_time)`` accumulator, which grows with the number of
+    sources rather than with the chunk. Lowering it shrinks the loop's working
+    set and nothing else.
 
     Parameters
     ----------
@@ -228,8 +240,10 @@ def matched_filter_light_curves(
         :class:`~tabascal.config.TabConfig` resolves it: a scalar, ``(n_bl,)``,
         ``(n_bl, n_freq)``, or a three-dimensional array whose axes match the
         visibilities or are 1. ``None`` weights every baseline equally, which
-        under-weights the quiet baselines and over-weights the loud ones -- the
-        callers warn when they fall back to it.
+        under-weights the quiet baselines and over-weights the loud ones, and
+        returns a ``nan`` error: without a sigma the weights are a shape rather
+        than a variance, and ``1 / sqrt(N)`` would be asserting a noise of 1 Jy
+        that nobody wrote down. The callers warn when they fall back to it.
     flags : Array (n_bl, n_freq, n_time) bool, optional
         ``True`` marks samples to exclude from the average.
     in_view : Array (n_src, n_time) bool, optional
@@ -254,7 +268,7 @@ def matched_filter_light_curves(
         The standard error of the (real) flux estimate, ``1 / sqrt(sum_bl w)``:
         the beam-former's noise floor, the visibility-space equivalent of a
         dirty-image aperture standard deviation. ``nan`` wherever the estimate
-        is not a measurement.
+        is not a measurement, and everywhere when ``noise`` is ``None``.
     """
     vis = np.asarray(vis)
     rfi_phase = np.asarray(rfi_phase)
@@ -325,7 +339,14 @@ def matched_filter_light_curves(
 
     with np.errstate(invalid="ignore", divide="ignore"):
         light_curves = np.where(visible, num / safe_den, 0.0)
-        error = np.where(visible, 1.0 / np.sqrt(safe_den), np.nan)
+        # With no sigma the denominator is a count, not an inverse variance, and
+        # 1/sqrt of it is a number in no units. Reporting nothing is the honest
+        # answer; the drivers say why.
+        error = (
+            np.full(light_curves.shape, np.nan)
+            if noise is None
+            else np.where(visible, 1.0 / np.sqrt(safe_den), np.nan)
+        )
 
     return light_curves, error
 
@@ -377,13 +398,25 @@ def _resolve_noise(noise, what: str):
         return noise
 
     print(
-        f"Warning: {what} carries no usable noise estimate, so the matched "
-        "filter falls back to uniform weights. The antennas of a real array "
-        "differ in sensitivity, so this over-weights the loud baselines and the "
-        "reported error is optimistic."
+        f"Warning: {what} carries no usable noise estimate, so the light curves "
+        "are both unweighted and unscaled. The antennas of a real array differ "
+        "in sensitivity, so averaging them equally over-weights the loud "
+        "baselines; and with no sigma there is no noise floor to quote, so the "
+        "error and the z statistic are nan and no coverage can be computed. Set "
+        "data.noise to get either back."
     )
 
     return None
+
+
+def has_noise_scale(result: dict) -> bool:
+    """Whether an estimate carries a noise floor, i.e. whether ``z`` means anything.
+
+    False when the visibilities were filtered with no sigma to weight them by:
+    the light curves are still there, but every ``error`` is ``nan`` and nothing
+    downstream that divides by one has anything to say.
+    """
+    return bool(np.isfinite(np.asarray(result["error"])).any())
 
 
 def _elevation_mask(orbit_records, times_jd, ants_itrf, min_elevation):
@@ -627,6 +660,55 @@ def _filter_visibilities(
     )
 
 
+def _model_on_ms_channels(xds, ms, zarr_path: str) -> NDArray:
+    """A run's gained prediction, on the channels the MS was read on.
+
+    Matched by frequency rather than by position. The two need not agree: a
+    ``freq`` narrows the MS read to one channel while the results zarr holds the
+    whole band the run fitted, and subtracting positionally would then take the
+    model's channel 0 from the data's channel *n* -- the right shape, no error,
+    and a residual that is mostly the difference between two channels of the
+    model. Nearest match within half a channel, so a store covering a different
+    band is refused rather than silently differenced against its closest edge.
+
+    A store with no ``freq`` coordinate cannot be matched at all; there the
+    channel counts are required to agree and the axes are taken as parallel,
+    which is the most that can be said about it.
+    """
+    model = xds.vis_obs.isel(sample=0)
+    freqs = np.asarray(ms["freqs"], dtype=np.float64)
+
+    if "freq" not in xds.coords and "freq" not in xds.variables:
+        n_model = int(model.sizes["freq"])
+        if n_model != len(freqs):
+            raise ValueError(
+                f"{zarr_path} has no 'freq' coordinate, so its {n_model} channels "
+                f"can only be matched to the {len(freqs)} being read by position "
+                "-- and the counts differ. Re-run tabascal to write a store that "
+                "records its frequencies, or read the same channels the run fitted."
+            )
+        return np.asarray(model.data.compute())
+
+    model_freqs = np.asarray(xds["freq"].values, dtype=np.float64)
+    nearest = np.abs(model_freqs[None, :] - freqs[:, None]).argmin(axis=1)
+    offset = np.abs(model_freqs[nearest] - freqs)
+    # Half a channel: inside it the two grids are the same channel, outside it
+    # they are different measurements and no subtraction is defined.
+    tol = 0.5 * abs(float(np.asarray(ms.get("chan_width", 0.0))))
+
+    if np.any(offset > tol):
+        worst = int(np.argmax(offset))
+        raise ValueError(
+            f"{zarr_path} does not cover the frequencies being read: channel "
+            f"{worst} of the MS is at {freqs[worst] / 1e6:.4f} MHz and the "
+            f"nearest in the store is {model_freqs[nearest[worst]] / 1e6:.4f} "
+            f"MHz, {offset[worst] / 1e6:.4f} MHz away. The residual would be the "
+            "difference between two different channels."
+        )
+
+    return np.asarray(model.isel(freq=nearest).data.compute())
+
+
 def extract_light_curves_from_zarr(
     ms_path: str,
     zarr_path: str,
@@ -651,6 +733,10 @@ def extract_light_curves_from_zarr(
     vis_rfi)``, so this is exactly the residual :func:`tabascal.write.write_results_ms` would
     write, without the MS round trip.
 
+    The model is matched to the MS's channels **by frequency**, so a ``freq``
+    that narrows the read to one channel still subtracts that channel's model.
+    See :func:`_model_on_ms_channels`.
+
     ``data_col`` is the *reference* column the residual is formed against (e.g.
     ``DATA``), not a residual column. Everything else is as
     :func:`extract_light_curves_from_ms`.
@@ -662,8 +748,7 @@ def extract_light_curves_from_zarr(
 
     norad_ids, records = _resolve_records(norad_ids, times_jd, extra_orbit_dir)
 
-    xds = xr.open_zarr(zarr_path)
-    model = np.asarray(xds.vis_obs.isel(sample=0).data.compute())
+    model = _model_on_ms_channels(xr.open_zarr(zarr_path), ms, zarr_path)
     residual = np.asarray(ms["vis_obs"]) - model
 
     label = f"{data_col} - {os.path.basename(str(zarr_path).rstrip('/'))}"

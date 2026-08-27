@@ -172,8 +172,10 @@ estimate `rfi.init: matched-filter` makes inside a run — see
 — written out in the `rfi.est` interchange format, so it can seed a later run
 unchanged.
 
-Given a config, the satellites, the data column and the elevation cut all come
-from it, and the Measurement Set is read once:
+Given a config, the satellites, the data column, the correlation and the
+elevation cut all come from it, and the Measurement Set is read once. Any of
+`-dc`, `-cr` and `--min-elevation` overrides the config for that one value; give
+none of them and the config decides:
 
 ```bash
 tabascal light-curve -c tab_target.yaml -ms path/to/ms/file.ms
@@ -206,6 +208,16 @@ against the `null` column the command prints, not against the analytic 99.73%:
 the noise floor assumes the de-rotated per-baseline samples are independent and
 residual sky is not, so the floor is optimistic. The null is the same statistic
 on `Im(S_hat)`, which after de-rotation carries the same noise and no source.
+
+The floor comes from the MS's own noise column, so an MS carrying none — and no
+`data.noise` to supply one — has no floor to quote. The light curves are still
+measured and written, but `error` and `z` are NaN and the coverage table is
+replaced by a line saying so: `1/sqrt(N_bl)` would be quoting a noise of 1 Jy
+that nobody stated, and a z built on it would look like a detection at any flux.
+
+To read one channel instead of the whole band, pass `-f` with a frequency in Hz;
+the nearest channel is used, and with `-z` the model is matched to it by
+frequency rather than by position.
 
 The `tabascal` script also has a help context which can be accessed with
 
