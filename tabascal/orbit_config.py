@@ -10,7 +10,9 @@ observation-epoch derivation. Preflight and execution must agree exactly on the
 epoch: it sets every TLE age comparison, so two slightly different means could
 make different acceptance decisions. The helper mirrors
 :func:`tabascal.ms.read_ms` — one time per integration, converted through the
-same :func:`tabascal.ms.times_to_mjd`.
+same :func:`tabascal.ms.times_to_mjd`, and normalised onto UTC from the same
+declared time scale, so the epoch is the instant the observation happened rather
+than whatever number the ``TIME`` column happens to hold.
 
 Three age settings exist and are deliberately kept distinct:
 
@@ -36,8 +38,8 @@ from typing import Optional
 import numpy as np
 
 from satchecker_client import SatCheckerError as TLEError
-from tabascal.ms import times_to_mjd
-from tabascal.time import mjd_to_jd
+from tabascal.ms import read_time_scale, times_to_mjd
+from tabascal.time import mjd_to_jd, to_utc_jd
 
 
 # ---------------------------------------------------------------------------
@@ -314,20 +316,38 @@ def normalise_tle_config(
 # Measurement Set observation epoch
 # ---------------------------------------------------------------------------
 
-def _ms_time_column(ms_path: str) -> np.ndarray:
-    """Raw ``TIME`` column of *ms_path*.
+def _ms_times_and_scale(ms_path: str) -> tuple:
+    """Raw ``TIME`` column of *ms_path*, and the time scale it declares.
 
-    Isolated so the epoch helper (and everything built on it) can be exercised
-    offline by patching this one casacore-touching seam.
+    Both come out of one casacore open, so preflight still reaches the
+    Measurement Set through a single seam — the one tests patch to run offline.
+    The scale is read rather than assumed for the same reason
+    :func:`tabascal.ms.read_ms` reads it: an epoch on the wrong scale is a wrong
+    instant, not a rounding difference.
+
+    The column's declared ``QuantumUnits`` are deliberately *not* read, even
+    though they are in reach here; see :func:`ms_integration_times_mjd`.
     """
     from casacore.tables import table as _ms_table
 
     with _ms_table(str(ms_path), readonly=True, ack=False) as t:
-        return np.asarray(t.getcol("TIME"), dtype=float)
+        times = np.asarray(t.getcol("TIME"), dtype=float)
+        scale = read_time_scale({"TIME": t.getcolkeywords("TIME")})
+
+    return times, scale
+
+
+def _integration_times_mjd(times: np.ndarray, ms_path: str) -> np.ndarray:
+    """One time per integration, in MJD days, from an already-read column."""
+
+    times = np.unique(times)
+    if times.size == 0:
+        raise TLEError(f"Measurement Set has an empty TIME column: {ms_path}")
+    return times_to_mjd(times)
 
 
 def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
-    """One observation time per integration, in MJD days.
+    """One observation time per integration, in MJD days, as the MS stores them.
 
     Mirrors :func:`tabascal.ms.read_ms`, which takes a single timestamp per
     integration (not one per visibility row), and converts through the same
@@ -336,28 +356,42 @@ def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
     ``TIME.reshape(n_time, n_bl)[:, 0]`` for a well-formed MS while remaining
     correct when the row count is not an exact multiple of the baseline count.
 
-    The column's declared ``QuantumUnits`` are not read here — that would be a
-    second casacore call, and preflight deliberately touches the MS through the
-    one seam above — so the unit always comes from ``times_to_mjd``'s heuristic.
-    That heuristic is order-insensitive and shared, so it cannot classify an MS
-    one way here and another in ``read_ms``, whatever order the MS stores its
-    timestep blocks in. The one case the two can still differ on is an MS whose
-    declaration contradicts the spacing of the times it stores: ``read_ms``
-    honours the declaration, this does not.
+    Left on the scale the MS declares, exactly as ``read_ms`` leaves
+    ``times_mjd``: this reports the column, and only the *epoch* below —
+    a physical instant — is moved onto UTC.
+
+    The column's declared ``QuantumUnits`` are not read, so the unit always
+    comes from ``times_to_mjd``'s heuristic. That heuristic is order-insensitive
+    and shared, so it cannot classify an MS one way here and another in
+    ``read_ms``, whatever order the MS stores its timestep blocks in. The one
+    case the two can still differ on is an MS whose declaration contradicts the
+    spacing of the times it stores: ``read_ms`` honours the declaration, this
+    does not.
     """
-    times = np.unique(_ms_time_column(ms_path))
-    if times.size == 0:
-        raise TLEError(f"Measurement Set has an empty TIME column: {ms_path}")
-    return times_to_mjd(times)
+    times, _ = _ms_times_and_scale(ms_path)
+
+    return _integration_times_mjd(times, ms_path)
 
 
 def ms_observation_epoch_jd(ms_path: str) -> float:
     """Mean observation epoch of *ms_path* as a UTC Julian Date.
 
     This exact value is what the canonical cache bucket and every TLE age check
-    are computed from, in both preflight and execution.
+    are computed from, in both preflight and execution — and it is an *instant*,
+    so the declared scale is honoured here as it is in the reader. A TAI column
+    read as UTC would put every age comparison and nearest-record decision 37 s
+    from the instant the fit then propagates at.
+
+    The times are normalised per sample and averaged afterwards, through the
+    same :func:`observation_epoch_jd` execution applies to what ``read_ms``
+    returned, so the two reductions are identical by construction — including
+    across a leap second, where averaging first and shifting once would differ
+    by up to half a second.
     """
-    return float(mjd_to_jd(ms_integration_times_mjd(ms_path).mean()))
+    times, scale = _ms_times_and_scale(ms_path)
+    times_mjd = _integration_times_mjd(times, ms_path)
+
+    return observation_epoch_jd(to_utc_jd(mjd_to_jd(times_mjd), scale))
 
 
 def observation_epoch_jd(times_jd) -> float:

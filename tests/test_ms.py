@@ -21,6 +21,7 @@ from tabascal.ms import (
     resolve_data_description,
     times_to_mjd,
 )
+from tabascal.time import mjd_to_jd
 
 
 class _FakePol:
@@ -517,8 +518,8 @@ class TestTimeUnits:
         n_bl = len(np.triu_indices(3, k=1)[0])
         monkeypatch.setattr(
             orbit_config,
-            "_ms_time_column",
-            lambda ms: np.repeat(days * 86400.0, n_bl),
+            "_ms_times_and_scale",
+            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc"),
         )
 
         from_reader = run_reader(days * 86400.0)["times_mjd"]
@@ -526,6 +527,183 @@ class TestTimeUnits:
 
         np.testing.assert_allclose(from_reader, days, rtol=1e-15)
         np.testing.assert_allclose(np.sort(from_reader), from_preflight, rtol=1e-15)
+
+
+class TestDeclaredTimeScale:
+    """The ``TIME`` column says what scale its numbers are on; the reader obeys it.
+
+    The declaration is honoured by normalising to UTC once, here at the
+    boundary, rather than by threading a scale through the trajectory maths.
+    Everything past ``read_ms`` -- skyfield, ``sgp4jax.itrf_to_gcrf`` (which has
+    no scale concept at all) and the TLE epoch checks -- reads UTC Julian Dates,
+    so one conversion covers all of them.
+    """
+
+    #: 2025-01-01T00:00:00 UTC as an MJD, when TAI - UTC was 37 s.
+    MJD = 60676.0
+
+    #: Leap seconds at that epoch. Fixed forever: a future leap second changes
+    #: the offset from then on, never the one that applied in 2025.
+    LEAP_SECS = 37.0
+
+    def _times(self, n_time=4, step=8.0):
+        """``n_time`` integrations ``step`` seconds apart, in MS seconds."""
+
+        return (self.MJD + np.arange(n_time) * step / 86400.0) * 86400.0
+
+    def _read_both(self, run_reader):
+        """The same TIME column, declared UTC and declared TAI."""
+
+        times = self._times()
+
+        return (
+            run_reader(times, keywords=_keywords("UTC")),
+            run_reader(times, keywords=_keywords("TAI")),
+        )
+
+    def test_the_scale_leaves_the_reader(self, run_reader):
+        data = run_reader(self._times(), keywords=_keywords("TAI"))
+
+        assert data["time_scale"] == "tai"
+
+    def test_a_utc_ms_reads_exactly_as_it_did_before(self, run_reader):
+        """Bit-identical: the common case gains no arithmetic and loses no digits."""
+        data = run_reader(self._times(), keywords=_keywords("UTC"))
+
+        np.testing.assert_array_equal(data["times_jd"], mjd_to_jd(data["times_mjd"]))
+
+    def test_the_declared_times_are_kept_as_declared(self, run_reader):
+        """``times_mjd`` is the MS's own column in days, so it stays on the MS's
+        own scale -- and the preflight helper reports it the same way."""
+        utc, tai = self._read_both(run_reader)
+
+        np.testing.assert_array_equal(tai["times_mjd"], utc["times_mjd"])
+
+    def test_a_tai_ms_is_normalised_to_utc(self, run_reader):
+        """The same numbers on TAI name an instant 37 s earlier than on UTC."""
+        utc, tai = self._read_both(run_reader)
+
+        shift = (tai["times_jd"] - utc["times_jd"]) * 86400.0
+
+        np.testing.assert_allclose(shift, -self.LEAP_SECS, atol=1e-3)
+
+    def test_a_non_utc_ms_no_longer_only_warns(self, run_reader, capsys):
+        """The placeholder that stood in for the behaviour until it existed."""
+        run_reader(self._times(), keywords=_keywords("TAI"))
+
+        assert "#133" not in capsys.readouterr().out
+
+    def test_a_scale_that_cannot_be_interpreted_stops_the_read(self, run_reader):
+        """Better than reading a sidereal angle as if it were a timestamp.
+
+        Raised before the visibilities are read, and before anything is
+        modelled: there is no defensible thing to do with an epoch reference
+        tabascal cannot place on a time line.
+        """
+        with pytest.raises(ValueError, match="valid Measurement Set epoch reference"):
+            run_reader(self._times(), keywords=_keywords("GAST"))
+
+    # -- the acceptance check: it reaches the satellites --------------------
+
+    def test_a_tai_ms_moves_the_satellite_by_the_leap_seconds(self, run_reader):
+        """Where the scale has to arrive, and what it costs when it does not.
+
+        The satellite is propagated over the times each read produced. Declaring
+        TAI must land it where it is 37 s before the UTC reading puts it -- which
+        is ~285 km along a LEO ground track, not a rounding difference. This is
+        the check that fails if the declaration is dropped anywhere between the
+        ``MEASINFO`` record and the propagator.
+        """
+        from tabascal.components.trajectory import get_satellite_positions
+
+        from .tle_helpers import make_tle_record
+
+        records = [make_tle_record(25544, mjd_to_jd(self.MJD))]
+        utc, tai = self._read_both(run_reader)
+
+        from_tai = get_satellite_positions(records, tai["times_jd"])
+        from_utc = get_satellite_positions(records, utc["times_jd"])
+        expected = get_satellite_positions(
+            records, utc["times_jd"] - self.LEAP_SECS / 86400.0
+        )
+
+        # Metres, against ~7.7 km/s of orbital motion: the two ways of naming
+        # the instant differ only by the ~40 us an f64 Julian Date resolves to.
+        np.testing.assert_allclose(from_tai, expected, rtol=0, atol=1.0)
+
+        # ~7.7 km/s for 37 s, along a curved track: ~285 km, and bounded on both
+        # sides so a shift of the wrong size fails as loudly as no shift at all.
+        moved = np.linalg.norm(from_utc - from_tai, axis=-1)
+        assert moved.min() > 280e3 and moved.max() < 290e3
+
+    # -- and what it must not disturb on the way ----------------------------
+
+    def test_preflight_and_the_reader_land_on_one_epoch_for_a_tai_ms(
+        self, run_reader, monkeypatch
+    ):
+        """Both sides of the agreement check are on UTC, and both are correct.
+
+        Preflight runs before ``read_ms`` and reads the same ``TIME`` column
+        through casacore -- including its ``MEASINFO`` record, so it normalises
+        the same way. That keeps the two comparable *and* puts the TLE
+        selection and age limits at the instant the observation actually
+        happened. Left on the declared scale, preflight would age its records
+        against an epoch 37 s from the one the fit propagates at.
+        """
+        from tabascal import orbit_config
+        from tabascal.orbit import TLEResolution, check_epoch_agreement
+
+        times = self._times()
+        n_bl = len(np.triu_indices(3, k=1)[0])
+        monkeypatch.setattr(
+            orbit_config,
+            "_ms_times_and_scale",
+            lambda ms: (np.repeat(times, n_bl), "tai"),
+        )
+        preflight_epoch = orbit_config.ms_observation_epoch_jd("in-memory.ms")
+
+        data = run_reader(times, keywords=_keywords("TAI"))
+
+        # The same instant from both reads, to the ~40 us an f64 JD resolves to.
+        assert (
+            preflight_epoch - float(np.mean(data["times_jd"]))
+        ) * 86400.0 == pytest.approx(0.0, abs=1e-3)
+
+        # And it is the shifted instant, not the declared number read as UTC.
+        declared = float(np.mean(mjd_to_jd(data["times_mjd"])))
+        assert (preflight_epoch - declared) * 86400.0 == pytest.approx(
+            -self.LEAP_SECS, abs=1e-3
+        )
+
+        check_epoch_agreement(
+            TLEResolution(
+                requested=[25544],
+                obs_epoch_jd=preflight_epoch,
+                remote_max_age_days=None,
+            ),
+            data["times_jd"],
+        )
+
+    def test_the_config_carries_the_scale_and_the_utc_times(self, run_reader):
+        """``TabConfig`` used to unpack every key of the read but this one.
+
+        Called on a stand-in rather than a real ``TabConfig``, which would want
+        an MS on disk and a TLE preflight to construct -- neither of which has
+        anything to say about the time scale.
+        """
+        from types import SimpleNamespace
+
+        from tabascal.config import TabConfig
+
+        # Leaves the in-memory MS patched in behind ``read_ms`` for the call below.
+        data = run_reader(self._times(), keywords=_keywords("TAI"))
+
+        config = SimpleNamespace(ms_path="in-memory.ms")
+        TabConfig.read_ms_params(config, None, "xx", "DATA")
+
+        assert config.time_scale == "tai"
+        np.testing.assert_array_equal(config.times_jd, data["times_jd"])
+        np.testing.assert_array_equal(config.times_mjd, data["times_mjd"])
 
 
 # ---------------------------------------------------------------------------

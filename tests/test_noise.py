@@ -1249,6 +1249,7 @@ class TestNoiselessMS:
             "int_time": 2.0,
             "times": np.arange(n_time, dtype=float),
             "times_mjd": np.array([60000.0, 60000.1]),
+            "times_jd": np.array([60000.0, 60000.1]) + 2400000.5,
             "time_scale": "utc",
             "chan_width": 1e5,
             "freqs": np.linspace(1e9, 1.1e9, N_FREQ),
@@ -1374,6 +1375,7 @@ class TestInitCallsTheReadBeforeTheOverride:
         leaves = {
             "read_ms_params": {
                 "n_freq": N_FREQ,
+                "times_mjd": np.array([59999.5]),
                 "times_jd": np.array([2460000.0]),
                 "noise": None,
                 "noise_scalar": None,
