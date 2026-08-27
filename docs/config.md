@@ -212,7 +212,7 @@ ast:
   point_sources: /path/to/sky.osm
 ```
 
-The inline form takes `ra` and `dec` in degrees, `I` in Jy, and optionally `name`, `ref_freq_mhz`, `alpha`, `fwhm_major_arcsec`, `fwhm_minor_arcsec` and `position_angle_deg`. The file form is the OSKAR sky model, which is what [Karabo](https://github.com/i4Ds/Karabo-Pipeline) emits: one source per line, fields separated by whitespace and/or commas, `#` starts a comment, and blank lines are skipped.
+The inline form requires `ra` and `dec` in degrees and `I` in Jy, and optionally takes `name`, `ref_freq_mhz`, `alpha`, `Q`, `U`, `V`, `rm`, `fwhm_major_arcsec`, `fwhm_minor_arcsec` and `position_angle_deg`. That list is exhaustive and case-sensitive: any other field is an error rather than being ignored, since a typo would otherwise change the source in silence — `fwhm_maj` for `fwhm_major_arcsec` would leave a Gaussian modelled as a point. An optional field may be given as `null` to mean "unset", but any other unreadable value (`alpha: ""`, `ref_freq_mhz: false`) is an error rather than a fallback to the default. The file form is the OSKAR sky model, which is what [Karabo](https://github.com/i4Ds/Karabo-Pipeline) emits: one source per line, fields separated by whitespace and/or commas, `#` starts a comment, and blank lines are skipped.
 
 `I` is the *integrated* flux of the source, and that is what appears on a zero-length baseline in any direction — there is no `1/n` applied to it. (The measurement equation carries the sky *brightness* as `B/n`, because the solid-angle element is `dl dm / n`; for a discrete source of integrated flux `S` the brightness is `S` times a delta function of solid angle, and the two factors of `n` cancel exactly.)
 

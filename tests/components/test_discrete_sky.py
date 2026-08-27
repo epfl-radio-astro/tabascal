@@ -684,6 +684,49 @@ def test_a_falsy_but_present_inline_value_is_an_error_not_a_default(field, value
         FixedDiscreteSky().setup(make_sky_config([source]))
 
 
+@pytest.mark.parametrize("typo, intended", [
+    ("fwhm_maj", "fwhm_major_arcsec"),   # degrades a Gaussian to a point in silence
+    ("RA", "ra"),                        # fields are case-sensitive
+    ("Alpha", "alpha"),
+    ("flux", "I"),
+])
+def test_an_unrecognised_inline_field_is_rejected(typo, intended):
+    """A misspelt optional field would otherwise be dropped and take its source with it."""
+    source = {"name": "Fornax A", "ra": 30.0, "dec": -26.7, "I": 5.0, typo: 20.0}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        FixedDiscreteSky().setup(make_sky_config([source]))
+
+    message = str(excinfo.value)
+    assert repr(typo) in message  # the offending key
+    assert "entry 0" in message and "Fornax A" in message  # and where it is
+    assert repr(intended) in message  # the accepted spelling is listed
+
+
+def test_unrecognised_inline_fields_are_all_named_at_once():
+    source = {"ra": 30.0, "dec": -26.7, "I": 5.0, "fwhm_maj": 1.0, "spectral_index": 2.0}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        FixedDiscreteSky().setup(make_sky_config([source]))
+
+    message = str(excinfo.value)
+    assert repr("fwhm_maj") in message
+    assert repr("spectral_index") in message
+
+
+def test_the_documented_inline_fields_are_all_accepted(exact_rtol):
+    """The allowed set is the documented one, `name` included."""
+    source = {
+        "name": "Fornax A", "ra": 30.0, "dec": -26.7, "I": 5.0,
+        "ref_freq_mhz": 154.0, "alpha": -0.77, "Q": 0.0, "U": 0.0, "V": 0.0, "rm": 0.0,
+        "fwhm_major_arcsec": 20.0, "fwhm_minor_arcsec": 10.0, "position_angle_deg": 45.0,
+    }
+    sky = FixedDiscreteSky()
+    sky.setup(make_sky_config([source]))
+
+    assert sky.n_src == 1
+
+
 def test_an_explicitly_null_optional_field_takes_the_default(exact_rtol):
     """`alpha:` with no value is how YAML says "unset", so it is absent, not malformed."""
     cfg = make_sky_config(

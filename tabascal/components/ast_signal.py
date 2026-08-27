@@ -147,6 +147,18 @@ def _inline_row(source, idx: int) -> dict:
     # the file, and two sources may share a name.
     where = f"ast.point_sources entry {idx}" + (f" ({name!r})" if name else "")
 
+    # Checked before the fields are read, so a misspelt key is reported as itself rather
+    # than as whatever it left missing. An unrecognised field would otherwise be dropped
+    # in silence and take its source's shape or spectrum with it.
+    unknown = sorted(set(source) - set(INLINE_FIELDS) - {"name"}, key=str)
+    if unknown:
+        raise ValueError(
+            f"{where} has unrecognised field(s) {unknown}. Fields are case-sensitive; "
+            f"the accepted ones are {sorted(set(INLINE_FIELDS) | {'name'})}. A typo is "
+            "not ignored here because it would quietly change the source: 'fwhm_maj' "
+            "for 'fwhm_major_arcsec' would leave a Gaussian modelled as a point."
+        )
+
     def value_of(key):
         units = INLINE_FIELDS[key][1]
 
