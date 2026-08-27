@@ -162,9 +162,55 @@ If you have a Measurement Set from another source you can run TABASCAL on that d
 tabascal run -c path/to/config.yaml -ms path/to/ms/file.ms
 ```
 
+## Extracting RFI light curves
+
+`tabascal light-curve` measures each satellite's apparent flux over time and
+frequency directly from the visibilities, by matched-filtering them against the
+known satellite trajectory phase. No imaging is involved. It is the same
+estimate `rfi.init: matched-filter` makes inside a run — see
+[Estimating the light curves from the data](config.md#estimating-the-light-curves-from-the-data)
+— written out in the `rfi.est` interchange format, so it can seed a later run
+unchanged.
+
+Given a config, the satellites, the data column and the elevation cut all come
+from it, and the Measurement Set is read once:
+
+```bash
+tabascal light-curve -c tab_target.yaml -ms path/to/ms/file.ms
+```
+
+For an observation TABASCAL has not been configured against, name the
+satellites yourself:
+
+```bash
+tabascal light-curve -ms path/to/ms/file.ms -n 27868,57865,60093 -dc DATA
+```
+
+The output goes to `<ms_dir>/light_curves/<tag or column>.npz` unless `-o` says
+otherwise. Alongside the four names the format requires it carries the noise
+floor (`error`), the significance `z = Re(S_hat) / error`, the complex estimate
+and the in-view mask; readers of the format ignore the extras. `-p` also writes
+a per-source spectrogram of `z`.
+
+To score a run, filter its *residual* rather than a data column. Point `-z` at
+the run's results zarr and `-dc` at the reference column the residual is formed
+against: the residual is then `data_col - zarr.vis_obs`, which cannot be
+invalidated by a later run overwriting the MS's `TAB_*` columns.
+
+```bash
+tabascal light-curve -c tab_target.yaml -z path/to/results/map_pred_Custom.zarr -dc DATA
+```
+
+A fully subtracted satellite has `|z| <= 3` almost everywhere. Judge that
+against the `null` column the command prints, not against the analytic 99.73%:
+the noise floor assumes the de-rotated per-baseline samples are independent and
+residual sky is not, so the floor is optimistic. The null is the same statistic
+on `Im(S_hat)`, which after de-rotation carries the same noise and no source.
+
 The `tabascal` script also has a help context which can be accessed with
 
 ```bash
-tabascal -h        # top-level: lists the subcommands
-tabascal run -h    # every option of the run subcommand
+tabascal -h                # top-level: lists the subcommands
+tabascal run -h            # every option of the run subcommand
+tabascal light-curve -h    # every option of the light-curve subcommand
 ```

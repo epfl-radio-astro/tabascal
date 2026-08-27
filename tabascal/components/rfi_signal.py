@@ -470,6 +470,66 @@ class BaseGPRFI(Component):
 
         return masked_signal
 
+    # ------------------------------------------------------------------
+    # Seeding the RFI amplitude from a per-satellite light curve
+    # ------------------------------------------------------------------
+
+    @property
+    def _est_n_ant(self) -> int:
+        """Antenna axis of the RFI amplitude. 1 where the amplitude is shared."""
+        return self.n_ant
+
+    def _rfi_k_from_light_curves(self, light_curves) -> Array:
+        """Latent ``rfi_k`` seeded from per-satellite light curves.
+
+        An RFI visibility is ``V ~ A_p conj(A_q)``, so the per-antenna amplitude
+        that reproduces a measured source flux ``|V|`` is ``sqrt(|V|)``. The two
+        light-curve sources -- a measured file and the matched filter -- differ
+        only in where the curves come from, so both land here.
+
+        ``light_curves`` is ``(n_rfi_real, n_freq, n_time)`` on the observation
+        grid, real from a file and complex from the filter. A non-finite sample
+        is one nothing was measured in, and seeds at zero, which is what
+        :func:`read_light_curves` already does to the file path's own.
+        """
+        A = jnp.abs(jnp.asarray(light_curves))
+        A = jnp.nan_to_num(A, nan=0.0, posinf=0.0, neginf=0.0)
+        est_rfi_A = jnp.broadcast_to(
+            jnp.sqrt(A)[:, None], (A.shape[0], self._est_n_ant) + A.shape[1:]
+        )
+
+        return self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(est_rfi_A))
+
+    def _read_estimate(self, est_path):
+        """Seed from a measured light-curve file (``rfi.est``)."""
+        # Real satellites only; _zero_pad_rfi restores the padded rows as zeros,
+        # so a duplicate id is never reported as a missing one.
+        return self._rfi_k_from_light_curves(
+            read_light_curves(
+                est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
+            )
+        )
+
+    def _matched_filter_estimate(self, tab_config):
+        """Seed by matched-filtering the visibilities against the trajectories.
+
+        The same estimate as ``est``, computed from the data already in memory:
+        no imaging step, no light-curve file, and no title matching, since the
+        curves come back ordered to match ``satellites.norad_ids``.
+
+        Imported lazily so that a run not using this option pays nothing for the
+        estimator's skyfield/propagation imports, and memoised so a config asking
+        for it as both the prior mean and the init filters the visibilities once.
+        """
+        if getattr(self, "_mf_rfi_k", None) is None:
+            from tabascal.rfi_estimate import light_curves_from_config
+
+            print("Estimating RFI light curves by matched filter (no imaging required)")
+            curves = light_curves_from_config(tab_config)["light_curves"]
+            self._mf_rfi_k = self._rfi_k_from_light_curves(curves)
+
+        return self._mf_rfi_k
+
     def _mask_dummy_rfi(self, arr: Array) -> Array:
         """Zero the padded (dark dummy) rows of an (n_rfi, ...) array; no-op unpadded."""
         return arr.at[self.n_rfi_real:].set(0)
@@ -540,7 +600,12 @@ class ComplexRFIVarAnt(BaseGPRFI):
 
             # Do expensive setup operations once
             self._compute_gp_params()
-            self._compute_prior_params(tab_config.args["rfi"]["mean"], tab_config.vis_obs, tab_config.args["rfi"]["est"])
+            self._compute_prior_params(
+                tab_config.args["rfi"]["mean"],
+                tab_config.vis_obs,
+                tab_config.args["rfi"]["est"],
+                tab_config,
+            )
             self._set_outputs()
 
             if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
@@ -551,7 +616,11 @@ class ComplexRFIVarAnt(BaseGPRFI):
             # if tab_config.args["rfi"]["init"] == "est":
             #     self._estimate_params(tab_config.fringe_freqs)
 
-            self._compute_init_params(tab_config.args["rfi"]["init"], tab_config.args["rfi"]["est"])
+            self._compute_init_params(
+                tab_config.args["rfi"]["init"],
+                tab_config.args["rfi"]["est"],
+                tab_config,
+            )
 
             # Validate dimensions
             self._validate_dimensions()
@@ -713,21 +782,24 @@ class ComplexRFIVarAnt(BaseGPRFI):
 
         return est_rfi_k
 
-    def _compute_prior_params(self, prior_type, vis_obs, est_path):
+    def _compute_prior_params(self, prior_type, vis_obs, est_path, tab_config=None):
 
         if prior_type == "data":
             print("Using data for RFI prior mean")
             self.mu_rfi_k = self._compute_data_est(vis_obs)
-        elif prior_type == "est": 
+        elif prior_type == "est":
             print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
+        elif prior_type in ["matched-filter", "mf"]:
+            print("Using matched-filter estimate for RFI prior mean")
+            self.mu_rfi_k = self._matched_filter_estimate(tab_config)
         elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
             )
         else:
-            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, est, matched-filter, zeros).")
 
     def forward_transform(self, base_params, sigma, mu):
 
@@ -748,24 +820,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
         self.true_rfi_k_A = self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(rfi_A))
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
-    def _read_estimate(self, est_path):
-
-        # Real satellites only; _zero_pad_rfi below restores the padded rows as
-        # zeros, so a duplicate is never reported as a missing id.
-        light_curves = read_light_curves(
-            est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
-        )
-
-        # Per source, so every antenna sees the same light curve.
-        est_rfi_A = jnp.broadcast_to(
-            jnp.sqrt(jnp.abs(light_curves))[:, None],
-            (light_curves.shape[0], self.n_ant, self.n_freq, self.n_time),
-        )
-        est_rfi_k_A = vmap(vmap(self.signal_to_latent))(est_rfi_A)
-
-        return self._zero_pad_rfi(est_rfi_k_A)
-
-    def _compute_init_params(self, init_type: str, est_path: str):
+    def _compute_init_params(self, init_type: str, est_path: str, tab_config=None):
 
         if init_type == "prior":
             print("Using prior mean for rfi_A init")
@@ -773,6 +828,9 @@ class ComplexRFIVarAnt(BaseGPRFI):
         elif init_type == "est":
             print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
+        elif init_type in ["matched-filter", "mf"]:
+            print("Using matched-filter estimate for rfi_A init")
+            self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":
             print("Using truth for rfi_A init")
             self.init_rfi_k = self.true_rfi_k_A
@@ -797,7 +855,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
             )
             self.init_rfi_k = self.masked_forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
         else:
-            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
+            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, est, matched-filter, truth, zeros, ones, sample).")
 
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
 
@@ -847,7 +905,12 @@ class ComplexRFIConstAnt(BaseGPRFI):
 
             # Do expensive setup operations once
             self._compute_gp_params()
-            self._compute_prior_params(tab_config.args["rfi"]["mean"], tab_config.vis_obs, tab_config.args["rfi"]["est"])
+            self._compute_prior_params(
+                tab_config.args["rfi"]["mean"],
+                tab_config.vis_obs,
+                tab_config.args["rfi"]["est"],
+                tab_config,
+            )
             self._set_outputs()
 
             if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
@@ -858,7 +921,11 @@ class ComplexRFIConstAnt(BaseGPRFI):
             # if tab_config.args["rfi"]["init"] == "est":
             #     self._estimate_params(tab_config.fringe_freqs)
 
-            self._compute_init_params(tab_config.args["rfi"]["init"], tab_config.args["rfi"]["est"])
+            self._compute_init_params(
+                tab_config.args["rfi"]["init"],
+                tab_config.args["rfi"]["est"],
+                tab_config,
+            )
 
             # Validate dimensions
             self._validate_dimensions()
@@ -1000,21 +1067,24 @@ class ComplexRFIConstAnt(BaseGPRFI):
 
         return est_rfi_k_A
 
-    def _compute_prior_params(self, prior_type, vis_obs, est_path):
+    def _compute_prior_params(self, prior_type, vis_obs, est_path, tab_config=None):
 
         if prior_type == "data":
             print("Using data for RFI prior mean")
             self.mu_rfi_k = self._compute_data_est(vis_obs)
-        elif prior_type == "est": 
+        elif prior_type == "est":
             print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
+        elif prior_type in ["matched-filter", "mf"]:
+            print("Using matched-filter estimate for RFI prior mean")
+            self.mu_rfi_k = self._matched_filter_estimate(tab_config)
         elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
                 (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
             )
         else:
-            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, est, matched-filter, zeros).")
 
     def forward_transform(self, base_params, sigma, mu):
 
@@ -1040,26 +1110,22 @@ class ComplexRFIConstAnt(BaseGPRFI):
 
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
-    def _read_estimate(self, est_path):
+    @property
+    def _est_n_ant(self) -> int:
+        """This model's RFI amplitude is shared across antennas, so a single axis."""
+        return 1
 
-        # Real satellites only; _zero_pad_rfi below restores the padded rows.
-        light_curves = read_light_curves(
-            est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
-        )
-
-        # Singleton antenna axis: the latent is shared and broadcast in the forward.
-        est_rfi_A = jnp.sqrt(jnp.abs(light_curves))[:, None]
-
-        return self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(est_rfi_A))
-
-    def _compute_init_params(self, init_type, est_path):
+    def _compute_init_params(self, init_type, est_path, tab_config=None):
 
         if init_type == "prior":
             print("Using prior mean for rfi_A init")
             self.init_rfi_k = self.mu_rfi_k
-        elif init_type == "est": 
+        elif init_type == "est":
             print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
+        elif init_type in ["matched-filter", "mf"]:
+            print("Using matched-filter estimate for rfi_A init")
+            self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":
             print("Using truth for rfi_A int")
             self.init_rfi_k = self.true_rfi_k_A
@@ -1082,7 +1148,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
             )
             self.init_rfi_k = self.masked_forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
         else:
-            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, truth, zeros, ones, sample).")
+            raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, est, matched-filter, truth, zeros, ones, sample).")
 
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
 

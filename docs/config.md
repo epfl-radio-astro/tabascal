@@ -323,7 +323,11 @@ rfi:
     cutoff: 1e-6
 ```
 
-All parameters in this section that overlap with those of the `ast` section have the same definition. The only additional parameters are
+All parameters in this section that overlap with those of the `ast` section have the same definition, except that `init` and `mean` accept one more value:
+
+* `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `rfi.est`, and no matching of light curves to satellites by name, since the estimator is handed `satellites.norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
+
+The only additional parameters are
 
 * `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
@@ -378,6 +382,20 @@ Some further details:
 * Labels that are not integer NORAD ids never match a satellite and are dropped, so a file may carry named sources (e.g. `Fornax A`) alongside the satellites without filtering beforehand, and those may repeat freely.
 * **Samples outside the file's coverage are zero**, on either axis — the file says nothing there, which is the same "no signal known" convention the elevation mask uses. An axis of length 1 is held constant instead, since a single sample carries no gradient to interpolate along; a single-frequency light curve therefore applies across the whole band rather than being zeroed outside it.
 * **The file does not have to cover every satellite in the fit.** Satellites with no light curve are initialised at zero and named in a warning, so light curves can be measured for a subset — the bright or well-characterised sources — while the rest are still modelled and fitted, just without an informative starting point. It is an error only if *no* configured satellite is found, which would otherwise silently reduce the whole estimate to zeros.
+
+### Estimating the light curves from the data
+
+`rfi.init: matched-filter` (alias `mf`) needs no file at all: it measures the light curves from the visibilities the run has already loaded. For a satellite on a known trajectory the RFI contribution to baseline $(p, q)$ is $A_p A_q^* e^{i(\phi_p - \phi_q)}$ with $\phi$ the geometric phase, so the unit-modulus template $T_{pq} = e^{i(\phi_p - \phi_q)}$ de-rotates it. The maximum-likelihood estimate of the source visibility at each channel and timestep is the inverse-variance-weighted, de-rotated baseline average
+
+$$\hat{S}[f, t] = \frac{\sum_{pq} w_{pq} T_{pq}^{*} V_{pq}}{\sum_{pq} w_{pq}}, \qquad w_{pq} = \frac{1}{\sigma_{pq}^2},$$
+
+with standard error $1/\sqrt{\sum w}$. The satellite's fringe adds coherently after de-rotation while the sky and the noise do not, so $\hat{S}$ isolates the satellite, and $\sqrt{\lvert \hat{S} \rvert}$ is the per-antenna amplitude the model is seeded with — the same quantity `est` reads out of a file.
+
+The weights are the run's own noise, resolved per baseline and per channel as far as the MS resolves it (see `data.noise`); the template carries no gain. Uniform weights on an array whose antennas differ in sensitivity would over-weight the loud baselines and report a noise floor that is too good. Flagged samples and autocorrelations are excluded, a satellite is not filtered for while it is below `rfi.min_elevation` (those times seed at zero, exactly as the elevation mask holds them there), and a channel and timestep where every baseline is flagged seeds at zero rather than at a measured value.
+
+The same estimate is available as a standalone tool, `tabascal light-curve`, which writes it in the interchange format above so it can seed a later run through `rfi.est`. See [Usage](usage.md#extracting-rfi-light-curves).
+
+Two limitations are worth knowing. The estimator assumes the satellite is exactly where its orbit record says it is: a position error scatters the per-baseline phases and costs coherence, which shows as an under-estimated flux rather than as an error. And it does not filter the astronomical signal out first, so a bright source in the field contributes to $\hat{S}$ wherever its fringe rate overlaps the satellite's.
 
 ## Satellites
 

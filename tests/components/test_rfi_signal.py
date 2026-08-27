@@ -593,6 +593,153 @@ class TestDummySourcesStayDark:
 # Elevation mask
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Seeding from a matched-filter estimate
+# ---------------------------------------------------------------------------
+
+class TestMatchedFilterSeeding:
+    """``rfi.init``/``rfi.mean: matched-filter`` seeds from the data in memory.
+
+    The imaging route measures the light curves out of band, writes them to a
+    file and points ``rfi.est`` at it. ``matched-filter`` estimates the *same*
+    curves from the visibilities the run has already loaded, so the two paths
+    must agree on the same data -- that equivalence is what says the new one is a
+    drop-in for the old, and it is the assertion these tests are built around.
+    """
+
+    @staticmethod
+    def _estimate(n_rfi_real=N_RFI_REAL, n_freq=N_FREQ, n_time=N_TIME):
+        """A light-curve result from the real estimator, not a hand-written dict."""
+        from tabascal.rfi_estimate import _lc_result, matched_filter_light_curves
+
+        rng = np.random.RandomState(0)
+        n_ant = 4
+        a1, a2 = np.triu_indices(n_ant, 1)
+        phase = rng.uniform(-np.pi, np.pi, (n_rfi_real, n_ant, n_freq, n_time))
+        E = np.exp(1j * phase)
+        curves = np.abs(rng.randn(n_rfi_real, n_freq, n_time)) + 0.5
+        vis = sum(
+            (E[s][a1] * np.conj(E[s][a2])) * curves[s] for s in range(n_rfi_real)
+        )
+        lc, err = matched_filter_light_curves(vis, phase, a1, a2)
+
+        return _lc_result(
+            lc,
+            err,
+            _norad_ids(n_rfi_real, n_rfi_real),
+            np.linspace(1.4e9, 1.41e9, n_freq, dtype=np.float64),
+            _TEST_EPOCH_MJD + np.linspace(0.0, 120.0, n_time, dtype=np.float64) / 86400.0,
+            "DATA",
+            "xx",
+        )
+
+    @pytest.fixture
+    def estimate(self, monkeypatch, tmp_path):
+        """The same estimate reachable both ways: in memory, and through a file.
+
+        ``light_curves_from_config`` is stubbed rather than run: the estimator
+        itself is covered by ``tests/test_rfi_estimate.py``, and a real one here
+        would need an MS and a SatChecker resolution behind the mock config.
+        """
+        from tabascal.rfi_estimate import save_light_curves_npz
+        import tabascal.rfi_estimate as mod
+
+        result = self._estimate()
+        calls = []
+        monkeypatch.setattr(
+            mod,
+            "light_curves_from_config",
+            lambda config, **kwargs: (calls.append(config), result)[1],
+        )
+        path = str(tmp_path / "mf.npz")
+        save_light_curves_npz(path, result)
+
+        return SimpleNamespace(result=result, path=path, calls=calls)
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    @pytest.mark.parametrize("mode", ["init", "mean"])
+    def test_it_agrees_with_the_same_curves_read_from_a_file(
+        self, cls, mode, estimate, exact_rtol
+    ):
+        """The verification the imaging-free path rests on: same data, same seed."""
+        key = "init" if mode == "init" else "mean"
+        filtered = setup_component(cls, **{key: "matched-filter"})
+        from_file = setup_component(cls, est=estimate.path, **{key: "est"})
+
+        attr = latent_attr(filtered) if mode == "init" else "mu_rfi_k"
+        got, expected = getattr(filtered, attr), getattr(from_file, attr)
+
+        assert jnp.max(jnp.abs(expected)) > 0
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(expected),
+            rtol=exact_rtol, atol=float(jnp.max(jnp.abs(expected))) * exact_rtol,
+        )
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    @pytest.mark.parametrize("alias", ["matched-filter", "mf"])
+    def test_the_alias_selects_the_same_estimate(self, cls, alias, estimate):
+        long_form = setup_component(cls, init="matched-filter")
+        aliased = setup_component(cls, init=alias)
+
+        np.testing.assert_array_equal(
+            np.asarray(aliased.init_rfi_k), np.asarray(long_form.init_rfi_k)
+        )
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    @pytest.mark.parametrize("mode", ["init", "mean"])
+    def test_the_padded_sources_stay_dark(self, cls, mode, estimate):
+        """The estimator only knows the real satellites; the dummies stay at zero."""
+        key = "init" if mode == "init" else "mean"
+        comp = setup_component(cls, **{key: "matched-filter"})
+
+        latent = getattr(comp, latent_attr(comp)) if mode == "init" else comp.mu_rfi_k
+
+        assert latent.shape[0] == N_RFI
+        assert jnp.all(latent[N_RFI_REAL:] == 0)
+        assert jnp.max(jnp.abs(latent[:N_RFI_REAL])) > 0
+
+    def test_the_antenna_axis_follows_the_model(self, estimate):
+        """VarAnt carries one amplitude per antenna; ConstAnt shares one."""
+        assert setup_component(ComplexRFIVarAnt, init="mf").init_rfi_k.shape[1] == N_ANT
+        assert setup_component(ComplexRFIConstAnt, init="mf").init_rfi_k.shape[1] == 1
+
+    def test_the_run_config_is_what_gets_filtered(self, estimate):
+        """The estimate is made from this run's own visibilities, not a file."""
+        config = make_rfi_config(init="matched-filter")
+        comp = ComplexRFIVarAnt()
+        comp.setup(config)
+
+        assert estimate.calls and estimate.calls[0] is config
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_an_unmeasured_sample_seeds_at_zero(self, cls, monkeypatch):
+        """A fully flagged cell comes back nan, and nan must not reach the latent."""
+        import tabascal.rfi_estimate as mod
+
+        result = self._estimate()
+        result["light_curves"][0, 0, 0] = np.nan
+        monkeypatch.setattr(
+            mod, "light_curves_from_config", lambda config, **kwargs: result
+        )
+
+        comp = setup_component(cls, init="matched-filter")
+
+        assert jnp.all(jnp.isfinite(comp.init_rfi_k))
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_no_estimate_file_is_needed(self, cls, estimate):
+        """`rfi.est` stays null: that is the point of the option."""
+        comp = setup_component(cls, init="matched-filter", est=None)
+
+        assert jnp.max(jnp.abs(comp.init_rfi_k)) > 0
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    @pytest.mark.parametrize("key", ["init", "mean"])
+    def test_the_option_is_named_in_the_error_for_a_bad_value(self, cls, key):
+        with pytest.raises(RuntimeError, match="matched-filter"):
+            setup_component(cls, **{key: "nonsense"})
+
+
 def elevation_mask(n_rfi=N_RFI, n_time_fine=N_TIME, down_from=N_TIME // 2):
     """A mask putting source 0 below the cut from ``down_from`` on; the rest always up.
 
