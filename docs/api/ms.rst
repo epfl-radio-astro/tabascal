@@ -29,11 +29,24 @@ scales differ by enough to matter — reading a UTC epoch as TAI shifts it by 32
 leap seconds, roughly 240 km along a LEO satellite's ground track — and none of
 these mismatches raise.
 
-.. note::
+The declaration is honoured by normalising to UTC once, in ``read_ms``:
+:func:`~tabascal.time.to_utc_jd` moves the declared Julian Dates onto UTC and
+the result is returned as ``times_jd``. Everything past the reader works on that
+— skyfield through :func:`~tabascal.time.skyfield_time`'s default, ``sgp4jax``'s
+propagator, which has no scale concept to be told otherwise, and the TLE epoch
+checks — so a single conversion covers all of them and no ``scale`` argument is
+threaded through the trajectory maths. A UTC-declared MS goes through no
+arithmetic at all and reads bit-identically.
 
-   The declared scale is currently *reported*, not yet honoured: satellite
-   trajectories are computed as if every observation were UTC, and a non-UTC MS
-   produces a warning. Wiring it through is tracked by issue #133.
+An epoch reference TABASCAL cannot place on a time line — a sidereal angle such
+as ``GAST``, or a relativistic scale skyfield offers no constructor for — stops
+the read, before the visibilities are touched, rather than being guessed at.
+
+``times_mjd`` stays exactly as declared, on the MS's own scale: it is written
+back into the results MS under that same ``MEASINFO`` record, and the preflight
+observation-epoch check reads the same column through casacore without reading
+the record — so that check is made on the declared scale too, and asks only
+whether the two reads of the column agree.
 
 **Time unit.** The same column's ``QuantumUnits`` keyword declares whether its
 values are seconds or days; TABASCAL works in MJD days.

@@ -176,6 +176,91 @@ def skyfield_time(times_jd, scale: str = "utc"):
     return constructor(jd_whole, jd_frac)
 
 
+def utc_offset_days(times_jd, scale: str = "utc"):
+    """Days to add to a Julian Date on ``scale`` to name the same instant on UTC.
+
+    The offset is what separates the scales -- the leap seconds for TAI, those
+    plus 32.184 s for TT, DUT1 for UT1 -- so it is small, at most a minute or so
+    of days, and it is computed **per sample**: an observation straddling a leap
+    second is offset by 36 s on one side of it and 37 s on the other.
+
+    It is read out of the whole/fraction pair skyfield already holds, rather than
+    by differencing two Julian Dates or by reconstructing a UTC date from an
+    accessor. Both of those would work at the Julian Date's own ~2.5e6 magnitude,
+    where f64 resolves only ~40 us; the whole days cancel exactly and the
+    fractions are O(1), so nothing is spent on a difference that is itself tiny.
+
+    Parameters
+    ----------
+    times_jd : array_like
+        Julian Dates as the source declares them, on ``scale``.
+    scale : str, optional
+        Time scale the Julian Dates are on; see :func:`skyfield_time`.
+
+    Returns
+    -------
+    np.ndarray
+        The offset in days, one per input time. Exactly zero for ``utc``.
+    """
+
+    times_jd = np.asarray(times_jd, dtype=float)
+
+    if str(scale).strip().lower() == "utc":
+        return np.zeros_like(times_jd)
+
+    declared = skyfield_time(times_jd, scale)
+    as_utc = skyfield_time(times_jd, "utc")
+
+    return (declared.whole - as_utc.whole) + (
+        declared.tt_fraction - as_utc.tt_fraction
+    )
+
+
+def to_utc_jd(times_jd, scale: str = "utc"):
+    """Julian Dates on a named scale as the same instants on UTC.
+
+    tabascal reads times on whatever scale their source declares and works in
+    UTC everywhere after that: :func:`skyfield_time` defaults to it, the epoch
+    checks compare against it, and ``sgp4jax.itrf_to_gcrf`` has no scale concept
+    to be told anything else. Converting once, where the times are read, puts all
+    of them on the instant the source actually named without a ``scale``
+    argument threaded through any of them.
+
+    ``utc`` returns the input unchanged -- bit-identical, not merely close, since
+    no arithmetic is done at all. The other scales have
+    :func:`utc_offset_days` added to the day fraction, leaving the whole day to
+    be carried across untouched: a JD's ~2.5e6 magnitude resolves to ~40 us in
+    f64, while its fraction resolves to ~20 ps.
+
+    Parameters
+    ----------
+    times_jd : array_like
+        Julian Dates as the source declares them, on ``scale``.
+    scale : str, optional
+        Time scale the Julian Dates are on; see :func:`skyfield_time`. Defaults
+        to ``"utc"``, which is a no-op.
+
+    Returns
+    -------
+    np.ndarray
+        The same instants, as UTC Julian Dates.
+
+    Raises
+    ------
+    ValueError
+        If ``scale`` is not one tabascal can interpret.
+    """
+
+    times_jd = np.asarray(times_jd, dtype=float)
+
+    if str(scale).strip().lower() == "utc":
+        return times_jd
+
+    whole = np.floor(times_jd)
+
+    return whole + ((times_jd - whole) + utc_offset_days(times_jd, scale))
+
+
 def gast_deg(times_jd, scale: str = "utc"):
     """Greenwich Apparent Sidereal Time, in degrees, for Julian Dates.
 

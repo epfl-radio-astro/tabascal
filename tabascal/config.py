@@ -161,7 +161,12 @@ class TabConfig:
 
         # The MS read must land on the same observation epoch preflight resolved
         # against, or the model would be built from TLEs checked at another time.
-        check_epoch_agreement(self.tle_resolution, self.times_jd)
+        # Compared on the MS's own time scale, which is what preflight reads: the
+        # check asks whether the two reads of the TIME column agree, not what
+        # those times mean, and self.times_jd has already been normalised to UTC
+        # -- on a TAI-declared MS that is 37 s from the declared value, against a
+        # tolerance of 1e-6 days.
+        check_epoch_agreement(self.tle_resolution, mjd_to_jd(self.times_mjd))
 
         self.get_orbital_elements()
 
@@ -367,10 +372,16 @@ class TabConfig:
 
         self.int_time = ms_params["int_time"]
         self.times = np.asarray(ms_params["times"])
-        # Kept as read: an MJD -> JD -> MJD round trip shifts samples by ~1e-10
-        # days, enough to push an endpoint outside a range it was written on.
+        # Kept as read, and on the scale the MS declares: an MJD -> JD -> MJD
+        # round trip shifts samples by ~1e-10 days, enough to push an endpoint
+        # outside a range it was written on, and these go back into the results
+        # MS under that same MEASINFO record.
         self.times_mjd = np.asarray(ms_params["times_mjd"])
-        self.times_jd = mjd_to_jd(ms_params["times_mjd"])
+        # Normalised to UTC by the reader, which is the scale everything
+        # downstream works on. Equal to mjd_to_jd(times_mjd) for the usual
+        # UTC-declared MS, and offset by the leap seconds for a TAI one.
+        self.times_jd = np.asarray(ms_params["times_jd"])
+        self.time_scale = ms_params["time_scale"]
 
         self.chan_width = ms_params["chan_width"]
         self.freqs = np.asarray(ms_params["freqs"])

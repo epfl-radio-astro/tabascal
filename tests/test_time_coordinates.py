@@ -14,6 +14,8 @@ from tabascal.time import (
     jd_to_datetime,
     datetime_to_jd,
     skyfield_time,
+    to_utc_jd,
+    utc_offset_days,
     TIME_SCALES,
     timescale,
 )
@@ -194,6 +196,31 @@ class TestSkyfieldTime:
 
         np.testing.assert_allclose(gast_deg(times), direct, rtol=0, atol=0)
 
+    def test_array_and_scalar_agree(self):
+        """A scalar stays 0-d and a length-1 array stays 1-d.
+
+        Callers index the result (``sf_times[0]`` in ``get_satellite_elevations``)
+        or broadcast it against a time axis, so a shape quietly gained or lost on
+        the way through is an error somewhere further on.
+        """
+        tt_array = np.asarray(skyfield_time(np.array([self.JD])).tt)
+        tt_scalar = np.asarray(skyfield_time(self.JD).tt)
+
+        assert tt_array.shape == (1,) and tt_scalar.shape == ()
+        assert tt_array[0] == float(tt_scalar)
+
+    def test_the_split_lands_on_the_unsplit_instant(self):
+        """The whole/fraction split is a precision trick, not an epoch shift.
+
+        It must name exactly the instant the unsplit Julian Date does -- to well
+        inside the ~40 us the unsplit form can resolve in the first place.
+        """
+        jd = 2460574.123456789
+        split = float(np.asarray(skyfield_time(jd).tt))
+        unsplit = float(np.asarray(timescale()._utc_jd(jd, 0.0).tt))
+
+        assert (split - unsplit) * 86400.0 == pytest.approx(0.0, abs=1e-4)
+
 
 # ---------------------------------------------------------------------------
 # tabascal.time — time scales
@@ -261,6 +288,132 @@ class TestTimeScale:
         assert gast_deg(self.JD, "utc") != pytest.approx(
             float(gast_deg(self.JD, "tai")), abs=1e-9
         )
+
+    def test_matches_astropy_utc(self):
+        """The one external anchor that ``scale="utc"`` really is UTC.
+
+        Every other check here is skyfield against skyfield, which would agree
+        with itself just as happily on the wrong scale. astropy knows the leap
+        seconds independently, so TT - UTC coming out as those leap seconds plus
+        32.184 s ties the default to the scale it claims to be.
+        """
+        atime = pytest.importorskip("astropy.time")
+
+        jds = np.array([2451545.3, 2460574.9])
+        from_skyfield = np.asarray(skyfield_time(jds).tt)
+        from_astropy = atime.Time(jds, format="jd", scale="utc").tt.jd
+
+        assert from_skyfield == pytest.approx(from_astropy, abs=1e-9)  # < 0.1 ms
+
+
+class TestToUtcJd:
+    """Moving a declared scale onto UTC, once, where the times are read.
+
+    Everything downstream reads a Julian Date as UTC -- skyfield through
+    ``skyfield_time``'s default, ``sgp4jax.itrf_to_gcrf``, which has no scale
+    concept to be told otherwise, and the TLE epoch checks. Normalising at the
+    boundary puts all of them on the instant the MS actually names, without a
+    ``scale`` argument threaded through any of them.
+    """
+
+    #: 2025-01-01T00:00:00 UTC, when TAI - UTC was 37 s.
+    JD = 2460676.5
+
+    #: 2017-01-01T00:00:00 UTC: the most recent leap second, 36 s -> 37 s.
+    LEAP_JD = 2457754.5
+
+    def _shift_secs(self, jd, scale):
+        """The shift measured end to end, off the returned Julian Dates.
+
+        Differencing two ~2.5e6 Julian Dates cannot resolve better than the ~40 us
+        f64 holds there, so the tolerances below are 0.1 ms. The exact offset is
+        checked against :func:`utc_offset_days`, which never leaves the fraction.
+        """
+
+        return (to_utc_jd(jd, scale) - np.asarray(jd, dtype=float)) * 86400.0
+
+    def test_utc_is_left_exactly_alone(self):
+        """Bit-identical, not merely close.
+
+        The common case is a UTC-declared MS, and it must read exactly as it did
+        before the scale was honoured -- so it goes through no arithmetic at all.
+        """
+        jd = self.JD + np.arange(4) * 8.0 / 86400.0
+
+        np.testing.assert_array_equal(to_utc_jd(jd, "utc"), jd)
+
+    def test_utc_is_the_default(self):
+        jd = self.JD + np.arange(3) * 8.0 / 86400.0
+
+        np.testing.assert_array_equal(to_utc_jd(jd), jd)
+
+    def test_tai_moves_back_by_the_leap_seconds(self):
+        """A TAI reading names an instant 37 s before the same number read as UTC."""
+        assert self._shift_secs(self.JD, "tai") == pytest.approx(-37.0, abs=1e-4)
+        assert utc_offset_days(self.JD, "tai") * 86400.0 == pytest.approx(
+            -37.0, abs=1e-9
+        )
+
+    def test_tt_moves_back_by_the_leap_seconds_plus_32_184(self):
+        assert self._shift_secs(self.JD, "tt") == pytest.approx(-69.184, abs=1e-3)
+
+    def test_ut1_moves_back_by_dut1(self):
+        """Sub-second, and still ~2.7 km of LEO ground track."""
+        assert 0.0 < abs(self._shift_secs(self.JD, "ut1")) < 0.9
+
+    @pytest.mark.parametrize("scale", sorted(TIME_SCALES))
+    def test_the_result_names_the_original_instant(self, scale):
+        """The whole point: read back as UTC, it is the instant the MS declared."""
+        declared = float(np.asarray(skyfield_time(self.JD, scale).tt))
+        normalised = float(np.asarray(skyfield_time(to_utc_jd(self.JD, scale)).tt))
+
+        assert (normalised - declared) * 86400.0 == pytest.approx(0.0, abs=1e-4)
+
+    def test_a_leap_second_inside_the_observation_is_followed(self):
+        """The offset is per sample, not one constant for the array.
+
+        An observation straddling a leap second is offset by 36 s on one side of
+        it and 37 s on the other; a single offset for the array would put half
+        the samples a second wrong.
+        """
+        jds = self.LEAP_JD + np.array([-0.5, 0.5])
+        offset_secs = utc_offset_days(jds, "tai") * 86400.0
+
+        assert offset_secs == pytest.approx([-36.0, -37.0], abs=1e-9)
+        assert self._shift_secs(jds, "tai") == pytest.approx([-36.0, -37.0], abs=1e-4)
+
+    def test_the_offset_is_applied_to_the_day_fraction(self):
+        """Not recomputed from a skyfield accessor at the Julian Date's own scale.
+
+        A JD of ~2.5e6 resolves to ~40 us in f64 while its day fraction resolves
+        to ~20 ps, so the shift is added to the fraction and the whole day is
+        carried across untouched. Reconstructing the UTC date from a skyfield
+        accessor instead would spend that ~40 us on the conversion.
+        """
+        jd = self.JD + np.arange(4) * 8.0 / 86400.0
+        whole = np.floor(jd)
+        expected = whole + ((jd - whole) + utc_offset_days(jd, "tai"))
+
+        np.testing.assert_array_equal(to_utc_jd(jd, "tai"), expected)
+
+    def test_the_offset_is_zero_on_utc(self):
+        assert utc_offset_days(self.JD, "utc") == 0.0
+
+    def test_shapes_are_preserved(self):
+        assert np.asarray(to_utc_jd(self.JD, "tai")).shape == ()
+        assert to_utc_jd(np.array([self.JD]), "tai").shape == (1,)
+
+    def test_scale_is_case_insensitive(self):
+        assert to_utc_jd(self.JD, "TAI") == to_utc_jd(self.JD, "tai")
+
+    def test_an_unsupported_scale_is_rejected(self):
+        """Rejected here as it is in ``skyfield_time``, and for the same reason."""
+        with pytest.raises(ValueError, match="Unsupported time scale 'nonsense'"):
+            to_utc_jd(self.JD, "nonsense")
+
+    def test_a_sidereal_reference_says_it_is_not_a_scale(self):
+        with pytest.raises(ValueError, match="valid Measurement Set epoch reference"):
+            to_utc_jd(self.JD, "gast")
 
 
 # ---------------------------------------------------------------------------

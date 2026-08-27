@@ -22,7 +22,7 @@ from tabascal.noise import (
     per_baseline_sigma,
     representative_sigma,
 )
-from tabascal.time import DAY_SECS, jd_to_datetime, mjd_to_jd
+from tabascal.time import DAY_SECS, jd_to_datetime, mjd_to_jd, to_utc_jd
 from tabascal.timing import measure_runtime
 
 
@@ -656,14 +656,6 @@ def read_ms(
     corr_idx = resolve_correlation(ms_path, corr, pol_id)
 
     time_scale = read_time_scale(column_keywords)
-    if time_scale != DEFAULT_TIME_SCALE:
-        # Surfaced rather than silently honoured: nothing downstream consumes
-        # this yet, so the trajectory maths still reads the times as UTC.
-        print(
-            f"Warning: {ms_path} declares {time_scale.upper()} times, but satellite "
-            f"trajectories are currently computed as if they were "
-            f"{DEFAULT_TIME_SCALE.upper()}. See issue #133."
-        )
 
     xds_ant = xds_from_table(ms_path + "::ANTENNA")[0]
     # Grouped per row for the same reason as POLARIZATION above: CHAN_FREQ and
@@ -689,7 +681,17 @@ def read_ms(
         read_time_unit(column_keywords),
     )
 
-    print(jd_to_datetime(mjd_to_jd(times_mjd[0])).isoformat())
+    # The declared scale is honoured by normalising to UTC once, here, rather
+    # than by threading a scale through the trajectory maths: everything past
+    # this point reads UTC Julian Dates -- skyfield through skyfield_time's
+    # default, sgp4jax.itrf_to_gcrf, which has no scale concept to be told
+    # otherwise, and the TLE epoch checks -- so one conversion covers all of
+    # them. times_mjd stays exactly as declared: it goes back into the results
+    # MS, under the same MEASINFO record, and the preflight epoch check reads
+    # the same column through casacore without that record.
+    times_jd = to_utc_jd(mjd_to_jd(times_mjd), time_scale)
+
+    print(jd_to_datetime(times_jd[0]).isoformat())
 
     times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
 
@@ -726,7 +728,10 @@ def read_ms(
         "n_ant": n_ant,
         "n_bl": n_bl,
         "dish_d": xds_ant.DISH_DIAMETER.data[0].compute(),
+        # As the MS declares them, on the scale it declares them on.
         "times_mjd": times_mjd,
+        # The same instants on UTC, which is what everything downstream reads.
+        "times_jd": times_jd,
         "times": times,
         "time_scale": time_scale,
         "int_time": int_time,
