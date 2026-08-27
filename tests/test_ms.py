@@ -518,8 +518,8 @@ class TestTimeUnits:
         n_bl = len(np.triu_indices(3, k=1)[0])
         monkeypatch.setattr(
             orbit_config,
-            "_ms_time_column",
-            lambda ms: np.repeat(days * 86400.0, n_bl),
+            "_ms_times_and_scale",
+            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc"),
         )
 
         from_reader = run_reader(days * 86400.0)["times_mjd"]
@@ -573,8 +573,8 @@ class TestDeclaredTimeScale:
         np.testing.assert_array_equal(data["times_jd"], mjd_to_jd(data["times_mjd"]))
 
     def test_the_declared_times_are_kept_as_declared(self, run_reader):
-        """``times_mjd`` is written back into the results MS, under that same
-        ``MEASINFO`` record, so it must stay on the scale the record names."""
+        """``times_mjd`` is the MS's own column in days, so it stays on the MS's
+        own scale -- and the preflight helper reports it the same way."""
         utc, tai = self._read_both(run_reader)
 
         np.testing.assert_array_equal(tai["times_mjd"], utc["times_mjd"])
@@ -629,45 +629,60 @@ class TestDeclaredTimeScale:
 
         # Metres, against ~7.7 km/s of orbital motion: the two ways of naming
         # the instant differ only by the ~40 us an f64 Julian Date resolves to.
-        np.testing.assert_allclose(from_tai, expected, atol=1.0)
+        np.testing.assert_allclose(from_tai, expected, rtol=0, atol=1.0)
 
+        # ~7.7 km/s for 37 s, along a curved track: ~285 km, and bounded on both
+        # sides so a shift of the wrong size fails as loudly as no shift at all.
         moved = np.linalg.norm(from_utc - from_tai, axis=-1)
-        assert moved.min() > 200e3
+        assert moved.min() > 280e3 and moved.max() < 290e3
 
     # -- and what it must not disturb on the way ----------------------------
 
-    def test_the_preflight_epoch_check_still_passes_on_a_tai_ms(
+    def test_preflight_and_the_reader_land_on_one_epoch_for_a_tai_ms(
         self, run_reader, monkeypatch
     ):
-        """The normalisation must not break the guard that the two reads agree.
+        """Both sides of the agreement check are on UTC, and both are correct.
 
-        Preflight reads the ``TIME`` column through casacore without its
-        ``MEASINFO`` record, so its epoch is on the MS's own scale. The check
-        asks whether the two reads of that column agree, not what the times
-        mean, so it is made on that same scale. Comparing the UTC-normalised
-        ``times_jd`` against it would stop every non-UTC run: 37 leap seconds is
-        4.3e-4 days against a tolerance of 1e-6.
+        Preflight runs before ``read_ms`` and reads the same ``TIME`` column
+        through casacore -- including its ``MEASINFO`` record, so it normalises
+        the same way. That keeps the two comparable *and* puts the TLE
+        selection and age limits at the instant the observation actually
+        happened. Left on the declared scale, preflight would age its records
+        against an epoch 37 s from the one the fit propagates at.
         """
         from tabascal import orbit_config
-        from tabascal.orbit import TLEError, TLEResolution, check_epoch_agreement
+        from tabascal.orbit import TLEResolution, check_epoch_agreement
 
         times = self._times()
         n_bl = len(np.triu_indices(3, k=1)[0])
         monkeypatch.setattr(
-            orbit_config, "_ms_time_column", lambda ms: np.repeat(times, n_bl)
+            orbit_config,
+            "_ms_times_and_scale",
+            lambda ms: (np.repeat(times, n_bl), "tai"),
         )
-        resolution = TLEResolution(
-            requested=[25544],
-            obs_epoch_jd=orbit_config.ms_observation_epoch_jd("in-memory.ms"),
-            remote_max_age_days=None,
-        )
+        preflight_epoch = orbit_config.ms_observation_epoch_jd("in-memory.ms")
 
         data = run_reader(times, keywords=_keywords("TAI"))
 
-        check_epoch_agreement(resolution, mjd_to_jd(data["times_mjd"]))
+        # The same instant from both reads, to the ~40 us an f64 JD resolves to.
+        assert (
+            preflight_epoch - float(np.mean(data["times_jd"]))
+        ) * 86400.0 == pytest.approx(0.0, abs=1e-3)
 
-        with pytest.raises(TLEError, match="epoch disagreement"):
-            check_epoch_agreement(resolution, data["times_jd"])
+        # And it is the shifted instant, not the declared number read as UTC.
+        declared = float(np.mean(mjd_to_jd(data["times_mjd"])))
+        assert (preflight_epoch - declared) * 86400.0 == pytest.approx(
+            -self.LEAP_SECS, abs=1e-3
+        )
+
+        check_epoch_agreement(
+            TLEResolution(
+                requested=[25544],
+                obs_epoch_jd=preflight_epoch,
+                remote_max_age_days=None,
+            ),
+            data["times_jd"],
+        )
 
     def test_the_config_carries_the_scale_and_the_utc_times(self, run_reader):
         """``TabConfig`` used to unpack every key of the read but this one.

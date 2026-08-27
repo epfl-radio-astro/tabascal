@@ -166,8 +166,12 @@ def read_time_scale(column_keywords: dict, column: str = "TIME") -> str:
     to convention: the ``TIME`` column carries ``MEASINFO {'type': 'epoch',
     'Ref': 'UTC'}``. ``UTC`` is overwhelmingly the common case, but it is a
     declaration to be read, not a property to be assumed -- an MS may legitimately
-    declare ``TAI`` or another scale, and the difference is 32 s of leap seconds,
-    which is ~240 km along a LEO satellite's ground track.
+    declare ``TAI`` or another scale, and the difference is the accumulated leap
+    seconds, 37 s since 2017, which is ~285 km along a LEO satellite's ground
+    track.
+
+    Read by :func:`read_ms`, which normalises the times it returns onto UTC, and
+    by ``orbit_config``'s preflight epoch helper, which normalises the same way.
 
     Parameters
     ----------
@@ -686,9 +690,9 @@ def read_ms(
     # this point reads UTC Julian Dates -- skyfield through skyfield_time's
     # default, sgp4jax.itrf_to_gcrf, which has no scale concept to be told
     # otherwise, and the TLE epoch checks -- so one conversion covers all of
-    # them. times_mjd stays exactly as declared: it goes back into the results
-    # MS, under the same MEASINFO record, and the preflight epoch check reads
-    # the same column through casacore without that record.
+    # them. times_mjd stays as declared beside it: it is the MS's own column in
+    # days, and orbit_config.ms_integration_times_mjd reports the same column
+    # the same way, so the two remain comparable.
     times_jd = to_utc_jd(mjd_to_jd(times_mjd), time_scale)
 
     print(jd_to_datetime(times_jd[0]).isoformat())

@@ -382,19 +382,36 @@ class TestToUtcJd:
         assert offset_secs == pytest.approx([-36.0, -37.0], abs=1e-9)
         assert self._shift_secs(jds, "tai") == pytest.approx([-36.0, -37.0], abs=1e-4)
 
-    def test_the_offset_is_applied_to_the_day_fraction(self):
-        """Not recomputed from a skyfield accessor at the Julian Date's own scale.
+    def test_the_shift_is_right_to_the_julian_date_quantum(self):
+        """What the returned value is worth, not how it is arrived at.
 
-        A JD of ~2.5e6 resolves to ~40 us in f64 while its day fraction resolves
-        to ~20 ps, so the shift is added to the fraction and the whole day is
-        carried across untouched. Reconstructing the UTC date from a skyfield
-        accessor instead would spend that ~40 us on the conversion.
+        A Julian Date near 2.5e6 is spaced ~40 us apart in f64, so that is the
+        floor on any single returned JD and no arrangement of the arithmetic
+        beats it. What the day-fraction route buys is that the conversion costs
+        nothing *beyond* that floor: the returned shift is the leap seconds to
+        within one representable step, where recomputing the date from a
+        skyfield accessor would spend the floor twice over.
         """
         jd = self.JD + np.arange(4) * 8.0 / 86400.0
-        whole = np.floor(jd)
-        expected = whole + ((jd - whole) + utc_offset_days(jd, "tai"))
 
-        np.testing.assert_array_equal(to_utc_jd(jd, "tai"), expected)
+        np.testing.assert_allclose(
+            to_utc_jd(jd, "tai"),
+            jd - 37.0 / 86400.0,
+            rtol=0,
+            atol=float(np.spacing(jd).max()),  # one representable step, ~40 us
+        )
+
+    def test_the_offset_itself_never_leaves_the_fraction(self):
+        """The offset is picosecond-clean even though the JD it lands on is not.
+
+        It is a difference of O(1) day fractions, so it carries far more digits
+        than the ~2.5e6-magnitude sum it is then added to. That is the half of
+        the calculation that is worth being exact, and it is.
+        """
+        jd = self.JD + np.arange(4) * 8.0 / 86400.0
+        offset_secs = utc_offset_days(jd, "tai") * 86400.0
+
+        np.testing.assert_allclose(offset_secs, -37.0, rtol=0, atol=1e-9)
 
     def test_the_offset_is_zero_on_utc(self):
         assert utc_offset_days(self.JD, "utc") == 0.0

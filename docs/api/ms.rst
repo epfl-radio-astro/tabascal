@@ -25,9 +25,9 @@ error or a silent read of the wrong polarisation.
 **Time scale.** The ``TIME`` column's ``MEASINFO`` record declares the scale its
 values are on, almost always ``UTC``. :func:`~tabascal.ms.read_time_scale`
 returns it, and it is carried in the ``read_ms`` result as ``time_scale``. The
-scales differ by enough to matter — reading a UTC epoch as TAI shifts it by 32
-leap seconds, roughly 240 km along a LEO satellite's ground track — and none of
-these mismatches raise.
+scales differ by enough to matter — reading a UTC epoch as TAI shifts it by the
+accumulated leap seconds, 37 s since 2017, or roughly 285 km along a LEO
+satellite's ground track — and none of these mismatches raise.
 
 The declaration is honoured by normalising to UTC once, in ``read_ms``:
 :func:`~tabascal.time.to_utc_jd` moves the declared Julian Dates onto UTC and
@@ -42,11 +42,19 @@ An epoch reference TABASCAL cannot place on a time line — a sidereal angle suc
 as ``GAST``, or a relativistic scale skyfield offers no constructor for — stops
 the read, before the visibilities are touched, rather than being guessed at.
 
-``times_mjd`` stays exactly as declared, on the MS's own scale: it is written
-back into the results MS under that same ``MEASINFO`` record, and the preflight
-observation-epoch check reads the same column through casacore without reading
-the record — so that check is made on the declared scale too, and asks only
-whether the two reads of the column agree.
+The preflight observation-epoch helper — which runs *before* the reader, and
+which every TLE age comparison and nearest-record decision is measured from —
+reads the same ``MEASINFO`` record through casacore and normalises the same way,
+so it lands on the same instant. That keeps it physically right and keeps
+``check_epoch_agreement`` comparing like with like, both sides on UTC.
+
+``times_mjd`` stays as declared beside ``times_jd``: it is the MS's own ``TIME``
+column in days — the numbers the file stores, converted in unit only — and
+:func:`~tabascal.orbit_config.ms_integration_times_mjd` reports that same column
+the same way, so the two stay comparable. It is kept as read rather than
+recovered from ``times_jd``, which loses ~1e-10 days on the round trip. Nothing
+writes it back to the MS: the results writer leaves the original ``TIME`` column
+untouched.
 
 **Time unit.** The same column's ``QuantumUnits`` keyword declares whether its
 values are seconds or days; TABASCAL works in MJD days.
@@ -63,10 +71,10 @@ Both :func:`~tabascal.ms.read_ms` and the preflight observation-epoch helper
 convert here, so the heuristic cannot classify one MS two ways — including for
 an MS whose timestep blocks do not ascend, since the classification sorts. What
 they can still differ on is a *declared* unit: the preflight helper reads the
-``TIME`` column through casacore directly and does not read its keywords, so an
-MS whose ``QuantumUnits`` contradicts the spacing of the times it stores is read
-on the declared unit by ``read_ms`` and on the inferred one by the TLE age
-checks.
+``TIME`` column through casacore and takes only its ``MEASINFO`` record from the
+keywords, not its ``QuantumUnits``, so an MS whose ``QuantumUnits`` contradicts
+the spacing of the times it stores is read on the declared unit by ``read_ms``
+and on the inferred one by the TLE age checks.
 
 .. automodule:: tabascal.ms
     :members:

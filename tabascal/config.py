@@ -26,7 +26,7 @@ from tabascal.interferometry import (
     itrf_to_uvw_numpy,
 )
 from tabascal.fft_gp import domain_ss
-from tabascal.time import secs_to_days, mjd_to_jd, jd_to_mjd, gast_deg
+from tabascal.time import secs_to_days, jd_to_mjd, gast_deg
 
 import jax.numpy as jnp
 
@@ -161,12 +161,10 @@ class TabConfig:
 
         # The MS read must land on the same observation epoch preflight resolved
         # against, or the model would be built from TLEs checked at another time.
-        # Compared on the MS's own time scale, which is what preflight reads: the
-        # check asks whether the two reads of the TIME column agree, not what
-        # those times mean, and self.times_jd has already been normalised to UTC
-        # -- on a TAI-declared MS that is 37 s from the declared value, against a
-        # tolerance of 1e-6 days.
-        check_epoch_agreement(self.tle_resolution, mjd_to_jd(self.times_mjd))
+        # Both sides are UTC: preflight reads the TIME column's MEASINFO record
+        # and normalises exactly as read_ms does, so the comparison is like with
+        # like and both are the instant the observation actually happened.
+        check_epoch_agreement(self.tle_resolution, self.times_jd)
 
         self.get_orbital_elements()
 
@@ -372,14 +370,15 @@ class TabConfig:
 
         self.int_time = ms_params["int_time"]
         self.times = np.asarray(ms_params["times"])
-        # Kept as read, and on the scale the MS declares: an MJD -> JD -> MJD
-        # round trip shifts samples by ~1e-10 days, enough to push an endpoint
-        # outside a range it was written on, and these go back into the results
-        # MS under that same MEASINFO record.
+        # The MS's own TIME column in days: the numbers it stores, on the scale
+        # it declares, converted in unit only. Kept as read rather than recovered
+        # from times_jd, which loses ~1e-10 days on the round trip -- enough to
+        # push an endpoint outside a range it was written on.
         self.times_mjd = np.asarray(ms_params["times_mjd"])
-        # Normalised to UTC by the reader, which is the scale everything
-        # downstream works on. Equal to mjd_to_jd(times_mjd) for the usual
-        # UTC-declared MS, and offset by the leap seconds for a TAI one.
+        # The instants those numbers name, normalised to UTC by the reader, which
+        # is the scale everything downstream works on. Equal to
+        # mjd_to_jd(times_mjd) for the usual UTC-declared MS, and offset by the
+        # leap seconds for a TAI one.
         self.times_jd = np.asarray(ms_params["times_jd"])
         self.time_scale = ms_params["time_scale"]
 

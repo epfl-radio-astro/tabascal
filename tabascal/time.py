@@ -188,7 +188,9 @@ def utc_offset_days(times_jd, scale: str = "utc"):
     by differencing two Julian Dates or by reconstructing a UTC date from an
     accessor. Both of those would work at the Julian Date's own ~2.5e6 magnitude,
     where f64 resolves only ~40 us; the whole days cancel exactly and the
-    fractions are O(1), so nothing is spent on a difference that is itself tiny.
+    fractions are O(1), so the offset itself comes out exact to picoseconds. The
+    Julian Date it is then added to still resolves only to that ~40 us -- see
+    :func:`to_utc_jd`.
 
     Parameters
     ----------
@@ -227,10 +229,16 @@ def to_utc_jd(times_jd, scale: str = "utc"):
     argument threaded through any of them.
 
     ``utc`` returns the input unchanged -- bit-identical, not merely close, since
-    no arithmetic is done at all. The other scales have
-    :func:`utc_offset_days` added to the day fraction, leaving the whole day to
-    be carried across untouched: a JD's ~2.5e6 magnitude resolves to ~40 us in
-    f64, while its fraction resolves to ~20 ps.
+    no arithmetic is done at all. The other scales have :func:`utc_offset_days`
+    added to the day fraction, with the whole day carried across separately.
+
+    That does **not** make the answer picosecond-accurate. The return value is a
+    single f64 Julian Date, and near 2.5e6 days those are spaced ~40 us apart:
+    that is the floor on any JD, before or after conversion, and no arrangement
+    of the arithmetic beats it. What the split buys is that the conversion costs
+    nothing *beyond* that floor -- the offset itself is exact to picoseconds,
+    being a difference of O(1) fractions, and recombining rounds once. Rebuilding
+    the UTC date from a skyfield accessor would spend the floor a second time.
 
     Parameters
     ----------
