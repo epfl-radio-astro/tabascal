@@ -1,5 +1,5 @@
-Measurement Set Reading
-=======================
+Measurement Sets and Calibration Tables
+=======================================
 
 Everything that knows the Measurement Set format. Named for the format rather
 than generically, so that a second input format becomes a sibling module with
@@ -54,6 +54,41 @@ they can still differ on is a *declared* unit: the preflight helper reads the
 MS whose ``QuantumUnits`` contradicts the spacing of the times it stores is read
 on the declared unit by ``read_ms`` and on the inferred one by the TLE age
 checks.
+
+CASA calibration tables
+-----------------------
+
+Gains are exchanged in CASA's own format rather than as ad-hoc ``.npz`` files, so
+that standard tooling — ``applycal``, CARAcal, stimela — can consume what
+TABASCAL solves for. :func:`~tabascal.ms.write_caltable` emits a ``B Jones``
+table laid out exactly as ``casatasks.gaincal`` emits one: one row per
+``(time, antenna)``, time-major, with ``CPARAM`` of shape ``(n_chan, n_pol)``.
+``B Jones`` rather than ``G Jones`` because the gains are frequency dependent,
+which a scalar G table cannot carry.
+
+CASA identifies a caltable by its table *INFO record*, not by its keywords:
+without ``type='Calibration'`` ``applycal`` rejects the table outright. The MS's
+``ANTENNA``, ``FIELD``, ``SPECTRAL_WINDOW``, ``OBSERVATION`` and ``HISTORY``
+subtables are copied in beside it, as CASA does, which is what lets
+:func:`~tabascal.ms.read_caltable` return the channel frequencies the gains
+belong to without being handed the MS again.
+
+The convention is CASA's: ``V_obs = g_p conj(g_q) V_true``, so calibrating
+divides that out and the noise follows the data,
+``sigma_cal = sigma / |g_p conj(g_q)|``.
+:func:`~tabascal.ms.apply_gains_to_data` is that one statement in code. Gains
+that are zero or non-finite are written FLAGged and read back as NaN — a
+baseline with one is a division by zero, and its visibilities must be flagged by
+the caller.
+
+.. warning::
+
+   Do not rely on ``applycal`` to set the weights for a frequency-dependent
+   gain. ``applycal(calwt=True)`` applies a single per-row weight factor,
+   constant across channels, even when ``WEIGHT_SPECTRUM`` exists — it collapses
+   the frequency axis rather than scaling each channel by its own
+   ``|g_ch|**2``. TABASCAL therefore computes ``WEIGHT_SPECTRUM`` itself when it
+   writes results.
 
 .. automodule:: tabascal.ms
     :members:
