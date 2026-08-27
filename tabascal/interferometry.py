@@ -492,11 +492,37 @@ def calculate_rfi_vis_variable(
     return vis_rfi
 
 
+def baseline_gains(gains: Array, a1: Array, a2: Array, ant_axis: int = 0) -> Array:
+    """Per-baseline gain ``g_p conj(g_q)`` from per-antenna gains.
+
+    ``ant_axis`` names the antenna axis, so an array carrying a leading sample
+    axis can have the product formed per sample, before the samples are reduced:
+    ``E[g_p conj(g_q)]`` is not ``E[g_p] conj(E[g_q])`` once the two antennas
+    covary.
+
+    Written with plain indexing and ``.conj()`` rather than ``jnp`` calls so that
+    the one definition serves both users -- the model jits it on jax arrays, and
+    the results writer applies it to dask arrays straight out of a zarr.
+    """
+
+    lead = (slice(None),) * ant_axis
+
+    return gains[lead + (a1,)] * gains[lead + (a2,)].conj()
+
+
 def apply_gains(gains: Array, vis: Array, a1: Array, a2: Array) -> Array:
+    """Apply per-antenna gains to per-baseline visibilities.
 
-    vis_obs = gains[a1] * vis * jnp.conjugate(gains)[a2]
+    The same product as :func:`baseline_gains`, which is the one definition of
+    the convention and what the tests hold this to. It is multiplied in the
+    order ``g_p * vis * conj(g_q)`` rather than ``(g_p conj(g_q)) * vis``,
+    though: floating point is not associative, and with ``complex64`` gains far
+    from unity the baseline product can overflow where ``g_p * vis`` first
+    does not. This order is also the one every reference result was produced
+    with, so the model's output is unchanged to the bit.
+    """
 
-    return vis_obs
+    return gains[a1] * vis * gains[a2].conj()
 
 
 #########################################################################

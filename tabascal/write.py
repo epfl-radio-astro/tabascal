@@ -1,7 +1,17 @@
 from tabascal.distributed import is_process_0
+from tabascal.interferometry import baseline_gains
+from tabascal.ms import (
+    fitted_correlation,
+    grid_to_rows,
+    into_corr,
+    ms_layout,
+    partition_polarization,
+)
 from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_to_table
+
+import warnings
 
 import numpy as np
 
@@ -10,8 +20,193 @@ import dask.array as da
 import dask
 
 
+def _to_ms_column(arr, dims, chunks, n_freq, n_corr=1):
+    """``(bl, freq, time)`` array to an MS ``(row, chan, corr)`` DataArray.
+
+    ``n_corr`` is 1 here: tabascal fits one correlation, so every result starts
+    life on a length-1 correlation axis and :func:`into_corr` places it on the
+    MS's axis afterwards.
+    """
+
+    return xr.DataArray(grid_to_rows(arr, n_freq, n_corr), dims=dims).chunk(chunks)
+
+
+def data_frame_residuals(vis_obs, gained_ast, gained_rfi, gained_total):
+    """``TAB_*_RES`` residuals, in the frame of the observed data.
+
+    Takes models already multiplied by the baseline gain, since that has to
+    happen per sample and only the caller still holds the sample axis.
+
+    ``gained_total`` is passed rather than summed from the two parts: the results
+    zarr stores the forward model the gains component actually produced, and a
+    component is free to gain only one of the two terms.
+
+    Data frame rather than calibrated: dividing by the gain inflates the noise on
+    low-gain baselines and distorts noise-referenced metrics. Moving every column
+    to one calibrated frame is #123.
+    """
+
+    return {
+        "ast": vis_obs - gained_ast,
+        "rfi": vis_obs - gained_rfi,
+        "total": vis_obs - gained_total,
+    }
+
+
+def unit_bad_gains(gains):
+    """Replace zero and non-finite antenna gains with 1, elementwise.
+
+    ``GPGains`` fits an unconstrained affine GP amplitude with no positivity
+    transform, and the SVI loop never checks ``isfinite``, so an unflagged dead
+    antenna can be driven to zero -- and dividing ``DATA`` by a zero or NaN
+    baseline gain poisons ``CORRECTED_DATA`` and every residual column that
+    touches the antenna.
+
+    Unity rather than a blank: the affected baselines are then simply
+    *uncalibrated* on that antenna, which stays finite and imageable, where NaN
+    would drop the data and zero would read as a real, well-calibrated value.
+    Substituting on the antenna gains rather than the baseline product means
+    everything derived downstream follows automatically.
+
+    Returns ``(gains, bad)`` with ``bad`` the mask that was substituted.
+    """
+
+    bad = ~np.isfinite(gains) | (gains == 0)
+
+    return np.where(bad, np.array(1, dtype=gains.dtype), gains), bad
+
+
+def count_substituted(bad, ant_axis=None):
+    """Lazy reductions of a substitution mask: the count, and which antennas.
+
+    Reductions rather than the mask itself. The masks are the size of the gains
+    -- ``(sample, ant, freq, time)`` -- or of the baseline product --
+    ``(bl, freq, time)`` -- and materialising either just to count it would
+    hold a full-size boolean array in memory for the sake of a number. A
+    reduction on a dask array runs chunk by chunk and leaves nothing resident;
+    on numpy it is simply the count.
+
+    Returns ``bad.sum()`` alone, or ``(bad.sum(), bad.any(over every axis but
+    ant_axis))`` when there is an antenna axis to name antennas from. Both are
+    still lazy for dask input; the caller computes them, ideally in the same
+    ``dask.compute`` as the arrays the mask feeds, so the graph runs once.
+    """
+
+    n_bad = bad.sum()
+
+    if ant_axis is None:
+        return n_bad
+
+    axes = tuple(axis for axis in range(bad.ndim) if axis != ant_axis)
+
+    return n_bad, bad.any(axis=axes)
+
+
+def _warn_substituted(n_bad: int, size: int, what: str, detail: str) -> int:
+    """Warn about ``n_bad`` of ``size`` substitutions, if any. Returns ``n_bad``.
+
+    The two public warnings below say different things about different arrays;
+    what they share is how a count becomes a percentage and a
+    ``RuntimeWarning``, which is the part worth having once. Takes the computed
+    numbers, not the mask: see :func:`count_substituted`.
+    """
+
+    n_bad = int(n_bad)
+
+    if n_bad:
+        warnings.warn(
+            f"{n_bad} of {size} {what} ({100 * n_bad / size:.3g}%) were "
+            f"zero or non-finite and have been set to 1{detail}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    return n_bad
+
+
+def warn_bad_gains(n_bad: int, size: int, bad_ants) -> int:
+    """Warn, naming the antennas, when any gain was substituted. Returns the count.
+
+    Silent substitution would look like a calibration failure downstream, so the
+    count and the antennas it touched are reported where they are known.
+    ``bad_ants`` is the per-antenna boolean from :func:`count_substituted`.
+    """
+
+    ants = np.flatnonzero(np.asarray(bad_ants)).tolist()
+
+    return _warn_substituted(
+        n_bad,
+        size,
+        "antenna gain values",
+        f". Affected antennas: {ants}. Baselines touching them are written "
+        "uncalibrated on that antenna.",
+    )
+
+
+def total_model(stored, gained_ast, gained_rfi, bad_bl):
+    """The gained total model, preferring the forward model the run stored.
+
+    The zarr's ``vis_obs`` is what the gains component actually produced, so it
+    is right even where a component gains only one of the two terms -- see the
+    commented-out variant in ``components/gains.py``.
+
+    It was formed with the *original* gains, though, so on any baseline whose
+    antenna gain was pushed to unity it still carries the zero or non-finite
+    value. There the model is re-derived from the two substituted parts, which
+    is the same quantity everywhere the substitution did not bite.
+
+    Every argument keeps its sample axis, so the choice is made per sample and
+    the caller averages afterwards. Reducing ``bad_bl`` over samples first would
+    throw away the stored model on *every* sample of a cell because one sample
+    happened to have a bad gain.
+    """
+
+    return np.where(bad_bl, gained_ast + gained_rfi, stored)
+
+
+def warn_bad_baseline_gains(n_bad: int, size: int) -> int:
+    """Warn when a *mean* baseline gain was substituted. Returns the count.
+
+    Separate from the per-antenna warning because it is a separate failure. The
+    per-sample gains can every one of them be finite and non-zero and still
+    average to zero -- ``g_q = +1`` on one sample and ``-1`` on the next -- and
+    it is the mean that ``CORRECTED_DATA`` is divided by. There is no antenna to
+    name: the substitution happens after the product and after the reduction.
+    """
+
+    return _warn_substituted(
+        n_bad,
+        size,
+        "mean baseline gains",
+        ", even though the per-sample gains were not. CORRECTED_DATA equals the "
+        "data in those (baseline, channel, time) cells.",
+    )
+
+
+def gained_model_mean(gains_bl, model, sample_axis: int = 0):
+    """Sample-mean of ``gains_bl * model``, formed per sample.
+
+    Separate from the residual so the reduction order is pinnable.
+    """
+
+    return (gains_bl * model).mean(axis=sample_axis)
+
+
 @measure_runtime
-def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA"):
+def write_results_ms(
+    ms_path: str,
+    results_zarr_path: str,
+    data_col: str = "DATA",
+    corr: str | None = None,
+):
+    """Copy a results zarr into the Measurement Set it was fitted from.
+
+    ``corr`` names the correlation the results belong to. It is an override, not
+    the normal route: ``write_results_xds`` records the fitted correlation on the
+    zarr, and results carrying it need nothing here. Pass it only for a zarr
+    written before that attribute existed, where a multi-correlation MS has no
+    other way to know.
+    """
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
     # so no other rank needs to participate.
@@ -24,63 +219,119 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
     dims = ["row", "chan", "corr"]
     chunks = {k: v for k, v in xds_ms.chunks.items() if k in dims}
 
-    if xds_tab.ast_vis.data.ndim == 3:
-        vis_ast = xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
-        vis_ast = xr.DataArray(da.expand_dims(vis_ast, axis=(1, 2)), dims=dims).chunk(
-            chunks
-        )
+    # The results live on a length-1 correlation axis until they are placed on
+    # the MS's, so they must not be chunked with the MS's correlation chunk.
+    fit_chunks = {k: v for k, v in chunks.items() if k != "corr"}
 
-        vis_rfi = xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0).T.flatten()
-        vis_rfi = xr.DataArray(da.expand_dims(vis_rfi, axis=(1, 2)), dims=dims).chunk(
-            chunks
-        )
-
-    elif xds_tab.ast_vis.data.ndim == 4:
-        n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
-        n_corr = 1
-
-        vis_ast = da.transpose(
-            xds_tab.ast_vis.data.astype(np.complex64).mean(axis=0), (2, 0, 1)
-        ).reshape(-1, n_freq, n_corr)
-        vis_ast = xr.DataArray(vis_ast, dims=dims).chunk(chunks)
-
-        vis_rfi = da.transpose(
-            xds_tab.rfi_vis.data.astype(np.complex64).mean(axis=0), (2, 0, 1)
-        ).reshape(-1, n_freq, n_corr)
-        vis_rfi = xr.DataArray(vis_rfi, dims=dims).chunk(chunks)
-
-        a1 = xds_ms.ANTENNA1.data[:n_bl].compute()
-        a2 = xds_ms.ANTENNA1.data[:n_bl].compute()
-
-        gains = xds_tab.gains.data.astype(np.complex64).mean(axis=0)
-        gains_bl = da.transpose(gains[a1] * da.conj(gains[a2]), (2, 0, 1)).reshape(-1, n_freq, n_corr)
-        gains_bl = xr.DataArray(gains_bl, dims=dims).chunk(chunks)
-
-    else:
+    if xds_tab.ast_vis.data.ndim != 4:
         raise ValueError(
-            f"Unknown data dimensions. Expected 3 or 4 but got {xds_tab.ast_vis.data.ndim}"
+            f"ast_vis has {xds_tab.ast_vis.data.ndim} dimensions; expected 4, "
+            "(sample, bl, freq, time)."
         )
-    
-    
+
+    n_sample, n_bl, n_freq, n_time = xds_tab.ast_vis.data.shape
+    n_corr = xds_ms.sizes["corr"]
+
+    # The polarization setup this partition actually uses, which need not be
+    # row 0 of POLARIZATION -- resolved the way read_ms resolves it.
+    corr_idx = fitted_correlation(
+        ms_path,
+        xds_tab.attrs.get("corr"),
+        corr,
+        n_corr,
+        partition_polarization(ms_path, xds_ms),
+    )
+
+    # Derived and validated in one place, shared with the reader. Before any
+    # column is built: a zarr from a different MS otherwise surfaces as a dask
+    # "chunks do not add up to shape" error from the first reshape.
+    layout = ms_layout(xds_ms)
+    a1, a2 = layout.a1, layout.a2
+
+    # The MS's layout is the MS's business; whether the results describe *this*
+    # MS is the writer's.
+    if layout.n_bl != n_bl:
+        raise ValueError(
+            f"The results hold {n_bl} baselines but the MS has {layout.n_bl} "
+            f"({layout.n_time * layout.n_bl} rows over {layout.n_time} "
+            "timesteps). The results zarr does not belong to this measurement "
+            "set, or an antenna was dropped between the run and the write."
+        )
+
+    ast_vis = xds_tab.ast_vis.data.astype(np.complex64)
+    rfi_vis = xds_tab.rfi_vis.data.astype(np.complex64)
+
+    vis_ast = _to_ms_column(ast_vis.mean(axis=0), dims, fit_chunks, n_freq)
+    vis_rfi = _to_ms_column(rfi_vis.mean(axis=0), dims, fit_chunks, n_freq)
+
+    gains, bad = unit_bad_gains(xds_tab.gains.data.astype(np.complex64))
+    n_bad, bad_ants = count_substituted(bad, ant_axis=1)
+
+    gains_bl_s = baseline_gains(gains, a1, a2, ant_axis=1)
+
+    gained_ast = _to_ms_column(
+        gained_model_mean(gains_bl_s, ast_vis), dims, fit_chunks, n_freq
+    )
+    gained_rfi = _to_ms_column(
+        gained_model_mean(gains_bl_s, rfi_vis), dims, fit_chunks, n_freq
+    )
+    # Guarded again after the reduction: per-sample gains that are all finite
+    # and non-zero can still average to zero, and it is the mean that the data
+    # is divided by.
+    gains_bl_mean, bad_bl_mean = unit_bad_gains(gains_bl_s.mean(axis=0))
+    n_bad_bl = count_substituted(bad_bl_mean)
+
+    gains_bl = _to_ms_column(gains_bl_mean, dims, fit_chunks, n_freq)
+
+    # The zarr's vis_obs is the gained total the forward model produced, so the
+    # total residual need not re-derive it from the two parts -- except on the
+    # samples whose gains were substituted, where the stored value predates it.
+    # Chosen per sample, then averaged; dask shares the two products below with
+    # the ones formed for the per-component columns above.
+    if "vis_obs" in xds_tab:
+        total_s = total_model(
+            xds_tab.vis_obs.data.astype(np.complex64),
+            gains_bl_s * ast_vis,
+            gains_bl_s * rfi_vis,
+            bad[:, a1] | bad[:, a2],
+        )
+    else:
+        # Defensive: every current producer stores it beside the split.
+        total_s = gains_bl_s * (ast_vis + rfi_vis)
+
+    gained_total = _to_ms_column(total_s.mean(axis=0), dims, fit_chunks, n_freq)
 
     vis_obs = xds_ms[data_col]
-    vis_cal = vis_obs
 
-    vis_ast_res = vis_obs - vis_ast
-    vis_rfi_res = vis_obs - vis_rfi
-    vis_res = vis_obs - (vis_ast + vis_rfi)
-    # vis_cal = vis_obs / gains_bl
+    # Sliced by position rather than with .isel so no correlation coordinate can
+    # come along and misalign the arithmetic below.
+    vis_obs_fit = xr.DataArray(
+        vis_obs.data[:, :, corr_idx : corr_idx + 1], dims=dims
+    ).chunk(fit_chunks)
 
-    # vis_ast_res = vis_obs - vis_ast * gains_bl
-    # vis_rfi_res = vis_obs - vis_rfi * gains_bl
-    # vis_res = vis_obs - (vis_ast + vis_rfi) * gains_bl
+    vis_cal = vis_obs_fit / gains_bl
 
-    xds_ms = xds_ms.assign(CORRECTED_DATA=vis_cal)
-    xds_ms = xds_ms.assign(TAB_AST_DATA=vis_ast)
-    xds_ms = xds_ms.assign(TAB_RFI_DATA=vis_rfi)
-    xds_ms = xds_ms.assign(TAB_AST_RES=vis_ast_res)
-    xds_ms = xds_ms.assign(TAB_RFI_RES=vis_rfi_res)
-    xds_ms = xds_ms.assign(TAB_RES_DATA=vis_res)
+    residuals = data_frame_residuals(
+        vis_obs_fit, gained_ast, gained_rfi, gained_total
+    )
+
+    def column(col, fill):
+        """One result placed on the MS's correlation axis, ready to assign."""
+
+        return xr.DataArray(
+            into_corr(col.data, corr_idx, n_corr, fill), dims=dims
+        ).chunk(chunks)
+
+    # Model columns are zero on the correlations that were not fitted; the
+    # data-frame columns pass the data through there, ungained and unsubtracted.
+    passthrough = vis_obs.data
+
+    xds_ms = xds_ms.assign(CORRECTED_DATA=column(vis_cal, passthrough))
+    xds_ms = xds_ms.assign(TAB_AST_DATA=column(vis_ast, 0))
+    xds_ms = xds_ms.assign(TAB_RFI_DATA=column(vis_rfi, 0))
+    xds_ms = xds_ms.assign(TAB_AST_RES=column(residuals["ast"], passthrough))
+    xds_ms = xds_ms.assign(TAB_RFI_RES=column(residuals["rfi"], passthrough))
+    xds_ms = xds_ms.assign(TAB_RES_DATA=column(residuals["total"], passthrough))
 
     cols = [
         "CORRECTED_DATA",
@@ -94,7 +345,21 @@ def write_results_ms(ms_path: str, results_zarr_path: str, data_col: str = "DATA
 
     print(f"Writing tabascal results to {cols} columns in MS file.")
 
-    dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
+    # One compute for the write and for the warning counts, so the warnings
+    # follow the write: the substitution is the designed behaviour and the
+    # warning a report of it, not a precondition. Warning first would cost a
+    # second pass over the mask graph. The masks feed the
+    # columns, so evaluating everything in one graph runs them once, chunk by
+    # chunk, and nothing full-size is ever held in memory for the warnings.
+    n_bad, bad_ants, n_bad_bl, _ = dask.compute(
+        n_bad,
+        bad_ants,
+        n_bad_bl,
+        xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords),
+    )
+
+    warn_bad_gains(n_bad, bad.size, bad_ants)
+    warn_bad_baseline_gains(n_bad_bl, bad_bl_mean.size)
 
 
 @measure_runtime
@@ -140,6 +405,9 @@ def write_results_xds(
             # "rfi_time": da.asarray(args["rfi_times"]),
             # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
         },
+        # Which correlation was fitted, by name. Without it the writer cannot
+        # tell where the results belong on a multi-correlation MS.
+        attrs={"corr": tab_config.args["data"]["corr"]},
     )
     # print(map_xds)
 

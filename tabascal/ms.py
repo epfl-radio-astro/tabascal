@@ -6,12 +6,13 @@ with its own name, instead of accreting into one file the way MS reading
 accreted into ``tab_tools.py``.
 """
 
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+import dask
 from daskms import xds_from_ms, xds_from_table
 
 from tabascal.timing import measure_runtime
@@ -188,6 +189,230 @@ def read_time_scale(column_keywords: dict, column: str = "TIME") -> str:
     return str(ref).strip().lower()
 
 
+# ---------------------------------------------------------------------------
+# Row layout
+# ---------------------------------------------------------------------------
+
+class MSLayout(NamedTuple):
+    """How an MS partition's rows map onto tabascal's ``(n_time, n_bl)`` grid.
+
+    ``a1``/``a2`` are the antenna pairs of one timestep's block, in row order.
+    """
+
+    n_time: int
+    n_bl: int
+    a1: np.ndarray
+    a2: np.ndarray
+
+
+def _materialise(*arrays):
+    """Numpy values of ``arrays``, computing the dask ones in a single pass."""
+
+    lazy = [i for i, a in enumerate(arrays) if hasattr(a, "compute")]
+    values = list(arrays)
+
+    if lazy:
+        computed = dask.compute(*(arrays[i] for i in lazy))
+        for i, value in zip(lazy, computed):
+            values[i] = value
+
+    return tuple(np.asarray(v) for v in values)
+
+
+def ms_layout(xds) -> MSLayout:
+    """Derive and validate the row layout of one MS partition.
+
+    tabascal reads every visibility column as ``(n_time, n_bl)``, so the rows
+    have to be time-major: ``n_bl`` consecutive rows holding one timestep of a
+    fixed baseline sequence, repeated per timestep. That was assumed everywhere
+    the reshape appears; it is checked once here instead, for the reader and the
+    results writer alike.
+
+    Three distinct ways an MS can break the reshape, each silent on its own:
+    a baseline-major store repeats one pair down the first rows; a per-timestep
+    reshuffle keeps the row count right while moving each baseline's data; and
+    rows that cycle through baselines *and* times together satisfy both of those
+    while landing every visibility on the wrong timestamp.
+
+    Nothing the size of a column is ever held in memory. The only values read
+    whole are the ``n_time`` distinct times and the first block's ``n_bl``
+    antenna pairs; the checks over the full columns are reductions, computed
+    together in one pass, chunk by chunk, on dask-backed input.
+    """
+
+    times = xds.TIME.data
+    a1_col = xds.ANTENNA1.data
+    a2_col = xds.ANTENNA2.data
+
+    n_row = int(times.shape[0])
+    (unique_times,) = _materialise(np.unique(times))
+    n_time = int(unique_times.size)
+    n_bl, remainder = divmod(n_row, n_time)
+
+    if remainder:
+        raise ValueError(
+            f"The MS holds {n_row} rows over {n_time} timesteps, which is not "
+            "a whole number of baselines per timestep. tabascal reads "
+            "visibilities as (n_time, n_bl) and cannot use this MS."
+        )
+
+    a1, a2 = _materialise(a1_col[:n_bl], a2_col[:n_bl])
+
+    if len(set(zip(a1.tolist(), a2.tolist()))) != n_bl:
+        raise ValueError(
+            f"The first {n_bl} rows do not hold {n_bl} distinct antenna pairs, so "
+            "the MS is not ordered time-major. tabascal reads visibilities as "
+            "(n_time, n_bl); sort the MS by TIME before running."
+        )
+
+    # The first block's pairs broadcast down the block axis; each block's own
+    # first time broadcasts along it. Only constancy within a block is
+    # required, not ascending block order: the time axis of everything tabascal
+    # writes follows the same block order.
+    times_2d = times.reshape(n_time, n_bl)
+    same_order = (a1_col.reshape(n_time, n_bl) == a1).all() & (
+        a2_col.reshape(n_time, n_bl) == a2
+    ).all()
+    one_time_per_block = (times_2d == times_2d[:, :1]).all()
+
+    same_order, one_time_per_block = (
+        bool(flag) for flag in _materialise(same_order, one_time_per_block)
+    )
+
+    if not same_order:
+        raise ValueError(
+            "The baseline order differs between timesteps. tabascal reads "
+            "visibilities as (n_time, n_bl) with one fixed baseline order per "
+            "timestep; sort the MS by TIME, ANTENNA1, ANTENNA2 before running."
+        )
+
+    if not one_time_per_block:
+        raise ValueError(
+            "The MS rows interleave timesteps within a baseline block: a block "
+            f"of {n_bl} consecutive rows holds more than one TIME. tabascal "
+            "reads visibilities as (n_time, n_bl), so each block must be a "
+            "single timestep; sort the MS by TIME, ANTENNA1, ANTENNA2 before "
+            "running."
+        )
+
+    return MSLayout(n_time=n_time, n_bl=n_bl, a1=a1, a2=a2)
+
+
+def partition_setup(ms_path: str, xds) -> tuple:
+    """``(spectral_window_id, polarization_id)`` for the partition ``xds``.
+
+    ``xds_from_ms`` partitions by ``(FIELD_ID, DATA_DESC_ID)`` and records the id
+    in each partition's attrs, so a partition can say which subtable rows its
+    data is described by rather than assuming row 0.
+    """
+
+    return resolve_data_description(ms_path, int(xds.attrs.get("DATA_DESC_ID", 0)))
+
+
+def partition_polarization(ms_path: str, xds) -> int:
+    """The ``POLARIZATION`` row the partition ``xds`` uses.
+
+    The half of :func:`partition_setup` a caller needs when it is placing
+    correlations rather than reading channel frequencies.
+    """
+
+    return partition_setup(ms_path, xds)[1]
+
+
+def fitted_correlation(
+    ms_path: str, zarr_corr, corr, n_corr: int, pol_id: int = 0
+) -> int:
+    """Index on the MS's correlation axis that the results belong to.
+
+    tabascal fits one correlation. Its name comes from the ``corr`` argument if
+    given, else from the ``corr`` attribute the run recorded on the results
+    zarr, and is resolved to an index **by identity, not by position** -- a
+    single-polarisation MS holds one correlation whatever it is, so ``yy`` is
+    index 0 there.
+
+    ``pol_id`` is the ``POLARIZATION`` row the data partition actually uses,
+    the same one ``read_ms`` resolved through ``DATA_DESCRIPTION``. Row 0 is
+    only a convention: a partition on another row may order its correlations
+    differently, or hold fewer of them, and resolving against the wrong row
+    would put the results in the wrong polarisation without a word.
+
+    A zarr written before that attribute existed carries no name. With one
+    correlation there is only one answer; with more, guessing would silently
+    write the results into the wrong polarisation, so it is an error.
+    """
+
+    name = corr if corr is not None else zarr_corr
+
+    if name is None:
+        if n_corr == 1:
+            return 0
+
+        raise ValueError(
+            f"The MS has {n_corr} correlations and the results zarr does not "
+            "record which one was fitted -- it predates that attribute. Pass "
+            "the correlation explicitly: write_results_ms(..., corr='xx'), or "
+            "tab2MS -c xx."
+        )
+
+    corr_idx = resolve_correlation(ms_path, name, pol_id)
+
+    if not 0 <= corr_idx < n_corr:
+        raise ValueError(
+            f"Correlation {name!r} resolves to index {corr_idx} on POLARIZATION "
+            f"row {pol_id}, but the data partition has {n_corr} correlations. "
+            "The MS's DATA_DESCRIPTION and POLARIZATION subtables disagree."
+        )
+
+    return corr_idx
+
+
+def into_corr(col, corr_idx: int, n_corr: int, fill):
+    """Place a one-correlation result on the MS's correlation axis.
+
+    Results are ``(row, chan, 1)`` while the MS column may be ``(row, chan, 4)``.
+    The fitted correlation takes the result; the others take ``fill`` -- zero for
+    the model columns, and the data column itself for the data-frame columns,
+    which is what "no gain applied and nothing subtracted" means there.
+
+    Works on the raw arrays because xarray will not broadcast a length-1 ``corr``
+    dimension against a length-4 one; the caller re-wraps.
+    """
+
+    if n_corr == 1:
+        return col
+
+    return np.where(np.arange(n_corr) == corr_idx, col, fill)
+
+
+# ---------------------------------------------------------------------------
+# Column layout: MS rows and channels vs tabascal's (bl, freq, time) grid
+# ---------------------------------------------------------------------------
+
+def rows_to_grid(col, n_time: int, n_bl: int, n_freq: int):
+    """MS ``(row, chan)`` to tabascal's ``(bl, freq, time)``.
+
+    The rows are time-major -- ``n_bl`` consecutive rows per timestep, in a fixed
+    baseline order, as :func:`ms_layout` checks -- so the row axis unfolds into
+    ``(n_time, n_bl)`` and the time axis then moves to the back.
+
+    Method calls rather than ``np.``/``jnp.``/``da.`` functions, so the reader can
+    pass jax arrays and the writer dask ones through the same mapping.
+    """
+
+    return col.reshape(n_time, n_bl, n_freq).transpose(1, 2, 0)
+
+
+def grid_to_rows(arr, n_freq: int, n_corr: int = 1):
+    """tabascal's ``(bl, freq, time)`` back to MS ``(row, chan, corr)``.
+
+    The exact inverse of :func:`rows_to_grid`, and the reason they live next to
+    each other: a transpose written once in each direction cannot drift out of
+    step the way two independent ones can.
+    """
+
+    return arr.transpose(2, 0, 1).reshape(-1, n_freq, n_corr)
+
+
 @measure_runtime
 def read_ms(
     ms_path,
@@ -203,8 +428,7 @@ def read_ms(
     # Which spectral window and polarization setup this partition actually uses.
     # xds_from_ms partitions by (FIELD_ID, DATA_DESC_ID) and records the id in the
     # partition attrs; DATA_DESCRIPTION maps it to the subtable rows.
-    data_desc_id = int(xds.attrs.get("DATA_DESC_ID", 0))
-    spw_id, pol_id = resolve_data_description(ms_path, data_desc_id)
+    spw_id, pol_id = partition_setup(ms_path, xds)
 
     corr_idx = resolve_correlation(ms_path, corr, pol_id)
 
@@ -228,8 +452,8 @@ def read_ms(
     ants_itrf = np.array(xds_ant.POSITION.data.compute())
 
     n_ant = ants_itrf.shape[0]
-    n_time = len(np.unique(xds.TIME.data.compute()))
-    n_bl = xds[data_col].data.shape[0] // n_time
+    layout = ms_layout(xds)
+    n_time, n_bl = layout.n_time, layout.n_bl
     n_freq, n_corr = xds[data_col].data.shape[1:]
 
     spec_row = xds_spec[spw_id]
@@ -257,14 +481,12 @@ def read_ms(
 
     print(n_freq, chans)
 
-    read_data = lambda col_name: jnp.transpose(
-        jnp.array(
-            xds[col_name]
-            # .data[:, chans, corr_idx].reshape(n_time, n_bl, n_freq)
-            .data[:, :, corr_idx].reshape(n_time, n_bl, n_freq)
-            .compute()
-        ),
-        (1, 2, 0),
+    # .data[:, chans, corr_idx] once channel selection is wired through.
+    read_data = lambda col_name: rows_to_grid(
+        jnp.array(xds[col_name].data[:, :, corr_idx].compute()),
+        n_time,
+        n_bl,
+        n_freq,
     )
 
     data = {
@@ -291,8 +513,8 @@ def read_ms(
         "vis_obs": read_data(data_col),
         "flags": read_data("FLAG"),
         "noise": jnp.array(xds.SIGMA.data.mean().compute()),
-        "a1": jnp.array(xds.ANTENNA1.data[:n_bl].compute()),
-        "a2": jnp.array(xds.ANTENNA2.data[:n_bl].compute()),
+        "a1": jnp.array(layout.a1),
+        "a2": jnp.array(layout.a2),
     }
 
     return data
