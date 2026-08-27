@@ -1,21 +1,55 @@
-"""Reading Measurement Sets.
+"""Reading Measurement Sets, and the calibration tables that go beside them.
 
 Everything that knows the MS format lives here. Named for the format rather than
 generically (``io.py``) so that a second input format becomes a sibling module
 with its own name, instead of accreting into one file the way MS reading
 accreted into ``tab_tools.py``.
+
+The CASA caltable block at the end is the one place that knows the calibration
+table format, so that gains can be exchanged with standard tooling (``applycal``,
+CASA/CARAcal/stimela) instead of ad-hoc ``.npz`` files. It sits here because a
+caltable is an MS-shaped thing that only means anything beside its MS, and is
+kept a self-contained block so it can become its own module unchanged.
+
+Its scope is the scope tabascal solves for: one spectral window and one
+correlation. Both are checked rather than assumed -- a multi-window table would
+label one window's gains with another's channels, and a table holding a
+different Jones term per polarisation cannot be collapsed to the single gain
+tabascal fits.
+
+Gain convention (CASA's, and the only one used here)
+----------------------------------------------------
+The gain multiplies the *model* to give the *observed* visibility::
+
+    V_obs[p, q] = g_p * conj(g_q) * V_true[p, q]
+
+so calibrating divides it out, and the noise follows the data::
+
+    V_cal      = V_obs / (g_p conj(g_q))
+    sigma_cal  = sigma / |g_p conj(g_q)|
+    weight_cal = weight * |g_p conj(g_q)|**2      (weight == 1 / sigma**2)
+
+A scalar flux scale ``V_cal = k * V_obs`` is therefore the antenna-independent
+gain ``g = k ** -0.5``.
 """
 
+import os
+import shutil
 import warnings
 from typing import NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from numpy.typing import NDArray
 
 import dask
 from daskms import xds_from_ms, xds_from_table
 
+# Re-exported as part of the caltable surface below rather than defined twice:
+# g_p conj(g_q) has one definition in this codebase, and the calibration written
+# to a caltable has to be the same product the model applied.
+from tabascal.interferometry import baseline_gains
 from tabascal.noise import (
     NoUsableSigma,
     per_baseline_freq_sigma,
@@ -764,3 +798,582 @@ def get_observation_data_type(data_col: str):
     }
 
     return data_type
+
+
+# ---------------------------------------------------------------------------
+# CASA calibration tables
+#
+# Self-contained: nothing above depends on anything below, and the casacore
+# imports are function-local so that reading an MS through dask-ms does not pull
+# python-casacore in eagerly. See the gain convention in the module docstring.
+# ---------------------------------------------------------------------------
+
+#: Subtables a caltable carries; CASA copies these straight from the MS.
+_SUBTABLES = ("ANTENNA", "FIELD", "SPECTRAL_WINDOW", "OBSERVATION", "HISTORY")
+
+
+def _caltable_desc():
+    """Table description matching ``casatasks.gaincal``'s output."""
+
+    from casacore.tables import makearrcoldesc, makescacoldesc, maketabdesc
+
+    time = makescacoldesc("TIME", 0.0, valuetype="double")
+    time["desc"]["keywords"] = {
+        "QuantumUnits": ["s"],
+        "MEASINFO": {"type": "epoch", "Ref": "UTC"},
+    }
+    interval = makescacoldesc("INTERVAL", 0.0, valuetype="double")
+    interval["desc"]["keywords"] = {"QuantumUnits": ["s"]}
+
+    scalars = [
+        time,
+        makescacoldesc("FIELD_ID", 0, valuetype="int"),
+        makescacoldesc("SPECTRAL_WINDOW_ID", 0, valuetype="int"),
+        makescacoldesc("ANTENNA1", 0, valuetype="int"),
+        makescacoldesc("ANTENNA2", 0, valuetype="int"),
+        interval,
+        makescacoldesc("SCAN_NUMBER", 0, valuetype="int"),
+        makescacoldesc("OBSERVATION_ID", 0, valuetype="int"),
+    ]
+    arrays = [
+        makearrcoldesc("CPARAM", 0j, ndim=2, valuetype="complex"),
+        makearrcoldesc("PARAMERR", 0.0, ndim=2, valuetype="float"),
+        makearrcoldesc("FLAG", False, ndim=2, valuetype="boolean"),
+        makearrcoldesc("SNR", 0.0, ndim=2, valuetype="float"),
+        # CASA declares WEIGHT but leaves it unfilled; mirror that.
+        makearrcoldesc("WEIGHT", 0.0, ndim=2, valuetype="float"),
+    ]
+
+    return maketabdesc(scalars + arrays)
+
+
+def _path_identity(path: str):
+    """``(st_dev, st_ino)`` of *path*, or ``None`` where nothing is there to stat.
+
+    The filesystem's own answer to "which directory is this", which is the only
+    one that survives the ways a single directory can be spelled.
+    """
+
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+
+    return (stat.st_dev, stat.st_ino)
+
+
+def _same_directory(a: str, b: str) -> bool:
+    """Whether two paths name one directory.
+
+    Equal strings settle it; otherwise the filesystem does, because a
+    case-insensitive one (APFS, NTFS) resolves ``X.ms`` and ``x.ms`` to the same
+    directory while ``realpath`` hands back whichever spelling it was given. The
+    strings differ there and the inode does not.
+
+    Compared through :func:`_path_identity` rather than ``os.path.samefile``, so
+    that a path disappearing between the look and the comparison answers "not
+    the same directory" instead of raising from inside a validation check.
+    """
+
+    if a == b:
+        return True
+
+    a_id = _path_identity(a)
+
+    return a_id is not None and a_id == _path_identity(b)
+
+
+def _is_inside(inner: str, outer: str) -> bool:
+    """Whether *inner* is *outer* or sits somewhere beneath it.
+
+    Walks *inner* up to the root, comparing each ancestor against *outer* by
+    ``(st_dev, st_ino)`` first and by name second. The inode comparison is the
+    authority -- it is what catches an ancestor reached by a different spelling
+    of the same directory -- and the name comparison covers the part of the walk
+    with nothing on disk to stat, such as a fresh output path under an MS that
+    does not exist either.
+
+    An ancestor walk, never a string prefix test: that is what keeps
+    ``/data/x.ms2`` from counting as a child of ``/data/x.ms``.
+    """
+
+    outer_id = _path_identity(outer)
+    current = inner
+
+    while True:
+        if outer_id is not None and _path_identity(current) == outer_id:
+            return True
+
+        if current == outer:
+            return True
+
+        parent = os.path.dirname(current)
+        if parent == current:  # reached the root
+            return False
+
+        current = parent
+
+
+def _reject_overlapping_paths(path: str, ms_path: str) -> None:
+    """Refuse an output path that is, contains, or sits inside the MS.
+
+    ``overwrite=True`` removes the output outright, and the subtables are copied
+    out of the MS *afterwards*, so an output that is the MS -- or an ancestor of
+    it -- deletes the observation before anything is read from it. An output
+    nested inside the MS is the milder form of the same mistake: it writes into
+    the directories it is about to copy from.
+
+    Decided by the filesystem rather than by comparing paths as text. One
+    directory has many spellings -- a symlink, a ``..``, and on a
+    case-insensitive filesystem a different case -- and a guard that trusts the
+    strings hands the caller a way to delete the observation.
+    """
+
+    real_path = os.path.realpath(path)
+    real_ms = os.path.realpath(ms_path)
+
+    if _same_directory(real_path, real_ms):
+        raise ValueError(
+            f"path and ms_path resolve to the same directory ({real_path}). "
+            "Writing the caltable there would delete the Measurement Set it is "
+            "written from."
+        )
+
+    if _is_inside(real_path, real_ms):
+        raise ValueError(
+            f"path ({real_path}) is inside the Measurement Set at {real_ms}. A "
+            "caltable written there would be writing into the subtables it "
+            "copies from; put it beside the MS instead."
+        )
+
+    if _is_inside(real_ms, real_path):
+        raise ValueError(
+            f"path ({real_path}) would contain the Measurement Set at {real_ms}. "
+            "Writing the caltable there would delete the observation before its "
+            "subtables could be copied."
+        )
+
+
+def write_caltable(
+    path: str,
+    gains: NDArray,
+    times: NDArray,
+    ms_path: str,
+    interval: float = 0.0,
+    n_pol: int = 2,
+    viscal: str = "B Jones",
+    overwrite: bool = True,
+) -> str:
+    """Write an ``applycal``-compatible calibration table.
+
+    The layout mirrors exactly what ``casatasks.gaincal`` emits (verified against
+    a reference table it produced): one row per (time, antenna), time-major, with
+    ``CPARAM`` of shape ``(n_chan, n_pol)``. ``B Jones`` rather than ``G Jones``
+    because the gains here are frequency dependent, which a scalar G table cannot
+    represent.
+
+    Verified against CASA: ``applycal`` accepts the table, and its
+    ``CORRECTED_DATA`` reproduces ``V / (g_p conj(g_q))`` to 6e-7 relative
+    (float32 round-off) over 6.7e6 visibilities.
+
+    **Do not rely on applycal to set the weights for a frequency-dependent gain.**
+    ``applycal(calwt=True)`` was measured to apply a single per-row weight factor,
+    constant across channels (within-row CV of the applied factor = 0.0000), even
+    when ``WEIGHT_SPECTRUM`` exists -- it collapses the frequency axis rather than
+    scaling each channel by its own ``|g_ch|**2``. For a channel-constant gain
+    that is exact; for a frequency-dependent one it is an approximation. tabascal
+    therefore computes ``WEIGHT_SPECTRUM = 1 / sigma_cal**2`` per channel itself
+    when it writes results.
+
+    A gain that is zero or non-finite carries no solution, and *both* halves of
+    that are written: ``FLAG`` is set and ``CPARAM`` is NaN. A reader going by
+    the flag and one going by the value have to reach the same conclusion --
+    a zero left in ``CPARAM`` reads as a solution that calibrates to infinity,
+    and an Inf reads as a number too.
+
+    One spectral window only. Every row is written with
+    ``SPECTRAL_WINDOW_ID = 0``, so an MS with more than one window is rejected
+    rather than having one window's gains filed under another's id.
+
+    Parameters
+    ----------
+    path : str
+        Output caltable path.
+    gains : NDArray
+        ``(n_ant, n_freq, n_time)`` complex -- ``g_p``, in the
+        ``V_obs = g_p conj(g_q) V_true`` convention of the module docstring.
+    times : NDArray
+        ``(n_time,)`` MS ``TIME`` values in seconds (MJD seconds, as in the MS).
+    ms_path : str
+        The MS these gains belong to; its ``ANTENNA``, ``FIELD``,
+        ``SPECTRAL_WINDOW``, ``OBSERVATION`` and ``HISTORY`` subtables are copied
+        into the caltable, as CASA does. Subtables it does not have are skipped.
+    n_pol : int, optional
+        CASA writes 2 polarisations even for a single-correlation MS, so the gain
+        is duplicated across the pol axis by default.
+
+    Returns
+    -------
+    str
+        The caltable path.
+
+    The gains are checked against the MS they claim to belong to before any of
+    this happens, since the copied subtables are what the table's own rows index:
+    ``ANTENNA1`` into ``ANTENNA``, and ``CPARAM``'s channel axis onto
+    ``CHAN_FREQ``. Gains of the wrong width would produce a table that disagrees
+    with the copy of the MS inside itself.
+
+    ``path`` may not be, contain, or sit inside ``ms_path``: the output is
+    removed before the subtables are copied out of the MS, so an overlapping
+    path would destroy the observation. That is rejected before any of it
+    happens, which is also what keeps the clean-up on the failure path from
+    reaching anything but the caltable's own directory.
+
+    Raises
+    ------
+    ValueError
+        If the arguments do not describe one single-spectral-window solution set
+        for this MS. **Every check on the caller's arguments runs before an
+        existing table is removed**: ``overwrite=True`` deletes a calibration
+        that took a run to produce, and a caller's mistake must not cost them
+        that. An I/O failure part-way through the write cannot put the old table
+        back; the partial output is then removed on a best-effort basis before
+        the error is re-raised, so a half-written table can only survive a
+        failure that also prevents its removal. The original exception always
+        propagates -- nothing raised during the clean-up replaces it.
+    FileExistsError
+        If ``path`` exists and ``overwrite`` is false.
+    """
+
+    from casacore.tables import table
+
+    gains = np.asarray(gains)
+    if gains.ndim != 3:
+        raise ValueError(f"gains must be (n_ant, n_freq, n_time), got {gains.shape}")
+    n_ant, n_freq, n_time = gains.shape
+
+    # Checked here rather than left to np.isfinite half-way through the write,
+    # which is past the point of no return for the table being overwritten.
+    if not np.issubdtype(gains.dtype, np.number):
+        raise ValueError(
+            f"gains must be a numeric array to be written as complex gains, got "
+            f"dtype {gains.dtype}"
+        )
+
+    times = np.asarray(times, dtype=float)
+    if times.ndim != 1 or times.size != n_time:
+        raise ValueError(
+            f"times must be one-dimensional of length n_time = {n_time} to match "
+            f"the gains, got shape {times.shape}"
+        )
+
+    # bool first: it subclasses int, so True would otherwise be accepted as 1.
+    if (
+        isinstance(n_pol, (bool, np.bool_))
+        or not isinstance(n_pol, (int, np.integer))
+        or n_pol < 1
+    ):
+        raise ValueError(
+            f"n_pol must be a positive integer, got {n_pol!r}. CASA writes 2 "
+            "polarisations even for a single-correlation MS."
+        )
+
+    try:
+        interval = float(interval)
+    except (TypeError, ValueError) as err:
+        raise ValueError(
+            f"interval must be a number of seconds, got {interval!r}"
+        ) from err
+
+    if not isinstance(viscal, str):
+        raise ValueError(
+            f"viscal must be a string naming the calibration type, got {viscal!r}"
+        )
+
+    # Checked rather than taken for its truthiness, because the truthy values are
+    # the dangerous ones: overwrite="False" reads as a refusal and deletes the
+    # table the caller was trying to protect.
+    if not isinstance(overwrite, (bool, np.bool_)):
+        raise ValueError(
+            f"overwrite must be True or False, got {overwrite!r}. It decides "
+            "whether an existing calibration table is deleted, so it is not "
+            "taken on truthiness."
+        )
+
+    # Before anything is read from disk, let alone removed from it: the output
+    # must not overlap the MS it is written from.
+    _reject_overlapping_paths(path, ms_path)
+
+    # The gains have to describe the MS whose subtables are about to be copied in
+    # beside them, since the table's own rows index those copies.
+    ms_spw = os.path.join(ms_path, "SPECTRAL_WINDOW")
+    if os.path.exists(ms_spw):
+        chan_freq = _single_spw_chan_freq(ms_spw, f"{ms_path}::SPECTRAL_WINDOW")
+
+        if n_freq != len(chan_freq):
+            raise ValueError(
+                f"gains cover {n_freq} channels but {ms_path}::SPECTRAL_WINDOW "
+                f"describes {len(chan_freq)}. The caltable carries a copy of that "
+                "subtable, so its CPARAM channel axis would not line up with its "
+                "own channel frequencies."
+            )
+
+    n_ms_ant = _ms_antenna_count(ms_path)
+    if n_ms_ant is not None and n_ant != n_ms_ant:
+        raise ValueError(
+            f"gains cover {n_ant} antennas but {ms_path}::ANTENNA holds "
+            f"{n_ms_ant} rows. The caltable carries a copy of that subtable, so "
+            "its ANTENNA1 ids would not index its own antenna table."
+        )
+
+    # Everything above is validation; only now is anything on disk touched.
+    if os.path.exists(path):
+        if not overwrite:
+            raise FileExistsError(f"{path} already exists. Use overwrite=True.")
+        shutil.rmtree(path)
+
+    n_row = n_time * n_ant
+
+    # Row order is time-major: (t0,a0), (t0,a1), ... -- matching gaincal.
+    ant_idx = np.tile(np.arange(n_ant, dtype=np.int32), n_time)
+    time_col = np.repeat(times, n_ant)
+
+    # (n_ant, n_freq, n_time) -> (n_row, n_freq), then duplicated across pol.
+    g_rows = np.transpose(gains, (2, 0, 1)).reshape(n_row, n_freq)
+    bad = ~np.isfinite(g_rows) | (g_rows == 0)
+    solved = np.where(bad, complex(np.nan, np.nan), g_rows)
+    cparam = np.repeat(solved[:, :, None], n_pol, axis=2).astype(np.complex64)
+    flag = np.repeat(bad[:, :, None], n_pol, axis=2)
+
+    # Past here the old table is gone and cannot be brought back, so the one
+    # guarantee left is that a failure leaves no half-written table where a valid
+    # one is expected. BaseException, not Exception: a Ctrl-C mid-write is
+    # exactly the case that would otherwise strand one.
+    try:
+        with table(path, _caltable_desc(), nrow=n_row, ack=False) as tb:
+            tb.putcol("TIME", time_col)
+            tb.putcol("ANTENNA1", ant_idx)
+            tb.putcol("ANTENNA2", np.full(n_row, -1, dtype=np.int32))
+            tb.putcol("FIELD_ID", np.zeros(n_row, dtype=np.int32))
+            tb.putcol("SPECTRAL_WINDOW_ID", np.zeros(n_row, dtype=np.int32))
+            tb.putcol("SCAN_NUMBER", np.zeros(n_row, dtype=np.int32))
+            tb.putcol("OBSERVATION_ID", np.zeros(n_row, dtype=np.int32))
+            tb.putcol("INTERVAL", np.full(n_row, interval))
+            tb.putcol("CPARAM", cparam)
+            tb.putcol("FLAG", flag)
+            tb.putcol("PARAMERR", np.zeros((n_row, n_freq, n_pol), dtype=np.float32))
+            tb.putcol("SNR", np.ones((n_row, n_freq, n_pol), dtype=np.float32))
+
+            # CASA identifies a caltable by its table INFO record, not by its
+            # keywords -- without this, applycal rejects the table with 'is not a
+            # valid Calibration table'.
+            tb.putinfo({"type": "Calibration", "subType": viscal, "readme": ""})
+
+            tb.putkeyword("VisCal", viscal)
+            tb.putkeyword("ParType", "Complex")
+            tb.putkeyword("MSName", os.path.basename(os.path.normpath(ms_path)))
+            tb.putkeyword("PolBasis", "unknown")
+
+            for sub in _SUBTABLES:
+                src = os.path.join(ms_path, sub)
+                if not os.path.exists(src):
+                    continue
+                dst = os.path.join(path, sub)
+                # Not casacore's tablecopy(): that opens the source table and
+                # never closes it. Same copy, with both handles released.
+                with table(src, ack=False) as source:
+                    source.copy(dst).close()
+                tb.putkeyword(sub, "Table: " + os.path.abspath(dst))
+
+            tb.flush()
+    except BaseException:
+        # Best effort, and deliberately silent: whatever went wrong with the
+        # write is what the caller needs to see, so nothing raised while clearing
+        # up is allowed to take its place.
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except BaseException:
+            pass
+        raise
+
+    return path
+
+
+def _single_spw_chan_freq(spw_path: str, described: str) -> NDArray:
+    """``CHAN_FREQ`` of the one spectral window in the table at *spw_path*.
+
+    A single spectral window is the supported scope, and it is checked rather
+    than assumed. A caltable's rows all carry ``SPECTRAL_WINDOW_ID = 0`` and its
+    frequencies are read back from row 0, so a second window has nowhere to go:
+    its gains would be filed under the first window's id, and read out against
+    the first window's channels, with nothing to say they were wrong.
+    """
+
+    from casacore.tables import table
+
+    with table(spw_path, ack=False) as spw:
+        n_spw = spw.nrows()
+
+        if n_spw != 1:
+            raise ValueError(
+                f"{described} holds {n_spw} spectral windows. tabascal writes and "
+                "reads single-spectral-window calibration tables -- every row "
+                "carries SPECTRAL_WINDOW_ID 0 and the channel frequencies come "
+                "from window 0 -- so a multi-window table would silently label "
+                "one window's gains with another window's channels. Split by "
+                "spectral window first."
+            )
+
+        return np.asarray(spw.getcell("CHAN_FREQ", 0), dtype=float)
+
+
+def _ms_antenna_count(ms_path: str) -> Optional[int]:
+    """Number of rows in an MS's ``ANTENNA`` subtable, or ``None`` if it has none.
+
+    ``None`` rather than an error: the subtables are optional, and a caltable
+    written for an MS that carries none has nothing to contradict.
+    """
+
+    from casacore.tables import table
+
+    ant_path = os.path.join(ms_path, "ANTENNA")
+    if not os.path.exists(ant_path):
+        return None
+
+    with table(ant_path, ack=False) as ant:
+        return int(ant.nrows())
+
+
+def _caltable_freqs(path: str) -> Optional[NDArray]:
+    """Channel frequencies from a caltable's own ``SPECTRAL_WINDOW``, if it has one.
+
+    A caltable carries a copy of the MS's ``SPECTRAL_WINDOW``, which is what makes
+    it self-describing: the gains can be placed on their channels without the MS
+    that produced them. ``None`` when the subtable was not copied, since a table
+    written for an MS that had none is still a valid caltable.
+    """
+
+    spw_path = os.path.join(path, "SPECTRAL_WINDOW")
+    if not os.path.exists(spw_path):
+        return None
+
+    return _single_spw_chan_freq(spw_path, f"{path}::SPECTRAL_WINDOW")
+
+
+def _collapse_pols(cparam: NDArray, flag: NDArray) -> NDArray:
+    """One gain per ``(row, channel)`` from a caltable's polarisation axis.
+
+    tabascal fits one correlation and :func:`write_caltable` duplicates that one
+    solution across the pol axis, so collapsing it again is a no-op for our own
+    tables. A caltable from CASA can hold a genuinely different Jones term per
+    polarisation, though, and averaging those would return a gain that calibrates
+    neither -- so the unflagged polarisations are *required to agree* rather than
+    quietly reduced. Reading per-polarisation gains is issue #151.
+
+    A flagged polarisation is missing, not zero: where one pol holds a solution
+    and the other does not, the surviving one is the answer. Only an entry with
+    no unflagged polarisation left is NaN.
+    """
+
+    valid = ~np.asarray(flag, dtype=bool)
+    n_valid = valid.sum(axis=-1)
+
+    # Every unflagged pol is compared against the first unflagged one. Where only
+    # one is valid that compares it with itself; where none is, the comparison is
+    # masked out entirely, so junk under a flag says nothing.
+    first = np.argmax(valid, axis=-1)[..., None]
+    reference = np.take_along_axis(cparam, first, axis=-1)
+    disagrees = valid & ~np.isclose(cparam, reference)
+
+    if disagrees.any():
+        n_entry = int(disagrees.any(axis=-1).sum())
+        raise ValueError(
+            f"The caltable holds different solutions per polarisation at {n_entry} "
+            "(row, channel) entries. tabascal fits a single correlation, so "
+            "reading per-polarisation gains is not yet supported -- see issue "
+            "#151. Select one polarisation, or split the table, before reading."
+        )
+
+    # Summed over the valid pols only. A flagged cell's CPARAM is NaN, so
+    # averaging it in would erase the solution the other polarisation still holds.
+    total = np.where(valid, cparam, 0).sum(axis=-1)
+
+    return np.where(n_valid > 0, total / np.maximum(n_valid, 1), np.nan)
+
+
+def read_caltable(path: str) -> dict:
+    """Read a caltable written by :func:`write_caltable` (or by CASA).
+
+    Returns a dict with ``gains`` ``(n_ant, n_freq, n_time)`` complex -- flagged
+    solutions set to NaN -- plus ``times``, ``ant_idx``, ``freqs`` (``None`` if
+    the table carries no ``SPECTRAL_WINDOW``) and ``viscal``.
+
+    Reads the single-correlation, single-spectral-window tables tabascal fits.
+    A table whose polarisations carry genuinely different solutions, or which
+    describes more than one spectral window, is an error rather than a silent
+    collapse -- see :func:`_collapse_pols` and :func:`_single_spw_chan_freq`.
+    """
+
+    from casacore.tables import table
+
+    with table(path, ack=False) as tb:
+        time_col = tb.getcol("TIME")
+        ant1 = tb.getcol("ANTENNA1")
+        cparam = tb.getcol("CPARAM")  # (n_row, n_freq, n_pol)
+        flag = tb.getcol("FLAG")
+        viscal = tb.getkeyword("VisCal") if "VisCal" in tb.keywordnames() else ""
+
+    g = _collapse_pols(cparam, flag)  # (n_row, n_freq)
+
+    times = np.unique(time_col)
+    n_ant = int(ant1.max()) + 1
+    n_time, n_freq = len(times), g.shape[1]
+
+    gains = np.full((n_ant, n_freq, n_time), np.nan, dtype=complex)
+    t_idx = np.searchsorted(times, time_col)
+    gains[ant1, :, t_idx] = g
+
+    return {
+        "gains": gains,
+        "times": times,
+        "ant_idx": np.arange(n_ant),
+        "freqs": _caltable_freqs(path),
+        "viscal": viscal,
+    }
+
+
+def apply_gains_to_data(
+    vis: NDArray,
+    gains: NDArray,
+    a1: NDArray,
+    a2: NDArray,
+    sigma: NDArray | float | None = None,
+):
+    """Divide the gains out of the data (and carry the noise with it).
+
+    This is the whole convention in one place -- see the module docstring.
+
+    ``vis`` is ``(n_bl, n_freq, n_time)``; ``gains`` is ``(n_ant, n_freq,
+    n_time)``; ``sigma`` is anything broadcastable against ``vis`` (a scalar, or
+    ``(n_bl, 1, 1)``).
+
+    Returns ``(vis_cal, sigma_cal)``; ``sigma_cal`` is ``None`` if no ``sigma``
+    was given. A baseline whose gain is dead -- flagged, zero or non-finite --
+    has no calibrated value, and comes back as NaN in both; such visibilities
+    must be flagged by the caller.
+    """
+
+    g_bl = baseline_gains(np.asarray(gains), np.asarray(a1), np.asarray(a2))
+
+    # Every kind of dead gain is made the one NaN the caller is told to expect.
+    # Left alone, a zero gain divides to Inf and an Inf gain divides to zero, and
+    # both of those read downstream as ordinary numbers -- so a caller flagging
+    # on isnan would keep them.
+    dead = ~np.isfinite(g_bl) | (g_bl == 0)
+    g_bl = np.where(dead, np.nan, g_bl)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        vis_cal = np.asarray(vis) / g_bl
+        sigma_cal = None if sigma is None else np.asarray(sigma) / np.abs(g_bl)
+
+    return vis_cal, sigma_cal
