@@ -8,6 +8,7 @@ API Reference
    api/trajectory
    api/rfi_signal
    api/rfi_vis
+   api/ast_signal
    api/ast_vis
    api/gains
    api/time
