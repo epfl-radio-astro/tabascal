@@ -1,8 +1,9 @@
-"""The ``tabascal`` CLI argument surface.
+"""The ``tabascal`` CLI: its argument surface, and what ``run()`` always reports.
 
-Every command form the documentation shows a user must actually parse. These
-tests only exercise the parser, so nothing is imported from the heavy JAX/NumPyro
-run implementation and nothing is executed.
+Every command form the documentation shows a user must actually parse. The
+parser tests exercise the parser alone, so nothing is imported from the heavy
+JAX/NumPyro run implementation and nothing is executed; the ``run()`` tests
+import that module lazily and stub the run itself out.
 """
 
 import re
@@ -50,6 +51,15 @@ def _parse(*argv):
     return build_parser().parse_args(list(argv))
 
 
+def _raise(error):
+    """A no-argument stub that raises ``error``."""
+
+    def stub():
+        raise error
+
+    return stub
+
+
 class TestRunSubcommand:
 
     def test_config_and_sim_dir(self):
@@ -80,6 +90,139 @@ class TestRunSubcommand:
         # The bare `tabascal -c ...` form the docs used to show is not valid.
         with pytest.raises(SystemExit):
             _parse("-c", "config.yaml")
+
+
+class TestRunReporting:
+    """``run()`` reports peak memory however the run ends; timings only on success."""
+
+    @pytest.fixture
+    def impl(self):
+        """The run implementation module, imported lazily.
+
+        Kept out of the module scope so the parser tests above go on paying
+        nothing for the JAX/NumPyro import.
+        """
+        from tabascal.scripts import _run_tabascal_impl
+
+        return _run_tabascal_impl
+
+    @pytest.fixture
+    def calls(self, impl, monkeypatch):
+        """Record what ``run()`` reports, with everything heavy stubbed out."""
+        calls = []
+        monkeypatch.setattr(impl, "load_config", lambda path: {})
+        # set_precision and enable_timings both mutate global state (x64, the
+        # timing manager); neither is under test here.
+        monkeypatch.setattr(impl, "set_precision", lambda config: False)
+        monkeypatch.setattr(impl, "enable_timings", lambda: None)
+        monkeypatch.setattr(impl, "print_memory_usage", lambda: calls.append("memory"))
+        monkeypatch.setattr(impl, "print_timings", lambda: calls.append("timings"))
+        return calls
+
+    @staticmethod
+    def _stub_run(impl, monkeypatch, calls, raises=None):
+        def tabascal_subtraction(*args, **kwargs):
+            calls.append("run")
+            if raises is not None:
+                raise raises
+
+        monkeypatch.setattr(impl, "tabascal_subtraction", tabascal_subtraction)
+
+    def test_reports_memory_when_the_run_raises(self, impl, monkeypatch, calls):
+        """An OOM -- or any other mid-run death -- still gets its peak-memory number."""
+        error = RuntimeError("RESOURCE_EXHAUSTED: out of memory")
+        self._stub_run(impl, monkeypatch, calls, raises=error)
+
+        with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
+            impl.run(_parse("run", "-c", "c.yaml", "-t"))
+
+        # Timings are deliberately left out: a timing table for a dead run misleads.
+        assert calls == ["run", "memory"]
+
+    def test_reports_memory_when_the_run_exits_on_an_orbit_error(
+        self, impl, monkeypatch, calls
+    ):
+        """The TLE/truth error path exits 1 -- and reports on the way out."""
+        from tabascal.orbit import TLEError
+
+        self._stub_run(impl, monkeypatch, calls, raises=TLEError("no orbit for 99999"))
+
+        with pytest.raises(SystemExit) as exc:
+            impl.run(_parse("run", "-c", "c.yaml"))
+
+        assert exc.value.code == 1
+        assert calls == ["run", "memory"]
+
+    @pytest.mark.parametrize(
+        "argv, expected",
+        [
+            (("run", "-c", "c.yaml"), ["run", "memory"]),
+            (("run", "-c", "c.yaml", "-t"), ["run", "memory", "timings"]),
+        ],
+    )
+    def test_success_path_is_unchanged(self, impl, monkeypatch, calls, argv, expected):
+        """A completed run reports memory, and timings when they were asked for."""
+        self._stub_run(impl, monkeypatch, calls)
+
+        impl.run(_parse(*argv))
+
+        assert calls == expected
+
+    def test_a_failed_report_does_not_mask_the_run_failure(
+        self, impl, monkeypatch, calls, capsys
+    ):
+        """The report queries the backend that may have just died -- it must not raise.
+
+        Without this the reporting exception would replace the OOM (or the
+        TLE/truth ``SystemExit``) on the way out, losing the primary diagnostic.
+        """
+        self._stub_run(impl, monkeypatch, calls, raises=RuntimeError("RESOURCE_EXHAUSTED"))
+        monkeypatch.setattr(
+            impl,
+            "print_memory_usage",
+            _raise(RuntimeError("backend is gone")),
+        )
+
+        with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
+            impl.run(_parse("run", "-c", "c.yaml"))
+
+        assert "backend is gone" in capsys.readouterr().err
+
+    def test_a_failed_report_does_not_mask_the_orbit_error_exit(
+        self, impl, monkeypatch, calls, capsys
+    ):
+        """Nor may it turn the documented exit-1 into an unhandled exception."""
+        from tabascal.orbit import TLEError
+
+        self._stub_run(impl, monkeypatch, calls, raises=TLEError("no orbit for 99999"))
+        monkeypatch.setattr(
+            impl, "print_memory_usage", _raise(RuntimeError("backend is gone"))
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            impl.run(_parse("run", "-c", "c.yaml"))
+
+        assert exc.value.code == 1
+        assert "backend is gone" in capsys.readouterr().err
+
+    def test_a_worker_rank_reports_nothing_on_success(self, impl, monkeypatch, calls):
+        """Only rank 0 talks: the report tables are printed once, not once per process."""
+        monkeypatch.setattr(impl, "is_process_0", lambda: False)
+        self._stub_run(impl, monkeypatch, calls)
+
+        impl.run(_parse("run", "-c", "c.yaml", "-t"))
+
+        assert calls == ["run"]
+
+    def test_a_worker_rank_reports_nothing_but_still_fails(self, impl, monkeypatch, calls):
+        """The rank gate silences the report, never the failure."""
+        monkeypatch.setattr(impl, "is_process_0", lambda: False)
+        self._stub_run(impl, monkeypatch, calls, raises=RuntimeError("RESOURCE_EXHAUSTED"))
+
+        with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
+            impl.run(_parse("run", "-c", "c.yaml", "-t"))
+
+        assert calls == ["run"]
 
 
 class TestDocumentedCommandScraper:

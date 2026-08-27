@@ -447,8 +447,19 @@ def run(args):
     except (TLEError, TruthError) as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        # Report even when the run dies mid-way (e.g. OOM): the peak up to
+        # the failure is the number needed to diagnose it. Timings stay out of
+        # here -- a timing table for a dead run misleads. (An XLA `Check
+        # failure` process abort runs no `finally`, so it is still unreported.)
+        if is_process_0():
+            try:
+                print_memory_usage()
+            except Exception as e:
+                # The report queries the very backend that may have just died, and
+                # an exception raised in a `finally` replaces the one on its way
+                # out. Never let the diagnostic destroy the failure it describes.
+                print(f"\nCould not report memory usage: {e}", file=sys.stderr)
 
-    if is_process_0():
-        print_memory_usage()
-        if args.timings:
-            print_timings()
+    if is_process_0() and args.timings:
+        print_timings()
