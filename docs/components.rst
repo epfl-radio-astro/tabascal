@@ -10,6 +10,7 @@ TABASCAL uses a component-based model description. This means that various diffe
    components/trajectory
    components/rfi_signal
    components/rfi_vis
+   components/ast_signal
    components/ast_vis
    components/gains
 
@@ -34,7 +35,7 @@ TABASCAL uses a component-based model description. This means that various diffe
        rfi_A [label="rfi_A", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        vis_rfi [label="vis_rfi", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        ast_radec [label="ast_radec", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
-       ast_I [label="ast_I", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
+       ast_I [label="• ast_I\l• ast_shape\l", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        vis_ast [label="vis_ast", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
        vis_obs [label="• gains\l• vis_obs", shape=ellipse, fillcolor=lightgray, fontname="Courier"];
 

@@ -207,6 +207,77 @@ The parameters for the power spectrum are defined as
 * `gammas`: The rate of drop off in the power spectrum. As $\gamma \rightarrow \infty$, the power spectrum tends to a Gaussian with width given by `k0_freq` in the frequency axis and inferred from `fov_deg` in the time axis.
 * `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and then Fourier components, where the power spectrum value is less than `p0 * cutoff`, are removed and not modelled. This reduces the number of parameters to fit.
 
+### A fixed sky of discrete sources
+
+The GP sky above is flexible: it has per-baseline freedom, so a free per-antenna gain can be absorbed into it and is a flat direction of the likelihood. A source with a *known* position, flux and shape is rigid, and so anchors the gain. That sky is configured with `ast.point_sources` and needs two components, {class}`~tabascal.components.ast_signal.FixedDiscreteSky` to read the catalogue and {class}`~tabascal.components.ast_vis.DiscreteSkyVis` to turn it into visibilities:
+
+```yaml
+model:
+  components:
+    - ast_signal:FixedDiscreteSky   # must come before DiscreteSkyVis
+    - ast_vis:GPVisAst              # optional
+    - ast_vis:DiscreteSkyVis
+    - gains:UnitaryGains
+
+ast:
+  point_sources:
+    - {name: Fornax A, ra: 50.6738, dec: -37.2083, I: 750.0, ref_freq_mhz: 154.0, alpha: -0.77}
+  source_block_size: 128
+```
+
+`FixedDiscreteSky` writes the sky into the model state and `DiscreteSkyVis` reads it, so **`FixedDiscreteSky` must be listed first**. `DiscreteSkyVis` *accumulates* into `vis_ast` rather than assigning it, so it composes with `ast_vis:GPVisAst` — with both listed, `vis_ast` is the GP plus the fixed sources, and since `vis_ast` is zeroed before the components run the two may be given in either order. Neither component has any free parameters.
+
+Sources are either the inline list above or a path to an OSKAR sky model file:
+
+```yaml
+ast:
+  point_sources: /path/to/sky.osm
+```
+
+The inline form requires `ra` and `dec` in degrees and `I` in Jy, and optionally takes `name`, `ref_freq_mhz`, `alpha`, `Q`, `U`, `V`, `rm`, `fwhm_major_arcsec`, `fwhm_minor_arcsec` and `position_angle_deg`. That list is exhaustive and case-sensitive: any other field is an error rather than being ignored, since a typo would otherwise change the source in silence — `fwhm_maj` for `fwhm_major_arcsec` would leave a Gaussian modelled as a point. An optional field may be given as `null` to mean "unset", but any other unreadable value (`alpha: ""`, `ref_freq_mhz: false`) is an error rather than a fallback to the default. The file form is the OSKAR sky model, which is what [Karabo](https://github.com/i4Ds/Karabo-Pipeline) emits: one source per line, fields separated by whitespace and/or commas, `#` starts a comment, and blank lines are skipped.
+
+`I` is the *integrated* flux of the source, and that is what appears on a zero-length baseline in any direction — there is no `1/n` applied to it. (The measurement equation carries the sky *brightness* as `B/n`, because the solid-angle element is `dl dm / n`; for a discrete source of integrated flux `S` the brightness is `S` times a delta function of solid angle, and the two factors of `n` cancel exactly.)
+
+| # | Column | Units | Meaning |
+|---|---|---|---|
+| 1 | RA | deg | Right ascension |
+| 2 | Dec | deg | Declination |
+| 3 | I | Jy | Stokes I at the reference frequency |
+| 4 | Q | Jy | Stokes Q |
+| 5 | U | Jy | Stokes U |
+| 6 | V | Jy | Stokes V |
+| 7 | Reference frequency | Hz | Frequency at which the Stokes fluxes are quoted |
+| 8 | Spectral index | — | `alpha` in `I(nu) = I (nu / nu_ref)**alpha` |
+| 9 | Rotation measure | rad/m² | |
+| 10 | FWHM major | arcsec | Gaussian major axis; `0` for a point source |
+| 11 | FWHM minor | arcsec | Gaussian minor axis; `0` for a point source |
+| 12 | Position angle | deg | Major-axis position angle, north through east |
+
+A row need not carry all twelve fields, but only three lengths are meaningful, and they follow OSKAR's own fixed-format reader:
+
+* **3 to 9 columns** — the leading columns above, with the rest defaulting to zero. `ra dec I` is a valid flat-spectrum point source.
+* **11 columns** — the *legacy* layout: columns 1-8 as above, then FWHM major, FWHM minor and position angle, with no rotation measure (it defaults to zero). This is not the 12-column layout with one field missing; read as though it were, the major axis lands in the rotation-measure column and a perfectly ordinary Gaussian is rejected as polarised.
+* **12 columns** — the full modern layout.
+
+**10 columns, or 13 and more, are rejected**: 10 is a half-specified shape (a major axis with no minor axis or position angle) and 13+ is not the format.
+
+Two points about the columns themselves:
+
+* **Polarisation is parsed but not modelled.** A non-zero Stokes Q, U or V, or a non-zero rotation measure, is *rejected* with an error naming the source, rather than being silently dropped. The whole format is accepted so that modelling polarisation later ([issue #151](https://github.com/epfl-radio-astro/tabascal/issues/151)) widens what these values mean rather than changing what the file may contain.
+* **A spectral index needs a reference frequency.** A non-zero spectral index with no positive reference frequency is an error, since falling back to a flat spectrum would put the source at the wrong flux in every channel with nothing in the output to say so. A zero spectral index is a flat spectrum and needs no reference frequency.
+
+A source with a non-zero FWHM is an elliptical Gaussian, which multiplies the point-source visibility by the uv-plane envelope
+
+$$G(u,v) = \exp\left(-\frac{\pi^2}{4\ln 2}\left(a^2 u'^2 + b^2 v'^2\right)\right)$$
+
+for FWHM $a$ (major) and $b$ (minor) in radians, where $(u', v')$ is the baseline in wavelengths rotated into the source frame, $u' = u\sin\phi + v\cos\phi$ along the major axis and $v' = u\cos\phi - v\sin\phi$ along the minor axis. The position angle $\phi$ follows the radio convention, measured from north (the $m$ axis) through east (the $l$ axis), so `position_angle_deg: 0` puts the major axis north-south and a north-south baseline is the one that resolves the source out. A zero FWHM gives $G = 1$ exactly, so points and Gaussians are the same code path and the same component.
+
+A source more than 90 degrees from the phase centre is modelled as given, not rejected — the w term is computed exactly over the whole sphere — but it raises a warning naming the sources, since in practice it means a swapped or mis-signed coordinate rather than a real field.
+
+* `source_block_size`: The number of sources `DiscreteSkyVis` handles per step of its scan over the catalogue, a whole number defaulting to `128`. The geometric delay array is `(n_bl, n_time, n_src)`, which for a large catalogue is the biggest array in the model; the scan replaces `n_src` in that shape with `source_block_size`, at the cost of recomputing each block in the backward pass. It is purely a memory strategy — the result does not depend on it.
+
+Note that the catalogue fluxes are in the same scale as the data the model is fit to. With data calibrated to Jy these are physical Jy; without that, the data are in raw correlator units and a Jy catalogue flux is meaningless.
+
 
 ## RFI signal
 
