@@ -691,6 +691,100 @@ class TestSourceMsConsistency:
         assert os.path.exists(path)
 
 
+class TestOutputDoesNotOverlapTheMs:
+    """The output must not be, contain, or sit inside the MS it is written from.
+
+    ``overwrite=True`` removes the output path outright, and the subtables are
+    copied out of the MS *afterwards* -- so an output that is the MS, or contains
+    it, deletes the observation before reading it. The comparison is on resolved
+    paths, because a symlink and a ``..`` are two spellings of one directory and
+    a plain string prefix would call ``x.ms2`` a child of ``x.ms``.
+    """
+
+    def _ms_still_reads(self, ms_path):
+        """The MS is openable and its subtables still hold what they held."""
+
+        with table(ms_path, ack=False) as ms:
+            assert ms.nrows() == 1
+
+        with table(os.path.join(ms_path, "ANTENNA"), ack=False) as ant:
+            assert ant.nrows() == N_ANT
+
+        with table(os.path.join(ms_path, "SPECTRAL_WINDOW"), ack=False) as spw:
+            assert np.allclose(spw.getcell("CHAN_FREQ", 0), FREQS)
+
+    def test_the_output_may_not_be_the_ms_itself(self, tmp_path, gains, ms_path):
+        with pytest.raises(ValueError, match="same directory"):
+            write_caltable(
+                ms_path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        self._ms_still_reads(ms_path)
+
+    def test_the_output_may_not_be_a_symlink_to_the_ms(
+        self, tmp_path, gains, ms_path
+    ):
+        """Why the comparison is on realpaths and not on the strings given."""
+
+        link = str(tmp_path / "link.B")
+        os.symlink(ms_path, link)
+
+        with pytest.raises(ValueError, match="same directory"):
+            write_caltable(
+                link, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        self._ms_still_reads(ms_path)
+
+    def test_the_output_may_not_sit_inside_the_ms(self, tmp_path, gains, ms_path):
+        inside = os.path.join(ms_path, "cal.B")
+
+        with pytest.raises(ValueError, match="inside the Measurement Set"):
+            write_caltable(
+                inside, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        self._ms_still_reads(ms_path)
+
+    def test_the_output_may_not_contain_the_ms(self, tmp_path, gains):
+        """The one that costs the observation: rmtree of an ancestor of the MS."""
+
+        outer = str(tmp_path / "outer")
+        os.makedirs(outer)
+        ms = _minimal_ms(os.path.join(outer, "inner.ms"))
+
+        with pytest.raises(ValueError, match="would contain the Measurement Set"):
+            write_caltable(outer, gains, np.arange(N_TIME, dtype=float), ms_path=ms)
+
+        assert os.path.exists(outer)
+        self._ms_still_reads(ms)
+
+    def test_a_relative_spelling_of_the_same_directory_is_caught(
+        self, tmp_path, gains, ms_path
+    ):
+        """``..`` makes a second spelling that a string comparison would miss."""
+
+        detour = os.path.join(ms_path, "..", os.path.basename(ms_path))
+
+        with pytest.raises(ValueError, match="same directory"):
+            write_caltable(
+                detour, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        self._ms_still_reads(ms_path)
+
+    def test_a_sibling_whose_name_extends_the_ms_name_is_fine(self, tmp_path, gains):
+        """``x.ms2`` is not inside ``x.ms``; a prefix test would say it was."""
+
+        ms = _minimal_ms(str(tmp_path / "x.ms"))
+        path = str(tmp_path / "x.ms2")
+
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms)
+
+        assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
+        self._ms_still_reads(ms)
+
+
 class TestPartialWrites:
     """A write that fails part-way leaves nothing behind.
 

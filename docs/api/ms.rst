@@ -117,6 +117,14 @@ of the MS's ``ANTENNA`` and ``SPECTRAL_WINDOW``, and its own rows index those
 copies, so gains of the wrong antenna or channel width would produce a table
 that disagrees with the MS inside itself. A mismatch names both counts.
 
+The output path is also required not to overlap the MS. Writing the caltable
+*to* the MS, or to a directory containing it, would delete the observation
+before its subtables could be copied out — and writing it *inside* the MS means
+writing into the very directories being copied from. All three are rejected up
+front, comparing resolved paths rather than strings, so a symlink or a ``..``
+cannot spell its way past the check and a sibling named ``x.ms2`` is not
+mistaken for a child of ``x.ms``.
+
 That gives two guarantees, which are deliberately different:
 
 *A caller's mistake costs nothing* — the call raises before the removal, and an

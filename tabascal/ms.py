@@ -847,6 +847,47 @@ def _caltable_desc():
     return maketabdesc(scalars + arrays)
 
 
+def _reject_overlapping_paths(path: str, ms_path: str) -> None:
+    """Refuse an output path that is, contains, or sits inside the MS.
+
+    ``overwrite=True`` removes the output outright, and the subtables are copied
+    out of the MS *afterwards*, so an output that is the MS -- or an ancestor of
+    it -- deletes the observation before anything is read from it. An output
+    nested inside the MS is the milder form of the same mistake: it writes into
+    the directories it is about to copy from.
+
+    Compared as resolved paths through ``commonpath``, never as strings. A
+    symlink and a ``..`` are two spellings of one directory, and a string prefix
+    test would call ``/data/x.ms2`` a child of ``/data/x.ms``.
+    """
+
+    real_path = os.path.realpath(path)
+    real_ms = os.path.realpath(ms_path)
+
+    if real_path == real_ms:
+        raise ValueError(
+            f"path and ms_path resolve to the same directory ({real_path}). "
+            "Writing the caltable there would delete the Measurement Set it is "
+            "written from."
+        )
+
+    common = os.path.commonpath([real_path, real_ms])
+
+    if common == real_ms:
+        raise ValueError(
+            f"path ({real_path}) is inside the Measurement Set at {real_ms}. A "
+            "caltable written there would be writing into the subtables it "
+            "copies from; put it beside the MS instead."
+        )
+
+    if common == real_path:
+        raise ValueError(
+            f"path ({real_path}) would contain the Measurement Set at {real_ms}. "
+            "Writing the caltable there would delete the observation before its "
+            "subtables could be copied."
+        )
+
+
 def write_caltable(
     path: str,
     gains: NDArray,
@@ -915,6 +956,12 @@ def write_caltable(
     ``ANTENNA1`` into ``ANTENNA``, and ``CPARAM``'s channel axis onto
     ``CHAN_FREQ``. Gains of the wrong width would produce a table that disagrees
     with the copy of the MS inside itself.
+
+    ``path`` may not be, contain, or sit inside ``ms_path``: the output is
+    removed before the subtables are copied out of the MS, so an overlapping
+    path would destroy the observation. That is rejected before any of it
+    happens, which is also what keeps the clean-up on the failure path from
+    reaching anything but the caltable's own directory.
 
     Raises
     ------
@@ -986,6 +1033,10 @@ def write_caltable(
             "whether an existing calibration table is deleted, so it is not "
             "taken on truthiness."
         )
+
+    # Before anything is read from disk, let alone removed from it: the output
+    # must not overlap the MS it is written from.
+    _reject_overlapping_paths(path, ms_path)
 
     # The gains have to describe the MS whose subtables are about to be copied in
     # beside them, since the table's own rows index those copies.
