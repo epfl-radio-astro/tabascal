@@ -121,9 +121,16 @@ The output path is also required not to overlap the MS. Writing the caltable
 *to* the MS, or to a directory containing it, would delete the observation
 before its subtables could be copied out — and writing it *inside* the MS means
 writing into the very directories being copied from. All three are rejected up
-front, comparing resolved paths rather than strings, so a symlink or a ``..``
-cannot spell its way past the check and a sibling named ``x.ms2`` is not
-mistaken for a child of ``x.ms``.
+front.
+
+The check asks the filesystem rather than comparing paths as text, because one
+directory has many spellings: a symlink, a ``..``, and — on a case-insensitive
+filesystem such as APFS or NTFS — a different case. ``realpath`` hands back
+whichever spelling it was given, so ``X.ms`` and ``x.ms`` resolve to strings that
+differ while naming one directory; identity and containment are settled by
+``(st_dev, st_ino)`` instead, walking a path's ancestors rather than testing it
+as a prefix. A sibling named ``x.ms2`` is therefore not mistaken for a child of
+``x.ms``, and a case-variant alias cannot spell its way past the guard.
 
 That gives two guarantees, which are deliberately different:
 

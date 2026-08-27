@@ -847,6 +847,73 @@ def _caltable_desc():
     return maketabdesc(scalars + arrays)
 
 
+def _path_identity(path: str):
+    """``(st_dev, st_ino)`` of *path*, or ``None`` where nothing is there to stat.
+
+    The filesystem's own answer to "which directory is this", which is the only
+    one that survives the ways a single directory can be spelled.
+    """
+
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+
+    return (stat.st_dev, stat.st_ino)
+
+
+def _same_directory(a: str, b: str) -> bool:
+    """Whether two paths name one directory.
+
+    Equal strings settle it; otherwise the filesystem does, because a
+    case-insensitive one (APFS, NTFS) resolves ``X.ms`` and ``x.ms`` to the same
+    directory while ``realpath`` hands back whichever spelling it was given. The
+    strings differ there and the inode does not.
+
+    Compared through :func:`_path_identity` rather than ``os.path.samefile``, so
+    that a path disappearing between the look and the comparison answers "not
+    the same directory" instead of raising from inside a validation check.
+    """
+
+    if a == b:
+        return True
+
+    a_id = _path_identity(a)
+
+    return a_id is not None and a_id == _path_identity(b)
+
+
+def _is_inside(inner: str, outer: str) -> bool:
+    """Whether *inner* is *outer* or sits somewhere beneath it.
+
+    Walks *inner* up to the root, comparing each ancestor against *outer* by
+    ``(st_dev, st_ino)`` first and by name second. The inode comparison is the
+    authority -- it is what catches an ancestor reached by a different spelling
+    of the same directory -- and the name comparison covers the part of the walk
+    with nothing on disk to stat, such as a fresh output path under an MS that
+    does not exist either.
+
+    An ancestor walk, never a string prefix test: that is what keeps
+    ``/data/x.ms2`` from counting as a child of ``/data/x.ms``.
+    """
+
+    outer_id = _path_identity(outer)
+    current = inner
+
+    while True:
+        if outer_id is not None and _path_identity(current) == outer_id:
+            return True
+
+        if current == outer:
+            return True
+
+        parent = os.path.dirname(current)
+        if parent == current:  # reached the root
+            return False
+
+        current = parent
+
+
 def _reject_overlapping_paths(path: str, ms_path: str) -> None:
     """Refuse an output path that is, contains, or sits inside the MS.
 
@@ -856,31 +923,30 @@ def _reject_overlapping_paths(path: str, ms_path: str) -> None:
     nested inside the MS is the milder form of the same mistake: it writes into
     the directories it is about to copy from.
 
-    Compared as resolved paths through ``commonpath``, never as strings. A
-    symlink and a ``..`` are two spellings of one directory, and a string prefix
-    test would call ``/data/x.ms2`` a child of ``/data/x.ms``.
+    Decided by the filesystem rather than by comparing paths as text. One
+    directory has many spellings -- a symlink, a ``..``, and on a
+    case-insensitive filesystem a different case -- and a guard that trusts the
+    strings hands the caller a way to delete the observation.
     """
 
     real_path = os.path.realpath(path)
     real_ms = os.path.realpath(ms_path)
 
-    if real_path == real_ms:
+    if _same_directory(real_path, real_ms):
         raise ValueError(
             f"path and ms_path resolve to the same directory ({real_path}). "
             "Writing the caltable there would delete the Measurement Set it is "
             "written from."
         )
 
-    common = os.path.commonpath([real_path, real_ms])
-
-    if common == real_ms:
+    if _is_inside(real_path, real_ms):
         raise ValueError(
             f"path ({real_path}) is inside the Measurement Set at {real_ms}. A "
             "caltable written there would be writing into the subtables it "
             "copies from; put it beside the MS instead."
         )
 
-    if common == real_path:
+    if _is_inside(real_ms, real_path):
         raise ValueError(
             f"path ({real_path}) would contain the Measurement Set at {real_ms}. "
             "Writing the caltable there would delete the observation before its "

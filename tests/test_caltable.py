@@ -143,6 +143,27 @@ def ms_path(tmp_path):
     return _minimal_ms(str(tmp_path / "minimal.ms"))
 
 
+@pytest.fixture
+def case_insensitive_fs(tmp_path):
+    """Skip unless this filesystem treats ``X`` and ``x`` as one name.
+
+    Probed rather than inferred from the platform: macOS is case-insensitive by
+    default but can be formatted either way, and a Linux box can mount a
+    case-insensitive volume. On a case-sensitive filesystem a case variant is
+    genuinely a different directory, so there is nothing for these to test.
+    """
+
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    insensitive = (tmp_path / "caseprobe").exists()
+    probe.rmdir()
+
+    if not insensitive:
+        pytest.skip(
+            "case-sensitive filesystem: a case variant is a different directory"
+        )
+
+
 def _raw(path: str, column: str):
     """A column straight out of the caltable, with no interpretation applied."""
 
@@ -782,6 +803,58 @@ class TestOutputDoesNotOverlapTheMs:
         write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms)
 
         assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
+        self._ms_still_reads(ms)
+
+    # -- Case-variant aliases -------------------------------------------------
+    #
+    # On a case-insensitive filesystem (APFS, NTFS) "X.ms" and "x.ms" are one
+    # directory, but realpath returns whichever spelling it was handed, so the
+    # resolved strings still differ. A guard comparing those strings sees two
+    # unrelated paths and lets the caller delete the MS. Only the filesystem can
+    # settle it, so the guard asks it -- and so do these.
+
+    def test_a_case_variant_of_the_ms_is_the_same_directory(
+        self, tmp_path, gains, case_insensitive_fs
+    ):
+        ms = _minimal_ms(str(tmp_path / "x.ms"))
+        alias = str(tmp_path / "X.ms")
+
+        with pytest.raises(ValueError, match="same directory"):
+            write_caltable(
+                alias, gains, np.arange(N_TIME, dtype=float), ms_path=ms
+            )
+
+        self._ms_still_reads(ms)
+
+    def test_a_case_variant_ancestor_still_contains_the_ms(
+        self, tmp_path, gains, case_insensitive_fs
+    ):
+        """The costly one: rmtree of an ancestor reached by a different spelling."""
+
+        outer = str(tmp_path / "outer")
+        os.makedirs(outer)
+        ms = _minimal_ms(os.path.join(outer, "inner.ms"))
+
+        with pytest.raises(ValueError, match="would contain the Measurement Set"):
+            write_caltable(
+                str(tmp_path / "OUTER"), gains,
+                np.arange(N_TIME, dtype=float), ms_path=ms,
+            )
+
+        assert os.path.exists(outer)
+        self._ms_still_reads(ms)
+
+    def test_a_case_variant_parent_puts_the_output_inside_the_ms(
+        self, tmp_path, gains, case_insensitive_fs
+    ):
+        ms = _minimal_ms(str(tmp_path / "x.ms"))
+        inside = os.path.join(str(tmp_path / "X.ms"), "cal.B")
+
+        with pytest.raises(ValueError, match="inside the Measurement Set"):
+            write_caltable(
+                inside, gains, np.arange(N_TIME, dtype=float), ms_path=ms
+            )
+
         self._ms_still_reads(ms)
 
 
