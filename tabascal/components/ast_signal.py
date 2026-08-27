@@ -120,6 +120,17 @@ def read_oskar_sky_model(path: str) -> list:
                     f"but {line!r} is not ({e})."
                 ) from e
 
+            # float() reads 'nan', 'inf' and an overflowing '1e999' without complaint.
+            # Left alone they turn the visibilities of every baseline the source touches
+            # non-finite, and the optimiser reports that as a failure to converge a long
+            # way from the row that caused it.
+            for column, value in zip(columns, values):
+                if not np.isfinite(value):
+                    raise ValueError(
+                        f"{path} line {lineno}: {column} is {value}, but every OSKAR "
+                        f"sky model value must be finite: {line!r}."
+                    )
+
             row = {column: 0.0 for column in OSKAR_COLUMNS}
             row.update(zip(columns, values))
             row["name"] = f"{name} line {lineno}"
@@ -178,9 +189,18 @@ def _inline_row(source, idx: int) -> dict:
         # bool is an int in Python, so float(False) would pass silently as 0.
         if not isinstance(value, bool):
             try:
-                return float(value)
+                number = float(value)
             except (TypeError, ValueError):
                 pass
+            else:
+                # NaN and infinity convert without complaint and then spread into the
+                # visibility of every baseline this source touches.
+                if np.isfinite(number):
+                    return number
+                raise ValueError(
+                    f"{where} has {key!r} = {value!r}, which is not a finite number "
+                    f"({units})."
+                )
 
         raise ValueError(
             f"{where} has {key!r} = {value!r}, which is not a number ({units})."

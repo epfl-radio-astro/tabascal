@@ -389,6 +389,47 @@ def test_oskar_invalid_column_counts_are_rejected(n_col, tmp_path):
         FixedDiscreteSky().setup(make_sky_config(path))
 
 
+@pytest.mark.parametrize("row, column", [
+    ("nan -26.7 5.0", "ra_deg"),
+    ("30.0 NaN 5.0", "dec_deg"),
+    ("30.0 -26.7 inf", "I"),
+    ("30.0 -26.7 5.0 0 0 0 1e999 -0.7", "ref_freq_hz"),
+    ("30.0 -26.7 5.0 0 0 0 1.0e8 -inf", "alpha"),
+    ("30.0 -26.7 5.0 0 0 0 1.0e8 -0.7 0 nan 10.0 45.0", "fwhm_major_arcsec"),
+])
+def test_a_non_finite_oskar_value_is_rejected(row, column, tmp_path):
+    """float() takes 'nan' and 'inf' happily; they then poison every visibility."""
+    path = write_sky_file(tmp_path, row + "\n")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        FixedDiscreteSky().setup(make_sky_config(path))
+
+    message = str(excinfo.value)
+    assert "line 1" in message
+    assert column in message
+
+
+@pytest.mark.parametrize("field, units", [
+    ("ra", "degrees"),
+    ("I", "Jy"),
+    ("alpha", "spectral index"),
+    ("ref_freq_mhz", "MHz"),
+    ("fwhm_major_arcsec", "arcsec"),
+])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_inline_value_is_rejected(field, units, value):
+    source = {"name": "Fornax A", "ra": 30.0, "dec": -26.7, "I": 5.0, field: value}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        FixedDiscreteSky().setup(make_sky_config([source]))
+
+    message = str(excinfo.value)
+    assert "entry 0" in message
+    assert "Fornax A" in message
+    assert repr(field) in message
+    assert units in message
+
+
 def test_oskar_short_row_is_an_error(tmp_path):
     path = write_sky_file(tmp_path, "30.0 -26.7\n")
     with pytest.raises(RuntimeError, match="line 1"):
