@@ -15,6 +15,12 @@ import numpy as np
 import dask
 from daskms import xds_from_ms, xds_from_table
 
+from tabascal.noise import (
+    NoUsableSigma,
+    per_baseline_freq_sigma,
+    per_baseline_sigma,
+    representative_sigma,
+)
 from tabascal.timing import measure_runtime
 
 
@@ -366,6 +372,106 @@ def fitted_correlation(
     return corr_idx
 
 
+def _column_values(xds, name: str) -> Optional[np.ndarray]:
+    """The values of a column, or ``None`` if it is not there to be read.
+
+    "Not there" covers two cases that a noise read has to treat alike: a column
+    the MS does not have, and one CASA has declared without filling any of its
+    cells -- reading one of those raises rather than returning anything.
+    """
+
+    column = getattr(xds, name, None)
+
+    if column is None:
+        return None
+
+    try:
+        return np.asarray(column.data.compute())
+    except Exception as err:
+        print(
+            f"Warning: {name} is present in the MS but could not be read ({err}); "
+            "treating it as absent."
+        )
+
+        return None
+
+
+def partition_noise(
+    xds, n_time: int, n_bl: int, n_freq: int, corr_idx: int = 0
+) -> Optional[np.ndarray]:
+    """The noise on one MS partition's visibilities, as resolved as the MS allows.
+
+    Most specific column first:
+
+    ``SIGMA_SPECTRUM`` ``(row, chan, corr)``
+        Noise per (baseline, channel), shape ``(n_bl, n_freq)``. The default,
+        because a bandpass is not flat and an MS that has measured that says so.
+    ``SIGMA`` ``(row, corr)``
+        Per-baseline noise, shape ``(n_bl,)`` -- the band-averaged version of the
+        same measurement, and what most MSs carry.
+
+    Either column keeps its time axis if it has one to keep: a column whose rows
+    genuinely change over the observation comes back as ``(n_bl, n_freq,
+    n_time)``, or ``(n_bl, 1, n_time)`` from ``SIGMA``. See :mod:`tabascal.noise`.
+
+    A ``SIGMA_SPECTRUM`` that is absent, that holds no positive finite value
+    anywhere (a column that was never filled in), or that describes a different
+    set of channels from the ones being read is not an error: the read falls
+    through to ``SIGMA``. A column that contradicts the row layout *is* an error
+    -- that is the reader and the MS disagreeing about the grid, which reading
+    another column instead would only bury.
+
+    Nothing is invented: if neither column is usable this returns ``None``, after
+    saying why, because a made-up noise scale silently re-weights the entire fit.
+    ``None`` rather than an exception because ``data.noise`` is read *after* the
+    MS -- an override is exactly the answer to an MS with no noise in it, and
+    raising here would take its turn away. :meth:`TabConfig.set_noise` is where a
+    still-unset noise becomes the error that stops the run.
+    """
+
+    values = _column_values(xds, "SIGMA_SPECTRUM")
+
+    if values is not None:
+        n_chan = values.shape[1] if values.ndim > 1 else 0
+
+        # Channels are handled exactly as read_data handles them -- every channel,
+        # for now -- and must stay in lockstep with it: the noise divides those
+        # visibilities, cell by cell, so a column covering a different set of
+        # channels cannot weight them.
+        if n_chan != n_freq:
+            print(
+                f"Warning: SIGMA_SPECTRUM covers {n_chan} channels but {n_freq} are "
+                "being read, so it cannot line up with the visibilities; falling "
+                "back to the SIGMA column."
+            )
+        else:
+            try:
+                return per_baseline_freq_sigma(values, n_time, n_bl, corr_idx)
+            except NoUsableSigma as err:
+                print(f"Warning: {err} Falling back to the SIGMA column.")
+
+    sigma = _column_values(xds, "SIGMA")
+
+    if sigma is None:
+        print(
+            "Warning: the MS partition has neither a usable SIGMA_SPECTRUM nor a "
+            "readable SIGMA column, so it carries no noise estimate at all; set "
+            "data.noise explicitly."
+        )
+
+        return None
+
+    # Only the empty column is deferred. A SIGMA that contradicts the row layout
+    # still raises: that is the reader and the MS disagreeing about the
+    # observation, which no data.noise value makes right.
+    try:
+        return per_baseline_sigma(sigma, n_time, n_bl, corr_idx)
+    except NoUsableSigma as err:
+        print(f"Warning: {err}")
+
+        return None
+
+
 def into_corr(col, corr_idx: int, n_corr: int, fill):
     """Place a one-correlation result on the MS's correlation axis.
 
@@ -481,6 +587,8 @@ def read_ms(
 
     print(n_freq, chans)
 
+    sigma = partition_noise(xds, n_time, n_bl, n_freq, corr_idx)
+
     # .data[:, chans, corr_idx] once channel selection is wired through.
     read_data = lambda col_name: rows_to_grid(
         jnp.array(xds[col_name].data[:, :, corr_idx].compute()),
@@ -512,7 +620,14 @@ def read_ms(
         "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),
         "vis_obs": read_data(data_col),
         "flags": read_data("FLAG"),
-        "noise": jnp.array(xds.SIGMA.data.mean().compute()),
+        # Per (baseline, channel) where the MS resolves it that far, per baseline
+        # otherwise, and per timestep on top of either where the column varies in
+        # time -- never collapsed to a scalar: the antennas differ in
+        # sensitivity and the band is not flat, so a single number mis-weights
+        # every visibility. See tabascal.noise. None when the MS carries no
+        # usable noise column at all, which data.noise is then read to supply.
+        "noise": None if sigma is None else jnp.asarray(sigma),
+        "noise_scalar": None if sigma is None else representative_sigma(sigma),
         "a1": jnp.array(layout.a1),
         "a2": jnp.array(layout.a2),
     }

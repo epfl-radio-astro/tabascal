@@ -7,6 +7,11 @@ from tabascal.distributed import (
     sharding_enabled,
 )
 from tabascal.ms import read_ms
+from tabascal.noise import (
+    broadcast_to_vis,
+    read_noise_file,
+    representative_sigma,
+)
 from tabascal.tab_tools import fix_padding
 from tabascal.components.trajectory import (
     fetch_orbital_elements,
@@ -188,11 +193,18 @@ class TabConfig:
             # These are captured in closures during Model setup (likelihood) and used
             # eagerly against globally-sharded arrays; process-local device arrays
             # cannot mix with global ones in multi-process, so globalize them here,
-            # before any component sees them. noise becomes a plain float (a closure
-            # literal has no device placement to conflict).
+            # before any component sees them.
             self.vis_obs = make_global(self.vis_obs, replicated_sharding())
             self.flags = make_global(self.flags, replicated_sharding())
-            self.noise = float(self.noise)
+            # Was float(self.noise), which a resolved noise array cannot survive.
+            # Replicated rather than sharded: it is one array indexed by baseline
+            # (and channel, and timestep where the MS resolves the noise that
+            # far), and every process needs all of it -- at most the size of
+            # vis_obs, which is replicated beside it. A scalar override goes
+            # through unchanged, as a 0-d global array.
+            self.noise = make_global(
+                jnp.asarray(self.noise), replicated_sharding()
+            )
 
     def set_elevation_mask(self, min_elevation: Optional[float]):
         """Mask the RFI signal to zero whenever a satellite is below `min_elevation`.
@@ -233,10 +245,101 @@ class TabConfig:
                 f"(elevation {el.min():.1f} to {el.max():.1f} deg)"
             )
 
-    def set_noise(self, noise: float):
+    def set_noise(self, noise):
+        """Override the noise read from the MS's ``SIGMA_SPECTRUM``/``SIGMA``.
 
-        if noise:
-            self.noise = noise
+        Accepts a scalar, which applies to every visibility, or a path to an
+        ``.npz`` carrying ``sigma_bl_freq`` (per baseline and channel),
+        ``sigma_bl`` (per baseline) or ``s_ant`` (per antenna) -- for a noise
+        measured out of band. ``None`` keeps the MS estimate, and is the only
+        value that does.
+
+        This is also where an MS with no usable noise column becomes an error.
+        The read defers that (``read_ms`` returns no noise and says why) so that
+        an override gets its turn first: a noise given here is exactly the answer
+        to an MS that carries none, and stopping in the reader would make the
+        recovery unreachable.
+
+        A file's values are checked twice: once as read, in float64, and again
+        after conversion to the precision the run works in, which single
+        precision can turn into a zero or an infinity.
+        """
+
+        if noise is not None:
+            if isinstance(noise, str):
+                sigma = read_noise_file(
+                    noise,
+                    self.n_bl,
+                    np.asarray(self.a1),
+                    np.asarray(self.a2),
+                    n_freq=self.n_freq,
+                )
+                # Re-checked *after* the conversion, not only as read: the file is
+                # validated in float64 but jnp.asarray works at the run's
+                # precision, and under single precision 1e-50 underflows to zero
+                # and 1e40 overflows to infinity. A zero noise divides the
+                # likelihood by nothing, so a file that cannot survive the trip
+                # to the device is an error rather than a silent re-weighting.
+                converted = jnp.asarray(sigma)
+                on_device = np.asarray(converted)
+                degenerate = ~(np.isfinite(on_device) & (on_device > 0))
+
+                if degenerate.any():
+                    raise ValueError(
+                        f"data.noise = {noise!r}: {int(degenerate.sum())} of "
+                        f"{sigma.size} values are positive and finite in the file "
+                        f"but not after conversion to {converted.dtype} -- they "
+                        "underflow to zero or overflow to infinity at this run's "
+                        "precision. Set model.precision to 'double', or give the "
+                        "noise in units it can hold."
+                    )
+
+                self.noise = converted
+                self.noise_scalar = representative_sigma(sigma)
+            else:
+                # `noise: true` is YAML for a switch and this option is not one,
+                # but float(True) is 1.0 -- so without this the run would proceed
+                # on a uniform 1 Jy noise nobody wrote down, plausible enough to
+                # go unnoticed. Caught before float() so `false` is reported as
+                # the same mistake rather than as a non-positive number.
+                if isinstance(noise, bool):
+                    raise ValueError(
+                        f"data.noise = {noise!r} is neither a number nor a path to "
+                        "an .npz of noise values. Give a positive number in Jy, a "
+                        "path to an .npz, or leave it null to use the MS's own "
+                        "estimate."
+                    )
+
+                # A zero used to read as "no override" and silently keep the MS
+                # estimate, which is neither of the things a user writing
+                # `noise: 0` could have meant. Zero noise is not a noise: it
+                # divides the likelihood by nothing.
+                try:
+                    value = float(noise)
+                except (TypeError, ValueError) as err:
+                    raise ValueError(
+                        f"data.noise = {noise!r} is neither a number nor a path to "
+                        "an .npz of noise values."
+                    ) from err
+
+                if not np.isfinite(value) or value <= 0:
+                    raise ValueError(
+                        f"data.noise = {noise!r} is not a usable noise. Give a "
+                        "positive number in Jy, a path to an .npz, or leave it "
+                        "null to use the MS's own estimate."
+                    )
+
+                self.noise = value
+                self.noise_scalar = value
+
+        # Nothing downstream can run without a noise, and nothing invents one:
+        # every consumer of self.noise sits after this point.
+        if self.noise is None:
+            raise ValueError(
+                "The MS partition has neither a usable SIGMA_SPECTRUM nor a "
+                "readable SIGMA column, so it carries no noise estimate at all; "
+                "set data.noise explicitly."
+            )
 
     def set_flags(self, include_flags: bool):
 
@@ -272,7 +375,16 @@ class TabConfig:
         self.chan_width = ms_params["chan_width"]
         self.freqs = np.asarray(ms_params["freqs"])
 
+        # Shape (n_bl, n_freq) where the MS resolves the noise over the band,
+        # (n_bl,) otherwise, and (n_bl, n_freq, n_time) / (n_bl, 1, n_time) where
+        # the column varies over the observation. Every one of those broadcasts
+        # onto vis_obs through noise.broadcast_to_vis, which is where the shape
+        # is checked. noise_scalar is the one representative value for the
+        # heuristics that genuinely need a single number; the likelihood and
+        # chi^2 use the resolved array. None when the MS has no usable noise
+        # column: set_noise, next, either overrides it or stops the run.
         self.noise = ms_params["noise"]
+        self.noise_scalar = ms_params["noise_scalar"]
         self.a1 = ms_params["a1"]
         self.a2 = ms_params["a2"]
 
@@ -333,7 +445,7 @@ class TabConfig:
         sample_freq_bl = (
             np.pi
             * np.max(np.abs(fringe_freq), axis=(0, 1))
-            * np.sqrt(self.max_rfi_vis / (6 * self.noise))
+            * np.sqrt(self.max_rfi_vis / (6 * self.noise_scalar))
         )
         n_int_times = np.ceil(time_int_factor * self.int_time * sample_freq_bl).astype(int)
 
@@ -405,7 +517,12 @@ class Model:
         self.noise = tab_config.noise
         self.n_rfi = tab_config.n_rfi
         self.likelihood = lambda pred, obs_data: likelihood(
-            pred, obs_data, {"noise": tab_config.noise, "flags": tab_config.flags}
+            pred,
+            obs_data,
+            {
+                "noise": broadcast_to_vis(tab_config.noise, tab_config.vis_obs.shape),
+                "flags": tab_config.flags,
+            },
         )
 
         components = [C() for C in import_components(component_list)]

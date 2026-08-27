@@ -56,7 +56,8 @@ def _config(zarr_path, **overrides):
 def _tab_config(zarr_path):
     return SimpleNamespace(
         n_bl=N_BL, n_freq=N_FREQ, n_time=N_TIME, n_ant=N_ANT,
-        noise=1.0, flags=jnp.zeros((N_BL, N_FREQ, N_TIME), dtype=bool),
+        noise=1.0, noise_scalar=1.0,
+        flags=jnp.zeros((N_BL, N_FREQ, N_TIME), dtype=bool),
         args=_config(zarr_path),
     )
 

@@ -10,6 +10,7 @@ from tabascal.ms import (
     grid_to_rows,
     into_corr,
     ms_layout,
+    partition_noise,
     partition_polarization,
     partition_setup,
     read_time_scale,
@@ -521,6 +522,305 @@ class TestPartitionSetup:
 
         assert partition_setup("fake.ms", xds) == (3, 4)
         assert partition_polarization("fake.ms", xds) == 4
+
+
+# ---------------------------------------------------------------------------
+# Which noise column a partition's noise comes from
+# ---------------------------------------------------------------------------
+
+N_TIME_N, N_BL_N, N_FREQ_N = 4, 3, 2
+
+
+def _noise_partition(sigma=None, sigma_spectrum=None):
+    """An MS partition stripped to the noise columns, as a real dataset.
+
+    An ``xr.Dataset`` rather than a stub: the chain asks whether a column is
+    there at all, and a real dataset raises ``AttributeError`` for a missing
+    variable and hands back a dask array for a present one -- exactly what
+    dask-ms does, and the two halves the chain turns on.
+    """
+
+    import dask.array as da
+    import xarray as xr
+
+    data = {}
+    if sigma is not None:
+        sigma = np.asarray(sigma, dtype=float)
+        data["SIGMA"] = (("row", "corr"), da.from_array(sigma, chunks=(5, -1)))
+    if sigma_spectrum is not None:
+        sigma_spectrum = np.asarray(sigma_spectrum, dtype=float)
+        data["SIGMA_SPECTRUM"] = (
+            ("row", "chan", "corr"),
+            da.from_array(sigma_spectrum, chunks=(5, -1, -1)),
+        )
+
+    return xr.Dataset(data)
+
+
+def _sigma_rows(per_bl, n_corr=1):
+    """A SIGMA column holding ``per_bl``, repeated over ``N_TIME_N`` timesteps."""
+
+    per_bl = np.asarray(per_bl, dtype=float)
+
+    return np.repeat(
+        np.tile(per_bl, N_TIME_N)[:, None], n_corr, axis=1
+    )
+
+
+class _UnfilledColumn:
+    """A column CASA has declared and never written a cell of.
+
+    Reading one raises rather than returning anything, which is what makes an
+    optional column's absence two cases instead of one.
+    """
+
+    class _Data:
+        def compute(self):
+            raise RuntimeError("no array in row 0")
+
+    data = _Data()
+
+
+def _spectrum_rows(per_bl_freq, n_corr=1):
+    """A SIGMA_SPECTRUM column holding ``per_bl_freq``, repeated over time."""
+
+    per_bl_freq = np.asarray(per_bl_freq, dtype=float)
+    rows = np.tile(per_bl_freq, (N_TIME_N, 1, 1)).reshape(-1, per_bl_freq.shape[1])
+
+    return np.repeat(rows[:, :, None], n_corr, axis=2)
+
+
+def _sigma_rows_time(per_bl_time, n_corr=1):
+    """A SIGMA column that changes over time, ``(n_bl, n_time)`` in.
+
+    Time-major, like every other column: row ``t * n_bl + b`` is baseline ``b``
+    at time ``t``.
+    """
+
+    per_bl_time = np.asarray(per_bl_time, dtype=float)
+
+    return np.repeat(per_bl_time.T.reshape(-1, 1), n_corr, axis=1)
+
+
+def _spectrum_rows_time(per_bl_freq_time, n_corr=1):
+    """A SIGMA_SPECTRUM that changes over time, ``(n_bl, n_freq, n_time)`` in."""
+
+    arr = np.asarray(per_bl_freq_time, dtype=float)
+
+    return np.repeat(grid_to_rows(arr, arr.shape[1]), n_corr, axis=2)
+
+
+class TestPartitionNoise:
+    """The resolution chain ``read_ms`` reads its noise through.
+
+    Exercised here rather than through ``read_ms`` itself, which needs a real MS
+    on disk -- five subtables of it -- to reach these four lines. The chain is
+    the whole of the decision; ``read_ms`` only passes it the partition and the
+    grid it has already derived.
+    """
+
+    PER_BL = np.array([1.0, 2.0, 4.0])
+    PER_BL_FREQ = np.array([[1.0, 10.0], [2.0, 20.0], [4.0, 40.0]])
+
+    def _call(self, xds, **kwargs):
+        return partition_noise(
+            xds, N_TIME_N, N_BL_N, N_FREQ_N, **kwargs
+        )
+
+    def test_a_spectrum_gives_a_per_baseline_channel_noise(self):
+        """Frequency-dependent by default: the band is not flat and the MS says so."""
+        xds = _noise_partition(sigma_spectrum=_spectrum_rows(self.PER_BL_FREQ))
+
+        out = self._call(xds)
+
+        assert out.shape == (N_BL_N, N_FREQ_N)
+        np.testing.assert_allclose(out, self.PER_BL_FREQ)
+
+    def test_sigma_is_used_when_there_is_no_spectrum(self):
+        """Most MSs carry only SIGMA, and per baseline is still better than a scalar."""
+        xds = _noise_partition(sigma=_sigma_rows(self.PER_BL))
+
+        out = self._call(xds)
+
+        assert out.shape == (N_BL_N,)
+        np.testing.assert_allclose(out, self.PER_BL)
+
+    def test_the_spectrum_wins_when_both_are_there(self):
+        """SIGMA is the band-averaged version of the same measurement."""
+        xds = _noise_partition(
+            sigma=_sigma_rows(np.full(N_BL_N, 99.0)),
+            sigma_spectrum=_spectrum_rows(self.PER_BL_FREQ),
+        )
+
+        np.testing.assert_allclose(self._call(xds), self.PER_BL_FREQ)
+
+    def test_an_empty_spectrum_falls_through_to_sigma(self, capsys):
+        """A column of zeros is a column that was never filled in."""
+        xds = _noise_partition(
+            sigma=_sigma_rows(self.PER_BL),
+            sigma_spectrum=_spectrum_rows(np.zeros((N_BL_N, N_FREQ_N))),
+        )
+
+        out = self._call(xds)
+
+        np.testing.assert_allclose(out, self.PER_BL)
+        assert "SIGMA_SPECTRUM" in capsys.readouterr().out
+
+    def test_a_spectrum_of_other_channels_falls_through_to_sigma(self, capsys):
+        """It cannot line up with the visibilities, so it cannot weight them."""
+        xds = _noise_partition(
+            sigma=_sigma_rows(self.PER_BL),
+            sigma_spectrum=_spectrum_rows(np.ones((N_BL_N, N_FREQ_N + 3))),
+        )
+
+        out = self._call(xds)
+
+        np.testing.assert_allclose(out, self.PER_BL)
+        assert "channels" in capsys.readouterr().out
+
+    def test_the_requested_correlation_is_selected_from_the_spectrum(self):
+        col = np.concatenate(
+            [
+                _spectrum_rows(self.PER_BL_FREQ),
+                _spectrum_rows(self.PER_BL_FREQ * 10),
+            ],
+            axis=2,
+        )
+
+        np.testing.assert_allclose(
+            self._call(_noise_partition(sigma_spectrum=col), corr_idx=1),
+            self.PER_BL_FREQ * 10,
+        )
+
+    def test_the_requested_correlation_is_selected_from_sigma(self):
+        col = np.stack(
+            [_sigma_rows(self.PER_BL)[:, 0], _sigma_rows(self.PER_BL * 10)[:, 0]],
+            axis=1,
+        )
+
+        np.testing.assert_allclose(
+            self._call(_noise_partition(sigma=col), corr_idx=1), self.PER_BL * 10
+        )
+
+    def test_a_declared_but_unfilled_spectrum_falls_through_to_sigma(self, capsys):
+        """SIGMA_SPECTRUM is optional, and CASA writes the column before any of
+        its cells: unreadable is the same as absent, not a reason to stop."""
+        from types import SimpleNamespace
+
+        xds = SimpleNamespace(
+            SIGMA=_FakeVar(_sigma_rows(self.PER_BL)),
+            SIGMA_SPECTRUM=_UnfilledColumn(),
+        )
+
+        np.testing.assert_allclose(self._call(xds), self.PER_BL)
+        assert "could not be read" in capsys.readouterr().out
+
+    def test_neither_column_leaves_the_noise_unset(self, capsys):
+        """Never invented -- and never terminal here either.
+
+        ``data.noise`` is read *after* the MS, so a read that raised would take
+        the override's turn away and the documented recovery could not happen.
+        The read says why it found nothing and returns None; ``TabConfig`` gives
+        the override its chance and stops only if there is still no noise.
+        """
+        assert self._call(_noise_partition()) is None
+        assert "neither" in capsys.readouterr().out
+
+    def test_an_unreadable_sigma_leaves_the_noise_unset(self, capsys):
+        """Said in tabascal's words, not as an opaque casacore error from three
+        frames down -- and said as a warning, since the override may yet fix it."""
+        from types import SimpleNamespace
+
+        assert self._call(SimpleNamespace(SIGMA=_UnfilledColumn())) is None
+        assert "could not be read" in capsys.readouterr().out
+
+    def test_both_columns_empty_leaves_the_noise_unset(self, capsys):
+        xds = _noise_partition(
+            sigma=_sigma_rows(np.zeros(N_BL_N)),
+            sigma_spectrum=_spectrum_rows(np.zeros((N_BL_N, N_FREQ_N))),
+        )
+
+        assert self._call(xds) is None
+        assert "data.noise" in capsys.readouterr().out
+
+    def test_a_malformed_sigma_is_still_an_error(self, capsys):
+        """Deferring the *empty* column is not deferring a broken one: a row
+        count that disagrees with the grid means the reader and the MS describe
+        different observations, which no data.noise value makes right."""
+        xds = _noise_partition(sigma=_sigma_rows(self.PER_BL))
+
+        with pytest.raises(ValueError, match="does not match the observation grid"):
+            partition_noise(xds, N_TIME_N + 1, N_BL_N, N_FREQ_N)
+
+    def test_a_time_varying_spectrum_keeps_the_time_axis(self):
+        """A column that changes over time is the MS saying the noise changed,
+        so the chain hands back the whole ``(n_bl, n_freq, n_time)`` grid."""
+        per_bl_freq_time = 1.0 + np.arange(
+            N_BL_N * N_FREQ_N * N_TIME_N, dtype=float
+        ).reshape(N_BL_N, N_FREQ_N, N_TIME_N)
+
+        out = self._call(
+            _noise_partition(sigma_spectrum=_spectrum_rows_time(per_bl_freq_time))
+        )
+
+        assert out.shape == (N_BL_N, N_FREQ_N, N_TIME_N)
+        np.testing.assert_allclose(out, per_bl_freq_time)
+
+    def test_a_time_varying_spectrum_still_wins_over_sigma(self):
+        """The order of preference is about which column is more resolved, and
+        a time-resolved spectrum is the most resolved answer there is."""
+        per_bl_freq_time = 1.0 + np.arange(
+            N_BL_N * N_FREQ_N * N_TIME_N, dtype=float
+        ).reshape(N_BL_N, N_FREQ_N, N_TIME_N)
+        xds = _noise_partition(
+            sigma=_sigma_rows(np.full(N_BL_N, 99.0)),
+            sigma_spectrum=_spectrum_rows_time(per_bl_freq_time),
+        )
+
+        np.testing.assert_allclose(self._call(xds), per_bl_freq_time)
+
+    def test_a_time_varying_sigma_is_read_when_there_is_no_spectrum(self):
+        """``(n_bl, 1, n_time)`` -- never ``(n_bl, n_time)``, which with
+        n_freq == n_time nothing downstream could tell from a channel axis."""
+        per_bl_time = np.outer(self.PER_BL, 1.0 + np.arange(N_TIME_N, dtype=float))
+
+        out = self._call(_noise_partition(sigma=_sigma_rows_time(per_bl_time)))
+
+        assert out.shape == (N_BL_N, 1, N_TIME_N)
+        np.testing.assert_allclose(out[:, 0, :], per_bl_time)
+
+    def test_a_time_varying_but_empty_spectrum_falls_through_to_sigma(self, capsys):
+        """The fallthrough does not care how the column varies, only that none
+        of it is a noise."""
+        xds = _noise_partition(
+            sigma=_sigma_rows(self.PER_BL),
+            sigma_spectrum=_spectrum_rows_time(
+                -1.0
+                - np.arange(N_BL_N * N_FREQ_N * N_TIME_N, dtype=float).reshape(
+                    N_BL_N, N_FREQ_N, N_TIME_N
+                )
+            ),
+        )
+
+        out = self._call(xds)
+
+        np.testing.assert_allclose(out, self.PER_BL)
+        assert "SIGMA_SPECTRUM" in capsys.readouterr().out
+
+    def test_a_malformed_spectrum_is_not_fallen_through(self):
+        """A row count that does not match the grid means the reader and the MS
+        disagree about the observation; reading SIGMA instead would bury that.
+
+        The error must name SIGMA_SPECTRUM: falling through would raise the same
+        sentence about SIGMA and point the reader at the wrong column.
+        """
+        xds = _noise_partition(
+            sigma=_sigma_rows(self.PER_BL),
+            sigma_spectrum=_spectrum_rows(self.PER_BL_FREQ),
+        )
+
+        with pytest.raises(ValueError, match="SIGMA_SPECTRUM has 12 rows"):
+            partition_noise(xds, N_TIME_N + 1, N_BL_N, N_FREQ_N)
 
 
 # ---------------------------------------------------------------------------
