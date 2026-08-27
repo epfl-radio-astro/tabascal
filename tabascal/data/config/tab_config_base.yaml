@@ -7,7 +7,8 @@ data:
   freq: null              # Optional - Defaults to channel 0
   data_col: DATA          # Optional - Defaults to 'DATA'
   corr: xx                # Optional - Correlation to model, matched against the MS's POLARIZATION::CORR_TYPE
-  noise: null             # Optional - Defaults to reading from the MS file
+  noise: null             # Optional - Defaults to reading from the MS file. NOTE it is in the frame of data_col, i.e. BEFORE gain_table is applied - with a gain table, leave it null and let SIGMA carry it rather than pre-scaling it by hand
+  gain_table: null        # Optional - Path to a CASA calibration table, or an ordered list of them, to divide out of the data AND the noise at read time. Everything downstream then lives in the calibrated frame, and the gains are applied once rather than on every forward pass. This replaces hand-scaling noise by k and ast.pow_spec.p0 by k^2
   flags: false            # Optional - Defaults to not including the flags from the MS file
 ######################
 # Plotting parameters

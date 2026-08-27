@@ -6,6 +6,7 @@ from tabascal.distributed import (
     replicated_sharding,
     sharding_enabled,
 )
+from tabascal.gain_table import gains_from_tables, normalise_gain_tables
 from tabascal.ms import read_ms
 from tabascal.noise import (
     broadcast_to_vis,
@@ -21,12 +22,13 @@ from tabascal.components.trajectory import (
 from tabascal.orbit import check_epoch_agreement, preflight_tle_check
 from tabascal.orbit_config import normalise_tle_config
 from tabascal.interferometry import (
+    baseline_gains,
     calculate_fringe_frequency_numpy,
     get_strides_and_idxs,
     itrf_to_uvw_numpy,
 )
 from tabascal.fft_gp import domain_ss
-from tabascal.time import secs_to_days, jd_to_mjd, gast_deg
+from tabascal.time import DAY_SECS, secs_to_days, jd_to_mjd, gast_deg
 
 import jax.numpy as jnp
 
@@ -154,6 +156,11 @@ class TabConfig:
             config["data"]["data_col"],
         )
         self.set_noise(config["data"]["noise"])
+        # After set_noise, so the noise it resolved is carried into the
+        # calibrated frame with the data; before set_flags, so the samples no
+        # gain could be found for reach the flags; and before the sharding block
+        # at the end of this constructor, which makes vis_obs a global array.
+        self.apply_gain_table(config["data"].get("gain_table"))
         self.set_flags(config["data"]["flags"])
         config = fix_padding(
             config, self.n_freq
@@ -344,10 +351,98 @@ class TabConfig:
                 "set data.noise explicitly."
             )
 
+    def apply_gain_table(self, gain_table):
+        """Divide externally-solved gains out of the data and the noise, once.
+
+        ``data.gain_table`` names a CASA calibration table -- from
+        ``flux-calibrate``, ``gaincal``, or any standard tool -- or an ordered
+        list of them. Applying them here rather than inside the model means the
+        gains are applied once at read time instead of on every forward pass,
+        and everything downstream (priors, RFI/AST models, chi^2, and the
+        results written back to the MS) lives in one frame: the calibrated one.
+        That retires the manual "scale the noise by k and ``ast.pow_spec.p0`` by
+        k^2" workaround.
+
+        The noise is carried with the data -- ``sigma_cal = sigma / |g_p
+        conj(g_q)|`` -- which is the point of using a table rather than scaling
+        the data by hand: get this wrong and chi^2 is off by |g|^2. It is
+        therefore resolved onto the visibilities first, since a gain that varies
+        over frequency or time makes a scalar or per-baseline noise vary with
+        them too.
+
+        Each table is placed on this observation's grid before the product is
+        formed, and how that is done -- amplitude and unwrapped phase, bridging
+        flagged solutions, holding the edge value beyond the solved range -- is
+        :mod:`tabascal.gain_table`'s subject. A visibility no table could supply
+        a gain for is flagged rather than divided by a number nobody solved.
+        """
+
+        self.gain_table = normalise_gain_tables(gain_table)
+        self.gain_flags = None
+
+        if not self.gain_table:
+            return
+
+        # A caltable's TIME column holds MS TIME, i.e. MJD seconds (that is what
+        # write_caltable writes and what CASA emits). self.times is
+        # seconds-from-start, so the match is made on the MJD -- in float64,
+        # since an MJD second in float32 is coarser than an integration.
+        times_sec = np.asarray(self.times_mjd, dtype=np.float64) * DAY_SECS
+
+        gains, dead = gains_from_tables(
+            self.gain_table, times_sec, self.freqs, n_ant=self.n_ant
+        )
+
+        # The whole placement is host-side numpy in float64, whatever precision
+        # the run works in: it happens once, and it sets the calibration scale
+        # every number downstream is expressed in.
+        a1, a2 = np.asarray(self.a1), np.asarray(self.a2)
+        g_bl = baseline_gains(gains, a1, a2)
+        bad = dead[a1] | dead[a2]
+        # Unity where there is no calibration, so that nothing downstream divides
+        # by a NaN; those visibilities are flagged below instead.
+        g_bl = np.where(bad, 1.0, g_bl)
+
+        self.vis_obs = self.vis_obs / jnp.asarray(g_bl)
+
+        if self.noise is not None:
+            # Broadcast before dividing: a scalar or per-baseline sigma is
+            # resolved over frequency and time by a gain that varies over them,
+            # so the result is legitimately three-dimensional.
+            noise = broadcast_to_vis(self.noise, self.vis_obs.shape)
+            self.noise = jnp.asarray(noise) / jnp.abs(jnp.asarray(g_bl))
+            self.noise_scalar = representative_sigma(self.noise)
+
+        # Kept apart from self.flags: data.flags decides whether the MS's own
+        # flags are honoured, but an uncalibratable visibility is not data at
+        # all and is excluded even when that is false. set_flags ORs it in.
+        self.gain_flags = jnp.asarray(bad)
+
+        print(
+            f"\nApplied {len(self.gain_table)} gain table(s) to the data and the noise"
+        )
+
+        amp = np.abs(g_bl[~bad])
+        if amp.size:
+            print(
+                f"  |g_p conj(g_q)|: p10/p50/p90 = {np.percentile(amp, 10):.4g} / "
+                f"{np.median(amp):.4g} / {np.percentile(amp, 90):.4g}"
+                f"  (data scaled by ~{1 / np.median(amp):.4g}x)"
+            )
+        if self.noise is not None:
+            print(f"  calibrated noise: median {self.noise_scalar:.4g}")
+        if bad.any():
+            print(f"  {100 * bad.mean():.2f} % of visibilities have no gain (flagged)")
+
     def set_flags(self, include_flags: bool):
 
         if not include_flags:
             self.flags = jnp.zeros_like(self.flags, dtype=bool)
+
+        # A visibility with no valid gain was never calibrated, so it is excluded
+        # even when data.flags is false -- see apply_gain_table.
+        if getattr(self, "gain_flags", None) is not None:
+            self.flags = self.flags | self.gain_flags
 
         print(f"\n{100*self.flags.mean():.1f} % Data Flagged (Not Included in Likelihood)\n")
 
