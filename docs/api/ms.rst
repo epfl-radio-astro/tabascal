@@ -108,7 +108,10 @@ What a failed write leaves behind
 ``overwrite=True`` removes a calibration that took a run to produce, so
 ``write_caltable`` checks *every* argument before it touches anything on disk —
 including the checks that would otherwise only fail deep in the write, such as a
-non-numeric ``gains`` array reaching ``np.isfinite``. The gains are also
+non-numeric ``gains`` array reaching ``np.isfinite``, and ``overwrite`` itself,
+which is required to be a genuine boolean rather than taken on its truthiness:
+``overwrite="False"`` reads as a refusal and would delete the very table the
+caller was trying to protect. The gains are also
 cross-checked against the MS they claim to belong to: the caltable carries a copy
 of the MS's ``ANTENNA`` and ``SPECTRAL_WINDOW``, and its own rows index those
 copies, so gains of the wrong antenna or channel width would produce a table
@@ -119,9 +122,11 @@ That gives two guarantees, which are deliberately different:
 *A caller's mistake costs nothing* — the call raises before the removal, and an
 existing table is left exactly as it was.
 
-*An I/O failure part-way through the write* cannot put the old table back, but
-the partial output is removed before the error is re-raised, so there is never a
-half-written table sitting where a valid one is expected.
+*An I/O failure part-way through the write* cannot put the old table back. The
+partial output is then removed on a best-effort basis before the error is
+re-raised, so a half-written table can only survive a failure that also prevents
+its own removal. The original error always propagates — nothing raised while
+clearing up replaces it.
 
 .. warning::
 

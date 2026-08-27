@@ -567,7 +567,15 @@ BAD_CALLS = [
     pytest.param({"n_pol": 2.5}, "n_pol", id="n_pol-fractional"),
     pytest.param({"n_pol": "2"}, "n_pol", id="n_pol-string"),
     pytest.param({"n_pol": None}, "n_pol", id="n_pol-none"),
+    # bool is a subclass of int, so True would otherwise pass as n_pol = 1.
+    pytest.param({"n_pol": True}, "n_pol", id="n_pol-bool"),
     pytest.param({"interval": "soon"}, "interval", id="interval-not-a-number"),
+    pytest.param({"viscal": 3}, "viscal", id="viscal-not-a-string"),
+    # "False" is a truthy string: taken as a flag it would delete the table the
+    # caller was trying to protect.
+    pytest.param({"overwrite": "False"}, "overwrite", id="overwrite-string"),
+    pytest.param({"overwrite": 1}, "overwrite", id="overwrite-int"),
+    pytest.param({"overwrite": None}, "overwrite", id="overwrite-none"),
 ]
 
 
@@ -624,8 +632,10 @@ class TestValidation:
         path = str(tmp_path / "test.B")
         write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
 
+        # overwrite first, so a case that is *about* a bad overwrite keeps its
+        # own value rather than having it replaced by the default here.
         with pytest.raises(ValueError, match=message):
-            self._call(path, gains, ms_path, {**overrides, "overwrite": True})
+            self._call(path, gains, ms_path, {"overwrite": True, **overrides})
 
         assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
 
@@ -690,8 +700,13 @@ class TestPartialWrites:
     half-written table sitting where a valid one is expected.
     """
 
+    # KeyboardInterrupt as well as an ordinary error: a Ctrl-C mid-write is the
+    # likeliest way to strand a partial table, and it is not an Exception, so
+    # narrowing the cleanup to `except Exception` would pass every other check
+    # here while leaving exactly that case broken.
+    @pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
     def test_a_failure_mid_write_leaves_no_partial_table(
-        self, tmp_path, gains, ms_path, monkeypatch
+        self, tmp_path, gains, ms_path, monkeypatch, failure
     ):
         import casacore.tables
 
@@ -702,16 +717,42 @@ class TestPartialWrites:
             # Once the output exists the validation reads are done, so this is
             # the subtable copy: the first genuinely mid-write step.
             if os.path.exists(path) and str(name).startswith(ms_path):
-                raise RuntimeError("the disk went away")
+                raise failure("the disk went away")
 
             return real_table(name, *args, **kwargs)
 
         monkeypatch.setattr(casacore.tables, "table", flaky)
 
-        with pytest.raises(RuntimeError, match="disk"):
+        with pytest.raises(failure, match="disk"):
             write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
 
         assert not os.path.exists(path)
+
+    def test_a_cleanup_failure_does_not_replace_the_original_error(
+        self, tmp_path, gains, ms_path, monkeypatch
+    ):
+        """Removal is best effort; the error that caused it always propagates."""
+
+        import casacore.tables
+
+        path = str(tmp_path / "test.B")
+        real_table = casacore.tables.table
+
+        def flaky(name, *args, **kwargs):
+            if os.path.exists(path) and str(name).startswith(ms_path):
+                raise RuntimeError("the disk went away")
+
+            return real_table(name, *args, **kwargs)
+
+        def unremovable(*args, **kwargs):
+            raise OSError("the directory is not going anywhere either")
+
+        monkeypatch.setattr(casacore.tables, "table", flaky)
+        monkeypatch.setattr(shutil, "rmtree", unremovable)
+
+        # The write's failure, not the cleanup's.
+        with pytest.raises(RuntimeError, match="disk"):
+            write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
 
 
 # ---------------------------------------------------------------------------

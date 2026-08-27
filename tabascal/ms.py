@@ -924,8 +924,10 @@ def write_caltable(
         existing table is removed**: ``overwrite=True`` deletes a calibration
         that took a run to produce, and a caller's mistake must not cost them
         that. An I/O failure part-way through the write cannot put the old table
-        back, but it does not leave a half-written one either -- the partial
-        output is removed and the error re-raised.
+        back; the partial output is then removed on a best-effort basis before
+        the error is re-raised, so a half-written table can only survive a
+        failure that also prevents its removal. The original exception always
+        propagates -- nothing raised during the clean-up replaces it.
     FileExistsError
         If ``path`` exists and ``overwrite`` is false.
     """
@@ -952,7 +954,12 @@ def write_caltable(
             f"the gains, got shape {times.shape}"
         )
 
-    if not isinstance(n_pol, (int, np.integer)) or n_pol < 1:
+    # bool first: it subclasses int, so True would otherwise be accepted as 1.
+    if (
+        isinstance(n_pol, (bool, np.bool_))
+        or not isinstance(n_pol, (int, np.integer))
+        or n_pol < 1
+    ):
         raise ValueError(
             f"n_pol must be a positive integer, got {n_pol!r}. CASA writes 2 "
             "polarisations even for a single-correlation MS."
@@ -968,6 +975,16 @@ def write_caltable(
     if not isinstance(viscal, str):
         raise ValueError(
             f"viscal must be a string naming the calibration type, got {viscal!r}"
+        )
+
+    # Checked rather than taken for its truthiness, because the truthy values are
+    # the dangerous ones: overwrite="False" reads as a refusal and deletes the
+    # table the caller was trying to protect.
+    if not isinstance(overwrite, (bool, np.bool_)):
+        raise ValueError(
+            f"overwrite must be True or False, got {overwrite!r}. It decides "
+            "whether an existing calibration table is deleted, so it is not "
+            "taken on truthiness."
         )
 
     # The gains have to describe the MS whose subtables are about to be copied in
@@ -1053,7 +1070,13 @@ def write_caltable(
 
             tb.flush()
     except BaseException:
-        shutil.rmtree(path, ignore_errors=True)
+        # Best effort, and deliberately silent: whatever went wrong with the
+        # write is what the caller needs to see, so nothing raised while clearing
+        # up is allowed to take its place.
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except BaseException:
+            pass
         raise
 
     return path
