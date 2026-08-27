@@ -910,13 +910,22 @@ def write_caltable(
     str
         The caltable path.
 
+    The gains are checked against the MS they claim to belong to before any of
+    this happens, since the copied subtables are what the table's own rows index:
+    ``ANTENNA1`` into ``ANTENNA``, and ``CPARAM``'s channel axis onto
+    ``CHAN_FREQ``. Gains of the wrong width would produce a table that disagrees
+    with the copy of the MS inside itself.
+
     Raises
     ------
     ValueError
-        If the arguments do not describe one single-spectral-window solution set.
-        Every check runs *before* an existing table is removed: ``overwrite=True``
-        deletes a calibration that took a run to produce, and a caller's mistake
-        must not cost them that.
+        If the arguments do not describe one single-spectral-window solution set
+        for this MS. **Every check on the caller's arguments runs before an
+        existing table is removed**: ``overwrite=True`` deletes a calibration
+        that took a run to produce, and a caller's mistake must not cost them
+        that. An I/O failure part-way through the write cannot put the old table
+        back, but it does not leave a half-written one either -- the partial
+        output is removed and the error re-raised.
     FileExistsError
         If ``path`` exists and ``overwrite`` is false.
     """
@@ -927,6 +936,14 @@ def write_caltable(
     if gains.ndim != 3:
         raise ValueError(f"gains must be (n_ant, n_freq, n_time), got {gains.shape}")
     n_ant, n_freq, n_time = gains.shape
+
+    # Checked here rather than left to np.isfinite half-way through the write,
+    # which is past the point of no return for the table being overwritten.
+    if not np.issubdtype(gains.dtype, np.number):
+        raise ValueError(
+            f"gains must be a numeric array to be written as complex gains, got "
+            f"dtype {gains.dtype}"
+        )
 
     times = np.asarray(times, dtype=float)
     if times.ndim != 1 or times.size != n_time:
@@ -941,9 +958,39 @@ def write_caltable(
             "polarisations even for a single-correlation MS."
         )
 
+    try:
+        interval = float(interval)
+    except (TypeError, ValueError) as err:
+        raise ValueError(
+            f"interval must be a number of seconds, got {interval!r}"
+        ) from err
+
+    if not isinstance(viscal, str):
+        raise ValueError(
+            f"viscal must be a string naming the calibration type, got {viscal!r}"
+        )
+
+    # The gains have to describe the MS whose subtables are about to be copied in
+    # beside them, since the table's own rows index those copies.
     ms_spw = os.path.join(ms_path, "SPECTRAL_WINDOW")
     if os.path.exists(ms_spw):
-        _single_spw_chan_freq(ms_spw, f"{ms_path}::SPECTRAL_WINDOW")
+        chan_freq = _single_spw_chan_freq(ms_spw, f"{ms_path}::SPECTRAL_WINDOW")
+
+        if n_freq != len(chan_freq):
+            raise ValueError(
+                f"gains cover {n_freq} channels but {ms_path}::SPECTRAL_WINDOW "
+                f"describes {len(chan_freq)}. The caltable carries a copy of that "
+                "subtable, so its CPARAM channel axis would not line up with its "
+                "own channel frequencies."
+            )
+
+    n_ms_ant = _ms_antenna_count(ms_path)
+    if n_ms_ant is not None and n_ant != n_ms_ant:
+        raise ValueError(
+            f"gains cover {n_ant} antennas but {ms_path}::ANTENNA holds "
+            f"{n_ms_ant} rows. The caltable carries a copy of that subtable, so "
+            "its ANTENNA1 ids would not index its own antenna table."
+        )
 
     # Everything above is validation; only now is anything on disk touched.
     if os.path.exists(path):
@@ -964,42 +1011,50 @@ def write_caltable(
     cparam = np.repeat(solved[:, :, None], n_pol, axis=2).astype(np.complex64)
     flag = np.repeat(bad[:, :, None], n_pol, axis=2)
 
-    with table(path, _caltable_desc(), nrow=n_row, ack=False) as tb:
-        tb.putcol("TIME", time_col)
-        tb.putcol("ANTENNA1", ant_idx)
-        tb.putcol("ANTENNA2", np.full(n_row, -1, dtype=np.int32))
-        tb.putcol("FIELD_ID", np.zeros(n_row, dtype=np.int32))
-        tb.putcol("SPECTRAL_WINDOW_ID", np.zeros(n_row, dtype=np.int32))
-        tb.putcol("SCAN_NUMBER", np.zeros(n_row, dtype=np.int32))
-        tb.putcol("OBSERVATION_ID", np.zeros(n_row, dtype=np.int32))
-        tb.putcol("INTERVAL", np.full(n_row, float(interval)))
-        tb.putcol("CPARAM", cparam)
-        tb.putcol("FLAG", flag)
-        tb.putcol("PARAMERR", np.zeros((n_row, n_freq, n_pol), dtype=np.float32))
-        tb.putcol("SNR", np.ones((n_row, n_freq, n_pol), dtype=np.float32))
+    # Past here the old table is gone and cannot be brought back, so the one
+    # guarantee left is that a failure leaves no half-written table where a valid
+    # one is expected. BaseException, not Exception: a Ctrl-C mid-write is
+    # exactly the case that would otherwise strand one.
+    try:
+        with table(path, _caltable_desc(), nrow=n_row, ack=False) as tb:
+            tb.putcol("TIME", time_col)
+            tb.putcol("ANTENNA1", ant_idx)
+            tb.putcol("ANTENNA2", np.full(n_row, -1, dtype=np.int32))
+            tb.putcol("FIELD_ID", np.zeros(n_row, dtype=np.int32))
+            tb.putcol("SPECTRAL_WINDOW_ID", np.zeros(n_row, dtype=np.int32))
+            tb.putcol("SCAN_NUMBER", np.zeros(n_row, dtype=np.int32))
+            tb.putcol("OBSERVATION_ID", np.zeros(n_row, dtype=np.int32))
+            tb.putcol("INTERVAL", np.full(n_row, interval))
+            tb.putcol("CPARAM", cparam)
+            tb.putcol("FLAG", flag)
+            tb.putcol("PARAMERR", np.zeros((n_row, n_freq, n_pol), dtype=np.float32))
+            tb.putcol("SNR", np.ones((n_row, n_freq, n_pol), dtype=np.float32))
 
-        # CASA identifies a caltable by its table INFO record, not by its keywords
-        # -- without this, applycal rejects the table with 'is not a valid
-        # Calibration table'.
-        tb.putinfo({"type": "Calibration", "subType": viscal, "readme": ""})
+            # CASA identifies a caltable by its table INFO record, not by its
+            # keywords -- without this, applycal rejects the table with 'is not a
+            # valid Calibration table'.
+            tb.putinfo({"type": "Calibration", "subType": viscal, "readme": ""})
 
-        tb.putkeyword("VisCal", viscal)
-        tb.putkeyword("ParType", "Complex")
-        tb.putkeyword("MSName", os.path.basename(os.path.normpath(ms_path)))
-        tb.putkeyword("PolBasis", "unknown")
+            tb.putkeyword("VisCal", viscal)
+            tb.putkeyword("ParType", "Complex")
+            tb.putkeyword("MSName", os.path.basename(os.path.normpath(ms_path)))
+            tb.putkeyword("PolBasis", "unknown")
 
-        for sub in _SUBTABLES:
-            src = os.path.join(ms_path, sub)
-            if not os.path.exists(src):
-                continue
-            dst = os.path.join(path, sub)
-            # Not casacore's tablecopy(): that opens the source table and never
-            # closes it. Same copy, with both handles released.
-            with table(src, ack=False) as source:
-                source.copy(dst).close()
-            tb.putkeyword(sub, "Table: " + os.path.abspath(dst))
+            for sub in _SUBTABLES:
+                src = os.path.join(ms_path, sub)
+                if not os.path.exists(src):
+                    continue
+                dst = os.path.join(path, sub)
+                # Not casacore's tablecopy(): that opens the source table and
+                # never closes it. Same copy, with both handles released.
+                with table(src, ack=False) as source:
+                    source.copy(dst).close()
+                tb.putkeyword(sub, "Table: " + os.path.abspath(dst))
 
-        tb.flush()
+            tb.flush()
+    except BaseException:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
 
     return path
 
@@ -1030,6 +1085,23 @@ def _single_spw_chan_freq(spw_path: str, described: str) -> NDArray:
             )
 
         return np.asarray(spw.getcell("CHAN_FREQ", 0), dtype=float)
+
+
+def _ms_antenna_count(ms_path: str) -> Optional[int]:
+    """Number of rows in an MS's ``ANTENNA`` subtable, or ``None`` if it has none.
+
+    ``None`` rather than an error: the subtables are optional, and a caltable
+    written for an MS that carries none has nothing to contradict.
+    """
+
+    from casacore.tables import table
+
+    ant_path = os.path.join(ms_path, "ANTENNA")
+    if not os.path.exists(ant_path):
+        return None
+
+    with table(ant_path, ack=False) as ant:
+        return int(ant.nrows())
 
 
 def _caltable_freqs(path: str) -> Optional[NDArray]:

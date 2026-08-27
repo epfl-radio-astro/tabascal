@@ -284,11 +284,20 @@ class TestFlagging:
 
         # Row 2 is (t0, a2) in the time-major layout; channel 1, both pols.
         cparam, flag = _raw(path, "CPARAM"), _raw(path, "FLAG")
+        dead = cparam[2, 1]
 
         assert flag[2, 1].all()
-        assert np.all(np.isnan(cparam[2, 1]))
-        # The raw value is gone, not merely flagged.
-        assert not np.any(cparam[2, 1] == np.complex64(bad_value))
+        # Both components, checked apart: np.isnan on a complex is true when
+        # either half is NaN, so it would pass on a real-only NaN too.
+        assert np.all(np.isnan(dead.real))
+        assert np.all(np.isnan(dead.imag))
+
+        if not np.isnan(bad_value):
+            # The raw value is gone, not merely flagged. Only meaningful for the
+            # values that would otherwise have survived into the column -- NaN
+            # compares equal to nothing, so this says nothing about that case,
+            # where the two assertions above carry the weight instead.
+            assert not np.any(dead == np.complex64(bad_value))
 
         # Its neighbours are untouched.
         assert not flag[2, 0].any()
@@ -517,12 +526,69 @@ class TestRoundtrip:
 # Validation, and what a rejected call leaves behind
 # ---------------------------------------------------------------------------
 
+#: Every way a caller can get ``write_caltable``'s arguments wrong, as an
+#: override of the good call built in :meth:`TestValidation._call`, paired with
+#: what the error has to say. Each of these must be caught before the existing
+#: table is removed, so the same list drives both halves of the guarantee.
+BAD_CALLS = [
+    pytest.param(
+        {"gains": np.ones((N_ANT, N_FREQ), dtype=complex)},
+        "n_ant, n_freq, n_time",
+        id="gains-too-few-axes",
+    ),
+    pytest.param(
+        {"gains": np.ones((N_ANT, N_FREQ, N_TIME, 1), dtype=complex)},
+        "n_ant, n_freq, n_time",
+        id="gains-too-many-axes",
+    ),
+    pytest.param(
+        {"gains": np.full((N_ANT, N_FREQ, N_TIME), "x")},
+        "numeric",
+        id="gains-not-numeric",
+    ),
+    pytest.param(
+        {"gains": np.ones((N_ANT, N_FREQ + 1, N_TIME), dtype=complex)},
+        "channel",
+        id="gains-channels-vs-ms",
+    ),
+    pytest.param(
+        {"gains": np.ones((N_ANT + 1, N_FREQ, N_TIME), dtype=complex)},
+        "antenna",
+        id="gains-antennas-vs-ms",
+    ),
+    pytest.param(
+        {"times": np.arange(N_TIME + 1, dtype=float)}, "times", id="times-length"
+    ),
+    pytest.param(
+        {"times": np.zeros((N_TIME, 2), dtype=float)}, "times", id="times-shape"
+    ),
+    pytest.param({"n_pol": 0}, "n_pol", id="n_pol-zero"),
+    pytest.param({"n_pol": -1}, "n_pol", id="n_pol-negative"),
+    pytest.param({"n_pol": 2.5}, "n_pol", id="n_pol-fractional"),
+    pytest.param({"n_pol": "2"}, "n_pol", id="n_pol-string"),
+    pytest.param({"n_pol": None}, "n_pol", id="n_pol-none"),
+    pytest.param({"interval": "soon"}, "interval", id="interval-not-a-number"),
+]
+
+
 class TestValidation:
     """Nothing is deleted until the arguments are known to be good.
 
-    ``overwrite=True`` removes the existing table, so validation that runs after
-    it turns a caller's mistake into the loss of a good calibration.
+    ``overwrite=True`` removes the existing table, so any check that runs after
+    it turns a caller's mistake into the loss of a good calibration -- including
+    the checks that only fail deep in the write, like a gains array of strings
+    reaching ``np.isfinite`` or an ``interval`` that is not a number.
     """
+
+    def _call(self, path, gains, ms_path, overrides):
+        kwargs = {
+            "gains": gains,
+            "times": np.arange(N_TIME, dtype=float),
+            "ms_path": ms_path,
+        }
+        kwargs.update(overrides)
+
+        return write_caltable(path, **kwargs)
 
     def test_an_existing_table_is_not_overwritten_unasked(
         self, tmp_path, gains, ms_path
@@ -537,75 +603,115 @@ class TestValidation:
         # Still readable: the refusal left the table alone.
         assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
 
-    @pytest.mark.parametrize(
-        "shape", [(N_ANT, N_FREQ), (N_ANT, N_FREQ, N_TIME, 1)]
-    )
-    def test_gains_must_carry_all_three_axes(self, tmp_path, shape):
-        with pytest.raises(ValueError, match="n_ant, n_freq, n_time"):
-            write_caltable(
-                str(tmp_path / "test.B"),
-                np.ones(shape, dtype=complex),
-                np.arange(N_TIME, dtype=float),
-                ms_path=str(tmp_path / "fake.ms"),
-            )
-
-    def test_times_must_match_the_gains_time_axis(self, tmp_path, gains):
-        with pytest.raises(ValueError, match="times"):
-            write_caltable(
-                str(tmp_path / "test.B"),
-                gains,
-                np.arange(N_TIME + 1, dtype=float),
-                ms_path=str(tmp_path / "fake.ms"),
-            )
-
-    def test_times_must_be_one_dimensional(self, tmp_path, gains):
-        """(n_time, 2) has the right length and the wrong shape."""
-
-        with pytest.raises(ValueError, match="times"):
-            write_caltable(
-                str(tmp_path / "test.B"),
-                gains,
-                np.zeros((N_TIME, 2), dtype=float),
-                ms_path=str(tmp_path / "fake.ms"),
-            )
-
-    @pytest.mark.parametrize("n_pol", [0, -1, 2.5, "2", None])
-    def test_n_pol_must_be_a_positive_integer(self, tmp_path, gains, n_pol):
-        with pytest.raises(ValueError, match="n_pol"):
-            write_caltable(
-                str(tmp_path / "test.B"),
-                gains,
-                np.arange(N_TIME, dtype=float),
-                ms_path=str(tmp_path / "fake.ms"),
-                n_pol=n_pol,
-            )
-
-    @pytest.mark.parametrize(
-        "kwargs, bad",
-        [
-            ({"n_pol": 0}, "n_pol"),
-            ({}, "times"),
-        ],
-    )
-    def test_a_rejected_call_leaves_the_existing_table_intact(
-        self, tmp_path, gains, ms_path, kwargs, bad
+    @pytest.mark.parametrize("overrides, message", BAD_CALLS)
+    def test_a_bad_call_is_rejected_before_anything_is_written(
+        self, tmp_path, gains, ms_path, overrides, message
     ):
-        """The whole point of validating first: overwrite=True must not destroy
-        a good table on the way to raising."""
+        path = str(tmp_path / "test.B")
+
+        with pytest.raises(ValueError, match=message):
+            self._call(path, gains, ms_path, overrides)
+
+        assert not os.path.exists(path)
+
+    @pytest.mark.parametrize("overrides, message", BAD_CALLS)
+    def test_a_bad_call_leaves_an_existing_table_intact(
+        self, tmp_path, gains, ms_path, overrides, message
+    ):
+        """The whole point of validating first: ``overwrite=True`` must not
+        destroy a good calibration on the way to raising."""
 
         path = str(tmp_path / "test.B")
         write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
 
-        times = (
-            np.arange(N_TIME, dtype=float)
-            if bad == "n_pol"
-            else np.zeros((N_TIME, 2), dtype=float)
-        )
-
-        with pytest.raises(ValueError, match=bad):
-            write_caltable(path, gains, times, ms_path=ms_path, overwrite=True, **kwargs)
+        with pytest.raises(ValueError, match=message):
+            self._call(path, gains, ms_path, {**overrides, "overwrite": True})
 
         assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
+
+
+class TestSourceMsConsistency:
+    """The gains have to describe the MS whose subtables get copied in beside them.
+
+    A caltable carries the MS's own ``ANTENNA`` and ``SPECTRAL_WINDOW``, and its
+    rows index them: ``ANTENNA1`` into the antenna table, ``CPARAM``'s channel
+    axis onto ``CHAN_FREQ``. Gains of the wrong width produce a table that
+    disagrees with the copy of the MS inside itself, which nothing downstream can
+    detect.
+    """
+
+    def test_the_channel_count_must_match_the_spectral_window(
+        self, tmp_path, gains, ms_path
+    ):
+        wrong = np.ones((N_ANT, N_FREQ + 2, N_TIME), dtype=complex)
+
+        with pytest.raises(ValueError, match="channel") as err:
+            write_caltable(
+                str(tmp_path / "test.B"), wrong,
+                np.arange(N_TIME, dtype=float), ms_path=ms_path,
+            )
+
+        # Both numbers, so the caller can see which end is wrong.
+        assert str(N_FREQ + 2) in str(err.value) and str(N_FREQ) in str(err.value)
+
+    def test_the_antenna_count_must_match_the_antenna_table(
+        self, tmp_path, gains, ms_path
+    ):
+        wrong = np.ones((N_ANT + 2, N_FREQ, N_TIME), dtype=complex)
+
+        with pytest.raises(ValueError, match="antenna") as err:
+            write_caltable(
+                str(tmp_path / "test.B"), wrong,
+                np.arange(N_TIME, dtype=float), ms_path=ms_path,
+            )
+
+        assert str(N_ANT + 2) in str(err.value) and str(N_ANT) in str(err.value)
+
+    def test_an_ms_without_the_subtables_cannot_contradict_anything(
+        self, tmp_path, gains
+    ):
+        """Nothing to check against is not a mismatch: the subtables are optional."""
+
+        path = str(tmp_path / "test.B")
+        write_caltable(
+            path, gains, np.arange(N_TIME, dtype=float),
+            ms_path=str(tmp_path / "fake.ms"),
+        )
+
+        assert os.path.exists(path)
+
+
+class TestPartialWrites:
+    """A write that fails part-way leaves nothing behind.
+
+    The two halves of the guarantee are different: a caller's mistake is caught
+    before the old table is removed and costs nothing, but an I/O failure after
+    that point cannot bring the old table back. What it must not do is leave a
+    half-written table sitting where a valid one is expected.
+    """
+
+    def test_a_failure_mid_write_leaves_no_partial_table(
+        self, tmp_path, gains, ms_path, monkeypatch
+    ):
+        import casacore.tables
+
+        path = str(tmp_path / "test.B")
+        real_table = casacore.tables.table
+
+        def flaky(name, *args, **kwargs):
+            # Once the output exists the validation reads are done, so this is
+            # the subtable copy: the first genuinely mid-write step.
+            if os.path.exists(path) and str(name).startswith(ms_path):
+                raise RuntimeError("the disk went away")
+
+            return real_table(name, *args, **kwargs)
+
+        monkeypatch.setattr(casacore.tables, "table", flaky)
+
+        with pytest.raises(RuntimeError, match="disk"):
+            write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        assert not os.path.exists(path)
 
 
 # ---------------------------------------------------------------------------

@@ -102,9 +102,26 @@ flagged polarisation is treated as *missing* rather than as zero: where one
 polarisation holds a solution and the other does not, the surviving one is
 returned.
 
-Argument checking in ``write_caltable`` happens before anything on disk is
-touched, since ``overwrite=True`` removes a calibration that took a run to
-produce.
+What a failed write leaves behind
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``overwrite=True`` removes a calibration that took a run to produce, so
+``write_caltable`` checks *every* argument before it touches anything on disk —
+including the checks that would otherwise only fail deep in the write, such as a
+non-numeric ``gains`` array reaching ``np.isfinite``. The gains are also
+cross-checked against the MS they claim to belong to: the caltable carries a copy
+of the MS's ``ANTENNA`` and ``SPECTRAL_WINDOW``, and its own rows index those
+copies, so gains of the wrong antenna or channel width would produce a table
+that disagrees with the MS inside itself. A mismatch names both counts.
+
+That gives two guarantees, which are deliberately different:
+
+*A caller's mistake costs nothing* — the call raises before the removal, and an
+existing table is left exactly as it was.
+
+*An I/O failure part-way through the write* cannot put the old table back, but
+the partial output is removed before the error is re-raised, so there is never a
+half-written table sitting where a valid one is expected.
 
 .. warning::
 
