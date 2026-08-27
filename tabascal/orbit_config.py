@@ -9,8 +9,8 @@ The module also owns :func:`ms_observation_epoch_jd`, the single Measurement Set
 observation-epoch derivation. Preflight and execution must agree exactly on the
 epoch: it sets every TLE age comparison, so two slightly different means could
 make different acceptance decisions. The helper mirrors
-:func:`tabascal.ms.read_ms` — one time
-per integration, with the same seconds-versus-days unit guard.
+:func:`tabascal.ms.read_ms` — one time per integration, converted through the
+same :func:`tabascal.ms.times_to_mjd`.
 
 Three age settings exist and are deliberately kept distinct:
 
@@ -36,6 +36,7 @@ from typing import Optional
 import numpy as np
 
 from satchecker_client import SatCheckerError as TLEError
+from tabascal.ms import times_to_mjd
 from tabascal.time import mjd_to_jd
 
 
@@ -329,26 +330,25 @@ def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
     """One observation time per integration, in MJD days.
 
     Mirrors :func:`tabascal.ms.read_ms`, which takes a single timestamp per
-    integration (not one per visibility row) and divides by 86400 when consecutive
-    timestamps are more than 0.5 apart — the signature of a ``TIME`` column stored
-    in seconds rather than days. The unique-times form used here equals
+    integration (not one per visibility row), and converts through the same
+    :func:`tabascal.ms.times_to_mjd` so the two cannot read one MS on two
+    different units. The unique-times form used here equals
     ``TIME.reshape(n_time, n_bl)[:, 0]`` for a well-formed MS while remaining
     correct when the row count is not an exact multiple of the baseline count.
 
-    Negative (pre-1858) and pre-1970 epochs are supported: the guard reads the
-    *spacing* of consecutive samples, which is positive regardless of sign. A
-    single-integration MS has no spacing to read, so its unit is inferred from
-    magnitude instead — an MJD day number is at most ~1e5 in any plausible
-    observing era, while the same instant in seconds is ~1e9.
+    The column's declared ``QuantumUnits`` are not read here — that would be a
+    second casacore call, and preflight deliberately touches the MS through the
+    one seam above — so the unit always comes from ``times_to_mjd``'s heuristic.
+    That heuristic is order-insensitive and shared, so it cannot classify an MS
+    one way here and another in ``read_ms``, whatever order the MS stores its
+    timestep blocks in. The one case the two can still differ on is an MS whose
+    declaration contradicts the spacing of the times it stores: ``read_ms``
+    honours the declaration, this does not.
     """
     times = np.unique(_ms_time_column(ms_path))
     if times.size == 0:
         raise TLEError(f"Measurement Set has an empty TIME column: {ms_path}")
-    if times.size > 1:
-        in_seconds = (times[1] - times[0]) > 0.5
-    else:
-        in_seconds = abs(times[0]) > 1e5
-    return times / 86400.0 if in_seconds else times
+    return times_to_mjd(times)
 
 
 def ms_observation_epoch_jd(ms_path: str) -> float:

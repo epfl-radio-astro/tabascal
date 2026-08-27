@@ -6,6 +6,7 @@ with its own name, instead of accreting into one file the way MS reading
 accreted into ``tab_tools.py``.
 """
 
+import warnings
 from typing import NamedTuple, Optional
 
 import jax
@@ -21,6 +22,7 @@ from tabascal.noise import (
     per_baseline_sigma,
     representative_sigma,
 )
+from tabascal.time import DAY_SECS, jd_to_datetime, mjd_to_jd
 from tabascal.timing import measure_runtime
 
 
@@ -193,6 +195,121 @@ def read_time_scale(column_keywords: dict, column: str = "TIME") -> str:
         return DEFAULT_TIME_SCALE
 
     return str(ref).strip().lower()
+
+
+#: Units a ``TIME`` column can declare in ``QuantumUnits``, mapped to the two
+#: tabascal distinguishes. casacore writes ``'s'``; the longer spellings are
+#: accepted for the same reason the scale names are -- the point is to read
+#: whatever the MS declares, not to insist on one spelling of it.
+TIME_UNITS = {
+    "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
+    "d": "d", "day": "d", "days": "d",
+}
+
+
+def read_time_unit(column_keywords: dict, column: str = "TIME") -> Optional[str]:
+    """Unit an MS column declares its times in, from its ``QuantumUnits`` keyword.
+
+    The MS format leaves the unit of ``TIME`` to the column: casacore writes
+    seconds and declares ``QuantumUnits ['s']``, but days are equally legal.
+    Reading the declaration makes it authoritative and leaves
+    :func:`times_to_mjd`'s heuristic as the fallback for the columns that carry
+    no declaration.
+
+    Parameters
+    ----------
+    column_keywords : dict
+        Per-column keyword mapping, as returned by
+        ``xds_from_ms(path, column_keywords=True)[1]``.
+    column : str, optional
+        Column to read the unit from. Defaults to ``"TIME"``.
+
+    Returns
+    -------
+    str or None
+        ``"s"`` or ``"d"``, or ``None`` when the MS declares nothing usable --
+        which is not an error, only an absence for the caller to infer around.
+
+    Warns
+    -----
+    UserWarning
+        If the column declares a unit that is neither seconds nor days. An
+        ignored declaration is worth saying out loud, and worth being able to
+        filter and assert on, which a bare print is not.
+    """
+
+    units = (column_keywords or {}).get(column, {}).get("QuantumUnits")
+
+    if isinstance(units, str):
+        units = [units]
+
+    if units is None or len(units) == 0:
+        return None
+
+    declared = str(units[0]).strip()
+    unit = TIME_UNITS.get(declared.lower())
+
+    if unit is None:
+        warnings.warn(
+            f"{column} declares QuantumUnits {declared!r}, which is neither "
+            "seconds nor days; reading the unit from the times instead.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    return unit
+
+
+#: Largest ``|MJD|`` in days that an observation could plausibly carry: MJD 1e5
+#: is the year 2132, and -1e5 is 1585. Only used where there is a single
+#: timestamp and so no spacing to read; see :func:`times_to_mjd`.
+_MJD_DAY_LIMIT = 1e5
+
+
+def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
+    """An MS ``TIME`` column as Modified Julian Dates in days.
+
+    tabascal works in MJD days throughout, while an MS stores ``TIME`` in the
+    unit its column declares -- seconds, as casacore writes it. Pass that
+    declaration (:func:`read_time_unit`) and it is honoured; pass ``None`` and
+    the unit is inferred, because not every writer fills the keyword in.
+
+    The inference reads the *spacing* of consecutive samples rather than their
+    magnitude: an integration is seconds long, so a gap above 0.5 can only be
+    seconds, where times stored in days step by ~1e-4. Spacing also stays
+    positive for a pre-1858 epoch, whose MJD day number is negative. The
+    threshold is strict, so a spacing of exactly 0.5 reads as days.
+
+    A single-integration MS has no spacing to read, so its unit comes from
+    magnitude after all: an MJD day number is at most ~1e5 in any plausible
+    observing era, while the same instant in seconds is ~1e9. Strict again: a
+    magnitude of exactly 1e5 reads as days.
+
+    The classification looks at the *sorted* distinct values, and so does not
+    depend on the order the times arrive in -- :func:`ms_layout` permits an MS
+    whose timestep blocks do not ascend, and
+    ``orbit_config.ms_integration_times_mjd`` reads the same column through
+    ``np.unique``. Reading the raw leading pair instead would let those two
+    classify one MS two different ways. The values come back in the order they
+    were given, sorted or not: only the unit decision looks at them sorted.
+
+    So the heuristic is one rule for both callers. A *declared* unit can still
+    part them, because only :func:`read_ms` passes one: an MS whose
+    ``QuantumUnits`` contradicts the spacing of the times it stores is read on
+    the declaration there and on the spacing by the preflight epoch check.
+    """
+
+    times = np.asarray(times, dtype=float)
+
+    if unit is None and times.size:
+        ordered = np.unique(times)
+
+        if ordered.size > 1:
+            unit = "s" if (ordered[1] - ordered[0]) > 0.5 else "d"
+        else:
+            unit = "s" if abs(ordered[0]) > _MJD_DAY_LIMIT else "d"
+
+    return times / DAY_SECS if unit == "s" else times
 
 
 # ---------------------------------------------------------------------------
@@ -567,11 +684,10 @@ def read_ms(
     chan_width = np.array(spec_row.CHAN_WIDTH.data[0, 0].compute())
     int_time = xds.INTERVAL.data[0].compute()
 
-    times_mjd = np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
-    if times_mjd[1] - times_mjd[0] > 0.5:
-        times_mjd = times_mjd / (24 * 3600)
-
-    from tabascal.time import jd_to_datetime, mjd_to_jd
+    times_mjd = times_to_mjd(
+        np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()),
+        read_time_unit(column_keywords),
+    )
 
     print(jd_to_datetime(mjd_to_jd(times_mjd[0])).isoformat())
 

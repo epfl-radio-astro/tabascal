@@ -13,10 +13,13 @@ from tabascal.ms import (
     partition_noise,
     partition_polarization,
     partition_setup,
+    read_ms,
     read_time_scale,
+    read_time_unit,
     rows_to_grid,
     resolve_correlation,
     resolve_data_description,
+    times_to_mjd,
 )
 
 
@@ -170,14 +173,22 @@ def test_unreadable_polarization_raises(monkeypatch):
 # Time scale, from the TIME column's MEASINFO record
 # ---------------------------------------------------------------------------
 
-def _keywords(ref=None, column="TIME"):
-    """Column keywords as dask-ms returns them, optionally declaring a scale."""
+def _keywords(ref=None, column="TIME", units=("s",)):
+    """Column keywords as dask-ms returns them, optionally declaring a scale.
+
+    ``units`` is the ``QuantumUnits`` declaration; ``None`` leaves it off, which
+    is what a column written without one looks like.
+    """
 
     measinfo = {"type": "epoch"}
     if ref is not None:
         measinfo["Ref"] = ref
 
-    return {column: {"QuantumUnits": ["s"], "MEASINFO": measinfo}}
+    keywords = {column: {"MEASINFO": measinfo}}
+    if units is not None:
+        keywords[column]["QuantumUnits"] = units
+
+    return keywords
 
 
 def test_reads_the_declared_scale():
@@ -212,6 +223,309 @@ def test_a_different_column_can_be_read():
     keywords = _keywords("TAI", column="TIME_CENTROID")
 
     assert read_time_scale(keywords, column="TIME_CENTROID") == "tai"
+
+
+# ---------------------------------------------------------------------------
+# Time unit: what the numbers in a TIME column mean
+# ---------------------------------------------------------------------------
+
+def _in_memory_ms(times, n_ant=3, n_freq=2, int_time=8.0):
+    """A whole MS partition and its subtables, in memory.
+
+    ``read_ms`` reaches casacore only through ``xds_from_ms``/``xds_from_table``,
+    so standing those two up covers the reader end to end without an MS on disk.
+    Row-major and dask-backed, as a real partition is.
+    """
+
+    import dask.array as da
+    import xarray as xr
+
+    a1_bl, a2_bl = np.triu_indices(n_ant, k=1)
+    n_bl = len(a1_bl)
+    n_time = len(times)
+    n_row = n_time * n_bl
+
+    column = lambda values, dims: (dims, da.from_array(np.asarray(values)))
+    row_shape = lambda *rest: (n_row, *rest)
+
+    partition = xr.Dataset(
+        data_vars={
+            "TIME": column(np.repeat(np.asarray(times, float), n_bl), ["row"]),
+            "ANTENNA1": column(np.tile(a1_bl, n_time), ["row"]),
+            "ANTENNA2": column(np.tile(a2_bl, n_time), ["row"]),
+            "INTERVAL": column(np.full(n_row, int_time), ["row"]),
+            "UVW": column(np.zeros(row_shape(3)), ["row", "uvw"]),
+            "DATA": column(
+                np.ones(row_shape(n_freq, 1), dtype=complex), ["row", "chan", "corr"]
+            ),
+            "FLAG": column(
+                np.zeros(row_shape(n_freq, 1), bool), ["row", "chan", "corr"]
+            ),
+            "SIGMA": column(np.ones(row_shape(1)), ["row", "corr"]),
+        }
+    )
+
+    subtables = {
+        "ANTENNA": xr.Dataset(
+            data_vars={
+                "POSITION": column(np.zeros((n_ant, 3)), ["row", "xyz"]),
+                "DISH_DIAMETER": column(np.full(n_ant, 35.0), ["row"]),
+            }
+        ),
+        # Grouped by row, so the leading axis of length 1 that read_ms indexes.
+        "SPECTRAL_WINDOW": xr.Dataset(
+            data_vars={
+                "CHAN_FREQ": column(
+                    np.linspace(1.0e9, 1.1e9, n_freq)[None], ["row", "chan"]
+                ),
+                "CHAN_WIDTH": column(np.full((1, n_freq), 1.0e6), ["row", "chan"]),
+            }
+        ),
+        "SOURCE": xr.Dataset(
+            data_vars={"DIRECTION": column([[0.35, -0.5]], ["row", "radec"])}
+        ),
+        "DATA_DESCRIPTION": xr.Dataset(
+            data_vars={
+                "SPECTRAL_WINDOW_ID": column([0], ["row"]),
+                "POLARIZATION_ID": column([0], ["row"]),
+            }
+        ),
+        "POLARIZATION": xr.Dataset(
+            data_vars={"CORR_TYPE": column([[CORR_TYPES["xx"]]], ["row", "corr"])}
+        ),
+    }
+
+    return partition, subtables
+
+
+@pytest.fixture
+def run_reader(monkeypatch):
+    """Run ``read_ms`` over an in-memory MS holding the given times."""
+
+    def _run(times, keywords=None, **kwargs):
+        partition, subtables = _in_memory_ms(times, **kwargs)
+
+        monkeypatch.setattr(
+            "tabascal.ms.xds_from_ms",
+            lambda path, column_keywords=False: ([partition], keywords or {}),
+        )
+        monkeypatch.setattr(
+            "tabascal.ms.xds_from_table",
+            lambda path, group_cols=None: [subtables[path.split("::")[-1]]],
+        )
+
+        return read_ms("in-memory.ms")
+
+    return _run
+
+
+class TestTimeUnits:
+    """The one rule for reading a TIME column as MJD days.
+
+    ``read_ms`` and the epoch helper in ``orbit_config`` both go through
+    :func:`times_to_mjd`, so an MS cannot be read on one unit by the preflight
+    check and on another by the run itself.
+    """
+
+    #: 2025-01-01T00:00:00 UTC, the era the array cases are built around.
+    MJD = 60676.0
+
+    #: 1965-03-04T06:00:00 UTC: before the Unix epoch, still a positive MJD.
+    MJD_1965 = 38823.25
+
+    #: 1800-01-01T00:00:00 UTC: before the MJD epoch, so a negative day number.
+    MJD_1800 = -21504.0
+
+    def _days(self, mjd=None, n_time=4, step=8.0):
+        """``n_time`` integrations ``step`` seconds apart, in MJD days."""
+
+        return (self.MJD if mjd is None else mjd) + np.arange(n_time) * step / 86400.0
+
+    # -- the spacing rule, on a normal multi-integration MS -----------------
+
+    def test_seconds_are_converted_to_days(self):
+        days = self._days()
+
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+
+    def test_days_are_left_alone(self):
+        days = self._days()
+
+        np.testing.assert_array_equal(times_to_mjd(days), days)
+
+    def test_a_pre_1858_epoch_is_read_in_either_unit(self):
+        """Its MJD day number is negative; the spacing the rule reads is not."""
+        days = self._days(mjd=self.MJD_1800)
+
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+        np.testing.assert_array_equal(times_to_mjd(days), days)
+
+    def test_a_long_integration_is_still_seconds(self):
+        """0.5 is the threshold in *days*: no integration is 12 hours long."""
+        days = self._days(step=3600.0)
+
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+
+    def test_two_integrations_are_enough_to_read_a_spacing(self):
+        """The shortest column the spacing rule applies to at all."""
+        days = self._days(n_time=2)
+
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+        np.testing.assert_array_equal(times_to_mjd(days), days)
+
+    def test_the_spacing_boundary_is_strict(self):
+        """A spacing of exactly 0.5 reads as days: the test is ``> 0.5``."""
+        half_day_apart = self.MJD + np.arange(3) * 0.5
+
+        np.testing.assert_array_equal(times_to_mjd(half_day_apart), half_day_apart)
+
+    def test_the_rule_does_not_depend_on_row_order(self):
+        """``ms_layout`` permits timestep blocks that do not ascend."""
+        days = self._days()[::-1]
+
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+        np.testing.assert_array_equal(times_to_mjd(days), days)
+
+    # -- the magnitude fallback, when there is no spacing to read -----------
+
+    @pytest.mark.parametrize("mjd_name", ["MJD", "MJD_1965", "MJD_1800"])
+    def test_single_integration_in_seconds(self, mjd_name):
+        mjd = getattr(self, mjd_name)
+
+        np.testing.assert_allclose(
+            times_to_mjd(np.array([mjd * 86400.0])), [mjd], rtol=1e-15
+        )
+
+    @pytest.mark.parametrize("mjd_name", ["MJD", "MJD_1965", "MJD_1800"])
+    def test_single_integration_in_days(self, mjd_name):
+        mjd = getattr(self, mjd_name)
+
+        np.testing.assert_array_equal(times_to_mjd(np.array([mjd])), [mjd])
+
+    @pytest.mark.parametrize("sign", [1, -1])
+    def test_the_magnitude_boundary_is_strict(self, sign):
+        """A magnitude of exactly 1e5 reads as days: the test is ``> 1e5``."""
+        at_the_limit = np.array([sign * 1e5])
+
+        np.testing.assert_array_equal(times_to_mjd(at_the_limit), at_the_limit)
+
+    def test_an_empty_column_converts_to_nothing(self):
+        assert times_to_mjd(np.array([])).size == 0
+
+    # -- a declared unit outranks the heuristic -----------------------------
+
+    def test_a_declared_day_unit_beats_the_spacing_rule(self):
+        """Spacing says seconds; the MS says days, and the MS is authoritative."""
+        days = self._days()
+
+        np.testing.assert_array_equal(times_to_mjd(days * 86400.0, "d"), days * 86400.0)
+
+    def test_a_declared_second_unit_beats_the_spacing_rule(self):
+        days = self._days()
+
+        np.testing.assert_allclose(times_to_mjd(days, "s"), days / 86400.0, rtol=1e-15)
+
+    def test_a_declared_unit_beats_the_magnitude_fallback(self):
+        one = np.array([self.MJD])
+
+        np.testing.assert_array_equal(times_to_mjd(one, "d"), [self.MJD])
+
+    # -- reading the declaration -------------------------------------------
+
+    def test_reads_the_declared_unit(self):
+        assert read_time_unit(_keywords("UTC")) == "s"
+
+    @pytest.mark.parametrize(
+        "declared, expected",
+        [
+            ("s", "s"), ("S", "s"), (" s ", "s"), ("seconds", "s"),
+            ("d", "d"), ("day", "d"), ("days", "d"),
+        ],
+    )
+    def test_unit_spellings(self, declared, expected):
+        assert read_time_unit(_keywords(units=[declared])) == expected
+
+    @pytest.mark.parametrize("declaration", [np.array(["s"]), "s"])
+    def test_the_keyword_is_read_as_casacore_stored_it(self, declaration):
+        """dask-ms hands the keyword back as it was written: array or scalar."""
+        assert read_time_unit(_keywords(units=declaration)) == "s"
+
+    def test_an_undeclared_unit_leaves_it_to_the_heuristic(self):
+        assert read_time_unit(_keywords("UTC", units=None)) is None
+
+    def test_an_empty_declaration_leaves_it_to_the_heuristic(self):
+        assert read_time_unit(_keywords(units=[])) is None
+
+    def test_a_missing_column_leaves_it_to_the_heuristic(self):
+        assert read_time_unit({}) is None
+
+    def test_none_keywords_leave_it_to_the_heuristic(self):
+        assert read_time_unit(None) is None
+
+    def test_an_unrecognised_unit_is_reported(self):
+        """Ignoring a declaration silently is what the warning exists to stop."""
+        with pytest.warns(UserWarning, match="rad"):
+            assert read_time_unit(_keywords(units=["rad"])) is None
+
+    def test_a_recognised_unit_is_read_without_a_warning(self, recwarn):
+        assert read_time_unit(_keywords(units=["d"])) == "d"
+        assert not recwarn.list
+
+    def test_a_different_column_can_be_read(self):
+        keywords = _keywords(units=["d"], column="TIME_CENTROID")
+
+        assert read_time_unit(keywords, column="TIME_CENTROID") == "d"
+
+    # -- through the reader -------------------------------------------------
+
+    def test_read_ms_converts_seconds_to_mjd(self, run_reader):
+        days = self._days(n_time=3)
+
+        data = run_reader(days * 86400.0)
+
+        np.testing.assert_allclose(data["times_mjd"], days, rtol=1e-15)
+
+    def test_read_ms_reads_a_single_integration_ms(self, run_reader):
+        """The IndexError of issue #148: one integration has no spacing to read."""
+        data = run_reader(np.array([self.MJD * 86400.0]))
+
+        assert data["n_time"] == 1
+        np.testing.assert_allclose(data["times_mjd"], [self.MJD], rtol=1e-15)
+
+    def test_read_ms_honours_the_declared_unit(self, run_reader):
+        """Declared seconds, spacing of days: the reader follows the declaration."""
+        times = self._days(n_time=3)
+
+        data = run_reader(times, keywords=_keywords("UTC", units=["s"]))
+
+        np.testing.assert_allclose(data["times_mjd"], times / 86400.0, rtol=1e-15)
+
+    def test_the_reader_and_preflight_agree_on_a_descending_column(
+        self, run_reader, monkeypatch
+    ):
+        """The units cannot part company over the order the MS stores its blocks.
+
+        ``ms_layout`` permits timestep blocks that do not ascend, and the
+        preflight epoch helper sorts the column where ``read_ms`` keeps it in
+        block order. Only that order may differ between them: a unit read one
+        way for the TLE age checks and another for the fit would age the orbits
+        against an epoch the run never used.
+        """
+        from tabascal import orbit_config
+
+        days = self._days(n_time=3)[::-1]
+        n_bl = len(np.triu_indices(3, k=1)[0])
+        monkeypatch.setattr(
+            orbit_config,
+            "_ms_time_column",
+            lambda ms: np.repeat(days * 86400.0, n_bl),
+        )
+
+        from_reader = run_reader(days * 86400.0)["times_mjd"]
+        from_preflight = orbit_config.ms_integration_times_mjd("in-memory.ms")
+
+        np.testing.assert_allclose(from_reader, days, rtol=1e-15)
+        np.testing.assert_allclose(np.sort(from_reader), from_preflight, rtol=1e-15)
 
 
 # ---------------------------------------------------------------------------
