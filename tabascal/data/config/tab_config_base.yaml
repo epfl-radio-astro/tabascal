@@ -34,6 +34,7 @@ opt:
   max_iter: 500           # Optional - Maximum number of iterations to run the optimization for
   guide: map              # Optional - The type of optimization to run. Currently only 'map' is possible
   dual_run: true          # Optional - Whether to continue optimzation for a second run using a step size 10x smaller
+  trace_path: null        # Optional - Path to write an .npz trace of the per-iteration loss, wall-clock time and reduced chi^2 to. null disables it. Overridden by the TAB_LOSS_TRACE environment variable
 ################################################
 # Fisher-based covariance prediction parameters
 ################################################
