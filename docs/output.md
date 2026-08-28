@@ -57,7 +57,7 @@ This shows that we have a dataset with 1 sample, 28 baselines, 1 frequency chann
 
 The dataset contains the predictions for the astronomical visibilities, `ast_vis`, the gains, `gains`, the RFI visibilities, `rfi_vis`, and finally the observed visibility prediction, `vis_obs`. It also carries a `corr` attribute naming the correlation the run fitted, which is what tells the MS writer where the results belong.
 
-A run with [`data.save_rfi_per_sat: true`](config.md) stores one more variable, `rfi_vis_src (sample, src, bl, freq, time)`, with a `norad_id` coordinate on the `src` axis: the same `rfi_vis` split into its per-satellite contributions. It is `n_rfi` times the size of `rfi_vis`, which is why it is opt-in.
+A run with [`data.save_rfi_per_sat: true`](config.md) stores one more variable, `rfi_vis_src (sample, src, bl, freq, time)`, with a `norad_id` coordinate on the `src` axis: the same `rfi_vis` split into its per-satellite contributions. It is `n_rfi` times the size of `rfi_vis` on disk, which is why it is opt-in — but only one `(sample, satellite)` block of it is ever in memory, since each is written into the store as it is evaluated.
 
 ## MS file columns
 
