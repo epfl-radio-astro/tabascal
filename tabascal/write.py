@@ -1155,12 +1155,13 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     ``sink`` is how the result leaves without ever being whole: a callable
     ``sink(sample, source, block)`` handed each evaluated ``(n_bl, n_freq,
     n_time)`` block on process 0 as it is made, in place of storing it. **With a
-    sink the peak this adds to the writing process is one block** -- one
-    satellite of one sample -- rather than the ``n_rfi_real x sizeof(vis_rfi)``
-    the accumulating form holds before the zarr sees any of it, which is the
-    whole of the option's memory cost at a real channel count. Without one the
-    array is assembled and returned, which is what an interactive caller wants
-    and what the tests compare against.
+    sink the peak this adds to the writing process is a small multiple of one
+    block** -- the block on the device, its copy on the host, and whatever the
+    sink's write buffers -- rather than the ``n_rfi_real x sizeof(vis_rfi)`` the
+    accumulating form holds before the zarr sees any of it, which is the whole of
+    the option's memory cost at a real channel count. Without one the array is
+    assembled and returned, which is what an interactive caller wants and what
+    the tests compare against.
 
     Returns ``(vis_src, norad_ids)`` with ``vis_src`` of shape ``(n_sample,
     n_rfi_real, n_bl, n_freq, n_time)`` in the model's own dtype -- ``None`` off
