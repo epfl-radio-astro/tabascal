@@ -402,7 +402,7 @@ gains:
 ```
 
 * `init`: How the gain parameters are initialised. `prior` (the default) starts at the prior mean. `gains:ConstGains` additionally accepts a path to a previously measured gain — see [A constant gain per antenna](#a-constant-gain-per-antenna).
-* `amp_mean`: The mean of the prior over the gain amplitude.
+* `amp_mean`: The mean of the prior over the gain amplitude. `gains:ConstGains` reads it only when `fix_flux_scale` is `false` — see below.
 * `amp_std`: The standard deviation of the prior over the gain amplitude, **as a percentage** of `amp_mean`. `amp_std: 10` with `amp_mean: 1.0` is a 10 % spread.
 * `phase_mean`: The mean of the prior over the gain phase, in **radians**.
 * `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**.
@@ -415,7 +415,7 @@ gains:
 
 $$V^\text{OBS}_{pq} = g_p g_q^* \left( V^\text{AST}_{pq} + V^\text{RFI}_{pq} \right)$$
 
-It adds only $2 n_\text{ant} - 1$ parameters, and unlike a *fixed* gain it is constrained by the data.
+It adds only $2 n_\text{ant} - 2$ parameters, and unlike a *fixed* gain it is constrained by the data.
 
 ```yaml
 model:
@@ -440,9 +440,15 @@ gains:
 **The gauge.** The gain is purely *relative*: it carries no absolute flux scale and no absolute phase, and both are removed by construction rather than fitted.
 
 * The overall **phase** is unobservable, so `ref_ant`'s phase is pinned to exactly 0 and the other $n_\text{ant} - 1$ phases are free.
-* The overall **amplitude** is degenerate with the RFI source amplitude and the astronomical amplitude, so the amplitudes are parameterised in log space with a zero-sum constraint: $\sum_p \log |g_p| = 0$, i.e. a geometric mean $|g|$ of exactly 1. Left free it simply drifts — in one earlier run it settled at a median $|g|$ of 0.70, with the sky model absorbing the reciprocal — which is a nuisance direction that buys nothing and slows convergence. The amplitude therefore has $n_\text{ant} - 1$ effective degrees of freedom, as the phase does.
+* The overall **amplitude** is degenerate with the RFI source amplitude and the astronomical amplitude, so the log amplitudes are carried by $n_\text{ant} - 1$ parameters on an orthonormal basis of the zero-sum subspace, giving $\sum_p \log |g_p| = 0$, i.e. a geometric mean $|g|$ of exactly 1. Left free it simply drifts — in one earlier run it settled at a median $|g|$ of 0.70, with the sky model absorbing the reciprocal — which is a nuisance direction that buys nothing and slows convergence.
+
+Both directions are removed from the **parameters**, not just from the value they map to. Writing $n_\text{ant}$ amplitude parameters and subtracting their mean would give the same gains and the same prior, but would leave the all-ones direction of that latent space invisible to every visibility: flat in the likelihood however much data there is, curved only by the prior. Such a coordinate wrecks the conditioning of the optimisation and makes a likelihood-only Fisher matrix singular, so there is no such coordinate.
+
+The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the prior mean **only when the flux scale is free**: under the zero-sum gauge the geometric mean is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so. A non-positive `amp_mean` is an error — the amplitude is fitted in log space.
 
 * `ref_ant`: The antenna whose phase is pinned to 0. `null` (the default) selects the first antenna with any unflagged data. An antenna every one of whose baselines is flagged everywhere is not constrained by any visibility, so it cannot be the reference the others are measured against, and naming one explicitly is an error rather than a silently unpinned fit.
+
+  **One reference pins one connected group.** A phase is measured relative to another antenna's along a chain of baselines that carry data, so if the unflagged baselines split the array into groups that share no baseline, pinning `ref_ant` in one group leaves every other group's overall phase unconstrained. Setup computes the connected components of the unflagged baseline graph and **stops**, naming the groups, rather than fitting a model with a flat direction in it. Fit the groups separately, or flag the smaller ones out of the run. Heavy flagging is fine as long as what survives still connects the array.
 * `fix_flux_scale`: Whether to keep the zero-sum log-amplitude constraint above. `true` is the default. `false` frees the overall amplitude and is accepted **only** with `ast_signal:FixedDiscreteSky` in `model.components`, since a fixed-flux sky is the one thing in the model that can set the scale; without it the run stops at setup with the degeneracy spelled out. Nothing else changes: the phase reference is still pinned either way.
 
 The absolute flux scale is assumed to be set by the data — e.g. by a `REAL_DATA_FLUXCAL` column, or by the fixed sky above — and if it ever needs fitting it belongs in a separate scalar component rather than in the gain.

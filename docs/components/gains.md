@@ -4,7 +4,7 @@ Gain components calculate the complex-valued gains and then perform the computat
 
 $$V^\text{OBS}_{pq} = G_p \left( V_{pq}^\text{RFI} + V_{pq}^\text{AST} \right) G^*_q$$
 
-All of these components vary over time and frequency, $(t, \nu)$, and the indices $p$ and $q$ indicate the antennas forming a baseline $pq$.
+The indices $p$ and $q$ are the antennas forming a baseline $pq$. Every component produces a gain on the full $(t, \nu)$ grid, but they differ in how much of it they let vary: {class}`~tabascal.components.gains.GPGains` varies over time and frequency, {class}`~tabascal.components.gains.ConstGains` is constant over both, and {class}`~tabascal.components.gains.UnitaryGains` is constant at 1.
 
 ## Unitary Gains - {class}`~tabascal.components.gains.UnitaryGains`
 
@@ -18,7 +18,7 @@ One complex direction-independent gain per antenna, constant over time and frequ
 
 $$V^\text{OBS}_{pq} = g_p g_q^* \left( V_{pq}^\text{RFI} + V_{pq}^\text{AST} \right)$$
 
-This is the static gain of the array rather than a time-variable one, so it adds only $2 n_\text{ant} - 1$ parameters. It is written in the gauge the data can actually see: the amplitudes are parameterised in log space with a zero-sum constraint, so the geometric mean of $|g_p|$ is exactly 1 and the gain carries no absolute flux scale, and the phase of the reference antenna `gains.ref_ant` is pinned to 0, so it carries no absolute phase either. Both constraints remove a direction the likelihood is flat along rather than leaving the fit to drift along it.
+This is the static gain of the array rather than a time-variable one, so it adds only $2 n_\text{ant} - 2$ parameters. It is written in the gauge the data can actually see: the log amplitudes are carried by $n_\text{ant} - 1$ parameters on an orthonormal basis of the zero-sum subspace, so the geometric mean of $|g_p|$ is exactly 1 and the gain carries no absolute flux scale, and the phase of the reference antenna `gains.ref_ant` is pinned to 0, so it carries no absolute phase either. Both directions the likelihood is flat along are removed from the parameters themselves, rather than left in as coordinates the data cannot see.
 
 The gain is only identifiable against a model term it cannot deform, so `ConstGains` pairs with {class}`~tabascal.components.rfi_signal.ComplexRFIConstAnt` (whose RFI amplitude has no per-antenna freedom of its own) and with a rigid sky, {class}`~tabascal.components.ast_signal.FixedDiscreteSky` and {class}`~tabascal.components.ast_vis.DiscreteSkyVis`. Combining it with {class}`~tabascal.components.rfi_signal.ComplexRFIVarAnt` raises a warning naming the flat direction. See the [gains configuration section](../config.md#a-constant-gain-per-antenna) for the configuration keys, the identifiability rules and how to initialise the fit at a previously measured gain.
 

@@ -87,15 +87,23 @@ def gains_config_validation(gains_config: Dict, freqs: Array, chan_width: float,
         else:
             return ext
 
-    gains_config = validate_gain_scales(gains_config)
-
+    # Every key this function needs is read before any of them is written, scales
+    # included: a config missing one of them fails with nothing half-normalised
+    # behind it, exactly as it did before the scale half was split out.
     try:
+        gains_config["r_seed"]
+        gains_config["amp_mean"]
+        gains_config["amp_std"]
+        gains_config["phase_mean"]
+        gains_config["phase_std"]
         gp_amp_freq_l = gains_config["amp_corr_freq"]
         gp_amp_time_l = gains_config["amp_corr_time"]
         gp_phase_freq_l = gains_config["phase_corr_freq"]
         gp_phase_time_l = gains_config["phase_corr_time"]
     except Exception as e:
         raise ValueError(f"Gains configuration validation failed.")
+
+    gains_config = validate_gain_scales(gains_config)
 
     if not gp_amp_freq_l: # Set Default
         est_gp_amp_freq_l = extent(freqs, chan_width)
@@ -435,22 +443,86 @@ def component_class_names(tab_config) -> List[str]:
     return [str(ref).replace(":", ".").rsplit(".", 1)[-1] for ref in components]
 
 
-def antennas_with_data(flags: Array, a1: Array, a2: Array, n_ant: int) -> NDArray:
-    """Which antennas have at least one unflagged visibility.
+def zero_sum_basis(n: int) -> NDArray:
+    """An orthonormal ``(n, n - 1)`` basis of the zero-sum subspace of R^n.
 
-    An antenna every one of whose baselines is flagged everywhere contributes
-    nothing to the likelihood, so its gain is unconstrained — it cannot carry the
-    phase reference, and asking it to would pin the one phase the data cannot see.
+    The Helmert contrasts: column ``k`` is ``k`` entries of ``1/sqrt(k(k+1))``
+    followed by ``-k/sqrt(k(k+1))``. Each column sums to zero, and ``H.T @ H`` is the
+    identity while ``H @ H.T`` is the centring projector ``I - J/n``.
+
+    This is what lets the zero-sum log amplitude be *parameterised* rather than
+    projected. Writing ``log_amp = sigma (I - J/n) z`` with ``n`` parameters gives
+    the same values and the same prior, but leaves ``z -> z + c`` an exact null
+    direction of the forward model: a coordinate no visibility can see, curved only
+    by the prior, which ruins the conditioning of the fit and makes a
+    likelihood-only Fisher matrix singular.
+    """
+
+    k = np.arange(1, n)
+    rows = np.arange(n)[:, None]
+
+    return np.where(rows < k, 1.0, np.where(rows == k, -k, 0.0)) / np.sqrt(k * (k + 1))
+
+
+def _format_group(group: List[int], max_listed: int = 10) -> str:
+    """One connected group of antennas, truncated so a 256-antenna array still reads."""
+
+    if len(group) <= max_listed:
+        return str(group)
+
+    listed = ", ".join(str(ant) for ant in group[:max_listed])
+
+    return f"[{listed}, ... ({len(group)} antennas)]"
+
+
+def antenna_connectivity(
+    flags: Array, a1: Array, a2: Array, n_ant: int
+) -> Tuple[NDArray, List[List[int]]]:
+    """Which antennas carry unflagged data, and the groups the baselines join them into.
+
+    Two things a gain phase needs, which are not the same thing:
+
+    * an antenna every one of whose baselines is flagged everywhere contributes
+      nothing to the likelihood, so its own gain is unconstrained;
+    * a phase is only ever measured *relative* to another antenna's, along a chain of
+      baselines that carry data. Antennas in different connected components of that
+      graph share no reference at all, so pinning one component's phase says nothing
+      about another's, whose overall phase stays flat however the reference is chosen.
+
+    Returns the per-antenna data mask and the connected components, each a sorted
+    antenna list, ordered by their first antenna. Antennas with no data at all are
+    left out rather than counted as components of their own.
     """
 
     flagged = np.asarray(flags, dtype=bool)
-    bl_has_data = ~flagged.reshape(flagged.shape[0], -1).all(axis=1)
+    a1, a2 = np.asarray(a1), np.asarray(a2)
 
     has_data = np.zeros(n_ant, dtype=bool)
-    np.logical_or.at(has_data, np.asarray(a1), bl_has_data)
-    np.logical_or.at(has_data, np.asarray(a2), bl_has_data)
+    if len(a1) == 0 or flagged.size == 0:
+        return has_data, []
 
-    return has_data
+    bl_has_data = ~flagged.reshape(flagged.shape[0], -1).all(axis=1)
+    np.logical_or.at(has_data, a1, bl_has_data)
+    np.logical_or.at(has_data, a2, bl_has_data)
+
+    parent = list(range(n_ant))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for p, q in zip(a1[bl_has_data], a2[bl_has_data]):
+        root_p, root_q = find(int(p)), find(int(q))
+        if root_p != root_q:
+            parent[root_q] = root_p
+
+    groups: Dict[int, List[int]] = {}
+    for ant in np.flatnonzero(has_data):
+        groups.setdefault(find(int(ant)), []).append(int(ant))
+
+    return has_data, sorted((sorted(g) for g in groups.values()), key=min)
 
 
 def reduce_caltable_gains(path: str, n_ant: int) -> NDArray:
@@ -568,8 +640,8 @@ class ConstGains(Component):
 
         vis_obs[p, q] = g_p conj(g_q) (vis_ast[p, q] + vis_rfi[p, q])
 
-    Unlike a GP gain this adds only ``2 n_ant - 1`` parameters, and unlike a *fixed*
-    gain it is constrained by the data.
+    Unlike a GP gain this adds only ``2 n_ant - 2`` parameters (``2 n_ant - 1`` with
+    the flux scale freed), and unlike a *fixed* gain it is constrained by the data.
 
     **What has to be true for it to be identifiable** (issue #124). A gain is only
     constrained by a model term the gain cannot deform:
@@ -586,14 +658,27 @@ class ConstGains(Component):
 
     * the overall PHASE is unobservable, so ``gains.ref_ant``'s phase is pinned to 0
       and the other ``n_ant - 1`` phases are free. The default reference is the first
-      antenna with any unflagged data;
+      antenna with any unflagged data. One reference only pins one *connected* group
+      of antennas, so setup also refuses an array the unflagged baselines split in two;
     * the overall AMPLITUDE is degenerate with the RFI source amplitude and the
-      astronomical amplitude, so it is REMOVED by construction: the amplitudes are
-      parameterised in log space with a zero-sum constraint, giving a geometric mean
-      of exactly 1. Left free, the fit simply drifts (it settled at a median ``|g|``
-      of 0.70 in an earlier run, with the sky model absorbing the reciprocal) — a nuisance
-      direction that buys nothing and slows convergence. So the amplitude has
-      ``n_ant - 1`` effective degrees of freedom, as the phase does.
+      astronomical amplitude, so it is REMOVED by construction: the log amplitudes are
+      carried by ``n_ant - 1`` parameters on an orthonormal basis of the zero-sum
+      subspace (:func:`zero_sum_basis`), giving a geometric mean ``|g|`` of exactly 1.
+      Left free, the fit simply drifts (it settled at a median ``|g|`` of 0.70 in an
+      earlier run, with the sky model absorbing the reciprocal) — a nuisance direction
+      that buys nothing and slows convergence.
+
+    Both removed directions are removed from the *parameters*, not merely from the
+    value they map to, so no latent coordinate is invisible to the data: such a
+    coordinate is flat in the likelihood however much data there is, which ruins the
+    conditioning of the fit and makes a likelihood-only Fisher matrix singular.
+
+    The prior on ``|g_p|`` is lognormal: ``gains.amp_std`` (a percentage) is used as
+    the standard deviation of ``log|g|``, which agrees with a fractional spread to
+    first order and keeps the gain positive. ``gains.amp_mean`` is the prior mean only
+    when the flux scale is free — under the zero-sum gauge the geometric mean is 1 by
+    construction and ``amp_mean`` only sets the scale the percentage is taken of, so a
+    non-unit value there warns.
 
     ``gains.fix_flux_scale: false`` lifts the amplitude constraint, and is accepted
     only with a fixed-flux sky in the model, which is the one thing that can set the
@@ -637,15 +722,50 @@ class ConstGains(Component):
             self.gp_amp_std = gains_config["amp_std"]
             self.gp_phase_mean = gains_config["phase_mean"]
             self.gp_phase_std = gains_config["phase_std"]
+
+            if not self.gp_amp_mean > 0:
+                raise ValueError(
+                    f"Config parameter (gains:\n\tamp_mean: {self.gp_amp_mean}) is not "
+                    "positive. The amplitude is fitted in log space, which a "
+                    "non-positive mean has no value at."
+                )
+
             # amp_std is a fractional spread (the config gives a percentage); use it
-            # as the log-amplitude sigma, which is the same thing to first order for
-            # spreads of tens of percent and keeps the gain positive by construction.
+            # as the log-amplitude sigma, which makes the prior on |g| lognormal and
+            # keeps the gain positive by construction. The two agree to first order,
+            # so a "10 %" prior is a 10 % spread for any spread worth writing down.
             self.log_amp_std = self.gp_amp_std / max(self.gp_amp_mean, 1e-12)
 
             components = component_class_names(tab_config)
             self.fix_flux_scale = self._resolve_fix_flux_scale(gains_config, components)
             self.ref_ant = self._resolve_ref_ant(gains_config, tab_config)
             self._warn_on_rfi_degeneracy(components)
+
+            # Under the zero-sum gauge the geometric mean of |g| is 1 by construction,
+            # so there is no overall amplitude for amp_mean to be the mean of; it only
+            # sets the scale amp_std's percentage is taken of. With the scale free it
+            # is the prior mean it says it is, in log space.
+            self.log_amp_offset = (
+                0.0 if self.fix_flux_scale else float(np.log(self.gp_amp_mean))
+            )
+            self.amp_basis = jnp.asarray(zero_sum_basis(self.n_ant))
+            self.n_amp_params = self.n_ant - 1 if self.fix_flux_scale else self.n_ant
+            self.parameter_shapes = {
+                "gains_amp_base": ("n_ant-1",) if self.fix_flux_scale else ("n_ant",),
+                "gains_phase_base": ("n_ant-1",),
+            }
+
+            if self.fix_flux_scale and self.gp_amp_mean != 1.0:
+                warnings.warn(
+                    f"gains.amp_mean = {self.gp_amp_mean} does not set the fitted gain "
+                    "amplitude while gains.fix_flux_scale is true: the zero-sum gauge "
+                    "makes the geometric mean of |g| exactly 1, and amp_mean only sets "
+                    "the scale that gains.amp_std's percentage is taken of. Set "
+                    "gains.fix_flux_scale to false (which needs a fixed-flux sky) for "
+                    "amp_mean to be the amplitude the fit starts at.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
             self._set_outputs()
             self._compute_init_params(gains_config.get("init"))
@@ -691,19 +811,39 @@ class ConstGains(Component):
     def _resolve_ref_ant(self, gains_config: Dict, tab_config: TabConfig) -> int:
         """The antenna whose phase is pinned to zero."""
 
-        has_data = antennas_with_data(
+        has_data, groups = antenna_connectivity(
             tab_config.flags, self.a1, self.a2, self.n_ant
         )
+
+        if len(self.a1) == 0:
+            raise ValueError(
+                f"The observation has no baselines, only {self.n_ant} antenna(s), so "
+                "no gain is measured by anything. ConstGains fits a gain per antenna "
+                "against the visibilities and there are none."
+            )
+
+        if not has_data.any():
+            raise ValueError(
+                "Every antenna is fully flagged, so there is no antenna whose phase "
+                "can reference the others."
+            )
+
+        if len(groups) > 1:
+            raise ValueError(
+                f"The unflagged baselines split the array into {len(groups)} groups "
+                "that share no baseline with each other: "
+                + "; ".join(_format_group(g) for g in groups)
+                + ". A gain phase is only measured relative to another antenna's, "
+                "along a chain of baselines that carry data, so pinning gains.ref_ant "
+                "in one group leaves every other group's overall phase unconstrained "
+                "— one reference cannot serve them all. Run the groups separately, or "
+                "flag the smaller ones out of this run."
+            )
+
         ref_ant = gains_config.get("ref_ant")
 
         if ref_ant is None:
-            with_data = np.flatnonzero(has_data)
-            if len(with_data) == 0:
-                raise ValueError(
-                    "Every antenna is fully flagged, so there is no antenna whose "
-                    "phase can reference the others."
-                )
-            ref_ant = int(with_data[0])
+            ref_ant = int(np.flatnonzero(has_data)[0])
         else:
             if isinstance(ref_ant, bool) or not isinstance(ref_ant, (int, np.integer)):
                 raise ValueError(
@@ -748,7 +888,9 @@ class ConstGains(Component):
 
         def set_params(params):
 
-            params["gains_amp_base"] = standard_normal("gains_amp_base", (self.n_ant,))
+            params["gains_amp_base"] = standard_normal(
+                "gains_amp_base", (self.n_amp_params,)
+            )
             params["gains_phase_base"] = standard_normal(
                 "gains_phase_base", (self.n_ant - 1,)
             )
@@ -757,9 +899,14 @@ class ConstGains(Component):
 
         return set_params
 
+    def build_constants(self):
+        return {"amp_basis": self.amp_basis}
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
+        prefix = self.prefix
         log_amp_std = self.log_amp_std
+        log_amp_offset = self.log_amp_offset
         fix_flux_scale = self.fix_flux_scale
         phase_mean, phase_std = self.gp_phase_mean, self.gp_phase_std
         ref_ant = self.ref_ant
@@ -767,12 +914,17 @@ class ConstGains(Component):
         n_freq, n_time = self.n_freq, self.n_time
 
         def forward(params, state, constants):
-            log_amp = log_amp_std * params["gains_amp_base"]
             if fix_flux_scale:
                 # Zero-sum in log space => prod(|g_p|) = 1 exactly: the overall
                 # amplitude scale is removed, not fitted. Only relative antenna
-                # amplitudes remain.
-                log_amp = log_amp - jnp.mean(log_amp)
+                # amplitudes remain, and they are carried by n_ant - 1 parameters on
+                # an orthonormal basis of that subspace, so no latent coordinate is
+                # left that the visibilities cannot see.
+                log_amp = log_amp_std * (
+                    constants[f"{prefix}/amp_basis"] @ params["gains_amp_base"]
+                )
+            else:
+                log_amp = log_amp_offset + log_amp_std * params["gains_amp_base"]
             amp = jnp.exp(log_amp)
 
             # Reference antenna phase pinned to 0: the overall phase is unobservable.
@@ -809,10 +961,23 @@ class ConstGains(Component):
 
         return log_amp, phase
 
+    def _amp_base(self, log_amp: NDArray) -> NDArray:
+        """The latent amplitude coordinates of a log amplitude in the gauge.
+
+        Exact both ways: ``H`` has orthonormal columns, so ``H (H.T x) = x`` for any
+        zero-sum ``x``, which is what makes projecting an already-projected gain a
+        no-op.
+        """
+
+        if self.fix_flux_scale:
+            return np.asarray(self.amp_basis).T @ log_amp / self.log_amp_std
+
+        return (log_amp - self.log_amp_offset) / self.log_amp_std
+
     def _compute_init_params(self, init):
 
         if init is None or init == "prior":
-            log_amp = np.zeros(self.n_ant)
+            log_amp = np.full(self.n_ant, self.log_amp_offset)
             phase = np.full(self.n_ant, self.gp_phase_mean)
             phase[self.ref_ant] = 0.0
             print("Initialising ConstGains at the prior mean")
@@ -830,7 +995,7 @@ class ConstGains(Component):
             "gains_phase": jnp.asarray(phase),
         }
         self.init_params_base = {
-            "gains_amp_base": jnp.asarray(log_amp / self.log_amp_std),
+            "gains_amp_base": jnp.asarray(self._amp_base(log_amp)),
             "gains_phase_base": jnp.asarray(
                 (np.delete(phase, self.ref_ant) - self.gp_phase_mean) / self.gp_phase_std
             ),
@@ -846,5 +1011,6 @@ class ConstGains(Component):
     def _validate_dimensions(self):
         """Ensure all setup operations completed successfully"""
 
-        assert self.init_params_base["gains_amp_base"].shape == (self.n_ant,)
+        assert_attr_shape(self, "amp_basis", (self.n_ant, self.n_ant - 1))
+        assert self.init_params_base["gains_amp_base"].shape == (self.n_amp_params,)
         assert self.init_params_base["gains_phase_base"].shape == (self.n_ant - 1,)

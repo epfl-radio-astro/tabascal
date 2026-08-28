@@ -103,12 +103,29 @@ def make_vis_state(n_ant, n_freq, n_time, seed=0):
 
 
 def random_params(comp, seed=0, scale=1.0):
-    """A random draw of the base parameters, as the prior would give them."""
-    k1, k2 = jax.random.split(jax.random.PRNGKey(seed))
+    """A random draw of the base parameters, as the prior would give them.
+
+    Shapes are taken from the component, since the amplitude block is
+    ``n_ant - 1`` long under the zero-sum gauge and ``n_ant`` long without it.
+    """
+    keys = jax.random.split(jax.random.PRNGKey(seed), 2)
     return {
-        "gains_amp_base": scale * jax.random.normal(k1, (comp.n_ant,)),
-        "gains_phase_base": scale * jax.random.normal(k2, (comp.n_ant - 1,)),
+        name: scale * jax.random.normal(key, comp.init_params_base[name].shape)
+        for name, key in zip(("gains_amp_base", "gains_phase_base"), keys)
     }
+
+
+def helmert_basis(n):
+    """A textbook Helmert contrast basis, built independently of the component.
+
+    ``n - 1`` orthonormal columns, each summing to zero, so they span exactly the
+    zero-sum subspace of R^n.
+    """
+    H = np.zeros((n, n - 1))
+    for k in range(1, n):
+        H[:k, k - 1] = 1.0 / np.sqrt(k * (k + 1))
+        H[k, k - 1] = -k / np.sqrt(k * (k + 1))
+    return H
 
 
 def run_forward(comp, params, state=None, seed=0):
@@ -254,8 +271,9 @@ class TestForward:
         out = run_forward(comp, params, state)
 
         # Rebuilt from the parameters in numpy, not read back out of the component.
-        log_amp = comp.log_amp_std * np.asarray(params["gains_amp_base"])
-        log_amp -= log_amp.mean()
+        log_amp = comp.log_amp_std * (
+            helmert_basis(comp.n_ant) @ np.asarray(params["gains_amp_base"])
+        )
         free = comp.gp_phase_mean + comp.gp_phase_std * np.asarray(params["gains_phase_base"])
         phase = np.insert(free, comp.ref_ant, 0.0)
         g = np.exp(log_amp) * np.exp(1j * phase)
@@ -289,17 +307,133 @@ class TestForward:
         with numpyro.handlers.seed(rng_seed=0):
             params = comp.build_set_params()({})
 
-        assert params["gains_amp_base"].shape == (6,)
+        assert params["gains_amp_base"].shape == (5,)
         assert params["gains_phase_base"].shape == (5,)
 
-    def test_parameter_count_is_two_n_ant_minus_one(self):
-        """2 n_ant - 1 free parameters: n_ant amplitudes, n_ant - 1 phases."""
+
+class TestLatentParameterisation:
+    """The latent space carries the degrees of freedom the data can see, and no more.
+
+    A latent coordinate the forward model does not depend on is flat in the
+    likelihood however much data there is, so it is only ever curved by the prior:
+    it wrecks the conditioning of the optimisation and turns any likelihood-only
+    Fisher calculation singular. Both removed directions are therefore removed from
+    the *parameters*, not just from the value they map to.
+    """
+
+    def test_parameter_count_is_two_n_ant_minus_two(self):
+        """n_ant - 1 amplitudes and n_ant - 1 phases: the gauge costs one of each."""
         comp = ConstGains()
         comp.setup(make_const_gains_config(n_ant=8))
 
         n_params = sum(int(np.size(v)) for v in comp.init_params_base.values())
 
+        assert comp.init_params_base["gains_amp_base"].shape == (7,)
+        assert comp.init_params_base["gains_phase_base"].shape == (7,)
+        assert n_params == 2 * 8 - 2
+
+    def test_freeing_the_flux_scale_restores_the_amplitude_parameter(self):
+        comp = ConstGains()
+        comp.setup(
+            make_const_gains_config(
+                n_ant=8,
+                fix_flux_scale=False,
+                components=("ast_signal:FixedDiscreteSky", "gains:ConstGains"),
+            )
+        )
+
+        n_params = sum(int(np.size(v)) for v in comp.init_params_base.values())
+
+        assert comp.init_params_base["gains_amp_base"].shape == (8,)
         assert n_params == 2 * 8 - 1
+
+    def test_the_amplitude_basis_is_orthonormal_and_zero_sum(self, exact_rtol):
+        n_ant = 7
+        comp = ConstGains()
+        comp.setup(make_const_gains_config(n_ant=n_ant))
+
+        H = np.asarray(comp.amp_basis)
+
+        assert H.shape == (n_ant, n_ant - 1)
+        assert np.allclose(H.T @ H, np.eye(n_ant - 1), rtol=exact_rtol, atol=1e-6)
+        assert np.allclose(H.sum(axis=0), 0.0, rtol=exact_rtol, atol=1e-6)
+
+    def test_the_implied_amplitude_prior_is_unchanged(self, exact_rtol):
+        """The reparameterisation does not move the prior on log|g|.
+
+        The n_ant-parameter construction was ``log_amp = sigma (I - J/n) z`` with
+        ``z ~ N(0, I_n)``, whose covariance is ``sigma^2 (I - J/n)``. The
+        (n_ant - 1)-parameter one is ``log_amp = sigma H u`` with ``u ~ N(0, I_{n-1})``
+        and ``H`` orthonormal, whose covariance is ``sigma^2 H H^T`` — the same
+        projector, with no flat latent direction left over.
+        """
+        n_ant = 7
+        comp = ConstGains()
+        comp.setup(make_const_gains_config(n_ant=n_ant))
+
+        H = np.asarray(comp.amp_basis)
+        projector = np.eye(n_ant) - np.ones((n_ant, n_ant)) / n_ant
+
+        old = comp.log_amp_std**2 * (projector @ projector.T)
+        new = comp.log_amp_std**2 * (H @ H.T)
+
+        assert np.allclose(new, old, rtol=exact_rtol, atol=1e-8)
+
+    @pytest.mark.parametrize(
+        "fix_flux_scale,components",
+        [
+            (True, ("gains:ConstGains",)),
+            (False, ("ast_signal:FixedDiscreteSky", "gains:ConstGains")),
+        ],
+    )
+    def test_no_latent_amplitude_direction_is_flat(self, fix_flux_scale, components):
+        """d log|g| / d(amplitude parameters) has full column rank.
+
+        A rank deficit is exactly a direction of the latent space the observed
+        visibilities cannot see. With the n_ant-parameter zero-sum construction the
+        Jacobian was (n_ant, n_ant) of rank n_ant - 1 — the all-ones direction.
+        """
+        n_ant = 6
+        comp = ConstGains()
+        comp.setup(
+            make_const_gains_config(
+                n_ant=n_ant, fix_flux_scale=fix_flux_scale, components=components
+            )
+        )
+
+        params = random_params(comp, seed=11)
+        state = make_vis_state(n_ant, comp.n_freq, comp.n_time)
+        constants = make_constants(comp)
+        forward = comp.build_forward()
+
+        def log_amp(amp_base):
+            gains = forward({**params, "gains_amp_base": amp_base}, state, constants)
+            return jnp.log(jnp.abs(gains["gains"][:, 0, 0]))
+
+        jac = np.asarray(jax.jacfwd(log_amp)(params["gains_amp_base"]))
+
+        assert jac.shape == (n_ant, params["gains_amp_base"].shape[0])
+        assert np.linalg.matrix_rank(jac) == jac.shape[1]
+
+    def test_no_latent_phase_direction_is_flat(self):
+        """The same statement for the phase block, which pins by omission already."""
+        n_ant = 6
+        comp = ConstGains()
+        comp.setup(make_const_gains_config(n_ant=n_ant, ref_ant=2))
+
+        params = random_params(comp, seed=12)
+        state = make_vis_state(n_ant, comp.n_freq, comp.n_time)
+        constants = make_constants(comp)
+        forward = comp.build_forward()
+
+        def phase(phase_base):
+            gains = forward({**params, "gains_phase_base": phase_base}, state, constants)
+            return jnp.angle(gains["gains"][:, 0, 0])
+
+        jac = np.asarray(jax.jacfwd(phase)(params["gains_phase_base"]))
+
+        assert jac.shape == (n_ant, n_ant - 1)
+        assert np.linalg.matrix_rank(jac) == n_ant - 1
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +483,69 @@ class TestRefAnt:
             ConstGains().setup(
                 make_const_gains_config(n_ant=4, flagged_ants=(0, 1, 2, 3))
             )
+
+    def test_an_observation_with_no_baselines_is_an_error(self):
+        """A single antenna correlates with nothing, so no gain is measured at all."""
+        with pytest.raises(RuntimeError, match="no baselines"):
+            ConstGains().setup(
+                make_const_gains_config(n_ant=1, flags=np.zeros((0, 3, 4), dtype=bool))
+            )
+
+
+# ---------------------------------------------------------------------------
+# Connectivity of the unflagged baselines
+# ---------------------------------------------------------------------------
+
+
+def keep_only_baselines(n_ant, n_freq, n_time, keep):
+    """Flags leaving only the (p, q) baselines in *keep* unflagged."""
+    a1, a2 = np.triu_indices(n_ant, 1)
+    flags = np.ones((len(a1), n_freq, n_time), dtype=bool)
+    for p, q in keep:
+        flags[(a1 == p) & (a2 == q)] = False
+    return flags
+
+
+class TestConnectivity:
+    """One phase reference only pins one connected group of antennas.
+
+    A gain phase is measured relative to another antenna's, through a baseline that
+    carries data. Two groups joined by no chain of unflagged baselines have no common
+    reference at all, so pinning one leaves the other's overall phase flat — which
+    participation alone (every antenna having *some* data) does not catch.
+    """
+
+    def test_two_disconnected_groups_are_an_error(self):
+        flags = keep_only_baselines(4, 2, 2, [(0, 1), (2, 3)])
+
+        with pytest.raises(RuntimeError, match="no baseline"):
+            ConstGains().setup(make_const_gains_config(n_ant=4, n_freq=2, n_time=2, flags=flags))
+
+    def test_the_error_names_the_groups(self):
+        flags = keep_only_baselines(5, 2, 2, [(0, 1), (2, 3), (2, 4), (3, 4)])
+
+        with pytest.raises(RuntimeError) as excinfo:
+            ConstGains().setup(make_const_gains_config(n_ant=5, n_freq=2, n_time=2, flags=flags))
+
+        message = str(excinfo.value)
+        assert "[0, 1]" in message
+        assert "[2, 3, 4]" in message
+
+    def test_a_heavily_flagged_but_connected_array_is_fine(self):
+        """A bare spanning chain is still one group, and is accepted."""
+        flags = keep_only_baselines(5, 2, 2, [(0, 1), (1, 2), (2, 3), (3, 4)])
+
+        comp = ConstGains()
+        comp.setup(make_const_gains_config(n_ant=5, n_freq=2, n_time=2, flags=flags))
+
+        assert comp.ref_ant == 0
+
+    def test_an_isolated_flagged_antenna_does_not_count_as_a_group(self):
+        """Antenna 0 has no data at all — it is skipped, not called a second group."""
+        comp = ConstGains()
+        comp.setup(make_const_gains_config(n_ant=5, flagged_ants=(0,)))
+
+        assert comp.ref_ant == 1
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +612,74 @@ class TestFixFluxScale:
         comp.setup(make_const_gains_config(fix_flux_scale=None))
 
         assert comp.fix_flux_scale is True
+
+
+# ---------------------------------------------------------------------------
+# What amp_mean means in each mode
+# ---------------------------------------------------------------------------
+
+
+class TestAmpMean:
+
+    def test_the_fixed_gauge_starts_at_unit_gain_whatever_amp_mean_says(self, exact_rtol):
+        """Under the zero-sum gauge the geometric mean of |g| is 1 by construction."""
+        comp = ConstGains()
+        with pytest.warns(UserWarning, match="amp_mean"):
+            comp.setup(make_const_gains_config(n_ant=5, amp_mean=2.0))
+
+        amp = np.abs(np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0]))
+
+        assert np.allclose(amp, 1.0, rtol=exact_rtol, atol=exact_rtol)
+
+    def test_a_non_unit_amp_mean_warns_under_the_fixed_gauge(self):
+        with pytest.warns(UserWarning, match="fix_flux_scale"):
+            ConstGains().setup(make_const_gains_config(amp_mean=1.4))
+
+    def test_a_unit_amp_mean_does_not_warn(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            ConstGains().setup(make_const_gains_config(amp_mean=1.0))
+
+    def test_the_free_scale_starts_at_amp_mean(self, exact_rtol):
+        """With the scale free, amp_mean is the prior mean it actually starts at."""
+        comp = ConstGains()
+        comp.setup(
+            make_const_gains_config(
+                n_ant=5,
+                amp_mean=2.0,
+                fix_flux_scale=False,
+                components=("ast_signal:FixedDiscreteSky", "gains:ConstGains"),
+            )
+        )
+
+        amp = np.abs(np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0]))
+
+        assert np.allclose(amp, 2.0, rtol=exact_rtol, atol=exact_rtol)
+
+    def test_the_free_scale_prior_is_lognormal_about_amp_mean(self, exact_rtol):
+        """A one-sigma draw sits at amp_mean * exp(amp_std), the log-space spread."""
+        comp = ConstGains()
+        comp.setup(
+            make_const_gains_config(
+                n_ant=5,
+                amp_mean=2.0,
+                amp_std=10.0,  # percent
+                fix_flux_scale=False,
+                components=("ast_signal:FixedDiscreteSky", "gains:ConstGains"),
+            )
+        )
+
+        params = {
+            "gains_amp_base": jnp.ones(5),
+            "gains_phase_base": jnp.zeros(4),
+        }
+        amp = np.abs(np.asarray(run_forward(comp, params)["gains"][:, 0, 0]))
+
+        assert np.allclose(amp, 2.0 * np.exp(0.1), rtol=exact_rtol, atol=exact_rtol)
+
+    def test_a_non_positive_amp_mean_is_an_error(self):
+        with pytest.raises(RuntimeError, match="amp_mean"):
+            ConstGains().setup(make_const_gains_config(amp_mean=-1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +964,34 @@ def test_base_config_carries_the_new_keys():
     assert base["gains"]["fix_flux_scale"] is True
 
 
+def test_a_missing_correlation_key_still_fails_before_anything_is_converted():
+    """Splitting the scale validation out must not change how a malformed config fails.
+
+    ``gains_config_validation`` reads every key it needs before it writes any of
+    them, so a config missing one of the GP correlation lengths raises with nothing
+    half-normalised behind it.
+    """
+    from tabascal.components.gains import gains_config_validation
+
+    cfg = {
+        "r_seed": None,
+        "amp_mean": None,
+        "amp_std": 5.0,
+        "phase_mean": None,
+        "phase_std": 2.0,
+        "amp_corr_freq": None,
+        "amp_corr_time": None,
+        "phase_corr_freq": None,
+        # phase_corr_time missing
+    }
+    original = dict(cfg)
+
+    with pytest.raises(ValueError, match="Gains configuration validation failed"):
+        gains_config_validation(cfg, np.linspace(1.4e9, 1.41e9, 4), 1e6, np.arange(8.0), 8.0)
+
+    assert cfg == original
+
+
 def test_validate_gain_scales_matches_the_gp_conversion():
     """The shared scale validation is the one used by the GP gains: percent and degrees."""
     cfg = validate_gain_scales(
@@ -760,11 +1053,7 @@ def test_map_fit_recovers_known_constant_gains(precision):
         return jnp.mean(jnp.abs(residual) ** 2)
 
     # Started away from the truth so convergence is doing the work, not the init.
-    k1, k2 = jax.random.split(jax.random.PRNGKey(0))
-    params = {
-        "gains_amp_base": 0.5 * jax.random.normal(k1, (n_ant,)),
-        "gains_phase_base": 0.5 * jax.random.normal(k2, (n_ant - 1,)),
-    }
+    params = random_params(comp, seed=0, scale=0.5)
 
     optimiser = optax.adam(1e-2)
     opt_state = optimiser.init(params)
