@@ -5,6 +5,7 @@ import pytest
 
 from tabascal.ms import (
     CORR_TYPES,
+    read_ms,
     DEFAULT_TIME_SCALE,
     fitted_correlation,
     grid_to_rows,
@@ -1544,3 +1545,382 @@ class TestMovedNamesStayImportable:
         importlib.reload(importlib.import_module("tabascal.ms"))
 
         assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+
+# ---------------------------------------------------------------------------
+# Channel selection
+# ---------------------------------------------------------------------------
+
+N_ANT_C, N_TIME_C, N_FREQ_C, N_CORR_C = 4, 3, 5, 2
+
+#: The channel `-f` should land on, and the frequency asked for to reach it.
+TARGET_CHAN = 2
+
+
+def _channel_ms(n_ant=N_ANT_C, n_time=N_TIME_C, n_freq=N_FREQ_C, n_corr=N_CORR_C,
+                sigma_spectrum=True, spectrum_chans=None, widths=None, sigma=True):
+    """A whole MS partition and its subtables, in memory.
+
+    Real ``xr.Dataset``s over dask arrays rather than stubs: channel selection
+    has to survive the same lazy indexing a daskms column does, and every column
+    it touches -- data, flags and the noise spectrum -- has to come back on the
+    same channel axis or the visibilities are weighted by another channel's noise.
+    """
+
+    import dask.array as da
+    import xarray as xr
+
+    a1_bl, a2_bl = np.triu_indices(n_ant, k=1)
+    n_bl = len(a1_bl)
+    n_row = n_time * n_bl
+
+    # Value encodes (row, channel, correlation), so a mis-selected axis cannot
+    # coincide with the right answer.
+    grid = (
+        np.arange(n_row)[:, None, None] * 1000.0
+        + np.arange(n_freq)[None, :, None] * 10.0
+        + np.arange(n_corr)[None, None, :]
+    )
+    # Centres follow the widths, so a non-uniform window really is one: each
+    # centre sits half a width past the previous channel's edge.
+    widths = np.full(n_freq, 1e6) if widths is None else np.asarray(widths, float)
+    edges = np.concatenate([[0.0], np.cumsum(widths)])
+    freqs = 1.4e9 + 0.5 * (edges[:-1] + edges[1:])
+
+    columns = {
+        "DATA": (("row", "chan", "corr"), da.from_array(grid + 0j, chunks=(5, -1, -1))),
+        "FLAG": (
+            ("row", "chan", "corr"),
+            da.from_array(
+                np.broadcast_to(
+                    (np.arange(n_row)[:, None, None]
+                     + np.arange(n_freq)[None, :, None]) % 7 == 0,
+                    (n_row, n_freq, n_corr),
+                ).copy(),
+                chunks=(5, -1, -1),
+            ),
+        ),
+        "ANTENNA1": (("row",), da.from_array(np.tile(a1_bl, n_time), chunks=5)),
+        "ANTENNA2": (("row",), da.from_array(np.tile(a2_bl, n_time), chunks=5)),
+        "TIME": (
+            ("row",),
+            da.from_array(
+                np.repeat(60000.0 + np.arange(n_time) / 86400.0, n_bl), chunks=5
+            ),
+        ),
+        "INTERVAL": (("row",), da.from_array(np.full(n_row, 2.0), chunks=5)),
+        "UVW": (("row", "uvw"), da.from_array(np.zeros((n_row, 3)), chunks=(5, -1))),
+    }
+    if sigma:
+        # The band-averaged fallback, distinct from every channel of the spectrum.
+        columns["SIGMA"] = (
+            ("row", "corr"),
+            da.from_array(
+                np.repeat(
+                    np.tile(np.arange(n_bl) + 0.5, n_time)[:, None], n_corr, axis=1
+                ),
+                chunks=(5, -1),
+            ),
+        )
+    if sigma_spectrum:
+        # Per (baseline, channel), constant over time, and distinct per channel.
+        # `spectrum_chans` lets the column disagree with the data about the band.
+        n_spec = n_freq if spectrum_chans is None else spectrum_chans
+        per_bl_freq = (
+            (np.arange(n_bl)[:, None] + 1.0) * (np.arange(n_spec)[None, :] + 1.0)
+        )
+        rows = np.tile(per_bl_freq, (n_time, 1, 1)).reshape(-1, n_spec)
+        # Its own channel dimension, so the column is free to disagree with the
+        # data about how many channels the observation has -- which is the whole
+        # point of `spectrum_chans`, and what a real MS (separate columns, not one
+        # xarray Dataset) allows without comment.
+        columns["SIGMA_SPECTRUM"] = (
+            ("row", "spec_chan", "corr"),
+            da.from_array(
+                np.repeat(rows[:, :, None], n_corr, axis=2), chunks=(5, -1, -1)
+            ),
+        )
+
+    xds = xr.Dataset(columns)
+    ant = xr.Dataset(
+        {
+            "POSITION": (("row", "xyz"), da.from_array(np.arange(n_ant * 3.0).reshape(n_ant, 3))),
+            "DISH_DIAMETER": (("row",), da.from_array(np.full(n_ant, 35.0))),
+        }
+    )
+    spec = xr.Dataset(
+        {
+            "CHAN_FREQ": (("row", "chan"), da.from_array(freqs[None, :])),
+            "CHAN_WIDTH": (("row", "chan"), da.from_array(widths[None, :])),
+        }
+    )
+    src = xr.Dataset(
+        {"DIRECTION": (("row", "radec"), da.from_array(np.deg2rad([[30.0, -30.0]])))}
+    )
+
+    return xds, ant, spec, src, freqs, widths
+
+
+@pytest.fixture
+def channel_ms(monkeypatch):
+    """Install an in-memory MS and return the arrays it was built from."""
+
+    def _install(**kwargs):
+        xds, ant, spec, src, freqs, widths = _channel_ms(**kwargs)
+        import tabascal.ms as ms_mod
+
+        tables = {"::ANTENNA": [ant], "::SPECTRAL_WINDOW": [spec], "::SOURCE": [src]}
+
+        def fake_from_table(path, group_cols=None):
+            for suffix, value in tables.items():
+                if path.endswith(suffix):
+                    return value
+            raise AssertionError(f"unexpected subtable {path}")
+
+        monkeypatch.setattr(
+            ms_mod, "xds_from_ms",
+            lambda path, column_keywords=False: (
+                [xds], {"TIME": {"MEASINFO": {"Ref": "UTC"}}}
+            ),
+        )
+        monkeypatch.setattr(ms_mod, "xds_from_table", fake_from_table)
+        # Resolved elsewhere and separately tested; what is under test here is
+        # which channels come back, not which correlation.
+        monkeypatch.setattr(ms_mod, "partition_setup", lambda path, x: (0, 0))
+        monkeypatch.setattr(ms_mod, "resolve_correlation", lambda path, corr, pol: 1)
+
+        return xds, freqs, widths
+
+    return _install
+
+
+class TestReadMSChannelSelection:
+    """``freq`` / ``chans`` select channels, and everything follows them.
+
+    The selection used to be half-wired: ``freq`` produced a scalar index that
+    ``len()`` could not measure, and the data columns ignored it entirely, so the
+    option was advertised and unusable. What it must do now is narrow every
+    channel-indexed array together -- data, flags, frequencies and the noise --
+    since a noise left on the full band weights the visibilities by a channel
+    they did not come from.
+    """
+
+    def test_the_whole_band_is_read_by_default(self, channel_ms):
+        _, freqs, _ = channel_ms()
+
+        ms = read_ms("fake.ms")
+
+        assert ms["n_freq"] == N_FREQ_C
+        np.testing.assert_allclose(ms["freqs"], freqs)
+        assert ms["vis_obs"].shape[1] == N_FREQ_C
+
+    def test_freq_selects_the_nearest_single_channel(self, channel_ms):
+        _, freqs, _ = channel_ms()
+        # Deliberately off-centre, so "nearest" is doing the work.
+        asked = freqs[TARGET_CHAN] + 3e5
+
+        ms = read_ms("fake.ms", freq=asked)
+
+        assert ms["n_freq"] == 1
+        np.testing.assert_allclose(ms["freqs"], freqs[TARGET_CHAN : TARGET_CHAN + 1])
+
+    def test_the_selected_channel_carries_its_own_visibilities(self, channel_ms):
+        channel_ms()
+        full = read_ms("fake.ms")
+
+        one = read_ms("fake.ms", freq=float(np.asarray(full["freqs"])[TARGET_CHAN]))
+
+        assert one["vis_obs"].shape == (full["n_bl"], 1, full["n_time"])
+        np.testing.assert_allclose(
+            np.asarray(one["vis_obs"]),
+            np.asarray(full["vis_obs"])[:, TARGET_CHAN : TARGET_CHAN + 1],
+        )
+
+    def test_the_flags_follow_the_selection(self, channel_ms):
+        channel_ms()
+        full = read_ms("fake.ms")
+
+        one = read_ms("fake.ms", freq=float(np.asarray(full["freqs"])[TARGET_CHAN]))
+
+        np.testing.assert_array_equal(
+            np.asarray(one["flags"]),
+            np.asarray(full["flags"])[:, TARGET_CHAN : TARGET_CHAN + 1],
+        )
+
+    def test_the_noise_follows_the_selection(self, channel_ms):
+        """A SIGMA_SPECTRUM left on the full band would weight the wrong channel."""
+        channel_ms()
+        full = read_ms("fake.ms")
+
+        one = read_ms("fake.ms", freq=float(np.asarray(full["freqs"])[TARGET_CHAN]))
+
+        assert np.asarray(one["noise"]).shape == (full["n_bl"], 1)
+        np.testing.assert_allclose(
+            np.asarray(one["noise"]),
+            np.asarray(full["noise"])[:, TARGET_CHAN : TARGET_CHAN + 1],
+        )
+
+    def test_an_explicit_channel_list_is_honoured(self, channel_ms):
+        channel_ms()
+        full = read_ms("fake.ms")
+
+        some = read_ms("fake.ms", chans=np.array([0, 3]))
+
+        assert some["n_freq"] == 2
+        np.testing.assert_allclose(
+            np.asarray(some["freqs"]), np.asarray(full["freqs"])[[0, 3]]
+        )
+        np.testing.assert_allclose(
+            np.asarray(some["vis_obs"]), np.asarray(full["vis_obs"])[:, [0, 3]]
+        )
+
+    def test_a_channel_off_the_end_is_refused(self, channel_ms):
+        """Out of range, rather than wrapping round to another channel."""
+        channel_ms()
+
+        with pytest.raises(ValueError, match="off the"):
+            read_ms("fake.ms", chans=np.array([0, N_FREQ_C]))
+
+    def test_asking_for_the_whole_band_in_order_is_the_default_read(self, channel_ms):
+        """No selection to make, so none is made -- and the result is identical."""
+        channel_ms()
+
+        explicit = read_ms("fake.ms", chans=np.arange(N_FREQ_C))
+        default = read_ms("fake.ms")
+
+        np.testing.assert_allclose(
+            np.asarray(explicit["vis_obs"]), np.asarray(default["vis_obs"])
+        )
+        np.testing.assert_allclose(
+            np.asarray(explicit["noise"]), np.asarray(default["noise"])
+        )
+
+    def test_the_channel_widths_come_back_per_channel(self, channel_ms):
+        """A spectral window need not be uniform, so one width cannot describe it."""
+        widths = np.array([1e6, 2e6, 5e5, 4e6, 1e6])
+        _, _, built = channel_ms(widths=widths)
+
+        ms = read_ms("fake.ms")
+
+        np.testing.assert_allclose(np.asarray(ms["chan_widths"]), built)
+
+    def test_the_widths_follow_the_selection(self, channel_ms):
+        widths = np.array([1e6, 2e6, 5e5, 4e6, 1e6])
+        channel_ms(widths=widths)
+
+        ms = read_ms("fake.ms", chans=np.array([1, 3]))
+
+        np.testing.assert_allclose(np.asarray(ms["chan_widths"]), widths[[1, 3]])
+        # The scalar stays what it always was: the first width being read.
+        np.testing.assert_allclose(float(np.asarray(ms["chan_width"])), widths[1])
+
+
+class TestReadMSFrequencyRequest:
+    """`freq` names a channel of *this* band, or it is not a request this MS can serve.
+
+    ``argmin`` always returns an index, so without a range check a frequency from
+    another subband -- or a units slip, GHz for Hz -- reads the nearest edge
+    channel and reports nothing. The estimate then comes back on a channel nobody
+    asked for.
+    """
+
+    def test_a_frequency_outside_the_band_is_refused(self, channel_ms):
+        _, freqs, _ = channel_ms()
+
+        with pytest.raises(ValueError, match="outside"):
+            read_ms("fake.ms", freq=2.4e9)
+
+    def test_the_error_names_the_request_and_the_band(self, channel_ms):
+        _, freqs, _ = channel_ms()
+
+        with pytest.raises(ValueError) as excinfo:
+            read_ms("fake.ms", freq=2.4e9)
+
+        message = str(excinfo.value)
+        assert "2400" in message                      # the frequency asked for, MHz
+        assert f"{freqs[0] / 1e6:.4f}" in message      # and the band it is not in
+        assert f"{freqs[-1] / 1e6:.4f}" in message
+
+    def test_a_frequency_inside_the_edge_channel_is_accepted(self, channel_ms):
+        """Half a channel past the last centre is still that channel."""
+        _, freqs, widths = channel_ms()
+
+        ms = read_ms("fake.ms", freq=float(freqs[-1] + 0.4 * widths[-1]))
+
+        assert ms["n_freq"] == 1
+        np.testing.assert_allclose(np.asarray(ms["freqs"]), freqs[-1:])
+
+    def test_a_frequency_just_past_the_edge_channel_is_not(self, channel_ms):
+        _, freqs, widths = channel_ms()
+
+        with pytest.raises(ValueError, match="outside"):
+            read_ms("fake.ms", freq=float(freqs[-1] + 0.6 * widths[-1]))
+
+    def test_a_narrow_channel_gets_its_own_tolerance(self, channel_ms):
+        """The band's first width says nothing about a narrow channel in the middle."""
+        widths = np.array([4e6, 4e6, 1e5, 4e6, 4e6])
+        _, freqs, _ = channel_ms(widths=widths)
+        # Inside half of a 4 MHz channel, but far outside half of this 100 kHz one.
+        asked = float(freqs[2] + 1e6)
+
+        with pytest.raises(ValueError, match="outside"):
+            read_ms("fake.ms", freq=asked)
+
+    def test_an_explicit_channel_list_bypasses_the_range_check(self, channel_ms):
+        """`chans` names channels by index; there is no frequency to be outside."""
+        channel_ms()
+
+        assert read_ms("fake.ms", chans=np.array([4]))["n_freq"] == 1
+
+
+class TestReadMSNoiseAgreesWithTheBand:
+    """A narrowed read must not turn a disagreeing SIGMA_SPECTRUM into a passing one."""
+
+    def test_a_spectrum_that_misses_the_band_is_refused_even_when_narrowed(
+        self, channel_ms, capsys
+    ):
+        """The column describes the MS's channel axis, not the slice being read.
+
+        Validating after the narrowing let a 6-channel spectrum on 5-channel data
+        pass the moment a single channel was selected -- the column and the data
+        disagree about the observation either way, and selecting a channel does
+        not settle which of them is right.
+        """
+        _, freqs, _ = channel_ms(spectrum_chans=N_FREQ_C + 1)
+
+        ms = read_ms("fake.ms", freq=float(freqs[2]))
+
+        out = capsys.readouterr().out
+        assert "SIGMA_SPECTRUM" in out and "SIGMA" in out
+        # Fell through to SIGMA, which has no channel axis.
+        assert np.asarray(ms["noise"]).ndim == 1
+
+    def test_the_same_mismatch_is_refused_on_a_full_read(self, channel_ms, capsys):
+        channel_ms(spectrum_chans=N_FREQ_C + 1)
+
+        ms = read_ms("fake.ms")
+
+        assert "SIGMA_SPECTRUM" in capsys.readouterr().out
+        assert np.asarray(ms["noise"]).ndim == 1
+
+    def test_a_matching_spectrum_is_still_narrowed_and_used(self, channel_ms):
+        _, freqs, _ = channel_ms()
+        full = read_ms("fake.ms")
+
+        one = read_ms("fake.ms", freq=float(freqs[2]))
+
+        np.testing.assert_allclose(
+            np.asarray(one["noise"]), np.asarray(full["noise"])[:, 2:3]
+        )
+
+
+class TestReadMSChannelSelectionExtra:
+
+    def test_a_sigma_only_ms_still_selects(self, channel_ms):
+        """SIGMA has no channel axis, so selection must leave it per baseline."""
+        channel_ms(sigma_spectrum=False)
+
+        ms = read_ms("fake.ms", freq=1.4e9)
+
+        assert ms["n_freq"] == 1
+        assert ms["noise"] is None or np.asarray(ms["noise"]).ndim == 1

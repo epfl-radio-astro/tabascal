@@ -162,9 +162,100 @@ If you have a Measurement Set from another source you can run TABASCAL on that d
 tabascal run -c path/to/config.yaml -ms path/to/ms/file.ms
 ```
 
+## Extracting RFI light curves
+
+`tabascal light-curve` measures each satellite's apparent flux over time and
+frequency directly from the visibilities, by matched-filtering them against the
+known satellite trajectory phase. No imaging is involved. It is the same
+estimate `rfi.init: matched-filter` makes inside a run — see
+[Estimating the light curves from the data](config.md#estimating-the-light-curves-from-the-data)
+— written out in the `rfi.est` interchange format, so it can seed a later run
+unchanged.
+
+Given a config, the satellites, the data column, the correlation and the
+elevation cut all come from it, and the Measurement Set is read once. Any of
+`-dc`, `-cr` and `--min-elevation` overrides the config for that one value; give
+none of them and the config decides:
+
+```bash
+tabascal light-curve -c tab_target.yaml -ms path/to/ms/file.ms
+```
+
+For an observation TABASCAL has not been configured against, name the
+satellites yourself:
+
+```bash
+tabascal light-curve -ms path/to/ms/file.ms -n 27868,57865,60093 -dc DATA
+```
+
+The output goes to `<ms_dir>/light_curves/<tag or column>.npz` unless `-o` says
+otherwise. Alongside the four names the format requires it carries the noise
+floor (`error`), the significance `z = Re(S_hat) / error`, the complex estimate
+and the in-view mask; readers of the format ignore the extras. `-p` also writes
+a per-source spectrogram of `z`.
+
+To score a run, filter its *residual* rather than a data column. Point `-z` at
+the run's results zarr and `-dc` at the reference column the residual is formed
+against: the residual is then `data_col - zarr.vis_obs`, which cannot be
+invalidated by a later run overwriting the MS's `TAB_*` columns.
+
+```bash
+tabascal light-curve -c tab_target.yaml -z path/to/results/map_pred_Custom.zarr -dc DATA
+```
+
+The store is checked against the visibilities before anything is subtracted —
+its baseline and timestep counts, the cadence of its time axis, and the
+correlation it was fitted on — so a results zarr from another run or another
+correlation is refused rather than differenced. Frequencies are matched
+channel by channel; the counts and cadence are what catch a store that lines up
+by accident.
+
+A fully subtracted satellite has `|z| <= 3` almost everywhere. Judge that
+against the `null` column the command prints, not against the analytic 99.73%:
+the noise floor assumes the de-rotated per-baseline samples are independent and
+residual sky is not, so the floor is optimistic. The null is the same statistic
+on `Im(S_hat)`, which after de-rotation carries the same noise and no source.
+
+**`cov`, `null` and `excess` assume the column they scored is phase
+calibrated.** They read `Re(S_hat)`, which is the whole of a de-rotated real
+source only once the antenna gain phases are out of the data. The command names
+the column it scored in the heading for that reason.
+
+`|S|` is the same statistic on `|S_hat|/error`, against a Rayleigh threshold
+enclosing the same probability (3.44 for 3 sigma). It survives a phase **common
+to every baseline** — an overall offset, or a stable phase on the source itself —
+which would otherwise empty `Re(S_hat)` and push the source into the imaginary
+null that `cov` is judged against, moving both halves of that comparison the
+wrong way.
+
+**Neither survives an uncalibrated antenna gain.** A gain multiplies each
+baseline *before* the average, `S_hat = S · Σ w gₚ gq* / Σ w`, so
+antenna-dependent phases decorrelate the coherent sum itself: the estimate
+shrinks, and the magnitude shrinks with it. On a raw column both numbers
+understate what is there — they are a lower bound on the residual, not a
+detection threshold. The optimistic-floor caveat applies to both.
+
+The floor comes from the MS's own noise column, so an MS carrying none — and no
+`data.noise` to supply one — has no floor to quote. The light curves are still
+measured and written, but `error` and `z` are NaN and the coverage table is
+replaced by a line saying so: `1/sqrt(N_bl)` would be quoting a noise of 1 Jy
+that nobody stated, and a z built on it would look like a detection at any flux.
+
+An MS with no usable noise column is not an error here, unlike a `tabascal run`
+that has to weight a likelihood by it: the curves are still measured, and come
+back unweighted with NaN errors and no coverage table, as above.
+
+To read one channel instead of the whole band, pass `-f` with a frequency in Hz.
+The nearest channel is used, and the request must land inside it — a frequency
+more than half a channel outside the band is an error naming the band, rather
+than a silent read of the nearest edge channel. With `-z` the model is matched
+to the channels read by frequency, not by position, each within half of *its
+own* width, so a non-uniform spectral window is matched channel by channel.
+
 The `tabascal` script also has a help context which can be accessed with
 
 ```bash
-tabascal -h        # top-level: lists the subcommands
-tabascal run -h    # every option of the run subcommand
+tabascal -h                # top-level: lists the subcommands
+tabascal run -h            # every option of the run subcommand
+tabascal light-curve -h    # every option of the light-curve subcommand
 ```

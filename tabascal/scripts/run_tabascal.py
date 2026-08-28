@@ -20,6 +20,17 @@ def _run_cmd(args):
 
 
 # ---------------------------------------------------------------------------
+# 'light-curve' subcommand
+# ---------------------------------------------------------------------------
+
+def _light_curve_cmd(args):
+    # Imported lazily so --help and the parser tests don't pay the JAX cost. The
+    # parser itself comes from the same module and imports nothing heavy.
+    from tabascal.scripts.rfi_estimate import run
+    run(args)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -72,6 +83,15 @@ def build_parser():
         ),
     )
 
+    # -- light-curve --
+    from tabascal.scripts.rfi_estimate import build_parser as _build_lc_parser
+
+    lc_parser = subparsers.add_parser(
+        "light-curve",
+        help="Matched-filter RFI light-curve extraction from an MS column.",
+    )
+    _build_lc_parser(lc_parser)
+
     return parser
 
 
@@ -80,6 +100,8 @@ def main():
 
     if args.command == "run":
         _run_cmd(args)
+    elif args.command == "light-curve":
+        _light_curve_cmd(args)
 
 
 if __name__ == "__main__":

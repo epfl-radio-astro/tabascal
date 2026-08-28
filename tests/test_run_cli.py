@@ -92,6 +92,279 @@ class TestRunSubcommand:
             _parse("-c", "config.yaml")
 
 
+class TestLightCurveSubcommand:
+    """``tabascal light-curve``: the matched-filter light-curve extractor.
+
+    Two ways in, and they must not be mixed: a tabascal config, whose
+    ``satellites`` section already names the satellites and whose MS is read
+    once; or an MS plus an explicit list of NORAD IDs.
+    """
+
+    def test_a_config_names_the_satellites(self):
+        args = _parse("light-curve", "-c", "tab_target.yaml")
+        assert args.command == "light-curve"
+        assert args.config == "tab_target.yaml"
+        assert args.norad_ids is None and args.norad_path is None
+
+    def test_a_config_can_be_pointed_at_a_measurement_set(self):
+        args = _parse("light-curve", "-c", "c.yaml", "-ms", "obs.ms", "-s", "sim")
+        assert args.ms_path == "obs.ms"
+        assert args.sim_dir == "sim"
+
+    @pytest.mark.parametrize("flag", ["-n", "--norad-ids"])
+    def test_ids_can_be_given_directly(self, flag):
+        args = _parse("light-curve", "-ms", "obs.ms", flag, "27868,57865")
+        assert args.norad_ids == "27868,57865"
+
+    @pytest.mark.parametrize("flag", ["-np", "--norad-path"])
+    def test_ids_can_come_from_a_file(self, flag):
+        assert _parse(
+            "light-curve", "-ms", "obs.ms", flag, "ids.txt"
+        ).norad_path == "ids.txt"
+
+    def test_a_config_and_explicit_ids_are_mutually_exclusive(self):
+        """Both would name the satellites, and there is no rule for which wins."""
+        with pytest.raises(SystemExit):
+            _parse("light-curve", "-c", "c.yaml", "-n", "27868")
+        with pytest.raises(SystemExit):
+            _parse("light-curve", "-c", "c.yaml", "-np", "ids.txt")
+
+    def test_the_two_id_sources_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit):
+            _parse("light-curve", "-ms", "o.ms", "-n", "1", "-np", "ids.txt")
+
+    def test_the_column_and_correlation(self):
+        args = _parse(
+            "light-curve", "-ms", "o.ms", "-n", "1",
+            "-dc", "TAB_RES_DATA", "-cr", "yy", "-f", "1.4e9",
+        )
+        assert args.data_col == "TAB_RES_DATA"
+        assert args.corr == "yy"
+        assert args.freq == 1.4e9
+
+    def test_the_column_and_correlation_are_unset_when_not_given(self):
+        """Not defaulted in the parser: a config names them, and must win.
+
+        A parser default is indistinguishable from a value the user typed, so
+        defaulting here would silently overwrite `data.data_col` on every
+        `-c` run.
+        """
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1")
+        assert args.data_col is None
+        assert args.corr is None
+
+    @pytest.mark.parametrize("corr", ["xx", "yy", "rr", "ll", "rl", "i", "v"])
+    def test_every_correlation_the_reader_supports_is_accepted(self, corr):
+        """Circular and Stokes MSs exist, and read_ms resolves them all."""
+        assert _parse(
+            "light-curve", "-ms", "o.ms", "-n", "1", "-cr", corr
+        ).corr == corr
+
+    def test_the_residual_mode_takes_a_results_zarr(self):
+        args = _parse("light-curve", "-c", "c.yaml", "-z", "map_pred.zarr")
+        assert args.zarr == "map_pred.zarr"
+
+    def test_the_orbit_directory_flag_is_the_run_s(self):
+        """--extra-orbit-dir, not the retired --extra-tle-dir."""
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1",
+                      "--extra-orbit-dir", "orbits/")
+        assert args.extra_orbit_dir == "orbits/"
+
+    def test_the_elevation_cut(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1",
+                      "--min-elevation", "15")
+        assert args.min_elevation == 15.0
+        assert args.elevation_cut is True
+
+    def test_the_elevation_cut_can_be_turned_off(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1", "--no-elevation-cut")
+        assert args.elevation_cut is False
+
+    def test_a_cut_and_no_cut_together_are_refused(self):
+        """They contradict each other, and silently letting one win is worse."""
+        with pytest.raises(SystemExit):
+            _parse("light-curve", "-ms", "o.ms", "-n", "1",
+                   "--min-elevation", "15", "--no-elevation-cut")
+
+    def test_the_defaults(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1")
+        assert args.freq is None
+        assert args.output is None and args.tag is None
+        assert args.plot is False
+        assert args.exclude_autos is True
+        # Not given, so the config value (or 0) decides -- see resolve_min_elevation.
+        assert args.min_elevation is None
+        assert args.max_mem_gb == 1.0
+
+    def test_autocorrelations_can_be_kept(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1", "--include-autos")
+        assert args.exclude_autos is False
+
+
+class TestLightCurveInputs:
+    """Resolution of the inputs argparse cannot express on its own."""
+
+    @staticmethod
+    def _mod():
+        # Deliberately importable without JAX: the parser module is built by the
+        # top-level parser, which --help must not pay the run stack for.
+        from tabascal.scripts import rfi_estimate
+
+        return rfi_estimate
+
+    def test_norad_ids_parse_from_either_separator(self):
+        parse = self._mod()._parse_norad_ids
+        assert parse("1,2 3\n4") == [1, 2, 3, 4]
+
+    def test_norad_ids_come_off_a_file(self, tmp_path):
+        path = tmp_path / "ids.txt"
+        path.write_text("27868\n57865\n")
+        args = _parse("light-curve", "-ms", "o.ms", "-np", str(path))
+        assert self._mod().resolve_norad_ids(args) == [27868, 57865]
+
+    def test_an_ms_is_required_without_a_config(self):
+        with pytest.raises(SystemExit, match="-ms"):
+            self._mod().resolve_ms_path(_parse("light-curve", "-n", "1"), None)
+
+    def test_satellites_are_required_without_a_config(self):
+        with pytest.raises(SystemExit, match="NORAD"):
+            self._mod().resolve_norad_ids(_parse("light-curve", "-ms", "o.ms"))
+
+    def test_the_ms_comes_from_the_config_when_not_given(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+        config = {"data": {"ms_path": "/data/obs.ms", "sim_dir": None}}
+        assert self._mod().resolve_ms_path(args, config) == "/data/obs.ms"
+
+    def test_the_ms_is_derived_from_the_simulation_directory(self):
+        args = _parse("light-curve", "-c", "c.yaml", "-s", "/data/sim_run")
+        config = {"data": {"ms_path": None, "sim_dir": None}}
+        assert self._mod().resolve_ms_path(args, config).endswith(
+            "sim_run/sim_run.ms"
+        )
+
+    def test_the_flag_beats_the_config_for_the_elevation_cut(self):
+        args = _parse("light-curve", "-c", "c.yaml", "--min-elevation", "20")
+        assert self._mod().resolve_min_elevation(args, {"rfi": {"min_elevation": 0}}) == 20.0
+
+    def test_the_config_cut_is_used_when_the_flag_is_absent(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+        assert self._mod().resolve_min_elevation(args, {"rfi": {"min_elevation": 5}}) == 5
+
+    def test_a_null_config_cut_stays_off(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+        assert self._mod().resolve_min_elevation(
+            args, {"rfi": {"min_elevation": None}}
+        ) is None
+
+    def test_the_manual_default_is_the_horizon(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1")
+        assert self._mod().resolve_min_elevation(args, None) == 0.0
+
+    def test_no_elevation_cut_overrides_everything(self):
+        args = _parse("light-curve", "-c", "c.yaml", "--no-elevation-cut")
+        assert self._mod().resolve_min_elevation(args, {"rfi": {"min_elevation": 5}}) is None
+
+    def test_the_output_defaults_beside_the_measurement_set(self):
+        args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1")
+        path = self._mod().resolve_output(args, "/data/obs.ms", "DATA")
+        assert path == "/data/light_curves/DATA.npz"
+
+    def test_the_output_is_named_for_the_resolved_column(self):
+        """Not the parser default: with -c the config names the column."""
+        args = _parse("light-curve", "-c", "c.yaml")
+        path = self._mod().resolve_output(args, "/data/obs.ms", "TAB_RES_DATA")
+        assert path.endswith("light_curves/TAB_RES_DATA.npz")
+
+    def test_the_tag_names_the_output(self):
+        args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-sx", "runA")
+        assert self._mod().resolve_output(args, "/data/obs.ms", "DATA").endswith(
+            "light_curves/runA.npz"
+        )
+
+    def test_an_explicit_output_wins(self, tmp_path):
+        out = str(tmp_path / "curves.npz")
+        args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-o", out)
+        assert self._mod().resolve_output(args, "/data/obs.ms", "DATA") == out
+
+    def test_an_output_without_a_suffix_gets_one(self):
+        """`-o curves` writes curves.npz, so it must also say curves.npz."""
+        args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-o", "curves")
+        assert self._mod().resolve_output(args, "/data/obs.ms", "DATA") == "curves.npz"
+
+    def test_an_output_that_already_ends_in_npz_is_left_alone(self):
+        args = _parse("light-curve", "-ms", "/o.ms", "-n", "1", "-o", "a/b.npz")
+        assert self._mod().resolve_output(args, "/o.ms", "DATA") == "a/b.npz"
+
+    # --- the column and the correlation: the config wins unless overridden ---
+
+    def test_the_config_column_is_used_when_the_flag_is_absent(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+        config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
+        assert self._mod().resolve_data_col(args, config) == "TAB_RES_DATA"
+        assert self._mod().resolve_corr(args, config) == "yy"
+
+    def test_the_flag_beats_the_config_column(self):
+        args = _parse("light-curve", "-c", "c.yaml", "-dc", "DATA", "-cr", "xx")
+        config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
+        assert self._mod().resolve_data_col(args, config) == "DATA"
+        assert self._mod().resolve_corr(args, config) == "xx"
+
+    def test_an_unknown_correlation_is_refused(self):
+        """Not by the parser -- which would have to hard-code the list -- but
+        against tabascal.ms's own table, named in the error."""
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1", "-cr", "zz")
+
+        with pytest.raises(SystemExit, match="zz"):
+            self._mod().resolve_corr(args, None)
+
+    def test_a_correlation_the_reader_supports_passes_the_check(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1", "-cr", "rl")
+
+        assert self._mod().resolve_corr(args, None) == "rl"
+
+    def test_a_config_correlation_is_checked_too(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+
+        with pytest.raises(SystemExit, match="nonsense"):
+            self._mod().resolve_corr(args, {"data": {"corr": "nonsense"}})
+
+    def test_the_manual_defaults_apply_without_a_config(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1")
+        assert self._mod().resolve_data_col(args, None) == "DATA"
+        assert self._mod().resolve_corr(args, None) == "xx"
+
+    def test_a_config_that_names_neither_falls_back_to_the_defaults(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+        assert self._mod().resolve_data_col(args, {"data": {}}) == "DATA"
+        assert self._mod().resolve_corr(args, {"data": {}}) == "xx"
+
+    def test_a_flag_stands_alone_when_the_config_names_nothing(self):
+        """The remaining corner of the matrix: flag given, config key absent."""
+        args = _parse("light-curve", "-c", "c.yaml", "-dc", "AST_DATA", "-cr", "yx")
+        assert self._mod().resolve_data_col(args, {"data": {}}) == "AST_DATA"
+        assert self._mod().resolve_corr(args, {"data": {}}) == "yx"
+
+    def test_a_null_config_value_falls_back_to_the_default(self):
+        """`data_col: null` names nothing, so it is not an answer to be kept."""
+        args = _parse("light-curve", "-c", "c.yaml")
+        config = {"data": {"data_col": None, "corr": None}}
+        assert self._mod().resolve_data_col(args, config) == "DATA"
+        assert self._mod().resolve_corr(args, config) == "xx"
+
+    def test_the_column_flag_does_not_carry_the_correlation_with_it(self):
+        """One flag overrides one value: -dc must not pull -cr off the config."""
+        args = _parse("light-curve", "-c", "c.yaml", "-dc", "AST_DATA")
+        config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
+        assert self._mod().resolve_data_col(args, config) == "AST_DATA"
+        assert self._mod().resolve_corr(args, config) == "yy"
+
+    def test_the_correlation_flag_does_not_carry_the_column_with_it(self):
+        args = _parse("light-curve", "-c", "c.yaml", "-cr", "xy")
+        config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
+        assert self._mod().resolve_data_col(args, config) == "TAB_RES_DATA"
+        assert self._mod().resolve_corr(args, config) == "xy"
+
+
 class TestRunReporting:
     """``run()`` reports peak memory however the run ends; timings only on success."""
 

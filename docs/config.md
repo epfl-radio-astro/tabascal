@@ -73,6 +73,7 @@ data:
 * `data_col`: The data column within the MS file to use as the observed data. Default is `DATA` but can be any column that exists in the MS file.
 * `freq`: This is the frequency channel to run on. Default is to run on all frequency channels.
 * `corr`: This is the correlation product to run on, default `xx`. It is matched against the MS's `POLARIZATION::CORR_TYPE` **by identity, not by position**, so it names the correlation you want rather than an axis index: `yy` selects YY whether the MS holds all four correlations or only that one. Linear (`xx`, `xy`, `yx`, `yy`), circular (`rr`, `rl`, `lr`, `ll`) and Stokes (`i`, `q`, `u`, `v`) names are accepted. Requesting a correlation the MS does not hold is an error naming what it does hold.
+* `freq`: A single frequency in Hz to read instead of the whole band; the nearest channel is used. The request must fall inside the band — a frequency more than half a channel beyond the nearest centre is an error rather than a silent read of the edge channel, since `argmin` always returns a channel and a units slip would otherwise pass unnoticed. `null` (the default) reads every channel. `SIGMA_SPECTRUM` is narrowed to the same channel, so the noise cannot come back on a channel the visibilities did not.
 * `noise`: The per-visibility noise in Jy. **Leave it null to use the MS's own noise columns**, which are read *per baseline*, and *per channel* where the MS resolves them that far, rather than averaged to one number: the antennas of a real array differ in sensitivity and a bandpass is not flat, so a single value mis-weights every visibility. On EDA2 the per-baseline `SIGMA` spans a factor of ~30, so a scalar under-weights the quietest baselines by up to ~200x. It matters most when fitting gains, because the per-antenna noise correlates with the per-antenna gain (measured `sigma_a ~ amplitude_a^0.76`, R = 0.96) — a uniform-noise likelihood cannot tell a loud antenna from a noisy one, so the fitted gain absorbs the noise structure.
 
   With `noise: null` the noise is resolved from the MS, most specific column first:
@@ -81,6 +82,8 @@ data:
   |---|---|---|---|
   | `SIGMA_SPECTRUM` | `(row, chan, corr)` | `(n_bl, n_freq)` — per baseline **and** channel | `(n_bl, n_freq, n_time)` |
   | `SIGMA` | `(row, corr)` | `(n_bl,)` — per baseline | `(n_bl, 1, n_time)` — per baseline **and** timestep |
+
+  The column is checked against the MS's **whole** channel axis before any single-channel selection is applied: a `SIGMA_SPECTRUM` that covers a different number of channels from `DATA` is a disagreement about the observation, and narrowing both to one channel would let it pass without settling which is right.
 
   **The time axis is kept only when it carries something.** Each column is read cell by cell — per baseline for `SIGMA`, per (baseline, channel) for `SIGMA_SPECTRUM` — and a cell whose rows are all bit-identical is one measurement written into every row: it collapses to that value, so an MS with a uniform `SIGMA` weights exactly as it always did. If any cell's rows differ, the column is saying the noise changed over the observation, and the whole column is kept time-resolved. There is no tolerance and no threshold: an MS that writes a constant noise writes the identical value in every row, and a column that varies is taken at **face value**, because nothing here can tell a corrupted row from a timestep on which the noise really was different — both are a positive, finite number the MS wrote down. One odd-but-finite row is therefore enough to make a column vary, and it is kept rather than median-ed away. Validity masking applies either way: a non-positive or non-finite entry is never a measurement. The read prints one line when it finds time variation, saying the noise is being kept time-resolved. A time-resolved `SIGMA` is `(n_bl, 1, n_time)` and never `(n_bl, n_time)` — whenever the observation has as many channels as timesteps, nothing in that shape says which axis is which, and every consumer would weight the visibilities by the wrong one in silence.
 
@@ -323,7 +326,11 @@ rfi:
     cutoff: 1e-6
 ```
 
-All parameters in this section that overlap with those of the `ast` section have the same definition. The only additional parameters are
+All parameters in this section that overlap with those of the `ast` section have the same definition, except that `init` and `mean` accept one more value:
+
+* `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `rfi.est`, and no matching of light curves to satellites by name, since the estimator is handed `satellites.norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
+
+The only additional parameters are
 
 * `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
@@ -378,6 +385,26 @@ Some further details:
 * Labels that are not integer NORAD ids never match a satellite and are dropped, so a file may carry named sources (e.g. `Fornax A`) alongside the satellites without filtering beforehand, and those may repeat freely.
 * **Samples outside the file's coverage are zero**, on either axis — the file says nothing there, which is the same "no signal known" convention the elevation mask uses. An axis of length 1 is held constant instead, since a single sample carries no gradient to interpolate along; a single-frequency light curve therefore applies across the whole band rather than being zeroed outside it.
 * **The file does not have to cover every satellite in the fit.** Satellites with no light curve are initialised at zero and named in a warning, so light curves can be measured for a subset — the bright or well-characterised sources — while the rest are still modelled and fitted, just without an informative starting point. It is an error only if *no* configured satellite is found, which would otherwise silently reduce the whole estimate to zeros.
+
+### Estimating the light curves from the data
+
+`rfi.init: matched-filter` (alias `mf`) needs no file at all: it measures the light curves from the visibilities the run has already loaded. For a satellite on a known trajectory the RFI contribution to baseline $(p, q)$ is $A_p A_q^* e^{i(\phi_p - \phi_q)}$ with $\phi$ the geometric phase, so the unit-modulus template $T_{pq} = e^{i(\phi_p - \phi_q)}$ de-rotates it. The maximum-likelihood estimate of the source visibility at each channel and timestep is the inverse-variance-weighted, de-rotated baseline average
+
+$$\hat{S}[f, t] = \frac{\sum_{pq} w_{pq} T_{pq}^{*} V_{pq}}{\sum_{pq} w_{pq}}, \qquad w_{pq} = \frac{1}{\sigma_{pq}^2},$$
+
+with standard error $1/\sqrt{\sum w}$. The satellite's fringe adds coherently after de-rotation while the sky and the noise do not, so $\hat{S}$ isolates the satellite, and $\sqrt{\lvert \hat{S} \rvert}$ is the per-antenna amplitude the model is seeded with — the same quantity `est` reads out of a file.
+
+The weights are the run's own noise, resolved per baseline and per channel as far as the MS resolves it (see `data.noise`); the template carries no gain. Uniform weights on an array whose antennas differ in sensitivity would over-weight the loud baselines. With no usable noise anywhere the curves are still measured, but they are then both unweighted and *unscaled*: the error and the z statistic come back as NaN rather than as a floor derived from a noise nobody stated. Flagged samples and autocorrelations are excluded, a satellite is not filtered for while it is below `rfi.min_elevation` (those times seed at zero, exactly as the elevation mask holds them there), and a channel and timestep where every baseline is flagged seeds at zero rather than at a measured value.
+
+The same estimate is available as a standalone tool, `tabascal light-curve`, which writes it in the interchange format above so it can seed a later run through `rfi.est`. See [Usage](usage.md#extracting-rfi-light-curves).
+
+The z statistic reported alongside the curves reads `Re(S_hat)` and so assumes
+the column is phase calibrated. The magnitude statistic reported beside it is
+robust to a phase common to every baseline, but not to an uncalibrated antenna
+gain, which decorrelates the coherent sum and shrinks the estimate itself — see
+[Usage](usage.md#extracting-rfi-light-curves).
+
+Two limitations are worth knowing. The estimator assumes the satellite is exactly where its orbit record says it is: a position error scatters the per-baseline phases and costs coherence, which shows as an under-estimated flux rather than as an error. And it does not filter the astronomical signal out first, so a bright source in the field contributes to $\hat{S}$ wherever its fringe rate overlaps the satellite's.
 
 ## Satellites
 

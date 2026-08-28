@@ -58,9 +58,9 @@ ast:
 # RFI prior and initialization parameters
 ##########################################
 rfi:
-  est: null
-  init: sample          # Optional - The initialization method for the RFI signal parameters. Options are 'est', 'prior', 'truth'
-  mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'truth'
+  est: null             # Optional - Path to a measured light-curve file (.npz or .zarr) used by init/mean 'est'. Not needed for 'matched-filter'
+  init: sample          # Optional - The initialization method for the RFI signal parameters. Options are 'prior', 'est', 'matched-filter' (alias 'mf'), 'truth', 'zeros', 'ones', 'sample'. 'matched-filter' estimates the light curves from the visibilities already in memory - no imaging step and no est file
+  mean: 0               # Optional - Mean of the prior distribution for the RFI signal parameters. Options are 0/'zeros', 'data', 'est', 'matched-filter' (alias 'mf')
   var: null             # Optional - Variance of the RFI signal in Jy. When null an estimate is made based on the data
   min_elevation: 0      # Optional - Elevation in degrees below which the RFI signal of a satellite is masked to zero. 0 masks a satellite only while it is below the geometric horizon. Set to null to disable masking entirely
   corr_time: 24         # Optional - Correlation time of the RFI signal in seconds

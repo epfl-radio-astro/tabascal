@@ -1215,6 +1215,56 @@ class TestSetNoiseOverride:
 # An MS with no usable noise column, and the override that rescues it
 # ---------------------------------------------------------------------------
 
+class TestNoiseMayBeUnset:
+    """One caller reads an MS it cannot weight, and says so rather than stopping.
+
+    Inference cannot proceed without a noise -- the likelihood divides by it --
+    so `set_noise` stops the run. The matched-filter light-curve extractor is not
+    inference: it can still measure the curves, it simply cannot put an error bar
+    on them, and `tabascal light-curve` documents exactly that. The strictness is
+    therefore a parameter of the call rather than a property of the class, and it
+    defaults to strict.
+    """
+
+    @staticmethod
+    def _config_module():
+        from tabascal import config as config_module
+
+        return config_module
+
+    def _cfg(self, noise=None):
+        return SimpleNamespace(noise=noise, noise_scalar=None, n_bl=3, a1=None, a2=None,
+                               n_freq=2)
+
+    def test_it_still_stops_the_run_by_default(self):
+        cfg = self._cfg()
+
+        with pytest.raises(ValueError, match="no noise estimate"):
+            self._config_module().TabConfig.set_noise(cfg, None)
+
+    def test_it_can_be_asked_to_permit_an_unset_noise(self):
+        cfg = self._cfg()
+
+        self._config_module().TabConfig.set_noise(cfg, None, require=False)
+
+        assert cfg.noise is None
+        assert cfg.noise_scalar is None
+
+    def test_permitting_it_does_not_weaken_a_bad_override(self):
+        """Only the *absence* of a noise is permitted, not a nonsensical one."""
+        cfg = self._cfg()
+
+        with pytest.raises(ValueError, match="not a usable noise"):
+            self._config_module().TabConfig.set_noise(cfg, -1.0, require=False)
+
+    def test_an_override_is_still_honoured_when_not_required(self):
+        cfg = self._cfg()
+
+        self._config_module().TabConfig.set_noise(cfg, 0.5, require=False)
+
+        assert cfg.noise == 0.5
+
+
 class TestNoiselessMS:
     """The order of the two steps is the whole of the recovery path.
 
@@ -1252,6 +1302,9 @@ class TestNoiselessMS:
             "times_jd": np.array([60000.0, 60000.1]) + 2400000.5,
             "time_scale": "utc",
             "chan_width": 1e5,
+            # Per channel as well as the scalar, as read_ms returns it: a stub
+            # that stops mirroring the reader stops standing in for it.
+            "chan_widths": np.full(N_FREQ, 1e5),
             "freqs": np.linspace(1e9, 1.1e9, N_FREQ),
             # partition_noise found neither column usable and said so; deciding
             # what to do about it is not the reader's business.
