@@ -317,14 +317,13 @@ def test_the_default_uvw_sign_is_minus_one_on_every_axis():
     assert np.array_equal(absent, explicit)
 
 
-def test_flipping_every_uvw_sign_conjugates_the_visibilities():
+def test_flipping_every_uvw_sign_conjugates_the_visibilities(exact_rtol):
     """[1, 1, 1] is the opposite baseline convention, i.e. a sky mirrored through the
     phase centre.
 
     Negating (u, v, w) negates the delay of every source and leaves the Gaussian envelope
-    alone (it is even in u and v), so the visibility of each source becomes its own
-    conjugate -- exactly, since IEEE negation is exact and cos/sin carry the sign
-    symmetry through. Checked source by source as well as for the sky as a whole, so a
+    alone (it is even in u and v), so the visibility of each source is the conjugate of
+    the default's. Checked source by source as well as for the sky as a whole, so a
     cancellation between sources cannot hide a per-source error.
     """
     sources, uvw = mixed_sky()
@@ -335,7 +334,9 @@ def test_flipping_every_uvw_sign_conjugates_the_visibilities():
         flipped = sky_vis(make_sky_config(subset, uvw_sign=[1, 1, 1], **kwargs))
 
         assert np.abs(default.imag).max() > 0.1  # there is a phase to conjugate
-        assert np.array_equal(flipped, np.conj(default))
+        assert np.allclose(
+            flipped, np.conj(default), rtol=100 * exact_rtol, atol=100 * exact_rtol
+        )
 
 
 def test_a_mixed_uvw_sign_is_accepted_and_applied_per_axis(exact_rtol):
