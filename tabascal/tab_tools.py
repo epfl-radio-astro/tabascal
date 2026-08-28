@@ -745,8 +745,16 @@ def run_opt(
     print()
     print(f"Copying tabascal results to MS file from {map_path}")
     # No corr= here: write_results_xds recorded the fitted correlation on the
-    # zarr, so the results carry it themselves.
-    write_results_ms(ms_path, map_path, tab_config.args["data"]["data_col"])
+    # zarr, so the results carry it themselves. The gain tables are not on the
+    # zarr, though, and the MS's data column is still raw, so they are handed
+    # over as the config normalised them -- the same list, in the same order,
+    # that was divided out of the visibilities at read time.
+    write_results_ms(
+        ms_path,
+        map_path,
+        tab_config.args["data"]["data_col"],
+        gain_table=getattr(tab_config, "gain_table", None),
+    )
 
     return vi_pred, vi_results.losses, vi_params, rchi2
 

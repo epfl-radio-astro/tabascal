@@ -7,10 +7,19 @@ real results zarr and an in-memory stand-in for the measurement set, and compare
 every written column against an independent numpy reference.
 
 Every case uses non-unit, non-uniform complex gains: unity gains cannot tell
-``g_p conj(g_q)`` from ``|g_p|^2``, nor a gained model from a raw one.
+``g_p conj(g_q)`` from ``|g_p|^2``, nor a calibrated column from a data-frame one.
+
+Every column is written in ONE frame -- the data with both gain layers, the
+external table's and the fitted DIE gains, divided out (#123) -- so the anchor
+assertion here is the closure identity ``TAB_AST_DATA + TAB_RFI_DATA +
+TAB_RES_DATA == CORRECTED_DATA``, which fails loudly if any column moves frame.
 
 ``write_results_xds`` is covered here too, for the one thing the writer reads
 back out of it: which correlation the run fitted.
+
+No jax runs here: the writer works in ``complex64`` in either session
+precision, so the tolerances come from float32 round-off (``_tolerances``) and
+not from the ``exact_rtol`` fixture, whose fp64 bound the writer could not meet.
 """
 
 import warnings
@@ -33,6 +42,14 @@ N_CORR = 1
 
 A1_BL, A2_BL = np.triu_indices(N_ANT, k=1)
 N_BL = len(A1_BL)
+
+#: Per-baseline noise for the fake MS's ``SIGMA``. Non-uniform, so a weight
+#: built from the wrong axis -- or from one number for the whole array -- shows.
+SIGMA_BL = np.array([0.3, 0.5, 0.7, 1.1, 1.3, 1.7])
+
+#: Per-channel factors on top of it for ``SIGMA_SPECTRUM``: a bandpass is not
+#: flat, and a weight that ignores the channel axis reproduces neither.
+SIGMA_CHAN = np.array([1.0, 2.5])
 
 
 # ---------------------------------------------------------------------------
@@ -123,32 +140,84 @@ def _write_zarr(
     return path
 
 
-def _fake_ms(data, a1=None, a2=None, times=None):
+def _sigma_column(n_row, n_corr, per_chan: bool):
+    """A noise column for the fake MS, differing per correlation.
+
+    Each correlation carries its own noise, so reading the fitted one rather
+    than correlation 0 is an assertion rather than a coincidence.
+    """
+
+    scale = 1.0 + np.arange(n_corr, dtype=float)
+    # resize rather than tile: the baseline-count guard's MS has a row count
+    # that is not a multiple of N_BL, and it must reach the guard, not a
+    # shape error from this column.
+    rows = np.resize(SIGMA_BL, n_row)
+
+    if per_chan:
+        return rows[:, None, None] * SIGMA_CHAN[None, :, None] * scale
+
+    return rows[:, None] * scale
+
+
+def _sigma_grid(corr_idx: int, per_chan: bool = False):
+    """The noise the writer must have read, as ``(bl, freq, time)``.
+
+    The reference, written out from the same two constants the column is built
+    from rather than by re-reading it: ``SIGMA`` resolves per baseline and
+    ``SIGMA_SPECTRUM`` per (baseline, channel), and both are constant in time
+    here, so the time axis is a broadcast.
+    """
+
+    sigma = SIGMA_BL[:, None] * (SIGMA_CHAN if per_chan else np.ones(N_FREQ))
+
+    return np.broadcast_to(
+        (sigma * (1.0 + corr_idx))[:, :, None], (N_BL, N_FREQ, N_TIME)
+    )
+
+
+def _fake_ms(data, a1=None, a2=None, times=None, noise="sigma"):
     """An MS-like dataset: dask-backed, time-major rows.
 
     The correlation axis is however wide the ``DATA`` given here is, so the same
     fake covers a single-correlation MS and a full four-correlation one. The row
     columns default to the standard four-antenna layout.
+
+    ``noise`` picks the noise column(s) present: ``"sigma"`` (the default, what
+    most MSs carry), ``"sigma_spectrum"``, ``"both"`` -- where the frequency
+    resolved column must win -- or ``None`` for an MS with no noise at all.
     """
 
     row_chunk = N_BL
-    n_corr = data.shape[2]
+    n_row, _, n_corr = data.shape
     a1 = np.tile(A1_BL, N_TIME) if a1 is None else np.asarray(a1)
     a2 = np.tile(A2_BL, N_TIME) if a2 is None else np.asarray(a2)
     if times is None:
         times = np.repeat(np.arange(N_TIME, dtype=float), N_BL)
 
-    return xr.Dataset(
-        data_vars={
-            "DATA": (
-                ["row", "chan", "corr"],
-                da.from_array(data, chunks=(row_chunk, N_FREQ, n_corr)),
+    data_vars = {
+        "DATA": (
+            ["row", "chan", "corr"],
+            da.from_array(data, chunks=(row_chunk, N_FREQ, n_corr)),
+        ),
+        "ANTENNA1": (["row"], da.from_array(a1, chunks=row_chunk)),
+        "ANTENNA2": (["row"], da.from_array(a2, chunks=row_chunk)),
+        "TIME": (["row"], da.from_array(np.asarray(times), chunks=row_chunk)),
+    }
+
+    if noise in ("sigma", "both"):
+        data_vars["SIGMA"] = (
+            ["row", "corr"],
+            da.from_array(_sigma_column(n_row, n_corr, False), chunks=(row_chunk, n_corr)),
+        )
+    if noise in ("sigma_spectrum", "both"):
+        data_vars["SIGMA_SPECTRUM"] = (
+            ["row", "chan", "corr"],
+            da.from_array(
+                _sigma_column(n_row, n_corr, True), chunks=(row_chunk, N_FREQ, n_corr)
             ),
-            "ANTENNA1": (["row"], da.from_array(a1, chunks=row_chunk)),
-            "ANTENNA2": (["row"], da.from_array(a2, chunks=row_chunk)),
-            "TIME": (["row"], da.from_array(np.asarray(times), chunks=row_chunk)),
-        }
-    )
+        )
+
+    return xr.Dataset(data_vars=data_vars)
 
 
 def _observed(model_ms, seed: int = 7, noise_frac: float = 0.05):
@@ -218,26 +287,106 @@ COLS = [
     "TAB_RES_DATA",
 ]
 
+#: Written after the six visibility columns, when the MS carries a noise column.
+WEIGHT_COLS = ["WEIGHT_SPECTRUM", "WEIGHT"]
+
+#: The channel frequencies the fake ``SPECTRAL_WINDOW`` declares.
+FREQS = np.linspace(1.0e9, 1.1e9, N_FREQ)
+
 
 @pytest.fixture
-def run_writer(monkeypatch):
+def run_writer(monkeypatch, tmp_path):
     """Run ``write_results_ms`` against an in-memory MS, capturing the columns.
 
-    ``xds_from_ms``/``xds_to_table`` are the only casacore-facing calls, so
-    replacing them keeps the whole writer under test without an MS on disk.
+    ``xds_from_ms``/``xds_from_table``/``xds_to_table`` are the only
+    casacore-facing calls, so replacing them keeps the whole writer under test
+    without an MS on disk.
+
+    ``ext_gains`` supplies the external calibration the run was fitted with, in
+    place of a table on disk: the *placement* of a real caltable onto the
+    observation's grid is ``tabascal.gain_table``'s subject and is tested there,
+    while what belongs here is the frame the writer puts the columns in and the
+    grid it asks for the gains on -- which is captured and asserted.
     """
 
     captured = {}
 
-    def _run(xds_ms, zarr_path, *, corr=None, corr_idx=0, pol_id=0):
-        monkeypatch.setattr(write_mod, "xds_from_ms", lambda path: [xds_ms])
+    def _run(
+        xds_ms,
+        zarr_path,
+        *,
+        corr=None,
+        corr_idx=0,
+        pol_id=0,
+        ext_gains=None,
+        ext_dead=None,
+        gain_table=None,
+        n_ant=N_ANT,
+        spw_id=0,
+    ):
+        keywords = {"TIME": {"QuantumUnits": ["s"]}}
+
+        def _from_ms(path, column_keywords=False):
+            return ([xds_ms], keywords) if column_keywords else [xds_ms]
+
+        monkeypatch.setattr(write_mod, "xds_from_ms", _from_ms)
 
         def _describe(ms_path, data_desc_id=0):
             """Stand in for DATA_DESCRIPTION: records the id, returns pol_id."""
             captured["data_desc_id"] = data_desc_id
-            return 0, pol_id
+            return spw_id, pol_id
 
         monkeypatch.setattr(ms_mod, "resolve_data_description", _describe)
+
+        def _subtable(path, group_cols=None):
+            """Stand in for the SPECTRAL_WINDOW and ANTENNA subtables."""
+            if path.endswith("::SPECTRAL_WINDOW"):
+                # One dataset per row, as read_ms groups them: the partition's
+                # window is picked by its id rather than being assumed to be row 0.
+                return [
+                    xr.Dataset(
+                        {"CHAN_FREQ": (["row", "chan"], da.from_array(FREQS[None]))}
+                    )
+                    for _ in range(spw_id + 1)
+                ]
+            if path.endswith("::ANTENNA"):
+                return [
+                    xr.Dataset(
+                        {
+                            "POSITION": (
+                                ["row", "xyz"],
+                                da.from_array(np.zeros((n_ant, 3))),
+                            )
+                        }
+                    )
+                ]
+            raise AssertionError(f"unexpected subtable read: {path}")
+
+        monkeypatch.setattr(write_mod, "xds_from_table", _subtable)
+
+        if ext_gains is not None:
+            dead = (
+                np.zeros(np.shape(ext_gains), dtype=bool)
+                if ext_dead is None
+                else ext_dead
+            )
+
+            def _placed(paths, times, freqs, n_ant=None, verbose=True):
+                captured["ext"] = {
+                    "gain_table": list(paths),
+                    "times": np.asarray(times),
+                    "freqs": np.asarray(freqs),
+                    "n_ant": n_ant,
+                }
+                return np.where(dead, 1.0, ext_gains), dead
+
+            monkeypatch.setattr(write_mod, "gains_from_tables", _placed)
+
+            if gain_table is None:
+                # A real path, so normalise_gain_tables does its own job.
+                table = tmp_path / "flux.B0"
+                table.mkdir(exist_ok=True)
+                gain_table = str(table)
 
         def _capture(datasets, path, cols, column_keywords=None):
             captured["xds"] = datasets[0]
@@ -254,7 +403,7 @@ def run_writer(monkeypatch):
         monkeypatch.setattr(write_mod, "xds_to_table", _capture)
         monkeypatch.setattr(ms_mod, "resolve_correlation", _resolve)
 
-        write_results_ms("unused.ms", zarr_path, corr=corr)
+        write_results_ms("unused.ms", zarr_path, corr=corr, gain_table=gain_table)
 
         values = {
             col: np.asarray(captured["xds"][col].data) for col in captured["cols"]
@@ -263,6 +412,112 @@ def run_writer(monkeypatch):
         return values, captured
 
     return _run
+
+
+def _uniform_gains(n_sample: int, value=1.0):
+    """``UnitaryGains``-shaped gains: the same value on every antenna."""
+
+    return np.full((n_sample, N_ANT, N_FREQ, N_TIME), value, dtype=np.complex128)
+
+
+def _fitted_gains_bl(gains):
+    """The mean baseline gain the writer divides by, in the writer's precision.
+
+    The zarr's gains are cast to ``complex64`` *before* the baseline product and
+    the sample mean, so a reference that casts afterwards differs in the last
+    bit -- which matters wherever a column is asserted exactly.
+    """
+
+    g = np.asarray(gains).astype(np.complex64)
+
+    return _to_ms((g[:, A1_BL] * g[:, A2_BL].conj()).mean(axis=0))
+
+
+def _near(model_ms, seed: int = 7, frac: float = 0.02):
+    """MS ``DATA``: the model with a small per-component perturbation.
+
+    The closure identity is exact floating point only where the residual is
+    small next to the data -- the regime a fitted model is in, and the one #123
+    verified end-to-end on EDA2. ``_observed`` scales its noise to the *largest*
+    visibility in the array, which is what makes residual tolerances meaningful
+    but swamps the smallest cells; there ``s + (c - s)`` genuinely rounds to a
+    neighbouring float and the identity holds only to a ulp.
+
+    Perturbed per component rather than by a complex factor: a multiplicative
+    complex perturbation mixes the real and imaginary parts, so a cell whose
+    real part is far smaller than its imaginary part would be moved by more than
+    itself.
+    """
+
+    rng = np.random.default_rng(seed)
+    shape = model_ms.shape
+
+    return (
+        model_ms.real * (1 + frac * rng.normal(size=shape))
+        + 1j * model_ms.imag * (1 + frac * rng.normal(size=shape))
+    ).astype(np.complex64)
+
+
+def _ext_gains(seed: int = 21):
+    """Per-antenna external gains, as a caltable would place them on the grid."""
+
+    rng = np.random.default_rng(seed)
+    shape = (N_ANT, N_FREQ, N_TIME)
+    amp = rng.uniform(0.4, 2.5, shape)
+    phase = rng.uniform(-np.pi, np.pi, shape)
+
+    return (amp * np.exp(1j * phase)).astype(complex)
+
+
+def _ext_bl(gains):
+    """``g_p conj(g_q)`` of the external gains, as ``(row, chan, 1)`` complex64."""
+
+    return _to_ms(
+        (gains[A1_BL] * gains[A2_BL].conj()).astype(np.complex64)
+    )
+
+
+def _real_gains(n_sample: int = 1):
+    """Real, non-unit, non-uniform fitted gains: a divisor that acts per component.
+
+    Complex division mixes the real and imaginary parts, so with a complex gain
+    the calibrated data's real part is not a scaled copy of the model's real
+    part and Sterbenz's condition cannot be *arranged* per component -- only
+    hoped for. Dividing by a real positive gain is two independent real
+    divisions, which is what lets the exactness precondition be constructed and
+    then checked. Still non-unit and antenna-dependent, so it is a real divisor
+    and not a no-op.
+    """
+
+    amp = np.array([0.5, 1.0, 2.0, 1.5])
+    one = np.broadcast_to(amp[:, None, None], (N_ANT, N_FREQ, N_TIME))
+
+    return np.broadcast_to(one, (n_sample,) + one.shape).astype(np.complex128)
+
+
+def _real_ext_gains(seed: int = 23):
+    """External gains that are real and positive, for the same reason."""
+
+    rng = np.random.default_rng(seed)
+
+    return rng.uniform(0.4, 2.5, (N_ANT, N_FREQ, N_TIME)).astype(complex)
+
+
+def _at_most_one_ulp(got, want):
+    """``got`` within one float32 ulp of ``want``, per visibility.
+
+    Referenced to the visibility's *magnitude*, which is the honest bound: the
+    error in ``model + (data - model)`` is set by the size of the residual that
+    was rounded, and the residual is a property of the complex number, not of
+    whichever component happens to be small.
+    """
+
+    tol = np.spacing(np.abs(np.asarray(want)).astype(np.float32))
+    worst = np.abs(np.asarray(got) - np.asarray(want))
+
+    assert np.all(worst <= tol), (
+        f"max |got - want| = {worst.max():.3e}, worst allowance {tol.max():.3e}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,23 +543,26 @@ class TestWrittenColumns:
 
         values, captured = run_writer(_fake_ms(data), zarr_path, corr_idx=corr_idx)
 
-        assert captured["cols"] == COLS
+        assert captured["cols"] == COLS + WEIGHT_COLS
         assert captured["resolved"] == "yx"          # resolved by name, not index
 
         mean_gains_bl = _to_ms(gains_bl.mean(axis=0))
-        gained_ast = _to_ms((gains_bl * ast).mean(axis=0))
-        gained_rfi = _to_ms((gains_bl * rfi).mean(axis=0))
-        gained_total = _to_ms(vis_obs_zarr.mean(axis=0))
+        model_ast = _to_ms(ast.mean(0))
+        model_rfi = _to_ms(rfi.mean(0))
+        # Every column in one frame: the data with the gains divided out.
+        vis_cal = fit / mean_gains_bl
 
         kw = _tolerances(fit)
         got = {col: _fit(values[col], corr_idx) for col in COLS}
 
-        np.testing.assert_allclose(got["CORRECTED_DATA"], fit / mean_gains_bl, **kw)
-        np.testing.assert_allclose(got["TAB_AST_DATA"], _to_ms(ast.mean(0)), **kw)
-        np.testing.assert_allclose(got["TAB_RFI_DATA"], _to_ms(rfi.mean(0)), **kw)
-        np.testing.assert_allclose(got["TAB_AST_RES"], fit - gained_ast, **kw)
-        np.testing.assert_allclose(got["TAB_RFI_RES"], fit - gained_rfi, **kw)
-        np.testing.assert_allclose(got["TAB_RES_DATA"], fit - gained_total, **kw)
+        np.testing.assert_allclose(got["CORRECTED_DATA"], vis_cal, **kw)
+        np.testing.assert_allclose(got["TAB_AST_DATA"], model_ast, **kw)
+        np.testing.assert_allclose(got["TAB_RFI_DATA"], model_rfi, **kw)
+        np.testing.assert_allclose(got["TAB_AST_RES"], vis_cal - model_ast, **kw)
+        np.testing.assert_allclose(got["TAB_RFI_RES"], vis_cal - model_rfi, **kw)
+        np.testing.assert_allclose(
+            got["TAB_RES_DATA"], vis_cal - (model_ast + model_rfi), **kw
+        )
 
         for col in COLS:
             assert values[col].shape == (N_TIME * N_BL, N_FREQ, n_corr)
@@ -317,10 +575,15 @@ class TestWrittenColumns:
 
         values, captured = run_writer(xds_ms, zarr_path)
 
-        for col in COLS:
+        for col in COLS + ["WEIGHT_SPECTRUM"]:
             assert captured["xds"][col].dims == ("row", "chan", "corr")
             assert values[col].shape == (N_TIME * N_BL, N_FREQ, N_CORR)
 
+        assert captured["xds"]["WEIGHT"].dims == ("row", "corr")
+        assert values["WEIGHT"].shape == (N_TIME * N_BL, N_CORR)
+
+        # Jy on the visibility columns only; WEIGHT and WEIGHT_SPECTRUM are
+        # standard columns and are left with the units the MS gives them.
         assert captured["keywords"] == {col: {"UNIT": "Jy"} for col in COLS}
 
     def test_the_total_residual_closes_on_a_perfect_model(self, tmp_path, run_writer):
@@ -338,8 +601,486 @@ class TestWrittenColumns:
         )
 
 
+# ---------------------------------------------------------------------------
+# The calibrated frame
+# ---------------------------------------------------------------------------
+
+class TestClosureIdentity:
+    """``TAB_AST_DATA + TAB_RFI_DATA + TAB_RES_DATA == CORRECTED_DATA``.
+
+    #123's anchor check, and the reason it is worth having: it is floating-point
+    arithmetic on the written columns themselves, so it fails loudly if any one
+    of them is written in a frame the others are not.
+
+    It is *bit exact* where Sterbenz's condition holds per component -- the real
+    parts within a factor of two of one another and the imaginary parts likewise
+    -- and within one float32 ulp of the visibility's magnitude otherwise. The
+    two cases are tested separately, because a residual that is small next to
+    ``|data|`` does not establish the condition for a cell whose real part
+    nearly cancels, and a test asserting exactness on random complex data is
+    passing on its seed.
+    """
+
+    @staticmethod
+    def _closed(values):
+        return (
+            values["TAB_AST_DATA"] + values["TAB_RFI_DATA"] + values["TAB_RES_DATA"]
+        )
+
+    @pytest.mark.parametrize("external", [False, True], ids=["no_table", "table"])
+    @pytest.mark.parametrize("unitary", [False, True], ids=["fitted", "unitary"])
+    @pytest.mark.parametrize(
+        "n_corr, corr_idx", [(1, 0), (4, 2)], ids=["one_corr", "four_corr"]
+    )
+    def test_it_is_bit_exact_where_the_condition_holds(
+        self, tmp_path, run_writer, external, unitary, n_corr, corr_idx
+    ):
+        """Constructed so the per-component condition provably holds, then checked."""
+        _, ast, rfi = _model(1)
+        gains = _uniform_gains(1) if unitary else _real_gains(1)
+        ext = _real_ext_gains() if external else None
+
+        stored = _baseline_gains(gains) * (ast + rfi)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored, corr="yx")
+
+        # The divisor the writer will use: real and positive, so the complex
+        # division it performs is two independent real divisions.
+        g_total = _to_ms(_baseline_gains(gains).mean(axis=0)).real
+        if external:
+            g_total = g_total * _to_ms(ext[A1_BL] * ext[A2_BL].conj()).real
+
+        model = _to_ms((ast + rfi).mean(axis=0))
+        rng = np.random.default_rng(3)
+
+        # Each component of the data is its own model component times g_total,
+        # perturbed by at most 20 %. The calibrated data's component then sits
+        # within a factor of two of the model's, which is Sterbenz's condition.
+        def perturbed(component):
+            return g_total * component * (1 + 0.2 * rng.uniform(-1, 1, model.shape))
+
+        fit = (perturbed(model.real) + 1j * perturbed(model.imag)).astype(np.complex64)
+        data = _spread(fit, n_corr, corr_idx)
+
+        values, _ = run_writer(
+            _fake_ms(data), zarr_path, corr_idx=corr_idx, ext_gains=ext
+        )
+
+        calibrated = _fit(values["CORRECTED_DATA"], corr_idx)
+        summed = _fit(values["TAB_AST_DATA"] + values["TAB_RFI_DATA"], corr_idx)
+
+        # The precondition, checked rather than assumed: constructing it wrongly
+        # would leave the exactness below passing by luck, which is exactly the
+        # failure mode this test exists to remove.
+        for part in (np.real, np.imag):
+            model_part, data_part = part(summed), part(calibrated)
+            assert np.all(model_part != 0)
+            ratio = data_part / model_part
+            assert np.all((ratio >= 0.5) & (ratio <= 2.0)), ratio
+
+        np.testing.assert_array_equal(self._closed(values), values["CORRECTED_DATA"])
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+    @pytest.mark.parametrize("external", [False, True], ids=["no_table", "table"])
+    @pytest.mark.parametrize("unitary", [False, True], ids=["fitted", "unitary"])
+    def test_a_good_fit_closes_to_within_one_ulp(
+        self, tmp_path, run_writer, seed, external, unitary
+    ):
+        """Complex gains and a small residual: the general case, over five seeds.
+
+        Nothing here arranges the per-component condition -- a complex divisor
+        mixes the components -- so one ulp of the magnitude is the bound that is
+        actually available, and it is asserted rather than exactness, which would
+        be a property of the seed.
+        """
+        _, ast, rfi = _model(1)
+        gains = _uniform_gains(1) if unitary else _model(1)[0]
+        ext = _ext_gains(seed=21 + seed) if external else None
+
+        stored = _baseline_gains(gains) * (ast + rfi)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored, corr="yx")
+
+        gained = stored.mean(axis=0)
+        if external:
+            gained = gained * (ext[A1_BL] * ext[A2_BL].conj())
+        data = _near(_to_ms(gained), seed=seed)
+
+        values, _ = run_writer(_fake_ms(data), zarr_path, ext_gains=ext)
+
+        _at_most_one_ulp(self._closed(values), values["CORRECTED_DATA"])
+
+    def test_a_bad_fit_still_closes_to_float32_round_off(self, tmp_path, run_writer):
+        """Where a cell is all residual the bound widens, but only to round-off.
+
+        ``s + (c - s)`` reconstructs ``c`` exactly only when ``c - s`` is exact.
+        Here the residual is the size of the visibility, so the subtraction
+        rounds and the sum lands a few float32 steps away. It is worth saying
+        out loud that this is the whole of the degradation: a column in the wrong
+        frame is off by the gain, not by round-off.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, corr="yx")
+        # Noise scaled to the loudest visibility, so the quietest cells are all
+        # residual.
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        values, _ = run_writer(_fake_ms(data), zarr_path)
+
+        np.testing.assert_allclose(
+            self._closed(values),
+            values["CORRECTED_DATA"],
+            rtol=0,
+            atol=1e-6 * float(np.abs(values["CORRECTED_DATA"]).max()),
+        )
+
+    def test_it_closes_on_the_unfitted_correlations_too(self, tmp_path, run_writer):
+        """The models are zero there and the data passes through, so it must."""
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, corr="yx")
+        fit = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+        data = _spread(fit, 4, 2)
+
+        values, _ = run_writer(_fake_ms(data), zarr_path, corr_idx=2)
+
+        closed = (
+            values["TAB_AST_DATA"] + values["TAB_RFI_DATA"] + values["TAB_RES_DATA"]
+        )
+
+        np.testing.assert_array_equal(
+            _others(closed, 2), _others(values["CORRECTED_DATA"], 2)
+        )
+        np.testing.assert_array_equal(_others(closed, 2), _others(data, 2))
+
+
+class TestBothGainLayersComeOff:
+    """``CORRECTED_DATA = V / (g_ext g_fit)``: the external table and the fit."""
+
+    def test_the_external_and_fitted_gains_are_both_divided_out(
+        self, tmp_path, run_writer
+    ):
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        ext_bl = _ext_bl(ext)
+        fit = _observed(
+            _to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)) * ext_bl
+        )
+
+        values, _ = run_writer(_fake_ms(fit), zarr_path, ext_gains=ext)
+
+        gains_tot = ext_bl * _to_ms(_baseline_gains(gains).mean(axis=0))
+
+        np.testing.assert_allclose(
+            values["CORRECTED_DATA"], fit / gains_tot, **_tolerances(fit)
+        )
+        # Removing only the fitted layer leaves the whole external gain behind.
+        assert not np.allclose(
+            values["CORRECTED_DATA"],
+            fit / _to_ms(_baseline_gains(gains).mean(axis=0)),
+            rtol=1e-3,
+        )
+
+    def test_the_models_stay_where_the_run_left_them(self, tmp_path, run_writer):
+        """The zarr's models are already in the fully calibrated frame."""
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        fit = _observed(
+            _to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)) * _ext_bl(ext)
+        )
+
+        values, _ = run_writer(_fake_ms(fit), zarr_path, ext_gains=ext)
+
+        kw = _tolerances(fit)
+        np.testing.assert_allclose(values["TAB_AST_DATA"], _to_ms(ast.mean(0)), **kw)
+        np.testing.assert_allclose(values["TAB_RFI_DATA"], _to_ms(rfi.mean(0)), **kw)
+
+    def test_the_residuals_are_against_the_calibrated_data(self, tmp_path, run_writer):
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        ext_bl = _ext_bl(ext)
+        fit = _observed(
+            _to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)) * ext_bl
+        )
+
+        values, _ = run_writer(_fake_ms(fit), zarr_path, ext_gains=ext)
+
+        vis_cal = fit / (ext_bl * _to_ms(_baseline_gains(gains).mean(axis=0)))
+        kw = _tolerances(fit)
+
+        np.testing.assert_allclose(
+            values["TAB_AST_RES"], vis_cal - _to_ms(ast.mean(0)), **kw
+        )
+        np.testing.assert_allclose(
+            values["TAB_RFI_RES"], vis_cal - _to_ms(rfi.mean(0)), **kw
+        )
+        # The superseded #134 residual: the data with a re-gained model taken off.
+        assert not np.allclose(
+            values["TAB_AST_RES"],
+            fit - _to_ms((_baseline_gains(gains) * ast).mean(axis=0)),
+            rtol=1e-3,
+        )
+
+    def test_the_table_is_placed_on_the_runs_own_grid(self, tmp_path, run_writer):
+        """Same times, channels and antenna count the reader used, or another frame.
+
+        The external gains are re-derived here from the table rather than read
+        off the results, so they are only the *same* gains if they are asked for
+        on the same grid.
+        """
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        fit = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        table = tmp_path / "second.B0"
+        table.mkdir()
+
+        _, captured = run_writer(
+            _fake_ms(fit), zarr_path, ext_gains=ext, gain_table=[str(table)]
+        )
+
+        assert captured["ext"]["gain_table"] == [str(table)]
+        # The MS TIME column, one value per timestep block, in seconds.
+        np.testing.assert_array_equal(
+            captured["ext"]["times"], np.arange(N_TIME, dtype=float)
+        )
+        np.testing.assert_array_equal(captured["ext"]["freqs"], FREQS)
+        assert captured["ext"]["n_ant"] == N_ANT
+
+    def test_an_unsolved_antenna_is_left_uncalibrated_not_blanked(
+        self, tmp_path, run_writer
+    ):
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+        dead = np.zeros(ext.shape, dtype=bool)
+        dead[1] = True
+
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        fit = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        values, _ = run_writer(
+            _fake_ms(fit), zarr_path, ext_gains=ext, ext_dead=dead
+        )
+
+        assert np.all(np.isfinite(values["CORRECTED_DATA"]))
+
+        # On a baseline touching antenna 1 only the fitted gain comes off.
+        touched = np.tile((A1_BL == 1) | (A2_BL == 1), N_TIME)
+        fitted_only = fit / _to_ms(_baseline_gains(gains).mean(axis=0))
+        np.testing.assert_allclose(
+            values["CORRECTED_DATA"][touched],
+            fitted_only[touched],
+            **_tolerances(fit),
+        )
+
+    def test_without_a_table_only_the_fitted_gains_come_off(
+        self, tmp_path, run_writer
+    ):
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        fit = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        values, captured = run_writer(_fake_ms(fit), zarr_path)
+
+        assert "ext" not in captured
+        np.testing.assert_allclose(
+            values["CORRECTED_DATA"],
+            fit / _to_ms(_baseline_gains(gains).mean(axis=0)),
+            **_tolerances(fit),
+        )
+
+
+class TestUnityGainsReproduceTheOldBehaviour:
+    """The regression guard: unity gains and no table must move nothing.
+
+    Under unity gains the calibrated frame and the data frame are the same
+    numbers, so the columns are compared against the *superseded* expressions --
+    bit for bit, since dividing by and multiplying with an exact ``1 + 0j`` is
+    exact. This is what keeps the pipeline references from moving.
+    """
+
+    @pytest.fixture
+    def written(self, tmp_path, run_writer):
+        _, ast, rfi = _model(1)
+        gains = _uniform_gains(1)
+        stored = _baseline_gains(gains) * (ast + rfi)
+
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored)
+        data = _observed(_to_ms(stored.mean(axis=0)))
+
+        values, _ = run_writer(_fake_ms(data), zarr_path)
+
+        # complex64, the precision the writer casts the models to: the point is
+        # that the *values* did not move, not that the dtype did.
+        return (
+            values,
+            data,
+            _to_ms(ast.mean(0)).astype(np.complex64),
+            _to_ms(rfi.mean(0)).astype(np.complex64),
+        )
+
+    def test_corrected_data_is_the_data(self, written):
+        values, data, _, _ = written
+
+        np.testing.assert_array_equal(values["CORRECTED_DATA"], data)
+
+    def test_the_residuals_are_the_data_frame_residuals(self, written):
+        values, data, ast, rfi = written
+
+        np.testing.assert_array_equal(values["TAB_AST_RES"], data - ast)
+        np.testing.assert_array_equal(values["TAB_RFI_RES"], data - rfi)
+        np.testing.assert_array_equal(values["TAB_RES_DATA"], data - (ast + rfi))
+
+    def test_the_model_columns_are_the_models(self, written):
+        values, _, ast, rfi = written
+
+        np.testing.assert_array_equal(values["TAB_AST_DATA"], ast)
+        np.testing.assert_array_equal(values["TAB_RFI_DATA"], rfi)
+
+    def test_the_weights_are_the_ms_inverse_variance(self, written):
+        """``|1|^2 / SIGMA^2``: the MS's own weights, unchanged by calibration."""
+        values, _, _, _ = written
+
+        expected = (1.0 / _sigma_grid(0) ** 2).astype(np.float32)
+
+        np.testing.assert_array_equal(
+            values["WEIGHT_SPECTRUM"], _to_ms(expected)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Weights
+# ---------------------------------------------------------------------------
+
+class TestWeights:
+    """``WEIGHT_SPECTRUM = |g_total|^2 / SIGMA^2``, and ``WEIGHT`` its band mean."""
+
+    def _reference(self, gains_tot_ms, sigma_grid):
+        """The weight, written out longhand in the order the writer forms it."""
+
+        sigma = _to_ms(sigma_grid.astype(np.float64))
+
+        return np.abs(gains_tot_ms).astype(np.float64) ** 2 / sigma**2
+
+    @pytest.fixture
+    def run(self, tmp_path, run_writer):
+        def _go(*, noise="sigma", external=False, n_corr=1, corr_idx=0):
+            gains, ast, rfi = _model(1)
+            ext = _ext_gains() if external else None
+
+            zarr_path = _write_zarr(tmp_path, gains, ast, rfi, corr="yx")
+            gained = (_baseline_gains(gains) * (ast + rfi)).mean(axis=0)
+            model_ms = _to_ms(gained)
+            if external:
+                model_ms = model_ms * _ext_bl(ext)
+            data = _spread(_observed(model_ms), n_corr, corr_idx)
+
+            values, captured = run_writer(
+                _fake_ms(data, noise=noise),
+                zarr_path,
+                corr_idx=corr_idx,
+                ext_gains=ext,
+            )
+
+            gains_tot = _fitted_gains_bl(gains)
+            if external:
+                gains_tot = _ext_bl(ext) * gains_tot
+
+            return values, captured, gains_tot
+
+        return _go
+
+    def test_weight_spectrum_is_the_calibrated_inverse_variance(self, run):
+        values, _, gains_tot = run()
+
+        expected = self._reference(gains_tot, _sigma_grid(0)).astype(np.float32)
+
+        np.testing.assert_array_equal(values["WEIGHT_SPECTRUM"], expected)
+        assert values["WEIGHT_SPECTRUM"].dtype == np.float32
+
+    def test_weight_is_the_frequency_mean_of_the_spectrum(self, run):
+        values, _, gains_tot = run()
+
+        expected = self._reference(gains_tot, _sigma_grid(0))
+
+        np.testing.assert_array_equal(
+            values["WEIGHT"], expected.mean(axis=1).astype(np.float32)
+        )
+        # And it really is the mean of what was written, to float32 round-off.
+        np.testing.assert_allclose(
+            values["WEIGHT"], values["WEIGHT_SPECTRUM"].mean(axis=1), rtol=1e-6
+        )
+
+    def test_the_external_gain_raises_the_weight(self, run):
+        """Both layers of the divisor, or the weight describes another frame."""
+        with_table, _, gains_tot = run(external=True)
+        without, _, fitted_only = run()
+
+        np.testing.assert_array_equal(
+            with_table["WEIGHT_SPECTRUM"],
+            self._reference(gains_tot, _sigma_grid(0)).astype(np.float32),
+        )
+        assert not np.allclose(
+            with_table["WEIGHT_SPECTRUM"], without["WEIGHT_SPECTRUM"], rtol=1e-3
+        )
+
+    def test_sigma_spectrum_is_preferred_over_sigma(self, run):
+        """A bandpass is not flat; the frequency-resolved column says so."""
+        both, _, gains_tot = run(noise="both")
+
+        np.testing.assert_array_equal(
+            both["WEIGHT_SPECTRUM"],
+            self._reference(gains_tot, _sigma_grid(0, per_chan=True)).astype(
+                np.float32
+            ),
+        )
+        # The channel factors differ, so the two columns cannot coincide.
+        flat, _, _ = run(noise="sigma")
+        assert not np.allclose(both["WEIGHT_SPECTRUM"], flat["WEIGHT_SPECTRUM"])
+
+    def test_the_noise_is_read_on_the_fitted_correlation(self, run):
+        """SIGMA[:, 0] would weight the fit by another polarisation's noise."""
+        values, _, gains_tot = run(n_corr=4, corr_idx=2)
+
+        expected = self._reference(gains_tot, _sigma_grid(2)).astype(np.float32)
+
+        np.testing.assert_array_equal(
+            _fit(values["WEIGHT_SPECTRUM"], 2), expected
+        )
+        assert not np.allclose(
+            _fit(values["WEIGHT_SPECTRUM"], 2),
+            self._reference(gains_tot, _sigma_grid(0)).astype(np.float32),
+        )
+
+    def test_unfitted_correlations_carry_no_weight(self, run):
+        """Zero, matching the zeroed model columns: nothing was fitted there."""
+        values, _, _ = run(n_corr=4, corr_idx=2)
+
+        keep = [c for c in range(4) if c != 2]
+
+        np.testing.assert_array_equal(_others(values["WEIGHT_SPECTRUM"], 2), 0.0)
+        np.testing.assert_array_equal(values["WEIGHT"][:, keep], 0.0)
+        assert not np.allclose(_fit(values["WEIGHT_SPECTRUM"], 2), 0.0)
+        assert not np.allclose(values["WEIGHT"][:, 2], 0.0)
+
+    def test_an_ms_with_no_noise_column_gets_no_weights(self, tmp_path, run_writer):
+        """Nothing is invented: the weights are simply not written."""
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        values, captured = run_writer(_fake_ms(data, noise=None), zarr_path)
+
+        assert captured["cols"] == COLS
+        assert "WEIGHT_SPECTRUM" not in values
+
+
 class TestReductionOrder:
-    """``E[g m]`` is formed per sample, not from the two sample means."""
+    """``E[g_p conj(g_q)]`` is formed per sample, not from the two mean gains."""
 
     def test_mean_then_multiply_would_disagree(self, tmp_path, run_writer):
         gains, ast, rfi = _model(2)
@@ -350,14 +1091,24 @@ class TestReductionOrder:
 
         values, _ = run_writer(_fake_ms(data), zarr_path)
 
-        naive_ast = _to_ms(gains_bl.mean(axis=0) * ast.mean(axis=0))
         naive_gain = _to_ms(
             gains.mean(axis=0)[A1_BL] * np.conj(gains.mean(axis=0)[A2_BL])
         )
 
-        assert not np.allclose(values["TAB_AST_RES"], data - naive_ast, rtol=1e-3)
+        np.testing.assert_allclose(
+            values["CORRECTED_DATA"],
+            data / _to_ms(gains_bl.mean(axis=0)),
+            **_tolerances(data),
+        )
         assert not np.allclose(
             values["CORRECTED_DATA"], data / naive_gain, rtol=1e-3
+        )
+        # One divisor for the whole frame, so the same reduction order reaches
+        # every residual column too.
+        assert not np.allclose(
+            values["TAB_AST_RES"],
+            data / naive_gain - _to_ms(ast.mean(axis=0)),
+            rtol=1e-3,
         )
 
 
@@ -380,32 +1131,48 @@ class TestBothAntennasAreUsed:
         assert not np.allclose(np.imag(values["CORRECTED_DATA"]), np.imag(data))
 
 
-class TestTheStoredModelIsPreferred:
-    """The zarr's vis_obs is the forward model, which need not be the sum."""
+class TestTheTotalModelIsTheSumOfTheWrittenModels:
+    """In one frame there is one total: ``TAB_AST_DATA + TAB_RFI_DATA``.
+
+    The zarr's ``vis_obs`` is the forward model in the *gained* frame, and a
+    component that gains only one of the two terms leaves it in no single frame
+    at all -- ``ast + rfi / g``, which neither model column is written in. So
+    the calibrated total is the sum of the two calibrated model columns, which
+    is also what makes the closure identity exact rather than approximate.
+    """
 
     def test_a_gains_component_that_gains_only_one_term(self, tmp_path, run_writer):
-        """Re-deriving the total from the two parts would be wrong here.
-
-        See the commented-out variant in components/gains.py, where the
-        astronomical term carries the gain and the RFI does not.
-        """
+        """See the commented-out variant in components/gains.py."""
         gains, ast, rfi = _model(1)
         gains_bl = _baseline_gains(gains)
 
         stored = gains_bl * ast + rfi
         zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored)
-        data = _observed(_to_ms(stored.mean(axis=0)))
+        # Data consistent with the calibrated-frame model -- the frame the two
+        # written model columns are in -- so the closure identity is exact and
+        # the stored one-term-gained total is visibly not what was subtracted.
+        data = _near(_to_ms((gains_bl * (ast + rfi)).mean(axis=0)))
 
         values, _ = run_writer(_fake_ms(data), zarr_path)
 
+        vis_cal = data / _to_ms(gains_bl.mean(axis=0))
+
         np.testing.assert_allclose(
             values["TAB_RES_DATA"],
-            data - _to_ms(stored.mean(axis=0)),
+            vis_cal - (_to_ms(ast.mean(axis=0)) + _to_ms(rfi.mean(axis=0))),
             **_tolerances(data),
         )
+        _at_most_one_ulp(
+            values["TAB_AST_DATA"] + values["TAB_RFI_DATA"] + values["TAB_RES_DATA"],
+            values["CORRECTED_DATA"],
+        )
 
-        summed = _to_ms((gains_bl * (ast + rfi)).mean(axis=0))
-        assert not np.allclose(values["TAB_RES_DATA"], data - summed, rtol=1e-3)
+        # The stored forward model brought into the calibrated frame is a
+        # different quantity here, and the decomposition would not close on it.
+        stored_cal = _to_ms((stored / gains_bl).mean(axis=0))
+        assert not np.allclose(
+            values["TAB_RES_DATA"], vis_cal - stored_cal, rtol=1e-3
+        )
 
 
 class TestTheMeanBaselineGainIsGuarded:
@@ -509,8 +1276,8 @@ class TestMultipleCorrelations:
             np.testing.assert_array_equal(_others(values[col], idx), 0.0)
             assert not np.allclose(_fit(values[col], idx), 0.0)
 
-    def test_data_frame_columns_pass_the_data_through(self, run):
-        """Ungained and unsubtracted, which is what those columns mean there."""
+    def test_the_data_columns_pass_the_data_through(self, run):
+        """Uncalibrated and unsubtracted, which is what those columns mean there."""
         xds_ms, zarr_path, ms_data, run_writer, corr, idx = run()
 
         values, _ = run_writer(xds_ms, zarr_path, corr=corr, corr_idx=idx)
@@ -662,27 +1429,21 @@ class TestBadGainsAreSubstituted:
             assert np.all(np.isfinite(values[col])), col
 
         kw = _tolerances(data)
-        gained_ast = _to_ms((gains_bl * ast).mean(axis=0))
-        gained_rfi = _to_ms((gains_bl * rfi).mean(axis=0))
+        model_ast = _to_ms(ast.mean(axis=0))
+        model_rfi = _to_ms(rfi.mean(axis=0))
+        # The substituted gain is the divisor, so the whole frame follows it.
+        vis_cal = data / _to_ms(gains_bl.mean(axis=0))
 
+        np.testing.assert_allclose(values["CORRECTED_DATA"], vis_cal, **kw)
+        np.testing.assert_allclose(values["TAB_AST_RES"], vis_cal - model_ast, **kw)
+        np.testing.assert_allclose(values["TAB_RFI_RES"], vis_cal - model_rfi, **kw)
         np.testing.assert_allclose(
-            values["CORRECTED_DATA"], data / _to_ms(gains_bl.mean(axis=0)), **kw
+            values["TAB_RES_DATA"], vis_cal - (model_ast + model_rfi), **kw
         )
-        np.testing.assert_allclose(values["TAB_AST_RES"], data - gained_ast, **kw)
-        np.testing.assert_allclose(values["TAB_RFI_RES"], data - gained_rfi, **kw)
 
-        # The stored total still carries the bad gain on the touched baselines,
-        # so the total residual is re-derived there and stored elsewhere.
-        touched = np.tile((A1_BL == 2) | (A2_BL == 2), N_TIME)
-        np.testing.assert_allclose(
-            values["TAB_RES_DATA"][touched],
-            (data - (gained_ast + gained_rfi))[touched],
-            **kw,
-        )
-        np.testing.assert_allclose(
-            values["TAB_RES_DATA"][~touched],
-            (data - _to_ms(stored.mean(axis=0)))[~touched],
-            **kw,
+        # The zero the run stored in vis_obs cannot reach any column.
+        assert not np.allclose(
+            values["TAB_RES_DATA"], vis_cal - _to_ms(stored.mean(axis=0)), rtol=1e-3
         )
 
     def test_the_other_antennas_gain_is_still_applied(self, tmp_path, run_writer):
@@ -717,10 +1478,13 @@ class TestBadGainsAreSubstituted:
             values["CORRECTED_DATA"][bl :: N_BL], data[bl :: N_BL], rtol=1e-3
         )
 
-    def test_the_stored_total_is_not_used_where_the_gain_was_bad(
-        self, tmp_path, run_writer
-    ):
-        """Without the fallback the zero in the stored model leaks into the residual."""
+    def test_the_stored_total_never_reaches_a_column(self, tmp_path, run_writer):
+        """The stored model carries the zero gain; the written columns must not.
+
+        The calibrated total is the sum of the two model columns, so a dead
+        antenna's zero in the run's own ``vis_obs`` has nothing to leak into --
+        the guard the superseded per-sample fallback used to provide.
+        """
         gains, ast, rfi = _model(1)
         gains = gains.copy()
         gains[:, 2] = 0.0
@@ -735,53 +1499,46 @@ class TestBadGainsAreSubstituted:
             values, _ = run_writer(_fake_ms(data), zarr_path)
 
         touched = np.tile((A1_BL == 2) | (A2_BL == 2), N_TIME)
-        naive = (data - _to_ms(stored.mean(axis=0)))[touched]
+        vis_cal = data / _to_ms(gains_bl.mean(axis=0))
 
-        # The stored model is zero on those baselines, so the naive residual is
-        # just the data -- an obviously wrong, and obviously different, answer.
-        assert not np.allclose(values["TAB_RES_DATA"][touched], naive, rtol=1e-3)
+        np.testing.assert_allclose(
+            values["TAB_RES_DATA"],
+            vis_cal - (_to_ms(ast.mean(axis=0)) + _to_ms(rfi.mean(axis=0))),
+            **_tolerances(data),
+        )
 
-    def test_one_bad_sample_does_not_discard_the_stored_model_on_the_other(
-        self, tmp_path, run_writer
-    ):
-        """The fallback is per sample, not per cell."""
-        gains, ast, rfi = _model(2)
+        # The stored model is zero on those baselines, so a residual formed
+        # against it would just be the calibrated data.
+        assert not np.allclose(
+            values["TAB_RES_DATA"][touched],
+            (vis_cal - _to_ms(stored.mean(axis=0)))[touched],
+            rtol=1e-3,
+        )
+        assert np.all(np.isfinite(values["TAB_RES_DATA"]))
+
+    def test_the_weights_follow_the_substituted_gain(self, tmp_path, run_writer):
+        """The weight describes the frame that was written, substitution and all."""
+        gains, ast, rfi = _model(1)
         gains = gains.copy()
-        gains[0, 2] = 0.0                    # antenna 2 dead on sample 0 only
+        gains[:, 2] = 0.0
 
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
         gains_bl = _baseline_gains(_substitute(gains))
-
-        # A one-term-gained forward model, so the stored total differs from the
-        # sum of the two gained parts and which one was used is visible.
-        stored = _baseline_gains(gains) * ast + rfi
-        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored)
         data = _observed(_to_ms((gains_bl * (ast + rfi)).mean(axis=0)))
 
         with pytest.warns(RuntimeWarning):
             values, _ = run_writer(_fake_ms(data), zarr_path)
 
-        touched = (A1_BL == 2) | (A2_BL == 2)
-        bad_bl_s = np.zeros(ast.shape, dtype=bool)
-        bad_bl_s[0, touched] = True
+        expected = (
+            np.abs(_to_ms(gains_bl.mean(axis=0).astype(np.complex64))).astype(
+                np.float64
+            )
+            ** 2
+            / _to_ms(_sigma_grid(0).astype(np.float64)) ** 2
+        ).astype(np.float32)
 
-        expected = np.where(bad_bl_s, gains_bl * (ast + rfi), stored).mean(axis=0)
-        np.testing.assert_allclose(
-            values["TAB_RES_DATA"],
-            data - _to_ms(expected),
-            **_tolerances(data),
-        )
-
-        # Reducing the mask over samples first rebuilds the total on *both*
-        # samples of the touched cells, throwing away the stored sample 1.
-        any_sample = np.where(
-            bad_bl_s.any(axis=0), gains_bl * (ast + rfi), stored
-        ).mean(axis=0)
-        rows = np.tile(touched, N_TIME)
-        assert not np.allclose(
-            values["TAB_RES_DATA"][rows],
-            (data - _to_ms(any_sample))[rows],
-            rtol=1e-3,
-        )
+        np.testing.assert_array_equal(values["WEIGHT_SPECTRUM"], expected)
+        assert np.all(np.isfinite(values["WEIGHT_SPECTRUM"]))
 
     def test_the_columns_are_written_before_the_warning(self, tmp_path, monkeypatch):
         """The counts come out of the write's own compute, so the warning follows it.
@@ -800,7 +1557,13 @@ class TestBadGainsAreSubstituted:
         xds_ms = _fake_ms(data)
 
         written = []
-        monkeypatch.setattr(write_mod, "xds_from_ms", lambda path: [xds_ms])
+        monkeypatch.setattr(
+            write_mod,
+            "xds_from_ms",
+            lambda path, column_keywords=False: (
+                ([xds_ms], {}) if column_keywords else [xds_ms]
+            ),
+        )
         monkeypatch.setattr(
             write_mod, "xds_to_table",
             lambda datasets, path, cols, column_keywords=None: written.append(cols) or [],

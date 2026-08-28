@@ -1,15 +1,22 @@
 from tabascal.distributed import is_process_0
+from tabascal.gain_table import gains_from_tables, normalise_gain_tables
 from tabascal.interferometry import baseline_gains
 from tabascal.ms import (
     fitted_correlation,
     grid_to_rows,
     into_corr,
     ms_layout,
+    partition_noise,
     partition_polarization,
+    partition_setup,
+    read_time_unit,
+    times_to_mjd,
 )
+from tabascal.noise import broadcast_to_vis
+from tabascal.time import DAY_SECS
 from tabascal.timing import measure_runtime
 
-from daskms import xds_from_ms, xds_to_table
+from daskms import xds_from_ms, xds_from_table, xds_to_table
 
 import warnings
 
@@ -31,25 +38,46 @@ def _to_ms_column(arr, dims, chunks, n_freq, n_corr=1):
     return xr.DataArray(grid_to_rows(arr, n_freq, n_corr), dims=dims).chunk(chunks)
 
 
-def data_frame_residuals(vis_obs, gained_ast, gained_rfi, gained_total):
-    """``TAB_*_RES`` residuals, in the frame of the observed data.
+def calibrated_residuals(vis_cal, vis_ast, vis_rfi):
+    """``TAB_*_RES`` residuals, in the calibrated frame every column shares.
 
-    Takes models already multiplied by the baseline gain, since that has to
-    happen per sample and only the caller still holds the sample axis.
+    ``vis_cal`` is the data with *all* the gains divided out -- the external
+    tables' and the fitted DIE gains -- which is the frame the zarr's
+    ``vis_ast``/``vis_rfi`` were fitted in, so the models are subtracted as they
+    come and are never re-gained.
 
-    ``gained_total`` is passed rather than summed from the two parts: the results
-    zarr stores the forward model the gains component actually produced, and a
-    component is free to gain only one of the two terms.
+    The total is formed from ``vis_ast + vis_rfi``, the same sum written into
+    the two model columns, which is what makes
 
-    Data frame rather than calibrated: dividing by the gain inflates the noise on
-    low-gain baselines and distorts noise-referenced metrics. Moving every column
-    to one calibrated frame is #123.
+        ``TAB_AST_DATA + TAB_RFI_DATA + TAB_RES_DATA == CORRECTED_DATA``
+
+    an exact floating-point identity rather than an approximate one (#123) --
+    exact wherever ``vis_cal - model`` is exactly representable, which complex
+    arithmetic decides **per component**: Sterbenz's condition has to hold for
+    the real parts and for the imaginary parts separately, each pair within a
+    factor of two of the other. A residual that is small next to ``|vis_cal|`` is
+    not sufficient on its own, because a cell whose real part nearly cancels can
+    have a residual far larger than that component. Where the condition fails --
+    such a cell, or a fit so bad that a cell is all residual -- the identity
+    holds to within one float32 ulp of the visibility's magnitude instead, still
+    seven orders of magnitude tighter than a column in the wrong frame, which is
+    out by a gain.
+
+    The run's own ``vis_obs`` forward model is deliberately not used: it lives in
+    the gained frame, and a gains component that gains only one of the two terms
+    leaves it in no single frame at all -- ``ast + rfi / g`` is not a frame
+    either model column is written in.
+
+    Calibrated rather than the data frame #134 wrote: dividing by the gain
+    inflates the noise on low-gain baselines, and the answer to that is the
+    ``WEIGHT_SPECTRUM`` written beside these columns -- see
+    :func:`calibrated_weights` -- not a second frame no weight can describe.
     """
 
     return {
-        "ast": vis_obs - gained_ast,
-        "rfi": vis_obs - gained_rfi,
-        "total": vis_obs - gained_total,
+        "ast": vis_cal - vis_ast,
+        "rfi": vis_cal - vis_rfi,
+        "total": vis_cal - (vis_ast + vis_rfi),
     }
 
 
@@ -143,27 +171,6 @@ def warn_bad_gains(n_bad: int, size: int, bad_ants) -> int:
     )
 
 
-def total_model(stored, gained_ast, gained_rfi, bad_bl):
-    """The gained total model, preferring the forward model the run stored.
-
-    The zarr's ``vis_obs`` is what the gains component actually produced, so it
-    is right even where a component gains only one of the two terms -- see the
-    commented-out variant in ``components/gains.py``.
-
-    It was formed with the *original* gains, though, so on any baseline whose
-    antenna gain was pushed to unity it still carries the zero or non-finite
-    value. There the model is re-derived from the two substituted parts, which
-    is the same quantity everywhere the substitution did not bite.
-
-    Every argument keeps its sample axis, so the choice is made per sample and
-    the caller averages afterwards. Reducing ``bad_bl`` over samples first would
-    throw away the stored model on *every* sample of a cell because one sample
-    happened to have a bad gain.
-    """
-
-    return np.where(bad_bl, gained_ast + gained_rfi, stored)
-
-
 def warn_bad_baseline_gains(n_bad: int, size: int) -> int:
     """Warn when a *mean* baseline gain was substituted. Returns the count.
 
@@ -183,13 +190,146 @@ def warn_bad_baseline_gains(n_bad: int, size: int) -> int:
     )
 
 
-def gained_model_mean(gains_bl, model, sample_axis: int = 0):
-    """Sample-mean of ``gains_bl * model``, formed per sample.
+def external_baseline_gains(gain_table, times_sec, freqs, a1, a2, n_ant=None,
+                            verbose: bool = True):
+    """Per-baseline gains of the external calibration tables, on this grid.
 
-    Separate from the residual so the reduction order is pinnable.
+    ``data.gain_table`` was divided out of the visibilities **in memory** when
+    the MS was read (:meth:`TabConfig.apply_gain_table`); the MS's own data
+    column is still raw. So the same gains have to be re-derived here, or the
+    models -- which were fitted to the externally calibrated data -- would be
+    subtracted in a frame the data is not in.
+
+    Re-derived rather than read back off the results: the run does not record
+    them. That makes the *grid* load-bearing. ``times_sec`` must be the MS's own
+    ``TIME`` column in seconds on the scale it declares (never the UTC-normalised
+    ``times_jd``, which is 37 s away on a TAI-declared MS) and ``freqs`` the
+    partition's ``CHAN_FREQ``, exactly as the reader passed them -- otherwise
+    each table is placed on a different grid and the columns quietly leave the
+    frame the models are in. The placement itself, and the ordered composition
+    of several tables, is :mod:`tabascal.gain_table`'s subject.
+
+    Returns ``(n_bl, n_freq, n_time)``. A baseline no table could supply a gain
+    for takes 1, the same convention as :func:`unit_bad_gains`: those
+    visibilities are written *uncalibrated* rather than divided by a number
+    nobody solved. The run flagged them out of the fit at read time.
     """
 
-    return (gains_bl * model).mean(axis=sample_axis)
+    gains, dead = gains_from_tables(
+        gain_table, times_sec, freqs, n_ant=n_ant, verbose=verbose
+    )
+
+    a1, a2 = np.asarray(a1), np.asarray(a2)
+
+    return np.where(dead[a1] | dead[a2], 1.0, baseline_gains(gains, a1, a2))
+
+
+def calibrated_weights(gains_tot, sigma):
+    """``|g_total|^2 / sigma^2`` -- the weight the calibrated columns need.
+
+    ``sigma`` is the noise on the **raw** data, as the MS's ``SIGMA_SPECTRUM``
+    or ``SIGMA`` records it. Dividing a visibility by ``g_total`` divides its
+    noise by ``|g_total|`` too, so ``sigma_cal = sigma / |g_total|`` and the
+    weight rises with the square. That is the answer to the objection that
+    calibrating makes the noise heteroscedastic: it does, and this is the
+    number that says by how much.
+
+    Per channel, because a frequency-dependent gain gives a frequency-dependent
+    weight, which a single per-row ``WEIGHT`` cannot carry -- and which CASA's
+    ``applycal(calwt=True)`` does not produce either (see
+    :func:`tabascal.ms.write_caltable`).
+
+    Formed in float64 from the float32 magnitude, so the single cast the writer
+    makes on the way into the column is the only rounding in it.
+    """
+
+    return abs(gains_tot).astype(np.float64) ** 2 / sigma**2
+
+
+def _external_gains_column(
+    ms_path, xds_ms, layout, column_keywords, gain_table, dims, chunks, n_freq
+):
+    """The external tables' baseline gains, as an MS ``(row, chan, 1)`` column.
+
+    ``None`` when no table was used, so the caller divides by the fitted gains
+    alone rather than by a unit array the size of the data.
+    """
+
+    paths = normalise_gain_tables(gain_table)
+
+    if not paths:
+        return None
+
+    # The partition's own spectral window, resolved the way read_ms resolves it:
+    # row 0 of SPECTRAL_WINDOW is a convention, not a guarantee.
+    spw_id, _ = partition_setup(ms_path, xds_ms)
+    spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW", group_cols="__row__")[spw_id]
+    freqs = np.asarray(spec.CHAN_FREQ.data[0].compute(), dtype=np.float64)
+
+    if len(freqs) != n_freq:
+        raise ValueError(
+            f"The MS's spectral window holds {len(freqs)} channels but the "
+            f"results hold {n_freq}. The gain tables would be placed on a band "
+            "the results were not fitted on."
+        )
+
+    # From the ANTENNA subtable rather than from the antenna pairs in use: a
+    # table solved on a master MS covers this observation in its leading rows,
+    # and it is that count the reader trimmed each table to.
+    n_ant = int(xds_from_table(ms_path + "::ANTENNA")[0].sizes["row"])
+
+    # One TIME per timestep block, in seconds on the scale the column declares:
+    # a caltable's TIME is a copy of this column, so the match is made against
+    # the MS's own values and never against the UTC-normalised times_jd, which
+    # on a TAI-declared MS is 37 s away. float64 throughout -- an MJD second
+    # does not survive float32.
+    times = np.asarray(
+        xds_ms.TIME.data.reshape(layout.n_time, layout.n_bl)[:, 0].compute(),
+        dtype=np.float64,
+    )
+    times_sec = times_to_mjd(times, read_time_unit(column_keywords)) * DAY_SECS
+
+    g_bl = external_baseline_gains(
+        paths, times_sec, freqs, layout.a1, layout.a2, n_ant=n_ant
+    )
+
+    return _to_ms_column(g_bl.astype(np.complex64), dims, chunks, n_freq)
+
+
+def _weight_column(xds_ms, gains_tot, layout, n_freq, corr_idx, dims, chunks):
+    """``WEIGHT_SPECTRUM`` for the calibrated frame, or ``None``.
+
+    The noise comes from the MS the same way the reader takes it --
+    ``SIGMA_SPECTRUM`` first, ``SIGMA`` behind it, on the *fitted* correlation
+    rather than correlation 0, with the same median collapse and median fill for
+    the cells that measured nothing (see :mod:`tabascal.noise`). It describes the
+    raw data, which is what makes it the right numerator's denominator here.
+
+    ``None`` when the MS carries no usable noise at all: nothing is invented, and
+    the weight columns are left alone rather than filled with a made-up scale.
+    """
+
+    sigma = partition_noise(xds_ms, layout.n_time, layout.n_bl, n_freq, corr_idx)
+
+    if sigma is None:
+        print(
+            "Warning: the MS partition carries no usable SIGMA_SPECTRUM or "
+            "SIGMA column, so WEIGHT_SPECTRUM and WEIGHT are left untouched. "
+            "The columns written are calibrated and their noise is no longer "
+            "the MS's; re-weight them by |g_total|^2 before imaging."
+        )
+
+        return None
+
+    shape = (layout.n_bl, n_freq, layout.n_time)
+    # Resolved onto the visibilities before the transpose: partition_noise
+    # returns a noise per baseline, per (baseline, channel), or either of those
+    # per timestep as well, and only a full grid can be laid out in row order.
+    sigma = np.ascontiguousarray(
+        np.broadcast_to(broadcast_to_vis(sigma, shape), shape)
+    )
+
+    return calibrated_weights(gains_tot, _to_ms_column(sigma, dims, chunks, n_freq))
 
 
 @measure_runtime
@@ -198,14 +338,37 @@ def write_results_ms(
     results_zarr_path: str,
     data_col: str = "DATA",
     corr: str | None = None,
+    gain_table=None,
 ):
     """Copy a results zarr into the Measurement Set it was fitted from.
+
+    Every column written here -- ``CORRECTED_DATA``, ``TAB_AST_DATA``,
+    ``TAB_RFI_DATA``, ``TAB_AST_RES``, ``TAB_RFI_RES`` and ``TAB_RES_DATA`` --
+    lives in ONE frame: the data with **all** the gains divided out. There are
+    two layers and both come off:
+
+    * ``gain_table`` -- the external calibration ``data.gain_table`` divided out
+      when the MS was read. The MS's own ``data_col`` is still raw, so it has to
+      be removed here too or the models, which were fitted to calibrated data,
+      would be subtracted in the wrong frame.
+    * the DIE gains the model fitted, stored in the results zarr.
+
+    That is what makes ``TAB_AST_DATA + TAB_RFI_DATA + TAB_RES_DATA ==
+    CORRECTED_DATA`` hold exactly, and what lets one weight describe them all
+    (#123). It reverses the data-frame residuals of #134: dividing by the gain
+    does make the noise heteroscedastic, and the answer is the weight that says
+    so -- ``WEIGHT_SPECTRUM = |g_total|^2 / SIGMA^2`` per channel, with
+    ``WEIGHT`` its frequency mean -- rather than a second frame beside the first.
 
     ``corr`` names the correlation the results belong to. It is an override, not
     the normal route: ``write_results_xds`` records the fitted correlation on the
     zarr, and results carrying it need nothing here. Pass it only for a zarr
     written before that attribute existed, where a multi-correlation MS has no
     other way to know.
+
+    ``gain_table`` is the ordered list ``data.gain_table`` named, or a single
+    path. It is required whenever the run used one: without it every column is
+    written a whole calibration layer away from the frame it should be in.
     """
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
@@ -213,7 +376,10 @@ def write_results_ms(
     if not is_process_0():
         return
 
-    xds_ms = xds_from_ms(ms_path)[0]
+    # column_keywords for the TIME unit the gain tables are matched on, read the
+    # same way read_ms reads it so the two cannot disagree about the grid.
+    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True)
+    xds_ms = xds_list[0]
     xds_tab = xr.open_zarr(results_zarr_path)
 
     dims = ["row", "chan", "corr"]
@@ -269,12 +435,6 @@ def write_results_ms(
 
     gains_bl_s = baseline_gains(gains, a1, a2, ant_axis=1)
 
-    gained_ast = _to_ms_column(
-        gained_model_mean(gains_bl_s, ast_vis), dims, fit_chunks, n_freq
-    )
-    gained_rfi = _to_ms_column(
-        gained_model_mean(gains_bl_s, rfi_vis), dims, fit_chunks, n_freq
-    )
     # Guarded again after the reduction: per-sample gains that are all finite
     # and non-zero can still average to zero, and it is the mean that the data
     # is divided by.
@@ -283,23 +443,20 @@ def write_results_ms(
 
     gains_bl = _to_ms_column(gains_bl_mean, dims, fit_chunks, n_freq)
 
-    # The zarr's vis_obs is the gained total the forward model produced, so the
-    # total residual need not re-derive it from the two parts -- except on the
-    # samples whose gains were substituted, where the stored value predates it.
-    # Chosen per sample, then averaged; dask shares the two products below with
-    # the ones formed for the per-component columns above.
-    if "vis_obs" in xds_tab:
-        total_s = total_model(
-            xds_tab.vis_obs.data.astype(np.complex64),
-            gains_bl_s * ast_vis,
-            gains_bl_s * rfi_vis,
-            bad[:, a1] | bad[:, a2],
-        )
-    else:
-        # Defensive: every current producer stores it beside the split.
-        total_s = gains_bl_s * (ast_vis + rfi_vis)
+    # The external calibration data.gain_table divided out at read time; the MS's
+    # data_col is still raw, so it is re-derived on this observation's own grid
+    # and removed together with the fitted gains.
+    gains_ext = _external_gains_column(
+        ms_path, xds_ms, layout, column_keywords, gain_table, dims, fit_chunks,
+        n_freq,
+    )
 
-    gained_total = _to_ms_column(total_s.mean(axis=0), dims, fit_chunks, n_freq)
+    # The one divisor the whole frame is defined by. Not separately guarded
+    # against a product that underflows to zero in complex64: both factors are
+    # finite and non-zero by construction, and a composed gain that cannot be
+    # held in the MS's own precision is a failed calibration rather than a dead
+    # antenna -- the same line the overflow case is on.
+    gains_tot = gains_bl if gains_ext is None else gains_ext * gains_bl
 
     vis_obs = xds_ms[data_col]
 
@@ -309,21 +466,25 @@ def write_results_ms(
         vis_obs.data[:, :, corr_idx : corr_idx + 1], dims=dims
     ).chunk(fit_chunks)
 
-    vis_cal = vis_obs_fit / gains_bl
+    vis_cal = vis_obs_fit / gains_tot
 
-    residuals = data_frame_residuals(
-        vis_obs_fit, gained_ast, gained_rfi, gained_total
+    residuals = calibrated_residuals(vis_cal, vis_ast, vis_rfi)
+
+    weight = _weight_column(
+        xds_ms, gains_tot, layout, n_freq, corr_idx, dims, fit_chunks
     )
 
-    def column(col, fill):
+    def column(col, fill, col_dims=None):
         """One result placed on the MS's correlation axis, ready to assign."""
 
-        return xr.DataArray(
-            into_corr(col.data, corr_idx, n_corr, fill), dims=dims
-        ).chunk(chunks)
+        col_dims = dims if col_dims is None else col_dims
 
-    # Model columns are zero on the correlations that were not fitted; the
-    # data-frame columns pass the data through there, ungained and unsubtracted.
+        return xr.DataArray(
+            into_corr(col.data, corr_idx, n_corr, fill), dims=col_dims
+        ).chunk({k: v for k, v in chunks.items() if k in col_dims})
+
+    # Model columns are zero on the correlations that were not fitted; the data
+    # columns pass the data through there, uncalibrated and unsubtracted.
     passthrough = vis_obs.data
 
     xds_ms = xds_ms.assign(CORRECTED_DATA=column(vis_cal, passthrough))
@@ -341,7 +502,25 @@ def write_results_ms(
         "TAB_RFI_RES",
         "TAB_RES_DATA",
     ]
+    # Jy on the visibility columns. The weight columns are standard ones and are
+    # left with whatever units the MS gives them.
     col_keywords = {col: {"UNIT": "Jy"} for col in cols}
+
+    if weight is not None:
+        # Zero on the correlations that were not fitted, matching the zeroed
+        # model columns: nothing there was calibrated, so nothing there has this
+        # frame's weight. Cast once, on the way into the column.
+        xds_ms = xds_ms.assign(
+            WEIGHT_SPECTRUM=column(weight.astype(np.float32), np.float32(0))
+        )
+        xds_ms = xds_ms.assign(
+            WEIGHT=column(
+                weight.mean(dim="chan").astype(np.float32),
+                np.float32(0),
+                col_dims=["row", "corr"],
+            )
+        )
+        cols += ["WEIGHT_SPECTRUM", "WEIGHT"]
 
     print(f"Writing tabascal results to {cols} columns in MS file.")
 
@@ -400,6 +579,14 @@ def write_results_xds(
             # ),
         },
         coords={
+            # SEAM: `time` is seconds from the start of the observation, so the
+            # results carry no absolute epoch, no phase centre and no identity
+            # for the MS they came from. write_results_ms therefore has to
+            # re-derive both from the MS it is pointed at -- including the grid
+            # the external gain tables are placed on (_external_gains_column),
+            # which is only the run's own grid because the reader and the writer
+            # read the same column the same way. times_jd / times_mjd, the field
+            # direction and the source MS path belong here, beside `time`.
             "time": da.asarray(tab_config.times),  # type: ignore
             "freq": da.asarray(tab_config.freqs),  # type: ignore
             # "rfi_time": da.asarray(args["rfi_times"]),

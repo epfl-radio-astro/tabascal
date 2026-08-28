@@ -57,20 +57,60 @@ The dataset contains the predictions for the astronomical visibilities, `ast_vis
 
 ## MS file columns
 
-The results from tabascal shown above are also copied into the MS file used. Six columns are written: the standard `CORRECTED_DATA`, and five custom non-standard `TAB_*` columns. `DATA` and `MODEL_DATA` are left untouched.
+The results from tabascal shown above are also copied into the MS file used. Six visibility columns are written: the standard `CORRECTED_DATA`, and five custom non-standard `TAB_*` columns, plus the two weight columns described below. `DATA` and `MODEL_DATA` are left untouched.
 
-Below, `g_p` and `g_q` are the gain predictions for the two antennas of a baseline, so `g_p g_q*` is the per-baseline gain, and `DATA` stands for whichever column the run was given (usually `DATA`).
+**Every column is written in one frame: the data with all the gains divided out.** There are two gain layers and both come off:
+
+* the **external** calibration named by [`data.gain_table`](config.md), which is divided out of the visibilities when the MS is read. The MS's own data column is still raw, so the writer has to remove it again — pass the same tables to `tab2MS -gt` (see below), or the columns land a whole calibration layer away from the frame the models are in;
+* the **DIE gains the model fitted**, stored in the results `.zarr`.
+
+Below, `g_p` and `g_q` are the fitted gain predictions for the two antennas of a baseline, `g_ext` the per-baseline product of the external tables' gains, and
+
+```text
+g_total = g_ext × g_p g_q*
+```
+
+`DATA` stands for whichever column the run was given (usually `DATA`).
 
 | Column | Contents | Frame |
 | --- | --- | --- |
-| `CORRECTED_DATA` | `DATA / (g_p g_q*)` — the calibrated data | Calibrated |
-| `TAB_AST_DATA` | The astronomical visibility prediction | Calibrated (no gains applied) |
-| `TAB_RFI_DATA` | The RFI visibility prediction | Calibrated (no gains applied) |
-| `TAB_AST_RES` | `DATA - g_p g_q* × ast` — should contain only the RFI signal and noise | Data |
-| `TAB_RFI_RES` | `DATA - g_p g_q* × rfi` — should contain only the astronomical signal and noise | Data |
-| `TAB_RES_DATA` | `DATA - vis_obs` — should contain only noise | Data |
+| `CORRECTED_DATA` | `DATA / g_total` — the calibrated data | Calibrated |
+| `TAB_AST_DATA` | The astronomical visibility prediction | Calibrated |
+| `TAB_RFI_DATA` | The RFI visibility prediction | Calibrated |
+| `TAB_AST_RES` | `CORRECTED_DATA - ast` — should contain only the RFI signal and noise | Calibrated |
+| `TAB_RFI_RES` | `CORRECTED_DATA - rfi` — should contain only the astronomical signal and noise | Calibrated |
+| `TAB_RES_DATA` | `CORRECTED_DATA - (ast + rfi)` — should contain only noise | Calibrated |
 
-`TAB_RES_DATA` subtracts the `vis_obs` prediction stored in the results `.zarr`, which is the full forward model the gains component produced, rather than re-deriving it as `g_p g_q* × (ast + rfi)`.
+One frame means the decomposition closes:
+
+```text
+TAB_AST_DATA + TAB_RFI_DATA + TAB_RES_DATA == CORRECTED_DATA
+```
+
+The identity is **exact** — the same floating-point numbers, not merely to a tolerance — wherever Sterbenz's condition holds **per component**: for the real parts and for the imaginary parts *separately*, the model's component and the calibrated data's component must lie within a factor of two of one another, which makes `data − model` exactly representable and the sum reconstruct `data` bit for bit.
+
+That is a condition on the components, not on the magnitudes. A residual that is small next to `|data|` is not enough on its own: a cell whose real part very nearly cancels while its imaginary part is large can have a residual that dwarfs its own real part, and there the identity holds only to within **one `float32` ulp of the visibility's magnitude**. The same bound applies on a fit so bad that a cell is all residual.
+
+Either way it is worth checking after any change to the writer: a column written in the wrong frame is wrong by a *gain*, which is seven orders of magnitude above an ulp, so this closes loudly.
+
+The total model subtracted by `TAB_RES_DATA` is the sum of the two model columns, not the `vis_obs` forward model stored in the results `.zarr`. That stored model is in the *gained* frame, and a gains component that gains only one of its two terms leaves it in no single frame at all — `ast + rfi / g` is not a frame either model column is written in.
+
+### Weights
+
+Dividing by the gain makes the noise heteroscedastic: a low-gain baseline is noisier once calibrated. That is why the calibrated frame is usable — the writer also writes the weights that belong to it:
+
+| Column | Contents |
+| --- | --- |
+| `WEIGHT_SPECTRUM` | `\|g_total\|² / SIGMA²`, per (row, channel) |
+| `WEIGHT` | the frequency mean of `WEIGHT_SPECTRUM` |
+
+`SIGMA` here is the noise of the **raw** data as the MS records it, read exactly as the run reads it: `SIGMA_SPECTRUM` where the MS carries a usable one, `SIGMA` behind it, on the correlation that was fitted rather than correlation 0, with the same per-cell median collapse over time and median fill for cells that measured nothing (see the `tabascal.noise` module). Calibrating divides the noise by `|g_total|`, so `sigma_cal = SIGMA / |g_total|` and the weight rises with the square.
+
+`WEIGHT_SPECTRUM` rather than `WEIGHT` alone because a frequency-dependent gain gives a frequency-dependent weight, which a single per-row number cannot carry — and which CASA's `applycal(calwt=True)` does not produce either: it was measured to apply one per-row factor, constant across channels, even when `WEIGHT_SPECTRUM` exists.
+
+Both columns are **overwritten**, and whatever they held before is gone — if the MS carried weights from some other source (a re-weighting task, a hand-tuned scheme), copy them elsewhere first. Dividing the new `WEIGHT_SPECTRUM` by `|g_total|²` recovers `1 / SIGMA²`, the uncalibrated inverse-variance weighting implied by the MS's own noise column, and nothing else. Where a gain was substituted with 1 (see below) the weight is simply `1 / SIGMA²`, which is correct: those visibilities were written uncalibrated.
+
+If the MS carries no usable noise column at all, nothing is invented: a warning is printed and the two weight columns are left exactly as they were, while the visibility columns are still written.
 
 ### Correlations
 
@@ -79,7 +119,8 @@ TABASCAL fits a single correlation, named by `data.corr` in the configuration (d
 On the other correlations of a multi-correlation MS:
 
 * `TAB_AST_DATA` and `TAB_RFI_DATA` — the model columns — are **0**;
-* `CORRECTED_DATA`, `TAB_AST_RES`, `TAB_RFI_RES` and `TAB_RES_DATA` — the data-frame columns — carry the **data column passed through unchanged**: no gain applied and nothing subtracted, which is the honest value for a correlation that was never modelled.
+* `WEIGHT_SPECTRUM` and `WEIGHT` are **0** too, matching them: nothing there was calibrated, so nothing there has this frame's weight;
+* `CORRECTED_DATA`, `TAB_AST_RES`, `TAB_RFI_RES` and `TAB_RES_DATA` carry the **data column passed through unchanged**: no gain applied and nothing subtracted, which is the honest value for a correlation that was never modelled. The closure identity still holds there, trivially.
 
 A results `.zarr` written before the correlation was recorded does not say where it belongs. On a single-correlation MS there is only one answer; on a wider one, writing raises a `ValueError` rather than guessing. Pass the correlation explicitly in that case:
 
@@ -87,17 +128,26 @@ A results `.zarr` written before the correlation was recorded does not say where
 tab2MS -m path/to/file.ms -z path/to/results.zarr -c xx
 ```
 
-### Why the residuals are in the data frame
+### Writing results for a run that used a gain table
 
-The three residual columns are formed in the frame of the observed data, `DATA - gains × model`, rather than in the calibrated frame, `DATA / gains - model`. Dividing by the gain inflates the noise on low-gain baselines, which distorts any noise-referenced metric computed from the residual. Moving every column into a single calibrated frame, together with the `WEIGHT_SPECTRUM` that belongs to it, is tracked in [issue #123](https://github.com/epfl-radio-astro/tabascal/issues/123).
+The external calibration is applied when the MS is read, so the MS's data column on disk is still raw and the writer has to remove that layer itself. `tabascal` does this automatically — the run hands its own `data.gain_table` list to the writer. Running `tab2MS` by hand, name the same tables, in the same order:
+
+```bash
+tab2MS -m path/to/file.ms -z path/to/results.zarr -gt path/to/flux.B0 -gt path/to/phase.G0
+tab2MS -m path/to/file.ms -z path/to/results.zarr -gt path/to/flux.B0,path/to/phase.G0
+```
+
+Repeat `-gt` or give a comma-separated list; the two forms are equivalent and both mirror `data.gain_table`'s ordered list, since the tables compose in order. The gains are placed on this observation's grid exactly as the reader placed them — the MS's own `TIME` column in the unit and on the scale it declares, and the channel frequencies of the partition's spectral window — so the columns land in the frame the models were fitted in. Omitting the flag for a run that used a table writes every column, and the weights, one calibration layer out.
+
+A visibility no table could supply a gain for is written *uncalibrated on that layer* rather than blanked, the same convention as a dead fitted gain.
 
 ### Multiple samples
 
-The predictions above are averaged over the `sample` axis of the results `.zarr`. Products are formed per sample and averaged afterwards: the written gain is the mean of `g_p g_q*`, not the product of the two mean gains, and `TAB_AST_RES` subtracts the mean of `g_p g_q* × ast`. For a MAP run there is only one sample and the distinction does not arise, but for a posterior with several samples the two orders give different answers whenever the quantities covary.
+The predictions above are averaged over the `sample` axis of the results `.zarr`. The baseline gain is formed per sample and averaged afterwards, so the divisor is the mean of `g_p g_q*` and not the product of the two mean gains; the model columns are the sample means of `ast` and `rfi`. For a MAP run there is only one sample and the distinction does not arise, but for a posterior with several samples the two orders give different answers whenever the two antennas' gains covary. Because every column shares one divisor, that choice reaches all of them.
 
 ### Zero and non-finite gains
 
-An unflagged dead antenna can be driven to a zero or non-finite gain by the fit. Any such antenna gain is replaced by 1 before anything is derived from it, and a `RuntimeWarning` is raised naming the affected antennas and the number of gain values substituted. Baselines touching such an antenna are then written *uncalibrated on that antenna* — the other antenna's gain is still applied — rather than being blanked. The same substitution is applied once more to the *mean* baseline gain that `CORRECTED_DATA` is divided by, since per-sample gains that are all finite and non-zero can still average to zero; that case raises its own `RuntimeWarning`. Both warnings are emitted *after* the columns have been written: their counts come out of the same single pass that writes the data, so nothing is evaluated twice and nothing full-size is held in memory — which also means that a process promoting `RuntimeWarning` to an error will find the MS already written when it raises. The gain handling never introduces a `NaN` or `inf` from a zero or non-finite gain: no column is divided by, or multiplied with, one. It does not guard against a gain that is finite but so large that the `complex64` baseline product `g_p g_q*` overflows — a gain of that size is a failed fit, not a dead antenna, and it is written as it comes. Values that were already non-finite are written as they are — whatever the data column holds, including on correlations that were not fitted, which pass through unchanged, and any model value that the fit itself left non-finite in `ast_vis` or `rfi_vis`. The `vis_obs` stored in the results `.zarr` predates the substitution, so in every (sample, baseline, channel, time) cell where a gain was substituted, `TAB_RES_DATA` falls back to re-deriving that sample's total as `g_p g_q* × ast + g_p g_q* × rfi` from the substituted gains. The choice is made per posterior sample, before averaging, so one bad sample does not discard the stored model on the others.
+An unflagged dead antenna can be driven to a zero or non-finite gain by the fit. Any such antenna gain is replaced by 1 before anything is derived from it, and a `RuntimeWarning` is raised naming the affected antennas and the number of gain values substituted. Baselines touching such an antenna are then written *uncalibrated on that antenna* — the other antenna's gain is still applied — rather than being blanked. The same substitution is applied once more to the *mean* baseline gain that `CORRECTED_DATA` is divided by, since per-sample gains that are all finite and non-zero can still average to zero; that case raises its own `RuntimeWarning`. Both warnings are emitted *after* the columns have been written: their counts come out of the same single pass that writes the data, so nothing is evaluated twice and nothing full-size is held in memory — which also means that a process promoting `RuntimeWarning` to an error will find the MS already written when it raises. The gain handling never introduces a `NaN` or `inf` from a zero or non-finite gain: no column is divided by, or multiplied with, one. It does not guard against a gain that is finite but so large that the `complex64` baseline product `g_p g_q*` overflows, nor against a `g_total` whose two finite, non-zero layers underflow to zero when they are multiplied together — a calibration of that size is a failed fit, not a dead antenna, and it is written as it comes. Values that were already non-finite are written as they are — whatever the data column holds, including on correlations that were not fitted, which pass through unchanged, and any model value that the fit itself left non-finite in `ast_vis` or `rfi_vis`. The `vis_obs` stored in the results `.zarr` is not read at all, so a zero gain that it was formed with has nothing to leak into.
 
 ### When the results do not match the MS
 

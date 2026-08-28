@@ -375,9 +375,13 @@ def tabascal_subtraction(
         else:
             from tabascal.write import write_results_ms
             print(f"Copying tabascal initial values to MS file from {paths.init_pred_path}")
-            # The correlation comes off the zarr the line above just wrote.
+            # The correlation comes off the zarr the line above just wrote; the
+            # gain tables do not, and the MS's data column is still raw.
             write_results_ms(
-                ms_path, paths.init_pred_path, tab_config.args["data"]["data_col"]
+                ms_path,
+                paths.init_pred_path,
+                tab_config.args["data"]["data_col"],
+                gain_table=getattr(tab_config, "gain_table", None),
             )
 
     if log:
