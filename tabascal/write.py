@@ -380,6 +380,7 @@ def write_results_ms(
     data_col: str = "DATA",
     corr: str | None = None,
     gain_table=None,
+    caltable_path: str | None = None,
 ):
     """Copy a results zarr into the Measurement Set it was fitted from.
 
@@ -414,7 +415,11 @@ def write_results_ms(
     Once the columns are written, the calibration they were divided by is
     exported beside the results as a CASA table -- see
     :func:`write_gain_caltable`, which is where the two outputs deliberately
-    part company over a dead gain.
+    part company over a dead gain. ``caltable_path`` puts that table somewhere
+    other than the default ``<results>.B``, and is then the *only* path the
+    export knows: what is written, what is refused, and what a superseded table
+    is removed from all follow it, so a failed rerun cannot tidy up the default
+    it displaced while leaving its own stale table standing.
     """
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
@@ -468,6 +473,21 @@ def write_results_ms(
             f"({layout.n_time * layout.n_bl} rows over {layout.n_time} "
             "timesteps). The results zarr does not belong to this measurement "
             "set, or an antenna was dropped between the run and the write."
+        )
+
+    # A run narrowed with data.freq is a valid run whose results simply do not
+    # span the MS. Which channels it holds is not the missing piece -- the zarr's
+    # freq coordinate records them, since write_results_xds stores the run's own
+    # tab_config.freqs. What is missing is here: nothing below maps a partial
+    # band onto the MS's channel axis, and every column is built for the whole
+    # of it. Refused until it does, rather than reshaped against the full band.
+    if int(xds_ms.sizes["chan"]) != n_freq:
+        raise ValueError(
+            f"The results hold {n_freq} channels but the MS has "
+            f"{int(xds_ms.sizes['chan'])}. A run narrowed with data.freq covers "
+            "part of the band, and this writer does not yet use the results' "
+            "freq coordinate to place a partial band on the MS's channels, so "
+            "exporting one to a full-band measurement set is not yet supported."
         )
 
     ast_vis = xds_tab.ast_vis.data.astype(np.complex64)
@@ -597,7 +617,9 @@ def write_results_ms(
         # anywhere else. It contains its own failures (see _emit_gain_caltable),
         # and a warning it raises under such a filter arrives chained to the one
         # that was already propagating rather than replacing it.
-        _emit_gain_caltable(ms_path, results_zarr_path, gain_table)
+        _emit_gain_caltable(
+            ms_path, results_zarr_path, gain_table, out_path=caltable_path
+        )
 
 
 #: Extension of the calibration table written beside a results zarr. CASA's own
@@ -656,7 +678,9 @@ def _clear_failed_export(out_path: str, ms_path: str) -> str:
     return ""
 
 
-def _emit_gain_caltable(ms_path: str, results_zarr_path: str, gain_table):
+def _emit_gain_caltable(
+    ms_path: str, results_zarr_path: str, gain_table, out_path: str | None = None
+):
     """:func:`write_gain_caltable`, with a failure demoted to a warning.
 
     The export is an extra beside the columns, not a part of them, and it runs
@@ -678,6 +702,11 @@ def _emit_gain_caltable(ms_path: str, results_zarr_path: str, gain_table):
     run's table standing at the destination -- so it is cleared here too, by
     :func:`_clear_failed_export`, and what happened to it is part of the warning.
 
+    The destination is resolved here, once, and handed to both: the export and
+    the clean-up after it have to be talking about the same path, or a run given
+    an ``out_path`` of its own would remove the default it displaced and leave
+    its own superseded table exactly where it reads as this run's solution.
+
     ``MemoryError`` is not demoted: that is a statement about the process rather
     than about the data, and nothing downstream could reason about a run that
     carried on past it. ``KeyboardInterrupt`` is not caught at all.
@@ -687,8 +716,13 @@ def _emit_gain_caltable(ms_path: str, results_zarr_path: str, gain_table):
     exists for an MS a caltable cannot describe.
     """
 
+    if out_path is None:
+        out_path = caltable_path(results_zarr_path)
+
     try:
-        return write_gain_caltable(ms_path, results_zarr_path, gain_table=gain_table)
+        return write_gain_caltable(
+            ms_path, results_zarr_path, out_path, gain_table=gain_table
+        )
     except MemoryError:
         raise
     except Exception as err:
@@ -697,13 +731,16 @@ def _emit_gain_caltable(ms_path: str, results_zarr_path: str, gain_table):
         )
         # An earlier run's table is still standing at the destination this one
         # could not write, so it goes the same way it would on a no-op export.
-        cleared = _clear_failed_export(caltable_path(results_zarr_path), ms_path)
+        cleared = _clear_failed_export(out_path, ms_path)
 
         warnings.warn(
-            "The MS columns were written, but the calibration table beside "
-            f"{results_zarr_path} was not: {type(err).__name__}: {err}. The "
-            "results are unaffected; the solution is simply not available as a "
-            f"table to apply.{cleared}\n{tail}",
+            # The destination rather than the results it describes: with an
+            # out_path of the caller's the table is not beside them at all, and
+            # the path that failed is the one worth naming either way.
+            f"The MS columns were written, but the calibration table at "
+            f"{out_path} was not: {type(err).__name__}: {err}. The results at "
+            f"{results_zarr_path} are unaffected; the solution is simply not "
+            f"available as a table to apply.{cleared}\n{tail}",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -748,7 +785,10 @@ def write_gain_caltable(
     Written beside the results as ``<results>.B``, so that a tabascal solution
     can be consumed by standard tooling -- ``applycal``, CASA, CARAcal/stimela --
     like any other calibration, rather than only as the MS columns
-    :func:`write_results_ms` writes.
+    :func:`write_results_ms` writes. ``out_path`` overrides that name, and once
+    given it is the whole answer to "where the table goes": everything below --
+    the write, the guards it is refused by, and the removal of a table an
+    earlier run left -- acts on it and never on the default it displaced.
 
     What it holds is the **total** calibration, ``external x fitted``: the
     ordered ``gain_table`` product placed on this observation's grid, times the

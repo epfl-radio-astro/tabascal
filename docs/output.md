@@ -199,6 +199,7 @@ An unflagged dead antenna can be driven to a zero or non-finite gain by the fit.
 Writing raises a `ValueError`, before any column is built, if:
 
 * the results `.zarr` holds a different number of baselines than the MS — the results belong to another MS, or an antenna was dropped between the run and the write;
+* the results `.zarr` holds a different number of channels than the MS. A run narrowed with [`data.freq`](config.md) covers part of the MS's band. The results do record which part — the `freq` coordinate holds the channel frequencies the run was fitted on — but the writer does not yet use it to place a partial band on the MS's channel axis, so writing a narrowed run back to a full-band MS is not yet supported, the initial-prediction export included;
 * the MS rows are not ordered time-major, so the first `n_bl` rows do not hold `n_bl` distinct antenna pairs;
 * the baseline order differs between timesteps, which the `(n_time, n_bl)` reshape tabascal reads visibilities with cannot represent;
 * the rows interleave timesteps within a block of `n_bl` rows, which reshapes cleanly but puts every visibility on the wrong timestamp.
@@ -210,6 +211,18 @@ Sorting the MS by `TIME`, `ANTENNA1`, `ANTENNA2` resolves the last three.
 Every run that fits gains also writes the calibration it implies as a CASA calibration table, beside the results `.zarr` and named after it — `map_pred_Custom.zarr` gives `map_pred_Custom.B`. It is a `B Jones` table, one row per (time, antenna) with `CPARAM` of shape (channel, polarisation), exactly the layout `casatasks.gaincal` produces, so a tabascal solution can be consumed by standard tooling like any other calibration rather than only as the columns above.
 
 Every results `.zarr` the run writes gets its own table, named after it. A configuration that writes the initial prediction as well as the optimised one therefore leaves an `init_pred_Custom.B` beside `init_pred_Custom.zarr`: the calibration those initial values imply, which is a real if uninteresting calibration and is never confused with the fitted one.
+
+### Writing the table somewhere else
+
+`tab2MS -o` (`--caltable-path`) names the output, for a pipeline that wants the calibration under a name of its own rather than the results':
+
+```bash
+tab2MS -m path/to/file.ms -z path/to/results.zarr -o path/to/cal/tabascal.B
+```
+
+The path given is the **only** one the export uses: it writes there, every rule below is applied to it, and a table an earlier run left *there* is what a rerun with nothing to export removes. The default `<results>.B` is not written, read or removed.
+
+There is no configuration key for it, so the automatic export at the end of a run always names its table after the results `.zarr` it describes. That pairing is what the stale-table rules below are stated in terms of — a table left by an earlier run of *these* results — and a path fixed in a configuration, which is reused across runs, would break it: every run would write over one table, and a rerun that fitted no gains would remove one belonging to another run's results. Re-export with `tab2MS -o` when the table has to live elsewhere.
 
 The table's `TIME` column is a copy of the MS's, and its `MEASINFO` record declares the scale **the MS declares** rather than assuming UTC. Declared to declared, the same convention the external gain tables are matched on: relabelling a TAI-declared observation as UTC would move every timestamp by the accumulated leap seconds — 37 s since 2017 — for anything that reads the declaration.
 
@@ -253,14 +266,14 @@ Every-sample rather than on the mean: samples either side of 1 average to exactl
 
 **A table from a previous run of the same results is removed** in that case, with a `RuntimeWarning` saying so. A stale calibration sitting under the current name beside the current results reads as the current solution, which is a bad thing to be wrong about.
 
-Only a calibration table is ever removed: the path has to be a casacore table — casacore's own structural check, not just the marker files — whose INFO record declares `Type = Calibration`, and it may not be, contain, or sit inside the MS. A directory of your own that happens to be named `<results>.B` is left exactly as it is, and so is a table too damaged for casacore to open. The same rule applies to *writing*: the export replaces a previous calibration table at that path and refuses anything else, rather than deleting it.
+Only a calibration table is ever removed: the path has to be a casacore table — casacore's own structural check, not just the marker files — whose INFO record declares `Type = Calibration`, and it may not be, contain, or sit inside the MS. A directory of your own that happens to be named `<results>.B` — or named by `-o` — is left exactly as it is, and so is a table too damaged for casacore to open. The same rule applies to *writing*: the export replaces a previous calibration table at that path and refuses anything else, rather than deleting it.
 
 ### If the export fails
 
 The export is the last thing the writer does and is additive to it. Everything it can say about *this* MS or *these* results is reported as a `RuntimeWarning` — carrying the exception type, its message and the tail of its traceback — while the columns, which were already written, stand:
 
 * an MS with more than one spectral window, which the writer serves one partition of while a caltable can only file rows under one window's id;
-* an output path overlapping the MS (results written *inside* the MS put the table there too);
+* an output path overlapping the MS — results written *inside* the MS put the table there too, and `-o` can name a path inside it outright;
 * something at the output path that is not a calibration table;
 * results whose gains do not describe the MS's antennas or timesteps;
 * a `TIME` column declaring a time scale tabascal cannot interpret;

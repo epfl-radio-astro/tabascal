@@ -1,13 +1,19 @@
 #!/usr/bin/env python
-from tabascal.write import write_results_ms
+"""``tab2MS``: a tabascal results zarr into the MS it was fitted from.
+
+The parser is built separately from the run, as in the other export scripts, so
+the argument surface can be tested without importing ``tabascal.write`` -- and
+with it the whole JAX stack -- to do it.
+"""
 
 import argparse
 
-def main():
 
+def build_parser():
     parser = argparse.ArgumentParser(
         description="Copy recovered data from a tabascal run and save in a MS file under the column named 'TAB_DATA'."
     )
+
     parser.add_argument(
         "-m", "--ms_path", required=True, help="File path to the Measurement Set."
     )
@@ -45,14 +51,36 @@ def main():
             "config, since the tables compose in order."
         ),
     )
+    parser.add_argument(
+        "-o",
+        "--caltable-path",
+        dest="caltable_path",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Where to write the exported calibration table. Defaults to the "
+            "results path with a '.B' extension, beside the zarr. The path "
+            "given is the only one the export uses: it writes there, and a "
+            "table an earlier run left there is what a run with nothing to "
+            "export removes."
+        ),
+    )
 
-    args = parser.parse_args()
+    return parser
+
+
+def run(args):
+    # Imported here rather than at module level so building the parser costs
+    # nothing; tabascal.write pulls in the whole JAX stack.
+    from tabascal.write import write_results_ms
+
     write_results_ms(
         ms_path=args.ms_path,
         results_zarr_path=args.results_zarr_path,
         data_col=args.data_col,
         corr=args.corr,
         gain_table=_gain_tables(args.gain_table),
+        caltable_path=args.caltable_path,
     )
 
 
@@ -73,6 +101,10 @@ def _gain_tables(values):
         for path in value.split(",")
         if path.strip()
     ]
+
+
+def main():
+    run(build_parser().parse_args())
 
 
 if __name__ == "__main__":

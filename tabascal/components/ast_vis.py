@@ -333,7 +333,9 @@ class DiscreteSkyVis(Component):
     ``B = S delta_Omega`` and ``delta_Omega = n delta(l) delta(m)``, so the Jacobian
     cancels and a source contributes its catalogue flux exactly, in every direction.
     ``(u, v, w)`` is the ANTENNA2 - ANTENNA1 baseline the equation above is written for,
-    which is ``uvw_sign`` times the UVW column — see ``setup``.
+    which is ``ast.uvw_sign`` times the UVW column. Which baseline that column holds is a
+    property of whatever wrote the data, so the sign is a config key; the default,
+    ``(-1, -1, -1)``, is the convention tab-sim writes — see ``setup``.
 
     ``G_k`` is the uv-plane envelope of an elliptical Gaussian source,
 
@@ -392,18 +394,32 @@ class DiscreteSkyVis(Component):
             self.freqs = jnp.asarray(config.freqs)
             self.phase_centre_ra = jnp.deg2rad(config.phase_centre["ra"])
             self.phase_centre_dec = jnp.deg2rad(config.phase_centre["dec"])
-            # Per-term uvw sign toggles (u, v, w), applied before the exponent below.
+            # Per-axis uvw sign toggles (u, v, w), applied before the exponent below,
+            # from ast.uvw_sign.
             #
             # The measurement equation's exp(-2i pi b.(s - s0) / lambda) is written for
-            # b = ANTENNA2 - ANTENNA1. The UVW column read_ms gives us is the other
-            # baseline: tab-sim writes bl_uvw = ants_uvw[a1] - ants_uvw[a2], and
-            # tabascal forms its own baselines the same way throughout
-            # (interferometry.py: bl_u = ants_u[:, a1] - ants_u[:, a2]). Negating turns
-            # one into the other, which is what makes this agree with tab-sim's
-            # astro_vis on the very visibilities the model is fit to -- a sign error
-            # here is a sky mirrored through the phase centre, which is exactly the
-            # corruption a gain solved against a fixed sky would absorb.
-            self.uvw_sign = jnp.asarray((-1.0, -1.0, -1.0))
+            # b = ANTENNA2 - ANTENNA1, and which of the two baselines a UVW column
+            # holds is a property of whatever wrote it, not something we can read off
+            # the data. The default negates because tab-sim writes
+            # bl_uvw = ants_uvw[a1] - ants_uvw[a2] and tabascal forms its own baselines
+            # the same way throughout (interferometry.py:
+            # bl_u = ants_u[:, a1] - ants_u[:, a2]), so negating is what makes this
+            # agree with tab-sim's astro_vis on the very visibilities the model is fit
+            # to -- but an MS from another toolchain may well carry the opposite
+            # convention, and a wrong sign is a sky mirrored through the phase centre,
+            # exactly the corruption a gain solved against a fixed sky would absorb.
+            sign = config.args["ast"].get("uvw_sign", (-1, -1, -1))
+            entries = sign if isinstance(sign, (list, tuple)) else ()
+            if len(entries) != 3 or not all(
+                not isinstance(s, bool) and isinstance(s, (int, float)) and abs(s) == 1
+                for s in entries
+            ):
+                raise ValueError(
+                    "ast.uvw_sign is the sign applied to each of the u, v and w axes "
+                    "of the UVW column: a sequence of three values, each exactly "
+                    f"+1 or -1, e.g. [-1, -1, -1], got {sign!r}."
+                )
+            self.uvw_sign = jnp.asarray([float(s) for s in entries])
 
             # int() alone would turn 1.9 into 1 without a word, which is a hundredfold
             # slowdown dressed up as a valid setting.

@@ -316,6 +316,12 @@ A source more than 90 degrees from the phase centre is modelled as given, not re
 
 * `source_block_size`: The number of sources `DiscreteSkyVis` handles per step of its scan over the catalogue, a whole number defaulting to `128`. The geometric delay array is `(n_bl, n_time, n_src)`, which for a large catalogue is the biggest array in the model; the scan replaces `n_src` in that shape with `source_block_size`, at the cost of recomputing each block in the backward pass. It is purely a memory strategy — the result does not depend on it.
 
+* `uvw_sign`: The sign applied to each of the $u$, $v$ and $w$ axes of the measurement set's `UVW` column before `DiscreteSkyVis` uses it — three values, each exactly `+1` or `-1`, defaulting to `[-1, -1, -1]`.
+
+The visibility equation above is written for the baseline $b = \mathrm{ANTENNA2} - \mathrm{ANTENNA1}$, but a `UVW` column may hold either that baseline or its negative, depending on the software that wrote it, and nothing in the data says which. The default negates because that is what `tab-sim` writes — `bl_uvw = ants_uvw[a1] - ants_uvw[a2]`, the same convention tabascal uses to form baselines internally — so on simulated data the fixed sky lands on top of the simulated sources. A measurement set from another toolchain may carry the opposite convention, and then the right value is `[1, 1, 1]`; the per-axis form is there for the rarer case of a column that differs on only some axes.
+
+Getting it wrong is not obvious from the fit. Negating all three axes conjugates every visibility, which is the sky mirrored through the phase centre: the fixed sources sit in the wrong place, and since that corruption is smooth it is largely what a gain solved against a fixed sky will absorb, leaving the optimisation looking converged. The correct value is a property of the dataset rather than of the model, so it is worth establishing once per instrument or pipeline — for instance by checking the `UVW` column against the antenna positions and `ANTENNA1`/`ANTENNA2` of the same row, or by imaging a bright known source and confirming it is not reflected through the phase centre.
+
 Note that the catalogue fluxes are in the same scale as the data the model is fit to. With data calibrated to Jy these are physical Jy; without that, the data are in raw correlator units and a Jy catalogue flux is meaningless.
 
 

@@ -49,12 +49,17 @@ fisher:
 ast:
   point_sources: null   # Optional - Fixed (non-fitted) sources for ast_signal:FixedDiscreteSky + ast_vis:DiscreteSkyVis. Either a path to an OSKAR 12-column sky model file or an inline list, e.g. [{name: Fornax A, ra: 50.6738, dec: -37.2083, I: 750.0, ref_freq_mhz: 154.0, alpha: -0.77}] (ra/dec in degrees, I in Jy at ref_freq_mhz). A rigid sky the gain cannot deform, so it anchors a per-antenna gain that a flexible sky model would otherwise absorb
   source_block_size: 128 # Optional - Number of discrete sources handled per scan step in ast_vis:DiscreteSkyVis. Trades recomputation for peak memory: the delay array is (n_bl, n_time, source_block_size) rather than (n_bl, n_time, n_src)
+  uvw_sign: [-1, -1, -1] # Optional - Sign applied to each of the u, v and w axes of the MS UVW column by ast_vis:DiscreteSkyVis, each exactly +1 or -1. It turns that column into the ANTENNA2 - ANTENNA1 baseline the visibility equation is written for, so the right value is a property of whatever wrote the data. The default matches tab-sim, which writes ants_uvw[a1] - ants_uvw[a2]; the opposite convention needs [1, 1, 1] and getting it wrong mirrors the fixed sky through the phase centre
   init: sample          # Optional - The initialization method for the astronomical visibility parameters. Options are 'est', 'prior', 'truth', 'truth_mean'
   mean: 0               # Optional - Mean of the prior distribution for the astronomical visibility parameters. Options are 0, 'est', 'prior', 'truth', 'truth_mean'
-  pow_spec:
-    P0: null            # Optional - Power spectrum value at k=0 for the astronomical visibility parameters prior standard deviation 
-    gamma: 1.0          # Optional - Exponential of the power law section of the power spectrum for astronomical visibility parameters
-    k0: 1e-3            # Optional - Position of the knee of the power spectrum
+  pow_spec:             # Optional - Prior covariance of the astronomical visibilities, as the power spectrum of the signal in the Fourier domain. Read by ast_vis:GPVisAst
+    p0: 3e3             # Optional - Power at k=0, i.e. the variance scale of the signal, in the squared units of the data. It is the scale of the data and is worth setting to match it
+    k0_freq: 1          # Optional - Position of the knee of the power spectrum along the frequency axis, in inverse Hz
+    fov_deg: null       # Optional - Full field of view (angular diameter, in degrees) setting the knee along the time axis, through the maximum astronomical fringe rate of a source at fov_deg / 2 from the phase centre. null uses the primary beam of the telescope, 2 * 1.22 * lambda / D, from the dish diameter in the MS file
+    gammas: [5, 5]      # Optional - Rate of drop off of the power law section of the power spectrum along the (frequency, time) axes. As gamma -> infinity the power spectrum tends to a Gaussian
+    cutoff: 1e-6        # Optional - Relative cutoff on the power spectrum. Fourier modes whose power is below p0 * cutoff are dropped and not fitted
+  freq_pad_factor: 2.0  # Optional - Zero padding factor of the frequency axis of the Fourier domain signal model. 1.0 is the observed band itself, which makes the solution periodic over it
+  time_pad_factor: 2.0  # Optional - Zero padding factor of the time axis. The time axis equivalent of freq_pad_factor
 ##########################################
 # RFI prior and initialization parameters
 ##########################################
@@ -90,17 +95,17 @@ satellites:
 # Gain prior and initialization parameters
 ###########################################
 gains:
-  init: prior           # Optional - The initialization method for the gain parameters. Options are 'prior', 'truth'. gains:ConstGains also accepts a path to an .npz of per-antenna gains (key 'gain') or to a calibration table, projected into its gauge
+  init: prior           # Optional - The initialization method for the gain parameters. Only gains:ConstGains reads it, and it accepts 'prior' or a path to an .npz of per-antenna gains (key 'gain') or to a calibration table, projected into its gauge. gains:GPGains and gains:UnitaryGains ignore it entirely - GPGains always starts at the prior mean and UnitaryGains fits no gain at all
   ref_ant: null         # Optional - Phase reference antenna for gains:ConstGains, whose phase is pinned to 0. Defaults to the first antenna with any unflagged data
   fix_flux_scale: true  # Optional - Keep the zero-sum log-amplitude gauge of gains:ConstGains, so the gain carries no absolute flux scale. false frees the overall amplitude and requires a fixed-flux sky (ast_signal:FixedDiscreteSky) to set the scale
   amp_mean: 1.0         # Optional - Mean of the prior distribution over the gain amplitudes. Options are 'truth' or a value like 1.0
   phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radiands. Options are 'truth' or a value like 0.0
   amp_std: null          # Optional - Standard deviation of the prior distribution over the gain amplitudes as a percentage
   phase_std: null        # Optional - Standard deviation of the prior distribution over the gain phases in degrees
-  amp_corr_freq: null        # Optional - Correlation time of the gains in minutes
-  amp_corr_time: null        # Optional - Correlation time of the gains in minutes
-  phase_corr_freq: null        # Optional - Correlation time of the gains in minutes
-  phase_corr_time: null        # Optional - Correlation time of the gains in minutes
+  amp_corr_freq: null   # Optional - Correlation bandwidth of the gain amplitudes in Hz. Defaults to the frequency extent of the observation. Used by gains:GPGains
+  amp_corr_time: null   # Optional - Correlation time of the gain amplitudes in seconds. Defaults to the time extent of the observation. Used by gains:GPGains
+  phase_corr_freq: null # Optional - Correlation bandwidth of the gain phases in Hz. Defaults to the frequency extent of the observation. Used by gains:GPGains
+  phase_corr_time: null # Optional - Correlation time of the gain phases in seconds. Defaults to the time extent of the observation. Used by gains:GPGains
   r_seed: 123           # Optional - Random seed for the gain draws. Only null takes the default; 0 is a seed like any other
 # ###################
 # # Model parameters
