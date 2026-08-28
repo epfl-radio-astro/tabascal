@@ -65,6 +65,7 @@ data:
   freq: 0
   corr: xx
   noise:
+  gain_table:
 ```
 
 * `sim_dir`: Simulation directory created when using `sim-vis` to simulate a dataset. This can also be given at runtime of `tabascal` with the `-s` flag.
@@ -96,6 +97,29 @@ data:
   `sigma_bl` and `s_ant` must be one-dimensional, `s_ant` must cover every antenna the observation's baselines are formed from, and the values read must be real, positive and finite: every entry of `sigma_bl_freq` or `sigma_bl`, and, for `s_ant`, every antenna this observation actually correlates. A file of per-antenna noise may legitimately cover a whole array, and an entry for an antenna these baselines never use cannot mis-weight anything, so those entries are deliberately not policed. A complex array is rejected rather than read as its real part, and so are boolean and string arrays — only an integer or floating-point array is read as a noise, since `astype(float)` would otherwise turn a file of flags into a uniform 1 Jy and parse a file of text into whatever the strings spell. An override is used exactly as given, so it is *not* repaired the way an MS column is: a file carrying an entry that is not a noise is rejected, naming the key and how many entries offend, rather than having part of the user's own answer filled in for them. The median fill above applies to the MS columns only. No override is time-resolved — there is no key for a time axis, and a scalar, per-baseline or per-(baseline, channel) override applies to every timestep — so an MS whose noise genuinely varies over the observation is best read from its own columns.
 
   The values are checked again after conversion to the precision the run works in (`model.precision`). Under single precision a value like `1e-50` underflows to zero — which would divide the likelihood by nothing — and `1e40` overflows to infinity, so a file that is valid as written but not at the run's precision is an error naming the dtype, not a silent re-weighting.
+
+  **`noise` is in the frame of `data_col`, i.e. before `gain_table` is applied.** With a gain table, leave it null and let the MS's `SIGMA` carry the noise rather than pre-scaling it by hand — the table is divided out of the noise as well as the data, so a value given here would be scaled a second time.
+
+* `gain_table`: Path to a CASA calibration table — from `gaincal`, `flux-calibrate`, or anything else that writes one — or an ordered list of them. The gains are divided out of the visibilities **and the noise** once, when the MS is read:
+
+  ```
+  vis_obs   = DATA  / (g_p conj(g_q))
+  sigma_cal = SIGMA / |g_p conj(g_q)|
+  ```
+
+  so everything downstream — priors, the RFI and astronomical models, chi², and the results written back to the MS — lives in one frame, the calibrated one, and the gains are applied once instead of on every forward pass. Carrying the noise with the data is the point of using a table rather than scaling the data by hand: get it wrong and chi² is off by `|g|²`. This replaces the manual "scale `noise` by k and `ast.pow_spec.p0` by k²" workaround.
+
+  A table is solved on whatever `(frequency, time)` grid the calibrator chose, so it is placed on the observation's grid first. Matching is **by value**, not by index — a time within 1 ms and a channel within 1e-6 of the band centre frequency count as the same sample — which is what lets a table solved on a master MS apply to a subset carved out of it, in whatever channel order the subset was written. The times matched are the MS's own `TIME` column on the scale it declares (`times_mjd`), not the UTC-normalised `times_jd`, because a caltable's `TIME` is a copy of the MS's: declared frame to declared frame is exact, where the UTC coordinate of a TAI-declared MS is 37 s away.
+
+  Where the grids do not coincide the gains are interpolated **linearly in amplitude and unwrapped phase, never in real and imaginary parts**: two unit gains 60° apart average to `|g| = 0.87` in real/imag, so the data would be divided by a gain no antenna ever had and the flux scale would move by 13 %. The phase is unwrapped in **two dimensions** — along frequency within each timestep, and then the timesteps onto one another by whole turns — and stays a real surface through both interpolation stages, `exp(i·phase)` being applied once at the end. A `B` table winds across the band through a residual delay and around the ±π branch cut in time, so interpolating the stored angles across such a step averages the two sides of the cut into a gain pointing the wrong way; rebuilding a complex gain between the two stages loses the branch just as badly, and tears the band by a whole turn at whichever channel crossed the cut. **Beyond the solved range the edge value is held**: a table that does not reach the start of the observation calibrates it with the earliest solution it does have.
+
+  **The table has to sample the phase below half a turn, and nothing here can check that it did.** Unwrapping recovers a phase only where the solutions sample it: a genuine change of more than π between two adjacent solved samples — between two solved channels, or between two solution intervals of a phase slewing faster than the calibration cadence follows — is simply not in the table, because complex solutions carry the phase modulo 2π. Such a step aliases to the shorter branch and is taken as such: a true `0 → 1.5π` evolution between two solutions interpolates to `−0.25π` half way, not `+0.75π`. This is the same assumption `np.unwrap` makes, applied coherently across the band rather than channel by channel, and it is undetectable from the data — it is a requirement on the calibration that produced the table (solve finely enough in both axes), not something the interpolation can warn about. A step of exactly π is the boundary case, and is left as written rather than turned into a half turn of the opposite sign.
+
+  A flagged or zero solution is an *absence*, not a value: the interpolation bridges across it from the solutions either side, exactly as it bridges a coordinate the table never sampled. Only an antenna with no valid solution anywhere has nothing to interpolate from — its gain is 1 and its visibilities are flagged, **even when `flags: false`**, since a visibility nobody calibrated is not data.
+
+  With a list, **each table is interpolated onto the observation's grid and only then are they composed**, `g_total = Π gᵢ` in the order given. The two orders disagree: two amplitudes ramping 1 → 3 give `2 × 2 = 4` half way when each is interpolated first, and `(1 + 9) / 2 = 5` when the product is interpolated, which is an artefact of fitting a quadratic with a straight line.
+
+  Each table prints one coverage line as it is read, giving the fractions of the observation's samples whose gain was taken exactly from a solution, interpolated between solutions, held from an edge, or left unsolved — a table that turns out to cover the observation mostly by extrapolation says so rather than being applied in silence. Each sample is classified by the support it was actually built from, so a table whose solutions run along a diagonal reports the edge-holds it really performed rather than the rectangle its two axes span. The coverage line is also what catches a table whose `TIME` was written on some other unit or scale, which is assumed rather than read: it would report no exact cover at all.
 
 ## Plots
 
