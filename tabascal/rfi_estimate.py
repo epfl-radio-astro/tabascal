@@ -1023,12 +1023,24 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
     z_crit : float, default 3.0
         Detection threshold; cells above it are flagged as residual.
 
+    A source with no finite cell -- one held out of view for the whole
+    observation by the elevation cut, or flagged away -- has no coverage to
+    report and comes back as nan. It is still listed in ``per_source``, so the
+    table says it was not measured rather than omitting it, but ``overall``
+    summarises only the sources that *were*: nan is not a bad score, and a
+    source nothing was measured for cannot be the worst-fitted one. With no
+    source measured at all, every ``overall`` coverage metric is nan and
+    ``worst_source`` is ``None``; the thresholds (``z_crit``, ``amp_crit``) are
+    settings rather than measurements and stay populated.
+
     Returns
     -------
     dict
         ``per_source`` (title, coverage, null_coverage, excess, amp_coverage,
         max_z, max_amp, n_cells) and ``overall`` (pooled coverage, null,
-        amp_coverage, worst source, mean, z_crit, amp_crit).
+        amp_coverage, worst source, mean, z_crit, amp_crit). When nothing was
+        measured, ``worst_source`` is ``None`` and every coverage metric is nan,
+        while ``z_crit`` and ``amp_crit`` are unchanged.
     """
     if "z" not in result:
         raise ValueError(
@@ -1076,8 +1088,15 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
         pooled_null_in += n_null_in
         pooled_amp_in += n_amp_in
 
-    covs = [p["coverage"] for p in per_source]
-    worst = min(per_source, key=lambda p: p["coverage"]) if per_source else None
+    # Measured sources only. A source that was never in view has no finite cell
+    # and so a nan coverage, and nan loses every comparison -- `min` would keep
+    # whichever nan it met first and report a source nothing was measured for as
+    # the worst-fitted one, while `np.nanmean` over nothing but nans warns about
+    # an empty slice. With none measured every coverage figure is nan, which is
+    # what "no coverage" means; the per-source table still lists them.
+    measured = [p for p in per_source if np.isfinite(p["coverage"])]
+    covs = [p["coverage"] for p in measured]
+    worst = min(measured, key=lambda p: p["coverage"]) if measured else None
 
     return dict(
         per_source=per_source,
@@ -1085,9 +1104,9 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
             coverage=(pooled_in / pooled_n) if pooled_n else float("nan"),
             null_coverage=(pooled_null_in / pooled_n) if pooled_n else float("nan"),
             amp_coverage=(pooled_amp_in / pooled_n) if pooled_n else float("nan"),
-            mean_coverage=float(np.nanmean(covs)) if covs else float("nan"),
-            worst_source=worst["title"] if worst else None,
-            worst_coverage=worst["coverage"] if worst else float("nan"),
+            mean_coverage=float(np.mean(covs)) if covs else float("nan"),
+            worst_source=worst["title"] if worst is not None else None,
+            worst_coverage=worst["coverage"] if worst is not None else float("nan"),
             z_crit=z_crit,
             amp_crit=amp_crit,
         ),
