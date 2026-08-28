@@ -23,6 +23,12 @@ so the denominator is just ``D = sum_bl w_bl`` and::
 
     error = 1 / sqrt(D),      z = Re(S_hat) / error
 
+``z`` is a *calibrated-frame* statistic: it reads the real part because a
+de-rotated real source has no imaginary part to read, which holds only where the
+antenna gain phases have been taken out. On an uncalibrated column use the
+phase-blind ``|S_hat| / error`` instead, which :func:`coverage_stats` reports as
+``amp_coverage`` against a matched Rayleigh threshold.
+
 The satellite fringe adds coherently after de-rotation while the sky and the
 noise add incoherently, so ``S_hat`` isolates the RFI source visibility. Its
 magnitude is a per-antenna power estimate; ``sqrt(|S_hat|)`` is the per-antenna
@@ -556,6 +562,27 @@ def _read_ms(ms_path: str, freq, corr: str, data_col: str) -> dict:
     return read_ms(ms_path, freq, None, corr, data_col)
 
 
+def _times_jd(ms: dict) -> NDArray:
+    """The observation's instants on UTC, which is what the geometry reads.
+
+    An MS declares the time scale of its ``TIME`` column, and it is not always
+    UTC. :func:`tabascal.ms.read_ms` normalises whatever it finds onto UTC and
+    reports that as ``times_jd``, leaving ``times_mjd`` on the declared scale so
+    it stays comparable with the column itself. Rebuilding a Julian Date from
+    ``times_mjd`` here would undo that: skyfield, ``sgp4jax.itrf_to_gcrf`` and
+    the elevation calls all read UTC, so on a TAI-declared MS the propagation,
+    the fringe and the elevation cut would every one of them be 37 s out -- some
+    285 km along a LEO satellite's ground track, and nothing raises.
+    """
+    if "times_jd" in ms:
+        return np.asarray(ms["times_jd"])
+
+    # A reader that predates the normalisation reports only the declared-scale
+    # column, and read_ms warns about the scale itself. Converting it here is
+    # then exactly what the rest of that code base does with these times.
+    return mjd_to_jd(np.asarray(ms["times_mjd"]))
+
+
 def extract_light_curves_from_ms(
     ms_path: str,
     norad_ids: Optional[list] = None,
@@ -605,7 +632,7 @@ def extract_light_curves_from_ms(
         complex, ordered to match ``norad_ids``.
     """
     ms = _read_ms(ms_path, freq, corr, data_col)
-    times_jd = mjd_to_jd(np.asarray(ms["times_mjd"]))
+    times_jd = _times_jd(ms)
 
     norad_ids, records = _resolve_records(norad_ids, times_jd, extra_orbit_dir)
 
@@ -689,6 +716,66 @@ def _half_channel(freqs: NDArray, chan_widths=None) -> NDArray:
     return 0.5 * np.minimum(
         np.concatenate([gaps[:1], gaps]), np.concatenate([gaps, gaps[-1:]])
     )
+
+
+def _check_zarr_identity(xds, zarr_path: str, n_bl, times_mjd, corr=None) -> None:
+    """Refuse a results store that is not this observation's.
+
+    Matching the channels by frequency says the two grids describe the same part
+    of the band. It says nothing about whether the store belongs to *this*
+    observation: another pointing, another correlation or another night can carry
+    the same shapes, and the residual is then two unrelated datasets differenced
+    without a word.
+
+    What can be checked is what a results zarr records today -- its baseline and
+    timestep counts, the cadence of its time coordinate, and the correlation it
+    was fitted on. Absolute times and an observation identity would settle it
+    outright; writing those belongs with the results writer, not here.
+
+    A store that records no ``corr`` attribute is not evidence of disagreement,
+    so it passes; a store that records a different one is.
+    """
+    model = xds.vis_obs
+    n_time = len(np.asarray(times_mjd))
+
+    if int(model.sizes["bl"]) != int(n_bl):
+        raise ValueError(
+            f"{zarr_path} holds {int(model.sizes['bl'])} baselines but the "
+            f"visibilities being read have {int(n_bl)}, so it is not this "
+            "observation's model."
+        )
+
+    if int(model.sizes["time"]) != n_time:
+        raise ValueError(
+            f"{zarr_path} holds {int(model.sizes['time'])} timesteps but the "
+            f"visibilities being read have {n_time}, so it is not this "
+            "observation's model."
+        )
+
+    if corr is not None and xds.attrs.get("corr") not in (None, corr):
+        raise ValueError(
+            f"{zarr_path} was fitted on correlation {xds.attrs['corr']!r} but "
+            f"{corr!r} is being read. Subtracting one correlation's model from "
+            "another's visibilities is not a residual."
+        )
+
+    # Seconds from the start of the observation, which is what the results
+    # writer stores. Compared as a cadence rather than as absolute times: the
+    # store carries no epoch to compare against.
+    if "time" not in xds.coords or n_time < 2:
+        return
+
+    model_step = float(np.mean(np.diff(np.asarray(xds["time"].values, dtype=float))))
+    ms_step = float(
+        np.mean(np.diff(np.asarray(times_mjd, dtype=np.float64))) * 86400.0
+    )
+
+    if not np.isclose(model_step, ms_step, rtol=1e-3, atol=1e-6):
+        raise ValueError(
+            f"{zarr_path} has a cadence of {model_step:.6g} s but the "
+            f"visibilities being read step {ms_step:.6g} s, so the two are not "
+            "the same observation however well their shapes line up."
+        )
 
 
 def _model_on_ms_channels(xds, freqs, zarr_path: str, chan_widths=None) -> NDArray:
@@ -782,12 +869,16 @@ def extract_light_curves_from_zarr(
     import xarray as xr
 
     ms = _read_ms(ms_path, freq, corr, data_col)
-    times_jd = mjd_to_jd(np.asarray(ms["times_mjd"]))
+    times_jd = _times_jd(ms)
 
     norad_ids, records = _resolve_records(norad_ids, times_jd, extra_orbit_dir)
 
+    xds = xr.open_zarr(zarr_path)
+    _check_zarr_identity(
+        xds, zarr_path, len(np.asarray(ms["a1"])), ms["times_mjd"], corr
+    )
     model = _model_on_ms_channels(
-        xr.open_zarr(zarr_path), ms["freqs"], zarr_path, ms.get("chan_widths")
+        xds, ms["freqs"], zarr_path, ms.get("chan_widths")
     )
     residual = np.asarray(ms["vis_obs"]) - model
 
@@ -858,6 +949,23 @@ def save_light_curves_npz(path: str, result: dict) -> None:
 # z-statistic (residual / floor): coverage + spectrograms
 # ---------------------------------------------------------------------------
 
+def rayleigh_threshold(z_crit: float) -> float:
+    """The ``|S_hat|/error`` cut enclosing the same probability as ``|z| <= z_crit``.
+
+    Under the complex Gaussian null the real and imaginary parts of ``S_hat`` are
+    independent N(0, error^2), so ``|S_hat|/error`` is Rayleigh(1) with
+    ``P(R <= c) = 1 - exp(-c^2/2)``. Matching that to the two-sided normal
+    probability ``erf(z_crit/sqrt(2))`` gives ``c = sqrt(-2 ln(1 - erf(z/sqrt2)))``
+    -- 3.44 for the usual 3 sigma -- so the two coverages are read on the same
+    scale rather than against thresholds that mean different things.
+    """
+    from math import erf, log, sqrt
+
+    tail = 1.0 - erf(float(z_crit) / sqrt(2.0))
+
+    return float("inf") if tail <= 0.0 else sqrt(-2.0 * log(tail))
+
+
 def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
     """Fraction of time-frequency cells consistent with noise, per source.
 
@@ -866,6 +974,18 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
     ``z_crit`` almost everywhere. ``coverage`` is the fraction of finite
     (freq, time) cells with ``|z| <= z_crit``; ``max_z`` is the peak residual
     significance.
+
+    **The z statistic assumes the data are phase calibrated.** ``Re(S_hat)`` is
+    the whole of a de-rotated real source only when nothing else rotates it: an
+    uncalibrated antenna gain phase turns ``S_hat`` off the real axis, which
+    deflates ``z`` toward zero *and* spills the source into the imaginary part
+    that ``null_coverage`` is measured on -- so both halves of the comparison
+    move the wrong way, and a bright residual can read as clean. Use it on a
+    calibrated column (``CORRECTED_DATA``, the ``TAB_*`` columns, or a residual
+    against a fitted model); on a raw column read ``amp_coverage`` instead, which
+    is ``|S_hat|/error`` against :func:`rayleigh_threshold` and cannot be rotated
+    away. Its null is analytic -- Rayleigh(1) -- so it carries no ``excess``
+    column, and the same optimistic-floor caveat below applies to it.
 
     **Compare against ``null_coverage``, not against the analytic 2*Phi(z)-1.**
     The floor assumes the de-rotated per-baseline samples are independent. They
@@ -888,8 +1008,9 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
     Returns
     -------
     dict
-        ``per_source`` (title, coverage, null_coverage, excess, max_z, n_cells)
-        and ``overall`` (pooled coverage, null, worst source, mean, z_crit).
+        ``per_source`` (title, coverage, null_coverage, excess, amp_coverage,
+        max_z, max_amp, n_cells) and ``overall`` (pooled coverage, null,
+        amp_coverage, worst source, mean, z_crit, amp_crit).
     """
     if "z" not in result:
         raise ValueError(
@@ -898,11 +1019,14 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
 
     z = np.asarray(result["z"])
     titles = result["titles"]
+    amp_crit = rayleigh_threshold(z_crit)
 
     with np.errstate(invalid="ignore", divide="ignore"):
-        z_null = np.asarray(result["light_curves"]).imag / np.asarray(result["error"])
+        error = np.asarray(result["error"])
+        z_null = np.asarray(result["light_curves"]).imag / error
+        z_amp = np.abs(np.asarray(result["light_curves"])) / error
 
-    per_source, pooled_in, pooled_n, pooled_null_in = [], 0, 0, 0
+    per_source, pooled_in, pooled_n, pooled_null_in, pooled_amp_in = [], 0, 0, 0, 0
     for i, title in enumerate(titles):
         zi = z[i][np.isfinite(z[i])]
         n = zi.size
@@ -913,19 +1037,26 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
         n_null_in = int(np.sum(np.abs(zn) <= z_crit))
         null_cov = (n_null_in / zn.size) if zn.size else float("nan")
 
+        za = z_amp[i][np.isfinite(z_amp[i])]
+        n_amp_in = int(np.sum(za <= amp_crit))
+        amp_cov = (n_amp_in / za.size) if za.size else float("nan")
+
         per_source.append(
             dict(
                 title=title,
                 coverage=cov,
                 null_coverage=null_cov,
                 excess=(null_cov - cov) if np.isfinite(null_cov) else float("nan"),
+                amp_coverage=amp_cov,
                 max_z=float(np.max(np.abs(zi))) if n else float("nan"),
+                max_amp=float(np.max(za)) if za.size else float("nan"),
                 n_cells=int(n),
             )
         )
         pooled_in += n_in
         pooled_n += n
         pooled_null_in += n_null_in
+        pooled_amp_in += n_amp_in
 
     covs = [p["coverage"] for p in per_source]
     worst = min(per_source, key=lambda p: p["coverage"]) if per_source else None
@@ -935,10 +1066,12 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
         overall=dict(
             coverage=(pooled_in / pooled_n) if pooled_n else float("nan"),
             null_coverage=(pooled_null_in / pooled_n) if pooled_n else float("nan"),
+            amp_coverage=(pooled_amp_in / pooled_n) if pooled_n else float("nan"),
             mean_coverage=float(np.nanmean(covs)) if covs else float("nan"),
             worst_source=worst["title"] if worst else None,
             worst_coverage=worst["coverage"] if worst else float("nan"),
             z_crit=z_crit,
+            amp_crit=amp_crit,
         ),
     )
 

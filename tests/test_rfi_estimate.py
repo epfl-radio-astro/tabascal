@@ -22,6 +22,7 @@ import pytest
 from tabascal.rfi_estimate import (
     _half_channel,
     _lc_result,
+    _times_jd,
     coverage_stats,
     extract_light_curves_from_ms,
     extract_light_curves_from_zarr,
@@ -637,6 +638,88 @@ class TestSaveLightCurves:
         )
 
 
+class TestZarrIdentity:
+    """A results zarr that is not this observation's must not be subtracted.
+
+    Frequency alignment says the channels line up; it says nothing about whether
+    the store belongs to this observation at all. A run of a different pointing,
+    a different correlation or a different night can have the same shape, and
+    then the residual is two unrelated datasets differenced without a word.
+    """
+
+    @staticmethod
+    def _store(tmp_path, n_bl, n_time, freqs, times=None, corr=None, name="m.zarr"):
+        import xarray as xr
+
+        path = str(tmp_path / name)
+        coords = {"freq": np.asarray(freqs, dtype=float)}
+        if times is not None:
+            coords["time"] = np.asarray(times, dtype=float)
+        xr.Dataset(
+            {"vis_obs": (("sample", "bl", "freq", "time"),
+                         np.zeros((1, n_bl, len(freqs), n_time), dtype=complex))},
+            coords=coords,
+            attrs={} if corr is None else {"corr": corr},
+        ).to_zarr(path)
+        return path
+
+    def _run(self, path, **kwargs):
+        return extract_light_curves_from_zarr(
+            "obs.ms", path, norad_ids=[25544], **kwargs
+        )
+
+    def test_a_matching_store_is_accepted(self, tmp_path, stub_ms, stub_orbits):
+        ms = stub_ms()
+        n_bl = len(pairs()[0])
+        seconds = (np.asarray(ms["times_mjd"]) - ms["times_mjd"][0]) * 86400.0
+        path = self._store(tmp_path, n_bl, N_TIME, ms["freqs"], times=seconds,
+                           corr="xx")
+
+        assert self._run(path)["light_curves"].shape == (1, N_FREQ, N_TIME)
+
+    def test_a_different_baseline_count_is_refused(self, tmp_path, stub_ms,
+                                                   stub_orbits):
+        ms = stub_ms()
+        path = self._store(tmp_path, len(pairs()[0]) + 1, N_TIME, ms["freqs"])
+
+        with pytest.raises(ValueError, match="baseline"):
+            self._run(path)
+
+    def test_a_different_timestep_count_is_refused(self, tmp_path, stub_ms,
+                                                   stub_orbits):
+        ms = stub_ms()
+        path = self._store(tmp_path, len(pairs()[0]), N_TIME + 1, ms["freqs"])
+
+        with pytest.raises(ValueError, match="timestep"):
+            self._run(path)
+
+    def test_a_different_cadence_is_refused(self, tmp_path, stub_ms, stub_orbits):
+        """Same counts, different integration time: another observation."""
+        ms = stub_ms()
+        n_bl = len(pairs()[0])
+        seconds = (np.asarray(ms["times_mjd"]) - ms["times_mjd"][0]) * 86400.0
+        path = self._store(tmp_path, n_bl, N_TIME, ms["freqs"], times=5.0 * seconds)
+
+        with pytest.raises(ValueError, match="cadence"):
+            self._run(path)
+
+    def test_a_different_correlation_is_refused(self, tmp_path, stub_ms,
+                                                stub_orbits):
+        ms = stub_ms()
+        path = self._store(tmp_path, len(pairs()[0]), N_TIME, ms["freqs"], corr="yy")
+
+        with pytest.raises(ValueError, match="correlation"):
+            self._run(path, corr="xx")
+
+    def test_a_store_that_records_no_correlation_is_allowed(self, tmp_path, stub_ms,
+                                                            stub_orbits):
+        """Older stores carry no attribute; that is nothing to disagree with."""
+        ms = stub_ms()
+        path = self._store(tmp_path, len(pairs()[0]), N_TIME, ms["freqs"])
+
+        assert self._run(path)["light_curves"].shape == (1, N_FREQ, N_TIME)
+
+
 class TestCoverageStats:
     """The z statistic, judged against its own source-free null."""
 
@@ -667,6 +750,50 @@ class TestCoverageStats:
         # A noiseless source recovered exactly is enormously significant.
         assert stats["per_source"][0]["coverage"] < 0.5
         assert stats["per_source"][0]["excess"] > 0.4
+
+    def test_the_amplitude_statistic_is_reported_beside_the_real_one(self):
+        """|S_hat|/error is Rayleigh(1) under the null, and needs no phase.
+
+        Re(S_hat)/error assumes the data are phase calibrated: an uncalibrated
+        gain phase rotates S_hat off the real axis, deflating z and spilling
+        signal into the imaginary null that z is judged against. The magnitude
+        cannot be rotated away, so it still says something on such a column.
+        """
+        rfi_phase = phases(n_src=1, n_freq=1, n_time=4000, seed=9)
+        a1, a2 = pairs()
+        vis = observe(
+            rfi_phase, a1, a2, [np.zeros((1, 4000), dtype=complex)], noise=1.0
+        )
+        lc, err = matched_filter_light_curves(vis, rfi_phase, a1, a2, noise=1.0)
+        result = _lc_result(lc, err, [40000], np.array([1.4e9]),
+                            MJD0 + np.arange(4000) / 86400.0, "DATA", "xx")
+
+        stats = coverage_stats(result, z_crit=3.0)
+        source = stats["per_source"][0]
+
+        # Matched to the real statistic's tail, so the two are comparable: the
+        # Rayleigh threshold enclosing the same probability as |z| <= 3.
+        assert 3.4 < stats["overall"]["amp_crit"] < 3.5
+        assert source["amp_coverage"] > 0.99
+        assert 0.0 <= stats["overall"]["amp_coverage"] <= 1.0
+
+    def test_a_rotated_source_still_shows_in_the_amplitude(self):
+        """The case the real statistic misses: a source at 90 degrees of phase.
+
+        Re(S_hat) is then ~0 and z says "nothing here" however bright the source
+        is. The magnitude is unchanged by the rotation and still finds it.
+        """
+        result = make_result(n_src=1, n_time=64)
+        rotated = dict(result)
+        rotated["light_curves"] = result["light_curves"] * 1j
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rotated["z"] = rotated["light_curves"].real / rotated["error"]
+
+        real_stat = coverage_stats(rotated, z_crit=3.0)["per_source"][0]
+
+        # Blind to it in the real part, and not in the magnitude.
+        assert real_stat["coverage"] > 0.99
+        assert real_stat["amp_coverage"] < 0.5
 
     def test_a_result_without_z_is_refused(self):
         with pytest.raises(ValueError, match="no 'z'"):
@@ -822,7 +949,7 @@ def stub_ms(monkeypatch):
     """Stand in for ``tabascal.ms.read_ms`` with an in-memory observation."""
 
     def _install(noise=0.1, n_time=N_TIME, vis=None, flags=None, chans=None,
-                 chan_widths=None, freqs=None):
+                 chan_widths=None, freqs=None, leap=0.0):
         a1, a2 = pairs()
         times_mjd = MJD0 + np.arange(n_time) / 86400.0
         band = (
@@ -842,7 +969,11 @@ def stub_ms(monkeypatch):
             "ra": CENTRE["ra"],
             "dec": CENTRE["dec"],
             "ants_itrf": ANTS,
-            "times_mjd": times_mjd,
+            # As read_ms reports them: times_mjd on the scale the MS declares,
+            # times_jd the same instants normalised onto UTC. `leap` drives them
+            # apart the way a TAI-declared MS does.
+            "times_mjd": times_mjd + leap / 86400.0,
+            "times_jd": mjd_to_jd(times_mjd),
             "freqs": freqs,
             "chan_width": float(widths[0]),
             "chan_widths": widths,
@@ -956,6 +1087,109 @@ class TestExtractFromMS:
         stub_ms()
         with pytest.raises(ValueError, match="norad_ids"):
             extract_light_curves_from_ms("obs.ms")
+
+
+class TestDeclaredTimeScale:
+    """The trajectory maths reads UTC, so the driver must use the reader's UTC.
+
+    ``read_ms`` normalises whatever scale the MS declares onto UTC and reports
+    that as ``times_jd``, leaving ``times_mjd`` on the declared scale. Rebuilding
+    a Julian Date from ``times_mjd`` here throws that away: on a TAI-declared MS
+    the propagation, the fringe and the elevations are all 37 s out, which is
+    ~285 km along a LEO satellite's ground track.
+    """
+
+    LEAP = 37.0
+
+    def test_the_readers_utc_times_are_preferred(self):
+        ms = {"times_jd": np.array([2460000.5]),
+              "times_mjd": np.array([60000.0 + self.LEAP / 86400.0])}
+
+        np.testing.assert_allclose(_times_jd(ms), ms["times_jd"])
+
+    def test_a_reader_without_them_falls_back_to_the_declared_column(self):
+        """Readers predating the UTC normalisation report only times_mjd.
+
+        Those read every MS as UTC anyway -- and say so -- so converting the
+        declared column is exactly what the rest of that code base does with it.
+        The branch goes away once every reader normalises.
+        """
+        ms = {"times_mjd": np.array([60000.0])}
+
+        np.testing.assert_allclose(_times_jd(ms), mjd_to_jd(ms["times_mjd"]))
+
+    @pytest.fixture
+    def spy(self, monkeypatch, stub_orbits):
+        """Record the times the geometry is actually evaluated at.
+
+        Depends on ``stub_orbits`` so it is installed *after* it: that fixture
+        stubs the elevations too, and whichever patch lands last is the one the
+        driver calls.
+        """
+        import tabascal.rfi_estimate as mod
+
+        seen = {}
+        real_phase = mod.rfi_phase_from_records
+
+        def phase(records, ants, times_jd, centre, freqs):
+            seen["phase"] = np.asarray(times_jd)
+            return real_phase(records, ants, times_jd, centre, freqs)
+
+        def elevations(records, times_jd, ants):
+            seen["elevation"] = np.asarray(times_jd)
+            return np.full((len(records), len(times_jd)), 45.0)
+
+        monkeypatch.setattr(mod, "rfi_phase_from_records", phase)
+        monkeypatch.setattr(mod, "get_satellite_elevations", elevations)
+
+        return seen
+
+    @staticmethod
+    def _assert_utc(seen, ms, key):
+        np.testing.assert_allclose(seen[key], ms["times_jd"], rtol=0, atol=1e-9)
+        # And not the declared-scale column, a whole leap-second span away.
+        declared = mjd_to_jd(np.asarray(ms["times_mjd"]))
+        assert abs(float(seen[key][0]) - float(declared[0])) > 1e-5
+
+    def test_the_standalone_path_propagates_on_utc(self, stub_ms, spy):
+        ms = stub_ms(leap=self.LEAP)
+
+        extract_light_curves_from_ms("obs.ms", norad_ids=[25544])
+
+        self._assert_utc(spy, ms, "phase")
+
+    def test_the_elevation_cut_is_evaluated_on_utc_too(self, stub_ms, spy):
+        ms = stub_ms(leap=self.LEAP)
+
+        extract_light_curves_from_ms("obs.ms", norad_ids=[25544], min_elevation=0.0)
+
+        self._assert_utc(spy, ms, "elevation")
+
+    def test_the_residual_path_propagates_on_utc(self, tmp_path, stub_ms, spy):
+        import xarray as xr
+
+        a1, _ = pairs()
+        ms = stub_ms(leap=self.LEAP)
+        path = str(tmp_path / "map_pred.zarr")
+        xr.Dataset(
+            {"vis_obs": (("sample", "bl", "freq", "time"),
+                         np.zeros((1, len(a1), N_FREQ, N_TIME), dtype=complex))},
+            coords={"freq": np.asarray(ms["freqs"])},
+        ).to_zarr(path)
+
+        extract_light_curves_from_zarr("obs.ms", path, norad_ids=[25544])
+
+        self._assert_utc(spy, ms, "phase")
+
+    def test_a_utc_ms_is_unaffected(self, stub_ms, spy):
+        """With nothing to normalise the two agree, and nothing changes."""
+        ms = stub_ms()
+
+        extract_light_curves_from_ms("obs.ms", norad_ids=[25544])
+
+        np.testing.assert_allclose(
+            spy["phase"], mjd_to_jd(np.asarray(ms["times_mjd"])), atol=1e-9
+        )
 
 
 class TestExtractFromZarr:
@@ -1249,7 +1483,7 @@ class TestCommandLine:
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
             tabascal.config, "TabConfig",
-            lambda cfg, ms_path: built.append((cfg, ms_path)) or tab_config,
+            lambda cfg, ms_path, **kw: built.append((cfg, ms_path, kw)) or tab_config,
         )
         # Would flip jax_enable_x64 for the whole session; not under test here.
         monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
@@ -1265,6 +1499,9 @@ class TestCommandLine:
         assert len(built) == 1
         # The overrides reach the config the TabConfig is built from.
         assert built[0][0]["data"]["data_col"] == "TAB_RES_DATA"
+        # And an MS with no noise is a curve without an error bar here, not a
+        # stopped run: this command documents the unweighted fallback.
+        assert built[0][2]["require_noise"] is False
         with np.load(out, allow_pickle=False) as npz:
             np.testing.assert_array_equal(
                 npz["norad_ids"], tab_config.norad_ids[:tab_config.n_rfi_real]
@@ -1291,7 +1528,7 @@ class TestCommandLine:
         }
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
-            tabascal.config, "TabConfig", lambda cfg, ms_path: make_tab_config()
+            tabascal.config, "TabConfig", lambda cfg, ms_path, **kw: make_tab_config()
         )
         monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
 
@@ -1385,7 +1622,7 @@ class TestCommandLine:
         }
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
-            tabascal.config, "TabConfig", lambda cfg, ms_path: tab_config
+            tabascal.config, "TabConfig", lambda cfg, ms_path, **kw: tab_config
         )
         monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
         out = str(tmp_path / "res.npz")
@@ -1423,13 +1660,44 @@ class TestCommandLine:
         }
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
-            tabascal.config, "TabConfig", lambda cfg, ms_path: tab_config
+            tabascal.config, "TabConfig", lambda cfg, ms_path, **kw: tab_config
         )
         monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
 
         with pytest.raises(ValueError, match="frequenc"):
             run(_cli("-c", "tab.yaml", "-z", zarr_path,
                      "-o", str(tmp_path / "r.npz")))
+
+    def test_the_config_mode_survives_an_ms_with_no_noise(self, tmp_path, monkeypatch):
+        """End to end: unweighted curves, nan errors, and no coverage table.
+
+        `TabConfig` stops an inference run that has no noise to weight by. This
+        command is not inference, and docs/usage.md promises it still measures
+        the curves -- so it has to reach the estimator at all.
+        """
+        import tabascal.config
+        import tabascal.scripts._run_tabascal_impl as impl
+        from tabascal.scripts.rfi_estimate import run
+
+        config = {
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+                     "data_col": "DATA", "corr": "xx", "freq": None},
+            "rfi": {"min_elevation": None},
+            "satellites": {},
+        }
+        monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
+        monkeypatch.setattr(
+            tabascal.config, "TabConfig",
+            lambda cfg, ms_path, **kw: make_tab_config(noise=None),
+        )
+        monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
+        out = str(tmp_path / "c.npz")
+
+        run(_cli("-c", "tab.yaml", "-o", out))
+
+        with np.load(out, allow_pickle=False) as npz:
+            assert np.isfinite(npz["light_curves"]).all()
+            assert np.isnan(npz["error"]).all()
 
     def test_the_config_mode_honours_the_elevation_flag(self, tmp_path, monkeypatch):
         import tabascal.config
@@ -1444,7 +1712,7 @@ class TestCommandLine:
         }
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
-            tabascal.config, "TabConfig", lambda cfg, ms_path: make_tab_config()
+            tabascal.config, "TabConfig", lambda cfg, ms_path, **kw: make_tab_config()
         )
         monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
 

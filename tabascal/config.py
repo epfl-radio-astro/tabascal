@@ -132,7 +132,7 @@ class TabConfig:
     # Internal tuning parameter, intentionally not exposed in the config.
     _MIN_DIVISORS_VARIABLE = 8
 
-    def __init__(self, config: Dict, ms_path: str):
+    def __init__(self, config: Dict, ms_path: str, require_noise: bool = True):
 
         # self.config = config
         self.args = config
@@ -155,11 +155,15 @@ class TabConfig:
             config["data"]["corr"],
             config["data"]["data_col"],
         )
-        self.set_noise(config["data"]["noise"])
+        self.set_noise(config["data"]["noise"], require=require_noise)
         # After set_noise, so the noise it resolved is carried into the
         # calibrated frame with the data; before set_flags, so the samples no
         # gain could be found for reach the flags; and before the sharding block
         # at the end of this constructor, which makes vis_obs a global array.
+        # Where require_noise is False there may be no noise to carry, and
+        # apply_gain_table leaves that alone: the data are still calibrated and
+        # the uncalibratable samples still flagged, there is simply no error bar
+        # to divide by the gain.
         self.apply_gain_table(config["data"].get("gain_table"))
         self.set_flags(config["data"]["flags"])
         config = fix_padding(
@@ -212,9 +216,10 @@ class TabConfig:
             # far), and every process needs all of it -- at most the size of
             # vis_obs, which is replicated beside it. A scalar override goes
             # through unchanged, as a 0-d global array.
-            self.noise = make_global(
-                jnp.asarray(self.noise), replicated_sharding()
-            )
+            if self.noise is not None:
+                self.noise = make_global(
+                    jnp.asarray(self.noise), replicated_sharding()
+                )
 
     def set_elevation_mask(self, min_elevation: Optional[float]):
         """Mask the RFI signal to zero whenever a satellite is below `min_elevation`.
@@ -255,7 +260,7 @@ class TabConfig:
                 f"(elevation {el.min():.1f} to {el.max():.1f} deg)"
             )
 
-    def set_noise(self, noise):
+    def set_noise(self, noise, require: bool = True):
         """Override the noise read from the MS's ``SIGMA_SPECTRUM``/``SIGMA``.
 
         Accepts a scalar, which applies to every visibility, or a path to an
@@ -273,6 +278,15 @@ class TabConfig:
         A file's values are checked twice: once as read, in float64, and again
         after conversion to the precision the run works in, which single
         precision can turn into a zero or an infinity.
+
+        ``require=False`` lets a still-unset noise through instead of stopping.
+        It is for the one caller that is not inference: the matched-filter
+        light-curve extractor can still measure the curves without a noise, it
+        simply cannot put an error bar on them, and it says so. Nothing that
+        divides by the noise may use it -- a likelihood cannot be weighted by a
+        noise that is not there -- so the default is to stop. Only the *absence*
+        is permitted: an override that is given is validated exactly as strictly
+        either way.
         """
 
         if noise is not None:
@@ -342,9 +356,9 @@ class TabConfig:
                 self.noise = value
                 self.noise_scalar = value
 
-        # Nothing downstream can run without a noise, and nothing invents one:
-        # every consumer of self.noise sits after this point.
-        if self.noise is None:
+        # Nothing that weights by the noise can run without one, and nothing
+        # invents one: every such consumer of self.noise sits after this point.
+        if self.noise is None and require:
             raise ValueError(
                 "The MS partition has neither a usable SIGMA_SPECTRUM nor a "
                 "readable SIGMA column, so it carries no noise estimate at all; "

@@ -240,23 +240,35 @@ def _print_coverage(result, z_crit):
         return
 
     cov = coverage_stats(result, z_crit=z_crit)
-    print(f"\n  Coverage within {z_crit:g} sigma. Judge against the NULL column, not")
-    print("  the analytic value: the floor assumes independent baselines and is")
-    print("  optimistic. null = the same statistic on Im(S_hat), a matched")
-    print("  source-free null. excess = null - cov, the part attributable to a")
-    print("  real residual.\n")
-    print(f"    {'source':<12} {'cov':>7} {'null':>7} {'excess':>8} {'max|z|':>8}")
+    o = cov["overall"]
+    print(
+        f"\n  Coverage of '{result['data_col']}' ({result['corr']}) within "
+        f"{z_crit:g} sigma."
+    )
+    print("  cov/null/excess read Re(S_hat), which assumes that column is PHASE")
+    print("  CALIBRATED: an uncalibrated gain phase rotates the source out of the")
+    print("  real part and into the null, and both move the wrong way. On a raw")
+    print(f"  column read |S| instead (|S_hat|/error <= {o['amp_crit']:.2f}, the")
+    print("  Rayleigh cut enclosing the same probability), which no phase can")
+    print("  rotate away. Judge cov against the NULL column, not the analytic")
+    print("  value: the floor assumes independent baselines and is optimistic.")
+    print("  null = the same statistic on Im(S_hat), a matched source-free null.")
+    print("  excess = null - cov, the part attributable to a real residual.\n")
+    print(
+        f"    {'source':<12} {'cov':>7} {'null':>7} {'excess':>8} "
+        f"{'|S|':>7} {'max|z|':>8}"
+    )
     for p in cov["per_source"]:
         print(
             f"    {p['title']:<12} {p['coverage'] * 100:6.2f}% "
             f"{p['null_coverage'] * 100:6.2f}% {p['excess'] * 100:+7.2f}pp "
-            f"{p['max_z']:8.1f}"
+            f"{p['amp_coverage'] * 100:6.2f}% {p['max_z']:8.1f}"
         )
-    o = cov["overall"]
     print(
         f"    {'OVERALL':<12} {o['coverage'] * 100:6.2f}% "
         f"{o['null_coverage'] * 100:6.2f}% "
-        f"{(o['null_coverage'] - o['coverage']) * 100:+7.2f}pp"
+        f"{(o['null_coverage'] - o['coverage']) * 100:+7.2f}pp "
+        f"{o['amp_coverage'] * 100:6.2f}%"
     )
 
 
@@ -286,20 +298,35 @@ def _from_config(args):
     # both name them and there is no rule for which would win.
     config["rfi"]["min_elevation"] = resolve_min_elevation(args, config)
 
-    tab_config = TabConfig(config, ms_path)
+    # An MS with no usable noise column is not fatal here: the curves are still
+    # measured, and come back unweighted and unscaled with nan errors, which is
+    # what this command documents. Inference keeps the strict default.
+    tab_config = TabConfig(config, ms_path, require_noise=False)
 
     vis = None
     if args.zarr:
         import numpy as np
         import xarray as xr
 
-        from tabascal.rfi_estimate import _model_on_ms_channels
+        from tabascal.rfi_estimate import (
+            _check_zarr_identity,
+            _model_on_ms_channels,
+        )
 
-        # The same alignment the standalone residual goes through: subtracting
-        # positionally would meet a full-band store with a config narrowed by
-        # data.freq and difference two different channels.
+        # The same checks and the same alignment the standalone residual goes
+        # through: subtracting positionally would meet a full-band store with a
+        # config narrowed by data.freq and difference two different channels,
+        # and a store from another observation would be differenced at all.
+        xds = xr.open_zarr(args.zarr)
+        _check_zarr_identity(
+            xds,
+            args.zarr,
+            len(np.asarray(tab_config.a1)),
+            tab_config.times_mjd,
+            config["data"]["corr"],
+        )
         model = _model_on_ms_channels(
-            xr.open_zarr(args.zarr),
+            xds,
             tab_config.freqs,
             args.zarr,
             getattr(tab_config, "chan_widths", None),

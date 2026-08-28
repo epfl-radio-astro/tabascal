@@ -203,17 +203,39 @@ invalidated by a later run overwriting the MS's `TAB_*` columns.
 tabascal light-curve -c tab_target.yaml -z path/to/results/map_pred_Custom.zarr -dc DATA
 ```
 
+The store is checked against the visibilities before anything is subtracted —
+its baseline and timestep counts, the cadence of its time axis, and the
+correlation it was fitted on — so a results zarr from another run or another
+correlation is refused rather than differenced. Frequencies are matched
+channel by channel; the counts and cadence are what catch a store that lines up
+by accident.
+
 A fully subtracted satellite has `|z| <= 3` almost everywhere. Judge that
 against the `null` column the command prints, not against the analytic 99.73%:
 the noise floor assumes the de-rotated per-baseline samples are independent and
 residual sky is not, so the floor is optimistic. The null is the same statistic
 on `Im(S_hat)`, which after de-rotation carries the same noise and no source.
 
+**`cov`, `null` and `excess` assume the column they scored is phase
+calibrated.** They read `Re(S_hat)`, which is the whole of a de-rotated real
+source only once the antenna gain phases are out of the data; an uncalibrated
+phase rotates the source off the real axis, which deflates `z` *and* pushes the
+source into the imaginary null it is judged against — both move the wrong way,
+so a bright residual can read as clean. The command names the column it scored
+in the heading for that reason. On a raw column read the `|S|` column instead:
+that is `|S_hat|/error` against a Rayleigh threshold enclosing the same
+probability (3.44 for 3 sigma), and no phase can rotate a magnitude away. The
+optimistic-floor caveat applies to it equally.
+
 The floor comes from the MS's own noise column, so an MS carrying none — and no
 `data.noise` to supply one — has no floor to quote. The light curves are still
 measured and written, but `error` and `z` are NaN and the coverage table is
 replaced by a line saying so: `1/sqrt(N_bl)` would be quoting a noise of 1 Jy
 that nobody stated, and a z built on it would look like a detection at any flux.
+
+An MS with no usable noise column is not an error here, unlike a `tabascal run`
+that has to weight a likelihood by it: the curves are still measured, and come
+back unweighted with NaN errors and no coverage table, as above.
 
 To read one channel instead of the whole band, pass `-f` with a frequency in Hz.
 The nearest channel is used, and the request must land inside it — a frequency
