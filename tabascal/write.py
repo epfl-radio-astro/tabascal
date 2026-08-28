@@ -1,5 +1,12 @@
-from tabascal.distributed import is_process_0
+from tabascal.distributed import (
+    constrain_rfi_state,
+    is_process_0,
+    make_global,
+    rfi_sharding,
+    sharding_enabled,
+)
 from tabascal.gain_table import gains_from_tables, normalise_gain_tables
+from tabascal.imports import import_components
 from tabascal.interferometry import baseline_gains
 from tabascal.ms import (
     fitted_correlation,
@@ -27,9 +34,21 @@ import warnings
 
 import numpy as np
 
+import jax
+import jax.numpy as jnp
+
 import xarray as xr
 import dask.array as da
 import dask
+
+
+#: Prefix of the per-satellite RFI columns; the NORAD id is appended, giving
+#: ``TAB_RFI_58126``. The ``TAB_RFI_DATA`` those columns sum back to shares the
+#: prefix, which is the point: they are that column, split by satellite.
+RFI_PER_SAT_PREFIX = "TAB_RFI_"
+
+#: Dimensions of the per-satellite RFI variable in a results zarr, in order.
+RFI_PER_SAT_DIMS = ("sample", "src", "bl", "freq", "time")
 
 
 def _to_ms_column(arr, dims, chunks, n_freq, n_corr=1):
@@ -878,10 +897,456 @@ def write_gain_caltable(
     return out_path
 
 
+# ---------------------------------------------------------------------------
+# Per-satellite RFI decomposition
+# ---------------------------------------------------------------------------
+
+def _rfi_vis_reference(tab_config) -> str:
+    """The one ``rfi_vis`` component in the run's model list, as its reference.
+
+    The decomposition is only the run's own RFI visibility op run one satellite
+    at a time, so it has to be *that* op: a different one would answer a
+    question about a model the run did not fit. Which one it was is not recorded
+    anywhere but ``model.components``, and if that names none, or more than one,
+    there is no answer to give rather than a guess to make.
+    """
+
+    components = (tab_config.args.get("model") or {}).get("components") or []
+    refs = [
+        ref
+        for ref in components
+        if ref.replace(":", ".").rsplit(".", 1)[0].rsplit(".", 1)[-1] == "rfi_vis"
+    ]
+
+    if len(refs) != 1:
+        raise ValueError(
+            f"data.save_rfi_per_sat needs exactly one rfi_vis component to "
+            f"evaluate per satellite, but model.components names {len(refs)}: "
+            f"{refs}. The per-satellite decomposition is the run's own RFI "
+            "visibility op evaluated one source at a time, so there has to be "
+            "exactly one op to evaluate."
+        )
+
+    return refs[0]
+
+
+def wants_rfi_per_sat(vi_pred: dict, tab_config) -> bool:
+    """Whether this run asked for a per-satellite decomposition it can make.
+
+    Three things, and the last two are not the option's business: the run has to
+    have asked (``data.save_rfi_per_sat``), the prediction has to carry the
+    fitted fine grid the decomposition is made from, and there has to be at
+    least one real satellite to decompose into. A satellite-free run would
+    otherwise store an empty ``src`` axis, which is not a decomposition of
+    anything and is a column-less export downstream.
+
+    Evaluated on every process, and identically: the answer decides whether the
+    collective evaluations in :func:`rfi_vis_per_sat` are made at all.
+    """
+
+    return bool(
+        tab_config.args["data"].get("save_rfi_per_sat", False)
+        and "rfi_A" in vi_pred
+        and int(getattr(tab_config, "n_rfi_real", getattr(tab_config, "n_rfi", 0)))
+    )
+
+
+def _source_mask(r: int, n_rfi: int):
+    """A boolean ``(n_rfi, 1, 1, 1)`` mask selecting source ``r`` alone.
+
+    A **global** array under sharding, built through :func:`make_global` on the
+    RFI sharding, rather than a ``jnp.arange`` comparison: the operands it is
+    combined with are global arrays split over the mesh, and a process-local
+    array of the full length mixed into that is the mistake the distributed
+    layer exists to avoid -- every process would be describing the whole source
+    axis while holding one shard of it.
+
+    Boolean rather than 0/1, because it is used with ``jnp.where`` (see
+    :func:`rfi_vis_per_sat`) and never multiplied.
+    """
+
+    mask = np.zeros((n_rfi, 1, 1, 1), dtype=bool)
+    mask[r] = True
+
+    if sharding_enabled():
+        return make_global(mask, rfi_sharding())
+
+    return jnp.asarray(mask)
+
+
+def rfi_vis_per_sat(vi_pred: dict, tab_config):
+    """The fitted RFI visibility, decomposed one satellite at a time.
+
+    The RFI visibility op reduces over the satellite (``n_rfi``) axis, so each
+    source's contribution is recovered by evaluating the **same** op with every
+    other source's amplitude held at zero -- on the already-fitted fine-grid
+    ``rfi_A`` and ``rfi_phase`` carried in ``vi_pred``. No re-fit, no GP
+    re-evaluation, and no second model: the component is the run's own, rebuilt
+    from ``model.components`` (see :func:`_rfi_vis_reference`).
+
+    **The pieces sum back to ``vis_rfi`` exactly in exact arithmetic, and in
+    floating point to a difference that is data-dependent and cannot be bounded
+    by the coarse visibilities.** The op reduces over source *and* integration
+    sample together; evaluating one source at a time re-associates that single
+    reduction, and ``sum_r round(x_r) != round(sum_r x_r)``.
+
+    What the difference is bounded by is the **fine-grid** terms, not the coarse
+    values they average to -- and where the fine grid cancels, the two can be
+    nothing like each other. A source whose fine samples are ``[A, -A]`` beside
+    one whose are ``[1, 0]``: a kernel that sums the sources at each fine sample
+    (``RiemannVis`` does, in ``calculate_rfi_vis_fine``) rounds ``A + 1`` back to
+    ``A`` and averages to 0, while the per-source evaluation keeps the 1 and
+    gives 0.5. The difference is then the whole of the coarse visibility. Which
+    kernels it happens in is a property of their accumulation order: the FFI and
+    variable kernels accumulate source-major on that input and lose nothing.
+
+    In practice it is round-off: on fitted grids it measures ~2e-16 relative in
+    fp64 and ~6e-8 in fp32, orders of magnitude below anything a wrong
+    decomposition (a dropped source, a mask on the wrong axis) would produce.
+    The caveat is about what can be *promised*, and the promise is qualitative.
+
+    Zeroed rather than sliced, at ``n_rfi`` times the cost of a slice, because
+    that is what keeps the RFI-axis sharding intact: the op runs inside
+    ``psum_over_rfi``'s ``shard_map``, whose ``in_specs`` require the full
+    ``n_rfi`` leading axis, and a one-source slice could not be split across the
+    mesh at all. The alternative -- gathering the fine grids to one process --
+    would materialise the largest arrays in the run on a single device, which is
+    precisely what the sharding exists to avoid. Every process must therefore
+    call this: the evaluations are collectives. Only process 0 keeps the result,
+    since the op's output is replicated by the ``psum``.
+
+    Padded sources are excluded: sharding pads the satellite list to a multiple
+    of the device count with dark dummies, and only ``norad_ids[:n_rfi_real]``
+    name a satellite. They contribute exactly zero, so dropping them leaves the
+    sum-back above untouched.
+
+    **Process 0 holds the whole result**, ``n_rfi_real`` times the size of
+    ``vis_rfi``, before it is handed to the zarr -- the peak memory of the write,
+    and the reason the option's cost note names a storage multiplier rather than
+    a slice. Streaming each source straight into the store would remove that
+    multiplier; it is not done here, because the sink would have to be created
+    before the first collective and the results zarr is written after it.
+
+    Returns ``(vis_src, norad_ids)`` with ``vis_src`` of shape ``(n_sample,
+    n_rfi_real, n_bl, n_freq, n_time)`` in the model's own dtype -- ``None`` off
+    process 0 -- and ``norad_ids`` the satellite behind each ``src`` index.
+    """
+
+    comp = import_components([_rfi_vis_reference(tab_config)])[0]()
+    comp.setup(tab_config)
+    constants = {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
+    forward = comp.build_forward()
+
+    rfi_A, rfi_phase = vi_pred["rfi_A"], vi_pred["rfi_phase"]
+    vis_rfi = vi_pred["vis_rfi"]
+    n_sample, n_rfi = rfi_A.shape[:2]
+    n_real = int(getattr(tab_config, "n_rfi_real", n_rfi))
+
+    # One compile, reused for every source and sample: the mask is an argument
+    # rather than a Python constant. Jitted so the masking fuses into the
+    # reshape the op makes of rfi_A anyway, instead of leaving a second
+    # full-size copy of the fine grid resident beside it.
+    @jax.jit
+    def one_source(mask, rfi_A, rfi_phase, vis_zero):
+        # where, not a multiply by 0/1: a masked source is then exactly zero even
+        # where the fitted grid is not finite, since 0 * inf and 0 * nan are nan
+        # and one bad source would poison every other source's column -- the same
+        # reason the elevation mask in rfi_signal is a where. The phase is masked
+        # for the same reason and not only the amplitude: the kernels form
+        # exp(i * phase) before multiplying by it, so a non-finite phase gives a
+        # non-finite factor whatever the amplitude is.
+        state = {
+            "rfi_A": jnp.where(mask, rfi_A, 0),
+            "rfi_phase": jnp.where(mask, rfi_phase, 0),
+            "vis_rfi": vis_zero,
+        }
+
+        return forward({}, constrain_rfi_state(state, n_rfi), constants)["vis_rfi"]
+
+    keep = is_process_0()
+    vis_src, failure = None, None
+
+    if keep:
+        # Allocated before the first evaluation, and a failure here is carried to
+        # the end rather than raised on the spot: the evaluations below are
+        # collectives, and a rank that leaves the loop early strands every other
+        # rank in the next psum until the coordinator times out. Every rank makes
+        # every call; only process 0 stores what comes back.
+        try:
+            vis_src = np.empty(
+                (n_sample, n_real) + tuple(vis_rfi.shape[1:]), dtype=vis_rfi.dtype
+            )
+        except Exception as err:  # pragma: no cover - an allocation this size
+            failure = err
+
+    for s in range(n_sample):
+        vis_zero = jnp.zeros_like(vis_rfi[s])
+        for r in range(n_real):
+            vis = one_source(
+                _source_mask(r, n_rfi), rfi_A[s], rfi_phase[s], vis_zero
+            )
+
+            if vis_src is not None and failure is None:
+                try:
+                    vis_src[s, r] = np.asarray(vis)
+                except Exception as err:  # pragma: no cover - see above
+                    failure = err
+
+    # Only now, with every collective made on every rank.
+    if failure is not None:
+        raise failure
+
+    return vis_src, [int(nid) for nid in tab_config.norad_ids[:n_real]]
+
+
+def per_sat_sources(xds_tab, results_zarr_path: str):
+    """``(rfi_vis_src, norad_ids)`` from a results zarr, or a clear ``ValueError``.
+
+    Everything the writer assumes about the variable is checked here rather than
+    left to fail later or not at all. The two silent failures are what this is
+    for: an array whose axes are in another order still reshapes into MS rows,
+    putting visibilities on the wrong baselines and timesteps; and a ``norad_id``
+    coordinate that does not describe the ``src`` axis names the columns after
+    the wrong satellites. Both would be read as a decomposition, which is exactly
+    the thing this export exists to be trusted about.
+
+    The coordinate's *length* is not checked separately: once its dimensions are
+    ``("src",)`` xarray has already tied it to the ``src`` axis, and a store
+    where the two disagree cannot be opened at all.
+    """
+
+    if "rfi_vis_src" not in xds_tab:
+        raise ValueError(
+            f"{results_zarr_path} holds no 'rfi_vis_src'. Re-run tabascal with "
+            "data.save_rfi_per_sat: true to have the fit store the RFI "
+            "visibility split per satellite."
+        )
+
+    var = xds_tab.rfi_vis_src
+
+    if var.dims != RFI_PER_SAT_DIMS:
+        raise ValueError(
+            f"rfi_vis_src has dimensions {var.dims}; expected "
+            f"{RFI_PER_SAT_DIMS}. An array on other axes, or in another order, "
+            "reshapes into MS rows just as happily and puts every visibility "
+            "somewhere else."
+        )
+
+    if var.sizes["src"] == 0:
+        raise ValueError(
+            f"{results_zarr_path} holds an empty 'src' axis: there is no "
+            "satellite to write a column for. The run fitted no RFI sources."
+        )
+
+    if var.sizes["sample"] == 0:
+        raise ValueError(
+            f"{results_zarr_path} holds an empty 'sample' axis: there is no "
+            "prediction to average. The mean over no samples is NaN, and a "
+            "column of NaN would be read as a modelled visibility."
+        )
+
+    if "norad_id" not in xds_tab.coords:
+        raise ValueError(
+            f"{results_zarr_path} holds 'rfi_vis_src' but no 'norad_id' "
+            "coordinate, so nothing says which satellite each source is. The "
+            "columns are named after it and cannot be named without it."
+        )
+
+    norad_id = xds_tab.norad_id
+
+    if norad_id.dims != ("src",):
+        raise ValueError(
+            f"The norad_id coordinate has dimensions {norad_id.dims}; expected "
+            "('src',). It has to name one satellite per source."
+        )
+
+    if not np.issubdtype(norad_id.dtype, np.integer):
+        raise ValueError(
+            f"The norad_id coordinate is {norad_id.dtype}; expected an integer "
+            "type. A NORAD id is an integer, and a float one would name the "
+            "columns TAB_RFI_58126.0 or, worse, round to another satellite."
+        )
+
+    return var.data, [int(nid) for nid in norad_id.values]
+
+
+@measure_runtime
+def write_per_sat_rfi_ms(
+    ms_path: str,
+    results_zarr_path: str,
+    prefix: str = RFI_PER_SAT_PREFIX,
+    corr: str | None = None,
+):
+    """Write each satellite's RFI visibility prediction to its own MS column.
+
+    Reads ``rfi_vis_src`` -- written by a run with ``data.save_rfi_per_sat:
+    true`` -- back out of a results zarr and assigns one column per satellite,
+    ``<prefix><NORAD id>``, e.g. ``TAB_RFI_58126``. Image one of them to see a
+    single satellite's modelled RFI: a genuine satellite is a clean streak in
+    exactly one per-source image, while a feature that appears in several is sky
+    flux the RFI model has split across satellites -- which reduced chi^2 cannot
+    see, since the split costs it nothing.
+
+    Standalone and re-runnable: the zarr and the MS are all it needs, with no
+    ``TabConfig``, no re-fit and nothing of the run left in memory. So the
+    decomposition can be exported long after the fit, and re-exported.
+
+    The columns are in the **calibrated frame**, the one frame
+    :func:`write_results_ms` puts every column in, and they get there the same
+    way ``TAB_RFI_DATA`` does: they are model visibilities, fitted to data with
+    both gain layers already divided out, so nothing is applied to them here.
+    That is what makes
+
+        ``sum over satellites of TAB_RFI_<NORAD> == TAB_RFI_DATA``
+
+    a statement about round-off rather than about frames. Both sides make the
+    same ``complex64`` cast, in the same place -- before the sample mean, not
+    after it -- and go through the same row mapping, so what this writer adds is
+    float32 rounding and nothing else:
+
+        **Given** that the zarr's ``rfi_vis`` is the exact-arithmetic sum over
+        sources of ``rfi_vis_src``,
+
+        ``|sum_r TAB_RFI_<NORAD_r> - TAB_RFI_DATA|
+            <= (n_src + n_sample + 2) * ulp32(max_s sum_r |rfi_vis_src[s, r]|)``
+
+        per component, the real and imaginary parts separately, since a
+        complex64 cast rounds each of them on its own.
+
+    The hypothesis is what makes it a bound rather than a hope, and it is a
+    statement about the *zarr*, not about this writer: whether the fit's own
+    ``rfi_vis`` really is that sum is :func:`rfi_vis_per_sat`'s subject, and the
+    answer there is qualitative -- exact in exact arithmetic, round-off in
+    practice, and unbounded in the coarse values under fine-grid cancellation.
+    A results zarr carrying such a case exports columns that inherit it.
+
+    **The scale is measured before the sample mean**, on the per-sample,
+    per-source values, because that is where the rounding happens. Referencing
+    it to the columns instead would be wrong wherever the samples cancel: two
+    samples of ``+A`` and ``-A`` average to a column of zero while the total was
+    rounded from ``A``, so the columns can be zero and the difference nowhere
+    near it. The count is one ulp for each of the ``n_src`` terms cast into its
+    column, one for each step of the two sample means, and one for the sum
+    itself.
+
+    It is not a bit-for-bit identity, and cannot be: ``sum_r round(x_r)`` is not
+    ``round(sum_r x_r)``.
+
+    Correlations that were not fitted are 0, matching the model columns beside
+    them; ``corr`` overrides the correlation the zarr recorded, exactly as in
+    :func:`write_results_ms`, and is needed only for a zarr written before that
+    attribute existed.
+    """
+
+    # In multi-process runs only process 0 writes; nothing here is sharded.
+    if not is_process_0():
+        return
+
+    xds_ms = xds_from_ms(ms_path)[0]
+    xds_tab = xr.open_zarr(results_zarr_path)
+
+    src, norad_ids = per_sat_sources(xds_tab, results_zarr_path)
+    _, n_src, n_bl, n_freq, n_time = src.shape
+
+    n_corr = xds_ms.sizes["corr"]
+
+    corr_idx = fitted_correlation(
+        ms_path,
+        xds_tab.attrs.get("corr"),
+        corr,
+        n_corr,
+        partition_polarization(ms_path, xds_ms),
+    )
+
+    # Validated before any column is built, for the same reason write_results_ms
+    # validates there: a zarr from another MS otherwise surfaces as a dask
+    # "chunks do not add up to shape" error from the first reshape.
+    layout = ms_layout(xds_ms)
+
+    if layout.n_bl != n_bl:
+        raise ValueError(
+            f"The results hold {n_bl} baselines but the MS has {layout.n_bl} "
+            f"({layout.n_time * layout.n_bl} rows over {layout.n_time} "
+            "timesteps). The results zarr does not belong to this measurement "
+            "set, or an antenna was dropped between the run and the write."
+        )
+
+    if layout.n_time != n_time:
+        raise ValueError(
+            f"The results hold {n_time} timesteps but the MS has "
+            f"{layout.n_time}. The results zarr does not belong to this "
+            "measurement set."
+        )
+
+    if int(xds_ms.sizes["chan"]) != n_freq:
+        raise ValueError(
+            f"The results hold {n_freq} channels but the MS has "
+            f"{int(xds_ms.sizes['chan'])}. A run narrowed with data.freq covers "
+            "part of the band, and there is nothing here that says which part, "
+            "so the columns cannot be placed."
+        )
+
+    cols = [f"{prefix}{nid}" for nid in norad_ids]
+
+    if len(set(cols)) != n_src:
+        repeated = sorted({nid for nid in norad_ids if norad_ids.count(nid) > 1})
+        raise ValueError(
+            f"The results hold more than one source per NORAD id {repeated}, "
+            f"which would write one {prefix}<id> column per pair of sources "
+            "instead of one per source -- the later source silently replacing "
+            "the earlier. Fit each satellite once."
+        )
+
+    dims = ["row", "chan", "corr"]
+    chunks = {k: v for k, v in xds_ms.chunks.items() if k in dims}
+    # The results live on a length-1 correlation axis until into_corr places
+    # them on the MS's, so they must not carry the MS's correlation chunk.
+    fit_chunks = {k: v for k, v in chunks.items() if k != "corr"}
+
+    # Cast first and averaged afterwards, which is the order write_results_ms
+    # forms TAB_RFI_DATA in. Averaging first would leave the two sides of the
+    # sum-back rounding at different points and a multi-sample run's columns
+    # would no longer add up to the column they decompose.
+    src = src.astype(np.complex64).mean(axis=0)
+
+    for i, col in enumerate(cols):
+        vis = _to_ms_column(src[i], dims, fit_chunks, n_freq)
+        xds_ms = xds_ms.assign(
+            **{
+                col: xr.DataArray(
+                    into_corr(vis.data, corr_idx, n_corr, 0), dims=dims
+                ).chunk(chunks)
+            }
+        )
+
+    col_keywords = {col: {"UNIT": "Jy"} for col in cols}
+
+    print(f"Writing per-satellite RFI predictions to {cols} columns in MS file.")
+
+    # One fused compute for every column, as the results writer does: the
+    # sources share the read of the zarr and the MS's row layout.
+    dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
+
+
 @measure_runtime
 def write_results_xds(
     vi_pred: dict, tab_config, file_path: str, overwrite: bool = True
 ):
+
+    # Optional per-satellite decomposition of the fitted RFI visibility, one
+    # `src` slice per NORAD id, so each source can be imaged on its own -- a
+    # diagnostic for sky signal leaking into the RFI model. Off by default: it
+    # is ~n_rfi x the rfi_vis storage and n_rfi forward-op evaluations.
+    #
+    # Above the process-0 guard because it is a collective: the op runs inside
+    # psum_over_rfi's shard_map, so every process has to reach it. The workers'
+    # copy of the result is None, and they return at the guard below without
+    # ever looking at it.
+    per_sat = (
+        rfi_vis_per_sat(vi_pred, tab_config)
+        if wants_rfi_per_sat(vi_pred, tab_config)
+        else None
+    )
 
     # Only process 0 writes. Everything written below is replicated on every
     # process; per-RFI arrays (rfi_A/rfi_phase) are sharded and must not be
@@ -934,6 +1399,22 @@ def write_results_xds(
         attrs={"corr": tab_config.args["data"]["corr"]},
     )
     # print(map_xds)
+
+    if per_sat is not None:
+        vis_src, norad_ids = per_sat
+        map_xds = map_xds.assign(
+            rfi_vis_src=(
+                list(RFI_PER_SAT_DIMS),
+                # One chunk per (sample, satellite), which is how it is read:
+                # imaging one satellite, or writing one MS column, should not
+                # pull the whole decomposition off disk to reach a slice of it.
+                da.asarray(vis_src).rechunk((1, 1, -1, -1, -1)),  # type: ignore
+            )
+        )
+        # The satellite behind each `src` index, as an int -- the name the MS
+        # columns are written under, and the only thing that says which source
+        # is which.
+        map_xds = map_xds.assign_coords(norad_id=("src", np.asarray(norad_ids)))
 
     mode = "w" if overwrite else "w-"
 

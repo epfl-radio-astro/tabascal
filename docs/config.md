@@ -66,6 +66,7 @@ data:
   corr: xx
   noise:
   gain_table:
+  save_rfi_per_sat: false
 ```
 
 * `sim_dir`: Simulation directory created when using `sim-vis` to simulate a dataset. This can also be given at runtime of `tabascal` with the `-s` flag.
@@ -125,6 +126,16 @@ data:
   With a list, **each table is interpolated onto the observation's grid and only then are they composed**, `g_total = Π gᵢ` in the order given. The two orders disagree: two amplitudes ramping 1 → 3 give `2 × 2 = 4` half way when each is interpolated first, and `(1 + 9) / 2 = 5` when the product is interpolated, which is an artefact of fitting a quadratic with a straight line.
 
   Each table prints one coverage line as it is read, giving the fractions of the observation's samples whose gain was taken exactly from a solution, interpolated between solutions, held from an edge, or left unsolved — a table that turns out to cover the observation mostly by extrapolation says so rather than being applied in silence. Each sample is classified by the support it was actually built from, so a table whose solutions run along a diagonal reports the edge-holds it really performed rather than the rectangle its two axes span. The coverage line is also what catches a table whose `TIME` was written on some other unit or scale, which is assumed rather than read: it would report no exact cover at all.
+
+* `save_rfi_per_sat`: Also store the fitted RFI visibility **split per satellite** in the results `.zarr`, as `rfi_vis_src (sample, src, bl, freq, time)` with a `norad_id` coordinate naming the satellite behind each `src`. Default `false`.
+
+  It is a diagnostic for astronomical signal leaking into the RFI model: a genuine satellite is a clean streak in exactly one per-source image, while a feature that appears in several is sky flux the model has split across satellites — which reduced chi² is blind to, since the split costs it nothing. Write the sources into MS columns with [`tabascal rfi-per-sat`](output.md) and image one at a time.
+
+  Off by default because it is not free. The stored array is `n_rfi` times the size of `rfi_vis`, and filling it costs `n_rfi` extra evaluations of the run's own RFI-visibility op — one per satellite, each over the whole source axis with the other satellites' amplitudes held at zero, which is what keeps the evaluation inside the RFI-axis sharding rather than gathering the fine grids onto one device. That is a few forward passes' worth of work at the end of a fit, not a second fit, but it is `n_rfi` × the *storage* forever.
+
+  **The same multiplier applies to memory on the writing process**, which assembles the whole decomposition before handing it to the zarr: budget `n_rfi × sizeof(rfi_vis)` on rank 0 at the end of a run, on top of what the fit already holds. On disk it is chunked one satellite per chunk, so reading or imaging a single source does not pull the rest of them in.
+
+  Padded sources are not stored: under sharding the satellite list is padded to a multiple of the device count with dark dummies, and only the real satellites get a `src` slice. The sources sum back to `rfi_vis` exactly in exact arithmetic; in floating point the split re-associates the op's single reduction over (source, integration sample), which is round-off on fitted grids (~2e-16 relative in double, ~6e-8 in single) but is bounded by the *fine-grid* terms rather than by the coarse visibilities — see [the per-satellite columns](output.md) for the case where those two differ by everything.
 
 ## Plots
 

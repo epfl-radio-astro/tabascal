@@ -201,6 +201,79 @@ class TestLightCurveSubcommand:
         assert args.exclude_autos is False
 
 
+class TestRfiPerSatSubcommand:
+    """``tabascal rfi-per-sat``: the per-satellite RFI columns, post hoc.
+
+    Both inputs are required -- there is nothing to derive an MS from here, and
+    a results zarr the run did not write per-satellite visibilities into has
+    nothing to export.
+    """
+
+    def test_the_ms_and_the_results_zarr(self):
+        args = _parse("rfi-per-sat", "-m", "obs.ms", "-z", "map_pred.zarr")
+        assert args.command == "rfi-per-sat"
+        assert args.ms_path == "obs.ms"
+        assert args.results_zarr_path == "map_pred.zarr"
+
+    def test_both_are_required(self):
+        with pytest.raises(SystemExit):
+            _parse("rfi-per-sat", "-m", "obs.ms")
+        with pytest.raises(SystemExit):
+            _parse("rfi-per-sat", "-z", "map_pred.zarr")
+
+    def test_the_defaults(self):
+        args = _parse("rfi-per-sat", "-m", "o.ms", "-z", "r.zarr")
+        # The columns the docs name, and the correlation off the zarr.
+        assert args.prefix == "TAB_RFI_"
+        assert args.corr is None
+
+    def test_the_prefix_and_correlation_can_be_given(self):
+        args = _parse(
+            "rfi-per-sat", "-m", "o.ms", "-z", "r.zarr", "-p", "RFI_SRC_", "-c", "yy"
+        )
+        assert args.prefix == "RFI_SRC_"
+        assert args.corr == "yy"
+
+    def test_the_writer_is_imported_only_when_it_runs(self):
+        """The top-level parser builds this one, and `tabascal -h` stays cheap.
+
+        ``tabascal.write`` pulls in JAX, so it may not be imported at module
+        level here: the parser is built on every ``tabascal`` invocation.
+        """
+        from tabascal.scripts import rfi_per_sat_to_MS
+
+        assert not hasattr(rfi_per_sat_to_MS, "write_per_sat_rfi_ms")
+        assert rfi_per_sat_to_MS.build_parser() is not None
+
+    def test_building_the_whole_parser_imports_no_jax(self):
+        """In a clean process: the test session has JAX imported long before this.
+
+        Checking ``sys.modules`` in-process proves nothing -- conftest imports
+        JAX at collection. A subprocess that does nothing but build the parser is
+        the only place the claim can be made, and it covers every subcommand's
+        parser, not only this one's.
+        """
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys\n"
+                "from tabascal.scripts.run_tabascal import build_parser\n"
+                "build_parser().parse_args(['rfi-per-sat', '-m', 'o.ms', '-z', 'r.zarr'])\n"
+                "print(sorted(m for m in ('jax', 'numpyro', 'tabascal.write')"
+                " if m in sys.modules))\n",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "[]", result.stdout
+
+
 class TestLightCurveInputs:
     """Resolution of the inputs argparse cannot express on its own."""
 

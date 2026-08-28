@@ -31,6 +31,16 @@ def _light_curve_cmd(args):
 
 
 # ---------------------------------------------------------------------------
+# 'rfi-per-sat' subcommand
+# ---------------------------------------------------------------------------
+
+def _rfi_per_sat_cmd(args):
+    # Lazy for the same reason: the export needs tabascal.write, which is JAX.
+    from tabascal.scripts.rfi_per_sat_to_MS import run
+    run(args)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -92,6 +102,15 @@ def build_parser():
     )
     _build_lc_parser(lc_parser)
 
+    # -- rfi-per-sat --
+    from tabascal.scripts.rfi_per_sat_to_MS import build_parser as _build_ps_parser
+
+    ps_parser = subparsers.add_parser(
+        "rfi-per-sat",
+        help="Write each satellite's RFI visibility prediction to its own MS column.",
+    )
+    _build_ps_parser(ps_parser)
+
     return parser
 
 
@@ -102,6 +121,8 @@ def main():
         _run_cmd(args)
     elif args.command == "light-curve":
         _light_curve_cmd(args)
+    elif args.command == "rfi-per-sat":
+        _rfi_per_sat_cmd(args)
 
 
 if __name__ == "__main__":
