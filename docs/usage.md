@@ -181,6 +181,12 @@ none of them and the config decides:
 tabascal light-curve -c tab_target.yaml -ms path/to/ms/file.ms
 ```
 
+A satellite in the config that never rises above the cut is not an error here,
+as it is for a run: this command measures rather than fits, a satellite that
+never rose has a zero curve, and stopping would leave `--no-elevation-cut` —
+which drops the cut for *every* satellite — as the only way to measure the ones
+that were up. The command names it and carries on.
+
 For an observation TABASCAL has not been configured against, name the
 satellites yourself:
 
@@ -189,10 +195,12 @@ tabascal light-curve -ms path/to/ms/file.ms -n 27868,57865,60093 -dc DATA
 ```
 
 The output goes to `<ms_dir>/light_curves/<tag or column>.npz` unless `-o` says
-otherwise. Alongside the four names the format requires it carries the noise
-floor (`error`), the significance `z = Re(S_hat) / error`, the complex estimate
-and the in-view mask; readers of the format ignore the extras. `-p` also writes
-a per-source spectrogram of `z`.
+otherwise. `light_curves` is the magnitude `|S_hat|`, which is what the format
+requires — a complex array there is rejected on read rather than truncated to
+its real part. Alongside the four names the format requires, the output carries
+the noise floor (`error`), the significance `z = Re(S_hat) / error`, the native
+complex estimate (`light_curves_complex`) and the in-view mask; readers of the
+format ignore the extras. `-p` also writes a per-source spectrogram of `z`.
 
 To score a run, filter its *residual* rather than a data column. Point `-z` at
 the run's results zarr and `-dc` at the reference column the residual is formed

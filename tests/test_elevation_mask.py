@@ -18,7 +18,8 @@ import pytest
 from tabascal.config import TabConfig
 
 
-def build_mask(elevations, min_elevation, n_int_time=1, monkeypatch=None):
+def build_mask(elevations, min_elevation, n_int_time=1, monkeypatch=None,
+               require_in_view=True):
     """Run set_elevation_mask against a fixed elevation array."""
     elevations = np.asarray(elevations, dtype=float)
     n_rfi, n_time = elevations.shape
@@ -35,7 +36,7 @@ def build_mask(elevations, min_elevation, n_int_time=1, monkeypatch=None):
         "tabascal.config.get_satellite_elevations",
         lambda *args, **kwargs: elevations,
     )
-    TabConfig.set_elevation_mask(cfg, min_elevation)
+    TabConfig.set_elevation_mask(cfg, min_elevation, require_in_view=require_in_view)
     return cfg
 
 
@@ -92,3 +93,35 @@ class TestElevationMaskBehaviour:
         with pytest.raises(ValueError) as excinfo:
             build_mask([[50.0, 50.0], [-5.0, -1.0]], 30.0, monkeypatch=monkeypatch)
         assert "40001" in str(excinfo.value)
+
+
+class TestRequireInView:
+    """``require_in_view=False`` measures what is there instead of stopping.
+
+    A fully-masked satellite has no signal for inference to fit, so the default
+    is to stop. The matched-filter light-curve extractor is not inference: it
+    reports a zero curve for a satellite that never rose, which is an answer, and
+    stopping instead would make it impossible to measure the satellites that
+    *were* up without first editing them out of the config.
+    """
+
+    def test_a_never_visible_satellite_is_tolerated(self, monkeypatch):
+        cfg = build_mask(
+            [[50.0, 50.0], [-5.0, -1.0]], 30.0,
+            monkeypatch=monkeypatch, require_in_view=False,
+        )
+        np.testing.assert_array_equal(cfg.rfi_mask[0], [True, True])
+        assert not cfg.rfi_mask[1].any()
+
+    def test_the_tolerated_satellite_is_still_named(self, monkeypatch, capsys):
+        """Silently modelling nothing for a configured satellite is the failure."""
+        build_mask(
+            [[50.0, 50.0], [-5.0, -1.0]], 30.0,
+            monkeypatch=monkeypatch, require_in_view=False,
+        )
+        out = capsys.readouterr().out
+        assert "40001" in out and "never above" in out
+
+    def test_the_default_still_raises(self, monkeypatch):
+        with pytest.raises(ValueError, match="never above"):
+            build_mask([[50.0, 50.0], [-5.0, -1.0]], 30.0, monkeypatch=monkeypatch)

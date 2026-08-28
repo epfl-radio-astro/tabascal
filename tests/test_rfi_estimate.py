@@ -871,6 +871,80 @@ class TestCoverageStats:
             coverage_stats({"titles": ["a"]})
 
 
+class TestCoverageWithFullyMaskedSources:
+    """A source that was never in view has no coverage, and must not stand in for one.
+
+    Its cells are all nan, so its coverage is nan — and nan loses every
+    comparison, which makes ``min`` keep whichever nan it met first and report a
+    source that was never measured as the worst-fitted one. The summary has to
+    be over the sources that were actually measured.
+    """
+
+    #: Timesteps of the third source pushed outside the cut, so its coverage is
+    #: known exactly and is strictly the lowest of the measured sources.
+    N_BAD = 4
+    WORST = (N_TIME - N_BAD) / N_TIME
+
+    def _mixed(self):
+        """Three sources: one never in view, one fully covered, one partly.
+
+        The two visible sources' coverages are set on ``z`` directly rather than
+        left to the synthetic curves, since two random bright sources can easily
+        score the same and could not then tell an ordering apart from a bug.
+        """
+        in_view = np.ones((3, N_TIME), dtype=bool)
+        in_view[0] = False
+        result = make_result(n_src=3, in_view=in_view)
+        assert np.isnan(result["z"][0]).all(), "the masked source is not all nan"
+
+        result["z"][1] = 0.0
+        result["z"][2] = 0.0
+        result["z"][2][:, : self.N_BAD] = 10.0
+
+        return result
+
+    def test_the_worst_source_is_the_worst_measured_one(self):
+        result = self._mixed()
+
+        stats = coverage_stats(result, z_crit=3.0)
+
+        assert np.isnan(stats["per_source"][0]["coverage"]), "the mask was not applied"
+        assert stats["overall"]["worst_source"] == result["titles"][2]
+        assert stats["overall"]["worst_coverage"] == pytest.approx(self.WORST)
+
+    def test_the_mean_is_over_the_measured_sources_only(self):
+        stats = coverage_stats(self._mixed(), z_crit=3.0)
+        # The unmeasured source is absent from the mean, not counted as zero.
+        assert stats["overall"]["mean_coverage"] == pytest.approx(
+            (1.0 + self.WORST) / 2
+        )
+
+    def test_no_source_in_view_reports_nothing_and_warns_about_nothing(self):
+        """Every satellite below the cut: an empty summary, not an empty-slice warning."""
+        import warnings
+
+        result = make_result(n_src=2, in_view=np.zeros((2, N_TIME), dtype=bool))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            stats = coverage_stats(result, z_crit=3.0)
+
+        assert not [w for w in caught if issubclass(w.category, RuntimeWarning)], (
+            "reducing over no finite coverage warned"
+        )
+        assert stats["overall"]["worst_source"] is None
+        assert np.isnan(stats["overall"]["worst_coverage"])
+        assert np.isnan(stats["overall"]["mean_coverage"])
+        assert np.isnan(stats["overall"]["coverage"])
+        # The thresholds are settings, not measurements, so they survive having
+        # measured nothing -- the caller still prints the cut it applied.
+        assert stats["overall"]["z_crit"] == 3.0
+        assert np.isfinite(stats["overall"]["amp_crit"])
+        # The sources are still listed, so the table says they were masked
+        # rather than omitting them.
+        assert len(stats["per_source"]) == 2
+
+
 # ---------------------------------------------------------------------------
 # Drivers
 # ---------------------------------------------------------------------------
@@ -995,6 +1069,24 @@ class TestLightCurvesFromConfig:
         assert np.all(result["light_curves"][0, :, 2:] == 0)
         assert not np.any(result["light_curves"][1] == 0)
         np.testing.assert_array_equal(result["in_view"], mask[:2])
+
+    def test_a_never_visible_satellite_is_a_zero_curve_not_an_error(self):
+        """The estimator's answer for a satellite that never rose is zero.
+
+        `TabConfig.set_elevation_mask` stops an inference run on a fully-masked
+        satellite, since there is nothing there to fit. Measuring is different:
+        a zero curve is the measurement, and the satellites that *were* up must
+        still be measurable without editing the config first.
+        """
+        mask = np.ones((3, N_TIME), dtype=bool)
+        mask[0] = False
+        config = make_tab_config(rfi_mask=mask)
+
+        result = light_curves_from_config(config)
+
+        assert np.all(result["light_curves"][0] == 0)
+        assert np.isnan(result["error"][0]).all()
+        assert not np.any(result["light_curves"][1] == 0)
 
     def test_the_flags_on_the_config_are_honoured(self):
         flags = np.zeros((len(pairs()[0]), N_FREQ, N_TIME), dtype=bool)
@@ -1780,3 +1872,34 @@ class TestCommandLine:
                  "-o", str(tmp_path / "c.npz")))
 
         assert config["rfi"]["min_elevation"] is None
+
+    def test_the_config_mode_tolerates_a_never_visible_satellite(
+        self, tmp_path, monkeypatch
+    ):
+        """A fully-masked satellite is a zero curve here, not a dead command.
+
+        `TabConfig` stops an inference run on one, which would otherwise leave
+        `--no-elevation-cut` -- dropping the cut for *every* satellite -- as the
+        only way to measure the ones that were up.
+        """
+        import tabascal.config
+        import tabascal.scripts._run_tabascal_impl as impl
+        from tabascal.scripts.rfi_estimate import run
+
+        config = {
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+                     "data_col": "DATA", "corr": "xx", "freq": None},
+            "rfi": {"min_elevation": 20.0},
+            "satellites": {},
+        }
+        kwargs = {}
+        monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
+        monkeypatch.setattr(
+            tabascal.config, "TabConfig",
+            lambda cfg, ms_path, **kw: (kwargs.update(kw), make_tab_config())[1],
+        )
+        monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
+
+        run(_cli("-c", "tab.yaml", "-o", str(tmp_path / "c.npz")))
+
+        assert kwargs["require_in_view"] is False
