@@ -99,6 +99,14 @@ divides that out and the noise follows the data,
 ``sigma_cal = sigma / |g_p conj(g_q)|``.
 :func:`~tabascal.ms.apply_gains_to_data` is that one statement in code.
 
+Extra ``keywords`` are written beside the table's own, for what the solver knows
+and the format has no field for: TABASCAL records the correlation it fitted as
+``FittedCorr``, since a single-solution table otherwise cannot say, and applying
+an ``xx`` solution to ``yx`` data is a silent mistake. The names the table needs
+for itself — the four CASA identifies it by, and the one per subtable — are
+refused rather than overwritten. The solution TABASCAL fits is exported this way
+after every run; see :doc:`../output`.
+
 A gain that is zero or non-finite carries no solution, and both halves of that
 are written: ``FLAG`` is set *and* ``CPARAM`` is NaN, so a reader going by the
 flag and one going by the value reach the same conclusion. Calibrating with one

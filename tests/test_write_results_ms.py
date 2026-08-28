@@ -14,6 +14,13 @@ external table's and the fitted DIE gains, divided out (#123) -- so the anchor
 assertion here is the closure identity ``TAB_AST_DATA + TAB_RFI_DATA +
 TAB_RES_DATA == CORRECTED_DATA``, which fails loudly if any column moves frame.
 
+The calibration table the writer exports beside the results is covered here as
+well, since what makes it right is that it reproduces the columns written in the
+same call -- and what makes it interesting is where it deliberately does not:
+a gain the fit killed is flagged in the table and substituted with 1 in the
+columns. Those cases need a real MS on disk to copy subtables out of
+(``ms_skeleton``) and are skipped where casacore is not installed.
+
 ``write_results_xds`` is covered here too, for the one thing the writer reads
 back out of it: which correlation the run fitted.
 
@@ -22,6 +29,7 @@ precision, so the tolerances come from float32 round-off (``_tolerances``) and
 not from the ``exact_rtol`` fixture, whose fp64 bound the writer could not meet.
 """
 
+import os
 import warnings
 
 import numpy as np
@@ -32,6 +40,7 @@ import xarray as xr
 
 import tabascal.ms as ms_mod
 import tabascal.write as write_mod
+from tabascal.ms import read_caltable
 from tabascal.write import write_results_ms, write_results_xds
 
 
@@ -323,6 +332,8 @@ def run_writer(monkeypatch, tmp_path):
         gain_table=None,
         n_ant=N_ANT,
         spw_id=0,
+        ms_path="unused.ms",
+        emit=False,
     ):
         keywords = {"TIME": {"QuantumUnits": ["s"]}}
 
@@ -403,7 +414,23 @@ def run_writer(monkeypatch, tmp_path):
         monkeypatch.setattr(write_mod, "xds_to_table", _capture)
         monkeypatch.setattr(ms_mod, "resolve_correlation", _resolve)
 
-        write_results_ms("unused.ms", zarr_path, corr=corr, gain_table=gain_table)
+        if not emit:
+            # The caltable export runs at the end of every write and needs a real
+            # MS on disk to copy subtables out of, which these in-memory cases do
+            # not have. Stubbed by default so the column assertions stay about the
+            # columns; the export has its own tests, which pass ``emit=True``.
+            def _no_export(ms, zarr, out_path=None, gain_table=None):
+                captured["caltable"] = {
+                    "ms_path": ms,
+                    "results_zarr_path": zarr,
+                    "out_path": out_path,
+                    "gain_table": gain_table,
+                }
+                return None
+
+            monkeypatch.setattr(write_mod, "write_gain_caltable", _no_export)
+
+        write_results_ms(ms_path, zarr_path, corr=corr, gain_table=gain_table)
 
         values = {
             col: np.asarray(captured["xds"][col].data) for col in captured["cols"]
@@ -412,6 +439,61 @@ def run_writer(monkeypatch, tmp_path):
         return values, captured
 
     return _run
+
+
+@pytest.fixture
+def ms_skeleton(tmp_path):
+    """A real on-disk MS holding only the subtables a caltable copies out of one.
+
+    The writer itself still runs against the in-memory stand-in; it is
+    ``write_caltable`` that needs a real table on disk, because the caltable
+    carries a copy of the MS's ``ANTENNA`` and ``SPECTRAL_WINDOW``. The two
+    describe the same observation -- ``N_ANT`` antennas on ``FREQS`` -- which is
+    what the export validates itself against before it writes anything.
+    """
+
+    tables = pytest.importorskip("casacore.tables")
+
+    path = str(tmp_path / "skeleton.ms")
+
+    main = tables.table(
+        path,
+        tables.maketabdesc([tables.makescacoldesc("TIME", 0.0, valuetype="double")]),
+        nrow=1,
+        ack=False,
+    )
+
+    ant = tables.table(
+        os.path.join(path, "ANTENNA"),
+        tables.maketabdesc(
+            [tables.makearrcoldesc("POSITION", 0.0, ndim=1, valuetype="double")]
+        ),
+        nrow=N_ANT,
+        ack=False,
+    )
+    ant.putcol("POSITION", np.zeros((N_ANT, 3)))
+    ant.close()
+
+    spw = tables.table(
+        os.path.join(path, "SPECTRAL_WINDOW"),
+        tables.maketabdesc(
+            [tables.makearrcoldesc("CHAN_FREQ", 0.0, ndim=1, valuetype="double")]
+        ),
+        nrow=1,
+        ack=False,
+    )
+    spw.putcol("CHAN_FREQ", FREQS[None])
+    spw.close()
+
+    main.close()
+
+    return path
+
+
+def _caltable_path(zarr_path: str) -> str:
+    """Where the export puts its table: the results path with a ``.B`` extension."""
+
+    return os.path.splitext(zarr_path)[0] + ".B"
 
 
 def _uniform_gains(n_sample: int, value=1.0):
@@ -1588,6 +1670,366 @@ class TestBadGainsAreSubstituted:
             values, _ = run_writer(_fake_ms(data), zarr_path)
 
         assert np.all(np.isfinite(values["CORRECTED_DATA"]))
+
+
+# ---------------------------------------------------------------------------
+# The calibration table written beside the results
+# ---------------------------------------------------------------------------
+
+class TestTheExportRuns:
+    """It is the last thing the writer does, and it cannot undo the rest."""
+
+    def test_it_is_handed_the_ms_the_results_and_the_same_tables(
+        self, tmp_path, run_writer
+    ):
+        """The same MS, the same zarr and the same external tables, in order.
+
+        The export composes the total calibration itself, so it has to be given
+        the layer the columns were divided by; a different list would emit a
+        table that is not the calibration the columns are in the frame of.
+        """
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+        table = tmp_path / "flux.B0"
+        table.mkdir()
+
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(
+            _to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)) * _ext_bl(ext)
+        )
+
+        _, captured = run_writer(
+            _fake_ms(data),
+            zarr_path,
+            ext_gains=ext,
+            gain_table=[str(table)],
+            ms_path="real.ms",
+        )
+
+        assert captured["caltable"] == {
+            "ms_path": "real.ms",
+            "results_zarr_path": zarr_path,
+            "out_path": None,
+            "gain_table": [str(table)],
+        }
+
+    def test_a_failed_export_warns_and_leaves_the_columns_written(
+        self, tmp_path, run_writer, monkeypatch
+    ):
+        """An MS no caltable can describe must not cost the run its columns.
+
+        A multi-spectral-window MS is the real case: the writer serves one
+        partition of it happily, and ``write_caltable`` refuses it, because a
+        caltable files every row under one window's id.
+        """
+
+        def _boom(*args, **kwargs):
+            raise ValueError("two spectral windows")
+
+        monkeypatch.setattr(write_mod, "write_gain_caltable", _boom)
+
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning, match="two spectral windows"):
+            values, _ = run_writer(_fake_ms(data), zarr_path, emit=True)
+
+        assert set(COLS).issubset(values)
+        np.testing.assert_allclose(
+            values["CORRECTED_DATA"],
+            data / _to_ms(_baseline_gains(gains).mean(axis=0)),
+            **_tolerances(data),
+        )
+
+
+class TestTheEmittedCaltable:
+    """What the table holds, and what applying it does.
+
+    The claim the export exists for is that **one** application of this table
+    takes the MS's data column to the ``CORRECTED_DATA`` written beside it, so
+    that is asserted directly, against the columns the same run wrote.
+    """
+
+    def test_it_lands_beside_the_results_on_the_ms_own_grid(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        read = read_caltable(_caltable_path(zarr_path))
+        mean = gains.mean(axis=0)
+
+        np.testing.assert_allclose(
+            read["gains"], mean, rtol=1e-5, atol=1e-5 * np.abs(mean).max()
+        )
+        # The MS's own grid: its TIME column in seconds, and its channels.
+        np.testing.assert_allclose(read["times"], np.arange(N_TIME, dtype=float), atol=1e-9)
+        np.testing.assert_allclose(read["freqs"], FREQS)
+        # Frequency dependent, so B and not G.
+        assert read["viscal"] == "B Jones"
+
+    def test_the_total_calibration_is_external_times_fitted(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(
+            _to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)) * _ext_bl(ext)
+        )
+
+        run_writer(
+            _fake_ms(data), zarr_path, ext_gains=ext, ms_path=ms_skeleton, emit=True
+        )
+
+        read = read_caltable(_caltable_path(zarr_path))
+        total = ext * gains.mean(axis=0)
+
+        np.testing.assert_allclose(
+            read["gains"], total, rtol=1e-5, atol=1e-5 * np.abs(total).max()
+        )
+        # The fitted layer on its own is a different calibration.
+        assert not np.allclose(read["gains"], gains.mean(axis=0), rtol=1e-3)
+
+    def test_applying_it_reproduces_the_calibrated_column(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """``g_p^tot conj(g_q^tot)`` is the very divisor the columns were written with.
+
+        The table carries per-*antenna* gains while the writer divides by a
+        per-*baseline* product, and the two agree because the composition is the
+        same either way::
+
+            (g_ext_p g_fit_p) conj(g_ext_q g_fit_q)
+                == (g_ext_p conj(g_ext_q)) (g_fit_p conj(g_fit_q))
+
+        which is what makes one ``applycal`` enough. The sample mean commutes
+        with the product here because there is one sample, as there is in a MAP
+        run; see the several-samples case below for what a table can carry when
+        there is more than one.
+        """
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        ext_bl = _ext_bl(ext)
+        data = _observed(
+            _to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)) * ext_bl
+        )
+
+        values, _ = run_writer(
+            _fake_ms(data), zarr_path, ext_gains=ext, ms_path=ms_skeleton, emit=True
+        )
+
+        g = read_caltable(_caltable_path(zarr_path))["gains"].astype(np.complex64)
+        g_bl = _to_ms(g[A1_BL] * g[A2_BL].conj())
+
+        np.testing.assert_allclose(
+            g_bl, ext_bl * _fitted_gains_bl(gains), **_tolerances(g_bl)
+        )
+        np.testing.assert_allclose(
+            values["CORRECTED_DATA"] * g_bl, data, **_tolerances(data)
+        )
+
+    def test_a_dead_gain_is_flagged_in_the_table_and_unity_in_the_column(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """The one divergence, both halves of it in a single run.
+
+        A gain the fit drove to zero carries no solution: the table says so, with
+        ``FLAG`` set and ``CPARAM`` NaN, which is what CASA does with an unsolved
+        antenna. The columns cannot say it -- a blank column is a dropped
+        visibility -- so they keep #134's unity substitution and are written
+        uncalibrated on that antenna instead.
+        """
+        tables = pytest.importorskip("casacore.tables")
+
+        gains, ast, rfi = _model(1)
+        gains = gains.copy()
+        gains[:, 2] = 0.0
+
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        gains_sub = _substitute(gains)
+        data = _observed(_to_ms((_baseline_gains(gains_sub) * (ast + rfi)).mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning):
+            values, _ = run_writer(
+                _fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True
+            )
+
+        out = _caltable_path(zarr_path)
+        read = read_caltable(out)
+
+        assert np.all(np.isnan(read["gains"][2]))
+        assert np.all(np.isfinite(read["gains"][[0, 1, 3]]))
+
+        with tables.table(out, ack=False) as tb:
+            flag = tb.getcol("FLAG")
+            ant1 = tb.getcol("ANTENNA1")
+
+        assert np.all(flag[ant1 == 2])
+        assert not np.any(flag[ant1 != 2])
+
+        # The columns, in the same run: unity, so baseline (0, 2) is still
+        # calibrated on antenna 0 and nothing is blanked.
+        bl = int(np.flatnonzero((A1_BL == 0) & (A2_BL == 2))[0])
+
+        for t in range(N_TIME):
+            row = t * N_BL + bl
+            np.testing.assert_allclose(
+                values["CORRECTED_DATA"][row, :, 0],
+                data[row, :, 0] / gains_sub[0, 0, :, t],
+                **_tolerances(data),
+            )
+
+        assert np.all(np.isfinite(values["CORRECTED_DATA"]))
+
+    def test_an_antenna_no_table_solved_is_flagged_too(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """The same divergence on the external layer.
+
+        ``gains_from_tables`` reports an antenna it could not place a gain for
+        and hands back unity so the columns can be written uncalibrated on it.
+        The table has somewhere better to put that: a flag.
+        """
+        gains, ast, rfi = _model(1)
+        ext = _ext_gains()
+        dead = np.zeros(ext.shape, dtype=bool)
+        dead[1] = True
+
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        values, _ = run_writer(
+            _fake_ms(data),
+            zarr_path,
+            ext_gains=ext,
+            ext_dead=dead,
+            ms_path=ms_skeleton,
+            emit=True,
+        )
+
+        read = read_caltable(_caltable_path(zarr_path))
+
+        assert np.all(np.isnan(read["gains"][1]))
+        assert np.all(np.isfinite(read["gains"][[0, 2, 3]]))
+        assert np.all(np.isfinite(values["CORRECTED_DATA"]))
+
+    def test_the_fitted_correlation_is_recorded(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """A ``yx``-fitted table has to be identifiable as one.
+
+        Nothing in the caltable format says which correlation a single-solution
+        table belongs to, and applying an ``xx`` solution to ``yx`` data is a
+        silent mistake, so the run's own answer is carried as a keyword.
+        """
+        tables = pytest.importorskip("casacore.tables")
+
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, corr="yx")
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        with tables.table(_caltable_path(zarr_path), ack=False) as tb:
+            assert tb.getkeyword("FittedCorr") == "yx"
+
+    def test_several_samples_carry_the_mean_of_the_per_antenna_gains(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """All a per-antenna table can carry, and not quite the columns' divisor.
+
+        The columns divide by the mean of ``g_p conj(g_q)``; a caltable holds one
+        gain per antenna, so it can only carry the mean of ``g_p``. The two part
+        company exactly when the two antennas' gains covary across samples, which
+        a MAP run -- one sample -- never does.
+        """
+        gains, ast, rfi = _model(2)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        read = read_caltable(_caltable_path(zarr_path))
+        mean = gains.mean(axis=0)
+
+        np.testing.assert_allclose(
+            read["gains"], mean, rtol=1e-5, atol=1e-5 * np.abs(mean).max()
+        )
+
+        g = read["gains"].astype(np.complex64)
+        assert not np.allclose(
+            _to_ms(g[A1_BL] * g[A2_BL].conj()), _fitted_gains_bl(gains), rtol=1e-3
+        )
+
+    def test_a_second_write_replaces_the_table(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """Re-running over the same results overwrites its own table."""
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
+        run_writer(_fake_ms(data), again, ms_path=ms_skeleton, emit=True)
+
+        read = read_caltable(_caltable_path(zarr_path))
+        mean = 2 * gains.mean(axis=0)
+
+        np.testing.assert_allclose(
+            read["gains"], mean, rtol=1e-5, atol=1e-5 * np.abs(mean).max()
+        )
+
+
+class TestNothingIsExportedWithoutAFit:
+    """No fitted gains, no calibration to export -- and no empty table."""
+
+    def test_a_unitary_run_leaves_no_table_beside_its_results(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """``UnitaryGains`` stores ones, which is not a calibration."""
+        _, ast, rfi = _model(1)
+        gains = _uniform_gains(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        assert not os.path.exists(_caltable_path(zarr_path))
+
+    def test_a_zarr_without_gains_exports_nothing(self, tmp_path, ms_skeleton):
+        _, ast, rfi = _model(1)
+        path = str(tmp_path / "no_gains.zarr")
+        xr.Dataset(
+            data_vars={
+                "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(ast)),
+                "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(rfi)),
+            }
+        ).to_zarr(path, mode="w")
+
+        assert write_mod.write_gain_caltable(ms_skeleton, path) is None
+        assert not os.path.exists(_caltable_path(path))
+
+    def test_gains_that_are_not_a_grid_export_nothing(self, tmp_path, ms_skeleton):
+        """Not three-dimensional after the sample mean: nothing a caltable holds."""
+        path = str(tmp_path / "flat.zarr")
+        xr.Dataset(
+            data_vars={
+                "gains": (
+                    ["sample", "ant"],
+                    da.asarray(np.full((1, N_ANT), 2.0, dtype=complex)),
+                )
+            }
+        ).to_zarr(path, mode="w")
+
+        assert write_mod.write_gain_caltable(ms_skeleton, path) is None
+        assert not os.path.exists(_caltable_path(path))
 
 
 # ---------------------------------------------------------------------------

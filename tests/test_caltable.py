@@ -256,6 +256,29 @@ class TestCasaFormat:
         with table(os.path.join(path, "ANTENNA"), ack=False) as ant:
             assert ant.nrows() == N_ANT
 
+    def test_caller_keywords_ride_along(self, tmp_path, gains, ms_path):
+        """Extra keywords are written beside the table's own, not instead of them.
+
+        What a solver knows about its solution and the format has no field for --
+        the correlation tabascal fitted, say -- goes in a keyword, so the table
+        still says it when it is read back somewhere else.
+        """
+
+        path = str(tmp_path / "test.B")
+        write_caltable(
+            path,
+            gains,
+            np.arange(N_TIME, dtype=float),
+            ms_path=ms_path,
+            keywords={"FittedCorr": "yx"},
+        )
+
+        with table(path, ack=False) as tb:
+            assert tb.getkeyword("FittedCorr") == "yx"
+            # The keywords CASA identifies the table by are untouched.
+            assert tb.getkeyword("VisCal") == "B Jones"
+            assert tb.getkeyword("ANTENNA").startswith("Table: ")
+
     def test_a_missing_subtable_is_not_an_error(self, tmp_path, gains):
         """The subtables are copied if they are there; none of them is required."""
 
@@ -597,6 +620,12 @@ BAD_CALLS = [
     pytest.param({"overwrite": "False"}, "overwrite", id="overwrite-string"),
     pytest.param({"overwrite": 1}, "overwrite", id="overwrite-int"),
     pytest.param({"overwrite": None}, "overwrite", id="overwrite-none"),
+    pytest.param({"keywords": "FittedCorr"}, "keywords", id="keywords-not-a-mapping"),
+    pytest.param({"keywords": {5: "yx"}}, "keywords", id="keywords-name-not-a-string"),
+    # The table's own keywords are how CASA identifies it and reaches its
+    # subtables; a caller overwriting one would produce a table CASA rejects.
+    pytest.param({"keywords": {"VisCal": "G Jones"}}, "VisCal", id="keywords-viscal"),
+    pytest.param({"keywords": {"ANTENNA": "elsewhere"}}, "ANTENNA", id="keywords-subtable"),
 ]
 
 

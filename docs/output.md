@@ -23,6 +23,7 @@ parent_directory/
 |   ├── results/
 |       └── init_pred_Custom.zarr               # Initial parameter prediction values
 |       └── map_pred_Custom.zarr                # Optimised parameter prediction values
+|       └── map_pred_Custom.B                   # The calibration it implies, as a CASA table
 ```
 
 ## Results `.zarr` files
@@ -159,3 +160,45 @@ Writing raises a `ValueError`, before any column is built, if:
 * the rows interleave timesteps within a block of `n_bl` rows, which reshapes cleanly but puts every visibility on the wrong timestamp.
 
 Sorting the MS by `TIME`, `ANTENNA1`, `ANTENNA2` resolves the last three.
+
+## Calibration table
+
+Every run that fits gains also writes the calibration it implies as a CASA calibration table, beside the results `.zarr` and named after it — `map_pred_Custom.zarr` gives `map_pred_Custom.B`. It is a `B Jones` table, one row per (time, antenna) with `CPARAM` of shape (channel, polarisation), exactly the layout `casatasks.gaincal` produces, so a tabascal solution can be consumed by standard tooling like any other calibration rather than only as the columns above.
+
+The table holds the **total** calibration — the external tables placed on this observation's grid, times the DIE gains the model fitted:
+
+```text
+G_p = g_ext_p × g_p
+```
+
+so one application of this one table takes `DATA` to `CORRECTED_DATA`:
+
+```python
+from casatasks import applycal
+applycal(vis="dataset.ms", gaintable=["results/map_pred_Custom.B"])
+```
+
+That works because the two forms of the calibration agree: the columns are divided by a per-*baseline* gain and the table carries a per-*antenna* one, and `(g_ext_p g_p) conj(g_ext_q g_q)` is `(g_ext_p conj(g_ext_q)) (g_p conj(g_q))` — the very `g_total` the columns were divided by.
+
+**`applycal` operates on `DATA`.** An MS whose visibilities live in a non-standard column cannot consume the table, whatever the table says — it fails with `Error in Calibrater::correct` regardless of the calibration given.
+
+The table records which correlation was fitted in a `FittedCorr` keyword, since nothing in the caltable format says so and applying an `xx` solution to `yx` data is a silent mistake.
+
+### Flagged in the table, substituted in the columns
+
+A gain that is zero or non-finite carries no solution, and the two outputs give the honest answer each is able to give — deliberately different answers:
+
+* the **table** flags it: `FLAG` set and `CPARAM` `NaN`, which is what CASA does with an unsolved antenna and what a reader of the table expects. The raw gains from the `.zarr` are used here, not the substituted ones, and an antenna no external table could supply a gain for is flagged the same way;
+* the **columns** substitute 1, as described above, because a `NaN` there is a dropped visibility rather than a statement about the calibration.
+
+So an antenna the fit killed is *missing* from the table and *uncalibrated* in the columns. Applying the table to that MS therefore flags those visibilities where the columns kept them.
+
+### Several samples
+
+The table carries the mean of the per-antenna gains over the `sample` axis. Where the columns are divided by the mean of `g_p g_q*`, a per-antenna table can only hold the mean of `g_p`, and the two differ by the covariance between the two antennas' gains. For a MAP run — one sample — they are identical.
+
+### When no table is written
+
+Nothing is written, and no empty table is left behind, when there is no calibration to export: results with no `gains`, gains that are not a grid after the sample mean, or gains that are exactly 1 everywhere. A `UnitaryGains` run stores ones and fits nothing, and a run that used external tables while fitting nothing is in the same position — the total calibration is then the tables the caller already has.
+
+The export is the last thing the writer does and is additive to it: if it fails — most plausibly on an MS with more than one spectral window, which the writer serves one partition of while a caltable can only file rows under one window's id — the failure is reported as a `RuntimeWarning` and the columns, which were already written, stand.

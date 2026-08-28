@@ -36,6 +36,7 @@ gain ``g = k ** -0.5``.
 import os
 import shutil
 import warnings
+from collections.abc import Mapping
 from typing import NamedTuple, Optional
 
 import jax
@@ -892,6 +893,14 @@ def get_observation_data_type(data_col: str):
 #: Subtables a caltable carries; CASA copies these straight from the MS.
 _SUBTABLES = ("ANTENNA", "FIELD", "SPECTRAL_WINDOW", "OBSERVATION", "HISTORY")
 
+#: Keywords the table writes for itself: the four CASA identifies a calibration
+#: table by, and the one per subtable that points at its copy. A caller's extra
+#: keywords may not take any of these names -- overwriting one produces a table
+#: CASA either rejects or cannot find its own antennas in.
+_RESERVED_KEYWORDS = frozenset(
+    {"VisCal", "ParType", "MSName", "PolBasis"}
+).union(_SUBTABLES)
+
 
 def _caltable_desc():
     """Table description matching ``casatasks.gaincal``'s output."""
@@ -1044,6 +1053,7 @@ def write_caltable(
     n_pol: int = 2,
     viscal: str = "B Jones",
     overwrite: bool = True,
+    keywords: Optional[Mapping] = None,
 ) -> str:
     """Write an ``applycal``-compatible calibration table.
 
@@ -1092,6 +1102,12 @@ def write_caltable(
     n_pol : int, optional
         CASA writes 2 polarisations even for a single-correlation MS, so the gain
         is duplicated across the pol axis by default.
+    keywords : dict, optional
+        Extra table keywords, written beside the table's own. For what the
+        solver knows and the format has no field for -- the correlation tabascal
+        fitted, say -- so that the table still says it when it is read back
+        somewhere else. The names the table needs for itself
+        (:data:`_RESERVED_KEYWORDS`) are refused rather than overwritten.
 
     Returns
     -------
@@ -1181,6 +1197,26 @@ def write_caltable(
             "taken on truthiness."
         )
 
+    if keywords is None:
+        keywords = {}
+    elif not isinstance(keywords, Mapping):
+        raise ValueError(
+            f"keywords must be a mapping of table keyword names to values, got "
+            f"{keywords!r}"
+        )
+    elif not all(isinstance(name, str) for name in keywords):
+        raise ValueError(
+            f"keywords names must be strings naming table keywords, got "
+            f"{sorted(map(repr, keywords))}"
+        )
+
+    reserved = sorted(_RESERVED_KEYWORDS.intersection(keywords))
+    if reserved:
+        raise ValueError(
+            f"keywords may not set {reserved}: those are how CASA identifies a "
+            "calibration table and reaches the subtables it carries."
+        )
+
     # Before anything is read from disk, let alone removed from it: the output
     # must not overlap the MS it is written from.
     _reject_overlapping_paths(path, ms_path)
@@ -1254,6 +1290,9 @@ def write_caltable(
             tb.putkeyword("ParType", "Complex")
             tb.putkeyword("MSName", os.path.basename(os.path.normpath(ms_path)))
             tb.putkeyword("PolBasis", "unknown")
+
+            for name, value in keywords.items():
+                tb.putkeyword(name, value)
 
             for sub in _SUBTABLES:
                 src = os.path.join(ms_path, sub)
