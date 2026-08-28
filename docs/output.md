@@ -169,7 +169,18 @@ They decompose `TAB_RFI_DATA`:
 sum over satellites of TAB_RFI_<NORAD> == TAB_RFI_DATA
 ```
 
-**to within float32 round-off, not bit for bit.** The bound is about `n_src + 1` `float32` ulps of `Σ|TAB_RFI_<NORAD>|` — one for each term rounded on its way into its column, one for the total — referenced to the *terms* rather than to the total, since sources that partly cancel leave a total smaller than the numbers that made it. Two things stop it being exact:
+**to within float32 round-off, not bit for bit.** The bound is
+
+```text
+|Σ_r TAB_RFI_<NORAD_r> − TAB_RFI_DATA|
+    ≤ (n_src + n_sample + 2) × ulp32( max_s Σ_r |rfi_vis_src[s, r]| )
+```
+
+per component — the real and imaginary parts separately, since a `complex64` cast rounds each of them on its own — counting one ulp for each of the `n_src` terms cast into its column, one for each step of the two sample means, and one for the sum itself.
+
+**The scale is the per-sample, per-source values, taken before the sample mean**, because that is where the rounding happens. Referencing it to the columns instead would not be a bound at all: two samples of `+A` and `−A` average to a column of exactly zero while the total was rounded from `A`, so the columns can be zero and the difference nowhere near it. For a MAP run — one sample — the two readings coincide, but the guarantee is the one above.
+
+Two things stop it being exact:
 
 * `sum(round(x_r))` is not `round(sum(x_r))`. Both sides make the same `complex64` cast in the same place (before the sample mean, not after it) and go through the same row mapping, but the per-source columns are rounded individually and their sum is not the rounded sum;
 * the decomposition itself re-associates one reduction. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that into per-source partial sums, which differ from the single reduction by about an ulp of the working precision.

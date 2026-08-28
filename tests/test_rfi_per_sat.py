@@ -144,6 +144,11 @@ def make_pred(config, n_sample=1, dark=0, seed=42):
     so the sum-back is a statement about the decomposition rather than about two
     different models. ``dark`` is the number of trailing sources held at zero
     amplitude, which is what the sharding padding does to its dummy sources.
+
+    Every sample is **different** -- scaled in amplitude and offset in phase, and
+    each one put through the op on its own. Broadcasting one sample across the
+    axis would make every multi-sample case a single-sample case wearing a
+    bigger shape, and the sample mean the writer takes would be a no-op.
     """
 
     n_rfi = config.n_rfi
@@ -167,18 +172,24 @@ def make_pred(config, n_sample=1, dark=0, seed=42):
 
     forward, constants = _forward(config)
     vis_zero = jnp.zeros((N_BL, N_FREQ, N_TIME), dtype=_complex_dtype())
-    vis_rfi = forward(
-        {}, {"rfi_A": amp, "rfi_phase": phase, "vis_rfi": vis_zero}, constants
-    )["vis_rfi"]
 
-    stack = lambda x: jnp.broadcast_to(x[None], (n_sample,) + x.shape)
+    amps = [((1.0 + s) * amp).astype(_complex_dtype()) for s in range(n_sample)]
+    phases = [(phase + 0.3 * s).astype(_real_dtype()) for s in range(n_sample)]
+    vis = [
+        forward({}, {"rfi_A": a, "rfi_phase": p, "vis_rfi": vis_zero}, constants)[
+            "vis_rfi"
+        ]
+        for a, p in zip(amps, phases)
+    ]
+
+    vis_rfi = jnp.stack(vis)
 
     return {
-        "rfi_A": stack(amp),
-        "rfi_phase": stack(phase),
-        "vis_rfi": stack(vis_rfi),
-        "vis_ast": stack(jnp.zeros_like(vis_rfi)),
-        "vis_obs": stack(vis_rfi),
+        "rfi_A": jnp.stack(amps),
+        "rfi_phase": jnp.stack(phases),
+        "vis_rfi": vis_rfi,
+        "vis_ast": jnp.zeros_like(vis_rfi),
+        "vis_obs": vis_rfi,
         "gains": jnp.ones((n_sample, N_ANT, N_FREQ, N_TIME), dtype=_complex_dtype()),
     }
 
@@ -195,16 +206,83 @@ def _assert_close(got, want, exact_rtol):
 
 
 # ---------------------------------------------------------------------------
+# The sum-back bound
+# ---------------------------------------------------------------------------
+#
+# Every sum-back assertion in this file is referenced to the *terms* of the sum,
+# per component, and to the terms as they are **before any sample mean** -- which
+# is where the rounding that separates the two sides happens.
+#
+# Referencing it to the result instead is not a bound at all. Samples that cancel
+# leave a per-source mean of zero while the per-sample values that were rounded
+# were large: `TestTheColumnsSumBackToTheTotal.test_cancelling_samples` is a case
+# where every column is exactly 0, the total is 0.5, and a tolerance taken from
+# the columns allows 1e-45.
+
+def _term_scale(terms, dtype):
+    """Per-component ``sum |term|`` scales, as ``(real, imag)``.
+
+    ``terms`` is ``(n_sample, n_src, ...)``: the values as they are rounded,
+    before any mean. Summed over sources and maximised over samples, real and
+    imaginary parts apart, because a complex cast rounds each component on its
+    own and the two can be orders of magnitude apart in one visibility.
+    """
+
+    terms = np.asarray(terms)
+
+    return tuple(
+        np.abs(getattr(terms, part)).sum(axis=1).max(axis=0).astype(dtype)
+        for part in ("real", "imag")
+    )
+
+
+def _assert_sums_back(got, want, terms, n_ulp, dtype=np.float32):
+    """``|got - want| <= n_ulp * ulp(sum of |terms|)``, real and imaginary apart."""
+
+    got, want = np.asarray(got), np.asarray(want)
+
+    for part, scale in zip(("real", "imag"), _term_scale(terms, dtype)):
+        tol = n_ulp * np.spacing(scale)
+        worst = np.abs(getattr(got, part) - getattr(want, part))
+
+        assert np.all(worst <= tol), (
+            f"{part}: max |sum - total| = {worst.max():.3e}, worst allowance "
+            f"{np.max(tol):.3e} ({n_ulp} ulp of the summed terms)"
+        )
+
+
+def _reassociation_ulps(config):
+    """Ulps allowed for splitting the op's reduction into per-source sums.
+
+    The op accumulates over source *and* integration sample in one reduction of
+    depth ``n_rfi * n_int``; evaluating one source at a time gives ``n_rfi``
+    reductions of depth ``n_int`` which are then added up. The three depths
+    bound the re-association, referenced -- as everywhere here -- to the summed
+    per-source magnitudes, which stand in for the fine-grid terms behind them.
+    """
+
+    n_int = N_INT_FREQ * N_INT_TIME
+
+    return config.n_rfi * n_int + config.n_rfi + n_int
+
+
+# ---------------------------------------------------------------------------
 # rfi_vis_per_sat
 # ---------------------------------------------------------------------------
 
 class TestTheDecompositionSumsBack:
-    """The anchor: the per-satellite pieces are the whole of ``vis_rfi``."""
+    """The anchor: the per-satellite pieces are the whole of ``vis_rfi``.
+
+    Asserted at a few ulps of the summed per-source magnitudes, in the session's
+    own working precision -- not at the ``exact_rtol`` fixture, which is looser
+    by three orders of magnitude in fp64 and would pass a decomposition that had
+    genuinely lost a part of the signal. ``vis_rfi`` here comes from the real
+    kernel, so the re-association these bounds allow for is exercised rather
+    than assumed away by constructing the total as the sum.
+    """
 
     @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
-    def test_the_sources_sum_back_to_the_fitted_rfi_visibility(
-        self, component, exact_rtol
-    ):
+    def test_the_sources_sum_back_to_the_fitted_rfi_visibility(self, component):
         config = make_config(component=component)
         pred = make_pred(config)
 
@@ -212,7 +290,13 @@ class TestTheDecompositionSumsBack:
 
         assert norad_ids == NORAD_IDS
         assert vis_src.shape == (1, len(NORAD_IDS), N_BL, N_FREQ, N_TIME)
-        _assert_close(vis_src.sum(axis=1), pred["vis_rfi"], exact_rtol)
+        _assert_sums_back(
+            vis_src.sum(axis=1),
+            pred["vis_rfi"],
+            vis_src,
+            n_ulp=_reassociation_ulps(config),
+            dtype=np.dtype(_real_dtype()),
+        )
 
     def test_each_source_is_that_satellite_s_own_contribution(self, exact_rtol):
         """Not merely a set of numbers that happens to add up.
@@ -257,24 +341,39 @@ class TestTheDecompositionSumsBack:
 
         assert vis_src.dtype == np.dtype(_complex_dtype())
 
-    def test_several_samples_are_decomposed_one_by_one(self, exact_rtol):
+    def test_several_samples_are_decomposed_one_by_one(self):
         config = make_config()
         pred = make_pred(config, n_sample=2)
 
         vis_src, _ = rfi_vis_per_sat(pred, config)
 
         assert vis_src.shape[0] == 2
-        _assert_close(vis_src.sum(axis=1), pred["vis_rfi"], exact_rtol)
+        # The samples really do differ, or the mean the writer takes is a no-op
+        # and every multi-sample assertion here is a single-sample one.
+        assert not np.allclose(vis_src[0], vis_src[1])
+        _assert_sums_back(
+            vis_src.sum(axis=1),
+            pred["vis_rfi"],
+            vis_src,
+            n_ulp=_reassociation_ulps(config),
+            dtype=np.dtype(_real_dtype()),
+        )
 
 
 class TestPaddedSatellites:
     """Sharding pads the source list with dark dummies; they are not satellites."""
 
-    def test_only_the_real_satellites_are_stored(self, exact_rtol):
-        config = make_config(
-            norad_ids=NORAD_IDS + [NORAD_IDS[-1]],   # the padding duplicates the last
+    @staticmethod
+    def _padded_config(component="rfi_vis:RiemannVisFFI"):
+        return make_config(
+            component=component,
+            # The padding duplicates the last satellite.
+            norad_ids=NORAD_IDS + [NORAD_IDS[-1]],
             n_rfi_real=len(NORAD_IDS),
         )
+
+    def test_only_the_real_satellites_are_stored(self):
+        config = self._padded_config()
         pred = make_pred(config, dark=1)
 
         vis_src, norad_ids = rfi_vis_per_sat(pred, config)
@@ -282,13 +381,23 @@ class TestPaddedSatellites:
         assert norad_ids == NORAD_IDS
         assert vis_src.shape[1] == len(NORAD_IDS)
         # The dropped row was dark, so the real sources are still the whole of it.
-        _assert_close(vis_src.sum(axis=1), pred["vis_rfi"], exact_rtol)
-
-    def test_the_padded_row_carried_nothing(self):
-        """The premise of dropping it: a dummy source contributes exactly zero."""
-        config = make_config(
-            norad_ids=NORAD_IDS + [NORAD_IDS[-1]], n_rfi_real=len(NORAD_IDS)
+        _assert_sums_back(
+            vis_src.sum(axis=1),
+            pred["vis_rfi"],
+            vis_src,
+            n_ulp=_reassociation_ulps(config),
+            dtype=np.dtype(_real_dtype()),
         )
+
+    @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
+    def test_the_padded_row_carried_nothing(self, component):
+        """The premise of dropping it: a dummy source contributes exactly zero.
+
+        Per component, because each reduces over the source axis differently and
+        it is that reduction which has to leave a dark row at precisely zero --
+        not merely small.
+        """
+        config = self._padded_config(component)
         pred = make_pred(config, dark=1)
         forward, constants = _forward(config)
 
@@ -303,6 +412,40 @@ class TestPaddedSatellites:
         )["vis_rfi"]
 
         np.testing.assert_array_equal(np.asarray(dummy), 0)
+
+
+class TestNonFiniteSources:
+    """One source the fit put somewhere non-finite must not take the others down.
+
+    The mask is a ``where`` and not a multiply by 0/1 precisely for this: ``0 *
+    inf`` and ``0 * nan`` are ``nan``, so a multiplicative mask would carry one
+    bad source into every other source's column -- and the whole point of the
+    decomposition is to tell the sources apart. The phase is masked as well as
+    the amplitude because the kernels form ``exp(i * phase)`` before multiplying
+    by the amplitude, so a non-finite phase poisons the product on its own.
+    """
+
+    @pytest.mark.parametrize("field", ["rfi_A", "rfi_phase"])
+    @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
+    @pytest.mark.parametrize("value", [np.nan, np.inf])
+    def test_the_other_columns_stay_finite(self, field, component, value):
+        config = make_config(component=component)
+        pred = make_pred(config)
+        bad = pred[field].at[:, 1].set(value)
+
+        vis_src, _ = rfi_vis_per_sat({**pred, field: bad}, config)
+
+        assert np.all(np.isfinite(vis_src[:, [0, 2]]))
+
+    def test_the_source_itself_is_still_reported_as_it_is(self):
+        """Not repaired: a column of nan is the honest report of a nan fit."""
+        config = make_config()
+        pred = make_pred(config)
+        bad = pred["rfi_A"].at[:, 1].set(np.nan)
+
+        vis_src, _ = rfi_vis_per_sat({**pred, "rfi_A": bad}, config)
+
+        assert not np.any(np.isfinite(vis_src[:, 1]))
 
 
 class TestTheComponentMustBeResolvable:
@@ -356,18 +499,36 @@ class TestTheZarrVariable:
             assert [int(n) for n in xds.norad_id.values] == NORAD_IDS
             assert np.issubdtype(xds.norad_id.dtype, np.integer)
 
-    def test_the_stored_sources_sum_back_to_the_stored_rfi_vis(
-        self, tmp_path, exact_rtol
-    ):
+    def test_the_stored_sources_sum_back_to_the_stored_rfi_vis(self, tmp_path):
         config = make_config()
         pred = make_pred(config)
 
         write_results_xds(pred, config, str(tmp_path / "map.zarr"))
 
         with xr.open_zarr(str(tmp_path / "map.zarr")) as xds:
-            _assert_close(
-                xds.rfi_vis_src.sum(dim="src").values, xds.rfi_vis.values, exact_rtol
+            sources = xds.rfi_vis_src.values
+            _assert_sums_back(
+                sources.sum(axis=1),
+                xds.rfi_vis.values,
+                sources,
+                n_ulp=_reassociation_ulps(config),
+                dtype=np.dtype(_real_dtype()),
             )
+
+    def test_one_satellite_is_one_chunk(self, tmp_path):
+        """The read pattern: imaging one source must not pull all of them.
+
+        A single chunk over the whole variable would make every per-satellite
+        read a read of the entire decomposition, which is the one thing this
+        variable is big enough for that to matter on.
+        """
+        config = make_config()
+
+        write_results_xds(make_pred(config, n_sample=2), config, str(tmp_path / "map.zarr"))
+
+        with xr.open_zarr(str(tmp_path / "map.zarr")) as xds:
+            sample, src = xds.rfi_vis_src.chunks[:2]
+            assert set(sample) == {1} and set(src) == {1}
 
     @pytest.mark.parametrize("flag", [False, None], ids=["false", "absent"])
     def test_nothing_is_written_when_it_is_not_asked_for(self, tmp_path, flag):
@@ -551,6 +712,7 @@ def run_per_sat_writer(monkeypatch):
             captured["cols"] = list(cols)
             captured["keywords"] = column_keywords
             captured["path"] = path
+            captured["writes"] = captured.get("writes", 0) + 1
             return []
 
         monkeypatch.setattr(write_mod, "xds_from_ms", _from_ms)
@@ -634,14 +796,37 @@ class TestTheWrittenColumns:
         )
         np.testing.assert_array_equal(col[:, :, [0, 1, 3]], 0)
 
-    def test_the_columns_are_written_to_the_measurement_set(
+    def test_every_column_goes_into_the_measurement_set_in_one_write(
         self, tmp_path, run_per_sat_writer
     ):
+        """One fused write, not one per satellite.
+
+        The sources share the read of the zarr and of the MS's row layout; a
+        write per column would repeat both n_src times.
+        """
         zarr_path = _per_sat_zarr(tmp_path, _sources(), NORAD_IDS)
 
         _, captured = run_per_sat_writer(_fake_ms(), zarr_path)
 
         assert captured["path"] == "unused.ms"
+        assert captured["writes"] == 1
+        assert len(captured["cols"]) == len(NORAD_IDS)
+
+
+def _rows_per_source(vis_src):
+    """``rfi_vis_src`` as the writer rounds it: complex64, per sample, in rows."""
+
+    n_sample, n_src = np.asarray(vis_src).shape[:2]
+
+    return np.stack(
+        [
+            np.stack(
+                [_to_ms(np.asarray(vis_src)[s, r].astype(np.complex64))
+                 for r in range(n_src)]
+            )
+            for s in range(n_sample)
+        ]
+    )
 
 
 class TestTheColumnsSumBackToTheTotal:
@@ -649,10 +834,24 @@ class TestTheColumnsSumBackToTheTotal:
 
     Both sides go through the same path -- ``complex64`` cast, sample mean,
     ``grid_to_rows`` -- so what separates them is the float32 rounding of the
-    per-source terms and of their sum, and nothing else. The zarr here holds a
-    ``rfi_vis`` that is *exactly* the sum of its sources, so any larger
-    difference is the writer's.
+    per-source terms and of their sum, and nothing else. The zarr in the first
+    two cases holds a ``rfi_vis`` that is *exactly* the sum of its sources, so
+    any larger difference is the writer's; the last case takes a zarr the run
+    itself wrote, where the decomposition's own re-association is in there too.
+
+    The bound is
+
+        |sum_r TAB_RFI_<NORAD_r> - TAB_RFI_DATA|
+            <= (n_src + n_sample + 2) * ulp32(max_s sum_r |rfi_vis_src[s, r]|)
+
+    per component, with the scale taken **before** the sample mean.
     """
+
+    @staticmethod
+    def _n_ulp(n_src, n_sample):
+        """One ulp per term cast, one per step of the two means, one for the sum."""
+
+        return n_src + n_sample + 2
 
     @pytest.mark.parametrize("n_sample", [1, 3])
     def test_the_columns_sum_back_to_the_rfi_column(
@@ -667,15 +866,79 @@ class TestTheColumnsSumBackToTheTotal:
         # TAB_RFI_DATA, formed exactly as write_results_ms forms it.
         total = _to_ms(rfi_vis.astype(np.complex64).mean(axis=0))
         columns = [values[f"TAB_RFI_{nid}"] for nid in NORAD_IDS]
-        summed = np.sum(columns, axis=0)
 
-        # One ulp per term rounded, plus one for the total itself, referenced to
-        # the terms rather than to the total they may partly cancel in.
-        _within_ulps(
-            summed,
+        _assert_sums_back(
+            np.sum(columns, axis=0),
             total,
-            n_ulp=len(NORAD_IDS) + 1,
-            scale=np.sum(np.abs(columns), axis=0),
+            _rows_per_source(vis_src),
+            n_ulp=self._n_ulp(len(NORAD_IDS), n_sample),
+        )
+
+    def test_cancelling_samples(self, tmp_path, run_per_sat_writer):
+        """Where a bound taken from the columns would be no bound at all.
+
+        Two sources over two samples, arranged so that every per-source sample
+        mean is exactly zero while the per-sample totals are not: ``1 - A``
+        rounds to ``-A`` in float32, so source 1 loses the 1 that the total keeps.
+        The columns come out zero, ``TAB_RFI_DATA`` comes out 0.5, and the
+        difference is a float32 ulp of ``A`` -- which is what the rounding is
+        entitled to and what a scale measured before the mean allows.
+        """
+        A = 2.0 ** 25            # 1 is below half an ulp of A in float32
+        vis_src = np.zeros((2, 2, N_BL, N_FREQ, N_TIME), dtype=complex)
+        vis_src[0, 0], vis_src[1, 0] = A, -A
+        vis_src[0, 1], vis_src[1, 1] = 1 - A, A
+
+        rfi_vis = vis_src.sum(axis=1)          # [1, 0] per sample, exactly
+        norad_ids = NORAD_IDS[:2]
+        zarr_path = _per_sat_zarr(tmp_path, vis_src, norad_ids, rfi_vis=rfi_vis)
+
+        values, _ = run_per_sat_writer(_fake_ms(), zarr_path)
+
+        columns = [values[f"TAB_RFI_{nid}"] for nid in norad_ids]
+        total = _to_ms(rfi_vis.astype(np.complex64).mean(axis=0))
+
+        # The trap itself: the columns are zero and the total is not.
+        np.testing.assert_array_equal(np.sum(columns, axis=0), 0)
+        np.testing.assert_array_equal(total, 0.5)
+
+        _assert_sums_back(
+            np.sum(columns, axis=0),
+            total,
+            _rows_per_source(vis_src),
+            n_ulp=self._n_ulp(len(norad_ids), 2),
+        )
+
+    def test_a_zarr_the_run_wrote_exports_columns_that_sum_back(
+        self, tmp_path, run_per_sat_writer
+    ):
+        """End to end: the real kernel's decomposition, through the real writer.
+
+        The other cases construct ``rfi_vis`` as the exact sum of its sources,
+        which is what isolates the writer's rounding -- but it also means the
+        decomposition's own re-association is never in the comparison. Here the
+        zarr is the one a run would have written, so both are.
+        """
+        config = make_config()
+        pred = make_pred(config, n_sample=2)
+        zarr_path = str(tmp_path / "map.zarr")
+        write_results_xds(pred, config, zarr_path)
+
+        values, _ = run_per_sat_writer(_fake_ms(), zarr_path)
+
+        with xr.open_zarr(zarr_path) as xds:
+            vis_src = xds.rfi_vis_src.values
+            total = _to_ms(xds.rfi_vis.values.astype(np.complex64).mean(axis=0))
+
+        columns = [values[f"TAB_RFI_{nid}"] for nid in NORAD_IDS]
+
+        _assert_sums_back(
+            np.sum(columns, axis=0),
+            total,
+            _rows_per_source(vis_src),
+            # The writer's float32 rounding, plus the re-association -- which is
+            # below a float32 ulp whenever the fit itself ran in fp64.
+            n_ulp=self._n_ulp(len(NORAD_IDS), 2) + _reassociation_ulps(config),
         )
 
 
@@ -691,21 +954,111 @@ class TestTheWriterGuardsTheInputs:
         with pytest.raises(ValueError, match="save_rfi_per_sat"):
             run_per_sat_writer(_fake_ms(), zarr_path)
 
-    def test_a_wrongly_shaped_variable_is_refused(self, tmp_path, run_per_sat_writer):
-        """The dims, not just the name: a 4-d array would reshape into nonsense."""
-        path = str(tmp_path / "bad.zarr")
+    @staticmethod
+    def _zarr_with(tmp_path, name, variable, coords=None):
+        """A results zarr holding exactly the ``rfi_vis_src`` given."""
+
+        path = str(tmp_path / name)
         xr.Dataset(
-            data_vars={
-                "rfi_vis_src": (
-                    ["sample", "bl", "freq", "time"],
-                    da.zeros((1, N_BL, N_FREQ, N_TIME), dtype=complex),
-                )
-            },
+            data_vars={"rfi_vis_src": variable},
+            coords={} if coords is None else coords,
             attrs={"corr": "xx"},
         ).to_zarr(path, mode="w")
 
+        return path
+
+    def test_a_four_dimensional_variable_is_refused(
+        self, tmp_path, run_per_sat_writer
+    ):
+        """The dims, not just the name: a 4-d array would reshape into nonsense."""
+        path = self._zarr_with(
+            tmp_path,
+            "flat.zarr",
+            (
+                ["sample", "bl", "freq", "time"],
+                da.zeros((1, N_BL, N_FREQ, N_TIME), dtype=complex),
+            ),
+        )
+
         with pytest.raises(ValueError, match="dimensions"):
             run_per_sat_writer(_fake_ms(), path)
+
+    def test_a_transposed_variable_is_refused(self, tmp_path, run_per_sat_writer):
+        """The silent one: the right axes in the wrong order still reshape.
+
+        ``(sample, src, freq, bl, time)`` has the same number of elements and
+        maps into MS rows without complaint, putting every visibility on another
+        baseline and channel. Only the dimension *names* catch it.
+        """
+        path = self._zarr_with(
+            tmp_path,
+            "transposed.zarr",
+            (
+                ["sample", "src", "freq", "bl", "time"],
+                da.zeros((1, 3, N_FREQ, N_BL, N_TIME), dtype=complex),
+            ),
+            coords={"norad_id": ("src", np.asarray(NORAD_IDS, dtype=np.int64))},
+        )
+
+        with pytest.raises(ValueError, match="dimensions"):
+            run_per_sat_writer(_fake_ms(), path)
+
+    def test_a_variable_with_no_norad_ids_is_refused(
+        self, tmp_path, run_per_sat_writer
+    ):
+        """The columns are named after the coordinate; there is no default."""
+        path = self._zarr_with(
+            tmp_path,
+            "nameless.zarr",
+            (
+                list(write_mod.RFI_PER_SAT_DIMS),
+                da.zeros((1, 3, N_BL, N_FREQ, N_TIME), dtype=complex),
+            ),
+        )
+
+        with pytest.raises(ValueError, match="norad_id"):
+            run_per_sat_writer(_fake_ms(), path)
+
+    def test_norad_ids_on_the_wrong_axis_are_refused(
+        self, tmp_path, run_per_sat_writer
+    ):
+        """One id per source, not per baseline: otherwise it names the wrong ones."""
+        path = self._zarr_with(
+            tmp_path,
+            "misaligned.zarr",
+            (
+                list(write_mod.RFI_PER_SAT_DIMS),
+                da.zeros((1, 3, N_BL, N_FREQ, N_TIME), dtype=complex),
+            ),
+            coords={"norad_id": ("bl", np.arange(N_BL, dtype=np.int64))},
+        )
+
+        with pytest.raises(ValueError, match="norad_id"):
+            run_per_sat_writer(_fake_ms(), path)
+
+    def test_floating_point_norad_ids_are_refused(self, tmp_path, run_per_sat_writer):
+        """`TAB_RFI_58126.0` is not a column name anyone asked for."""
+        path = self._zarr_with(
+            tmp_path,
+            "floats.zarr",
+            (
+                list(write_mod.RFI_PER_SAT_DIMS),
+                da.zeros((1, 3, N_BL, N_FREQ, N_TIME), dtype=complex),
+            ),
+            coords={"norad_id": ("src", np.asarray(NORAD_IDS, dtype=float))},
+        )
+
+        with pytest.raises(ValueError, match="integer"):
+            run_per_sat_writer(_fake_ms(), path)
+
+    def test_a_different_number_of_timesteps_is_refused(
+        self, tmp_path, run_per_sat_writer
+    ):
+        """As many rows as the MS, but not the same observation."""
+        zarr_path = _per_sat_zarr(tmp_path, _sources(n_time=N_TIME + 1), NORAD_IDS)
+
+        with pytest.raises(ValueError, match="timesteps"):
+            run_per_sat_writer(_fake_ms(), zarr_path)
 
     def test_a_zarr_with_no_satellites_is_refused(self, tmp_path, run_per_sat_writer):
         """A column-less write is not a decomposition; say so instead."""

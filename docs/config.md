@@ -133,6 +133,8 @@ data:
 
   Off by default because it is not free. The stored array is `n_rfi` times the size of `rfi_vis`, and filling it costs `n_rfi` extra evaluations of the run's own RFI-visibility op — one per satellite, each over the whole source axis with the other satellites' amplitudes held at zero, which is what keeps the evaluation inside the RFI-axis sharding rather than gathering the fine grids onto one device. That is a few forward passes' worth of work at the end of a fit, not a second fit, but it is `n_rfi` × the *storage* forever.
 
+  **The same multiplier applies to memory on the writing process**, which assembles the whole decomposition before handing it to the zarr: budget `n_rfi × sizeof(rfi_vis)` on rank 0 at the end of a run, on top of what the fit already holds. On disk it is chunked one satellite per chunk, so reading or imaging a single source does not pull the rest of them in.
+
   Padded sources are not stored: under sharding the satellite list is padded to a multiple of the device count with dark dummies, and only the real satellites get a `src` slice. The sources sum back to `rfi_vis` — exactly in exact arithmetic, and to within round-off in floating point, since splitting the op's single reduction over (source, integration sample) into per-source partial sums re-associates it.
 
 ## Plots

@@ -728,6 +728,7 @@ def _prepare_sharded_run(
     provide_test_data: Path,
     work_dir: Path,
     rfi_vis: str = "RiemannVis",
+    save_rfi_per_sat: bool = False,
 ) -> tuple[list[str], Path]:
     """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command.
 
@@ -748,11 +749,21 @@ def _prepare_sharded_run(
     shutil.copytree(src, sim_dir)
 
     config_path = work_dir / "tab_target.yaml"
-    read_and_modify_yaml(
-        {"model": {"components": _sharded_components(rfi_vis), "precision": "double"}},
-        data_dir / "tab_target.yaml",
-        config_path,
-    )
+    updates: dict = {
+        "model": {"components": _sharded_components(rfi_vis), "precision": "double"}
+    }
+
+    if save_rfi_per_sat:
+        from tabascal.config import yaml_load
+
+        # The whole section, not just the new key: read_and_modify_yaml replaces
+        # a top-level section rather than merging into it, and dropping
+        # data_col/noise here would change what the run reads.
+        data = dict(yaml_load(data_dir / "tab_target.yaml").get("data", {}))
+        data["save_rfi_per_sat"] = True
+        updates["data"] = data
+
+    read_and_modify_yaml(updates, data_dir / "tab_target.yaml", config_path)
 
     script = Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
     tle_dir = str(_res_files("tabascal").joinpath("data/tles"))
@@ -770,6 +781,27 @@ def _extract_chi2(stdout: str, point: str) -> float:
     match = re.search(rf"Reduced Chi\^2 @ {point} params : ([\d.eE+-]+)", stdout)
     assert match, f"Could not find 'Reduced Chi^2 @ {point}' in output:\n{stdout}"
     return float(match.group(1))
+
+
+def _cpu_env(n_devices: int) -> dict:
+    """Environment pinning a child run to exactly ``n_devices`` CPU devices.
+
+    Pinning to CPU is only half of it: a stale ``CUDA_VISIBLE_DEVICES`` in the
+    parent environment would still be inherited by the child, which would then
+    shard itself over whatever accelerators it found.
+    """
+
+    import os
+
+    env = dict(os.environ)
+    env["JAX_PLATFORMS"] = "cpu"
+    env["XLA_FLAGS"] = (
+        env.get("XLA_FLAGS", "")
+        + f" --xla_force_host_platform_device_count={n_devices}"
+    ).strip()
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+
+    return env
 
 
 @pytest.mark.parametrize(
@@ -804,20 +836,6 @@ def test_pipeline_sharded_equivalence(
     if precision != "double":
         pytest.skip("equivalence is asserted exactly; components require double")
 
-    import os
-
-    def _cpu_env(n_devices: int) -> dict:
-        env = dict(os.environ)
-        env["JAX_PLATFORMS"] = "cpu"
-        env["XLA_FLAGS"] = (
-            env.get("XLA_FLAGS", "")
-            + f" --xla_force_host_platform_device_count={n_devices}"
-        ).strip()
-        # Pinning to CPU is only half of it: a stale CUDA_VISIBLE_DEVICES in the
-        # parent environment would still be inherited by the child.
-        env.pop("CUDA_VISIBLE_DEVICES", None)
-        return env
-
     ref_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "ref", rfi_vis)
     ref = subprocess.run(
         ref_cmd, capture_output=True, text=True, cwd=tmp_path / "ref", env=_cpu_env(1)
@@ -844,17 +862,72 @@ def test_pipeline_sharded_equivalence(
     _assert_chi2(shard.stdout, _SHARDED_CHI2_REF)
 
 
-def test_pipeline_multiprocess(
+def _assert_per_sat_results(sim_dir: Path) -> None:
+    """What a ``save_rfi_per_sat`` run must have left in its results zarr.
+
+    Written once, holding only the *real* satellites -- the sharded runs pad 3
+    sources to 4 for the mesh, and the dummy names no satellite -- and still
+    summing back to the ``rfi_vis`` it decomposes.
+    """
+
+    import numpy as np
+    import xarray as xr
+
+    with xr.open_zarr(str(sim_dir / "results" / "map_pred_Custom.zarr")) as xds:
+        assert xds.rfi_vis_src.dims == ("sample", "src", "bl", "freq", "time")
+        assert xds.sizes["src"] == 3
+        assert len({int(nid) for nid in xds.norad_id.values}) == 3
+
+        sources = xds.rfi_vis_src.values
+        total = xds.rfi_vis.values
+
+    # The per-device partial sums the psum adds up have to cover every satellite.
+    # Referenced to the summed per-source magnitudes, as everywhere: this is a
+    # re-association of one reduction, not an approximation of it. The 64 is
+    # slack rather than derived -- the run's integration depth, which sets the
+    # re-association's own bound, is not visible from the zarr -- and is still
+    # twelve orders of magnitude below a missing satellite.
+    scale = np.abs(sources).sum(axis=1).max(axis=0)
+
+    assert np.all(np.abs(sources.sum(axis=1) - total) <= 64 * np.spacing(scale))
+
+
+def test_pipeline_sharded_per_sat(
     provide_test_data: Path, tmp_path: Path, precision: str
 ) -> None:
-    """Two coordinated processes (jax.distributed, 1 CPU device each) solve once.
+    """``data.save_rfi_per_sat`` on a 2-device mesh, in one process.
 
-    Verifies the full multi-process path: coordinator bring-up through the
-    MASTER_ADDR/RANK env route in init_distributed, RFI padding/sharding across
-    processes, worker stdout silence, and rank-0-only result writing.
+    The RFI axis really is split here, so the per-satellite evaluation goes
+    through ``psum_over_rfi``'s ``shard_map`` and its source mask has to be a
+    global array on that mesh rather than a process-local one -- everything the
+    decomposition does differently under sharding, short of a second process,
+    which ``test_pipeline_multiprocess_per_sat`` covers. The 3 satellites are
+    padded to 4 for the mesh, so the padded dummy has to stay out of the zarr.
     """
     if precision != "double":
         pytest.skip("uses components that require double precision")
+
+    cmd, sim_dir = _prepare_sharded_run(
+        provide_test_data, tmp_path, save_rfi_per_sat=True
+    )
+    run = subprocess.run(
+        cmd, capture_output=True, text=True, cwd=tmp_path, env=_cpu_env(2)
+    )
+
+    assert run.returncode == 0, f"sharded run failed: {run.stderr}"
+    assert "Padded 3 RFI sources to 4" in run.stdout
+    assert "Sharding RFI sources over 2 devices:" in run.stdout
+
+    _assert_per_sat_results(sim_dir)
+
+
+def _run_two_processes(cmd: list[str], work_dir: Path) -> list[tuple[str, str]]:
+    """Run ``cmd`` as two coordinated jax.distributed ranks; return their output.
+
+    One CPU device per process (no ``--xla_force_host_platform_device_count``):
+    the two must contribute one device each to a 2-device global mesh. Asserts
+    both exited cleanly, so a caller can go straight to what the run produced.
+    """
 
     import os
     import socket
@@ -863,7 +936,6 @@ def test_pipeline_multiprocess(
         s.bind(("localhost", 0))
         port = s.getsockname()[1]
 
-    cmd, sim_dir = _prepare_sharded_run(provide_test_data, tmp_path)
     # Drop any launcher variables we inherited: ``init_distributed`` consults SLURM /
     # OpenMPI / PMI before the torchrun-style ``WORLD_SIZE``/``RANK`` pair, so running
     # this test inside an allocation (SLURM_NTASKS=1, SLURM_PROCID=0) would shadow the
@@ -873,8 +945,6 @@ def test_pipeline_multiprocess(
         k: v for k, v in os.environ.items()
         if not k.startswith(("SLURM_", "OMPI_", "PMI_"))
     }
-    # One CPU device per process (no --xla_force_host_platform_device_count): the two
-    # processes must contribute one device each to a 2-device global mesh.
     base_env.update({
         "MASTER_ADDR": "localhost",
         "MASTER_PORT": str(port),
@@ -889,13 +959,32 @@ def test_pipeline_multiprocess(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=tmp_path,
+            cwd=work_dir,
         )
         for rank in (0, 1)
     ]
     outs = [p.communicate(timeout=600) for p in procs]
+
     for rank, (p, (out, err)) in enumerate(zip(procs, outs)):
         assert p.returncode == 0, f"rank {rank} failed:\nstdout:\n{out}\nstderr:\n{err}"
+
+    return outs
+
+
+def test_pipeline_multiprocess(
+    provide_test_data: Path, tmp_path: Path, precision: str
+) -> None:
+    """Two coordinated processes (jax.distributed, 1 CPU device each) solve once.
+
+    Verifies the full multi-process path: coordinator bring-up through the
+    MASTER_ADDR/RANK env route in init_distributed, RFI padding/sharding across
+    processes, worker stdout silence, and rank-0-only result writing.
+    """
+    if precision != "double":
+        pytest.skip("uses components that require double precision")
+
+    cmd, sim_dir = _prepare_sharded_run(provide_test_data, tmp_path)
+    outs = _run_two_processes(cmd, tmp_path)
 
     rank0_out = outs[0][0]
     assert "Sharding RFI sources over 2 devices:" in rank0_out
@@ -912,3 +1001,31 @@ def test_pipeline_multiprocess(
     )
     assert worker_out == "", f"rank 1 was not silent:\n{worker_out}"
     assert (sim_dir / "results" / "map_pred_Custom.zarr").is_dir()
+
+
+def test_pipeline_multiprocess_per_sat(
+    provide_test_data: Path, tmp_path: Path, precision: str
+) -> None:
+    """``data.save_rfi_per_sat`` across two processes: the sharded decomposition.
+
+    Nothing single-process reaches what this covers. The per-satellite
+    evaluation runs inside ``psum_over_rfi``'s ``shard_map``, so it is a
+    collective every rank has to make -- a rank that skipped it, or made a
+    different number of them, would hang here rather than in a comment -- and
+    its source mask has to be a *global* array on the RFI sharding, since a
+    process-local one of the full length describes an axis each process holds
+    only a shard of. The 3 satellites are padded to 4 for the 2-device mesh, so
+    this is also where the padded dummy has to stay out of what is written.
+    """
+    if precision != "double":
+        pytest.skip("uses components that require double precision")
+
+    cmd, sim_dir = _prepare_sharded_run(
+        provide_test_data, tmp_path, save_rfi_per_sat=True
+    )
+    outs = _run_two_processes(cmd, tmp_path)
+
+    assert "Padded 3 RFI sources to 4" in outs[0][0]
+
+    # Written once, by rank 0, and holding only the real satellites.
+    _assert_per_sat_results(sim_dir)

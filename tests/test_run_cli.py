@@ -245,6 +245,34 @@ class TestRfiPerSatSubcommand:
         assert not hasattr(rfi_per_sat_to_MS, "write_per_sat_rfi_ms")
         assert rfi_per_sat_to_MS.build_parser() is not None
 
+    def test_building_the_whole_parser_imports_no_jax(self):
+        """In a clean process: the test session has JAX imported long before this.
+
+        Checking ``sys.modules`` in-process proves nothing -- conftest imports
+        JAX at collection. A subprocess that does nothing but build the parser is
+        the only place the claim can be made, and it covers every subcommand's
+        parser, not only this one's.
+        """
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys\n"
+                "from tabascal.scripts.run_tabascal import build_parser\n"
+                "build_parser().parse_args(['rfi-per-sat', '-m', 'o.ms', '-z', 'r.zarr'])\n"
+                "print(sorted(m for m in ('jax', 'numpyro', 'tabascal.write')"
+                " if m in sys.modules))\n",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "[]", result.stdout
+
 
 class TestLightCurveInputs:
     """Resolution of the inputs argparse cannot express on its own."""
