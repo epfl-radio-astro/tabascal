@@ -12,11 +12,14 @@ Three things are pinned here, in the order the feature runs:
   satellite, in the same calibrated frame as ``TAB_RFI_DATA`` and summing back
   to it.
 
-The jax half uses the ``exact_rtol`` fixture: the sum-back is exact in exact
-arithmetic and its floating-point error is set by the working precision (see
-:func:`rfi_vis_per_sat` for why it is not bit-exact). The MS half runs no jax at
-all -- the writer works in ``complex64`` in either session precision -- so its
-bounds come from float32 round-off, as in ``test_write_results_ms.py``.
+The sum-back is exact in exact arithmetic and perturbed by floating point in two
+separate ways -- the writer's rounding, which is bounded, and the kernel's
+re-association, which is not bounded by anything these tests can measure. The
+distinction is set out above the helpers below, and it is the reason the ``jax``
+half here does not use the ``exact_rtol`` fixture: a relative tolerance says
+nothing about either. The MS half runs no jax at all -- the writer works in
+``complex64`` in either session precision -- so its bound comes from float32
+round-off, as in ``test_write_results_ms.py``.
 """
 
 import hashlib
@@ -206,18 +209,26 @@ def _assert_close(got, want, exact_rtol):
 
 
 # ---------------------------------------------------------------------------
-# The sum-back bound
+# The sum-back: two claims, only one of them a bound
 # ---------------------------------------------------------------------------
 #
-# Every sum-back assertion in this file is referenced to the *terms* of the sum,
-# per component, and to the terms as they are **before any sample mean** -- which
-# is where the rounding that separates the two sides happens.
+# 1. The WRITER's rounding -- what `write_per_sat_rfi_ms` adds on top of the
+#    decomposition it is given. A real bound, and asserted as one, *given* that
+#    the zarr's `rfi_vis` is the exact-arithmetic sum of `rfi_vis_src`: the cases
+#    that assert it construct exactly that hypothesis. It is referenced to the
+#    *terms* of the sum, per component, and to the terms as they are **before any
+#    sample mean** -- which is where the rounding happens. Referencing it to the
+#    result instead is not a bound at all: samples that cancel leave a per-source
+#    mean of zero while the per-sample values that were rounded were large, and
+#    `TestTheColumnsSumBackToTheTotal.test_cancelling_samples` is a case where
+#    every column is exactly 0, the total is 0.5, and a tolerance taken from the
+#    columns allows 1e-45.
 #
-# Referencing it to the result instead is not a bound at all. Samples that cancel
-# leave a per-source mean of zero while the per-sample values that were rounded
-# were large: `TestTheColumnsSumBackToTheTotal.test_cancelling_samples` is a case
-# where every column is exactly 0, the total is 0.5, and a tolerance taken from
-# the columns allows 1e-45.
+# 2. The KERNEL's re-association -- the joint evaluation against the sum of the
+#    per-source ones, which is the hypothesis above. **Not bounded by these
+#    coarse magnitudes at all**: see `PRACTICAL_REASSOCIATION_ULPS` and
+#    `TestFineGridCancellation`. The assertions using it pin the regime a fit is
+#    in; the demonstration pins the caveat.
 
 def _term_scale(terms, dtype):
     """Per-component ``sum |term|`` scales, as ``(real, imag)``.
@@ -251,19 +262,21 @@ def _assert_sums_back(got, want, terms, n_ulp, dtype=np.float32):
         )
 
 
-def _reassociation_ulps(config):
-    """Ulps allowed for splitting the op's reduction into per-source sums.
-
-    The op accumulates over source *and* integration sample in one reduction of
-    depth ``n_rfi * n_int``; evaluating one source at a time gives ``n_rfi``
-    reductions of depth ``n_int`` which are then added up. The three depths
-    bound the re-association, referenced -- as everywhere here -- to the summed
-    per-source magnitudes, which stand in for the fine-grid terms behind them.
-    """
-
-    n_int = N_INT_FREQ * N_INT_TIME
-
-    return config.n_rfi * n_int + config.n_rfi + n_int
+#: Ulps of the summed per-source magnitudes allowed for the *kernel*-level
+#: difference: the joint evaluation against the sum of the per-source ones.
+#:
+#: **This is a measurement, not a bound.** Splitting the op's single reduction
+#: over (source, integration sample) re-associates it, and what that costs is
+#: set by the *fine-grid* terms behind each visibility -- which can be arbitrarily
+#: larger than the coarse values they average to. ``TestFineGridCancellation``
+#: constructs the case where the difference is the whole coarse visibility, and
+#: no constant here would survive it.
+#:
+#: What these tests pin is the regime a fit is actually in: on grids like the
+#: ones below the difference measures 1-2 ulps in fp64 and under one in fp32, so
+#: 64 is ample headroom for a data-dependent quantity while staying twelve
+#: orders of magnitude (fp64) below a dropped or duplicated source.
+PRACTICAL_REASSOCIATION_ULPS = 64
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +307,7 @@ class TestTheDecompositionSumsBack:
             vis_src.sum(axis=1),
             pred["vis_rfi"],
             vis_src,
-            n_ulp=_reassociation_ulps(config),
+            n_ulp=PRACTICAL_REASSOCIATION_ULPS,
             dtype=np.dtype(_real_dtype()),
         )
 
@@ -355,7 +368,7 @@ class TestTheDecompositionSumsBack:
             vis_src.sum(axis=1),
             pred["vis_rfi"],
             vis_src,
-            n_ulp=_reassociation_ulps(config),
+            n_ulp=PRACTICAL_REASSOCIATION_ULPS,
             dtype=np.dtype(_real_dtype()),
         )
 
@@ -385,7 +398,7 @@ class TestPaddedSatellites:
             vis_src.sum(axis=1),
             pred["vis_rfi"],
             vis_src,
-            n_ulp=_reassociation_ulps(config),
+            n_ulp=PRACTICAL_REASSOCIATION_ULPS,
             dtype=np.dtype(_real_dtype()),
         )
 
@@ -412,6 +425,127 @@ class TestPaddedSatellites:
         )["vis_rfi"]
 
         np.testing.assert_array_equal(np.asarray(dummy), 0)
+
+
+class TestFineGridCancellation:
+    """The case with no bound: why the kernel-level claim stays qualitative.
+
+    The op reduces over source *and* integration sample together. ``RiemannVis``
+    does it in that order literally -- ``calculate_rfi_vis_fine`` sums the
+    sources at each fine sample, and the mean over fine samples comes after --
+    so a source whose fine samples are ``[A, -A]`` beside one whose are
+    ``[1, 0]`` loses the ``1`` inside the joint evaluation, where it is added to
+    ``A``, and keeps it in the per-source one, where it is not.
+
+    The difference is then the whole of the coarse visibility, with the summed
+    per-source magnitudes no larger. No tolerance expressed in those magnitudes
+    -- which is every tolerance in this file -- could hold here, which is why
+    the documented claim about the decomposition is qualitative and why
+    ``PRACTICAL_REASSOCIATION_ULPS`` says it is a measurement.
+
+    Constructed through the real path: the component's own forward for the joint
+    value, :func:`rfi_vis_per_sat` for the split one.
+    """
+
+    @staticmethod
+    def _config():
+        """Two sources, two antennas, one output cell over two fine samples."""
+
+        return SimpleNamespace(
+            n_ant=2, n_bl=1, n_time=1, n_freq=1, n_int_time=2,
+            n_rfi=2, n_rfi_real=2, norad_ids=NORAD_IDS[:2],
+            a1=jnp.asarray([0], dtype=jnp.int32),
+            a2=jnp.asarray([1], dtype=jnp.int32),
+            precision="double" if jax.config.read("jax_enable_x64") else "single",
+            times=np.zeros(1), freqs=np.full(1, 1.0e9),
+            time_sample_idxs=[np.zeros(1, dtype="int32")], time_strides=[1],
+            args={
+                "rfi": {"freq_int_samples": 1},
+                "model": {"components": ["rfi_vis:RiemannVis"]},
+                "data": {"corr": "xx", "save_rfi_per_sat": True},
+            },
+        )
+
+    @staticmethod
+    def _fine_grid():
+        """``rfi_A`` giving fine-sample terms ``[A, -A]`` and ``[1, 0]``.
+
+        The second antenna is held at 1, so the baseline product ``A_p conj(A_q)``
+        is the first antenna's value and the terms are exactly as named. ``A`` is
+        the smallest power of two whose ulp exceeds 2 in the session's precision,
+        so ``A + 1`` rounds back to ``A`` and the ``1`` is what the two orders of
+        summation disagree about.
+        """
+
+        A = 2.0 ** (54 if jax.config.read("jax_enable_x64") else 25)
+        amp = np.zeros((2, 2, 1, 2), dtype=complex)
+        amp[0, 0], amp[0, 1] = [A, -A], [1, 1]
+        amp[1, 0], amp[1, 1] = [1, 0], [1, 1]
+
+        return jnp.asarray(amp, dtype=_complex_dtype()), jnp.zeros(
+            (2, 2, 1, 2), dtype=_real_dtype()
+        )
+
+    def test_the_difference_can_be_the_whole_visibility(self):
+        config = self._config()
+        amp, phase = self._fine_grid()
+        forward, constants = _forward(config)
+
+        joint = forward(
+            {},
+            {
+                "rfi_A": amp,
+                "rfi_phase": phase,
+                "vis_rfi": jnp.zeros((1, 1, 1), dtype=_complex_dtype()),
+            },
+            constants,
+        )["vis_rfi"]
+
+        vis_src, _ = rfi_vis_per_sat(
+            {"rfi_A": amp[None], "rfi_phase": phase[None], "vis_rfi": joint[None]},
+            config,
+        )
+
+        # The mean over the two fine samples of [A, -A] is 0 and of [1, 0] is
+        # 0.5, so the sources come to 0.5 -- while the joint evaluation added the
+        # 1 to A first, lost it, and averaged [A, -A] to 0.
+        split = vis_src.sum(axis=1)
+        np.testing.assert_array_equal(np.asarray(joint), 0)
+        np.testing.assert_array_equal(split, 0.5)
+
+        # The difference is 100% of the summed per-source magnitudes: every
+        # tolerance in this file is a multiple of an *ulp* of that number.
+        assert np.abs(split - np.asarray(joint)).max() == np.abs(vis_src).sum()
+
+    def test_the_practical_tolerance_would_not_cover_it(self):
+        """Named so the constant cannot quietly be re-read as a bound."""
+
+        config = self._config()
+        amp, phase = self._fine_grid()
+        forward, constants = _forward(config)
+
+        joint = forward(
+            {},
+            {
+                "rfi_A": amp,
+                "rfi_phase": phase,
+                "vis_rfi": jnp.zeros((1, 1, 1), dtype=_complex_dtype()),
+            },
+            constants,
+        )["vis_rfi"]
+        vis_src, _ = rfi_vis_per_sat(
+            {"rfi_A": amp[None], "rfi_phase": phase[None], "vis_rfi": joint[None]},
+            config,
+        )
+
+        with pytest.raises(AssertionError):
+            _assert_sums_back(
+                vis_src.sum(axis=1),
+                joint[None],
+                vis_src,
+                n_ulp=PRACTICAL_REASSOCIATION_ULPS,
+                dtype=np.dtype(_real_dtype()),
+            )
 
 
 class TestNonFiniteSources:
@@ -511,7 +645,7 @@ class TestTheZarrVariable:
                 sources.sum(axis=1),
                 xds.rfi_vis.values,
                 sources,
-                n_ulp=_reassociation_ulps(config),
+                n_ulp=PRACTICAL_REASSOCIATION_ULPS,
                 dtype=np.dtype(_real_dtype()),
             )
 
@@ -938,7 +1072,7 @@ class TestTheColumnsSumBackToTheTotal:
             _rows_per_source(vis_src),
             # The writer's float32 rounding, plus the re-association -- which is
             # below a float32 ulp whenever the fit itself ran in fp64.
-            n_ulp=self._n_ulp(len(NORAD_IDS), 2) + _reassociation_ulps(config),
+            n_ulp=self._n_ulp(len(NORAD_IDS), 2) + PRACTICAL_REASSOCIATION_ULPS,
         )
 
 
@@ -1001,6 +1135,21 @@ class TestTheWriterGuardsTheInputs:
         )
 
         with pytest.raises(ValueError, match="dimensions"):
+            run_per_sat_writer(_fake_ms(), path)
+
+    def test_an_empty_sample_axis_is_refused(self, tmp_path, run_per_sat_writer):
+        """The mean over no samples is NaN, and a NaN column reads as a model."""
+        path = self._zarr_with(
+            tmp_path,
+            "nosamples.zarr",
+            (
+                list(write_mod.RFI_PER_SAT_DIMS),
+                da.zeros((0, 3, N_BL, N_FREQ, N_TIME), dtype=complex),
+            ),
+            coords={"norad_id": ("src", np.asarray(NORAD_IDS, dtype=np.int64))},
+        )
+
+        with pytest.raises(ValueError, match="sample"):
             run_per_sat_writer(_fake_ms(), path)
 
     def test_a_variable_with_no_norad_ids_is_refused(

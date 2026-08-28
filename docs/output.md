@@ -169,7 +169,9 @@ They decompose `TAB_RFI_DATA`:
 sum over satellites of TAB_RFI_<NORAD> == TAB_RFI_DATA
 ```
 
-**to within float32 round-off, not bit for bit.** The bound is
+**exactly in exact arithmetic, and not bit for bit in floating point.** Two separate things stand between the two sides, and only the first of them can be given a bound.
+
+**The writer's rounding.** Both sides make the same `complex64` cast in the same place (before the sample mean, not after it) and go through the same row mapping, but the per-source columns are rounded individually and their sum is not the rounded sum. *Given* that the zarr's `rfi_vis` is the exact-arithmetic sum over sources of `rfi_vis_src`, this contributes at most
 
 ```text
 |Σ_r TAB_RFI_<NORAD_r> − TAB_RFI_DATA|
@@ -180,12 +182,9 @@ per component — the real and imaginary parts separately, since a `complex64` c
 
 **The scale is the per-sample, per-source values, taken before the sample mean**, because that is where the rounding happens. Referencing it to the columns instead would not be a bound at all: two samples of `+A` and `−A` average to a column of exactly zero while the total was rounded from `A`, so the columns can be zero and the difference nowhere near it. For a MAP run — one sample — the two readings coincide, but the guarantee is the one above.
 
-Two things stop it being exact:
+**The decomposition's own re-association**, which is the hypothesis above and has *no* bound in these coarse values. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that single reduction into per-source partial sums. The difference is bounded by the **fine-grid** terms behind each visibility, not by the coarse values they average to, and where the fine grid cancels the two are nothing like each other: a source whose fine samples are `[A, −A]` beside one whose are `[1, 0]` gives a joint evaluation of exactly `0` and per-source values summing to exactly `0.5` — a difference equal to the whole coarse visibility. Whether it happens at all depends on the kernel's accumulation order (`RiemannVis` sums the sources at each fine sample and loses the `1`; the FFI and variable kernels accumulate source-major on that input and lose nothing).
 
-* `sum(round(x_r))` is not `round(sum(x_r))`. Both sides make the same `complex64` cast in the same place (before the sample mean, not after it) and go through the same row mapping, but the per-source columns are rounded individually and their sum is not the rounded sum;
-* the decomposition itself re-associates one reduction. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that into per-source partial sums, which differ from the single reduction by about an ulp of the working precision.
-
-Both are round-off. Anything larger is a real difference — a dropped source, a column in the wrong frame — and shows up orders of magnitude above this bound.
+On fitted grids it is round-off: measured at ~2e-16 relative in double precision and ~6e-8 in single. Treat the sum-back as an exact identity that floating point perturbs, rather than as a guarantee with a number on it, and read a large discrepancy as what it usually is — a dropped source or a column in the wrong frame, which are orders of magnitude larger again — before suspecting cancellation.
 
 A satellite is named by its NORAD id, so a run that somehow fitted the same satellite twice is refused rather than writing one column per *pair* of sources. Sources the sharding padded the list with are not written at all: they carry no signal and name no satellite.
 

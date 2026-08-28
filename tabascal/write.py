@@ -984,17 +984,26 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config):
     re-evaluation, and no second model: the component is the run's own, rebuilt
     from ``model.components`` (see :func:`_rfi_vis_reference`).
 
-    **The pieces sum back to ``vis_rfi``, to round-off but not bit for bit.**
-    The op reduces over source *and* integration sample together, and splitting
-    that one reduction into per-source partial sums re-associates it;
-    ``sum_r round(x_r) != round(sum_r x_r)`` in floating point. The residual is
-    bounded by the working precision's ulp times the reduction depths that were
-    re-associated (``n_rfi``, the integration samples, and their product), on the
-    *terms* of the sum rather than on the total -- sources that partly cancel
-    leave a total smaller than the numbers that made it, and the rounding is of
-    the numbers. It is exact in exact arithmetic, and the residual is orders of
-    magnitude below anything a wrong decomposition (a dropped source, a mask on
-    the wrong axis) would produce.
+    **The pieces sum back to ``vis_rfi`` exactly in exact arithmetic, and in
+    floating point to a difference that is data-dependent and cannot be bounded
+    by the coarse visibilities.** The op reduces over source *and* integration
+    sample together; evaluating one source at a time re-associates that single
+    reduction, and ``sum_r round(x_r) != round(sum_r x_r)``.
+
+    What the difference is bounded by is the **fine-grid** terms, not the coarse
+    values they average to -- and where the fine grid cancels, the two can be
+    nothing like each other. A source whose fine samples are ``[A, -A]`` beside
+    one whose are ``[1, 0]``: a kernel that sums the sources at each fine sample
+    (``RiemannVis`` does, in ``calculate_rfi_vis_fine``) rounds ``A + 1`` back to
+    ``A`` and averages to 0, while the per-source evaluation keeps the 1 and
+    gives 0.5. The difference is then the whole of the coarse visibility. Which
+    kernels it happens in is a property of their accumulation order: the FFI and
+    variable kernels accumulate source-major on that input and lose nothing.
+
+    In practice it is round-off: on fitted grids it measures ~2e-16 relative in
+    fp64 and ~6e-8 in fp32, orders of magnitude below anything a wrong
+    decomposition (a dropped source, a mask on the wrong axis) would produce.
+    The caveat is about what can be *promised*, and the promise is qualitative.
 
     Zeroed rather than sliced, at ``n_rfi`` times the cost of a slice, because
     that is what keeps the RFI-axis sharding intact: the op runs inside
@@ -1129,6 +1138,13 @@ def per_sat_sources(xds_tab, results_zarr_path: str):
             "satellite to write a column for. The run fitted no RFI sources."
         )
 
+    if var.sizes["sample"] == 0:
+        raise ValueError(
+            f"{results_zarr_path} holds an empty 'sample' axis: there is no "
+            "prediction to average. The mean over no samples is NaN, and a "
+            "column of NaN would be read as a modelled visibility."
+        )
+
     if "norad_id" not in xds_tab.coords:
         raise ValueError(
             f"{results_zarr_path} holds 'rfi_vis_src' but no 'norad_id' "
@@ -1185,14 +1201,24 @@ def write_per_sat_rfi_ms(
 
     a statement about round-off rather than about frames. Both sides make the
     same ``complex64`` cast, in the same place -- before the sample mean, not
-    after it -- and go through the same row mapping, so what separates them is
-    the float32 rounding, in the bound
+    after it -- and go through the same row mapping, so what this writer adds is
+    float32 rounding and nothing else:
+
+        **Given** that the zarr's ``rfi_vis`` is the exact-arithmetic sum over
+        sources of ``rfi_vis_src``,
 
         ``|sum_r TAB_RFI_<NORAD_r> - TAB_RFI_DATA|
             <= (n_src + n_sample + 2) * ulp32(max_s sum_r |rfi_vis_src[s, r]|)``
 
-    per component, the real and imaginary parts separately, since a complex64
-    cast rounds each of them on its own.
+        per component, the real and imaginary parts separately, since a
+        complex64 cast rounds each of them on its own.
+
+    The hypothesis is what makes it a bound rather than a hope, and it is a
+    statement about the *zarr*, not about this writer: whether the fit's own
+    ``rfi_vis`` really is that sum is :func:`rfi_vis_per_sat`'s subject, and the
+    answer there is qualitative -- exact in exact arithmetic, round-off in
+    practice, and unbounded in the coarse values under fine-grid cancellation.
+    A results zarr carrying such a case exports columns that inherit it.
 
     **The scale is measured before the sample mean**, on the per-sample,
     per-source values, because that is where the rounding happens. Referencing
@@ -1204,9 +1230,7 @@ def write_per_sat_rfi_ms(
     itself.
 
     It is not a bit-for-bit identity, and cannot be: ``sum_r round(x_r)`` is not
-    ``round(sum_r x_r)``. On top of the rounding above sits the ulp-level
-    re-association :func:`rfi_vis_per_sat` describes, which is below a float32
-    ulp whenever the fit ran in double precision.
+    ``round(sum_r x_r)``.
 
     Correlations that were not fitted are 0, matching the model columns beside
     them; ``corr`` overrides the correlation the zarr recorded, exactly as in

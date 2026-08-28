@@ -135,7 +135,7 @@ data:
 
   **The same multiplier applies to memory on the writing process**, which assembles the whole decomposition before handing it to the zarr: budget `n_rfi × sizeof(rfi_vis)` on rank 0 at the end of a run, on top of what the fit already holds. On disk it is chunked one satellite per chunk, so reading or imaging a single source does not pull the rest of them in.
 
-  Padded sources are not stored: under sharding the satellite list is padded to a multiple of the device count with dark dummies, and only the real satellites get a `src` slice. The sources sum back to `rfi_vis` — exactly in exact arithmetic, and to within round-off in floating point, since splitting the op's single reduction over (source, integration sample) into per-source partial sums re-associates it.
+  Padded sources are not stored: under sharding the satellite list is padded to a multiple of the device count with dark dummies, and only the real satellites get a `src` slice. The sources sum back to `rfi_vis` exactly in exact arithmetic; in floating point the split re-associates the op's single reduction over (source, integration sample), which is round-off on fitted grids (~2e-16 relative in double, ~6e-8 in single) but is bounded by the *fine-grid* terms rather than by the coarse visibilities — see [the per-satellite columns](output.md) for the case where those two differ by everything.
 
 ## Plots
 

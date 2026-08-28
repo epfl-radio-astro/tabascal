@@ -882,11 +882,13 @@ def _assert_per_sat_results(sim_dir: Path) -> None:
         total = xds.rfi_vis.values
 
     # The per-device partial sums the psum adds up have to cover every satellite.
-    # Referenced to the summed per-source magnitudes, as everywhere: this is a
-    # re-association of one reduction, not an approximation of it. The 64 is
-    # slack rather than derived -- the run's integration depth, which sets the
-    # re-association's own bound, is not visible from the zarr -- and is still
-    # twelve orders of magnitude below a missing satellite.
+    # The 64 ulps are a measured regime and not a bound: splitting the op's one
+    # reduction over (source, integration sample) is re-association, and what it
+    # costs is set by the fine-grid terms rather than by the coarse magnitudes
+    # this is referenced to -- which can differ by everything under fine-grid
+    # cancellation (tests/test_rfi_per_sat.py::TestFineGridCancellation). On a
+    # fitted grid it is 1-2 ulps, and this is still twelve orders of magnitude
+    # below a missing satellite, which is what the assertion is here to catch.
     scale = np.abs(sources).sum(axis=1).max(axis=0)
 
     assert np.all(np.abs(sources.sum(axis=1) - total) <= 64 * np.spacing(scale))
