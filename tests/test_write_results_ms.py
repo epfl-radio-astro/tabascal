@@ -2060,7 +2060,7 @@ class TestTheExportRuns:
         with pytest.warns(RuntimeWarning) as record:
             run_writer(_fake_ms(data), zarr_path, emit=True)
 
-        message = str(record[0].message)
+        message = str(record.pop(RuntimeWarning).message)
 
         assert "ZeroDivisionError" in message
         assert "a bug, not a bad MS" in message
@@ -2593,7 +2593,7 @@ class TestACustomCaltablePath:
                 caltable_path=elsewhere,
             )
 
-        message = str(record[0].message)
+        message = str(record.pop(RuntimeWarning).message)
 
         assert "spectral window" in message
         assert elsewhere in message
@@ -2630,7 +2630,7 @@ class TestACustomCaltablePath:
                 caltable_path=elsewhere,
             )
 
-        assert elsewhere in str(record[0].message)
+        assert elsewhere in str(record.pop(RuntimeWarning).message)
         assert not os.path.exists(elsewhere)
 
     def test_something_else_at_the_custom_path_is_neither_written_nor_removed(
