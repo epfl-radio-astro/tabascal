@@ -289,6 +289,81 @@ def test_rank0_first_worker_waits_before_body(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# fail_together: work only process 0 does must not end only process 0
+# ---------------------------------------------------------------------------
+#
+# Same constraint as the rank0_first tests above -- real multi-host collectives
+# are unavailable in this session -- so these force the multi-process branch and
+# stand in for the broadcast. What they pin is the decision each process takes
+# from what the broadcast tells it, which is what keeps a worker out of a
+# collective process 0 has already unwound past.
+#
+# Waking the workers is *not* enough here, which is why this exists beside
+# rank0_first: a woken worker carries on into the next model evaluation, and
+# there is no missing resource for it to fail on -- it simply waits.
+
+
+def _patch_broadcast(monkeypatch, *, rank0_failed: bool):
+    """Force the multi-process branch; the broadcast reports rank 0's verdict."""
+
+    from jax.experimental import multihost_utils
+
+    sent = []
+
+    def broadcast(value):
+        sent.append(np.asarray(value).tolist())
+        return np.array([1 if rank0_failed else 0], dtype=np.int32)
+
+    monkeypatch.setattr(dist.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(multihost_utils, "broadcast_one_to_all", broadcast)
+
+    return sent
+
+
+class TestFailTogether:
+
+    def test_single_process_just_raises_what_it_was_given(self):
+        with pytest.raises(OSError, match="no space"):
+            dist.fail_together(OSError("no space left"), "write the results")
+
+        assert dist.fail_together(None, "write the results") is None
+
+    def test_a_worker_stops_when_process_0_failed(self, monkeypatch):
+        """The whole point: this process had no error of its own to find."""
+
+        _patch_broadcast(monkeypatch, rank0_failed=True)
+
+        with pytest.raises(dist.RankZeroFailure, match="write the results"):
+            dist.fail_together(None, "write the results")
+
+    def test_a_worker_carries_on_when_process_0_did_not(self, monkeypatch):
+        _patch_broadcast(monkeypatch, rank0_failed=False)
+
+        assert dist.fail_together(None, "write the results") is None
+
+    def test_process_0_raises_the_error_it_actually_hit(self, monkeypatch):
+        """Not a RankZeroFailure: the run's report has to name the real cause."""
+
+        sent = _patch_broadcast(monkeypatch, rank0_failed=True)
+
+        with pytest.raises(OSError, match="no space"):
+            dist.fail_together(OSError("no space left"), "write the results")
+
+        # And it told the others before raising -- a process that raised first
+        # would leave every other one waiting in the broadcast it never made.
+        assert sent == [[1]]
+
+    def test_the_others_are_told_even_when_nothing_failed(self, monkeypatch):
+        """The collective is unconditional, or the two sides cannot meet at all."""
+
+        sent = _patch_broadcast(monkeypatch, rank0_failed=False)
+
+        dist.fail_together(None, "write the results")
+
+        assert sent == [[0]]
+
+
+# ---------------------------------------------------------------------------
 # Resolution broadcast: elements must be identical on every rank
 # ---------------------------------------------------------------------------
 

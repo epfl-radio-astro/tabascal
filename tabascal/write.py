@@ -1,5 +1,6 @@
 from tabascal.distributed import (
     constrain_rfi_state,
+    fail_together,
     is_process_0,
     make_global,
     rfi_sharding,
@@ -29,8 +30,11 @@ from tabascal.timing import measure_runtime
 from daskms import xds_from_ms, xds_from_table, xds_to_table
 
 import os
+import shutil
 import traceback
 import warnings
+
+from functools import partial
 
 import numpy as np
 
@@ -40,6 +44,7 @@ import jax.numpy as jnp
 import xarray as xr
 import dask.array as da
 import dask
+import zarr
 
 
 #: Prefix of the per-satellite RFI columns; the NORAD id is appended, giving
@@ -991,6 +996,103 @@ def wants_rfi_per_sat(vi_pred: dict, tab_config) -> bool:
     )
 
 
+def per_sat_layout(vi_pred: dict, tab_config):
+    """``(shape, dtype, norad_ids)`` of the decomposition, before it is evaluated.
+
+    The store it is streamed into has to exist before the first collective (see
+    :func:`rfi_vis_per_sat`), so what the store has to hold is read off the fit
+    rather than off the result: the sample axis and the visibility shape from
+    ``vi_pred``, the satellite axis from the run's *real* source count, and the
+    ``src`` coordinate from the satellites those name.
+    """
+
+    vis_rfi = vi_pred["vis_rfi"]
+    n_sample = vi_pred["rfi_A"].shape[0]
+    n_real = int(getattr(tab_config, "n_rfi_real", getattr(tab_config, "n_rfi", 0)))
+
+    return (
+        (n_sample, n_real) + tuple(vis_rfi.shape[1:]),
+        np.dtype(vis_rfi.dtype),
+        [int(nid) for nid in tab_config.norad_ids[:n_real]],
+    )
+
+
+def _create_per_sat_store(file_path: str, shape, dtype, norad_ids, mode: str) -> None:
+    """Create the results zarr around an empty, chunked ``rfi_vis_src``.
+
+    Metadata only -- ``compute=False`` writes the array's shape, dtype and chunk
+    grid and none of its chunks, which are filled one at a time by
+    :func:`_put_per_sat_block` as the evaluation makes them. The rest of the
+    results are appended to this same store once the streaming is done, so the
+    ``mode`` the run asked for is spent here: this is the write that creates the
+    store, and the one that refuses to overwrite an existing one.
+
+    Opening the array to write into is a separate step
+    (:func:`_open_per_sat_array`) rather than the end of this one, so that the
+    caller has somewhere to record that the store now exists: from the moment
+    this returns there is an openable, zero-filled store on disk, and everything
+    after it -- the open, the sink it is wrapped in -- can fail with that store
+    already there. See the ownership rule in :func:`write_results_xds`.
+    """
+
+    xr.Dataset(
+        data_vars={
+            "rfi_vis_src": (
+                list(RFI_PER_SAT_DIMS),
+                # One chunk per (sample, satellite), which is both how it is
+                # written -- one evaluated block, one chunk, nothing read back to
+                # complete a partial one -- and how it is read: imaging one
+                # satellite, or writing one MS column, should not pull the whole
+                # decomposition off disk to reach a slice of it.
+                da.zeros(shape, dtype=dtype, chunks=(1, 1, -1, -1, -1)),
+            )
+        },
+        # The satellite behind each `src` index, as an int -- the name the MS
+        # columns are written under, and the only thing that says which source
+        # is which. Known before the evaluation, and written with the metadata.
+        coords={"norad_id": ("src", np.asarray(norad_ids))},
+    ).to_zarr(file_path, mode=mode, compute=False)
+
+
+def _open_per_sat_array(file_path: str):
+    """The writable ``rfi_vis_src`` of a store :func:`_create_per_sat_store` made."""
+
+    return zarr.open_group(file_path, mode="r+")["rfi_vis_src"]
+
+
+def _put_per_sat_block(array, s: int, r: int, block) -> None:
+    """Write one evaluated ``(sample, satellite)`` block into the store.
+
+    One block is exactly one chunk, so this is a single chunk write: nothing is
+    read back, and the block is the largest thing the write holds.
+    """
+
+    array[s, r] = block
+
+
+def _drop_per_sat_block(s: int, r: int, block) -> None:
+    """Discard a block, for when the store it was destined for does not exist.
+
+    The evaluations are collectives and are made whether or not there is
+    anywhere to put the results (see :func:`write_results_xds`); keeping the
+    blocks instead would rebuild the very peak the streaming removes, on a run
+    that is going to raise anyway.
+    """
+
+
+def _remove_partial_store(file_path: str) -> None:
+    """Remove a results zarr the writer failed part way through.
+
+    A store holding a part-filled ``rfi_vis_src`` and none of the other
+    variables is not a results zarr, and it is not one that says so either: the
+    unwritten chunks read back as the array's fill value, so it would open and
+    present as a decomposition in which some satellites contributed nothing.
+    There is nothing in it to keep.
+    """
+
+    shutil.rmtree(file_path, ignore_errors=True)
+
+
 def _source_mask(r: int, n_rfi: int):
     """A boolean ``(n_rfi, 1, 1, 1)`` mask selecting source ``r`` alone.
 
@@ -1014,7 +1116,7 @@ def _source_mask(r: int, n_rfi: int):
     return jnp.asarray(mask)
 
 
-def rfi_vis_per_sat(vi_pred: dict, tab_config):
+def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     """The fitted RFI visibility, decomposed one satellite at a time.
 
     The RFI visibility op reduces over the satellite (``n_rfi``) axis, so each
@@ -1060,16 +1162,21 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config):
     name a satellite. They contribute exactly zero, so dropping them leaves the
     sum-back above untouched.
 
-    **Process 0 holds the whole result**, ``n_rfi_real`` times the size of
-    ``vis_rfi``, before it is handed to the zarr -- the peak memory of the write,
-    and the reason the option's cost note names a storage multiplier rather than
-    a slice. Streaming each source straight into the store would remove that
-    multiplier; it is not done here, because the sink would have to be created
-    before the first collective and the results zarr is written after it.
+    ``sink`` is how the result leaves without ever being whole: a callable
+    ``sink(sample, source, block)`` handed each evaluated ``(n_bl, n_freq,
+    n_time)`` block on process 0 as it is made, in place of storing it. **With a
+    sink the peak this adds to the writing process is a small multiple of one
+    block** -- the block on the device, its copy on the host, and whatever the
+    sink's write buffers -- rather than the ``n_rfi_real x sizeof(vis_rfi)`` the
+    accumulating form holds before the zarr sees any of it, which is the whole of
+    the option's memory cost at a real channel count. Without one the array is
+    assembled and returned, which is what an interactive caller wants and what
+    the tests compare against.
 
     Returns ``(vis_src, norad_ids)`` with ``vis_src`` of shape ``(n_sample,
     n_rfi_real, n_bl, n_freq, n_time)`` in the model's own dtype -- ``None`` off
-    process 0 -- and ``norad_ids`` the satellite behind each ``src`` index.
+    process 0, and ``None`` whenever a ``sink`` took the blocks -- and
+    ``norad_ids`` the satellite behind each ``src`` index.
     """
 
     comp = import_components([_rfi_vis_reference(tab_config)])[0]()
@@ -1080,7 +1187,8 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config):
     rfi_A, rfi_phase = vi_pred["rfi_A"], vi_pred["rfi_phase"]
     vis_rfi = vi_pred["vis_rfi"]
     n_sample, n_rfi = rfi_A.shape[:2]
-    n_real = int(getattr(tab_config, "n_rfi_real", n_rfi))
+    shape, dtype, norad_ids = per_sat_layout(vi_pred, tab_config)
+    n_real = shape[1]
 
     # One compile, reused for every source and sample: the mask is an argument
     # rather than a Python constant. Jitted so the masking fuses into the
@@ -1106,16 +1214,14 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config):
     keep = is_process_0()
     vis_src, failure = None, None
 
-    if keep:
+    if keep and sink is None:
         # Allocated before the first evaluation, and a failure here is carried to
         # the end rather than raised on the spot: the evaluations below are
         # collectives, and a rank that leaves the loop early strands every other
         # rank in the next psum until the coordinator times out. Every rank makes
         # every call; only process 0 stores what comes back.
         try:
-            vis_src = np.empty(
-                (n_sample, n_real) + tuple(vis_rfi.shape[1:]), dtype=vis_rfi.dtype
-            )
+            vis_src = np.empty(shape, dtype=dtype)
         except Exception as err:  # pragma: no cover - an allocation this size
             failure = err
 
@@ -1126,17 +1232,26 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config):
                 _source_mask(r, n_rfi), rfi_A[s], rfi_phase[s], vis_zero
             )
 
-            if vis_src is not None and failure is None:
-                try:
+            # The evaluation is unconditional; only what happens to the block is
+            # not. A failed store -- a full disk on the sink's first write as
+            # much as a failed allocation above -- stops the storing and not the
+            # loop, for the same reason: every rank has to reach every psum.
+            if not keep or failure is not None:
+                continue
+
+            try:
+                if sink is None:
                     vis_src[s, r] = np.asarray(vis)
-                except Exception as err:  # pragma: no cover - see above
-                    failure = err
+                else:
+                    sink(s, r, np.asarray(vis))
+            except Exception as err:
+                failure = err
 
     # Only now, with every collective made on every rank.
     if failure is not None:
         raise failure
 
-    return vis_src, [int(nid) for nid in tab_config.norad_ids[:n_real]]
+    return vis_src, norad_ids
 
 
 def per_sat_sources(xds_tab, results_zarr_path: str):
@@ -1372,92 +1487,167 @@ def write_per_sat_rfi_ms(
 def write_results_xds(
     vi_pred: dict, tab_config, file_path: str, overwrite: bool = True
 ):
+    """Write the fit's predictions to ``file_path`` as a zarr store.
+
+    Returns the dataset written -- ``None`` off process 0, which writes nothing
+    -- less the per-satellite decomposition when there is one: that variable is
+    streamed into the store block by block and is never held whole in memory,
+    which is the point of it (see :func:`rfi_vis_per_sat`).
+
+    Called on **every** process, and left on every process together: it ends in
+    :func:`fail_together`, which is a collective.
+    """
+
+    mode = "w" if overwrite else "w-"
 
     # Optional per-satellite decomposition of the fitted RFI visibility, one
     # `src` slice per NORAD id, so each source can be imaged on its own -- a
     # diagnostic for sky signal leaking into the RFI model. Off by default: it
     # is ~n_rfi x the rfi_vis storage and n_rfi forward-op evaluations.
     #
-    # Above the process-0 guard because it is a collective: the op runs inside
-    # psum_over_rfi's shard_map, so every process has to reach it. The workers'
-    # copy of the result is None, and they return at the guard below without
-    # ever looking at it.
-    per_sat = (
-        rfi_vis_per_sat(vi_pred, tab_config)
-        if wants_rfi_per_sat(vi_pred, tab_config)
-        else None
-    )
+    # Reached by every process because it is a collective: the op runs inside
+    # psum_over_rfi's shard_map. The workers write nothing; they make the
+    # evaluations, skip the writing below, and leave at the same exit.
+    #
+    # The store is created *here*, before the first of those collectives, and
+    # each evaluated block is written straight into it. That ordering is the
+    # whole shape of this function: rank-0-only work that can fail has to happen
+    # either before the collectives (creating the store) or after the last of
+    # them, never between two of them.
+    #
+    # And it is not enough for process 0 to survive to the end of the loop -- it
+    # has to leave this function by the same door as everybody else. Every path
+    # out, failed or not, goes through the fail_together at the bottom: the
+    # workers do none of the writing and return from here into the next
+    # collective, so a process 0 that raised on its own would strand them there
+    # rather than release them. Nothing between here and that call may raise on
+    # process 0 alone -- which is why the failures below are carried rather than
+    # raised, and why the errors that are *not* carried (per_sat_layout,
+    # wants_rfi_per_sat) are the ones every process makes identically.
+    #
+    # What no test covers is a real two-rank run with a fault injected. The
+    # single-process ones see the routing (TestEveryProcessLeavesTogether in
+    # tests/test_rfi_per_sat.py) and TestFailTogether in tests/test_distributed.py
+    # sees the decision each process takes from the broadcast, but nothing puts
+    # the two together -- TestTheStoreIsStreamedInto says why.
+    per_sat = wants_rfi_per_sat(vi_pred, tab_config)
+    failure, sink, created, map_xds = None, _drop_per_sat_block, False, None
 
-    # Only process 0 writes. Everything written below is replicated on every
-    # process; per-RFI arrays (rfi_A/rfi_phase) are sharded and must not be
-    # materialized here without a process_allgather.
-    if not is_process_0():
-        return None
+    if per_sat:
+        # Read off the fit's shape, so it is the same on every rank and is taken
+        # outside the rank-0 branch below: an error in it is then an error
+        # everywhere, rather than one rank that never arrives at the psum the
+        # others are waiting in.
+        layout = per_sat_layout(vi_pred, tab_config)
 
-    # print(vi_pred.keys())
-    # print(vi_pred["rfi_vis"].shape)
-    # print(vi_pred["rfi_vis"])
+        if is_process_0():
+            try:
+                _create_per_sat_store(file_path, *layout, mode)
+                # OWNERSHIP, and deliberately on its own line between the two:
+                # the cleanup below removes the store only when this is set, and
+                # from the statement above there is a store on disk. Recording
+                # it after the open, or after the sink was built, would leave
+                # the store standing whenever one of those failed instead.
+                #
+                # It is the creation *result* and not a `path exists` check
+                # taken beforehand, because that check is a race: a concurrent
+                # writer creating the path between the check and the `w-` that
+                # then fails on it would have its store read as ours and
+                # deleted. The asymmetry is deliberate -- a creation that failed
+                # part way through can still leave residue nobody removes, and
+                # residue is recoverable where somebody else's deleted results
+                # are not.
+                created = True
+                sink = partial(_put_per_sat_block, _open_per_sat_array(file_path))
+            except Exception as err:
+                failure = err
 
-    # print(da.asarray(vi_pred["ast_vis"]))
-    # print(da.asarray(vi_pred["gains"]))
-    # print(da.asarray(vi_pred["rfi_vis"]))
-    # print(da.asarray(vi_pred["vis_obs"]))
-    # print(da.asarray(vi_pred["rfi_A"]))
-    # print(da.asarray(args["rfi_phase"]))
+        try:
+            rfi_vis_per_sat(vi_pred, tab_config, sink=sink)
+        except Exception as err:
+            # The earlier failure is the one reported: a store that could not be
+            # created is why the blocks had nowhere to go.
+            if failure is None:
+                failure = err
 
-    map_xds = xr.Dataset(
-        data_vars={
-            "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_rfi"])),  # type: ignore
-            "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
-            "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
-            "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
-            # "rfi_A": (
-            #     ["sample", "src", "ant", "rfi_time"],
-            #     da.asarray(vi_pred["rfi_A"]),
-            # ),
-            # "rfi_phase": (
-            #     ["src", "ant", "time_mjd_fine"],
-            #     da.asarray(args["rfi_phase"]),
-            # ),
-        },
-        coords={
-            # SEAM: `time` is seconds from the start of the observation, so the
-            # results carry no absolute epoch, no phase centre and no identity
-            # for the MS they came from. write_results_ms therefore has to
-            # re-derive both from the MS it is pointed at -- including the grid
-            # the external gain tables are placed on (_external_gains_column),
-            # which is only the run's own grid because the reader and the writer
-            # read the same column the same way. times_jd / times_mjd, the field
-            # direction and the source MS path belong here, beside `time`.
-            "time": da.asarray(tab_config.times),  # type: ignore
-            "freq": da.asarray(tab_config.freqs),  # type: ignore
-            # "rfi_time": da.asarray(args["rfi_times"]),
-            # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
-        },
-        # Which correlation was fitted, by name. Without it the writer cannot
-        # tell where the results belong on a multi-correlation MS.
-        attrs={"corr": tab_config.args["data"]["corr"]},
-    )
-    # print(map_xds)
+    # Only process 0 writes, and only when there is still a store to write into:
+    # the blocks and the variables go into the same one, so a run that lost the
+    # blocks has nothing to append them to. Everything written below is
+    # replicated on every process; per-RFI arrays (rfi_A/rfi_phase) are sharded
+    # and must not be materialized here without a process_allgather.
+    if failure is None and is_process_0():
+        # print(vi_pred.keys())
+        # print(vi_pred["rfi_vis"].shape)
+        # print(vi_pred["rfi_vis"])
 
-    if per_sat is not None:
-        vis_src, norad_ids = per_sat
-        map_xds = map_xds.assign(
-            rfi_vis_src=(
-                list(RFI_PER_SAT_DIMS),
-                # One chunk per (sample, satellite), which is how it is read:
-                # imaging one satellite, or writing one MS column, should not
-                # pull the whole decomposition off disk to reach a slice of it.
-                da.asarray(vis_src).rechunk((1, 1, -1, -1, -1)),  # type: ignore
+        # print(da.asarray(vi_pred["ast_vis"]))
+        # print(da.asarray(vi_pred["gains"]))
+        # print(da.asarray(vi_pred["rfi_vis"]))
+        # print(da.asarray(vi_pred["vis_obs"]))
+        # print(da.asarray(vi_pred["rfi_A"]))
+        # print(da.asarray(args["rfi_phase"]))
+
+        try:
+            map_xds = xr.Dataset(
+                data_vars={
+                    "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_rfi"])),  # type: ignore
+                    "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
+                    "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
+                    "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
+                    # "rfi_A": (
+                    #     ["sample", "src", "ant", "rfi_time"],
+                    #     da.asarray(vi_pred["rfi_A"]),
+                    # ),
+                    # "rfi_phase": (
+                    #     ["src", "ant", "time_mjd_fine"],
+                    #     da.asarray(args["rfi_phase"]),
+                    # ),
+                },
+                coords={
+                    # SEAM: `time` is seconds from the start of the observation,
+                    # so the results carry no absolute epoch, no phase centre and
+                    # no identity for the MS they came from. write_results_ms
+                    # therefore has to re-derive both from the MS it is pointed
+                    # at -- including the grid the external gain tables are placed
+                    # on (_external_gains_column), which is only the run's own
+                    # grid because the reader and the writer read the same column
+                    # the same way. times_jd / times_mjd, the field direction and
+                    # the source MS path belong here, beside `time`.
+                    "time": da.asarray(tab_config.times),  # type: ignore
+                    "freq": da.asarray(tab_config.freqs),  # type: ignore
+                    # "rfi_time": da.asarray(args["rfi_times"]),
+                    # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
+                },
+                # Which correlation was fitted, by name. Without it the writer
+                # cannot tell where the results belong on a multi-correlation MS.
+                attrs={"corr": tab_config.args["data"]["corr"]},
             )
-        )
-        # The satellite behind each `src` index, as an int -- the name the MS
-        # columns are written under, and the only thing that says which source
-        # is which.
-        map_xds = map_xds.assign_coords(norad_id=("src", np.asarray(norad_ids)))
+            # print(map_xds)
 
-    mode = "w" if overwrite else "w-"
+            # Appended to the store the decomposition was streamed into, rather
+            # than creating one: with per_sat on, the store already exists and
+            # already holds rfi_vis_src and its norad_id coordinate. Without it
+            # this is the write that creates the store, byte for byte as it
+            # always was.
+            map_xds.to_zarr(file_path, mode="a" if per_sat else mode)
+        except Exception as err:
+            # Carried, not raised, like every other failure here: past the
+            # per-satellite psums is not past the run's collectives, and process
+            # 0 leaving on its own strands the workers in the next one.
+            map_xds, failure = None, err
 
-    map_xds.to_zarr(file_path, mode=mode)
+    if failure is not None and created:
+        # A store that failed is removed for the same reason a failed block
+        # write's is: it would hold rfi_vis_src, and none or only some of the
+        # variables the results are actually read for, and still open as a
+        # results zarr. Only a store this call created, per the ownership rule
+        # above -- with the decomposition off nothing was created here and the
+        # failure is left exactly as it always was.
+        _remove_partial_store(file_path)
+
+    # The one exit, taken by every process. Process 0 raises what it hit; the
+    # workers raise because it did, rather than walking into a collective it has
+    # already left. Single-process, this is just the raise.
+    fail_together(failure, f"write the results to {file_path}")
 
     return map_xds

@@ -7,7 +7,12 @@ Three things are pinned here, in the order the feature runs:
   is that the pieces sum back to the run's ``vis_rfi``: a decomposition that
   does not is not a decomposition of anything;
 * ``write_results_xds`` with ``data.save_rfi_per_sat`` -- on, off, and off by
-  default, where the zarr must be byte-for-byte what it always was;
+  default, where the zarr must be byte-for-byte what it always was. On, the
+  decomposition is streamed into a store created before the first evaluation, so
+  what is pinned is *where* the values are as much as what they are: the store
+  exists before anything is evaluated, holds bit for bit what accumulating the
+  whole thing would have held, and a failure anywhere in the write leaves behind
+  neither a half-written store nor anybody else's;
 * :func:`write_per_sat_rfi_ms` -- one ``TAB_RFI_<NORAD>`` MS column per
   satellite, in the same calibrated frame as ``TAB_RFI_DATA`` and summing back
   to it.
@@ -582,6 +587,50 @@ class TestNonFiniteSources:
         assert not np.any(np.isfinite(vis_src[:, 1]))
 
 
+class TestTheBlocksAreHandedOverOneAtATime:
+    """Given a sink, nothing the size of the decomposition is ever held.
+
+    The peak this removes is rank 0's. Accumulated, the whole decomposition --
+    ``n_rfi`` x ``sizeof(rfi_vis)`` -- is resident before the zarr sees any of
+    it, which at EDA2's channel count is tens of gigabytes for a result that is
+    written out block by block anyway. Streamed, the largest thing alive is one
+    ``(sample, satellite)`` block.
+    """
+
+    def test_every_block_is_handed_over_and_none_is_kept(self):
+        config = make_config()
+        pred = make_pred(config, n_sample=2)
+
+        blocks = {}
+        vis_src, norad_ids = rfi_vis_per_sat(
+            pred, config, sink=lambda s, r, block: blocks.__setitem__((s, r), block)
+        )
+
+        # Nothing came back: the array that used to be returned *is* the peak.
+        assert vis_src is None
+        assert norad_ids == NORAD_IDS
+        assert set(blocks) == {
+            (s, r) for s in range(2) for r in range(len(NORAD_IDS))
+        }
+        assert all(b.shape == (N_BL, N_FREQ, N_TIME) for b in blocks.values())
+
+    def test_the_blocks_are_the_decomposition(self):
+        """Streaming changes where the values go, not what they are."""
+
+        config = make_config()
+        pred = make_pred(config, n_sample=2)
+        reference, _ = rfi_vis_per_sat(pred, config)
+
+        blocks = {}
+        rfi_vis_per_sat(
+            pred, config, sink=lambda s, r, block: blocks.__setitem__((s, r), block)
+        )
+
+        assert blocks
+        for (s, r), block in blocks.items():
+            np.testing.assert_array_equal(block, np.asarray(reference)[s, r])
+
+
 class TestTheComponentMustBeResolvable:
 
     def test_a_model_with_no_rfi_vis_component_is_an_error(self):
@@ -715,6 +764,458 @@ class TestTheZarrVariable:
 
         with xr.open_zarr(str(tmp_path / "map.zarr")) as xds:
             assert "rfi_vis_src" not in xds
+
+
+class TestTheStoreIsStreamedInto:
+    """The decomposition goes to disk a block at a time, and the store is there first.
+
+    Two claims, and the second is what makes the first safe to make:
+
+    * the streamed store holds exactly what accumulating the whole thing and
+      writing it in one go held -- bit for bit, since it is the same evaluation
+      written to the same chunks;
+    * everything that can fail on rank 0 alone happens either *before* the first
+      evaluation (creating the store) or is carried to the single exit at the
+      end, and a failure removes only a store this call created.
+
+    **What these tests can and cannot see.** They run in one process, so what
+    they pin is the mechanism and not its purpose: the loop makes all
+    ``n_sample x n_rfi`` evaluations past an injected failure instead of leaving
+    early, and the store is gone afterwards. That a *second* rank is therefore
+    not left waiting in a ``psum_over_rfi`` collective with nobody to meet is why
+    the mechanism is shaped this way, and no test here asserts it.
+
+    The rest of that story is split across two other places: that every failure
+    reaches ``fail_together`` rather than being raised past it is
+    ``TestEveryProcessLeavesTogether`` below, and what ``fail_together`` then
+    does on two ranks is ``TestFailTogether`` in ``tests/test_distributed.py``,
+    which forces the multi-process branch. What none of them is is a real
+    two-rank run with a fault injected: the only harness for two ranks
+    (``tests/test_tabascal_pipeline.py``'s ``_run_two_processes``) drives the CLI
+    as a subprocess, where the injection would have to import ``tabascal.write``
+    -- and so all of jax -- before ``init_distributed()``, which is the one
+    ordering that entry point forbids. ``test_pipeline_multiprocess_per_sat``
+    covers the two-rank path with nothing failing.
+    """
+
+    @staticmethod
+    def _count_evaluations(monkeypatch):
+        """Record every source mask built -- one per evaluation of the loop."""
+
+        seen = []
+        real = write_mod._source_mask
+        monkeypatch.setattr(
+            write_mod,
+            "_source_mask",
+            lambda r, n_rfi: seen.append(r) or real(r, n_rfi),
+        )
+
+        return seen
+
+    def test_the_store_exists_before_the_first_evaluation(self, tmp_path, monkeypatch):
+        """Rank-0-only work has to be done where only rank 0 can fail."""
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        seen = []
+        real = write_mod._source_mask
+        monkeypatch.setattr(
+            write_mod,
+            "_source_mask",
+            lambda r, n_rfi: seen.append(
+                os.path.exists(os.path.join(path, "rfi_vis_src"))
+            )
+            or real(r, n_rfi),
+        )
+
+        write_results_xds(make_pred(config), config, path)
+
+        assert seen and all(seen)
+
+    def test_the_streamed_store_is_the_accumulated_one(self, tmp_path):
+        """Bit for bit: the same evaluations, in the same chunks."""
+
+        config = make_config()
+        pred = make_pred(config, n_sample=2)
+        reference, norad_ids = rfi_vis_per_sat(pred, config)
+
+        write_results_xds(pred, config, str(tmp_path / "streamed.zarr"))
+
+        with xr.open_zarr(str(tmp_path / "streamed.zarr")) as xds:
+            np.testing.assert_array_equal(
+                xds.rfi_vis_src.values, np.asarray(reference)
+            )
+            assert xds.rfi_vis_src.dims == ("sample", "src", "bl", "freq", "time")
+            assert xds.rfi_vis_src.dtype == reference.dtype
+            assert [int(n) for n in xds.norad_id.values] == norad_ids
+            sample, src = xds.rfi_vis_src.chunks[:2]
+            assert set(sample) == {1} and set(src) == {1}
+
+    def test_the_rest_of_the_store_is_what_it_is_without_the_decomposition(
+        self, tmp_path
+    ):
+        """Appending the other variables leaves them the ones the off path writes."""
+
+        config = make_config()
+        pred = make_pred(config, n_sample=2)
+
+        write_results_xds(pred, config, str(tmp_path / "on.zarr"))
+        config.args["data"]["save_rfi_per_sat"] = False
+        write_results_xds(pred, config, str(tmp_path / "off.zarr"))
+
+        with xr.open_zarr(str(tmp_path / "on.zarr")) as on:
+            with xr.open_zarr(str(tmp_path / "off.zarr")) as off:
+                xr.testing.assert_identical(
+                    on.drop_vars(["rfi_vis_src", "norad_id"]), off
+                )
+
+    def test_a_failed_write_leaves_no_store_and_still_finishes_the_loop(
+        self, tmp_path, monkeypatch
+    ):
+        """The deferred-failure rule, extended to the streamed writes."""
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        pred = make_pred(config, n_sample=2)
+        writes = []
+
+        def full_disk(array, s, r, block):
+            writes.append((s, r))
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(write_mod, "_put_per_sat_block", full_disk)
+        seen = self._count_evaluations(monkeypatch)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(pred, config, path)
+
+        # The loop ran to the end rather than raising in the middle of it. In one
+        # process that is all this can show; under sharding it is what keeps the
+        # other ranks from waiting in a collective this one never reaches (see
+        # the class docstring for what is not covered).
+        assert len(seen) == 2 * len(NORAD_IDS)
+        # And the writer stopped writing at the first failure rather than
+        # raising the last of n_rfi identical errors.
+        assert writes == [(0, 0)]
+        # A store holding a part-filled decomposition and none of the other
+        # variables is not a results zarr; there is nothing in it to keep.
+        assert not os.path.exists(path)
+
+    def test_a_store_that_cannot_be_created_still_finishes_the_loop(
+        self, tmp_path, monkeypatch
+    ):
+        """Creation is before the evaluations; its failure is raised after them."""
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        pred = make_pred(config, n_sample=2)
+
+        def unwritable(*args, **kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(write_mod, "_create_per_sat_store", unwritable)
+        seen = self._count_evaluations(monkeypatch)
+
+        with pytest.raises(OSError, match="read-only"):
+            write_results_xds(pred, config, path)
+
+        assert len(seen) == 2 * len(NORAD_IDS)
+        assert not os.path.exists(path)
+
+    def test_a_failed_append_leaves_no_store_either(self, tmp_path, monkeypatch):
+        """The variables appended after the streaming are part of the same store.
+
+        A store that kept ``rfi_vis_src`` and lost the visibilities it decomposes
+        is the same half-written results zarr a failed block write would leave,
+        and reads as a complete one just as readily. The append is past the last
+        evaluation, so this one is raised where it happens.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        pred = make_pred(config)
+        real_to_zarr = xr.Dataset.to_zarr
+
+        def fail_the_append(self, *args, **kwargs):
+            if kwargs.get("mode") == "a":
+                raise OSError("no space left on device")
+
+            return real_to_zarr(self, *args, **kwargs)
+
+        monkeypatch.setattr(xr.Dataset, "to_zarr", fail_the_append)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(pred, config, path)
+
+        assert not os.path.exists(path)
+
+    def test_a_store_that_fails_when_it_is_reopened_is_still_cleaned_up(
+        self, tmp_path, monkeypatch
+    ):
+        """Ownership starts at the metadata write, not at the end of the creation.
+
+        Creating the store is two steps -- write the metadata, then open the
+        array for writing -- and after the first of them there is an openable,
+        zero-filled store on disk whoever else fails next. Recording ownership
+        only once both had succeeded left exactly that store behind.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        real_open_group = write_mod.zarr.open_group
+
+        def fail_the_reopen(*args, **kwargs):
+            # "r+" is the writable reopen; the metadata write xarray does first
+            # goes through the same function under the run's own mode.
+            if kwargs.get("mode") == "r+":
+                raise OSError("stale file handle")
+
+            return real_open_group(*args, **kwargs)
+
+        monkeypatch.setattr(write_mod.zarr, "open_group", fail_the_reopen)
+
+        with pytest.raises(OSError, match="stale file handle"):
+            write_results_xds(make_pred(config), config, path)
+
+        assert not os.path.exists(path)
+
+    def test_a_store_left_by_a_failure_after_the_creation_is_cleaned_up_too(
+        self, tmp_path, monkeypatch
+    ):
+        """The other side of the same boundary: the store exists, the sink does not.
+
+        Anything between the store existing and the first block being written --
+        here the sink's own construction -- fails with a store on disk that only
+        this call could have made.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+
+        def no_memory(*args, **kwargs):
+            raise MemoryError("cannot allocate")
+
+        monkeypatch.setattr(write_mod, "partial", no_memory)
+
+        with pytest.raises(MemoryError, match="cannot allocate"):
+            write_results_xds(make_pred(config), config, path)
+
+        assert not os.path.exists(path)
+
+    def test_a_failed_creation_removes_nothing_at_all(self, tmp_path, monkeypatch):
+        """Deletion follows from having created the store, not from a path check.
+
+        A ``path exists`` snapshot taken before the attempt is a race: a
+        concurrent writer that creates the path in between would have its store
+        taken for this run's own partial one and removed. So the rule is the
+        creation *result*, and a creation that failed leaves nothing this call is
+        known to own -- whatever the path held before, and whether or not the
+        run was allowed to overwrite it.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        pred = make_pred(config)
+
+        write_results_xds(pred, config, path)
+        before = _tree(path)
+
+        def unwritable(*args, **kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(write_mod, "_create_per_sat_store", unwritable)
+
+        with pytest.raises(OSError, match="read-only"):
+            write_results_xds(pred, config, path)
+
+        assert _tree(path) == before
+
+    def test_the_off_path_is_left_exactly_as_it_was(self, tmp_path, monkeypatch):
+        """Nothing is removed on a run that never created a store to stream into.
+
+        The cleanup belongs to the streaming: with the decomposition off, a
+        failed write leaves whatever it left before this change, which is the
+        point of the off path being untouched.
+        """
+
+        removals = []
+        monkeypatch.setattr(write_mod, "_remove_partial_store", removals.append)
+
+        def full_disk(self, *args, **kwargs):
+            raise OSError("no space left on device")
+
+        config = make_config(save_rfi_per_sat=False)
+        pred = make_pred(config)
+        monkeypatch.setattr(xr.Dataset, "to_zarr", full_disk)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(pred, config, str(tmp_path / "map.zarr"))
+
+        assert removals == []
+
+    def test_overwriting_leaves_nothing_of_the_previous_store(self, tmp_path):
+        """The mode is spent creating the store, so creating it has to do the clearing.
+
+        The remaining variables are appended afterwards, and an append does not
+        remove anything: whatever the previous run left has to have gone at
+        creation, or a two-sample decomposition would still be sitting under a
+        one-sample one.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+
+        write_results_xds(make_pred(config, n_sample=2), config, path)
+        write_results_xds(make_pred(config, seed=7), config, path)
+
+        write_results_xds(make_pred(config, seed=7), config, str(tmp_path / "fresh.zarr"))
+
+        assert _tree(path) == _tree(tmp_path / "fresh.zarr")
+
+    def test_a_refused_overwrite_leaves_the_existing_store_alone(self, tmp_path):
+        """The one store the cleanup must never remove is one it did not create."""
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        pred = make_pred(config)
+
+        write_results_xds(pred, config, path)
+        before = _tree(path)
+
+        with pytest.raises(Exception):
+            write_results_xds(pred, config, path, overwrite=False)
+
+        assert _tree(path) == before
+
+
+class TestEveryProcessLeavesTogether:
+    """A write that fails on process 0 alone must not leave the workers waiting.
+
+    The workers do none of the writing and return from ``write_results_xds``
+    straight into the next collective -- the SVI solve after the initial
+    prediction is written, the reduced chi^2 after the optimised one, and the
+    mandatory end-of-run barrier. So process 0 unwinding out of the writer on
+    its own does not release them, it strands them there until the coordinator
+    times out. Every path out of the writer therefore ends in ``fail_together``,
+    which is where a worker learns that process 0 is not coming.
+
+    Single-process here, so what these pin is the *routing*: that a failure
+    reaches that call instead of being raised past it, and that a successful
+    write reaches it too -- a process that skipped the collective on the happy
+    path would strand the others just as thoroughly. What the call then does
+    with the answer on two ranks is pinned in ``tests/test_distributed.py``.
+    """
+
+    @staticmethod
+    def _record(monkeypatch):
+        """Spy on fail_together, still doing what it really does."""
+
+        calls = []
+        real = write_mod.fail_together
+
+        def spy(failure, what):
+            calls.append(failure)
+
+            return real(failure, what)
+
+        monkeypatch.setattr(write_mod, "fail_together", spy)
+
+        return calls
+
+    @pytest.mark.parametrize("per_sat", [True, False], ids=["on", "off"])
+    def test_a_successful_write_meets_the_others_too(
+        self, tmp_path, monkeypatch, per_sat
+    ):
+        config = make_config(save_rfi_per_sat=per_sat)
+        calls = self._record(monkeypatch)
+
+        write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        assert calls == [None]
+
+    def test_a_failed_block_write_goes_through_it(self, tmp_path, monkeypatch):
+        config = make_config()
+
+        def full_disk(array, s, r, block):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(write_mod, "_put_per_sat_block", full_disk)
+        calls = self._record(monkeypatch)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        assert [type(err) for err in calls] == [OSError]
+
+    def test_a_failed_creation_goes_through_it(self, tmp_path, monkeypatch):
+        config = make_config()
+
+        def unwritable(*args, **kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(write_mod, "_create_per_sat_store", unwritable)
+        calls = self._record(monkeypatch)
+
+        with pytest.raises(OSError, match="read-only"):
+            write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        assert [type(err) for err in calls] == [OSError]
+
+    @pytest.mark.parametrize("per_sat", [True, False], ids=["on", "off"])
+    def test_a_failed_write_of_the_other_variables_goes_through_it(
+        self, tmp_path, monkeypatch, per_sat
+    ):
+        """Including with the decomposition off, where it always could fail alone."""
+
+        config = make_config(save_rfi_per_sat=per_sat)
+        real_to_zarr = xr.Dataset.to_zarr
+        wanted = "a" if per_sat else "w"
+
+        def fail_the_results_write(self, *args, **kwargs):
+            if kwargs.get("mode") == wanted:
+                raise OSError("no space left on device")
+
+            return real_to_zarr(self, *args, **kwargs)
+
+        monkeypatch.setattr(xr.Dataset, "to_zarr", fail_the_results_write)
+        calls = self._record(monkeypatch)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        assert [type(err) for err in calls] == [OSError]
+
+    def test_the_append_is_not_attempted_after_a_deferred_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """One failure, one report: the deferred one is raised before the append.
+
+        The blocks and the variables go into the same store, so a run that lost
+        the blocks has nothing to append them to; attempting it anyway would
+        replace the error that says what went wrong with whatever the append
+        made of a store in that state.
+        """
+
+        config = make_config()
+        modes = []
+        real_to_zarr = xr.Dataset.to_zarr
+
+        def note_mode(self, *args, **kwargs):
+            modes.append(kwargs.get("mode"))
+
+            return real_to_zarr(self, *args, **kwargs)
+
+        def full_disk(array, s, r, block):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(write_mod, "_put_per_sat_block", full_disk)
+        monkeypatch.setattr(xr.Dataset, "to_zarr", note_mode)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        # The creation, and nothing after it.
+        assert modes == ["w"]
 
 
 # ---------------------------------------------------------------------------
