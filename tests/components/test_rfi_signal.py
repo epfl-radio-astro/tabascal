@@ -1225,29 +1225,40 @@ class TestReadLightCurves:
 
         assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
 
-    @pytest.mark.parametrize("declared", ["UTC", " utc "])
+    @pytest.mark.parametrize(
+        "declared", ["UTC", " utc ", b"utc", b"UTC", np.array(["utc"])]
+    )
     def test_the_stated_scale_is_read_leniently(self, tmp_path, declared, recwarn):
-        """Case and surrounding space are not a different scale."""
+        """Case, surrounding space and storage type are not a different scale.
+
+        A stamp comes back as whatever the writer stored: npz keeps a scalar as
+        a 0-d array and a byte string as ``|S``, and a zarr attribute may be
+        either. Compared with a bare ``str()`` those render as ``"b'utc'"`` or
+        ``"['utc']"`` and a perfectly good UTC file is refused as being on a
+        scale nobody wrote.
+        """
         path = self._npz(tmp_path, [100], time_scale=declared)
 
         read_light_curves(path, [100], self._times(), self._freqs())
 
         assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
 
-    @pytest.mark.parametrize("declared", ["tai", "tt", "ut1"])
+    @pytest.mark.parametrize("declared", ["tai", "tt", "ut1", b"tai"])
     def test_a_file_on_another_scale_is_rejected_by_name(self, tmp_path, declared):
         """Not converted here: the reader cannot know what a third party meant.
 
         A file that states TAI is self-describing enough to be fixed at the
         source, and converting it silently would make the reader the second
-        place the format's scale is decided.
+        place the format's scale is decided. Named in the message as text, so a
+        byte-string stamp reads as ``'tai'`` rather than as ``"b'tai'"``.
         """
         path = self._npz(tmp_path, [100], time_scale=declared)
 
         with pytest.raises(ValueError, match="time_scale") as excinfo:
             read_light_curves(path, [100], self._times(), self._freqs())
         message = str(excinfo.value)
-        assert declared in message
+        expected = declared.decode() if isinstance(declared, bytes) else declared
+        assert f"'{expected}'" in message
         assert "UTC" in message or "utc" in message
 
     def test_an_untagged_file_warns_that_it_is_being_read_as_utc(self, tmp_path):

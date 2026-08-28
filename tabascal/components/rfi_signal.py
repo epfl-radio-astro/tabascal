@@ -32,6 +32,27 @@ _LIGHT_CURVE_DIMS = ("norad_ids", "times", "freqs")
 _LIGHT_CURVE_TIME_SCALE = "utc"
 
 
+def _scale_text(declared) -> str:
+    """A stamped time scale as comparable text, however the file stored it.
+
+    A stamp comes back as whatever the writer put there: an npz keeps a scalar
+    as a 0-d array and a byte string as ``|S``, and a zarr attribute may be a
+    ``str``, ``bytes`` or a length-1 array. ``str()`` on those renders
+    ``"b'utc'"`` or ``"['utc']"``, which would refuse a perfectly good UTC file
+    as being on a scale nobody wrote -- so the scalar is unwrapped and decoded
+    before the case and whitespace are normalised.
+
+    Anything that is not a single value is left to ``str()`` and rejected by the
+    caller, which says what was found rather than raising from inside here.
+    """
+    if isinstance(declared, np.ndarray) and declared.size == 1:
+        declared = declared.reshape(-1)[0]
+    if isinstance(declared, bytes):
+        declared = declared.decode(errors="replace")
+
+    return str(declared).strip().lower()
+
+
 def _light_curve_contents(
     est_path: str,
 ) -> Tuple[NDArray, NDArray, NDArray, NDArray, Optional[str]]:
@@ -41,9 +62,10 @@ def _light_curve_contents(
     Both carry the same four arrays under the same names; the zarr form keeps
     ``norad_ids``/``times``/``freqs`` as coordinates of ``light_curves``.
 
-    ``scale`` is the file's ``time_scale`` stamp -- a store attribute in the zarr
-    form, an array in the npz -- or ``None`` for a file written before the format
-    stated one. :func:`_check_light_curve_time_scale` rules on it.
+    ``scale`` is the file's ``time_scale`` stamp as text, normalised by
+    :func:`_scale_text` -- a store attribute in the zarr form, an array in the
+    npz -- or ``None`` for a file written before the format stated one.
+    :func:`_check_light_curve_time_scale` rules on it.
     """
     if str(est_path).rstrip("/").endswith(".zarr"):
         # Closed on the way out however the function leaves, as for the npz
@@ -65,6 +87,8 @@ def _light_curve_contents(
             # By name, not stored order: a swapped store with equal-length dims
             # would otherwise pass the shape check below and be read along the
             # wrong axes.
+            stamp = xds.attrs.get("time_scale")
+
             dims = tuple(xds["light_curves"].dims)
             if set(dims) != set(_LIGHT_CURVE_DIMS):
                 raise ValueError(
@@ -79,7 +103,7 @@ def _light_curve_contents(
                 np.asarray(xds["norad_ids"].data),
                 np.asarray(xds["times"].data),
                 np.asarray(xds["freqs"].data),
-                xds.attrs.get("time_scale"),
+                None if stamp is None else _scale_text(stamp),
             )
 
     loaded = np.load(est_path)
@@ -101,7 +125,9 @@ def _light_curve_contents(
                 f"{est_path} is missing {missing}. A light-curve .npz must hold "
                 f"{list(_LIGHT_CURVE_VARS)}. It contains {sorted(npz.files)}."
             )
-        scale = str(npz["time_scale"]) if "time_scale" in npz.files else None
+        scale = (
+            _scale_text(npz["time_scale"]) if "time_scale" in npz.files else None
+        )
 
         return (
             *(np.asarray(npz[name]) for name in _LIGHT_CURVE_VARS),  # type: ignore
@@ -111,6 +137,9 @@ def _light_curve_contents(
 
 def _check_light_curve_time_scale(est_path: str, declared: Optional[str]) -> None:
     """Rule on the scale a light-curve file says its ``times`` are on.
+
+    ``declared`` is the stamp as :func:`_scale_text` normalised it, or ``None``
+    where the file carries none.
 
     The format states one scale, UTC, so that a curve measured against one
     observation can be read back against another. A file that says so is read
@@ -141,10 +170,9 @@ def _check_light_curve_time_scale(est_path: str, declared: Optional[str]) -> Non
         )
         return
 
-    scale = str(declared).strip().lower()
-    if scale != _LIGHT_CURVE_TIME_SCALE:
+    if declared != _LIGHT_CURVE_TIME_SCALE:
         raise ValueError(
-            f"{est_path} declares time_scale {str(declared)!r}, but a "
+            f"{est_path} declares time_scale {declared!r}, but a "
             "light-curve file's times are UTC MJD. They are not converted here: "
             "the file is the place the scale is stated, and a reader that "
             "quietly moved the samples would be a second one. Rewrite times as "
