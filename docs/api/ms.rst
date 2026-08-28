@@ -99,6 +99,56 @@ divides that out and the noise follows the data,
 ``sigma_cal = sigma / |g_p conj(g_q)|``.
 :func:`~tabascal.ms.apply_gains_to_data` is that one statement in code.
 
+Extra ``keywords`` are written beside the table's own, for what the solver knows
+and the format has no field for: TABASCAL records the correlation it fitted as
+``FittedCorr``, since a single-solution table otherwise cannot say, and applying
+an ``xx`` solution to ``yx`` data is a silent mistake. The names the table needs
+for itself — the four CASA identifies it by, and the one per subtable — are
+refused rather than overwritten, and so are values casacore cannot be relied on
+to encode: a keyword value is a string, bool, int or float, or a non-empty list
+of one single one of those. :func:`~tabascal.ms.read_caltable` returns the
+caller's keywords, and only those, so a round trip needs no casacore.
+
+``time_ref`` is the epoch reference the ``TIME`` column declares, and it must be
+the MS's own. The times are a copy of the MS's column and nothing shifts them,
+so a table declaring UTC over a TAI-declared observation has moved every
+timestamp by the accumulated leap seconds for anything that reads the
+declaration. It is validated against :data:`~tabascal.time.TIME_SCALES`, and
+read back as ``time_ref``.
+
+:func:`~tabascal.ms.remove_caltable` is the other end: it deletes a table whose
+solution has been superseded — a rerun that fits no gains has none to overwrite
+the previous one with, and a stale table under the current name reads as the
+current calibration. It applies the same overlap guard as the writer, and the
+same test of what it is about to delete.
+
+What may be deleted
+~~~~~~~~~~~~~~~~~~~
+
+Both calls that remove something — ``remove_caltable``, and ``write_caltable``
+clearing an existing output under ``overwrite=True`` — first ask whether the path
+holds a table this module could have written. Three checks, each catching what
+the others miss: casacore's marker files, which a caller's own directory and an
+ordinary file do not have; an INFO record declaring ``Type = Calibration``, which
+is the *only* thing separating a caltable from a Measurement Set, since an MS
+carries the same markers; and ``tableexists``, casacore's read-only structural
+check, which catches a directory dressed up with hand-written marker files and a
+``table.dat`` that has been truncated or replaced.
+
+That is a check on the format and not a guarantee of integrity — a table that
+opens cleanly can still hold a solution that is wrong, or for another
+observation — but it does guarantee that what is removed was a casacore
+calibration table rather than a caller's data. Anything else at the path is a
+``ValueError`` from the writer and a ``False`` from the remover; a damaged table
+is refused on the same rule and has to be cleared by hand. This tightens the
+original ``overwrite`` contract, which removed the destination on sight: every
+legitimate overwrite target is a previous solution, so anything else there is a
+path pointing somewhere the caller did not mean, and the cost of reading it the
+other way is a deletion that cannot be undone.
+
+The solution TABASCAL fits is exported this way after every run; see
+:doc:`../output`.
+
 A gain that is zero or non-finite carries no solution, and both halves of that
 are written: ``FLAG`` is set *and* ``CPARAM`` is NaN, so a reader going by the
 flag and one going by the value reach the same conclusion. Calibrating with one

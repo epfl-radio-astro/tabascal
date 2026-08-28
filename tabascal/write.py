@@ -9,8 +9,11 @@ from tabascal.ms import (
     partition_noise,
     partition_polarization,
     partition_setup,
+    read_time_scale,
     read_time_unit,
+    remove_caltable,
     times_to_mjd,
+    write_caltable,
 )
 from tabascal.noise import broadcast_to_vis
 from tabascal.time import DAY_SECS
@@ -18,6 +21,8 @@ from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_from_table, xds_to_table
 
+import os
+import traceback
 import warnings
 
 import numpy as np
@@ -246,19 +251,20 @@ def calibrated_weights(gains_tot, sigma):
     return abs(gains_tot).astype(np.float64) ** 2 / sigma**2
 
 
-def _external_gains_column(
-    ms_path, xds_ms, layout, column_keywords, gain_table, dims, chunks, n_freq
-):
-    """The external tables' baseline gains, as an MS ``(row, chan, 1)`` column.
+def _observation_grid(ms_path, xds_ms, layout, column_keywords, n_freq):
+    """``(times_sec, freqs, n_ant)`` -- the grid this run's gains live on.
 
-    ``None`` when no table was used, so the caller divides by the fitted gains
-    alone rather than by a unit array the size of the data.
+    One definition of it, because two things are placed on it: the external
+    tables the columns are divided by, and the calibration table written beside
+    the results. Derived twice, they could be derived differently, and the two
+    would then describe calibrations of two different observations.
+
+    ``times_sec`` is one ``TIME`` per timestep block, in seconds on the scale the
+    column declares -- a caltable's ``TIME`` is a copy of this column, so the
+    match is made against the MS's own values and never against the
+    UTC-normalised ``times_jd``, which on a TAI-declared MS is 37 s away.
+    float64 throughout: an MJD second does not survive float32.
     """
-
-    paths = normalise_gain_tables(gain_table)
-
-    if not paths:
-        return None
 
     # The partition's own spectral window, resolved the way read_ms resolves it:
     # row 0 of SPECTRAL_WINDOW is a convention, not a guarantee.
@@ -278,16 +284,32 @@ def _external_gains_column(
     # and it is that count the reader trimmed each table to.
     n_ant = int(xds_from_table(ms_path + "::ANTENNA")[0].sizes["row"])
 
-    # One TIME per timestep block, in seconds on the scale the column declares:
-    # a caltable's TIME is a copy of this column, so the match is made against
-    # the MS's own values and never against the UTC-normalised times_jd, which
-    # on a TAI-declared MS is 37 s away. float64 throughout -- an MJD second
-    # does not survive float32.
     times = np.asarray(
         xds_ms.TIME.data.reshape(layout.n_time, layout.n_bl)[:, 0].compute(),
         dtype=np.float64,
     )
     times_sec = times_to_mjd(times, read_time_unit(column_keywords)) * DAY_SECS
+
+    return times_sec, freqs, n_ant
+
+
+def _external_gains_column(
+    ms_path, xds_ms, layout, column_keywords, gain_table, dims, chunks, n_freq
+):
+    """The external tables' baseline gains, as an MS ``(row, chan, 1)`` column.
+
+    ``None`` when no table was used, so the caller divides by the fitted gains
+    alone rather than by a unit array the size of the data.
+    """
+
+    paths = normalise_gain_tables(gain_table)
+
+    if not paths:
+        return None
+
+    times_sec, freqs, n_ant = _observation_grid(
+        ms_path, xds_ms, layout, column_keywords, n_freq
+    )
 
     g_bl = external_baseline_gains(
         paths, times_sec, freqs, layout.a1, layout.a2, n_ant=n_ant
@@ -369,6 +391,11 @@ def write_results_ms(
     ``gain_table`` is the ordered list ``data.gain_table`` named, or a single
     path. It is required whenever the run used one: without it every column is
     written a whole calibration layer away from the frame it should be in.
+
+    Once the columns are written, the calibration they were divided by is
+    exported beside the results as a CASA table -- see
+    :func:`write_gain_caltable`, which is where the two outputs deliberately
+    part company over a dead gain.
     """
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
@@ -537,8 +564,318 @@ def write_results_ms(
         xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords),
     )
 
-    warn_bad_gains(n_bad, bad.size, bad_ants)
-    warn_bad_baseline_gains(n_bad_bl, bad_bl_mean.size)
+    try:
+        warn_bad_gains(n_bad, bad.size, bad_ants)
+        warn_bad_baseline_gains(n_bad_bl, bad_bl_mean.size)
+    finally:
+        # The same calibration these columns were divided by, as a table standard
+        # tooling can apply. Last, and additive -- but in a finally, because the
+        # two warnings above can *raise*: a process filtering RuntimeWarning to an
+        # error stops on them, and the columns are already written by then. The
+        # export would be skipped with the previous run's table still beside the
+        # new results, under the current name, describing gains that are no longer
+        # there -- the stale calibration this export goes to some length to avoid
+        # anywhere else. It contains its own failures (see _emit_gain_caltable),
+        # and a warning it raises under such a filter arrives chained to the one
+        # that was already propagating rather than replacing it.
+        _emit_gain_caltable(ms_path, results_zarr_path, gain_table)
+
+
+#: Extension of the calibration table written beside a results zarr. CASA's own
+#: convention for a bandpass-shaped solution: ``<name>.B``.
+CALTABLE_EXT = ".B"
+
+#: Lines of traceback carried into a demoted export failure's warning. Enough to
+#: name the frame that raised and the one that called it; a full traceback in a
+#: warning is unreadable, and the message alone cannot tell a refused MS from a
+#: bug in the export.
+_TRACEBACK_LINES = 6
+
+
+def caltable_path(results_zarr_path: str) -> str:
+    """Where a results zarr's calibration table goes: the same name, ``.B``.
+
+    One definition, because two things need it: the export, and the clean-up
+    that has to find the table an export could not replace.
+    """
+
+    # normpath first: a results path with a trailing separator would otherwise
+    # put the table *inside* the zarr directory.
+    return os.path.splitext(os.path.normpath(results_zarr_path))[0] + CALTABLE_EXT
+
+
+def _clear_failed_export(out_path: str, ms_path: str) -> str:
+    """Remove a table a failed export could not replace. Returns what happened.
+
+    A failure *before* the write -- a multi-window MS, results that do not
+    describe it, an output path overlapping it -- leaves the previous run's table
+    standing beside the new results, under the current name, which is the
+    stale-calibration hazard :func:`_drop_superseded_caltable` exists for reached
+    down the other path. The same removal is made here, through the same safe
+    remover, and reported in the same warning.
+
+    Never raises: the export has already failed, and a failure to clean up after
+    it must not replace that news with its own. The returned sentence is empty
+    when there was nothing there at all.
+    """
+
+    try:
+        if remove_caltable(out_path, ms_path):
+            return f" The superseded table at {out_path} has been removed."
+
+        if os.path.exists(out_path):
+            return (
+                f" {out_path} holds something that is not a calibration table, "
+                "so it has been left alone."
+            )
+    except Exception as err:
+        return (
+            f" The table at {out_path} could not be removed either: "
+            f"{type(err).__name__}: {err}."
+        )
+
+    return ""
+
+
+def _emit_gain_caltable(ms_path: str, results_zarr_path: str, gain_table):
+    """:func:`write_gain_caltable`, with a failure demoted to a warning.
+
+    The export is an extra beside the columns, not a part of them, and it runs
+    after they are safely written -- so a failure here has to leave the run's
+    result standing rather than ending a completed job with a traceback. What
+    gets demoted is everything the export can say about *this* MS or *these*
+    results:
+
+    * an MS with more than one spectral window, which the writer serves one
+      partition of happily and :func:`~tabascal.ms.write_caltable` refuses,
+      since a caltable files every row under one window's id;
+    * an output path overlapping the MS, refused by the same guard;
+    * something at the output path that is not a calibration table;
+    * results whose gains do not describe the MS's antennas or timesteps;
+    * a ``TIME`` column declaring a scale tabascal cannot interpret;
+    * anything the filesystem refuses.
+
+    All of those fail *before* the table is written, which leaves an earlier
+    run's table standing at the destination -- so it is cleared here too, by
+    :func:`_clear_failed_export`, and what happened to it is part of the warning.
+
+    ``MemoryError`` is not demoted: that is a statement about the process rather
+    than about the data, and nothing downstream could reason about a run that
+    carried on past it. ``KeyboardInterrupt`` is not caught at all.
+
+    The warning carries the exception type, its message and the tail of its
+    traceback, so a bug in the export cannot hide behind the same demotion that
+    exists for an MS a caltable cannot describe.
+    """
+
+    try:
+        return write_gain_caltable(ms_path, results_zarr_path, gain_table=gain_table)
+    except MemoryError:
+        raise
+    except Exception as err:
+        tail = "".join(
+            traceback.format_exc().splitlines(keepends=True)[-_TRACEBACK_LINES:]
+        )
+        # An earlier run's table is still standing at the destination this one
+        # could not write, so it goes the same way it would on a no-op export.
+        cleared = _clear_failed_export(caltable_path(results_zarr_path), ms_path)
+
+        warnings.warn(
+            "The MS columns were written, but the calibration table beside "
+            f"{results_zarr_path} was not: {type(err).__name__}: {err}. The "
+            "results are unaffected; the solution is simply not available as a "
+            f"table to apply.{cleared}\n{tail}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+        return None
+
+
+def _drop_superseded_caltable(out_path: str, ms_path: str, why: str) -> None:
+    """Remove the previous run's table when this run has none to replace it.
+
+    A stale calibration is worse than none: it sits beside the current results
+    under the current name and reads as the current solution. Returns ``None``,
+    so a no-op export can ``return _drop_superseded_caltable(...)`` and say both
+    things at once.
+
+    Only ever removes a calibration table, and never one overlapping the MS --
+    :func:`~tabascal.ms.remove_caltable` is where that is decided.
+    """
+
+    if remove_caltable(out_path, ms_path):
+        warnings.warn(
+            f"{out_path} holds a calibration table from an earlier run of these "
+            f"results, and this run has none to replace it with ({why}), so it "
+            "has been removed. A table left there would read as this run's "
+            "solution.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    return None
+
+
+@measure_runtime
+def write_gain_caltable(
+    ms_path: str,
+    results_zarr_path: str,
+    out_path: str | None = None,
+    gain_table=None,
+) -> str | None:
+    """Export the calibration a run implies as an ``applycal``-compatible table.
+
+    Written beside the results as ``<results>.B``, so that a tabascal solution
+    can be consumed by standard tooling -- ``applycal``, CASA, CARAcal/stimela --
+    like any other calibration, rather than only as the MS columns
+    :func:`write_results_ms` writes.
+
+    What it holds is the **total** calibration, ``external x fitted``: the
+    ordered ``gain_table`` product placed on this observation's grid, times the
+    DIE gains the model fitted. One ``applycal`` of this table therefore
+    reproduces ``CORRECTED_DATA`` from the MS's data column in a single step,
+    which is the whole point of composing them here.
+
+    That works because the two forms of the calibration agree. The columns are
+    divided by a per-*baseline* gain and a caltable holds a per-*antenna* one,
+    and::
+
+        (g_ext_p g_fit_p) conj(g_ext_q g_fit_q)
+            == (g_ext_p conj(g_ext_q)) (g_fit_p conj(g_fit_q))
+
+    is exactly the ``gains_tot`` :func:`write_results_ms` divided by -- provided
+    the sample mean commutes with the baseline product, which it does for the one
+    sample a MAP run has. With several samples the columns are divided by the
+    mean of ``g_p conj(g_q)`` while a per-antenna table can only carry the mean
+    of ``g_p``, and the two differ by the covariance between the two antennas'
+    gains.
+
+    **A dead gain is flagged here and substituted there.** A gain that is zero or
+    non-finite carries no solution, and a caltable can say so: ``FLAG`` set and
+    ``CPARAM`` NaN, which is what CASA does and what a reader of this table
+    expects. The MS columns cannot say it -- a NaN there is a dropped visibility
+    -- so they keep :func:`unit_bad_gains`' substitution and are written
+    uncalibrated on that antenna instead. The raw zarr gains are passed through
+    here, not the substituted ones, and an antenna no external table could supply
+    a gain for is flagged the same way. It is a deliberate divergence: each
+    format gets the honest answer it is able to give.
+
+    The table's ``TIME`` is the MS's own column and its ``MEASINFO`` declares the
+    MS's own scale, never a hard-coded UTC: declared to declared, the same
+    convention the external tables are matched on.
+
+    Returns the path written, or ``None`` when there was no calibration to
+    export: no ``gains`` in the results, gains that are not the ``(sample,
+    antenna, channel, time)`` grid a caltable can hold, or gains that are exactly
+    1 **on every sample** -- a ``UnitaryGains`` run fits none, and a table of ones
+    is not a calibration. Every-sample rather than on the mean, because samples
+    either side of 1 average to unity while the divisor the columns use, the mean
+    of the baseline product, is a real calibration. A run that used external
+    tables and fitted nothing is in the same position as a unitary one: the total
+    calibration is the tables the caller already has.
+
+    In each of those cases a table left by an *earlier* run of the same results
+    is removed (:func:`_drop_superseded_caltable`), because a stale calibration
+    under the current name reads as the current one. A run whose export *fails*
+    is in the same position, and :func:`_clear_failed_export` does the same there.
+    Only a calibration table is ever removed, and never one overlapping the MS.
+
+    Note that ``applycal`` operates on ``DATA``. An MS whose visibilities live in
+    a non-standard column cannot consume this table, whatever the table says.
+    """
+
+    # Derived before anything is read, because the no-op paths need it too: a
+    # rerun that fits nothing has to remove the table the last run left here.
+    if out_path is None:
+        out_path = caltable_path(results_zarr_path)
+
+    # Closed on the way out: this runs at the end of a long job, and a store left
+    # open holds file handles for the rest of it.
+    with xr.open_zarr(results_zarr_path) as xds_tab:
+        if "gains" not in xds_tab:
+            return _drop_superseded_caltable(
+                out_path, ms_path, "the results carry no gains"
+            )
+
+        stored = xds_tab.gains.data
+        corr = xds_tab.attrs.get("corr")
+
+        if stored.ndim != 4:
+            return _drop_superseded_caltable(
+                out_path,
+                ms_path,
+                f"the results' gains have {stored.ndim} dimensions, not the four "
+                "(sample, antenna, channel, time) a caltable can hold",
+            )
+
+        # Both reductions over the stored chunks, in one pass: a posterior is
+        # (sample, antenna, channel, time) and can be far larger than the table
+        # it reduces to, so neither the mean nor the unity test may materialise
+        # it. Unity over the *whole* sample axis rather than over the mean --
+        # what says a run fitted no gains is that every sample is 1, where a mean
+        # of 1 says nothing: samples either side of it average to unity while the
+        # divisor the columns use, the mean of the baseline product, is a real
+        # calibration. Inside the store's context, since these are the reads.
+        unitary, gains = dask.compute((stored == 1).all(), stored.mean(axis=0))
+
+    if unitary:
+        return _drop_superseded_caltable(
+            out_path, ms_path, "the fitted gains are unity on every sample"
+        )
+
+    gains = np.asarray(gains)
+    n_ant_fit, n_freq, n_time_fit = gains.shape
+
+    # A second read of the MS -- the caller above has one open, but this is
+    # callable on its own -- and a cheap one: the TIME column and two subtables,
+    # no visibilities. daskms hands back plain datasets over its own table cache,
+    # so there is nothing here to close.
+    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True)
+    xds_ms = xds_list[0]
+    layout = ms_layout(xds_ms)
+
+    times_sec, freqs, n_ant = _observation_grid(
+        ms_path, xds_ms, layout, column_keywords, n_freq
+    )
+
+    if (n_ant_fit, n_time_fit) != (n_ant, layout.n_time):
+        raise ValueError(
+            f"The results hold gains for {n_ant_fit} antennas over {n_time_fit} "
+            f"timesteps, but the MS has {n_ant} antennas over {layout.n_time}. "
+            "The results zarr does not belong to this measurement set."
+        )
+
+    paths = normalise_gain_tables(gain_table)
+
+    if paths:
+        # Silent: on the normal route the columns have just been written from
+        # these same tables on this same grid, and their placement reported the
+        # coverage. A second identical report would say nothing new.
+        ext, dead = gains_from_tables(
+            paths, times_sec, freqs, n_ant=n_ant, verbose=False
+        )
+        # NaN rather than the unity gains_from_tables substitutes: an antenna no
+        # table solved has no solution to record, and NaN is what write_caltable
+        # turns into a flag.
+        gains = np.where(dead, np.nan, ext) * gains
+
+    write_caltable(
+        out_path,
+        gains,
+        times_sec,
+        ms_path=ms_path,
+        # The MS's own scale, since times_sec is the MS's own column: declaring
+        # UTC over a TAI-declared MS moves every timestamp by the leap seconds.
+        time_ref=read_time_scale(column_keywords),
+        # Which correlation these gains belong to. Nothing in the caltable format
+        # records it, and applying an xx solution to yx data is a silent mistake.
+        keywords={} if corr is None else {"FittedCorr": str(corr)},
+    )
+
+    print(f"Wrote the total calibration to {out_path} (apply with casatasks.applycal).")
+
+    return out_path
 
 
 @measure_runtime

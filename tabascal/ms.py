@@ -36,6 +36,7 @@ gain ``g = k ** -0.5``.
 import os
 import shutil
 import warnings
+from collections.abc import Mapping
 from typing import NamedTuple, Optional
 
 import jax
@@ -56,7 +57,13 @@ from tabascal.noise import (
     per_baseline_sigma,
     representative_sigma,
 )
-from tabascal.time import DAY_SECS, jd_to_datetime, mjd_to_jd, to_utc_jd
+from tabascal.time import (
+    DAY_SECS,
+    TIME_SCALES,
+    jd_to_datetime,
+    mjd_to_jd,
+    to_utc_jd,
+)
 from tabascal.timing import measure_runtime
 
 
@@ -892,16 +899,75 @@ def get_observation_data_type(data_col: str):
 #: Subtables a caltable carries; CASA copies these straight from the MS.
 _SUBTABLES = ("ANTENNA", "FIELD", "SPECTRAL_WINDOW", "OBSERVATION", "HISTORY")
 
+#: Keywords the table writes for itself: the four CASA identifies a calibration
+#: table by, and the one per subtable that points at its copy. A caller's extra
+#: keywords may not take any of these names -- overwriting one produces a table
+#: CASA either rejects or cannot find its own antennas in.
+_RESERVED_KEYWORDS = frozenset(
+    {"VisCal", "ParType", "MSName", "PolBasis"}
+).union(_SUBTABLES)
 
-def _caltable_desc():
-    """Table description matching ``casatasks.gaincal``'s output."""
+#: Files casacore writes for every table it creates. Their presence is what makes
+#: a directory identifiable as a table without opening it.
+_TABLE_MARKERS = ("table.dat", "table.info")
+
+#: What a calibration table's ``table.info`` declares itself to be. An MS is a
+#: casacore table too, so the markers alone do not tell the two apart.
+_CALTABLE_INFO_TYPE = "calibration"
+
+
+def _keyword_kind(value) -> Optional[str]:
+    """Which of casacore's scalar keyword types *value* is, or ``None``.
+
+    bool before int, because bool is an int subclass and a list mixing the two
+    has no single type for casacore to write.
+    """
+
+    if isinstance(value, (bool, np.bool_)):
+        return "bool"
+    if isinstance(value, (int, np.integer)):
+        return "int"
+    if isinstance(value, (float, np.floating)):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+
+    return None
+
+
+def _is_keyword_value(value) -> bool:
+    """Whether casacore can be relied on to encode *value* as a table keyword.
+
+    A scalar of one of the four types it writes, or a non-empty list of one
+    single type. An empty list has no type to write, and a mixed one has two.
+    """
+
+    if _keyword_kind(value) is not None:
+        return True
+
+    if isinstance(value, (list, tuple)) and len(value) > 0:
+        kinds = {_keyword_kind(item) for item in value}
+
+        return None not in kinds and len(kinds) == 1
+
+    return False
+
+
+def _caltable_desc(time_ref: str = "UTC"):
+    """Table description matching ``casatasks.gaincal``'s output.
+
+    ``time_ref`` is the epoch reference the ``TIME`` column declares. It is the
+    MS's own, not a constant: the values are copied across untouched, so a table
+    that declares UTC over times an MS declared as TAI has moved every timestamp
+    by the accumulated leap seconds for anything that reads the declaration.
+    """
 
     from casacore.tables import makearrcoldesc, makescacoldesc, maketabdesc
 
     time = makescacoldesc("TIME", 0.0, valuetype="double")
     time["desc"]["keywords"] = {
         "QuantumUnits": ["s"],
-        "MEASINFO": {"type": "epoch", "Ref": "UTC"},
+        "MEASINFO": {"type": "epoch", "Ref": time_ref},
     }
     interval = makescacoldesc("INTERVAL", 0.0, valuetype="double")
     interval["desc"]["keywords"] = {"QuantumUnits": ["s"]}
@@ -1044,6 +1110,8 @@ def write_caltable(
     n_pol: int = 2,
     viscal: str = "B Jones",
     overwrite: bool = True,
+    keywords: Optional[Mapping] = None,
+    time_ref: str = "UTC",
 ) -> str:
     """Write an ``applycal``-compatible calibration table.
 
@@ -1084,7 +1152,8 @@ def write_caltable(
         ``(n_ant, n_freq, n_time)`` complex -- ``g_p``, in the
         ``V_obs = g_p conj(g_q) V_true`` convention of the module docstring.
     times : NDArray
-        ``(n_time,)`` MS ``TIME`` values in seconds (MJD seconds, as in the MS).
+        ``(n_time,)`` MS ``TIME`` values in seconds (MJD seconds, as in the MS),
+        on the scale ``time_ref`` names.
     ms_path : str
         The MS these gains belong to; its ``ANTENNA``, ``FIELD``,
         ``SPECTRAL_WINDOW``, ``OBSERVATION`` and ``HISTORY`` subtables are copied
@@ -1092,6 +1161,21 @@ def write_caltable(
     n_pol : int, optional
         CASA writes 2 polarisations even for a single-correlation MS, so the gain
         is duplicated across the pol axis by default.
+    keywords : dict, optional
+        Extra table keywords, written beside the table's own. For what the
+        solver knows and the format has no field for -- the correlation tabascal
+        fitted, say -- so that the table still says it when it is read back
+        somewhere else. The names the table needs for itself
+        (:data:`_RESERVED_KEYWORDS`) are refused rather than overwritten, and so
+        are values casacore cannot be relied on to encode: a string, bool, int
+        or float, or a non-empty list of one of those.
+    time_ref : str, optional
+        Epoch reference the ``TIME`` column declares, which must be **the MS's
+        own**: ``times`` is a copy of its column and nothing here shifts it, so
+        declaring UTC over a TAI-declared MS moves every timestamp by the
+        accumulated leap seconds for anything that reads the declaration.
+        Validated against :data:`~tabascal.time.TIME_SCALES` -- the scales
+        tabascal can interpret -- and written in casacore's upper case.
 
     Returns
     -------
@@ -1110,6 +1194,16 @@ def write_caltable(
     happens, which is also what keeps the clean-up on the failure path from
     reaching anything but the caltable's own directory.
 
+    **``overwrite=True`` replaces a calibration table and nothing else.** An
+    existing output that is not one -- a caller's directory, an ordinary file, a
+    Measurement Set, a table too damaged for casacore to open (see
+    :func:`_is_caltable`) -- is a ``ValueError`` naming the path and what was
+    found, rather than a ``rmtree``. Every legitimate overwrite target is a
+    previous solution, so anything else there is a path pointing somewhere the
+    caller did not mean; the cost of that reading is a deletion that cannot be
+    undone. A damaged caltable is refused on the same rule and has to be removed
+    by hand.
+
     Raises
     ------
     ValueError
@@ -1122,6 +1216,9 @@ def write_caltable(
         the error is re-raised, so a half-written table can only survive a
         failure that also prevents its removal. The original exception always
         propagates -- nothing raised during the clean-up replaces it.
+
+        Also if ``path`` exists, ``overwrite`` is true, and what is there is not
+        a calibration table this function could have written.
     FileExistsError
         If ``path`` exists and ``overwrite`` is false.
     """
@@ -1181,6 +1278,46 @@ def write_caltable(
             "taken on truthiness."
         )
 
+    if keywords is None:
+        keywords = {}
+    elif not isinstance(keywords, Mapping):
+        raise ValueError(
+            f"keywords must be a mapping of table keyword names to values, got "
+            f"{keywords!r}"
+        )
+    elif not all(isinstance(name, str) for name in keywords):
+        raise ValueError(
+            f"keywords names must be strings naming table keywords, got "
+            f"{sorted(map(repr, keywords))}"
+        )
+
+    reserved = sorted(_RESERVED_KEYWORDS.intersection(keywords))
+    if reserved:
+        raise ValueError(
+            f"keywords may not set {reserved}: those are how CASA identifies a "
+            "calibration table and reaches the subtables it carries."
+        )
+
+    # The values too, and here rather than at putkeyword: that is past the
+    # removal, with the old table already gone.
+    unwritable = sorted(
+        name for name, value in keywords.items() if not _is_keyword_value(value)
+    )
+    if unwritable:
+        raise ValueError(
+            f"keywords {unwritable} hold values casacore cannot be relied on to "
+            "encode. A keyword value must be a string, bool, int or float, or a "
+            "non-empty list of one single one of those."
+        )
+
+    if not isinstance(time_ref, str) or time_ref.strip().lower() not in TIME_SCALES:
+        raise ValueError(
+            f"time_ref must name a time scale a Measurement Set can declare its "
+            f"TIME column on, got {time_ref!r}. Supported: "
+            f"{sorted(TIME_SCALES)}. The caltable's times are a copy of the MS's, "
+            "so this has to be the MS's own declaration."
+        )
+
     # Before anything is read from disk, let alone removed from it: the output
     # must not overlap the MS it is written from.
     _reject_overlapping_paths(path, ms_path)
@@ -1211,6 +1348,19 @@ def write_caltable(
     if os.path.exists(path):
         if not overwrite:
             raise FileExistsError(f"{path} already exists. Use overwrite=True.")
+
+        # overwrite=True is permission to replace a *calibration table*, not to
+        # delete whatever is at the path. Every legitimate target is a caltable --
+        # a previous solution -- so anything else here is a caller pointing the
+        # writer somewhere they did not mean to, and rmtree is not the answer.
+        if not _is_caltable(path):
+            raise ValueError(
+                f"{path} exists and is not a calibration table ({_what_is_at(path)}), "
+                "so it will not be removed. write_caltable only overwrites a table "
+                "it could have written; move or delete this yourself if you meant "
+                "to replace it."
+            )
+
         shutil.rmtree(path)
 
     n_row = n_time * n_ant
@@ -1231,7 +1381,9 @@ def write_caltable(
     # one is expected. BaseException, not Exception: a Ctrl-C mid-write is
     # exactly the case that would otherwise strand one.
     try:
-        with table(path, _caltable_desc(), nrow=n_row, ack=False) as tb:
+        with table(
+            path, _caltable_desc(time_ref.strip().upper()), nrow=n_row, ack=False
+        ) as tb:
             tb.putcol("TIME", time_col)
             tb.putcol("ANTENNA1", ant_idx)
             tb.putcol("ANTENNA2", np.full(n_row, -1, dtype=np.int32))
@@ -1254,6 +1406,9 @@ def write_caltable(
             tb.putkeyword("ParType", "Complex")
             tb.putkeyword("MSName", os.path.basename(os.path.normpath(ms_path)))
             tb.putkeyword("PolBasis", "unknown")
+
+            for name, value in keywords.items():
+                tb.putkeyword(name, value)
 
             for sub in _SUBTABLES:
                 src = os.path.join(ms_path, sub)
@@ -1278,6 +1433,108 @@ def write_caltable(
         raise
 
     return path
+
+
+def _is_caltable(path: str) -> bool:
+    """Whether *path* holds a casacore table that declares itself a calibration.
+
+    Asked before anything is deleted, by :func:`remove_caltable` and by
+    :func:`write_caltable` on the destination it is about to overwrite, so it
+    answers exactly one question: *could this have been written by
+    ``write_caltable``?* Three things say yes, and each of them says no for
+    something the other two miss:
+
+    * the marker files casacore writes for every table -- absent for a caller's
+      own directory, and for an ordinary file;
+    * an INFO record whose first line declares ``Type = Calibration``, read as a
+      file rather than through casacore, which is what tells a caltable from a
+      Measurement Set: an MS carries the same markers and differs only here;
+    * ``tableexists``, casacore's own read-only structural check, which is what
+      tells a table from a directory dressed up as one, and catches a
+      ``table.dat`` that has been truncated or replaced.
+
+    That is a check on the *format*, not a guarantee of integrity: a table that
+    opens cleanly may still hold a solution that is wrong, incomplete or for
+    another observation, and nothing here would say so. What it does guarantee
+    is that the thing about to be removed was a casacore calibration table and
+    not a caller's data.
+
+    Never raises, literally: every read here is guarded, casacore's import
+    included. A damaged table -- an INFO record that is not even text, a
+    ``table.dat`` that is not a table, an environment without casacore -- has to
+    answer "no" rather than take the caller down on the way to a deletion that
+    then does not happen.
+    """
+
+    if not os.path.isdir(path):
+        return False
+
+    if any(not os.path.exists(os.path.join(path, m)) for m in _TABLE_MARKERS):
+        return False
+
+    try:
+        with open(os.path.join(path, "table.info")) as info:
+            declared = info.read(4096)
+    except Exception:
+        # Not only OSError: a table.info that is not valid text decodes to a
+        # UnicodeDecodeError, which is a ValueError.
+        return False
+
+    # "Type = Calibration" on the first line, as casacore writes it.
+    name, _, value = declared.partition("\n")[0].partition("=")
+
+    if name.strip().lower() != "type" or value.strip().lower() != _CALTABLE_INFO_TYPE:
+        return False
+
+    try:
+        from casacore.tables import tableexists
+
+        return bool(tableexists(path))
+    except Exception:
+        return False
+
+
+def _what_is_at(path: str) -> str:
+    """A short description of whatever is at *path*, for a refusal to name it."""
+
+    if not os.path.isdir(path):
+        return "a file"
+
+    if all(os.path.exists(os.path.join(path, m)) for m in _TABLE_MARKERS):
+        return (
+            "a casacore table that does not declare itself a calibration table, "
+            "or one whose own files are damaged"
+        )
+
+    return "a directory"
+
+
+def remove_caltable(path: str, ms_path: str) -> bool:
+    """Delete the calibration table at *path*, if that is what is there.
+
+    For a solution that has been superseded. A run that fits no gains has no
+    table to overwrite the previous run's with, and one left standing beside the
+    new results reads as the current calibration -- the failure mode a stale
+    file always has, and a calibration is a bad thing to be wrong about.
+
+    Returns whether a table was removed; nothing there is not an error.
+
+    This is a ``rmtree`` on a path a caller named, so it is the one call here
+    that has to be sure. Both checks refuse rather than delete: the path must
+    hold a casacore table declaring itself a calibration (:func:`_is_caltable`),
+    and it must not be, contain, or sit inside the MS -- the same guard
+    :func:`write_caltable` applies before it removes an existing output, and for
+    the same reason.
+    """
+
+    _reject_overlapping_paths(path, ms_path)
+
+    if not _is_caltable(path):
+        return False
+
+    shutil.rmtree(path)
+
+    return True
 
 
 def _single_spw_chan_freq(spw_path: str, described: str) -> NDArray:
@@ -1389,6 +1646,12 @@ def read_caltable(path: str) -> dict:
     solutions set to NaN -- plus ``times``, ``ant_idx``, ``freqs`` (``None`` if
     the table carries no ``SPECTRAL_WINDOW``) and ``viscal``.
 
+    ``time_ref`` is the scale the ``TIME`` column declares, as written, or
+    ``None`` for a table that declares none. ``keywords`` holds the *caller's*
+    keywords -- whatever the solver recorded, such as tabascal's ``FittedCorr``
+    -- with the names the format claims for itself left out, so that reading
+    back what was written needs no casacore.
+
     Reads the single-correlation, single-spectral-window tables tabascal fits.
     A table whose polarisations carry genuinely different solutions, or which
     describes more than one spectral window, is an error rather than a silent
@@ -1403,6 +1666,12 @@ def read_caltable(path: str) -> dict:
         cparam = tb.getcol("CPARAM")  # (n_row, n_freq, n_pol)
         flag = tb.getcol("FLAG")
         viscal = tb.getkeyword("VisCal") if "VisCal" in tb.keywordnames() else ""
+        extra = {
+            name: tb.getkeyword(name)
+            for name in tb.keywordnames()
+            if name not in _RESERVED_KEYWORDS
+        }
+        time_ref = tb.getcolkeywords("TIME").get("MEASINFO", {}).get("Ref")
 
     g = _collapse_pols(cparam, flag)  # (n_row, n_freq)
 
@@ -1420,6 +1689,8 @@ def read_caltable(path: str) -> dict:
         "ant_idx": np.arange(n_ant),
         "freqs": _caltable_freqs(path),
         "viscal": viscal,
+        "time_ref": time_ref,
+        "keywords": extra,
     }
 
 

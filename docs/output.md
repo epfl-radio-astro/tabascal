@@ -22,7 +22,9 @@ parent_directory/
 |       └── Custom_prior_rfi_vis_imag.pdf       # RFI visibility prediction of prior distribution
 |   ├── results/
 |       └── init_pred_Custom.zarr               # Initial parameter prediction values
+|       └── init_pred_Custom.B                  # The calibration the initial values imply
 |       └── map_pred_Custom.zarr                # Optimised parameter prediction values
+|       └── map_pred_Custom.B                   # The calibration it implies, as a CASA table
 ```
 
 ## Results `.zarr` files
@@ -159,3 +161,70 @@ Writing raises a `ValueError`, before any column is built, if:
 * the rows interleave timesteps within a block of `n_bl` rows, which reshapes cleanly but puts every visibility on the wrong timestamp.
 
 Sorting the MS by `TIME`, `ANTENNA1`, `ANTENNA2` resolves the last three.
+
+## Calibration table
+
+Every run that fits gains also writes the calibration it implies as a CASA calibration table, beside the results `.zarr` and named after it — `map_pred_Custom.zarr` gives `map_pred_Custom.B`. It is a `B Jones` table, one row per (time, antenna) with `CPARAM` of shape (channel, polarisation), exactly the layout `casatasks.gaincal` produces, so a tabascal solution can be consumed by standard tooling like any other calibration rather than only as the columns above.
+
+Every results `.zarr` the run writes gets its own table, named after it. A configuration that writes the initial prediction as well as the optimised one therefore leaves an `init_pred_Custom.B` beside `init_pred_Custom.zarr`: the calibration those initial values imply, which is a real if uninteresting calibration and is never confused with the fitted one.
+
+The table's `TIME` column is a copy of the MS's, and its `MEASINFO` record declares the scale **the MS declares** rather than assuming UTC. Declared to declared, the same convention the external gain tables are matched on: relabelling a TAI-declared observation as UTC would move every timestamp by the accumulated leap seconds — 37 s since 2017 — for anything that reads the declaration.
+
+The table holds the **total** calibration — the external tables placed on this observation's grid, times the DIE gains the model fitted:
+
+```text
+G_p = g_ext_p × g_p
+```
+
+so one application of this one table takes `DATA` to `CORRECTED_DATA`:
+
+```python
+from casatasks import applycal
+applycal(vis="dataset.ms", gaintable=["results/map_pred_Custom.B"])
+```
+
+That works because the two forms of the calibration agree: the columns are divided by a per-*baseline* gain and the table carries a per-*antenna* one, and `(g_ext_p g_p) conj(g_ext_q g_q)` is `(g_ext_p conj(g_ext_q)) (g_p conj(g_q))` — the very `g_total` the columns were divided by.
+
+**`applycal` operates on `DATA`.** An MS whose visibilities live in a non-standard column cannot consume the table, whatever the table says — it fails with `Error in Calibrater::correct` regardless of the calibration given.
+
+The table records which correlation was fitted in a `FittedCorr` keyword, since nothing in the caltable format says so and applying an `xx` solution to `yx` data is a silent mistake.
+
+### Flagged in the table, substituted in the columns
+
+A gain that is zero or non-finite carries no solution, and the two outputs give the honest answer each is able to give — deliberately different answers:
+
+* the **table** flags it: `FLAG` set and `CPARAM` `NaN`, which is what CASA does with an unsolved antenna and what a reader of the table expects. The raw gains from the `.zarr` are used here, not the substituted ones, and an antenna no external table could supply a gain for is flagged the same way;
+* the **columns** substitute 1, as described above, because a `NaN` there is a dropped visibility rather than a statement about the calibration.
+
+So an antenna the fit killed is *missing* from the table and *uncalibrated* in the columns. Applying the table to that MS therefore flags those visibilities where the columns kept them.
+
+### Several samples
+
+The table carries the mean of the per-antenna gains over the `sample` axis. Where the columns are divided by the mean of `g_p g_q*`, a per-antenna table can only hold the mean of `g_p`, and the two differ by the covariance between the two antennas' gains. For a MAP run — one sample — they are identical.
+
+### When no table is written
+
+Nothing is written when there is no calibration to export: results with no `gains`, gains that are not the four-dimensional `(sample, antenna, channel, time)` grid a caltable can hold, or gains that are exactly 1 **on every sample**. A `UnitaryGains` run stores ones and fits nothing, and a run that used external tables while fitting nothing is in the same position — the total calibration is then the tables the caller already has.
+
+Every-sample rather than on the mean: samples either side of 1 average to exactly 1 while the divisor the columns use — the mean of the baseline *product* — is a real calibration, so testing the mean alone would throw one away.
+
+**A table from a previous run of the same results is removed** in that case, with a `RuntimeWarning` saying so. A stale calibration sitting under the current name beside the current results reads as the current solution, which is a bad thing to be wrong about.
+
+Only a calibration table is ever removed: the path has to be a casacore table — casacore's own structural check, not just the marker files — whose INFO record declares `Type = Calibration`, and it may not be, contain, or sit inside the MS. A directory of your own that happens to be named `<results>.B` is left exactly as it is, and so is a table too damaged for casacore to open. The same rule applies to *writing*: the export replaces a previous calibration table at that path and refuses anything else, rather than deleting it.
+
+### If the export fails
+
+The export is the last thing the writer does and is additive to it. Everything it can say about *this* MS or *these* results is reported as a `RuntimeWarning` — carrying the exception type, its message and the tail of its traceback — while the columns, which were already written, stand:
+
+* an MS with more than one spectral window, which the writer serves one partition of while a caltable can only file rows under one window's id;
+* an output path overlapping the MS (results written *inside* the MS put the table there too);
+* something at the output path that is not a calibration table;
+* results whose gains do not describe the MS's antennas or timesteps;
+* a `TIME` column declaring a time scale tabascal cannot interpret;
+* anything the filesystem refuses.
+
+**A table from an earlier run is removed here too**, and the warning says so. A run whose export fails is in the same position as one that has nothing to export: the table it could not replace would otherwise stand beside the new results as if it were this run's answer. It is removed under exactly the rules above — so a directory of your own in the way is reported and left alone.
+
+A `MemoryError` is not demoted — that is a statement about the process, not about the data — and `Ctrl-C` stops the run as it always would.
+
+The export also runs when the gain warnings above are promoted to errors (`python -W error::RuntimeWarning`, or a `warnings.simplefilter` in a calling script). Those warnings are raised after the columns are written, so a process that turns them into exceptions would otherwise stop with the columns updated and the previous run's table still beside them; the export runs in a `finally` instead. The exception still propagates, and if the export needs to warn under the same filter its warning arrives *chained* to the first one rather than replacing it — both reports survive in the traceback.

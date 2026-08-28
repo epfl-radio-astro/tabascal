@@ -12,6 +12,7 @@ either session; the pure-numpy identities are float64 in both.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from tabascal.ms import (  # noqa: E402
     apply_gains_to_data,
     baseline_gains,
     read_caltable,
+    remove_caltable,
     write_caltable,
 )
 
@@ -256,6 +258,60 @@ class TestCasaFormat:
         with table(os.path.join(path, "ANTENNA"), ack=False) as ant:
             assert ant.nrows() == N_ANT
 
+    def test_caller_keywords_ride_along(self, tmp_path, gains, ms_path):
+        """Extra keywords are written beside the table's own, not instead of them.
+
+        What a solver knows about its solution and the format has no field for --
+        the correlation tabascal fitted, say -- goes in a keyword, so the table
+        still says it when it is read back somewhere else.
+        """
+
+        path = str(tmp_path / "test.B")
+        write_caltable(
+            path,
+            gains,
+            np.arange(N_TIME, dtype=float),
+            ms_path=ms_path,
+            keywords={"FittedCorr": "yx"},
+        )
+
+        with table(path, ack=False) as tb:
+            assert tb.getkeyword("FittedCorr") == "yx"
+            # The keywords CASA identifies the table by are untouched.
+            assert tb.getkeyword("VisCal") == "B Jones"
+            assert tb.getkeyword("ANTENNA").startswith("Table: ")
+
+    def test_caller_keywords_come_back_from_the_reader(
+        self, tmp_path, gains, ms_path
+    ):
+        """The round trip is through the API: a caller never needs casacore.
+
+        Only the caller's own keywords: the four CASA identifies the table by and
+        the subtable pointers describe the *format*, and a reader asking what the
+        solver recorded does not want them mixed in with it.
+        """
+
+        path = str(tmp_path / "test.B")
+        write_caltable(
+            path,
+            gains,
+            np.arange(N_TIME, dtype=float),
+            ms_path=ms_path,
+            keywords={"FittedCorr": "yx", "SolveIters": 300},
+        )
+
+        out = read_caltable(path)
+
+        assert out["keywords"] == {"FittedCorr": "yx", "SolveIters": 300}
+
+    def test_a_table_with_no_caller_keywords_reads_back_empty(
+        self, tmp_path, gains, ms_path
+    ):
+        path = str(tmp_path / "test.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        assert read_caltable(path)["keywords"] == {}
+
     def test_a_missing_subtable_is_not_an_error(self, tmp_path, gains):
         """The subtables are copied if they are there; none of them is required."""
 
@@ -279,6 +335,184 @@ class TestCasaFormat:
             _raw(path, "ANTENNA1"), np.tile(np.arange(N_ANT), N_TIME)
         )
         assert np.array_equal(_raw(path, "TIME"), np.repeat(times, N_ANT))
+
+
+# ---------------------------------------------------------------------------
+# The scale the times are on
+# ---------------------------------------------------------------------------
+
+class TestTheDeclaredTimeScale:
+    """A caltable's ``TIME`` is a copy of the MS's, and so is its scale.
+
+    The values are copied across untouched, so the ``MEASINFO`` record has to
+    say what the MS said. Declaring UTC over times an MS declared as TAI moves
+    every timestamp by the accumulated leap seconds -- 37 s since 2017 -- for
+    anything that reads the declaration rather than assuming it.
+    """
+
+    def test_utc_by_default(self, tmp_path, gains, ms_path):
+        path = str(tmp_path / "test.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        with table(path, ack=False) as tb:
+            assert tb.getcolkeyword("TIME", "MEASINFO")["Ref"] == "UTC"
+
+        assert read_caltable(path)["time_ref"] == "UTC"
+
+    @pytest.mark.parametrize("ref", ["TAI", "tai", "TDT", "UT1"])
+    def test_the_declared_scale_is_carried(self, tmp_path, gains, ms_path, ref):
+        """Whatever the MS declares, spelled as casacore spells it."""
+
+        path = str(tmp_path / "test.B")
+        times = np.array([10.0, 20.0, 30.0])
+        write_caltable(path, gains, times, ms_path=ms_path, time_ref=ref)
+
+        with table(path, ack=False) as tb:
+            assert tb.getcolkeyword("TIME", "MEASINFO")["Ref"] == ref.upper()
+            # Declared to declared: the values themselves are never shifted.
+            assert np.array_equal(tb.getcol("TIME"), np.repeat(times, N_ANT))
+
+        assert read_caltable(path)["time_ref"] == ref.upper()
+
+    def test_a_table_that_declares_nothing_reads_back_as_none(
+        self, tmp_path, gains, ms_path
+    ):
+        """A hand-made table need not carry the record; that is not an error."""
+
+        path = str(tmp_path / "test.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        with table(path, readonly=False, ack=False) as tb:
+            tb.removecolkeyword("TIME", "MEASINFO")
+
+        assert read_caltable(path)["time_ref"] is None
+
+
+# ---------------------------------------------------------------------------
+# Removing a superseded table
+# ---------------------------------------------------------------------------
+
+class TestRemoveCaltable:
+    """Deleting a solution that has been superseded, and nothing else.
+
+    A rerun that fits no gains has no table to write, and the previous run's
+    table left beside its results would read as the current solution. Removing
+    it is the only honest answer -- but it is a ``shutil.rmtree`` on a path a
+    caller named, so what is there has to be a calibration table before it goes.
+    """
+
+    def test_it_removes_a_table_it_wrote(self, tmp_path, gains, ms_path):
+        path = str(tmp_path / "test.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        assert remove_caltable(path, ms_path) is True
+        assert not os.path.exists(path)
+
+    def test_nothing_there_is_not_an_error(self, tmp_path, ms_path):
+        assert remove_caltable(str(tmp_path / "absent.B"), ms_path) is False
+
+    @pytest.mark.parametrize("kind", ["directory", "file", "table"])
+    def test_it_refuses_anything_that_is_not_a_caltable(
+        self, tmp_path, ms_path, kind
+    ):
+        """A caller's own directory, an ordinary file, or a plain casacore table.
+
+        The last is the one a marker file alone would not catch: an MS is a
+        casacore table too, and only its ``Type`` says it is not a calibration.
+        """
+
+        path = str(tmp_path / f"not_a_caltable_{kind}")
+
+        if kind == "directory":
+            os.makedirs(os.path.join(path, "important"))
+        elif kind == "file":
+            with open(path, "w") as f:
+                f.write("mine")
+        else:
+            _minimal_ms(path, n_ant=2)
+
+        assert remove_caltable(path, ms_path) is False
+        assert os.path.exists(path)
+
+    @pytest.mark.parametrize("damage", ["truncate", "remove"])
+    def test_it_refuses_a_table_whose_own_files_are_damaged(
+        self, tmp_path, gains, ms_path, damage
+    ):
+        """The marker files are a name, not a proof; casacore reads the table.
+
+        A directory can carry ``table.dat`` and an INFO record saying
+        ``Calibration`` and still not be a table -- by damage, by an interrupted
+        write, or because somebody put them there. What settles it is whether
+        casacore can open the thing.
+        """
+
+        path = str(tmp_path / "damaged.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        table_dat = os.path.join(path, "table.dat")
+
+        if damage == "truncate":
+            open(table_dat, "wb").close()
+        else:
+            os.remove(table_dat)
+
+        assert remove_caltable(path, ms_path) is False
+        assert os.path.exists(path)
+
+    def test_an_unreadable_info_record_is_refused_rather_than_raised(
+        self, tmp_path, gains, ms_path
+    ):
+        """The answer is always yes or no, never an exception.
+
+        This is asked on the way to a deletion, and often while something else
+        has already gone wrong, so a table whose INFO record is not even text
+        has to come back "not a caltable" rather than take the caller down.
+        """
+
+        path = str(tmp_path / "binary.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        with open(os.path.join(path, "table.info"), "wb") as f:
+            f.write(b"\xff\xfe\x00Type = Calibration")
+
+        assert remove_caltable(path, ms_path) is False
+        assert os.path.exists(path)
+
+    def test_it_refuses_hand_written_marker_files(self, tmp_path, ms_path):
+        """A directory dressed up as a caltable is still not one."""
+
+        path = str(tmp_path / "pretend.B")
+        os.makedirs(path)
+
+        with open(os.path.join(path, "table.dat"), "w") as f:
+            f.write("not really a table")
+        with open(os.path.join(path, "table.info"), "w") as f:
+            f.write("Type = Calibration\nSubType = B Jones\n")
+        with open(os.path.join(path, "mine.txt"), "w") as f:
+            f.write("keep me")
+
+        assert remove_caltable(path, ms_path) is False
+        assert os.path.exists(os.path.join(path, "mine.txt"))
+
+    def test_it_refuses_a_path_overlapping_the_ms(self, tmp_path, gains, ms_path):
+        """The same guard the writer applies, on the one call that deletes."""
+
+        with pytest.raises(ValueError, match="same directory"):
+            remove_caltable(ms_path, ms_path)
+
+        assert os.path.exists(os.path.join(ms_path, "ANTENNA"))
+
+        inside = os.path.join(ms_path, "nested.B")
+        write_caltable(
+            str(tmp_path / "test.B"), gains, np.arange(N_TIME, dtype=float),
+            ms_path=ms_path,
+        )
+        shutil.copytree(str(tmp_path / "test.B"), inside)
+
+        with pytest.raises(ValueError, match="inside"):
+            remove_caltable(inside, ms_path)
+
+        assert os.path.exists(inside)
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +831,23 @@ BAD_CALLS = [
     pytest.param({"overwrite": "False"}, "overwrite", id="overwrite-string"),
     pytest.param({"overwrite": 1}, "overwrite", id="overwrite-int"),
     pytest.param({"overwrite": None}, "overwrite", id="overwrite-none"),
+    pytest.param({"keywords": "FittedCorr"}, "keywords", id="keywords-not-a-mapping"),
+    pytest.param({"keywords": {5: "yx"}}, "keywords", id="keywords-name-not-a-string"),
+    # The table's own keywords are how CASA identifies it and reaches its
+    # subtables; a caller overwriting one would produce a table CASA rejects.
+    pytest.param({"keywords": {"VisCal": "G Jones"}}, "VisCal", id="keywords-viscal"),
+    pytest.param({"keywords": {"ANTENNA": "elsewhere"}}, "ANTENNA", id="keywords-subtable"),
+    # Values casacore cannot encode reliably, caught here rather than by
+    # putkeyword half-way through the write -- which is past the removal.
+    pytest.param(
+        {"keywords": {"Solver": {"name": "svi"}}}, "keywords", id="keywords-mapping-value"
+    ),
+    pytest.param({"keywords": {"Solver": None}}, "keywords", id="keywords-none-value"),
+    pytest.param({"keywords": {"Iters": []}}, "keywords", id="keywords-empty-list"),
+    pytest.param({"keywords": {"Iters": [1, "two"]}}, "keywords", id="keywords-mixed-list"),
+    pytest.param({"time_ref": "GAST"}, "time_ref", id="time_ref-unsupported"),
+    pytest.param({"time_ref": "nonsense"}, "time_ref", id="time_ref-unknown"),
+    pytest.param({"time_ref": 3}, "time_ref", id="time_ref-not-a-string"),
 ]
 
 
@@ -659,6 +910,80 @@ class TestValidation:
             self._call(path, gains, ms_path, {"overwrite": True, **overrides})
 
         assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
+
+
+class TestWhatOverwriteMayReplace:
+    """``overwrite=True`` is permission to replace a *calibration table*.
+
+    It is not permission to delete whatever happens to be at the path. Every
+    legitimate overwrite target is a caltable -- a previous solution -- so
+    anything else there is a caller pointing the writer at the wrong place, and
+    ``rmtree`` is not the answer to that. Tightens the original contract, which
+    removed the destination on sight.
+    """
+
+    def _sentinel_dir(self, tmp_path, name="test.B"):
+        path = str(tmp_path / name)
+        os.makedirs(path)
+        with open(os.path.join(path, "mine.txt"), "w") as f:
+            f.write("keep me")
+
+        return path
+
+    def test_a_directory_is_refused_and_kept(self, tmp_path, gains, ms_path):
+        path = self._sentinel_dir(tmp_path)
+
+        with pytest.raises(ValueError, match="not a calibration table"):
+            write_caltable(
+                path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        assert os.path.exists(os.path.join(path, "mine.txt"))
+
+    def test_an_ordinary_file_is_refused(self, tmp_path, gains, ms_path):
+        path = str(tmp_path / "test.B")
+        with open(path, "w") as f:
+            f.write("keep me")
+
+        with pytest.raises(ValueError, match="not a calibration table"):
+            write_caltable(
+                path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        with open(path) as f:
+            assert f.read() == "keep me"
+
+    def test_a_plain_casacore_table_is_refused(self, tmp_path, gains, ms_path):
+        """An MS is a casacore table too; only its INFO record says it is not one."""
+
+        path = _minimal_ms(str(tmp_path / "other.ms"), n_ant=2)
+
+        with pytest.raises(ValueError, match="not a calibration table"):
+            write_caltable(
+                path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        assert os.path.exists(os.path.join(path, "ANTENNA"))
+
+    def test_the_error_names_the_path(self, tmp_path, gains, ms_path):
+        path = self._sentinel_dir(tmp_path)
+
+        with pytest.raises(ValueError, match=re.escape(path)):
+            write_caltable(
+                path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+    def test_a_caltable_is_still_replaced(self, tmp_path, gains, ms_path):
+        """The case overwrite exists for, unaffected by the tightening."""
+
+        path = str(tmp_path / "test.B")
+        times = np.arange(N_TIME, dtype=float)
+        write_caltable(path, gains, times, ms_path=ms_path)
+        write_caltable(path, 2 * gains, times, ms_path=ms_path)
+
+        assert np.allclose(
+            read_caltable(path)["gains"], 2 * gains, rtol=1e-5, atol=1e-6
+        )
 
 
 class TestSourceMsConsistency:
