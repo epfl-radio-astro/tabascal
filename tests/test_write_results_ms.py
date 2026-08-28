@@ -334,8 +334,14 @@ def run_writer(monkeypatch, tmp_path):
         spw_id=0,
         ms_path="unused.ms",
         emit=False,
+        time_scale=None,
     ):
+        # What the MS's TIME column declares. The scale is left off unless a case
+        # is about it, which is what an MS that declares only a unit looks like.
         keywords = {"TIME": {"QuantumUnits": ["s"]}}
+
+        if time_scale is not None:
+            keywords["TIME"]["MEASINFO"] = {"type": "epoch", "Ref": time_scale}
 
         def _from_ms(path, column_keywords=False):
             return ([xds_ms], keywords) if column_keywords else [xds_ms]
@@ -441,8 +447,7 @@ def run_writer(monkeypatch, tmp_path):
     return _run
 
 
-@pytest.fixture
-def ms_skeleton(tmp_path):
+def _ms_skeleton(tmp_path, name="skeleton.ms", n_spw=1):
     """A real on-disk MS holding only the subtables a caltable copies out of one.
 
     The writer itself still runs against the in-memory stand-in; it is
@@ -450,11 +455,14 @@ def ms_skeleton(tmp_path):
     carries a copy of the MS's ``ANTENNA`` and ``SPECTRAL_WINDOW``. The two
     describe the same observation -- ``N_ANT`` antennas on ``FREQS`` -- which is
     what the export validates itself against before it writes anything.
+
+    ``n_spw`` above 1 makes an MS the writer serves one partition of happily and
+    a caltable cannot describe at all.
     """
 
     tables = pytest.importorskip("casacore.tables")
 
-    path = str(tmp_path / "skeleton.ms")
+    path = str(tmp_path / name)
 
     main = tables.table(
         path,
@@ -479,15 +487,22 @@ def ms_skeleton(tmp_path):
         tables.maketabdesc(
             [tables.makearrcoldesc("CHAN_FREQ", 0.0, ndim=1, valuetype="double")]
         ),
-        nrow=1,
+        nrow=n_spw,
         ack=False,
     )
-    spw.putcol("CHAN_FREQ", FREQS[None])
+    spw.putcol("CHAN_FREQ", np.tile(FREQS, (n_spw, 1)))
     spw.close()
 
     main.close()
 
     return path
+
+
+@pytest.fixture
+def ms_skeleton(tmp_path):
+    """A real single-spectral-window MS to write caltables from."""
+
+    return _ms_skeleton(tmp_path)
 
 
 def _caltable_path(zarr_path: str) -> str:
@@ -1713,27 +1728,8 @@ class TestTheExportRuns:
             "gain_table": [str(table)],
         }
 
-    def test_a_failed_export_warns_and_leaves_the_columns_written(
-        self, tmp_path, run_writer, monkeypatch
-    ):
-        """An MS no caltable can describe must not cost the run its columns.
-
-        A multi-spectral-window MS is the real case: the writer serves one
-        partition of it happily, and ``write_caltable`` refuses it, because a
-        caltable files every row under one window's id.
-        """
-
-        def _boom(*args, **kwargs):
-            raise ValueError("two spectral windows")
-
-        monkeypatch.setattr(write_mod, "write_gain_caltable", _boom)
-
-        gains, ast, rfi = _model(1)
-        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
-        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
-
-        with pytest.warns(RuntimeWarning, match="two spectral windows"):
-            values, _ = run_writer(_fake_ms(data), zarr_path, emit=True)
+    def _columns_are_intact(self, values, gains, data):
+        """Every column written, and written correctly, export or no export."""
 
         assert set(COLS).issubset(values)
         np.testing.assert_allclose(
@@ -1741,6 +1737,98 @@ class TestTheExportRuns:
             data / _to_ms(_baseline_gains(gains).mean(axis=0)),
             **_tolerances(data),
         )
+
+    def test_a_multi_window_ms_warns_and_keeps_the_columns(self, tmp_path, run_writer):
+        """The real failure this demotion exists for.
+
+        The writer serves one partition of a multi-spectral-window MS happily,
+        and ``write_caltable`` refuses the MS outright, because a caltable files
+        every row under one window's id. A completed run must not end in a
+        traceback over a table it could not have written.
+        """
+        ms_path = _ms_skeleton(tmp_path, name="two_windows.ms", n_spw=2)
+
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning, match="spectral window"):
+            values, _ = run_writer(
+                _fake_ms(data), zarr_path, ms_path=ms_path, emit=True
+            )
+
+        self._columns_are_intact(values, gains, data)
+        assert not os.path.exists(_caltable_path(zarr_path))
+
+    def test_an_output_inside_the_ms_warns_and_leaves_the_ms_alone(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """#157's overlap guard fires, and the MS it protects is still there.
+
+        Results written inside the MS put the table there too, which is the
+        milder half of the guard: the export would be writing into the very
+        subtables it copies from.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(
+            tmp_path, gains, ast, rfi, name=os.path.join("skeleton.ms", "results.zarr")
+        )
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning, match="inside the Measurement Set"):
+            values, _ = run_writer(
+                _fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True
+            )
+
+        self._columns_are_intact(values, gains, data)
+        # The observation the guard is about, still readable.
+        tables = pytest.importorskip("casacore.tables")
+        with tables.table(os.path.join(ms_skeleton, "ANTENNA"), ack=False) as ant:
+            assert ant.nrows() == N_ANT
+
+    def test_a_memory_error_is_not_demoted(self, tmp_path, run_writer, monkeypatch):
+        """Running out of memory is the machine's problem, not the export's.
+
+        Everything else the export can raise is a statement about this MS or
+        these results; ``MemoryError`` is a statement about the process, and
+        swallowing it would let the run carry on in a state nothing else here
+        can reason about.
+        """
+
+        def _oom(*args, **kwargs):
+            raise MemoryError("out of memory")
+
+        monkeypatch.setattr(write_mod, "write_gain_caltable", _oom)
+
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        with pytest.raises(MemoryError):
+            run_writer(_fake_ms(data), zarr_path, emit=True)
+
+    def test_the_warning_names_the_error_and_where_it_came_from(
+        self, tmp_path, run_writer, monkeypatch
+    ):
+        """A demoted failure has to stay diagnosable: type, message, traceback tail."""
+
+        def _boom(*args, **kwargs):
+            raise ZeroDivisionError("a bug, not a bad MS")
+
+        monkeypatch.setattr(write_mod, "write_gain_caltable", _boom)
+
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning) as record:
+            run_writer(_fake_ms(data), zarr_path, emit=True)
+
+        message = str(record[0].message)
+
+        assert "ZeroDivisionError" in message
+        assert "a bug, not a bad MS" in message
+        assert "_boom" in message  # the traceback tail, not just the exception
 
 
 class TestTheEmittedCaltable:
@@ -1795,10 +1883,16 @@ class TestTheEmittedCaltable:
         # The fitted layer on its own is a different calibration.
         assert not np.allclose(read["gains"], gains.mean(axis=0), rtol=1e-3)
 
-    def test_applying_it_reproduces_the_calibrated_column(
+    def test_the_table_reproduces_the_calibrated_column(
         self, tmp_path, run_writer, ms_skeleton
     ):
         """``g_p^tot conj(g_q^tot)`` is the very divisor the columns were written with.
+
+        This is tabascal's own composition arithmetic, checked at complex64
+        round-off -- not a test of CASA. That ``applycal`` accepts a table of this
+        shape and applies it as ``V / (g_p conj(g_q))`` is
+        :func:`~tabascal.ms.write_caltable`'s claim, verified against CASA where
+        that function is documented.
 
         The table carries per-*antenna* gains while the writer divides by a
         per-*baseline* product, and the two agree because the composition is the
@@ -1967,6 +2061,48 @@ class TestTheEmittedCaltable:
             _to_ms(g[A1_BL] * g[A2_BL].conj()), _fitted_gains_bl(gains), rtol=1e-3
         )
 
+    def test_the_time_scale_is_the_ms_own(self, tmp_path, run_writer, ms_skeleton):
+        """A TAI-declared MS gives a TAI-declared table, with the same numbers.
+
+        The caltable's ``TIME`` is a copy of the MS's column, so relabelling it
+        UTC would move every timestamp by the leap seconds -- 37 s since 2017 --
+        for anything that reads the declaration. Declared to declared, which is
+        also the convention the gain tables are matched on.
+        """
+        tables = pytest.importorskip("casacore.tables")
+
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(
+            _fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True, time_scale="TAI"
+        )
+
+        with tables.table(_caltable_path(zarr_path), ack=False) as tb:
+            assert tb.getcolkeyword("TIME", "MEASINFO")["Ref"] == "TAI"
+            assert np.array_equal(
+                tb.getcol("TIME"), np.repeat(np.arange(N_TIME, dtype=float), N_ANT)
+            )
+
+    def test_the_table_is_named_after_the_results_it_came_from(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """Including the initial prediction, which gets a table of its own.
+
+        A run writes results twice under some configurations -- the initial
+        parameters and the optimised ones -- and each export is named after the
+        zarr it was made from, so the two never overwrite one another and it is
+        always clear which solution a table is.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, name="init_pred_Custom.zarr")
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        assert os.path.exists(str(tmp_path / "init_pred_Custom.B"))
+
     def test_a_second_write_replaces_the_table(
         self, tmp_path, run_writer, ms_skeleton
     ):
@@ -1988,7 +2124,7 @@ class TestTheEmittedCaltable:
 
 
 class TestNothingIsExportedWithoutAFit:
-    """No fitted gains, no calibration to export -- and no empty table."""
+    """No fitted gains, no calibration to export -- and no stale table left."""
 
     def test_a_unitary_run_leaves_no_table_beside_its_results(
         self, tmp_path, run_writer, ms_skeleton
@@ -2002,6 +2138,63 @@ class TestNothingIsExportedWithoutAFit:
         run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
 
         assert not os.path.exists(_caltable_path(zarr_path))
+
+    def test_a_rerun_that_fits_nothing_removes_the_superseded_table(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """The stale table is the dangerous one: it reads as this run's answer.
+
+        Re-running the same results path with a model that fits no gains has no
+        table to overwrite the old one with, so the old one is removed and the
+        removal is reported.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        assert os.path.exists(_caltable_path(zarr_path))
+
+        unity = _uniform_gains(1)
+        again = _write_zarr(tmp_path, unity, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(unity) * (ast + rfi)).mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning, match="earlier run"):
+            run_writer(_fake_ms(data), again, ms_path=ms_skeleton, emit=True)
+
+        assert not os.path.exists(_caltable_path(zarr_path))
+
+    def test_nothing_to_remove_is_silent(self, tmp_path, run_writer, ms_skeleton):
+        """The usual unitary run: no table there, nothing to say about it."""
+        _, ast, rfi = _model(1)
+        gains = _uniform_gains(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+    def test_samples_that_average_to_unity_are_still_a_calibration(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """Only gains that are unity on *every* sample say the run fitted none.
+
+        Two samples either side of 1 average to exactly 1 while the divisor the
+        columns use -- the mean of the baseline *product* -- is nothing of the
+        kind, so a check on the mean alone would throw away a real calibration.
+        """
+        _, ast, rfi = _model(2)
+        gains = np.concatenate([_uniform_gains(1, 0.5), _uniform_gains(1, 1.5)])
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        read = read_caltable(_caltable_path(zarr_path))
+
+        assert np.all(gains.mean(axis=0) == 1)
+        np.testing.assert_allclose(read["gains"], 1.0, rtol=1e-5, atol=1e-6)
 
     def test_a_zarr_without_gains_exports_nothing(self, tmp_path, ms_skeleton):
         _, ast, rfi = _model(1)

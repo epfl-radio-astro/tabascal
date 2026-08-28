@@ -104,8 +104,29 @@ and the format has no field for: TABASCAL records the correlation it fitted as
 ``FittedCorr``, since a single-solution table otherwise cannot say, and applying
 an ``xx`` solution to ``yx`` data is a silent mistake. The names the table needs
 for itself — the four CASA identifies it by, and the one per subtable — are
-refused rather than overwritten. The solution TABASCAL fits is exported this way
-after every run; see :doc:`../output`.
+refused rather than overwritten, and so are values casacore cannot be relied on
+to encode: a keyword value is a string, bool, int or float, or a non-empty list
+of one single one of those. :func:`~tabascal.ms.read_caltable` returns the
+caller's keywords, and only those, so a round trip needs no casacore.
+
+``time_ref`` is the epoch reference the ``TIME`` column declares, and it must be
+the MS's own. The times are a copy of the MS's column and nothing shifts them,
+so a table declaring UTC over a TAI-declared observation has moved every
+timestamp by the accumulated leap seconds for anything that reads the
+declaration. It is validated against :data:`~tabascal.time.TIME_SCALES`, and
+read back as ``time_ref``.
+
+:func:`~tabascal.ms.remove_caltable` is the other end: it deletes a table whose
+solution has been superseded — a rerun that fits no gains has none to overwrite
+the previous one with, and a stale table under the current name reads as the
+current calibration. Being the one call here that deletes a path a caller named,
+it refuses rather than removes unless the path holds a casacore table whose INFO
+record says ``Calibration`` (a Measurement Set is a casacore table too, and only
+its ``Type`` says otherwise), and it applies the same overlap guard as the
+writer.
+
+The solution TABASCAL fits is exported this way after every run; see
+:doc:`../output`.
 
 A gain that is zero or non-finite carries no solution, and both halves of that
 are written: ``FLAG`` is set *and* ``CPARAM`` is NaN, so a reader going by the

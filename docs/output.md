@@ -22,6 +22,7 @@ parent_directory/
 |       └── Custom_prior_rfi_vis_imag.pdf       # RFI visibility prediction of prior distribution
 |   ├── results/
 |       └── init_pred_Custom.zarr               # Initial parameter prediction values
+|       └── init_pred_Custom.B                  # The calibration the initial values imply
 |       └── map_pred_Custom.zarr                # Optimised parameter prediction values
 |       └── map_pred_Custom.B                   # The calibration it implies, as a CASA table
 ```
@@ -165,6 +166,10 @@ Sorting the MS by `TIME`, `ANTENNA1`, `ANTENNA2` resolves the last three.
 
 Every run that fits gains also writes the calibration it implies as a CASA calibration table, beside the results `.zarr` and named after it — `map_pred_Custom.zarr` gives `map_pred_Custom.B`. It is a `B Jones` table, one row per (time, antenna) with `CPARAM` of shape (channel, polarisation), exactly the layout `casatasks.gaincal` produces, so a tabascal solution can be consumed by standard tooling like any other calibration rather than only as the columns above.
 
+Every results `.zarr` the run writes gets its own table, named after it. A configuration that writes the initial prediction as well as the optimised one therefore leaves an `init_pred_Custom.B` beside `init_pred_Custom.zarr`: the calibration those initial values imply, which is a real if uninteresting calibration and is never confused with the fitted one.
+
+The table's `TIME` column is a copy of the MS's, and its `MEASINFO` record declares the scale **the MS declares** rather than assuming UTC. Declared to declared, the same convention the external gain tables are matched on: relabelling a TAI-declared observation as UTC would move every timestamp by the accumulated leap seconds — 37 s since 2017 — for anything that reads the declaration.
+
 The table holds the **total** calibration — the external tables placed on this observation's grid, times the DIE gains the model fitted:
 
 ```text
@@ -199,6 +204,20 @@ The table carries the mean of the per-antenna gains over the `sample` axis. Wher
 
 ### When no table is written
 
-Nothing is written, and no empty table is left behind, when there is no calibration to export: results with no `gains`, gains that are not a grid after the sample mean, or gains that are exactly 1 everywhere. A `UnitaryGains` run stores ones and fits nothing, and a run that used external tables while fitting nothing is in the same position — the total calibration is then the tables the caller already has.
+Nothing is written when there is no calibration to export: results with no `gains`, gains that are not the four-dimensional `(sample, antenna, channel, time)` grid a caltable can hold, or gains that are exactly 1 **on every sample**. A `UnitaryGains` run stores ones and fits nothing, and a run that used external tables while fitting nothing is in the same position — the total calibration is then the tables the caller already has.
 
-The export is the last thing the writer does and is additive to it: if it fails — most plausibly on an MS with more than one spectral window, which the writer serves one partition of while a caltable can only file rows under one window's id — the failure is reported as a `RuntimeWarning` and the columns, which were already written, stand.
+Every-sample rather than on the mean: samples either side of 1 average to exactly 1 while the divisor the columns use — the mean of the baseline *product* — is a real calibration, so testing the mean alone would throw one away.
+
+**A table from a previous run of the same results is removed** in that case, with a `RuntimeWarning` saying so. A stale calibration sitting under the current name beside the current results reads as the current solution, which is a bad thing to be wrong about. Only a directory that is a casacore table declaring itself a `Calibration` is ever removed — a path of your own that happens to be named `.B` is left alone — and never one that is, contains, or sits inside the MS.
+
+### If the export fails
+
+The export is the last thing the writer does and is additive to it. Everything it can say about *this* MS or *these* results is reported as a `RuntimeWarning` — carrying the exception type, its message and the tail of its traceback — while the columns, which were already written, stand:
+
+* an MS with more than one spectral window, which the writer serves one partition of while a caltable can only file rows under one window's id;
+* an output path overlapping the MS (results written *inside* the MS put the table there too);
+* results whose gains do not describe the MS's antennas or timesteps;
+* a `TIME` column declaring a time scale tabascal cannot interpret;
+* anything the filesystem refuses.
+
+A `MemoryError` is not demoted — that is a statement about the process, not about the data — and `Ctrl-C` stops the run as it always would.
