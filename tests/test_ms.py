@@ -207,18 +207,19 @@ def test_a_non_utc_scale_is_reported_as_declared():
     assert read_time_scale(_keywords("TAI")) == "tai"
 
 
-def test_missing_measinfo_ref_falls_back_with_a_warning(capsys):
-    assert read_time_scale(_keywords(None)) == DEFAULT_TIME_SCALE
-    assert "no MEASINFO Ref" in capsys.readouterr().out
+def test_missing_measinfo_ref_falls_back_with_a_warning():
+    with pytest.warns(UserWarning, match="no MEASINFO Ref"):
+        assert read_time_scale(_keywords(None)) == DEFAULT_TIME_SCALE
 
 
-def test_missing_column_falls_back_with_a_warning(capsys):
-    assert read_time_scale({}) == DEFAULT_TIME_SCALE
-    assert "no MEASINFO Ref" in capsys.readouterr().out
+def test_missing_column_falls_back_with_a_warning():
+    with pytest.warns(UserWarning, match="no MEASINFO Ref"):
+        assert read_time_scale({}) == DEFAULT_TIME_SCALE
 
 
 def test_none_keywords_fall_back():
-    assert read_time_scale(None) == DEFAULT_TIME_SCALE
+    with pytest.warns(UserWarning, match="no MEASINFO Ref"):
+        assert read_time_scale(None) == DEFAULT_TIME_SCALE
 
 
 def test_a_different_column_can_be_read():
@@ -307,9 +308,16 @@ def run_reader(monkeypatch):
     def _run(times, keywords=None, **kwargs):
         partition, subtables = _in_memory_ms(times, **kwargs)
 
+        # Declares its scale and not its unit. The unit is what the default
+        # cases are about, so it stays undeclared; leaving the *scale*
+        # undeclared as well would only add the reader's fallback warning to
+        # every one of them.
+        if keywords is None:
+            keywords = _keywords("UTC", units=None)
+
         monkeypatch.setattr(
             "tabascal.ms.xds_from_ms",
-            lambda path, column_keywords=False: ([partition], keywords or {}),
+            lambda path, column_keywords=False: ([partition], keywords),
         )
         monkeypatch.setattr(
             "tabascal.ms.xds_from_table",

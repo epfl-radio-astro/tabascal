@@ -65,8 +65,8 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
             np.asarray(xds["freqs"].data),
         )
 
-    npz = np.load(est_path)
-    if not isinstance(npz, np.lib.npyio.NpzFile):
+    loaded = np.load(est_path)
+    if not isinstance(loaded, np.lib.npyio.NpzFile):
         raise ValueError(
             f"{est_path} is a bare .npy array. A light-curve file must be a .zarr "
             f"or a .npz holding {list(_LIGHT_CURVE_VARS)}, so that its rows can be "
@@ -74,13 +74,17 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
             "the observation grid. A bare array carries none of that."
         )
 
-    missing = [name for name in _LIGHT_CURVE_VARS if name not in npz.files]
-    if missing:
-        raise ValueError(
-            f"{est_path} is missing {missing}. A light-curve .npz must hold "
-            f"{list(_LIGHT_CURVE_VARS)}. It contains {sorted(npz.files)}."
-        )
-    return tuple(np.asarray(npz[name]) for name in _LIGHT_CURVE_VARS)  # type: ignore
+    # An NpzFile holds the zip open until it is closed, and the rejections below
+    # leave the function by raising -- so the handle is closed on the way out
+    # whichever way that happens. The arrays are read inside the block.
+    with loaded as npz:
+        missing = [name for name in _LIGHT_CURVE_VARS if name not in npz.files]
+        if missing:
+            raise ValueError(
+                f"{est_path} is missing {missing}. A light-curve .npz must hold "
+                f"{list(_LIGHT_CURVE_VARS)}. It contains {sorted(npz.files)}."
+            )
+        return tuple(np.asarray(npz[name]) for name in _LIGHT_CURVE_VARS)  # type: ignore
 
 
 def _as_norad_ids(labels: NDArray) -> List[Optional[int]]:
@@ -1127,7 +1131,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
             print("Using matched-filter estimate for rfi_A init")
             self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":
-            print("Using truth for rfi_A int")
+            print("Using truth for rfi_A init")
             self.init_rfi_k = self.true_rfi_k_A
         elif init_type in ["zeros", 0]:
             print("Using zeros for rfi_A init")

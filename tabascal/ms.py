@@ -227,15 +227,24 @@ def read_time_scale(column_keywords: dict, column: str = "TIME") -> str:
     str
         The declared scale, lower-cased, or :data:`DEFAULT_TIME_SCALE` when the
         MS does not declare one.
+
+    Warns
+    -----
+    UserWarning
+        If the column declares no scale and the default is assumed. An assumed
+        scale is worth saying out loud, and worth being able to filter and
+        assert on, which a bare print is not -- as in :func:`read_time_unit`.
     """
 
     measinfo = (column_keywords or {}).get(column, {}).get("MEASINFO", {})
     ref = measinfo.get("Ref")
 
     if not ref:
-        print(
-            f"Warning: {column} carries no MEASINFO Ref; assuming "
-            f"{DEFAULT_TIME_SCALE.upper()} times."
+        warnings.warn(
+            f"{column} carries no MEASINFO Ref; assuming "
+            f"{DEFAULT_TIME_SCALE.upper()} times.",
+            UserWarning,
+            stacklevel=2,
         )
         return DEFAULT_TIME_SCALE
 
@@ -763,7 +772,7 @@ def read_ms(
     # the same way, so the two remain comparable.
     times_jd = to_utc_jd(mjd_to_jd(times_mjd), time_scale)
 
-    print(jd_to_datetime(times_jd[0]).isoformat())
+    print(f"Observation starts at {jd_to_datetime(times_jd[0]).isoformat()} UTC")
 
     times = jnp.linspace(0, n_time * int_time, n_time, endpoint=False)
 

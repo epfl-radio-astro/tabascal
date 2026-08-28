@@ -1827,7 +1827,9 @@ class TestTheExportRuns:
         with pytest.warns(RuntimeWarning) as record:
             run_writer(_fake_ms(data), again, ms_path=two_windows, emit=True)
 
-        message = str(record[0].message)
+        # By category, not by position: the skeleton MS declares no MEASINFO Ref,
+        # so the reader's own UserWarning shares the record with this one.
+        message = str(record.pop(RuntimeWarning).message)
 
         assert "spectral window" in message
         assert "superseded" in message
