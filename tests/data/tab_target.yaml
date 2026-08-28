@@ -70,4 +70,3 @@ gains:
   phase_mean: 0.0
   amp_std: 1.0      # %
   phase_std: 1.0    # degrees
-  corr_time: 180    # minutes
