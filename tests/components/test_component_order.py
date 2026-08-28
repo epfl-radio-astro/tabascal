@@ -12,16 +12,22 @@ the missing key, and what produces it, and says whether that producer is absent
 or merely listed too late.
 """
 
+import importlib
+import pkgutil
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
+import numpy as np
 import pytest
 import yaml
 
 from tabascal.components import (
+    Component,
     ComponentOrderError,
     in_tree_components,
+    is_class,
     state_key_producers,
     validate_component_order,
 )
@@ -484,6 +490,53 @@ def test_model_makes_the_check_before_it_sets_anything_up():
             SimpleNamespace(noise=1.0, n_rfi=0),
             FULL_RFI + ["ast_vis:DiscreteSkyVis", "gains:UnitaryGains"],
         )
+
+
+class TestTheComponentScan:
+    """Discovery has to survive everything a module namespace holds.
+
+    The scan reads ``vars(module)``, which is full of things that are not
+    classes -- type aliases, constants, functions -- and ``issubclass`` raises
+    on any of them. The guard cannot be ``isinstance(obj, type)``: up to Python
+    3.10 a PEP 585 alias proxies ``__class__`` to its origin and passes it, so
+    that spelling discovered nothing locally on 3.13 and crashed collection on
+    the 3.10 floor, where ``numpy.typing.NDArray`` is such an alias and is
+    imported by three of the scanned modules.
+    """
+
+    #: What ``numpy.typing.NDArray`` is on the versions that broke.
+    alias = np.ndarray[Any, np.dtype[Any]]
+
+    def test_a_generic_alias_is_not_a_class(self):
+        assert not is_class(self.alias)
+
+    def test_letting_one_through_is_what_breaks_collection(self):
+        """Why the guard has to hold: the call it guards raises, on every version."""
+        with pytest.raises(TypeError):
+            issubclass(self.alias, Component)
+
+    def test_real_classes_are_still_classes(self):
+        for cls in (int, Component, *in_tree_components().values()):
+            assert is_class(cls)
+
+    def test_the_scanned_modules_really_do_hold_non_classes(self):
+        """The precondition, so this stays a regression test and not a tautology.
+
+        If the modules stopped importing anything but classes the guard would
+        pass vacuously and the next `NDArray`-shaped import would break the
+        floor again with nothing to catch it.
+        """
+        package = importlib.import_module("tabascal.components")
+        non_classes = [
+            f"{info.name}:{name}"
+            for info in pkgutil.iter_modules(package.__path__)
+            for name, obj in vars(
+                importlib.import_module(f"tabascal.components.{info.name}")
+            ).items()
+            if not is_class(obj)
+        ]
+        assert non_classes
+        assert in_tree_components()
 
 
 def test_every_required_input_has_an_in_tree_producer():

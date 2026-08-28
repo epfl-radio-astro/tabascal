@@ -126,6 +126,23 @@ def assert_attr_shape(obj, attr, shape):
     ), f"Expected shape {shape} for {attr} but got {attr_shape}."
 
 
+def is_class(obj: Any) -> bool:
+    """Whether ``obj`` really is a class, on every supported Python.
+
+    ``isinstance(obj, type)`` is not enough to guard an ``issubclass`` call. Up
+    to Python 3.10 a PEP 585 alias such as ``np.ndarray[Any, np.dtype[Any]]``
+    proxies ``__class__`` to its origin, so it passes that check and then makes
+    ``issubclass`` raise ``TypeError: issubclass() arg 1 must be a class``.
+    CPython removed the proxy in 3.11 (gh-88912), which is why the module scan
+    below only ever broke on the 3.10 floor -- and it scans real module
+    namespaces, where ``numpy.typing.NDArray`` was exactly such an alias.
+
+    ``type(obj)`` is never proxied, so asking whether the *real* metaclass is a
+    metaclass is stable across versions.
+    """
+    return issubclass(type(obj), type)
+
+
 @lru_cache(maxsize=1)
 def in_tree_components() -> Dict[str, type]:
     """Every concrete component shipped with tabascal, keyed by config reference.
@@ -138,8 +155,10 @@ def in_tree_components() -> Dict[str, type]:
     for info in pkgutil.iter_modules(__path__):
         module = importlib.import_module(f"{__name__}.{info.name}")
         for name, obj in vars(module).items():
+            # A module namespace holds far more than classes -- type aliases,
+            # constants, functions -- so this must survive every one of them.
             if (
-                isinstance(obj, type)
+                is_class(obj)
                 and issubclass(obj, Component)
                 and obj is not Component
                 # Skip re-exports, so each class is named by the module it lives in.
