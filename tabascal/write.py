@@ -1500,8 +1500,13 @@ def write_results_xds(
     # whole shape of this function: rank-0-only work that can fail has to happen
     # either before the collectives (creating the store) or after the last of
     # them (the deferred failure below), never between two of them.
+    #
+    # Nothing checks the multi-rank half of that. The tests are single-process
+    # and can only see that the loop finishes rather than that a second rank was
+    # spared a hang -- TestTheStoreIsStreamedInto in tests/test_rfi_per_sat.py
+    # says why a two-rank fault-injection test is not available here.
     per_sat = wants_rfi_per_sat(vi_pred, tab_config)
-    failure, sink, existed = None, _drop_per_sat_block, False
+    failure, sink, created = None, _drop_per_sat_block, False
 
     if per_sat:
         # Read off the fit's shape, so it is the same on every rank and is taken
@@ -1511,7 +1516,6 @@ def write_results_xds(
         layout = per_sat_layout(vi_pred, tab_config)
 
         if is_process_0():
-            existed = os.path.exists(file_path)
             try:
                 sink = partial(
                     _put_per_sat_block,
@@ -1519,6 +1523,18 @@ def write_results_xds(
                 )
             except Exception as err:
                 failure = err
+            else:
+                # OWNERSHIP: the cleanup below removes the store only when this
+                # is set, i.e. only a store this call is known to have created.
+                # It is the creation *result* and not a `path exists` check
+                # taken beforehand, because that check is a race: a concurrent
+                # writer creating the path between the check and the `w-` that
+                # then fails on it would have its store read as ours and
+                # deleted. The asymmetry is deliberate -- a creation that failed
+                # somewhere in the middle can leave a partial store behind that
+                # nobody removes, and unremoved residue is recoverable where
+                # deleting somebody else's results is not.
+                created = True
 
         try:
             rfi_vis_per_sat(vi_pred, tab_config, sink=sink)
@@ -1529,10 +1545,7 @@ def write_results_xds(
                 failure = err
 
     if failure is not None:
-        # Never remove a store this call was refused permission to touch: with
-        # overwrite=False an existing path is exactly what the creation failed
-        # on, and those are somebody else's results.
-        if is_process_0() and not (existed and not overwrite):
+        if created:
             _remove_partial_store(file_path)
 
         raise failure
@@ -1554,45 +1567,62 @@ def write_results_xds(
     # print(da.asarray(vi_pred["rfi_A"]))
     # print(da.asarray(args["rfi_phase"]))
 
-    map_xds = xr.Dataset(
-        data_vars={
-            "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_rfi"])),  # type: ignore
-            "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
-            "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
-            "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
-            # "rfi_A": (
-            #     ["sample", "src", "ant", "rfi_time"],
-            #     da.asarray(vi_pred["rfi_A"]),
-            # ),
-            # "rfi_phase": (
-            #     ["src", "ant", "time_mjd_fine"],
-            #     da.asarray(args["rfi_phase"]),
-            # ),
-        },
-        coords={
-            # SEAM: `time` is seconds from the start of the observation, so the
-            # results carry no absolute epoch, no phase centre and no identity
-            # for the MS they came from. write_results_ms therefore has to
-            # re-derive both from the MS it is pointed at -- including the grid
-            # the external gain tables are placed on (_external_gains_column),
-            # which is only the run's own grid because the reader and the writer
-            # read the same column the same way. times_jd / times_mjd, the field
-            # direction and the source MS path belong here, beside `time`.
-            "time": da.asarray(tab_config.times),  # type: ignore
-            "freq": da.asarray(tab_config.freqs),  # type: ignore
-            # "rfi_time": da.asarray(args["rfi_times"]),
-            # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
-        },
-        # Which correlation was fitted, by name. Without it the writer cannot
-        # tell where the results belong on a multi-correlation MS.
-        attrs={"corr": tab_config.args["data"]["corr"]},
-    )
-    # print(map_xds)
+    try:
+        map_xds = xr.Dataset(
+            data_vars={
+                "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_rfi"])),  # type: ignore
+                "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
+                "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
+                "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
+                # "rfi_A": (
+                #     ["sample", "src", "ant", "rfi_time"],
+                #     da.asarray(vi_pred["rfi_A"]),
+                # ),
+                # "rfi_phase": (
+                #     ["src", "ant", "time_mjd_fine"],
+                #     da.asarray(args["rfi_phase"]),
+                # ),
+            },
+            coords={
+                # SEAM: `time` is seconds from the start of the observation, so
+                # the results carry no absolute epoch, no phase centre and no
+                # identity for the MS they came from. write_results_ms therefore
+                # has to re-derive both from the MS it is pointed at -- including
+                # the grid the external gain tables are placed on
+                # (_external_gains_column), which is only the run's own grid
+                # because the reader and the writer read the same column the same
+                # way. times_jd / times_mjd, the field direction and the source MS
+                # path belong here, beside `time`.
+                "time": da.asarray(tab_config.times),  # type: ignore
+                "freq": da.asarray(tab_config.freqs),  # type: ignore
+                # "rfi_time": da.asarray(args["rfi_times"]),
+                # "time_mjd_fine": da.asarray(args["times_mjd_fine"]),
+            },
+            # Which correlation was fitted, by name. Without it the writer cannot
+            # tell where the results belong on a multi-correlation MS.
+            attrs={"corr": tab_config.args["data"]["corr"]},
+        )
+        # print(map_xds)
 
-    # Appended to the store the decomposition was streamed into, rather than
-    # creating one: with per_sat on, the store already exists and already holds
-    # rfi_vis_src and its norad_id coordinate. Without it this is the write that
-    # creates the store, byte for byte as it always was.
-    map_xds.to_zarr(file_path, mode="a" if per_sat else mode)
+        # Appended to the store the decomposition was streamed into, rather than
+        # creating one: with per_sat on, the store already exists and already
+        # holds rfi_vis_src and its norad_id coordinate. Without it this is the
+        # write that creates the store, byte for byte as it always was.
+        map_xds.to_zarr(file_path, mode="a" if per_sat else mode)
+    except Exception:
+        # Raised on the spot rather than deferred: this is past the last
+        # collective -- every rank has made every psum and the workers returned
+        # at the guard above -- so there is no rank left to strand.
+        #
+        # A store that failed here is removed for the same reason a failed block
+        # write's is: it would hold rfi_vis_src, and none or only some of the
+        # variables the results are actually read for, and still open as a
+        # results zarr. Only a store this call created, per the ownership rule
+        # above -- with the decomposition off nothing was created here and the
+        # failure is left exactly as it always was.
+        if created:
+            _remove_partial_store(file_path)
+
+        raise
 
     return map_xds

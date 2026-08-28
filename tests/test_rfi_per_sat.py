@@ -8,10 +8,11 @@ Three things are pinned here, in the order the feature runs:
   does not is not a decomposition of anything;
 * ``write_results_xds`` with ``data.save_rfi_per_sat`` -- on, off, and off by
   default, where the zarr must be byte-for-byte what it always was. On, the
-  decomposition is streamed into a store created before the first collective,
-  so what is pinned is *where* the values are as much as what they are: the
-  store exists before anything is evaluated, holds bit for bit what accumulating
-  the whole thing would have held, and leaves nothing behind when a write fails;
+  decomposition is streamed into a store created before the first evaluation, so
+  what is pinned is *where* the values are as much as what they are: the store
+  exists before anything is evaluated, holds bit for bit what accumulating the
+  whole thing would have held, and a failure anywhere in the write leaves behind
+  neither a half-written store nor anybody else's;
 * :func:`write_per_sat_rfi_ms` -- one ``TAB_RFI_<NORAD>`` MS column per
   satellite, in the same calibrated frame as ``TAB_RFI_DATA`` and summing back
   to it.
@@ -774,15 +775,28 @@ class TestTheStoreIsStreamedInto:
       writing it in one go held -- bit for bit, since it is the same evaluation
       written to the same chunks;
     * everything that can fail on rank 0 alone happens either *before* the first
-      collective (creating the store) or is *deferred* past the last one (the
-      block writes). The evaluations are collectives inside ``psum_over_rfi``:
-      a rank that raises in the middle of the loop leaves every other rank in a
-      psum with nobody to meet, until the coordinator times out.
+      evaluation (creating the store) or *after the last* (the deferred block
+      writes and the append), and a failure removes only a store this call
+      created.
+
+    **What these tests can and cannot see.** They run in one process, so what
+    they pin is the mechanism and not its purpose: the loop makes all
+    ``n_sample x n_rfi`` evaluations past an injected failure instead of leaving
+    early, and the store is gone afterwards. That a *second* rank is therefore
+    not left waiting in a ``psum_over_rfi`` collective with nobody to meet is why
+    the mechanism is shaped this way, and it is **not asserted anywhere**:
+    showing it needs a two-rank run with a fault injected into rank 0's store,
+    and the only harness for two ranks (``tests/test_tabascal_pipeline.py``'s
+    ``_run_two_processes``) drives the CLI as a subprocess, where an injection
+    would have to import ``tabascal.write`` -- and so all of jax -- before
+    ``init_distributed()``, which is the one ordering that entry point forbids.
+    ``test_pipeline_multiprocess_per_sat`` covers the two-rank path with nothing
+    failing.
     """
 
     @staticmethod
     def _count_evaluations(monkeypatch):
-        """Record every source mask built -- one per collective evaluation."""
+        """Record every source mask built -- one per evaluation of the loop."""
 
         seen = []
         real = write_mod._source_mask
@@ -851,7 +865,7 @@ class TestTheStoreIsStreamedInto:
                     on.drop_vars(["rfi_vis_src", "norad_id"]), off
                 )
 
-    def test_a_failed_write_leaves_no_store_and_still_makes_every_collective(
+    def test_a_failed_write_leaves_no_store_and_still_finishes_the_loop(
         self, tmp_path, monkeypatch
     ):
         """The deferred-failure rule, extended to the streamed writes."""
@@ -871,7 +885,10 @@ class TestTheStoreIsStreamedInto:
         with pytest.raises(OSError, match="no space left"):
             write_results_xds(pred, config, path)
 
-        # Every rank made every collective: the loop ran to the end.
+        # The loop ran to the end rather than raising in the middle of it. In one
+        # process that is all this can show; under sharding it is what keeps the
+        # other ranks from waiting in a collective this one never reaches (see
+        # the class docstring for what is not covered).
         assert len(seen) == 2 * len(NORAD_IDS)
         # And the writer stopped writing at the first failure rather than
         # raising the last of n_rfi identical errors.
@@ -880,10 +897,10 @@ class TestTheStoreIsStreamedInto:
         # variables is not a results zarr; there is nothing in it to keep.
         assert not os.path.exists(path)
 
-    def test_a_store_that_cannot_be_created_still_makes_every_collective(
+    def test_a_store_that_cannot_be_created_still_finishes_the_loop(
         self, tmp_path, monkeypatch
     ):
-        """Creation is before the collectives; its failure is raised after them."""
+        """Creation is before the evaluations; its failure is raised after them."""
 
         path = str(tmp_path / "map.zarr")
         config = make_config()
@@ -900,6 +917,84 @@ class TestTheStoreIsStreamedInto:
 
         assert len(seen) == 2 * len(NORAD_IDS)
         assert not os.path.exists(path)
+
+    def test_a_failed_append_leaves_no_store_either(self, tmp_path, monkeypatch):
+        """The variables appended after the streaming are part of the same store.
+
+        A store that kept ``rfi_vis_src`` and lost the visibilities it decomposes
+        is the same half-written results zarr a failed block write would leave,
+        and reads as a complete one just as readily. The append is past the last
+        evaluation, so this one is raised where it happens.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        pred = make_pred(config)
+        real_to_zarr = xr.Dataset.to_zarr
+
+        def fail_the_append(self, *args, **kwargs):
+            if kwargs.get("mode") == "a":
+                raise OSError("no space left on device")
+
+            return real_to_zarr(self, *args, **kwargs)
+
+        monkeypatch.setattr(xr.Dataset, "to_zarr", fail_the_append)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(pred, config, path)
+
+        assert not os.path.exists(path)
+
+    def test_a_failed_creation_removes_nothing_at_all(self, tmp_path, monkeypatch):
+        """Deletion follows from having created the store, not from a path check.
+
+        A ``path exists`` snapshot taken before the attempt is a race: a
+        concurrent writer that creates the path in between would have its store
+        taken for this run's own partial one and removed. So the rule is the
+        creation *result*, and a creation that failed leaves nothing this call is
+        known to own -- whatever the path held before, and whether or not the
+        run was allowed to overwrite it.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        pred = make_pred(config)
+
+        write_results_xds(pred, config, path)
+        before = _tree(path)
+
+        def unwritable(*args, **kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(write_mod, "_create_per_sat_store", unwritable)
+
+        with pytest.raises(OSError, match="read-only"):
+            write_results_xds(pred, config, path)
+
+        assert _tree(path) == before
+
+    def test_the_off_path_is_left_exactly_as_it_was(self, tmp_path, monkeypatch):
+        """Nothing is removed on a run that never created a store to stream into.
+
+        The cleanup belongs to the streaming: with the decomposition off, a
+        failed write leaves whatever it left before this change, which is the
+        point of the off path being untouched.
+        """
+
+        removals = []
+        monkeypatch.setattr(write_mod, "_remove_partial_store", removals.append)
+
+        def full_disk(self, *args, **kwargs):
+            raise OSError("no space left on device")
+
+        config = make_config(save_rfi_per_sat=False)
+        pred = make_pred(config)
+        monkeypatch.setattr(xr.Dataset, "to_zarr", full_disk)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(pred, config, str(tmp_path / "map.zarr"))
+
+        assert removals == []
 
     def test_overwriting_leaves_nothing_of_the_previous_store(self, tmp_path):
         """The mode is spent creating the store, so creating it has to do the clearing.
