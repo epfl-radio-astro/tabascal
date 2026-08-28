@@ -27,6 +27,9 @@ GAUSS_UV = np.pi**2 / (4 * np.log(2.0))
 # ---------------------------------------------------------------------------
 
 
+UNSET = object()  # "the key is absent", so the component's own default is exercised
+
+
 def make_sky_config(
     sources,
     n_bl=5,
@@ -36,6 +39,7 @@ def make_sky_config(
     ra0=30.0,
     dec0=-26.7,
     source_block_size=128,
+    uvw_sign=UNSET,
     seed=0,
 ):
     """Build a minimal mock TabConfig for the discrete-sky components.
@@ -48,6 +52,10 @@ def make_sky_config(
         uvw = np.random.default_rng(seed).normal(0, 200, (n_time, n_bl, 3))
     uvw = np.asarray(uvw, dtype=float)
 
+    ast_args = {"point_sources": sources, "source_block_size": source_block_size}
+    if uvw_sign is not UNSET:
+        ast_args["uvw_sign"] = uvw_sign
+
     return SimpleNamespace(
         n_bl=uvw.shape[1],
         n_time=uvw.shape[0],
@@ -55,7 +63,7 @@ def make_sky_config(
         freqs=freqs,
         uvw=uvw,
         phase_centre={"ra": ra0, "dec": dec0},
-        args={"ast": {"point_sources": sources, "source_block_size": source_block_size}},
+        args={"ast": ast_args},
     )
 
 
@@ -273,6 +281,108 @@ def test_matches_tabsim_astro_vis(exact_rtol):
     assert np.allclose(
         ours, expected.transpose(1, 2, 0), rtol=100 * exact_rtol, atol=100 * exact_rtol
     )
+
+
+# ---------------------------------------------------------------------------
+# ast.uvw_sign -- the baseline convention of the UVW column
+# ---------------------------------------------------------------------------
+
+
+def mixed_sky():
+    """A sky and a uv track with nothing symmetric left in them.
+
+    Several sources off the phase centre, two of them Gaussians at different position
+    angles, over several baselines, times and channels: no degeneracy that would let a
+    sign error pass unnoticed.
+    """
+    sources = [
+        {"ra": 34.0, "dec": -30.0, "I": 3.0},
+        {"ra": 27.5, "dec": -24.1, "I": 1.5, "fwhm_major_arcsec": 30.0,
+         "fwhm_minor_arcsec": 12.0, "position_angle_deg": 20.0},
+        {"ra": 30.9, "dec": -28.8, "I": 0.7, "fwhm_major_arcsec": 8.0,
+         "fwhm_minor_arcsec": 8.0, "position_angle_deg": 115.0},
+    ]
+    uvw = np.random.default_rng(7).normal(0, 800, (4, 6, 3))
+    return sources, uvw
+
+
+def test_the_default_uvw_sign_is_minus_one_on_every_axis():
+    """The absent key and an explicit [-1, -1, -1] are the same run, bit for bit."""
+    sources, uvw = mixed_sky()
+    kwargs = dict(uvw=uvw, freqs=(1.0e8, 1.5e8, 2.0e8))
+
+    absent = sky_vis(make_sky_config(sources, **kwargs))
+    explicit = sky_vis(make_sky_config(sources, uvw_sign=[-1, -1, -1], **kwargs))
+
+    assert np.array_equal(absent, explicit)
+
+
+def test_flipping_every_uvw_sign_conjugates_the_visibilities():
+    """[1, 1, 1] is the opposite baseline convention, i.e. a sky mirrored through the
+    phase centre.
+
+    Negating (u, v, w) negates the delay of every source and leaves the Gaussian envelope
+    alone (it is even in u and v), so the visibility of each source becomes its own
+    conjugate -- exactly, since IEEE negation is exact and cos/sin carry the sign
+    symmetry through. Checked source by source as well as for the sky as a whole, so a
+    cancellation between sources cannot hide a per-source error.
+    """
+    sources, uvw = mixed_sky()
+    kwargs = dict(uvw=uvw, freqs=(1.0e8, 1.5e8, 2.0e8))
+
+    for subset in [[source] for source in sources] + [sources]:
+        default = sky_vis(make_sky_config(subset, **kwargs))
+        flipped = sky_vis(make_sky_config(subset, uvw_sign=[1, 1, 1], **kwargs))
+
+        assert np.abs(default.imag).max() > 0.1  # there is a phase to conjugate
+        assert np.array_equal(flipped, np.conj(default))
+
+
+def test_a_mixed_uvw_sign_is_accepted_and_applied_per_axis(exact_rtol):
+    """Signs are per axis: [1, -1, -1] flips u only, which is not any global conjugate."""
+    u, v, w, freq, flux = 120.0, -80.0, 45.0, 1.0e8, 3.0
+    ra, dec, ra0, dec0 = 34.0, -30.0, 30.0, -26.7
+
+    cfg = single_baseline_config(
+        (u, v, w), freq=freq, ra0=ra0, dec0=dec0, uvw_sign=[1, -1, -1],
+        sources=[{"ra": ra, "dec": dec, "I": flux}],
+    )
+    vis = complex(sky_vis(cfg).ravel()[0])
+
+    l, m, _, n_minus_1 = (float(x) for x in radec_to_lmn(
+        np.deg2rad(ra), np.deg2rad(dec), np.deg2rad(ra0), np.deg2rad(dec0)))
+    tau = u * l - v * m - w * n_minus_1  # u kept, v and w negated
+    expected = flux * np.exp(-2j * np.pi * tau * freq / C)
+
+    assert np.isclose(vis, expected, rtol=100 * exact_rtol)
+
+
+@pytest.mark.parametrize(
+    "sign",
+    [
+        [0, -1, -1],        # zero drops an axis rather than choosing a convention
+        [-1, 2, -1],        # a scale factor, not a sign
+        [-1.5, -1, -1],
+        [True, False, -1],  # bools are ints in Python; they are not signs
+        [-1, -1],           # too short
+        [-1, -1, -1, -1],   # too long
+        -1,                 # a scalar is not a per-axis convention
+        "-1",
+        None,
+        {"u": -1, "v": -1, "w": -1},
+    ],
+)
+def test_an_invalid_uvw_sign_is_rejected(sign):
+    """A silent fallback here is a mirrored sky, so anything unreadable is an error."""
+    cfg = make_sky_config([{"ra": 30.0, "dec": -26.7, "I": 1.0}], uvw_sign=sign)
+
+    with pytest.raises(RuntimeError, match="uvw_sign") as excinfo:
+        DiscreteSkyVis().setup(cfg)
+
+    message = str(excinfo.value)
+    assert "ast.uvw_sign" in message  # the key, as it is written in the config
+    assert repr(sign) in message  # the offending value
+    assert "+1 or -1" in message  # and what it should have been
 
 
 # ---------------------------------------------------------------------------
