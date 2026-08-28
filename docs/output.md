@@ -57,6 +57,8 @@ This shows that we have a dataset with 1 sample, 28 baselines, 1 frequency chann
 
 The dataset contains the predictions for the astronomical visibilities, `ast_vis`, the gains, `gains`, the RFI visibilities, `rfi_vis`, and finally the observed visibility prediction, `vis_obs`. It also carries a `corr` attribute naming the correlation the run fitted, which is what tells the MS writer where the results belong.
 
+A run with [`data.save_rfi_per_sat: true`](config.md) stores one more variable, `rfi_vis_src (sample, src, bl, freq, time)`, with a `norad_id` coordinate on the `src` axis: the same `rfi_vis` split into its per-satellite contributions. It is `n_rfi` times the size of `rfi_vis`, which is why it is opt-in.
+
 ## MS file columns
 
 The results from tabascal shown above are also copied into the MS file used. Six visibility columns are written: the standard `CORRECTED_DATA`, and five custom non-standard `TAB_*` columns, plus the two weight columns described below. `DATA` and `MODEL_DATA` are left untouched.
@@ -146,6 +148,37 @@ A visibility no table could supply a gain for is written *uncalibrated on that l
 ### Multiple samples
 
 The predictions above are averaged over the `sample` axis of the results `.zarr`. The baseline gain is formed per sample and averaged afterwards, so the divisor is the mean of `g_p g_q*` and not the product of the two mean gains; the model columns are the sample means of `ast` and `rfi`. For a MAP run there is only one sample and the distinction does not arise, but for a posterior with several samples the two orders give different answers whenever the two antennas' gains covary. Because every column shares one divisor, that choice reaches all of them.
+
+### Per-satellite RFI columns
+
+`TAB_RFI_DATA` is the RFI model summed over every satellite the run fitted. A run with [`data.save_rfi_per_sat: true`](config.md) also stores that sum's parts, and they can be written into the MS as one column per satellite — `TAB_RFI_<NORAD id>`, e.g. `TAB_RFI_58126`:
+
+```bash
+tabascal rfi-per-sat -m path/to/file.ms -z path/to/results/map_pred_Custom.zarr
+```
+
+`tab2MS-persat` is the same tool under the name that matches `tab2MS`, and `-p` changes the `TAB_RFI_` prefix. It reads `rfi_vis_src` back out of the zarr and needs nothing else: no re-fit, no configuration, and no gain tables — so the export can be made long after the run, and re-made. A zarr from a run that did not store the decomposition is an error saying which option produces one.
+
+**What they are for.** Image one column at a time. A real satellite is a clean streak in exactly one per-source image; a feature that shows up in several is astronomical flux the RFI model has split across satellites. Reduced chi² cannot see that — a fixed total split differently between sources costs it nothing — so the per-source images are the diagnostic for it.
+
+The columns are in the same **calibrated frame** as every other column above, and they get there the same way `TAB_RFI_DATA` does: they are model visibilities, fitted to data whose gain layers were already divided out, so nothing is applied to them. Correlations that were not fitted are `0`, matching the model columns. The correlation comes off the zarr, and `-c` overrides it for a zarr written before that was recorded, exactly as for `tab2MS`.
+
+They decompose `TAB_RFI_DATA`:
+
+```text
+sum over satellites of TAB_RFI_<NORAD> == TAB_RFI_DATA
+```
+
+**to within float32 round-off, not bit for bit.** The bound is about `n_src + 1` `float32` ulps of `Σ|TAB_RFI_<NORAD>|` — one for each term rounded on its way into its column, one for the total — referenced to the *terms* rather than to the total, since sources that partly cancel leave a total smaller than the numbers that made it. Two things stop it being exact:
+
+* `sum(round(x_r))` is not `round(sum(x_r))`. Both sides make the same `complex64` cast in the same place (before the sample mean, not after it) and go through the same row mapping, but the per-source columns are rounded individually and their sum is not the rounded sum;
+* the decomposition itself re-associates one reduction. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that into per-source partial sums, which differ from the single reduction by about an ulp of the working precision.
+
+Both are round-off. Anything larger is a real difference — a dropped source, a column in the wrong frame — and shows up orders of magnitude above this bound.
+
+A satellite is named by its NORAD id, so a run that somehow fitted the same satellite twice is refused rather than writing one column per *pair* of sources. Sources the sharding padded the list with are not written at all: they carry no signal and name no satellite.
+
+Note that a run narrowed to one channel with `data.freq` is refused here too — the results then cover part of the MS's band, and nothing in them says which part.
 
 ### Zero and non-finite gains
 
