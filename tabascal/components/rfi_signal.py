@@ -34,36 +34,40 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
     ``norad_ids``/``times``/``freqs`` as coordinates of ``light_curves``.
     """
     if str(est_path).rstrip("/").endswith(".zarr"):
-        xds = xr.open_zarr(est_path)
-        available = sorted(set(xds.variables))
-        missing = [
-            name
-            for name in _LIGHT_CURVE_VARS
-            if name not in xds.variables and name not in xds.coords
-        ]
-        if missing:
-            raise ValueError(
-                f"{est_path} is missing {missing}. A light-curve zarr must hold "
-                f"{list(_LIGHT_CURVE_VARS)}, with light_curves dimensioned "
-                f"(norad_ids, times, freqs). It contains {available}."
-            )
-        # By name, not stored order: a swapped store with equal-length dims would
-        # otherwise pass the shape check below and be read along the wrong axes.
-        dims = tuple(xds["light_curves"].dims)
-        if set(dims) != set(_LIGHT_CURVE_DIMS):
-            raise ValueError(
-                f"{est_path}: light_curves is dimensioned {dims}, but a "
-                f"light-curve zarr must use exactly {_LIGHT_CURVE_DIMS} (in any "
-                "order)."
-            )
-        curves = xds["light_curves"].transpose(*_LIGHT_CURVE_DIMS)
+        # Closed on the way out however the function leaves, as for the npz
+        # below: a zipped or consolidated store keeps a real file handle open,
+        # and the arrays are read (np.asarray) inside the block.
+        with xr.open_zarr(est_path) as xds:
+            available = sorted(set(xds.variables))
+            missing = [
+                name
+                for name in _LIGHT_CURVE_VARS
+                if name not in xds.variables and name not in xds.coords
+            ]
+            if missing:
+                raise ValueError(
+                    f"{est_path} is missing {missing}. A light-curve zarr must hold "
+                    f"{list(_LIGHT_CURVE_VARS)}, with light_curves dimensioned "
+                    f"(norad_ids, times, freqs). It contains {available}."
+                )
+            # By name, not stored order: a swapped store with equal-length dims
+            # would otherwise pass the shape check below and be read along the
+            # wrong axes.
+            dims = tuple(xds["light_curves"].dims)
+            if set(dims) != set(_LIGHT_CURVE_DIMS):
+                raise ValueError(
+                    f"{est_path}: light_curves is dimensioned {dims}, but a "
+                    f"light-curve zarr must use exactly {_LIGHT_CURVE_DIMS} (in any "
+                    "order)."
+                )
+            curves = xds["light_curves"].transpose(*_LIGHT_CURVE_DIMS)
 
-        return (
-            np.asarray(curves.data),
-            np.asarray(xds["norad_ids"].data),
-            np.asarray(xds["times"].data),
-            np.asarray(xds["freqs"].data),
-        )
+            return (
+                np.asarray(curves.data),
+                np.asarray(xds["norad_ids"].data),
+                np.asarray(xds["times"].data),
+                np.asarray(xds["freqs"].data),
+            )
 
     loaded = np.load(est_path)
     if not isinstance(loaded, np.lib.npyio.NpzFile):
@@ -143,8 +147,11 @@ def read_light_curves(
     A ``.zarr`` store (read with :func:`xarray.open_zarr`) or a ``.npz``, holding
 
     ``light_curves``
-        ``(n_src, n_time, n_freq)``. One light curve per source, in the same
-        units the RFI visibility amplitude is squared from.
+        ``(n_src, n_time, n_freq)``, **real**. One light curve per source, the
+        magnitude ``|S|``, in the same units the RFI visibility amplitude is
+        squared from. A complex array is rejected rather than truncated: the
+        complex estimate belongs in ``light_curves_complex``, which
+        ``tabascal light-curve`` writes alongside and this reader ignores.
     ``norad_ids``
         ``(n_src,)``. NORAD id labelling each row of ``light_curves``.
     ``times``
@@ -201,6 +208,17 @@ def read_light_curves(
         raise ValueError(
             f"{est_path}: light_curves has shape {curves.shape} but norad_ids, "
             f"times and freqs imply {expected}."
+        )
+    if np.iscomplexobj(curves):
+        raise ValueError(
+            f"{est_path}: light_curves is complex ({curves.dtype}), but the "
+            "format's light_curves is the real magnitude |S|. Casting a complex "
+            "array to float64 keeps Re(S) and drops Im(S) behind nothing but a "
+            "numpy warning, which on an uncalibrated column discards most of the "
+            "signal without changing the shape of the result. Save "
+            "np.abs(...) as light_curves; the complex estimate rides alongside "
+            "it as light_curves_complex, which `tabascal light-curve` already "
+            "writes and this reader ignores."
         )
 
     file_ids = _as_norad_ids(labels)

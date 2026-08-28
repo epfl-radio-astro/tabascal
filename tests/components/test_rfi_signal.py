@@ -1225,6 +1225,38 @@ class TestReadLightCurves:
         with pytest.raises(ValueError, match="missing"):
             read_light_curves(path, [100], self._times(), self._freqs())
 
+    def test_the_zarr_store_is_closed_after_reading(self, tmp_path, monkeypatch):
+        """A read store holds its backing files open until it is closed.
+
+        Harmless for a plain directory store on POSIX, but a zipped or
+        consolidated store keeps a real file handle, and the reader is called
+        once per run — inside long-lived processes that also open measurement
+        sets. The npz branch was closed in #174; this is the same leak.
+        """
+        import xarray as xr
+
+        from tabascal.components import rfi_signal
+
+        path = self._zarr(tmp_path, [100, 200])
+        opened = []
+        real_open_zarr = xr.open_zarr
+
+        def spy(*args, **kwargs):
+            xds = real_open_zarr(*args, **kwargs)
+            opened.append(xds)
+            return xds
+
+        monkeypatch.setattr(rfi_signal.xr, "open_zarr", spy)
+        read_light_curves(path, [100, 200], self._times(), self._freqs())
+
+        assert opened, "the zarr branch did not open a store"
+        # xarray drops the store's close callable when the Dataset is closed, so
+        # a still-set _close is an unclosed store. Checked against a live one so
+        # the probe cannot pass by simply never being set.
+        with real_open_zarr(path) as control:
+            assert control._close is not None, "xarray no longer sets _close"
+        assert all(xds._close is None for xds in opened), "the zarr store was left open"
+
     # --- strictness ---
 
     @pytest.mark.parametrize("drop", ["norad_ids", "times", "freqs"])
@@ -1249,6 +1281,44 @@ class TestReadLightCurves:
         np.save(path, np.ones((2, 5, 3)))
         with pytest.raises(ValueError, match="bare .npy"):
             read_light_curves(str(path), [100, 200], self._times(), self._freqs())
+
+    def test_a_complex_light_curve_array_is_rejected(self, tmp_path):
+        """Casting to f64 would keep Re(S) and drop Im(S), with only a warning.
+
+        A complex file is the plausible mistake — it is what the matched filter
+        natively produces — and the truncation is not visible in the result: the
+        curve stays the right shape and is merely wrong by the phase, which for
+        an uncalibrated column is most of the signal.
+        """
+        curves = np.full((1, 5, 3), 3.0 + 4.0j)
+        path = self._npz(tmp_path, [100], curves=curves)
+
+        with pytest.raises(ValueError, match="complex") as excinfo:
+            read_light_curves(path, [100], self._times(), self._freqs())
+        message = str(excinfo.value)
+        assert "light_curves" in message
+        assert "light_curves_complex" in message, "the error does not name the fix"
+
+    def test_a_complex_zarr_is_rejected_too(self, tmp_path):
+        """Both branches load the same array, so both must reject it."""
+        curves = np.full((1, 5, 3), 3.0 + 4.0j)
+        path = self._zarr(tmp_path, [100], curves=curves)
+
+        with pytest.raises(ValueError, match="complex"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    def test_the_magnitude_is_read_with_the_complex_estimate_riding_along(
+        self, tmp_path
+    ):
+        """The rfi.est format save_light_curves_npz writes: |S| plus the extra."""
+        complex_curves = np.full((1, 5, 3), 3.0 + 4.0j)
+        path = self._npz(
+            tmp_path, [100], curves=np.abs(complex_curves),
+            light_curves_complex=complex_curves,
+        )
+
+        out = np.asarray(read_light_curves(path, [100], self._times(), self._freqs()))
+        assert np.allclose(out, 5.0), "the magnitude was not read, or the extra was"
 
     def test_a_shape_disagreement_raises(self, tmp_path):
         path = self._npz(tmp_path, [100, 200], curves=np.ones((2, 4, 3)))
