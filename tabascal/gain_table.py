@@ -30,6 +30,21 @@ unwrapped along frequency within each timestep, the timesteps are brought onto
 one branch by whole turns (which is also the unwrap along time), and
 ``exp(i phase)`` is applied exactly once, at the end.
 
+The shortest branch, and what that assumes
+-------------------------------------------
+Unwrapping recovers a phase only where the solutions *sample* it. A genuine
+change of more than pi between two adjacent solved samples -- between two solved
+channels, or between two solution intervals of a phase slewing faster than the
+calibration cadence follows -- is not in the table at all: complex samples carry
+the phase modulo 2 pi, so such a step aliases to the shorter branch and is taken
+as such. A true 0 -> 1.5 pi evolution between two solutions interpolates to
+-0.25 pi at the midpoint, not +0.75 pi. This is ``np.unwrap``'s assumption,
+applied band-coherently rather than line by line, and **nothing in the data can
+detect when it fails**: both solved intervals have to sample the phase below
+half a turn, which is a requirement on the calibration that produced the table
+rather than something the placement can check. The half-turn tie in
+:func:`_align_timesteps` is the boundary case of exactly this ambiguity.
+
 The interpolation is linear and separable -- frequency first, then time -- and
 **extrapolation holds the edge value**: a table that does not reach the start of
 the observation calibrates it with the earliest solution it does have, which is
@@ -93,8 +108,9 @@ TIME_ATOL = 1e-3
 FREQ_RTOL = 1e-6
 
 #: How each output sample got its value, worst last: the categories combine with
-#: ``maximum`` as provenance is carried from one interpolation stage to the next.
-_EXACT, _INTERPOLATED, _EDGE_HELD, _DEAD = 0, 1, 2, 3
+#: ``maximum`` as provenance is carried from one interpolation stage to the next,
+#: so a sample interpolated between two edge-held ones is itself edge-held.
+EXACT, INTERPOLATED, EDGE_HELD, DEAD = 0, 1, 2, 3
 
 _TURN = 2 * np.pi
 
@@ -119,12 +135,15 @@ class GridGains(NamedTuple):
 
     ``gains`` is ``(n_ant, n_freq, n_time)``; ``dead`` marks the entries no
     solution could be reached for, which carry a unity gain so that nothing
-    downstream divides by a NaN.
+    downstream divides by a NaN. ``category`` is the same shape and holds
+    :data:`EXACT` / :data:`INTERPOLATED` / :data:`EDGE_HELD` / :data:`DEAD` per
+    sample -- the per-sample form of ``coverage``, which is only its histogram.
     """
 
     gains: NDArray
     dead: NDArray
     coverage: Coverage
+    category: NDArray
 
 
 def normalise_gain_tables(gain_table) -> List[str]:
@@ -233,7 +252,9 @@ def _align_timesteps(phase: NDArray, valid: NDArray, times: NDArray) -> None:
     This is also the unwrap along time -- the median step is brought into
     ``(-pi, pi]``. A step of exactly half a turn is the one genuinely ambiguous
     case and is left as written (``np.round``'s half-to-even), rather than being
-    turned into a half turn of the opposite sign.
+    turned into a half turn of the opposite sign -- it is the boundary of the
+    shortest-branch assumption the module docstring sets out, which every step
+    beyond half a turn falls the other side of, silently.
 
     Mutates ``phase`` in place; timesteps carrying nothing are stepped over, so
     the alignment spans them the way the interpolation does.
@@ -331,7 +352,7 @@ def _place_axis(
     n_want = len(want)
 
     values = np.full((n_surface, n_line, n_want), np.nan)
-    category = np.full((n_line, n_want), _DEAD, dtype=np.int8)
+    category = np.full((n_line, n_want), DEAD, dtype=np.int8)
     lo_idx = np.full((n_line, n_want), -1)
     hi_idx = np.full((n_line, n_want), -1)
     only_lo = np.zeros((n_line, n_want), dtype=bool)
@@ -362,7 +383,7 @@ def _place_axis(
         outside = (want < xs[0] - atol) | (want > xs[-1] + atol)
 
         category[rows] = np.where(
-            outside, _EDGE_HELD, np.where(at_lo | at_hi, _EXACT, _INTERPOLATED)
+            outside, EDGE_HELD, np.where(at_lo | at_hi, EXACT, INTERPOLATED)
         )
         lo_idx[rows] = support[lo]
         hi_idx[rows] = support[hi]
@@ -396,10 +417,10 @@ def _coverage(category: NDArray) -> Coverage:
     total = category.size
 
     return Coverage(
-        exact=float((category == _EXACT).sum() / total),
-        interpolated=float((category == _INTERPOLATED).sum() / total),
-        edge_held=float((category == _EDGE_HELD).sum() / total),
-        dead=float((category == _DEAD).sum() / total),
+        exact=float((category == EXACT).sum() / total),
+        interpolated=float((category == INTERPOLATED).sum() / total),
+        edge_held=float((category == EDGE_HELD).sum() / total),
+        dead=float((category == DEAD).sum() / total),
     )
 
 
@@ -420,7 +441,11 @@ def interpolate_gains(
     a single solution is then broadcast across the band, but channels that
     cannot be placed are an error rather than a guess.
 
-    See the module docstring for the interpolation semantics.
+    See the module docstring for the interpolation semantics -- in particular
+    that the phase is taken on its shortest branch, so the table's channels and
+    solution intervals must each sample the phase by less than half a turn. A
+    faster evolution than that is not recoverable from the solutions and is
+    aliased, without anything here being able to tell.
     """
 
     times = np.asarray(times, dtype=float)
@@ -465,7 +490,7 @@ def interpolate_gains(
         # every channel rather than an extrapolation onto them.
         on_freq = np.repeat(surfaces, n_freq, axis=2)
         cat_freq = np.where(
-            np.repeat(valid, n_freq, axis=1), np.int8(_EXACT), np.int8(_DEAD)
+            np.repeat(valid, n_freq, axis=1), np.int8(EXACT), np.int8(DEAD)
         )
     else:
         # Frequency first: a B table's phase winds across the band, so it is the
@@ -486,7 +511,7 @@ def interpolate_gains(
 
     placed = _place_axis(
         on_freq.reshape(2, -1, n_cal_time),
-        (cat_freq != _DEAD).reshape(-1, n_cal_time),
+        (cat_freq != DEAD).reshape(-1, n_cal_time),
         cal_times,
         times,
         time_atol,
@@ -500,9 +525,11 @@ def interpolate_gains(
     # The one place the phase becomes an angle again, once both axes are done.
     on_grid = amplitude * np.exp(1j * phase)
 
-    dead = (category == _DEAD) | ~np.isfinite(on_grid)
+    dead = (category == DEAD) | ~np.isfinite(on_grid)
 
-    return GridGains(np.where(dead, 1.0, on_grid), dead, _coverage(category))
+    return GridGains(
+        np.where(dead, 1.0, on_grid), dead, _coverage(category), category
+    )
 
 
 def compose_gains(

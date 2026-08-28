@@ -20,6 +20,10 @@ import numpy as np
 import pytest
 
 from tabascal.gain_table import (
+    DEAD,
+    EDGE_HELD,
+    EXACT,
+    INTERPOLATED,
     Coverage,
     compose_gains,
     gains_from_tables,
@@ -223,16 +227,28 @@ class TestBridging:
         assert np.allclose(np.abs(got[0, :, 0]), [1.0, 2.0, 3.0])
 
     def test_a_time_with_no_valid_channel_is_bridged(self):
-        """A wholly flagged timestep leaves the other times to span it."""
+        """A wholly flagged timestep leaves the other times to span it.
 
-        block = np.array(
-            [[1.0 + 0j, np.nan, 3.0 + 0j], [1.0 + 0j, np.nan, 3.0 + 0j]]
+        Phases either side of the gap, and a quarter-way sample rather than the
+        midpoint, so the branch carried across the gap is pinned rather than
+        assumed: the solved timesteps step by 1.5 turns as stored, so bridging
+        them needs the whole turn that only the alignment supplies, and a
+        midpoint would hide its sign (a turn's error halves to 2 pi and wraps
+        away, while a quarter of it does not).
+        """
+
+        amplitude = np.array([[1.0, np.nan, 3.0], [1.0, np.nan, 3.0]])
+        phase = np.pi * np.array([[0.8, np.nan, 1.3], [0.9, np.nan, 1.4]])
+        cal = _one_ant(
+            amplitude * np.exp(1j * phase), times=[0.0, 5.0, 10.0], freqs=[1e9, 2e9]
         )
-        cal = _one_ant(block, times=[0.0, 5.0, 10.0], freqs=[1e9, 2e9])
 
-        got = interpolate_gains(cal, times=[5.0], freqs=[1e9, 2e9]).gains
+        got = interpolate_gains(cal, times=[2.5], freqs=[1e9, 2e9]).gains
 
-        assert np.allclose(np.abs(got[0, :, 0]), 2.0)
+        assert np.allclose(np.abs(got[0, :, 0]), 1.5)
+        assert np.allclose(
+            np.angle(got[0, :, 0]), np.pi * np.array([0.925, -0.975])
+        )
 
     def test_an_antenna_with_no_valid_solution_anywhere_is_dead(self):
         """Unity gain, and reported so the caller can flag it."""
@@ -314,12 +330,18 @@ class TestCoverage:
         gains[0, 1, 1] = 2.0
         cal = _cal(gains, times=[0.0, 10.0], freqs=[1e9, 2e9])
 
-        cov = interpolate_gains(cal, times=[0.0, 10.0], freqs=[1e9, 2e9]).coverage
+        placed = interpolate_gains(cal, times=[0.0, 10.0], freqs=[1e9, 2e9])
 
-        assert cov.exact == pytest.approx(0.5)
-        assert cov.edge_held == pytest.approx(0.5)
-        assert cov.interpolated == 0.0
-        assert cov.dead == 0.0
+        # Per cell, not just in aggregate: the solved corners are the exact ones
+        # and the empty corners the held ones. A 50/50 total survives swapping
+        # the two, which is to say it does not pin which endpoint each output
+        # inherited its provenance from.
+        assert placed.category.tolist() == [
+            [[EXACT, EDGE_HELD], [EDGE_HELD, EXACT]]
+        ]
+        assert placed.coverage == Coverage(
+            exact=0.5, interpolated=0.0, edge_held=0.5, dead=0.0
+        )
 
     def test_a_dead_antenna_is_reported_as_dead(self):
         gains = np.ones((2, 1, 1), dtype=complex)
