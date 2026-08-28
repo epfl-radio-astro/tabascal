@@ -326,8 +326,15 @@ def _from_config(args):
 
     # An MS with no usable noise column is not fatal here: the curves are still
     # measured, and come back unweighted and unscaled with nan errors, which is
-    # what this command documents. Inference keeps the strict default.
-    tab_config = TabConfig(config, ms_path, require_noise=False)
+    # what this command documents. Nor is a satellite that never rose: its curve
+    # is zero, which is a measurement, and stopping would leave
+    # --no-elevation-cut -- which drops the cut for every satellite -- as the
+    # only way to measure the ones that were up. Inference keeps both strict
+    # defaults: neither an unweighted likelihood nor a fully-masked satellite
+    # has anything to fit.
+    tab_config = TabConfig(
+        config, ms_path, require_noise=False, require_in_view=False
+    )
 
     vis = None
     if args.zarr:

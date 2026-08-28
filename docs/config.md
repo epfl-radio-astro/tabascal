@@ -355,7 +355,7 @@ The only additional parameters are
 
   While a satellite is below the horizon it contributes no signal, but an unmasked model still carries a full set of free parameters for it over those times. Those parameters have no signal of their own to constrain them, so they are free to absorb signal that belongs elsewhere — the astronomical sky, or another RFI source — to the extent that the RFI signal prior admits it and the fringe rates overlap. Masking removes the parameters rather than relying on the fit to leave them alone. This is why `0` rather than `null` is the default: a satellite below the horizon is not a modelling choice, it is simply not there.
 
-  Each satellite gets its own in-view window, evaluated on the observation time grid and expanded over each integration, so an integration is never partially masked. Setup fails if a satellite is never above the cut, since it would then be modelled nowhere.
+  Each satellite gets its own in-view window, evaluated on the observation time grid and expanded over each integration, so an integration is never partially masked. Setup fails if a satellite is never above the cut, since it would then be modelled nowhere. `tabascal light-curve` is the exception: it is measuring rather than fitting, so a satellite that never rose comes back as a zero curve, named in a warning, and the satellites that were up are still measured.
 
   Raising the cut above `0` additionally excludes the low-elevation part of each pass, where the fringe rate is lowest and the overlap with other components is therefore greatest. How far to raise it is observation-dependent and is not currently calibrated, so no value above `0` is recommended here. Note that masking is about which parameters exist, not about subtraction quality, and reduced $\chi^2$ is largely insensitive to it — judge the effect on the recovered sky model.
 
@@ -374,7 +374,7 @@ The file is either a **`.zarr` store** (read with `xarray.open_zarr`) or a **`.n
 
 | name | shape | contents |
 |---|---|---|
-| `light_curves` | `(n_src, n_time, n_freq)` | apparent flux per source, in **Jy** |
+| `light_curves` | `(n_src, n_time, n_freq)`, **real** | apparent flux per source, in **Jy** |
 | `norad_ids` | `(n_src,)` | NORAD id of each row of `light_curves` |
 | `times` | `(n_time,)` | Modified Julian Date, in **days**, strictly increasing |
 | `freqs` | `(n_freq,)` | frequency in **Hz**, strictly increasing |
@@ -400,6 +400,7 @@ Times are absolute (MJD) rather than seconds from the start of a particular obse
 
 Some further details:
 
+* `light_curves` must be **real** — the magnitude $\lvert \hat{S} \rvert$. A complex array is rejected rather than truncated: the cast to float64 would keep $\text{Re}(\hat{S})$ and drop $\text{Im}(\hat{S})$ behind nothing but a numpy warning, which on an uncalibrated column discards most of the signal without changing the shape of the result. `tabascal light-curve` writes the magnitude under this name and keeps the native complex estimate alongside it as `light_curves_complex`, which the reader ignores.
 * Each satellite must appear **exactly once**. A repeated NORAD id has no single answer to which row belongs to it, and resolving that by file order is the thing id-matching exists to avoid, so it is rejected — merge the passes or drop one before using the file as an estimate.
 * Labels that are not integer NORAD ids never match a satellite and are dropped, so a file may carry named sources (e.g. `Fornax A`) alongside the satellites without filtering beforehand, and those may repeat freely.
 * **Samples outside the file's coverage are zero**, on either axis — the file says nothing there, which is the same "no signal known" convention the elevation mask uses. An axis of length 1 is held constant instead, since a single sample carries no gradient to interpolate along; a single-frequency light curve therefore applies across the whole band rather than being zeroed outside it.

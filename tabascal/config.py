@@ -132,7 +132,13 @@ class TabConfig:
     # Internal tuning parameter, intentionally not exposed in the config.
     _MIN_DIVISORS_VARIABLE = 8
 
-    def __init__(self, config: Dict, ms_path: str, require_noise: bool = True):
+    def __init__(
+        self,
+        config: Dict,
+        ms_path: str,
+        require_noise: bool = True,
+        require_in_view: bool = True,
+    ):
 
         # self.config = config
         self.args = config
@@ -201,7 +207,9 @@ class TabConfig:
 
         self._set_freqs_times()
 
-        self.set_elevation_mask(config["rfi"].get("min_elevation"))
+        self.set_elevation_mask(
+            config["rfi"].get("min_elevation"), require_in_view=require_in_view
+        )
 
         if sharding_enabled():
             # These are captured in closures during Model setup (likelihood) and used
@@ -221,12 +229,25 @@ class TabConfig:
                     jnp.asarray(self.noise), replicated_sharding()
                 )
 
-    def set_elevation_mask(self, min_elevation: Optional[float]):
+    def set_elevation_mask(
+        self, min_elevation: Optional[float], require_in_view: bool = True
+    ):
         """Mask the RFI signal to zero whenever a satellite is below `min_elevation`.
 
         The elevation is evaluated on the observation time grid and the mask is
         expanded over each integration, so an integration is either fully modelled
         or fully masked. `min_elevation` is in degrees; None disables masking.
+
+        A satellite that is never above the cut is fully masked, which leaves
+        inference nothing to fit and its parameters unconstrained, so by default
+        that stops the run.
+
+        ``require_in_view=False`` keeps the all-zero mask instead, named out
+        loud. It is for the one caller that is not inference: the matched-filter
+        light-curve extractor, for which a satellite that never rose has an
+        answer -- a zero curve -- and stopping would leave
+        ``--no-elevation-cut``, which drops the cut for *every* satellite, as the
+        only way to measure the ones that were up.
         """
 
         self.min_elevation = min_elevation
@@ -250,11 +271,18 @@ class TabConfig:
         print(f"\nRFI signal masked below {min_elevation} deg elevation")
         for norad_id, mask, el in zip(self.norad_ids, self.rfi_mask, self.rfi_elevation):
             if not mask.any():
-                raise ValueError(
+                never_up = (
                     f"Satellite {norad_id} is never above {min_elevation} deg "
-                    "elevation, so its RFI signal is fully masked. Remove it from "
-                    "satellites.norad_ids or lower rfi.min_elevation."
+                    f"elevation (it peaks at {el.max():.1f} deg), so its RFI "
+                    "signal is fully masked"
                 )
+                if require_in_view:
+                    raise ValueError(
+                        f"{never_up}. Remove it from satellites.norad_ids or "
+                        "lower rfi.min_elevation."
+                    )
+                print(f"Warning: {never_up} and comes back as zero.")
+                continue
             print(
                 f"{norad_id}: {100 * mask.mean():5.1f} % of times in view "
                 f"(elevation {el.min():.1f} to {el.max():.1f} deg)"

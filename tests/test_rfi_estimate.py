@@ -996,6 +996,24 @@ class TestLightCurvesFromConfig:
         assert not np.any(result["light_curves"][1] == 0)
         np.testing.assert_array_equal(result["in_view"], mask[:2])
 
+    def test_a_never_visible_satellite_is_a_zero_curve_not_an_error(self):
+        """The estimator's answer for a satellite that never rose is zero.
+
+        `TabConfig.set_elevation_mask` stops an inference run on a fully-masked
+        satellite, since there is nothing there to fit. Measuring is different:
+        a zero curve is the measurement, and the satellites that *were* up must
+        still be measurable without editing the config first.
+        """
+        mask = np.ones((3, N_TIME), dtype=bool)
+        mask[0] = False
+        config = make_tab_config(rfi_mask=mask)
+
+        result = light_curves_from_config(config)
+
+        assert np.all(result["light_curves"][0] == 0)
+        assert np.isnan(result["error"][0]).all()
+        assert not np.any(result["light_curves"][1] == 0)
+
     def test_the_flags_on_the_config_are_honoured(self):
         flags = np.zeros((len(pairs()[0]), N_FREQ, N_TIME), dtype=bool)
         flags[:, 0, 0] = True
@@ -1780,3 +1798,34 @@ class TestCommandLine:
                  "-o", str(tmp_path / "c.npz")))
 
         assert config["rfi"]["min_elevation"] is None
+
+    def test_the_config_mode_tolerates_a_never_visible_satellite(
+        self, tmp_path, monkeypatch
+    ):
+        """A fully-masked satellite is a zero curve here, not a dead command.
+
+        `TabConfig` stops an inference run on one, which would otherwise leave
+        `--no-elevation-cut` -- dropping the cut for *every* satellite -- as the
+        only way to measure the ones that were up.
+        """
+        import tabascal.config
+        import tabascal.scripts._run_tabascal_impl as impl
+        from tabascal.scripts.rfi_estimate import run
+
+        config = {
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+                     "data_col": "DATA", "corr": "xx", "freq": None},
+            "rfi": {"min_elevation": 20.0},
+            "satellites": {},
+        }
+        kwargs = {}
+        monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
+        monkeypatch.setattr(
+            tabascal.config, "TabConfig",
+            lambda cfg, ms_path, **kw: (kwargs.update(kw), make_tab_config())[1],
+        )
+        monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
+
+        run(_cli("-c", "tab.yaml", "-o", str(tmp_path / "c.npz")))
+
+        assert kwargs["require_in_view"] is False
