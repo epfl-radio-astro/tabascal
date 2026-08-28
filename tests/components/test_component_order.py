@@ -200,6 +200,15 @@ class TestValidLists:
     def test_documented_combinations_assemble(self, refs):
         check(refs)
 
+    def test_an_empty_component_list_validates_vacuously(self):
+        """Nothing to chain, so nothing to reject.
+
+        A model with no components is refused later, on its own terms -- the
+        point here is that the order walk has no opinion about it, so the
+        harvest can carry an empty list without the check inventing a failure.
+        """
+        validate_component_order([], BASE_STATE_KEYS)
+
     def test_the_accumulators_come_from_the_model(self):
         """``vis_ast``/``vis_rfi`` are zeroed by ``Model``, not by a component.
 
@@ -209,37 +218,131 @@ class TestValidLists:
         check(["ast_vis:GPVisAst"])
 
 
-def _config_component_lists():
-    """Every ``model.components`` list shipped in the repo, as (label, refs)."""
-    found = []
-    for directory in ("examples", "tests/data", "ci/reframe/data"):
-        for path in sorted((REPO_ROOT / directory).glob("*.yaml")):
-            config = yaml.safe_load(path.read_text()) or {}
-            refs = (config.get("model") or {}).get("components")
-            if refs:
-                found.append((str(path.relative_to(REPO_ROOT)), refs))
-    return found
+# Where a shipped ``model.components`` list can live. Searched recursively: a
+# config in a subdirectory is as shipped as one at the top.
+CONFIG_ROOTS = ("examples", "tests/data", "ci/reframe/data")
+DOC_ROOT = "docs"
+
+#: A fenced YAML block in Markdown, however it is indented and however its info
+#: string is spelled. Three or more backticks open it (four are how a block that
+#: itself contains a fence is written), ``yaml``/``yml`` in any case must be the
+#: first word of the info string but may be followed by attributes, and it closes
+#: on a run at least as long at the same indent -- with nothing after it but
+#: horizontal whitespace, so a line that merely *starts* with backticks is not a
+#: closer and cannot truncate the block.
+_YAML_FENCE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<ticks>`{3,})[ \t]*ya?ml(?![^ \t\n])[^\n]*\n"
+    r"(?P<body>.*?)"
+    r"^(?P=indent)(?P=ticks)`*[ \t]*$",
+    re.M | re.S | re.I,
+)
+
+#: Whether *unparseable* text looked like it was meant to carry a component
+#: list. Deciding that lexically is only defensible when there is no parse to
+#: consult: it reads a ``components:`` key inside a block scalar or a comment as
+#: real, and misses one written quoted or in flow style. Both are tolerable in a
+#: best-effort screen over text that is already known to be broken -- the worst
+#: case is a broken document reported with a slightly wrong reason, or not
+#: reported. It must never be asked about text that parsed.
+_COMPONENTS_KEY = re.compile(r"^[ \t]*components[ \t]*:", re.M)
+
+#: Every place the harvest below must find a list, and how many it must find
+#: there. Pinned exactly rather than as a lower bound so that a shipped example
+#: disappearing from the harvest -- a fence that stops matching, a file that
+#: moves -- fails here instead of quietly shrinking the coverage.
+EXPECTED_LOCATIONS = {
+    "ci/reframe/data/tab_target.yaml": 1,
+    "examples/tab_target.yaml": 1,
+    "tests/data/tab_target.yaml": 1,
+    "docs/config.md": 3,
+    "docs/kernels.md": 1,
+}
+
+_UPDATE_HINT = (
+    "Update EXPECTED_LOCATIONS in this file when you add, move or remove a "
+    "shipped config or a documented model.components example."
+)
 
 
-def _doc_component_lists():
-    """The same, from the fenced YAML blocks of the documentation."""
-    found = []
-    for path in sorted((REPO_ROOT / "docs").glob("*.md")):
-        blocks = re.findall(r"^```yaml\n(.*?)^```", path.read_text(), re.M | re.S)
-        for i, block in enumerate(blocks):
-            try:
-                config = yaml.safe_load(block) or {}
-            except yaml.YAMLError:
-                continue
-            if not isinstance(config, dict):
-                continue
-            refs = (config.get("model") or {}).get("components")
-            if refs:
-                found.append((f"{path.relative_to(REPO_ROOT)}#{i}", refs))
-    return found
+def _fenced_yaml_blocks(text):
+    """The YAML blocks of a Markdown document, dedented to their fence."""
+    for match in _YAML_FENCE.finditer(text):
+        indent, body = match.group("indent"), match.group("body")
+        if indent:
+            body = "\n".join(
+                line[len(indent) :] if line.startswith(indent) else line
+                for line in body.splitlines()
+            )
+        yield body
 
 
-ALL_SHIPPED_LISTS = _config_component_lists() + _doc_component_lists()
+def _component_lists(label, text, broken):
+    """The ``model.components`` lists in one YAML document.
+
+    A document meant to carry a component list but not readable as one is
+    recorded in ``broken`` rather than skipped: silently dropping it would hide
+    exactly the breakage this harvest exists to catch.
+
+    "Meant to" is decided from the parsed structure whenever there *is* one --
+    a ``components`` key under ``model``, or one at the root, which is malformed
+    since every shipped list in this repo sits under ``model:``. Text is only
+    consulted when the parse failed, where there is nothing else to go on;
+    judging a document that parsed by its text would condemn perfectly good YAML
+    whose prose happens to contain a ``components:`` line.
+    """
+    try:
+        config = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        if _COMPONENTS_KEY.search(text):
+            broken.append(f"{label}: not valid YAML ({exc.__class__.__name__})")
+        return []
+
+    if not isinstance(config, dict):
+        return []
+
+    model = config.get("model")
+    if not (isinstance(model, dict) and "components" in model):
+        if "components" in config:
+            broken.append(
+                f"{label}: carries a root-level components: "
+                "but no model.components mapping"
+            )
+        return []
+
+    refs = model["components"]
+    if not isinstance(refs, list):
+        broken.append(f"{label}: 'model.components' is not a list")
+        return []
+    # An explicitly empty list is harvested like any other, so that it shows up
+    # in the location counts instead of vanishing between the two.
+    return [refs]
+
+
+def _shipped_component_lists():
+    """Every shipped ``model.components`` list, as (label, refs), plus breakages."""
+    found, broken = [], []
+
+    for root in CONFIG_ROOTS:
+        # Enumerate everything and match on the lowered suffix: a glob pattern is
+        # itself case-sensitive on a case-sensitive filesystem, so filtering a
+        # `*.y*ml` glob would never get the chance to see a CONFIG.YAML.
+        paths = (REPO_ROOT / root).rglob("*")
+        for path in sorted(p for p in paths if p.suffix.lower() in (".yaml", ".yml")):
+            label = str(path.relative_to(REPO_ROOT))
+            for refs in _component_lists(label, path.read_text(), broken):
+                found.append((label, refs))
+
+    for path in sorted((REPO_ROOT / DOC_ROOT).rglob("*.md")):
+        label = str(path.relative_to(REPO_ROOT))
+        lists = []
+        for i, block in enumerate(_fenced_yaml_blocks(path.read_text())):
+            lists += _component_lists(f"{label} block {i}", block, broken)
+        found += [(f"{label}#{i}", refs) for i, refs in enumerate(lists)]
+
+    return found, broken
+
+
+ALL_SHIPPED_LISTS, BROKEN_SHIPPED_LISTS = _shipped_component_lists()
 
 
 def _is_whole_model(refs):
@@ -262,11 +365,85 @@ WHOLE_MODEL_LISTS = [
 ]
 
 
-def test_the_shipped_lists_were_found():
-    """Guard the collection above: a silent zero would make the next tests vacuous."""
-    assert len(_config_component_lists()) >= 3
-    assert len(_doc_component_lists()) >= 2
-    assert len(WHOLE_MODEL_LISTS) >= 4
+class TestTheHarvestDecision:
+    """What counts as a component list, a breakage, and neither.
+
+    The harvest above is the only thing standing between a broken shipped
+    example and a green CI run, so its judgement is pinned here directly rather
+    than only through whatever happens to be in the repo today.
+    """
+
+    def read(self, text):
+        broken = []
+        return _component_lists("doc", text, broken), broken
+
+    def test_a_model_components_list_is_harvested(self):
+        found, broken = self.read("model:\n  components:\n    - gains:UnitaryGains\n")
+        assert found == [["gains:UnitaryGains"]]
+        assert broken == []
+
+    def test_an_explicitly_empty_list_is_harvested_not_dropped(self):
+        """``components: []`` is a real, visible list, not an absent one.
+
+        Discarding it would put it in neither the harvest nor the breakages, so
+        it would slip past the exact-location counts -- the one thing those
+        counts exist to make impossible.
+        """
+        found, broken = self.read("model:\n  components: []\n")
+        assert found == [[]]
+        assert broken == []
+
+    def test_prose_mentioning_components_is_not_condemned(self):
+        """A ``components:`` line inside a block scalar is content, not a key.
+
+        The document parses, and the parse says there is no component list
+        anywhere in it. Reaching for the text instead would fail a file that is
+        perfectly well formed.
+        """
+        found, broken = self.read("note: |\n  components: only prose\n")
+        assert found == []
+        assert broken == []
+
+    def test_a_root_level_components_list_is_a_breakage(self):
+        found, broken = self.read("components:\n  - gains:UnitaryGains\n")
+        assert found == []
+        assert broken == ["doc: carries a root-level components: but no model.components mapping"]
+
+    def test_a_non_list_components_value_is_a_breakage(self):
+        found, broken = self.read("model:\n  components: gains:UnitaryGains\n")
+        assert found == []
+        assert broken == ["doc: 'model.components' is not a list"]
+
+    def test_unparseable_text_that_looks_like_a_list_is_a_breakage(self):
+        found, broken = self.read("model:\n  components:\n   - a\n  - b\n")
+        assert found == []
+        assert broken == ["doc: not valid YAML (ParserError)"]
+
+    def test_unparseable_text_that_looks_like_nothing_is_ignored(self):
+        found, broken = self.read("data:\n   - a\n  - b\n")
+        assert (found, broken) == ([], [])
+
+
+def test_no_shipped_yaml_carrying_a_component_list_is_unreadable():
+    """A shipped example that cannot be read is a failure, never a skip."""
+    assert not BROKEN_SHIPPED_LISTS, (
+        "shipped YAML carrying a 'components:' key could not be read as a "
+        f"model.components list:\n  " + "\n  ".join(BROKEN_SHIPPED_LISTS)
+    )
+
+
+def test_the_harvest_found_every_expected_location():
+    """The harvest itself, pinned to an exact set of places and counts.
+
+    The tests below are only as good as what this collects, and a harvest that
+    quietly stops seeing a file proves nothing while still passing. Pinning the
+    locations means a fence that stops matching, a config that moves, or an
+    example that is deleted fails here.
+    """
+    counts = {}
+    for label, _ in ALL_SHIPPED_LISTS:
+        counts[label.split("#")[0]] = counts.get(label.split("#")[0], 0) + 1
+    assert counts == EXPECTED_LOCATIONS, _UPDATE_HINT
 
 
 @pytest.mark.parametrize(
