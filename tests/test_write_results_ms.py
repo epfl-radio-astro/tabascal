@@ -1681,6 +1681,10 @@ class TestBadGainsAreSubstituted:
         )
         monkeypatch.setattr(ms_mod, "resolve_data_description", lambda ms_path, ddid=0: (0, 0))
         monkeypatch.setattr(ms_mod, "resolve_correlation", lambda ms_path, name, pol_id=0: 0)
+        # The export runs after this warning whatever the warning does, and there
+        # is no MS on disk here for it to run against; it is the subject of its
+        # own tests above, not of this one.
+        monkeypatch.setattr(write_mod, "write_gain_caltable", lambda *a, **kw: None)
 
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
@@ -1857,6 +1861,84 @@ class TestTheExportRuns:
 
         with open(sentinel) as f:
             assert f.read() == "keep me"
+
+    def test_it_runs_even_when_the_gain_warnings_are_errors(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """A filter promoting ``RuntimeWarning`` must not strand the old table.
+
+        The bad-gain warnings are raised after the columns are written, so a
+        process that promotes them to errors stops there -- with the columns
+        already updated and the previous run's table still beside them, under the
+        current name, describing gains that are no longer in the results. The
+        export runs in a ``finally`` for exactly that: the error still comes out,
+        and the table on disk is this run's.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        stale = read_caltable(_caltable_path(zarr_path))["gains"]
+        assert np.all(np.isfinite(stale))
+
+        # Re-fitted, and this time the fit killed an antenna.
+        dead = gains.copy()
+        dead[:, 2] = 0.0
+        again = _write_zarr(tmp_path, dead, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(_substitute(dead)) * (ast + rfi)).mean(axis=0)))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+
+            with pytest.raises(RuntimeWarning, match="Affected antennas"):
+                run_writer(_fake_ms(data), again, ms_path=ms_skeleton, emit=True)
+
+        # The table beside the results is the new one: antenna 2 has no solution.
+        current = read_caltable(_caltable_path(zarr_path))["gains"]
+
+        assert np.all(np.isnan(current[2]))
+        assert np.all(np.isfinite(current[[0, 1, 3]]))
+
+    def test_two_warnings_in_flight_keep_the_first(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """Bad gains *and* a failed export, both under an error filter.
+
+        The export still clears the table it could not replace -- that happens
+        before its own warning -- and the warning it then raises arrives chained
+        to the bad-gain error rather than in place of it, so neither report is
+        lost.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        assert os.path.exists(_caltable_path(zarr_path))
+
+        two_windows = _ms_skeleton(tmp_path, name="two_windows.ms", n_spw=2)
+        dead = gains.copy()
+        dead[:, 2] = 0.0
+        again = _write_zarr(tmp_path, dead, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(_substitute(dead)) * (ast + rfi)).mean(axis=0)))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+
+            with pytest.raises(RuntimeWarning) as raised:
+                run_writer(_fake_ms(data), again, ms_path=two_windows, emit=True)
+
+        chain, error = [], raised.value
+        while error is not None:
+            chain.append(str(error))
+            error = error.__context__
+
+        assert any("spectral window" in link for link in chain)
+        assert any("Affected antennas" in link for link in chain)
+        # And the table that described the previous fit is gone even here: the
+        # clean-up runs before the export's own warning does.
+        assert not os.path.exists(_caltable_path(zarr_path))
 
     def test_a_memory_error_is_not_demoted(self, tmp_path, run_writer, monkeypatch):
         """Running out of memory is the machine's problem, not the export's.

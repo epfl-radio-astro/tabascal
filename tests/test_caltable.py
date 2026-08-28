@@ -459,6 +459,25 @@ class TestRemoveCaltable:
         assert remove_caltable(path, ms_path) is False
         assert os.path.exists(path)
 
+    def test_an_unreadable_info_record_is_refused_rather_than_raised(
+        self, tmp_path, gains, ms_path
+    ):
+        """The answer is always yes or no, never an exception.
+
+        This is asked on the way to a deletion, and often while something else
+        has already gone wrong, so a table whose INFO record is not even text
+        has to come back "not a caltable" rather than take the caller down.
+        """
+
+        path = str(tmp_path / "binary.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        with open(os.path.join(path, "table.info"), "wb") as f:
+            f.write(b"\xff\xfe\x00Type = Calibration")
+
+        assert remove_caltable(path, ms_path) is False
+        assert os.path.exists(path)
+
     def test_it_refuses_hand_written_marker_files(self, tmp_path, ms_path):
         """A directory dressed up as a caltable is still not one."""
 

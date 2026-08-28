@@ -564,12 +564,21 @@ def write_results_ms(
         xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords),
     )
 
-    warn_bad_gains(n_bad, bad.size, bad_ants)
-    warn_bad_baseline_gains(n_bad_bl, bad_bl_mean.size)
-
-    # The same calibration these columns were divided by, as a table standard
-    # tooling can apply. Last, and additive: see _emit_gain_caltable.
-    _emit_gain_caltable(ms_path, results_zarr_path, gain_table)
+    try:
+        warn_bad_gains(n_bad, bad.size, bad_ants)
+        warn_bad_baseline_gains(n_bad_bl, bad_bl_mean.size)
+    finally:
+        # The same calibration these columns were divided by, as a table standard
+        # tooling can apply. Last, and additive -- but in a finally, because the
+        # two warnings above can *raise*: a process filtering RuntimeWarning to an
+        # error stops on them, and the columns are already written by then. The
+        # export would be skipped with the previous run's table still beside the
+        # new results, under the current name, describing gains that are no longer
+        # there -- the stale calibration this export goes to some length to avoid
+        # anywhere else. It contains its own failures (see _emit_gain_caltable),
+        # and a warning it raises under such a filter arrives chained to the one
+        # that was already propagating rather than replacing it.
+        _emit_gain_caltable(ms_path, results_zarr_path, gain_table)
 
 
 #: Extension of the calibration table written beside a results zarr. CASA's own

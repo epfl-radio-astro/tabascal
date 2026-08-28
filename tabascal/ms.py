@@ -1459,11 +1459,12 @@ def _is_caltable(path: str) -> bool:
     is that the thing about to be removed was a casacore calibration table and
     not a caller's data.
 
-    Never raises: a damaged table has to answer "no" rather than take the caller
-    down on the way to a deletion that then does not happen.
+    Never raises, literally: every read here is guarded, casacore's import
+    included. A damaged table -- an INFO record that is not even text, a
+    ``table.dat`` that is not a table, an environment without casacore -- has to
+    answer "no" rather than take the caller down on the way to a deletion that
+    then does not happen.
     """
-
-    from casacore.tables import tableexists
 
     if not os.path.isdir(path):
         return False
@@ -1474,7 +1475,9 @@ def _is_caltable(path: str) -> bool:
     try:
         with open(os.path.join(path, "table.info")) as info:
             declared = info.read(4096)
-    except OSError:
+    except Exception:
+        # Not only OSError: a table.info that is not valid text decodes to a
+        # UnicodeDecodeError, which is a ValueError.
         return False
 
     # "Type = Calibration" on the first line, as casacore writes it.
@@ -1484,6 +1487,8 @@ def _is_caltable(path: str) -> bool:
         return False
 
     try:
+        from casacore.tables import tableexists
+
         return bool(tableexists(path))
     except Exception:
         return False
