@@ -22,7 +22,9 @@ columns. Those cases need a real MS on disk to copy subtables out of
 (``ms_skeleton``) and are skipped where casacore is not installed.
 
 ``write_results_xds`` is covered here too, for the one thing the writer reads
-back out of it: which correlation the run fitted.
+back out of it: which correlation the run fitted. So is the writer's own command
+line, ``tab2MS``, for the arguments that have to reach the writer to mean
+anything.
 
 No jax runs here: the writer works in ``complex64`` in either session
 precision, so the tolerances come from float32 round-off (``_tolerances``) and
@@ -39,6 +41,7 @@ import dask.array as da
 import xarray as xr
 
 import tabascal.ms as ms_mod
+import tabascal.scripts.results_to_MS as tab2ms_mod
 import tabascal.write as write_mod
 from tabascal.ms import read_caltable
 from tabascal.write import write_results_ms, write_results_xds
@@ -344,6 +347,7 @@ def run_writer(monkeypatch, tmp_path):
         ext_gains=None,
         ext_dead=None,
         gain_table=None,
+        caltable_path=None,
         n_ant=N_ANT,
         spw_id=0,
         ms_path="unused.ms",
@@ -450,7 +454,13 @@ def run_writer(monkeypatch, tmp_path):
 
             monkeypatch.setattr(write_mod, "write_gain_caltable", _no_export)
 
-        write_results_ms(ms_path, zarr_path, corr=corr, gain_table=gain_table)
+        write_results_ms(
+            ms_path,
+            zarr_path,
+            corr=corr,
+            gain_table=gain_table,
+            caltable_path=caltable_path,
+        )
 
         values = {
             col: np.asarray(captured["xds"][col].data) for col in captured["cols"]
@@ -1739,10 +1749,12 @@ class TestTheExportRuns:
             ms_path="real.ms",
         )
 
+        # out_path resolved by the writer rather than left for the export to
+        # derive: it is the one path the clean-up also acts on.
         assert captured["caltable"] == {
             "ms_path": "real.ms",
             "results_zarr_path": zarr_path,
-            "out_path": None,
+            "out_path": _caltable_path(zarr_path),
             "gain_table": [str(table)],
         }
 
@@ -2418,6 +2430,225 @@ class TestNothingIsExportedWithoutAFit:
 
         assert write_mod.write_gain_caltable(ms_skeleton, path) is None
         assert not os.path.exists(_caltable_path(path))
+
+
+class TestACustomCaltablePath:
+    """``tab2MS -o``: one path, authoritative everywhere.
+
+    The default ``<results>.B`` is derived from the results zarr, and the
+    clean-up that removes a superseded table used to derive it a second time.
+    A custom path has to displace the default *everywhere* -- what is written,
+    what is refused, what a failed or no-op export tidies away -- or a rerun
+    cleans a location it never wrote to and leaves standing the stale table it
+    did write, which is the one hazard this whole export is careful about.
+    """
+
+    @pytest.fixture
+    def elsewhere(self, tmp_path):
+        """A caltable path with nothing to do with the results' name or place."""
+
+        directory = tmp_path / "cal"
+        directory.mkdir()
+
+        return str(directory / "solution.B")
+
+    def test_the_flag_reaches_the_export(self, tmp_path, run_writer, elsewhere):
+        """Threaded through, unchanged, rather than re-derived downstream."""
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        _, captured = run_writer(_fake_ms(data), zarr_path, caltable_path=elsewhere)
+
+        assert captured["caltable"]["out_path"] == elsewhere
+
+    def test_the_table_is_written_there_and_not_at_the_default(
+        self, tmp_path, run_writer, ms_skeleton, elsewhere
+    ):
+        """The whole point: the calibration lands where it was asked for."""
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(
+            _fake_ms(data),
+            zarr_path,
+            ms_path=ms_skeleton,
+            emit=True,
+            caltable_path=elsewhere,
+        )
+
+        assert not os.path.exists(_caltable_path(zarr_path))
+
+        read = read_caltable(elsewhere)
+
+        np.testing.assert_allclose(
+            read["gains"],
+            gains.mean(axis=0).astype(np.complex64),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+    def test_a_failed_export_clears_the_custom_path_and_not_the_default(
+        self, tmp_path, run_writer, ms_skeleton, elsewhere
+    ):
+        """The regression the threading exists to avoid.
+
+        A run that exported to the default and then to a custom path leaves a
+        table at both. When the custom export fails, the table it could not
+        replace is the custom one -- removing the default instead would sweep up
+        a table this run never touched *and* leave the stale one standing under
+        the name the run was asked to write.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+        run_writer(
+            _fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True,
+            caltable_path=elsewhere,
+        )
+
+        assert os.path.exists(_caltable_path(zarr_path))
+        assert os.path.exists(elsewhere)
+
+        # The same results, re-fitted, on an MS no caltable can describe.
+        two_windows = _ms_skeleton(tmp_path, name="two_windows.ms", n_spw=2)
+        again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
+
+        with pytest.warns(RuntimeWarning) as record:
+            run_writer(
+                _fake_ms(data), again, ms_path=two_windows, emit=True,
+                caltable_path=elsewhere,
+            )
+
+        message = str(record[0].message)
+
+        assert "spectral window" in message
+        assert elsewhere in message
+        assert not os.path.exists(elsewhere)
+        assert os.path.exists(_caltable_path(zarr_path))
+
+    def test_a_no_op_rerun_removes_the_custom_table(
+        self, tmp_path, run_writer, ms_skeleton, elsewhere
+    ):
+        """A rerun that fits nothing follows the custom path too.
+
+        The stale table is the dangerous one wherever it sits: it is beside the
+        results under the name the caller asked for, so it reads as this run's
+        solution just as the default would.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(
+            _fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True,
+            caltable_path=elsewhere,
+        )
+
+        assert os.path.exists(elsewhere)
+
+        unity = _uniform_gains(1)
+        again = _write_zarr(tmp_path, unity, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(unity) * (ast + rfi)).mean(axis=0)))
+
+        with pytest.warns(RuntimeWarning, match="earlier run") as record:
+            run_writer(
+                _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
+                caltable_path=elsewhere,
+            )
+
+        assert elsewhere in str(record[0].message)
+        assert not os.path.exists(elsewhere)
+
+    def test_something_else_at_the_custom_path_is_neither_written_nor_removed(
+        self, tmp_path, run_writer, ms_skeleton, elsewhere
+    ):
+        """The export names its own output; the caller naming it changes nothing.
+
+        A directory of the caller's already at the custom path is left exactly as
+        it is -- neither overwritten by the write nor swept up by the clean-up.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        os.makedirs(elsewhere)
+        sentinel = os.path.join(elsewhere, "mine.txt")
+        with open(sentinel, "w") as f:
+            f.write("keep me")
+
+        with pytest.warns(RuntimeWarning, match="not a calibration table"):
+            values, _ = run_writer(
+                _fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True,
+                caltable_path=elsewhere,
+            )
+
+        assert set(COLS).issubset(values)
+
+        with open(sentinel) as f:
+            assert f.read() == "keep me"
+
+    def test_a_custom_path_inside_the_ms_is_refused(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """#157's overlap guard follows the custom path, and the MS survives.
+
+        The results can sit anywhere here; it is the output the caller named
+        that would be written into the very subtables the export copies from.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        inside = os.path.join(ms_skeleton, "solution.B")
+
+        with pytest.warns(RuntimeWarning, match="inside the Measurement Set"):
+            values, _ = run_writer(
+                _fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True,
+                caltable_path=inside,
+            )
+
+        assert set(COLS).issubset(values)
+        assert not os.path.exists(inside)
+
+        # The observation the guard is about, still readable.
+        tables = pytest.importorskip("casacore.tables")
+        with tables.table(os.path.join(ms_skeleton, "ANTENNA"), ack=False) as ant:
+            assert ant.nrows() == N_ANT
+
+
+class TestTheTab2MSArguments:
+    """``tab2MS``'s own surface: what the flags parse to and what they call."""
+
+    def _args(self, *argv):
+        return tab2ms_mod.build_parser().parse_args(
+            ["-m", "a.ms", "-z", "r.zarr", *argv]
+        )
+
+    def test_the_caltable_path_is_optional(self):
+        """No flag, no override: the export keeps deriving ``<results>.B``."""
+
+        assert self._args().caltable_path is None
+
+    @pytest.mark.parametrize("flag", ["-o", "--caltable-path"])
+    def test_both_spellings_set_it(self, flag):
+        assert self._args(flag, "/cal/solution.B").caltable_path == "/cal/solution.B"
+
+    def test_it_is_handed_to_the_writer(self, monkeypatch):
+        """Parsed and passed on, rather than parsed and dropped."""
+
+        captured = {}
+        monkeypatch.setattr(
+            write_mod, "write_results_ms", lambda **kw: captured.update(kw)
+        )
+
+        tab2ms_mod.run(self._args("-o", "/cal/solution.B"))
+
+        assert captured["caltable_path"] == "/cal/solution.B"
+        assert captured["results_zarr_path"] == "r.zarr"
 
 
 # ---------------------------------------------------------------------------
