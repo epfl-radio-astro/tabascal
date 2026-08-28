@@ -22,6 +22,7 @@ import pytest
 from tabascal.gain_table import (
     Coverage,
     compose_gains,
+    gains_from_tables,
     interpolate_gains,
     normalise_gain_tables,
 )
@@ -107,6 +108,42 @@ class TestAmplitudeAndPhase:
         # 1.2 pi, wrapped back into (-pi, pi]. Interpolating the *stored* angles
         # would give 0.2 pi here -- a gain rotated by a whole radian.
         assert np.angle(got[0, 1, 0]) == pytest.approx(-0.8 * np.pi, abs=1e-9)
+
+    def test_the_two_axes_share_one_phase_branch(self):
+        """The phase is one surface, not a stack of independently-branched lines.
+
+        Three channels whose phase passes through +-pi between the two solved
+        times. Reconstructing a complex gain after the frequency stage throws
+        the unwrap branch away, and the time stage then picks a branch per
+        channel -- tearing the band by a whole turn at whichever channel crossed
+        the cut.
+        """
+
+        block = np.exp(1j * np.pi * np.array([[0.0, 0.85], [0.0, 0.95], [0.0, 1.05]]))
+        cal = _one_ant(block, times=[0.0, 10.0], freqs=[1e9, 1.1e9, 1.2e9])
+
+        got = interpolate_gains(cal, times=[5.0], freqs=[1e9, 1.1e9, 1.2e9]).gains
+
+        assert np.allclose(
+            np.angle(got[0, :, 0]), np.pi * np.array([0.425, 0.475, 0.525])
+        )
+
+    def test_a_half_turn_step_leaves_the_band_continuous(self):
+        """The reproduction case: a median step of exactly half a turn.
+
+        The two channels step 0.9 pi and 1.1 pi over the same interval, so the
+        band's own shape is what says they belong on one branch -- a per-channel
+        unwrap has nothing to go on and flips the second by 2 pi.
+        """
+
+        block = np.exp(1j * np.pi * np.array([[0.0, 0.9], [0.0, 1.1]]))
+        cal = _one_ant(block, times=[0.0, 10.0], freqs=[1e9, 1.2e9])
+
+        got = interpolate_gains(cal, times=[5.0], freqs=[1e9, 1.1e9, 1.2e9]).gains
+
+        assert np.allclose(
+            np.angle(got[0, :, 0]), np.pi * np.array([0.45, 0.50, 0.55])
+        )
 
     def test_extrapolation_holds_the_edge_value_in_both_axes(self):
         block = np.array([[1.0 + 0j, 2.0 + 0j], [4.0 + 0j, 8.0 + 0j]])
@@ -262,6 +299,27 @@ class TestCoverage:
         assert cov == Coverage(
             exact=0.0, interpolated=1.0, edge_held=0.0, dead=0.0
         )
+
+    def test_a_non_rectangular_support_is_not_reported_as_a_rectangle(self):
+        """Two solutions on a diagonal cover their own corners and hold an edge
+        for the other two.
+
+        An envelope taken over the two axes separately would call both of those
+        interpolated: each sits inside the antenna's solved range on *each*
+        axis, and inside nothing at all on the line it was actually placed by.
+        """
+
+        gains = np.full((1, 2, 2), np.nan, dtype=complex)
+        gains[0, 0, 0] = 1.0
+        gains[0, 1, 1] = 2.0
+        cal = _cal(gains, times=[0.0, 10.0], freqs=[1e9, 2e9])
+
+        cov = interpolate_gains(cal, times=[0.0, 10.0], freqs=[1e9, 2e9]).coverage
+
+        assert cov.exact == pytest.approx(0.5)
+        assert cov.edge_held == pytest.approx(0.5)
+        assert cov.interpolated == 0.0
+        assert cov.dead == 0.0
 
     def test_a_dead_antenna_is_reported_as_dead(self):
         gains = np.ones((2, 1, 1), dtype=complex)
@@ -754,6 +812,79 @@ class TestApplyGainTable:
             np.asarray(config.vis_obs), np.asarray(expected), rtol=exact_rtol
         )
         assert config.gain_table == [os.path.abspath(first), os.path.abspath(second)]
+
+
+class TestDeclaredTimeScale:
+    """A caltable's TIME is matched on the MS's own numbers, not on UTC.
+
+    Since #158 the reader keeps two time coordinates: ``times_mjd``, the MS's
+    ``TIME`` column converted in unit only and still on the scale the column
+    declares, and ``times_jd``, the instants those numbers name normalised to
+    UTC. A caltable's ``TIME`` is a copy of the MS's, so the match is
+    declared-frame to declared-frame -- exact, and free of any leap-second
+    question. Matching on ``times_jd`` instead would be 37 seconds out on a
+    TAI-declared MS, which is four orders of magnitude past the tolerance.
+
+    The relationship between the two is taken from ``time.to_utc_jd``, which is
+    the function ``read_ms`` itself builds ``times_jd`` with; the reader's end
+    of it is pinned by ``test_ms.py::TestDeclaredTimeScale``.
+    """
+
+    #: Leap seconds at the epoch TIMES_MJD sits on; they have stood at 37 since
+    #: 2017, and a future one changes the offset from then on, never this one.
+    LEAP_SECS = 37.0
+
+    def _tai_config(self, vis_obs):
+        """A config as ``read_ms`` leaves one for a TAI-declared MS."""
+
+        from tabascal.time import mjd_to_jd, to_utc_jd
+
+        config = _tab_config(vis_obs, noise=0.5)
+        config.times_jd = to_utc_jd(mjd_to_jd(config.times_mjd), "tai")
+
+        return config
+
+    def test_the_two_coordinates_really_do_differ(self, vis_obs):
+        """Otherwise the tests below would pass on either choice."""
+
+        from tabascal.time import jd_to_mjd, mjd_to_jd
+
+        config = self._tai_config(vis_obs)
+        drift = (mjd_to_jd(config.times_mjd) - config.times_jd) * DAY_SECS
+
+        assert np.allclose(drift, self.LEAP_SECS, atol=1e-3)
+        assert np.abs(jd_to_mjd(config.times_jd) - config.times_mjd).max() > 0
+
+    def test_the_table_matches_the_declared_times_exactly(
+        self, casacore, tmp_path, gains, vis_obs, capsys
+    ):
+        path = _write_table(tmp_path, gains)
+        config = self._tai_config(vis_obs)
+
+        config.apply_gain_table(path)
+
+        assert "100.0 % exact" in capsys.readouterr().out
+
+    def test_matching_on_the_utc_times_would_miss_every_sample(
+        self, casacore, tmp_path, gains, vis_obs
+    ):
+        """What the 37 seconds cost, stated as behaviour rather than arithmetic."""
+
+        from tabascal.time import jd_to_mjd
+
+        from tabascal.ms import read_caltable
+
+        path = _write_table(tmp_path, gains)
+        config = self._tai_config(vis_obs)
+
+        coverage = interpolate_gains(
+            read_caltable(path), jd_to_mjd(config.times_jd) * DAY_SECS, config.freqs
+        ).coverage
+
+        # Every sample lands 37 s past the last solved one, so the whole
+        # observation would be calibrated by holding one edge.
+        assert coverage.exact == 0.0
+        assert coverage.edge_held == 1.0
 
 
 # ---------------------------------------------------------------------------

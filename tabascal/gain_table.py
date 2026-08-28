@@ -14,10 +14,21 @@ Interpolating the real and imaginary parts is the obvious implementation and is
 wrong: two unit gains 60 degrees apart average to ``|g| = 0.87``, so the data
 would be divided by a gain no antenna ever had and the flux scale would move by
 13 %. Amplitude and phase are interpolated separately, and the phase is
-*unwrapped* first, along each axis it is interpolated along: a B table winds
-across the band through a residual delay and around the ``+-pi`` branch cut in
-time, and interpolating the stored angles across such a step averages the two
-sides of the cut into a gain pointing the wrong way.
+*unwrapped* first: a B table winds across the band through a residual delay and
+around the ``+-pi`` branch cut in time, and interpolating the stored angles
+across such a step averages the two sides of the cut into a gain pointing the
+wrong way.
+
+One phase surface, not a stack of branches
+-------------------------------------------
+The unwrap has to be *two-dimensional*, and the phase has to stay a real
+surface through both interpolation stages. Unwrapping along frequency and then
+rebuilding a complex gain throws the branch away; the time stage then takes
+``angle()`` again and picks a branch per channel, which tears the band by a
+whole turn at whichever channel happened to cross the cut. So the phase is
+unwrapped along frequency within each timestep, the timesteps are brought onto
+one branch by whole turns (which is also the unwrap along time), and
+``exp(i phase)`` is applied exactly once, at the end.
 
 The interpolation is linear and separable -- frequency first, then time -- and
 **extrapolation holds the edge value**: a table that does not reach the start of
@@ -32,6 +43,11 @@ table never sampled. Only an antenna with no valid solution *anywhere* has
 nothing to interpolate from; its gain is 1 and it is reported ``dead``, so the
 caller can flag those visibilities rather than divide by a number nobody solved.
 
+Every output is classified by the support it was actually built from, line by
+line, and the provenance of the frequency stage is carried through the time
+stage -- so a table whose solutions run along a diagonal reports the edge-holds
+it really performed rather than the rectangle its two axes span.
+
 Several tables compose on the grid, not before it
 --------------------------------------------------
 ``data.gain_table`` takes an ordered list, and each table is placed on the
@@ -39,9 +55,25 @@ observation's grid *before* the product is formed. The two orders do not agree:
 two amplitudes ramping 1 -> 3 give ``2 * 2 = 4`` half way when each is
 interpolated first, and ``(1 + 9) / 2 = 5`` when the product is interpolated,
 which is an artefact of fitting a quadratic with a straight line.
+
+Times
+-----
+A caltable's ``TIME`` is a copy of the MS's, so it is matched against
+``TabConfig.times_mjd`` -- the MS's own column, converted in unit only and still
+on the scale the column declares -- and never against ``times_jd``, which the
+reader has normalised to UTC (#158). Declared frame to declared frame is exact;
+on a TAI-declared MS the UTC coordinate is 37 seconds away, four orders of
+magnitude past the matching tolerance. The residual hazard is that a caltable's
+own ``TIME`` metadata is taken on the CASA convention rather than read: the unit
+is assumed to be seconds and the epoch reference assumed to be the MS's, because
+a caltable is written beside its MS by tools that copy that column across. A
+table whose ``TIME`` was written on another unit or another scale would be
+matched wrongly, and the coverage line is what would say so -- it would report
+no exact cover at all.
 """
 
 import os
+import warnings
 from collections.abc import Sequence
 from typing import Dict, List, NamedTuple, Optional, Union
 
@@ -60,14 +92,20 @@ TIME_ATOL = 1e-3
 #: written by two different tools agrees to far better than this.
 FREQ_RTOL = 1e-6
 
+#: How each output sample got its value, worst last: the categories combine with
+#: ``maximum`` as provenance is carried from one interpolation stage to the next.
+_EXACT, _INTERPOLATED, _EDGE_HELD, _DEAD = 0, 1, 2, 3
+
+_TURN = 2 * np.pi
+
 
 class Coverage(NamedTuple):
     """Fractions of the observation's samples by how their gain was obtained.
 
     ``exact`` is a solved sample sitting on the requested coordinate,
     ``interpolated`` one spanned by solutions either side, ``edge_held`` one
-    beyond the last solution on either axis, and ``dead`` an antenna that was
-    never solved at all. They sum to 1.
+    beyond the last solution on the line it was placed by, and ``dead`` an
+    antenna that was never solved at all. They sum to 1.
     """
 
     exact: float
@@ -130,152 +168,239 @@ def normalise_gain_tables(gain_table) -> List[str]:
     return resolved
 
 
-def _match(want: NDArray, have: NDArray, atol: float) -> NDArray:
-    """Index in ``have`` of each ``want`` within ``atol``, or ``-1``.
+# ---------------------------------------------------------------------------
+# One branch for the whole phase surface
+# ---------------------------------------------------------------------------
 
-    By value rather than by index, which is what lets a table solved on a master
-    apply to a subset carved out of it, in whatever channel order the subset was
-    written.
+def _groups(valid: NDArray):
+    """Line indices grouped by which samples they carry.
+
+    In practice a table shares one flagging pattern across most of its lines (or
+    a handful of them), so grouping turns a per-line loop into a few vectorised
+    operations over the lines that need the same thing done to them.
     """
-
-    order = np.argsort(have)
-    ordered = have[order]
-
-    right = np.clip(np.searchsorted(ordered, want), 0, len(have) - 1)
-    left = np.clip(right - 1, 0, len(have) - 1)
-    nearer = np.where(
-        np.abs(ordered[right] - want) <= np.abs(ordered[left] - want), right, left
-    )
-    idx = order[nearer]
-
-    return np.where(np.abs(have[idx] - want) <= atol, idx, -1)
-
-
-def _linear(xs: NDArray, ys: NDArray, want: NDArray) -> NDArray:
-    """Linear interpolation of ``ys`` along its last axis, holding the edges.
-
-    ``np.interp``'s behaviour, vectorised over every leading axis: the support
-    points are shared by all of them, which is what makes a whole group of lines
-    one array operation.
-    """
-
-    if len(xs) == 1:
-        return np.repeat(ys, len(want), axis=-1)
-
-    hi = np.clip(np.searchsorted(xs, want), 1, len(xs) - 1)
-    lo = hi - 1
-    # Clipped, so a coordinate outside the solved range takes the edge value
-    # rather than a straight line continued off the end of the solutions.
-    weight = np.clip((want - xs[lo]) / (xs[hi] - xs[lo]), 0.0, 1.0)
-
-    return ys[..., lo] + weight * (ys[..., hi] - ys[..., lo])
-
-
-def _interp_last_axis(gains: NDArray, have: NDArray, want: NDArray) -> NDArray:
-    """Interpolate complex gains onto ``want`` along their last axis.
-
-    NaN entries are absences: each line is interpolated from the samples it does
-    carry, so a flagged solution is bridged rather than honoured. Lines are
-    grouped by which samples they carry, since in practice a whole table shares
-    one flagging pattern (or a handful) and each group is then one vectorised
-    interpolation.
-    """
-
-    lines = gains.reshape(-1, gains.shape[-1])
-    valid = np.isfinite(lines) & (lines != 0)
-
-    out = np.full((lines.shape[0], len(want)), np.nan, dtype=complex)
 
     patterns, inverse = np.unique(valid, axis=0, return_inverse=True)
     inverse = np.reshape(inverse, -1)
 
     for p, pattern in enumerate(patterns):
+        yield np.flatnonzero(inverse == p), pattern
+
+
+def _support(pattern: NDArray, have: NDArray) -> NDArray:
+    """The indices a line carries, in ascending coordinate order."""
+
+    support = np.flatnonzero(pattern)
+    support = support[np.argsort(have[support])]
+
+    if len(support) > 1 and np.any(np.diff(have[support]) <= 0):
+        raise ValueError(
+            "The calibration table holds two solutions on the same coordinate, "
+            "so there is no interval to interpolate over. Its times and channel "
+            "frequencies must each be distinct."
+        )
+
+    return support
+
+
+def _unwrap_along_last(phase: NDArray, valid: NDArray, have: NDArray) -> NDArray:
+    """``np.unwrap`` along the last axis, over the samples each line carries."""
+
+    lines = phase.reshape(-1, phase.shape[-1]).copy()
+    mask = valid.reshape(-1, valid.shape[-1])
+
+    for rows, pattern in _groups(mask):
+        if pattern.sum() < 2:
+            continue
+
+        support = _support(pattern, have)
+        lines[np.ix_(rows, support)] = np.unwrap(
+            lines[np.ix_(rows, support)], axis=-1
+        )
+
+    return lines.reshape(phase.shape)
+
+
+def _align_timesteps(phase: NDArray, valid: NDArray, times: NDArray) -> None:
+    """Shift each timestep by whole turns so the band stays on one branch.
+
+    Unwrapping along frequency leaves each timestep on the branch of its own
+    first solved channel, so two timesteps can sit a whole turn apart even where
+    the gain barely moved. They are brought together by the median step over the
+    channels the two have in common: the band's own shape is what says where the
+    branch is, and a per-channel unwrap cannot see it.
+
+    This is also the unwrap along time -- the median step is brought into
+    ``(-pi, pi]``. A step of exactly half a turn is the one genuinely ambiguous
+    case and is left as written (``np.round``'s half-to-even), rather than being
+    turned into a half turn of the opposite sign.
+
+    Mutates ``phase`` in place; timesteps carrying nothing are stepped over, so
+    the alignment spans them the way the interpolation does.
+    """
+
+    n_ant, n_freq, _ = phase.shape
+    offset = np.zeros(n_ant)
+    previous = np.full(n_ant, -1)
+
+    for t in np.argsort(times):
+        here = valid[:, :, t]
+        has = here.any(axis=1)
+
+        if (previous >= 0).any():
+            at = np.broadcast_to(
+                np.clip(previous, 0, None)[:, None, None], (n_ant, n_freq, 1)
+            )
+            both = here & np.take_along_axis(valid, at, axis=2)[:, :, 0]
+            both &= (previous >= 0)[:, None]
+
+            step = np.where(
+                both,
+                phase[:, :, t] + offset[:, None]
+                - np.take_along_axis(phase, at, axis=2)[:, :, 0],
+                np.nan,
+            )
+            with warnings.catch_warnings():
+                # A line with nothing in common with the previous timestep has
+                # no step to read; it keeps the offset it already carried.
+                warnings.simplefilter("ignore", RuntimeWarning)
+                median = np.nanmedian(step, axis=1)
+
+            turns = np.where(np.isnan(median), 0.0, np.round(median / _TURN))
+            offset = np.where(has, offset - _TURN * turns, offset)
+
+        phase[:, :, t] += offset[:, None]
+        previous = np.where(has, t, previous)
+
+
+def _unwrap_surface(gains: NDArray, valid: NDArray, times: NDArray, freqs: NDArray):
+    """Amplitude and a branch-consistent unwrapped phase on the table's grid.
+
+    Both are NaN where the table carries no solution, which is what makes them
+    absences the interpolation bridges rather than values it honours.
+    """
+
+    amplitude = np.where(valid, np.abs(gains), np.nan)
+    phase = np.where(valid, np.angle(gains), np.nan)
+
+    if freqs is not None:
+        phase = np.moveaxis(
+            _unwrap_along_last(
+                np.moveaxis(phase, 1, -1), np.moveaxis(valid, 1, -1), freqs
+            ),
+            -1,
+            1,
+        )
+
+    _align_timesteps(phase, valid, times)
+
+    return amplitude, phase
+
+
+# ---------------------------------------------------------------------------
+# Placing a surface on one axis of the observation's grid
+# ---------------------------------------------------------------------------
+
+class _Placed(NamedTuple):
+    """The result of interpolating along one axis, and where it came from.
+
+    ``lo`` and ``hi`` index the *input* axis, so a second stage can gather the
+    first stage's categories at the samples it actually interpolated between;
+    ``only_lo`` / ``only_hi`` mark the outputs that took one endpoint alone,
+    which is every exact match and every edge-hold.
+    """
+
+    values: NDArray
+    category: NDArray
+    lo: NDArray
+    hi: NDArray
+    only_lo: NDArray
+    only_hi: NDArray
+
+
+def _place_axis(
+    surfaces: NDArray, valid: NDArray, have: NDArray, want: NDArray, atol: float
+) -> _Placed:
+    """Interpolate ``(n_surface, n_line, n_have)`` onto ``want``, holding edges.
+
+    The surfaces are amplitude and unwrapped phase, interpolated with the same
+    weights because they are two halves of one gain and share one validity mask.
+    """
+
+    n_surface, n_line, _ = surfaces.shape
+    n_want = len(want)
+
+    values = np.full((n_surface, n_line, n_want), np.nan)
+    category = np.full((n_line, n_want), _DEAD, dtype=np.int8)
+    lo_idx = np.full((n_line, n_want), -1)
+    hi_idx = np.full((n_line, n_want), -1)
+    only_lo = np.zeros((n_line, n_want), dtype=bool)
+    only_hi = np.zeros((n_line, n_want), dtype=bool)
+
+    for rows, pattern in _groups(valid):
         if not pattern.any():
             continue
 
-        rows = np.flatnonzero(inverse == p)
-        support = np.flatnonzero(pattern)
-        order = np.argsort(have[support])
-        support = support[order]
-
+        support = _support(pattern, have)
         xs = have[support]
-        if len(xs) > 1 and np.any(np.diff(xs) <= 0):
-            raise ValueError(
-                "The calibration table solves two solutions on the same "
-                "coordinate, so there is no interval to interpolate over. Its "
-                "times and channel frequencies must each be distinct."
-            )
 
-        block = lines[np.ix_(rows, support)]
-        # Unwrapped along the axis being interpolated, and only over the samples
-        # actually being interpolated between: the branch cut is an artefact of
-        # storing an angle, not a feature of the gain.
-        amplitude = _linear(xs, np.abs(block), want)
-        phase = _linear(xs, np.unwrap(np.angle(block), axis=-1), want)
+        if len(xs) == 1:
+            lo = hi = np.zeros(n_want, dtype=int)
+            weight = np.zeros(n_want)
+        else:
+            hi = np.clip(np.searchsorted(xs, want), 1, len(xs) - 1)
+            lo = hi - 1
+            # Clipped, so a coordinate outside the solved range takes the edge
+            # value rather than a straight line continued off the end of it.
+            weight = np.clip((want - xs[lo]) / (xs[hi] - xs[lo]), 0.0, 1.0)
 
-        out[rows] = amplitude * np.exp(1j * phase)
+        block = surfaces[:, rows][:, :, support]
+        values[:, rows] = block[..., lo] + weight * (block[..., hi] - block[..., lo])
 
-    return out.reshape(gains.shape[:-1] + (len(want),))
+        at_lo = np.abs(want - xs[lo]) <= atol
+        at_hi = np.abs(want - xs[hi]) <= atol
+        outside = (want < xs[0] - atol) | (want > xs[-1] + atol)
+
+        category[rows] = np.where(
+            outside, _EDGE_HELD, np.where(at_lo | at_hi, _EXACT, _INTERPOLATED)
+        )
+        lo_idx[rows] = support[lo]
+        hi_idx[rows] = support[hi]
+        only_lo[rows] = at_lo | (weight <= 0.0)
+        only_hi[rows] = at_hi | (weight >= 1.0)
+
+    return _Placed(values, category, lo_idx, hi_idx, only_lo, only_hi)
 
 
-def _classify(
-    valid: NDArray,
-    cal_freqs: Optional[NDArray],
-    cal_times: NDArray,
-    freqs: NDArray,
-    times: NDArray,
-    freq_atol: float,
-    time_atol: float,
-) -> Coverage:
-    """How each sample of the observation's grid got its gain.
+def _carry(previous: NDArray, placed: _Placed) -> NDArray:
+    """This stage's categories, worsened by those of the values it read.
 
-    Read off the table's own coordinates and validity rather than out of the
-    interpolation, so the classification says something about the calibration
-    that was supplied -- which is what the log line is for.
+    A sample interpolated between two edge-held ones was itself edge-held, and
+    saying otherwise is how a coverage report comes to describe a rectangle the
+    solutions never filled.
     """
 
-    n_ant = valid.shape[0]
+    at_lo = np.take_along_axis(previous, np.clip(placed.lo, 0, None), axis=-1)
+    at_hi = np.take_along_axis(previous, np.clip(placed.hi, 0, None), axis=-1)
 
-    if cal_freqs is None:
-        # The table does not resolve frequency, so its solution is the answer
-        # for every channel rather than an extrapolation onto them.
-        f_idx = np.zeros(len(freqs), dtype=int)
-        in_band = np.ones((n_ant, len(freqs)), dtype=bool)
-    else:
-        f_idx = _match(freqs, cal_freqs, freq_atol)
-        in_band = _within(valid.any(axis=2), cal_freqs, freqs, freq_atol)
-
-    t_idx = _match(times, cal_times, time_atol)
-    in_span = _within(valid.any(axis=1), cal_times, times, time_atol)
-
-    solved = valid[:, np.clip(f_idx, 0, None)][:, :, np.clip(t_idx, 0, None)]
-    exact = solved & (f_idx >= 0)[None, :, None] & (t_idx >= 0)[None, None, :]
-
-    dead = np.broadcast_to(
-        ~valid.any(axis=(1, 2))[:, None, None], (n_ant, len(freqs), len(times))
+    inherited = np.where(
+        placed.only_lo,
+        at_lo,
+        np.where(placed.only_hi, at_hi, np.maximum(at_lo, at_hi)),
     )
-    edge = ~(in_band[:, :, None] & in_span[:, None, :]) & ~dead
-    exact = exact & ~dead & ~edge
 
-    total = dead.size
+    return np.maximum(placed.category, inherited)
+
+
+def _coverage(category: NDArray) -> Coverage:
+    total = category.size
 
     return Coverage(
-        exact=float(exact.sum() / total),
-        interpolated=float((~exact & ~edge & ~dead).sum() / total),
-        edge_held=float(edge.sum() / total),
-        dead=float(dead.sum() / total),
+        exact=float((category == _EXACT).sum() / total),
+        interpolated=float((category == _INTERPOLATED).sum() / total),
+        edge_held=float((category == _EDGE_HELD).sum() / total),
+        dead=float((category == _DEAD).sum() / total),
     )
-
-
-def _within(valid: NDArray, have: NDArray, want: NDArray, atol: float) -> NDArray:
-    """Per antenna, whether each ``want`` lies inside its solved range."""
-
-    # An antenna with nothing solved gets an empty range (+inf to -inf), which
-    # holds no coordinate at all; it is reported dead rather than edge-held.
-    low = np.min(np.where(valid, have[None], np.inf), axis=1)
-    high = np.max(np.where(valid, have[None], -np.inf), axis=1)
-
-    return (want[None] >= low[:, None] - atol) & (want[None] <= high[:, None] + atol)
 
 
 def interpolate_gains(
@@ -288,8 +413,8 @@ def interpolate_gains(
     """One caltable's gains on an observation's ``(freq, time)`` grid.
 
     ``cal`` is what :func:`tabascal.ms.read_caltable` returns. ``times`` are in
-    the table's own time convention -- MS ``TIME``, i.e. MJD seconds -- and
-    ``freqs`` in Hz.
+    the table's own time convention -- MS ``TIME``, i.e. MJD seconds on the scale
+    the MS declares -- and ``freqs`` in Hz.
 
     A table carrying no ``SPECTRAL_WINDOW`` has no frequencies to match against;
     a single solution is then broadcast across the band, but channels that
@@ -306,6 +431,7 @@ def interpolate_gains(
     cal_freqs = None if cal["freqs"] is None else np.asarray(cal["freqs"], dtype=float)
 
     n_ant, n_cal_freq, n_cal_time = gains.shape
+    n_freq, n_time = len(freqs), len(times)
 
     if len(cal_times) != n_cal_time:
         raise ValueError(
@@ -319,40 +445,64 @@ def interpolate_gains(
             f"{len(cal_freqs)} channel frequencies."
         )
 
+    if cal_freqs is None and n_cal_freq != 1:
+        raise ValueError(
+            f"The calibration table has {n_cal_freq} channels but no "
+            "SPECTRAL_WINDOW subtable, so there is nothing to say which "
+            "frequencies they were solved on. A single-channel table is "
+            "broadcast across the band; a multi-channel one cannot be placed."
+        )
+
     # Every kind of missing solution is made the one absence the interpolation
     # bridges: a zero gain calibrates to infinity, so it is no more a solution
     # than a flagged entry is.
     valid = np.isfinite(gains) & (gains != 0)
-    gains = np.where(valid, gains, np.nan)
+
+    surfaces = np.stack(_unwrap_surface(gains, valid, cal_times, cal_freqs))
 
     if cal_freqs is None:
-        if n_cal_freq != 1:
-            raise ValueError(
-                f"The calibration table has {n_cal_freq} channels but no "
-                "SPECTRAL_WINDOW subtable, so there is nothing to say which "
-                "frequencies they were solved on. A single-channel table is "
-                "broadcast across the band; a multi-channel one cannot be placed."
-            )
-        on_freq = np.repeat(gains, len(freqs), axis=1)
+        # The table does not resolve frequency, so its solution is the answer for
+        # every channel rather than an extrapolation onto them.
+        on_freq = np.repeat(surfaces, n_freq, axis=2)
+        cat_freq = np.where(
+            np.repeat(valid, n_freq, axis=1), np.int8(_EXACT), np.int8(_DEAD)
+        )
     else:
         # Frequency first: a B table's phase winds across the band, so it is the
         # axis whose wraps most need resolving before anything is averaged.
+        placed = _place_axis(
+            np.moveaxis(surfaces, 2, -1).reshape(2, -1, n_cal_freq),
+            np.moveaxis(valid, 1, -1).reshape(-1, n_cal_freq),
+            cal_freqs,
+            freqs,
+            freq_rtol * float(np.median(freqs)),
+        )
         on_freq = np.moveaxis(
-            _interp_last_axis(np.moveaxis(gains, 1, -1), cal_freqs, freqs), -1, 1
+            placed.values.reshape(2, n_ant, n_cal_time, n_freq), -1, 2
+        )
+        cat_freq = np.moveaxis(
+            placed.category.reshape(n_ant, n_cal_time, n_freq), -1, 1
         )
 
-    on_grid = _interp_last_axis(on_freq, cal_times, times)
-
-    freq_atol = freq_rtol * float(np.median(freqs))
-    coverage = _classify(
-        valid, cal_freqs, cal_times, freqs, times, freq_atol, time_atol
+    placed = _place_axis(
+        on_freq.reshape(2, -1, n_cal_time),
+        (cat_freq != _DEAD).reshape(-1, n_cal_time),
+        cal_times,
+        times,
+        time_atol,
     )
 
-    # Only an antenna with no solution anywhere survives both stages as a NaN:
-    # one solved sample is an edge, and an edge is held.
-    dead = ~np.isfinite(on_grid)
+    category = _carry(cat_freq.reshape(-1, n_cal_time), placed).reshape(
+        n_ant, n_freq, n_time
+    )
+    amplitude, phase = placed.values.reshape(2, n_ant, n_freq, n_time)
 
-    return GridGains(np.where(dead, 1.0, on_grid), dead, coverage)
+    # The one place the phase becomes an angle again, once both axes are done.
+    on_grid = amplitude * np.exp(1j * phase)
+
+    dead = (category == _DEAD) | ~np.isfinite(on_grid)
+
+    return GridGains(np.where(dead, 1.0, on_grid), dead, _coverage(category))
 
 
 def compose_gains(
@@ -439,8 +589,8 @@ def gains_from_tables(
 ):
     """:func:`compose_gains` over the tables ``data.gain_table`` names.
 
-    ``times`` are MS ``TIME`` values in seconds (MJD seconds), which is what a
-    caltable's own ``TIME`` column holds.
+    ``times`` are MS ``TIME`` values in seconds, on the scale the MS declares,
+    which is what a caltable's own ``TIME`` column holds.
     """
 
     paths = normalise_gain_tables(gain_table)

@@ -383,10 +383,13 @@ class TabConfig:
         if not self.gain_table:
             return
 
-        # A caltable's TIME column holds MS TIME, i.e. MJD seconds (that is what
-        # write_caltable writes and what CASA emits). self.times is
-        # seconds-from-start, so the match is made on the MJD -- in float64,
-        # since an MJD second in float32 is coarser than an integration.
+        # A caltable's TIME is a copy of the MS's, so the match is made on
+        # times_mjd -- the MS's own column, converted in unit only and still on
+        # the scale the column declares -- and never on times_jd, which the
+        # reader has normalised to UTC. Declared frame to declared frame is
+        # exact; on a TAI-declared MS the UTC coordinate is 37 s away, four
+        # orders of magnitude past the matching tolerance. In float64, since an
+        # MJD second in float32 is coarser than an integration.
         times_sec = np.asarray(self.times_mjd, dtype=np.float64) * DAY_SECS
 
         gains, dead = gains_from_tables(
