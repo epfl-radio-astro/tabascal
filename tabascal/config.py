@@ -1,4 +1,5 @@
 from tabascal.imports import import_components
+from tabascal.components import validate_component_order
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
     constrain_rfi_state,
@@ -659,6 +660,12 @@ class TabConfig:
             )
 
 
+# The state keys Model supplies itself, whatever the component list holds: the
+# two visibility accumulators the components add into, zeroed below, and the
+# RMSE diagnostics. Every other state key comes from a component.
+BASE_STATE_KEYS = ("vis_ast", "vis_rfi", "rmse_ast", "rmse_rfi", "rmse_gains")
+
+
 class Model:
 
     def __init__(
@@ -681,6 +688,14 @@ class Model:
 
         components = [C() for C in import_components(component_list)]
         self.components = components
+
+        # The components chain through a shared state dict, each reading keys the
+        # ones before it wrote. Check that against their declarations here, before
+        # setup: an incomplete or mis-ordered list is then named at assembly rather
+        # than surfacing as a traced KeyError inside the forward pass, with no
+        # component to point at.
+        validate_component_order(components, BASE_STATE_KEYS)
+
         for comp in components:
             comp.setup(tab_config)
 

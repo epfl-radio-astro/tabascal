@@ -8,11 +8,13 @@ from ri_kernels.jax_api import RFIVisOp
 
 class RiemannVis(Component):
 
+    # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
     }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
 
@@ -89,11 +91,13 @@ class RiemannVis(Component):
 
 class RiemannVisFFI(Component):
 
+    # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
     }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
 
@@ -174,11 +178,13 @@ class RiemannVisFFI(Component):
 
 class RiemannVisVariable(Component):
 
+    # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
     }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
 
@@ -286,11 +292,13 @@ class RiemannVisVariable(Component):
 
 class RiemannVisVariableFFI(Component):
 
+    # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
     }
-    output_shape = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
 
     parameters = {}
 

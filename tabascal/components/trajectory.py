@@ -245,9 +245,9 @@ class PhaseCalculationRFI(Component):
 class FixedOrbit(Component):
 
     required_inputs = {}  # No inputs needed
-    outputs_shapes = {
+    output_shapes = {
         "rfi_xyz": ("n_rfi", "n_time_fine", 3),
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time_fine"),
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
     }
 
     # Add parameter specifications

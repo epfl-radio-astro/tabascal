@@ -1,7 +1,9 @@
 Components
 ==========
 
-TABASCAL uses a component-based model description. This means that various different models can be created where each model component can be selected freely in a configuration file. Therefore, each component should work with all others. There is a standard component class template where the base class is defined in :class:`~tabascal.components.Component` 
+TABASCAL uses a component-based model description. This means that various different models can be created where each model component can be selected freely in a configuration file. Therefore, each component should work with all others. There is a standard component class template where the base class is defined in :class:`~tabascal.components.Component`
+
+The components pass their results to one another through a shared state dictionary, along the edges of the graph below. Each component declares the state keys it reads as ``required_inputs`` and the keys it writes as ``output_shapes``, and those declarations are checked against the configured ``model.components`` list when the model is assembled: a list that leaves out a component, or gives the right ones in the wrong order, is rejected by name before anything is computed.
 
 .. toctree::
    :maxdepth: 1

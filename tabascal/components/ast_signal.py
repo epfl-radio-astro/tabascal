@@ -295,6 +295,11 @@ class FixedDiscreteSky(Component):
     """
 
     required_inputs = {}  # No inputs needed
+    output_shapes = {
+        "ast_radec": ("n_src", 2),
+        "ast_I": ("n_src", "n_freq"),
+        "ast_shape": ("n_src", 3),
+    }
     parameter_shapes = {}
 
     def setup(self, config):
