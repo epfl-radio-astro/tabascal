@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from tabascal.rfi_estimate import (
+    _half_channel,
     _lc_result,
     coverage_stats,
     extract_light_curves_from_ms,
@@ -489,6 +490,48 @@ class TestPhaseFromRecords:
         np.testing.assert_allclose(got, expected, rtol=exact_rtol)
 
 
+class TestHalfChannel:
+    """The radius inside which two frequency grids are describing one channel."""
+
+    FREQS = np.array([1.0e9, 1.002e9, 1.0025e9])
+
+    def test_widths_are_used_where_they_are_known(self):
+        widths = np.array([2e6, 5e5, 5e5])
+
+        np.testing.assert_allclose(_half_channel(self.FREQS, widths), widths / 2)
+
+    def test_a_negative_width_is_still_a_width(self):
+        """CHAN_WIDTH is signed for a descending window; a radius is not."""
+        np.testing.assert_allclose(
+            _half_channel(self.FREQS, np.full(3, -2e6)), np.full(3, 1e6)
+        )
+
+    def test_one_width_describes_a_uniform_window(self):
+        np.testing.assert_allclose(_half_channel(self.FREQS, 2e6), np.full(3, 1e6))
+
+    def test_without_widths_the_spacing_stands_in(self):
+        """The frequencies alone still say how far apart the channels are."""
+        got = _half_channel(self.FREQS, None)
+
+        # Gaps are 2 MHz and 500 kHz; each channel takes the smaller of its
+        # neighbours', so the radius never reaches into the next channel along.
+        np.testing.assert_allclose(got, 0.5 * np.array([2e6, 5e5, 5e5]))
+
+    def test_a_mismatched_width_array_is_ignored(self):
+        """Neither one width nor one per channel: it describes something else."""
+        np.testing.assert_allclose(
+            _half_channel(self.FREQS, np.array([1e6, 2e6])),
+            _half_channel(self.FREQS, None),
+        )
+
+    def test_a_single_channel_with_no_width_must_match_exactly(self):
+        """One frequency has no neighbour, so nothing says how wide it is."""
+        np.testing.assert_array_equal(_half_channel(np.array([1e9]), None), [0.0])
+
+    def test_a_single_channel_with_a_width_uses_it(self):
+        np.testing.assert_allclose(_half_channel(np.array([1e9]), 4e6), [2e6])
+
+
 # ---------------------------------------------------------------------------
 # The interchange format
 # ---------------------------------------------------------------------------
@@ -634,8 +677,13 @@ class TestCoverageStats:
 # Drivers
 # ---------------------------------------------------------------------------
 
+#: Channel widths of the mock band, uniform unless a test says otherwise.
+CHAN_WIDTH = float(np.diff(np.linspace(1.4e9, 1.41e9, N_FREQ))[0])
+
+
 def make_tab_config(n_rfi=3, n_rfi_real=2, n_ant=N_ANT, n_freq=N_FREQ,
-                    n_time=N_TIME, noise=0.1, rfi_mask=None, flags=None):
+                    n_time=N_TIME, noise=0.1, rfi_mask=None, flags=None,
+                    chans=None, chan_widths=None):
     """A TabConfig stub carrying exactly what the estimator reads off one.
 
     A real TabConfig needs a Measurement Set and a SatChecker resolution, so the
@@ -645,6 +693,16 @@ def make_tab_config(n_rfi=3, n_rfi_real=2, n_ant=N_ANT, n_freq=N_FREQ,
     ids = [40000 + i for i in range(n_rfi_real)]
     ids = ids + [ids[-1]] * (n_rfi - n_rfi_real)
     times_jd = JD0 + np.arange(n_time) / 86400.0
+    # `chans` stands in for a `-f` read: the config comes back on a subset of the
+    # band, which anything it is differenced against has to be matched to.
+    band = np.linspace(1.4e9, 1.41e9, n_freq)
+    widths = (
+        np.full(n_freq, CHAN_WIDTH) if chan_widths is None
+        else np.asarray(chan_widths, dtype=float)
+    )
+    if chans is not None:
+        band, widths = band[np.asarray(chans)], widths[np.asarray(chans)]
+    n_freq = len(band)
     return SimpleNamespace(
         vis_obs=np.ones((len(a1), n_freq, n_time), dtype=complex),
         flags=(np.zeros((len(a1), n_freq, n_time), dtype=bool)
@@ -653,7 +711,9 @@ def make_tab_config(n_rfi=3, n_rfi_real=2, n_ant=N_ANT, n_freq=N_FREQ,
         ants_itrf=ANTS[:n_ant],
         times_jd=times_jd,
         times_mjd=times_jd - 2400000.5,
-        freqs=np.linspace(1.4e9, 1.41e9, n_freq),
+        freqs=band,
+        chan_width=float(widths[0]),
+        chan_widths=widths,
         phase_centre=dict(CENTRE),
         a1=a1,
         a2=a2,
@@ -761,23 +821,34 @@ class TestLightCurvesFromConfig:
 def stub_ms(monkeypatch):
     """Stand in for ``tabascal.ms.read_ms`` with an in-memory observation."""
 
-    def _install(noise=0.1, n_time=N_TIME, vis=None, flags=None, chans=None):
+    def _install(noise=0.1, n_time=N_TIME, vis=None, flags=None, chans=None,
+                 chan_widths=None, freqs=None):
         a1, a2 = pairs()
         times_mjd = MJD0 + np.arange(n_time) / 86400.0
-        band = np.linspace(1.4e9, 1.41e9, N_FREQ)
+        band = (
+            np.linspace(1.4e9, 1.41e9, N_FREQ) if freqs is None
+            else np.asarray(freqs, dtype=float)
+        )
+        widths = (
+            np.full(len(band), float(band[1] - band[0])) if chan_widths is None
+            else np.asarray(chan_widths, dtype=float)
+        )
         # `chans` stands in for a `-f` read: the MS comes back on a subset of the
         # band, which anything it is differenced against has to be matched to.
-        freqs = band if chans is None else band[np.asarray(chans)]
-        n_freq = len(freqs)
+        if chans is not None:
+            band, widths = band[np.asarray(chans)], widths[np.asarray(chans)]
+        freqs, n_freq = band, len(band)
         data = {
             "ra": CENTRE["ra"],
             "dec": CENTRE["dec"],
             "ants_itrf": ANTS,
             "times_mjd": times_mjd,
             "freqs": freqs,
-            "chan_width": float(band[1] - band[0]),
+            "chan_width": float(widths[0]),
+            "chan_widths": widths,
             "vis_obs": (np.ones((len(a1), n_freq, n_time), dtype=complex)
                         if vis is None else vis),
+            "n_freq": n_freq,
             "flags": (np.zeros((len(a1), n_freq, n_time), dtype=bool)
                       if flags is None else flags),
             "noise": noise,
@@ -1021,6 +1092,57 @@ class TestExtractFromZarr:
                 "obs.ms", self._zarr(tmp_path, model), norad_ids=[25544]
             )
 
+    #: A two-channel window whose channels differ by a factor of 40, and an
+    #: offset that is inside half the wide one and far outside half the narrow
+    #: one. A single tolerance taken from the *first* channel -- which is what
+    #: CHAN_WIDTH[0, 0] gives -- cannot tell these two apart.
+    MIXED_WIDTHS = np.array([4e6, 1e5])
+    UNIFORM_WIDTHS = np.array([4e6, 4e6])
+    DRIFT = 5e5
+
+    def _two_channel(self, stub_ms, widths):
+        """An MS on a two-channel band of the given widths, and a drifted model."""
+        band = np.asarray(
+            [1.4e9 + 0.5 * widths[0], 1.4e9 + widths[0] + 0.5 * widths[1]]
+        )
+        ms = stub_ms(chan_widths=widths, freqs=band)
+        return ms, band + self.DRIFT
+
+    def test_a_narrow_channel_is_matched_on_its_own_width(
+        self, tmp_path, stub_ms, stub_orbits
+    ):
+        """One width for the whole window is wrong when the window is not uniform.
+
+        Read across the *whole* band, so the scalar the reader reports is the
+        first channel's. The drift sits inside half of that wide channel and far
+        outside half of the narrow one, so a single tolerance accepts a model
+        channel that is not the one being differenced.
+        """
+        a1, _ = pairs()
+        ms, drifted = self._two_channel(stub_ms, self.MIXED_WIDTHS)
+        model = np.zeros((len(a1), 2, N_TIME), dtype=complex)
+
+        with pytest.raises(ValueError, match="frequenc"):
+            extract_light_curves_from_zarr(
+                "obs.ms",
+                self._zarr(tmp_path, model, freqs=drifted),
+                norad_ids=[25544],
+            )
+
+    def test_a_uniformly_wide_window_accepts_the_same_offset(
+        self, tmp_path, stub_ms, stub_orbits
+    ):
+        """The same drift where every channel is wide is the same channel, and matches."""
+        a1, _ = pairs()
+        ms, drifted = self._two_channel(stub_ms, self.UNIFORM_WIDTHS)
+        model = np.zeros((len(a1), 2, N_TIME), dtype=complex)
+
+        result = extract_light_curves_from_zarr(
+            "obs.ms", self._zarr(tmp_path, model, freqs=drifted), norad_ids=[25544]
+        )
+
+        assert result["light_curves"].shape == (1, 2, N_TIME)
+
     def test_the_column_records_what_was_subtracted(
         self, tmp_path, stub_ms, stub_orbits
     ):
@@ -1208,6 +1330,106 @@ class TestCommandLine:
         out = capsys.readouterr().out
         assert "OVERALL" not in out
         assert "no coverage statistic" in out.lower()
+
+    def test_the_config_mode_aligns_its_residual_by_frequency(
+        self, tmp_path, monkeypatch
+    ):
+        """`-c -z -f`: the config path must match the model to its channel too.
+
+        It subtracted `zarr.vis_obs` from `tab_config.vis_obs` directly, so a
+        config narrowed to one channel met a full-band store and either broadcast
+        wrongly or -- with matching counts -- differenced two different channels
+        in silence. The manual path was fixed; this is the same subtraction.
+        """
+        import tabascal.config
+        import tabascal.scripts._run_tabascal_impl as impl
+        import xarray as xr
+        from tabascal.scripts.rfi_estimate import run
+
+        chan = 2
+        tab_config = make_tab_config(chans=[chan])
+        band = np.linspace(1.4e9, 1.41e9, N_FREQ)
+        n_bl = len(pairs()[0])
+        # Channels differ, so taking the wrong one leaves a residual that is not
+        # the injected source.
+        model = np.ones((1, n_bl, N_FREQ, N_TIME), dtype=complex)
+        model = model * (1.0 + np.arange(N_FREQ)[None, None, :, None])
+        zarr_path = str(tmp_path / "map_pred.zarr")
+        xr.Dataset(
+            {"vis_obs": (("sample", "bl", "freq", "time"), model)},
+            coords={"freq": band},
+        ).to_zarr(zarr_path)
+
+        # What is left of the satellite after subtraction, injected on its real
+        # propagated template so the filter has something to de-rotate. A
+        # constant residual would average away and say nothing about which
+        # channel was taken.
+        rfi_phase = rfi_phase_from_records(
+            tab_config.orbit_records[: tab_config.n_rfi_real],
+            tab_config.ants_itrf,
+            tab_config.times_jd,
+            tab_config.phase_centre,
+            tab_config.freqs,
+        )
+        leftover = source(n_freq=1)
+        tab_config.vis_obs = (
+            model[0, :, chan : chan + 1]
+            + template(rfi_phase, tab_config.a1, tab_config.a2) * leftover
+        )
+
+        config = {
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+                     "data_col": "DATA", "corr": "xx", "freq": float(band[chan])},
+            "rfi": {"min_elevation": None},
+            "satellites": {},
+        }
+        monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
+        monkeypatch.setattr(
+            tabascal.config, "TabConfig", lambda cfg, ms_path: tab_config
+        )
+        monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
+        out = str(tmp_path / "res.npz")
+
+        run(_cli("-c", "tab.yaml", "-z", zarr_path, "-o", out))
+
+        # The right channel leaves exactly the injected source; any other leaves
+        # it plus a constant, which de-rotates to something else entirely.
+        with np.load(out, allow_pickle=False) as npz:
+            np.testing.assert_allclose(
+                npz["light_curves"][0], np.abs(leftover).T, rtol=1e-9, atol=1e-9
+            )
+
+    def test_the_config_mode_refuses_a_store_off_the_band(self, tmp_path, monkeypatch):
+        """And it refuses what the manual path refuses, rather than subtracting."""
+        import tabascal.config
+        import tabascal.scripts._run_tabascal_impl as impl
+        import xarray as xr
+        from tabascal.scripts.rfi_estimate import run
+
+        tab_config = make_tab_config()
+        n_bl = len(pairs()[0])
+        zarr_path = str(tmp_path / "map_pred.zarr")
+        xr.Dataset(
+            {"vis_obs": (("sample", "bl", "freq", "time"),
+                         np.zeros((1, n_bl, N_FREQ, N_TIME), dtype=complex))},
+            coords={"freq": np.linspace(2.4e9, 2.41e9, N_FREQ)},
+        ).to_zarr(zarr_path)
+
+        config = {
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+                     "data_col": "DATA", "corr": "xx", "freq": None},
+            "rfi": {"min_elevation": None},
+            "satellites": {},
+        }
+        monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
+        monkeypatch.setattr(
+            tabascal.config, "TabConfig", lambda cfg, ms_path: tab_config
+        )
+        monkeypatch.setattr(impl, "set_precision", lambda cfg: None)
+
+        with pytest.raises(ValueError, match="frequenc"):
+            run(_cli("-c", "tab.yaml", "-z", zarr_path,
+                     "-o", str(tmp_path / "r.npz")))
 
     def test_the_config_mode_honours_the_elevation_flag(self, tmp_path, monkeypatch):
         import tabascal.config

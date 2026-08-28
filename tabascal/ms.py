@@ -552,7 +552,13 @@ def _column_values(xds, name: str) -> Optional[np.ndarray]:
 
 
 def partition_noise(
-    xds, n_time: int, n_bl: int, n_freq: int, corr_idx: int = 0, chans=None
+    xds,
+    n_time: int,
+    n_bl: int,
+    n_freq: int,
+    corr_idx: int = 0,
+    chans=None,
+    n_chan_ms: Optional[int] = None,
 ) -> Optional[np.ndarray]:
     """The noise on one MS partition's visibilities, as resolved as the MS allows.
 
@@ -587,31 +593,35 @@ def partition_noise(
     the same selection the data went through: the noise divides those
     visibilities cell by cell, so a noise left on the full band would weight
     every channel by another channel's. ``SIGMA`` has no channel axis to narrow.
+    ``n_chan_ms`` is the MS's own channel count, which the column is validated
+    against; it defaults to ``n_freq``, i.e. no selection was made.
     """
+
+    # The column describes the MS's channel axis, so it is checked against the
+    # whole band *before* any narrowing. Validating the narrowed column instead
+    # would let a spectrum that disagrees with the data pass the moment the
+    # selection happened to fit inside it -- and selecting a channel does not
+    # settle which of the two is right about the observation.
+    band = n_freq if n_chan_ms is None else n_chan_ms
 
     values = _column_values(xds, "SIGMA_SPECTRUM")
 
     if values is not None:
-        # Narrowed before the count is taken, so a selected column is compared
-        # against the channels actually being read rather than the whole band.
-        if chans is not None and values.ndim > 1:
-            chans = np.asarray(chans)
-            if chans.size and int(chans.max()) < values.shape[1]:
-                values = values[:, chans]
-
         n_chan = values.shape[1] if values.ndim > 1 else 0
 
-        # Channels are handled exactly as read_data handles them -- every channel,
-        # for now -- and must stay in lockstep with it: the noise divides those
-        # visibilities, cell by cell, so a column covering a different set of
-        # channels cannot weight them.
-        if n_chan != n_freq:
+        # Channels are handled exactly as read_data handles them, and must stay
+        # in lockstep with it: the noise divides those visibilities, cell by
+        # cell, so a column covering a different set of channels cannot weight
+        # them.
+        if n_chan != band:
             print(
-                f"Warning: SIGMA_SPECTRUM covers {n_chan} channels but {n_freq} are "
-                "being read, so it cannot line up with the visibilities; falling "
+                f"Warning: SIGMA_SPECTRUM covers {n_chan} channels but the MS has "
+                f"{band}, so it cannot line up with the visibilities; falling "
                 "back to the SIGMA column."
             )
         else:
+            if chans is not None:
+                values = values[:, np.asarray(chans)]
             try:
                 return per_baseline_freq_sigma(values, n_time, n_bl, corr_idx)
             except NoUsableSigma as err:
@@ -723,7 +733,12 @@ def read_ms(
 
     spec_row = xds_spec[spw_id]
     freqs = np.array(spec_row.CHAN_FREQ.data[0].compute())
-    chan_width = np.array(spec_row.CHAN_WIDTH.data[0, 0].compute())
+    # Per channel, not one number for the window. A spectral window need not be
+    # uniform, and the width is what says whether a frequency falls inside a
+    # channel -- so one channel's width cannot answer that for another's.
+    chan_widths = np.atleast_1d(np.array(spec_row.CHAN_WIDTH.data[0].compute()))
+    if chan_widths.size == 1 and len(freqs) > 1:
+        chan_widths = np.repeat(chan_widths, len(freqs))
     int_time = xds.INTERVAL.data[0].compute()
 
     times_mjd = times_to_mjd(
@@ -750,7 +765,23 @@ def read_ms(
     # array rather than a jax one -- it indexes dask columns, and a scalar index
     # would silently drop the channel axis it is meant to narrow.
     if chans is None and freq is not None:
-        chans = np.argmin(np.abs(freq - freqs))
+        nearest = int(np.argmin(np.abs(freq - freqs)))
+        offset = abs(float(freq) - float(freqs[nearest]))
+        # argmin always lands on a channel, so the *request* has to be checked
+        # against the band as well. Without this a frequency from another
+        # subband -- or a units slip, GHz written for Hz -- reads the nearest
+        # edge channel and says nothing, and everything downstream is then on a
+        # channel nobody asked for.
+        if offset > 0.5 * abs(float(chan_widths[nearest])):
+            raise ValueError(
+                f"Requested frequency {float(freq) / 1e6:.4f} MHz is outside the "
+                f"band of {ms_path}: its {len(freqs)} channels run "
+                f"{freqs[0] / 1e6:.4f} - {freqs[-1] / 1e6:.4f} MHz, and the "
+                f"nearest centre is {freqs[nearest] / 1e6:.4f} MHz, "
+                f"{offset / 1e6:.4f} MHz away -- more than half that channel's "
+                f"width ({abs(float(chan_widths[nearest])) / 1e6:.4f} MHz)."
+            )
+        chans = nearest
 
     chan_sel = None if chans is None else np.atleast_1d(np.asarray(chans)).astype(int)
 
@@ -767,6 +798,7 @@ def read_ms(
 
     if chan_sel is not None:
         freqs = freqs[chan_sel]
+        chan_widths = chan_widths[chan_sel]
         print(
             f"Reading {len(freqs)} of {n_chan_ms} channels "
             f"({freqs[0] / 1e6:.3f} - {freqs[-1] / 1e6:.3f} MHz)"
@@ -775,8 +807,12 @@ def read_ms(
     n_freq = len(freqs)
 
     # The same selection the data goes through: a noise on the full band would
-    # weight every visibility by a channel it did not come from.
-    sigma = partition_noise(xds, n_time, n_bl, n_freq, corr_idx, chans=chan_sel)
+    # weight every visibility by a channel it did not come from. The MS's own
+    # channel count goes with it, since that is what the column is validated
+    # against -- narrowing cannot make a disagreeing column agree.
+    sigma = partition_noise(
+        xds, n_time, n_bl, n_freq, corr_idx, chans=chan_sel, n_chan_ms=n_chan_ms
+    )
 
     def read_data(col_name):
         col = xds[col_name].data[:, :, corr_idx]
@@ -805,7 +841,12 @@ def read_ms(
         "time_scale": time_scale,
         "int_time": int_time,
         "freqs": freqs,
-        "chan_width": chan_width,
+        # The scalar stays what it always was -- the first width being read,
+        # signed as CHAN_WIDTH stores it, since the fine-grid construction steps
+        # along the band with it. chan_widths is the per-channel magnitude, for
+        # anything asking whether a frequency falls inside a given channel.
+        "chan_width": chan_widths[0],
+        "chan_widths": np.abs(chan_widths),
         "ants_itrf": ants_itrf,
         "uvw": jnp.array(xds.UVW.data.reshape(n_time, n_bl, 3).compute()),
         "vis_obs": read_data(data_col),

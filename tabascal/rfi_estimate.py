@@ -660,23 +660,59 @@ def _filter_visibilities(
     )
 
 
-def _model_on_ms_channels(xds, ms, zarr_path: str) -> NDArray:
-    """A run's gained prediction, on the channels the MS was read on.
+def _half_channel(freqs: NDArray, chan_widths=None) -> NDArray:
+    """Half the width of each channel: the radius inside which two grids agree.
+
+    Per channel, because a spectral window need not be uniform -- a band with a
+    4 MHz channel next to a 100 kHz one has no single tolerance, and the wide
+    one's would accept a model channel that is nowhere near the narrow one.
+
+    Falls back to half the spacing to the nearest neighbouring channel where no
+    widths are given, which is the most the frequencies alone can say; a single
+    channel with no width has neither, and is then required to match exactly.
+    """
+    freqs = np.asarray(freqs, dtype=np.float64)
+
+    if chan_widths is not None:
+        widths = np.abs(np.atleast_1d(np.asarray(chan_widths, dtype=np.float64)))
+        if widths.size == 1:
+            widths = np.repeat(widths, len(freqs))
+        if widths.size == len(freqs):
+            return 0.5 * widths
+
+    if len(freqs) < 2:
+        return np.zeros(len(freqs))
+
+    gaps = np.abs(np.diff(freqs))
+    # The smaller of the two neighbouring gaps, so the radius can never reach
+    # into a channel that belongs to the other side.
+    return 0.5 * np.minimum(
+        np.concatenate([gaps[:1], gaps]), np.concatenate([gaps, gaps[-1:]])
+    )
+
+
+def _model_on_ms_channels(xds, freqs, zarr_path: str, chan_widths=None) -> NDArray:
+    """A run's gained prediction, on the channels the visibilities were read on.
 
     Matched by frequency rather than by position. The two need not agree: a
-    ``freq`` narrows the MS read to one channel while the results zarr holds the
+    ``freq`` narrows the read to one channel while the results zarr holds the
     whole band the run fitted, and subtracting positionally would then take the
     model's channel 0 from the data's channel *n* -- the right shape, no error,
     and a residual that is mostly the difference between two channels of the
-    model. Nearest match within half a channel, so a store covering a different
-    band is refused rather than silently differenced against its closest edge.
+    model. Nearest match within half a channel (:func:`_half_channel`), so a
+    store covering a different band is refused rather than silently differenced
+    against its closest edge.
 
     A store with no ``freq`` coordinate cannot be matched at all; there the
     channel counts are required to agree and the axes are taken as parallel,
     which is the most that can be said about it.
+
+    Takes the frequencies and widths themselves rather than a reader's result,
+    so the in-process path can pass a :class:`TabConfig`'s and both residuals go
+    through the same alignment.
     """
     model = xds.vis_obs.isel(sample=0)
-    freqs = np.asarray(ms["freqs"], dtype=np.float64)
+    freqs = np.asarray(freqs, dtype=np.float64)
 
     if "freq" not in xds.coords and "freq" not in xds.variables:
         n_model = int(model.sizes["freq"])
@@ -692,18 +728,20 @@ def _model_on_ms_channels(xds, ms, zarr_path: str) -> NDArray:
     model_freqs = np.asarray(xds["freq"].values, dtype=np.float64)
     nearest = np.abs(model_freqs[None, :] - freqs[:, None]).argmin(axis=1)
     offset = np.abs(model_freqs[nearest] - freqs)
-    # Half a channel: inside it the two grids are the same channel, outside it
-    # they are different measurements and no subtraction is defined.
-    tol = 0.5 * abs(float(np.asarray(ms.get("chan_width", 0.0))))
+    # Inside half a channel the two grids are the same channel; outside it they
+    # are different measurements and no subtraction is defined.
+    tol = _half_channel(freqs, chan_widths)
+    over = offset > tol
 
-    if np.any(offset > tol):
-        worst = int(np.argmax(offset))
+    if over.any():
+        worst = int(np.argmax(offset - tol))
         raise ValueError(
             f"{zarr_path} does not cover the frequencies being read: channel "
-            f"{worst} of the MS is at {freqs[worst] / 1e6:.4f} MHz and the "
-            f"nearest in the store is {model_freqs[nearest[worst]] / 1e6:.4f} "
-            f"MHz, {offset[worst] / 1e6:.4f} MHz away. The residual would be the "
-            "difference between two different channels."
+            f"{worst} is at {freqs[worst] / 1e6:.4f} MHz and the nearest in the "
+            f"store is {model_freqs[nearest[worst]] / 1e6:.4f} MHz, "
+            f"{offset[worst] / 1e6:.4f} MHz away -- more than half that "
+            f"channel's width ({2 * tol[worst] / 1e6:.4f} MHz). The residual "
+            "would be the difference between two different channels."
         )
 
     return np.asarray(model.isel(freq=nearest).data.compute())
@@ -748,7 +786,9 @@ def extract_light_curves_from_zarr(
 
     norad_ids, records = _resolve_records(norad_ids, times_jd, extra_orbit_dir)
 
-    model = _model_on_ms_channels(xr.open_zarr(zarr_path), ms, zarr_path)
+    model = _model_on_ms_channels(
+        xr.open_zarr(zarr_path), ms["freqs"], zarr_path, ms.get("chan_widths")
+    )
     residual = np.asarray(ms["vis_obs"]) - model
 
     label = f"{data_col} - {os.path.basename(str(zarr_path).rstrip('/'))}"

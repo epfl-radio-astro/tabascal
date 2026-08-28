@@ -1252,6 +1252,9 @@ class TestNoiselessMS:
             "times_jd": np.array([60000.0, 60000.1]) + 2400000.5,
             "time_scale": "utc",
             "chan_width": 1e5,
+            # Per channel as well as the scalar, as read_ms returns it: a stub
+            # that stops mirroring the reader stops standing in for it.
+            "chan_widths": np.full(N_FREQ, 1e5),
             "freqs": np.linspace(1e9, 1.1e9, N_FREQ),
             # partition_noise found neither column usable and said so; deciding
             # what to do about it is not the reader's business.

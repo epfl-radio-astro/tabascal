@@ -481,6 +481,10 @@ class TabConfig:
         self.time_scale = ms_params["time_scale"]
 
         self.chan_width = ms_params["chan_width"]
+        # Per channel as well as the scalar: a spectral window need not be
+        # uniform, and anything asking whether a frequency falls inside a given
+        # channel needs that channel's own width. See tabascal.ms.read_ms.
+        self.chan_widths = np.asarray(ms_params["chan_widths"])
         self.freqs = np.asarray(ms_params["freqs"])
 
         # Shape (n_bl, n_freq) where the MS resolves the noise over the band,

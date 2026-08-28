@@ -293,8 +293,16 @@ def _from_config(args):
         import numpy as np
         import xarray as xr
 
-        model = np.asarray(
-            xr.open_zarr(args.zarr).vis_obs.isel(sample=0).data.compute()
+        from tabascal.rfi_estimate import _model_on_ms_channels
+
+        # The same alignment the standalone residual goes through: subtracting
+        # positionally would meet a full-band store with a config narrowed by
+        # data.freq and difference two different channels.
+        model = _model_on_ms_channels(
+            xr.open_zarr(args.zarr),
+            tab_config.freqs,
+            args.zarr,
+            getattr(tab_config, "chan_widths", None),
         )
         vis = np.asarray(tab_config.vis_obs) - model
 

@@ -316,6 +316,32 @@ class TestLightCurveInputs:
         assert self._mod().resolve_data_col(args, {"data": {}}) == "DATA"
         assert self._mod().resolve_corr(args, {"data": {}}) == "xx"
 
+    def test_a_flag_stands_alone_when_the_config_names_nothing(self):
+        """The remaining corner of the matrix: flag given, config key absent."""
+        args = _parse("light-curve", "-c", "c.yaml", "-dc", "AST_DATA", "-cr", "yx")
+        assert self._mod().resolve_data_col(args, {"data": {}}) == "AST_DATA"
+        assert self._mod().resolve_corr(args, {"data": {}}) == "yx"
+
+    def test_a_null_config_value_falls_back_to_the_default(self):
+        """`data_col: null` names nothing, so it is not an answer to be kept."""
+        args = _parse("light-curve", "-c", "c.yaml")
+        config = {"data": {"data_col": None, "corr": None}}
+        assert self._mod().resolve_data_col(args, config) == "DATA"
+        assert self._mod().resolve_corr(args, config) == "xx"
+
+    def test_the_column_flag_does_not_carry_the_correlation_with_it(self):
+        """One flag overrides one value: -dc must not pull -cr off the config."""
+        args = _parse("light-curve", "-c", "c.yaml", "-dc", "AST_DATA")
+        config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
+        assert self._mod().resolve_data_col(args, config) == "AST_DATA"
+        assert self._mod().resolve_corr(args, config) == "yy"
+
+    def test_the_correlation_flag_does_not_carry_the_column_with_it(self):
+        args = _parse("light-curve", "-c", "c.yaml", "-cr", "xy")
+        config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
+        assert self._mod().resolve_data_col(args, config) == "TAB_RES_DATA"
+        assert self._mod().resolve_corr(args, config) == "xy"
+
 
 class TestRunReporting:
     """``run()`` reports peak memory however the run ends; timings only on success."""

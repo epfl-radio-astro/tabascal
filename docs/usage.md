@@ -215,9 +215,12 @@ measured and written, but `error` and `z` are NaN and the coverage table is
 replaced by a line saying so: `1/sqrt(N_bl)` would be quoting a noise of 1 Jy
 that nobody stated, and a z built on it would look like a detection at any flux.
 
-To read one channel instead of the whole band, pass `-f` with a frequency in Hz;
-the nearest channel is used, and with `-z` the model is matched to it by
-frequency rather than by position.
+To read one channel instead of the whole band, pass `-f` with a frequency in Hz.
+The nearest channel is used, and the request must land inside it — a frequency
+more than half a channel outside the band is an error naming the band, rather
+than a silent read of the nearest edge channel. With `-z` the model is matched
+to the channels read by frequency, not by position, each within half of *its
+own* width, so a non-uniform spectral window is matched channel by channel.
 
 The `tabascal` script also has a help context which can be accessed with
 
