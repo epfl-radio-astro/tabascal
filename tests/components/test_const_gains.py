@@ -698,6 +698,54 @@ class TestAmpMean:
 
 
 # ---------------------------------------------------------------------------
+# The rest of the scale keys, read the same way
+# ---------------------------------------------------------------------------
+
+
+class TestScaleKeysReachTheComponent:
+    """What :func:`validate_gain_scales` decides, ``ConstGains`` is the one that uses.
+
+    The unit tests of the reads themselves live in ``test_gains.py``; these check the
+    decision survives the trip through setup, whose ``except`` wraps a ``ValueError``
+    into a ``RuntimeError``.
+    """
+
+    def test_a_zero_seed_is_the_seed_it_says(self):
+        comp = ConstGains()
+        cfg = make_const_gains_config()
+        cfg.args["gains"]["r_seed"] = 0
+        comp.setup(cfg)
+
+        assert comp.r_seed == 0
+
+    @pytest.mark.parametrize("width", [0, 0.0, -1.0, float("nan"), float("inf")])
+    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    def test_an_unusable_prior_width_is_an_error(self, key, width):
+        """A zero width used to be read as "unset" and silently become the default.
+
+        ``phase_std`` divides the initial phase in :meth:`_compute_init_params` and
+        both widths scale a standard normal, so a degenerate width is a mistake worth
+        naming rather than a default worth guessing.
+        """
+        cfg = make_const_gains_config()
+        cfg.args["gains"][key] = width
+
+        with pytest.raises(RuntimeError, match=key):
+            ConstGains().setup(cfg)
+
+    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    def test_an_unset_prior_width_still_defaults(self, key):
+        cfg = make_const_gains_config()
+        cfg.args["gains"][key] = None
+        comp = ConstGains()
+        comp.setup(cfg)
+
+        expected = {"amp_std": 0.01, "phase_std": float(np.deg2rad(1))}[key]
+
+        assert getattr(comp, {"amp_std": "gp_amp_std", "phase_std": "gp_phase_std"}[key]) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
 # The RFI degeneracy warning
 # ---------------------------------------------------------------------------
 

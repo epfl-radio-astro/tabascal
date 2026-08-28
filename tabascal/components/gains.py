@@ -17,6 +17,44 @@ import warnings
 
 from typing import Dict, List, Tuple
 
+def _missing_key(key: str) -> ValueError:
+    """The error for a gains key the config does not carry at all.
+
+    Naming it is the whole point: nine keys are read here, and a bare "validation
+    failed" leaves the reader to find which one is missing by bisection.
+    """
+
+    return ValueError(
+        f"Gains configuration validation failed: the config has no gains:{key}. "
+        "Give it a value, or null to take the default."
+    )
+
+
+def _positive_scale(key: str, value, convert, reason: str) -> float:
+    """A gain-prior scale in the units the model works in, checked to be usable.
+
+    ``value`` is what the config says and ``convert`` puts it in those units (a
+    percentage of ``amp_mean``, degrees to radians, or unchanged for a value already
+    in them). Only ``None`` means unset, and the caller handles it: ``not value``
+    also caught 0, so a zero prior width or correlation length — a degenerate
+    distribution, not an absent one — was silently replaced by a default nobody
+    wrote, while NaN and infinity went through untouched.
+    """
+
+    if isinstance(value, (float, int)):
+        converted = float(convert(value))
+    else:
+        raise ValueError(f"Config parameter (gains:\n\t{key}: {value}) is not of type float or int.")
+
+    if not np.isfinite(converted) or converted <= 0:
+        raise ValueError(
+            f"Config parameter (gains:\n\t{key}: {value}) is not a positive, finite "
+            f"number. {reason}"
+        )
+
+    return converted
+
+
 def validate_gain_scales(gains_config: Dict) -> Dict:
     """Validate and normalise the scale parameters of the gain prior, in place.
 
@@ -25,6 +63,14 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
     radians. Separated from :func:`gains_config_validation` so a gain component
     with no Gaussian process behind it (:class:`ConstGains`) can read the prior
     it does use without also carrying correlation lengths it does not.
+
+    A key is defaulted when, and only when, it is ``None`` or absent. This is a
+    BEHAVIOUR CHANGE for a config that writes a literal 0: ``r_seed: 0`` is now the
+    seed it says rather than the default seed, and a zero ``amp_std`` or
+    ``phase_std`` is an error rather than the default width — a zero-width prior
+    pins every gain to its mean, which is a mistake worth naming rather than a
+    default worth guessing. ``phase_mean: 0`` is unaffected: the default it used to
+    be replaced by is also 0.
     """
 
     try:
@@ -33,10 +79,10 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
         gp_amp_std = gains_config["amp_std"]
         gp_phase_mean = gains_config["phase_mean"]
         gp_phase_std = gains_config["phase_std"]
-    except Exception as e:
-        raise ValueError(f"Gains configuration validation failed.")
+    except KeyError as e:
+        raise _missing_key(e.args[0]) from e
 
-    if not r_seed: # Set Default
+    if r_seed is None: # Set Default
         gains_config["r_seed"] = 2
     elif isinstance(r_seed, int):
         pass
@@ -50,28 +96,29 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
     if gp_amp_mean is None: # Set Default
         est_gp_amp_mean = 1.0
         gains_config["amp_mean"] = est_gp_amp_mean
-    elif isinstance(gp_amp_mean, (float, int)):
-        gains_config["amp_mean"] = float(gp_amp_mean)
     else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_mean: {gp_amp_mean}) is not of type float or int.")
-
-    if not np.isfinite(gains_config["amp_mean"]) or gains_config["amp_mean"] <= 0:
-        raise ValueError(
-            f"Config parameter (gains:\n\tamp_mean: {gp_amp_mean}) is not a positive, "
-            "finite number. It is the scale the gain amplitudes are measured "
-            "against: amp_std is a percentage of it, and a constant gain is fitted "
-            "as its logarithm."
+        gains_config["amp_mean"] = _positive_scale(
+            "amp_mean",
+            gp_amp_mean,
+            float,
+            "It is the scale the gain amplitudes are measured against: amp_std is a "
+            "percentage of it, and a constant gain is fitted as its logarithm.",
         )
 
-    if not gp_amp_std: # Set Default
+    if gp_amp_std is None: # Set Default
         est_gp_amp_std = 1 / 100 * gains_config["amp_mean"] # 1 %
         gains_config["amp_std"] = est_gp_amp_std
-    elif isinstance(gp_amp_std, (float, int)):
-        gains_config["amp_std"] = float(gp_amp_std) / 100 * gains_config["amp_mean"]
     else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_std: {gp_amp_std}) is not of type float or int.")
-    
-    if not gp_phase_mean: # Set Default
+        gains_config["amp_std"] = _positive_scale(
+            "amp_std",
+            gp_amp_std,
+            lambda std: std / 100 * gains_config["amp_mean"],
+            "It is the width of the prior over the gain amplitudes, as a percentage "
+            "of amp_mean; a zero width pins every amplitude to amp_mean and leaves "
+            "the fit nothing to move.",
+        )
+
+    if gp_phase_mean is None: # Set Default
         est_gp_phase_mean = 0.0
         gains_config["phase_mean"] = est_gp_phase_mean
     elif isinstance(gp_phase_mean, (float, int)):
@@ -79,13 +126,17 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
     else:
         raise ValueError(f"Config parameter (gains:\n\tphase_mean: {gp_phase_mean}) is not of type float or int.")
 
-    if not gp_phase_std: # Set Default
+    if gp_phase_std is None: # Set Default
         est_gp_phase_std = float(jnp.deg2rad(1)) # degrees
         gains_config["phase_std"] = est_gp_phase_std
-    elif isinstance(gp_phase_std, (float, int)):
-        gains_config["phase_std"] = float(jnp.deg2rad(gp_phase_std))
     else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_std: {gp_phase_std}) is not of type float or int.")
+        gains_config["phase_std"] = _positive_scale(
+            "phase_std",
+            gp_phase_std,
+            jnp.deg2rad,
+            "It is the width of the prior over the gain phases, in degrees; a zero "
+            "width pins every phase to phase_mean and leaves the fit nothing to move.",
+        )
 
     return gains_config
 
@@ -112,42 +163,30 @@ def gains_config_validation(gains_config: Dict, freqs: Array, chan_width: float,
         gp_amp_time_l = gains_config["amp_corr_time"]
         gp_phase_freq_l = gains_config["phase_corr_freq"]
         gp_phase_time_l = gains_config["phase_corr_time"]
-    except Exception as e:
-        raise ValueError(f"Gains configuration validation failed.")
+    except KeyError as e:
+        raise _missing_key(e.args[0]) from e
 
     gains_config = validate_gain_scales(gains_config)
 
-    if not gp_amp_freq_l: # Set Default
-        est_gp_amp_freq_l = extent(freqs, chan_width)
-        gains_config["amp_corr_freq"] = est_gp_amp_freq_l
-    elif isinstance(gp_amp_freq_l, (float, int)):
-        gains_config["amp_corr_freq"] = float(gp_amp_freq_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_corr_freq: {gp_amp_freq_l}) is not of type float or int.")
+    # As with the prior widths, only an unset correlation length is defaulted. A zero
+    # one is a degenerate kernel — every sample independent of every other, and the
+    # Cholesky of a diagonal-only covariance — not a request for the default.
+    corr_reason = (
+        "It is the correlation length of the gain Gaussian process along that axis; "
+        "a zero length is a degenerate kernel. Set it to null for the extent of the "
+        "observation."
+    )
 
-    if not gp_amp_time_l: # Set Default
-        est_gp_amp_time_l = extent(times, int_time)
-        gains_config["amp_corr_time"] = est_gp_amp_time_l
-    elif isinstance(gp_amp_time_l, (float, int)):
-        gains_config["amp_corr_time"] = float(gp_amp_time_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tamp_corr_time: {gp_amp_time_l}) is not of type float or int.")
-
-    if not gp_phase_freq_l: # Set Default
-        est_gp_phase_freq_l = extent(freqs, chan_width)
-        gains_config["phase_corr_freq"] = est_gp_phase_freq_l
-    elif isinstance(gp_phase_freq_l, (float, int)):
-        gains_config["phase_corr_freq"] = float(gp_phase_freq_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_corr_freq: {gp_phase_freq_l}) is not of type float or int.")
-
-    if not gp_phase_time_l: # Set Default
-        est_gp_phase_time_l = extent(times, int_time)
-        gains_config["phase_corr_time"] = est_gp_phase_time_l
-    elif isinstance(gp_phase_time_l, (float, int)):
-        gains_config["phase_corr_time"] = float(gp_phase_time_l)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_corr_time: {gp_phase_time_l}) is not of type float or int.")
+    for key, value, x, dx in (
+        ("amp_corr_freq", gp_amp_freq_l, freqs, chan_width),
+        ("amp_corr_time", gp_amp_time_l, times, int_time),
+        ("phase_corr_freq", gp_phase_freq_l, freqs, chan_width),
+        ("phase_corr_time", gp_phase_time_l, times, int_time),
+    ):
+        if value is None: # Set Default
+            gains_config[key] = extent(x, dx)
+        else:
+            gains_config[key] = _positive_scale(key, value, float, corr_reason)
 
     print()
     print(f"Using Gains amplitude mean : {gains_config['amp_mean']:.1f}")

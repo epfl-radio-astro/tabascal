@@ -101,7 +101,7 @@ gains:
   amp_corr_time: null        # Optional - Correlation time of the gains in minutes
   phase_corr_freq: null        # Optional - Correlation time of the gains in minutes
   phase_corr_time: null        # Optional - Correlation time of the gains in minutes
-  r_seed: 123
+  r_seed: 123           # Optional - Random seed for the gain draws. Only null takes the default; 0 is a seed like any other
 # ###################
 # # Model parameters
 # ###################
