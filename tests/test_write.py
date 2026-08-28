@@ -1,7 +1,12 @@
-"""Tests for tabascal.write — per-baseline gains and residual framing.
+"""Tests for tabascal.write — per-baseline gains, the calibrated frame, weights.
 
 Every case uses a non-unit, non-uniform gain: a unity gain cannot distinguish
-``g_p conj(g_q)`` from ``|g_p|^2``, nor a gained model from a raw one.
+``g_p conj(g_q)`` from ``|g_p|^2``, nor a calibrated column from a data-frame one.
+
+No jax here, so the tolerances are not the ``exact_rtol`` fixture's business:
+the writer works in ``complex64`` whatever precision the session is in, and the
+identities below are either exact in floating point (and asserted as such) or
+bounded by float64 round-off.
 """
 
 import warnings
@@ -9,11 +14,12 @@ import warnings
 import numpy as np
 import pytest
 
+import tabascal.write as write_mod
 from tabascal.interferometry import baseline_gains
 from tabascal.write import (
-    data_frame_residuals,
-    gained_model_mean,
-    total_model,
+    calibrated_residuals,
+    calibrated_weights,
+    external_baseline_gains,
     unit_bad_gains,
     count_substituted,
     warn_bad_baseline_gains,
@@ -41,10 +47,11 @@ def pairs():
 
 
 # ---------------------------------------------------------------------------
-# data_frame_residuals
+# calibrated_residuals
 # ---------------------------------------------------------------------------
 
-class TestDataFrameResiduals:
+class TestCalibratedResiduals:
+    """One frame for every column: the data with all the gains divided out."""
 
     @pytest.fixture
     def model(self):
@@ -55,169 +62,70 @@ class TestDataFrameResiduals:
 
         return vis_ast, vis_rfi
 
-    def test_the_total_residual_closes(self, model, gains, pairs):
-        """vis_obs reconstructs exactly from the gained model plus its residual.
+    def test_the_decomposition_closes_exactly(self, model, gains, pairs):
+        """The anchor: ast + rfi + total residual reconstructs the calibrated data.
 
-        This is the identity the bug broke: with a raw (un-gained) model
-        subtracted, the gains are left behind in the residual.
+        Bit-for-bit, not to a tolerance -- the total residual is formed against
+        the *same* sum the two model columns are written from, so the identity
+        is the one thing that fails loudly if a column moves frame.
         """
         vis_ast, vis_rfi = model
         a1, a2 = pairs
         gains_bl = baseline_gains(gains, a1, a2)
 
-        vis_obs = gains_bl * (vis_ast + vis_rfi) + 0.01
+        vis_cal = (gains_bl * (vis_ast + vis_rfi) + 0.01) / gains_bl
 
-        res = data_frame_residuals(
-            vis_obs,
-            gains_bl * vis_ast,
-            gains_bl * vis_rfi,
-            gains_bl * (vis_ast + vis_rfi),
-        )
+        res = calibrated_residuals(vis_cal, vis_ast, vis_rfi)
 
-        np.testing.assert_allclose(
-            gains_bl * (vis_ast + vis_rfi) + res["total"], vis_obs, atol=1e-12
-        )
+        np.testing.assert_array_equal(vis_ast + vis_rfi + res["total"], vis_cal)
 
-    def test_a_perfect_model_leaves_zero_residual(self, model, gains, pairs):
+    def test_a_perfect_model_leaves_zero_residual(self, model):
         vis_ast, vis_rfi = model
-        a1, a2 = pairs
-        gains_bl = baseline_gains(gains, a1, a2)
 
-        vis_obs = gains_bl * (vis_ast + vis_rfi)
-        res = data_frame_residuals(
-            vis_obs,
-            gains_bl * vis_ast,
-            gains_bl * vis_rfi,
-            gains_bl * (vis_ast + vis_rfi),
-        )
+        res = calibrated_residuals(vis_ast + vis_rfi, vis_ast, vis_rfi)
 
         np.testing.assert_allclose(res["total"], 0.0, atol=1e-12)
 
-    def test_subtracting_the_raw_model_does_not_close(self, model, gains, pairs):
-        """The old behaviour, kept as a guard against reverting it."""
+    def test_the_models_are_never_re_gained(self, model, gains, pairs):
+        """The data-frame form is what this replaces; it must not come back."""
         vis_ast, vis_rfi = model
         a1, a2 = pairs
         gains_bl = baseline_gains(gains, a1, a2)
-
         vis_obs = gains_bl * (vis_ast + vis_rfi)
-        old_residual = vis_obs - (vis_ast + vis_rfi)
 
-        assert not np.allclose(old_residual, 0.0, atol=1e-8)
+        res = calibrated_residuals(vis_obs / gains_bl, vis_ast, vis_rfi)
+
+        np.testing.assert_allclose(res["total"], 0.0, atol=1e-12)
+        # The superseded #134 residual, which does not close in this frame.
+        assert not np.allclose(vis_obs / gains_bl - gains_bl * vis_ast, 0.0)
+
+    def test_per_component_residuals_leave_the_other_component(self, model, gains, pairs):
+        vis_ast, vis_rfi = model
+        a1, a2 = pairs
+        gains_bl = baseline_gains(gains, a1, a2)
+        vis_cal = (gains_bl * (vis_ast + vis_rfi)) / gains_bl
+
+        res = calibrated_residuals(vis_cal, vis_ast, vis_rfi)
+
+        # Removing only the astronomical model leaves exactly the RFI -- and it
+        # is the un-gained RFI, because that is the frame every column is in.
+        np.testing.assert_allclose(res["ast"], vis_rfi, atol=1e-12)
+        np.testing.assert_allclose(res["rfi"], vis_ast, atol=1e-12)
 
     def test_reduces_to_the_old_behaviour_under_unity_gains(self, model):
-        """No change for existing UnitaryGains results, so no refs move."""
-        vis_ast, vis_rfi = model
+        """No change for existing UnitaryGains results, so no refs move.
 
-        res = data_frame_residuals(
-            vis_ast * 0 + 5.0, vis_ast, vis_rfi, vis_ast + vis_rfi
-        )
-
-        np.testing.assert_allclose(res["ast"], 5.0 - vis_ast)
-        np.testing.assert_allclose(res["rfi"], 5.0 - vis_rfi)
-        np.testing.assert_allclose(res["total"], 5.0 - (vis_ast + vis_rfi))
-
-    def test_per_component_residuals_use_the_same_gain(self, model, gains, pairs):
-        vis_ast, vis_rfi = model
-        a1, a2 = pairs
-        gains_bl = baseline_gains(gains, a1, a2)
-        vis_obs = gains_bl * (vis_ast + vis_rfi)
-
-        res = data_frame_residuals(
-            vis_obs,
-            gains_bl * vis_ast,
-            gains_bl * vis_rfi,
-            gains_bl * (vis_ast + vis_rfi),
-        )
-
-        # Removing only the astronomical model leaves exactly the gained RFI.
-        np.testing.assert_allclose(res["ast"], gains_bl * vis_rfi, atol=1e-12)
-        np.testing.assert_allclose(res["rfi"], gains_bl * vis_ast, atol=1e-12)
-
-    def test_summing_the_parts_reproduces_the_old_total(self, model, gains, pairs):
-        """Passing the total explicitly changes nothing for the usual case."""
-        vis_ast, vis_rfi = model
-        a1, a2 = pairs
-        gains_bl = baseline_gains(gains, a1, a2)
-        vis_obs = gains_bl * (vis_ast + vis_rfi) + 0.01
-        gained_ast, gained_rfi = gains_bl * vis_ast, gains_bl * vis_rfi
-
-        res = data_frame_residuals(
-            vis_obs, gained_ast, gained_rfi, gained_ast + gained_rfi
-        )
-
-        np.testing.assert_allclose(
-            res["total"], vis_obs - (gained_ast + gained_rfi), atol=1e-12
-        )
-
-    def test_the_given_total_is_used_not_the_sum(self, model, gains, pairs):
-        """The stored forward model wins: a component may gain only one term.
-
-        See the commented-out variant in components/gains.py, where the
-        astronomical term alone carries the gain.
+        With ``g = 1`` the calibrated data *is* the data, so the calibrated
+        residual and the data-frame residual it replaces are the same numbers.
         """
         vis_ast, vis_rfi = model
-        a1, a2 = pairs
-        gains_bl = baseline_gains(gains, a1, a2)
-        gained_ast, gained_rfi = gains_bl * vis_ast, gains_bl * vis_rfi
-        stored_total = gained_ast + vis_rfi          # RFI left un-gained
-        vis_obs = stored_total
+        data = vis_ast * 0 + 5.0
 
-        res = data_frame_residuals(vis_obs, gained_ast, gained_rfi, stored_total)
+        res = calibrated_residuals(data / 1.0, vis_ast, vis_rfi)
 
-        np.testing.assert_allclose(res["total"], 0.0, atol=1e-12)
-        assert not np.allclose(
-            vis_obs - (gained_ast + gained_rfi), 0.0, atol=1e-8
-        )
-
-
-
-class TestGainedModelMean:
-    """E[g*m] is not E[g]E[m] once the gains and the model covary."""
-
-    def test_forms_the_gained_model_before_reducing(self):
-        # Both gain and model rise across the two samples, i.e. they covary --
-        # which posterior draws from a joint fit generally do.
-        gains_bl = np.array([1.0 + 0j, 2.0 + 0j])[:, None, None, None]
-        model = np.array([1.0 + 0j, 3.0 + 0j])[:, None, None, None]
-
-        correct = gained_model_mean(gains_bl, model)
-        naive = gains_bl.mean(axis=0) * model.mean(axis=0)
-
-        # E[gm] = (1*1 + 2*3) / 2 = 3.5;  E[g]E[m] = 1.5 * 2.0 = 3.0
-        np.testing.assert_allclose(correct.ravel(), [3.5])
-        np.testing.assert_allclose(naive.ravel(), [3.0])
-        assert not np.allclose(correct, naive)
-
-    def test_single_sample_matches_the_naive_order(self):
-        rng = np.random.default_rng(4)
-        shape = (1, 6, 2, 3)
-        gains_bl = rng.normal(size=shape) + 1j * rng.normal(size=shape)
-        model = rng.normal(size=shape) + 1j * rng.normal(size=shape)
-
-        np.testing.assert_allclose(
-            gained_model_mean(gains_bl, model),
-            gains_bl.mean(axis=0) * model.mean(axis=0),
-        )
-
-    def test_residuals_close_against_the_gained_model(self):
-        """The identity the whole change exists to preserve, multi-sample."""
-        rng = np.random.default_rng(5)
-        shape = (3, 6, 2, 4)
-        gains_bl = rng.normal(size=shape) + 1j * rng.normal(size=shape)
-        ast = rng.normal(size=shape) + 1j * rng.normal(size=shape)
-        rfi = rng.normal(size=shape) + 1j * rng.normal(size=shape)
-
-        gained_ast = gained_model_mean(gains_bl, ast)
-        gained_rfi = gained_model_mean(gains_bl, rfi)
-        vis_obs = gained_ast + gained_rfi + 0.5
-
-        res = data_frame_residuals(
-            vis_obs, gained_ast, gained_rfi, gained_ast + gained_rfi
-        )
-
-        np.testing.assert_allclose(
-            gained_ast + gained_rfi + res["total"], vis_obs, atol=1e-12
-        )
+        np.testing.assert_array_equal(res["ast"], data - vis_ast)
+        np.testing.assert_array_equal(res["rfi"], data - vis_rfi)
+        np.testing.assert_array_equal(res["total"], data - (vis_ast + vis_rfi))
 
 
 # ---------------------------------------------------------------------------
@@ -410,106 +318,142 @@ class TestWarnBadGains:
 
 
 # ---------------------------------------------------------------------------
-# total_model
+# external_baseline_gains
 # ---------------------------------------------------------------------------
 
-class TestTotalModel:
-    """The stored forward model wins, except where the gains were substituted."""
+N_ANT_EXT, N_FREQ_EXT, N_TIME_EXT = 4, 2, 3
 
-    @pytest.fixture
-    def parts(self):
-        rng = np.random.default_rng(8)
-        shape = (6, 2, 1)
-        gained_ast = rng.normal(size=shape) + 1j * rng.normal(size=shape)
-        gained_rfi = rng.normal(size=shape) + 1j * rng.normal(size=shape)
 
-        return gained_ast, gained_rfi
+@pytest.fixture
+def ext_gains():
+    """Per-antenna external gains on an observation grid, non-unit and complex."""
 
-    def test_the_stored_model_is_used_where_the_gains_were_good(self, parts):
-        gained_ast, gained_rfi = parts
-        stored = gained_ast + gained_rfi + 7.0        # deliberately not the sum
-        bad_bl = np.zeros(gained_ast.shape, dtype=bool)
+    rng = np.random.default_rng(12)
+    shape = (N_ANT_EXT, N_FREQ_EXT, N_TIME_EXT)
+    amp = rng.uniform(0.3, 3.0, shape)
+    phase = rng.uniform(-np.pi, np.pi, shape)
 
-        out = total_model(stored, gained_ast, gained_rfi, bad_bl)
+    return (amp * np.exp(1j * phase)).astype(complex)
 
-        np.testing.assert_allclose(out, stored)
 
-    def test_substituted_baselines_fall_back_to_the_sum(self, parts):
-        """The stored value predates the substitution and still carries the zero."""
-        gained_ast, gained_rfi = parts
-        stored = gained_ast + gained_rfi
-        stored[2] = 0.0                               # the dead antenna's baseline
-        bad_bl = np.zeros(gained_ast.shape, dtype=bool)
-        bad_bl[2] = True
+@pytest.fixture
+def placed(monkeypatch, ext_gains):
+    """``external_baseline_gains`` with the table placement stubbed out.
 
-        out = total_model(stored, gained_ast, gained_rfi, bad_bl)
+    The placement itself is ``tabascal.gain_table``'s subject and is tested
+    there; what belongs here is what the writer does with the result -- the
+    baseline product, and the unity substitution for an antenna nobody solved.
+    """
 
-        np.testing.assert_allclose(out[2], (gained_ast + gained_rfi)[2])
-        np.testing.assert_allclose(out[[0, 1, 3, 4, 5]], stored[[0, 1, 3, 4, 5]])
+    captured = {}
 
-    def test_a_non_finite_stored_value_does_not_survive(self, parts):
-        gained_ast, gained_rfi = parts
-        stored = gained_ast + gained_rfi
-        stored[4] = np.nan
-        bad_bl = np.zeros(gained_ast.shape, dtype=bool)
-        bad_bl[4] = True
+    def _run(dead=None, **kwargs):
+        gains = np.asarray(ext_gains)
+        dead = np.zeros(gains.shape, dtype=bool) if dead is None else dead
 
-        out = total_model(stored, gained_ast, gained_rfi, bad_bl)
+        def _stub(gain_table, times, freqs, n_ant=None, verbose=True):
+            captured.update(
+                gain_table=gain_table, times=times, freqs=freqs, n_ant=n_ant
+            )
+            return np.where(dead, 1.0, gains), dead
 
-        assert np.all(np.isfinite(out))
+        monkeypatch.setattr(write_mod, "gains_from_tables", _stub)
 
-    def test_the_choice_is_made_per_sample(self, parts):
-        """One bad sample must not discard the stored model on the other.
-
-        Reducing the mask over samples first -- the bug -- rebuilds the total
-        from the two parts on every sample of the cell.
-        """
-        gained_ast, gained_rfi = parts
-        gained_ast = np.stack([gained_ast, 2 * gained_ast])
-        gained_rfi = np.stack([gained_rfi, 2 * gained_rfi])
-
-        stored = gained_ast + gained_rfi + 5.0        # deliberately not the sum
-        stored[0] = 0.0                               # sample 0 had a bad gain
-
-        bad_bl = np.zeros(stored.shape, dtype=bool)
-        bad_bl[0] = True
-
-        out = total_model(stored, gained_ast, gained_rfi, bad_bl)
-
-        np.testing.assert_allclose(out[0], (gained_ast + gained_rfi)[0])
-        np.testing.assert_allclose(out[1], stored[1])
-
-        # What reducing over samples first would have given.
-        any_sample = np.where(
-            bad_bl.any(axis=0), gained_ast + gained_rfi, stored
+        a1, a2 = np.triu_indices(N_ANT_EXT, k=1)
+        args = dict(
+            gain_table=["/tables/B0"],
+            times_sec=np.array([0.0, 2.0, 4.0]),
+            freqs=np.array([1.0e9, 1.1e9]),
+            a1=a1,
+            a2=a2,
+            n_ant=N_ANT_EXT,
         )
-        assert not np.allclose(out[1], any_sample[1])
+        args.update(kwargs)
 
-    def test_works_on_dask_arrays(self, parts):
-        """write_results_ms passes the zarr's dask arrays straight in."""
-        da = pytest.importorskip("dask.array")
-        gained_ast, gained_rfi = parts
-        stored = gained_ast + gained_rfi + 3.0
-        bad_bl = np.zeros(stored.shape, dtype=bool)
-        bad_bl[1] = True
+        return external_baseline_gains(**args), captured, a1, a2
 
-        out = total_model(
-            da.from_array(stored, chunks=(2, 2, 1)),
-            da.from_array(gained_ast, chunks=(2, 2, 1)),
-            da.from_array(gained_rfi, chunks=(2, 2, 1)),
-            da.from_array(bad_bl, chunks=(2, 2, 1)),
-        )
+    return _run
+
+
+class TestExternalBaselineGains:
+    """The external layer of the calibrated frame, in the writer's own terms."""
+
+    def test_is_the_baseline_product_of_the_placed_gains(self, placed, ext_gains):
+        g_bl, _, a1, a2 = placed()
+
+        np.testing.assert_allclose(g_bl, ext_gains[a1] * ext_gains[a2].conj())
+        assert g_bl.shape == (len(a1), N_FREQ_EXT, N_TIME_EXT)
+
+    def test_both_antennas_are_used(self, placed, ext_gains):
+        """The ANTENNA1-twice mistake gives ``|g_p|^2``: real, and phaseless."""
+        g_bl, _, a1, _ = placed()
+
+        assert not np.allclose(g_bl, ext_gains[a1] * ext_gains[a1].conj())
+        assert np.abs(np.imag(g_bl)).max() > 0
+
+    def test_an_unsolved_antenna_makes_its_baselines_unity(self, placed, ext_gains):
+        """Unity, not NaN: those visibilities are written uncalibrated, not lost."""
+        dead = np.zeros(ext_gains.shape, dtype=bool)
+        dead[2] = True
+
+        g_bl, _, a1, a2 = placed(dead=dead)
+
+        touched = (a1 == 2) | (a2 == 2)
+        np.testing.assert_array_equal(g_bl[touched], 1.0)
+        assert np.all(np.isfinite(g_bl))
+        assert not np.any(g_bl[~touched] == 1.0)
+
+    def test_the_grid_is_handed_to_the_placement_unchanged(self, placed):
+        """The frame is only shared with the run if the grid is the run's own."""
+        _, captured, _, _ = placed()
+
+        assert captured["gain_table"] == ["/tables/B0"]
+        np.testing.assert_array_equal(captured["times"], [0.0, 2.0, 4.0])
+        np.testing.assert_array_equal(captured["freqs"], [1.0e9, 1.1e9])
+        assert captured["n_ant"] == N_ANT_EXT
+
+
+# ---------------------------------------------------------------------------
+# calibrated_weights
+# ---------------------------------------------------------------------------
+
+class TestCalibratedWeights:
+    """``WEIGHT_SPECTRUM = |g_total|^2 / SIGMA^2``, per channel."""
+
+    def test_is_the_inverse_variance_of_the_calibrated_visibility(self):
+        rng = np.random.default_rng(13)
+        shape = (6, 2, 3)
+        g = (rng.uniform(0.3, 3.0, shape) * np.exp(1j * rng.uniform(-np.pi, np.pi, shape))).astype(np.complex64)
+        sigma = rng.uniform(0.1, 2.0, shape)
+
+        weight = calibrated_weights(g, sigma)
+
+        # sigma_cal = SIGMA / |g|, so weight = 1 / sigma_cal^2.
+        sigma_cal = sigma / np.abs(g).astype(np.float64)
+        np.testing.assert_allclose(weight, 1.0 / sigma_cal**2, rtol=1e-12)
+
+    def test_a_frequency_dependent_gain_gives_a_frequency_dependent_weight(self):
+        """The reason the column has to be WEIGHT_SPECTRUM and not WEIGHT."""
+        g = np.array([[1.0, 2.0, 4.0]], dtype=np.complex64)
+        sigma = np.ones((1, 3))
+
+        weight = calibrated_weights(g, sigma)
+
+        np.testing.assert_allclose(weight, [[1.0, 4.0, 16.0]])
+
+    def test_a_unity_gain_leaves_the_ms_weight(self):
+        sigma = np.array([0.5, 2.0])
 
         np.testing.assert_allclose(
-            np.asarray(out), np.where(bad_bl, gained_ast + gained_rfi, stored)
+            calibrated_weights(np.ones(2, dtype=np.complex64), sigma),
+            1.0 / sigma**2,
         )
 
-    def test_nothing_bad_means_nothing_changes(self, parts):
-        gained_ast, gained_rfi = parts
-        stored = gained_ast + gained_rfi
-
-        out = total_model(
-            stored, gained_ast, gained_rfi, np.zeros(stored.shape, dtype=bool)
+    def test_the_result_is_float64_whatever_the_gain_dtype(self):
+        """Squared in float64 so the write's single cast is the only rounding."""
+        weight = calibrated_weights(
+            np.full(3, 2.0, dtype=np.complex64), np.full(3, 0.5)
         )
 
-        np.testing.assert_allclose(out, gained_ast + gained_rfi)
+        assert weight.dtype == np.float64
+        np.testing.assert_array_equal(weight, 16.0)
