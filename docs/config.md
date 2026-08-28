@@ -402,7 +402,7 @@ gains:
 ```
 
 * `init`: How the gain parameters are initialised. `prior` (the default) starts at the prior mean. `gains:ConstGains` additionally accepts a path to a previously measured gain — see [A constant gain per antenna](#a-constant-gain-per-antenna).
-* `amp_mean`: The mean of the prior over the gain amplitude. `gains:ConstGains` reads it only when `fix_flux_scale` is `false` — see below.
+* `amp_mean`: The centre of the prior over the gain amplitude. It must be positive and finite. `gains:GPGains` takes it as the mean of a Gaussian; `gains:ConstGains` fits the log amplitude, so there it is the **median** of a lognormal — the centre in log space — and it reads it only when `fix_flux_scale` is `false`. See below.
 * `amp_std`: The standard deviation of the prior over the gain amplitude, **as a percentage** of `amp_mean`. `amp_std: 10` with `amp_mean: 1.0` is a 10 % spread.
 * `phase_mean`: The mean of the prior over the gain phase, in **radians**.
 * `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**.
@@ -444,7 +444,7 @@ gains:
 
 Both directions are removed from the **parameters**, not just from the value they map to. Writing $n_\text{ant}$ amplitude parameters and subtracting their mean would give the same gains and the same prior, but would leave the all-ones direction of that latent space invisible to every visibility: flat in the likelihood however much data there is, curved only by the prior. Such a coordinate wrecks the conditioning of the optimisation and makes a likelihood-only Fisher matrix singular, so there is no such coordinate.
 
-The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the prior mean **only when the flux scale is free**: under the zero-sum gauge the geometric mean is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so. A non-positive `amp_mean` is an error — the amplitude is fitted in log space.
+The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the **median** of that prior — its centre in log space, and the value the fit starts at — rather than its arithmetic mean, which is the slightly larger $\texttt{amp\_mean} \cdot e^{\sigma^2/2}$ for $\sigma$ the log-space spread. And it is that **only when the flux scale is free**: under the zero-sum gauge the geometric mean of $|g|$ is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so. A value that is not positive and finite is an error rather than a default — `amp_mean: 0` used to be read as "unset" and silently become 1.0.
 
 * `ref_ant`: The antenna whose phase is pinned to 0. `null` (the default) selects the first antenna with any unflagged data. An antenna every one of whose baselines is flagged everywhere is not constrained by any visibility, so it cannot be the reference the others are measured against, and naming one explicitly is an error rather than a silently unpinned fit.
 

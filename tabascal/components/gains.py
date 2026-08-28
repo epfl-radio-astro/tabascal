@@ -43,13 +43,25 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
     else:
         raise ValueError(f"Config parameter (gains:\n\tr_seed: {r_seed}) is not of type int.")
 
-    if not gp_amp_mean: # Set Default
+    # Defaulted only when it is genuinely unset. `not gp_amp_mean` also caught 0,
+    # which would silently become a 1.0 nobody wrote, and let NaN and infinity
+    # through untouched -- and every use of amp_mean divides by it or takes its
+    # logarithm.
+    if gp_amp_mean is None: # Set Default
         est_gp_amp_mean = 1.0
         gains_config["amp_mean"] = est_gp_amp_mean
     elif isinstance(gp_amp_mean, (float, int)):
         gains_config["amp_mean"] = float(gp_amp_mean)
     else:
         raise ValueError(f"Config parameter (gains:\n\tamp_mean: {gp_amp_mean}) is not of type float or int.")
+
+    if not np.isfinite(gains_config["amp_mean"]) or gains_config["amp_mean"] <= 0:
+        raise ValueError(
+            f"Config parameter (gains:\n\tamp_mean: {gp_amp_mean}) is not a positive, "
+            "finite number. It is the scale the gain amplitudes are measured "
+            "against: amp_std is a percentage of it, and a constant gain is fitted "
+            "as its logarithm."
+        )
 
     if not gp_amp_std: # Set Default
         est_gp_amp_std = 1 / 100 * gains_config["amp_mean"] # 1 %
@@ -675,10 +687,11 @@ class ConstGains(Component):
 
     The prior on ``|g_p|`` is lognormal: ``gains.amp_std`` (a percentage) is used as
     the standard deviation of ``log|g|``, which agrees with a fractional spread to
-    first order and keeps the gain positive. ``gains.amp_mean`` is the prior mean only
-    when the flux scale is free — under the zero-sum gauge the geometric mean is 1 by
-    construction and ``amp_mean`` only sets the scale the percentage is taken of, so a
-    non-unit value there warns.
+    first order and keeps the gain positive. ``gains.amp_mean`` is then the *median*
+    of that prior — its centre in log space, not its arithmetic mean — and it is that
+    only when the flux scale is free: under the zero-sum gauge the geometric mean is 1
+    by construction and ``amp_mean`` only sets the scale the percentage is taken of,
+    so a non-unit value there warns.
 
     ``gains.fix_flux_scale: false`` lifts the amplitude constraint, and is accepted
     only with a fixed-flux sky in the model, which is the one thing that can set the
@@ -722,13 +735,6 @@ class ConstGains(Component):
             self.gp_amp_std = gains_config["amp_std"]
             self.gp_phase_mean = gains_config["phase_mean"]
             self.gp_phase_std = gains_config["phase_std"]
-
-            if not self.gp_amp_mean > 0:
-                raise ValueError(
-                    f"Config parameter (gains:\n\tamp_mean: {self.gp_amp_mean}) is not "
-                    "positive. The amplitude is fitted in log space, which a "
-                    "non-positive mean has no value at."
-                )
 
             # amp_std is a fractional spread (the config gives a percentage); use it
             # as the log-amplitude sigma, which makes the prior on |g| lognormal and

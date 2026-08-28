@@ -677,9 +677,24 @@ class TestAmpMean:
 
         assert np.allclose(amp, 2.0 * np.exp(0.1), rtol=exact_rtol, atol=exact_rtol)
 
-    def test_a_non_positive_amp_mean_is_an_error(self):
+    @pytest.mark.parametrize(
+        "amp_mean", [-1.0, 0.0, 0, float("nan"), float("inf"), -float("inf")]
+    )
+    def test_an_unusable_amp_mean_is_an_error(self, amp_mean):
+        """Zero included: it used to be read as "unset" and silently become 1.0.
+
+        Every use of amp_mean divides by it or takes its logarithm, so a value that
+        is not positive and finite is a mistake worth naming rather than a default
+        worth guessing.
+        """
         with pytest.raises(RuntimeError, match="amp_mean"):
-            ConstGains().setup(make_const_gains_config(amp_mean=-1.0))
+            ConstGains().setup(make_const_gains_config(amp_mean=amp_mean))
+
+    def test_an_unset_amp_mean_still_defaults(self):
+        comp = ConstGains()
+        comp.setup(make_const_gains_config(amp_mean=None))
+
+        assert comp.gp_amp_mean == 1.0
 
 
 # ---------------------------------------------------------------------------
