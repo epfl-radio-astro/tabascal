@@ -208,7 +208,9 @@ Nothing is written when there is no calibration to export: results with no `gain
 
 Every-sample rather than on the mean: samples either side of 1 average to exactly 1 while the divisor the columns use — the mean of the baseline *product* — is a real calibration, so testing the mean alone would throw one away.
 
-**A table from a previous run of the same results is removed** in that case, with a `RuntimeWarning` saying so. A stale calibration sitting under the current name beside the current results reads as the current solution, which is a bad thing to be wrong about. Only a directory that is a casacore table declaring itself a `Calibration` is ever removed — a path of your own that happens to be named `.B` is left alone — and never one that is, contains, or sits inside the MS.
+**A table from a previous run of the same results is removed** in that case, with a `RuntimeWarning` saying so. A stale calibration sitting under the current name beside the current results reads as the current solution, which is a bad thing to be wrong about.
+
+Only a calibration table is ever removed: the path has to be a casacore table — casacore's own structural check, not just the marker files — whose INFO record declares `Type = Calibration`, and it may not be, contain, or sit inside the MS. A directory of your own that happens to be named `<results>.B` is left exactly as it is, and so is a table too damaged for casacore to open. The same rule applies to *writing*: the export replaces a previous calibration table at that path and refuses anything else, rather than deleting it.
 
 ### If the export fails
 
@@ -216,8 +218,11 @@ The export is the last thing the writer does and is additive to it. Everything i
 
 * an MS with more than one spectral window, which the writer serves one partition of while a caltable can only file rows under one window's id;
 * an output path overlapping the MS (results written *inside* the MS put the table there too);
+* something at the output path that is not a calibration table;
 * results whose gains do not describe the MS's antennas or timesteps;
 * a `TIME` column declaring a time scale tabascal cannot interpret;
 * anything the filesystem refuses.
+
+**A table from an earlier run is removed here too**, and the warning says so. A run whose export fails is in the same position as one that has nothing to export: the table it could not replace would otherwise stand beside the new results as if it were this run's answer. It is removed under exactly the rules above — so a directory of your own in the way is reported and left alone.
 
 A `MemoryError` is not demoted — that is a statement about the process, not about the data — and `Ctrl-C` stops the run as it always would.

@@ -1194,6 +1194,16 @@ def write_caltable(
     happens, which is also what keeps the clean-up on the failure path from
     reaching anything but the caltable's own directory.
 
+    **``overwrite=True`` replaces a calibration table and nothing else.** An
+    existing output that is not one -- a caller's directory, an ordinary file, a
+    Measurement Set, a table too damaged for casacore to open (see
+    :func:`_is_caltable`) -- is a ``ValueError`` naming the path and what was
+    found, rather than a ``rmtree``. Every legitimate overwrite target is a
+    previous solution, so anything else there is a path pointing somewhere the
+    caller did not mean; the cost of that reading is a deletion that cannot be
+    undone. A damaged caltable is refused on the same rule and has to be removed
+    by hand.
+
     Raises
     ------
     ValueError
@@ -1206,6 +1216,9 @@ def write_caltable(
         the error is re-raised, so a half-written table can only survive a
         failure that also prevents its removal. The original exception always
         propagates -- nothing raised during the clean-up replaces it.
+
+        Also if ``path`` exists, ``overwrite`` is true, and what is there is not
+        a calibration table this function could have written.
     FileExistsError
         If ``path`` exists and ``overwrite`` is false.
     """
@@ -1335,6 +1348,19 @@ def write_caltable(
     if os.path.exists(path):
         if not overwrite:
             raise FileExistsError(f"{path} already exists. Use overwrite=True.")
+
+        # overwrite=True is permission to replace a *calibration table*, not to
+        # delete whatever is at the path. Every legitimate target is a caltable --
+        # a previous solution -- so anything else here is a caller pointing the
+        # writer somewhere they did not mean to, and rmtree is not the answer.
+        if not _is_caltable(path):
+            raise ValueError(
+                f"{path} exists and is not a calibration table ({_what_is_at(path)}), "
+                "so it will not be removed. write_caltable only overwrites a table "
+                "it could have written; move or delete this yourself if you meant "
+                "to replace it."
+            )
+
         shutil.rmtree(path)
 
     n_row = n_time * n_ant
@@ -1410,14 +1436,34 @@ def write_caltable(
 
 
 def _is_caltable(path: str) -> bool:
-    """Whether *path* is a casacore table whose INFO record says ``Calibration``.
+    """Whether *path* holds a casacore table that declares itself a calibration.
 
-    Read off the ``table.info`` file rather than by opening the table, because
-    this question is asked before a ``rmtree``: it has to answer "no" for a
-    directory that is not a table, for a half-written or corrupt one, and for a
-    plain casacore table such as a Measurement Set -- which carries the same
-    marker files and is told apart only by what its INFO record declares.
+    Asked before anything is deleted, by :func:`remove_caltable` and by
+    :func:`write_caltable` on the destination it is about to overwrite, so it
+    answers exactly one question: *could this have been written by
+    ``write_caltable``?* Three things say yes, and each of them says no for
+    something the other two miss:
+
+    * the marker files casacore writes for every table -- absent for a caller's
+      own directory, and for an ordinary file;
+    * an INFO record whose first line declares ``Type = Calibration``, read as a
+      file rather than through casacore, which is what tells a caltable from a
+      Measurement Set: an MS carries the same markers and differs only here;
+    * ``tableexists``, casacore's own read-only structural check, which is what
+      tells a table from a directory dressed up as one, and catches a
+      ``table.dat`` that has been truncated or replaced.
+
+    That is a check on the *format*, not a guarantee of integrity: a table that
+    opens cleanly may still hold a solution that is wrong, incomplete or for
+    another observation, and nothing here would say so. What it does guarantee
+    is that the thing about to be removed was a casacore calibration table and
+    not a caller's data.
+
+    Never raises: a damaged table has to answer "no" rather than take the caller
+    down on the way to a deletion that then does not happen.
     """
+
+    from casacore.tables import tableexists
 
     if not os.path.isdir(path):
         return False
@@ -1434,10 +1480,28 @@ def _is_caltable(path: str) -> bool:
     # "Type = Calibration" on the first line, as casacore writes it.
     name, _, value = declared.partition("\n")[0].partition("=")
 
-    return (
-        name.strip().lower() == "type"
-        and value.strip().lower() == _CALTABLE_INFO_TYPE
-    )
+    if name.strip().lower() != "type" or value.strip().lower() != _CALTABLE_INFO_TYPE:
+        return False
+
+    try:
+        return bool(tableexists(path))
+    except Exception:
+        return False
+
+
+def _what_is_at(path: str) -> str:
+    """A short description of whatever is at *path*, for a refusal to name it."""
+
+    if not os.path.isdir(path):
+        return "a file"
+
+    if all(os.path.exists(os.path.join(path, m)) for m in _TABLE_MARKERS):
+        return (
+            "a casacore table that does not declare itself a calibration table, "
+            "or one whose own files are damaged"
+        )
+
+    return "a directory"
 
 
 def remove_caltable(path: str, ms_path: str) -> bool:

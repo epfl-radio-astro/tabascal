@@ -583,6 +583,51 @@ CALTABLE_EXT = ".B"
 _TRACEBACK_LINES = 6
 
 
+def caltable_path(results_zarr_path: str) -> str:
+    """Where a results zarr's calibration table goes: the same name, ``.B``.
+
+    One definition, because two things need it: the export, and the clean-up
+    that has to find the table an export could not replace.
+    """
+
+    # normpath first: a results path with a trailing separator would otherwise
+    # put the table *inside* the zarr directory.
+    return os.path.splitext(os.path.normpath(results_zarr_path))[0] + CALTABLE_EXT
+
+
+def _clear_failed_export(out_path: str, ms_path: str) -> str:
+    """Remove a table a failed export could not replace. Returns what happened.
+
+    A failure *before* the write -- a multi-window MS, results that do not
+    describe it, an output path overlapping it -- leaves the previous run's table
+    standing beside the new results, under the current name, which is the
+    stale-calibration hazard :func:`_drop_superseded_caltable` exists for reached
+    down the other path. The same removal is made here, through the same safe
+    remover, and reported in the same warning.
+
+    Never raises: the export has already failed, and a failure to clean up after
+    it must not replace that news with its own. The returned sentence is empty
+    when there was nothing there at all.
+    """
+
+    try:
+        if remove_caltable(out_path, ms_path):
+            return f" The superseded table at {out_path} has been removed."
+
+        if os.path.exists(out_path):
+            return (
+                f" {out_path} holds something that is not a calibration table, "
+                "so it has been left alone."
+            )
+    except Exception as err:
+        return (
+            f" The table at {out_path} could not be removed either: "
+            f"{type(err).__name__}: {err}."
+        )
+
+    return ""
+
+
 def _emit_gain_caltable(ms_path: str, results_zarr_path: str, gain_table):
     """:func:`write_gain_caltable`, with a failure demoted to a warning.
 
@@ -596,9 +641,14 @@ def _emit_gain_caltable(ms_path: str, results_zarr_path: str, gain_table):
       partition of happily and :func:`~tabascal.ms.write_caltable` refuses,
       since a caltable files every row under one window's id;
     * an output path overlapping the MS, refused by the same guard;
+    * something at the output path that is not a calibration table;
     * results whose gains do not describe the MS's antennas or timesteps;
     * a ``TIME`` column declaring a scale tabascal cannot interpret;
     * anything the filesystem refuses.
+
+    All of those fail *before* the table is written, which leaves an earlier
+    run's table standing at the destination -- so it is cleared here too, by
+    :func:`_clear_failed_export`, and what happened to it is part of the warning.
 
     ``MemoryError`` is not demoted: that is a statement about the process rather
     than about the data, and nothing downstream could reason about a run that
@@ -617,12 +667,15 @@ def _emit_gain_caltable(ms_path: str, results_zarr_path: str, gain_table):
         tail = "".join(
             traceback.format_exc().splitlines(keepends=True)[-_TRACEBACK_LINES:]
         )
+        # An earlier run's table is still standing at the destination this one
+        # could not write, so it goes the same way it would on a no-op export.
+        cleared = _clear_failed_export(caltable_path(results_zarr_path), ms_path)
 
         warnings.warn(
             "The MS columns were written, but the calibration table beside "
             f"{results_zarr_path} was not: {type(err).__name__}: {err}. The "
             "results are unaffected; the solution is simply not available as a "
-            f"table to apply.\n{tail}",
+            f"table to apply.{cleared}\n{tail}",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -715,7 +768,9 @@ def write_gain_caltable(
 
     In each of those cases a table left by an *earlier* run of the same results
     is removed (:func:`_drop_superseded_caltable`), because a stale calibration
-    under the current name reads as the current one.
+    under the current name reads as the current one. A run whose export *fails*
+    is in the same position, and :func:`_clear_failed_export` does the same there.
+    Only a calibration table is ever removed, and never one overlapping the MS.
 
     Note that ``applycal`` operates on ``DATA``. An MS whose visibilities live in
     a non-standard column cannot consume this table, whatever the table says.
@@ -724,10 +779,7 @@ def write_gain_caltable(
     # Derived before anything is read, because the no-op paths need it too: a
     # rerun that fits nothing has to remove the table the last run left here.
     if out_path is None:
-        # normpath first: a results path with a trailing separator would
-        # otherwise put the table *inside* the zarr directory.
-        stem = os.path.splitext(os.path.normpath(results_zarr_path))[0]
-        out_path = stem + CALTABLE_EXT
+        out_path = caltable_path(results_zarr_path)
 
     # Closed on the way out: this runs at the end of a long job, and a store left
     # open holds file handles for the rest of it.
@@ -737,27 +789,33 @@ def write_gain_caltable(
                 out_path, ms_path, "the results carry no gains"
             )
 
-        # The whole sample axis, not the mean: what says a run fitted no gains is
-        # that every sample is unity. A mean of 1 says nothing -- samples either
-        # side of it average to unity while the divisor the columns use, the mean
-        # of the baseline product, is a real calibration.
-        raw = np.asarray(xds_tab.gains.data)
+        stored = xds_tab.gains.data
         corr = xds_tab.attrs.get("corr")
 
-    if raw.ndim != 4:
-        return _drop_superseded_caltable(
-            out_path,
-            ms_path,
-            f"the results' gains have {raw.ndim} dimensions, not the four "
-            "(sample, antenna, channel, time) a caltable can hold",
-        )
+        if stored.ndim != 4:
+            return _drop_superseded_caltable(
+                out_path,
+                ms_path,
+                f"the results' gains have {stored.ndim} dimensions, not the four "
+                "(sample, antenna, channel, time) a caltable can hold",
+            )
 
-    if np.all(raw == 1):
+        # Both reductions over the stored chunks, in one pass: a posterior is
+        # (sample, antenna, channel, time) and can be far larger than the table
+        # it reduces to, so neither the mean nor the unity test may materialise
+        # it. Unity over the *whole* sample axis rather than over the mean --
+        # what says a run fitted no gains is that every sample is 1, where a mean
+        # of 1 says nothing: samples either side of it average to unity while the
+        # divisor the columns use, the mean of the baseline product, is a real
+        # calibration. Inside the store's context, since these are the reads.
+        unitary, gains = dask.compute((stored == 1).all(), stored.mean(axis=0))
+
+    if unitary:
         return _drop_superseded_caltable(
             out_path, ms_path, "the fitted gains are unity on every sample"
         )
 
-    gains = raw.mean(axis=0)
+    gains = np.asarray(gains)
     n_ant_fit, n_freq, n_time_fit = gains.shape
 
     # A second read of the MS -- the caller above has one open, but this is

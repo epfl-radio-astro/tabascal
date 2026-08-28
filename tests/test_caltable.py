@@ -12,6 +12,7 @@ either session; the pure-numpy identities are float64 in both.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -433,6 +434,47 @@ class TestRemoveCaltable:
         assert remove_caltable(path, ms_path) is False
         assert os.path.exists(path)
 
+    @pytest.mark.parametrize("damage", ["truncate", "remove"])
+    def test_it_refuses_a_table_whose_own_files_are_damaged(
+        self, tmp_path, gains, ms_path, damage
+    ):
+        """The marker files are a name, not a proof; casacore reads the table.
+
+        A directory can carry ``table.dat`` and an INFO record saying
+        ``Calibration`` and still not be a table -- by damage, by an interrupted
+        write, or because somebody put them there. What settles it is whether
+        casacore can open the thing.
+        """
+
+        path = str(tmp_path / "damaged.B")
+        write_caltable(path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path)
+
+        table_dat = os.path.join(path, "table.dat")
+
+        if damage == "truncate":
+            open(table_dat, "wb").close()
+        else:
+            os.remove(table_dat)
+
+        assert remove_caltable(path, ms_path) is False
+        assert os.path.exists(path)
+
+    def test_it_refuses_hand_written_marker_files(self, tmp_path, ms_path):
+        """A directory dressed up as a caltable is still not one."""
+
+        path = str(tmp_path / "pretend.B")
+        os.makedirs(path)
+
+        with open(os.path.join(path, "table.dat"), "w") as f:
+            f.write("not really a table")
+        with open(os.path.join(path, "table.info"), "w") as f:
+            f.write("Type = Calibration\nSubType = B Jones\n")
+        with open(os.path.join(path, "mine.txt"), "w") as f:
+            f.write("keep me")
+
+        assert remove_caltable(path, ms_path) is False
+        assert os.path.exists(os.path.join(path, "mine.txt"))
+
     def test_it_refuses_a_path_overlapping_the_ms(self, tmp_path, gains, ms_path):
         """The same guard the writer applies, on the one call that deletes."""
 
@@ -849,6 +891,80 @@ class TestValidation:
             self._call(path, gains, ms_path, {"overwrite": True, **overrides})
 
         assert np.allclose(read_caltable(path)["gains"], gains, rtol=1e-5, atol=1e-6)
+
+
+class TestWhatOverwriteMayReplace:
+    """``overwrite=True`` is permission to replace a *calibration table*.
+
+    It is not permission to delete whatever happens to be at the path. Every
+    legitimate overwrite target is a caltable -- a previous solution -- so
+    anything else there is a caller pointing the writer at the wrong place, and
+    ``rmtree`` is not the answer to that. Tightens the original contract, which
+    removed the destination on sight.
+    """
+
+    def _sentinel_dir(self, tmp_path, name="test.B"):
+        path = str(tmp_path / name)
+        os.makedirs(path)
+        with open(os.path.join(path, "mine.txt"), "w") as f:
+            f.write("keep me")
+
+        return path
+
+    def test_a_directory_is_refused_and_kept(self, tmp_path, gains, ms_path):
+        path = self._sentinel_dir(tmp_path)
+
+        with pytest.raises(ValueError, match="not a calibration table"):
+            write_caltable(
+                path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        assert os.path.exists(os.path.join(path, "mine.txt"))
+
+    def test_an_ordinary_file_is_refused(self, tmp_path, gains, ms_path):
+        path = str(tmp_path / "test.B")
+        with open(path, "w") as f:
+            f.write("keep me")
+
+        with pytest.raises(ValueError, match="not a calibration table"):
+            write_caltable(
+                path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        with open(path) as f:
+            assert f.read() == "keep me"
+
+    def test_a_plain_casacore_table_is_refused(self, tmp_path, gains, ms_path):
+        """An MS is a casacore table too; only its INFO record says it is not one."""
+
+        path = _minimal_ms(str(tmp_path / "other.ms"), n_ant=2)
+
+        with pytest.raises(ValueError, match="not a calibration table"):
+            write_caltable(
+                path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+        assert os.path.exists(os.path.join(path, "ANTENNA"))
+
+    def test_the_error_names_the_path(self, tmp_path, gains, ms_path):
+        path = self._sentinel_dir(tmp_path)
+
+        with pytest.raises(ValueError, match=re.escape(path)):
+            write_caltable(
+                path, gains, np.arange(N_TIME, dtype=float), ms_path=ms_path
+            )
+
+    def test_a_caltable_is_still_replaced(self, tmp_path, gains, ms_path):
+        """The case overwrite exists for, unaffected by the tightening."""
+
+        path = str(tmp_path / "test.B")
+        times = np.arange(N_TIME, dtype=float)
+        write_caltable(path, gains, times, ms_path=ms_path)
+        write_caltable(path, 2 * gains, times, ms_path=ms_path)
+
+        assert np.allclose(
+            read_caltable(path)["gains"], 2 * gains, rtol=1e-5, atol=1e-6
+        )
 
 
 class TestSourceMsConsistency:

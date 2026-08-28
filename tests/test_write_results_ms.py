@@ -115,12 +115,23 @@ def _baseline_gains(gains):
 
 
 def _write_zarr(
-    tmp_path, gains, ast, rfi, name="results.zarr", vis_obs=None, corr=None
+    tmp_path,
+    gains,
+    ast,
+    rfi,
+    name="results.zarr",
+    vis_obs=None,
+    corr=None,
+    sample_chunk=None,
 ):
     """A results zarr in the layout ``write_results_xds`` produces.
 
     ``corr`` is the fitted-correlation attribute; ``None`` leaves it off, which
     is what a zarr written before the attribute existed looks like.
+
+    ``sample_chunk`` stores the arrays chunked along the sample axis, as a
+    posterior with many samples is: the export reduces them chunk by chunk and
+    must never hold the whole four-dimensional array.
     """
 
     if vis_obs is None:
@@ -142,6 +153,9 @@ def _write_zarr(
         },
         attrs={} if corr is None else {"corr": corr},
     )
+
+    if sample_chunk is not None:
+        xds = xds.chunk({"sample": sample_chunk})
 
     path = str(tmp_path / name)
     xds.to_zarr(path, mode="w")
@@ -1786,6 +1800,64 @@ class TestTheExportRuns:
         with tables.table(os.path.join(ms_skeleton, "ANTENNA"), ack=False) as ant:
             assert ant.nrows() == N_ANT
 
+    def test_a_failed_export_removes_the_superseded_table(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """A failure before the write is another way to leave a stale table.
+
+        The no-op paths remove the previous run's table because it would read as
+        this run's solution; a run whose export *fails* is in exactly that
+        position, and the table it could not replace is removed there too.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        assert os.path.exists(_caltable_path(zarr_path))
+
+        # The same results, re-fitted, on an MS no caltable can describe.
+        two_windows = _ms_skeleton(tmp_path, name="two_windows.ms", n_spw=2)
+        again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
+
+        with pytest.warns(RuntimeWarning) as record:
+            run_writer(_fake_ms(data), again, ms_path=two_windows, emit=True)
+
+        message = str(record[0].message)
+
+        assert "spectral window" in message
+        assert "superseded" in message
+        assert not os.path.exists(_caltable_path(zarr_path))
+
+    def test_a_directory_in_the_way_is_neither_written_nor_removed(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """The export names its own output; it does not own everything so named.
+
+        ``results.zarr`` gives ``results.B``, and if a directory of the caller's
+        is already there it is left exactly as it is -- neither overwritten by
+        the write nor swept up by the clean-up afterwards.
+        """
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        in_the_way = _caltable_path(zarr_path)
+        os.makedirs(in_the_way)
+        sentinel = os.path.join(in_the_way, "mine.txt")
+        with open(sentinel, "w") as f:
+            f.write("keep me")
+
+        with pytest.warns(RuntimeWarning, match="not a calibration table"):
+            values, _ = run_writer(
+                _fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True
+            )
+
+        self._columns_are_intact(values, gains, data)
+
+        with open(sentinel) as f:
+            assert f.read() == "keep me"
+
     def test_a_memory_error_is_not_demoted(self, tmp_path, run_writer, monkeypatch):
         """Running out of memory is the machine's problem, not the export's.
 
@@ -2103,6 +2175,34 @@ class TestTheEmittedCaltable:
 
         assert os.path.exists(str(tmp_path / "init_pred_Custom.B"))
 
+    def test_a_chunked_posterior_is_reduced_chunk_by_chunk(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """The sample axis is reduced by dask rather than materialised whole.
+
+        A posterior is ``(sample, antenna, channel, time)`` and can be far larger
+        than the table it reduces to, so both the unity check and the sample mean
+        run over the stored chunks. The memory that is *not* used is not
+        something a test can see; what is asserted is that the chunked path
+        reaches the same answer as the contiguous one.
+        """
+        gains, ast, rfi = _model(3)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, sample_chunk=1)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        # One chunk per sample on disk, or the reduction is over a single chunk
+        # and proves nothing.
+        assert xr.open_zarr(zarr_path).gains.chunksizes["sample"] == (1, 1, 1)
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        read = read_caltable(_caltable_path(zarr_path))
+        mean = gains.mean(axis=0)
+
+        np.testing.assert_allclose(
+            read["gains"], mean, rtol=1e-5, atol=1e-5 * np.abs(mean).max()
+        )
+
     def test_a_second_write_replaces_the_table(
         self, tmp_path, run_writer, ms_skeleton
     ):
@@ -2174,6 +2274,19 @@ class TestNothingIsExportedWithoutAFit:
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+    def test_a_chunked_unitary_posterior_exports_nothing(
+        self, tmp_path, run_writer, ms_skeleton
+    ):
+        """The unity test is a chunked reduction and gives the chunked answer."""
+        _, ast, rfi = _model(3)
+        gains = _uniform_gains(3)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, sample_chunk=1)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        assert not os.path.exists(_caltable_path(zarr_path))
 
     def test_samples_that_average_to_unity_are_still_a_calibration(
         self, tmp_path, run_writer, ms_skeleton

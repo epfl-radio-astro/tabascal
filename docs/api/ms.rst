@@ -119,11 +119,32 @@ read back as ``time_ref``.
 :func:`~tabascal.ms.remove_caltable` is the other end: it deletes a table whose
 solution has been superseded — a rerun that fits no gains has none to overwrite
 the previous one with, and a stale table under the current name reads as the
-current calibration. Being the one call here that deletes a path a caller named,
-it refuses rather than removes unless the path holds a casacore table whose INFO
-record says ``Calibration`` (a Measurement Set is a casacore table too, and only
-its ``Type`` says otherwise), and it applies the same overlap guard as the
-writer.
+current calibration. It applies the same overlap guard as the writer, and the
+same test of what it is about to delete.
+
+What may be deleted
+~~~~~~~~~~~~~~~~~~~
+
+Both calls that remove something — ``remove_caltable``, and ``write_caltable``
+clearing an existing output under ``overwrite=True`` — first ask whether the path
+holds a table this module could have written. Three checks, each catching what
+the others miss: casacore's marker files, which a caller's own directory and an
+ordinary file do not have; an INFO record declaring ``Type = Calibration``, which
+is the *only* thing separating a caltable from a Measurement Set, since an MS
+carries the same markers; and ``tableexists``, casacore's read-only structural
+check, which catches a directory dressed up with hand-written marker files and a
+``table.dat`` that has been truncated or replaced.
+
+That is a check on the format and not a guarantee of integrity — a table that
+opens cleanly can still hold a solution that is wrong, or for another
+observation — but it does guarantee that what is removed was a casacore
+calibration table rather than a caller's data. Anything else at the path is a
+``ValueError`` from the writer and a ``False`` from the remover; a damaged table
+is refused on the same rule and has to be cleared by hand. This tightens the
+original ``overwrite`` contract, which removed the destination on sight: every
+legitimate overwrite target is a previous solution, so anything else there is a
+path pointing somewhere the caller did not mean, and the cost of reading it the
+other way is a deletion that cannot be undone.
 
 The solution TABASCAL fits is exported this way after every run; see
 :doc:`../output`.
