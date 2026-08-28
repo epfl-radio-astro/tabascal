@@ -12,6 +12,7 @@ from tabascal.components.gains import (
     UnitaryGains,
     GPGains,
     gains_config_validation,
+    validate_gain_scales,
 )
 
 from .conftest import make_constants, assert_transform_roundtrip
@@ -188,6 +189,188 @@ class TestGainsConfigValidation:
         result = gains_config_validation(cfg, freqs, 1e6, times, 8.0)
         assert result["amp_corr_freq"] > 0
         assert result["amp_corr_time"] > 0
+
+
+# ---------------------------------------------------------------------------
+# None means "unset", 0 means 0
+# ---------------------------------------------------------------------------
+
+SCALE_KEYS = ("r_seed", "amp_mean", "amp_std", "phase_mean", "phase_std")
+CORR_KEYS = ("amp_corr_freq", "amp_corr_time", "phase_corr_freq", "phase_corr_time")
+
+#: Every value that is not a width: zero included, since a zero-width prior is a
+#: degenerate Normal rather than an unset one.
+UNUSABLE = [0, 0.0, -1.0, float("nan"), float("inf"), -float("inf")]
+
+
+def scale_config(**overrides):
+    """The keys :func:`validate_gain_scales` reads, all unset unless overridden."""
+
+    return {**{key: None for key in SCALE_KEYS}, **overrides}
+
+
+def full_config(**overrides):
+    """The keys :func:`gains_config_validation` reads, all unset unless overridden."""
+
+    return {**{key: None for key in SCALE_KEYS + CORR_KEYS}, **overrides}
+
+
+def validate_full(cfg, freqs=None, times=None, chan_width=1e6, int_time=8.0):
+    freqs = jnp.linspace(1.4e9, 1.41e9, 4) if freqs is None else freqs
+    times = jnp.linspace(0.0, 120.0, 8) if times is None else times
+
+    return gains_config_validation(cfg, freqs, chan_width, times, int_time)
+
+
+class TestSeed:
+
+    def test_an_explicit_zero_seed_is_honoured(self):
+        """0 is a seed like any other; ``not r_seed`` used to read it as "unset".
+
+        The substitution was not harmless — seed 0 and the default seed 2 drive
+        different draws — so a config asking for 0 quietly got someone else's random
+        numbers.
+        """
+        assert validate_gain_scales(scale_config(r_seed=0))["r_seed"] == 0
+        assert not jnp.allclose(
+            jax.random.normal(jax.random.PRNGKey(0), (8,)),
+            jax.random.normal(jax.random.PRNGKey(2), (8,)),
+        )
+
+    def test_an_unset_seed_still_defaults(self):
+        assert validate_gain_scales(scale_config())["r_seed"] == 2
+        assert validate_full(full_config())["r_seed"] == 2
+
+    def test_a_non_integer_seed_is_an_error(self):
+        with pytest.raises(ValueError, match="r_seed"):
+            validate_gain_scales(scale_config(r_seed=1.5))
+
+
+class TestPriorWidths:
+
+    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    @pytest.mark.parametrize("value", UNUSABLE)
+    def test_an_unusable_width_is_an_error(self, key, value):
+        """A zero width is a degenerate prior, not an unset one.
+
+        It pins every gain to the mean and gives the fit nothing to move, so it is
+        named rather than silently replaced by the default width.
+        """
+        with pytest.raises(ValueError, match=key):
+            validate_gain_scales(scale_config(**{key: value}))
+
+        with pytest.raises(ValueError, match=key):
+            validate_full(full_config(**{key: value}))
+
+    def test_unset_widths_still_default(self):
+        cfg = validate_gain_scales(scale_config())
+
+        assert cfg["amp_std"] == pytest.approx(0.01)  # 1 % of the default amp_mean
+        assert cfg["phase_std"] == pytest.approx(float(np.deg2rad(1)))
+
+    def test_explicit_widths_keep_their_units(self):
+        cfg = validate_gain_scales(scale_config(amp_mean=2.0, amp_std=5.0, phase_std=2.0))
+
+        assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
+        assert cfg["phase_std"] == pytest.approx(float(np.deg2rad(2.0)))
+
+    def test_the_percentage_is_floated_before_it_is_divided(self):
+        """``float(std) / 100``, not ``std / 100``: the two orders are not the same.
+
+        An int too large to be represented exactly as a float is rounded by
+        ``float()`` but divided exactly by ``/``, so the order of the two decides the
+        last bit. Pinned because the conversion moved into a closure and the arithmetic
+        of an accepted value must not shift.
+        """
+        std = 9007199254740993  # 2**53 + 1, the first int a float cannot hold
+        cfg = validate_gain_scales(scale_config(amp_mean=1.0, amp_std=std))
+
+        assert cfg["amp_std"] == float(std) / 100 * 1.0
+        assert cfg["amp_std"] != std / 100 * 1.0
+
+    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    def test_a_non_numeric_width_is_an_error(self, key):
+        with pytest.raises(ValueError, match=key):
+            validate_gain_scales(scale_config(**{key: "bad"}))
+
+
+class TestPhaseMean:
+
+    def test_the_default_phase_mean_is_zero(self):
+        """Reading 0 honestly costs nothing here: the default it replaced is also 0.
+
+        Which is what makes this key the one behaviour-neutral member of the group —
+        worth pinning, since it is the only reason the old ``not phase_mean`` read
+        never bit anyone.
+        """
+        assert validate_gain_scales(scale_config())["phase_mean"] == 0.0
+        assert validate_gain_scales(scale_config(phase_mean=0))["phase_mean"] == 0.0
+        assert validate_gain_scales(scale_config(phase_mean=0.0))["phase_mean"] == 0.0
+
+    def test_a_non_zero_phase_mean_is_kept(self):
+        assert validate_gain_scales(scale_config(phase_mean=-0.3))["phase_mean"] == pytest.approx(-0.3)
+
+    def test_a_non_numeric_phase_mean_is_an_error(self):
+        with pytest.raises(ValueError, match="phase_mean"):
+            validate_gain_scales(scale_config(phase_mean="bad"))
+
+
+class TestCorrelationLengths:
+
+    @pytest.mark.parametrize("key", CORR_KEYS)
+    @pytest.mark.parametrize("value", UNUSABLE)
+    def test_an_unusable_correlation_length_is_an_error(self, key, value):
+        """A zero correlation length is a degenerate kernel, not an unset one."""
+        with pytest.raises(ValueError, match=key):
+            validate_full(full_config(**{key: value}))
+
+    @pytest.mark.parametrize("key", CORR_KEYS)
+    def test_a_non_numeric_correlation_length_is_an_error(self, key):
+        with pytest.raises(ValueError, match=key):
+            validate_full(full_config(**{key: "bad"}))
+
+    def test_unset_correlation_lengths_still_come_from_the_observation(self):
+        """The documented default: the extent of the observation along that axis."""
+        freqs = jnp.linspace(1.4e9, 1.41e9, 4)
+        times = jnp.linspace(0.0, 120.0, 8)
+        cfg = validate_full(full_config(), freqs=freqs, times=times)
+
+        assert cfg["amp_corr_freq"] == pytest.approx(1e7)
+        assert cfg["phase_corr_freq"] == pytest.approx(1e7)
+        assert cfg["amp_corr_time"] == pytest.approx(120.0)
+        assert cfg["phase_corr_time"] == pytest.approx(120.0)
+
+
+class TestMissingKeysAreNamed:
+
+    @pytest.mark.parametrize("key", SCALE_KEYS)
+    def test_validate_gain_scales_names_the_missing_key(self, key):
+        cfg = scale_config()
+        del cfg[key]
+
+        with pytest.raises(ValueError, match=key):
+            validate_gain_scales(cfg)
+
+    @pytest.mark.parametrize("key", SCALE_KEYS + CORR_KEYS)
+    def test_gains_config_validation_names_the_missing_key(self, key):
+        cfg = full_config()
+        del cfg[key]
+        original = dict(cfg)
+
+        with pytest.raises(ValueError, match=key):
+            validate_full(cfg)
+
+        # Still nothing half-normalised behind the failure.
+        assert cfg == original
+
+    def test_the_original_key_error_is_chained(self):
+        cfg = full_config()
+        del cfg["phase_corr_time"]
+
+        with pytest.raises(ValueError) as excinfo:
+            validate_full(cfg)
+
+        assert isinstance(excinfo.value.__cause__, KeyError)
 
 
 # ---------------------------------------------------------------------------

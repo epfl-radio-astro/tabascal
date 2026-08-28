@@ -478,6 +478,9 @@ gains:
 * `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**.
 * `amp_corr_freq`, `amp_corr_time`, `phase_corr_freq`, `phase_corr_time`: The correlation lengths of the gain Gaussian process, in Hz and in seconds. They are read by `gains:GPGains` only, and each defaults to the extent of the observation along that axis, i.e. to a gain that varies smoothly across the whole run.
 * `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
+* `r_seed`: The random seed the gain component draws with.
+
+**`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. It used to be any *falsy* value that triggered the default, so a literal `0` was read as "I did not set this": `r_seed: 0` silently became the default seed, and `amp_std: 0`, `phase_std: 0` or a zero correlation length silently became the default width or the observation extent. A zero seed is now the seed it says. A zero width or correlation length is now an **error naming the key**, because it is a degenerate distribution rather than an absent one — a zero-width prior pins every gain to its mean and leaves the fit nothing to move, and a zero correlation length is a kernel with nothing off its diagonal. Negative and non-finite values are errors for the same reason, where before they passed straight through. `phase_mean: 0` is the one member of the group that behaves exactly as it always did, the default it was being replaced by being `0.0` itself. A config that relied on any of the silent substitutions above will now stop and say which key it is, rather than run with a scale nobody chose.
 
 ### A constant gain per antenna
 
