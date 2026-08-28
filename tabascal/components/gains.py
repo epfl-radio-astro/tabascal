@@ -112,7 +112,9 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
         gains_config["amp_std"] = _positive_scale(
             "amp_std",
             gp_amp_std,
-            lambda std: std / 100 * gains_config["amp_mean"],
+            # float() first, then divide: an int large enough to lose precision in a
+            # float rounds differently if the true division goes first.
+            lambda std: float(std) / 100 * gains_config["amp_mean"],
             "It is the width of the prior over the gain amplitudes, as a percentage "
             "of amp_mean; a zero width pins every amplitude to amp_mean and leaves "
             "the fit nothing to move.",

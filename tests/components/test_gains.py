@@ -274,6 +274,20 @@ class TestPriorWidths:
         assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
         assert cfg["phase_std"] == pytest.approx(float(np.deg2rad(2.0)))
 
+    def test_the_percentage_is_floated_before_it_is_divided(self):
+        """``float(std) / 100``, not ``std / 100``: the two orders are not the same.
+
+        An int too large to be represented exactly as a float is rounded by
+        ``float()`` but divided exactly by ``/``, so the order of the two decides the
+        last bit. Pinned because the conversion moved into a closure and the arithmetic
+        of an accepted value must not shift.
+        """
+        std = 9007199254740993  # 2**53 + 1, the first int a float cannot hold
+        cfg = validate_gain_scales(scale_config(amp_mean=1.0, amp_std=std))
+
+        assert cfg["amp_std"] == float(std) / 100 * 1.0
+        assert cfg["amp_std"] != std / 100 * 1.0
+
     @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
     def test_a_non_numeric_width_is_an_error(self, key):
         with pytest.raises(ValueError, match=key):
