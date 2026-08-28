@@ -324,6 +324,66 @@ def broadcast_bytes_from_rank0(payload, name: str) -> bytes:
     return np.asarray(received, dtype=np.uint8).tobytes()
 
 
+class RankZeroFailure(RuntimeError):
+    """Raised on the workers when process 0 failed at work only it does."""
+
+
+def fail_together(failure, what: str) -> None:
+    """End every process when the one doing the writing could not finish.
+
+    Work only process 0 does can fail on process 0 alone, and the workers cannot
+    see it: they took no part in it and are already on their way into the next
+    collective -- the solve after the initial prediction is written, the chi^2
+    after the optimised one, the end-of-run barrier. Process 0 unwinding there
+    does not release them, it strands them in that collective until the
+    coordinator times out, with nothing in any log to say why.
+
+    Waking them is not enough either, which is what separates this from
+    :func:`rank0_first`: there the workers go on to fail by themselves on the
+    resource process 0 could not put in place, and here there is nothing for
+    them to fail on -- the next collective simply waits.
+
+    So the *fact* of the failure is broadcast and every process raises: process
+    0 with the error it actually hit, so the run reports its real cause, and the
+    workers with a :class:`RankZeroFailure` naming what was being done. The run
+    then exits non-zero on every process instead of hanging on all but one.
+
+    Call it on **every** process, unconditionally, at a point every process
+    reaches whether or not anything went wrong -- it is itself a collective, and
+    a process that skipped it on the happy path would strand the rest just as
+    surely as one that raised past it. Single-process: the failure, straight
+    back up.
+    """
+
+    if jax.process_count() == 1:
+        if failure is not None:
+            raise failure
+
+        return
+
+    from jax.experimental import multihost_utils
+
+    # Before the raise below, never after it: a process that raised first would
+    # leave every other one waiting in a broadcast it never joined.
+    rank0_failed = bool(
+        np.asarray(
+            multihost_utils.broadcast_one_to_all(
+                np.array([failure is not None], dtype=np.int32)
+            )
+        ).reshape(-1)[0]
+    )
+
+    if failure is not None:
+        raise failure
+
+    if rank0_failed:
+        raise RankZeroFailure(
+            f"process 0 failed to {what}. Stopping this process too: it is not "
+            "the one that failed, but carrying on would leave it waiting in a "
+            "collective process 0 will never reach. See process 0 for the cause."
+        )
+
+
 @contextmanager
 def rank0_first(name: str):
     """Run the block on process 0 first, then on all other processes.

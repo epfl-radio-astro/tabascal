@@ -775,23 +775,27 @@ class TestTheStoreIsStreamedInto:
       writing it in one go held -- bit for bit, since it is the same evaluation
       written to the same chunks;
     * everything that can fail on rank 0 alone happens either *before* the first
-      evaluation (creating the store) or *after the last* (the deferred block
-      writes and the append), and a failure removes only a store this call
-      created.
+      evaluation (creating the store) or is carried to the single exit at the
+      end, and a failure removes only a store this call created.
 
     **What these tests can and cannot see.** They run in one process, so what
     they pin is the mechanism and not its purpose: the loop makes all
     ``n_sample x n_rfi`` evaluations past an injected failure instead of leaving
     early, and the store is gone afterwards. That a *second* rank is therefore
     not left waiting in a ``psum_over_rfi`` collective with nobody to meet is why
-    the mechanism is shaped this way, and it is **not asserted anywhere**:
-    showing it needs a two-rank run with a fault injected into rank 0's store,
-    and the only harness for two ranks (``tests/test_tabascal_pipeline.py``'s
-    ``_run_two_processes``) drives the CLI as a subprocess, where an injection
-    would have to import ``tabascal.write`` -- and so all of jax -- before
-    ``init_distributed()``, which is the one ordering that entry point forbids.
-    ``test_pipeline_multiprocess_per_sat`` covers the two-rank path with nothing
-    failing.
+    the mechanism is shaped this way, and no test here asserts it.
+
+    The rest of that story is split across two other places: that every failure
+    reaches ``fail_together`` rather than being raised past it is
+    ``TestEveryProcessLeavesTogether`` below, and what ``fail_together`` then
+    does on two ranks is ``TestFailTogether`` in ``tests/test_distributed.py``,
+    which forces the multi-process branch. What none of them is is a real
+    two-rank run with a fault injected: the only harness for two ranks
+    (``tests/test_tabascal_pipeline.py``'s ``_run_two_processes``) drives the CLI
+    as a subprocess, where the injection would have to import ``tabascal.write``
+    -- and so all of jax -- before ``init_distributed()``, which is the one
+    ordering that entry point forbids. ``test_pipeline_multiprocess_per_sat``
+    covers the two-rank path with nothing failing.
     """
 
     @staticmethod
@@ -945,6 +949,59 @@ class TestTheStoreIsStreamedInto:
 
         assert not os.path.exists(path)
 
+    def test_a_store_that_fails_when_it_is_reopened_is_still_cleaned_up(
+        self, tmp_path, monkeypatch
+    ):
+        """Ownership starts at the metadata write, not at the end of the creation.
+
+        Creating the store is two steps -- write the metadata, then open the
+        array for writing -- and after the first of them there is an openable,
+        zero-filled store on disk whoever else fails next. Recording ownership
+        only once both had succeeded left exactly that store behind.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+        real_open_group = write_mod.zarr.open_group
+
+        def fail_the_reopen(*args, **kwargs):
+            # "r+" is the writable reopen; the metadata write xarray does first
+            # goes through the same function under the run's own mode.
+            if kwargs.get("mode") == "r+":
+                raise OSError("stale file handle")
+
+            return real_open_group(*args, **kwargs)
+
+        monkeypatch.setattr(write_mod.zarr, "open_group", fail_the_reopen)
+
+        with pytest.raises(OSError, match="stale file handle"):
+            write_results_xds(make_pred(config), config, path)
+
+        assert not os.path.exists(path)
+
+    def test_a_store_left_by_a_failure_after_the_creation_is_cleaned_up_too(
+        self, tmp_path, monkeypatch
+    ):
+        """The other side of the same boundary: the store exists, the sink does not.
+
+        Anything between the store existing and the first block being written --
+        here the sink's own construction -- fails with a store on disk that only
+        this call could have made.
+        """
+
+        path = str(tmp_path / "map.zarr")
+        config = make_config()
+
+        def no_memory(*args, **kwargs):
+            raise MemoryError("cannot allocate")
+
+        monkeypatch.setattr(write_mod, "partial", no_memory)
+
+        with pytest.raises(MemoryError, match="cannot allocate"):
+            write_results_xds(make_pred(config), config, path)
+
+        assert not os.path.exists(path)
+
     def test_a_failed_creation_removes_nothing_at_all(self, tmp_path, monkeypatch):
         """Deletion follows from having created the store, not from a path check.
 
@@ -1029,6 +1086,136 @@ class TestTheStoreIsStreamedInto:
             write_results_xds(pred, config, path, overwrite=False)
 
         assert _tree(path) == before
+
+
+class TestEveryProcessLeavesTogether:
+    """A write that fails on process 0 alone must not leave the workers waiting.
+
+    The workers do none of the writing and return from ``write_results_xds``
+    straight into the next collective -- the SVI solve after the initial
+    prediction is written, the reduced chi^2 after the optimised one, and the
+    mandatory end-of-run barrier. So process 0 unwinding out of the writer on
+    its own does not release them, it strands them there until the coordinator
+    times out. Every path out of the writer therefore ends in ``fail_together``,
+    which is where a worker learns that process 0 is not coming.
+
+    Single-process here, so what these pin is the *routing*: that a failure
+    reaches that call instead of being raised past it, and that a successful
+    write reaches it too -- a process that skipped the collective on the happy
+    path would strand the others just as thoroughly. What the call then does
+    with the answer on two ranks is pinned in ``tests/test_distributed.py``.
+    """
+
+    @staticmethod
+    def _record(monkeypatch):
+        """Spy on fail_together, still doing what it really does."""
+
+        calls = []
+        real = write_mod.fail_together
+
+        def spy(failure, what):
+            calls.append(failure)
+
+            return real(failure, what)
+
+        monkeypatch.setattr(write_mod, "fail_together", spy)
+
+        return calls
+
+    @pytest.mark.parametrize("per_sat", [True, False], ids=["on", "off"])
+    def test_a_successful_write_meets_the_others_too(
+        self, tmp_path, monkeypatch, per_sat
+    ):
+        config = make_config(save_rfi_per_sat=per_sat)
+        calls = self._record(monkeypatch)
+
+        write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        assert calls == [None]
+
+    def test_a_failed_block_write_goes_through_it(self, tmp_path, monkeypatch):
+        config = make_config()
+
+        def full_disk(array, s, r, block):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(write_mod, "_put_per_sat_block", full_disk)
+        calls = self._record(monkeypatch)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        assert [type(err) for err in calls] == [OSError]
+
+    def test_a_failed_creation_goes_through_it(self, tmp_path, monkeypatch):
+        config = make_config()
+
+        def unwritable(*args, **kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(write_mod, "_create_per_sat_store", unwritable)
+        calls = self._record(monkeypatch)
+
+        with pytest.raises(OSError, match="read-only"):
+            write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        assert [type(err) for err in calls] == [OSError]
+
+    @pytest.mark.parametrize("per_sat", [True, False], ids=["on", "off"])
+    def test_a_failed_write_of_the_other_variables_goes_through_it(
+        self, tmp_path, monkeypatch, per_sat
+    ):
+        """Including with the decomposition off, where it always could fail alone."""
+
+        config = make_config(save_rfi_per_sat=per_sat)
+        real_to_zarr = xr.Dataset.to_zarr
+        wanted = "a" if per_sat else "w"
+
+        def fail_the_results_write(self, *args, **kwargs):
+            if kwargs.get("mode") == wanted:
+                raise OSError("no space left on device")
+
+            return real_to_zarr(self, *args, **kwargs)
+
+        monkeypatch.setattr(xr.Dataset, "to_zarr", fail_the_results_write)
+        calls = self._record(monkeypatch)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        assert [type(err) for err in calls] == [OSError]
+
+    def test_the_append_is_not_attempted_after_a_deferred_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """One failure, one report: the deferred one is raised before the append.
+
+        The blocks and the variables go into the same store, so a run that lost
+        the blocks has nothing to append them to; attempting it anyway would
+        replace the error that says what went wrong with whatever the append
+        made of a store in that state.
+        """
+
+        config = make_config()
+        modes = []
+        real_to_zarr = xr.Dataset.to_zarr
+
+        def note_mode(self, *args, **kwargs):
+            modes.append(kwargs.get("mode"))
+
+            return real_to_zarr(self, *args, **kwargs)
+
+        def full_disk(array, s, r, block):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(write_mod, "_put_per_sat_block", full_disk)
+        monkeypatch.setattr(xr.Dataset, "to_zarr", note_mode)
+
+        with pytest.raises(OSError, match="no space left"):
+            write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
+
+        # The creation, and nothing after it.
+        assert modes == ["w"]
 
 
 # ---------------------------------------------------------------------------
