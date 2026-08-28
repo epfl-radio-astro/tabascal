@@ -71,10 +71,15 @@ def build_parser(parser=None):
         "column the residual is formed against. Defaults to the config's "
         "data.data_col with -c, and to DATA otherwise.",
     )
+    # No `choices`: the correlations tabascal can read live in
+    # tabascal.ms.CORR_TYPES, and importing that here to list them would pull
+    # the whole JAX/dask stack into `tabascal -h`. The value is checked against
+    # that table in resolve_corr instead, once the run is already paying for it.
     parser.add_argument(
-        "-cr", "--corr", default=None, choices=["xx", "xy", "yx", "yy"],
-        help="Correlation to read. Defaults to the config's data.corr with -c, "
-        "and to xx otherwise.",
+        "-cr", "--corr", default=None, metavar="CORR",
+        help="Correlation to read: a linear (xx/xy/yx/yy), circular "
+        "(rr/rl/lr/ll) or Stokes (i/q/u/v) name, whichever the MS holds. "
+        "Defaults to the config's data.corr with -c, and to xx otherwise.",
     )
     parser.add_argument(
         "-f", "--freq", type=float, default=None,
@@ -185,13 +190,31 @@ def resolve_data_col(args, config):
 
 
 def resolve_corr(args, config):
-    """The correlation to read: the flag, else the config's, else ``xx``."""
-    if args.corr is not None:
-        return args.corr
-    if config is not None:
-        return config.get("data", {}).get("corr") or "xx"
+    """The correlation to read: the flag, else the config's, else ``xx``.
 
-    return "xx"
+    Checked against :data:`tabascal.ms.CORR_TYPES` rather than against a list
+    repeated here, so the command accepts exactly what the reader resolves --
+    circular and Stokes MSs included -- and cannot drift from it. The import is
+    deferred because it carries the JAX stack, which ``tabascal -h`` must not
+    pay for; by the time this runs the command is committed to reading an MS
+    anyway.
+    """
+    if args.corr is not None:
+        corr = args.corr
+    elif config is not None:
+        corr = config.get("data", {}).get("corr") or "xx"
+    else:
+        corr = "xx"
+
+    from tabascal.ms import CORR_TYPES
+
+    if str(corr).lower() not in CORR_TYPES:
+        raise SystemExit(
+            f"Correlation {corr!r} is not one tabascal can read. Choose from "
+            f"{', '.join(sorted(CORR_TYPES))} -- whichever the MS actually holds."
+        )
+
+    return corr
 
 
 def resolve_min_elevation(args, config):
@@ -246,14 +269,17 @@ def _print_coverage(result, z_crit):
         f"{z_crit:g} sigma."
     )
     print("  cov/null/excess read Re(S_hat), which assumes that column is PHASE")
-    print("  CALIBRATED: an uncalibrated gain phase rotates the source out of the")
-    print("  real part and into the null, and both move the wrong way. On a raw")
-    print(f"  column read |S| instead (|S_hat|/error <= {o['amp_crit']:.2f}, the")
-    print("  Rayleigh cut enclosing the same probability), which no phase can")
-    print("  rotate away. Judge cov against the NULL column, not the analytic")
-    print("  value: the floor assumes independent baselines and is optimistic.")
-    print("  null = the same statistic on Im(S_hat), a matched source-free null.")
-    print("  excess = null - cov, the part attributable to a real residual.\n")
+    print("  CALIBRATED. |S| is the same statistic on |S_hat|/error <= "
+          f"{o['amp_crit']:.2f} (the")
+    print("  Rayleigh cut enclosing the same probability); it survives a phase")
+    print("  common to every baseline, which empties Re(S_hat) into the null.")
+    print("  Neither survives an uncalibrated ANTENNA gain: those phases")
+    print("  decorrelate the sum itself, shrinking the estimate, so on a raw")
+    print("  column both numbers understate what is there. Judge cov against")
+    print("  the NULL column, not the analytic value: the floor assumes")
+    print("  independent baselines and is optimistic. null = the same statistic")
+    print("  on Im(S_hat), a matched source-free null. excess = null - cov, the")
+    print("  part attributable to a real residual.\n")
     print(
         f"    {'source':<12} {'cov':>7} {'null':>7} {'excess':>8} "
         f"{'|S|':>7} {'max|z|':>8}"

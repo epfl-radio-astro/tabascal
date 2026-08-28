@@ -218,14 +218,22 @@ on `Im(S_hat)`, which after de-rotation carries the same noise and no source.
 
 **`cov`, `null` and `excess` assume the column they scored is phase
 calibrated.** They read `Re(S_hat)`, which is the whole of a de-rotated real
-source only once the antenna gain phases are out of the data; an uncalibrated
-phase rotates the source off the real axis, which deflates `z` *and* pushes the
-source into the imaginary null it is judged against — both move the wrong way,
-so a bright residual can read as clean. The command names the column it scored
-in the heading for that reason. On a raw column read the `|S|` column instead:
-that is `|S_hat|/error` against a Rayleigh threshold enclosing the same
-probability (3.44 for 3 sigma), and no phase can rotate a magnitude away. The
-optimistic-floor caveat applies to it equally.
+source only once the antenna gain phases are out of the data. The command names
+the column it scored in the heading for that reason.
+
+`|S|` is the same statistic on `|S_hat|/error`, against a Rayleigh threshold
+enclosing the same probability (3.44 for 3 sigma). It survives a phase **common
+to every baseline** — an overall offset, or a stable phase on the source itself —
+which would otherwise empty `Re(S_hat)` and push the source into the imaginary
+null that `cov` is judged against, moving both halves of that comparison the
+wrong way.
+
+**Neither survives an uncalibrated antenna gain.** A gain multiplies each
+baseline *before* the average, `S_hat = S · Σ w gₚ gq* / Σ w`, so
+antenna-dependent phases decorrelate the coherent sum itself: the estimate
+shrinks, and the magnitude shrinks with it. On a raw column both numbers
+understate what is there — they are a lower bound on the residual, not a
+detection threshold. The optimistic-floor caveat applies to both.
 
 The floor comes from the MS's own noise column, so an MS carrying none — and no
 `data.noise` to supply one — has no floor to quote. The light curves are still

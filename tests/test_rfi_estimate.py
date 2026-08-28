@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from tabascal.rfi_estimate import (
+    rayleigh_threshold,
     _half_channel,
     _lc_result,
     _times_jd,
@@ -491,6 +492,31 @@ class TestPhaseFromRecords:
         np.testing.assert_allclose(got, expected, rtol=exact_rtol)
 
 
+class TestRayleighThreshold:
+    """The magnitude cut matched to a two-sided normal tail."""
+
+    def test_the_three_sigma_cut(self):
+        np.testing.assert_allclose(rayleigh_threshold(3.0), 3.4394, atol=1e-4)
+
+    def test_a_far_tail_stays_finite(self):
+        """1 - erf(z/sqrt2) cancels to exactly 0 out here; erfc does not.
+
+        Without erfc the threshold came back as infinity, which silently marks
+        every cell as consistent with noise -- a coverage of 100% for any data.
+        """
+        got = rayleigh_threshold(9.0)
+
+        assert np.isfinite(got)
+        # sqrt(-2 ln erfc(9/sqrt2)): the tail is ~2.3e-19, so the cut is ~9.27.
+        np.testing.assert_allclose(got, 9.2666, atol=1e-3)
+
+    def test_it_grows_with_the_threshold(self):
+        cuts = [rayleigh_threshold(z) for z in (1.0, 3.0, 5.0, 7.0)]
+
+        assert all(np.isfinite(cuts))
+        assert cuts == sorted(cuts)
+
+
 class TestHalfChannel:
     """The radius inside which two frequency grids are describing one channel."""
 
@@ -774,14 +800,18 @@ class TestCoverageStats:
         # Matched to the real statistic's tail, so the two are comparable: the
         # Rayleigh threshold enclosing the same probability as |z| <= 3.
         assert 3.4 < stats["overall"]["amp_crit"] < 3.5
+        np.testing.assert_allclose(stats["overall"]["amp_crit"], 3.4394, atol=1e-4)
         assert source["amp_coverage"] > 0.99
         assert 0.0 <= stats["overall"]["amp_coverage"] <= 1.0
 
-    def test_a_rotated_source_still_shows_in_the_amplitude(self):
-        """The case the real statistic misses: a source at 90 degrees of phase.
+    def test_a_commonly_rotated_source_still_shows_in_the_amplitude(self):
+        """What the magnitude *is* invariant to: one rotation of the result.
 
-        Re(S_hat) is then ~0 and z says "nothing here" however bright the source
-        is. The magnitude is unchanged by the rotation and still finds it.
+        A phase common to every baseline -- a stable phase on the source itself,
+        or an overall offset -- turns S_hat as a whole. At 90 degrees Re(S_hat)
+        is ~0 and z reports "nothing here" however bright the source is, while
+        |S_hat| is untouched. This is the only phase failure the magnitude
+        rescues; see the next test for the one it does not.
         """
         result = make_result(n_src=1, n_time=64)
         rotated = dict(result)
@@ -789,11 +819,52 @@ class TestCoverageStats:
         with np.errstate(invalid="ignore", divide="ignore"):
             rotated["z"] = rotated["light_curves"].real / rotated["error"]
 
-        real_stat = coverage_stats(rotated, z_crit=3.0)["per_source"][0]
+        stat = coverage_stats(rotated, z_crit=3.0)["per_source"][0]
 
         # Blind to it in the real part, and not in the magnitude.
-        assert real_stat["coverage"] > 0.99
-        assert real_stat["amp_coverage"] < 0.5
+        assert stat["coverage"] > 0.99
+        assert stat["amp_coverage"] < 0.5
+
+    def test_per_antenna_phases_deflate_both_statistics(self):
+        """What neither statistic survives: an uncalibrated gain phase.
+
+        A gain acts per baseline, *before* the average:
+        ``S_hat = S * sum_bl w g_p conj(g_q) / sum_bl w``. Antenna-dependent
+        phases therefore decorrelate the coherent sum itself, so it is the
+        estimate that is lost, not merely its projection onto the real axis --
+        and the magnitude has nothing left to recover. Pinning that, so the
+        magnitude statistic is not mistaken for immunity to raw gains.
+        """
+        rng = np.random.default_rng(17)
+        n_time = 64
+        rfi_phase = phases(n_src=1, n_time=n_time, seed=31)
+        a1, a2 = pairs()
+        curve = source(n_time=n_time, seed=32)
+        clean = observe(rfi_phase, a1, a2, [curve])
+
+        # A pure phase per antenna: amplitudes untouched, so only the coherence
+        # of the sum can change.
+        gains = np.exp(1j * rng.uniform(-np.pi, np.pi, N_ANT))
+        gained = clean * (gains[a1] * np.conj(gains[a2]))[:, None, None]
+
+        def stats(vis):
+            # A noise the calibrated source clears comfortably and the
+            # decorrelated one does not, so the loss shows in the score rather
+            # than saturating both at zero.
+            lc, err = matched_filter_light_curves(vis, rfi_phase, a1, a2, noise=0.6)
+            result = _lc_result(
+                lc, err, [40000], np.linspace(1.4e9, 1.41e9, N_FREQ),
+                MJD0 + np.arange(n_time) / 86400.0, "DATA", "xx",
+            )
+            return coverage_stats(result, z_crit=3.0)["per_source"][0]
+
+        calibrated, uncalibrated = stats(clean), stats(gained)
+
+        # The estimate itself is smaller, not just its real part.
+        assert uncalibrated["max_amp"] < calibrated["max_amp"]
+        # So both statistics move toward "nothing here": more cells look clean.
+        assert uncalibrated["coverage"] > calibrated["coverage"]
+        assert uncalibrated["amp_coverage"] > calibrated["amp_coverage"]
 
     def test_a_result_without_z_is_refused(self):
         with pytest.raises(ValueError, match="no 'z'"):
@@ -1101,22 +1172,11 @@ class TestDeclaredTimeScale:
 
     LEAP = 37.0
 
-    def test_the_readers_utc_times_are_preferred(self):
+    def test_the_readers_utc_times_are_used(self):
         ms = {"times_jd": np.array([2460000.5]),
               "times_mjd": np.array([60000.0 + self.LEAP / 86400.0])}
 
         np.testing.assert_allclose(_times_jd(ms), ms["times_jd"])
-
-    def test_a_reader_without_them_falls_back_to_the_declared_column(self):
-        """Readers predating the UTC normalisation report only times_mjd.
-
-        Those read every MS as UTC anyway -- and say so -- so converting the
-        declared column is exactly what the rest of that code base does with it.
-        The branch goes away once every reader normalises.
-        """
-        ms = {"times_mjd": np.array([60000.0])}
-
-        np.testing.assert_allclose(_times_jd(ms), mjd_to_jd(ms["times_mjd"]))
 
     @pytest.fixture
     def spy(self, monkeypatch, stub_orbits):

@@ -399,8 +399,10 @@ The weights are the run's own noise, resolved per baseline and per channel as fa
 The same estimate is available as a standalone tool, `tabascal light-curve`, which writes it in the interchange format above so it can seed a later run through `rfi.est`. See [Usage](usage.md#extracting-rfi-light-curves).
 
 The z statistic reported alongside the curves reads `Re(S_hat)` and so assumes
-the column is phase calibrated; on a raw column read the magnitude statistic
-instead (see [Usage](usage.md#extracting-rfi-light-curves)).
+the column is phase calibrated. The magnitude statistic reported beside it is
+robust to a phase common to every baseline, but not to an uncalibrated antenna
+gain, which decorrelates the coherent sum and shrinks the estimate itself — see
+[Usage](usage.md#extracting-rfi-light-curves).
 
 Two limitations are worth knowing. The estimator assumes the satellite is exactly where its orbit record says it is: a position error scatters the per-baseline phases and costs coherence, which shows as an under-estimated flux rather than as an error. And it does not filter the astronomical signal out first, so a bright source in the field contributes to $\hat{S}$ wherever its fringe rate overlaps the satellite's.
 

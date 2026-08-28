@@ -153,9 +153,12 @@ class TestLightCurveSubcommand:
         assert args.data_col is None
         assert args.corr is None
 
-    def test_an_unknown_correlation_is_refused(self):
-        with pytest.raises(SystemExit):
-            _parse("light-curve", "-ms", "o.ms", "-n", "1", "-cr", "rr")
+    @pytest.mark.parametrize("corr", ["xx", "yy", "rr", "ll", "rl", "i", "v"])
+    def test_every_correlation_the_reader_supports_is_accepted(self, corr):
+        """Circular and Stokes MSs exist, and read_ms resolves them all."""
+        assert _parse(
+            "light-curve", "-ms", "o.ms", "-n", "1", "-cr", corr
+        ).corr == corr
 
     def test_the_residual_mode_takes_a_results_zarr(self):
         args = _parse("light-curve", "-c", "c.yaml", "-z", "map_pred.zarr")
@@ -305,6 +308,25 @@ class TestLightCurveInputs:
         config = {"data": {"data_col": "TAB_RES_DATA", "corr": "yy"}}
         assert self._mod().resolve_data_col(args, config) == "DATA"
         assert self._mod().resolve_corr(args, config) == "xx"
+
+    def test_an_unknown_correlation_is_refused(self):
+        """Not by the parser -- which would have to hard-code the list -- but
+        against tabascal.ms's own table, named in the error."""
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1", "-cr", "zz")
+
+        with pytest.raises(SystemExit, match="zz"):
+            self._mod().resolve_corr(args, None)
+
+    def test_a_correlation_the_reader_supports_passes_the_check(self):
+        args = _parse("light-curve", "-ms", "o.ms", "-n", "1", "-cr", "rl")
+
+        assert self._mod().resolve_corr(args, None) == "rl"
+
+    def test_a_config_correlation_is_checked_too(self):
+        args = _parse("light-curve", "-c", "c.yaml")
+
+        with pytest.raises(SystemExit, match="nonsense"):
+            self._mod().resolve_corr(args, {"data": {"corr": "nonsense"}})
 
     def test_the_manual_defaults_apply_without_a_config(self):
         args = _parse("light-curve", "-ms", "o.ms", "-n", "1")

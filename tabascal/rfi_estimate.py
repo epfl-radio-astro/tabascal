@@ -25,9 +25,18 @@ so the denominator is just ``D = sum_bl w_bl`` and::
 
 ``z`` is a *calibrated-frame* statistic: it reads the real part because a
 de-rotated real source has no imaginary part to read, which holds only where the
-antenna gain phases have been taken out. On an uncalibrated column use the
-phase-blind ``|S_hat| / error`` instead, which :func:`coverage_stats` reports as
-``amp_coverage`` against a matched Rayleigh threshold.
+antenna gain phases have been taken out. :func:`coverage_stats` reports
+``|S_hat| / error`` beside it as ``amp_coverage``, against a matched Rayleigh
+threshold. That magnitude is invariant to a phase *common* to every baseline --
+an overall offset, or a stable phase on the source itself -- which would
+otherwise turn the signal out of the real part and hide it from ``z``.
+
+It is **not** a defence against an uncalibrated antenna gain. A gain multiplies
+each baseline before the average, ``S_hat = S * sum_bl w g_p conj(g_q) / sum_bl
+w``, so antenna-dependent phases decorrelate the coherent sum itself: the
+estimate shrinks, and there is nothing left in its magnitude for either statistic
+to find. Calibrate the phases, or accept that both numbers understate what is
+there.
 
 The satellite fringe adds coherently after de-rotation while the sky and the
 noise add incoherently, so ``S_hat`` isolates the RFI source visibility. Its
@@ -574,13 +583,7 @@ def _times_jd(ms: dict) -> NDArray:
     the fringe and the elevation cut would every one of them be 37 s out -- some
     285 km along a LEO satellite's ground track, and nothing raises.
     """
-    if "times_jd" in ms:
-        return np.asarray(ms["times_jd"])
-
-    # A reader that predates the normalisation reports only the declared-scale
-    # column, and read_ms warns about the scale itself. Converting it here is
-    # then exactly what the rest of that code base does with these times.
-    return mjd_to_jd(np.asarray(ms["times_mjd"]))
+    return np.asarray(ms["times_jd"])
 
 
 def extract_light_curves_from_ms(
@@ -955,13 +958,19 @@ def rayleigh_threshold(z_crit: float) -> float:
     Under the complex Gaussian null the real and imaginary parts of ``S_hat`` are
     independent N(0, error^2), so ``|S_hat|/error`` is Rayleigh(1) with
     ``P(R <= c) = 1 - exp(-c^2/2)``. Matching that to the two-sided normal
-    probability ``erf(z_crit/sqrt(2))`` gives ``c = sqrt(-2 ln(1 - erf(z/sqrt2)))``
-    -- 3.44 for the usual 3 sigma -- so the two coverages are read on the same
-    scale rather than against thresholds that mean different things.
-    """
-    from math import erf, log, sqrt
+    probability leaves ``c = sqrt(-2 ln(erfc(z / sqrt 2)))`` -- 3.44 for the
+    usual 3 sigma -- so the two coverages are read on the same scale rather than
+    against thresholds that mean different things.
 
-    tail = 1.0 - erf(float(z_crit) / sqrt(2.0))
+    The tail is taken from ``erfc`` rather than as ``1 - erf``: that subtraction
+    cancels to exactly zero once ``erf`` rounds to 1, somewhere past 6 sigma, and
+    the threshold came back infinite -- which marks every cell as consistent with
+    noise and reports a coverage of 100% for any data at all. ``erfc`` *is* the
+    two-sided tail, computed without the cancellation.
+    """
+    from math import erfc, log, sqrt
+
+    tail = erfc(float(z_crit) / sqrt(2.0))
 
     return float("inf") if tail <= 0.0 else sqrt(-2.0 * log(tail))
 
@@ -976,16 +985,25 @@ def coverage_stats(result: dict, z_crit: float = 3.0) -> dict:
     significance.
 
     **The z statistic assumes the data are phase calibrated.** ``Re(S_hat)`` is
-    the whole of a de-rotated real source only when nothing else rotates it: an
-    uncalibrated antenna gain phase turns ``S_hat`` off the real axis, which
-    deflates ``z`` toward zero *and* spills the source into the imaginary part
-    that ``null_coverage`` is measured on -- so both halves of the comparison
-    move the wrong way, and a bright residual can read as clean. Use it on a
-    calibrated column (``CORRECTED_DATA``, the ``TAB_*`` columns, or a residual
-    against a fitted model); on a raw column read ``amp_coverage`` instead, which
-    is ``|S_hat|/error`` against :func:`rayleigh_threshold` and cannot be rotated
-    away. Its null is analytic -- Rayleigh(1) -- so it carries no ``excess``
-    column, and the same optimistic-floor caveat below applies to it.
+    the whole of a de-rotated real source only when nothing else rotates it, so
+    read it on a calibrated column (``CORRECTED_DATA``, the ``TAB_*`` columns, or
+    a residual against a fitted model).
+
+    ``amp_coverage`` is the same statistic on ``|S_hat|/error``, against
+    :func:`rayleigh_threshold`; its null is analytic -- Rayleigh(1) -- so it
+    carries no ``excess`` column. It is invariant to a rotation **common to every
+    baseline**: an overall phase offset, or a stable phase on the source, turns
+    ``S_hat`` as a whole, which empties ``Re(S_hat)`` and spills the source into
+    the imaginary part that ``null_coverage`` is measured on -- both halves of
+    that comparison then move the wrong way while the magnitude is untouched.
+
+    It is **not** immunity to an uncalibrated antenna gain. A gain multiplies
+    each baseline before the average, ``S_hat = S * sum_bl w g_p conj(g_q) /
+    sum_bl w``, so antenna-dependent phases decorrelate the sum itself: the
+    estimate shrinks and its magnitude with it, and *both* statistics drift
+    toward "nothing here". On a raw column neither number is a detection
+    threshold so much as a lower bound. The optimistic-floor caveat below applies
+    to both.
 
     **Compare against ``null_coverage``, not against the analytic 2*Phi(z)-1.**
     The floor assumes the de-rotated per-baseline samples are independent. They
