@@ -385,3 +385,82 @@ satellites:
 * `ric_std`: The error in the orbital elements is not provided as part of the element sets. When estimated positions are analysed the error is calculated in a local reference frame of the satellite. This is the radial, in-track, and cross-track (RIC) frame. This parameter gives a factor by which to scale the RIC covariance that is stored internally which is taken from a paper where the average errors are calculated.
 
 ## Gains
+
+The `gains` section defines the prior over the antenna gains and how they are initialised. An example is given below.
+
+```yaml
+gains:
+  init: prior
+  amp_mean: 1.0
+  amp_std: 10
+  phase_mean: 0.0
+  phase_std: 30
+  amp_corr_time: 180
+  phase_corr_time: 180
+  ref_ant: null
+  fix_flux_scale: true
+```
+
+* `init`: How the gain parameters are initialised. `prior` (the default) starts at the prior mean. `gains:ConstGains` additionally accepts a path to a previously measured gain — see [A constant gain per antenna](#a-constant-gain-per-antenna).
+* `amp_mean`: The centre of the prior over the gain amplitude. It must be positive and finite. `gains:GPGains` takes it as the mean of a Gaussian; `gains:ConstGains` fits the log amplitude, so there it is the **median** of a lognormal — the centre in log space — and it reads it only when `fix_flux_scale` is `false`. See below.
+* `amp_std`: The standard deviation of the prior over the gain amplitude, **as a percentage** of `amp_mean`. `amp_std: 10` with `amp_mean: 1.0` is a 10 % spread.
+* `phase_mean`: The mean of the prior over the gain phase, in **radians**.
+* `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**.
+* `amp_corr_freq`, `amp_corr_time`, `phase_corr_freq`, `phase_corr_time`: The correlation lengths of the gain Gaussian process, in Hz and in seconds. They are read by `gains:GPGains` only, and each defaults to the extent of the observation along that axis, i.e. to a gain that varies smoothly across the whole run.
+* `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
+
+### A constant gain per antenna
+
+{class}`~tabascal.components.gains.ConstGains` fits **one complex gain per antenna, constant over time and frequency** — the static direction-independent gain the array is known to have:
+
+$$V^\text{OBS}_{pq} = g_p g_q^* \left( V^\text{AST}_{pq} + V^\text{RFI}_{pq} \right)$$
+
+It adds only $2 n_\text{ant} - 2$ parameters, and unlike a *fixed* gain it is constrained by the data.
+
+```yaml
+model:
+  components:
+    - trajectory:FixedOrbit
+    - rfi_signal:ComplexRFIConstAnt   # not ComplexRFIVarAnt — see below
+    - rfi_vis:RiemannVis
+    - ast_signal:FixedDiscreteSky
+    - ast_vis:DiscreteSkyVis
+    - gains:ConstGains
+
+gains:
+  ref_ant: null
+  fix_flux_scale: true
+```
+
+**A gain is only identifiable against a model term it cannot deform**, which is what the component list above is for ([issue #124](https://github.com/epfl-radio-astro/tabascal/issues/124)):
+
+* **Pair it with `rfi_signal:ComplexRFIConstAnt`.** With the per-antenna RFI model `ComplexRFIVarAnt` the RFI amplitude $A_p$ is already free per antenna, so $g_p A_p (g_q A_q)^*$ is unchanged by $g_p \rightarrow c_p g_p$ together with $A_p \rightarrow A_p / c_p$: the gain is an exact flat direction of the RFI term and only the astronomical model constrains it. Setup **warns** when the two are combined rather than refusing — the pairing is a modelling rule, not a hard error — and names the flat direction.
+* **The astronomical GP absorbs a gain the same way.** `ast_vis:GPVisAst` has per-baseline freedom, so a gain solved against it alone is a reparametrisation of an already-free `vis_ast`. A rigid sky — `ast_signal:FixedDiscreteSky` with `ast_vis:DiscreteSkyVis` — is what anchors the gain.
+
+**The gauge.** The gain is purely *relative*: it carries no absolute flux scale and no absolute phase, and both are removed by construction rather than fitted.
+
+* The overall **phase** is unobservable, so `ref_ant`'s phase is pinned to exactly 0 and the other $n_\text{ant} - 1$ phases are free.
+* The overall **amplitude** is degenerate with the RFI source amplitude and the astronomical amplitude, so the log amplitudes are carried by $n_\text{ant} - 1$ parameters on an orthonormal basis of the zero-sum subspace, giving $\sum_p \log |g_p| = 0$, i.e. a geometric mean $|g|$ of exactly 1. Left free it simply drifts — in one earlier run it settled at a median $|g|$ of 0.70, with the sky model absorbing the reciprocal — which is a nuisance direction that buys nothing and slows convergence.
+
+Both directions are removed from the **parameters**, not just from the value they map to. Writing $n_\text{ant}$ amplitude parameters and subtracting their mean would give the same gains and the same prior, but would leave the all-ones direction of that latent space invisible to every visibility: flat in the likelihood however much data there is, curved only by the prior. Such a coordinate wrecks the conditioning of the optimisation and makes a likelihood-only Fisher matrix singular, so there is no such coordinate.
+
+The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the **median** of that prior — its centre in log space, and the value the fit starts at — rather than its arithmetic mean, which is the slightly larger $\texttt{amp\_mean} \cdot e^{\sigma^2/2}$ for $\sigma$ the log-space spread. And it is that **only when the flux scale is free**: under the zero-sum gauge the geometric mean of $|g|$ is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so. A value that is not positive and finite is an error rather than a default — `amp_mean: 0` used to be read as "unset" and silently become 1.0.
+
+* `ref_ant`: The antenna whose phase is pinned to 0. `null` (the default) selects the first antenna with any unflagged data. An antenna every one of whose baselines is flagged everywhere is not constrained by any visibility, so it cannot be the reference the others are measured against, and naming one explicitly is an error rather than a silently unpinned fit.
+
+  **One reference pins one connected group.** A phase is measured relative to another antenna's along a chain of baselines that carry data, so if the unflagged baselines split the array into groups that share no baseline, pinning `ref_ant` in one group leaves every other group's overall phase unconstrained. Setup computes the connected components of the unflagged baseline graph and **stops**, naming the groups, rather than fitting a model with a flat direction in it. Fit the groups separately, or flag the smaller ones out of the run. Heavy flagging is fine as long as what survives still connects the array.
+* `fix_flux_scale`: Whether to keep the zero-sum log-amplitude constraint above. `true` is the default. `false` frees the overall amplitude and is accepted **only** with `ast_signal:FixedDiscreteSky` in `model.components`, since a fixed-flux sky is the one thing in the model that can set the scale; without it the run stops at setup with the degeneracy spelled out. Nothing else changes: the phase reference is still pinned either way.
+
+The absolute flux scale is assumed to be set by the data — e.g. by a `REAL_DATA_FLUXCAL` column, or by the fixed sky above — and if it ever needs fitting it belongs in a separate scalar component rather than in the gain.
+
+**Initialising at a measured gain.** `gains.init` optionally starts the fit at a gain measured elsewhere, which is a much better starting point than the prior mean:
+
+```yaml
+gains:
+  init: /path/to/gains.npz     # or /path/to/caltable.B
+```
+
+* An **`.npz`** carrying the per-antenna gain under the key `gain`, shape `(n_ant,)` complex.
+* A **calibration table**, read with {func}`~tabascal.ms.read_caltable` — one tabascal wrote with `tab2MS`, or one from CASA. A caltable is resolved over frequency and time and `ConstGains` is not, so it is reduced to the median $|g|$ and the mean phase direction over each antenna's valid samples, with a warning naming the largest deviation when the solutions actually do vary. Flagged solutions are dropped rather than counted as zero, and an antenna the table has no solution for at all falls back to unit gain, with a warning.
+
+Either way the gain is **projected into the gauge** rather than taken as given: the mean log amplitude is subtracted (unless `fix_flux_scale: false`) and the phases are referenced to `ref_ant`. Projecting an already-projected gain changes nothing, so the same file can be handed back to a second run. A zero or non-finite gain is an error — the fit is in log amplitude, which such a value has no value at.
