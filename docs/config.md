@@ -376,7 +376,7 @@ The file is either a **`.zarr` store** (read with `xarray.open_zarr`) or a **`.n
 |---|---|---|
 | `light_curves` | `(n_src, n_time, n_freq)`, **real** | apparent flux per source, in **Jy** |
 | `norad_ids` | `(n_src,)` | NORAD id of each row of `light_curves` |
-| `times` | `(n_time,)` | Modified Julian Date, in **days**, strictly increasing |
+| `times` | `(n_time,)` | **UTC** Modified Julian Date, in **days**, strictly increasing |
 | `freqs` | `(n_freq,)` | frequency in **Hz**, strictly increasing |
 
 In the zarr form the last three are coordinates of `light_curves`, whose dimensions must be exactly `norad_ids`, `times` and `freqs` — declared in any order, since they are identified by name and transposed on read. A minimal writer:
@@ -386,7 +386,7 @@ import numpy as np, xarray as xr
 
 xr.Dataset(
     {"light_curves": (("norad_ids", "times", "freqs"), curves)},
-    coords={"norad_ids": np.array([25544, 27386]), "times": times_mjd, "freqs": freqs_hz},
+    coords={"norad_ids": np.array([25544, 27386]), "times": times_mjd_utc, "freqs": freqs_hz},
 ).to_zarr("light_curves.zarr")
 ```
 
@@ -394,7 +394,7 @@ xr.Dataset(
 
 Both are strict because their failure modes are silent. A light curve attached to the wrong satellite still has the right shape and still optimises — it just seeds the prior from another satellite. A file whose sampling is assumed rather than declared is resampled wrongly by an unknown amount. Neither surfaces as an error, only as a worse fit, so a file that cannot state which satellite and which sample times it describes is rejected rather than guessed at.
 
-Times are absolute (MJD) rather than seconds from the start of a particular observation, so a light curve is interpretable on its own and can be reused across measurement sets covering the same pass.
+Times are absolute (MJD on a stated scale) rather than seconds from the start of a particular observation, so a light curve is interpretable on its own and can be reused across measurement sets covering the same pass. Both halves of that matter, and the stated scale is **UTC**. A Julian day number is a number until a scale says what it counts: a Measurement Set declares the scale of its `TIME` column in a `MEASINFO` record and is free to declare TAI, whose numbers name instants 37 s from the ones the same numbers name on UTC. An axis written on whatever the measuring MS happened to declare would be reusable only against another MS that happened to declare the same thing — and would be resampled by the difference without anything raising. tabascal reads the observation's own times onto UTC before sampling an estimate, and `tabascal light-curve` writes them the same way, so both ends of the format are on one scale.
 
 `light_curves` is a **flux in Jy**, not the modelled amplitude `rfi_A`. The RFI visibility is quadratic in `rfi_A` ($V^\text{RFI}_{pq} = A_p A_q^* e^{i\Delta\phi}$), so `rfi_A` carries units of $\sqrt{\text{Jy}}$ and the estimate is seeded with $\sqrt{\lvert \text{light\_curves} \rvert}$. Supplying an amplitude where a flux is expected is squared away silently, so the value is wrong rather than the shape — give the flux the source would show in the visibilities, on the same scale as `rfi.var`.
 

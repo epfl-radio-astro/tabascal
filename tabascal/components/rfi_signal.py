@@ -10,6 +10,7 @@ from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
 from tabascal.ms import get_observation_data_type
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
+from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
 import numpy as np
@@ -138,7 +139,7 @@ def _interp_axis(values: NDArray, src: NDArray, dst: NDArray, axis: int) -> NDAr
 
 
 def read_light_curves(
-    est_path: str, norad_ids: List[int], times_mjd: NDArray, freqs: NDArray
+    est_path: str, norad_ids: List[int], times_mjd_utc: NDArray, freqs: NDArray
 ) -> Array:
     """Read an RFI light curve estimate onto the observation grid.
 
@@ -155,7 +156,11 @@ def read_light_curves(
     ``norad_ids``
         ``(n_src,)``. NORAD id labelling each row of ``light_curves``.
     ``times``
-        ``(n_time,)``. Modified Julian Date, in **days**, strictly increasing.
+        ``(n_time,)``. **UTC** Modified Julian Date, in **days**, strictly
+        increasing. UTC and not "whatever the measuring observation declared":
+        a Julian day number is a number until a scale says what it counts, and
+        an MS may declare TAI in its ``TIME`` column, which is 37 s from the
+        instant the same number names on UTC.
     ``freqs``
         ``(n_freq,)``. Frequency in **Hz**, strictly increasing.
 
@@ -169,13 +174,18 @@ def read_light_curves(
     observation's resamples it wrongly by an unknown amount. Neither shows up as
     an error, only as a worse fit.
 
-    Times are absolute (MJD) rather than seconds from the start of a particular
-    observation, so a light curve is interpretable on its own and can be reused
-    across measurement sets covering the same pass.
+    Times are absolute (MJD on a stated scale) rather than seconds from the start
+    of a particular observation, so a light curve is interpretable on its own and
+    can be reused across measurement sets covering the same pass. Both halves
+    matter: an axis on no stated scale would be reusable only against a
+    measurement set that happened to declare the same one.
 
     Resampling
     ----------
-    Light curves are interpolated linearly onto ``times_mjd`` and ``freqs``.
+    Light curves are interpolated linearly onto ``times_mjd_utc`` and ``freqs``.
+    ``times_mjd_utc`` is the observation's own times as UTC MJD --
+    :func:`tabascal.time.to_utc_mjd` of the MS's column, not the column itself,
+    which is on whatever scale the MS declared.
     Samples outside the file's coverage are zero, on either axis -- the file
     says nothing there, which is the same "no signal known" convention the
     elevation mask uses. An axis of length 1 is held constant instead, since a
@@ -269,7 +279,7 @@ def read_light_curves(
     matched = np.nan_to_num(matched, nan=0.0, posinf=0.0, neginf=0.0)
 
     # (n_matched, n_time, n_freq) -> observation grid -> (n_matched, n_freq, n_time)
-    matched = _interp_axis(matched, src_times, np.asarray(times_mjd), axis=1)
+    matched = _interp_axis(matched, src_times, np.asarray(times_mjd_utc), axis=1)
     matched = _interp_axis(matched, src_freqs, np.asarray(freqs), axis=2)
     matched = np.swapaxes(matched, 1, 2)
 
@@ -410,9 +420,18 @@ class BaseGPRFI(Component):
         self.chan_width = tab_config.chan_width
         self.times = tab_config.times
         self.times_fine = tab_config.times_fine
-        # Absolute times, for resampling estimates sampled in MJD. Taken as read,
-        # not recovered from times_jd, which loses ~1e-10 days on the round trip.
-        self.times_mjd = np.asarray(tab_config.times_mjd)
+        # Absolute times, for resampling estimates sampled in MJD, as *UTC* MJD:
+        # that is the scale a light-curve file's `times` are on, and read_ms
+        # deliberately leaves times_mjd on whatever the MS declared. Sampling
+        # there instead reads a file 37 s from where it was measured on a
+        # TAI-declared MS -- a few integrations, and silent, since a curve
+        # resampled off by a few timesteps is still the right shape.
+        #
+        # Converted from times_mjd rather than from times_jd: a UTC MS then goes
+        # through no arithmetic at all and keeps its column exactly, where the
+        # JD round trip would round it at ~2.5e6 magnitude and move every sample
+        # ~10 us for nothing. See tabascal.time.to_utc_mjd.
+        self.est_times_mjd = to_utc_mjd(tab_config.times_mjd, tab_config.time_scale)
         self.int_time = tab_config.int_time
 
         self.gp_var = rfi_config["var"]
@@ -528,7 +547,10 @@ class BaseGPRFI(Component):
         # so a duplicate id is never reported as a missing one.
         return self._rfi_k_from_light_curves(
             read_light_curves(
-                est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
+                est_path,
+                self.norad_ids[:self.n_rfi_real],
+                self.est_times_mjd,
+                self.freqs,
             )
         )
 

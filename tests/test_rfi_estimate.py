@@ -34,7 +34,7 @@ from tabascal.rfi_estimate import (
     save_light_curves_npz,
 )
 from tabascal.components.rfi_signal import read_light_curves
-from tabascal.time import mjd_to_jd
+from tabascal.time import jd_to_mjd, mjd_to_jd, to_utc_mjd
 
 from .tle_helpers import make_tle_record
 
@@ -596,7 +596,7 @@ class TestSaveLightCurves:
             # the imaginary part of a complex array.
             assert not np.iscomplexobj(npz["light_curves"])
             np.testing.assert_array_equal(npz["norad_ids"], result["norad_ids"])
-            np.testing.assert_allclose(npz["times"], result["times_mjd"])
+            np.testing.assert_allclose(npz["times"], result["times_mjd_utc"])
             np.testing.assert_allclose(npz["freqs"], result["freqs"])
 
     def test_it_loads_back_through_read_light_curves(self, tmp_path, exact_rtol):
@@ -606,7 +606,7 @@ class TestSaveLightCurves:
 
         curves = np.asarray(
             read_light_curves(
-                path, result["norad_ids"], result["times_mjd"], result["freqs"]
+                path, result["norad_ids"], result["times_mjd_utc"], result["freqs"]
             )
         )
 
@@ -623,7 +623,7 @@ class TestSaveLightCurves:
 
         curves = np.asarray(
             read_light_curves(
-                path, [200, 300, 100], result["times_mjd"], result["freqs"]
+                path, [200, 300, 100], result["times_mjd_utc"], result["freqs"]
             )
         )
 
@@ -983,6 +983,7 @@ def make_tab_config(n_rfi=3, n_rfi_real=2, n_ant=N_ANT, n_freq=N_FREQ,
         ants_itrf=ANTS[:n_ant],
         times_jd=times_jd,
         times_mjd=times_jd - 2400000.5,
+        time_scale="utc",
         freqs=band,
         chan_width=float(widths[0]),
         chan_widths=widths,
@@ -1133,10 +1134,12 @@ def stub_ms(monkeypatch):
             "dec": CENTRE["dec"],
             "ants_itrf": ANTS,
             # As read_ms reports them: times_mjd on the scale the MS declares,
-            # times_jd the same instants normalised onto UTC. `leap` drives them
-            # apart the way a TAI-declared MS does.
+            # times_jd the same instants normalised onto UTC, and time_scale the
+            # declaration itself. `leap` drives the first two apart the way a
+            # TAI-declared MS does, so the scale follows it.
             "times_mjd": times_mjd + leap / 86400.0,
             "times_jd": mjd_to_jd(times_mjd),
+            "time_scale": "tai" if leap else "utc",
             "freqs": freqs,
             "chan_width": float(widths[0]),
             "chan_widths": widths,
@@ -1341,6 +1344,78 @@ class TestDeclaredTimeScale:
 
         np.testing.assert_allclose(
             spy["phase"], mjd_to_jd(np.asarray(ms["times_mjd"])), atol=1e-9
+        )
+
+    # -- and the axis the estimate is written on --------------------------
+
+    def test_the_times_it_writes_are_utc_not_the_declared_column(
+        self, tmp_path, stub_ms, stub_orbits
+    ):
+        """The file's own axis, which a later run samples the curves at.
+
+        ``times`` is UTC MJD: a light curve is meant to be interpretable on its
+        own and reusable across measurement sets covering the same pass, so its
+        axis has to name an instant rather than the number one MS happened to
+        store. Written from the declared column instead, a TAI-declared MS
+        produces a file whose every sample claims to be 37 s later than it is --
+        and the run that reads it back seeds the satellite at the wrong times.
+        """
+        ms = stub_ms(leap=self.LEAP)
+        result = extract_light_curves_from_ms("obs.ms", norad_ids=[25544])
+
+        path = str(tmp_path / "curves.npz")
+        save_light_curves_npz(path, result)
+        with np.load(path, allow_pickle=False) as npz:
+            times = npz["times"]
+
+        np.testing.assert_allclose(
+            times, jd_to_mjd(np.asarray(ms["times_jd"])), rtol=0, atol=1e-9
+        )
+        # And not the declared column, a whole leap-second span away.
+        shift = (times - np.asarray(ms["times_mjd"])) * 86400.0
+        np.testing.assert_allclose(shift, -self.LEAP, rtol=0, atol=1e-3)
+
+    def test_the_in_process_path_writes_the_same_axis(self, stub_orbits):
+        """``light_curves_from_config`` reads the config's scale, not just the MS's."""
+        config = make_tab_config()
+        config.time_scale = "tai"
+        config.times_mjd = np.asarray(config.times_mjd) + self.LEAP / 86400.0
+
+        result = light_curves_from_config(config)
+
+        np.testing.assert_allclose(
+            result["times_mjd_utc"],
+            jd_to_mjd(np.asarray(config.times_jd)),
+            rtol=0,
+            atol=1e-9,
+        )
+
+    def test_the_writer_and_the_reader_convert_the_column_identically(
+        self, stub_ms, stub_orbits
+    ):
+        """One conversion, used at both ends, so a round trip resamples nothing.
+
+        The reader sets its own axis the same way (see
+        ``TestTheEstimateIsSampledOnUtc``), so what is written and what it is
+        read back at agree bit for bit rather than to a tolerance.
+        """
+        ms = stub_ms(leap=self.LEAP)
+
+        result = extract_light_curves_from_ms("obs.ms", norad_ids=[25544])
+
+        np.testing.assert_array_equal(
+            result["times_mjd_utc"],
+            to_utc_mjd(np.asarray(ms["times_mjd"]), ms["time_scale"]),
+        )
+
+    def test_a_utc_ms_writes_its_column_untouched(self, stub_ms, stub_orbits):
+        """Behaviour-neutral for the common case: bit-identical, not merely close."""
+        ms = stub_ms()
+
+        result = extract_light_curves_from_ms("obs.ms", norad_ids=[25544])
+
+        np.testing.assert_array_equal(
+            result["times_mjd_utc"], np.asarray(ms["times_mjd"])
         )
 
 
