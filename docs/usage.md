@@ -200,7 +200,10 @@ requires — a complex array there is rejected on read rather than truncated to
 its real part. `times` is written as **UTC** MJD, whatever scale the MS declares
 in its `TIME` column: the format states one scale so the curves stay
 interpretable away from the MS they were measured on, and a run seeding from
-them samples on the same one. Alongside the four names the format requires, the
+them samples on the same one. That scale is stamped into the file as
+`time_scale`, so nothing downstream has to assume it — and a file written before
+the stamp existed, which may have been on a declared scale, is read as UTC with
+a warning rather than silently. Alongside the four names the format requires, the
 output carries the noise floor (`error`), the significance
 `z = Re(S_hat) / error`, the native complex estimate (`light_curves_complex`)
 and the in-view mask; readers of the format ignore the extras. `-p` also writes

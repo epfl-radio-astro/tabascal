@@ -85,8 +85,16 @@ own: UTC. :func:`~tabascal.time.to_utc_mjd` is the conversion onto it, and both
 ends of that format go through it — ``tabascal light-curve`` when it writes the
 axis, and the RFI signal component when it samples an estimate onto the
 observation grid. It adds the offset at MJD magnitude rather than routing
-through a Julian Date, which keeps the ~1.3 µs an MJD near 6e4 resolves to
-instead of the ~40 µs a JD does; ``utc`` again returns its input bit-identically.
+through a Julian Date, which keeps the sub-microsecond (~0.6 µs) an MJD near 6e4
+resolves to instead of the ~40 µs a JD does; ``utc`` again returns its input
+bit-identically.
+
+The format states its scale in the file: ``tabascal light-curve`` stamps
+``time_scale: "utc"``, a file declaring anything else is refused rather than
+converted, and one declaring nothing is read as UTC with a warning — files
+written before the stamp existed took their times from the ``TIME`` column as
+declared, so one measured on a non-UTC MS is offset by the leap seconds and
+should be regenerated.
 
 .. automodule:: tabascal.time
     :members:

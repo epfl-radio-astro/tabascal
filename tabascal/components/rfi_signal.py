@@ -1,3 +1,4 @@
+import warnings
 from abc import abstractmethod
 
 from jax import vmap, random, Array, lax, checkpoint
@@ -26,13 +27,23 @@ _LIGHT_CURVE_VARS = ("light_curves", "norad_ids", "times", "freqs")
 #: Dimensions of ``light_curves``. A store may declare them in any order.
 _LIGHT_CURVE_DIMS = ("norad_ids", "times", "freqs")
 
+#: The only scale a light-curve file's ``times`` may be on, stamped by the writer
+#: as ``time_scale`` and checked on read. See :func:`read_light_curves`.
+_LIGHT_CURVE_TIME_SCALE = "utc"
 
-def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDArray]:
-    """Load a light-curve file into (light_curves, norad_ids, times, freqs).
+
+def _light_curve_contents(
+    est_path: str,
+) -> Tuple[NDArray, NDArray, NDArray, NDArray, Optional[str]]:
+    """Load a light-curve file into (light_curves, norad_ids, times, freqs, scale).
 
     Accepts a ``.zarr`` store (read with :func:`xarray.open_zarr`) or a ``.npz``.
     Both carry the same four arrays under the same names; the zarr form keeps
     ``norad_ids``/``times``/``freqs`` as coordinates of ``light_curves``.
+
+    ``scale`` is the file's ``time_scale`` stamp -- a store attribute in the zarr
+    form, an array in the npz -- or ``None`` for a file written before the format
+    stated one. :func:`_check_light_curve_time_scale` rules on it.
     """
     if str(est_path).rstrip("/").endswith(".zarr"):
         # Closed on the way out however the function leaves, as for the npz
@@ -68,6 +79,7 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
                 np.asarray(xds["norad_ids"].data),
                 np.asarray(xds["times"].data),
                 np.asarray(xds["freqs"].data),
+                xds.attrs.get("time_scale"),
             )
 
     loaded = np.load(est_path)
@@ -89,7 +101,55 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
                 f"{est_path} is missing {missing}. A light-curve .npz must hold "
                 f"{list(_LIGHT_CURVE_VARS)}. It contains {sorted(npz.files)}."
             )
-        return tuple(np.asarray(npz[name]) for name in _LIGHT_CURVE_VARS)  # type: ignore
+        scale = str(npz["time_scale"]) if "time_scale" in npz.files else None
+
+        return (
+            *(np.asarray(npz[name]) for name in _LIGHT_CURVE_VARS),  # type: ignore
+            scale,
+        )
+
+
+def _check_light_curve_time_scale(est_path: str, declared: Optional[str]) -> None:
+    """Rule on the scale a light-curve file says its ``times`` are on.
+
+    The format states one scale, UTC, so that a curve measured against one
+    observation can be read back against another. A file that says so is read
+    silently; one that says something else is refused rather than converted --
+    the reader has no way to know what a third-party writer meant by it, and
+    converting here would make this the second place the format's scale is
+    decided. A file that says nothing is read as UTC, with a warning.
+
+    The warning covers the files written before the stamp existed. Those took
+    their ``times`` from the measurement set's ``TIME`` column as declared, so
+    one written from a UTC-declared MS -- the overwhelmingly common case -- is
+    already right, and one written from a TAI-declared MS is 37 s out with
+    nothing in the file to tell the two apart. Refusing every untagged file would
+    break the runs that were correct all along, so this states the assumption and
+    proceeds.
+    """
+    if declared is None:
+        warnings.warn(
+            f"{est_path} states no time_scale, so its times are being read as "
+            "UTC MJD, which is what the light-curve format specifies. Files "
+            "written before the stamp existed took their times from the "
+            "measurement set's TIME column as declared: one written from a "
+            "UTC-declared MS is already correct, but one written from a TAI- or "
+            "TT-declared MS is offset by the leap seconds (37 s for TAI) and "
+            "should be regenerated with `tabascal light-curve`.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return
+
+    scale = str(declared).strip().lower()
+    if scale != _LIGHT_CURVE_TIME_SCALE:
+        raise ValueError(
+            f"{est_path} declares time_scale {str(declared)!r}, but a "
+            "light-curve file's times are UTC MJD. They are not converted here: "
+            "the file is the place the scale is stated, and a reader that "
+            "quietly moved the samples would be a second one. Rewrite times as "
+            "UTC MJD (tabascal.time.to_utc_mjd) and stamp time_scale 'utc'."
+        )
 
 
 def _as_norad_ids(labels: NDArray) -> List[Optional[int]]:
@@ -166,7 +226,17 @@ def read_light_curves(
 
     In the zarr form the last three are coordinates of ``light_curves``.
 
-    All four are required. The format is deliberately strict: this is the
+    Optionally, and written by ``tabascal light-curve``:
+
+    ``time_scale``
+        ``"utc"``, stamping the scale ``times`` is on. A store attribute in the
+        zarr form, an array in the npz. Any other value is refused rather than
+        converted. A file that omits it is read as UTC with a warning: files
+        written before the stamp existed took ``times`` from the MS's ``TIME``
+        column as declared, so one written from a TAI-declared MS is 37 s out
+        and indistinguishable from a correct one -- regenerate those.
+
+    The four are all required. The format is deliberately strict: this is the
     interchange standard between tabascal and whatever measures the light curves,
     and every loose alternative it could accept instead fails silently. Matching
     rows by position rather than by id attaches a curve to the wrong satellite
@@ -206,7 +276,8 @@ def read_light_curves(
         unmatched satellites zero and NaNs replaced by zero.
     """
 
-    curves, labels, src_times, src_freqs = _light_curve_contents(est_path)
+    curves, labels, src_times, src_freqs, declared = _light_curve_contents(est_path)
+    _check_light_curve_time_scale(est_path, declared)
 
     if curves.ndim != 3:
         raise ValueError(

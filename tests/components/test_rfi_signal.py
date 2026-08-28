@@ -204,6 +204,7 @@ def make_est_file(tmp_path, n_rfi_real=N_RFI_REAL, n_time=N_TIME, n_freq=N_FREQ)
         norad_ids=np.array(_norad_ids(n_rfi_real, n_rfi_real)),
         times=_TEST_EPOCH_MJD + times / 86400.0,
         freqs=np.linspace(1.4e9, 1.41e9, n_freq, dtype=np.float64),
+        time_scale="utc",
     )
     return str(path)
 
@@ -1049,7 +1050,8 @@ class TestReadLightCurves:
         return np.linspace(self.F0, self.F1, n)
 
     def _npz(self, tmp_path, labels, times=None, freqs=None, curves=None,
-             name="est.npz", **extra):
+             name="est.npz", time_scale="utc", **extra):
+        """A light-curve .npz. ``time_scale=None`` writes an untagged legacy file."""
         times = self._times() if times is None else times
         freqs = self._freqs() if freqs is None else freqs
         if curves is None:
@@ -1060,11 +1062,14 @@ class TestReadLightCurves:
         path = tmp_path / name
         fields = {"light_curves": curves, "norad_ids": np.array(labels),
                   "times": np.asarray(times), "freqs": np.asarray(freqs)}
+        if time_scale is not None:
+            fields["time_scale"] = time_scale
         fields.update(extra)
         np.savez(path, **fields)
         return str(path)
 
-    def _zarr(self, tmp_path, labels, times=None, freqs=None, curves=None):
+    def _zarr(self, tmp_path, labels, times=None, freqs=None, curves=None,
+              time_scale="utc"):
         import xarray as xr
 
         times = self._times() if times is None else times
@@ -1078,6 +1083,7 @@ class TestReadLightCurves:
             {"light_curves": (("norad_ids", "times", "freqs"), curves)},
             coords={"norad_ids": np.array(labels), "times": np.asarray(times),
                     "freqs": np.asarray(freqs)},
+            attrs={} if time_scale is None else {"time_scale": time_scale},
         ).to_zarr(path)
         return path
 
@@ -1207,6 +1213,84 @@ class TestReadLightCurves:
         path = self._npz(tmp_path, [100], times=times,
                          curves=np.ones((1, 3, 3)))
         with pytest.raises(ValueError, match="strictly increasing"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    # --- the scale the file states its times are on ---
+
+    def test_a_file_stating_utc_reads_without_comment(self, tmp_path, recwarn):
+        """The stamp the current writer leaves; nothing to say about it."""
+        path = self._npz(tmp_path, [100])
+
+        read_light_curves(path, [100], self._times(), self._freqs())
+
+        assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+    @pytest.mark.parametrize("declared", ["UTC", " utc "])
+    def test_the_stated_scale_is_read_leniently(self, tmp_path, declared, recwarn):
+        """Case and surrounding space are not a different scale."""
+        path = self._npz(tmp_path, [100], time_scale=declared)
+
+        read_light_curves(path, [100], self._times(), self._freqs())
+
+        assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+    @pytest.mark.parametrize("declared", ["tai", "tt", "ut1"])
+    def test_a_file_on_another_scale_is_rejected_by_name(self, tmp_path, declared):
+        """Not converted here: the reader cannot know what a third party meant.
+
+        A file that states TAI is self-describing enough to be fixed at the
+        source, and converting it silently would make the reader the second
+        place the format's scale is decided.
+        """
+        path = self._npz(tmp_path, [100], time_scale=declared)
+
+        with pytest.raises(ValueError, match="time_scale") as excinfo:
+            read_light_curves(path, [100], self._times(), self._freqs())
+        message = str(excinfo.value)
+        assert declared in message
+        assert "UTC" in message or "utc" in message
+
+    def test_an_untagged_file_warns_that_it_is_being_read_as_utc(self, tmp_path):
+        """Legacy files pre-date the stamp, and one of them may be 37 s out.
+
+        Before the scale was stated, `tabascal light-curve` wrote whatever the
+        measurement set's TIME column declared. One written from a UTC MS -- the
+        common case -- is already right; one written from a TAI MS is offset by
+        the leap seconds and cannot be told apart from it. A warning, not an
+        error: refusing every legacy file would break the runs that are correct.
+        """
+        path = self._npz(tmp_path, [100], time_scale=None)
+
+        with pytest.warns(UserWarning, match="time_scale") as record:
+            out = np.asarray(
+                read_light_curves(path, [100], self._times(), self._freqs())
+            )
+
+        message = str(record[0].message)
+        assert "UTC" in message
+        assert "regenerate" in message or "regenerated" in message
+        # And it still reads, on the assumption it just stated.
+        assert out[0].max() == 1.0
+
+    def test_an_untagged_zarr_warns_too(self, tmp_path):
+        """Both branches carry the tag, so both must notice its absence."""
+        path = self._zarr(tmp_path, [100], time_scale=None)
+
+        with pytest.warns(UserWarning, match="time_scale"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    def test_a_zarr_attribute_states_the_scale(self, tmp_path, recwarn):
+        """The zarr form carries it as a store attribute, not as a variable."""
+        path = self._zarr(tmp_path, [100])
+
+        read_light_curves(path, [100], self._times(), self._freqs())
+
+        assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+    def test_a_zarr_on_another_scale_is_rejected_too(self, tmp_path):
+        path = self._zarr(tmp_path, [100], time_scale="tai")
+
+        with pytest.raises(ValueError, match="time_scale"):
             read_light_curves(path, [100], self._times(), self._freqs())
 
     # --- zarr ---
@@ -1417,10 +1501,12 @@ class TestReadLightCurves:
         freqs = np.linspace(self.F0, self.F1, n)
         curves = np.arange(n ** 3, dtype=float).reshape(n, n, n)
 
+        attrs = {"time_scale": "utc"}
         canonical = str(tmp_path / "canonical.zarr")
         xr.Dataset(
             {"light_curves": (("norad_ids", "times", "freqs"), curves)},
             coords={"norad_ids": np.array(labels), "times": times, "freqs": freqs},
+            attrs=attrs,
         ).to_zarr(canonical)
 
         swapped = str(tmp_path / "swapped.zarr")
@@ -1428,6 +1514,7 @@ class TestReadLightCurves:
             {"light_curves": (("times", "freqs", "norad_ids"),
                               np.transpose(curves, (1, 2, 0)))},
             coords={"norad_ids": np.array(labels), "times": times, "freqs": freqs},
+            attrs=attrs,
         ).to_zarr(swapped)
 
         args = (labels, times, freqs)
@@ -1592,6 +1679,7 @@ class TestTheEstimateIsSampledOnUtc:
             norad_ids=np.asarray(norad_ids),
             times=peak_mjd_utc + secs / 86400.0,
             freqs=np.array([self.F0]),
+            time_scale="utc",
         )
 
         return path
@@ -1649,7 +1737,7 @@ class TestTheEstimateIsSampledOnUtc:
         assert declared[peak] == 0.0
 
     def test_the_component_reads_the_estimate_on_utc(self, run_reader):
-        """The axis itself, to the ~1 us an MJD resolves at f64."""
+        """The axis itself, to the sub-microsecond an MJD resolves to at f64."""
         data = run_reader(self._ms_times(), keywords=_keywords("TAI"))
         comp, config = self._component(data)
 

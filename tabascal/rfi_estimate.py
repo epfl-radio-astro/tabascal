@@ -923,7 +923,10 @@ def save_light_curves_npz(path: str, result: dict) -> None:
     states one scale so a curve stays interpretable away from the MS it was
     measured on, and the reader samples it on the same one: on a TAI-declared MS
     the declared numbers are 37 s from the instants they name, which would seed a
-    later run with a satellite that brightens at the wrong times.
+    later run with a satellite that brightens at the wrong times. That scale is
+    stamped into the file as ``time_scale``, so a reader never has to assume it
+    -- and so an untagged file, which pre-dates the stamp and may have been
+    written on a declared scale, can be told apart and warned about.
 
     ``light_curves`` is the *magnitude* ``|S_hat|``, an apparent flux in Jy: the
     reader casts to float64, which would silently discard the imaginary part of a
@@ -947,6 +950,10 @@ def save_light_curves_npz(path: str, result: dict) -> None:
         light_curves=np.abs(lc),
         norad_ids=np.asarray(result["norad_ids"]),
         times=np.asarray(result["times_mjd_utc"], dtype=np.float64),
+        # Stamped rather than assumed on read: without it a file written before
+        # the format stated a scale is indistinguishable from one written after,
+        # and a legacy file measured on a TAI-declared MS is 37 s out.
+        time_scale="utc",
         freqs=np.asarray(result["freqs"], dtype=np.float64),
         light_curves_complex=lc,
         error=error,

@@ -460,7 +460,7 @@ class TestToUtcMjd:
 
     @staticmethod
     def _quantum_secs(mjd):
-        """One representable step at that magnitude, in seconds (~1.3 us).
+        """One representable step at that magnitude, in seconds (~0.6 us).
 
         The floor on any single returned MJD, and so on any shift differenced
         back out of one. The offset itself is checked against
@@ -508,8 +508,8 @@ class TestToUtcMjd:
     def test_it_keeps_the_digits_the_julian_date_route_spends(self):
         """Why it converts at MJD magnitude instead of routing through a JD.
 
-        An MJD near 6e4 is spaced ~1.3 us apart in f64; a Julian Date near 2.5e6
-        is spaced ~40 us apart. Going out to a JD and back rounds twice at the
+        An MJD near 6e4 is spaced sub-microsecond (~0.6 us) apart in f64; a JD
+        near 2.5e6 is spaced ~40 us apart. Going out to a JD and back rounds twice at the
         coarser magnitude, and on a UTC MS that is a shift applied to a column
         that needed no conversion at all.
         """

@@ -284,10 +284,10 @@ def to_utc_mjd(times_mjd, scale: str = "utc"):
     added.
 
     The offset is added at MJD magnitude rather than by routing through
-    :func:`to_utc_jd`: an MJD near 6e4 is spaced ~1.3 us apart in f64, where a
-    Julian Date near 2.5e6 is spaced ~40 us apart, so the round trip out to a JD
-    and back would round twice at the coarser magnitude -- on a UTC MS, for a
-    conversion that is not even needed. The offset *lookup* still goes through a
+    :func:`to_utc_jd`: an MJD near 6e4 is spaced sub-microsecond (~0.6 us) apart
+    in f64, where a Julian Date near 2.5e6 is spaced ~40 us apart, so the round
+    trip out to a JD and back would round twice at the coarser magnitude -- on a
+    UTC MS, for a conversion that is not even needed. The offset *lookup* still goes through a
     Julian Date, which costs nothing: it selects which leap-second era the time
     falls in, and 40 us only changes that within 40 us of a leap second.
 

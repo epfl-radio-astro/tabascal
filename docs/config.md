@@ -379,7 +379,13 @@ The file is either a **`.zarr` store** (read with `xarray.open_zarr`) or a **`.n
 | `times` | `(n_time,)` | **UTC** Modified Julian Date, in **days**, strictly increasing |
 | `freqs` | `(n_freq,)` | frequency in **Hz**, strictly increasing |
 
-In the zarr form the last three are coordinates of `light_curves`, whose dimensions must be exactly `norad_ids`, `times` and `freqs` — declared in any order, since they are identified by name and transposed on read. A minimal writer:
+and should also carry
+
+| name | shape | contents |
+|---|---|---|
+| `time_scale` | scalar | `"utc"` — the scale `times` is on. A store attribute in the zarr form, an array in the npz |
+
+In the zarr form the four required names are coordinates or variables of `light_curves`, whose dimensions must be exactly `norad_ids`, `times` and `freqs` — declared in any order, since they are identified by name and transposed on read. `time_scale` is a store attribute. A minimal writer:
 
 ```python
 import numpy as np, xarray as xr
@@ -387,8 +393,13 @@ import numpy as np, xarray as xr
 xr.Dataset(
     {"light_curves": (("norad_ids", "times", "freqs"), curves)},
     coords={"norad_ids": np.array([25544, 27386]), "times": times_mjd_utc, "freqs": freqs_hz},
+    attrs={"time_scale": "utc"},
 ).to_zarr("light_curves.zarr")
 ```
+
+`time_scale` is checked, not merely recorded: a file declaring anything other than `utc` is **refused** rather than converted, since the reader cannot know what another writer meant by it and converting there would make the reader a second place the format's scale is decided. Fix the file instead — rewrite `times` as UTC MJD (`tabascal.time.to_utc_mjd`) and stamp `utc`.
+
+A file that carries no `time_scale` is read as UTC with a warning. Light-curve files written by tabascal before the stamp existed took their `times` from the measurement set's `TIME` column *as declared*, so one written from a UTC-declared MS — the overwhelmingly common case — is already correct, while one written from a TAI- or TT-declared MS is offset by the leap seconds and is indistinguishable from a correct file. **Regenerate any estimate measured on a non-UTC MS** with `tabascal light-curve`; the rest can be left alone or re-stamped.
 
 **Rows are matched to satellites by NORAD id, never by position**, so the order of sources in the file does not have to match `satellites.norad_ids`. **Samples are interpolated onto the observation's own time and frequency grid**, so the file's sampling does not have to match the observation either.
 

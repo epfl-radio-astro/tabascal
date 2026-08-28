@@ -599,6 +599,32 @@ class TestSaveLightCurves:
             np.testing.assert_allclose(npz["times"], result["times_mjd_utc"])
             np.testing.assert_allclose(npz["freqs"], result["freqs"])
 
+    def test_it_stamps_the_scale_its_times_are_on(self, tmp_path):
+        """The file says UTC rather than leaving the reader to assume it.
+
+        Without the stamp a file written before the format stated a scale is
+        indistinguishable from one written after, so a legacy file measured on a
+        TAI-declared MS would be read 37 s wrong with nothing to notice it.
+        """
+        path = str(tmp_path / "lc.npz")
+
+        save_light_curves_npz(path, make_result())
+
+        with np.load(path, allow_pickle=False) as npz:
+            assert str(npz["time_scale"]) == "utc"
+
+    def test_what_it_writes_needs_no_assumption_on_read(self, tmp_path, recwarn):
+        """The stamped file is read silently; only untagged ones are warned about."""
+        path = str(tmp_path / "lc.npz")
+        result = make_result()
+        save_light_curves_npz(path, result)
+
+        read_light_curves(
+            path, result["norad_ids"], result["times_mjd_utc"], result["freqs"]
+        )
+
+        assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
     def test_it_loads_back_through_read_light_curves(self, tmp_path, exact_rtol):
         path = str(tmp_path / "lc.npz")
         result = make_result()
