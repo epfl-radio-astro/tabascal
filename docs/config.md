@@ -11,7 +11,7 @@ model:
   name: Custom
   components:
     # RFI Phase
-    - trajectory:KeplerOrbit
+    - trajectory:Orbit
     - trajectory:PhaseCalculationRFI
     # RFI Signal
     - rfi_signal:ComplexRFIVarAnt
@@ -23,7 +23,9 @@ model:
     - gains:UnitaryGains
 ```
 
-The components should be given in order of dependency. For example, `trajectory:KeplerOrbit` is specified before `trajectory:PhaseCalculationRFI` because the later depends on the output of the former. Each component is a class which defines the parameters (if any), their initialisation, their prior distribution, and its own forward model for the component. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the module name and then the class name. For example the component `trajectory:KeplerOrbit` is a class named {class}`~tabascal.components.trajectory.KeplerOrbit` that resides in the module file [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)
+The components should be given in order of dependency. For example, `trajectory:Orbit` is specified before `trajectory:PhaseCalculationRFI` because the later depends on the output of the former. Each component is a class which defines the parameters (if any), their initialisation, their prior distribution, and its own forward model for the component. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the module name and then the class name. For example the component `trajectory:Orbit` is a class named {class}`~tabascal.components.trajectory.Orbit` that resides in the module file [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)
+
+That order is checked when the model is assembled, before anything is computed. Each component declares the state keys it reads and the keys it writes, and a list that leaves out a component — or holds the right ones in the wrong order — is rejected by name, saying which key is missing, what produces it, and whether that producer is absent or merely listed too late.
 
 ### Precision
 

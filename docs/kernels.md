@@ -35,7 +35,7 @@ file](config.md):
 ```yaml
 model:
   components:
-    - rfi_vis: RiemannVisFFI
+    - rfi_vis:RiemannVisFFI
 ```
 
 ## Precision

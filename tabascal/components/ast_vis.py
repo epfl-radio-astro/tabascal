@@ -11,8 +11,11 @@ from tabascal.truth import read_true_vis_ast
 
 class GPVisAst(Component):
 
-    required_inputs = {}  # No inputs needed
-    output_shape = {
+    # Accumulates into vis_ast, which Model zeroes before the components run.
+    required_inputs = {
+        "vis_ast": ("n_bl", "n_freq", "n_time"),
+    }
+    output_shapes = {
         "vis_ast": ("n_bl", "n_freq", "n_time"),
     }
 
@@ -377,8 +380,9 @@ class DiscreteSkyVis(Component):
         "ast_radec": ("n_src", 2),
         "ast_I": ("n_src", "n_freq"),
         "ast_shape": ("n_src", 3),
+        "vis_ast": ("n_bl", "n_freq", "n_time"),
     }
-    output_shape = {
+    output_shapes = {
         "vis_ast": ("n_bl", "n_freq", "n_time"),
     }
     parameter_shapes = {}
