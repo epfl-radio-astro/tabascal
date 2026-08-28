@@ -138,6 +138,10 @@ def _write_zarr(
         vis_obs = _baseline_gains(gains) * (ast + rfi)
 
     n_bl = ast.shape[1]
+    # Taken from the arrays rather than fixed at the module's counts, so a run
+    # narrowed with data.freq -- fewer channels in the results than in the MS --
+    # is built by the same helper as a full-band one.
+    n_freq = ast.shape[2]
 
     xds = xr.Dataset(
         data_vars={
@@ -148,7 +152,7 @@ def _write_zarr(
         },
         coords={
             "time": np.arange(N_TIME, dtype=float),
-            "freq": np.linspace(1.0e9, 1.1e9, N_FREQ),
+            "freq": np.linspace(1.0e9, 1.1e9, N_FREQ)[:n_freq],
             "bl": np.arange(n_bl),
         },
         attrs={} if corr is None else {"corr": corr},
@@ -1507,6 +1511,70 @@ class TestBaselineCountGuard:
         assert "does not belong" in message
         assert "6 baselines" in message and "has 3" in message
         assert "time-major" not in message
+
+
+class TestChannelCountGuard:
+    """A run narrowed with ``data.freq`` reaches a refusal, not a reshape.
+
+    The results then cover part of the MS's band. Which part is not what is
+    missing -- the zarr's ``freq`` coordinate records the fitted channels -- the
+    writer simply has no path from a partial band onto the MS's channel axis.
+    Placing one is future work; until then it is refused, and refused where
+    every other mismatch is: before the first column is built, rather than
+    deep inside dask with a chunk-arithmetic error naming neither count.
+    """
+
+    def _narrowed(self, tmp_path):
+        """A results zarr on one channel of the two-channel fake MS."""
+
+        gains, ast, rfi = _model(1)
+
+        return _write_zarr(
+            tmp_path, gains[:, :, :1], ast[:, :, :1], rfi[:, :, :1]
+        )
+
+    def test_fewer_channels_in_the_results_than_the_ms(self, tmp_path, run_writer):
+        zarr_path = self._narrowed(tmp_path)
+        xds_ms = _fake_ms(np.zeros((N_TIME * N_BL, N_FREQ, N_CORR), np.complex64))
+
+        with pytest.raises(ValueError) as excinfo:
+            run_writer(xds_ms, zarr_path)
+
+        message = str(excinfo.value)
+        # Both counts, and the limitation named as one: an export that is not
+        # supported yet reads differently from a zarr that is simply wrong.
+        assert "1 channels" in message and "has 2" in message
+        assert "data.freq" in message
+        assert "not yet supported" in message
+        # And named accurately. The zarr does say which channels were fitted;
+        # the writer is what does not yet place them, and a message blaming the
+        # results would send a reader looking for a coordinate that is there.
+        assert "freq coordinate" in message
+
+    def test_no_column_is_built_and_the_ms_is_untouched(
+        self, tmp_path, monkeypatch, run_writer
+    ):
+        """Nothing is computed and nothing is written: the guard is first."""
+
+        def _no_columns(*args, **kwargs):
+            raise AssertionError("a column was built before the guard ran")
+
+        monkeypatch.setattr(write_mod, "_to_ms_column", _no_columns)
+
+        zarr_path = self._narrowed(tmp_path)
+        data = (
+            np.arange(N_TIME * N_BL * N_FREQ * N_CORR)
+            .reshape(N_TIME * N_BL, N_FREQ, N_CORR)
+            .astype(np.complex64)
+        )
+        xds_ms = _fake_ms(data)
+        before = set(xds_ms.data_vars)
+
+        with pytest.raises(ValueError, match="not yet supported"):
+            run_writer(xds_ms, zarr_path)
+
+        assert set(xds_ms.data_vars) == before
+        np.testing.assert_array_equal(np.asarray(xds_ms["DATA"].data), data)
 
 
 def _substitute(gains):

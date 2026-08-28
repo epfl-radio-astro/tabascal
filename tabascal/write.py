@@ -470,6 +470,21 @@ def write_results_ms(
             "set, or an antenna was dropped between the run and the write."
         )
 
+    # A run narrowed with data.freq is a valid run whose results simply do not
+    # span the MS. Which channels it holds is not the missing piece -- the zarr's
+    # freq coordinate records them, since write_results_xds stores the run's own
+    # tab_config.freqs. What is missing is here: nothing below maps a partial
+    # band onto the MS's channel axis, and every column is built for the whole
+    # of it. Refused until it does, rather than reshaped against the full band.
+    if int(xds_ms.sizes["chan"]) != n_freq:
+        raise ValueError(
+            f"The results hold {n_freq} channels but the MS has "
+            f"{int(xds_ms.sizes['chan'])}. A run narrowed with data.freq covers "
+            "part of the band, and this writer does not yet use the results' "
+            "freq coordinate to place a partial band on the MS's channels, so "
+            "exporting one to a full-band measurement set is not yet supported."
+        )
+
     ast_vis = xds_tab.ast_vis.data.astype(np.complex64)
     rfi_vis = xds_tab.rfi_vis.data.astype(np.complex64)
 

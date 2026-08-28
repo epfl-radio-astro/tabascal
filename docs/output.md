@@ -199,6 +199,7 @@ An unflagged dead antenna can be driven to a zero or non-finite gain by the fit.
 Writing raises a `ValueError`, before any column is built, if:
 
 * the results `.zarr` holds a different number of baselines than the MS — the results belong to another MS, or an antenna was dropped between the run and the write;
+* the results `.zarr` holds a different number of channels than the MS. A run narrowed with [`data.freq`](config.md) covers part of the MS's band. The results do record which part — the `freq` coordinate holds the channel frequencies the run was fitted on — but the writer does not yet use it to place a partial band on the MS's channel axis, so writing a narrowed run back to a full-band MS is not yet supported, the initial-prediction export included;
 * the MS rows are not ordered time-major, so the first `n_bl` rows do not hold `n_bl` distinct antenna pairs;
 * the baseline order differs between timesteps, which the `(n_time, n_bl)` reshape tabascal reads visibilities with cannot represent;
 * the rows interleave timesteps within a block of `n_bl` rows, which reshapes cleanly but puts every visibility on the wrong timestamp.
