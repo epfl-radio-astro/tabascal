@@ -15,6 +15,7 @@ from tabascal.time import (
     datetime_to_jd,
     skyfield_time,
     to_utc_jd,
+    to_utc_mjd,
     utc_offset_days,
     TIME_SCALES,
     timescale,
@@ -431,6 +432,118 @@ class TestToUtcJd:
     def test_a_sidereal_reference_says_it_is_not_a_scale(self):
         with pytest.raises(ValueError, match="valid Measurement Set epoch reference"):
             to_utc_jd(self.JD, "gast")
+
+
+class TestToUtcMjd:
+    """The MJD counterpart, for day numbers that are compared to another source's.
+
+    A Modified Julian Date is a number until a scale says what it counts, so an
+    MJD that leaves an observation -- into a light-curve file, say -- has to name
+    a scale for anything else to sample it at the right instant. UTC is the one
+    tabascal states, and this is what puts a declared column on it.
+    """
+
+    #: 2025-01-01T00:00:00 UTC, when TAI - UTC was 37 s.
+    MJD = 60676.0
+
+    #: 2017-01-01T00:00:00 UTC: the most recent leap second, 36 s -> 37 s.
+    LEAP_MJD = 57754.0
+
+    def _times(self, n_time=4, step=8.0):
+        return self.MJD + np.arange(n_time) * step / 86400.0
+
+    @staticmethod
+    def _shift_secs(mjd):
+        """The shift measured end to end, off the returned day numbers."""
+
+        return (to_utc_mjd(mjd, "tai") - np.asarray(mjd, dtype=float)) * 86400.0
+
+    @staticmethod
+    def _quantum_secs(mjd):
+        """One representable step at that magnitude, in seconds (~0.6 us).
+
+        The floor on any single returned MJD, and so on any shift differenced
+        back out of one. The offset itself is checked against
+        :func:`utc_offset_days`, which never leaves the day fraction.
+        """
+
+        return float(np.spacing(np.asarray(mjd, dtype=float)).max()) * 86400.0
+
+    def test_utc_is_left_exactly_alone(self):
+        """Bit-identical, not merely close.
+
+        The overwhelmingly common case is a UTC-declared MS, whose light curves
+        must be sampled at exactly the coordinates they were before the scale was
+        honoured -- so it goes through no arithmetic at all.
+        """
+        mjd = self._times()
+
+        np.testing.assert_array_equal(to_utc_mjd(mjd, "utc"), mjd)
+
+    def test_utc_is_the_default(self):
+        mjd = self._times()
+
+        np.testing.assert_array_equal(to_utc_mjd(mjd), mjd)
+
+    def test_tai_moves_back_by_the_leap_seconds(self):
+        """The same numbers read as TAI name an instant 37 s earlier."""
+        mjd = self._times()
+
+        np.testing.assert_allclose(
+            self._shift_secs(mjd), -37.0, rtol=0, atol=self._quantum_secs(mjd)
+        )
+
+    def test_tt_moves_back_by_the_leap_seconds_plus_32_184(self):
+        shift = (to_utc_mjd(self.MJD, "tt") - self.MJD) * 86400.0
+
+        assert shift == pytest.approx(-69.184, abs=self._quantum_secs(self.MJD))
+
+    def test_it_names_the_same_instant_as_the_julian_date_route(self):
+        """Same answer as ``to_utc_jd``, to the ~40 us that route resolves to."""
+        mjd = self._times()
+        via_jd = jd_to_mjd(to_utc_jd(mjd_to_jd(mjd), "tai"))
+
+        np.testing.assert_allclose(to_utc_mjd(mjd, "tai"), via_jd, rtol=0, atol=1e-9)
+
+    def test_it_keeps_the_digits_the_julian_date_route_spends(self):
+        """Why it converts at MJD magnitude instead of routing through a JD.
+
+        An MJD near 6e4 is spaced sub-microsecond (~0.6 us) apart in f64; a JD
+        near 2.5e6 is spaced ~40 us apart. Going out to a JD and back rounds twice at the
+        coarser magnitude, and on a UTC MS that is a shift applied to a column
+        that needed no conversion at all.
+        """
+        mjd = self.MJD + np.arange(4) * 8.5 / 86400.0
+        round_tripped = jd_to_mjd(mjd_to_jd(mjd))
+
+        # The route not taken really does lose digits, so there is something here
+        # to keep...
+        assert np.any(round_tripped != mjd)
+        # ...and the one taken keeps them.
+        np.testing.assert_array_equal(to_utc_mjd(mjd, "utc"), mjd)
+
+    def test_a_leap_second_inside_the_observation_is_followed(self):
+        """Per sample, as ``utc_offset_days`` is: 36 s one side of it, 37 s the other."""
+        mjd = self.LEAP_MJD + np.array([-0.5, 0.5])
+
+        assert self._shift_secs(mjd) == pytest.approx(
+            [-36.0, -37.0], abs=self._quantum_secs(mjd)
+        )
+
+    def test_shapes_are_preserved(self):
+        assert np.asarray(to_utc_mjd(self.MJD, "tai")).shape == ()
+        assert to_utc_mjd(np.array([self.MJD]), "tai").shape == (1,)
+
+    def test_scale_is_case_insensitive(self):
+        assert to_utc_mjd(self.MJD, "TAI") == to_utc_mjd(self.MJD, "tai")
+
+    def test_an_unsupported_scale_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported time scale 'nonsense'"):
+            to_utc_mjd(self.MJD, "nonsense")
+
+    def test_a_sidereal_reference_says_it_is_not_a_scale(self):
+        with pytest.raises(ValueError, match="valid Measurement Set epoch reference"):
+            to_utc_mjd(self.MJD, "gast")
 
 
 # ---------------------------------------------------------------------------

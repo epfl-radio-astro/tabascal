@@ -89,7 +89,7 @@ from tabascal.components.trajectory import (
 )
 from tabascal.interferometry import get_rfi_phase_numpy, itrf_to_uvw_numpy
 from tabascal.noise import broadcast_to_vis
-from tabascal.time import gast_deg, mjd_to_jd
+from tabascal.time import gast_deg, mjd_to_jd, to_utc_mjd
 
 
 #: Bytes of working array per (baseline, channel, timestep) inside the
@@ -375,13 +375,19 @@ def _lc_result(
     error: NDArray,
     norad_ids,
     freqs: NDArray,
-    times_mjd: NDArray,
+    times_mjd_utc: NDArray,
     data_col: str,
     corr: str,
     in_view: Optional[NDArray] = None,
 ) -> dict:
-    """Bundle an estimate with the coordinates it is only interpretable against."""
-    times_mjd = np.asarray(times_mjd, dtype=np.float64)
+    """Bundle an estimate with the coordinates it is only interpretable against.
+
+    ``times_mjd_utc`` is UTC MJD, not the MS's ``TIME`` column as declared: it is
+    what :func:`save_light_curves_npz` writes as the file's ``times``, and the
+    interchange format states one scale so a curve can be read back against any
+    measurement set covering the same pass. See :func:`tabascal.time.to_utc_mjd`.
+    """
+    times_mjd_utc = np.asarray(times_mjd_utc, dtype=np.float64)
     norad_ids = [int(n) for n in norad_ids]
 
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -397,8 +403,8 @@ def _lc_result(
         "norad_ids": norad_ids,
         "titles": [str(n) for n in norad_ids],
         "freqs": np.asarray(freqs, dtype=np.float64),
-        "times_mjd": times_mjd,
-        "times_sec": (times_mjd - times_mjd[0]) * 86400.0,
+        "times_mjd_utc": times_mjd_utc,
+        "times_sec": (times_mjd_utc - times_mjd_utc[0]) * 86400.0,
         "in_view": None if in_view is None else np.asarray(in_view, dtype=bool),
         "data_col": data_col,
         "corr": corr,
@@ -497,8 +503,8 @@ def light_curves_from_config(
     ----------
     tab_config : tabascal.config.TabConfig
         A configured object exposing ``vis_obs``, ``flags``, ``noise``,
-        ``ants_itrf``, ``times_jd``, ``times_mjd``, ``freqs``, ``phase_centre``,
-        ``a1``, ``a2``, ``orbit_records`` and ``norad_ids``.
+        ``ants_itrf``, ``times_jd``, ``times_mjd``, ``time_scale``, ``freqs``,
+        ``phase_centre``, ``a1``, ``a2``, ``orbit_records`` and ``norad_ids``.
     vis : Array (n_bl, n_freq, n_time), optional
         Visibilities to filter; defaults to ``tab_config.vis_obs``.
     exclude_autos : bool, default True
@@ -557,7 +563,7 @@ def light_curves_from_config(
         error,
         norad_ids,
         np.asarray(tab_config.freqs),
-        np.asarray(tab_config.times_mjd),
+        to_utc_mjd(tab_config.times_mjd, tab_config.time_scale),
         tab_config.args["data"]["data_col"],
         tab_config.args["data"]["corr"],
         in_view=in_view,
@@ -683,7 +689,7 @@ def _filter_visibilities(
         error,
         norad_ids,
         np.asarray(ms["freqs"]),
-        np.asarray(ms["times_mjd"]),
+        to_utc_mjd(ms["times_mjd"], ms["time_scale"]),
         data_col,
         corr,
         in_view=in_view,
@@ -910,8 +916,17 @@ def save_light_curves_npz(path: str, result: dict) -> None:
 
     The four names :func:`tabascal.components.rfi_signal.read_light_curves`
     requires -- ``light_curves`` ``(n_src, n_time, n_freq)``, ``norad_ids``,
-    ``times`` (MJD) and ``freqs`` (Hz) -- so the output of a
+    ``times`` (**UTC** MJD) and ``freqs`` (Hz) -- so the output of a
     ``tabascal light-curve`` run can be pointed at with ``rfi.est`` unchanged.
+
+    ``times`` is UTC and not the MS's ``TIME`` column as declared. The format
+    states one scale so a curve stays interpretable away from the MS it was
+    measured on, and the reader samples it on the same one: on a TAI-declared MS
+    the declared numbers are 37 s from the instants they name, which would seed a
+    later run with a satellite that brightens at the wrong times. That scale is
+    stamped into the file as ``time_scale``, so a reader never has to assume it
+    -- and so an untagged file, which pre-dates the stamp and may have been
+    written on a declared scale, can be told apart and warned about.
 
     ``light_curves`` is the *magnitude* ``|S_hat|``, an apparent flux in Jy: the
     reader casts to float64, which would silently discard the imaginary part of a
@@ -934,7 +949,11 @@ def save_light_curves_npz(path: str, result: dict) -> None:
     arrays = dict(
         light_curves=np.abs(lc),
         norad_ids=np.asarray(result["norad_ids"]),
-        times=np.asarray(result["times_mjd"], dtype=np.float64),
+        times=np.asarray(result["times_mjd_utc"], dtype=np.float64),
+        # Stamped rather than assumed on read: without it a file written before
+        # the format stated a scale is indistinguishable from one written after,
+        # and a legacy file measured on a TAI-declared MS is 37 s out.
+        time_scale="utc",
         freqs=np.asarray(result["freqs"], dtype=np.float64),
         light_curves_complex=lc,
         error=error,

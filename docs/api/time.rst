@@ -70,5 +70,31 @@ to thread one through. It happens in two places, both reading the same
 :func:`~tabascal.orbit_config.ms_observation_epoch_jd` for the preflight epoch
 the TLE age checks are measured from.
 
+Day numbers that leave the observation
+--------------------------------------
+
+``read_ms`` deliberately keeps a second time coordinate, ``times_mjd``: the
+``TIME`` column in days, on the scale the column declares, so it stays
+comparable with the column itself and with anything copied from it — a
+caltable's own ``TIME``, for instance.
+
+That makes it the wrong coordinate to hand to anything *outside* the
+measurement set. A light-curve estimate's time axis is written once and read
+back by other runs against other measurement sets, so it names a scale of its
+own: UTC. :func:`~tabascal.time.to_utc_mjd` is the conversion onto it, and both
+ends of that format go through it — ``tabascal light-curve`` when it writes the
+axis, and the RFI signal component when it samples an estimate onto the
+observation grid. It adds the offset at MJD magnitude rather than routing
+through a Julian Date, which keeps the sub-microsecond (~0.6 µs) an MJD near 6e4
+resolves to instead of the ~40 µs a JD does; ``utc`` again returns its input
+bit-identically.
+
+The format states its scale in the file: ``tabascal light-curve`` stamps
+``time_scale: "utc"``, a file declaring anything else is refused rather than
+converted, and one declaring nothing is read as UTC with a warning — files
+written before the stamp existed took their times from the ``TIME`` column as
+declared, so one measured on a non-UTC MS is offset by the leap seconds and
+should be regenerated.
+
 .. automodule:: tabascal.time
     :members:

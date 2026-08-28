@@ -197,10 +197,17 @@ tabascal light-curve -ms path/to/ms/file.ms -n 27868,57865,60093 -dc DATA
 The output goes to `<ms_dir>/light_curves/<tag or column>.npz` unless `-o` says
 otherwise. `light_curves` is the magnitude `|S_hat|`, which is what the format
 requires — a complex array there is rejected on read rather than truncated to
-its real part. Alongside the four names the format requires, the output carries
-the noise floor (`error`), the significance `z = Re(S_hat) / error`, the native
-complex estimate (`light_curves_complex`) and the in-view mask; readers of the
-format ignore the extras. `-p` also writes a per-source spectrogram of `z`.
+its real part. `times` is written as **UTC** MJD, whatever scale the MS declares
+in its `TIME` column: the format states one scale so the curves stay
+interpretable away from the MS they were measured on, and a run seeding from
+them samples on the same one. That scale is stamped into the file as
+`time_scale`, so nothing downstream has to assume it — and a file written before
+the stamp existed, which may have been on a declared scale, is read as UTC with
+a warning rather than silently. Alongside the four names the format requires, the
+output carries the noise floor (`error`), the significance
+`z = Re(S_hat) / error`, the native complex estimate (`light_curves_complex`)
+and the in-view mask; readers of the format ignore the extras. `-p` also writes
+a per-source spectrogram of `z`.
 
 To score a run, filter its *residual* rather than a data column. Point `-z` at
 the run's results zarr and `-dc` at the reference column the residual is formed

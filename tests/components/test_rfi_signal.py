@@ -36,6 +36,11 @@ from tabascal.gp import base_kernel, get_times
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
 
+# The in-memory MS rig from the reader's own tests, whose TIME column declares
+# its scale through a MEASINFO record the way casacore does. Imported rather
+# than restated so the scale under test is the one read_ms actually reads.
+from ..test_ms import _keywords, run_reader  # noqa: F401 -- run_reader is a fixture
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -85,6 +90,7 @@ def make_rfi_config(
     pad_factor=2,
     with_n_rfi_real=True,
     rfi_mask_fine=None,
+    time_scale="utc",
 ):
     """Build a minimal mock TabConfig for the RFI-signal components.
 
@@ -117,11 +123,13 @@ def make_rfi_config(
         freqs_fine=jnp.linspace(freqs[0], freqs[-1], n_freq_fine),
         chan_width=chan_width,
         times=times,
-        # Absolute grid the light-curve estimate is interpolated against.
         # Absolute grid the light-curve estimate is interpolated against. MJD is
         # carried alongside JD rather than derived from it; see read_ms_params.
+        # ``time_scale`` is what the MS's TIME column declared, and is what puts
+        # times_mjd onto the UTC the estimate file's own axis is on.
         times_mjd=_TEST_EPOCH_MJD + np.linspace(0.0, 120.0, n_time, dtype=np.float64) / 86400.0,
         times_jd=_TEST_EPOCH_JD + np.linspace(0.0, 120.0, n_time, dtype=np.float64) / 86400.0,
+        time_scale=time_scale,
         times_fine=jnp.linspace(times[0], times[-1], n_time_fine),
         int_time=int_time,
         vis_obs=jnp.ones((n_bl, n_freq, n_time), dtype=complex),
@@ -196,6 +204,7 @@ def make_est_file(tmp_path, n_rfi_real=N_RFI_REAL, n_time=N_TIME, n_freq=N_FREQ)
         norad_ids=np.array(_norad_ids(n_rfi_real, n_rfi_real)),
         times=_TEST_EPOCH_MJD + times / 86400.0,
         freqs=np.linspace(1.4e9, 1.41e9, n_freq, dtype=np.float64),
+        time_scale="utc",
     )
     return str(path)
 
@@ -961,6 +970,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
         times=times, times_fine=times, int_time=float(times[1] - times[0]),
     times_jd=2460000.5 + times / 86400.0,
     times_mjd=60000.0 + times / 86400.0,
+    time_scale="utc",
         vis_obs=jnp.ones((3, n_freq, n_time), dtype=complex),
         args={
             "rfi": {"r_seed": 1, "var": 1.0, "corr_freq": 5e6, "corr_time": 60.0,
@@ -1040,7 +1050,8 @@ class TestReadLightCurves:
         return np.linspace(self.F0, self.F1, n)
 
     def _npz(self, tmp_path, labels, times=None, freqs=None, curves=None,
-             name="est.npz", **extra):
+             name="est.npz", time_scale="utc", **extra):
+        """A light-curve .npz. ``time_scale=None`` writes an untagged legacy file."""
         times = self._times() if times is None else times
         freqs = self._freqs() if freqs is None else freqs
         if curves is None:
@@ -1051,11 +1062,14 @@ class TestReadLightCurves:
         path = tmp_path / name
         fields = {"light_curves": curves, "norad_ids": np.array(labels),
                   "times": np.asarray(times), "freqs": np.asarray(freqs)}
+        if time_scale is not None:
+            fields["time_scale"] = time_scale
         fields.update(extra)
         np.savez(path, **fields)
         return str(path)
 
-    def _zarr(self, tmp_path, labels, times=None, freqs=None, curves=None):
+    def _zarr(self, tmp_path, labels, times=None, freqs=None, curves=None,
+              time_scale="utc"):
         import xarray as xr
 
         times = self._times() if times is None else times
@@ -1069,6 +1083,7 @@ class TestReadLightCurves:
             {"light_curves": (("norad_ids", "times", "freqs"), curves)},
             coords={"norad_ids": np.array(labels), "times": np.asarray(times),
                     "freqs": np.asarray(freqs)},
+            attrs={} if time_scale is None else {"time_scale": time_scale},
         ).to_zarr(path)
         return path
 
@@ -1198,6 +1213,95 @@ class TestReadLightCurves:
         path = self._npz(tmp_path, [100], times=times,
                          curves=np.ones((1, 3, 3)))
         with pytest.raises(ValueError, match="strictly increasing"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    # --- the scale the file states its times are on ---
+
+    def test_a_file_stating_utc_reads_without_comment(self, tmp_path, recwarn):
+        """The stamp the current writer leaves; nothing to say about it."""
+        path = self._npz(tmp_path, [100])
+
+        read_light_curves(path, [100], self._times(), self._freqs())
+
+        assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+    @pytest.mark.parametrize(
+        "declared", ["UTC", " utc ", b"utc", b"UTC", np.array(["utc"])]
+    )
+    def test_the_stated_scale_is_read_leniently(self, tmp_path, declared, recwarn):
+        """Case, surrounding space and storage type are not a different scale.
+
+        A stamp comes back as whatever the writer stored: npz keeps a scalar as
+        a 0-d array and a byte string as ``|S``, and a zarr attribute may be
+        either. Compared with a bare ``str()`` those render as ``"b'utc'"`` or
+        ``"['utc']"`` and a perfectly good UTC file is refused as being on a
+        scale nobody wrote.
+        """
+        path = self._npz(tmp_path, [100], time_scale=declared)
+
+        read_light_curves(path, [100], self._times(), self._freqs())
+
+        assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+    @pytest.mark.parametrize("declared", ["tai", "tt", "ut1", b"tai"])
+    def test_a_file_on_another_scale_is_rejected_by_name(self, tmp_path, declared):
+        """Not converted here: the reader cannot know what a third party meant.
+
+        A file that states TAI is self-describing enough to be fixed at the
+        source, and converting it silently would make the reader the second
+        place the format's scale is decided. Named in the message as text, so a
+        byte-string stamp reads as ``'tai'`` rather than as ``"b'tai'"``.
+        """
+        path = self._npz(tmp_path, [100], time_scale=declared)
+
+        with pytest.raises(ValueError, match="time_scale") as excinfo:
+            read_light_curves(path, [100], self._times(), self._freqs())
+        message = str(excinfo.value)
+        expected = declared.decode() if isinstance(declared, bytes) else declared
+        assert f"'{expected}'" in message
+        assert "UTC" in message or "utc" in message
+
+    def test_an_untagged_file_warns_that_it_is_being_read_as_utc(self, tmp_path):
+        """Legacy files pre-date the stamp, and one of them may be 37 s out.
+
+        Before the scale was stated, `tabascal light-curve` wrote whatever the
+        measurement set's TIME column declared. One written from a UTC MS -- the
+        common case -- is already right; one written from a TAI MS is offset by
+        the leap seconds and cannot be told apart from it. A warning, not an
+        error: refusing every legacy file would break the runs that are correct.
+        """
+        path = self._npz(tmp_path, [100], time_scale=None)
+
+        with pytest.warns(UserWarning, match="time_scale") as record:
+            out = np.asarray(
+                read_light_curves(path, [100], self._times(), self._freqs())
+            )
+
+        message = str(record[0].message)
+        assert "UTC" in message
+        assert "regenerate" in message or "regenerated" in message
+        # And it still reads, on the assumption it just stated.
+        assert out[0].max() == 1.0
+
+    def test_an_untagged_zarr_warns_too(self, tmp_path):
+        """Both branches carry the tag, so both must notice its absence."""
+        path = self._zarr(tmp_path, [100], time_scale=None)
+
+        with pytest.warns(UserWarning, match="time_scale"):
+            read_light_curves(path, [100], self._times(), self._freqs())
+
+    def test_a_zarr_attribute_states_the_scale(self, tmp_path, recwarn):
+        """The zarr form carries it as a store attribute, not as a variable."""
+        path = self._zarr(tmp_path, [100])
+
+        read_light_curves(path, [100], self._times(), self._freqs())
+
+        assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+    def test_a_zarr_on_another_scale_is_rejected_too(self, tmp_path):
+        path = self._zarr(tmp_path, [100], time_scale="tai")
+
+        with pytest.raises(ValueError, match="time_scale"):
             read_light_curves(path, [100], self._times(), self._freqs())
 
     # --- zarr ---
@@ -1408,10 +1512,12 @@ class TestReadLightCurves:
         freqs = np.linspace(self.F0, self.F1, n)
         curves = np.arange(n ** 3, dtype=float).reshape(n, n, n)
 
+        attrs = {"time_scale": "utc"}
         canonical = str(tmp_path / "canonical.zarr")
         xr.Dataset(
             {"light_curves": (("norad_ids", "times", "freqs"), curves)},
             coords={"norad_ids": np.array(labels), "times": times, "freqs": freqs},
+            attrs=attrs,
         ).to_zarr(canonical)
 
         swapped = str(tmp_path / "swapped.zarr")
@@ -1419,6 +1525,7 @@ class TestReadLightCurves:
             {"light_curves": (("times", "freqs", "norad_ids"),
                               np.transpose(curves, (1, 2, 0)))},
             coords={"norad_ids": np.array(labels), "times": times, "freqs": freqs},
+            attrs=attrs,
         ).to_zarr(swapped)
 
         args = (labels, times, freqs)
@@ -1500,6 +1607,192 @@ class TestReadLightCurves:
 
         read_light_curves(path, [100], self._times(), self._freqs())
         assert "infinite" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Which time axis the estimate is sampled on
+# ---------------------------------------------------------------------------
+
+class TestTheEstimateIsSampledOnUtc:
+    """A light-curve file's ``times`` are UTC MJD, so the sampling has to be too.
+
+    The format is an interchange one, reusable across measurement sets covering
+    the same pass, which only works if its time axis names an *instant* rather
+    than whatever number some MS happened to store. That instant is on UTC, the
+    scale everything past ``read_ms`` already works on.
+
+    An MS is free to declare something else in its ``TIME`` column's ``MEASINFO``
+    record, and ``read_ms`` deliberately leaves ``times_mjd`` on the declared
+    scale so it stays comparable with the column itself. Sampling the estimate
+    there instead reads the file 37 s from where it was measured on a
+    TAI-declared MS -- silently, since a light curve resampled off by a few
+    integrations is still the right shape and still optimises.
+
+    The MS comes through the in-memory rig from ``tests.test_ms``, so the scale
+    is declared the way casacore declares it rather than asserted onto a stub.
+    """
+
+    #: 2025-01-01T00:00:00 UTC as an MJD, when TAI - UTC was 37 s.
+    MJD = 60676.0
+    LEAP_SECS = 37.0
+
+    #: 25 integrations 8 s apart: long enough that 37 s is a few timesteps inside
+    #: the observation rather than more than the whole of it.
+    N_TIME, STEP = 25, 8.0
+
+    #: Half-width of the spike, and the half-width of its flat top, in seconds.
+    #: The plateau is wider than any rounding in the time axis and far narrower
+    #: than one integration, so the peak sample is exactly 1.0 when it lands on
+    #: the feature and exactly 0.0 one integration away.
+    WIDTH, PLATEAU = 8.0, 1.0
+
+    F0 = 1.405e9
+
+    def _ms_times(self):
+        """The MS ``TIME`` column, in seconds, on whatever scale it declares."""
+
+        return (self.MJD + np.arange(self.N_TIME) * self.STEP / 86400.0) * 86400.0
+
+    @property
+    def _peak_step(self):
+        """Timestep the spike is centred on."""
+
+        return self.N_TIME // 2
+
+    def _peak_mjd_utc(self, shift_secs):
+        """UTC MJD of that timestep, given what the declaration costs it.
+
+        Stated as "the declared number, less the leap seconds" rather than read
+        off the conversion under test, so the expectation is independent of it.
+        """
+
+        declared = self.MJD + self._peak_step * self.STEP / 86400.0
+
+        return declared + shift_secs / 86400.0
+
+    def _spike_file(self, tmp_path, norad_ids, peak_mjd_utc):
+        """A curve that is zero except for one narrow spike at ``peak_mjd_utc``.
+
+        Sampled every second -- an order finer than the observation -- so where
+        the spike lands in the result is set by the coordinate the reader asks
+        for and not by the file's own resolution. A single-frequency axis, which
+        the reader holds constant across the band, keeps frequency out of it.
+        """
+
+        secs = np.arange(-120.0, 120.0 + 1.0, 1.0)
+        curve = np.clip(
+            (self.WIDTH - np.abs(secs)) / (self.WIDTH - self.PLATEAU), 0.0, 1.0
+        )
+        path = str(tmp_path / "spike.npz")
+        np.savez(
+            path,
+            light_curves=np.tile(curve[None, :, None], (len(norad_ids), 1, 1)),
+            norad_ids=np.asarray(norad_ids),
+            times=peak_mjd_utc + secs / 86400.0,
+            freqs=np.array([self.F0]),
+            time_scale="utc",
+        )
+
+        return path
+
+    def _component(self, data):
+        """A component set up on the times and scale a real MS read produced."""
+
+        config = make_rfi_config(n_time=self.N_TIME)
+        config.times_mjd = np.asarray(data["times_mjd"])
+        config.times_jd = np.asarray(data["times_jd"])
+        config.time_scale = data["time_scale"]
+
+        comp = ComplexRFIVarAnt()
+        comp.setup(config)
+
+        return comp, config
+
+    @staticmethod
+    def _sample(comp, path, times_mjd):
+        """The one satellite's light curve, read onto ``times_mjd``."""
+
+        ids = comp.norad_ids[: comp.n_rfi_real]
+
+        return np.asarray(read_light_curves(path, ids, times_mjd, comp.freqs))[0, 0]
+
+    def test_a_tai_ms_samples_the_estimate_where_utc_says(self, run_reader, tmp_path):
+        """The acceptance check: the spike lands on the integration that saw it.
+
+        The file's peak is at the UTC instant of one integration. Sampled on
+        UTC, that integration reads the peak and its neighbours read zero.
+        Sampled on the declared TAI numbers the whole curve slides 37 s, which is
+        4.6 integrations -- so the peak lands nowhere near the timestep that
+        measured it, and the run is seeded with a satellite that brightens at the
+        wrong time.
+        """
+        data = run_reader(self._ms_times(), keywords=_keywords("TAI"))
+        comp, config = self._component(data)
+        path = self._spike_file(
+            tmp_path,
+            comp.norad_ids[: comp.n_rfi_real],
+            self._peak_mjd_utc(-self.LEAP_SECS),
+        )
+
+        curve = self._sample(comp, path, comp.est_times_mjd)
+
+        peak = self._peak_step
+        assert curve.argmax() == peak
+        assert curve[peak] == 1.0
+        assert curve[peak - 1] == 0.0 and curve[peak + 1] == 0.0
+
+        # And what sampling the declared column instead would have done: the
+        # feature moves by the leap seconds, i.e. round(37 / 8) = 5 integrations.
+        declared = self._sample(comp, path, config.times_mjd)
+        assert declared.argmax() == peak - round(self.LEAP_SECS / self.STEP)
+        assert declared[peak] == 0.0
+
+    def test_the_component_reads_the_estimate_on_utc(self, run_reader):
+        """The axis itself, to the sub-microsecond an MJD resolves to at f64."""
+        data = run_reader(self._ms_times(), keywords=_keywords("TAI"))
+        comp, config = self._component(data)
+
+        np.testing.assert_allclose(
+            comp.est_times_mjd,
+            np.asarray(config.times_mjd) - self.LEAP_SECS / 86400.0,
+            rtol=0,
+            atol=1e-9,  # days, i.e. ~90 us
+        )
+
+    def test_a_utc_ms_is_sampled_exactly_where_it_always_was(
+        self, run_reader, tmp_path
+    ):
+        """Behaviour-neutral for the common case: bit-identical, not merely close.
+
+        A UTC-declared MS needs no conversion, and must get none -- routing its
+        column out to a Julian Date and back would round it at the coarser ~2.5e6
+        magnitude and move every sample by ~10 us for nothing.
+        """
+        data = run_reader(self._ms_times(), keywords=_keywords("UTC"))
+        comp, config = self._component(data)
+        path = self._spike_file(
+            tmp_path, comp.norad_ids[: comp.n_rfi_real], self._peak_mjd_utc(0.0)
+        )
+
+        np.testing.assert_array_equal(comp.est_times_mjd, config.times_mjd)
+        np.testing.assert_array_equal(
+            self._sample(comp, path, comp.est_times_mjd),
+            self._sample(comp, path, config.times_mjd),
+        )
+
+    def test_a_utc_ms_still_finds_the_feature(self, run_reader, tmp_path):
+        """The control for the TAI case: with nothing to shift, nothing shifts."""
+        data = run_reader(self._ms_times(), keywords=_keywords("UTC"))
+        comp, _ = self._component(data)
+        path = self._spike_file(
+            tmp_path, comp.norad_ids[: comp.n_rfi_real], self._peak_mjd_utc(0.0)
+        )
+
+        curve = self._sample(comp, path, comp.est_times_mjd)
+
+        assert curve.argmax() == self._peak_step
+        assert curve[self._peak_step] == 1.0
+
 
 class TestMaskIsolatesNonFiniteSamples:
     """A masked sample must be exactly zero, whatever rfi_A holds there.

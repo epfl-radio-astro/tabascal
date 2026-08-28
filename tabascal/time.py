@@ -269,6 +269,55 @@ def to_utc_jd(times_jd, scale: str = "utc"):
     return whole + ((times_jd - whole) + utc_offset_days(times_jd, scale))
 
 
+def to_utc_mjd(times_mjd, scale: str = "utc"):
+    """Modified Julian Dates on a named scale as the same instants on UTC.
+
+    The MJD counterpart of :func:`to_utc_jd`, for the day numbers that leave an
+    observation and are compared against another source's -- a light-curve
+    estimate's time axis, say. An MJD is a number until a scale says what it
+    counts, so a day number written on whatever an MS happened to declare cannot
+    be matched against one from anywhere else; UTC is the scale tabascal states
+    for those, and this is what puts a declared column on it.
+
+    ``utc`` returns the input unchanged -- bit-identical, not merely close, since
+    no arithmetic is done at all. The other scales have :func:`utc_offset_days`
+    added.
+
+    The offset is added at MJD magnitude rather than by routing through
+    :func:`to_utc_jd`: an MJD near 6e4 is spaced sub-microsecond (~0.6 us) apart
+    in f64, where a Julian Date near 2.5e6 is spaced ~40 us apart, so the round
+    trip out to a JD and back would round twice at the coarser magnitude -- on a
+    UTC MS, for a conversion that is not even needed. The offset *lookup* still goes through a
+    Julian Date, which costs nothing: it selects which leap-second era the time
+    falls in, and 40 us only changes that within 40 us of a leap second.
+
+    Parameters
+    ----------
+    times_mjd : array_like
+        Modified Julian Dates as the source declares them, on ``scale``.
+    scale : str, optional
+        Time scale the day numbers are on; see :func:`skyfield_time`. Defaults
+        to ``"utc"``, which is a no-op.
+
+    Returns
+    -------
+    np.ndarray
+        The same instants, as UTC Modified Julian Dates.
+
+    Raises
+    ------
+    ValueError
+        If ``scale`` is not one tabascal can interpret.
+    """
+
+    times_mjd = np.asarray(times_mjd, dtype=float)
+
+    if str(scale).strip().lower() == "utc":
+        return times_mjd
+
+    return times_mjd + utc_offset_days(mjd_to_jd(times_mjd), scale)
+
+
 def gast_deg(times_jd, scale: str = "utc"):
     """Greenwich Apparent Sidereal Time, in degrees, for Julian Dates.
 

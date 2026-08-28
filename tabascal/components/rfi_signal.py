@@ -1,3 +1,4 @@
+import warnings
 from abc import abstractmethod
 
 from jax import vmap, random, Array, lax, checkpoint
@@ -10,6 +11,7 @@ from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
 from tabascal.ms import get_observation_data_type
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
+from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
 import numpy as np
@@ -25,13 +27,45 @@ _LIGHT_CURVE_VARS = ("light_curves", "norad_ids", "times", "freqs")
 #: Dimensions of ``light_curves``. A store may declare them in any order.
 _LIGHT_CURVE_DIMS = ("norad_ids", "times", "freqs")
 
+#: The only scale a light-curve file's ``times`` may be on, stamped by the writer
+#: as ``time_scale`` and checked on read. See :func:`read_light_curves`.
+_LIGHT_CURVE_TIME_SCALE = "utc"
 
-def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDArray]:
-    """Load a light-curve file into (light_curves, norad_ids, times, freqs).
+
+def _scale_text(declared) -> str:
+    """A stamped time scale as comparable text, however the file stored it.
+
+    A stamp comes back as whatever the writer put there: an npz keeps a scalar
+    as a 0-d array and a byte string as ``|S``, and a zarr attribute may be a
+    ``str``, ``bytes`` or a length-1 array. ``str()`` on those renders
+    ``"b'utc'"`` or ``"['utc']"``, which would refuse a perfectly good UTC file
+    as being on a scale nobody wrote -- so the scalar is unwrapped and decoded
+    before the case and whitespace are normalised.
+
+    Anything that is not a single value is left to ``str()`` and rejected by the
+    caller, which says what was found rather than raising from inside here.
+    """
+    if isinstance(declared, np.ndarray) and declared.size == 1:
+        declared = declared.reshape(-1)[0]
+    if isinstance(declared, bytes):
+        declared = declared.decode(errors="replace")
+
+    return str(declared).strip().lower()
+
+
+def _light_curve_contents(
+    est_path: str,
+) -> Tuple[NDArray, NDArray, NDArray, NDArray, Optional[str]]:
+    """Load a light-curve file into (light_curves, norad_ids, times, freqs, scale).
 
     Accepts a ``.zarr`` store (read with :func:`xarray.open_zarr`) or a ``.npz``.
     Both carry the same four arrays under the same names; the zarr form keeps
     ``norad_ids``/``times``/``freqs`` as coordinates of ``light_curves``.
+
+    ``scale`` is the file's ``time_scale`` stamp as text, normalised by
+    :func:`_scale_text` -- a store attribute in the zarr form, an array in the
+    npz -- or ``None`` for a file written before the format stated one.
+    :func:`_check_light_curve_time_scale` rules on it.
     """
     if str(est_path).rstrip("/").endswith(".zarr"):
         # Closed on the way out however the function leaves, as for the npz
@@ -53,6 +87,8 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
             # By name, not stored order: a swapped store with equal-length dims
             # would otherwise pass the shape check below and be read along the
             # wrong axes.
+            stamp = xds.attrs.get("time_scale")
+
             dims = tuple(xds["light_curves"].dims)
             if set(dims) != set(_LIGHT_CURVE_DIMS):
                 raise ValueError(
@@ -67,6 +103,7 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
                 np.asarray(xds["norad_ids"].data),
                 np.asarray(xds["times"].data),
                 np.asarray(xds["freqs"].data),
+                None if stamp is None else _scale_text(stamp),
             )
 
     loaded = np.load(est_path)
@@ -88,7 +125,59 @@ def _light_curve_contents(est_path: str) -> Tuple[NDArray, NDArray, NDArray, NDA
                 f"{est_path} is missing {missing}. A light-curve .npz must hold "
                 f"{list(_LIGHT_CURVE_VARS)}. It contains {sorted(npz.files)}."
             )
-        return tuple(np.asarray(npz[name]) for name in _LIGHT_CURVE_VARS)  # type: ignore
+        scale = (
+            _scale_text(npz["time_scale"]) if "time_scale" in npz.files else None
+        )
+
+        return (
+            *(np.asarray(npz[name]) for name in _LIGHT_CURVE_VARS),  # type: ignore
+            scale,
+        )
+
+
+def _check_light_curve_time_scale(est_path: str, declared: Optional[str]) -> None:
+    """Rule on the scale a light-curve file says its ``times`` are on.
+
+    ``declared`` is the stamp as :func:`_scale_text` normalised it, or ``None``
+    where the file carries none.
+
+    The format states one scale, UTC, so that a curve measured against one
+    observation can be read back against another. A file that says so is read
+    silently; one that says something else is refused rather than converted --
+    the reader has no way to know what a third-party writer meant by it, and
+    converting here would make this the second place the format's scale is
+    decided. A file that says nothing is read as UTC, with a warning.
+
+    The warning covers the files written before the stamp existed. Those took
+    their ``times`` from the measurement set's ``TIME`` column as declared, so
+    one written from a UTC-declared MS -- the overwhelmingly common case -- is
+    already right, and one written from a TAI-declared MS is 37 s out with
+    nothing in the file to tell the two apart. Refusing every untagged file would
+    break the runs that were correct all along, so this states the assumption and
+    proceeds.
+    """
+    if declared is None:
+        warnings.warn(
+            f"{est_path} states no time_scale, so its times are being read as "
+            "UTC MJD, which is what the light-curve format specifies. Files "
+            "written before the stamp existed took their times from the "
+            "measurement set's TIME column as declared: one written from a "
+            "UTC-declared MS is already correct, but one written from a TAI- or "
+            "TT-declared MS is offset by the leap seconds (37 s for TAI) and "
+            "should be regenerated with `tabascal light-curve`.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return
+
+    if declared != _LIGHT_CURVE_TIME_SCALE:
+        raise ValueError(
+            f"{est_path} declares time_scale {declared!r}, but a "
+            "light-curve file's times are UTC MJD. They are not converted here: "
+            "the file is the place the scale is stated, and a reader that "
+            "quietly moved the samples would be a second one. Rewrite times as "
+            "UTC MJD (tabascal.time.to_utc_mjd) and stamp time_scale 'utc'."
+        )
 
 
 def _as_norad_ids(labels: NDArray) -> List[Optional[int]]:
@@ -138,7 +227,7 @@ def _interp_axis(values: NDArray, src: NDArray, dst: NDArray, axis: int) -> NDAr
 
 
 def read_light_curves(
-    est_path: str, norad_ids: List[int], times_mjd: NDArray, freqs: NDArray
+    est_path: str, norad_ids: List[int], times_mjd_utc: NDArray, freqs: NDArray
 ) -> Array:
     """Read an RFI light curve estimate onto the observation grid.
 
@@ -155,13 +244,27 @@ def read_light_curves(
     ``norad_ids``
         ``(n_src,)``. NORAD id labelling each row of ``light_curves``.
     ``times``
-        ``(n_time,)``. Modified Julian Date, in **days**, strictly increasing.
+        ``(n_time,)``. **UTC** Modified Julian Date, in **days**, strictly
+        increasing. UTC and not "whatever the measuring observation declared":
+        a Julian day number is a number until a scale says what it counts, and
+        an MS may declare TAI in its ``TIME`` column, which is 37 s from the
+        instant the same number names on UTC.
     ``freqs``
         ``(n_freq,)``. Frequency in **Hz**, strictly increasing.
 
     In the zarr form the last three are coordinates of ``light_curves``.
 
-    All four are required. The format is deliberately strict: this is the
+    Optionally, and written by ``tabascal light-curve``:
+
+    ``time_scale``
+        ``"utc"``, stamping the scale ``times`` is on. A store attribute in the
+        zarr form, an array in the npz. Any other value is refused rather than
+        converted. A file that omits it is read as UTC with a warning: files
+        written before the stamp existed took ``times`` from the MS's ``TIME``
+        column as declared, so one written from a TAI-declared MS is 37 s out
+        and indistinguishable from a correct one -- regenerate those.
+
+    The four are all required. The format is deliberately strict: this is the
     interchange standard between tabascal and whatever measures the light curves,
     and every loose alternative it could accept instead fails silently. Matching
     rows by position rather than by id attaches a curve to the wrong satellite
@@ -169,13 +272,18 @@ def read_light_curves(
     observation's resamples it wrongly by an unknown amount. Neither shows up as
     an error, only as a worse fit.
 
-    Times are absolute (MJD) rather than seconds from the start of a particular
-    observation, so a light curve is interpretable on its own and can be reused
-    across measurement sets covering the same pass.
+    Times are absolute (MJD on a stated scale) rather than seconds from the start
+    of a particular observation, so a light curve is interpretable on its own and
+    can be reused across measurement sets covering the same pass. Both halves
+    matter: an axis on no stated scale would be reusable only against a
+    measurement set that happened to declare the same one.
 
     Resampling
     ----------
-    Light curves are interpolated linearly onto ``times_mjd`` and ``freqs``.
+    Light curves are interpolated linearly onto ``times_mjd_utc`` and ``freqs``.
+    ``times_mjd_utc`` is the observation's own times as UTC MJD --
+    :func:`tabascal.time.to_utc_mjd` of the MS's column, not the column itself,
+    which is on whatever scale the MS declared.
     Samples outside the file's coverage are zero, on either axis -- the file
     says nothing there, which is the same "no signal known" convention the
     elevation mask uses. An axis of length 1 is held constant instead, since a
@@ -196,7 +304,8 @@ def read_light_curves(
         unmatched satellites zero and NaNs replaced by zero.
     """
 
-    curves, labels, src_times, src_freqs = _light_curve_contents(est_path)
+    curves, labels, src_times, src_freqs, declared = _light_curve_contents(est_path)
+    _check_light_curve_time_scale(est_path, declared)
 
     if curves.ndim != 3:
         raise ValueError(
@@ -269,7 +378,7 @@ def read_light_curves(
     matched = np.nan_to_num(matched, nan=0.0, posinf=0.0, neginf=0.0)
 
     # (n_matched, n_time, n_freq) -> observation grid -> (n_matched, n_freq, n_time)
-    matched = _interp_axis(matched, src_times, np.asarray(times_mjd), axis=1)
+    matched = _interp_axis(matched, src_times, np.asarray(times_mjd_utc), axis=1)
     matched = _interp_axis(matched, src_freqs, np.asarray(freqs), axis=2)
     matched = np.swapaxes(matched, 1, 2)
 
@@ -410,9 +519,18 @@ class BaseGPRFI(Component):
         self.chan_width = tab_config.chan_width
         self.times = tab_config.times
         self.times_fine = tab_config.times_fine
-        # Absolute times, for resampling estimates sampled in MJD. Taken as read,
-        # not recovered from times_jd, which loses ~1e-10 days on the round trip.
-        self.times_mjd = np.asarray(tab_config.times_mjd)
+        # Absolute times, for resampling estimates sampled in MJD, as *UTC* MJD:
+        # that is the scale a light-curve file's `times` are on, and read_ms
+        # deliberately leaves times_mjd on whatever the MS declared. Sampling
+        # there instead reads a file 37 s from where it was measured on a
+        # TAI-declared MS -- a few integrations, and silent, since a curve
+        # resampled off by a few timesteps is still the right shape.
+        #
+        # Converted from times_mjd rather than from times_jd: a UTC MS then goes
+        # through no arithmetic at all and keeps its column exactly, where the
+        # JD round trip would round it at ~2.5e6 magnitude and move every sample
+        # ~10 us for nothing. See tabascal.time.to_utc_mjd.
+        self.est_times_mjd = to_utc_mjd(tab_config.times_mjd, tab_config.time_scale)
         self.int_time = tab_config.int_time
 
         self.gp_var = rfi_config["var"]
@@ -528,7 +646,10 @@ class BaseGPRFI(Component):
         # so a duplicate id is never reported as a missing one.
         return self._rfi_k_from_light_curves(
             read_light_curves(
-                est_path, self.norad_ids[:self.n_rfi_real], self.times_mjd, self.freqs
+                est_path,
+                self.norad_ids[:self.n_rfi_real],
+                self.est_times_mjd,
+                self.freqs,
             )
         )
 
