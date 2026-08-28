@@ -52,10 +52,16 @@ def calibrated_residuals(vis_cal, vis_ast, vis_rfi):
         ``TAB_AST_DATA + TAB_RFI_DATA + TAB_RES_DATA == CORRECTED_DATA``
 
     an exact floating-point identity rather than an approximate one (#123) --
-    exact wherever ``vis_cal - model`` is representable, i.e. wherever the
-    residual is no larger than the data, which is what a fitted model gives. On a
-    cell that is all residual it holds to a ulp instead, still five orders of
-    magnitude tighter than a column in the wrong frame, which is out by a gain.
+    exact wherever ``vis_cal - model`` is exactly representable, which complex
+    arithmetic decides **per component**: Sterbenz's condition has to hold for
+    the real parts and for the imaginary parts separately, each pair within a
+    factor of two of the other. A residual that is small next to ``|vis_cal|`` is
+    not sufficient on its own, because a cell whose real part nearly cancels can
+    have a residual far larger than that component. Where the condition fails --
+    such a cell, or a fit so bad that a cell is all residual -- the identity
+    holds to within one float32 ulp of the visibility's magnitude instead, still
+    seven orders of magnitude tighter than a column in the wrong frame, which is
+    out by a gain.
 
     The run's own ``vis_obs`` forward model is deliberately not used: it lives in
     the gained frame, and a gains component that gains only one of the two terms

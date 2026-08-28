@@ -87,7 +87,11 @@ One frame means the decomposition closes:
 TAB_AST_DATA + TAB_RFI_DATA + TAB_RES_DATA == CORRECTED_DATA
 ```
 
-exactly — the same floating-point numbers, not merely to a tolerance, wherever the residual is no larger than the data (which is what a fitted model gives; on a fit so bad that a cell is all residual the identity holds only to a `float32` ulp). It is worth checking after any change to the writer: a column written in the wrong frame is wrong by a *gain*, so this closes loudly.
+The identity is **exact** — the same floating-point numbers, not merely to a tolerance — wherever Sterbenz's condition holds **per component**: for the real parts and for the imaginary parts *separately*, the model's component and the calibrated data's component must lie within a factor of two of one another, which makes `data − model` exactly representable and the sum reconstruct `data` bit for bit.
+
+That is a condition on the components, not on the magnitudes. A residual that is small next to `|data|` is not enough on its own: a cell whose real part very nearly cancels while its imaginary part is large can have a residual that dwarfs its own real part, and there the identity holds only to within **one `float32` ulp of the visibility's magnitude**. The same bound applies on a fit so bad that a cell is all residual.
+
+Either way it is worth checking after any change to the writer: a column written in the wrong frame is wrong by a *gain*, which is seven orders of magnitude above an ulp, so this closes loudly.
 
 The total model subtracted by `TAB_RES_DATA` is the sum of the two model columns, not the `vis_obs` forward model stored in the results `.zarr`. That stored model is in the *gained* frame, and a gains component that gains only one of its two terms leaves it in no single frame at all — `ast + rfi / g` is not a frame either model column is written in.
 
@@ -104,7 +108,7 @@ Dividing by the gain makes the noise heteroscedastic: a low-gain baseline is noi
 
 `WEIGHT_SPECTRUM` rather than `WEIGHT` alone because a frequency-dependent gain gives a frequency-dependent weight, which a single per-row number cannot carry — and which CASA's `applycal(calwt=True)` does not produce either: it was measured to apply one per-row factor, constant across channels, even when `WEIGHT_SPECTRUM` exists.
 
-Both columns are **overwritten**. The MS's original weights are recoverable as `WEIGHT_SPECTRUM / |g_total|²`. Where a gain was substituted with 1 (see below) the weight is simply `1 / SIGMA²`, which is correct: those visibilities were written uncalibrated.
+Both columns are **overwritten**, and whatever they held before is gone — if the MS carried weights from some other source (a re-weighting task, a hand-tuned scheme), copy them elsewhere first. Dividing the new `WEIGHT_SPECTRUM` by `|g_total|²` recovers `1 / SIGMA²`, the uncalibrated inverse-variance weighting implied by the MS's own noise column, and nothing else. Where a gain was substituted with 1 (see below) the weight is simply `1 / SIGMA²`, which is correct: those visibilities were written uncalibrated.
 
 If the MS carries no usable noise column at all, nothing is invented: a warning is printed and the two weight columns are left exactly as they were, while the visibility columns are still written.
 

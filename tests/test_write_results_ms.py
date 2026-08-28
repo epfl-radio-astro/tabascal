@@ -477,6 +477,49 @@ def _ext_bl(gains):
     )
 
 
+def _real_gains(n_sample: int = 1):
+    """Real, non-unit, non-uniform fitted gains: a divisor that acts per component.
+
+    Complex division mixes the real and imaginary parts, so with a complex gain
+    the calibrated data's real part is not a scaled copy of the model's real
+    part and Sterbenz's condition cannot be *arranged* per component -- only
+    hoped for. Dividing by a real positive gain is two independent real
+    divisions, which is what lets the exactness precondition be constructed and
+    then checked. Still non-unit and antenna-dependent, so it is a real divisor
+    and not a no-op.
+    """
+
+    amp = np.array([0.5, 1.0, 2.0, 1.5])
+    one = np.broadcast_to(amp[:, None, None], (N_ANT, N_FREQ, N_TIME))
+
+    return np.broadcast_to(one, (n_sample,) + one.shape).astype(np.complex128)
+
+
+def _real_ext_gains(seed: int = 23):
+    """External gains that are real and positive, for the same reason."""
+
+    rng = np.random.default_rng(seed)
+
+    return rng.uniform(0.4, 2.5, (N_ANT, N_FREQ, N_TIME)).astype(complex)
+
+
+def _at_most_one_ulp(got, want):
+    """``got`` within one float32 ulp of ``want``, per visibility.
+
+    Referenced to the visibility's *magnitude*, which is the honest bound: the
+    error in ``model + (data - model)`` is set by the size of the residual that
+    was rounded, and the residual is a property of the complex number, not of
+    whichever component happens to be small.
+    """
+
+    tol = np.spacing(np.abs(np.asarray(want)).astype(np.float32))
+    worst = np.abs(np.asarray(got) - np.asarray(want))
+
+    assert np.all(worst <= tol), (
+        f"max |got - want| = {worst.max():.3e}, worst allowance {tol.max():.3e}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Column values
 # ---------------------------------------------------------------------------
@@ -565,22 +608,93 @@ class TestWrittenColumns:
 class TestClosureIdentity:
     """``TAB_AST_DATA + TAB_RFI_DATA + TAB_RES_DATA == CORRECTED_DATA``.
 
-    #123's anchor check, and the reason it is worth having: it is exact
-    floating-point arithmetic on the written columns themselves, so it fails
-    loudly if any one of them is written in a frame the others are not.
+    #123's anchor check, and the reason it is worth having: it is floating-point
+    arithmetic on the written columns themselves, so it fails loudly if any one
+    of them is written in a frame the others are not.
+
+    It is *bit exact* where Sterbenz's condition holds per component -- the real
+    parts within a factor of two of one another and the imaginary parts likewise
+    -- and within one float32 ulp of the visibility's magnitude otherwise. The
+    two cases are tested separately, because a residual that is small next to
+    ``|data|`` does not establish the condition for a cell whose real part
+    nearly cancels, and a test asserting exactness on random complex data is
+    passing on its seed.
     """
+
+    @staticmethod
+    def _closed(values):
+        return (
+            values["TAB_AST_DATA"] + values["TAB_RFI_DATA"] + values["TAB_RES_DATA"]
+        )
 
     @pytest.mark.parametrize("external", [False, True], ids=["no_table", "table"])
     @pytest.mark.parametrize("unitary", [False, True], ids=["fitted", "unitary"])
     @pytest.mark.parametrize(
         "n_corr, corr_idx", [(1, 0), (4, 2)], ids=["one_corr", "four_corr"]
     )
-    def test_the_decomposition_closes_exactly(
+    def test_it_is_bit_exact_where_the_condition_holds(
         self, tmp_path, run_writer, external, unitary, n_corr, corr_idx
     ):
+        """Constructed so the per-component condition provably holds, then checked."""
+        _, ast, rfi = _model(1)
+        gains = _uniform_gains(1) if unitary else _real_gains(1)
+        ext = _real_ext_gains() if external else None
+
+        stored = _baseline_gains(gains) * (ast + rfi)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored, corr="yx")
+
+        # The divisor the writer will use: real and positive, so the complex
+        # division it performs is two independent real divisions.
+        g_total = _to_ms(_baseline_gains(gains).mean(axis=0)).real
+        if external:
+            g_total = g_total * _to_ms(ext[A1_BL] * ext[A2_BL].conj()).real
+
+        model = _to_ms((ast + rfi).mean(axis=0))
+        rng = np.random.default_rng(3)
+
+        # Each component of the data is its own model component times g_total,
+        # perturbed by at most 20 %. The calibrated data's component then sits
+        # within a factor of two of the model's, which is Sterbenz's condition.
+        def perturbed(component):
+            return g_total * component * (1 + 0.2 * rng.uniform(-1, 1, model.shape))
+
+        fit = (perturbed(model.real) + 1j * perturbed(model.imag)).astype(np.complex64)
+        data = _spread(fit, n_corr, corr_idx)
+
+        values, _ = run_writer(
+            _fake_ms(data), zarr_path, corr_idx=corr_idx, ext_gains=ext
+        )
+
+        calibrated = _fit(values["CORRECTED_DATA"], corr_idx)
+        summed = _fit(values["TAB_AST_DATA"] + values["TAB_RFI_DATA"], corr_idx)
+
+        # The precondition, checked rather than assumed: constructing it wrongly
+        # would leave the exactness below passing by luck, which is exactly the
+        # failure mode this test exists to remove.
+        for part in (np.real, np.imag):
+            model_part, data_part = part(summed), part(calibrated)
+            assert np.all(model_part != 0)
+            ratio = data_part / model_part
+            assert np.all((ratio >= 0.5) & (ratio <= 2.0)), ratio
+
+        np.testing.assert_array_equal(self._closed(values), values["CORRECTED_DATA"])
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+    @pytest.mark.parametrize("external", [False, True], ids=["no_table", "table"])
+    @pytest.mark.parametrize("unitary", [False, True], ids=["fitted", "unitary"])
+    def test_a_good_fit_closes_to_within_one_ulp(
+        self, tmp_path, run_writer, seed, external, unitary
+    ):
+        """Complex gains and a small residual: the general case, over five seeds.
+
+        Nothing here arranges the per-component condition -- a complex divisor
+        mixes the components -- so one ulp of the magnitude is the bound that is
+        actually available, and it is asserted rather than exactness, which would
+        be a property of the seed.
+        """
         _, ast, rfi = _model(1)
         gains = _uniform_gains(1) if unitary else _model(1)[0]
-        ext = _ext_gains() if external else None
+        ext = _ext_gains(seed=21 + seed) if external else None
 
         stored = _baseline_gains(gains) * (ast + rfi)
         zarr_path = _write_zarr(tmp_path, gains, ast, rfi, vis_obs=stored, corr="yx")
@@ -588,26 +702,20 @@ class TestClosureIdentity:
         gained = stored.mean(axis=0)
         if external:
             gained = gained * (ext[A1_BL] * ext[A2_BL].conj())
-        data = _spread(_near(_to_ms(gained)), n_corr, corr_idx)
+        data = _near(_to_ms(gained), seed=seed)
 
-        values, _ = run_writer(
-            _fake_ms(data), zarr_path, corr_idx=corr_idx, ext_gains=ext
-        )
+        values, _ = run_writer(_fake_ms(data), zarr_path, ext_gains=ext)
 
-        closed = (
-            values["TAB_AST_DATA"] + values["TAB_RFI_DATA"] + values["TAB_RES_DATA"]
-        )
-
-        np.testing.assert_array_equal(closed, values["CORRECTED_DATA"])
+        _at_most_one_ulp(self._closed(values), values["CORRECTED_DATA"])
 
     def test_a_bad_fit_still_closes_to_float32_round_off(self, tmp_path, run_writer):
-        """Where the residual is *larger* than the data the identity is a ulp wide.
+        """Where a cell is all residual the bound widens, but only to round-off.
 
-        ``s + (c - s)`` is exactly ``c`` only when ``c - s`` is exact, which
-        needs the residual to be no larger than the data. It is worth saying out
-        loud that this is the bound, because it is still five orders of magnitude
-        tighter than any frame mistake: a column in the wrong frame is off by the
-        gain, not by an ulp.
+        ``s + (c - s)`` reconstructs ``c`` exactly only when ``c - s`` is exact.
+        Here the residual is the size of the visibility, so the subtraction
+        rounds and the sum lands a few float32 steps away. It is worth saying
+        out loud that this is the whole of the degradation: a column in the wrong
+        frame is off by the gain, not by round-off.
         """
         gains, ast, rfi = _model(1)
         zarr_path = _write_zarr(tmp_path, gains, ast, rfi, corr="yx")
@@ -617,12 +725,8 @@ class TestClosureIdentity:
 
         values, _ = run_writer(_fake_ms(data), zarr_path)
 
-        closed = (
-            values["TAB_AST_DATA"] + values["TAB_RFI_DATA"] + values["TAB_RES_DATA"]
-        )
-
         np.testing.assert_allclose(
-            closed,
+            self._closed(values),
             values["CORRECTED_DATA"],
             rtol=0,
             atol=1e-6 * float(np.abs(values["CORRECTED_DATA"]).max()),
@@ -1058,7 +1162,7 @@ class TestTheTotalModelIsTheSumOfTheWrittenModels:
             vis_cal - (_to_ms(ast.mean(axis=0)) + _to_ms(rfi.mean(axis=0))),
             **_tolerances(data),
         )
-        np.testing.assert_array_equal(
+        _at_most_one_ulp(
             values["TAB_AST_DATA"] + values["TAB_RFI_DATA"] + values["TAB_RES_DATA"],
             values["CORRECTED_DATA"],
         )
