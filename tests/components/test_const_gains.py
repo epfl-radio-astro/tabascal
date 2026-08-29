@@ -740,9 +740,43 @@ class TestScaleKeysReachTheComponent:
         comp = ConstGains()
         comp.setup(cfg)
 
-        expected = {"amp_std": 0.01, "phase_std": float(np.deg2rad(1))}[key]
+        expected = {"amp_std": 0.2, "phase_std": float(jnp.deg2rad(180))}[key]
 
         assert getattr(comp, {"amp_std": "gp_amp_std", "phase_std": "gp_phase_std"}[key]) == pytest.approx(expected)
+
+    def test_the_default_phase_width_puts_a_whole_turn_inside_one_sigma(self, tmp_path):
+        """180 degrees is half a turn, so any measured phase starts within |z| <= 1.
+
+        ``phase_std`` divides the measured phase in :meth:`_compute_init_params`, so
+        the width decides where a gain read in from outside starts the fit: under the
+        1-degree default an ordinary phase started it ~100 sigma from the prior mean,
+        in a coordinate the optimiser then had to walk back one ``opt.epsilon`` step
+        at a time. Driven through the real measured-gain branch rather than through a
+        re-implementation of its arithmetic, so it is the shipped path that is pinned.
+        """
+        n_ant = 6
+        rng = np.random.default_rng(0)
+        # Phases spread over the whole circle, including near +/-pi.
+        g = np.exp(1j * np.linspace(-np.pi + 1e-3, np.pi, n_ant))
+        path = tmp_path / "gain.npz"
+        np.savez(path, gain=g)
+
+        comp = ConstGains()
+        comp.setup(
+            make_const_gains_config(n_ant=n_ant, phase_std=None, init=str(path))
+        )
+
+        base = np.asarray(comp.init_params_base["gains_phase_base"])
+
+        assert np.all(np.abs(base) <= 1.0)
+        # And the width really is what bounds it: the old default puts the same gain
+        # far outside the prior.
+        narrow = ConstGains()
+        narrow.setup(
+            make_const_gains_config(n_ant=n_ant, phase_std=1.0, init=str(path))
+        )
+
+        assert np.max(np.abs(np.asarray(narrow.init_params_base["gains_phase_base"]))) > 100
 
 
 # ---------------------------------------------------------------------------
