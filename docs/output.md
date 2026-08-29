@@ -10,6 +10,7 @@ parent_directory/
 |       └── memory_2.prof                       # Memory profile for prediction of initial parameters
 |       └── memory_3.prof                       # Memory profile for prediction of prior distribution
 |   ├── plots/
+|       └── log_tab_01-02-2026T03:04:05.txt     # The run's console output, bar the final summaries
 |       └── Custom_init_ast_vis_imag.pdf        # Astronomical visibility prediction of initial parameters
 |       └── Custom_init_gains_amp_phase.pdf     # Gain prediction of initial parameters
 |       └── Custom_init_rfi_vis_imag.pdf        # RFI visibility prediction of initial parameters
@@ -26,6 +27,8 @@ parent_directory/
 |       └── map_pred_Custom.zarr                # Optimised parameter prediction values
 |       └── map_pred_Custom.B                   # The calibration it implies, as a CASA table
 ```
+
+The log holds the run's console output up to — but not including — the memory-usage and timings summaries, which are printed after the log has been closed and so reach the console only. It is written into `plots/` as the run goes, so it is there to watch while the run is still going and it survives a run that dies. Naming a run with `-sx <suffix>` puts its plots in `plots/<suffix>/` and the suffix in the log's name, `log_tab_<suffix>_<timestamp>.txt`, which is what tells two runs over the same dataset apart — the timestamp alone has one-second resolution. `-nl` turns the log off.
 
 ## Results `.zarr` files
 

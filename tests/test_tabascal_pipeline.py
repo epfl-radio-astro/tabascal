@@ -698,6 +698,97 @@ def test_pipeline(
 
 
 # ---------------------------------------------------------------------------
+# Where a run writes its log
+# ---------------------------------------------------------------------------
+
+
+def _copy_sim(provide_test_data: Path, work_dir: Path) -> Path:
+    """Copy the 8A/3-satellite sim into ``work_dir`` and return the copy.
+
+    The copy keeps the sim directory basename (the zarr/MS paths inside the run are
+    derived from it) and keeps the run's outputs -- plots, logs, results -- out of
+    the shared HuggingFace cache, so a test can assert on what its own run wrote.
+    """
+    import shutil
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = Path(__file__).parent / "data"
+    input_hash = compute_sha256(data_dir / "sim_target_8A.yaml")
+    input_dir = Path(provide_test_data) / input_hash
+    src = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
+    assert src, f"No pnt_src* directory found in {input_dir}"
+    sim_dir = work_dir / src.name
+    shutil.copytree(src, sim_dir)
+    return sim_dir
+
+
+def test_pipeline_log_is_written_in_the_plot_directory(
+    provide_test_data: Path, tmp_path: Path, precision: str
+) -> None:
+    """A run leaves one log, in the plot directory it fills anyway, named for it.
+
+    The log used to be opened in the process's working directory and copied into
+    the plot directory once the run had finished, so a run left a file there for
+    its whole duration and two runs launched in the same second from one
+    directory could not both survive it. Nothing in the working directory, then,
+    and the suffix in the name so the log says which run it belongs to.
+
+    One iteration: what is under test is where the run writes, not what it fits.
+    """
+    sim_dir = _copy_sim(provide_test_data, tmp_path)
+    # The cached sim the copy comes from collects a log from every run the tests
+    # above make against it in place, so what *this* run wrote is the difference
+    # rather than everything that is there.
+    before = set(tmp_path.rglob("log_tab*"))
+
+    data_dir = Path(__file__).parent / "data"
+    config_path = tmp_path / "tab_target.yaml"
+    read_and_modify_yaml(
+        {
+            "model": {
+                "components": [
+                    "trajectory:FixedOrbit",
+                    "rfi_signal:ComplexRFIVarAnt",
+                    "rfi_vis:RiemannVis",
+                    "ast_vis:GPVisAst",
+                    "gains:UnitaryGains",
+                ],
+                "precision": precision,
+            },
+            "opt": {"epsilon": 1e-3, "max_iter": 1, "dual_run": False, "guide": "map"},
+        },
+        data_dir / "tab_target.yaml",
+        config_path,
+    )
+
+    script = Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
+    result = subprocess.run(
+        [
+            sys.executable, str(script), "run",
+            "-c", str(config_path),
+            "-s", str(sim_dir),
+            "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
+            "-sx", "runA",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert result.returncode == 0, f"Tabascal failed: {result.stderr}"
+
+    # One log, and nowhere but the plot directory: not in the directory the run
+    # was launched from, and not anywhere else under the sim it wrote into.
+    written = set(tmp_path.rglob("log_tab*")) - before
+    assert len(written) == 1, f"expected one new log, found {written}"
+
+    log = written.pop()
+    assert log.parent == sim_dir / "plots" / "runA"
+    assert log.name.startswith("log_tab_runA_")
+    assert "Start Time :" in log.read_text()
+
+
+# ---------------------------------------------------------------------------
 # RFI-axis device sharding (multi-GPU / multi-process)
 # ---------------------------------------------------------------------------
 #
@@ -730,23 +821,9 @@ def _prepare_sharded_run(
     rfi_vis: str = "RiemannVis",
     save_rfi_per_sat: bool = False,
 ) -> tuple[list[str], Path]:
-    """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command.
-
-    The copy keeps the sim directory basename (the zarr/MS paths inside the run are
-    derived from it) and keeps these runs from writing results into the shared
-    HuggingFace cache -- the multi-process test in particular has two processes
-    using one sim directory.
-    """
-    import shutil
-
-    work_dir.mkdir(parents=True, exist_ok=True)
+    """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command."""
+    sim_dir = _copy_sim(provide_test_data, work_dir)
     data_dir = Path(__file__).parent / "data"
-    input_hash = compute_sha256(data_dir / "sim_target_8A.yaml")
-    input_dir = Path(provide_test_data) / input_hash
-    src = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
-    assert src, f"No pnt_src* directory found in {input_dir}"
-    sim_dir = work_dir / src.name
-    shutil.copytree(src, sim_dir)
 
     config_path = work_dir / "tab_target.yaml"
     updates: dict = {
