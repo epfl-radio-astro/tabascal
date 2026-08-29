@@ -49,6 +49,7 @@ fisher:
 ast:
   # init: sample
   # init: prior
+  # init: data
   # init: zeros
   init: truth
   mean: 0
