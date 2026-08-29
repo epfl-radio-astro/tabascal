@@ -206,7 +206,7 @@ class GPVisAst(Component):
                 (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex
             )
         else:
-            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros, 0).")
 
     def _set_outputs(self):
 
@@ -253,6 +253,21 @@ class GPVisAst(Component):
             self.init_ast_k = self.forward_transform(
                 prior_sample, self.sigma_ast_k, self.mu_ast_k
             )
+        elif init_type == "zeros":
+            print("Using zeros for AST init")
+            # The zero signal put through the same encoding `data` uses, rather
+            # than the zero latent written straight in, so `zeros` keeps meaning
+            # "no sky" independently of what the encoding does. One
+            # (n_freq, n_time) plane rather than the full (n_bl, n_freq, n_time)
+            # array: the transform is per-baseline, so every baseline encodes to
+            # the same latent, and encoding all of them would allocate a padded
+            # FFT of the whole visibility array to get it.
+            zeros_k = signal_to_latent(
+                jnp.zeros((self.n_freq, self.n_time), dtype=complex),
+                self.pad_factors,
+                self.latent_idxs,
+            )
+            self.init_ast_k = jnp.broadcast_to(zeros_k, (self.n_bl, *zeros_k.shape))
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (data, prior, truth, sample, zeros).")
 

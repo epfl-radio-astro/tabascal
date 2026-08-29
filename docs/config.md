@@ -235,8 +235,8 @@ ast:
     cutoff: 1e-6
 ```
 
-* `init`: This gives the initialisation of the parameters. In the sample above `prior` is given so then the parameters will be initialised with the mean of the prior distribution. Other options include `est` to estimate the best initialisation, `sample` to draw a sample from the prior distribution, and `truth` to initialise at the true values. `truth` is only possible when running on a dataset simulated with `sim-vis`.
-* `mean`: This is the mean value of the prior distribution.
+* `init`: Where the parameters start. `sample`, the default, draws one realisation from the prior; `prior` starts at the prior mean, i.e. at whatever `mean` is set to; `data` starts at the observed visibilities themselves, RFI and all, attributed to the sky; `zeros` starts at an identically zero sky; and `truth` starts at the simulated astronomical visibilities. `zeros` and `prior` are the same starting point at the default `mean: 0`, and part company once the prior mean is the data. `truth` reads the tab-sim `.zarr` beside the measurement set, so it is only possible on a dataset simulated with `sim-vis` — as is `plots.truth`, which reads the same truth; a config asking for either without a readable zarr stops before the run starts rather than deep inside component setup.
+* `mean`: The mean of the prior distribution: `0` (equivalently `zeros`), the default, or `data`, the observed visibilities.
 * `freq_pad_factor`: This defines the size of the padding used when modelling the signal in the Fourier domain. The signal is modelled in the Fourier domain where periodicity is assumed on some interval. If `freq_pad_factor: 1.0` is given then the interval is the interval of the data itself and will lead to periodic solutions.
 * `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`.
 * `pow_spec`: This is the section that defines the prior covariance of the signal. The signal is modelled in the Fourier domain so the prior covariance is given by the power spectrum of the signal.

@@ -47,12 +47,12 @@ fisher:
 
 # Priors and Initialization
 ast:
-  # init: est
+  # init: sample
   # init: prior
+  # init: zeros
   init: truth
   mean: 0
-  # mean: est
-  # mean: truth
+  # mean: data
   pow_spec:
     # P0: 3e3
     # k0: 1e-3
