@@ -7,99 +7,109 @@ array turns a general tool into that array's tool, and a machine the authors
 happen to develop on is not a property of the software at all. Review catches
 most of that; a grep catches the rest, which is what this is.
 
-``ci/`` is deliberately outside the scanned roots. Those files configure real
-infrastructure -- a GitLab CI runner, a ReFrame system name, a bencher testbed
--- where the machine name *is* the identifier and renaming it would break the
-job rather than generalise it. ``docs/performance.md`` documents that same
-infrastructure and is allowed for the same reason; it is the only exception.
+The scan is over what ``git ls-files`` reports, not over the working tree: an
+untracked scratch file is not something a reviewer can be asked to rewrite, and
+a new top-level directory should be covered the day it is committed rather than
+the day someone remembers to add it here.
+
+``ci/`` is scanned for the array name but not for the cluster names. Those files
+configure real infrastructure -- a GitLab runner, a ReFrame system, a bencher
+testbed -- where the machine name *is* the identifier and renaming it breaks the
+job rather than generalising it. ``docs/performance.md`` documents that same
+infrastructure and is exempt for the same reason.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 _REPO = Path(__file__).parent.parent
 
-# Everything that ships or is published. ``ci/`` is excluded on purpose -- see
-# the module docstring.
-_ROOTS = ("tabascal", "docs", "tests", "examples", "README.md", "pyproject.toml")
+# The array some of this work was validated against. "On <array> SIGMA spans a
+# factor of ~30" is a measurement and reads fine without the name.
+_ARRAY = re.compile(r"(?<![A-Za-z0-9])eda[-_ ]?2(?![0-9])", re.IGNORECASE)
 
-# Build artefacts and caches that live inside the roots but are not the tree.
-_SKIP_DIRS = frozenset({"__pycache__", ".pytest_cache", "_build", ".ipynb_checkpoints"})
-
-_FORBIDDEN = (
-    # A telescope some of this work was validated against. "On <array> SIGMA
-    # spans a factor of ~30" is a measurement and reads fine without the name.
-    re.compile(r"(?<![A-Za-z0-9])eda[-_ ]?2(?![0-9])", re.IGNORECASE),
-    # The cluster and the computing centre the project benchmarks on. Facts
-    # about a machine, not about TABASCAL.
-    re.compile(r"(?<![A-Za-z])daint(?![A-Za-z])", re.IGNORECASE),
-    re.compile(r"(?<![A-Za-z])cscs(?![A-Za-z])", re.IGNORECASE),
+# The cluster and the computing centre the project benchmarks on. Facts about a
+# machine, not about TABASCAL. The lookbehind keeps a base64 blob -- a
+# regenerated SVG, an embedded asset -- from reading as a name.
+_CLUSTER = (
+    re.compile(r"(?<![A-Za-z0-9])daint(?![A-Za-z])", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9])cscs(?![A-Za-z])", re.IGNORECASE),
 )
 
-# Paths relative to the repository root that may name them anyway. Keep this
-# short, and say why for every entry.
-_ALLOWED = {
-    # Documents the ReFrame performance checks, which run on one specific
-    # partition under one specific CI project: the names are the identifiers
-    # of `ci/cscs.yml` and of the bencher testbed the history is stored under.
+# Where the cluster names are load-bearing identifiers rather than references.
+# Keep this short, and say why for every entry.
+_CLUSTER_EXEMPT_PREFIXES = (
+    # The CI pipeline, the ReFrame system definition and the performance
+    # references keyed by partition: `daint:gpu`, `.container-runner-daint-gh200`,
+    # `$CSCS_REGISTRY_PATH`. The array name is still forbidden here.
+    "ci/",
+)
+_CLUSTER_EXEMPT_FILES = {
+    # Documents the above, including the bencher.dev testbed `cscs-daint-gh200`
+    # the benchmark history is stored under.
     "docs/performance.md",
 }
 
-# This file has to spell the tokens out to look for them.
+# This file has to spell the names out to look for them.
 _SELF = Path(__file__).relative_to(_REPO).as_posix()
 
 
-def scanned_files(repo=_REPO):
-    """Every file under the published roots, minus caches and the allowlist."""
+def tracked_files(repo=_REPO):
+    """Every file git tracks, as repository-relative posix paths."""
 
-    for root in _ROOTS:
-        path = repo / root
-        if path.is_file():
-            candidates = [path]
-        elif path.is_dir():
-            candidates = sorted(p for p in path.rglob("*") if p.is_file())
-        else:  # pragma: no cover - the roots are all tracked
-            continue
-        for file in candidates:
-            rel = file.relative_to(repo).as_posix()
-            if set(file.relative_to(repo).parts) & _SKIP_DIRS:
-                continue
-            if rel in _ALLOWED or rel == _SELF:
-                continue
-            yield rel, file
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "-z"],
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as e:  # pragma: no cover
+        pytest.skip(f"not a git checkout, so there is no committed tree to scan: {e}")
+    return [rel for rel in out.decode().split("\0") if rel and rel != _SELF]
+
+
+def patterns_for(rel):
+    """The names forbidden in this file. Not every file is held to all of them."""
+
+    if rel in _CLUSTER_EXEMPT_FILES or rel.startswith(_CLUSTER_EXEMPT_PREFIXES):
+        return (_ARRAY,)
+    return (_ARRAY, *_CLUSTER)
 
 
 def _hits(text, rel):
+    patterns = patterns_for(rel)
     for lineno, line in enumerate(text.splitlines(), start=1):
-        for pattern in _FORBIDDEN:
-            if pattern.search(line):
-                yield f"{rel}:{lineno}: {line.strip()[:120]}"
-                break
+        if any(pattern.search(line) for pattern in patterns):
+            yield f"{rel}:{lineno}: {line.strip()[:120]}"
 
 
-def test_the_roots_are_all_present():
-    """A typo in ``_ROOTS`` would make the sweep pass by scanning nothing."""
+def test_the_scan_actually_reaches_the_tree():
+    """A broken ``git ls-files`` would let the sweep pass by scanning nothing."""
 
-    for root in _ROOTS:
-        assert (_REPO / root).exists(), f"{root} is not in the repository"
+    tracked = tracked_files()
 
-    assert any(True for _ in scanned_files()), "the scan found no files at all"
+    assert len(tracked) > 50, "the scan found almost no files"
+    for expected in ("README.md", "tabascal/noise.py", "docs/config.md"):
+        assert expected in tracked, f"{expected} is not in the scan"
 
 
 def test_no_file_contents_name_a_telescope_or_a_cluster():
     found = []
-    for rel, file in scanned_files():
-        text = file.read_text(encoding="utf-8", errors="replace")
-        found.extend(_hits(text, rel))
+    for rel in tracked_files():
+        raw = (_REPO / rel).read_bytes()
+        if b"\0" in raw:  # a binary asset, not prose
+            continue
+        found.extend(_hits(raw.decode("utf-8", errors="replace"), rel))
 
     assert not found, (
         "TABASCAL's tree stays telescope- and observation-agnostic; these lines "
         "name a specific array, cluster or computing centre. Rewrite them "
         "generically (quote the measurement, not the array), or -- if the name "
-        "is a load-bearing identifier -- add the file to _ALLOWED with a "
-        "reason:\n  " + "\n  ".join(found)
+        "is a load-bearing identifier -- exempt the file with a reason:\n  "
+        + "\n  ".join(found)
     )
 
 
@@ -108,8 +118,8 @@ def test_no_file_paths_name_a_telescope_or_a_cluster():
 
     found = [
         rel
-        for rel, _ in scanned_files()
-        if any(pattern.search(rel) for pattern in _FORBIDDEN)
+        for rel in tracked_files()
+        if any(pattern.search(rel) for pattern in patterns_for(rel))
     ]
 
     assert not found, "these paths name a specific array or cluster:\n  " + "\n  ".join(
@@ -121,19 +131,29 @@ def test_no_file_paths_name_a_telescope_or_a_cluster():
     "text, expected",
     [
         ("EDA2", True),
-        ("eda2's per-baseline SIGMA", True),
+        ("eda2's", True),
         ("eda-2", True),
-        ("the EDA 2 array", True),
+        ("eda 2", True),
         ("images/eda2_starlink.svg", True),
         ("daint:gpu", True),
-        ("Piz Daint", True),
         ("cscs-daint-gh200", True),
-        # Not hits: the tokens have to stand on their own.
+        # Not hits: a name has to stand on its own, and a character before one
+        # makes it a fragment -- a longer word, or a base64 chunk.
         ("Alameda 2000", False),
         ("edam", False),
+        ("7daint", False),
+        ("9cscs", False),
         ("the median absolute deviation", False),
         ("wideband", False),
     ],
 )
 def test_the_patterns_match_the_names_and_nothing_near_them(text, expected):
-    assert any(pattern.search(text) for pattern in _FORBIDDEN) is expected
+    assert any(p.search(text) for p in (_ARRAY, *_CLUSTER)) is expected
+
+
+def test_the_cluster_exemption_does_not_extend_to_the_array_name():
+    """``ci/`` may name the machine it runs on. It may not name the array."""
+
+    for rel in ("ci/cscs.yml", "ci/reframe/data/tab_target.yaml", "docs/performance.md"):
+        assert list(_hits("runs on daint:gpu at CSCS", rel)) == []
+        assert list(_hits("recorded on EDA2", rel)) != []
