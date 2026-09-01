@@ -116,7 +116,9 @@ def check_renamed_keys(config: Dict, path: str):
 
     for old, new in RENAMED_KEYS.items():
         section, key = old.split(".")
-        if key in config.get(section, {}):
+        # `or {}` rather than a default: a yaml section header with nothing
+        # under it parses as None, which `in` cannot search.
+        if key in (config.get(section) or {}):
             raise ValueError(
                 f"{old} was renamed {new}. Update {path}: the two named the same "
                 "quantity and only the new name is read."

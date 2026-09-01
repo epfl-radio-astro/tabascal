@@ -26,7 +26,8 @@ import numpy as np
 import pytest
 
 from tabascal.components.ast_vis import GPVisAst
-from tabascal.config import TabConfig, load_config
+from tabascal.components.rfi_vis import RiemannVis
+from tabascal.config import TabConfig, check_renamed_keys, load_config
 from tabascal.interferometry import max_ast_fringe_rate
 
 
@@ -226,13 +227,111 @@ class TestBaseConfigIntegrationSampleCounts:
         assert "rfi.freq_int_samples" in message
         assert "rfi.n_int_freq" in message
 
-    def test_a_config_that_never_mentions_the_frequency_axis_loads(self, tmp_path):
-        """The gap this closes: omitting the key is a default, not an error."""
+    def test_an_empty_section_is_not_a_rename_hit(self):
+        """``rfi:`` with nothing under it parses as None, which ``in`` cannot search.
+
+        The check runs on every load, so a section that is merely empty has to
+        pass through it — not raise a ``TypeError`` from the rename machinery
+        about a config that contains no renamed key at all. What an empty
+        section then does to the merged config is ``deep_update``'s business
+        (it replaces the section wholesale, so the defaults under it are lost);
+        this check must not be what reports it.
+        """
+
+        check_renamed_keys({"rfi": None}, "user.yaml")
+
+    def test_the_frequency_default_survives_the_merge(self, tmp_path):
+        """A config overriding nothing of ``rfi`` still carries the count.
+
+        Only the merge, not the run: the run is
+        ``test_a_config_omitting_the_frequency_count_builds_a_component``.
+        """
 
         path = tmp_path / "user.yaml"
         path.write_text(_MINIMAL_CONFIG)
 
         assert load_config(str(path))["rfi"]["n_int_freq"] == 1
+
+    def test_a_config_omitting_the_frequency_count_builds_a_component(
+        self, tmp_path, monkeypatch
+    ):
+        """The gap this closes, end to end: load a config, build the real
+        ``TabConfig`` from it, set up a component that consumes the fine grid.
+
+        This is the chain that used to die with ``RuntimeError: RiemannVis setup
+        failed: 'freq_int_samples'`` — a name no base config has ever supplied,
+        read straight out of ``config.args`` by five components. Asserting on
+        the merged dict alone would not have caught it, since the merged dict
+        was always fine; what was missing was a reader of the key it supplies.
+
+        Only the steps that need an MS, a satellite catalogue or the network are
+        stubbed. The integration-count binding, ``estimate_rfi_sampling``,
+        ``fix_padding`` and ``_set_freqs_times`` — everything that decides the
+        fine grid — all really run.
+        """
+
+        path = tmp_path / "user.yaml"
+        path.write_text(_MINIMAL_CONFIG)
+        config = load_config(str(path))
+        assert "n_int_freq" in config["rfi"]  # the user file said nothing
+
+        n_ant, n_bl, n_freq, n_time = 3, 3, 4, 5
+        a1, a2 = np.triu_indices(n_ant, 1)
+        stubs = {
+            "read_ms_params": {
+                "n_ant": n_ant,
+                "n_bl": n_bl,
+                "n_freq": n_freq,
+                "n_time": n_time,
+                "a1": a1.astype("int32"),
+                "a2": a2.astype("int32"),
+                "freqs": 1e9 + 1e6 * np.arange(n_freq),
+                "chan_width": 1e6,
+                "times": 2.0 * np.arange(n_time),
+                "int_time": 2.0,
+                "times_jd": 2460000.5 + 2.0 * np.arange(n_time) / 86400.0,
+                "vis_obs": np.zeros((n_bl, n_freq, n_time), dtype=complex),
+                "flags": np.zeros((n_bl, n_freq, n_time), dtype=bool),
+                "noise": 1.0,
+                "noise_scalar": 1.0,
+            },
+            "set_noise": {},
+            "apply_gain_table": {},
+            "set_flags": {},
+            # No satellites: estimate_rfi_sampling then takes its own n_rfi == 0
+            # branch, which is real code and needs no trajectory.
+            "get_orbital_elements": {"n_rfi": 0, "orbit_records": [], "norad_ids": []},
+        }
+
+        def stub(leaves):
+            def method(self, *args, **kwargs):
+                for key, value in leaves.items():
+                    setattr(self, key, value)
+
+            return method
+
+        for name, leaves in stubs.items():
+            monkeypatch.setattr(TabConfig, name, stub(leaves))
+        monkeypatch.setattr(
+            "tabascal.config.preflight_tle_check", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "tabascal.config.check_epoch_agreement", lambda *a, **k: None
+        )
+
+        tab_config = TabConfig(config, "never/read.ms")
+
+        assert tab_config.n_int_freq == 1
+        assert tab_config.n_freq_fine == n_freq * tab_config.n_int_freq
+        assert tab_config.n_time_fine == n_time * tab_config.n_int_time
+
+        # The component that used to raise. Its fine grid must be the one
+        # TabConfig just built, or the reshape in forward cannot line up.
+        comp = RiemannVis()
+        comp.setup(tab_config)
+
+        assert comp.n_int_freq == tab_config.n_int_freq
+        assert comp.n_int_time == tab_config.n_int_time
 
     def test_each_count_sets_the_fine_grid_axis_it_names(self, tmp_path):
         """``n`` samples per channel and per integration, which is what the
