@@ -57,6 +57,24 @@ class TestConfigNormalisation:
         with pytest.raises(TLEConfigurationError, match="no NORAD catalogue IDs"):
             tle_config.normalise_tle_config(config)
 
+    def test_the_guard_names_only_trajectories_that_exist(self):
+        """The hand-maintained list must not outlive a component it names.
+
+        A deleted or renamed trajectory left in it can send a config that names
+        the old class off to hunt for NORAD IDs it does not need, instead of
+        being told by the importer that the component is gone: under
+        ``model.precision: double`` this guard is reached first, since the
+        precision check that resolves the components returns early there.
+        """
+        from tabascal.components import in_tree_components
+
+        trajectories = {
+            ref.split(":")[1]
+            for ref in in_tree_components()
+            if ref.startswith("trajectory:")
+        }
+        assert tle_config._TLE_TRAJECTORY_COMPONENTS <= trajectories
+
     def test_ids_are_deduplicated_preserving_order(self):
         cfg = tle_config.normalise_tle_config(_config(norad_ids=[333, 111, 333, 222]))
         assert cfg.norad_ids == [333, 111, 222]
