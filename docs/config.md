@@ -338,7 +338,8 @@ rfi:
   min_elevation: 0
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
-  freq_int_samples: 1
+  n_int_freq: 1
+  n_int_time: null
   time_int_factor: 1
   pow_spec:
     p0: 1e3
@@ -361,7 +362,10 @@ The only additional parameters are
 
   Raising the cut above `0` additionally excludes the low-elevation part of each pass, where the fringe rate is lowest and the overlap with other components is therefore greatest. How far to raise it is observation-dependent and is not currently calibrated, so no value above `0` is recommended here. Note that masking is about which parameters exist, not about subtraction quality, and reduced $\chi^2$ is largely insensitive to it — judge the effect on the recovered sky model.
 
-* `freq_int_samples`: This is the amount of over-sampling in the frequency domain that is used and then averaged back down to the data sampling rate. It therefore determines the number of samples per frequency channel that are used in the averaging to correctly calculate the fringe-winding loss (band-smearing). Band-smearing can be caused by both the phase variation over the channel width due to the geometric phase as well as the intrinsic signal of the RFI sources.
+The RFI signal is modelled on a grid finer than the data, then averaged back down onto it. `n_int_freq` and `n_int_time` are the number of fine samples per data cell on each axis, so the fine grid is `n_freq * n_int_freq` by `n_time * n_int_time`. The two axes differ in how the count is arrived at: the frequency count is taken as given, while the time count is estimated from the observation and `time_int_factor` scales that estimate.
+
+* `n_int_freq`: This is the amount of over-sampling in the frequency domain that is used and then averaged back down to the data sampling rate. It therefore determines the number of samples per frequency channel that are used in the averaging to correctly calculate the fringe-winding loss (band-smearing). Band-smearing can be caused by both the phase variation over the channel width due to the geometric phase as well as the intrinsic signal of the RFI sources. The default is `1`, i.e. no over-sampling.
+* `n_int_time`: The time-axis counterpart, in samples per integration. It is **not** currently read: the count is always the estimate below, whatever this is set to. Leave it at `null` and use `time_int_factor` to change the sampling.
 * `time_int_factor`: In the time axis the number of integration samples needed to accurately model fringe-winding loss (time-smearing) is calculated based solely on the fringe rate due to the movement of the RFI source as well as the signal to noise ratio with
 
 $$N^T_\text{int} \geq  \pi \nu_F \Delta t \sqrt{\frac{\lvert V^\text{RFI}_\text{inst} \rvert}{6 \sigma_n}}$$

@@ -20,17 +20,20 @@ def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, precisio
         n_time=n_time,
         n_freq=n_freq,
         n_int_time=n_int_time,
+        n_int_freq=n_int_freq,
         n_bl=a1.shape[0],
         a1=a1,
         a2=a2,
         precision=precision or active_precision(),
-        args={"rfi": {"freq_int_samples": n_int_freq}},
+        # Deliberately empty: the integration sample counts are read off the
+        # bound TabConfig attributes, never out of the raw config dict.
+        args={"rfi": {}},
     )
 
 
 def create_state(config, rand_vis_rfi=False, r_key=42, real_dtype=jnp.float64):
     complex_dtype = jnp.complex64 if real_dtype == jnp.float32 else jnp.complex128
-    n_int_freq = config.args["rfi"]["freq_int_samples"]
+    n_int_freq = config.n_int_freq
     input_shape = (config.n_rfi, config.n_ant, config.n_freq * n_int_freq, config.n_time * config.n_int_time)
     output_shape = (config.n_bl, config.n_freq, config.n_time)
     rfi_phase = jax.random.uniform(jax.random.PRNGKey(r_key), input_shape).astype(real_dtype)
@@ -156,7 +159,7 @@ def test_mixed_precision_rejected():
     mismatch to reject.
     """
     config = create_config(4, 2, 3, 3, 2, 2)
-    n_int_freq = config.args["rfi"]["freq_int_samples"]
+    n_int_freq = config.n_int_freq
     input_shape = (config.n_rfi, config.n_ant, config.n_freq * n_int_freq, config.n_time * config.n_int_time)
     rfi_amp = (
         jax.random.normal(jax.random.PRNGKey(0), input_shape)
@@ -211,6 +214,29 @@ def make_variable_config(
     config.time_sample_idxs = idxs
     config.time_strides = u_strides
     return config
+
+
+@pytest.mark.parametrize(
+    "Impl", [RiemannVis, RiemannVisFFI, RiemannVisVariable, RiemannVisVariableFFI]
+)
+def test_integration_sample_counts_come_from_the_bound_config(Impl):
+    """``n_int_freq`` and ``n_int_time`` are read off the TabConfig, symmetrically.
+
+    The frequency count used to be read straight out of ``config.args["rfi"]``
+    under a second spelling, which both duplicated the bound attribute the rest
+    of the model uses and made a config that never set that spelling fail in
+    setup. Reading the bound attribute is what keeps the fine grid these
+    components reshape and the one ``TabConfig`` built the same grid.
+    """
+
+    config = make_variable_config(4, 2, 3, 5, 4, 3, strides=[1, 2])
+    assert config.args["rfi"] == {}
+
+    impl = Impl()
+    impl.setup(config)
+
+    assert impl.n_int_freq == config.n_int_freq == 3
+    assert impl.n_int_time == config.n_int_time == 4
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)

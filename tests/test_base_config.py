@@ -13,6 +13,10 @@ The tests below fail in either direction of that drift: a key the component
 reads and the base does not supply raises out of ``setup``, and a key the base
 supplies that the component never reads is caught by the recorded-read
 comparison.
+
+The same file is also where a key that was *renamed* is checked: a config still
+using the old name must stop with the new one, rather than fall through to the
+base default under a name that is no longer read.
 """
 
 from types import SimpleNamespace
@@ -22,7 +26,7 @@ import numpy as np
 import pytest
 
 from tabascal.components.ast_vis import GPVisAst
-from tabascal.config import load_config
+from tabascal.config import TabConfig, load_config
 from tabascal.interferometry import max_ast_fringe_rate
 
 
@@ -178,3 +182,79 @@ class TestBaseConfigAstKeys:
             config.uvw, config.phase_centre["dec"], config.freqs, config.dish_d
         )
         np.testing.assert_allclose(comp.k0_time, expected, rtol=exact_rtol)
+
+
+class TestBaseConfigIntegrationSampleCounts:
+    """One spelling per axis for the RFI fine-grid sample counts.
+
+    ``rfi.freq_int_samples`` and ``rfi.n_int_freq`` named the same knob: the base
+    config shipped the second, the Riemann visibility components and
+    ``trajectory:FixedOrbit`` read the first, and everything else
+    (``rfi_signal``, ``gains``, the fine grid ``TabConfig`` itself builds) read
+    the second. A config omitting the first died in setup; a config setting both
+    to different values built two disagreeing fine grids.
+    """
+
+    def test_the_base_supplies_a_count_for_each_axis(self, tmp_path):
+        """Both axes are in the base, so neither has to be written out."""
+
+        rfi = base_args(tmp_path)["rfi"]
+
+        assert rfi["n_int_freq"] == 1
+        assert rfi["n_int_time"] is None
+        assert rfi["time_int_factor"] == pytest.approx(1)
+
+    def test_the_removed_frequency_spelling_is_gone_from_the_base(self, tmp_path):
+        """Nothing may reintroduce the second spelling as a default."""
+
+        assert "freq_int_samples" not in base_args(tmp_path)["rfi"]
+
+    def test_a_config_setting_the_old_name_stops_and_names_the_new_one(self, tmp_path):
+        """A stale config fails loudly at load, pointing at the replacement.
+
+        Not an alias: silently accepting the old name is how the two spellings
+        got to disagree in the first place.
+        """
+
+        path = tmp_path / "user.yaml"
+        path.write_text("rfi:\n  freq_int_samples: 4\n")
+
+        with pytest.raises(ValueError) as excinfo:
+            load_config(str(path))
+
+        message = str(excinfo.value)
+        assert "rfi.freq_int_samples" in message
+        assert "rfi.n_int_freq" in message
+
+    def test_a_config_that_never_mentions_the_frequency_axis_loads(self, tmp_path):
+        """The gap this closes: omitting the key is a default, not an error."""
+
+        path = tmp_path / "user.yaml"
+        path.write_text(_MINIMAL_CONFIG)
+
+        assert load_config(str(path))["rfi"]["n_int_freq"] == 1
+
+    def test_each_count_sets_the_fine_grid_axis_it_names(self, tmp_path):
+        """``n`` samples per channel and per integration, which is what the
+        Riemann components reshape the RFI signal into. The Fourier padding is
+        cropped back off, so the fine grid is exactly the supersampled data grid.
+        """
+
+        n_freq, n_time, n_int_freq, n_int_time = 4, 8, 3, 2
+        cfg = SimpleNamespace(
+            n_freq=n_freq,
+            n_time=n_time,
+            n_int_freq=n_int_freq,
+            n_int_time=n_int_time,
+            freqs=1.4e9 + 1e6 * np.arange(n_freq),
+            chan_width=1e6,
+            times=2.0 * np.arange(n_time),
+            int_time=2.0,
+            times_jd=2460000.5 + 2.0 * np.arange(n_time) / 86400.0,
+            args=base_args(tmp_path),
+        )
+
+        TabConfig._set_freqs_times(cfg)
+
+        assert cfg.n_freq_fine == n_freq * n_int_freq
+        assert cfg.n_time_fine == n_time * n_int_time

@@ -24,8 +24,7 @@ class RiemannVis(Component):
             self.a1 = config.a1
             self.a2 = config.a2
             self.n_int_time = config.n_int_time
-            # self.n_int_freq = config.n_int_freq
-            self.n_int_freq = config.args["rfi"]["freq_int_samples"]
+            self.n_int_freq = config.n_int_freq
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
@@ -107,8 +106,7 @@ class RiemannVisFFI(Component):
             self.a1 = config.a1
             self.a2 = config.a2
             self.n_int_time = config.n_int_time
-            # self.n_int_freq = config.n_int_freq
-            self.n_int_freq = config.args["rfi"]["freq_int_samples"]
+            self.n_int_freq = config.n_int_freq
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
@@ -194,7 +192,7 @@ class RiemannVisVariable(Component):
             self.a1 = config.a1
             self.a2 = config.a2
             self.n_int_time = config.n_int_time
-            self.n_int_freq = config.args["rfi"]["freq_int_samples"]
+            self.n_int_freq = config.n_int_freq
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
             self.n_time = config.n_time
@@ -308,7 +306,7 @@ class RiemannVisVariableFFI(Component):
             self.a1 = config.a1
             self.a2 = config.a2
             self.n_int_time = config.n_int_time
-            self.n_int_freq = config.args["rfi"]["freq_int_samples"]
+            self.n_int_freq = config.n_int_freq
             self.n_rfi = config.n_rfi
             self.n_ant = config.n_ant
             self.n_time = config.n_time

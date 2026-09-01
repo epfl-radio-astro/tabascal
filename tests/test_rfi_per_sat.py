@@ -112,6 +112,7 @@ def make_config(
         n_time=N_TIME,
         n_freq=N_FREQ,
         n_int_time=N_INT_TIME,
+        n_int_freq=N_INT_FREQ,
         n_rfi=n_rfi,
         n_rfi_real=n_rfi if n_rfi_real is None else n_rfi_real,
         norad_ids=list(norad_ids),
@@ -125,7 +126,7 @@ def make_config(
         time_sample_idxs=[np.arange(N_BL, dtype="int32")],
         time_strides=[1],
         args={
-            "rfi": {"freq_int_samples": N_INT_FREQ},
+            "rfi": {},
             "model": {"components": ["trajectory:FixedOrbit", component]},
             "data": {"corr": corr, "save_rfi_per_sat": save_rfi_per_sat},
         },
@@ -457,7 +458,7 @@ class TestFineGridCancellation:
         """Two sources, two antennas, one output cell over two fine samples."""
 
         return SimpleNamespace(
-            n_ant=2, n_bl=1, n_time=1, n_freq=1, n_int_time=2,
+            n_ant=2, n_bl=1, n_time=1, n_freq=1, n_int_time=2, n_int_freq=1,
             n_rfi=2, n_rfi_real=2, norad_ids=NORAD_IDS[:2],
             a1=jnp.asarray([0], dtype=jnp.int32),
             a2=jnp.asarray([1], dtype=jnp.int32),
@@ -465,7 +466,7 @@ class TestFineGridCancellation:
             times=np.zeros(1), freqs=np.full(1, 1.0e9),
             time_sample_idxs=[np.zeros(1, dtype="int32")], time_strides=[1],
             args={
-                "rfi": {"freq_int_samples": 1},
+                "rfi": {},
                 "model": {"components": ["rfi_vis:RiemannVis"]},
                 "data": {"corr": "xx", "save_rfi_per_sat": True},
             },

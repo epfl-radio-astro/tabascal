@@ -122,7 +122,9 @@ def make_trajectory_config(
         times=times,
         times_fine=times_fine,
         precision=precision,
-        args={"rfi": {"freq_int_samples": n_int_freq}},
+        # Deliberately empty: the integration sample counts are bound TabConfig
+        # attributes, not raw config keys.
+        args={"rfi": {}},
     )
 
 
@@ -407,7 +409,9 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
         norad_ids=_BUNDLED_NORAD_IDS,
         extra_orbit_dir=_bundled_tle_dir,
         precision=precision,
-        args={"rfi": {"freq_int_samples": n_int_freq}},
+        # Deliberately empty: the integration sample counts are bound TabConfig
+        # attributes, not raw config keys.
+        args={"rfi": {}},
     )
 
 
