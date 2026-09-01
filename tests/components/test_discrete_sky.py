@@ -98,7 +98,7 @@ def single_baseline_config(uvw_m, freq=1.4e9, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Ported from the daint FixedPointSky commit — the DFT itself
+# Ported from the original FixedPointSky draft — the DFT itself
 # ---------------------------------------------------------------------------
 
 

@@ -394,7 +394,7 @@ class TestSubsetGrid:
         assert got.coverage.exact == 1.0
 
     def test_a_time_outside_the_solved_range_is_edge_held_not_an_error(self):
-        """The daint draft raised here; the locked semantics hold the edge."""
+        """The original draft raised here; the locked semantics hold the edge."""
 
         cal = _one_ant([[1.0 + 0j, 2.0 + 0j]], times=[10.0, 20.0], freqs=[1e9])
 

@@ -1,9 +1,9 @@
 # Example result
 
-A run on real data from the **Engineering Development Array 2 (EDA2)**: a 151 MHz
+A run on real data from a **low-frequency aperture array**: a 151 MHz
 observation in XX, crossed by several Starlink satellites.
 
-![Starlink subtraction on EDA2 data](images/eda2_starlink_subtraction.svg)
+![Starlink subtraction in a real observation](images/starlink_subtraction.svg)
 
 The dashed circle marks the field of view and the small open ellipse at lower
 left is the synthesised beam. The two rows use different flux scales: the sky

@@ -4,13 +4,14 @@ The antennas of a real array differ in sensitivity, so the noise on a
 visibility is a property of its baseline, not of the observation. Collapsing it
 to one number mis-weights every point in the likelihood.
 
-On EDA2 the per-baseline ``SIGMA`` spans a factor of ~30, so a scalar
-under-weights the quietest baselines by up to ~200x in a chi-squared sum. It is
-worse for anything that fits gains: the per-antenna noise **correlates** with
-the per-antenna gain (measured ``sigma_a ~ amplitude_a^0.76``, R = 0.96), so a
-uniform-noise likelihood cannot tell a loud antenna from a noisy one and the
-fitted gain absorbs the noise structure. That is a bias in the calibration
-solution, not merely a loss of efficiency.
+On a real low-frequency array the per-baseline ``SIGMA`` has been measured to
+span a factor of ~30, so a scalar under-weights the quietest baselines by up to
+~200x in a chi-squared sum. It is worse for anything that fits gains: the
+per-antenna noise **correlates** with the per-antenna gain (on that same
+observation, ``sigma_a ~ amplitude_a^0.76``, R = 0.96), so a uniform-noise
+likelihood cannot tell a loud antenna from a noisy one and the fitted gain
+absorbs the noise structure. That is a bias in the calibration solution, not
+merely a loss of efficiency.
 
 The same argument runs across the band: a bandpass is not flat, so the channels
 at the edge of a subband are noisier than the ones in the middle. An MS that has

@@ -563,10 +563,10 @@ def _near(model_ms, seed: int = 7, frac: float = 0.02):
 
     The closure identity is exact floating point only where the residual is
     small next to the data -- the regime a fitted model is in, and the one #123
-    verified end-to-end on EDA2. ``_observed`` scales its noise to the *largest*
-    visibility in the array, which is what makes residual tolerances meaningful
-    but swamps the smallest cells; there ``s + (c - s)`` genuinely rounds to a
-    neighbouring float and the identity holds only to a ulp.
+    verified end-to-end on real data. ``_observed`` scales its noise to the
+    *largest* visibility in the array, which is what makes residual tolerances
+    meaningful but swamps the smallest cells; there ``s + (c - s)`` genuinely
+    rounds to a neighbouring float and the identity holds only to a ulp.
 
     Perturbed per component rather than by a complex factor: a multiplicative
     complex perturbation mixes the real and imaginary parts, so a cell whose

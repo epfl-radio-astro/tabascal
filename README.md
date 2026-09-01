@@ -16,9 +16,9 @@ project.** It supersedes the earlier repository at
 archived and no longer maintained. Documentation is published at
 [tabascal.readthedocs.io](https://tabascal.readthedocs.io/).
 
-![Starlink subtraction on EDA2 data](docs/images/eda2_starlink_subtraction.svg)
+![Starlink subtraction in a real observation](docs/images/starlink_subtraction.svg)
 
-A result on real **EDA2** data: a 151 MHz observation (XX) crossed by several Starlink satellites. The satellite trails dominating the field (a) are gone after subtraction (b), leaving the inferred sky (c). Reversing the split shows what was removed — subtracting the sky instead (e) isolates the trails, which the model reconstructs as the satellite signal (f). The final residual (d) is noise-like apart from the marked features. Note the two rows use different flux scales: the satellite signal is a few hundred Jy/beam against a sky spanning roughly -400 to 1000 Jy/beam.
+A result on real data from a low-frequency aperture array: a 151 MHz observation (XX) crossed by several Starlink satellites. The satellite trails dominating the field (a) are gone after subtraction (b), leaving the inferred sky (c). Reversing the split shows what was removed — subtracting the sky instead (e) isolates the trails, which the model reconstructs as the satellite signal (f). The final residual (d) is noise-like apart from the marked features. Note the two rows use different flux scales: the satellite signal is a few hundred Jy/beam against a sky spanning roughly -400 to 1000 Jy/beam.
 
 ## Installation
 
