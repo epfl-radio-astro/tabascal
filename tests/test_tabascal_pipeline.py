@@ -43,11 +43,19 @@ def provide_test_data(tmp_path: Path) -> Path:
     by HuggingFace (usually in ~/.cache/huggingface).
     If data cannot be downloaded from HuggingFace, it is generated with tabsim.
 
+    The directory returned by the download path is shared by every test, every
+    session and every checkout on the machine, and nothing ever re-verifies its
+    contents, so a test must treat it as read-only: point a run at a copy of the
+    sim (``_copy_sim``), never at the cached one. ``keep_the_test_data_pristine``
+    below enforces that.
+
     Args:
         tmp_path: Pytest fixture providing temporary directory for test files
 
     Returns:
-        Path to the local directory containing the downloaded test data
+        Path to the local directory containing the test data: the shared
+        HuggingFace snapshot, or ``tmp_path`` when the data had to be generated
+        locally
     """
     branch = f"tabsim_v{tabsim.__version__}"
 
@@ -93,6 +101,41 @@ def provide_test_data(tmp_path: Path) -> Path:
                 )
 
         return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def keep_the_test_data_pristine(request: pytest.FixtureRequest, tmp_path: Path):
+    """Fail any test that leaves a file behind in the shared test-data snapshot.
+
+    A tabascal run writes what it produces -- results, plots, its log -- into the
+    sim directory it is pointed at, so a test that points one at the cached sim
+    deposits output into the HuggingFace cache. ``snapshot_download`` never
+    re-verifies a snapshot it already has, so anything written there survives
+    forever, is visible to every later test on the machine, and would silently
+    replace real data if it landed on an existing name. Copy the sim first
+    (``_copy_sim``) and the run has nowhere to write but the copy.
+
+    A filename-set diff taken around the test -- no hashing, so it costs one
+    directory walk. Tests that do not ask for the data are left alone, as is the
+    fallback where the data was generated into the test's own ``tmp_path``, which
+    a run is free to write into.
+    """
+    if "provide_test_data" not in request.fixturenames:
+        yield
+        return
+
+    data_root = Path(request.getfixturevalue("provide_test_data"))
+    if data_root == tmp_path:  # locally generated, not the shared cache
+        yield
+        return
+
+    before = set(data_root.rglob("*"))
+    yield
+    written = sorted(str(p) for p in set(data_root.rglob("*")) - before)
+    assert not written, (
+        f"{len(written)} path(s) written into the shared test data at {data_root}; "
+        f"point the run at a copy of the sim instead: {written[:5]}"
+    )
 
 
 def read_and_modify_yaml(
