@@ -91,12 +91,13 @@ class TestEmptySectionMerge:
         assert config["rfi"] == defaults
 
     def test_the_read_that_used_to_die_on_a_bare_section(self, tmp_path):
-        """``config["rfi"]["n_int_time"]``, the first thing ``TabConfig`` asks
-        the section for, and where the wipe surfaced."""
+        """``config["rfi"]["n_int_freq"]``, the first thing ``TabConfig`` asks
+        the section for. The wipe originally surfaced on ``n_int_time``,
+        since removed (#195)."""
 
         config = merged(tmp_path, "rfi:\n" + _MINIMAL_CONFIG)
 
-        assert config["rfi"]["n_int_time"] is None
+        assert config["rfi"]["n_int_freq"] == 1
 
     def test_a_bare_nested_section_keeps_its_defaults(self, tmp_path):
         """The same rule one level down: ``ast.pow_spec`` written bare."""
