@@ -32,7 +32,6 @@ from tabascal.components.rfi_signal import (
     rfi_signal_config_validation,
 )
 from tabascal.fft_gp import latent_to_signal
-from tabascal.gp import base_kernel, get_times
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
 

@@ -112,11 +112,11 @@ def process_count() -> int:
 
 # Array names whose *leading* axis is the RFI-source axis and which should therefore be
 # split across devices. Everything else (per-baseline data, per-antenna gains, ast
-# params, GP operators) is replicated. Constants are keyed "<prefix>/<name>" in the
-# model, so matching happens on the part after the last "/". Membership here is not
+# params, component constants) is replicated. Constants are keyed "<prefix>/<name>" in
+# the model, so matching happens on the part after the last "/". Membership here is not
 # sufficient on its own: shard_pytree additionally requires leaf.shape[0] == n_rfi, so
-# a GP operator whose leading dim is an inducing-point count could not be sharded even
-# if a future rename made its name match.
+# a constant whose leading dimension is a basis size of its own could not be sharded
+# even if a future rename made its name match.
 RFI_AXIS_NAMES = frozenset({
     # latent params (optimized)
     "rfi_k_r_base", "rfi_k_i_base",

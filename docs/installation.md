@@ -75,7 +75,7 @@ To run a single file or test, open a dev shell first:
 ```bash
 pixi shell -e dev
 pytest tests/components/test_gains.py
-pytest tests/components/test_gains.py::TestGPGains::test_forward_output_shapes
+pytest tests/components/test_gains.py::TestUnitaryGains::test_forward_vis_obs_equals_sum
 ```
 
 SGP4 component tests use a bundled TLE cache (`tabascal/data/tles/`) and run

@@ -1,12 +1,14 @@
 """Resolving ``model.components`` references, and what a stale one has to say.
 
-PR #106 renamed most components and deleted six of them. There are no aliases
-and none are coming: a config written before it is expected to fail, and the
-user is expected to edit it. What is pinned here is that the failure explains
-itself -- it names the reference that failed, says what to write instead when
-the name is one of the known old ones, lists what the module actually offers,
-and points at the migration table. What it used to say named neither the rename
-nor the valid options: only that the class was not in the module.
+PR #106 renamed most components and deleted six of them, and #129 deleted the
+Gaussian process gain. There are no aliases and none are coming: a config
+written before one of those changes is expected to fail, and the user is
+expected to edit it. What is pinned here is that the failure explains itself --
+it names the reference that failed, says what to write instead when the name is
+one of the known old ones and where it changed, lists what the module actually
+offers, and points at the migration table. What it used to say
+named neither the rename nor the valid options: only that the class was not in
+the module.
 """
 
 import re
@@ -111,30 +113,70 @@ class TestAnUnknownClassInAKnownModule:
         assert "was deleted" not in text
 
 
-class TestTheKnownOldNames:
-    """Every name PR #106 changed says what it became."""
+class TestTheGainComponentDeletedIn129:
+    """``gains:GPGains`` is gone, and the failure has to say so and where to go.
 
-    @pytest.mark.parametrize("old,new", sorted(RENAMED_COMPONENTS.items()))
-    def test_a_renamed_component_names_its_replacement(self, old, new):
+    The one entry in the maps that did not come from #106, so it is also what
+    proves the note cites the change it belongs to rather than a fixed number.
+    """
+
+    def test_it_names_the_constant_gain_as_the_nearest(self):
+        text = message("gains:GPGains")
+
+        assert "GPGains" in text
+        assert "gains:ConstGains" in text
+
+    def test_it_cites_the_removal_and_not_106(self):
+        text = message("gains:GPGains")
+
+        assert "#129" in text
+        assert "#106" not in text
+
+    def test_it_still_fails(self):
+        """Naming the nearest component is not resolving it."""
+        with pytest.raises(ImportError):
+            import_components(["gains:GPGains"])
+
+
+#: ``old name -> current reference``, both maps together and without the issue
+#: or pull request numbers, for the cases that only care about the two names.
+CHANGED_COMPONENTS = {
+    old: ref
+    for old, (ref, _) in {**RENAMED_COMPONENTS, **REMOVED_COMPONENTS}.items()
+}
+
+
+class TestTheKnownOldNames:
+    """Every name that changed says what it became, and where it changed."""
+
+    @pytest.mark.parametrize(
+        "old,new,changed_in",
+        sorted((old, new, ref) for old, (new, ref) in RENAMED_COMPONENTS.items()),
+    )
+    def test_a_renamed_component_names_its_replacement(self, old, new, changed_in):
         module = new.split(":")[0]
         text = message(f"{module}:{old}")
         assert old in text
         assert new in text
+        assert changed_in in text
         assert "was renamed to" in text
 
-    @pytest.mark.parametrize("old,nearest", sorted(REMOVED_COMPONENTS.items()))
-    def test_a_deleted_component_says_so_and_names_the_nearest(self, old, nearest):
+    @pytest.mark.parametrize(
+        "old,nearest,changed_in",
+        sorted((old, ref, where) for old, (ref, where) in REMOVED_COMPONENTS.items()),
+    )
+    def test_a_deleted_component_says_so_and_names_the_nearest(
+        self, old, nearest, changed_in
+    ):
         module = nearest.split(":")[0]
         text = message(f"{module}:{old}")
         assert old in text
         assert nearest in text
+        assert changed_in in text
         assert "was deleted" in text
         assert "no successor" in text
 
-    @pytest.mark.parametrize(
-        "old,new",
-        sorted({**RENAMED_COMPONENTS, **REMOVED_COMPONENTS}.items()),
-    )
+    @pytest.mark.parametrize("old,new", sorted(CHANGED_COMPONENTS.items()))
     def test_a_known_old_name_still_fails(self, old, new):
         """The map is message-only. Naming the replacement is not resolving it."""
         module = new.split(":")[0]
@@ -142,8 +184,7 @@ class TestTheKnownOldNames:
             import_components([f"{module}:{old}"])
 
     @pytest.mark.parametrize(
-        "replacement",
-        sorted(set(RENAMED_COMPONENTS.values()) | set(REMOVED_COMPONENTS.values())),
+        "replacement", sorted(set(CHANGED_COMPONENTS.values()))
     )
     def test_every_replacement_is_a_real_component(self, replacement):
         """A later rename must not leave the migration table pointing at nothing."""
@@ -160,6 +201,7 @@ class TestTheKnownOldNames:
             "SGP4LEONoDragOrbit",
             "ComplexRFI",
             "RealRFI",
+            "GPGains",
         }
         assert documented <= set(RENAMED_COMPONENTS) | set(REMOVED_COMPONENTS)
 
@@ -172,9 +214,7 @@ class TestTheDocumentedTable:
     sends them to a page that cannot answer the question they arrived with.
     """
 
-    @pytest.mark.parametrize(
-        "old,new", sorted({**RENAMED_COMPONENTS, **REMOVED_COMPONENTS}.items())
-    )
+    @pytest.mark.parametrize("old,new", sorted(CHANGED_COMPONENTS.items()))
     def test_every_name_the_importer_knows_is_documented(self, old, new):
         # Whole words, inside the section the error points at: 'ComplexRFI' is a
         # prefix of a current class name and occurs all over the page, so a

@@ -461,3 +461,76 @@ class TestTheTimeCountIsNotAConfigKey:
         assert expected == 2  # the value this fixture has always run at
         assert tab_config.n_int_time == expected
         assert tab_config.n_time_fine == sizes.n_time * expected
+
+
+#: The gain Gaussian process's correlation lengths, removed with the component
+#: that read them.
+GAIN_CORR_KEYS = (
+    "amp_corr_freq",
+    "amp_corr_time",
+    "phase_corr_freq",
+    "phase_corr_time",
+)
+
+
+class TestTheGainCorrelationLengthsAreGone:
+    """The four ``gains`` correlation lengths went with ``gains:GPGains`` (#129).
+
+    They were the length scales of a squared-exponential kernel over the gains,
+    and no surviving gain component has a kernel: ``gains:ConstGains`` fits one
+    constant gain per antenna and ``gains:UnitaryGains`` fits none at all. There
+    is nothing to point a config at, so the failure says the keys are gone rather
+    than offering a replacement that would mean something different.
+    """
+
+    @pytest.mark.parametrize("key", GAIN_CORR_KEYS)
+    def test_the_base_no_longer_ships_it(self, tmp_path, key):
+        """A default left behind would let a stale config merge cleanly and be
+        ignored, which is the state the removal exists to make impossible."""
+
+        assert key not in base_args(tmp_path)["gains"]
+
+    @pytest.mark.parametrize("key", GAIN_CORR_KEYS)
+    def test_a_config_setting_it_stops_and_says_what_happened(self, tmp_path, key):
+        path = tmp_path / "user.yaml"
+        path.write_text(f"gains:\n  {key}: 180\n")
+
+        with pytest.raises(ValueError) as excinfo:
+            load_config(str(path))
+
+        message = str(excinfo.value)
+        assert f"gains.{key}" in message
+        assert "GPGains" in message
+        assert "#129" in message
+
+    @pytest.mark.parametrize("key", GAIN_CORR_KEYS)
+    def test_a_null_value_is_still_a_hit(self, tmp_path, key):
+        """Presence, not value: the base default was ``null``, so every config
+        that carried these keys is likely to have written them that way."""
+
+        path = tmp_path / "user.yaml"
+        path.write_text(f"gains:\n  {key}:\n")
+
+        with pytest.raises(ValueError) as excinfo:
+            load_config(str(path))
+
+        assert f"gains.{key}" in str(excinfo.value)
+
+    def test_an_empty_gains_section_is_not_a_hit(self):
+        """``gains:`` with nothing under it is no override, not a removed key."""
+
+        check_removed_keys({"gains": None}, "user.yaml")
+
+    def test_the_keys_the_gains_section_still_ships(self, tmp_path):
+        """What is left is the prior over a constant gain, and nothing else."""
+
+        assert set(base_args(tmp_path)["gains"]) == {
+            "init",
+            "ref_ant",
+            "fix_flux_scale",
+            "amp_mean",
+            "phase_mean",
+            "amp_std",
+            "phase_std",
+            "r_seed",
+        }

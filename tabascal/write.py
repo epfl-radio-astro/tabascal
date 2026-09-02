@@ -113,11 +113,11 @@ def calibrated_residuals(vis_cal, vis_ast, vis_rfi):
 def unit_bad_gains(gains):
     """Replace zero and non-finite antenna gains with 1, elementwise.
 
-    ``GPGains`` fits an unconstrained affine GP amplitude with no positivity
-    transform, and the SVI loop never checks ``isfinite``, so an unflagged dead
-    antenna can be driven to zero -- and dividing ``DATA`` by a zero or NaN
-    baseline gain poisons ``CORRECTED_DATA`` and every residual column that
-    touches the antenna.
+    The SVI loop never checks ``isfinite``, so whatever the fit does to an
+    unflagged dead antenna arrives here unexamined; and a gain averaged over
+    posterior samples can cancel to zero even where no single sample does.
+    Dividing ``DATA`` by a zero or NaN baseline gain poisons ``CORRECTED_DATA``
+    and every residual column that touches the antenna.
 
     Unity rather than a blank: the affected baselines are then simply
     *uncalibrated* on that antenna, which stays finite and imageable, where NaN

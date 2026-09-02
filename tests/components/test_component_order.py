@@ -172,7 +172,7 @@ class TestValidLists:
                     "rfi_signal:ComplexRFIVarAnt",
                     "rfi_vis:RiemannVisFFI",
                     "ast_vis:GPVisAst",
-                    "gains:GPGains",
+                    "gains:UnitaryGains",
                 ],
                 id="fitted-phase",
             ),

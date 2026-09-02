@@ -11,47 +11,53 @@ MIGRATION_DOCS = (
     "#renamed-and-removed-components"
 )
 
-#: Components renamed in PR #106, as ``old class name -> current reference``.
-#: Message-only: nothing here is ever resolved, so an old config still fails --
-#: the map exists so that the failure can say what to write instead. Keyed on the
-#: class name alone because that is what identifies the component; the module a
-#: config happens to name it under does not have to be right for the hint to be.
+#: Components that were renamed, as ``old class name -> (current reference, the
+#: issue or pull request it was renamed in)``. Message-only: nothing here is ever
+#: resolved, so an old config still fails -- the map exists so that the failure
+#: can say what to write instead. Keyed on the class name alone because that is
+#: what identifies the component; the module a config happens to name it under
+#: does not have to be right for the hint to be. Where it changed is carried per
+#: entry rather than stated once: the table outlived the release that started it.
 RENAMED_COMPONENTS = {
-    "FourierGPRFI": "rfi_signal:ComplexRFIVarAnt",
-    "FourierGPRFIConstAnt": "rfi_signal:ComplexRFIConstAnt",
-    "FourierTimeFreqGPAst": "ast_vis:GPVisAst",
-    "RiemannVisTimeFreqCalculation": "rfi_vis:RiemannVis",
-    "RiemannVisTimeFreqCalculationFFI": "rfi_vis:RiemannVisFFI",
-    "RiemannVisTimeFreqVariable": "rfi_vis:RiemannVisVariable",
-    "RiemannVisTimeFreqVariableFFI": "rfi_vis:RiemannVisVariableFFI",
-    "SGP4LEONoDragOrbit": "trajectory:NoDragOrbit",
-    "SGP4LEOOrbit": "trajectory:Orbit",
+    "FourierGPRFI": ("rfi_signal:ComplexRFIVarAnt", "#106"),
+    "FourierGPRFIConstAnt": ("rfi_signal:ComplexRFIConstAnt", "#106"),
+    "FourierTimeFreqGPAst": ("ast_vis:GPVisAst", "#106"),
+    "RiemannVisTimeFreqCalculation": ("rfi_vis:RiemannVis", "#106"),
+    "RiemannVisTimeFreqCalculationFFI": ("rfi_vis:RiemannVisFFI", "#106"),
+    "RiemannVisTimeFreqVariable": ("rfi_vis:RiemannVisVariable", "#106"),
+    "RiemannVisTimeFreqVariableFFI": ("rfi_vis:RiemannVisVariableFFI", "#106"),
+    "SGP4LEONoDragOrbit": ("trajectory:NoDragOrbit", "#106"),
+    "SGP4LEOOrbit": ("trajectory:Orbit", "#106"),
 }
 
-#: Components deleted in PR #106, as ``old class name -> nearest current
-#: reference``. Nearest, not equivalent: none of these has a drop-in successor,
-#: so a config using one has a modelling decision to make, not a substitution.
+#: Components that were deleted, as ``old class name -> (nearest current
+#: reference, the issue or pull request it was deleted in)``. Nearest, not
+#: equivalent: none of these has a drop-in successor, so a config using one has a
+#: modelling decision to make, not a substitution.
 REMOVED_COMPONENTS = {
-    "ComplexRFI": "rfi_signal:ComplexRFIVarAnt",
-    "FourierTimeAst": "ast_vis:GPVisAst",
-    "FourierTimeConstFreqAst": "ast_vis:GPVisAst",
-    "FourierTimeFreqAst": "ast_vis:GPVisAst",
-    "RealRFI": "rfi_signal:ComplexRFIVarAnt",
-    "RiemannVisCalculation": "rfi_vis:RiemannVis",
+    "ComplexRFI": ("rfi_signal:ComplexRFIVarAnt", "#106"),
+    "FourierTimeAst": ("ast_vis:GPVisAst", "#106"),
+    "FourierTimeConstFreqAst": ("ast_vis:GPVisAst", "#106"),
+    "FourierTimeFreqAst": ("ast_vis:GPVisAst", "#106"),
+    "GPGains": ("gains:ConstGains", "#129"),
+    "RealRFI": ("rfi_signal:ComplexRFIVarAnt", "#106"),
+    "RiemannVisCalculation": ("rfi_vis:RiemannVis", "#106"),
 }
 
 
 def _migration_note(cls_name: str) -> str:
-    """What became of ``cls_name``, if it is one of the names PR #106 changed."""
+    """What became of ``cls_name``, if it is one of the names that changed."""
     if cls_name in RENAMED_COMPONENTS:
+        new, changed_in = RENAMED_COMPONENTS[cls_name]
         return (
-            f"'{cls_name}' was renamed to '{RENAMED_COMPONENTS[cls_name]}' in #106; "
+            f"'{cls_name}' was renamed to '{new}' in {changed_in}; "
             "there are no aliases, so update the config by hand."
         )
     if cls_name in REMOVED_COMPONENTS:
+        nearest, changed_in = REMOVED_COMPONENTS[cls_name]
         return (
-            f"'{cls_name}' was deleted in #106 with no successor; the nearest "
-            f"current component is '{REMOVED_COMPONENTS[cls_name]}'."
+            f"'{cls_name}' was deleted in {changed_in} with no successor; the nearest "
+            f"current component is '{nearest}'."
         )
     return ""
 
@@ -208,11 +214,11 @@ def import_components(
     (e.g., 'foo:Foo' -> 'tabascal.components.foo.Foo') and then falls
     back to absolute imports if that fails.
 
-    A reference that does not resolve raises, always: the components renamed and
-    deleted in PR #106 have no aliases, so a config predating it is broken and
-    has to be edited. The failure carries what is needed to do that -- the
-    current name where the old one is known, what the module does offer, and the
-    migration table.
+    A reference that does not resolve raises, always: the components that have
+    been renamed and deleted have no aliases, so a config predating one of those
+    changes is broken and has to be edited. The failure carries what is needed to
+    do that -- the current name where the old one is known, what the module does
+    offer, and the migration table.
     """
     classes: List[Type] = []
     errors: list[str] = []

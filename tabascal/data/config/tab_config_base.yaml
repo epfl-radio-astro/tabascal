@@ -94,17 +94,13 @@ satellites:
 # Gain prior and initialization parameters
 ###########################################
 gains:
-  init: prior           # Optional - The initialization method for the gain parameters. Only gains:ConstGains reads it, and it accepts 'prior' or a path to an .npz of per-antenna gains (key 'gain') or to a calibration table, projected into its gauge. gains:GPGains and gains:UnitaryGains ignore it entirely - GPGains always starts at the prior mean and UnitaryGains fits no gain at all
+  init: prior           # Optional - The initialization method for the gain parameters. Only gains:ConstGains reads it, and it accepts 'prior' or a path to an .npz of per-antenna gains (key 'gain') or to a calibration table, projected into its gauge. gains:UnitaryGains ignores it entirely - it fits no gain at all
   ref_ant: null         # Optional - Phase reference antenna for gains:ConstGains, whose phase is pinned to 0. Defaults to the first antenna with any unflagged data
   fix_flux_scale: true  # Optional - Keep the zero-sum log-amplitude gauge of gains:ConstGains, so the gain carries no absolute flux scale. false frees the overall amplitude and requires a fixed-flux sky (ast_signal:FixedDiscreteSky) to set the scale
   amp_mean: 1.0         # Optional - Mean of the prior distribution over the gain amplitudes. Options are 'truth' or a value like 1.0
   phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radiands. Options are 'truth' or a value like 0.0
   amp_std: null         # Optional - Standard deviation of the prior distribution over the gain amplitudes as a percentage of amp_mean. null defaults to 20, i.e. a 20 % spread
   phase_std: null       # Optional - Standard deviation of the prior distribution over the gain phases in degrees. null defaults to 180, half a turn, which is effectively uniform over the circle - the wrapped prior is flat to 1.4 %
-  amp_corr_freq: null   # Optional - Correlation bandwidth of the gain amplitudes in Hz. Defaults to the frequency extent of the observation. Used by gains:GPGains
-  amp_corr_time: null   # Optional - Correlation time of the gain amplitudes in seconds. Defaults to the time extent of the observation. Used by gains:GPGains
-  phase_corr_freq: null # Optional - Correlation bandwidth of the gain phases in Hz. Defaults to the frequency extent of the observation. Used by gains:GPGains
-  phase_corr_time: null # Optional - Correlation time of the gain phases in seconds. Defaults to the time extent of the observation. Used by gains:GPGains
   r_seed: 123           # Optional - Random seed for the gain draws. Only null takes the default; 0 is a seed like any other
 # ###################
 # # Model parameters
