@@ -3,7 +3,6 @@ import os
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import sys
-import shutil
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime
@@ -216,7 +215,11 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
 
     return _RunPaths(
         run_id=run_id,
-        log_path=f"log_tab_{run_id}.txt",
+        # Written straight into the plot directory, which exists by now, and named
+        # for the run: two runs launched in the same second from one working
+        # directory used to share a log file there, and whichever finished first
+        # took it away from the other.
+        log_path=os.path.join(plot_dir, f"log_tab{suffix}_{run_id}.txt"),
         model_name=model_name,
         f_name=f_name,
         ms_path=ms_path,
@@ -383,10 +386,6 @@ def tabascal_subtraction(
                 tab_config.args["data"]["data_col"],
                 gain_table=getattr(tab_config, "gain_table", None),
             )
-
-    if log:
-        shutil.copy(paths.log_path, paths.plot_dir)
-        os.remove(paths.log_path)
 
     if is_process_0():
         with open(os.path.join(paths.plot_dir, f"tab_config_{paths.run_id}.yaml"), "w") as fp:

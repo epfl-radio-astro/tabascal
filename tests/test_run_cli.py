@@ -1,12 +1,15 @@
-"""The ``tabascal`` CLI: its argument surface, and what ``run()`` always reports.
+"""The ``tabascal`` CLI: its argument surface, where a run writes, and what
+``run()`` always reports.
 
 Every command form the documentation shows a user must actually parse. The
 parser tests exercise the parser alone, so nothing is imported from the heavy
-JAX/NumPyro run implementation and nothing is executed; the ``run()`` tests
-import that module lazily and stub the run itself out.
+JAX/NumPyro run implementation and nothing is executed; the ``run()`` and path
+tests import that module lazily and stub the run itself out.
 """
 
+import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,18 @@ _DOCS = Path(__file__).parent.parent / "docs"
 
 # A shell prompt some docs put in front of a command.
 _PROMPT = re.compile(r"^\$\s+")
+
+
+@pytest.fixture
+def impl():
+    """The run implementation module.
+
+    Imported inside the fixture so the parser tests go on paying nothing for the
+    JAX/NumPyro import.
+    """
+    from tabascal.scripts import _run_tabascal_impl
+
+    return _run_tabascal_impl
 
 
 def documented_commands(docs_dir=_DOCS):
@@ -438,19 +453,90 @@ class TestLightCurveInputs:
         assert self._mod().resolve_corr(args, config) == "xy"
 
 
+class _FrozenClock:
+    """``datetime`` with a stopped clock, for the same-second collision test."""
+
+    @staticmethod
+    def now():
+        return datetime(2026, 1, 2, 3, 4, 5)
+
+
+class TestRunLogPath:
+    """Where a run's log is written: in the plot directory it fills anyway.
+
+    It used to be opened in the process's working directory and copied into the
+    plot directory once the run had finished. Two runs started in the same
+    second from one directory then shared that filename, and the first to finish
+    removed it -- killing the second inside the copy with all of its compute
+    already done.
+    """
+
+    @staticmethod
+    def _resolve(impl, tmp_path, suffix=""):
+        config = {"data": {"sim_dir": str(tmp_path / "obs")}, "model": {}}
+        return impl._resolve_paths(config, None, None, suffix, None)
+
+    @staticmethod
+    def _assert_log_is_in_the_plot_dir(paths):
+        # Normalised: a run with no suffix leaves plot_dir with a trailing
+        # separator, which dirname() of the log path does not have.
+        assert os.path.normpath(os.path.dirname(paths.log_path)) == os.path.normpath(
+            paths.plot_dir
+        )
+
+    def test_the_log_is_written_in_the_plot_directory(self, impl, tmp_path):
+        paths = self._resolve(impl, tmp_path)
+
+        assert os.path.isabs(paths.log_path)  # never relative to the CWD
+        self._assert_log_is_in_the_plot_dir(paths)
+        assert os.path.basename(paths.log_path) == f"log_tab_{paths.run_id}.txt"
+
+    def test_the_suffix_names_the_log(self, impl, tmp_path):
+        """Which run a log belongs to, without opening it."""
+        paths = self._resolve(impl, tmp_path, suffix="runA")
+
+        self._assert_log_is_in_the_plot_dir(paths)
+        assert paths.plot_dir.endswith(os.path.join("plots", "runA"))
+        assert os.path.basename(paths.log_path) == f"log_tab_runA_{paths.run_id}.txt"
+
+    def test_the_directory_is_there_before_the_log_is_opened(
+        self, impl, tmp_path, monkeypatch
+    ):
+        """``_stdout_logger`` opens the path for writing; nothing creates it later.
+
+        And the directory the run was launched from is left alone.
+        """
+        monkeypatch.chdir(tmp_path)
+        paths = self._resolve(impl, tmp_path)
+
+        with impl._stdout_logger(paths.log_path, True):
+            print("logged")
+
+        assert Path(paths.log_path).read_text().strip() == "logged"
+        assert list(Path.cwd().glob("log_tab*")) == []
+
+    def test_runs_in_the_same_second_are_told_apart_by_their_suffix(
+        self, impl, tmp_path, monkeypatch
+    ):
+        """The suffix separates concurrent runs; the timestamp alone cannot.
+
+        ``run_id`` has 1-second resolution, so two runs launched together with
+        the *same* suffix still resolve to one path -- asserted here so what is
+        left of the collision is on the record rather than assumed gone.
+        """
+        monkeypatch.setattr(impl, "datetime", _FrozenClock)
+
+        run_a = self._resolve(impl, tmp_path, "runA")
+        run_b = self._resolve(impl, tmp_path, "runB")
+        run_a_again = self._resolve(impl, tmp_path, "runA")
+
+        assert run_a.run_id == run_b.run_id == run_a_again.run_id
+        assert run_a.log_path != run_b.log_path
+        assert run_a.log_path == run_a_again.log_path
+
+
 class TestRunReporting:
     """``run()`` reports peak memory however the run ends; timings only on success."""
-
-    @pytest.fixture
-    def impl(self):
-        """The run implementation module, imported lazily.
-
-        Kept out of the module scope so the parser tests above go on paying
-        nothing for the JAX/NumPyro import.
-        """
-        from tabascal.scripts import _run_tabascal_impl
-
-        return _run_tabascal_impl
 
     @pytest.fixture
     def calls(self, impl, monkeypatch):
