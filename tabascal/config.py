@@ -102,6 +102,29 @@ def yaml_load(path):
         return yaml.load(f, Loader=_TabSafeLoader)
 
 
+#: Config keys that have been renamed, old dotted name -> new dotted name.
+#: Checked rather than aliased: a config carrying the old name is loaded with
+#: the base default for the new one, so accepting it silently would run the
+#: model on a value the user did not ask for.
+RENAMED_KEYS = {
+    "rfi.freq_int_samples": "rfi.n_int_freq",
+}
+
+
+def check_renamed_keys(config: Dict, path: str):
+    """Stop on a config still using a key that has been renamed."""
+
+    for old, new in RENAMED_KEYS.items():
+        section, key = old.split(".")
+        # `or {}` rather than a default: a yaml section header with nothing
+        # under it parses as None, which `in` cannot search.
+        if key in (config.get(section) or {}):
+            raise ValueError(
+                f"{old} was renamed {new}. Update {path}: the two named the same "
+                "quantity and only the new name is read."
+            )
+
+
 def load_config(path: str) -> Dict:
     """Load a configuration file and populate default parameters where needed.
 
@@ -109,7 +132,7 @@ def load_config(path: str) -> Dict:
     ----------
     path : str
         Path to the yaml config file.
-    
+
     Returns
     -------
     dict
@@ -120,9 +143,16 @@ def load_config(path: str) -> Dict:
     base_config = yaml_load(tab_base_config_path)
 
     try:
-        return deep_update(base_config, yaml_load(path))
+        config = deep_update(base_config, yaml_load(path))
     except Exception as e:
         raise IOError(f"Configuration file could not be loaded from {path}") from e
+
+    # After the merge, not inside it: the base ships none of the old names, so a
+    # hit here can only have come from the user's file, and the error says so
+    # rather than being wrapped in "could not be loaded".
+    check_renamed_keys(config, path)
+
+    return config
 
     
 class TabConfig:

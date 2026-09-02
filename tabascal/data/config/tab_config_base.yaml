@@ -76,8 +76,8 @@ rfi:
   time_int_factor: 1    # Optional - Factor to increase the number of time integration samples over the predicted value
   min_time_bins: 1      # Optional - Minimum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariable / +FFI)
   max_time_bins: 30     # Optional - Maximum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariable / +FFI)
-  n_int_time: null      # Optional - Specify the number of integration samples to use along the time axis
-  n_int_freq: 1         # Optional - Specify the number of integration samples to use along the frequency axis
+  n_int_time: null      # Optional - Number of integration samples per time step of the RFI fine grid. Currently always estimated from the observation and its RFI sampling requirements (see TabConfig.estimate_rfi_sampling); a value set here is not read
+  n_int_freq: 1         # Optional - Number of integration samples per frequency channel of the RFI fine grid. Taken as given - there is no estimate on this axis
   r_seed: 123           # Optional - Random seed to use for sampling
 ############################
 # Satellite path parameters

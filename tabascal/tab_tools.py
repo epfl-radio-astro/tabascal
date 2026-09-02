@@ -302,7 +302,7 @@ def fix_padding(config: dict, n_freq):
         if (
             config["rfi"]["freq_pad_factor"] < 3
             and n_freq == 1
-            and config["rfi"]["freq_int_samples"] > 1
+            and config["rfi"]["n_int_freq"] > 1
         ):
             config["rfi"]["freq_pad_factor"] = 3
     except:

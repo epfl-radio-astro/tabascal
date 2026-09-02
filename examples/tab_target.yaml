@@ -78,7 +78,7 @@ rfi:
   n_int_time:
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
-  freq_int_samples: 1
+  n_int_freq: 1
   time_int_factor: 5
   pow_spec:
     p0: 1e3
