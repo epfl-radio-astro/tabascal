@@ -593,9 +593,9 @@ class TestTheBlocksAreHandedOverOneAtATime:
 
     The peak this removes is rank 0's. Accumulated, the whole decomposition --
     ``n_rfi`` x ``sizeof(rfi_vis)`` -- is resident before the zarr sees any of
-    it, which at EDA2's channel count is tens of gigabytes for a result that is
-    written out block by block anyway. Streamed, the largest thing alive is one
-    ``(sample, satellite)`` block.
+    it, which at a real observation's channel count is tens of gigabytes for a
+    result that is written out block by block anyway. Streamed, the largest
+    thing alive is one ``(sample, satellite)`` block.
     """
 
     def test_every_block_is_handed_over_and_none_is_kept(self):

@@ -472,7 +472,7 @@ class TestResolvedNoise:
 
     @staticmethod
     def _noise(shape):
-        # Spread over a factor of ~30, as EDA2's per-baseline SIGMA is: a
+        # Spread over a factor of ~30, as a real array's per-baseline SIGMA is: a
         # mis-aligned broadcast then moves the chi^2 by a lot, not a little.
         rng = np.random.default_rng(7)
         return 0.05 * np.exp(rng.uniform(0.0, np.log(30.0), shape))
