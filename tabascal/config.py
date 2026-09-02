@@ -124,16 +124,31 @@ RENAMED_KEYS = {
 }
 
 
-#: Config keys that have been removed, old dotted name -> (what to set instead,
-#: why the key is gone). Checked rather than ignored, for the same reason as
-#: RENAMED_KEYS: a key nothing reads still looks like a setting in the file, and
-#: leaving it there is how it stayed unread for as long as it did.
+#: Why the four gain correlation lengths are gone, shared by all of them. There is
+#: nothing to point a config at: they were length scales of a covariance function,
+#: and no gain component has one any more.
+_GAIN_CORR_REMOVED = (
+    "it was a correlation length of the gain Gaussian process fitted by "
+    "gains:GPGains, which was removed in #129. There is no replacement: "
+    "gains:ConstGains fits one gain per antenna, constant over time and frequency, "
+    "and gains:UnitaryGains fits none at all, so neither has a correlation length"
+)
+
+#: Config keys that have been removed, old dotted name -> (what to set instead or
+#: None where nothing replaces it, why the key is gone). Checked rather than
+#: ignored, for the same reason as RENAMED_KEYS: a key nothing reads still looks
+#: like a setting in the file, and leaving it there is how it stayed unread for as
+#: long as it did.
 REMOVED_KEYS = {
     "rfi.n_int_time": (
         "rfi.time_int_factor",
         "the number of time integration samples is estimated from the RFI fringe "
         "rate and the noise, never given directly - nothing has ever read this key",
     ),
+    "gains.amp_corr_freq": (None, _GAIN_CORR_REMOVED),
+    "gains.amp_corr_time": (None, _GAIN_CORR_REMOVED),
+    "gains.phase_corr_freq": (None, _GAIN_CORR_REMOVED),
+    "gains.phase_corr_time": (None, _GAIN_CORR_REMOVED),
 }
 
 
@@ -159,9 +174,12 @@ def check_removed_keys(config: Dict, path: str):
         # Presence, not value: every config that carried a removed key is one
         # that needs editing, whatever it set the key to.
         if key in (config.get(section) or {}):
+            # A successor is named where there is one. Where there is not, the
+            # error says only to delete the key: offering the nearest surviving
+            # setting would be inviting the user to write something else.
+            instead = f" and set {new} instead" if new else ""
             raise ValueError(
-                f"{old} has been removed. Delete it from {path} and set {new} "
-                f"instead: {why}."
+                f"{old} has been removed. Delete it from {path}{instead}: {why}."
             )
 
 

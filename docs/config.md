@@ -31,7 +31,7 @@ That order is checked when the model is assembled, before anything is computed. 
 
 ### Renamed and removed components
 
-Component classes were renamed to a consistent scheme in [PR #106](https://github.com/epfl-radio-astro/tabascal/pull/106), and the matrix-GP RFI-signal components were deleted there in favour of the Fourier ones. **There are no aliases and none are planned.** A configuration file written before that release will not run: every stale `model.components` entry has to be edited by hand to the current name below. The failure is loud — the importer names the reference that did not resolve, what the module does offer, and, for the names in this table, what replaced it.
+Component classes were renamed to a consistent scheme in [PR #106](https://github.com/epfl-radio-astro/tabascal/pull/106), and the matrix-GP RFI-signal components were deleted there in favour of the Fourier ones. One more component has gone since, under [issue #129](https://github.com/epfl-radio-astro/tabascal/issues/129). **There are no aliases and none are planned.** A configuration file written before either change will not run: every stale `model.components` entry has to be edited by hand to the current name below. The failure is loud — the importer names the reference that did not resolve, where it changed, what the module does offer, and, for the names in these tables, what replaced it.
 
 | Name before #106 | Now |
 |---|---|
@@ -53,6 +53,12 @@ The components below were deleted outright. None has a drop-in successor, so rep
 | `rfi_signal:RealRFI` | `rfi_signal:ComplexRFIVarAnt` | The same replacement, and the amplitude becomes complex rather than real. Both matrix-GP components went on numerical-stability grounds: the Cholesky jitter is absolute, so at the RFI prior's variance it regularises far too weakly and returns NaN in single precision. |
 | `rfi_vis:RiemannVisCalculation` | `rfi_vis:RiemannVis` | The Riemann sum integrates the frequency axis as well as the time axis, so the RFI signal it consumes is on a fine grid in both. |
 | `ast_vis:FourierTimeAst`, `ast_vis:FourierTimeConstFreqAst`, `ast_vis:FourierTimeFreqAst` | `ast_vis:GPVisAst` | The plain Fourier astronomical models are gone; the GP over time and frequency is the free-form sky model that replaces them. (The other astronomical visibility model, [`ast_vis:DiscreteSkyVis`](#a-fixed-sky-of-discrete-sources), is a rigid catalogue sky rather than a replacement for these.) |
+
+The Gaussian process gain went the same way, in a later release:
+
+| Deleted in #129 | Nearest current component | What changed |
+|---|---|---|
+| `gains:GPGains` | `gains:ConstGains` | The gain no longer varies over the observation: `gains:ConstGains` fits one complex gain per antenna, constant over time and frequency. That is a modelling change and not a substitution, so it is worth reading [A constant gain per antenna](#a-constant-gain-per-antenna) before making it — in particular the identifiability rules, which a time-variable gain did not have. `gains:GPGains` was the last model built on a dense covariance matrix; the Fourier-domain Gaussian processes (`rfi_signal:ComplexRFIVarAnt`, `ast_vis:GPVisAst`) are unaffected. Its four correlation-length keys were removed with it — see [Gains](#gains). |
 
 ### Precision
 
@@ -79,8 +85,9 @@ error under `single`, so set `model.precision: double` to use them:
 * `trajectory:Orbit`
 
 Both `rfi_vis` kernels (`RiemannVis` and the FFI `RiemannVisFFI`, see [RFI-visibility
-kernels](kernels.md)) and the GP astronomical and gains components run in either
-precision.
+kernels](kernels.md)) run in either precision, as do the astronomical Gaussian
+process `ast_vis:GPVisAst` and both gain components, `gains:ConstGains` and
+`gains:UnitaryGains`.
 
 ## Data
 
@@ -214,7 +221,7 @@ opt:
 
 ### Optimiser trace
 
-Two models cannot be compared on their loss curves. The loss is a negative log *joint*, so its prior term scales with the latent dimension of whichever parameterisation is running — a Fourier basis with 123 k-modes and 76 inducing times for the same Gaussian process do not put their losses on a common scale. And loss *per iteration* hides the cost of an iteration, so a model that converges in fewer but more expensive steps looks better than it is.
+Two models cannot be compared on their loss curves. The loss is a negative log *joint*, so its prior term scales with the latent dimension of whichever parameterisation is running — `gains:UnitaryGains`, which fits no gain at all, and `gains:ConstGains`, which fits $2 n_\text{ant} - 2$ parameters, do not put their losses on a common scale. And loss *per iteration* hides the cost of an iteration, so a model that converges in fewer but more expensive steps looks better than it is.
 
 Setting `trace_path` records, once per optimiser iteration, the quantities that can be compared: the wall-clock time the iteration finished, and the metrics fixed by the data rather than by the parameterisation. The metrics are read out of the same forward pass as the loss, so they cost a few elementwise reductions rather than a second evaluation of the model, and the run is otherwise unchanged. With `trace_path` left `null` nothing is recorded and the optimiser takes the same compiled path it always did.
 
@@ -512,26 +519,25 @@ gains:
   amp_std: 10
   phase_mean: 0.0
   phase_std: 30
-  amp_corr_time: 180
-  phase_corr_time: 180
   ref_ant: null
   fix_flux_scale: true
 ```
 
 * `init`: How the gain parameters are initialised. `prior` (the default) starts at the prior mean. `gains:ConstGains` additionally accepts a path to a previously measured gain — see [A constant gain per antenna](#a-constant-gain-per-antenna).
-* `amp_mean`: The centre of the prior over the gain amplitude. It must be positive and finite. `gains:GPGains` takes it as the mean of a Gaussian; `gains:ConstGains` fits the log amplitude, so there it is the **median** of a lognormal — the centre in log space — and it reads it only when `fix_flux_scale` is `false`. See below.
+* `amp_mean`: The centre of the prior over the gain amplitude. It must be positive and finite. `gains:ConstGains` fits the log amplitude, so it is the **median** of a lognormal — the centre in log space — and it is read only when `fix_flux_scale` is `false`. See below.
 * `amp_std`: The standard deviation of the prior over the gain amplitude, **as a percentage** of `amp_mean`. `amp_std: 10` with `amp_mean: 1.0` is a 10 % spread. `null` defaults to **20**, a 20 % spread.
 * `phase_mean`: The mean of the prior over the gain phase, in **radians**.
 * `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**. `null` defaults to **180** — half a turn, which is effectively uniform over the circle. See below.
-* `amp_corr_freq`, `amp_corr_time`, `phase_corr_freq`, `phase_corr_time`: The correlation lengths of the gain Gaussian process, in Hz and in seconds. They are read by `gains:GPGains` only, and each defaults to the extent of the observation along that axis, i.e. to a gain that varies smoothly across the whole run.
 * `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
 * `r_seed`: The random seed the gain component draws with.
 
-**`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. It used to be any *falsy* value that triggered the default, so a literal `0` was read as "I did not set this": `r_seed: 0` silently became the default seed, and `amp_std: 0`, `phase_std: 0` or a zero correlation length silently became the default width or the observation extent. A zero seed is now the seed it says. A zero width or correlation length is now an **error naming the key**, because it is a degenerate distribution rather than an absent one — a zero-width prior pins every gain to its mean and leaves the fit nothing to move, and a zero correlation length is a kernel with nothing off its diagonal. Negative and non-finite values are errors for the same reason, where before they passed straight through. `phase_mean: 0` is the one member of the group that behaves exactly as it always did, the default it was being replaced by being `0.0` itself. A config that relied on any of the silent substitutions above will now stop and say which key it is, rather than run with a scale nobody chose.
+**`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. It used to be any *falsy* value that triggered the default, so a literal `0` was read as "I did not set this": `r_seed: 0` silently became the default seed, and `amp_std: 0` or `phase_std: 0` silently became the default width. A zero seed is now the seed it says. A zero width is now an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason, where before they passed straight through. `phase_mean: 0` is the one member of the group that behaves exactly as it always did, the default it was being replaced by being `0.0` itself. A config that relied on any of the silent substitutions above will now stop and say which key it is, rather than run with a scale nobody chose.
+
+**The correlation lengths are gone.** `amp_corr_freq`, `amp_corr_time`, `phase_corr_freq` and `phase_corr_time` were the length scales of the Gaussian process gain `gains:GPGains`, [removed in #129](#renamed-and-removed-components). They have no replacement — `gains:ConstGains` fits a gain that is constant over time and frequency, and `gains:UnitaryGains` fits none — so a config still setting any of them stops at load naming the key, rather than carrying a setting nothing reads.
 
 ### The default prior widths
 
-`amp_std: null` resolves to **20 %** and `phase_std: null` to **180°**. Both are wide on purpose, because in these components the prior width is not only a prior. The fitted parameter is always a standard normal $z$, and the width is what carries it to the gain — directly in {class}`~tabascal.components.gains.ConstGains` ($\texttt{phase} = \texttt{mean} + \texttt{phase\_std}\cdot z$, and $|g| = e^{\texttt{amp\_std}\, z}$), through the Cholesky of a $\texttt{std}^2$ kernel in {class}`~tabascal.components.gains.GPGains`. Either way a narrow prior is a short lever. Under a per-coordinate optimiser the step in $z$ is set by `opt.epsilon` whatever the gradient is, so the phase moves by $\texttt{phase\_std} \cdot \texttt{epsilon}$ per iteration. At the old 1° default and the default `epsilon` of `1e-2` that is 0.01° an iteration: the whole 500-iteration budget could not cross a radian, and a run whose antennas genuinely differed by tens of degrees ended where it started, looking converged. `phase_std` divides the phase on the way in as well (`ConstGains` reads a measured gain through it), so a narrow width also starts such a fit tens of $\sigma$ from the prior mean. ({class}`~tabascal.components.gains.UnitaryGains` fits no gain and reads neither width.)
+`amp_std: null` resolves to **20 %** and `phase_std: null` to **180°**. Both are wide on purpose, because in these components the prior width is not only a prior. The fitted parameter is always a standard normal $z$, and the width is what carries it to the gain — directly in {class}`~tabascal.components.gains.ConstGains` ($\texttt{phase} = \texttt{mean} + \texttt{phase\_std}\cdot z$, and $|g| = e^{\texttt{amp\_std}\, z}$). A narrow prior is therefore a short lever. Under a per-coordinate optimiser the step in $z$ is set by `opt.epsilon` whatever the gradient is, so the phase moves by $\texttt{phase\_std} \cdot \texttt{epsilon}$ per iteration. At the old 1° default and the default `epsilon` of `1e-2` that is 0.01° an iteration: the whole 500-iteration budget could not cross a radian, and a run whose antennas genuinely differed by tens of degrees ended where it started, looking converged. `phase_std` divides the phase on the way in as well (`ConstGains` reads a measured gain through it), so a narrow width also starts such a fit tens of $\sigma$ from the prior mean. ({class}`~tabascal.components.gains.UnitaryGains` fits no gain and reads neither width.)
 
 **Why 180° is "effectively uniform".** The prior is Gaussian but the phase is an angle, so what the model sees is the *wrapped* normal,
 
@@ -540,10 +546,6 @@ $$p(\theta) = \frac{1}{2\pi}\left(1 + 2\sum_{k \ge 1} e^{-k^2\sigma^2/2}\cos k\t
 which is uniform to within $2e^{-\sigma^2/2}$: **1.4 % at 180°**, and 5e-9 at 360°. The extra six decades of flatness buy nothing — no fit is sensitive to a 1.4 % tilt in the prior around the circle — and a full turn costs something, since the likelihood is $2\pi$-periodic in the phase and therefore periodic in $z$ with period $2\pi/\sigma$: doubling $\sigma$ halves that period and puts twice as many whole-turn copies of every optimum inside the prior's bulk. Half a turn is also the width at which $|z| \le 1$ covers the whole circle, so every phase — including one read from a calibration table — starts inside the prior rather than outside it.
 
 **Set them explicitly when you know better.** These are the widths for an array you have no prior information about. A well-behaved instrument with a recent calibration justifies a much tighter prior, and tightening it is what makes the prior do work; leaving it at the default only says that the data should decide.
-
-**A wide prior and the GP's conditioning.** `gains:GPGains` factorises a squared-exponential kernel scaled by $\sigma^2$, and the jitter that makes that kernel positive-definite in floating point is added *after* the scaling. A fixed jitter is therefore a regularisation of $\text{jitter}/\sigma^2$ in the only terms that matter, so widening the prior would have weakened it — at 180° to below fp32's $\sim 1.2\times 10^{-7}$ of precision, which turns the Cholesky, the initial parameters and every reported gain into NaN. The jitter is consequently tied to the kernel's own variance (with a floor at the historical absolute value, so narrow priors factorise exactly as they always did), which makes the factorisation scale-free: whether it succeeds depends on the node grid, not on the units the prior is written in.
-
-That grid is set by the **shorter** of `amp_corr_time` and `phase_corr_time` against the length of the observation, while each kernel keeps its own length scale. The limit is therefore **not** the size of the grid: nodes are laid down about two per correlation length, and a grid built that way factorises at any size (measured fine in fp32 at 4802 nodes with both correlation times equal). What exhausts the jitter is the two correlation times being far **apart** — the smoother kernel then carries as many nodes per correlation length as the two differ by, and its Gram matrix goes singular. In single precision that limit falls between roughly 240 and 480 nodes per correlation length of the smoother kernel, i.e. once one correlation time is a few hundred times the other. That is now an **error naming the key that set the grid**, not a silent NaN: lengthen that correlation time (bringing the two closer together), set `model.precision: double`, or fit `gains:ConstGains` instead.
 
 ### A constant gain per antenna
 

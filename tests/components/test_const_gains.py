@@ -779,6 +779,84 @@ class TestScaleKeysReachTheComponent:
         assert np.max(np.abs(np.asarray(narrow.init_params_base["gains_phase_base"]))) > 100
 
 
+class TestTheDefaultPhasePriorCoversTheCircle:
+    """Drawn through the component, the unset ``phase_std`` says nothing about the phase.
+
+    The width itself is checked analytically in ``test_gains.py`` (the wrapped normal
+    at half a turn is flat to 1.4 %). What is checked here is that the component's own
+    prior path delivers that: the parameterisation is non-centred
+    (``phase = mean + sigma z``, ``z ~ N(0, 1)``) and the phase is then wrapped by
+    ``exp(1j phase)``, so a standard normal draw has to come out spread over the whole
+    circle rather than concentrated anywhere on it.
+
+    One time--frequency sample per draw: the gain is constant over both, so the extra
+    grid would only duplicate each phase.
+    """
+
+    #: Coarse enough that a genuinely flat prior passes on sampling noise alone, and
+    #: far too tight for anything concentrated: a 1-degree prior puts every draw in
+    #: one bin.
+    N_BINS = 12
+    MAX_BIN_RATIO = 1.5
+
+    N_ANT = 33
+    N_DRAWS = 512
+
+    def draw_phases(self, phase_std):
+        """Gain phases from ``N_DRAWS`` prior draws, through the component's forward.
+
+        The reference antenna's phase is pinned to zero (the overall phase is not
+        observable), so it is dropped: a gauge choice rather than a draw.
+        """
+
+        comp = ConstGains()
+        comp.setup(
+            make_const_gains_config(
+                n_ant=self.N_ANT, n_freq=1, n_time=1, phase_std=phase_std, ref_ant=0
+            )
+        )
+
+        forward = comp.build_forward()
+        state = make_vis_state(self.N_ANT, 1, 1)
+        constants = make_constants(comp)
+        keys = jax.random.split(jax.random.PRNGKey(0), 2 * self.N_DRAWS)
+
+        def one_draw(amp_key, phase_key):
+            params = {
+                "gains_amp_base": jax.random.normal(
+                    amp_key, comp.init_params_base["gains_amp_base"].shape
+                ),
+                "gains_phase_base": jax.random.normal(
+                    phase_key, comp.init_params_base["gains_phase_base"].shape
+                ),
+            }
+            gains = forward(params, state, constants)["gains"][:, 0, 0]
+            return jnp.angle(gains[1:])  # ref_ant is antenna 0
+
+        phases = jax.vmap(one_draw)(keys[: self.N_DRAWS], keys[self.N_DRAWS :])
+
+        return np.asarray(phases).ravel()
+
+    def test_the_default_prior_covers_the_circle(self):
+        phases = self.draw_phases(phase_std=None)
+        counts, _ = np.histogram(phases, bins=self.N_BINS, range=(-np.pi, np.pi))
+
+        assert counts.min() > 0
+        assert counts.max() / counts.min() < self.MAX_BIN_RATIO
+        # Mean resultant length: exp(-sigma^2/2) for a wrapped normal, so ~7e-3 at
+        # 180 degrees against ~1 for any prior worth calling concentrated.
+        assert abs(np.mean(np.exp(1j * phases))) < 0.1
+
+    def test_a_one_degree_prior_does_not(self):
+        """The teeth of the test above: the default it replaces fails both bounds."""
+
+        phases = self.draw_phases(phase_std=1.0)
+        counts, _ = np.histogram(phases, bins=self.N_BINS, range=(-np.pi, np.pi))
+
+        assert counts.min() == 0
+        assert abs(np.mean(np.exp(1j * phases))) > 0.9
+
+
 # ---------------------------------------------------------------------------
 # The RFI degeneracy warning
 # ---------------------------------------------------------------------------
@@ -1061,36 +1139,23 @@ def test_base_config_carries_the_new_keys():
     assert base["gains"]["fix_flux_scale"] is True
 
 
-def test_a_missing_correlation_key_still_fails_before_anything_is_converted():
-    """Splitting the scale validation out must not change how a malformed config fails.
+def test_the_correlation_lengths_are_not_read_here():
+    """The gain correlation lengths went with ``gains:GPGains`` (#129).
 
-    ``gains_config_validation`` reads every key it needs before it writes any of
-    them, so a config missing one of the GP correlation lengths raises with nothing
-    half-normalised behind it.
+    A config carrying them is stopped at load by
+    :func:`~tabascal.config.check_removed_keys`; what is pinned here is the other
+    half of that, namely that nothing on the ``ConstGains`` path would look for one.
     """
-    from tabascal.components.gains import gains_config_validation
+    cfg = make_const_gains_config()
 
-    cfg = {
-        "r_seed": None,
-        "amp_mean": None,
-        "amp_std": 5.0,
-        "phase_mean": None,
-        "phase_std": 2.0,
-        "amp_corr_freq": None,
-        "amp_corr_time": None,
-        "phase_corr_freq": None,
-        # phase_corr_time missing
-    }
-    original = dict(cfg)
+    assert not [key for key in cfg.args["gains"] if key.endswith(("_corr_freq", "_corr_time"))]
 
-    with pytest.raises(ValueError, match="Gains configuration validation failed"):
-        gains_config_validation(cfg, np.linspace(1.4e9, 1.41e9, 4), 1e6, np.arange(8.0), 8.0)
-
-    assert cfg == original
+    comp = ConstGains()
+    comp.setup(cfg)  # no correlation length in the config, and none missed
 
 
-def test_validate_gain_scales_matches_the_gp_conversion():
-    """The shared scale validation is the one used by the GP gains: percent and degrees."""
+def test_validate_gain_scales_converts_percent_and_degrees():
+    """The scales reach the component in the units the model works in."""
     cfg = validate_gain_scales(
         {
             "r_seed": None,

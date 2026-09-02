@@ -4,7 +4,7 @@ Gain components calculate the complex-valued gains and then perform the computat
 
 $$V^\text{OBS}_{pq} = G_p \left( V_{pq}^\text{RFI} + V_{pq}^\text{AST} \right) G^*_q$$
 
-The indices $p$ and $q$ are the antennas forming a baseline $pq$. Every component produces a gain on the full $(t, \nu)$ grid, but they differ in how much of it they let vary: {class}`~tabascal.components.gains.GPGains` varies over time and frequency, {class}`~tabascal.components.gains.ConstGains` is constant over both, and {class}`~tabascal.components.gains.UnitaryGains` is constant at 1.
+The indices $p$ and $q$ are the antennas forming a baseline $pq$. Both components produce a gain on the full $(t, \nu)$ grid and hold it constant over both axes; they differ in whether it is fitted. {class}`~tabascal.components.gains.ConstGains` fits one complex gain per antenna, and {class}`~tabascal.components.gains.UnitaryGains` fits nothing and leaves it at 1.
 
 ## Unitary Gains - {class}`~tabascal.components.gains.UnitaryGains`
 

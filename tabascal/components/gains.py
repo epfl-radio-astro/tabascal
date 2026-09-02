@@ -2,13 +2,10 @@ from tabascal.components import Component, assert_attr_shape
 from tabascal.interferometry import apply_gains
 from tabascal.dist import standard_normal
 from tabascal.config import TabConfig
-from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.ms import read_caltable
-from tabascal.transform import affine_transform_full
 
-import jax
 import jax.numpy as jnp
-from jax import vmap, Array
+from jax import Array
 
 import numpy as np
 from numpy.typing import NDArray
@@ -21,7 +18,7 @@ from typing import Dict, List, Tuple
 def _missing_key(key: str) -> ValueError:
     """The error for a gains key the config does not carry at all.
 
-    Naming it is the whole point: nine keys are read here, and a bare "validation
+    Naming it is the whole point: five keys are read here, and a bare "validation
     failed" leaves the reader to find which one is missing by bisection.
     """
 
@@ -37,9 +34,9 @@ def _positive_scale(key: str, value, convert, reason: str) -> float:
     ``value`` is what the config says and ``convert`` puts it in those units (a
     percentage of ``amp_mean``, degrees to radians, or unchanged for a value already
     in them). Only ``None`` means unset, and the caller handles it: ``not value``
-    also caught 0, so a zero prior width or correlation length — a degenerate
-    distribution, not an absent one — was silently replaced by a default nobody
-    wrote, while NaN and infinity went through untouched.
+    also caught 0, so a zero prior width — a degenerate distribution, not an absent
+    one — was silently replaced by a default nobody wrote, while NaN and infinity
+    went through untouched.
     """
 
     if isinstance(value, (float, int)):
@@ -61,8 +58,7 @@ def _positive_scale(key: str, value, convert, reason: str) -> float:
 #: percent, so a prior that narrow is a claim about the array rather than an absence
 #: of one, and it is also the fit's own ceiling: the fitted parameter is always a
 #: standard normal ``z``, and the width is what carries it to the gain — through
-#: ``exp(amp_std z)`` in :class:`ConstGains` and through the Cholesky of an
-#: ``amp_std**2`` kernel in :class:`GPGains`. Either way a narrow prior is a short
+#: ``exp(amp_std z)`` in :class:`ConstGains`. A narrow prior is therefore a short
 #: lever, and the optimiser's step in ``z`` is set by ``opt.epsilon`` rather than by
 #: the gradient. (:class:`UnitaryGains` fits no gain and reads neither width.)
 DEFAULT_AMP_STD_PERCENT = 20.0
@@ -76,99 +72,13 @@ DEFAULT_AMP_STD_PERCENT = 20.0
 #: extra six decades buy nothing: no fit is sensitive to a 1.4 % tilt in the prior
 #: over the circle, and the full turn costs something. The phase is carried from the
 #: fitted standard normal ``z`` by ``sigma`` directly (``phase = mean + sigma z`` in
-#: :class:`ConstGains`, a ``sigma**2`` kernel in :class:`GPGains`), so the likelihood
-#: — ``2 pi``-periodic in the phase — is periodic in ``z`` with period
-#: ``2 pi / sigma``, which halves as sigma doubles, putting twice as many whole-turn
-#: copies of every optimum inside the prior's bulk. Half a turn also makes
-#: ``|z| <= 1`` cover the whole circle, so any phase, including one read from a
-#: measured gain, starts the fit inside the prior rather than tens of sigma outside
-#: it.
+#: :class:`ConstGains`), so the likelihood — ``2 pi``-periodic in the phase — is
+#: periodic in ``z`` with period ``2 pi / sigma``, which halves as sigma doubles,
+#: putting twice as many whole-turn copies of every optimum inside the prior's bulk.
+#: Half a turn also makes ``|z| <= 1`` cover the whole circle, so any phase,
+#: including one read from a measured gain, starts the fit inside the prior rather
+#: than tens of sigma outside it.
 DEFAULT_PHASE_STD_DEGREES = 180.0
-
-
-#: Jitter added to a gain Gaussian process kernel, as a fraction of the kernel's own
-#: variance, and the absolute floor it never drops below.
-#:
-#: :func:`~tabascal.gp.cholesky` and :func:`~tabascal.gp.resampling_kernel` add their
-#: jitter ABSOLUTELY, after the kernel has been scaled by the prior variance, so a
-#: fixed 1e-8 is a regularisation of ``1e-8 / var`` in the only terms that matter --
-#: and the squared-exponential Gram matrix on a fine node grid is numerically
-#: singular without one. Tying the jitter to the variance makes the factorisation
-#: scale-free: ``chol(var (SE + R I)) = sqrt(var) chol(SE + R I)``, so whether it
-#: succeeds depends on the node grid and ``R`` alone, and never on the units the
-#: prior happens to be written in.
-#:
-#: The floor keeps the historical absolute jitter wherever it is already the larger
-#: of the two, i.e. for every ``var`` below ``_GP_JITTER_FLOOR / _GP_JITTER_RELATIVE``
-#: = 1e-3. Narrow priors -- which is every prior that used to work -- are therefore
-#: regularised exactly as before, bit for bit.
-#:
-#: ``1e-5`` rather than something smaller: fp32 has ~1.2e-7 of relative precision, so
-#: a jitter at or below that is not represented in the assembled kernel at all. What
-#: it has to survive is not a large grid as such -- :func:`~tabascal.gp.get_times`
-#: lays down about two nodes per correlation length, and such a grid factorises at any
-#: size -- but the two kernels sharing one grid, which leaves the smoother of them
-#: carrying as many nodes per correlation length as the two correlation times differ
-#: by. Measured over a 1200 s observation with that ratio at its worst, 1e-7 already
-#: fails and 1e-6 is the first value to clear a 243-node grid, so 1e-5 is the smallest
-#: round value with a decade of headroom, while staying a factor of ~3 below the
-#: variance at which the floor would stop applying (which is what keeps every recorded
-#: reference on the floor, and so unchanged).
-_GP_JITTER_RELATIVE = 1e-5
-_GP_JITTER_FLOOR = 1e-8
-
-
-def gp_jitter(var: float) -> float:
-    """The jitter to add to a gain Gaussian process kernel of variance ``var``.
-
-    Never smaller than the absolute jitter the kernels were always given, so a prior
-    narrow enough for that to dominate is regularised exactly as it was before.
-    """
-
-    return max(_GP_JITTER_FLOOR, _GP_JITTER_RELATIVE * float(var))
-
-
-def check_gp_conditioning(
-    name: str, array: Array, corr_keys: List[str], n_g_times: int
-) -> Array:
-    """Refuse a gain Gaussian process the working precision cannot factorise.
-
-    The jitter above buys a wide margin but not an unlimited one. What exhausts it is
-    not the size of the node grid -- :func:`~tabascal.gp.get_times` always lays down
-    about two nodes per correlation length, and a grid built that way factorises at
-    any size -- but a kernel that is SMOOTH on the grid another kernel asked for. The
-    two share one grid, taken from the shorter correlation time, so the wider the two
-    correlation times are apart, the more nodes per correlation length the smoother
-    kernel carries and the faster its squared-exponential Gram matrix goes singular.
-    In single precision that comes back as a NaN Cholesky, which then flows silently
-    into the initial parameters and out through every gain the run reports.
-
-    So it is named here instead. ``corr_keys`` are the config keys that actually set
-    the grid -- whichever correlation time is the shorter, or both when they are
-    equal -- rather than the key belonging to the kernel that happened to fail:
-    lengthening the other one cannot coarsen the grid, so naming it would print a
-    remedy that does nothing.
-    """
-
-    if bool(jnp.all(jnp.isfinite(array))):
-        return array
-
-    precision = "double" if jax.config.read("jax_enable_x64") else "single"
-    named = " and ".join(f"gains.{key}" for key in corr_keys)
-    verb, pronoun = ("are", "them") if len(corr_keys) > 1 else ("is", "it")
-
-    raise ValueError(
-        f"The gain Gaussian process is too finely resolved to factorise in {precision} "
-        f"precision: {name} came back non-finite on a grid of {n_g_times} nodes. Both "
-        "gain kernels share one node grid, taken from whichever of "
-        "gains.amp_corr_time and gains.phase_corr_time is the shorter, so "
-        f"{named} {verb} asking for more gain resolution than can be carried here -- "
-        "and the further apart the two correlation times are, the more nodes per "
-        f"correlation length the smoother kernel has to carry. Lengthen {pronoun} "
-        "(null gives one correlation length over the whole observation), "
-        + ("" if precision == "double" else "or run in double precision (model.precision: double), ")
-        + "or fit a constant gain per antenna with gains:ConstGains instead."
-    )
 
 
 def validate_gain_scales(gains_config: Dict) -> Dict:
@@ -176,9 +86,9 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
 
     ``amp_std`` is given as a percentage of ``amp_mean`` and ``phase_std`` in
     degrees; both come back in the units the model works in — a fraction and
-    radians. Separated from :func:`gains_config_validation` so a gain component
-    with no Gaussian process behind it (:class:`ConstGains`) can read the prior
-    it does use without also carrying correlation lengths it does not.
+    radians. :class:`ConstGains` is the only component that reads them:
+    :class:`UnitaryGains` fits no gain and reads nothing from the gains section
+    at all.
 
     A key is defaulted when, and only when, it is ``None`` or absent. This is a
     BEHAVIOUR CHANGE for a config that writes a literal 0: ``r_seed: 0`` is now the
@@ -259,122 +169,39 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
     return gains_config
 
 
-def gains_config_validation(gains_config: Dict, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
+class UnitaryGains(Component):
+    """A perfect gain of 1 on every antenna, over the whole time--frequency grid.
 
-    def extent(x, dx):
-        ext = float(jnp.max(x) - jnp.min(x))
-        if ext == 0.0:
-            return float(dx)
-        else:
-            return ext
+    Nothing is fitted::
 
-    # Every key this function needs is read before any of them is written, scales
-    # included: a config missing one of them fails with nothing half-normalised
-    # behind it, exactly as it did before the scale half was split out.
-    try:
-        gains_config["r_seed"]
-        gains_config["amp_mean"]
-        gains_config["amp_std"]
-        gains_config["phase_mean"]
-        gains_config["phase_std"]
-        gp_amp_freq_l = gains_config["amp_corr_freq"]
-        gp_amp_time_l = gains_config["amp_corr_time"]
-        gp_phase_freq_l = gains_config["phase_corr_freq"]
-        gp_phase_time_l = gains_config["phase_corr_time"]
-    except KeyError as e:
-        raise _missing_key(e.args[0]) from e
+        vis_obs[p, q] = vis_ast[p, q] + vis_rfi[p, q]
 
-    gains_config = validate_gain_scales(gains_config)
-
-    # As with the prior widths, only an unset correlation length is defaulted. A zero
-    # one is a degenerate kernel — every sample independent of every other, and the
-    # Cholesky of a diagonal-only covariance — not a request for the default.
-    corr_reason = (
-        "It is the correlation length of the gain Gaussian process along that axis; "
-        "a zero length is a degenerate kernel. Set it to null for the extent of the "
-        "observation."
-    )
-
-    for key, value, x, dx in (
-        ("amp_corr_freq", gp_amp_freq_l, freqs, chan_width),
-        ("amp_corr_time", gp_amp_time_l, times, int_time),
-        ("phase_corr_freq", gp_phase_freq_l, freqs, chan_width),
-        ("phase_corr_time", gp_phase_time_l, times, int_time),
-    ):
-        if value is None: # Set Default
-            gains_config[key] = extent(x, dx)
-        else:
-            gains_config[key] = _positive_scale(key, value, float, corr_reason)
-
-    print()
-    print(f"Using Gains amplitude mean : {gains_config['amp_mean']:.1f}")
-    print(f"Using Gains amplitude std : {gains_config['amp_std']*100/gains_config['amp_mean']:.1f} %")
-    print(f"Using Gains amplitude corr_freq : {gains_config['amp_corr_freq']/1e3:.1f} kHz")
-    print(f"Using Gains amplitude corr_time : {gains_config['amp_corr_time']:.1f} s")
-    print()
-    print(f"Using Gains phase mean : {jnp.rad2deg(gains_config['phase_mean']):.1f} degrees")
-    print(f"Using Gains phase std : {jnp.rad2deg(gains_config['phase_std']):.1f} degrees")
-    print(f"Using Gains phase corr_freq : {gains_config['phase_corr_freq']/1e3:.1f} kHz")
-    print(f"Using Gains phase corr_time : {gains_config['phase_corr_time']:.1f} s")
-
-    return gains_config
-
-
-class BaseGPGains(Component):
+    Which is why it reads nothing from the ``gains`` section of the config: no
+    prior width, no mean and no seed applies to a gain that is fixed at unity.
+    """
 
     required_inputs = {
-        "vis_rfi": ("n_bl", "n_freq", "n_time"), 
-        "vis_ast": ("n_bl", "n_freq", "n_time")
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
+        "vis_ast": ("n_bl", "n_freq", "n_time"),
     }
     output_shapes = {
-        "gains": ("n_ant", "n_freq", "n_time"), 
-        "vis_obs": ("n_bl", "n_freq", "n_time")
+        "gains": ("n_ant", "n_freq", "n_time"),
+        "vis_obs": ("n_bl", "n_freq", "n_time"),
     }
     parameter_shapes = {}
 
     def setup(self, tab_config: TabConfig):
+        """All validation and error-prone operations here"""
+        try:
+            self.n_ant = tab_config.n_ant
+            self.n_bl = tab_config.n_bl
+            self.n_freq = tab_config.n_freq
+            self.n_time = tab_config.n_time
 
-        # Validate config and set defaults
-        gains_config = gains_config_validation(
-            tab_config.args["gains"], tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
+            self._set_outputs()
 
-        # Random seed used for random sampling such as initial parameters drawn from the prior
-        self.r_seed = gains_config["r_seed"]
-        # Basic shape parameters
-        self.n_ant = tab_config.n_ant
-        self.n_bl = tab_config.n_bl
-        self.n_freq = tab_config.n_freq
-        self.n_freq_fine = tab_config.n_freq_fine
-        self.n_int_freq = tab_config.n_int_freq
-        self.n_time = tab_config.n_time
-        self.n_time_fine = tab_config.n_time_fine
-        self.n_int_time = tab_config.n_int_time
-
-        self.a1 = tab_config.a1
-        self.a2 = tab_config.a2
-
-        # Domain arrays needed to calculate Gaussian process parameters
-        self.freqs = tab_config.freqs
-        self.chan_width = tab_config.chan_width
-        self.times = tab_config.times
-        self.int_time = tab_config.int_time
-
-        self.gp_amp_mean = gains_config["amp_mean"]
-        self.gp_amp_std = gains_config["amp_std"]
-        self.amp_corr_freq = gains_config["amp_corr_freq"]
-        self.amp_corr_time = gains_config["amp_corr_time"]
-        self.gp_phase_mean = gains_config["phase_mean"]
-        self.gp_phase_std = gains_config["phase_std"]
-        self.phase_corr_freq = gains_config["phase_corr_freq"]
-        self.phase_corr_time = gains_config["phase_corr_time"]
-
-    def build_set_params(self):
-
-        def set_params(params: Dict) -> Dict:
-
-            return params
-
-        return set_params
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
     def _set_outputs(self):
 
@@ -382,35 +209,6 @@ class BaseGPGains(Component):
             "gains": jnp.ones((self.n_ant, self.n_freq, self.n_time), dtype=complex),
             "vis_obs": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
-
-    def _compute_gp_params(self):
-        pass
-
-    def _compute_prior_params(self):
-        pass
-
-    def _compute_init_params(self):
-        pass
-
-class UnitaryGains(BaseGPGains):
-
-    parameters = {}
-
-    def setup(self, tab_config: TabConfig):
-        """All validation and error-prone operations here"""
-        try:
-            super().setup(tab_config)
-
-            # Validate dimensions
-            self._set_outputs()
-            self._validate_dimensions()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def _validate_dimensions(self):
-        """Ensure all setup operations completed successfully"""
-        pass
 
     def build_forward(self):
         gains = self.state_outputs["gains"]
@@ -421,218 +219,6 @@ class UnitaryGains(BaseGPGains):
             return state
 
         return forward
-
-
-class GPGains(BaseGPGains):
-
-    parameters = {
-        "gains_amp_induce_base": ("n_ant", "n_g_times"),
-        "gains_phase_induce_base": ("n_ant-1", "n_g_times"),
-    }
-
-    def setup(self, tab_config: TabConfig):
-        """All validation and error-prone operations here"""
-        try:
-            super().setup(tab_config)
-
-            self._set_outputs()
-            self._compute_gp_params()
-            self._compute_prior_params()
-            self._compute_init_params()
-            # Validate dimensions
-            self._validate_dimensions()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-
-    def build_set_params(self):
-
-        def set_params(params):
-
-            params["gains_amp_induce_base"] = standard_normal("gains_amp_induce_base", (self.n_ant, self.n_freq, self.n_g_times))
-            params["gains_phase_induce_base"] = standard_normal("gains_phase_induce_base", (self.n_ant-1, self.n_freq, self.n_g_times))
-
-            return params
-
-        return set_params
-
-    def build_constants(self):
-        return {
-            "resample_amp": self.resample_amp,
-            "L_gains_amp": self.L_gains_amp,
-            "mu_gains_amp": self.mu_gains_amp,
-            "resample_phase": self.resample_phase,
-            "L_gains_phase": self.L_gains_phase,
-            "mu_gains_phase": self.mu_gains_phase,
-        }
-
-    def build_forward(self):
-        """Return pure, JIT-compatible function"""
-        prefix = self.prefix
-        forward_transform = self.forward_transform
-        gp_amp_mean = self.gp_amp_mean
-        gp_phase_mean = self.gp_phase_mean
-        a1 = self.a1
-        a2 = self.a2
-        n_freq = self.n_freq
-        n_time = self.n_time
-
-        def forward(params, state, constants):
-
-            interp = lambda R, x, mu: jnp.einsum("ij,afj->afi", R, x - mu) + mu
-
-            gains_amp_induce_base = params["gains_amp_induce_base"]
-            gains_phase_induce_base = params["gains_phase_induce_base"]
-
-            L_gains_amp = constants[f"{prefix}/L_gains_amp"]
-            mu_gains_amp = constants[f"{prefix}/mu_gains_amp"]
-            L_gains_phase = constants[f"{prefix}/L_gains_phase"]
-            mu_gains_phase = constants[f"{prefix}/mu_gains_phase"]
-            resample_amp = constants[f"{prefix}/resample_amp"]
-            resample_phase = constants[f"{prefix}/resample_phase"]
-
-            gains_amp_induce = forward_transform(gains_amp_induce_base, L_gains_amp, mu_gains_amp)
-            gains_phase_induce = forward_transform(gains_phase_induce_base, L_gains_phase, mu_gains_phase)
-
-            gains_amp = interp(resample_amp, gains_amp_induce, gp_amp_mean)
-            gains_phase = jnp.concatenate([interp(resample_phase, gains_phase_induce, gp_phase_mean), jnp.zeros((1, n_freq, n_time))], axis=0)
-
-            gains = gains_amp * jnp.exp(1.0j * gains_phase)
-
-            vis_obs = apply_gains(gains, state["vis_rfi"] + state["vis_ast"], a1, a2)
-            # vis_obs = apply_gains(gains, state["vis_rfi"], a1, a2) + state["vis_ast"]
-
-            state = {**state, "vis_obs": vis_obs, "gains": gains}
-            return state
-
-        return forward
-
-    def _compute_gp_params(self):
-
-        self.g_times = get_times(self.times, min(self.amp_corr_time, self.phase_corr_time))
-        self.n_g_times = len(self.g_times)
-
-        # The keys that actually set the grid, for the error in check_gp_conditioning:
-        # whichever correlation time is the shorter, or both when they are equal.
-        # Lengthening the other one cannot coarsen the grid.
-        grid_corr_time = min(self.amp_corr_time, self.phase_corr_time)
-        self.grid_corr_keys = [
-            key
-            for key, value in (
-                ("amp_corr_time", self.amp_corr_time),
-                ("phase_corr_time", self.phase_corr_time),
-            )
-            if value == grid_corr_time
-        ]
-
-        self.resample_amp = check_gp_conditioning(
-            "the amplitude resampling kernel",
-            resampling_kernel(
-                self.g_times,
-                self.times,
-                self.gp_amp_std**2,
-                self.amp_corr_time,
-                gp_jitter(self.gp_amp_std**2),
-            ),
-            self.grid_corr_keys,
-            self.n_g_times,
-        )
-        self.resample_phase = check_gp_conditioning(
-            "the phase resampling kernel",
-            resampling_kernel(
-                self.g_times,
-                self.times,
-                self.gp_phase_std**2,
-                self.phase_corr_time,
-                gp_jitter(self.gp_phase_std**2),
-            ),
-            self.grid_corr_keys,
-            self.n_g_times,
-        )
-
-    def _compute_prior_params(self):
-
-        self.L_gains_amp = check_gp_conditioning(
-            "the amplitude Cholesky",
-            cholesky(
-                self.g_times,
-                self.gp_amp_std**2,
-                self.amp_corr_time,
-                gp_jitter(self.gp_amp_std**2),
-            ),
-            self.grid_corr_keys,
-            self.n_g_times,
-        )
-        self.mu_gains_amp = self.gp_amp_mean * jnp.ones(
-            (self.n_ant, self.n_freq, self.n_g_times)
-        )
-
-        self.L_gains_phase = check_gp_conditioning(
-            "the phase Cholesky",
-            cholesky(
-                self.g_times,
-                self.gp_phase_std**2,
-                self.phase_corr_time,
-                gp_jitter(self.gp_phase_std**2),
-            ),
-            self.grid_corr_keys,
-            self.n_g_times,
-        )
-        self.mu_gains_phase = self.gp_phase_mean * jnp.ones(
-            (self.n_ant-1, self.n_freq, self.n_g_times)
-        )
-
-    def forward_transform(self, base_params: Array, L: Array, mu: Array) -> Array:
-
-        affine_same_scale = lambda _base_params, _mu: affine_transform_full(_base_params, L, _mu)
-        params = vmap(vmap(affine_same_scale))(base_params, mu)
-
-        return params
-
-    def inv_transform(self, params: Array, L: Array, mu: Array) -> Array:
-
-        inv_affine_same_scale = lambda centred_params: jnp.linalg.solve(L, centred_params)
-        base_params = vmap(vmap(inv_affine_same_scale))(params - mu)
-
-        return base_params
-
-    def _compute_init_params(self):
-
-        self.init_gains_amp_induce = self.mu_gains_amp
-        self.init_gains_amp_induce_base = self.inv_transform(
-            self.init_gains_amp_induce, self.L_gains_amp, self.mu_gains_amp
-        )
-
-        self.init_gains_phase_induce = self.mu_gains_phase
-        self.init_gains_phase_induce_base = self.inv_transform(
-            self.init_gains_phase_induce, self.L_gains_phase, self.mu_gains_phase
-        )
-
-        self.init_params = {
-            "gains_amp_induce": self.init_gains_amp_induce,
-            "gains_phase_induce": self.init_gains_phase_induce,
-        }
-        self.init_params_base = {
-            "gains_amp_induce_base": self.init_gains_amp_induce_base,
-            "gains_phase_induce_base": self.init_gains_phase_induce_base,
-        }
-
-    def _validate_dimensions(self):
-        """Ensure all setup operations completed successfully"""
-
-        amp_shape = (self.n_ant, self.n_freq, self.n_g_times)
-        phase_shape = (self.n_ant-1, self.n_freq, self.n_g_times)
-
-        assert_attr_shape(self, "mu_gains_amp", amp_shape)
-        assert_attr_shape(self, "L_gains_amp", (self.n_g_times, self.n_g_times))
-        assert_attr_shape(self, "init_gains_amp_induce", amp_shape)
-        assert_attr_shape(self, "init_gains_amp_induce_base", amp_shape)
-
-        assert_attr_shape(self, "mu_gains_phase", phase_shape)
-        assert_attr_shape(self, "L_gains_amp", (self.n_g_times, self.n_g_times))
-        assert_attr_shape(self, "init_gains_phase_induce", phase_shape)
-        assert_attr_shape(self, "init_gains_phase_induce_base", phase_shape)
 
 
 #: Relative deviation from the reduced gain above which a calibration table is
@@ -852,8 +438,9 @@ class ConstGains(Component):
 
         vis_obs[p, q] = g_p conj(g_q) (vis_ast[p, q] + vis_rfi[p, q])
 
-    Unlike a GP gain this adds only ``2 n_ant - 2`` parameters (``2 n_ant - 1`` with
-    the flux scale freed), and unlike a *fixed* gain it is constrained by the data.
+    Unlike a gain that varies over the observation this adds only ``2 n_ant - 2``
+    parameters (``2 n_ant - 1`` with the flux scale freed), and unlike a *fixed* gain
+    it is constrained by the data.
 
     **What has to be true for it to be identifiable** (issue #124). A gain is only
     constrained by a model term the gain cannot deform:
@@ -900,9 +487,9 @@ class ConstGains(Component):
     much better starting point than the prior mean. Any such gain is *projected* into
     the gauge above rather than taken as given.
 
-    Deliberately not a :class:`BaseGPGains` subclass (issue #129): there is no
-    Gaussian process here, so it binds the observation shapes and the amplitude and
-    phase scales of the prior and nothing else.
+    It binds the observation shapes and the amplitude and phase scales of the prior,
+    and nothing else: the correlation lengths that used to sit beside them belonged
+    to the Gaussian process gain removed in #129, and a constant gain has none.
     """
 
     required_inputs = {

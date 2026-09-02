@@ -566,60 +566,12 @@ ast_vis_configs = []
 # Gains components — upstream fixed to FixedOrbit
 # ---------------------------------------------------------------------------
 
-gains_configs = [
-    # UnitaryGains covered by RiemannVis
-    pytest.param(
-        PipelineTestConfig(
-            "sim_target_8A.yaml",
-            [
-                "trajectory:FixedOrbit",
-                "rfi_signal:ComplexRFIVarAnt",
-                "rfi_vis:RiemannVis",
-                "ast_vis:GPVisAst",
-                "gains:GPGains",
-            ],
-            config_overrides={
-                "gains": {
-                    "amp_mean": 1.0,
-                    "amp_std": 1.0,
-                    "phase_mean": 0.0,
-                    "phase_std": 1.0,
-                    "amp_corr_time": None,
-                    "phase_corr_time": None,
-                    "amp_corr_freq": None,
-                    "phase_corr_freq": None,
-                    "r_seed": 123,
-                },
-            },
-            chi2_ref=0.8874142592424018,
-            # Truth-based metrics at the opt point; same scheme as RiemannVis
-            # (ast/rfi assert NRMSE(noise) against the noise floor + bias_significance as a
-            # "no significant coherent bias" guard). Here GPGains fits the gains and recovers
-            # them, so gains keeps an RMSE bound with headroom for the fp32 fit residual.
-            #
-            # Measured opt-point values, re-recorded for the exact astronomical fringe rate on
-            # all three platforms in both precisions. Unlike the UnitaryGains cases, GPGains
-            # actually fits the gains, so gains RMSE is a real fitted residual here rather
-            # than an exact zero:
-            #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | gains RMSE | chi2
-            #   double  ARM    |      0.2617        1.1     |      0.4279       0.2     |  5.328e-4  | 0.8874142592
-            #   double  x86    |      0.2617        1.1     |      0.4279       0.2     |  5.328e-4  | 0.8874142591
-            #   double  GPU    |      0.2617        1.1     |      0.4279       0.2     |  5.328e-4  | 0.8874142591
-            #   single  ARM    |      0.2617        1.1     |      0.4279       0.2     |  5.334e-4  | 0.8874352574
-            #   single  x86    |      0.2617        1.1     |      0.4279       0.2     |  5.333e-4  | 0.8874352574
-            #   single  GPU    |      0.2617        1.1     |      0.4279       0.2     |  5.334e-4  | 0.8874353170
-            # The gains RMSE bound keeps ~2x headroom over the measured fp32 residual, which
-            # is why one bound covers both precisions (fp64 5.328e-4, fp32 5.334e-4).
-            # Widest chi2 spread across the three platforms: 1.6e-10 double, 6.7e-8 single.
-            metrics_ref={
-                "ast": {"NRMSE(noise)": (0.24, 0.28), "bias_significance": (0.0, 2.0)},
-                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
-                "gains": {"RMSE": (0.0, 1e-3)},
-            },
-        ),
-        id="GPGains",
-    ),
-]
+# UnitaryGains is exercised by every case above -- it is the gains component they
+# all use, and each of them asserts the recovered gains against the truth. The one
+# case that lived here fitted the Gaussian process gain removed in #129, and its
+# references went with it; ConstGains is covered by its own tests, up to an
+# end-to-end MAP fit against a known gain.
+gains_configs = []
 
 
 # ---------------------------------------------------------------------------

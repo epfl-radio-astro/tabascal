@@ -8,20 +8,10 @@ $$\boldsymbol{y} \sim \mathcal{N}(\boldsymbol{0}, \boldsymbol{C}),$$
 
 where $\boldsymbol{y}$ is the signal, $\mathcal{N}$ represents the Normal/Gaussian distribution, $\boldsymbol{0}$ is the zero vector/function, and $\boldsymbol{C}$ is the covariance matrix/function.
 
-In TABASCAL, our forward model is, in general, a non-linear model. Therefore the standard analytical form to get the posterior distrbution over the signal(s) cannot be used. The standard form can be seen as a form of probabilistic interpolation though. Therefore, we can use the estimator for the mean to interpolate from a coarse grain solution to a required sampling resolution. This is useful for reducing the parameter space and also the correlation between parameters.  
-
-<!-- For reference, this would be
-
-$$\boldsymbol{y}(t_b) \sim \mathcal{N} \left( \boldsymbol{C}_{t_bt_a} \boldsymbol{C}_{t_at_a}^{-1} \boldsymbol{y}(t_a),  \boldsymbol{C}_{t_bt_b} - \boldsymbol{C}_{t_bt_a} \boldsymbol{C}_{t_at_a}^{-1} \boldsymbol{C}_{t_bt_a} \right)$$ -->
-
-## Signal-domain models
-
-When modelling the our signal in its own space, i.e. the signal domain, we can use a select number of locations, $\boldsymbol{t}_a$, where we fit for the signal values, $\boldsymbol{y}_a$. From these, we can use the standard GP mean estimator to interpolate the signal to the required locations $\boldsymbol{t}_b$ and get interpolated signal values, $\boldsymbol{y}_b$. The interpolation formula is
-
-$$\boldsymbol{y}_b = \boldsymbol{C}_{ba} \boldsymbol{C}_{aa}^{-1} \boldsymbol{y}_a,$$
-
-where $\boldsymbol{C}_{aa}$ is the covariance matrix formed by evaluating the covariance function between all combinations of positions in $\boldsymbol{t}_a$ and $\boldsymbol{C}_{ba}$ is the covariance matrix formed by evaluating the covariance function between all combinations of the locations $\boldsymbol{t}_b$ and $\boldsymbol{t}_a$.
+In TABASCAL, our forward model is, in general, a non-linear model. Therefore the standard analytical form to get the posterior distrbution over the signal(s) cannot be used, and the GP enters as a prior that the fit has to carry rather than as something that can be conditioned on in closed form.
 
 ## Fourier-domain models
 
-For most cases the covariance function used to model the signal is kept stationary. This means that the same covariance function does not change depending on the location and is only dependent on the distance between locations. For this case, The signal can be modelled in the Fourier-domain more efficiently. The covariance function of the signal is then given by its power spectrum. Additionally, the covariance matrix is now diagonal in this space with the power spectrum representing the variance.
+Every signal GP in TABASCAL is modelled in the Fourier domain. For most cases the covariance function used to model the signal is kept stationary. This means that the same covariance function does not change depending on the location and is only dependent on the distance between locations. For this case, the signal can be modelled in the Fourier-domain more efficiently. The covariance function of the signal is then given by its power spectrum. Additionally, the covariance matrix is now diagonal in this space with the power spectrum representing the variance.
+
+That leaves the parameters uncorrelated under the prior, and it costs a fast Fourier transform per evaluation rather than a factorisation of a dense covariance matrix — which is also why nothing here builds one. The last model that did, the Gaussian process gain `gains:GPGains`, was removed in #129; the components that remain — {class}`~tabascal.components.rfi_signal.ComplexRFIVarAnt`, {class}`~tabascal.components.rfi_signal.ComplexRFIConstAnt` and {class}`~tabascal.components.ast_vis.GPVisAst` — are all Fourier-domain.
