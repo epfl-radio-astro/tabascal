@@ -3,10 +3,16 @@
 TABASCAL's runtime and memory use are guarded by
 [ReFrame](https://reframe-hpc.readthedocs.io/) checks in
 [`ci/reframe/tabascal_perf_check.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/ci/reframe/tabascal_perf_check.py).
-They run on the CSCS Daint GH200 partition from
-[`ci/cscs.yml`](https://github.com/epfl-radio-astro/tabascal/blob/main/ci/cscs.yml)
-and complement the [pipeline tests](pipeline_tests.md): the pipeline tests catch
-a change in *what* TABASCAL infers, these catch a change in *how long it takes*.
+The checks themselves are system-generic — they declare a `generic:default`
+partition and run anywhere ReFrame does, a dev machine included (see [Running
+the checks directly](#running-the-checks-directly)); it is the *reference
+values* that belong to a node type. In this project's CI they run on, and their
+references were measured on, the CSCS Daint GH200 partition defined in
+[`ci/cscs.yml`](https://github.com/epfl-radio-astro/tabascal/blob/main/ci/cscs.yml).
+
+They complement the [pipeline tests](pipeline_tests.md): the pipeline tests
+catch a change in *what* TABASCAL infers, these catch a change in *how long it
+takes*.
 
 ## What is checked
 
@@ -26,7 +32,9 @@ References are keyed by `(variant, precision)` and are only meaningful on the
 node type they were measured on. Sanity therefore requires the run to have used
 exactly the expected number of GPUs of exactly the expected kind (`GH200`) —
 anything else fails rather than being silently compared against timings it
-cannot be compared against.
+cannot be compared against. That gate is on the *comparison*, not on running the
+checks: elsewhere, run them with `-S strict_check=0` (below) to get the metrics
+reported without being asserted.
 
 ## Reproducing a regression locally
 

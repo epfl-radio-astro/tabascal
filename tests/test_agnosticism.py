@@ -7,16 +7,23 @@ array turns a general tool into that array's tool, and a machine the authors
 happen to develop on is not a property of the software at all. Review catches
 most of that; a grep catches the rest, which is what this is.
 
+Two standing rules, both encoded below rather than left to judgement:
+
+* **Generic first, instrument in parentheses.** A page that shows one
+  instrument's actual data may name it -- "real data from a low-frequency
+  aperture array (EDA2)" -- because the reader is entitled to know what they are
+  looking at. The generic description leads and the name goes in brackets after
+  it; bare "on EDA2" prose still fails, on the showcase pages as everywhere else.
+* **A machine name may be an identifier.** ``ci/`` and ``docs/performance.md``
+  configure and document real infrastructure -- a GitLab runner, a ReFrame
+  system, a bencher testbed -- where the cluster name *is* the identifier and
+  renaming it breaks the job rather than generalising it. They are exempt from
+  the cluster names only; the array name is still forbidden there.
+
 The scan is over what ``git ls-files`` reports, not over the working tree: an
 untracked scratch file is not something a reviewer can be asked to rewrite, and
 a new top-level directory should be covered the day it is committed rather than
 the day someone remembers to add it here.
-
-``ci/`` is scanned for the array name but not for the cluster names. Those files
-configure real infrastructure -- a GitLab runner, a ReFrame system, a bencher
-testbed -- where the machine name *is* the identifier and renaming it breaks the
-job rather than generalising it. ``docs/performance.md`` documents that same
-infrastructure and is exempt for the same reason.
 """
 
 import re
@@ -39,12 +46,20 @@ _CLUSTER = (
     re.compile(r"(?<![A-Za-z0-9])cscs(?![A-Za-z])", re.IGNORECASE),
 )
 
+# Pages carrying a figure made from one instrument's actual data, which may
+# therefore name it in parentheses after the generic description. Keep this
+# short: it is for content that *shows* the instrument's data, not for prose
+# that merely mentions it.
+_ARRAY_IN_PARENTHESES_OK = {
+    "README.md",
+    "docs/example.md",
+}
+
 # Where the cluster names are load-bearing identifiers rather than references.
-# Keep this short, and say why for every entry.
 _CLUSTER_EXEMPT_PREFIXES = (
     # The CI pipeline, the ReFrame system definition and the performance
     # references keyed by partition: `daint:gpu`, `.container-runner-daint-gh200`,
-    # `$CSCS_REGISTRY_PATH`. The array name is still forbidden here.
+    # `$CSCS_REGISTRY_PATH`.
     "ci/",
 )
 _CLUSTER_EXEMPT_FILES = {
@@ -52,6 +67,8 @@ _CLUSTER_EXEMPT_FILES = {
     # the benchmark history is stored under.
     "docs/performance.md",
 }
+
+_PARENTHESISED = re.compile(r"\(([^()]*)\)")
 
 # This file has to spell the names out to look for them.
 _SELF = Path(__file__).relative_to(_REPO).as_posix()
@@ -71,18 +88,32 @@ def tracked_files(repo=_REPO):
     return [rel for rel in out.decode().split("\0") if rel and rel != _SELF]
 
 
-def patterns_for(rel):
-    """The names forbidden in this file. Not every file is held to all of them."""
+def cluster_patterns_for(rel):
+    """The cluster names forbidden in this file, which may be none of them."""
 
     if rel in _CLUSTER_EXEMPT_FILES or rel.startswith(_CLUSTER_EXEMPT_PREFIXES):
-        return (_ARRAY,)
-    return (_ARRAY, *_CLUSTER)
+        return ()
+    return _CLUSTER
+
+
+def _array_offends(line, rel):
+    """Is the array named here in a way the generic-first rule does not allow?"""
+
+    allowed = (
+        [m.span(1) for m in _PARENTHESISED.finditer(line)]
+        if rel in _ARRAY_IN_PARENTHESES_OK
+        else []
+    )
+    return any(
+        not any(lo <= m.start() and m.end() <= hi for lo, hi in allowed)
+        for m in _ARRAY.finditer(line)
+    )
 
 
 def _hits(text, rel):
-    patterns = patterns_for(rel)
+    cluster = cluster_patterns_for(rel)
     for lineno, line in enumerate(text.splitlines(), start=1):
-        if any(pattern.search(line) for pattern in patterns):
+        if _array_offends(line, rel) or any(p.search(line) for p in cluster):
             yield f"{rel}:{lineno}: {line.strip()[:120]}"
 
 
@@ -106,20 +137,25 @@ def test_no_file_contents_name_a_telescope_or_a_cluster():
 
     assert not found, (
         "TABASCAL's tree stays telescope- and observation-agnostic; these lines "
-        "name a specific array, cluster or computing centre. Rewrite them "
-        "generically (quote the measurement, not the array), or -- if the name "
-        "is a load-bearing identifier -- exempt the file with a reason:\n  "
-        + "\n  ".join(found)
+        "name a specific array, cluster or computing centre. Lead with the "
+        "generic description and quote the measurement, not the array. A page "
+        "showing one instrument's actual data may name it in parentheses after "
+        "the generic phrase; a load-bearing machine identifier is exempted by "
+        "file, with a reason:\n  " + "\n  ".join(found)
     )
 
 
 def test_no_file_paths_name_a_telescope_or_a_cluster():
-    """A generic caption over ``images/<array>_result.svg`` is still a hit."""
+    """A generic caption over ``images/<array>_result.svg`` is still a hit.
+
+    Paths get no parenthesis rule -- there is nothing in a filename for the
+    generic description to lead with.
+    """
 
     found = [
         rel
         for rel in tracked_files()
-        if any(pattern.search(rel) for pattern in patterns_for(rel))
+        if _ARRAY.search(rel) or any(p.search(rel) for p in cluster_patterns_for(rel))
     ]
 
     assert not found, "these paths name a specific array or cluster:\n  " + "\n  ".join(
@@ -157,3 +193,26 @@ def test_the_cluster_exemption_does_not_extend_to_the_array_name():
     for rel in ("ci/cscs.yml", "ci/reframe/data/tab_target.yaml", "docs/performance.md"):
         assert list(_hits("runs on daint:gpu at CSCS", rel)) == []
         assert list(_hits("recorded on EDA2", rel)) != []
+
+
+class TestTheGenericFirstRule:
+    """The showcase pages may bracket the instrument, not lead with it."""
+
+    def test_a_parenthesised_instrument_is_allowed_where_the_data_is_shown(self):
+        line = "real data from a low-frequency aperture array (EDA2): 151 MHz"
+
+        assert list(_hits(line, "README.md")) == []
+        assert list(_hits(line, "docs/example.md")) == []
+
+    def test_bare_prose_still_fails_on_those_same_pages(self):
+        assert list(_hits("A result on real EDA2 data", "README.md")) != []
+        assert list(_hits("the EDA2 observation", "docs/example.md")) != []
+
+    def test_the_allowance_does_not_leak_to_other_files(self):
+        line = "measured on a low-frequency array (EDA2)"
+
+        assert list(_hits(line, "docs/config.md")) != []
+        assert list(_hits(line, "tabascal/noise.py")) != []
+
+    def test_the_showcase_pages_are_still_held_to_the_cluster_names(self):
+        assert list(_hits("benchmarked on daint", "README.md")) != []

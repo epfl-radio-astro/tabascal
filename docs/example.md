@@ -1,6 +1,6 @@
 # Example result
 
-A run on real data from a **low-frequency aperture array**: a 151 MHz
+A run on real data from a **low-frequency aperture array (EDA2)**: a 151 MHz
 observation in XX, crossed by several Starlink satellites.
 
 ![Starlink subtraction in a real observation](images/starlink_subtraction.svg)
