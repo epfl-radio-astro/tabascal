@@ -7,7 +7,6 @@ variables:
   # check (TabascalMultiGpuPerfCheck) unsets this in its own run script to pick
   # up every GPU of the node.
   CUDA_VISIBLE_DEVICES: "0"
-  SLURM_TIMELIMIT: '00:30:00'
 
 stages:
   - build
@@ -37,21 +36,24 @@ test_job:
   extends: .container-runner-daint-gh200
   parallel:
     matrix:
+      # One job per JAX build and precision, so a failure names its precision.
       - JAX_VERSION: ["0.6.0", "latest"]
+        PRECISION: ["single", "double"]
   image: $PERSIST_IMAGE_NAME
   script:
     - . /opt/conda/etc/profile.d/conda.sh
     - conda activate tab
     - cd /tabascal/src
-    # Run the suite in both precisions; the --x64 flag drives jax_enable_x64.
-    # Name tests/ explicitly: --x64 is defined in tests/conftest.py and since pytest
-    # 9.1 a bare `pytest` (no path) loads that subdirectory conftest too late to
-    # register the option, failing with "unrecognized arguments: --x64".
-    - python3 -m pytest tests/ --x64 false   # single precision (fp32)
-    - python3 -m pytest tests/ --x64 true    # double precision (fp64)
+    # --x64 drives jax_enable_x64. Name tests/ explicitly: the option is defined
+    # in tests/conftest.py and since pytest 9.1 a bare `pytest` (no path) loads
+    # that conftest too late to register it ("unrecognized arguments: --x64").
+    - python3 -m pytest tests/ --x64 $([ "$PRECISION" = double ] && echo true || echo false)
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
+    # Job level on purpose: CSCS's .f7t-runner template sets a 15-minute
+    # SLURM_TIMELIMIT at job level, which overrides a pipeline-global value.
+    SLURM_TIMELIMIT: '00:30:00'
     PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
 
 .perf_job_template:
@@ -85,6 +87,7 @@ test_job:
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_NTASKS: 1
+    SLURM_TIMELIMIT: '00:30:00'  # job level, see test_job
     PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/tabascal:$CI_COMMIT_SHORT_SHA-jax$JAX_VERSION
     BENCHER_API_TOKEN: $BENCHER_API_TOKEN
 
