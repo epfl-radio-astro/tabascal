@@ -233,9 +233,9 @@ class TestBaseConfigIntegrationSampleCounts:
         The check runs on every load, so a section that is merely empty has to
         pass through it — not raise a ``TypeError`` from the rename machinery
         about a config that contains no renamed key at all. What an empty
-        section then does to the merged config is ``deep_update``'s business
-        (it replaces the section wholesale, so the defaults under it are lost);
-        this check must not be what reports it.
+        section means for the merged config is ``deep_update``'s business (it
+        reads as no override, leaving the defaults under it in place — see
+        ``tests/test_config_yaml.py``); this check only has to survive one.
         """
 
         check_renamed_keys({"rfi": None}, "user.yaml")

@@ -2,6 +2,8 @@
 
 TABASCAL makes use of a configuration file to fully define the model used, what satellites to include and what inference to do. The configuration file is in YAML format using only the most basic constructs and types. The configuration file is broken up into multiple sections. Each section will be described below.
 
+Your file is merged onto the base configuration that ships with TABASCAL, key by key, so only the keys you want to change have to appear in it — everything else takes the documented default. A section header written with nothing under it is therefore inert: `rfi:` alone, like `rfi: null`, leaves the whole `rfi` section at its defaults rather than emptying it. Setting an individual key to `null` is a different thing entirely — it is a value, and the sections below say what each one means (`rfi.min_elevation: null` disables the elevation mask, `data.noise: null` reads the noise from the measurement set). Which of the two you get follows the default the key has: an empty value is ignored only where the default is a section of further keys, so a key whose default is a single value or a list — `satellites.norad_ids:`, written with nothing after it — is `null` like any other. Leaving a section empty, or setting it to `null`, never removes its defaults.
+
 ## Model
 
 The forward model used by TABASCAL is modular and configurable directly in the `model` section of the configuration file. An example of this section is shown below.
