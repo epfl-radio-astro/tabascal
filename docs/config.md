@@ -85,8 +85,9 @@ error under `single`, so set `model.precision: double` to use them:
 * `trajectory:Orbit`
 
 Both `rfi_vis` kernels (`RiemannVis` and the FFI `RiemannVisFFI`, see [RFI-visibility
-kernels](kernels.md)) and the GP astronomical and gains components run in either
-precision.
+kernels](kernels.md)) run in either precision, as do the astronomical Gaussian
+process `ast_vis:GPVisAst` and both gain components, `gains:ConstGains` and
+`gains:UnitaryGains`.
 
 ## Data
 
