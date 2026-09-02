@@ -18,6 +18,7 @@ from tabascal.components.gains import (
     gp_jitter,
     validate_gain_scales,
 )
+from tabascal.gp import base_kernel
 
 from .conftest import make_constants, assert_transform_roundtrip
 
@@ -532,6 +533,59 @@ class TestTheJitterIsRelativeAboveTheFloor:
         nothing beyond it.
         """
         assert gp_jitter(std**2) == _GP_JITTER_FLOOR == 1e-8, label
+
+
+class TestTheJitterStaysOffTheResamplingMatrix:
+    """The gain resampling matrix is a CROSS-covariance and must carry no jitter.
+
+    It is never inverted or factorised — it multiplies the node values on their way
+    to the observation grid — so a diagonal added to it is not regularisation but a
+    bias on every gain the run reports. ``gp.resampling_kernel`` used to add one
+    whenever the matrix came out square, which the node grid and the observation grid
+    do whenever they happen to have the same length: ``gp.get_times`` lays down about
+    two nodes per correlation length, so a correlation time of about twice the
+    integration time is enough. That is what the 1200 s, 240-sample observation below
+    gets at 10.1 s, and the jitter it attracted was an ABSOLUTE 1e-3 — a hundred times
+    the jitter the node covariance is regularised with at these widths.
+
+    See ``tests/test_gp.py`` for the kernels themselves; this is the reachability.
+    """
+
+    CORR_TIME = 10.1
+
+    def make_comp(self):
+        cfg = make_gains_config(
+            n_ant=4, n_freq=2, n_time=240,
+            amp_corr_time=self.CORR_TIME, phase_corr_time=self.CORR_TIME,
+        )
+        cfg.times = jnp.linspace(0.0, 1200.0, 240)
+        cfg.int_time = float(cfg.times[1] - cfg.times[0])
+        comp = GPGains()
+        comp.setup(cfg)
+
+        return comp
+
+    def test_the_node_grid_can_be_as_long_as_the_observation(self):
+        comp = self.make_comp()
+
+        assert comp.n_g_times == len(comp.times)
+
+    @pytest.mark.parametrize("name, std_attr", [
+        ("resample_amp", "gp_amp_std"), ("resample_phase", "gp_phase_std"),
+    ])
+    def test_the_resampling_matrices_are_the_bare_conditional(self, name, std_attr, exact_rtol):
+        comp = self.make_comp()
+        var = getattr(comp, std_attr) ** 2
+        # K_s K^-1, with the jitter on the inverted matrix alone. base_kernel takes no
+        # jitter at all, so the reference cannot inherit the defect under test.
+        reference = base_kernel(comp.g_times, comp.times, var, self.CORR_TIME) @ jnp.linalg.inv(
+            base_kernel(comp.g_times, comp.g_times, var, self.CORR_TIME)
+            + gp_jitter(var) * jnp.eye(comp.n_g_times)
+        )
+
+        difference = jnp.max(jnp.abs(getattr(comp, name) - reference))
+
+        assert float(difference) <= exact_rtol * float(jnp.max(jnp.abs(reference)))
 
 
 class TestAnUnfactorisableGPIsNamed:

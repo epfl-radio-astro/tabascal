@@ -22,20 +22,33 @@ def cholesky(x_in, var, l, noise=1e-8):
     return L
 
 
-def kernel(x, x_, var, l, noise=1e-3):
+def kernel(x, x_, var, l):
+    """The squared-exponential covariance between the points ``x`` and ``x_``.
+
+    The covariance and nothing else: the jitter that lets a covariance be inverted
+    or factorised belongs to the grid it regularises, and is added by whoever takes
+    that inverse. On a covariance BETWEEN two grids -- which is only ever multiplied
+    -- a diagonal is not regularisation but a bias on whatever is predicted through
+    it. This function therefore takes no ``noise``; it is added by
+    :func:`resampling_kernel` where it inverts the node covariance, and by
+    :func:`cholesky` where it factorises one.
+    """
 
     x = x[:, None] if x.ndim == 1 else x
     x_ = x_[:, None] if x_.ndim == 1 else x_
     chi = jnp.linalg.norm(x[None, :, :] - x_[:, None, :], axis=-1) / l
-    cov = jnp.abs(var) * jnp.exp(-0.5 * chi**2)
-    if chi.shape[0] == chi.shape[1]:
-        cov += noise * jnp.eye(x.shape[0])
 
-    return cov
+    return jnp.abs(var) * jnp.exp(-0.5 * chi**2)
 
 
 def resampling_kernel(x, x_, var, l, noise=1e-3):
-    K_inv = jnp.linalg.inv(kernel(x, x, var, l, noise))
+    """The matrix carrying values on the nodes ``x`` to the conditional mean on ``x_``.
+
+    ``noise`` is the jitter on the node covariance, the only term here that is
+    inverted.
+    """
+
+    K_inv = jnp.linalg.inv(kernel(x, x, var, l) + noise * jnp.eye(x.shape[0]))
     K_s = kernel(x, x_, var, l)
     return K_s @ K_inv
 
