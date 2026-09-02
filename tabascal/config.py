@@ -49,6 +49,17 @@ import collections.abc
 def deep_update(d: Dict, u: Dict) -> Dict:
     """Recursively update a dictionary which includes subdictionaries.
 
+    An update value of ``None`` where the base holds a mapping is no update at
+    all: a yaml section header written with nothing under it (``rfi:``) parses
+    as ``None``, and taking that literally would drop every default the base
+    supplies under the section. A section therefore cannot be emptied by
+    setting it to null, at any depth.
+
+    A ``None`` anywhere else is a value like any other. It overrides a scalar,
+    which is what ``data.noise: null`` and ``rfi.min_elevation: null`` are for,
+    and under a key the base does not have — where there is no default to keep
+    — it is stored, as an unknown key of any other value would be.
+
     Parameters
     ----------
     d : Dict
@@ -64,6 +75,8 @@ def deep_update(d: Dict, u: Dict) -> Dict:
     for k, v in u.items():
         if isinstance(v, collections.abc.Mapping):
             d[k] = deep_update(d.get(k, {}), v)
+        elif v is None and isinstance(d.get(k), collections.abc.Mapping):
+            continue
         else:
             d[k] = v
     return d
