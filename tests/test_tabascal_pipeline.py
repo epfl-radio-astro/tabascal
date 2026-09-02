@@ -47,7 +47,7 @@ def provide_test_data(tmp_path: Path) -> Path:
     session and every checkout on the machine, and nothing ever re-verifies its
     contents, so a test must treat it as read-only: point a run at a copy of the
     sim (``_copy_sim``), never at the cached one. ``keep_the_test_data_pristine``
-    below enforces that.
+    below detects a test that fails to, within the limits its docstring gives.
 
     Args:
         tmp_path: Pytest fixture providing temporary directory for test files
@@ -103,22 +103,52 @@ def provide_test_data(tmp_path: Path) -> Path:
         return tmp_path
 
 
+def _stat_index(root: Path) -> dict[Path, tuple[int, int]]:
+    """Size and mtime of every path under ``root``, following symlinks.
+
+    ``stat`` rather than ``lstat``, and this is the whole point of the index: a
+    downloaded snapshot is a tree of *symlinks* into a shared content-addressed
+    blob store, so a write to a snapshot path rewrites the blob it points at.
+    The name under ``root`` does not change and the bytes are not under ``root``
+    at all, so only the dereferenced size/mtime moves. Entries that disappear
+    between the walk and the stat are dropped, so a comparison of two indices
+    reports removals as well as additions and rewrites.
+    """
+    index: dict[Path, tuple[int, int]] = {}
+    for p in root.rglob("*"):
+        try:
+            st = p.stat()
+        except OSError:  # broken symlink, or gone since the walk listed it
+            continue
+        index[p] = (st.st_size, st.st_mtime_ns)
+    return index
+
+
 @pytest.fixture(autouse=True)
 def keep_the_test_data_pristine(request: pytest.FixtureRequest, tmp_path: Path):
-    """Fail any test that leaves a file behind in the shared test-data snapshot.
+    """Fail any test that changes anything in the shared test-data snapshot.
 
     A tabascal run writes what it produces -- results, plots, its log -- into the
-    sim directory it is pointed at, so a test that points one at the cached sim
-    deposits output into the HuggingFace cache. ``snapshot_download`` never
-    re-verifies a snapshot it already has, so anything written there survives
-    forever, is visible to every later test on the machine, and would silently
-    replace real data if it landed on an existing name. Copy the sim first
-    (``_copy_sim``) and the run has nowhere to write but the copy.
+    sim directory it is pointed at, and it adds columns to the measurement set it
+    reads, so a test that points one at the cached sim both deposits output in the
+    HuggingFace cache and rewrites files of the dataset itself.
+    ``snapshot_download`` never re-verifies a snapshot it already has, so what
+    lands there survives forever and is visible to every later test on the
+    machine, and a rewritten file is a corrupted dataset that nothing will
+    correct. Copy the sim first (``_copy_sim``) and the run has nowhere to write
+    but the copy.
 
-    A filename-set diff taken around the test -- no hashing, so it costs one
-    directory walk. Tests that do not ask for the data are left alone, as is the
-    fallback where the data was generated into the test's own ``tmp_path``, which
-    a run is free to write into.
+    Two ``_stat_index`` walks, one either side of the test, compared for added,
+    removed and rewritten paths. No hashing: a rewrite is caught by size/mtime,
+    which is what makes this cheap enough to run around every test.
+
+    Two things it deliberately does not do. It stands down for a test that does
+    not declare ``provide_test_data``, which keeps a test that never touches the
+    data off the network -- so a test that reaches for the data mid-body, through
+    ``request.getfixturevalue`` or ``snapshot_download`` directly, is unguarded;
+    declare the fixture in the signature. And it says nothing about the fallback
+    where the data was generated into the test's own ``tmp_path``, which a run is
+    free to write into.
     """
     if "provide_test_data" not in request.fixturenames:
         yield
@@ -129,13 +159,48 @@ def keep_the_test_data_pristine(request: pytest.FixtureRequest, tmp_path: Path):
         yield
         return
 
-    before = set(data_root.rglob("*"))
+    before = _stat_index(data_root)
     yield
-    written = sorted(str(p) for p in set(data_root.rglob("*")) - before)
-    assert not written, (
-        f"{len(written)} path(s) written into the shared test data at {data_root}; "
-        f"point the run at a copy of the sim instead: {written[:5]}"
+    after = _stat_index(data_root)
+    changed = sorted(
+        str(p) for p in set(before) | set(after) if before.get(p) != after.get(p)
     )
+    assert not changed, (
+        f"{len(changed)} path(s) added to, removed from or rewritten in the shared "
+        f"test data at {data_root}; point the run at a copy of the sim instead: "
+        f"{changed[:5]}"
+    )
+
+
+def test_stat_index_sees_a_write_through_a_symlink(tmp_path: Path) -> None:
+    """The index the guard diffs catches the damage a name-set diff cannot.
+
+    Over a miniature of the cache layout: a blob store, and a snapshot of symlinks
+    into it. A run that writes to a snapshot path rewrites the shared blob, which
+    leaves the snapshot's own names untouched -- and that is the write that
+    silently corrupts a dataset, as opposed to the stray output that merely
+    accretes. Additions and removals are differences too, and the guard reports
+    all three the same way. No network, no sim data.
+    """
+    blob = tmp_path / "blobs" / "content-addressed-name"
+    blob.parent.mkdir()
+    blob.write_text("the dataset as it was downloaded")
+    snapshot = tmp_path / "snapshots" / "rev"
+    snapshot.mkdir(parents=True)
+    (snapshot / "table.dat").symlink_to(blob)
+
+    before = _stat_index(snapshot)
+
+    blob.write_text("what a run wrote through the link")
+    after = _stat_index(snapshot)
+    assert set(after) == set(before), "the rewrite must not change any name"
+    assert after != before, "...and must still be visible in the index"
+
+    (snapshot / "log_tab_stray.txt").write_text("!")
+    assert set(_stat_index(snapshot)) - set(before) == {snapshot / "log_tab_stray.txt"}
+
+    (snapshot / "table.dat").unlink()
+    assert set(before) - set(_stat_index(snapshot)) == {snapshot / "table.dat"}
 
 
 def read_and_modify_yaml(
@@ -217,7 +282,9 @@ def _copy_sim(
 
     work_dir.mkdir(parents=True, exist_ok=True)
     data_dir = Path(__file__).parent / "data"
-    input_hash = compute_sha256(data_dir / sim_file_name)
+    sim_file = data_dir / sim_file_name
+    assert sim_file.is_file(), f"No sim config {sim_file_name} in {data_dir}"
+    input_hash = compute_sha256(sim_file)
     input_dir = Path(provide_test_data) / input_hash
     src = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
     assert src, f"No pnt_src* directory found in {input_dir}"
@@ -734,6 +801,8 @@ def test_pipeline_log_is_written_in_the_plot_directory(
     sim_dir = _copy_sim(provide_test_data, tmp_path)
     # What *this* run wrote is the difference, taken across the run: whatever the
     # sim it was copied from already carried is excluded rather than counted.
+    # Empty on a clean cache, and kept for the machine whose cache still holds the
+    # logs left there by the runs this module used to make against it in place.
     before = set(tmp_path.rglob("log_tab*"))
 
     data_dir = Path(__file__).parent / "data"
