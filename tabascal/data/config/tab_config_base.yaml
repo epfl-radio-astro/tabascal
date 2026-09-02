@@ -73,11 +73,10 @@ rfi:
   corr_freq: 1e6        # Optional - Correlation bandwidth of the RFI signal in Hz
   time_pad_factor: 2
   freq_pad_factor: 2
-  time_int_factor: 1    # Optional - Factor to increase the number of time integration samples over the predicted value
+  time_int_factor: 1    # Optional - Factor to increase the number of integration samples per time step of the RFI fine grid over the estimate. The count itself is always estimated from the observation and its RFI sampling requirements (see TabConfig.estimate_rfi_sampling) and cannot be given directly - this factor is the knob on that axis
   min_time_bins: 1      # Optional - Minimum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariable / +FFI)
   max_time_bins: 30     # Optional - Maximum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariable / +FFI)
-  n_int_time: null      # Optional - Number of integration samples per time step of the RFI fine grid. Currently always estimated from the observation and its RFI sampling requirements (see TabConfig.estimate_rfi_sampling); a value set here is not read
-  n_int_freq: 1         # Optional - Number of integration samples per frequency channel of the RFI fine grid. Taken as given - there is no estimate on this axis
+  n_int_freq: 1         # Optional - Number of integration samples per frequency channel of the RFI fine grid. Given directly - there is no estimate on this axis, which is why it takes a count where the time axis takes a factor
   r_seed: 123           # Optional - Random seed to use for sampling
 ############################
 # Satellite path parameters
