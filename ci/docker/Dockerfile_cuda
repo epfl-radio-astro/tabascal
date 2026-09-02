@@ -6,14 +6,12 @@ FROM base-${CUDA_VARIANT} AS base
 
 SHELL ["/bin/bash", "-c"]
 
-# Install system dependencies. build-essential is still required even though
-# tabascal itself no longer compiles anything: on aarch64 numcodecs (pulled in by
-# tabsim -> zarr<3, which caps numcodecs<0.16) has no manylinux wheel, so pip
-# falls back to building it from the sdist.
+# Install system dependencies. No compiler: nothing in the image is built from
+# source (see the conda step below for the one dependency pip would compile).
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive TZ=Europe/Zurich \
      apt-get install -yqq --no-install-recommends \
-       build-essential curl git wget \
+       curl git wget \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Miniforge
@@ -24,9 +22,11 @@ RUN wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Mi
 
 ENV PATH="/opt/conda/bin:${PATH}"
 
-# Create conda environment and install conda-only dependencies
+# Create the conda environment with the dependencies pip cannot get as wheels on
+# aarch64: python-casacore, and numcodecs (tabsim -> zarr<3 caps it below 0.16,
+# which has no aarch64 wheel on PyPI; see #120 for the zarr bound).
 RUN conda create -y -n tab python=3.12 pip \
-  && conda install -n tab -y python-casacore \
+  && conda install -n tab -y python-casacore "numcodecs<0.16" \
   && conda clean -afy
 
 # Activate the conda env by prepending it to PATH
