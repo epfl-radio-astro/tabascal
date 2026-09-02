@@ -2,7 +2,8 @@ model:
   components:
   # RFI Phase from trajectory
     - trajectory:FixedOrbit
-    # - trajectory:KeplerOrbit
+    # - trajectory:NoDragOrbit
+    # - trajectory:Orbit
     # - trajectory:PhaseCalculationRFI
   # RFI signal model
     - rfi_signal:ComplexRFIVarAnt
