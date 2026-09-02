@@ -364,7 +364,6 @@ rfi:
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   n_int_freq: 1
-  n_int_time: null
   time_int_factor: 1
   pow_spec:
     p0: 1e3
@@ -389,15 +388,16 @@ The only additional parameters are
 
   Raising the cut above `0` additionally excludes the low-elevation part of each pass, where the fringe rate is lowest and the overlap with other components is therefore greatest. How far to raise it is observation-dependent and is not currently calibrated, so no value above `0` is recommended here. Note that masking is about which parameters exist, not about subtraction quality, and reduced $\chi^2$ is largely insensitive to it — judge the effect on the recovered sky model.
 
-The RFI signal is modelled on a grid finer than the data, then averaged back down onto it. `n_int_freq` and `n_int_time` are the number of fine samples per data cell on each axis, so the fine grid is `n_freq * n_int_freq` by `n_time * n_int_time`. The two axes differ in how the count is arrived at: the frequency count is taken as given, while the time count is estimated from the observation and its RFI sampling requirements, with `time_int_factor` scaling that estimate.
+The RFI signal is modelled on a grid finer than the data, then averaged back down onto it. The fine grid is `n_freq * n_int_freq` by `n_time * n_int_time`, where each count is the number of fine samples per data cell on that axis. The two axes are configured differently, because only one of them can be estimated: there is no observable that fixes the frequency count, so `n_int_freq` is given directly, while the time count follows from how fast the RFI fringe winds and is therefore derived rather than written down. `time_int_factor` scales that derivation. **There is no `rfi.n_int_time` key**; a configuration that sets one is rejected at load, naming `rfi.time_int_factor`. Earlier releases shipped the key but never read it — `TabConfig` bound it and the estimator overwrote it on every path — so a configuration that set it was already running on the estimated count, and deleting the line changes nothing about the run.
 
 * `n_int_freq`: This is the amount of over-sampling in the frequency domain that is used and then averaged back down to the data sampling rate. It therefore determines the number of samples per frequency channel that are used in the averaging to correctly calculate the fringe-winding loss (band-smearing). Band-smearing can be caused by both the phase variation over the channel width due to the geometric phase as well as the intrinsic signal of the RFI sources. The default is `1`, i.e. no over-sampling.
-* `n_int_time`: The time-axis counterpart, in samples per integration. It is **not** currently read: the count is always derived by `TabConfig.estimate_rfi_sampling`, whatever this is set to. That derivation is the estimate below scaled by `time_int_factor`, then shaped by `min_time_bins`/`max_time_bins` and rounded up to a divisor-rich size where a `RiemannVisVariable` component needs one; with no satellites configured there is no fringe rate to estimate from and it falls back to one sample per integration. Leave this at `null` and use `time_int_factor` to change the sampling.
 * `time_int_factor`: In the time axis the number of integration samples needed to accurately model fringe-winding loss (time-smearing) is calculated based solely on the fringe rate due to the movement of the RFI source as well as the signal to noise ratio with
 
 $$N^T_\text{int} \geq  \pi \nu_F \Delta t \sqrt{\frac{\lvert V^\text{RFI}_\text{inst} \rvert}{6 \sigma_n}}$$
 
 where $N^T_\text{int}$ is the number of integration samples used per time step, $\Delta t$ is the integration time for a single sample, $\nu_F$ is the fringe frequency of the source due to its movement, $\lvert V^\text{RFI}_\text{inst} \rvert$ is the instantaneous RFI visibility amplitude, and $\sigma_n$ is the visibility noise of a single data point. This parameter (`time_int_factor`) determines the factor by which to increase this oversampling.
+
+The estimate is per baseline, since $\nu_F$ is, and `TabConfig.estimate_rfi_sampling` then reduces it to the single fine-grid count: the per-baseline rates are binned into between `min_time_bins` and `max_time_bins` stride groups, and the count is the largest rate, rounded up to a divisor-rich size where a `RiemannVisVariable` component needs the strides to divide it. With no satellites configured there is no fringe rate to estimate from at all, and every baseline falls back to a single required sample. So the effective count is not exactly `time_int_factor` times the formula above — the factor scales the per-baseline rates going in, and the binning decides what comes out. The value actually used is printed during setup.
 
 ### RFI light curve estimates
 

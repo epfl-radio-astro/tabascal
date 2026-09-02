@@ -1413,7 +1413,7 @@ class TestInitCallsTheReadBeforeTheOverride:
                 "noise": noise,
                 "flags": False,
             },
-            "rfi": {"n_int_time": 4, "n_int_freq": 1, "time_int_factor": 1.0},
+            "rfi": {"n_int_freq": 1, "time_int_factor": 1.0},
             "satellites": {},
         }
 

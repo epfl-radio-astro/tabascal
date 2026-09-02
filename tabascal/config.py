@@ -111,6 +111,19 @@ RENAMED_KEYS = {
 }
 
 
+#: Config keys that have been removed, old dotted name -> (what to set instead,
+#: why the key is gone). Checked rather than ignored, for the same reason as
+#: RENAMED_KEYS: a key nothing reads still looks like a setting in the file, and
+#: leaving it there is how it stayed unread for as long as it did.
+REMOVED_KEYS = {
+    "rfi.n_int_time": (
+        "rfi.time_int_factor",
+        "the number of time integration samples is estimated from the RFI fringe "
+        "rate and the noise, never given directly - nothing has ever read this key",
+    ),
+}
+
+
 def check_renamed_keys(config: Dict, path: str):
     """Stop on a config still using a key that has been renamed."""
 
@@ -122,6 +135,20 @@ def check_renamed_keys(config: Dict, path: str):
             raise ValueError(
                 f"{old} was renamed {new}. Update {path}: the two named the same "
                 "quantity and only the new name is read."
+            )
+
+
+def check_removed_keys(config: Dict, path: str):
+    """Stop on a config still setting a key that has been removed."""
+
+    for old, (new, why) in REMOVED_KEYS.items():
+        section, key = old.split(".")
+        # Presence, not value: every config that carried a removed key is one
+        # that needs editing, whatever it set the key to.
+        if key in (config.get(section) or {}):
+            raise ValueError(
+                f"{old} has been removed. Delete it from {path} and set {new} "
+                f"instead: {why}."
             )
 
 
@@ -151,6 +178,7 @@ def load_config(path: str) -> Dict:
     # hit here can only have come from the user's file, and the error says so
     # rather than being wrapped in "could not be loaded".
     check_renamed_keys(config, path)
+    check_removed_keys(config, path)
 
     return config
 
@@ -216,7 +244,10 @@ class TabConfig:
 
         self.get_orbital_elements()
 
-        self.n_int_time = config["rfi"]["n_int_time"]
+        # Only the frequency count is a free choice: there is no observable to
+        # derive it from. n_int_time is set by estimate_rfi_sampling below, from
+        # the fringe rate the RFI sampling has to follow -- it is not a config
+        # key, and rfi.time_int_factor is how a config scales it.
         self.n_int_freq = config["rfi"]["n_int_freq"]
 
         # The divisor-rich fine grid (min_divisors > 1) is only needed by the

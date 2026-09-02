@@ -14,9 +14,10 @@ reads and the base does not supply raises out of ``setup``, and a key the base
 supplies that the component never reads is caught by the recorded-read
 comparison.
 
-The same file is also where a key that was *renamed* is checked: a config still
-using the old name must stop with the new one, rather than fall through to the
-base default under a name that is no longer read.
+The same file is also where a key that was *renamed* or *removed* is checked: a
+config still setting one must stop, naming what to write instead, rather than
+fall through to a base default under a name that is no longer read -- or, worse,
+sit in the config looking like a setting while nothing reads it at all.
 """
 
 from types import SimpleNamespace
@@ -27,8 +28,13 @@ import pytest
 
 from tabascal.components.ast_vis import GPVisAst
 from tabascal.components.rfi_vis import RiemannVis
-from tabascal.config import TabConfig, check_renamed_keys, load_config
-from tabascal.interferometry import max_ast_fringe_rate
+from tabascal.config import (
+    TabConfig,
+    check_removed_keys,
+    check_renamed_keys,
+    load_config,
+)
+from tabascal.interferometry import get_strides_and_idxs, max_ast_fringe_rate
 
 
 #: A user config that overrides nothing of the astronomical section, so every
@@ -64,6 +70,63 @@ def base_args(tmp_path):
     path.write_text(_MINIMAL_CONFIG)
 
     return load_config(str(path))
+
+
+def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5):
+    """Build a real ``TabConfig`` from ``config`` on a tiny synthetic observation.
+
+    Only the steps that need a measurement set, a satellite catalogue or the
+    network are stubbed. Everything that decides the fine grid --- the
+    integration-count binding, ``estimate_rfi_sampling``, ``fix_padding`` and
+    ``_set_freqs_times`` --- really runs, which is the whole point: a test that
+    asserts on the merged config dict alone never touches the code that reads it.
+
+    Returns the config and the observation sizes it was built on.
+    """
+
+    n_bl = n_ant * (n_ant - 1) // 2
+    a1, a2 = np.triu_indices(n_ant, 1)
+    stubs = {
+        "read_ms_params": {
+            "n_ant": n_ant,
+            "n_bl": n_bl,
+            "n_freq": n_freq,
+            "n_time": n_time,
+            "a1": a1.astype("int32"),
+            "a2": a2.astype("int32"),
+            "freqs": 1e9 + 1e6 * np.arange(n_freq),
+            "chan_width": 1e6,
+            "times": 2.0 * np.arange(n_time),
+            "int_time": 2.0,
+            "times_jd": 2460000.5 + 2.0 * np.arange(n_time) / 86400.0,
+            "vis_obs": np.zeros((n_bl, n_freq, n_time), dtype=complex),
+            "flags": np.zeros((n_bl, n_freq, n_time), dtype=bool),
+            "noise": 1.0,
+            "noise_scalar": 1.0,
+        },
+        "set_noise": {},
+        "apply_gain_table": {},
+        "set_flags": {},
+        # No satellites: estimate_rfi_sampling then takes its own n_rfi == 0
+        # branch, which is real code and needs no trajectory.
+        "get_orbital_elements": {"n_rfi": 0, "orbit_records": [], "norad_ids": []},
+    }
+
+    def stub(leaves):
+        def method(self, *args, **kwargs):
+            for key, value in leaves.items():
+                setattr(self, key, value)
+
+        return method
+
+    for name, leaves in stubs.items():
+        monkeypatch.setattr(TabConfig, name, stub(leaves))
+    monkeypatch.setattr("tabascal.config.preflight_tle_check", lambda *a, **k: None)
+    monkeypatch.setattr("tabascal.config.check_epoch_agreement", lambda *a, **k: None)
+
+    sizes = SimpleNamespace(n_ant=n_ant, n_bl=n_bl, n_freq=n_freq, n_time=n_time)
+
+    return TabConfig(config, "never/read.ms"), sizes
 
 
 def make_ast_config(args, n_ant=4, n_freq=4, n_time=8, dish_d=13.5):
@@ -196,13 +259,15 @@ class TestBaseConfigIntegrationSampleCounts:
     to different values built two disagreeing fine grids.
     """
 
-    def test_the_base_supplies_a_count_for_each_axis(self, tmp_path):
-        """Both axes are in the base, so neither has to be written out."""
+    def test_the_base_supplies_what_each_axis_is_configured_with(self, tmp_path):
+        """The frequency axis takes a count, the time axis takes a factor.
+
+        Both are in the base, so neither has to be written out.
+        """
 
         rfi = base_args(tmp_path)["rfi"]
 
         assert rfi["n_int_freq"] == 1
-        assert rfi["n_int_time"] is None
         assert rfi["time_int_factor"] == pytest.approx(1)
 
     def test_the_removed_frequency_spelling_is_gone_from_the_base(self, tmp_path):
@@ -275,55 +340,11 @@ class TestBaseConfigIntegrationSampleCounts:
         config = load_config(str(path))
         assert "n_int_freq" in config["rfi"]  # the user file said nothing
 
-        n_ant, n_bl, n_freq, n_time = 3, 3, 4, 5
-        a1, a2 = np.triu_indices(n_ant, 1)
-        stubs = {
-            "read_ms_params": {
-                "n_ant": n_ant,
-                "n_bl": n_bl,
-                "n_freq": n_freq,
-                "n_time": n_time,
-                "a1": a1.astype("int32"),
-                "a2": a2.astype("int32"),
-                "freqs": 1e9 + 1e6 * np.arange(n_freq),
-                "chan_width": 1e6,
-                "times": 2.0 * np.arange(n_time),
-                "int_time": 2.0,
-                "times_jd": 2460000.5 + 2.0 * np.arange(n_time) / 86400.0,
-                "vis_obs": np.zeros((n_bl, n_freq, n_time), dtype=complex),
-                "flags": np.zeros((n_bl, n_freq, n_time), dtype=bool),
-                "noise": 1.0,
-                "noise_scalar": 1.0,
-            },
-            "set_noise": {},
-            "apply_gain_table": {},
-            "set_flags": {},
-            # No satellites: estimate_rfi_sampling then takes its own n_rfi == 0
-            # branch, which is real code and needs no trajectory.
-            "get_orbital_elements": {"n_rfi": 0, "orbit_records": [], "norad_ids": []},
-        }
-
-        def stub(leaves):
-            def method(self, *args, **kwargs):
-                for key, value in leaves.items():
-                    setattr(self, key, value)
-
-            return method
-
-        for name, leaves in stubs.items():
-            monkeypatch.setattr(TabConfig, name, stub(leaves))
-        monkeypatch.setattr(
-            "tabascal.config.preflight_tle_check", lambda *a, **k: None
-        )
-        monkeypatch.setattr(
-            "tabascal.config.check_epoch_agreement", lambda *a, **k: None
-        )
-
-        tab_config = TabConfig(config, "never/read.ms")
+        tab_config, sizes = build_stubbed_tab_config(config, monkeypatch)
 
         assert tab_config.n_int_freq == 1
-        assert tab_config.n_freq_fine == n_freq * tab_config.n_int_freq
-        assert tab_config.n_time_fine == n_time * tab_config.n_int_time
+        assert tab_config.n_freq_fine == sizes.n_freq * tab_config.n_int_freq
+        assert tab_config.n_time_fine == sizes.n_time * tab_config.n_int_time
 
         # The component that used to raise. Its fine grid must be the one
         # TabConfig just built, or the reshape in forward cannot line up.
@@ -357,3 +378,86 @@ class TestBaseConfigIntegrationSampleCounts:
 
         assert cfg.n_freq_fine == n_freq * n_int_freq
         assert cfg.n_time_fine == n_time * n_int_time
+
+
+class TestTheTimeCountIsNotAConfigKey:
+    """``rfi.n_int_time`` is gone: nothing ever read it.
+
+    ``TabConfig.__init__`` bound it and ``estimate_rfi_sampling`` then
+    overwrote it unconditionally, on both of its branches, so a value written
+    there had no effect in any release. The two axes are configured differently
+    because only one of them can be estimated: the frequency count is a free
+    choice with no observable to derive it from, while the time count follows
+    from the RFI fringe rate, the noise and the per-baseline stride binning.
+    ``rfi.time_int_factor`` scales that derivation, which is the knob a config
+    setting ``n_int_time`` was reaching for.
+    """
+
+    def test_the_base_no_longer_ships_it(self, tmp_path):
+        """Nothing may reintroduce it as a default, which would make a config
+        setting it merge cleanly and be ignored all over again."""
+
+        assert "n_int_time" not in base_args(tmp_path)["rfi"]
+
+    def test_a_config_setting_it_stops_and_names_the_factor(self, tmp_path):
+        """A stale config fails at load, pointing at the supported knob."""
+
+        path = tmp_path / "user.yaml"
+        path.write_text("rfi:\n  n_int_time: 4\n")
+
+        with pytest.raises(ValueError) as excinfo:
+            load_config(str(path))
+
+        message = str(excinfo.value)
+        assert "rfi.n_int_time" in message
+        assert "rfi.time_int_factor" in message
+
+    def test_a_null_value_is_still_a_hit(self, tmp_path):
+        """Presence, not value.
+
+        Every config that carried the key wrote it as ``n_int_time:`` --- the
+        base default was ``null`` --- so a check that let ``null`` through would
+        pass exactly the files that need editing.
+        """
+
+        path = tmp_path / "user.yaml"
+        path.write_text("rfi:\n  n_int_time:\n")
+
+        with pytest.raises(ValueError) as excinfo:
+            load_config(str(path))
+
+        assert "rfi.n_int_time" in str(excinfo.value)
+
+    def test_an_empty_section_is_not_a_removed_hit(self):
+        """``rfi:`` with nothing under it parses as None, which ``in`` cannot
+        search. The check runs on every load, so a merely empty section has to
+        pass through it rather than raise a ``TypeError`` from the machinery."""
+
+        check_removed_keys({"rfi": None}, "user.yaml")
+
+    def test_the_count_still_comes_from_the_estimator(self, tmp_path, monkeypatch):
+        """The default path, end to end, unmoved by the key going away.
+
+        With no satellites ``estimate_rfi_sampling`` takes its ``n_rfi == 0``
+        branch: one required sample per baseline, through the same
+        ``get_strides_and_idxs`` binning as the fringe-rate path. That is what
+        sets ``n_int_time``, and hence the fine time grid every RFI component
+        reshapes against.
+        """
+
+        path = tmp_path / "user.yaml"
+        path.write_text(_MINIMAL_CONFIG)
+        config = load_config(str(path))
+
+        tab_config, sizes = build_stubbed_tab_config(config, monkeypatch)
+
+        expected = get_strides_and_idxs(
+            np.ones(sizes.n_bl, dtype=int),
+            config["rfi"]["min_time_bins"],
+            config["rfi"]["max_time_bins"],
+            1,
+        )[2]
+
+        assert expected == 2  # the value this fixture has always run at
+        assert tab_config.n_int_time == expected
+        assert tab_config.n_time_fine == sizes.n_time * expected
