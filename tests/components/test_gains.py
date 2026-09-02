@@ -1,5 +1,7 @@
 """Tests for tabascal.components.gains — UnitaryGains, GPGains, and config validation."""
 
+import re
+
 import pytest
 from types import SimpleNamespace
 
@@ -9,9 +11,11 @@ import numpy as np
 import numpyro
 
 from tabascal.components.gains import (
+    _GP_JITTER_FLOOR,
     UnitaryGains,
     GPGains,
     gains_config_validation,
+    gp_jitter,
     validate_gain_scales,
 )
 
@@ -111,7 +115,7 @@ class TestGainsConfigValidation:
 
         assert result["r_seed"] == 2
         assert result["amp_mean"] == pytest.approx(1.0)
-        assert result["amp_std"] == pytest.approx(0.01)  # 1% of amp_mean=1.0
+        assert result["amp_std"] == pytest.approx(0.2)  # 20 % of amp_mean=1.0
         assert result["phase_mean"] == pytest.approx(0.0)
         assert result["amp_corr_time"] > 0
         assert result["phase_corr_time"] > 0
@@ -202,6 +206,13 @@ CORR_KEYS = ("amp_corr_freq", "amp_corr_time", "phase_corr_freq", "phase_corr_ti
 #: degenerate Normal rather than an unset one.
 UNUSABLE = [0, 0.0, -1.0, float("nan"), float("inf"), -float("inf")]
 
+#: What an unset width resolves to, in the units the config writes it in — a
+#: percentage of ``amp_mean`` and degrees. Restated here rather than imported from
+#: :mod:`tabascal.components.gains`, so these are the numbers the base config
+#: comments and docs/config.md quote and not whatever the module happens to hold.
+DEFAULT_AMP_STD_PERCENT = 20.0
+DEFAULT_PHASE_STD_DEGREES = 180.0
+
 
 def scale_config(**overrides):
     """The keys :func:`validate_gain_scales` reads, all unset unless overridden."""
@@ -265,8 +276,35 @@ class TestPriorWidths:
     def test_unset_widths_still_default(self):
         cfg = validate_gain_scales(scale_config())
 
-        assert cfg["amp_std"] == pytest.approx(0.01)  # 1 % of the default amp_mean
-        assert cfg["phase_std"] == pytest.approx(float(np.deg2rad(1)))
+        assert cfg["amp_std"] == pytest.approx(
+            DEFAULT_AMP_STD_PERCENT / 100
+        )  # of the default amp_mean
+        assert cfg["phase_std"] == pytest.approx(
+            float(jnp.deg2rad(DEFAULT_PHASE_STD_DEGREES))
+        )
+
+    def test_the_default_amp_width_is_a_percentage_of_amp_mean(self):
+        """The default is a *fraction* of amp_mean, exactly as an explicit value is."""
+        cfg = validate_gain_scales(scale_config(amp_mean=2.5))
+
+        assert cfg["amp_std"] == pytest.approx(DEFAULT_AMP_STD_PERCENT / 100 * 2.5)
+
+    @pytest.mark.parametrize(
+        "key, written",
+        [("amp_std", DEFAULT_AMP_STD_PERCENT), ("phase_std", DEFAULT_PHASE_STD_DEGREES)],
+    )
+    def test_an_unset_width_resolves_exactly_as_writing_the_default_out_does(
+        self, key, written
+    ):
+        """The documented default and the value written into a config are one number.
+
+        Which is what makes the documentation checkable: a config that says
+        ``amp_std: 20`` is the config that says ``amp_std: null``, bit for bit, so
+        the two conversion paths cannot drift apart unnoticed.
+        """
+        assert validate_gain_scales(scale_config())[key] == validate_gain_scales(
+            scale_config(**{key: written})
+        )[key]
 
     def test_explicit_widths_keep_their_units(self):
         cfg = validate_gain_scales(scale_config(amp_mean=2.0, amp_std=5.0, phase_std=2.0))
@@ -292,6 +330,309 @@ class TestPriorWidths:
     def test_a_non_numeric_width_is_an_error(self, key):
         with pytest.raises(ValueError, match=key):
             validate_gain_scales(scale_config(**{key: "bad"}))
+
+
+class TestTheDefaultPhasePriorIsEffectivelyUniform:
+    """The unset ``phase_std`` has to say nothing about the phase, and let the fit move it.
+
+    Two separate properties, both of which the old 1-degree default failed:
+
+    * the prior the *model* sees is on an angle, so what matters is the WRAPPED
+      normal. Its density is
+      ``p(t) = (1 + 2 sum_k exp(-(k sigma)^2 / 2) cos(k t)) / 2 pi``, flat to within
+      ``2 exp(-sigma^2 / 2)`` — 1.4 % at sigma = 180 degrees;
+    * the parameterisation is non-centred (``phase = mean + sigma z`` with
+      ``z ~ N(0, 1)``), so ``sigma`` also scales the map from the fitted coordinate to
+      the phase. Under a per-coordinate optimiser the step in ``z`` is set by
+      ``opt.epsilon`` whatever the gradient, so the phase moves by ``sigma * epsilon``
+      per iteration: at 1 degree and the default ``epsilon`` of 1e-2 that is 0.01
+      degrees an iteration, and 500 iterations cannot cross a radian.
+    """
+
+    #: Coarse enough that a genuinely flat prior passes on sampling noise alone, and
+    #: far too tight for anything concentrated: a 1-degree prior puts every draw in
+    #: one bin.
+    N_BINS = 12
+    MAX_BIN_RATIO = 1.5
+
+    def wrapped_ripple(self, sigma: float) -> float:
+        """Peak relative deviation of the wrapped normal from uniform, at t = 0."""
+
+        return 2 * sum(np.exp(-0.5 * (k * sigma) ** 2) for k in range(1, 200))
+
+    def test_the_wrapped_default_prior_is_flat_over_the_circle(self):
+        default = validate_gain_scales(scale_config())["phase_std"]
+
+        assert self.wrapped_ripple(default) < 0.02
+        # The value it replaces is not remotely flat, which is the point.
+        assert self.wrapped_ripple(float(jnp.deg2rad(1))) > 1.0
+
+    def draw_phases(self, comp, n_draws=24):
+        """Gain phases drawn through the component's own prior path.
+
+        The last antenna's phase is pinned to zero by :meth:`GPGains.build_forward`
+        (the overall phase is unobservable), so it is dropped: it is a gauge choice
+        rather than a draw from the prior.
+        """
+
+        forward = comp.build_forward()
+        constants = make_constants(comp)
+        state = make_vis_state(comp.n_ant, comp.n_freq, comp.n_time)
+        shapes = {
+            "gains_amp_induce_base": (comp.n_ant, comp.n_freq, comp.n_g_times),
+            "gains_phase_induce_base": (comp.n_ant - 1, comp.n_freq, comp.n_g_times),
+        }
+
+        phases = []
+        for seed in range(n_draws):
+            keys = jax.random.split(jax.random.PRNGKey(seed), 2)
+            params = {
+                name: jax.random.normal(key, shape)
+                for key, (name, shape) in zip(keys, shapes.items())
+            }
+            phases.append(jnp.angle(forward(params, state, constants)["gains"][:-1]))
+
+        return np.asarray(jnp.concatenate([p.ravel() for p in phases]))
+
+    def make_comp(self, phase_std):
+        """A GPGains over enough antennas for the draws to be worth histogramming."""
+
+        cfg = make_gains_config(
+            n_ant=33, n_freq=4, n_time=8, amp_std=None, phase_std=phase_std
+        )
+        comp = GPGains()
+        comp.setup(cfg)
+
+        return comp
+
+    def test_the_default_prior_covers_the_circle(self):
+        comp = self.make_comp(phase_std=None)
+
+        # The Cholesky of the phase kernel is taken at sigma^2, and its jitter is
+        # absolute: a wide prior makes 1e-8 relatively smaller. Checked here because
+        # it is the one part of the widening that could fail numerically, and it
+        # would fail in single precision first.
+        assert bool(jnp.all(jnp.isfinite(comp.L_gains_phase)))
+
+        phases = self.draw_phases(comp)
+        counts, _ = np.histogram(phases, bins=self.N_BINS, range=(-np.pi, np.pi))
+
+        assert counts.min() > 0
+        assert counts.max() / counts.min() < self.MAX_BIN_RATIO
+        # Mean resultant length: exp(-sigma^2/2) for a wrapped normal, so ~7e-3 at
+        # 180 degrees against ~1 for any prior worth calling concentrated.
+        assert abs(np.mean(np.exp(1j * phases))) < 0.1
+
+    def test_a_one_degree_prior_does_not(self):
+        """The teeth of the test above: the default it replaces fails both bounds."""
+
+        phases = self.draw_phases(self.make_comp(phase_std=1.0))
+        counts, _ = np.histogram(phases, bins=self.N_BINS, range=(-np.pi, np.pi))
+
+        assert counts.min() == 0
+        assert abs(np.mean(np.exp(1j * phases))) > 0.9
+
+
+#: Correlation times, in seconds, against the 1200 s observation
+#: :meth:`TestTheGPStaysFactorisable.make_comp` builds. The node grid is
+#: ``~2 * extent / corr_time`` wide, so these run from 4 nodes to 243 -- and every row
+#: from 60 s down returned a NaN Cholesky in single precision at the widened default
+#: widths, before the jitter was tied to the kernel variance.
+GP_CORR_TIMES = [1200.0, 600.0, 300.0, 120.0, 60.0, 30.0, 20.0, 10.0]
+
+
+class TestTheGPStaysFactorisable:
+    """A wide prior must not cost the Gaussian process its Cholesky.
+
+    ``gp.cholesky`` adds its jitter ABSOLUTELY, after the kernel has been scaled by
+    the prior variance, so a fixed 1e-8 regularises a squared-exponential Gram matrix
+    by ``1e-8 / var`` in relative terms -- 3.3e-5 at the old 1-degree phase width and
+    1e-9 at 180 degrees, which is below fp32's ~1.2e-7 of precision. Widening the
+    default without tying the jitter to the variance therefore turned the *default*
+    configuration into a NaN Cholesky in single precision, and a NaN
+    ``init_params_base`` behind it, for any correlation time short against the
+    observation.
+
+    The worst case is the ASYMMETRIC one: the node grid is built from the shorter of
+    the two correlation times while each kernel keeps its own length scale, so a short
+    ``phase_corr_time`` puts the long-length-scale AMPLITUDE kernel on a fine grid.
+    Both sides are covered below.
+    """
+
+    def make_comp(self, phase_corr_time, amp_corr_time=None, amp_std=None, phase_std=None):
+        """GPGains over a 1200 s observation, at the default widths unless overridden."""
+
+        cfg = make_gains_config(
+            n_ant=4, n_freq=2, n_time=240, amp_std=amp_std, phase_std=phase_std,
+            amp_corr_time=amp_corr_time, phase_corr_time=phase_corr_time,
+        )
+        cfg.times = jnp.linspace(0.0, 1200.0, 240)
+        cfg.int_time = float(cfg.times[1] - cfg.times[0])
+        comp = GPGains()
+        comp.setup(cfg)
+
+        return comp
+
+    def assert_usable(self, comp):
+        for name in (
+            "L_gains_amp", "L_gains_phase", "resample_amp", "resample_phase",
+        ):
+            assert bool(jnp.all(jnp.isfinite(getattr(comp, name)))), name
+        for name, value in comp.init_params_base.items():
+            assert bool(jnp.all(jnp.isfinite(value))), name
+
+    @pytest.mark.parametrize("corr_time", GP_CORR_TIMES)
+    def test_the_defaults_factorise_at_every_correlation_time(self, corr_time):
+        """Both correlation times short together: the node grid is fine for both."""
+
+        self.assert_usable(self.make_comp(corr_time, amp_corr_time=corr_time))
+
+    @pytest.mark.parametrize("corr_time", GP_CORR_TIMES)
+    def test_the_defaults_factorise_with_a_short_phase_correlation_time(self, corr_time):
+        """The asymmetric case: ``amp_corr_time`` null, so the amplitude kernel is
+        the smooth one sitting on the grid the phase asked for."""
+
+        self.assert_usable(self.make_comp(corr_time, amp_corr_time=None))
+
+
+class TestTheJitterIsRelativeAboveTheFloor:
+    """Tied to the kernel variance, but never below the absolute value it always had.
+
+    ``chol(var (SE + R I)) = sqrt(var) chol(SE + R I)``, so a jitter proportional to
+    the variance makes the factorisation scale-free -- whether it succeeds depends on
+    the node grid and ``R``, not on the units the prior is written in. The floor is
+    what keeps every prior narrow enough for 1e-8 to dominate regularised exactly as
+    it was before, which is what leaves the pipeline references where they are.
+    """
+
+    def test_the_floor_applies_to_narrow_priors(self):
+        assert gp_jitter(1e-4) == 1e-8
+        assert gp_jitter(0.0) == 1e-8
+
+    def test_the_jitter_is_relative_to_a_wide_prior(self):
+        assert gp_jitter(9.87) == pytest.approx(9.87e-5)
+
+    def test_the_hinge_is_where_the_two_meet(self):
+        hinge = 1e-8 / 1e-5
+        assert gp_jitter(hinge) == pytest.approx(1e-8)
+        assert gp_jitter(10 * hinge) == pytest.approx(1e-7)
+
+    @pytest.mark.parametrize(
+        "std, label",
+        [(1.0 / 100 * 1.0, "amp_std: 1 %"), (float(jnp.deg2rad(1.0)), "phase_std: 1 deg")],
+    )
+    def test_the_recorded_pipeline_widths_are_bit_identical(self, std, label):
+        """The widths the GPGains pipeline case writes out must factorise unchanged.
+
+        The jitter is the ONLY argument this change touches, and at these widths it is
+        still exactly the 1e-8 the kernels were always handed — so every call is the
+        call it was before, on any grid, and the recorded chi2 cannot move. Asserting
+        that one number is the whole of the guarantee; comparing two ``cholesky``
+        calls that differ only in an argument just shown to be equal would prove
+        nothing beyond it.
+        """
+        assert gp_jitter(std**2) == _GP_JITTER_FLOOR == 1e-8, label
+
+
+class TestAnUnfactorisableGPIsNamed:
+    """Past the jitter's reach the run stops with an error, rather than reporting NaN.
+
+    The jitter buys a wide margin, not an unlimited one: a correlation length short
+    enough against the observation puts hundreds of nodes on the grid and the
+    squared-exponential Gram matrix goes singular faster than any reasonable jitter
+    regularises it. That is a real limit of the working precision, so it is named --
+    where before it was a NaN Cholesky that flowed silently into the initial
+    parameters and out through every gain the run reported.
+    """
+
+    #: The attribution clause, as opposed to the sentence listing both key names to
+    #: explain where the grid comes from. Matching the latter would pass whatever the
+    #: error blamed, which is exactly the bug this class exists to catch.
+    ATTRIBUTION = r"so gains\.{} is asking"
+
+    def over_resolve(self, short_key, precision):
+        """A GP whose two correlation times are far enough apart to be unfactorisable.
+
+        Whichever key is given the short time sets the node grid, so that is the key
+        the error has to name -- lengthening the other one, which is already null and
+        therefore maximal, could not coarsen the grid by a single node.
+        """
+        if precision == "double":
+            pytest.skip("double precision factorises every grid this test can build")
+
+        other = "amp_corr_time" if short_key == "phase_corr_time" else "phase_corr_time"
+
+        return TestTheGPStaysFactorisable().make_comp(**{short_key: 2.0, other: None})
+
+    @pytest.mark.parametrize("short_key", ["phase_corr_time", "amp_corr_time"])
+    def test_an_over_resolved_gp_blames_the_key_that_set_the_grid(
+        self, short_key, precision
+    ):
+        """Both directions of the asymmetry: the error names the SHORTER key.
+
+        Parameterised over which side is short because the amplitude and phase
+        kernels are checked separately and each used to name its own key -- so on an
+        asymmetric grid the failure of one kernel would blame a correlation time that
+        was not responsible for the grid and could not be lengthened any further.
+        """
+        with pytest.raises(RuntimeError, match=self.ATTRIBUTION.format(short_key)):
+            self.over_resolve(short_key, precision)
+
+    @pytest.mark.parametrize("short_key", ["phase_corr_time", "amp_corr_time"])
+    def test_the_error_does_not_blame_the_maximal_key(self, short_key, precision):
+        """The remedy has to be actionable: never "lengthen" an already-null key."""
+        other = "amp_corr_time" if short_key == "phase_corr_time" else "phase_corr_time"
+
+        with pytest.raises(RuntimeError) as excinfo:
+            self.over_resolve(short_key, precision)
+
+        assert not re.search(self.ATTRIBUTION.format(other), str(excinfo.value))
+
+    def test_the_error_says_what_to_do_about_it(self, precision):
+        with pytest.raises(RuntimeError, match="too finely resolved") as excinfo:
+            self.over_resolve("phase_corr_time", precision)
+
+        message = str(excinfo.value)
+        assert "single precision" in message
+        assert "model.precision: double" in message
+        assert "ConstGains" in message
+
+    def test_an_equally_short_pair_names_both(self, precision):
+        """With the two correlation times equal, both keys set the grid.
+
+        A symmetric grid is the one arrangement that does not fail, so this pins the
+        naming rather than the failure: lengthening only one of an equal pair leaves
+        the other setting the same grid, so both have to be named.
+        """
+        if precision == "double":
+            pytest.skip("double precision factorises every grid this test can build")
+
+        comp = TestTheGPStaysFactorisable().make_comp(600.0, amp_corr_time=600.0)
+
+        assert comp.grid_corr_keys == ["amp_corr_time", "phase_corr_time"]
+
+
+class TestResolvedValuesArePrinted:
+    """The run's own record of what it used, in the units the config writes.
+
+    ``amp_std`` is stored as a fraction of ``amp_mean`` and ``phase_std`` in radians,
+    so both are converted back on the way out; the defaults have to survive that
+    round trip and read as the numbers the documentation quotes.
+    """
+
+    def test_the_defaults_print_in_config_units(self, capsys):
+        validate_full(full_config())
+        out = capsys.readouterr().out
+
+        assert f"Using Gains amplitude std : {DEFAULT_AMP_STD_PERCENT:.1f} %" in out
+        assert f"Using Gains phase std : {DEFAULT_PHASE_STD_DEGREES:.1f} degrees" in out
+
+    def test_explicit_values_print_as_written(self, capsys):
+        validate_full(full_config(amp_mean=2.0, amp_std=7.0, phase_std=45.0))
+        out = capsys.readouterr().out
+
+        assert "Using Gains amplitude std : 7.0 %" in out
+        assert "Using Gains phase std : 45.0 degrees" in out
 
 
 class TestPhaseMean:

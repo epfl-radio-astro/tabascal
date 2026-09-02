@@ -6,6 +6,7 @@ from tabascal.gp import cholesky, resampling_kernel, get_times
 from tabascal.ms import read_caltable
 from tabascal.transform import affine_transform_full
 
+import jax
 import jax.numpy as jnp
 from jax import vmap, Array
 
@@ -53,6 +54,121 @@ def _positive_scale(key: str, value, convert, reason: str) -> float:
         )
 
     return converted
+
+
+#: The width of the amplitude prior when the config leaves it unset, as a percentage
+#: of ``amp_mean``. A real array's antennas differ in sensitivity by far more than a
+#: percent, so a prior that narrow is a claim about the array rather than an absence
+#: of one, and it is also the fit's own ceiling: the fitted parameter is always a
+#: standard normal ``z``, and the width is what carries it to the gain — through
+#: ``exp(amp_std z)`` in :class:`ConstGains` and through the Cholesky of an
+#: ``amp_std**2`` kernel in :class:`GPGains`. Either way a narrow prior is a short
+#: lever, and the optimiser's step in ``z`` is set by ``opt.epsilon`` rather than by
+#: the gradient. (:class:`UnitaryGains` fits no gain and reads neither width.)
+DEFAULT_AMP_STD_PERCENT = 20.0
+
+#: The width of the phase prior when the config leaves it unset, in degrees. Chosen
+#: to say as close to nothing about the phase as a Gaussian on an angle can.
+#:
+#: The prior the model sees is the WRAPPED normal, whose density is
+#: ``(1 + 2 sum_k exp(-(k sigma)^2 / 2) cos(k t)) / 2 pi`` — uniform to within
+#: ``2 exp(-sigma^2 / 2)``, which is 1.4 % at half a turn and 5e-9 at a full one. The
+#: extra six decades buy nothing: no fit is sensitive to a 1.4 % tilt in the prior
+#: over the circle, and the full turn costs something. The phase is carried from the
+#: fitted standard normal ``z`` by ``sigma`` directly (``phase = mean + sigma z`` in
+#: :class:`ConstGains`, a ``sigma**2`` kernel in :class:`GPGains`), so the likelihood
+#: — ``2 pi``-periodic in the phase — is periodic in ``z`` with period
+#: ``2 pi / sigma``, which halves as sigma doubles, putting twice as many whole-turn
+#: copies of every optimum inside the prior's bulk. Half a turn also makes
+#: ``|z| <= 1`` cover the whole circle, so any phase, including one read from a
+#: measured gain, starts the fit inside the prior rather than tens of sigma outside
+#: it.
+DEFAULT_PHASE_STD_DEGREES = 180.0
+
+
+#: Jitter added to a gain Gaussian process kernel, as a fraction of the kernel's own
+#: variance, and the absolute floor it never drops below.
+#:
+#: :func:`~tabascal.gp.cholesky` and :func:`~tabascal.gp.resampling_kernel` add their
+#: jitter ABSOLUTELY, after the kernel has been scaled by the prior variance, so a
+#: fixed 1e-8 is a regularisation of ``1e-8 / var`` in the only terms that matter --
+#: and the squared-exponential Gram matrix on a fine node grid is numerically
+#: singular without one. Tying the jitter to the variance makes the factorisation
+#: scale-free: ``chol(var (SE + R I)) = sqrt(var) chol(SE + R I)``, so whether it
+#: succeeds depends on the node grid and ``R`` alone, and never on the units the
+#: prior happens to be written in.
+#:
+#: The floor keeps the historical absolute jitter wherever it is already the larger
+#: of the two, i.e. for every ``var`` below ``_GP_JITTER_FLOOR / _GP_JITTER_RELATIVE``
+#: = 1e-3. Narrow priors -- which is every prior that used to work -- are therefore
+#: regularised exactly as before, bit for bit.
+#:
+#: ``1e-5`` rather than something smaller: fp32 has ~1.2e-7 of relative precision, so
+#: a jitter at or below that is not represented in the assembled kernel at all. What
+#: it has to survive is not a large grid as such -- :func:`~tabascal.gp.get_times`
+#: lays down about two nodes per correlation length, and such a grid factorises at any
+#: size -- but the two kernels sharing one grid, which leaves the smoother of them
+#: carrying as many nodes per correlation length as the two correlation times differ
+#: by. Measured over a 1200 s observation with that ratio at its worst, 1e-7 already
+#: fails and 1e-6 is the first value to clear a 243-node grid, so 1e-5 is the smallest
+#: round value with a decade of headroom, while staying a factor of ~3 below the
+#: variance at which the floor would stop applying (which is what keeps every recorded
+#: reference on the floor, and so unchanged).
+_GP_JITTER_RELATIVE = 1e-5
+_GP_JITTER_FLOOR = 1e-8
+
+
+def gp_jitter(var: float) -> float:
+    """The jitter to add to a gain Gaussian process kernel of variance ``var``.
+
+    Never smaller than the absolute jitter the kernels were always given, so a prior
+    narrow enough for that to dominate is regularised exactly as it was before.
+    """
+
+    return max(_GP_JITTER_FLOOR, _GP_JITTER_RELATIVE * float(var))
+
+
+def check_gp_conditioning(
+    name: str, array: Array, corr_keys: List[str], n_g_times: int
+) -> Array:
+    """Refuse a gain Gaussian process the working precision cannot factorise.
+
+    The jitter above buys a wide margin but not an unlimited one. What exhausts it is
+    not the size of the node grid -- :func:`~tabascal.gp.get_times` always lays down
+    about two nodes per correlation length, and a grid built that way factorises at
+    any size -- but a kernel that is SMOOTH on the grid another kernel asked for. The
+    two share one grid, taken from the shorter correlation time, so the wider the two
+    correlation times are apart, the more nodes per correlation length the smoother
+    kernel carries and the faster its squared-exponential Gram matrix goes singular.
+    In single precision that comes back as a NaN Cholesky, which then flows silently
+    into the initial parameters and out through every gain the run reports.
+
+    So it is named here instead. ``corr_keys`` are the config keys that actually set
+    the grid -- whichever correlation time is the shorter, or both when they are
+    equal -- rather than the key belonging to the kernel that happened to fail:
+    lengthening the other one cannot coarsen the grid, so naming it would print a
+    remedy that does nothing.
+    """
+
+    if bool(jnp.all(jnp.isfinite(array))):
+        return array
+
+    precision = "double" if jax.config.read("jax_enable_x64") else "single"
+    named = " and ".join(f"gains.{key}" for key in corr_keys)
+    verb, pronoun = ("are", "them") if len(corr_keys) > 1 else ("is", "it")
+
+    raise ValueError(
+        f"The gain Gaussian process is too finely resolved to factorise in {precision} "
+        f"precision: {name} came back non-finite on a grid of {n_g_times} nodes. Both "
+        "gain kernels share one node grid, taken from whichever of "
+        "gains.amp_corr_time and gains.phase_corr_time is the shorter, so "
+        f"{named} {verb} asking for more gain resolution than can be carried here -- "
+        "and the further apart the two correlation times are, the more nodes per "
+        f"correlation length the smoother kernel has to carry. Lengthen {pronoun} "
+        "(null gives one correlation length over the whole observation), "
+        + ("" if precision == "double" else "or run in double precision (model.precision: double), ")
+        + "or fit a constant gain per antenna with gains:ConstGains instead."
+    )
 
 
 def validate_gain_scales(gains_config: Dict) -> Dict:
@@ -106,7 +222,7 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
         )
 
     if gp_amp_std is None: # Set Default
-        est_gp_amp_std = 1 / 100 * gains_config["amp_mean"] # 1 %
+        est_gp_amp_std = DEFAULT_AMP_STD_PERCENT / 100 * gains_config["amp_mean"]
         gains_config["amp_std"] = est_gp_amp_std
     else:
         gains_config["amp_std"] = _positive_scale(
@@ -129,7 +245,7 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
         raise ValueError(f"Config parameter (gains:\n\tphase_mean: {gp_phase_mean}) is not of type float or int.")
 
     if gp_phase_std is None: # Set Default
-        est_gp_phase_std = float(jnp.deg2rad(1)) # degrees
+        est_gp_phase_std = float(jnp.deg2rad(DEFAULT_PHASE_STD_DEGREES))
         gains_config["phase_std"] = est_gp_phase_std
     else:
         gains_config["phase_std"] = _positive_scale(
@@ -397,29 +513,72 @@ class GPGains(BaseGPGains):
         self.g_times = get_times(self.times, min(self.amp_corr_time, self.phase_corr_time))
         self.n_g_times = len(self.g_times)
 
-        self.resample_amp = resampling_kernel(
-            self.g_times,
-            self.times,
-            self.gp_amp_std**2,
-            self.amp_corr_time,
-            1e-8,
+        # The keys that actually set the grid, for the error in check_gp_conditioning:
+        # whichever correlation time is the shorter, or both when they are equal.
+        # Lengthening the other one cannot coarsen the grid.
+        grid_corr_time = min(self.amp_corr_time, self.phase_corr_time)
+        self.grid_corr_keys = [
+            key
+            for key, value in (
+                ("amp_corr_time", self.amp_corr_time),
+                ("phase_corr_time", self.phase_corr_time),
+            )
+            if value == grid_corr_time
+        ]
+
+        self.resample_amp = check_gp_conditioning(
+            "the amplitude resampling kernel",
+            resampling_kernel(
+                self.g_times,
+                self.times,
+                self.gp_amp_std**2,
+                self.amp_corr_time,
+                gp_jitter(self.gp_amp_std**2),
+            ),
+            self.grid_corr_keys,
+            self.n_g_times,
         )
-        self.resample_phase = resampling_kernel(
-            self.g_times,
-            self.times,
-            self.gp_phase_std**2,
-            self.phase_corr_time,
-            1e-8,
+        self.resample_phase = check_gp_conditioning(
+            "the phase resampling kernel",
+            resampling_kernel(
+                self.g_times,
+                self.times,
+                self.gp_phase_std**2,
+                self.phase_corr_time,
+                gp_jitter(self.gp_phase_std**2),
+            ),
+            self.grid_corr_keys,
+            self.n_g_times,
         )
 
     def _compute_prior_params(self):
 
-        self.L_gains_amp = cholesky(self.g_times, self.gp_amp_std**2, self.amp_corr_time, 1e-8)
+        self.L_gains_amp = check_gp_conditioning(
+            "the amplitude Cholesky",
+            cholesky(
+                self.g_times,
+                self.gp_amp_std**2,
+                self.amp_corr_time,
+                gp_jitter(self.gp_amp_std**2),
+            ),
+            self.grid_corr_keys,
+            self.n_g_times,
+        )
         self.mu_gains_amp = self.gp_amp_mean * jnp.ones(
             (self.n_ant, self.n_freq, self.n_g_times)
         )
 
-        self.L_gains_phase = cholesky(self.g_times, self.gp_phase_std**2, self.phase_corr_time, 1e-8)
+        self.L_gains_phase = check_gp_conditioning(
+            "the phase Cholesky",
+            cholesky(
+                self.g_times,
+                self.gp_phase_std**2,
+                self.phase_corr_time,
+                gp_jitter(self.gp_phase_std**2),
+            ),
+            self.grid_corr_keys,
+            self.n_g_times,
+        )
         self.mu_gains_phase = self.gp_phase_mean * jnp.ones(
             (self.n_ant-1, self.n_freq, self.n_g_times)
         )
@@ -780,7 +939,10 @@ class ConstGains(Component):
             # amp_std is a fractional spread (the config gives a percentage); use it
             # as the log-amplitude sigma, which makes the prior on |g| lognormal and
             # keeps the gain positive by construction. The two agree to first order,
-            # so a "10 %" prior is a 10 % spread for any spread worth writing down.
+            # so a "10 %" prior is a 10 % spread; they part company only at widths so
+            # wide that the exact figure is not what is being said. At the 20 %
+            # default the +1 sigma draw sits at exp(0.2) = 1.22 times the median, and
+            # the standard deviation of |g| itself is 20.6 % of the median.
             self.log_amp_std = self.gp_amp_std / max(self.gp_amp_mean, 1e-12)
 
             components = component_class_names(tab_config)
