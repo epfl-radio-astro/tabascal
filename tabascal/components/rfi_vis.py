@@ -1,12 +1,38 @@
+from math import isfinite
+
 import jax.numpy as jnp
 
 from tabascal.distributed import psum_over_rfi, sharding_enabled
-from tabascal.interferometry import calculate_rfi_vis_fine, calculate_rfi_vis_variable
+from tabascal.interferometry import (
+    calculate_rfi_vis_blocked,
+    calculate_rfi_vis_variable,
+)
 from tabascal.components import Component
 from ri_kernels.jax_api import RFIVisOp
 
 
 class RiemannVis(Component):
+    """Riemann-sum RFI visibilities in pure JAX, scanned over the baseline axis.
+
+    The reference implementation of the same integral as :class:`RiemannVisFFI`,
+    and the one that kernel is validated against in value, forward mode and
+    reverse mode. The baseline axis is walked in blocks of
+    ``rfi.baseline_block_size`` under ``checkpoint`` (see
+    :func:`tabascal.interferometry.calculate_rfi_vis_blocked`) so that the fine
+    grid it integrates is bounded by the block rather than by the whole array:
+    what the forward pass leaves behind for reverse mode is the result and a
+    transposed copy of its per-antenna inputs, not the ``(n_bl, n_rfi,
+    n_freq_fine, n_time_fine)`` intermediate the reduction is built from.
+
+    It trades recomputation for memory rather than aiming at speed. The block
+    size does not change the result -- baselines are independent -- only how much
+    of the fine grid is live at once, and how many scan steps that takes. A null
+    block size is every baseline in a single step: the fine grid is still
+    recomputed rather than stored, so the tape stays small, but it is formed
+    whole. Measured on one GH200 that peaks where the unscanned kernel did, and
+    across four it is well under it, the tape being per-device memory that the
+    collective does not divide.
+    """
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
@@ -28,6 +54,31 @@ class RiemannVis(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
+
+            # null is a setting, not a missing value: one block over every
+            # baseline, which keeps the checkpoint and leaves the scan a single
+            # step. int() alone would turn 1.9 into 1 without a word: one
+            # baseline per scan step, dressed up as a valid setting. The
+            # finiteness test guards int() against yaml's .inf and .nan, which
+            # raise there with a message about floats rather than about the key;
+            # it is asked of floats only, since an int is finite by construction
+            # and float() on a big enough one raises in its turn.
+            block_size = config.args["rfi"].get("baseline_block_size", 128)
+            if block_size is not None and (
+                isinstance(block_size, bool)
+                or not isinstance(block_size, (int, float))
+                or (isinstance(block_size, float) and not isfinite(block_size))
+                or block_size != int(block_size)
+                or block_size < 1
+            ):
+                raise ValueError(
+                    "rfi.baseline_block_size is the number of baselines handled "
+                    "per scan step: a whole number of at least 1, or null for a "
+                    f"single block over every baseline, got {block_size!r}."
+                )
+            self.baseline_block_size = (
+                None if block_size is None else int(block_size)
+            )
 
             # Validate dimensions
             self._set_outputs()
@@ -56,9 +107,7 @@ class RiemannVis(Component):
         prefix = self.prefix
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
-        n_time = self.n_time
-        n_bl = self.n_bl
-        n_freq = self.n_freq
+        block_size = self.baseline_block_size
 
         def forward(params, state, constants):
             # Pure JAX operations only
@@ -68,11 +117,12 @@ class RiemannVis(Component):
             # Per-RFI-shard body (any leading RFI count); psum-ed across devices
             # under sharding. The fine->coarse mean runs before the cross-device
             # sum, so the collective is only coarse-grid sized (sum/mean commute).
+            # That mean runs per baseline block, inside the scan, which is
+            # what keeps it ahead of the psum while bounding the fine grid.
             def local_vis(rfi_A, rfi_phase):
-                vis_rfi_fine = calculate_rfi_vis_fine(rfi_A, rfi_phase, a1, a2)
-                # vis_rfi_fine is shape (n_bl, n_freq_fine, n_time_fine)
-                new_shape = (n_bl, n_freq, n_int_freq, n_time, n_int_time)
-                return jnp.mean(jnp.reshape(vis_rfi_fine, new_shape), axis=(-3, -1))
+                return calculate_rfi_vis_blocked(
+                    rfi_A, rfi_phase, a1, a2, n_int_freq, n_int_time, block_size
+                )
 
             vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
             # vis_rfi is shape (n_bl, n_freq, n_time)

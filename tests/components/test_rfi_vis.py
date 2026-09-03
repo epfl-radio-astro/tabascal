@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+import textwrap
+
 import pytest
 from types import SimpleNamespace
 from tabascal.components.rfi_vis import *
@@ -6,11 +11,24 @@ import jax
 import numpy as np
 
 from ri_kernels.jax_api import RFIVisOp
-from tabascal.interferometry import get_divisors
+from tabascal.interferometry import (
+    calculate_rfi_vis_blocked,
+    calculate_rfi_vis_fine,
+    get_divisors,
+)
 from .conftest import active_precision, make_constants
 
 
-def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, precision=None):
+def create_config(
+    n_ant,
+    n_rfi,
+    n_time,
+    n_freq,
+    n_int_time,
+    n_int_freq,
+    precision=None,
+    rfi_args=None,
+):
     a1, a2 = jnp.triu_indices(n_ant, 1)
     a1 = a1.astype('int32')
     a2 = a2.astype('int32')
@@ -25,9 +43,11 @@ def create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, precisio
         a1=a1,
         a2=a2,
         precision=precision or active_precision(),
-        # Deliberately empty: the integration sample counts are read off the
-        # bound TabConfig attributes, never out of the raw config dict.
-        args={"rfi": {}},
+        # Deliberately empty by default: the integration sample counts are read
+        # off the bound TabConfig attributes, never out of the raw config dict.
+        # ``rfi_args`` is for the keys that genuinely do live in the config dict,
+        # i.e. rfi.baseline_block_size.
+        args={"rfi": dict(rfi_args or {})},
     )
 
 
@@ -174,6 +194,427 @@ def test_mixed_precision_rejected():
     op = RFIVisOp(config.n_ant, config.a1, config.a2)
     with pytest.raises(TypeError):
         op.eval(rfi_amp, rfi_phase)
+
+
+# ---------------------------------------------------------------------------
+# Blocked baseline scan
+#
+# RiemannVis walks the baseline axis in blocks of rfi.baseline_block_size under
+# jax.checkpoint, so the (n_bl, n_rfi, n_freq_fine, n_time_fine) fine grid the
+# Riemann sum is built from is formed a block at a time rather than for the whole
+# axis, and is recomputed in the backward pass rather than kept. Baselines are independent, so
+# the block size is a memory strategy and nothing else: the tests below pin that
+# it changes neither the value nor the gradient, and that the fine grid really
+# does stay off the tape.
+# ---------------------------------------------------------------------------
+
+
+def dense_vis_rfi(state, config):
+    """The unblocked reduction: the whole fine grid, then the fine->coarse mean.
+
+    What ``RiemannVis`` computed before the scan, written out here so the blocked
+    kernel is held to the formula rather than only to itself.
+    """
+    vis_fine = calculate_rfi_vis_fine(
+        state["rfi_A"], state["rfi_phase"], config.a1, config.a2
+    )
+    new_shape = (
+        config.n_bl,
+        config.n_freq,
+        config.n_int_freq,
+        config.n_time,
+        config.n_int_time,
+    )
+    return jnp.mean(jnp.reshape(vis_fine, new_shape), axis=(-3, -1))
+
+
+def reverse_pass_residual_bytes(f, *primals):
+    """The bytes the forward pass leaves behind for the reverse pass.
+
+    ``jax.linearize`` runs the forward pass once and returns the linear map that
+    the backward pass transposes; everything the forward pass saved for it is
+    closed into that map as a constant. Summing those constants is therefore a
+    direct measurement of the tape, without reference to any backend's allocator.
+    """
+    _, f_lin = jax.linearize(f, *primals)
+    tangents = jax.tree.map(jnp.zeros_like, primals)
+    jaxpr = jax.make_jaxpr(f_lin)(*tangents)
+
+    return sum(c.size * c.dtype.itemsize for c in jaxpr.consts)
+
+
+def state_bytes(state):
+    return sum(x.size * x.dtype.itemsize for x in state.values())
+
+
+# n_bl for these sizes is 1, 6 and 2016, so the block sizes below span "one
+# baseline at a time", blocks that do and do not divide n_bl, blocks larger than
+# the whole axis, and None -- a single block, which is the setting that keeps the
+# checkpoint and leaves the scan a single step.
+block_sizes = [1, 5, 128, 4096, None]
+
+
+@pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
+@pytest.mark.parametrize("block_size", block_sizes)
+def test_blocked_kernel_matches_the_unblocked_reduction(
+    n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq, block_size
+):
+    """The scanned kernel reproduces the fine-grid formula, at any block size.
+
+    Including block sizes that leave a ragged last block, whose padding baselines
+    are antenna 0 against itself and must be dropped rather than summed in.
+    """
+    config = create_config(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq)
+    real_dtype = _session_dtype()
+    state = create_state(config, False, 42, real_dtype=real_dtype)
+
+    blocked = calculate_rfi_vis_blocked(
+        state["rfi_A"],
+        state["rfi_phase"],
+        config.a1,
+        config.a2,
+        n_int_freq,
+        n_int_time,
+        block_size,
+    )
+    dense = dense_vis_rfi(state, config)
+
+    atol, rtol = _tols(real_dtype)
+    assert blocked.shape == (config.n_bl, n_freq, n_time)
+    assert blocked.dtype == dense.dtype
+    assert jnp.allclose(blocked, dense, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("block_size", block_sizes)
+def test_the_block_size_changes_neither_the_value_nor_the_gradient(block_size):
+    """The component's output and its VJP match the unblocked reduction's.
+
+    The reference is the fine-grid formula, not the same component at some other
+    block size: a defect that every block shares -- a systematically dropped
+    conjugate, a mis-shaped reduction -- would agree with itself at every setting
+    and only disagree with the formula. The gradient case is not redundant
+    either: ``checkpoint`` changes how the tape is built, so a padding baseline
+    reaching the result, or a residual captured across steps, shows in reverse
+    mode alone.
+    """
+    sizes = (64, 4, 8, 4, 4, 2)
+    real_dtype = _session_dtype()
+    config = create_config(*sizes, rfi_args={"baseline_block_size": block_size})
+    state = create_state(config, False, 42, real_dtype=real_dtype)
+    cotangent = create_state(config, True, 50, real_dtype=real_dtype)["vis_rfi"]
+
+    impl = RiemannVis()
+    impl.setup(config)
+    constants = make_constants(impl)
+    forward = impl.build_forward()
+
+    def value_and_grads(f):
+        primal, vjp = jax.vjp(f, state)
+        (grads,) = vjp(cotangent)
+
+        return primal, grads
+
+    vis, grads = value_and_grads(lambda s: forward({}, s, constants)["vis_rfi"])
+    ref_vis, ref_grads = value_and_grads(lambda s: dense_vis_rfi(s, config))
+
+    atol, rtol = _tols(real_dtype)
+    assert jnp.allclose(vis, ref_vis, atol=atol, rtol=rtol)
+    for key in ("rfi_A", "rfi_phase"):
+        assert grads[key].dtype == ref_grads[key].dtype
+        assert jnp.allclose(grads[key], ref_grads[key], atol=atol, rtol=rtol)
+
+
+def test_the_fine_grid_is_not_kept_for_the_reverse_pass():
+    """The tape holds the inputs and the result, not the fine grid.
+
+    The point of the change, measured rather than asserted structurally: the
+    unblocked reduction saves intermediates of shape
+    ``(n_bl, n_rfi, n_freq_fine, n_time_fine)``, and the blocked kernel saves
+    nothing carrying both the baseline axis and the fine grid. What it does keep
+    is a transposed copy of the per-antenna inputs, sized by ``n_ant``.
+    """
+    block_size = 16
+    config = create_config(64, 4, 8, 4, 4, 2, rfi_args={"baseline_block_size": block_size})
+    real_dtype = _session_dtype()
+    state = create_state(config, False, 42, real_dtype=real_dtype)
+
+    impl = RiemannVis()
+    impl.setup(config)
+    constants = make_constants(impl)
+    forward = impl.build_forward()
+
+    blocked_bytes = reverse_pass_residual_bytes(
+        lambda s: forward({}, s, constants)["vis_rfi"], state
+    )
+    dense_bytes = reverse_pass_residual_bytes(lambda s: dense_vis_rfi(s, config), state)
+
+    # The transposed inputs, and whatever the compiler keeps beside them. The
+    # bound is the state the caller already holds -- both fine-grid inputs plus a
+    # vis_rfi -- with a factor of two for headroom rather than as a measurement:
+    # the blocked residual sits at roughly one copy of the two inputs.
+    assert blocked_bytes < 2 * state_bytes(state)
+    # And the comparison the assertion above is only meaningful against: the
+    # unblocked form of the same reduction really does keep the fine grid, which
+    # here is n_rfi * n_int_freq * n_int_time = 32 times the visibilities.
+    assert dense_bytes > 8 * blocked_bytes
+
+
+def scan_steps(f, *args):
+    """The trip count of every ``lax.scan`` in the jaxpr of ``f``.
+
+    Walks nested jaxprs, since the scan sits inside whatever the caller wrapped
+    around it.
+    """
+    from jax.extend.core import ClosedJaxpr, Jaxpr
+
+    lengths = []
+
+    def walk(jaxpr):
+        for eqn in jaxpr.eqns:
+            if eqn.primitive.name == "scan":
+                lengths.append(eqn.params["length"])
+            for param in eqn.params.values():
+                if isinstance(param, ClosedJaxpr):
+                    walk(param.jaxpr)
+                elif isinstance(param, Jaxpr):
+                    walk(param)
+
+    walk(jax.make_jaxpr(f)(*args).jaxpr)
+
+    return lengths
+
+
+# 2016 baselines at n_ant=64: 126 steps of 16, 16 steps of 128, and one step for
+# null or for any block at or above the axis.
+@pytest.mark.parametrize(
+    "block_size, expected_steps", [(16, 126), (128, 16), (None, 1), (4096, 1)]
+)
+def test_the_block_size_sets_the_number_of_scan_steps(block_size, expected_steps):
+    """What the setting does to the program, not just to the answer.
+
+    Every other test here is of a quantity the block size deliberately does not
+    change -- the value, the gradient, the tape -- so all of them would pass
+    just as well if ``null`` quietly meant 16. This one reads the trip count out
+    of the jaxpr, which is the thing the setting actually controls.
+    """
+    config = create_config(64, 2, 4, 4, 2, 2)
+    real_dtype = _session_dtype()
+    state = create_state(config, False, 42, real_dtype=real_dtype)
+
+    steps = scan_steps(
+        lambda A, P: calculate_rfi_vis_blocked(
+            A, P, config.a1, config.a2, config.n_int_freq, config.n_int_time, block_size
+        ),
+        state["rfi_A"],
+        state["rfi_phase"],
+    )
+
+    assert steps == [expected_steps]
+
+
+def test_the_default_block_size_is_used_when_the_config_does_not_set_one():
+    """A config predating the key still builds, on the base default of 128."""
+    config = create_config(4, 2, 3, 5, 4, 3)
+    assert config.args["rfi"] == {}
+
+    impl = RiemannVis()
+    impl.setup(config)
+
+    assert impl.baseline_block_size == 128
+
+
+def test_a_null_block_size_is_one_block_over_every_baseline():
+    """null is accepted, kept as None, and equals a block that spans the axis.
+
+    The two are the same computation -- a block size at or above ``n_bl`` clamps
+    to it -- so this pins the spelling, which is the point of the setting: it
+    asks for one step over the whole axis without the config having to know how
+    many baselines there are.
+    """
+    sizes = (64, 4, 8, 4, 4, 2)
+    real_dtype = _session_dtype()
+    config = create_config(*sizes, rfi_args={"baseline_block_size": None})
+    state = create_state(config, False, 42, real_dtype=real_dtype)
+
+    impl = RiemannVis()
+    impl.setup(config)
+    assert impl.baseline_block_size is None
+
+    vis = impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
+    whole_axis = calculate_rfi_vis_blocked(
+        state["rfi_A"],
+        state["rfi_phase"],
+        config.a1,
+        config.a2,
+        config.n_int_freq,
+        config.n_int_time,
+        config.n_bl,
+    )
+
+    assert jnp.array_equal(vis, whole_axis)
+
+
+def test_a_null_block_size_keeps_the_tape_bounded():
+    """What null keeps: the checkpoint, and so the small tape.
+
+    The scan is down to a single step over the whole axis, but the checkpoint on
+    its body is still there, so the fine grid stays off the tape and the
+    residuals match a small block's. What null gives up is the bound on the
+    array itself -- the backward pass rebuilds every baseline at once rather
+    than one block at a time -- which is a peak rather than a tape, and was
+    measured on a GPU rather than here: the ReFrame references are recorded at
+    the default block, not at null.
+    """
+    sizes = (64, 4, 8, 4, 4, 2)
+    real_dtype = _session_dtype()
+
+    def residual_bytes(block):
+        config = create_config(*sizes, rfi_args={"baseline_block_size": block})
+        state = create_state(config, False, 42, real_dtype=real_dtype)
+        impl = RiemannVis()
+        impl.setup(config)
+        constants = make_constants(impl)
+        forward = impl.build_forward()
+
+        return reverse_pass_residual_bytes(
+            lambda s: forward({}, s, constants)["vis_rfi"], state
+        ), state
+
+    null_bytes, state = residual_bytes(None)
+    block_bytes, _ = residual_bytes(16)
+
+    assert null_bytes < 2 * state_bytes(state)
+    assert null_bytes == block_bytes
+
+
+@pytest.mark.parametrize(
+    "block_size", [0, -1, 1.5, True, "128", float("inf"), float("nan")]
+)
+def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
+    block_size,
+):
+    """Rejected in setup, by name, rather than silently rounded or ignored.
+
+    ``.inf`` and ``.nan`` are in the list because yaml can spell them and because
+    they are the two that reach ``int()`` before any comparison does. ``None`` is
+    deliberately not in it: null is a setting, covered below.
+    """
+    config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"baseline_block_size": block_size})
+
+    with pytest.raises(RuntimeError, match="baseline_block_size"):
+        RiemannVis().setup(config)
+
+
+_SHARDED_BLOCK_SCRIPT = textwrap.dedent(
+    """
+    import os
+
+    import jax
+    import jax.numpy as jnp
+    from types import SimpleNamespace
+
+    # The precision of the session that launched this, so the sharded path is
+    # exercised in whichever one CI is running -- complex64 under --x64 false is
+    # a different kernel from complex128, and the FFI comparison tests only cover
+    # the unsharded one.
+    x64 = os.environ["TAB_TEST_X64"] == "1"
+    jax.config.update("jax_enable_x64", x64)
+
+    from tabascal.components.rfi_vis import RiemannVis
+    from tabascal.distributed import sharding_enabled
+
+    assert jax.device_count() == 2, jax.device_count()
+    assert sharding_enabled(), "the RFI axis is not sharded"
+
+    n_ant, n_rfi, n_freq, n_int_freq, n_time, n_int_time = 12, 8, 3, 2, 4, 2
+    a1, a2 = jnp.triu_indices(n_ant, 1)
+    a1, a2 = a1.astype("int32"), a2.astype("int32")
+    n_bl = int(a1.shape[0])
+
+    shape = (n_rfi, n_ant, n_freq * n_int_freq, n_time * n_int_time)
+    keys = jax.random.split(jax.random.PRNGKey(0), 6)
+    real = jnp.float64 if x64 else jnp.float32
+    cplx = jnp.complex128 if x64 else jnp.complex64
+    state = {
+        "rfi_A": (
+            jax.random.normal(keys[0], shape) + 1j * jax.random.normal(keys[1], shape)
+        ).astype(cplx),
+        "rfi_phase": jax.random.uniform(keys[2], shape).astype(real),
+        "vis_rfi": jnp.zeros((n_bl, n_freq, n_time), cplx),
+    }
+    tangent = {
+        "rfi_A": (
+            jax.random.normal(keys[3], shape) + 1j * jax.random.normal(keys[4], shape)
+        ).astype(cplx),
+        "rfi_phase": jax.random.uniform(keys[5], shape).astype(real),
+        "vis_rfi": jnp.zeros((n_bl, n_freq, n_time), cplx),
+    }
+    cotangent = jnp.ones((n_bl, n_freq, n_time), cplx)
+    atol = 1e-10 if x64 else 1e-4
+
+    def run(block_size):
+        config = SimpleNamespace(
+            n_ant=n_ant, n_rfi=n_rfi, n_time=n_time, n_freq=n_freq,
+            n_int_time=n_int_time, n_int_freq=n_int_freq, n_bl=n_bl, a1=a1, a2=a2,
+            precision="double", args={"rfi": {"baseline_block_size": block_size}},
+        )
+        comp = RiemannVis()
+        comp.setup(config)
+        constants = {
+            f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()
+        }
+        forward = comp.build_forward()
+        f = lambda s: forward({}, s, constants)["vis_rfi"]
+        primal, vjp = jax.vjp(f, state)
+        (grads,) = vjp(cotangent)
+        _, tangent_out = jax.jvp(f, (state,), (tangent,))
+
+        return primal, grads, tangent_out
+
+    ref_vis, ref_grads, ref_tangent = run(4)
+    for block_size in (None, n_bl, 128):
+        vis, grads, tangent_out = run(block_size)
+        assert jnp.allclose(vis, ref_vis, atol=atol), block_size
+        assert jnp.allclose(tangent_out, ref_tangent, atol=atol), block_size
+        for key in ("rfi_A", "rfi_phase"):
+            assert jnp.allclose(grads[key], ref_grads[key], atol=atol), (block_size, key)
+
+    print("SHARDED_BLOCK_OK")
+    """
+)
+
+
+def test_every_block_size_agrees_with_the_rfi_axis_split_across_devices():
+    """The scan lives inside the shard_map body, so the block interacts with it.
+
+    A null block size is the case worth spending a subprocess on: it is the one
+    where the body holds every baseline at once, which is also what the psum
+    that follows has to keep coarse-grid sized. Run under two devices, since
+    sharding is decided by the device count at import, and in the session's own
+    precision, since the sharded path is otherwise only ever seen in double.
+
+    Value, JVP and VJP, because the checkpoint and the psum each have their own
+    rule and a defect in one need not show in the others.
+    """
+    env = {
+        **os.environ,
+        "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+        "JAX_PLATFORMS": "cpu",
+        "TAB_TEST_X64": "1" if active_precision() == "double" else "0",
+    }
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", _SHARDED_BLOCK_SCRIPT],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "SHARDED_BLOCK_OK" in result.stdout, (
+        f"returncode={result.returncode}\nstdout:\n{result.stdout}"
+        f"\nstderr:\n{result.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------

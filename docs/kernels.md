@@ -38,6 +38,36 @@ model:
     - rfi_vis:RiemannVisFFI
 ```
 
+## Memory
+
+The Riemann sum is a reduction over a fine grid of shape `(n_bl, n_rfi,
+n_freq_fine, n_time_fine)`, which is `n_rfi * n_int_freq * n_int_time` times the
+size of the visibilities it produces. The compiled kernels never form it: gather,
+multiply, sum over sources and the average back onto the data grid happen in one
+pass, and their transpose rule recomputes the same terms from the per-antenna
+inputs, so nothing of that size is kept for the backward pass either.
+
+{class}`~tabascal.components.rfi_vis.RiemannVis` reaches the same bound by
+scanning the baseline axis under `jax.checkpoint`: each step forms the fine grid
+for `rfi.baseline_block_size` baselines at a time, or for the whole axis where
+it is shorter than that, averages it onto the data grid, and
+lets the backward pass recompute it. The block size is the memory/recomputation
+trade and does not change the result — see
+[`baseline_block_size`](config.md#rfi-signal). It remains the slower of the two
+components, and what it holds still grows with the number of baselines, since the
+visibilities do; what the scan removes is the fine grid's baseline axis, which is
+the term that carried `n_rfi * n_int_freq * n_int_time` with it.
+
+On the reference workload of the [performance checks](performance.md) — 96
+antennas on one GH200 — that is a peak of 0.70 GB in single precision against
+8.68 GB without the scan, near the compiled kernel's own 0.56 GB, in exchange for
+an optimiser step 1.6 times longer. The recomputation is what is being paid for
+the memory. `rfi.baseline_block_size` moves the trade in either direction: a
+larger block is fewer scan steps and a larger fine grid, and `null` is a single
+block, which keeps the checkpoint but forms the grid whole — the tape stays
+bounded, the peak does not. The compiled kernel pays
+neither cost and remains the faster choice where it is available.
+
 ## Precision
 
 The kernels are compiled for both single and double precision and run in

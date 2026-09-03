@@ -222,19 +222,30 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
     # where RFI-vis still dominates (Riemann: -10% single, -6% double). Setup
     # time is unchanged, so total_runtime moves with optimizer_runtime alone.
     # Memory is flat. See issue #107 for why the slower component is preferred.
+    # The Riemann references were re-measured on Daint (JAX 0.6.0) from this
+    # pipeline's own perf job after #114 put the baseline axis under a scan and
+    # jax.checkpoint. Peak memory falls 12.5x in single and 10.8x in double, to
+    # within a quarter of what the FFI kernel itself peaks at, and the optimiser
+    # pays 1.64x and 1.74x for it. That cost is the recomputation the scan trades
+    # for the memory, and it is far more than the ~5% #108 paid for the same
+    # treatment of the antenna axis: rfi.baseline_block_size is the lever if the
+    # trade needs moving, a larger block being fewer scan steps and a larger fine
+    # grid. Tolerances are unchanged, and the RiemannFFI references are untouched
+    # -- measured 0.564 and 1.316 GB against them in the same run -- since the
+    # kernel bounds the same term inside itself.
     _reference_by_variant = {
         ("Riemann", "single"): {
             "daint:gpu": {
-                "total_runtime": (79.91, -0.25, 0.15, "s"),
-                "optimizer_runtime": (66.28, -0.20, 0.15, "s"),
-                "memory_usage": (8.679, -0.1, 0.1, "GB"),
+                "total_runtime": (122.40, -0.25, 0.15, "s"),
+                "optimizer_runtime": (108.54, -0.20, 0.15, "s"),
+                "memory_usage": (0.696, -0.1, 0.1, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
-                "total_runtime": (80.66, -0.25, 0.15, "s"),
-                "optimizer_runtime": (66.60, -0.20, 0.15, "s"),
-                "memory_usage": (16.887, -0.1, 0.1, "GB"),
+                "total_runtime": (129.55, -0.25, 0.15, "s"),
+                "optimizer_runtime": (115.64, -0.20, 0.15, "s"),
+                "memory_usage": (1.565, -0.1, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
@@ -310,19 +321,29 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     # test is the dominant remaining term. Memory rises 0.238 -> 0.306 GB
     # (single) and 0.477 -> 0.614 GB (double); both are sub-GB totals where the
     # signal component's absolute cost is a large fraction.
+    # The Riemann references were re-measured on Daint (JAX 0.6.0) from this
+    # pipeline's own perf job after #114 put the baseline axis under a scan and
+    # jax.checkpoint, alongside the single-GPU references above. Peak memory
+    # falls 10.1x in single and 10.9x in double, onto what the FFI kernel measured
+    # beside it in the same run -- 0.325 and 0.647 GB, equal to the printed
+    # precision -- since the fine grid was the whole of the difference between
+    # them. (The FFI references below are older measurements, 0.306 and 0.614.) The optimiser pays 1.39x and 1.22x, less than the single-GPU
+    # 1.6-1.7x: sharding the RFI axis already divides the work the scan
+    # recomputes. Tolerances are unchanged and the RiemannFFI references are
+    # untouched.
     _reference_by_variant: dict = {
         ("Riemann", "single"): {
             "daint:gpu": {
-                "total_runtime": (64.59, -0.25, 0.15, "s"),
-                "optimizer_runtime": (41.69, -0.20, 0.15, "s"),
-                "memory_usage": (3.294, -0.15, 0.15, "GB"),
+                "total_runtime": (74.48, -0.25, 0.15, "s"),
+                "optimizer_runtime": (57.94, -0.20, 0.15, "s"),
+                "memory_usage": (0.325, -0.15, 0.15, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
-                "total_runtime": (70.65, -0.25, 0.15, "s"),
-                "optimizer_runtime": (46.88, -0.20, 0.15, "s"),
-                "memory_usage": (7.058, -0.15, 0.15, "GB"),
+                "total_runtime": (74.51, -0.25, 0.15, "s"),
+                "optimizer_runtime": (57.39, -0.20, 0.15, "s"),
+                "memory_usage": (0.647, -0.15, 0.15, "GB"),
             },
         },
         ("RiemannFFI", "single"): {

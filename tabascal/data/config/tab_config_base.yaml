@@ -77,6 +77,7 @@ rfi:
   min_time_bins: 1      # Optional - Minimum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariable / +FFI)
   max_time_bins: 30     # Optional - Maximum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariable / +FFI)
   n_int_freq: 1         # Optional - Number of integration samples per frequency channel of the RFI fine grid. Given directly - there is no estimate on this axis, which is why it takes a count where the time axis takes a factor
+  baseline_block_size: 128 # Optional - Number of baselines handled per scan step in rfi_vis:RiemannVis, or null for a single block over every baseline. Trades recomputation for peak memory: the fine grid it integrates carries min(baseline_block_size, n_bl) on its baseline axis rather than n_bl. null keeps the checkpoint, so the reverse pass still recomputes that grid rather than storing it, but forms it whole - it bounds the tape and not the peak. Read by no other component - the FFI kernels bound the same term themselves
   r_seed: 123           # Optional - Random seed to use for sampling
 ############################
 # Satellite path parameters
