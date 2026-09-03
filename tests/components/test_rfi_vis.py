@@ -281,33 +281,37 @@ def test_blocked_kernel_matches_the_unblocked_reduction(
 
 @pytest.mark.parametrize("block_size", block_sizes)
 def test_the_block_size_changes_neither_the_value_nor_the_gradient(block_size):
-    """The component's output and its VJP are independent of the block size.
+    """The component's output and its VJP match the unblocked reduction's.
 
-    The gradient case is not redundant: ``checkpoint`` changes how the tape is
-    built, so a mistake in the scan body -- a padding baseline reaching the
-    result, a residual captured across steps -- would show in reverse mode alone.
+    The reference is the fine-grid formula, not the same component at some other
+    block size: a defect that every block shares -- a systematically dropped
+    conjugate, a mis-shaped reduction -- would agree with itself at every setting
+    and only disagree with the formula. The gradient case is not redundant
+    either: ``checkpoint`` changes how the tape is built, so a padding baseline
+    reaching the result, or a residual captured across steps, shows in reverse
+    mode alone.
     """
     sizes = (64, 4, 8, 4, 4, 2)
     real_dtype = _session_dtype()
+    config = create_config(*sizes, rfi_args={"baseline_block_size": block_size})
+    state = create_state(config, False, 42, real_dtype=real_dtype)
+    cotangent = create_state(config, True, 50, real_dtype=real_dtype)["vis_rfi"]
 
-    def value_and_grad(block):
-        config = create_config(*sizes, rfi_args={"baseline_block_size": block})
-        impl = RiemannVis()
-        impl.setup(config)
-        constants = make_constants(impl)
-        forward = impl.build_forward()
+    impl = RiemannVis()
+    impl.setup(config)
+    constants = make_constants(impl)
+    forward = impl.build_forward()
 
-        state = create_state(config, False, 42, real_dtype=real_dtype)
-        cotangent = create_state(config, True, 50, real_dtype=real_dtype)
-        primal, vjp = jax.vjp(lambda s: forward({}, s, constants), state)
+    def value_and_grads(f):
+        primal, vjp = jax.vjp(f, state)
         (grads,) = vjp(cotangent)
 
-        return primal["vis_rfi"], grads
+        return primal, grads
+
+    vis, grads = value_and_grads(lambda s: forward({}, s, constants)["vis_rfi"])
+    ref_vis, ref_grads = value_and_grads(lambda s: dense_vis_rfi(s, config))
 
     atol, rtol = _tols(real_dtype)
-    ref_vis, ref_grads = value_and_grad(sizes[0] * (sizes[0] - 1) // 2)
-    vis, grads = value_and_grad(block_size)
-
     assert jnp.allclose(vis, ref_vis, atol=atol, rtol=rtol)
     for key in ("rfi_A", "rfi_phase"):
         assert grads[key].dtype == ref_grads[key].dtype
@@ -320,7 +324,8 @@ def test_the_fine_grid_is_not_kept_for_the_reverse_pass():
     The point of the change, measured rather than asserted structurally: the
     unblocked reduction saves intermediates of shape
     ``(n_bl, n_rfi, n_freq_fine, n_time_fine)``, and the blocked kernel saves
-    nothing that grows with ``n_bl`` beyond its own coarse-grid output.
+    nothing carrying both the baseline axis and the fine grid. What it does keep
+    is a transposed copy of the per-antenna inputs, sized by ``n_ant``.
     """
     block_size = 16
     config = create_config(64, 4, 8, 4, 4, 2, rfi_args={"baseline_block_size": block_size})
@@ -337,10 +342,10 @@ def test_the_fine_grid_is_not_kept_for_the_reverse_pass():
     )
     dense_bytes = reverse_pass_residual_bytes(lambda s: dense_vis_rfi(s, config), state)
 
-    # What the caller is holding anyway: the two per-antenna inputs, the incoming
-    # vis_rfi and the result, which is the same shape as that. The factor of two
-    # is headroom for how the compiler splits a saved array, not a measured
-    # margin -- the blocked residual sits at roughly the input size.
+    # The transposed inputs, and whatever the compiler keeps beside them. The
+    # bound is the state the caller already holds -- both fine-grid inputs plus a
+    # vis_rfi -- with a factor of two for headroom rather than as a measurement:
+    # the blocked residual sits at roughly one copy of the two inputs.
     assert blocked_bytes < 2 * state_bytes(state)
     # And the comparison the assertion above is only meaningful against: the
     # unblocked form of the same reduction really does keep the fine grid, which
@@ -359,11 +364,17 @@ def test_the_default_block_size_is_used_when_the_config_does_not_set_one():
     assert impl.baseline_block_size == 128
 
 
-@pytest.mark.parametrize("block_size", [0, -1, 1.5, True, "128", None])
+@pytest.mark.parametrize(
+    "block_size", [0, -1, 1.5, True, "128", None, float("inf"), float("nan")]
+)
 def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     block_size,
 ):
-    """Rejected in setup, by name, rather than silently rounded or ignored."""
+    """Rejected in setup, by name, rather than silently rounded or ignored.
+
+    ``.inf`` and ``.nan`` are in the list because yaml can spell them and because
+    they are the two that reach ``int()`` before any comparison does.
+    """
     config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"baseline_block_size": block_size})
 
     with pytest.raises(RuntimeError, match="baseline_block_size"):

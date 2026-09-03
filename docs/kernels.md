@@ -53,8 +53,9 @@ for `rfi.baseline_block_size` baselines only, averages it onto the data grid, an
 lets the backward pass recompute it. The block size is the memory/recomputation
 trade and does not change the result — see
 [`baseline_block_size`](config.md#rfi-signal). It remains the slower of the two
-components; what the scan buys is a peak that no longer grows with the number of
-baselines.
+components, and what it holds still grows with the number of baselines, since the
+visibilities do; what the scan removes is the fine grid's baseline axis, which is
+the term that carried `n_rfi * n_int_freq * n_int_time` with it.
 
 ## Precision
 

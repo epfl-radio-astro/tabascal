@@ -1,3 +1,5 @@
+from math import isfinite
+
 import jax.numpy as jnp
 
 from tabascal.distributed import psum_over_rfi, sharding_enabled
@@ -18,9 +20,9 @@ class RiemannVis(Component):
     ``rfi.baseline_block_size`` under ``checkpoint`` (see
     :func:`tabascal.interferometry.calculate_rfi_vis_blocked`) so that the fine
     grid it integrates is bounded by the block rather than by the whole array:
-    what the forward pass leaves behind for reverse mode is the result plus its
-    per-antenna inputs, not the ``(n_bl, n_rfi, n_freq_fine, n_time_fine)``
-    intermediate the reduction is built from.
+    what the forward pass leaves behind for reverse mode is the result and a
+    transposed copy of its per-antenna inputs, not the ``(n_bl, n_rfi,
+    n_freq_fine, n_time_fine)`` intermediate the reduction is built from.
 
     It trades recomputation for memory rather than aiming at speed. The block
     size does not change the result -- baselines are independent -- only how much
@@ -49,11 +51,14 @@ class RiemannVis(Component):
             self.n_freq = config.n_freq
 
             # int() alone would turn 1.9 into 1 without a word: one baseline
-            # per scan step, dressed up as a valid setting.
+            # per scan step, dressed up as a valid setting. The finiteness test
+            # comes before it because yaml spells .inf and .nan, and int() raises
+            # on both -- with a message about floats rather than about the key.
             block_size = config.args["rfi"].get("baseline_block_size", 128)
             if (
                 isinstance(block_size, bool)
                 or not isinstance(block_size, (int, float))
+                or not isfinite(block_size)
                 or block_size != int(block_size)
                 or block_size < 1
             ):

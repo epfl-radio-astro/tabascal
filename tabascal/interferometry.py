@@ -483,8 +483,10 @@ def calculate_rfi_vis_blocked(
     n_int_time`` times the size of the result. Here each block is reduced onto the
     data grid before the next one is formed, and ``checkpoint`` keeps the block's
     fine arrays off the tape -- the backward pass recomputes them -- so what
-    survives the forward pass is the result plus the per-antenna inputs the caller
-    is holding anyway.
+    survives the forward pass is the result and the transposed copy of the
+    per-antenna signal and phase that the gather indexes. Both are the size of the
+    model's own state; neither carries the baseline axis and the fine grid at once,
+    which is the term that made the tape large.
 
     ``checkpoint`` is load-bearing rather than decorative: ``lax.scan`` stacks the
     body's residuals across iterations for reverse-mode AD, so a scan without it
@@ -549,7 +551,15 @@ def calculate_rfi_vis_blocked(
         pad = jnp.zeros(n_pad, dtype=a.dtype)
         return jnp.reshape(jnp.concatenate([a, pad]), (-1, n_block))
 
-    _, vis_rfi = lax.scan(checkpoint(block_vis), None, (bl_blocks(a1), bl_blocks(a2)))
+    # prevent_cse=False is what JAX documents for a remat body under lax.scan.
+    # The optimisation barrier it otherwise inserts exists to stop XLA
+    # common-subexpression-eliminating the recomputation back into the forward
+    # pass, which the loop structure already prevents here, so the barrier only
+    # constrains the optimiser. Measured neutral on CPU, in tape size, compiled
+    # peak and runtime alike.
+    remat_block_vis = checkpoint(block_vis, prevent_cse=False)
+
+    _, vis_rfi = lax.scan(remat_block_vis, None, (bl_blocks(a1), bl_blocks(a2)))
 
     # lax.scan stacks along axis 0, which is the baseline axis of the result
     # already, so the blocks need flattening rather than transposing.

@@ -227,10 +227,14 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
     # under. Their lower bound is open because the scan is expected to cut the
     # peak by roughly an order of magnitude and nothing below has been
     # re-measured on Daint: re-record the value and close the bound again from
-    # the first CSCS run that includes the scan. The runtime references are
-    # unchanged -- on CPU the scan costs nothing end to end -- and the
-    # RiemannFFI references are untouched throughout, since the kernel bounds
-    # the same term inside itself.
+    # the first CSCS run that includes the scan.
+    #
+    # The runtime references are left as they are, which is a bet rather than a
+    # measurement: the scan costs nothing end to end on CPU, and a GPU cost of
+    # the order #108 paid for the same treatment (~5%) would still sit inside
+    # the existing band. If the first Daint run says otherwise, they move too.
+    # The RiemannFFI references are untouched throughout, since the kernel
+    # bounds the same term inside itself.
     _reference_by_variant = {
         ("Riemann", "single"): {
             "daint:gpu": {
@@ -324,10 +328,14 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     # under. Their lower bound is open because the scan is expected to cut the
     # peak by roughly an order of magnitude and nothing below has been
     # re-measured on Daint: re-record the value and close the bound again from
-    # the first CSCS run that includes the scan. The runtime references are
-    # unchanged -- on CPU the scan costs nothing end to end -- and the
-    # RiemannFFI references are untouched throughout, since the kernel bounds
-    # the same term inside itself.
+    # the first CSCS run that includes the scan.
+    #
+    # The runtime references are left as they are, which is a bet rather than a
+    # measurement: the scan costs nothing end to end on CPU, and a GPU cost of
+    # the order #108 paid for the same treatment (~5%) would still sit inside
+    # the existing band. If the first Daint run says otherwise, they move too.
+    # The RiemannFFI references are untouched throughout, since the kernel
+    # bounds the same term inside itself.
     _reference_by_variant: dict = {
         ("Riemann", "single"): {
             "daint:gpu": {
