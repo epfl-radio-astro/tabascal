@@ -70,8 +70,10 @@ Measurement Set as the `TAB_AST_DATA`, `TAB_RFI_DATA`, `TAB_AST_RES`,
 Every option is listed by the help context:
 
 ```bash
-tabascal -h        # top-level: lists the subcommands
-tabascal run -h    # every option of the run subcommand
+tabascal -h                # top-level: lists the subcommands
+tabascal run -h            # every option of the run subcommand
+tabascal light-curve -h    # every option of the light-curve subcommand
+tabascal search -h         # every option of the search subcommand
 ```
 
 The satellite orbital elements TABASCAL needs are fetched automatically from the

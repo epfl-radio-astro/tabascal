@@ -96,6 +96,18 @@ identification search of #191 ``vmap``\\ s the same function over candidates.
 by ``-tau``, which reproduces the measured trajectory through
 ``extra_orbit_dir`` with no further code.
 
+**Which satellite it is.** Given a TLE snapshot and nothing else,
+:func:`enumerate_candidates` screens the records down to the ones that were above
+the horizon, :func:`search_candidates` runs that same scan over all of them --
+``jax.vmap`` over a candidate axis, one jitted program per batch, each
+candidate's horizon mask and coherence cut applied *inside* the statistic so the
+shapes stay static -- and :func:`select_detections` reads the ranking against the
+decohered null. ``tabascal search`` is the command, and what it emits is the
+``satellites.norad_ids`` list a run needs (:func:`write_config_fragment`), the
+ranking table (:func:`write_search_results`), and the light curves and shifted
+orbit records of whatever it named. That is GitHub #191, which produced
+STARLINK-1765 out of 2551 records on the MWA Cen A dataset.
+
 Only the satellite-trajectory source is implemented. RA/Dec and Alt/Az pointings
 can be added by constructing ``rfi_xyz`` from those and feeding
 :func:`rfi_phase_from_positions`.
@@ -426,7 +438,11 @@ def coherent_baseline_mask(
     With ``soft=True`` the step is replaced by ``exp(-(b / b_coh)^2)``, a Gaussian
     taper on the same scale: unity at zero spacing, ``1/e`` where the hard mask
     cuts. It down-weights the marginal baselines instead of discarding them,
-    which is the gentler choice when ``sigma`` is itself uncertain.
+    which is the gentler choice when ``sigma`` is itself uncertain. It is a
+    *weighting*, not a wider cut: the Gaussian is never exactly zero, so the
+    drivers keep the hard mask as the baseline support and apply these values
+    inside it (:func:`_coherence_weights`). Reading the support off the weights
+    instead would admit every baseline the array has.
 
     One range suffices, taken at mid-observation: ``b_coh`` depends on ``r`` only
     linearly and the slant range varies by a few tens of percent over a pass,
@@ -478,6 +494,52 @@ def coherent_baseline_mask(
         return jnp.exp(-((bl_len / b_coh) ** 2))
 
     return bl_len <= b_coh
+
+
+def _coherence_weights(
+    bl_len: NDArray,
+    mean_freq: float,
+    range_m: float,
+    sigma_transverse_m: float,
+    n_fine: int,
+    delta_t: float,
+    v_fringe: float,
+    soft: bool,
+):
+    """The baselines a satellite can be beam-formed over, and their weights.
+
+    Two calls to :func:`coherent_baseline_mask` rather than one, because ``soft``
+    says how the baselines *inside* the cut are weighted and not which ones are
+    in it. The Gaussian is never exactly zero, so a support read off the soft
+    weights is every baseline the array has -- an 8 km one whose fringe smears
+    away inside a dump included, at a weight of ``1e-210`` that changes no answer
+    and costs a whole path model apiece. Worse, whether such a weight underflows
+    to zero depends on the precision the scan happens to be run in, so the
+    baseline list would depend on it too.
+
+    Inside the support the taper is bounded below by ``1/e``, since that is what
+    the Gaussian is where the hard mask cuts, so nothing kept here is kept at a
+    weight that cannot matter.
+
+    Returns
+    -------
+    (Array (n_bl,) bool, Array (n_bl,) float64)
+        The hard support, and the weight to apply to each baseline: the Gaussian
+        taper where ``soft``, ones otherwise. Both are zero outside the support.
+    """
+    cut = dict(
+        bl_len=bl_len, freq=mean_freq, range_m=range_m,
+        sigma_transverse_m=sigma_transverse_m, n_fine=n_fine, delta_t=delta_t,
+        v_perp_m_s=v_fringe,
+    )
+    support = np.asarray(coherent_baseline_mask(**cut), dtype=bool)
+
+    if not soft:
+        return support, support.astype(np.float64)
+
+    taper = np.asarray(coherent_baseline_mask(**cut, soft=True), dtype=np.float64)
+
+    return support, np.where(support, taper, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1294,8 +1356,11 @@ def fit_time_offset(
         Transverse orbit error the coherence cut is sized by, in metres. Around
         the middle of what a Starlink TLE carries.
     soft_weights : bool, default False
-        Taper the marginal baselines rather than discarding them; see
-        :func:`coherent_baseline_mask`.
+        Taper the baselines inside the cut with a Gaussian on the coherence
+        length instead of weighting them all equally. The set summed over is the
+        hard cut either way (:func:`_coherence_weights`), so ``n_bl_used`` does
+        not depend on this; what changes is how much the marginal baselines are
+        allowed to say.
     min_elevation : float, optional, default 0.0
         Elevation in degrees below which the satellite is not searched for,
         inclusive, as ``rfi.min_elevation`` is. ``None`` uses every frame. The
@@ -1388,12 +1453,9 @@ def fit_time_offset(
     # 570 km, 0.6 % of a LEO's transverse speed and the whole of a
     # geostationary emitter's -- and only the fringe-rate ceiling cares.
     v_fringe = v_perp + Omega_e * range_m
-    coherence = np.asarray(
-        coherent_baseline_mask(
-            bl_len, mean_freq, range_m, sigma_transverse_m, n_fine, int_time,
-            v_fringe, soft=soft_weights,
-        ),
-        dtype=np.float64,
+    support, coherence = _coherence_weights(
+        bl_len, mean_freq, range_m, sigma_transverse_m, n_fine, int_time,
+        v_fringe, soft_weights,
     )
     b_coh = float(
         jnp.minimum(
@@ -1406,9 +1468,10 @@ def fit_time_offset(
 
     # Baselines that contribute nothing are dropped rather than carried at zero
     # weight: the paths are the largest array in the scan and there is no point
-    # building them for a baseline the cut has already answered for. With a soft
-    # cut that only removes the ones whose taper has underflowed to zero.
-    used = np.flatnonzero((coherence > 0.0) & non_auto)
+    # building them for a baseline the cut has already answered for. The support
+    # is the hard cut whether or not the weighting inside it is soft, for the
+    # reason :func:`_coherence_weights` gives.
+    used = np.flatnonzero(support & non_auto)
     n_bl_used = int(used.size)
 
     if n_bl_used == 0:
@@ -1544,6 +1607,992 @@ def _fitted_offsets(fits: list) -> list:
     return [
         float(fit["tau_best"]) if np.isfinite(fit["tau_best"]) else 0.0 for fit in fits
     ]
+
+
+# ---------------------------------------------------------------------------
+# Searching across candidate satellites
+# ---------------------------------------------------------------------------
+
+def _record_name(record, norad_id) -> str:
+    """A satellite's catalogue name, or its ID where the record carries none.
+
+    Every row of a ranking table has to be nameable, and a Space-Track export
+    need not carry ``OBJECT_NAME`` -- nor need one record in a file where the
+    others do, which is how a missing name arrives as a ``nan`` out of pandas.
+    """
+    name = record.get("OBJECT_NAME") if hasattr(record, "get") else None
+    if name is None or (isinstance(name, float) and np.isnan(name)):
+        return str(int(norad_id))
+
+    return str(name).strip() or str(int(norad_id))
+
+
+def _slant_range(record, ants_itrf: NDArray, t_jd: float) -> float:
+    """Distance from the array centre to the satellite at one instant, in metres.
+
+    Taken as the separation of two positions expressed in the *same* (inertial)
+    frame, which is what :func:`satellite_range_and_speed` differences. A
+    distance is invariant to the frame both ends are written in, so this is the
+    Earth-fixed slant range as well, without a second transform to get it.
+    """
+    centre = np.mean(np.asarray(ants_itrf, dtype=np.float64), axis=0)
+    t = np.atleast_1d(np.float64(t_jd))
+    sep = (
+        np.asarray(get_satellite_positions([record], t))[0]
+        - itrs_to_gcrs_sf(centre[None], t)[0]
+    )
+
+    return float(np.linalg.norm(sep[0]))
+
+
+def enumerate_candidates(
+    records: list,
+    names: list,
+    times_jd: NDArray,
+    ants_itrf: NDArray,
+    min_elevation: Optional[float] = 0.0,
+) -> list:
+    """Screen a snapshot down to the satellites worth scoring.
+
+    Stage one of the identification search of GitHub #191, and the step that
+    turns a constellation into a shortlist: on the MWA Cen A case it took 2551
+    Starlink records to the 128 that were above the horizon during the 56 s
+    observation. A satellite that never rose is not evidence, and scoring it
+    would cost a scan.
+
+    It also decides *which frames* each candidate is scored over. The mask is
+    computed once, here, and travels with the candidate: the batched scan
+    applies it inside the statistic rather than slicing, because its shapes have
+    to stay static to ``vmap``.
+
+    The screen is what keeps the shared baseline set of :func:`search_candidates`
+    honest, too. The coherence ceiling grows with the slant range, so a
+    satellite on the far side of the Earth -- 13 000 km away, through the ground
+    -- would lift it to kilometres and readmit every long baseline. Dropping it
+    here is what stops that; a search whose candidates are *all* below the
+    horizon has no set to sum over and returns nothing.
+
+    Elevations are evaluated once, at ``tau = 0``: the offsets searched for are
+    seconds, which moves a LEO satellite tens of kilometres along its track and
+    its elevation by a fraction of a degree. Nothing in the cut resolves that.
+
+    Parameters
+    ----------
+    records : list of dict, length n_records
+        Orbit records -- TLE or OMM, as resolved by :mod:`tabascal.orbit`. The
+        record itself travels with the candidate rather than just its ID, since
+        re-resolving later could pick up a different record for the same
+        satellite.
+    names : list of str, length n_records
+        Catalogue names, aligned with ``records``.
+    times_jd : Array (n_time,)
+        Integration centres as UTC Julian dates.
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in the ITRF frame, in metres; the mean is the site.
+    min_elevation : float, optional, default 0.0
+        Elevation in degrees at or above which a satellite counts as up,
+        inclusive, as ``rfi.min_elevation`` is. A satellite reaching it in at
+        least one integration is kept. ``None`` keeps every record over every
+        frame.
+
+    Returns
+    -------
+    list of dict
+        One per kept record, sorted by descending ``max_elevation``, each with
+        ``norad_id``, ``name``, ``record``, ``max_elevation``, ``elevation``
+        ``(n_time,)`` in degrees, ``frames`` ``(n_time,)`` bool, and ``range_m``
+        -- the slant range at the frame of maximum elevation, i.e. the closest
+        approach during the pass.
+
+        ``range_m`` is for **reporting**: it says how near the satellite came,
+        which is what a reader of a ranking table wants. It is not what sizes the
+        coherence cut. That is the mid-window ``(range, speed)`` pair
+        :func:`satellite_range_and_speed` returns for the in-view frames, one
+        geometry taken at one instant, which is what :func:`fit_time_offset` uses
+        and what :func:`search_candidates` reports in its per-candidate fits. The
+        two are half a pass apart.
+    """
+    records = list(records)
+    names = list(names)
+    if len(records) != len(names):
+        raise ValueError(
+            f"{len(records)} records against {len(names)} names; every candidate "
+            "has to be nameable, so the two lists are aligned."
+        )
+    if not records:
+        return []
+
+    times_jd = np.asarray(times_jd, dtype=np.float64)
+    ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
+    elevations = np.asarray(get_satellite_elevations(records, times_jd, ants_itrf))
+
+    candidates = []
+    for record, name, elevation in zip(records, names, elevations):
+        frames = (
+            np.ones(len(times_jd), dtype=bool)
+            if min_elevation is None
+            else elevation >= min_elevation
+        )
+        if not frames.any():
+            continue
+
+        peak = int(np.argmax(elevation))
+        candidates.append(
+            dict(
+                norad_id=int(record["NORAD_CAT_ID"]),
+                name=str(name),
+                record=record,
+                max_elevation=float(elevation[peak]),
+                elevation=elevation,
+                frames=frames,
+                range_m=_slant_range(record, ants_itrf, times_jd[peak]),
+            )
+        )
+
+    return sorted(candidates, key=lambda candidate: -candidate["max_elevation"])
+
+
+def candidates_from_orbit_dir(directory: str, times_jd: NDArray, name_filter=None):
+    """Every satellite in a local snapshot directory, one record apiece.
+
+    The ``--tle-dir`` source: a constellation export dropped in
+    ``extra_orbit_dir`` format, read through the same per-ID nearest-epoch policy
+    a run applies to ``extra_orbit_dir`` (:func:`tabascal.orbit._select_from_extra_dir`
+    with no age ceiling) -- so a file carrying several epochs for one satellite
+    contributes the record nearest the observation, rather than whichever row it
+    happened to list first.
+
+    That resolver prints a provenance line per satellite, which is the right
+    thing for the handful a run configures and the wrong thing for a whole
+    constellation, so only the lines reporting a *rejected* record are passed
+    through. The ranking table is the output here, and it should not arrive
+    under 2551 lines of bookkeeping.
+
+    Parameters
+    ----------
+    directory : str
+        Directory of orbit files (TLE or OMM), as ``--extra-orbit-dir`` takes.
+    times_jd : Array (n_time,)
+        Observation times as UTC Julian dates; their mean is the epoch records
+        are chosen against.
+    name_filter : str, optional
+        Case-insensitive substring of ``OBJECT_NAME``, e.g. ``"STARLINK"``. A
+        snapshot is usually a whole constellation plus whatever else the query
+        dragged in. ``None`` keeps all. A record with no name is named by its
+        ID, and so is kept only by a filter that matches the ID.
+
+    Returns
+    -------
+    (list of dict, list of str, list of int)
+        Records, names and NORAD IDs, in ascending ID order.
+    """
+    import contextlib
+    import io
+
+    from satchecker_client.cache import read_legacy_tle_records
+    from tabascal.orbit import _select_from_extra_dir, observation_epoch_jd
+
+    frame = read_legacy_tle_records(directory)
+    if not len(frame):
+        return [], [], []
+
+    wanted = set()
+    for value in np.asarray(frame["NORAD_CAT_ID"].values):
+        try:
+            wanted.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not wanted:
+        return [], [], []
+
+    provenance = io.StringIO()
+    with contextlib.redirect_stdout(provenance):
+        resolved, _ = _select_from_extra_dir(
+            str(directory), wanted, observation_epoch_jd(times_jd), None
+        )
+    for line in provenance.getvalue().splitlines():
+        if "rejected" in line:
+            print(line)
+
+    records, names, norad_ids = [], [], []
+    for norad_id in sorted(resolved):
+        record = dict(resolved[norad_id].record)
+        name = _record_name(record, norad_id)
+        if name_filter is not None and str(name_filter).lower() not in name.lower():
+            continue
+        records.append(record)
+        names.append(name)
+        norad_ids.append(int(norad_id))
+
+    return records, names, norad_ids
+
+
+def candidates_from_norad_ids(norad_ids, times_jd: NDArray, extra_orbit_dir=None):
+    """Orbit records for an explicit candidate list, in the order it was asked.
+
+    The other way into the search: ``-n``/``-np``, resolved through the run's own
+    :func:`~tabascal.components.trajectory.fetch_orbital_elements`, so
+    ``extra_orbit_dir``, the managed cache and SatChecker take exactly the
+    precedence a run gives them and the search scores the records a run would
+    model.
+
+    Returns
+    -------
+    (list of dict, list of str, list of int)
+        Records, names and NORAD IDs, in the requested order.
+    """
+    ids, records = _resolve_records(norad_ids, times_jd, extra_orbit_dir)
+    names = [_record_name(record, nid) for nid, record in zip(ids, records)]
+
+    return list(records), names, [int(n) for n in ids]
+
+
+#: The batched core: one program over a leading candidate axis of the weights,
+#: the paths and the frame mask, with the visibilities and the frequencies shared
+#: across the batch. Held at module level and jitted once, so a sweep over a
+#: constellation compiles a single time and then runs device-resident -- which is
+#: the whole design, and why :func:`tau_scan` is pure and undecorated. It is that
+#: same function: the search does not own a statistic of its own to disagree with
+#: :func:`fit_time_offset` about.
+_batched_tau_scan = jax.jit(jax.vmap(tau_scan, in_axes=(None, 0, 0, None, 0)))
+
+
+def _candidate_coherence(
+    candidate: dict,
+    ants_itrf: NDArray,
+    times_jd: NDArray,
+    bl_len: NDArray,
+    mean_freq: float,
+    sigma_transverse_m: float,
+    n_fine: int,
+    int_time: float,
+    soft_weights: bool,
+):
+    """One candidate's coherent baseline support, its weights and its geometry.
+
+    Sized from a *single* geometry, taken at the middle of the candidate's
+    in-view window -- the range and the crossing speed of one instant, from one
+    :func:`satellite_range_and_speed` call, exactly as :func:`fit_time_offset`
+    sizes a single satellite's, the phase-tracking term included. Mixing a range
+    from one point of the pass with a speed from another gives a ceiling neither
+    of them has, and would make the search disagree with the single-satellite fit
+    about which baselines a satellite can be beam-formed over.
+
+    The candidate's own ``range_m`` -- its closest approach -- is *not* used
+    here. It is a reporting number, and half a pass away from this one.
+    """
+    frames = np.asarray(candidate["frames"], dtype=bool)
+    range_m, v_perp = satellite_range_and_speed(
+        candidate["record"], ants_itrf, times_jd[frames]
+    )
+    v_fringe = v_perp + Omega_e * range_m
+
+    support, coherence = _coherence_weights(
+        bl_len, mean_freq, range_m, sigma_transverse_m, n_fine, int_time,
+        v_fringe, soft_weights,
+    )
+    b_coh = float(
+        jnp.minimum(
+            tle_coherence_length(mean_freq, range_m, sigma_transverse_m),
+            fringe_rate_coherence_length(
+                mean_freq, range_m, n_fine, int_time, v_fringe
+            ),
+        )
+    )
+
+    return support, coherence, b_coh, range_m, v_perp
+
+
+def _empty_search(taus, n_freq, n_time, n_bl_used=0, b_coh_max=float("nan")) -> dict:
+    """The result shape for a search with nothing to search.
+
+    A name filter that matched nothing, an empty snapshot, a sky with nothing
+    above the horizon in it, or a cut no baseline survives, is an answer about
+    the observation rather than a failure; the caller decides whether to stop.
+    Every key of a real result is here, so a caller can read the same fields
+    either way -- all of them empty, and ``batch_size`` zero, because no batch
+    was run.
+    """
+    return dict(
+        table=[],
+        candidates=[],
+        norad_ids=np.zeros(0, dtype=int),
+        z2_best=np.zeros(0),
+        tau_best=np.zeros(0),
+        best_chan=np.zeros(0, dtype=int),
+        significance=np.zeros(0),
+        z2_tau=np.zeros((0, len(taus), n_freq)),
+        tau_grid=taus,
+        frames=np.zeros((0, n_time), dtype=bool),
+        n_bl_used=int(n_bl_used),
+        b_coh_max=float(b_coh_max),
+        batch_size=0,
+        fits=[],
+        median_z2=float("nan"),
+    )
+
+
+def _bytes_per_candidate(n_bl: int, n_freq: int, n_time: int, n_fine: int,
+                         n_tau: int) -> int:
+    """What one candidate of a batch costs while it is being scored, in bytes.
+
+    Two arrays, and they are the two that grow with every dimension at once: the
+    fringe model, ``(n_bl, n_freq, n_time, n_fine)`` complex, which ``lax.map``
+    holds one offset at a time in whatever precision the scan is running in; and
+    the path differences for the whole offset grid,
+    ``(n_tau, n_bl, n_time, n_fine)`` float64, built on the host and cast on the
+    device.
+
+    Not counted: the weights (per baseline for a scalar sigma, the full
+    ``(n_bl, n_freq, n_time)`` once anything is flagged), the visibilities, and
+    whatever XLA keeps alive between the two. The estimate is a sizing heuristic
+    for the sweep, not a cap on the function.
+    """
+    # The model's width follows the session's precision -- complex64 with x64
+    # off, complex128 with it on -- so the budget has to be read in the precision
+    # the scan is actually going to run in, not in the one it was written in.
+    complex_bytes = np.dtype(jax.dtypes.canonicalize_dtype(np.complex128)).itemsize
+    samples = int(n_bl) * int(n_time) * int(n_fine)
+
+    return samples * int(n_freq) * complex_bytes + int(n_tau) * samples * 8
+
+
+def _batch_for_memory(
+    n_cand: int,
+    n_bl: int,
+    n_freq: int,
+    n_time: int,
+    n_fine: int,
+    n_tau: int,
+    batch_size: int,
+    max_mem_gb,
+) -> int:
+    """Candidates per jitted call: what was asked for, or what will fit.
+
+    ``batch_size`` is a wish; the observation decides. At the MWA scale the
+    budget is what actually sets the batch: once candidates come near the horizon
+    the coherent union reaches 7704 of the array's 9180 baselines
+    (``b_coh_max`` 2880 m), one candidate over 24 channels is then some 2.1 GB,
+    and a default batch of eight would ask for 17 GB -- the machine swaps long
+    before the device is asked for anything.
+
+    ``max_mem_gb = None`` is no budget at all, for a caller who has measured
+    their own. At least one candidate is always scored: a budget below a single
+    candidate has no smaller batch to fall back to, and refusing to run would
+    leave the search unusable at exactly the scale it exists for.
+    """
+    n_batch = min(int(batch_size), int(n_cand))
+    if max_mem_gb is None:
+        return max(1, n_batch)
+
+    per_candidate = max(
+        _bytes_per_candidate(n_bl, n_freq, n_time, n_fine, n_tau), 1
+    )
+    affordable = int(float(max_mem_gb) * 1e9) // per_candidate
+
+    return max(1, min(n_batch, affordable))
+
+
+def search_candidates(
+    vis: NDArray,
+    candidates: list,
+    ants_itrf: NDArray,
+    times_jd: NDArray,
+    phase_centre: dict,
+    freqs: NDArray,
+    a1: NDArray,
+    a2: NDArray,
+    int_time: float,
+    noise=None,
+    flags: Optional[NDArray] = None,
+    taus_s=None,
+    n_fine: int = 40,
+    sigma_transverse_m: float = 300.0,
+    soft_weights: bool = False,
+    exclude_autos: bool = True,
+    batch_size: int = 8,
+    max_mem_gb: float = 4.0,
+    n_null: int = 200,
+    null_jitter_m: float = 50.0,
+    n_null_candidates: int = 5,
+    seed: int = 0,
+    progress=None,
+) -> dict:
+    """Score every candidate satellite against the visibilities, and rank them.
+
+    Stage two of GitHub #191: the tau scan of :func:`fit_time_offset`, run over a
+    whole snapshot. It is the *same* statistic -- :func:`tau_scan` under
+    ``jax.vmap``, one jitted program per batch -- because a search that
+    re-derived the filter would be free to disagree with the single-satellite fit
+    about what a detection is. The score per candidate is the largest ``z2`` over
+    the offset grid and the channels: the emission is narrowband, so the maximum
+    over channels is the right statistic and the winning channel is itself a
+    deliverable, telling the user which channels to fit.
+
+    **One baseline set, each candidate's own cut.** ``vmap`` needs static shapes,
+    so the search sums over one baseline list: the **union** of the hard coherent
+    sets of the candidates above the geometric horizon. A union rather than the
+    farthest candidate's set, because the sets are not nested by range -- the
+    fringe-rate ceiling depends on each candidate's own transverse speed, so a
+    nearer, slower satellite can steer a baseline a farther, faster one cannot.
+    Each candidate then applies *its own* coherence as a per-baseline weight
+    inside the statistic, so another candidate's excess baselines enter at
+    exactly zero and it is scored over precisely the baselines it could steer --
+    the same numbers a search of that candidate alone would give. Only the
+    above-horizon candidates size the union: a satellite 13 000 km away, through
+    the Earth, tolerates kilometres of baseline and would otherwise readmit the
+    long ones for everybody. With ``soft_weights`` the support is still the hard
+    union and the taper weights the baselines inside it
+    (:func:`_coherence_weights`).
+
+    **The horizon lives inside the statistic.** Each candidate's in-view mask
+    from :func:`enumerate_candidates` is passed to :func:`tau_scan` as
+    ``frame_mask`` rather than slicing the arrays, so a satellite that rises or
+    sets mid-observation contributes only its own frames while the batch stays
+    rectangular. Masking and slicing give the same ``z2``, so the search and the
+    single-satellite fit report the same detection for the same pass.
+
+    **Sizing.** Two arrays dominate, per candidate of a batch: the fringe model,
+    ``(n_bl, n_freq, n_time, n_fine)`` complex, held one offset at a time, and
+    the paths for the whole grid, ``(n_tau, n_bl, n_time, n_fine)`` float64 on
+    the host. ``max_mem_gb`` is a budget for their sum, and the batch actually
+    run is the smaller of ``batch_size`` and what that budget affords -- reported
+    back as ``batch_size``, since it is what the sweep did rather than what it
+    was asked for. It is what sets the batch at real scale: on the MWA case the
+    coherent union reaches 7704 of the array's 9180 baselines once candidates
+    come near the horizon (``b_coh_max`` 2880 m), one candidate over 24 channels
+    is then some 2.1 GB, and a batch of eight would ask for 17 GB. Not counted
+    are the per-candidate weights, at whatever shape the noise and the flags
+    resolve to -- per baseline for a scalar sigma, the full
+    ``(n_bl, n_freq, n_time)`` once anything is flagged -- so this is a sizing
+    heuristic and not a cap. A ragged last batch is padded by repeating its last
+    candidate so every batch has one shape and the kernel compiles once; the
+    padding rows are dropped.
+
+    **The null is drawn for the top ``n_null_candidates`` only.** Two hundred
+    extra scans per satellite over a whole constellation is the search twice
+    over, spent on candidates nothing will be reported for. The rest are scored
+    and ranked but carry no significance. The shortlist is taken on raw ``z2``,
+    as the issue specifies -- and ``z2`` is a sum over in-view frames, so a short
+    pass ranks low against a full one at the same per-frame correlation. That is
+    a caveat on the shortlist, not a correction to make: comparing partial passes
+    against full ones is what the score is for.
+
+    Parameters
+    ----------
+    vis : Array (n_bl, n_freq, n_time) complex
+        Visibilities to search.
+    candidates : list of dict
+        Screened candidates from :func:`enumerate_candidates`.
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in the ITRF frame, in metres.
+    times_jd : Array (n_time,)
+        Integration centres as UTC Julian dates.
+    phase_centre : dict
+        ``{"ra": <deg>, "dec": <deg>}``.
+    freqs : Array (n_freq,)
+        Channel frequencies in Hz.
+    a1, a2 : Array (n_bl,)
+        Antenna indices of each baseline.
+    int_time : float
+        Integration (dump) time in seconds.
+    noise, flags, taus_s, n_fine, sigma_transverse_m, soft_weights, exclude_autos
+        As :func:`fit_time_offset`, and meaning the same thing.
+    n_null, null_jitter_m, seed
+        The decohered null, as :func:`fit_time_offset` draws it.
+    batch_size : int, default 8
+        Most candidates to score per jitted call. An efficiency knob and nothing
+        else: the answers do not depend on it.
+    max_mem_gb : float or None, default 4.0
+        Memory budget in gigabytes, which lowers the batch when ``batch_size``
+        candidates would not fit. ``None`` is no budget, for a caller who has
+        measured their own. See **Sizing** above for what it does and does not
+        cover.
+    n_null_candidates : int, default 5
+        How many of the ranked candidates get a decohered null, and so a
+        significance.
+    progress : callable, optional
+        Called ``(done, total)`` after each batch. A search over a constellation
+        runs for minutes, and a command that says nothing for all of them cannot
+        be told from a hung one.
+
+    Returns
+    -------
+    dict
+        ``table``, a list of per-candidate dicts in ranked order carrying
+        ``rank``, ``norad_id``, ``name``, ``max_elevation``, ``range_m``,
+        ``z2_best``, ``tau_best``, ``best_chan``, ``best_freq``, ``r_max``,
+        ``significance``, ``null_mean``, ``null_std`` and ``n_frames``; the same
+        columns as arrays under ``norad_ids``, ``z2_best``, ``tau_best``,
+        ``best_chan`` and ``significance``; the scan curves ``z2_tau``
+        ``(n_cand, n_tau, n_freq)`` on ``tau_grid``; ``frames``
+        ``(n_cand, n_time)`` bool; ``n_bl_used`` and ``b_coh_max`` for the shared
+        baseline set; ``batch_size``, the batch the sweep actually ran at;
+        ``median_z2``; ``fits``, one dict per candidate shaped like
+        :func:`fit_time_offset`'s, so :func:`plot_offset_diagnostics` and
+        :func:`attach_offset_fits` take them unchanged; and ``candidates``, the
+        screened candidates themselves in the same ranked order, which is where
+        the orbit record of a named satellite comes from.
+
+        A row's ``range_m`` is the candidate's closest approach, for reporting;
+        the geometry the cut was sized from is the mid-window pair in
+        ``fits[i]["range_m"]`` and ``fits[i]["v_perp_m_s"]``.
+
+        The *decision* is not among them; see :func:`select_detections`.
+    """
+    vis = np.asarray(vis)
+    ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
+    times_jd = np.asarray(times_jd, dtype=np.float64)
+    freqs = np.asarray(freqs, dtype=np.float64)
+    a1 = np.asarray(a1)
+    a2 = np.asarray(a2)
+    n_freq, n_time = vis.shape[1], vis.shape[2]
+
+    taus = (
+        DEFAULT_TAU_GRID.copy()
+        if taus_s is None
+        else np.atleast_1d(np.asarray(taus_s, dtype=np.float64))
+    )
+    candidates = list(candidates)
+    n_cand = len(candidates)
+    if n_cand == 0:
+        return _empty_search(taus, n_freq, n_time)
+
+    # A satellite below the geometric horizon cannot fringe the array at all, so
+    # it does not get to size the baseline set: thirteen thousand kilometres away,
+    # through the ground, its coherence length is kilometres and every baseline
+    # the array has would be readmitted. With nothing above the horizon there is
+    # no honest set to sum over, and so nothing to search.
+    sizing = [i for i in range(n_cand) if candidates[i]["max_elevation"] >= 0.0]
+    if not sizing:
+        print(
+            f"Warning: none of the {n_cand} candidates rises above the geometric "
+            "horizon during this observation, so there is no baseline set any of "
+            "them could be beam-formed over and nothing to search. Screening "
+            "below the horizon gets a candidate past the elevation cut; it does "
+            "not get one into the sum."
+        )
+        return _empty_search(taus, n_freq, n_time)
+
+    # -- what each candidate can steer, and the set they are all scored over --
+    non_auto = (a1 != a2) if exclude_autos else np.ones(len(a1), dtype=bool)
+    bl_len = np.asarray(baseline_lengths(ants_itrf, a1, a2), dtype=np.float64)
+    # One frequency for every cut, at the middle of the band, for the reason
+    # fit_time_offset gives: b_coh scales as lambda and a band spanning a few
+    # percent moves it far less than the orbit error does.
+    mean_freq = float(np.mean(freqs))
+
+    support, coherence, b_coh, range_mid, v_perp = [], [], [], [], []
+    for candidate in candidates:
+        keep, weights_bl, ceiling, distance, speed = _candidate_coherence(
+            candidate, ants_itrf, times_jd, bl_len, mean_freq, sigma_transverse_m,
+            n_fine, int_time, soft_weights,
+        )
+        support.append(keep & non_auto)
+        coherence.append(weights_bl * non_auto)
+        b_coh.append(ceiling)
+        range_mid.append(distance)
+        v_perp.append(speed)
+
+    # The union of the hard supports, not the farthest candidate's: the sets are
+    # not nested by range, since the fringe-rate ceiling turns on each
+    # candidate's own transverse speed.
+    union = np.zeros(len(bl_len), dtype=bool)
+    for i in sizing:
+        union |= support[i]
+    used = np.flatnonzero(union)
+    n_bl_used = int(used.size)
+    b_coh_max = float(max(b_coh[i] for i in sizing))
+
+    if n_bl_used == 0:
+        # Returned here rather than scanned, as fit_time_offset returns its
+        # no-fit result: a sum over no baseline is zero at every offset and
+        # channel, so the argmax would pick the first cell of the grid and the
+        # ranking would carry a tau and a channel nothing measured.
+        print(
+            f"Warning: no baseline is coherent for any candidate at "
+            f"{sigma_transverse_m:g} m of transverse orbit error and a "
+            f"{b_coh_max:.1f} m coherence length, so there is nothing to search."
+        )
+        return _empty_search(
+            taus, n_freq, n_time, n_bl_used=0, b_coh_max=b_coh_max
+        )
+
+    # -- the weights and visibilities the whole batch shares --
+    # Kept at whatever shape the noise resolves to rather than broadcast to the
+    # visibilities': every candidate carries a copy, and a per-baseline sigma
+    # need not become an (n_bl, n_freq, n_time) array to be used as one.
+    weights = _weight_source(noise, vis.shape)
+    weights = np.broadcast_to(weights, (len(a1),) + weights.shape[1:])[used]
+    if flags is not None:
+        flagged = np.broadcast_to(np.asarray(flags, dtype=bool), vis.shape)[used]
+        if flagged.any():
+            weights = np.where(flagged, 0.0, weights)
+    # A flagged visibility can be anything at all, and 0 * nan is nan. Only the
+    # shared weights are read here: a candidate's own coherence zeros multiply a
+    # finite number, which is fine, and zeroing on those would need a copy of the
+    # visibilities per candidate.
+    vis_used = vis[used]
+    vis_used = np.where(
+        np.broadcast_to(weights, vis_used.shape) > 0.0, vis_used, 0.0
+    )
+
+    a1_used, a2_used = a1[used], a2[used]
+    frames = np.stack([np.asarray(c["frames"], dtype=bool) for c in candidates])
+
+    def candidate_weights(i):
+        return weights * coherence[i][used][:, None, None]
+
+    # -- the sweep --
+    n_batch = _batch_for_memory(
+        n_cand, n_bl_used, n_freq, n_time, n_fine, len(taus), batch_size,
+        max_mem_gb,
+    )
+    z2_tau = np.empty((n_cand, len(taus), n_freq))
+    r_best = np.full((n_cand, n_freq, n_time), np.nan)
+    z2_best = np.empty(n_cand)
+    tau_best = np.empty(n_cand)
+    best_chan = np.empty(n_cand, dtype=int)
+    r_max = np.full(n_cand, np.nan)
+
+    paths = np.empty((n_batch, len(taus), n_bl_used, n_time, n_fine))
+    for start in range(0, n_cand, n_batch):
+        index = list(range(start, min(start + n_batch, n_cand)))
+        for k, i in enumerate(index):
+            paths[k] = near_field_baseline_paths(
+                candidates[i]["record"], ants_itrf, times_jd, phase_centre,
+                a1_used, a2_used, n_fine, int_time, taus_s=taus,
+            )
+        # A ragged last batch repeats its last candidate rather than shrinking:
+        # a shorter batch is another shape and so another compilation, and the
+        # padding rows are simply not read.
+        padded = index + [index[-1]] * (n_batch - len(index))
+        paths[len(index):] = paths[len(index) - 1]
+
+        scan = _batched_tau_scan(
+            vis_used,
+            np.stack([candidate_weights(i) for i in padded]),
+            paths,
+            freqs,
+            frames[padded].astype(np.float64),
+        )
+
+        z2 = np.asarray(scan["z2"], dtype=np.float64)
+        r = np.asarray(scan["r"], dtype=np.float64)
+        for k, i in enumerate(index):
+            in_view = frames[i]
+            i_tau, i_chan = np.unravel_index(int(np.argmax(z2[k])), z2[k].shape)
+            z2_tau[i] = z2[k]
+            z2_best[i] = z2[k][i_tau, i_chan]
+            tau_best[i] = taus[i_tau]
+            best_chan[i] = i_chan
+            # Back onto the full time axis, saying nothing where nothing was
+            # looked at: a zero correlation would read as a measurement.
+            r_best[i][:, in_view] = r[k, i_tau][:, in_view]
+            r_max[i] = np.max(r[k, i_tau, i_chan][in_view], initial=0.0)
+
+        if progress is not None:
+            progress(min(start + n_batch, n_cand), n_cand)
+
+    # -- rank, then calibrate the top of the ranking against a null --
+    order = np.argsort(-z2_best, kind="stable")
+    null = [np.full(int(n_null), np.nan) for _ in range(n_cand)]
+    null_mean = np.full(n_cand, np.nan)
+    null_std = np.full(n_cand, np.nan)
+    significance = np.full(n_cand, np.nan)
+
+    for i in order[: max(0, int(n_null_candidates))]:
+        paths_best = near_field_baseline_paths(
+            candidates[i]["record"], ants_itrf, times_jd, phase_centre, a1_used,
+            a2_used, n_fine, int_time, taus_s=tau_best[i],
+        )[0]
+        draws = np.asarray(
+            decohered_null(
+                vis_used, candidate_weights(i), paths_best, freqs, a1_used, a2_used,
+                frame_mask=frames[i], n_draws=n_null, jitter_m=null_jitter_m,
+                seed=seed,
+            ),
+            dtype=np.float64,
+        )
+        null[i] = draws
+        null_mean[i] = float(draws.mean())
+        null_std[i] = float(draws.std())
+        if null_std[i] > 0:
+            significance[i] = (z2_best[i] - null_mean[i]) / null_std[i]
+
+    # -- the ranking, and a fit per candidate the diagnostics can read --
+    times_sec = (times_jd - times_jd[0]) * 86400.0
+    table, fits = [], []
+    for rank, i in enumerate(order):
+        candidate = candidates[i]
+        table.append(
+            dict(
+                rank=rank,
+                norad_id=int(candidate["norad_id"]),
+                name=str(candidate["name"]),
+                max_elevation=float(candidate["max_elevation"]),
+                # The closest approach, which is what a ranking table wants to
+                # report; the geometry the cut was sized from is in the fit.
+                range_m=float(candidate["range_m"]),
+                z2_best=float(z2_best[i]),
+                tau_best=float(tau_best[i]),
+                best_chan=int(best_chan[i]),
+                best_freq=float(freqs[best_chan[i]]),
+                r_max=float(r_max[i]),
+                significance=float(significance[i]),
+                null_mean=float(null_mean[i]),
+                null_std=float(null_std[i]),
+                n_frames=int(frames[i].sum()),
+            )
+        )
+        fits.append(
+            dict(
+                tau_grid=taus,
+                z2_tau=z2_tau[i],
+                tau_best=float(tau_best[i]),
+                z2_best=float(z2_best[i]),
+                best_chan=int(best_chan[i]),
+                best_freq=float(freqs[best_chan[i]]),
+                r_best=r_best[i],
+                frames=frames[i],
+                elevation=np.asarray(candidate["elevation"], dtype=np.float64),
+                times_sec=times_sec,
+                null=null[i],
+                null_mean=float(null_mean[i]),
+                null_std=float(null_std[i]),
+                significance=float(significance[i]),
+                # The candidate's own count, which is what its score was summed
+                # over; the search's shared set is n_bl_used at the top level.
+                n_bl_used=int(support[i].sum()),
+                # The mid-window geometry the cut was sized from -- what
+                # fit_time_offset reports here, and not the closest approach the
+                # ranking table carries.
+                range_m=float(range_mid[i]),
+                v_perp_m_s=float(v_perp[i]),
+                b_coh=float(b_coh[i]),
+                n_fine=int(n_fine),
+                sigma_transverse_m=float(sigma_transverse_m),
+            )
+        )
+
+    return dict(
+        table=table,
+        candidates=[candidates[i] for i in order],
+        norad_ids=np.array([row["norad_id"] for row in table], dtype=int),
+        z2_best=z2_best[order],
+        tau_best=tau_best[order],
+        best_chan=best_chan[order],
+        significance=significance[order],
+        z2_tau=z2_tau[order],
+        tau_grid=taus,
+        frames=frames[order],
+        n_bl_used=n_bl_used,
+        b_coh_max=b_coh_max,
+        batch_size=int(n_batch),
+        fits=fits,
+        median_z2=float(np.median(z2_best)),
+    )
+
+
+def select_detections(
+    search: dict, threshold_sigma: float = 5.0, runner_up_ratio: float = 1.5
+) -> dict:
+    """Decide which candidates are detections, and what to warn about.
+
+    Ranking is not deciding. A detection is a candidate whose significance was
+    *measured* and clears ``threshold_sigma``; one outside the null's shortlist
+    carries ``nan``, and ``nan >= 5`` is false while ``nan < 5`` is false too --
+    only one of those readings is safe to rely on. Multiple detections are simply
+    all returned, in rank order: the fit accepts several satellites already.
+
+    Two warnings, both from the issue and both about a ranking that cannot be
+    read at face value:
+
+    * a **close runner-up** -- the second candidate within ``runner_up_ratio`` of
+      the first. Satellites in the same train partially match each other's
+      fringes, so a winner that is not clear of the field is a result to look at
+      twice rather than a satellite to name. It is a statement about the ranking
+      and does not wait for a detection: two candidates level at the noise floor
+      say the search could not separate them, which is worth knowing even when
+      neither is named.
+    * a **scan edge** -- a *detected* candidate whose best offset is the first or
+      last point of the grid. The peak may be off the grid, so the offset is at
+      least that large and the number reported is a floor; widening ``--tau-max``
+      is the fix. Only for a detection: an undetected candidate's best offset is
+      wherever noise happened to peak, and that it did so at the end of the grid
+      says nothing about anything.
+
+    Parameters
+    ----------
+    search : dict
+        A result from :func:`search_candidates`.
+    threshold_sigma : float, default 5.0
+        Significance above the decohered null at which a candidate counts. It
+        carries no trials factor; see :func:`fit_time_offset`.
+    runner_up_ratio : float, default 1.5
+        Warn when ``z2[1] >= z2[0] / runner_up_ratio``.
+
+    Returns
+    -------
+    dict
+        ``detected``, the qualifying rows of ``search["table"]`` in rank order,
+        and ``warnings``, a list of sentences.
+    """
+    table = list(search["table"])
+    threshold_sigma = float(threshold_sigma)
+    detected = [
+        row
+        for row in table
+        if np.isfinite(row["significance"]) and row["significance"] >= threshold_sigma
+    ]
+
+    warnings = []
+    if len(table) > 1 and table[1]["z2_best"] >= table[0]["z2_best"] / float(
+        runner_up_ratio
+    ):
+        warnings.append(
+            f"close runner-up: {table[1]['norad_id']} ({table[1]['name']}) scores "
+            f"{table[1]['z2_best']:.4f} against the winner "
+            f"{table[0]['norad_id']} ({table[0]['name']}) at "
+            f"{table[0]['z2_best']:.4f}, within {runner_up_ratio:g}x. Satellites "
+            "in the same train partially match each other's fringes, so read the "
+            "two scan curves before naming either."
+        )
+
+    taus = np.asarray(search["tau_grid"], dtype=np.float64)
+    edges = (float(taus[0]), float(taus[-1]))
+    for row in detected:
+        if row["tau_best"] in edges:
+            warnings.append(
+                f"tau at the scan edge: {row['norad_id']} ({row['name']}) peaks "
+                f"at tau = {row['tau_best']:+.3f} s, the end of the grid, so the "
+                "offset is at least that large and the peak may lie past it. "
+                "Widen --tau-max and run it again."
+            )
+
+    return {"detected": detected, "warnings": warnings}
+
+
+# ---------------------------------------------------------------------------
+# The search's artifacts
+# ---------------------------------------------------------------------------
+
+def write_search_results(
+    path: str, search: dict, selection: dict, threshold_sigma: float
+) -> str:
+    """Save the ranking table, detections or not.
+
+    "Nothing above the threshold" is a result about every satellite that was up,
+    and the evidence for it is the table -- so this is written either way, and
+    ``detected`` records which rows the selection named against the threshold it
+    was named by.
+
+    Returns
+    -------
+    str
+        ``path``.
+    """
+    table = search["table"]
+    detected = {row["rank"] for row in selection["detected"]}
+
+    def column(key, dtype=np.float64):
+        return np.array([row[key] for row in table], dtype=dtype)
+
+    np.savez(
+        path,
+        norad_ids=column("norad_id", int),
+        names=np.array([row["name"] for row in table]),
+        z2_best=column("z2_best"),
+        tau_best=column("tau_best"),
+        best_chan=column("best_chan", int),
+        best_freq=column("best_freq"),
+        significance=column("significance"),
+        null_mean=column("null_mean"),
+        null_std=column("null_std"),
+        max_elevation=column("max_elevation"),
+        range_m=column("range_m"),
+        r_max=column("r_max"),
+        n_frames=column("n_frames", int),
+        z2_tau=np.asarray(search["z2_tau"], dtype=np.float64),
+        tau_grid=np.asarray(search["tau_grid"], dtype=np.float64),
+        frames=np.asarray(search["frames"], dtype=bool),
+        detected=np.array([row["rank"] in detected for row in table], dtype=bool),
+        threshold_sigma=float(threshold_sigma),
+        n_bl_used=int(search["n_bl_used"]),
+        b_coh_max=float(search["b_coh_max"]),
+        median_z2=float(search["median_z2"]),
+    )
+
+    return path
+
+
+def write_config_fragment(path: str, selection: dict, shifted_orbit_dir=None) -> str:
+    """Write the detections as a tabascal ``satellites`` section.
+
+    The deliverable the issue asks for: the ``norad_ids`` list a run needs,
+    produced from the data rather than known in advance, ready to merge into a
+    config. Written even when nothing was detected -- an empty list with a line
+    saying why is an artifact to point at, where a missing file leaves the reader
+    to guess the run failed.
+
+    A bare list of IDs is not auditable, so above it, per satellite and as YAML
+    comments, is what it was detected on: the offset its curves must be extracted
+    at, its score, its significance, and the channel -- which is what tells the
+    user which channels to fit. Any warnings from :func:`select_detections` are
+    written under them.
+
+    With ``shifted_orbit_dir`` the section also points at the epoch-shifted
+    records (:func:`write_shifted_orbits`) with no age ceiling, which is the
+    whole point of writing them: a later run reproduces the trajectories the
+    search measured, whatever SatChecker serves by then.
+
+    Returns
+    -------
+    str
+        ``path``.
+    """
+    import yaml
+
+    detected = selection["detected"]
+    lines = [
+        "# tabascal satellite search: the satellites found in these visibilities.",
+        "# Merge this section into a config, or point --extra-orbit-dir at the",
+        "# shifted records it names.",
+    ]
+    if detected:
+        lines.append("#")
+        for row in detected:
+            lines.append(
+                f"#   {row['norad_id']}  {row['name']}  "
+                f"tau {row['tau_best']:+.3f} s  z2 {row['z2_best']:.4f}  "
+                f"{row['significance']:.2f} sigma  "
+                f"chan {row['best_chan']} ({row['best_freq'] / 1e6:.4f} MHz)"
+            )
+    else:
+        lines.append("#")
+        lines.append(
+            "#   No candidate cleared the detection threshold, so there is "
+            "nothing to name."
+        )
+    for warning in selection["warnings"]:
+        lines.append(f"# WARNING: {warning}")
+
+    satellites = {"norad_ids": [int(row["norad_id"]) for row in detected]}
+    if shifted_orbit_dir is not None:
+        satellites["extra_orbit_dir"] = str(shifted_orbit_dir)
+        satellites["extra_orbit_max_age_days"] = None
+
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+        # default_flow_style=None keeps the ID list on one line, as tabascal's
+        # own configs write it, while the section itself stays in block style.
+        fh.write(
+            yaml.safe_dump(
+                {"satellites": satellites}, sort_keys=False, default_flow_style=None
+            )
+        )
+
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -2827,6 +3876,88 @@ def plot_offset_diagnostics(  # pragma: no cover - matplotlib output, not unit-t
         y=0.99, fontsize=13,
     )
     fig.savefig(save_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+    return save_path
+
+
+def plot_candidate_ranking(  # pragma: no cover - matplotlib output, not unit-tested
+    search: dict,
+    selection: dict,
+    save_path: str,
+    title: Optional[str] = None,
+) -> str:
+    """The whole field, ranked: the chart a named satellite is judged against.
+
+    One bar per candidate in rank order, detections in red, the candidate median
+    as a dotted line and the winner annotated with its channel, its score and the
+    runner-up's. A single NORAD ID is not evidence; a winner standing clear of a
+    median drawn from every satellite that was up is. On the MWA Cen A case that
+    was 0.0995 against a runner-up of 0.0523 and a median of 0.0446.
+
+    Parameters
+    ----------
+    search : dict
+        A result from :func:`search_candidates`.
+    selection : dict
+        The matching :func:`select_detections` result; its rows are highlighted.
+    save_path : str
+        Output PNG path.
+    title : str, optional
+        Prefix for the figure title.
+
+    Returns
+    -------
+    str
+        ``save_path``.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = search["table"]
+    z2 = np.asarray(search["z2_best"], dtype=float)
+    detected = {row["rank"] for row in selection["detected"]}
+    ranks = np.arange(len(table))
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.bar(
+        ranks,
+        z2,
+        width=0.9,
+        color=["C3" if rank in detected else "C0" for rank in ranks],
+    )
+    median = float(search["median_z2"])
+    ax.axhline(median, color="gray", ls=":", lw=1)
+    if len(table):
+        ax.text(
+            len(table) - 1, median * 1.08, f"median {median:.4f}", color="gray",
+            fontsize=8, ha="right",
+        )
+        winner = table[0]
+        runner_up = f", runner-up {z2[1]:.4f}" if len(table) > 1 else ""
+        ax.annotate(
+            f"{winner['name']} / {winner['norad_id']}\n"
+            f"best chan {winner['best_chan']}, "
+            rf"$z^2$={winner['z2_best']:.4f}{runner_up}",
+            xy=(0, winner["z2_best"]),
+            # Pinned to the top right in axes fractions rather than offset from
+            # the bar in data space: the x axis is a rank count, so an offset
+            # that reads well over a constellation runs off a plot of five. The
+            # bars descend, so that corner is the one always free.
+            xytext=(0.97, 0.92), textcoords="axes fraction", ha="right", va="top",
+            arrowprops=dict(arrowstyle="->", color="C3"), color="C3", fontsize=9,
+        )
+    ax.set_xlabel(
+        f"Candidate rank ({len(table)} above-horizon satellites, tau-scanned "
+        f"near-field search over {search['n_bl_used']} coherent baselines)"
+    )
+    ax.set_ylabel(r"best $z^2$ (max over $\tau$ and channel)")
+    ax.set_title(f"{title + ': ' if title else ''}all-candidate ranking")
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=140)
     plt.close(fig)
 
     return save_path

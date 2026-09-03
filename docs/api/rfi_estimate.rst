@@ -134,6 +134,84 @@ identification search can ``vmap`` it over candidates.
 record whose epoch is moved by :math:`-\tau` reproduces the measured trajectory
 through ``--extra-orbit-dir`` with no further code.
 
+Searching across candidates
+---------------------------
+
+With a TLE snapshot and no prior knowledge of which satellite is in the data, the
+same scan is run over every candidate at once:
+:func:`~tabascal.rfi_estimate.enumerate_candidates` screens the records down to
+the ones that were above the horizon, recording per candidate the frames it was
+up for and its slant range at maximum elevation;
+:func:`~tabascal.rfi_estimate.search_candidates` scores them; and
+:func:`~tabascal.rfi_estimate.select_detections` reads the ranking. Three things
+make that the *same* statistic as the single-satellite fit rather than a second
+one.
+
+**One baseline set, each candidate's own cut.** ``vmap`` needs static shapes, so
+the search sums over a single baseline list: the **union** of the hard coherent
+sets of the candidates above the geometric horizon. A union, and not the farthest
+candidate's set, because the sets are not nested by range --
+:math:`b_\mathrm{TLE} \propto r` alone, while :math:`b_\mathrm{fringe}` turns on
+each candidate's own transverse speed, so a nearer, slower satellite can steer a
+baseline that a farther, faster one cannot. Each candidate then applies its own
+coherence as a per-baseline weight *inside* the statistic, so another candidate's
+excess baselines enter at exactly zero and it is scored over precisely the
+baselines it could steer. The union is sized from the above-horizon candidates
+alone: a satellite 13 000 km away, through the Earth, tolerates kilometres of
+baseline and would otherwise readmit the long ones for everybody -- and a search
+in which *no* candidate is above the horizon has no honest set to sum over at
+all, so it returns nothing rather than a ranking.
+
+The cut is sized from one geometry taken at one instant: the mid-window
+:math:`(r, v_\perp)` pair over the frames the candidate is in view for, which is
+the pair :func:`~tabascal.rfi_estimate.fit_time_offset` uses and which the search
+reports per candidate in ``fits[i]``. The ``range_m`` of a candidate, and of a
+ranking row, is a different number -- the closest approach during the pass,
+reported because it says how near the satellite came. With ``soft_weights`` the
+support is still the hard cut and the Gaussian weights the baselines inside it:
+the taper is never exactly zero, so a support read off the weights would be every
+baseline the array has, and would depend on the precision the scan happened to
+run in.
+
+**The horizon inside the statistic.** Each candidate's in-view mask is passed to
+:func:`~tabascal.rfi_estimate.tau_scan` as ``frame_mask`` rather than slicing the
+arrays, so a satellite that rises or sets mid-observation contributes only its
+own frames while the batch stays rectangular. Masking with zeros and slicing give
+the same :math:`z^2`, so the search and
+:func:`~tabascal.rfi_estimate.fit_time_offset` report the same detection for the
+same pass.
+
+**One compilation.** ``jax.jit(jax.vmap(tau_scan))`` is held at module level and
+the candidates are fed to it in batches, a ragged last batch padded by repeating
+its last candidate so every call has one shape. Two arrays per candidate dominate
+the memory -- the fringe model ``(n_bl, n_freq, n_time, n_fine)`` complex, one
+offset at a time, and the paths ``(n_tau, n_bl, n_time, n_fine)`` float64 -- and
+``max_mem_gb`` is a budget for their sum, so the batch actually run is the
+smaller of ``batch_size`` and what that budget affords (reported back as
+``batch_size``). At MWA scale it is the budget that decides: the union reaches
+7704 of the array's 9180 baselines once candidates come near the horizon, one
+candidate over 24 channels is then some 2.1 GB, and a batch of eight would ask
+for 17 GB.
+
+The null is drawn for the top ``n_null_candidates`` only: two hundred extra scans
+per satellite over a whole constellation is the search twice over, spent on
+candidates nothing will be reported for. That shortlist is taken on raw
+:math:`z^2`, which is a sum over in-view frames, so a short pass ranks below a
+full one at the same per-frame correlation -- a caveat on the shortlist rather
+than a correction to make.
+
+:func:`~tabascal.rfi_estimate.select_detections` carries two warnings: a **close
+runner-up** within ``runner_up_ratio`` of the winner, since satellites in the
+same train partially match each other's fringes and a winner that is not clear of
+the field is a result to look at twice; and a **detected** candidate whose best
+:math:`\tau` sits on the first or last grid point, whose offset is then a floor
+rather than a measurement, the remedy being a wider ``--tau-max``. The
+deliverables are :func:`~tabascal.rfi_estimate.write_config_fragment` -- the
+``satellites.norad_ids`` list, beside the epoch-shifted records it can be
+replayed from -- :func:`~tabascal.rfi_estimate.write_search_results` for the
+ranking table, and :func:`~tabascal.rfi_estimate.plot_candidate_ranking` for the
+chart a named satellite is judged against.
+
 Where it is used
 ----------------
 
@@ -145,6 +223,8 @@ Where it is used
   offset first, extracts the curves at it, and records it in the output.
 * ``tabascal light-curve -z`` filters a run's residual, taken from its results
   zarr, as a post-fit diagnostic.
+* ``tabascal search`` finds the satellites in an observation from a TLE snapshot
+  alone and emits the ``satellites.norad_ids`` a run needs.
 
 .. automodule:: tabascal.rfi_estimate
     :members:

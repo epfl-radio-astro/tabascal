@@ -287,3 +287,43 @@ The export is the last thing the writer does and is additive to it. Everything i
 A `MemoryError` is not demoted — that is a statement about the process, not about the data — and `Ctrl-C` stops the run as it always would.
 
 The export also runs when the gain warnings above are promoted to errors (`python -W error::RuntimeWarning`, or a `warnings.simplefilter` in a calling script). Those warnings are raised after the columns are written, so a process that turns them into exceptions would otherwise stop with the columns updated and the previous run's table still beside them; the export runs in a `finally` instead. The exception still propagates, and if the export needs to warn under the same filter its warning arrives *chained* to the first one rather than replacing it — both reports survive in the traceback.
+
+## Light curves and the satellite search
+
+The two matched-filter commands write outside the run's directories, beside the
+Measurement Set rather than under `results/`. Neither needs a run to have
+happened first.
+
+`tabascal light-curve` writes one `.npz` to
+`<ms_dir>/light_curves/<tag or column>.npz` in the `rfi.est` interchange format,
+so it can seed a later run unchanged. With `--fit-offset` the along-track offset
+fit travels in the same file beside the curves — `tau_best` above all, without
+which the trajectory the curves were measured on cannot be reproduced.
+
+`tabascal search` writes everything under one stem, `<ms_dir>/sat_search/<data
+column>` unless `-o` says otherwise:
+
+| file | when |
+| --- | --- |
+| `<stem>_ranking.npz` | always — the ranking table, every candidate |
+| `<stem>_config.yaml` | always — the `satellites` section, ready to merge |
+| `<stem>_light_curves.npz` | for the satellites that were named |
+| `<stem>_shifted_tles/` | for the satellites that were named |
+| `<stem>_ranking.png`, `<stem>_offset_<norad>.png` | with `-p` |
+
+The ranking and the config fragment are written whether or not anything cleared
+the threshold — the ranking is the evidence for a negative, and the fragment
+says so with an empty `norad_ids`. The curves, the epoch-shifted records and the
+per-satellite plots are for the satellites the search named.
+
+```bash
+tabascal light-curve -ms path/to/file.ms -n 46344 --fit-offset
+tabascal search -ms path/to/file.ms --tle-dir path/to/tle_snapshot
+```
+
+See [Extracting RFI light curves](usage.md#extracting-rfi-light-curves) and
+[Searching for the contaminating satellite](usage.md#searching-for-the-contaminating-satellite)
+for what the commands do, [RFI light curve estimates](config.md#rfi-light-curve-estimates)
+for the file format a run reads back, and
+[Records with a fitted time offset](orbits.md#records-with-a-fitted-time-offset)
+for the shifted orbit records.
