@@ -27,9 +27,9 @@ class RiemannVis(Component):
     It trades recomputation for memory rather than aiming at speed. The block
     size does not change the result -- baselines are independent -- only how much
     of the fine grid is live at once, and how many scan steps that takes. A null
-    block size is every baseline in one step: the fine grid is still recomputed
-    rather than stored, so the tape stays small, but it is formed whole and the
-    peak is what it was before the scan.
+    block size is every baseline in a single step: the fine grid is still
+    recomputed rather than stored, so the tape stays small, but it is formed
+    whole and the peak is what it was before the scan.
     """
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
@@ -54,16 +54,18 @@ class RiemannVis(Component):
             self.n_freq = config.n_freq
 
             # null is a setting, not a missing value: one block over every
-            # baseline, which keeps the checkpoint and drops the scan. int()
-            # alone would turn 1.9 into 1 without a word: one baseline per scan
-            # step, dressed up as a valid setting. The finiteness test comes
-            # before it because yaml spells .inf and .nan, and int() raises on
-            # both -- with a message about floats rather than about the key.
+            # baseline, which keeps the checkpoint and leaves the scan a single
+            # step. int() alone would turn 1.9 into 1 without a word: one
+            # baseline per scan step, dressed up as a valid setting. The
+            # finiteness test guards int() against yaml's .inf and .nan, which
+            # raise there with a message about floats rather than about the key;
+            # it is asked of floats only, since an int is finite by construction
+            # and float() on a big enough one raises in its turn.
             block_size = config.args["rfi"].get("baseline_block_size", 128)
             if block_size is not None and (
                 isinstance(block_size, bool)
                 or not isinstance(block_size, (int, float))
-                or not isfinite(block_size)
+                or (isinstance(block_size, float) and not isfinite(block_size))
                 or block_size != int(block_size)
                 or block_size < 1
             ):

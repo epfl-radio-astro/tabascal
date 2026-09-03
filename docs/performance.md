@@ -28,6 +28,14 @@ The metrics compared against references are `total_runtime`,
 `optimizer_runtime` and `memory_usage`. Metrics without a reference entry are
 reported but not asserted.
 
+The `Riemann` references describe a deliberate trade rather than a target: that
+component bounds its peak memory by scanning the baseline axis and recomputing
+each block in the backward pass (see
+[`baseline_block_size`](config.md#rfi-signal)), which on the GH200 references
+above is roughly an order of magnitude less memory for an optimiser step 1.2 to
+1.7 times longer. A run that comes out faster and hungrier than these numbers has
+probably lost the scan, not gained a speed-up.
+
 References are keyed by `(variant, precision)` and are only meaningful on the
 node type they were measured on. Sanity therefore requires the run to have used
 exactly the expected number of GPUs of exactly the expected kind (`GH200`) —

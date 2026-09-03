@@ -359,6 +359,59 @@ def test_the_fine_grid_is_not_kept_for_the_reverse_pass():
     assert dense_bytes > 8 * blocked_bytes
 
 
+def scan_steps(f, *args):
+    """The trip count of every ``lax.scan`` in the jaxpr of ``f``.
+
+    Walks nested jaxprs, since the scan sits inside whatever the caller wrapped
+    around it.
+    """
+    from jax.extend.core import ClosedJaxpr, Jaxpr
+
+    lengths = []
+
+    def walk(jaxpr):
+        for eqn in jaxpr.eqns:
+            if eqn.primitive.name == "scan":
+                lengths.append(eqn.params["length"])
+            for param in eqn.params.values():
+                if isinstance(param, ClosedJaxpr):
+                    walk(param.jaxpr)
+                elif isinstance(param, Jaxpr):
+                    walk(param)
+
+    walk(jax.make_jaxpr(f)(*args).jaxpr)
+
+    return lengths
+
+
+# 2016 baselines at n_ant=64: 126 steps of 16, 16 steps of 128, and one step for
+# null or for any block at or above the axis.
+@pytest.mark.parametrize(
+    "block_size, expected_steps", [(16, 126), (128, 16), (None, 1), (4096, 1)]
+)
+def test_the_block_size_sets_the_number_of_scan_steps(block_size, expected_steps):
+    """What the setting does to the program, not just to the answer.
+
+    Every other test here is of a quantity the block size deliberately does not
+    change -- the value, the gradient, the tape -- so all of them would pass
+    just as well if ``null`` quietly meant 16. This one reads the trip count out
+    of the jaxpr, which is the thing the setting actually controls.
+    """
+    config = create_config(64, 2, 4, 4, 2, 2)
+    real_dtype = _session_dtype()
+    state = create_state(config, False, 42, real_dtype=real_dtype)
+
+    steps = scan_steps(
+        lambda A, P: calculate_rfi_vis_blocked(
+            A, P, config.a1, config.a2, config.n_int_freq, config.n_int_time, block_size
+        ),
+        state["rfi_A"],
+        state["rfi_phase"],
+    )
+
+    assert steps == [expected_steps]
+
+
 def test_the_default_block_size_is_used_when_the_config_does_not_set_one():
     """A config predating the key still builds, on the base default of 128."""
     config = create_config(4, 2, 3, 5, 4, 3)
@@ -401,15 +454,15 @@ def test_a_null_block_size_is_one_block_over_every_baseline():
     assert jnp.array_equal(vis, whole_axis)
 
 
-def test_a_null_block_size_bounds_the_tape_but_not_the_peak():
-    """What null is for, and what it gives up, in one measurement.
+def test_a_null_block_size_keeps_the_tape_bounded():
+    """What null keeps: the checkpoint, and so the small tape.
 
-    The checkpoint is still there with no scan around it, so the fine grid stays
-    off the tape -- the residuals match a small block's. What it no longer does
-    is bound the array itself: the backward pass rebuilds every baseline at once
-    instead of one block at a time. Only the first half is measurable here, the
-    peak being the compiler's business, so the second is left to
-    ``docs/kernels.md`` and the reference numbers.
+    The scan is down to a single step over the whole axis, but the checkpoint on
+    its body is still there, so the fine grid stays off the tape and the
+    residuals match a small block's. What null gives up is the bound on the
+    array itself -- the backward pass rebuilds every baseline at once rather
+    than one block at a time -- which is a peak rather than a tape and so is
+    measured in the reference numbers, not here.
     """
     sizes = (64, 4, 8, 4, 4, 2)
     real_dtype = _session_dtype()
