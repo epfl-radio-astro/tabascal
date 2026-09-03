@@ -31,6 +31,18 @@ def _light_curve_cmd(args):
 
 
 # ---------------------------------------------------------------------------
+# 'search' subcommand
+# ---------------------------------------------------------------------------
+
+def _search_cmd(args):
+    # Lazy for the same reason, and it returns a status rather than None: a scan
+    # that found nothing above the detection threshold is a meaningful,
+    # scriptable outcome rather than a failure, so the exit code is the search's.
+    from tabascal.scripts.sat_search import run
+    return run(args)
+
+
+# ---------------------------------------------------------------------------
 # 'rfi-per-sat' subcommand
 # ---------------------------------------------------------------------------
 
@@ -102,6 +114,15 @@ def build_parser():
     )
     _build_lc_parser(lc_parser)
 
+    # -- search --
+    from tabascal.scripts.sat_search import build_parser as _build_search_parser
+
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Search a satellite snapshot for the ones contaminating an MS.",
+    )
+    _build_search_parser(search_parser)
+
     # -- rfi-per-sat --
     from tabascal.scripts.rfi_per_sat_to_MS import build_parser as _build_ps_parser
 
@@ -115,12 +136,18 @@ def build_parser():
 
 
 def main():
+    import sys
+
     args = build_parser().parse_args()
 
     if args.command == "run":
         _run_cmd(args)
     elif args.command == "light-curve":
         _light_curve_cmd(args)
+    elif args.command == "search":
+        # The only subcommand with a status of its own: 0 for a detection, 3 for
+        # a scan that cleared nothing. Exited with here so a script reads it.
+        sys.exit(_search_cmd(args))
     elif args.command == "rfi-per-sat":
         _rfi_per_sat_cmd(args)
 

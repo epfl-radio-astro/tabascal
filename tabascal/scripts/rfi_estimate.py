@@ -383,6 +383,12 @@ def _tau_grid_steps(tau_max, tau_step):
 def _check_offset_fit_arguments(args):
     """Refuse a scan setting that cannot describe a scan, naming the flag.
 
+    Shared with ``tabascal search`` (:mod:`tabascal.scripts.sat_search`), which
+    offers the same scan over many candidates: one scan means one set of checks,
+    and the same bad value is refused by the same name from either command. It
+    reads only the options both parsers define, so neither can drift into
+    checking a flag the other does not have.
+
     argparse types a value; it cannot say whether it means anything. Each of
     these produces something that is not a search -- an empty or infinite offset
     grid, a model with no sub-steps inside an integration, a null of one draw

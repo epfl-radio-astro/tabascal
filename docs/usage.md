@@ -322,10 +322,104 @@ than a silent read of the nearest edge channel. With `-z` the model is matched
 to the channels read by frequency, not by position, each within half of *its
 own* width, so a non-uniform spectral window is matched channel by channel.
 
+## Searching for the contaminating satellite
+
+Everything above assumes you know which satellite is in the data. `tabascal
+search` is for when you do not: given the visibilities and a TLE snapshot — a
+constellation export in a directory, or an explicit list of NORAD IDs — it
+produces the `satellites.norad_ids` list itself, with the along-track offset of
+each satellite it names, from the data and nothing else.
+
+The pipeline is four steps, each auditable on its own:
+
+1. **Enumerate.** Every record in the snapshot is propagated over the
+   observation and the ones that never came above `--min-elevation` are dropped.
+   That is also what keeps the geometry honest: the coherence ceiling grows with
+   slant range, so a satellite on the far side of the Earth would tolerate
+   kilometres of baseline and let every long one back into the sum.
+2. **Score.** The along-track scan of the previous section is run for every
+   surviving candidate — the same statistic, `vmap`ped over a candidate axis and
+   jitted once for the whole sweep, so a snapshot compiles a single program and
+   then runs device-resident. Each candidate's horizon mask and coherence cut are
+   applied *inside* the statistic as weights, because the batched shapes cannot
+   be sliced: a satellite that sets mid-observation contributes only its own
+   frames, and a nearer one is summed over only the baselines it can steer.
+3. **Rank and calibrate.** Candidates are ranked by the best `z²` over the offset
+   grid and the channels, and the top `--null-top` (5 by default) are measured
+   against the decohered null. The null is a whole scan's work per satellite;
+   over a constellation, drawing one for every candidate is the search twice
+   over, spent on satellites nothing will be reported for.
+4. **Select and emit.** Whatever clears `--threshold` is named, and the config
+   fragment, the light curves and the shifted orbit records are written for it.
+
+```bash
+tabascal search -ms path/to/ms/file.ms --tle-dir path/to/tle_snapshot --name-filter STARLINK -p
+```
+
+That is how the MWA Cen A observation was identified: 2551 Starlink records, 128
+of them above the horizon during the 56 s observation, and STARLINK-1765 / 46344
+alone at `z² = 0.0995` against a runner-up of 0.0523 and a candidate median of
+0.0446 — with its best channel at 175.0 MHz, the known UEMR downlink band.
+What *names* a satellite is its significance against the decohered null, measured
+against `--threshold`. The winner's separation from the candidate field — its
+`z²` beside the median, and the runner-up warning — is the diagnostic to read
+alongside it: `z²` is not calibrated between datasets, so its absolute value says
+little on its own, but a winner that does not stand clear of the field is one to
+look at twice however significant it is.
+
+The batch is sized against a memory budget as well as against `--batch-size`. It
+has to be: once candidates come near the horizon the shared coherent set grows
+with them, and on the MWA case it reaches 7704 of the array's 9180 baselines
+(`b_coh_max` 2880 m), which puts one candidate over 24 channels at some 2.1 GB —
+so a default batch of eight would ask for 17 GB. `--max-mem-gb` (4.0 by default)
+caps that; the run prints the batch it actually used. It counts the fringe model
+and the path differences, not the weights beside them, so it is a sizing
+heuristic rather than a guarantee: halve it before blaming the flag.
+
+Everything is written under `-o`'s stem, which defaults to
+`<ms_dir>/sat_search/<data column>`:
+
+| file | when |
+| --- | --- |
+| `<stem>_ranking.npz` | always — the ranking table, every candidate |
+| `<stem>_config.yaml` | always — the `satellites` section, ready to merge |
+| `<stem>_light_curves.npz` | for the satellites that were named |
+| `<stem>_shifted_tles/` | for the satellites that were named |
+| `<stem>_ranking.png`, `<stem>_offset_<norad>.png` | with `-p` |
+
+**Saving is threshold-gated by default.** A search meets hundreds of candidates,
+and a curve extracted at an offset that is not a detection is a curve extracted
+at noise, so only the detections get curves and plots; `--save-all` opens it for
+the run where the negatives are the point. The ranking table is written either
+way — it is the evidence for a negative. The config fragment names the shifted
+records with no age ceiling, so `tabascal run --extra-orbit-dir` reproduces the
+trajectories the search measured, whatever SatChecker serves by then.
+
+**The exit status is part of the answer.** `0` when at least one satellite
+cleared the threshold, `3` when the scan ran and nothing did — a meaningful,
+scriptable result rather than a failure — and an error when nothing in the
+snapshot was above the horizon at all, which is a statement about the snapshot
+rather than about the data.
+
+Two warnings are printed where the ranking cannot be read at face value. A
+**close runner-up** — a second candidate scoring within `--runner-up-ratio`
+(1.5) of the winner — is usually two satellites of the same train partially
+matching each other's fringes, and is a result to look at twice rather than a
+satellite to name. **`tau` at the scan edge** means a named satellite's best
+offset is the first or last point of the grid, so the peak may lie past it and
+the offset reported is a floor; widen `--tau-max` and run it again.
+
+The scan flags are the light-curve command's, with the same meanings and the same
+refusals, except that `--tau-step` defaults to the coarser 0.5 s because the scan
+runs once per candidate — halve it once the field is narrowed. There is no
+`--fit-offset` here: the scan *is* the search, and at `tau = 0` the MWA case
+scored 0.045 against a candidate median of 0.0446, which is no detection at all.
+
 The `tabascal` script also has a help context which can be accessed with
 
 ```bash
 tabascal -h                # top-level: lists the subcommands
 tabascal run -h            # every option of the run subcommand
 tabascal light-curve -h    # every option of the light-curve subcommand
+tabascal search -h         # every option of the search subcommand
 ```

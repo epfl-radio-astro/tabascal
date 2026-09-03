@@ -296,6 +296,14 @@ unlimited `extra_orbit_max_age_days`. The run log's per-satellite provenance lin
 says `from extra_orbit_dir`, and `used_orbits_<name>.json` records the lines
 actually propagated, so what was modelled can be read back afterwards.
 
+`tabascal search` writes the same records for every satellite it detects, into
+`<stem>_shifted_tles/` unless `--write-shifted-tle DIR` says otherwise, and the
+`satellites` config fragment it emits beside them already points
+`extra_orbit_dir` at that directory with `extra_orbit_max_age_days: null`.
+Merging the fragment into a config is then all a run needs to model the
+trajectories the search measured — see
+[Searching for the contaminating satellite](usage.md#searching-for-the-contaminating-satellite).
+
 Three things to keep in mind. The TLE epoch field holds eight decimal days, so a
 shift is quantised to 0.86 ms — about 6 m along a LEO track — while an OMM has no
 fixed-width field and carries the shift exactly; prefer the OMM where there is a
