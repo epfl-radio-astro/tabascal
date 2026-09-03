@@ -62,7 +62,9 @@ antennas on one GH200 — that is a peak of 0.70 GB in single precision against
 8.68 GB without the scan, near the compiled kernel's own 0.56 GB, in exchange for
 an optimiser step 1.6 times longer. The recomputation is what is being paid for
 the memory. `rfi.baseline_block_size` moves the trade in either direction: a
-larger block is fewer scan steps and a larger fine grid. The compiled kernel pays
+larger block is fewer scan steps and a larger fine grid, and `null` is a single
+block, which keeps the checkpoint but forms the grid whole — the tape stays
+bounded, the peak does not. The compiled kernel pays
 neither cost and remains the faster choice where it is available.
 
 ## Precision

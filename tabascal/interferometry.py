@@ -493,7 +493,10 @@ def calculate_rfi_vis_blocked(
     would bound the forward peak and leave the tape roughly where it was.
 
     ``block_size`` is the memory/step-count trade and nothing else: baselines are
-    independent, so the result does not depend on it.
+    independent, so the result does not depend on it. ``None`` is every baseline
+    in one step, which keeps the ``checkpoint`` -- so the fine grid is still
+    recomputed rather than stored -- but forms it whole, and therefore bounds the
+    tape without bounding the peak.
 
     Parameters
     ----------
@@ -509,8 +512,9 @@ def calculate_rfi_vis_blocked(
         The number of fine frequency samples per channel of the data grid.
     n_int_time : int
         The number of fine time samples per time step of the data grid.
-    block_size : int
-        The number of baselines calculated per scan step.
+    block_size : int or None
+        The number of baselines calculated per scan step. ``None`` puts every
+        baseline in a single step.
 
     Returns
     -------
@@ -528,7 +532,7 @@ def calculate_rfi_vis_blocked(
     rfi_A_ = jnp.swapaxes(rfi_A, 0, 1)
     rfi_phase_ = jnp.swapaxes(rfi_phase, 0, 1)
 
-    n_block = max(1, min(int(block_size), n_bl))
+    n_block = max(1, n_bl if block_size is None else min(int(block_size), n_bl))
     n_pad = -n_bl % n_block
 
     def block_vis(carry, bl_idx):

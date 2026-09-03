@@ -26,7 +26,10 @@ class RiemannVis(Component):
 
     It trades recomputation for memory rather than aiming at speed. The block
     size does not change the result -- baselines are independent -- only how much
-    of the fine grid is live at once, and how many scan steps that takes.
+    of the fine grid is live at once, and how many scan steps that takes. A null
+    block size is every baseline in one step: the fine grid is still recomputed
+    rather than stored, so the tape stays small, but it is formed whole and the
+    peak is what it was before the scan.
     """
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
@@ -50,12 +53,14 @@ class RiemannVis(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
 
-            # int() alone would turn 1.9 into 1 without a word: one baseline
-            # per scan step, dressed up as a valid setting. The finiteness test
-            # comes before it because yaml spells .inf and .nan, and int() raises
-            # on both -- with a message about floats rather than about the key.
+            # null is a setting, not a missing value: one block over every
+            # baseline, which keeps the checkpoint and drops the scan. int()
+            # alone would turn 1.9 into 1 without a word: one baseline per scan
+            # step, dressed up as a valid setting. The finiteness test comes
+            # before it because yaml spells .inf and .nan, and int() raises on
+            # both -- with a message about floats rather than about the key.
             block_size = config.args["rfi"].get("baseline_block_size", 128)
-            if (
+            if block_size is not None and (
                 isinstance(block_size, bool)
                 or not isinstance(block_size, (int, float))
                 or not isfinite(block_size)
@@ -64,10 +69,12 @@ class RiemannVis(Component):
             ):
                 raise ValueError(
                     "rfi.baseline_block_size is the number of baselines handled "
-                    f"per scan step: a whole number of at least 1, got "
-                    f"{block_size!r}."
+                    "per scan step: a whole number of at least 1, or null for a "
+                    f"single block over every baseline, got {block_size!r}."
                 )
-            self.baseline_block_size = int(block_size)
+            self.baseline_block_size = (
+                None if block_size is None else int(block_size)
+            )
 
             # Validate dimensions
             self._set_outputs()

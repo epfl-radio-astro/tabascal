@@ -243,9 +243,10 @@ def state_bytes(state):
 
 
 # n_bl for these sizes is 1, 6 and 2016, so the block sizes below span "one
-# baseline at a time", blocks that do and do not divide n_bl, and blocks larger
-# than the whole axis.
-block_sizes = [1, 5, 128, 4096]
+# baseline at a time", blocks that do and do not divide n_bl, blocks larger than
+# the whole axis, and None -- a single block, which is the setting that keeps the
+# checkpoint and drops the scan.
+block_sizes = [1, 5, 128, 4096, None]
 
 
 @pytest.mark.parametrize("n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq", test_sizes)
@@ -364,8 +365,71 @@ def test_the_default_block_size_is_used_when_the_config_does_not_set_one():
     assert impl.baseline_block_size == 128
 
 
+def test_a_null_block_size_is_one_block_over_every_baseline():
+    """null is accepted, kept as None, and equals a block that spans the axis.
+
+    The two are the same computation -- a block size at or above ``n_bl`` clamps
+    to it -- so this pins the spelling, which is the point of the setting: it
+    says "no scan" without the config having to know how many baselines there
+    are.
+    """
+    sizes = (64, 4, 8, 4, 4, 2)
+    real_dtype = _session_dtype()
+    config = create_config(*sizes, rfi_args={"baseline_block_size": None})
+    state = create_state(config, False, 42, real_dtype=real_dtype)
+
+    impl = RiemannVis()
+    impl.setup(config)
+    assert impl.baseline_block_size is None
+
+    vis = impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
+    whole_axis = calculate_rfi_vis_blocked(
+        state["rfi_A"],
+        state["rfi_phase"],
+        config.a1,
+        config.a2,
+        config.n_int_freq,
+        config.n_int_time,
+        config.n_bl,
+    )
+
+    assert jnp.array_equal(vis, whole_axis)
+
+
+def test_a_null_block_size_bounds_the_tape_but_not_the_peak():
+    """What null is for, and what it gives up, in one measurement.
+
+    The checkpoint is still there with no scan around it, so the fine grid stays
+    off the tape -- the residuals match a small block's. What it no longer does
+    is bound the array itself: the backward pass rebuilds every baseline at once
+    instead of one block at a time. Only the first half is measurable here, the
+    peak being the compiler's business, so the second is left to
+    ``docs/kernels.md`` and the reference numbers.
+    """
+    sizes = (64, 4, 8, 4, 4, 2)
+    real_dtype = _session_dtype()
+
+    def residual_bytes(block):
+        config = create_config(*sizes, rfi_args={"baseline_block_size": block})
+        state = create_state(config, False, 42, real_dtype=real_dtype)
+        impl = RiemannVis()
+        impl.setup(config)
+        constants = make_constants(impl)
+        forward = impl.build_forward()
+
+        return reverse_pass_residual_bytes(
+            lambda s: forward({}, s, constants)["vis_rfi"], state
+        ), state
+
+    null_bytes, state = residual_bytes(None)
+    block_bytes, _ = residual_bytes(16)
+
+    assert null_bytes < 2 * state_bytes(state)
+    assert null_bytes == block_bytes
+
+
 @pytest.mark.parametrize(
-    "block_size", [0, -1, 1.5, True, "128", None, float("inf"), float("nan")]
+    "block_size", [0, -1, 1.5, True, "128", float("inf"), float("nan")]
 )
 def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     block_size,
@@ -373,7 +437,8 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     """Rejected in setup, by name, rather than silently rounded or ignored.
 
     ``.inf`` and ``.nan`` are in the list because yaml can spell them and because
-    they are the two that reach ``int()`` before any comparison does.
+    they are the two that reach ``int()`` before any comparison does. ``None`` is
+    deliberately not in it: null is a setting, covered below.
     """
     config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"baseline_block_size": block_size})
 
