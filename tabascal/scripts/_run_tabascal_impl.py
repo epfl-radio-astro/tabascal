@@ -93,7 +93,7 @@ def print_devices():
     """Print a table of every *global* JAX device the run is spread over.
 
     Global rather than local: under multi-process only process 0 prints, and the
-    model is sharded over the full mesh (:func:`rfi_mesh` spans ``jax.devices()``),
+    model is sharded over the full mesh (:func:`device_mesh` spans ``jax.devices()``),
     so a local listing would understate what the job is actually using. The process
     column is what distinguishes the one-GPU-per-process layout from a
     single-process multi-GPU one at a glance.
@@ -314,9 +314,10 @@ def tabascal_subtraction(
             # propagates the shardings through the whole optimization (gradients and
             # optimizer state included) from here on. (vis_obs/flags/noise were already
             # globalized in TabConfig, before Model captured them in closures.)
-            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
-            model.state = shard_pytree(model.state, tab_config.n_rfi)
-            model.constants = shard_pytree(model.constants, tab_config.n_rfi)
+            n_bl = tab_config.n_bl
+            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi, n_bl)
+            model.state = shard_pytree(model.state, tab_config.n_rfi, n_bl)
+            model.constants = shard_pytree(model.constants, tab_config.n_rfi, n_bl)
 
         _print_model_summary(tab_config, model, start_time)
 

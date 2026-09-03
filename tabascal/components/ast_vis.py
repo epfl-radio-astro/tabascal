@@ -1,8 +1,11 @@
+from math import isfinite
+
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
+from tabascal.distributed import map_over_baselines
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
@@ -48,6 +51,29 @@ class GPVisAst(Component):
 
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]
+
+            # null is a setting, not a missing value: every baseline in one
+            # step, which is the padded transform at full width. int() alone
+            # would turn 1.9 into 1 without a word, and the finiteness test
+            # comes before it because yaml spells .inf and .nan, on which int()
+            # raises with a message about floats rather than about the key.
+            block_size = config.args["ast"].get("baseline_block_size", 128)
+            if block_size is not None and (
+                isinstance(block_size, bool)
+                or not isinstance(block_size, (int, float))
+                or not isfinite(block_size)
+                or block_size != int(block_size)
+                or block_size < 1
+            ):
+                raise ValueError(
+                    "ast.baseline_block_size is the number of baselines "
+                    "transformed per scan step: a whole number of at least 1, "
+                    f"or null for a single block over every baseline, got "
+                    f"{block_size!r}."
+                )
+            self.baseline_block_size = (
+                None if block_size is None else int(block_size)
+            )
 
             self.xs = [self.freqs, self.times]
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
@@ -97,11 +123,77 @@ class GPVisAst(Component):
         }
 
     def build_forward(self):
-        """Return pure, JIT-compatible function"""
+        """Return pure, JIT-compatible function
+
+        The baseline axis is walked in blocks of ``ast.baseline_block_size``
+        rather than vmapped whole. ``latent_to_signal`` pads the latent block up
+        to the padded k-grid, shifts, inverse-transforms and crops back, so a
+        vmap over every baseline holds ``(n_bl, n_freq_pad, n_time_pad)`` three
+        times over -- at the default padding, four times the visibilities on each
+        axis, and all of it thrown away by the crop. The scan replaces ``n_bl`` in
+        that shape with the block, which is the whole of the term this component
+        contributes to peak memory.
+
+        There is deliberately no ``checkpoint`` on the body, unlike the RFI
+        components' scans. The chain from the latent parameters to ``vis_ast`` is
+        affine -- an elementwise ``sigma * base + mu``, then pad, shift, ifftn and
+        crop, every one of them linear -- so reverse mode is its transpose and
+        stores no primal intermediates to begin with. Issue #153 records the
+        measurement; a remat here would be a no-op today and a silent
+        recomputation if the chain ever stopped being linear.
+
+        The affine transform runs inside the body, on the block, so that neither
+        it nor the padded grid is ever formed for every baseline at once.
+
+        Under sharding the whole of that runs per device on that device's slice
+        of the baseline axis, through :func:`map_over_baselines`. Baselines are
+        independent all the way to the likelihood, so there is no collective:
+        each device holds one slice of the latents, of their optimizer state and
+        of the padded grids built from them, and the block scan divides the last
+        of those again.
+        """
         prefix = self.prefix
         pads = self.pads
         ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
+        n_bl = self.n_bl
+        block_size = self.baseline_block_size
+
+        block_signal = vmap(latent_to_signal, (0, None, None), 0)
+
+        def local_vis(ast_k_base, sigma_ast_k, mu_ast_k):
+            # Sizes come off the arrays, not off the config: inside the shard_map
+            # body these are the device's own slice of the baseline axis.
+            n_local = ast_k_base.shape[0]
+            n_block = max(
+                1, n_local if block_size is None else min(block_size, n_local)
+            )
+            n_pad = -n_local % n_block
+
+            def block_vis(carry, block):
+                k_base, sigma, mu = block
+
+                return carry, block_signal(
+                    forward_transform(k_base, sigma, mu), pads, ss_idxs
+                )
+
+            # The padding baselines of the last block carry a zero latent, a zero
+            # sigma and a zero mu, so they transform to zero; the slice below
+            # drops them, and being linear it drops their gradient with them.
+            def bl_blocks(x):
+                padded = jnp.pad(x, ((0, n_pad), (0, 0), (0, 0)))
+
+                return jnp.reshape(padded, (-1, n_block) + x.shape[1:])
+
+            _, vis_ast = lax.scan(
+                block_vis,
+                None,
+                tuple(bl_blocks(x) for x in (ast_k_base, sigma_ast_k, mu_ast_k)),
+            )
+            # lax.scan stacks along axis 0, which is the baseline axis of the
+            # result already, so the blocks are flattened rather than transposed.
+
+            return jnp.reshape(vis_ast, (-1,) + vis_ast.shape[2:])[:n_local]
 
         def forward(params, state, constants):
             # Pure JAX operations only
@@ -110,9 +202,9 @@ class GPVisAst(Component):
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
-            ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
-
-            vis_ast = vmap(latent_to_signal, (0, None, None), 0)(ast_k, pads, ss_idxs)
+            vis_ast = map_over_baselines(local_vis, n_bl)(
+                ast_k_base, sigma_ast_k, mu_ast_k
+            )
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 

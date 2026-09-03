@@ -13,9 +13,14 @@ options the code takes, and ``zeros`` has to mean what it says -- an initial
 astronomical visibility of zero, through the forward the model actually runs.
 """
 
+import os
 import re
+import subprocess
+import sys
+import textwrap
 from importlib.resources import files
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -255,3 +260,202 @@ def test_ast_mean_zero_and_zeros_are_the_same_prior(tmp_path):
     np.testing.assert_array_equal(numeric.mu_ast_k, named.mu_ast_k)
     for key, value in numeric.init_params_base.items():
         np.testing.assert_array_equal(value, named.init_params_base[key])
+
+
+# ---------------------------------------------------------------------------
+# The baseline block scan
+#
+# latent_to_signal pads the latent grid up to the padded k-grid, transforms and
+# crops back, so vmapping it over every baseline holds (n_bl, n_freq_pad,
+# n_time_pad) several times over -- padding the crop then throws away. The
+# component walks the baseline axis in blocks of ast.baseline_block_size
+# instead. Baselines are independent, so the block changes memory and nothing
+# else; these tests are what holds that.
+# ---------------------------------------------------------------------------
+
+#: 6 baselines at n_ant=4, so these span one baseline per step, blocks that do
+#: and do not divide the axis, a block wider than it, and null (a single block).
+BLOCK_SIZES = [1, 4, 6, 128, None]
+
+
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+def test_the_baseline_block_size_changes_neither_value_nor_gradient(
+    tmp_path, block_size
+):
+    """The scanned transform reproduces the unblocked one, block for block.
+
+    Value and gradient both: the scan carries the affine transform into its body
+    and pads its last block, either of which could go wrong in a way that only
+    reverse mode would show.
+    """
+
+    def value_and_grad(block):
+        comp = setup_ast(ast_config(tmp_path, baseline_block_size=block))
+        constants = make_constants(comp)
+        forward = comp.build_forward()
+        state = dict(comp.state_outputs)
+
+        def loss(params):
+            vis = forward(params, state, constants)["vis_ast"]
+            return jnp.sum(jnp.abs(vis) ** 2)
+
+        params = comp.init_params_base
+        vis = forward(params, state, constants)["vis_ast"]
+
+        return np.asarray(vis), jax.grad(loss)(params)
+
+    # The reference is the whole axis in one step, i.e. the vmap this replaced.
+    ref_vis, ref_grads = value_and_grad(None)
+    vis, grads = value_and_grad(block_size)
+
+    np.testing.assert_allclose(vis, ref_vis, rtol=1e-12, atol=1e-12)
+    for key in ref_grads:
+        np.testing.assert_allclose(
+            np.asarray(grads[key]), np.asarray(ref_grads[key]), rtol=1e-12, atol=1e-12
+        )
+
+
+def test_the_default_baseline_block_size_comes_from_the_base_config(tmp_path):
+    """A config predating the key still builds, on the base default of 128."""
+
+    args = base_args(tmp_path)
+    del args["ast"]["baseline_block_size"]
+
+    config = make_ast_config(args)
+    comp = GPVisAst()
+    comp.setup(config)
+
+    assert comp.baseline_block_size == 128
+
+
+@pytest.mark.parametrize(
+    "block_size", [0, -1, 1.5, True, "128", float("inf"), float("nan")]
+)
+def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
+    tmp_path, block_size
+):
+    """Rejected in setup, by name. ``None`` is not here: null is a setting."""
+
+    message = setup_error(ast_config(tmp_path, baseline_block_size=block_size))
+
+    assert "baseline_block_size" in message
+
+
+_SHARDED_AST_SCRIPT = textwrap.dedent(
+    """
+    import numpy as np
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import PartitionSpec as P
+    from importlib.resources import files
+    from types import SimpleNamespace
+
+    jax.config.update("jax_enable_x64", True)
+
+    from tabascal.components.ast_vis import GPVisAst
+    from tabascal.config import yaml_load
+    from tabascal import distributed as dist
+
+    assert jax.device_count() == 2
+    assert dist.sharding_enabled()
+
+    args = yaml_load(
+        str(files("tabascal").joinpath("data/config/tab_config_base.yaml"))
+    )
+
+    n_ant, n_freq, n_time = 4, 4, 8
+    a1, a2 = jnp.triu_indices(n_ant, 1)
+    n_bl = len(a1)
+    freqs = jnp.linspace(1.4e9, 1.41e9, n_freq)
+    times = jnp.linspace(0.0, 120.0, n_time)
+    rng = np.random.default_rng(0)
+    uvw = jnp.asarray(rng.normal(scale=1e3, size=(n_time, n_bl, 3)))
+    vis_obs = jnp.asarray(
+        rng.normal(size=(n_bl, n_freq, n_time))
+        + 1j * rng.normal(size=(n_bl, n_freq, n_time))
+    )
+
+    def build(block_size):
+        args["ast"]["baseline_block_size"] = block_size
+        config = SimpleNamespace(
+            n_ant=n_ant, n_bl=n_bl, n_freq=n_freq, n_time=n_time,
+            freqs=freqs, chan_width=float(freqs[1] - freqs[0]),
+            times=times, int_time=float(times[1] - times[0]),
+            dish_d=13.5, uvw=uvw, phase_centre={"ra": 30.0, "dec": -30.0},
+            vis_obs=vis_obs, args=args,
+        )
+        comp = GPVisAst()
+        comp.setup(config)
+
+        return comp
+
+    def value_and_grad(comp, shard):
+        constants = {
+            f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()
+        }
+        params = dict(comp.init_params_base)
+        state = dict(comp.state_outputs)
+        if shard:
+            constants = dist.shard_pytree(constants, 0, n_bl)
+            params = dist.shard_pytree(params, 0, n_bl)
+            assert params["ast_k_r_base"].sharding.spec == P("dev")
+            assert (
+                constants[f"{comp.prefix}/sigma_ast_k"].sharding.spec == P("dev")
+            )
+        forward = comp.build_forward()
+
+        def loss(p):
+            return jnp.sum(jnp.abs(forward(p, state, constants)["vis_ast"]) ** 2)
+
+        vis = forward(params, state, constants)["vis_ast"]
+
+        return np.asarray(vis), jax.jit(jax.grad(loss))(params)
+
+    # The premise: 6 baselines over 2 devices divides. Without this the helper
+    # would fall back to running unsharded and the comparison below would be
+    # comparing one code path with itself.
+    assert dist.baselines_shardable(n_bl)
+
+    for block_size in (2, None):
+        comp = build(block_size)
+        ref_vis, ref_grads = value_and_grad(comp, shard=False)
+        vis, grads = value_and_grad(comp, shard=True)
+        np.testing.assert_allclose(vis, ref_vis, rtol=1e-10, atol=1e-10)
+        for key in ref_grads:
+            np.testing.assert_allclose(
+                np.asarray(grads[key]), np.asarray(ref_grads[key]),
+                rtol=1e-10, atol=1e-10,
+            )
+
+    print("SHARDED_AST_OK")
+    """
+)
+
+
+def test_the_baseline_axis_split_across_devices_changes_nothing(tmp_path):
+    """Sharded and unsharded agree, in value and in gradient.
+
+    The transform runs inside a ``shard_map`` body, so each device sees only its
+    own slice of the baseline axis and its own slice of the latents. Nothing is
+    reduced across devices here -- baselines are independent until the
+    likelihood -- so the two must agree exactly rather than to a collective's
+    tolerance.
+    """
+    env = {
+        **os.environ,
+        "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+        "JAX_PLATFORMS": "cpu",
+    }
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", _SHARDED_AST_SCRIPT],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "SHARDED_AST_OK" in result.stdout, (
+        f"returncode={result.returncode}\nstdout:\n{result.stdout}"
+        f"\nstderr:\n{result.stderr}"
+    )

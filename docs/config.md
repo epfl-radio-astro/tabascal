@@ -261,6 +261,7 @@ ast:
   mean: 0
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
+  baseline_block_size: 128
   pow_spec:
     p0: 3e3
     k0_freq: 1
@@ -273,6 +274,7 @@ ast:
 * `mean`: The mean of the prior distribution: `0` (equivalently `zeros`), the default, or `data`, the observed visibilities.
 * `freq_pad_factor`: This defines the size of the padding used when modelling the signal in the Fourier domain. The signal is modelled in the Fourier domain where periodicity is assumed on some interval. If `freq_pad_factor: 1.0` is given then the interval is the interval of the data itself and will lead to periodic solutions.
 * `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`.
+* `baseline_block_size`: The number of baselines `GPVisAst` transforms per step of its scan over the baseline axis, a whole number defaulting to `128`, or `null` for a single block over every baseline. Turning the latent modes back into visibilities means padding them up to the padded Fourier grid, transforming, and cropping the padding away again, so doing every baseline at once holds `(n_bl, n_freq * freq_pad_factor, n_time * time_pad_factor)` several times over — most of it discarded by the crop. The scan replaces `n_bl` in that shape with the block. It is purely a memory strategy: baselines are independent, so the result does not depend on it, and unlike the RFI scans there is no checkpoint on the body — the transform is linear, so reverse mode stores nothing that could be recomputed. Across several devices the scan runs on each device's own slice of the baseline axis; see [Splitting the work across devices](#splitting-the-work-across-devices).
 * `pow_spec`: This is the section that defines the prior covariance of the signal. The signal is modelled in the Fourier domain so the prior covariance is given by the power spectrum of the signal.
 
 The parameters for the power spectrum are defined as
@@ -360,6 +362,16 @@ Getting it wrong is not obvious from the fit. Negating all three axes conjugates
 
 Note that the catalogue fluxes are in the same scale as the data the model is fit to. With data calibrated to Jy these are physical Jy; without that, the data are in raw correlator units and a Jy catalogue flux is meaningless.
 
+
+### Splitting the work across devices
+
+With more than one device visible, the run splits two different axes over the same mesh.
+
+The RFI arrays split along their **source** axis: each device holds a slice of the satellites and their fine grids, and the per-source visibilities are summed across devices once per forward pass. The satellite list is padded to a multiple of the device count with dark dummies so the axis divides.
+
+The astronomical latent parameters — and their optimiser state, and the padded Fourier grids built from them — split along their **baseline** axis. Nothing is summed across devices for this one: baselines are independent until the likelihood, so each device transforms its own slice and keeps it. There is nothing to pad a baseline axis with, a baseline being a row of the data rather than a modelling choice, so when the baseline count does not divide the device count the astronomical arrays stay replicated and the run proceeds as it did before, whole on each device.
+
+The two are the same physical split of the same devices; which axis of a given array it walks is a property of that array.
 
 ## RFI signal
 
