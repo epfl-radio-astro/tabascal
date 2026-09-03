@@ -133,8 +133,9 @@ class GPVisAst(Component):
         rather than vmapped whole. ``latent_to_signal`` pads the latent block up
         to the padded k-grid, shifts, inverse-transforms and crops back, so a
         vmap over every baseline holds ``(n_bl, n_freq_pad, n_time_pad)`` three
-        times over -- at the default padding, four times the visibilities on each
-        axis, and all of it thrown away by the crop. The scan replaces ``n_bl`` in
+        times over -- at the default padding each axis is about twice the data
+        one, so about four times the elements of the visibilities, and the crop
+        throws all of that away. The scan replaces ``n_bl`` in
         that shape with the block, which is the whole of the term this component
         contributes to peak memory.
 

@@ -419,9 +419,15 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
         }
         params = dist.shard_pytree(dict(comp.init_params_base), 0, n_bl)
         constants = dist.shard_pytree(constants, 0, n_bl)
+        # All four of the arrays that carry the baseline axis, not a sample of
+        # them: dropping one from BL_AXIS_NAMES would leave a full-size array
+        # replicated on every device, and the arithmetic around the shard_map
+        # boundary would still give the right answer.
         spec = P("dev") if shardable else P()
-        assert params["ast_k_r_base"].sharding.spec == spec, n_bl
-        assert constants[f"{comp.prefix}/sigma_ast_k"].sharding.spec == spec, n_bl
+        for key in ("ast_k_r_base", "ast_k_i_base"):
+            assert params[key].sharding.spec == spec, (key, n_bl)
+        for key in ("sigma_ast_k", "mu_ast_k"):
+            assert constants[f"{comp.prefix}/{key}"].sharding.spec == spec, (key, n_bl)
 
         state = dict(comp.state_outputs)
         forward = comp.build_forward()
@@ -429,6 +435,8 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
 
         vis, grads = value_and_grad(component, params)
         ref_vis, ref_grads = value_and_grad(lambda p: reference(comp, p), params)
+        for key in ("ast_k_r_base", "ast_k_i_base"):
+            assert grads[key].sharding.spec == spec, (key, n_bl)
 
         np.testing.assert_allclose(vis, ref_vis, rtol=1e-10, atol=1e-10)
         for key in ref_grads:
