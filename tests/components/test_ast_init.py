@@ -346,6 +346,7 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
     import numpy as np
     import jax
     import jax.numpy as jnp
+    from jax import vmap
     from jax.sharding import PartitionSpec as P
     from importlib.resources import files
     from types import SimpleNamespace
@@ -354,6 +355,7 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
 
     from tabascal.components.ast_vis import GPVisAst
     from tabascal.config import yaml_load
+    from tabascal.fft_gp import latent_to_signal
     from tabascal import distributed as dist
 
     assert jax.device_count() == 2
@@ -363,19 +365,19 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
         str(files("tabascal").joinpath("data/config/tab_config_base.yaml"))
     )
 
-    n_ant, n_freq, n_time = 4, 4, 8
-    a1, a2 = jnp.triu_indices(n_ant, 1)
-    n_bl = len(a1)
+    n_freq, n_time = 4, 8
     freqs = jnp.linspace(1.4e9, 1.41e9, n_freq)
     times = jnp.linspace(0.0, 120.0, n_time)
-    rng = np.random.default_rng(0)
-    uvw = jnp.asarray(rng.normal(scale=1e3, size=(n_time, n_bl, 3)))
-    vis_obs = jnp.asarray(
-        rng.normal(size=(n_bl, n_freq, n_time))
-        + 1j * rng.normal(size=(n_bl, n_freq, n_time))
-    )
 
-    def build(block_size):
+    def build(n_ant, block_size):
+        a1, a2 = jnp.triu_indices(n_ant, 1)
+        n_bl = len(a1)
+        rng = np.random.default_rng(0)
+        uvw = jnp.asarray(rng.normal(scale=1e3, size=(n_time, n_bl, 3)))
+        vis_obs = jnp.asarray(
+            rng.normal(size=(n_bl, n_freq, n_time))
+            + 1j * rng.normal(size=(n_bl, n_freq, n_time))
+        )
         args["ast"]["baseline_block_size"] = block_size
         config = SimpleNamespace(
             n_ant=n_ant, n_bl=n_bl, n_freq=n_freq, n_time=n_time,
@@ -387,53 +389,47 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
         comp = GPVisAst()
         comp.setup(config)
 
-        return comp
+        return comp, n_bl
 
-    def value_and_grad(comp, shard):
+    def reference(comp, params):
+        # The formula itself: the affine transform, then one vmapped
+        # latent_to_signal over the whole baseline axis. Nothing here goes near
+        # map_over_baselines or the block scan, which is the point -- with
+        # sharding enabled the component takes the shard_map path whatever it is
+        # handed, so comparing the component with itself would prove nothing.
+        k = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
+        k = comp.forward_transform(k, comp.sigma_ast_k, comp.mu_ast_k)
+
+        return vmap(latent_to_signal, (0, None, None), 0)(k, comp.pads, comp.ss_idxs)
+
+    def value_and_grad(f, params):
+        def loss(p):
+            return jnp.sum(jnp.abs(f(p)) ** 2)
+
+        return np.asarray(f(params)), jax.jit(jax.grad(loss))(params)
+
+    for n_ant, block_size, shardable in ((4, 2, True), (4, None, True), (3, 2, False)):
+        comp, n_bl = build(n_ant, block_size)
+        # 6 baselines divide two devices; 3 do not, and that case has to run the
+        # component end to end rather than only assert the helper's fallback.
+        assert dist.baselines_shardable(n_bl) is shardable, n_bl
+
         constants = {
             f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()
         }
-        params = dict(comp.init_params_base)
+        params = dist.shard_pytree(dict(comp.init_params_base), 0, n_bl)
+        constants = dist.shard_pytree(constants, 0, n_bl)
+        spec = P("dev") if shardable else P()
+        assert params["ast_k_r_base"].sharding.spec == spec, n_bl
+        assert constants[f"{comp.prefix}/sigma_ast_k"].sharding.spec == spec, n_bl
+
         state = dict(comp.state_outputs)
-        if shard:
-            constants = dist.shard_pytree(constants, 0, n_bl)
-            params = dist.shard_pytree(params, 0, n_bl)
-            assert params["ast_k_r_base"].sharding.spec == P("dev")
-            assert (
-                constants[f"{comp.prefix}/sigma_ast_k"].sharding.spec == P("dev")
-            )
         forward = comp.build_forward()
+        component = lambda p: forward(p, state, constants)["vis_ast"]
 
-        def loss(p):
-            return jnp.sum(jnp.abs(forward(p, state, constants)["vis_ast"]) ** 2)
+        vis, grads = value_and_grad(component, params)
+        ref_vis, ref_grads = value_and_grad(lambda p: reference(comp, p), params)
 
-        vis = forward(params, state, constants)["vis_ast"]
-
-        return np.asarray(vis), jax.jit(jax.grad(loss))(params)
-
-    # The premise: 6 baselines over 2 devices divides. Without this the helper
-    # would fall back to running unsharded and the comparison below would be
-    # comparing one code path with itself.
-    assert dist.baselines_shardable(n_bl)
-
-    # What leaves the component is replicated, whatever went in. A baseline-
-    # sharded prediction reaches process 0's truth metrics, results writer and
-    # plots, and a multi-process run cannot fetch an array whose shards live on
-    # another process -- which is how this was found, in the two-rank pipeline
-    # test rather than here.
-    comp = build(2)
-    constants = {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
-    out = comp.build_forward()(
-        dist.shard_pytree(dict(comp.init_params_base), 0, n_bl),
-        dict(comp.state_outputs),
-        dist.shard_pytree(constants, 0, n_bl),
-    )["vis_ast"]
-    assert out.sharding.spec == P()
-
-    for block_size in (2, None):
-        comp = build(block_size)
-        ref_vis, ref_grads = value_and_grad(comp, shard=False)
-        vis, grads = value_and_grad(comp, shard=True)
         np.testing.assert_allclose(vis, ref_vis, rtol=1e-10, atol=1e-10)
         for key in ref_grads:
             np.testing.assert_allclose(
@@ -441,19 +437,27 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
                 rtol=1e-10, atol=1e-10,
             )
 
+        # What leaves the component is replicated, whatever went in. A baseline-
+        # sharded prediction reaches process 0's truth metrics, results writer
+        # and plots, and a multi-process run cannot fetch an array whose shards
+        # live on another process -- which is how this was found, in the two-rank
+        # pipeline test rather than here.
+        assert component(params).sharding.spec == P(), n_bl
+
     print("SHARDED_AST_OK")
     """
 )
 
 
 def test_the_baseline_axis_split_across_devices_changes_nothing(tmp_path):
-    """Sharded and unsharded agree, in value and in gradient.
+    """The sharded component reproduces the plain formula, value and gradient.
 
-    The transform runs inside a ``shard_map`` body, so each device sees only its
-    own slice of the baseline axis and its own slice of the latents. Nothing is
-    reduced across devices here -- baselines are independent until the
-    likelihood -- so the two must agree exactly rather than to a collective's
-    tolerance.
+    Held to ``vmap(latent_to_signal)`` over the whole axis rather than to itself:
+    with two devices visible the component takes the ``shard_map`` path whatever
+    it is handed, so a sharded-versus-unsharded comparison would be one code path
+    against itself. Covers a baseline count that divides the mesh and one that
+    does not, the block scan and ``null``, and pins that what comes out is
+    replicated.
     """
     env = {
         **os.environ,

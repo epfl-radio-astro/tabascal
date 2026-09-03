@@ -240,9 +240,17 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     def ast_loss(k):
         return jnp.sum(dist.map_over_baselines(local_ast, n_bl)(k, S_s, M_s) ** 2)
 
+    def plain_loss(k):
+        return jnp.sum(local_ast(k, jnp.asarray(S), jnp.asarray(M)) ** 2)
+
     g_ast = jax.jit(jax.grad(ast_loss))(K_s)
     assert g_ast.shape == K.shape
     assert g_ast.sharding.spec == P("dev")
+    # The values too, not only the shape and the sharding: the transpose of a
+    # shard_map is its own rule, and a wrong one keeps both of those.
+    np.testing.assert_allclose(
+        np.asarray(g_ast), np.asarray(jax.grad(plain_loss)(jnp.asarray(K))), rtol=1e-12
+    )
 
     # a ragged baseline count falls back to running the body unsharded
     assert dist.map_over_baselines(local_ast, 6) is local_ast

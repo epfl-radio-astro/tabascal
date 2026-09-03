@@ -111,8 +111,9 @@ def process_count() -> int:
 # ---------------------------------------------------------------------------
 
 # Array names whose *leading* axis is the RFI-source axis and which should therefore be
-# split across devices. Everything else (per-baseline data, per-antenna gains, ast
-# params, component constants) is replicated. Constants are keyed "<prefix>/<name>" in
+# split across devices. The astronomical latents have an axis of their own -- see
+# BL_AXIS_NAMES below -- and everything else (per-baseline data, per-antenna gains, the
+# remaining component constants) is replicated. Constants are keyed "<prefix>/<name>" in
 # the model, so matching happens on the part after the last "/". Membership here is not
 # sufficient on its own: shard_pytree additionally requires leaf.shape[0] == n_rfi, so
 # a constant whose leading dimension is a basis size of its own could not be sharded
@@ -339,6 +340,16 @@ def baselines_shardable(n_bl: int) -> bool:
 def _wants_bl_axis(key: str, leaf, n_bl: int) -> bool:
     name = key.rsplit("/", 1)[-1]
     return name in BL_AXIS_NAMES and np.ndim(leaf) >= 1 and np.shape(leaf)[0] == n_bl
+
+
+def bl_axis_leaves(tree: dict, n_bl: int) -> list:
+    """The keys of ``tree`` that carry the baseline axis, in order.
+
+    What the run reports when it says which arrays it split, and empty for a model
+    with no astronomical Fourier component at all -- which is the case where saying
+    anything about a baseline axis would be misleading.
+    """
+    return [key for key, leaf in tree.items() if _wants_bl_axis(key, leaf, n_bl)]
 
 
 def map_over_baselines(local_fn: Callable, n_bl: int) -> Callable:
