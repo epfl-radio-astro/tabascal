@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+import textwrap
+
 import pytest
 from types import SimpleNamespace
 from tabascal.components.rfi_vis import *
@@ -444,6 +449,92 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
 
     with pytest.raises(RuntimeError, match="baseline_block_size"):
         RiemannVis().setup(config)
+
+
+_SHARDED_BLOCK_SCRIPT = textwrap.dedent(
+    """
+    import jax
+    import jax.numpy as jnp
+    from types import SimpleNamespace
+
+    jax.config.update("jax_enable_x64", True)
+
+    from tabascal.components.rfi_vis import RiemannVis
+    from tabascal.distributed import sharding_enabled
+
+    assert jax.device_count() == 2, jax.device_count()
+    assert sharding_enabled(), "the RFI axis is not sharded"
+
+    n_ant, n_rfi, n_freq, n_int_freq, n_time, n_int_time = 12, 8, 3, 2, 4, 2
+    a1, a2 = jnp.triu_indices(n_ant, 1)
+    a1, a2 = a1.astype("int32"), a2.astype("int32")
+    n_bl = int(a1.shape[0])
+
+    shape = (n_rfi, n_ant, n_freq * n_int_freq, n_time * n_int_time)
+    keys = jax.random.split(jax.random.PRNGKey(0), 3)
+    state = {
+        "rfi_A": jax.random.normal(keys[0], shape)
+        + 1j * jax.random.normal(keys[1], shape),
+        "rfi_phase": jax.random.uniform(keys[2], shape),
+        "vis_rfi": jnp.zeros((n_bl, n_freq, n_time), complex),
+    }
+    cotangent = jnp.ones((n_bl, n_freq, n_time), complex)
+
+    def run(block_size):
+        config = SimpleNamespace(
+            n_ant=n_ant, n_rfi=n_rfi, n_time=n_time, n_freq=n_freq,
+            n_int_time=n_int_time, n_int_freq=n_int_freq, n_bl=n_bl, a1=a1, a2=a2,
+            precision="double", args={"rfi": {"baseline_block_size": block_size}},
+        )
+        comp = RiemannVis()
+        comp.setup(config)
+        constants = {
+            f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()
+        }
+        forward = comp.build_forward()
+        primal, vjp = jax.vjp(lambda s: forward({}, s, constants)["vis_rfi"], state)
+        (grads,) = vjp(cotangent)
+
+        return primal, grads
+
+    ref_vis, ref_grads = run(4)
+    for block_size in (None, n_bl, 128):
+        vis, grads = run(block_size)
+        assert jnp.allclose(vis, ref_vis, atol=1e-10), block_size
+        for key in ("rfi_A", "rfi_phase"):
+            assert jnp.allclose(grads[key], ref_grads[key], atol=1e-10), (block_size, key)
+
+    print("SHARDED_BLOCK_OK")
+    """
+)
+
+
+def test_every_block_size_agrees_with_the_rfi_axis_split_across_devices():
+    """The scan lives inside the shard_map body, so the block interacts with it.
+
+    A null block size is the case worth spending a subprocess on: it is the one
+    where the body holds every baseline at once, which is also what the psum
+    that follows has to keep coarse-grid sized. Run under two devices, since
+    sharding is decided by the device count at import.
+    """
+    env = {
+        **os.environ,
+        "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+        "JAX_PLATFORMS": "cpu",
+    }
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", _SHARDED_BLOCK_SCRIPT],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "SHARDED_BLOCK_OK" in result.stdout, (
+        f"returncode={result.returncode}\nstdout:\n{result.stdout}"
+        f"\nstderr:\n{result.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------
