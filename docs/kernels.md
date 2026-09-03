@@ -38,6 +38,24 @@ model:
     - rfi_vis:RiemannVisFFI
 ```
 
+## Memory
+
+The Riemann sum is a reduction over a fine grid of shape `(n_bl, n_rfi,
+n_freq_fine, n_time_fine)`, which is `n_rfi * n_int_freq * n_int_time` times the
+size of the visibilities it produces. The compiled kernels never form it: gather,
+multiply, sum over sources and the average back onto the data grid happen in one
+pass, and their transpose rule recomputes the same terms from the per-antenna
+inputs, so nothing of that size is kept for the backward pass either.
+
+{class}`~tabascal.components.rfi_vis.RiemannVis` reaches the same bound by
+scanning the baseline axis under `jax.checkpoint`: each step forms the fine grid
+for `rfi.baseline_block_size` baselines only, averages it onto the data grid, and
+lets the backward pass recompute it. The block size is the memory/recomputation
+trade and does not change the result — see
+[`baseline_block_size`](config.md#rfi-signal). It remains the slower of the two
+components; what the scan buys is a peak that no longer grows with the number of
+baselines.
+
 ## Precision
 
 The kernels are compiled for both single and double precision and run in

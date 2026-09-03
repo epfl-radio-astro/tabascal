@@ -222,19 +222,28 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
     # where RFI-vis still dominates (Riemann: -10% single, -6% double). Setup
     # time is unchanged, so total_runtime moves with optimizer_runtime alone.
     # Memory is flat. See issue #107 for why the slower component is preferred.
+    # The two Riemann memory references are the measurements from before the
+    # baseline scan of #114, kept as the ceiling the scanned kernel has to stay
+    # under. Their lower bound is open because the scan is expected to cut the
+    # peak by roughly an order of magnitude and nothing below has been
+    # re-measured on Daint: re-record the value and close the bound again from
+    # the first CSCS run that includes the scan. The runtime references are
+    # unchanged -- on CPU the scan costs nothing end to end -- and the
+    # RiemannFFI references are untouched throughout, since the kernel bounds
+    # the same term inside itself.
     _reference_by_variant = {
         ("Riemann", "single"): {
             "daint:gpu": {
                 "total_runtime": (79.91, -0.25, 0.15, "s"),
                 "optimizer_runtime": (66.28, -0.20, 0.15, "s"),
-                "memory_usage": (8.679, -0.1, 0.1, "GB"),
+                "memory_usage": (8.679, None, 0.1, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
                 "total_runtime": (80.66, -0.25, 0.15, "s"),
                 "optimizer_runtime": (66.60, -0.20, 0.15, "s"),
-                "memory_usage": (16.887, -0.1, 0.1, "GB"),
+                "memory_usage": (16.887, None, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
@@ -310,19 +319,28 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     # test is the dominant remaining term. Memory rises 0.238 -> 0.306 GB
     # (single) and 0.477 -> 0.614 GB (double); both are sub-GB totals where the
     # signal component's absolute cost is a large fraction.
+    # The two Riemann memory references are the measurements from before the
+    # baseline scan of #114, kept as the ceiling the scanned kernel has to stay
+    # under. Their lower bound is open because the scan is expected to cut the
+    # peak by roughly an order of magnitude and nothing below has been
+    # re-measured on Daint: re-record the value and close the bound again from
+    # the first CSCS run that includes the scan. The runtime references are
+    # unchanged -- on CPU the scan costs nothing end to end -- and the
+    # RiemannFFI references are untouched throughout, since the kernel bounds
+    # the same term inside itself.
     _reference_by_variant: dict = {
         ("Riemann", "single"): {
             "daint:gpu": {
                 "total_runtime": (64.59, -0.25, 0.15, "s"),
                 "optimizer_runtime": (41.69, -0.20, 0.15, "s"),
-                "memory_usage": (3.294, -0.15, 0.15, "GB"),
+                "memory_usage": (3.294, None, 0.15, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
                 "total_runtime": (70.65, -0.25, 0.15, "s"),
                 "optimizer_runtime": (46.88, -0.20, 0.15, "s"),
-                "memory_usage": (7.058, -0.15, 0.15, "GB"),
+                "memory_usage": (7.058, None, 0.15, "GB"),
             },
         },
         ("RiemannFFI", "single"): {

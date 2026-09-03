@@ -437,7 +437,7 @@ class TestFineGridCancellation:
     """The case with no bound: why the kernel-level claim stays qualitative.
 
     The op reduces over source *and* integration sample together. ``RiemannVis``
-    does it in that order literally -- ``calculate_rfi_vis_fine`` sums the
+    does it in that order literally -- ``calculate_rfi_vis_blocked`` sums the
     sources at each fine sample, and the mean over fine samples comes after --
     so a source whose fine samples are ``[A, -A]`` beside one whose are
     ``[1, 0]`` loses the ``1`` inside the joint evaluation, where it is added to

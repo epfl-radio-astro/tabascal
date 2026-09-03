@@ -1,6 +1,6 @@
 from tabascal.time import mjd_to_jd, gast_deg
 
-from jax import jit, lax, Array
+from jax import checkpoint, jit, lax, Array
 import jax.numpy as jnp
 from functools import partial
 import numpy as np
@@ -431,6 +431,13 @@ def calculate_rfi_vis_fine(
     -------
     Array (n_bl, ...)
         The visibilities on each baseline.
+
+    Notes
+    -----
+    The unblocked form of the reduction, over every baseline at once. It is what
+    :func:`calculate_rfi_vis_blocked` reproduces block by block, and what the
+    tests hold that function to; the model itself calls the blocked one, whose
+    peak memory is set by the block rather than by ``n_bl``.
     """
 
     # rfi_A is shape (n_rfi, n_ant, ...)
@@ -450,6 +457,103 @@ def calculate_rfi_vis_fine(
     )
 
     return vis_rfi_fine
+
+
+def calculate_rfi_vis_blocked(
+    rfi_A: Array,
+    rfi_phase: Array,
+    a1: Array,
+    a2: Array,
+    n_int_freq: int,
+    n_int_time: int,
+    block_size: int,
+) -> Array:
+    """Calculates the visibilities on the data grid, a block of baselines at a time.
+
+    The same quantity as :func:`calculate_rfi_vis_fine` followed by the mean over
+    each data cell's integration samples, but the baseline axis is walked in
+    blocks of ``block_size`` under ``checkpoint``, so the fine grid is never held
+    for every baseline at once.
+
+    :func:`calculate_rfi_vis_fine` gathers ``(n_ant, n_rfi, ...)`` up to ``(n_bl,
+    n_rfi, n_freq_fine, n_time_fine)``, and the product and the ``exp`` each
+    produce another array of that shape, before the sum over sources and the mean
+    over integration samples take it down to ``(n_bl, n_freq, n_time)``. Those
+    intermediates are what reverse mode keeps: a tape ``n_rfi * n_int_freq *
+    n_int_time`` times the size of the result. Here each block is reduced onto the
+    data grid before the next one is formed, and ``checkpoint`` keeps the block's
+    fine arrays off the tape -- the backward pass recomputes them -- so what
+    survives the forward pass is the result plus the per-antenna inputs the caller
+    is holding anyway.
+
+    ``checkpoint`` is load-bearing rather than decorative: ``lax.scan`` stacks the
+    body's residuals across iterations for reverse-mode AD, so a scan without it
+    would bound the forward peak and leave the tape roughly where it was.
+
+    ``block_size`` is the memory/step-count trade and nothing else: baselines are
+    independent, so the result does not depend on it.
+
+    Parameters
+    ----------
+    rfi_A : Array (n_rfi, n_ant, n_freq_fine, n_time_fine)
+        The complex-valued signal at each antenna, on the fine grid.
+    rfi_phase : Array (n_rfi, n_ant, n_freq_fine, n_time_fine)
+        The geometric phase delay at each antenna, on the fine grid.
+    a1 : Array (n_bl,)
+        The antenna index for antenna 1 in a baseline.
+    a2 : Array (n_bl,)
+        The antenna index for antenna 2 in a baseline.
+    n_int_freq : int
+        The number of fine frequency samples per channel of the data grid.
+    n_int_time : int
+        The number of fine time samples per time step of the data grid.
+    block_size : int
+        The number of baselines calculated per scan step.
+
+    Returns
+    -------
+    Array (n_bl, n_freq, n_time)
+        The visibilities on each baseline, averaged over the integration samples
+        of each data cell.
+    """
+
+    n_bl = a1.shape[0]
+    n_freq = rfi_A.shape[-2] // n_int_freq
+    n_time = rfi_A.shape[-1] // n_int_time
+
+    # Antenna axis first, as in calculate_rfi_vis_fine: it is the axis the block
+    # gathers, and the source axis it leaves behind is the one summed per block.
+    rfi_A_ = jnp.swapaxes(rfi_A, 0, 1)
+    rfi_phase_ = jnp.swapaxes(rfi_phase, 0, 1)
+
+    n_block = max(1, min(int(block_size), n_bl))
+    n_pad = -n_bl % n_block
+
+    def block_vis(carry, bl_idx):
+        b1, b2 = bl_idx
+        vis_fine = jnp.sum(
+            rfi_A_[b1]
+            * jnp.conjugate(rfi_A_[b2])
+            * jnp.exp(1.0j * (rfi_phase_[b1] - rfi_phase_[b2])),
+            axis=1,
+        )
+        # vis_fine is shape (n_block, n_freq_fine, n_time_fine)
+        new_shape = (n_block, n_freq, n_int_freq, n_time, n_int_time)
+
+        return carry, jnp.mean(jnp.reshape(vis_fine, new_shape), axis=(-3, -1))
+
+    # The padding baselines of the last block are antenna 0 against itself. Their
+    # visibilities are computed and then dropped by the slice below, so they reach
+    # neither the result nor -- the slice being linear -- its gradient.
+    def bl_blocks(a):
+        pad = jnp.zeros(n_pad, dtype=a.dtype)
+        return jnp.reshape(jnp.concatenate([a, pad]), (-1, n_block))
+
+    _, vis_rfi = lax.scan(checkpoint(block_vis), None, (bl_blocks(a1), bl_blocks(a2)))
+
+    # lax.scan stacks along axis 0, which is the baseline axis of the result
+    # already, so the blocks need flattening rather than transposing.
+    return jnp.reshape(vis_rfi, (-1, n_freq, n_time))[:n_bl]
 
 
 @partial(jit, static_argnames=("freq_stride", "time_stride"))
