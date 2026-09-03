@@ -70,6 +70,12 @@ Three entry points are provided:
 
 All three share the pure core :func:`matched_filter_light_curves`.
 
+Which baselines the filter should be summed over is a question of its own, and
+:func:`coherent_baseline_mask` answers it from the orbit accuracy and the fringe
+rate rather than from a hand-tuned cut; it is a pure array function so the jitted
+tau-scan and identification search (#190/#191) can apply the same selection
+inside their own traces.
+
 Only the satellite-trajectory source is implemented. RA/Dec and Alt/Az pointings
 can be added by constructing ``rfi_xyz`` from those and feeding
 :func:`rfi_phase_from_positions`.
@@ -78,7 +84,10 @@ can be added by constructing ``rfi_xyz`` from those and feeding
 import os
 from typing import Optional, Tuple
 
+import jax.numpy as jnp
 import numpy as np
+from jax import Array
+from jax.typing import ArrayLike
 from numpy.typing import NDArray
 
 from tabascal.components.trajectory import (
@@ -87,7 +96,7 @@ from tabascal.components.trajectory import (
     get_satellite_positions,
     itrs_to_gcrs_sf,
 )
-from tabascal.interferometry import get_rfi_phase_numpy, itrf_to_uvw_numpy
+from tabascal.interferometry import C, get_rfi_phase_numpy, itrf_to_uvw_numpy
 from tabascal.noise import broadcast_to_vis
 from tabascal.time import gast_deg, mjd_to_jd, to_utc_mjd
 
@@ -181,6 +190,226 @@ def rfi_phase_from_records(
     rfi_xyz = np.asarray(get_satellite_positions(orbit_records, list(times_jd)))
 
     return rfi_phase_from_positions(rfi_xyz, ants_itrf, times_jd, phase_centre, freqs)
+
+
+# ---------------------------------------------------------------------------
+# Baseline coherence: which baselines a TLE can steer
+# ---------------------------------------------------------------------------
+
+def baseline_lengths(ants_itrf: ArrayLike, a1: ArrayLike, a2: ArrayLike) -> Array:
+    """Physical separation of each antenna pair, in metres.
+
+    Both coherence criteria act on the baseline component perpendicular to the
+    line of sight *to the satellite*, which changes as it crosses the sky. The
+    physical length bounds that component from above in every direction, so it
+    is the conservative choice and needs no per-timestep geometry. The uv
+    distance is not a substitute: it is the projection toward the phase centre,
+    not toward the satellite, and would admit baselines the satellite sees at
+    full length.
+
+    Parameters
+    ----------
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in the ITRF (ECEF) frame, in metres.
+    a1, a2 : Array (n_bl,)
+        Antenna indices of each baseline.
+
+    Returns
+    -------
+    Array (n_bl,)
+        Baseline length in metres.
+    """
+    ants_itrf = jnp.asarray(ants_itrf)
+
+    return jnp.linalg.norm(
+        ants_itrf[jnp.asarray(a1)] - ants_itrf[jnp.asarray(a2)], axis=-1
+    )
+
+
+def tle_coherence_length(
+    freq: ArrayLike, range_m: ArrayLike, sigma_transverse_m: ArrayLike
+) -> Array:
+    """Longest baseline an orbit known to ``sigma`` metres can still steer.
+
+    A transverse position error ``delta`` at slant range ``r`` moves the
+    satellite's apparent direction by ``delta / r``, which costs
+    ``2 pi (b / lam) (delta / r)`` of template phase on a baseline of length
+    ``b``. Holding that to one radian gives::
+
+        b_tle = lam r / (2 pi delta)
+
+    Only the transverse error enters. The along-track error, which is the larger
+    part of a TLE's, is very nearly a pure time offset and is absorbed by the tau
+    search instead of by this cut.
+
+    The expression is symmetric in ``b`` and ``delta``, so it inverts itself: the
+    same call evaluated at ``sigma_transverse_m = b`` is the largest orbit error
+    the baseline ``b`` tolerates.
+
+    Parameters
+    ----------
+    freq : float or Array
+        Observing frequency in Hz.
+    range_m : float or Array
+        Slant range to the satellite in metres.
+    sigma_transverse_m : float or Array
+        Transverse (across the line of sight) TLE position error in metres. Taken
+        as a magnitude: a caller holding a signed component -- an offset measured
+        along some axis -- means its size, and a negative ceiling would be met by
+        no baseline at all. Zero is a perfect orbit and returns an infinite
+        coherence length.
+
+    Returns
+    -------
+    Array
+        Coherence length in metres, at the broadcast shape of the inputs.
+    """
+    lam = C / jnp.asarray(freq)
+    delta = jnp.abs(jnp.asarray(sigma_transverse_m))
+
+    return lam * jnp.asarray(range_m) / (2.0 * jnp.pi * delta)
+
+
+def fringe_rate_coherence_length(
+    freq: ArrayLike,
+    range_m: ArrayLike,
+    n_fine: ArrayLike,
+    delta_t: ArrayLike,
+    v_perp_m_s: ArrayLike,
+) -> Array:
+    """Longest baseline the model average itself can follow, in metres.
+
+    A satellite crossing at transverse speed ``v_perp`` sweeps the baseline
+    fringe at ``(b / lam) (v_perp / r)`` hertz. A model that averages ``n_fine``
+    sub-steps over an integration of length ``delta_t`` samples that fringe on a
+    grid of spacing ``delta_t / n_fine``, so it can follow it only up to the
+    Nyquist rate of its own grid, ``n_fine / (2 delta_t)``. Equating the two::
+
+        b_fringe = lam r n_fine / (2 delta_t v_perp)
+
+    Past it the template decoheres inside the integration against its own
+    discretisation, however good the orbit is; the cure is more fine steps or a
+    shorter dump, not a better TLE.
+
+    Parameters
+    ----------
+    freq, range_m : float or Array
+        See :func:`tle_coherence_length`.
+    n_fine : int or Array
+        Fine sub-steps the model averages over per integration.
+    delta_t : float or Array
+        Integration (dump) time in seconds.
+    v_perp_m_s : float or Array
+        Satellite speed across the line of sight in m/s. Taken as a magnitude,
+        for the same reason as ``sigma_transverse_m``: a pass in the other
+        direction fringes at the same rate. Zero is a stationary emitter, with no
+        fringe to outrun, and returns an infinite length.
+
+    Returns
+    -------
+    Array
+        Coherence length in metres, at the broadcast shape of the inputs.
+    """
+    lam = C / jnp.asarray(freq)
+    v_perp = jnp.abs(jnp.asarray(v_perp_m_s))
+
+    return (
+        lam
+        * jnp.asarray(range_m)
+        * jnp.asarray(n_fine)
+        / (2.0 * jnp.asarray(delta_t) * v_perp)
+    )
+
+
+def coherent_baseline_mask(
+    bl_len: ArrayLike,
+    freq: ArrayLike,
+    range_m: ArrayLike,
+    sigma_transverse_m: ArrayLike,
+    n_fine: ArrayLike,
+    delta_t: ArrayLike,
+    v_perp_m_s: ArrayLike,
+    soft: bool = False,
+) -> Array:
+    """Baselines a trajectory is accurate enough to beam-form with.
+
+    Two independent effects cap the baseline over which the template phase can be
+    trusted: the orbit error, at ``b_tle = lam r / (2 pi delta)`` for a radian of
+    phase (:func:`tle_coherence_length`), and the fringe rate against the Nyquist
+    rate of the model's own fine grid, at
+    ``b_fringe = lam r n_fine / (2 delta_t v_perp)``
+    (:func:`fringe_rate_coherence_length`). They are unrelated, so the smaller of
+    the two binds, element by element, and a baseline is kept when
+    ``b <= min(b_tle, b_fringe)``. Both are always in play: all three fringe
+    inputs are required, and a stationary emitter -- or a caller who wants the
+    orbit ceiling alone -- passes ``v_perp_m_s = 0.0``, which sends ``b_fringe``
+    to ``+inf`` so that it drops out of the minimum. There is no half-specified
+    call to get wrong.
+
+    Beyond the binding length a baseline does not merely stop helping: it enters
+    the coherent sum with an essentially random phase and dilutes the statistic
+    the shorter baselines built. That is what the MWA Cen A case study measured.
+    At 175 MHz and a 567 km slant range a 600 m baseline tolerates ``delta`` of
+    about 258 m while the full 5.3 km array needs about 29 m, and Starlink TLEs
+    carry 0.1-1 km of transverse error -- so the detection lived entirely in the
+    1004 baselines under 600 m (5.6 sigma), while the phase-coherent search over
+    all 9180 ranked the true satellite around 34th.
+
+    With ``soft=True`` the step is replaced by ``exp(-(b / b_coh)^2)``, a Gaussian
+    taper on the same scale: unity at zero spacing, ``1/e`` where the hard mask
+    cuts. It down-weights the marginal baselines instead of discarding them,
+    which is the gentler choice when ``sigma`` is itself uncertain.
+
+    One range suffices, taken at mid-observation: ``b_coh`` depends on ``r`` only
+    linearly and the slant range varies by a few tens of percent over a pass,
+    which moves the cut far less than the order-of-magnitude uncertainty on
+    ``delta`` does.
+
+    Everything goes through ``jax.numpy``, so this composes inside the jitted,
+    GPU-resident matched-filter core that consumes it. ``soft`` is the one static
+    argument -- it selects the output dtype and so cannot be traced.
+
+    Only the two magnitudes are made sign-safe; ``freq``, ``range_m``, ``delta_t``
+    and ``n_fine`` are positive-domain quantities that are taken as given, since
+    a negative frequency or dump time is a caller error rather than a convention
+    to absorb.
+
+    Parameters
+    ----------
+    bl_len : float or Array
+        Baseline lengths in metres (see :func:`baseline_lengths`).
+    freq, range_m, sigma_transverse_m : float or Array
+        See :func:`tle_coherence_length`. ``sigma_transverse_m`` is read as a
+        magnitude.
+    n_fine, delta_t, v_perp_m_s : int, float or Array
+        See :func:`fringe_rate_coherence_length`. Required, not optional:
+        ``v_perp_m_s = 0.0`` is how a caller asks for the TLE ceiling alone.
+        ``v_perp_m_s`` is read as a magnitude.
+    soft : bool, default False
+        Return Gaussian weights rather than a boolean mask.
+
+    Returns
+    -------
+    Array
+        Boolean mask, or float weights where ``soft``, at the broadcast shape of
+        the inputs.
+    """
+    b_coh = jnp.minimum(
+        tle_coherence_length(freq, range_m, sigma_transverse_m),
+        fringe_rate_coherence_length(freq, range_m, n_fine, delta_t, v_perp_m_s),
+    )
+
+    bl_len = jnp.asarray(bl_len)
+
+    # A perfect orbit or a stationary emitter divides by zero above and lifts
+    # its own ceiling to +inf, leaving the other one to bind; with both lifted
+    # b_coh is +inf and both branches carry that through to "everything is
+    # coherent" without a nan. Guarding the division instead would evaluate 0/0
+    # in one branch, and an epsilon would move the cut.
+    if soft:
+        return jnp.exp(-((bl_len / b_coh) ** 2))
+
+    return bl_len <= b_coh
 
 
 # ---------------------------------------------------------------------------
