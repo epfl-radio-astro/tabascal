@@ -357,17 +357,26 @@ def map_over_baselines(local_fn: Callable, n_bl: int) -> Callable:
     if not baselines_shardable(n_bl):
         return local_fn
 
-    # check_vma off for the same reason as psum_over_rfi: the varying-axis checker
-    # cannot prove what it needs to for every primitive under a custom transform.
-    kwargs = dict(
-        mesh=device_mesh(),
-        in_specs=(P("dev"), P("dev"), P("dev")),
-        out_specs=P("dev"),
-    )
-    try:
-        return shard_map(local_fn, check_vma=False, **kwargs)
-    except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
-        return shard_map(local_fn, check_rep=False, **kwargs)
+    def mapped(*arrays):
+        # The specs are built per call rather than fixed at wrap time so that the
+        # arity is the body's business: every argument carries the baseline axis
+        # and so takes the same spec.
+        kwargs = dict(
+            mesh=device_mesh(),
+            in_specs=tuple(P("dev") for _ in arrays),
+            out_specs=P("dev"),
+        )
+        # check_vma off for the same reason as psum_over_rfi: the varying-axis
+        # checker cannot prove what it needs to for every primitive under a
+        # custom transform.
+        try:
+            fn = shard_map(local_fn, check_vma=False, **kwargs)
+        except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
+            fn = shard_map(local_fn, check_rep=False, **kwargs)
+
+        return fn(*arrays)
+
+    return mapped
 
 
 # ---------------------------------------------------------------------------

@@ -89,6 +89,16 @@ kernels](kernels.md)) run in either precision, as do the astronomical Gaussian
 process `ast_vis:GPVisAst` and both gain components, `gains:ConstGains` and
 `gains:UnitaryGains`.
 
+### Splitting the work across devices
+
+With more than one device visible, the run splits two different axes over the same mesh.
+
+The RFI arrays split along their **source** axis: each device holds a slice of the satellites and their fine grids, and the per-source visibilities are summed across devices once per forward pass. The satellite list is padded to a multiple of the device count with dark dummies so the axis divides.
+
+The astronomical latent parameters — and their optimiser state, and the padded Fourier grids built from them — split along their **baseline** axis. Nothing is summed across devices for this one: baselines are independent until the likelihood, so each device transforms its own slice and keeps it. There is nothing to pad a baseline axis with, a baseline being a row of the data rather than a modelling choice, so when the baseline count does not divide the device count the astronomical arrays stay replicated and the run proceeds as it did before, whole on each device.
+
+The two are the same physical split of the same devices; which axis of a given array it walks is a property of that array.
+
 ## Data
 
 The `data` section of the configuration file includes only a few options to select the data to use. An exhaustive example is given below.
@@ -363,15 +373,6 @@ Getting it wrong is not obvious from the fit. Negating all three axes conjugates
 Note that the catalogue fluxes are in the same scale as the data the model is fit to. With data calibrated to Jy these are physical Jy; without that, the data are in raw correlator units and a Jy catalogue flux is meaningless.
 
 
-### Splitting the work across devices
-
-With more than one device visible, the run splits two different axes over the same mesh.
-
-The RFI arrays split along their **source** axis: each device holds a slice of the satellites and their fine grids, and the per-source visibilities are summed across devices once per forward pass. The satellite list is padded to a multiple of the device count with dark dummies so the axis divides.
-
-The astronomical latent parameters — and their optimiser state, and the padded Fourier grids built from them — split along their **baseline** axis. Nothing is summed across devices for this one: baselines are independent until the likelihood, so each device transforms its own slice and keeps it. There is nothing to pad a baseline axis with, a baseline being a row of the data rather than a modelling choice, so when the baseline count does not divide the device count the astronomical arrays stay replicated and the run proceeds as it did before, whole on each device.
-
-The two are the same physical split of the same devices; which axis of a given array it walks is a property of that array.
 
 ## RFI signal
 
