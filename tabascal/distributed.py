@@ -292,7 +292,7 @@ def psum_over_rfi(local_fn: Callable) -> Callable:
         return lax.psum(local_fn(rfi_A, rfi_phase), "dev")
 
     # Varying-axis type checking must be off: the FFI kernel's custom JVP/transpose
-    # rules produce cotangents without the {V:rfi} annotation, which trips the check
+    # rules produce cotangents without the {V:dev} annotation, which trips the check
     # under value_and_grad. The out_specs still hold -- the psum makes the result
     # replicated -- the checker just cannot prove it for custom primitives.
     kwargs = dict(mesh=device_mesh(), in_specs=(P("dev"), P("dev")), out_specs=P())

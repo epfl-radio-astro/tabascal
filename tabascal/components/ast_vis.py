@@ -5,7 +5,11 @@ import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
-from tabascal.distributed import map_over_baselines
+from tabascal.distributed import (
+    map_over_baselines,
+    replicated_sharding,
+    sharding_enabled,
+)
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
@@ -146,11 +150,13 @@ class GPVisAst(Component):
         it nor the padded grid is ever formed for every baseline at once.
 
         Under sharding the whole of that runs per device on that device's slice
-        of the baseline axis, through :func:`map_over_baselines`. Baselines are
-        independent all the way to the likelihood, so there is no collective:
-        each device holds one slice of the latents, of their optimizer state and
-        of the padded grids built from them, and the block scan divides the last
-        of those again.
+        of the baseline axis, through :func:`map_over_baselines`: each device
+        holds one slice of the latents, of their optimizer state and of the
+        padded grids built from them, and the block scan divides the last of
+        those again. Baselines are independent, so the transform itself needs no
+        collective; the visibilities are gathered back at the end of the forward,
+        because every host-side consumer of them reads the whole array on
+        process 0.
         """
         prefix = self.prefix
         pads = self.pads
@@ -205,6 +211,19 @@ class GPVisAst(Component):
             vis_ast = map_over_baselines(local_vis, n_bl)(
                 ast_k_base, sigma_ast_k, mu_ast_k
             )
+
+            if sharding_enabled():
+                # Gathered before it leaves the component. What is split is
+                # everything upstream of this line -- the latents, the optimizer
+                # state derived from them and the padded grids built from them,
+                # which is where the memory is. The visibilities themselves are
+                # read on process 0 by the truth metrics, the results writer and
+                # the plots, and a multi-process run cannot fetch an array whose
+                # shards live on another process, so this is where the split
+                # stops until those consumers move onto the same axis.
+                vis_ast = lax.with_sharding_constraint(
+                    vis_ast, replicated_sharding()
+                )
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 

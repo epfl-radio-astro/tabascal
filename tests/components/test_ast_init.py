@@ -416,6 +416,20 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
     # comparing one code path with itself.
     assert dist.baselines_shardable(n_bl)
 
+    # What leaves the component is replicated, whatever went in. A baseline-
+    # sharded prediction reaches process 0's truth metrics, results writer and
+    # plots, and a multi-process run cannot fetch an array whose shards live on
+    # another process -- which is how this was found, in the two-rank pipeline
+    # test rather than here.
+    comp = build(2)
+    constants = {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
+    out = comp.build_forward()(
+        dist.shard_pytree(dict(comp.init_params_base), 0, n_bl),
+        dict(comp.state_outputs),
+        dist.shard_pytree(constants, 0, n_bl),
+    )["vis_ast"]
+    assert out.sharding.spec == P()
+
     for block_size in (2, None):
         comp = build(block_size)
         ref_vis, ref_grads = value_and_grad(comp, shard=False)
