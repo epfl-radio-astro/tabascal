@@ -70,6 +70,70 @@ alone -- the escape hatch for a stationary emitter, or for a caller who wants
 the orbit ceiling by itself. With ``soft=True`` the step becomes Gaussian
 weights :math:`e^{-(b/b_\mathrm{coh})^2}` on the same scale.
 
+Along-track time offset
+-----------------------
+
+A TLE's dominant error is along-track, and along the track an error is very
+nearly a pure time offset: the satellite is where the elements say it will be
+:math:`\tau` seconds later. One scanned parameter therefore recovers most of the
+error budget. For each :math:`\tau` on a grid the orbit is evaluated at
+:math:`t + \tau`, the near-field fringe model is built on :math:`N` fine steps
+inside each integration and averaged over them, and the coherent baselines are
+summed against the data:
+
+.. math::
+
+   z = \sum_{pq} w V M^{*}, \qquad
+   n_1 = \sum_{pq} w |V|^2, \qquad
+   n_2 = \sum_{pq} w |M|^2, \qquad
+   r = \frac{|z|}{\sqrt{n_1 n_2}},
+
+with :math:`r \in [0, 1]` a per-frame correlation from which the intra-dump
+fringe smearing divides out. Frames are combined incoherently -- the emitter's
+own phase is not modelled between integrations -- into
+:math:`z^2 = \sum_t |z|^2 / (n_1 n_2)` per channel, and the best cell over
+:math:`(\tau, \mathrm{channel})` is the measurement. Only the satellite moves
+with :math:`\tau`: the antennas, the sidereal angle and the phase tracking stay
+at the observation's own times, because :math:`\tau` is an error in the orbit and
+not in the clock.
+
+The significance comes from a *decohered* null -- the same statistic at the best
+:math:`\tau` with each antenna's path pushed by an independent
+:math:`U(0, 50\,\mathrm{m})`, tens of wavelengths, so every baseline enters with
+an unrelated phase and the coherent sum collapses to an incoherent one. Two
+hundred draws give
+:math:`(z^2_\mathrm{best} - \langle z^2 \rangle_\mathrm{null}) / \sigma_\mathrm{null}`.
+Nothing about the real distribution of :math:`z^2` here is analytic, which is why
+the null is drawn on the data themselves, carrying their own weights, flagging,
+baseline set and residual sky.
+
+:func:`~tabascal.rfi_estimate.fit_time_offset` is the whole measurement and
+``tabascal light-curve --fit-offset`` exposes it. Two caveats travel with the
+number, both deliberate:
+
+* **It carries no trials factor.** The scan maximises over the whole grid and
+  every channel while the null maximises over channels at the best :math:`\tau`
+  alone, so the significance is biased high and grows with the size of the grid
+  searched. The 5 sigma default is a working cut calibrated on the MWA Cen A
+  case, not a false-alarm probability.
+* **The step must resolve the peak.** Its half-width scales like
+  :math:`\lambda r / (2 b_\mathrm{coh} v_\perp)` -- about 0.1 s for a 600 m
+  coherent array at 567 km -- so a coarser grid steps over the detection. The
+  0.25 s default matched the MWA curve, which decays over :math:`\pm 2` s because
+  the shortest baselines dominate that sum; a longer coherent array wants a finer
+  step, not a wider grid.
+
+The core (:func:`~tabascal.rfi_estimate.near_field_fringe_model`,
+:func:`~tabascal.rfi_estimate.matched_filter_sums`,
+:func:`~tabascal.rfi_estimate.coherence_scores`,
+:func:`~tabascal.rfi_estimate.tau_scan`) is pure ``jax.numpy`` over fixed-shape
+arrays, walking the grid with ``lax.map`` so one compilation covers the whole
+scan, and is left undecorated so the drivers own the ``jit`` and the batched
+identification search can ``vmap`` it over candidates.
+:func:`~tabascal.rfi_estimate.shift_orbit_record_epoch` closes the loop: an orbit
+record whose epoch is moved by :math:`-\tau` reproduces the measured trajectory
+through ``--extra-orbit-dir`` with no further code.
+
 Where it is used
 ----------------
 
@@ -77,6 +141,8 @@ Where it is used
   the visibilities a run has already loaded, through
   :func:`~tabascal.rfi_estimate.light_curves_from_config`.
 * ``tabascal light-curve`` writes the same estimate to an ``.npz``.
+* ``tabascal light-curve --fit-offset`` measures each satellite's along-track
+  offset first, extracts the curves at it, and records it in the output.
 * ``tabascal light-curve -z`` filters a run's residual, taken from its results
   zarr, as a post-fit diagnostic.
 

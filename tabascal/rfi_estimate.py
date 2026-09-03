@@ -76,29 +76,65 @@ rate rather than from a hand-tuned cut; it is a pure array function so the jitte
 tau-scan and identification search (#190/#191) can apply the same selection
 inside their own traces.
 
+**The along-track offset.** A TLE's dominant error is along-track -- kilometres
+to tens of kilometres of drag mismodelling and unannounced manoeuvres -- and an
+along-track error is very nearly a pure *time offset* in the trajectory. So one
+scanned parameter, ``tau``, recovers the bulk of it: evaluate the orbit at
+``t + tau``, build the near-field fringe model on a fine grid inside each
+integration, and coherently correlate it against the data over the baselines
+:func:`coherent_baseline_mask` keeps. :func:`fit_time_offset` is the whole
+measurement -- horizon window, coherence cut, scan, best cell and a
+decohered-antenna null for its significance -- and ``tabascal light-curve
+--fit-offset`` exposes it, extracting the curves at the offset it measured and
+recording that offset in the output. Its core
+(:func:`near_field_fringe_model`, :func:`matched_filter_sums`,
+:func:`coherence_scores`, :func:`tau_scan`) is pure ``jax.numpy`` over
+fixed-shape arrays, scanning the grid with ``lax.map`` and undecorated so the
+drivers own the ``jit``: one compilation covers the whole scan, and the batched
+identification search of #191 ``vmap``\\ s the same function over candidates.
+:func:`shift_orbit_record_epoch` is the other end of it -- an orbit record moved
+by ``-tau``, which reproduces the measured trajectory through
+``extra_orbit_dir`` with no further code.
+
 Only the satellite-trajectory source is implemented. RA/Dec and Alt/Az pointings
 can be added by constructing ``rfi_xyz`` from those and feeding
 :func:`rfi_phase_from_positions`.
 """
 
+import calendar
 import os
+from datetime import datetime
 from typing import Optional, Tuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 from jax.typing import ArrayLike
 from numpy.typing import NDArray
 
+from satchecker_client.records import KIND_TLE, record_epoch_jd, record_kind
+from satchecker_client.tle_parse import tle_checksum
 from tabascal.components.trajectory import (
     fetch_orbital_elements,
     get_satellite_elevations,
     get_satellite_positions,
     itrs_to_gcrs_sf,
 )
-from tabascal.interferometry import C, get_rfi_phase_numpy, itrf_to_uvw_numpy
+from tabascal.interferometry import (
+    C,
+    Omega_e,
+    get_rfi_phase_numpy,
+    itrf_to_uvw_numpy,
+)
 from tabascal.noise import broadcast_to_vis
-from tabascal.time import gast_deg, mjd_to_jd, to_utc_mjd
+from tabascal.time import (
+    datetime_to_jd,
+    gast_deg,
+    jd_to_datetime,
+    mjd_to_jd,
+    to_utc_mjd,
+)
 
 
 #: Bytes of working array per (baseline, channel, timestep) inside the
@@ -169,6 +205,7 @@ def rfi_phase_from_records(
     times_jd: NDArray,
     phase_centre: dict,
     freqs: NDArray,
+    time_offsets_s=None,
 ) -> NDArray:
     """Per-antenna geometric phase for satellites given their orbit records.
 
@@ -181,13 +218,44 @@ def rfi_phase_from_records(
         Orbit records, in the order the curves are wanted in.
     ants_itrf, times_jd, phase_centre, freqs
         See :func:`rfi_phase_from_positions`.
+    time_offsets_s : float or sequence of float, optional
+        Along-track offset per source, in seconds, as measured by
+        :func:`fit_time_offset`: source ``i``'s orbit is evaluated at
+        ``times_jd + tau_i``. A scalar applies to every source. It moves the
+        **satellite only** -- the antennas, the sidereal angle and the phase
+        tracking stay at ``times_jd``, because ``tau`` is an error in the orbit,
+        not in the observation's clock. Re-propagating the whole geometry at
+        ``t + tau`` would rotate the Earth under the fringe tracking as well and
+        give a different phase. ``None`` (the default) is the behaviour every
+        existing caller has, bit for bit.
 
     Returns
     -------
     Array (n_src, n_ant, n_freq, n_time)
     """
     times_jd = np.asarray(times_jd)
-    rfi_xyz = np.asarray(get_satellite_positions(orbit_records, list(times_jd)))
+
+    if time_offsets_s is None:
+        rfi_xyz = np.asarray(get_satellite_positions(orbit_records, list(times_jd)))
+    else:
+        taus = np.atleast_1d(np.asarray(time_offsets_s, dtype=np.float64))
+        if taus.size == 1:
+            taus = np.repeat(taus, len(orbit_records))
+        if taus.size != len(orbit_records):
+            raise ValueError(
+                f"time_offsets_s has {taus.size} entries for "
+                f"{len(orbit_records)} sources; give one per source, or a "
+                "single offset for all of them."
+            )
+        # One propagation per source, since each is read at its own instants.
+        rfi_xyz = np.stack(
+            [
+                np.asarray(
+                    get_satellite_positions([record], list(times_jd + tau / 86400.0))
+                )[0]
+                for record, tau in zip(orbit_records, taus)
+            ]
+        )
 
     return rfi_phase_from_positions(rfi_xyz, ants_itrf, times_jd, phase_centre, freqs)
 
@@ -413,6 +481,513 @@ def coherent_baseline_mask(
 
 
 # ---------------------------------------------------------------------------
+# Near-field geometry on the fine grid
+# ---------------------------------------------------------------------------
+
+#: Along-track offsets :func:`fit_time_offset` scans by default, in seconds:
+#: ``+-4 s`` in ``0.25 s`` steps, 33 points including 0 and both ends. Wide
+#: enough for a day-old Starlink TLE (the MWA Cen A case sat at -2.25 s on a
+#: TLE 1.4 h old) and fine enough to resolve the peak an array of a few hundred
+#: metres gives it -- see :func:`fit_time_offset` on sizing the step.
+DEFAULT_TAU_GRID = np.arange(-4.0, 4.0 + 0.125, 0.25)
+
+
+def fine_time_offsets(n_fine: int, delta_t: float) -> NDArray:
+    """Where inside an integration the fringe model is sampled, in seconds.
+
+    ``n_fine`` equal sub-steps spanning one dump, taken at their **midpoints**:
+    ``((k + 0.5) / n_fine - 0.5) * delta_t``. Midpoints rather than edges,
+    because an edge grid samples the boundary between two integrations twice and
+    biases each average by half a sub-step. ``n_fine = 1`` is then exactly the
+    integration centre, which is where the forward model's own template lives --
+    so the model reduces to :func:`rfi_phase_from_records`'s at one step, and the
+    two cannot drift apart.
+
+    Parameters
+    ----------
+    n_fine : int
+        Sub-steps per integration.
+    delta_t : float
+        Integration (dump) time in seconds.
+
+    Returns
+    -------
+    Array (n_fine,) float64
+        Offsets from the integration centre, in seconds.
+    """
+    n_fine = int(n_fine)
+
+    return ((np.arange(n_fine, dtype=np.float64) + 0.5) / n_fine - 0.5) * float(delta_t)
+
+
+def near_field_baseline_paths(
+    record,
+    ants_itrf: NDArray,
+    times_jd: NDArray,
+    phase_centre: dict,
+    a1: NDArray,
+    a2: NDArray,
+    n_fine: int,
+    delta_t: float,
+    taus_s=0.0,
+) -> NDArray:
+    """Per-baseline near-field path difference on the fine grid, in metres.
+
+    The quantity the whole search is built on. Per antenna the path is the
+    *spherical* one, ``|x_sat - x_a|`` -- never the plane-wave projection -- plus
+    the phase-tracking term ``w_a`` the visibilities are already rotated by,
+    exactly as :func:`tabascal.interferometry.get_rfi_phase_numpy` assembles it.
+    The baseline quantity is the difference ``path_p - path_q``, and the fringe
+    model is ``exp(-2 pi i (path_p - path_q) / lam)`` averaged over the fine axis
+    (:func:`near_field_fringe_model`).
+
+    ``taus_s`` moves the **satellite only**: the orbit is propagated to
+    ``t + offset + tau`` while the antennas, the sidereal angle and ``w`` stay at
+    ``t + offset``. That is what an along-track TLE error is. Shifting the whole
+    geometry instead turns the Earth under the phase tracking as well, which
+    moves the path difference by a tenth of a wavelength at metre wavelengths --
+    a different model, and the wrong one.
+
+    Everything here is numpy/f64 on the host, and stays f64 whatever ``--x64``
+    says: an absolute path is hundreds of kilometres, which f32 resolves to tens
+    of metres, and the model needs a small fraction of a wavelength. The
+    *difference* handed to the jitted core is at most the array's diameter, which
+    f32 does hold to well under a wavelength, so the cast happens there and not
+    before.
+
+    The antennas' fine-grid positions are computed once and shared by every
+    ``tau``; only the orbit is re-propagated, in a single vectorised call over
+    the flattened ``(n_tau, n_time, n_fine)`` grid.
+
+    Sizing: the result is ``n_tau * n_bl * n_time * n_fine`` float64. For the
+    MWA case (33 offsets, ~1000 coherent baselines, 27 frames, 40 sub-steps)
+    that is ~290 MB, which is why the coherence cut is applied to the baseline
+    list *before* the paths are built rather than after.
+
+    Parameters
+    ----------
+    record : dict
+        One orbit record -- TLE or OMM, as resolved by :mod:`tabascal.orbit`.
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in the ITRF (ECEF) frame, in metres.
+    times_jd : Array (n_time,)
+        Integration **centres**, as UTC Julian dates.
+    phase_centre : dict
+        ``{"ra": <deg>, "dec": <deg>}`` phase centre of the visibilities.
+    a1, a2 : Array (n_bl,)
+        Antenna indices of each baseline.
+    n_fine : int
+        Sub-steps per integration (see :func:`fine_time_offsets`).
+    delta_t : float
+        Integration time in seconds.
+    taus_s : float or Array (n_tau,), default 0.0
+        Along-track offsets to evaluate. A scalar still returns a grid of one,
+        so the core is written once, for a grid.
+
+    Returns
+    -------
+    Array (n_tau, n_bl, n_time, n_fine) float64
+        Path difference ``path_p - path_q`` in metres.
+    """
+    taus = np.atleast_1d(np.asarray(taus_s, dtype=np.float64))
+    ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
+    times_jd = np.asarray(times_jd, dtype=np.float64)
+    a1 = np.asarray(a1)
+    a2 = np.asarray(a2)
+    n_fine = int(n_fine)
+    n_time = len(times_jd)
+
+    offsets = fine_time_offsets(n_fine, delta_t)
+    t_fine = (times_jd[:, None] + offsets[None, :] / 86400.0).ravel()
+
+    # The array, once. It does not move with tau.
+    gh0 = (gast_deg(t_fine) - phase_centre["ra"]) % 360
+    w = np.transpose(
+        itrf_to_uvw_numpy(ants_itrf, gh0, phase_centre["dec"]), axes=(1, 0, 2)
+    )[..., -1]  # (n_ant, n_time * n_fine)
+    ants_xyz = itrs_to_gcrs_sf(ants_itrf, t_fine)  # (n_ant, n_time * n_fine, 3)
+
+    # The orbit, once for the whole grid: propagation dominates the cost, and a
+    # call per offset pays skyfield's per-call overhead n_tau times over.
+    grid = (t_fine[None, :] + taus[:, None] / 86400.0).ravel()
+    sat_xyz = np.asarray(get_satellite_positions([record], grid))[0].reshape(
+        len(taus), len(t_fine), 3
+    )
+
+    out = np.empty((len(taus), len(a1), n_time, n_fine), dtype=np.float64)
+    for i in range(len(taus)):
+        # Looped rather than broadcast over tau: the (n_ant, n_time * n_fine, 3)
+        # difference is the peak of this function and there is no reason to hold
+        # n_tau of them at once.
+        path = np.linalg.norm(ants_xyz - sat_xyz[i][None], axis=-1) + w
+        out[i] = (path[a1] - path[a2]).reshape(len(a1), n_time, n_fine)
+
+    return out
+
+
+def satellite_range_and_speed(record, ants_itrf: NDArray, times_jd: NDArray):
+    """Slant range and line-of-sight-crossing speed, at mid-observation.
+
+    The two numbers :func:`coherent_baseline_mask` needs, measured from the array
+    centre by finite difference over a second of the pass. Both are taken in the
+    **Earth-fixed** frame, which is the one the array sits still in: what fringes
+    a baseline is the rate at which the direction to the satellite sweeps across
+    the antennas, and a geostationary emitter -- which hangs motionless over the
+    array -- moves at three kilometres a second in the inertial frame.
+
+    That emitter does not fringe *nothing*, though. On phase-tracked
+    visibilities the ``w`` term keeps turning at the sidereal rate whatever the
+    satellite does, worth a fringe of order ``Omega_e b / lam`` -- about 0.03 Hz
+    on 600 m at 1.7 m, negligible beside a LEO's but not zero. This function
+    returns the satellite's own transverse speed; the term the phase tracking
+    adds is bounded by ``Omega_e * range_m`` and :func:`fit_time_offset` adds it
+    where the fringe-rate ceiling is sized.
+
+    The Earth-fixed direction is recovered by turning the inertial separation
+    back by the sidereal angle. That leaves the precession-nutation rotation in
+    it, which is constant to a part in ``1e12`` over the second differenced here
+    and so cannot affect a *rate*; against the full frame transform the speed
+    agrees to a part in ``1e4``.
+
+    It is not the orbital speed. Near the horizon most of a LEO satellite's
+    motion is along the line of sight and does not fringe, and its range is
+    several times the overhead one -- both of which lengthen the coherence
+    ceiling rather than shorten it.
+
+    Parameters
+    ----------
+    record : dict
+        One orbit record.
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in the ITRF frame, in metres; the mean is the site.
+    times_jd : Array (n_time,)
+        Observation times as UTC Julian dates. The middle one is used: the range
+        varies by tens of percent over a pass, far less than the uncertainty on
+        the orbit error the cut is set by.
+
+    Returns
+    -------
+    (float, float)
+        Slant range in metres, and speed across the line of sight in m/s.
+    """
+    times_jd = np.asarray(times_jd, dtype=np.float64)
+    centre = np.mean(np.asarray(ants_itrf, dtype=np.float64), axis=0)
+
+    step = 0.5 / 86400.0
+    t_mid = float(np.mean(times_jd))
+    t3 = np.array([t_mid - step, t_mid, t_mid + step])
+
+    sep = (
+        np.asarray(get_satellite_positions([record], t3))[0]
+        - itrs_to_gcrs_sf(centre[None], t3)[0]
+    )  # (3, 3), inertial
+
+    theta = np.deg2rad(gast_deg(t3))
+    cos, sin = np.cos(theta), np.sin(theta)
+    sep = np.stack(
+        [cos * sep[:, 0] + sin * sep[:, 1], -sin * sep[:, 0] + cos * sep[:, 1], sep[:, 2]],
+        axis=-1,
+    )
+
+    ranges = np.linalg.norm(sep, axis=-1)
+    look = sep / ranges[:, None]
+    range_m = float(ranges[1])
+
+    return range_m, float(np.linalg.norm(look[2] - look[0]) * range_m)
+
+
+# ---------------------------------------------------------------------------
+# The tau scan core
+# ---------------------------------------------------------------------------
+
+def near_field_fringe_model(paths: ArrayLike, freqs: ArrayLike) -> Array:
+    """The per-integration fringe model: the template, averaged over its dump.
+
+    ``mean_fine exp(-2 pi i path / lam)``. Each sub-step is a unit-modulus
+    steering vector, so the average can only shrink: a baseline whose fringe
+    turns a fraction of a cycle inside one integration keeps its modulus, and one
+    that sweeps tens of cycles averages away to nothing. That loss is real -- it
+    is in the data too -- and modelling it is what lets the normalised statistic
+    of :func:`coherence_scores` stay a correlation.
+
+    Pure ``jax.numpy`` and undecorated: the drivers own the ``jit``, and the
+    batched search of #191 needs it traceable inside its own. Its working
+    precision is the session's, which is why the *paths* are built in f64 on the
+    host and only their (short) baseline differences arrive here.
+
+    The intermediate is ``(..., n_bl, n_freq, n_time, n_fine)`` complex, which is
+    the largest array in the scan; :func:`tau_scan` holds one offset's worth of
+    it at a time.
+
+    Parameters
+    ----------
+    paths : Array (..., n_bl, n_time, n_fine)
+        Baseline path differences in metres (see
+        :func:`near_field_baseline_paths`).
+    freqs : Array (n_freq,)
+        Channel frequencies in Hz.
+
+    Returns
+    -------
+    Array (..., n_bl, n_freq, n_time) complex
+        Fringe model, of modulus at most 1.
+    """
+    paths = jnp.asarray(paths)
+    lam = C / jnp.asarray(freqs)
+
+    return jnp.exp(
+        -2j * jnp.pi * paths[..., None, :, :] / lam[:, None, None]
+    ).mean(axis=-1)
+
+
+def matched_filter_sums(vis: ArrayLike, model: ArrayLike, weights: ArrayLike):
+    """The three weighted inner products the coherence statistic is built from.
+
+    ``z = sum_bl w V conj(M)``, ``n1 = sum_bl w |V|^2``, ``n2 = sum_bl w |M|^2``,
+    each summed over the baseline axis alone so the result is per channel and per
+    frame: the satellite is coherent *within* an integration and the frames are
+    combined afterwards, incoherently, by :func:`coherence_scores`.
+
+    A plain weighted sum, with no flag handling of its own: a zero weight removes
+    a baseline exactly, and whether a flagged sample may be ``nan`` is the
+    driver's problem (:func:`fit_time_offset` zeroes those before the sums, since
+    ``0 * nan`` is ``nan`` and would poison the whole cell).
+
+    Parameters
+    ----------
+    vis : Array (n_bl, n_freq, n_time) complex
+        Visibilities.
+    model : Array (n_bl, n_freq, n_time) complex
+        Fringe model on the same grid.
+    weights : Array
+        Anything broadcastable onto ``(n_bl, n_freq, n_time)`` -- a per-baseline
+        ``(n_bl, 1, 1)`` is the common case.
+
+    Returns
+    -------
+    (Array, Array, Array)
+        ``(z, n1, n2)``, each ``(n_freq, n_time)``; ``z`` complex, the others
+        real.
+    """
+    vis = jnp.asarray(vis)
+    model = jnp.asarray(model)
+    weights = jnp.asarray(weights)
+
+    z = jnp.sum(weights * vis * jnp.conjugate(model), axis=0)
+    n1 = jnp.sum(weights * jnp.abs(vis) ** 2, axis=0)
+    n2 = jnp.sum(weights * jnp.abs(model) ** 2, axis=0)
+
+    return z, n1, n2
+
+
+def coherence_scores(z: ArrayLike, n1: ArrayLike, n2: ArrayLike, frame_mask=None):
+    """The per-frame correlation and the per-channel score it combines into.
+
+    ``r = |z| / sqrt(n1 n2)`` is a normalised correlation in ``[0, 1]``: the
+    intra-dump smearing that shrinks ``|M|`` on the longer baselines divides out
+    of it, so a frame's ``r`` says how well the data match the trajectory and not
+    how bright the fringe was. ``z2 = sum_frames |z|^2 / (n1 n2)`` combines the
+    frames incoherently -- the satellite's own phase is not modelled between
+    integrations -- and is therefore bounded by the number of frames in view,
+    which is what makes it comparable against a null.
+
+    A cell nothing was measured in has ``n1 n2 = 0`` and contributes exactly
+    zero, with ``r = 0`` there. Guarded with ``where`` rather than an epsilon in
+    the denominator: an epsilon shifts every other cell's value to spare this
+    one.
+
+    Parameters
+    ----------
+    z, n1, n2 : Array (n_freq, n_time)
+        The sums from :func:`matched_filter_sums`.
+    frame_mask : Array (n_time,) bool or 0/1, optional
+        Frames to combine. ``None`` combines all of them. It exists for the
+        batched search of #191, whose shapes must stay static and so cannot slice
+        the in-view window out; masking with zeros and slicing give the same
+        ``z2``, so the two paths report the same detection.
+
+    Returns
+    -------
+    (Array, Array)
+        ``r`` ``(n_freq, n_time)`` and ``z2`` ``(n_freq,)``.
+    """
+    z = jnp.asarray(z)
+    den = jnp.asarray(n1) * jnp.asarray(n2)
+    measured = den > 0
+    safe = jnp.where(measured, den, 1.0)
+
+    r = jnp.where(measured, jnp.abs(z) / jnp.sqrt(safe), 0.0)
+    per_frame = jnp.where(measured, jnp.abs(z) ** 2 / safe, 0.0)
+
+    if frame_mask is None:
+        return r, jnp.sum(per_frame, axis=-1)
+
+    mask = jnp.asarray(frame_mask).astype(per_frame.dtype)
+
+    return r, jnp.sum(mask * per_frame, axis=-1)
+
+
+def tau_scan(
+    vis: ArrayLike,
+    weights: ArrayLike,
+    paths: ArrayLike,
+    freqs: ArrayLike,
+    frame_mask=None,
+    ant_offsets=None,
+    a1=None,
+    a2=None,
+):
+    """Score every along-track offset on the grid: the scan itself.
+
+    One program for the whole grid. The offset axis is walked with
+    ``jax.lax.map``, not a Python loop over jitted kernels: a loop re-enters the
+    compiler per step and gives up the point of the design, which is one
+    compilation and then a device-resident sweep. ``lax.map`` rather than a
+    ``vmap`` over the grid for the same reason the paths are looped on the host
+    -- the per-offset ``(n_bl, n_freq, n_time, n_fine)`` model is the biggest
+    array in the calculation and only one of them need exist at a time.
+
+    The function is pure and of fixed-shape arrays, so it ``vmap``\\ s over a
+    leading candidate axis of ``paths``; that is the contract the multi-satellite
+    search of #191 is built on.
+
+    Parameters
+    ----------
+    vis : Array (n_bl, n_freq, n_time) complex
+        Visibilities, already zeroed wherever their weight is.
+    weights : Array
+        Broadcastable onto ``vis``; see :func:`matched_filter_sums`.
+    paths : Array (n_tau, n_bl, n_time, n_fine)
+        Baseline path differences per offset (:func:`near_field_baseline_paths`).
+    freqs : Array (n_freq,)
+        Channel frequencies in Hz.
+    frame_mask : Array (n_time,), optional
+        See :func:`coherence_scores`.
+    ant_offsets : Array (n_ant,), optional
+        Per-antenna path offsets in metres, added as
+        ``paths + off[a1] - off[a2]``. This is the decohered null's hook
+        (:func:`decohered_null`); ``a1`` and ``a2`` are then required.
+    a1, a2 : Array (n_bl,), optional
+        Antenna indices, needed only with ``ant_offsets``.
+
+    Returns
+    -------
+    dict
+        ``z2`` ``(n_tau, n_freq)`` and ``r`` ``(n_tau, n_freq, n_time)``. ``r``
+        keeps every frame, masked or not: it says what each frame did, and the
+        mask decides only which are combined.
+    """
+    vis = jnp.asarray(vis)
+    weights = jnp.asarray(weights)
+    paths = jnp.asarray(paths)
+    freqs = jnp.asarray(freqs)
+
+    if ant_offsets is not None:
+        if a1 is None or a2 is None:
+            raise ValueError(
+                "ant_offsets needs a1 and a2: a per-antenna offset only reaches "
+                "a baseline through the pair it belongs to."
+            )
+        offsets = jnp.asarray(ant_offsets)
+        delta = offsets[jnp.asarray(a1)] - offsets[jnp.asarray(a2)]
+        paths = paths + delta[:, None, None]
+
+    def one_offset(path):
+        model = near_field_fringe_model(path, freqs)
+        r, z2 = coherence_scores(*matched_filter_sums(vis, model, weights), frame_mask)
+
+        return {"z2": z2, "r": r}
+
+    return jax.lax.map(one_offset, paths)
+
+
+def _null_draw_scores(vis, weights, paths_best, freqs, offsets, a1, a2, frame_mask):
+    """``max``-over-channel ``z2`` for each row of ``offsets``."""
+
+    def one_draw(offset):
+        scan = tau_scan(
+            vis, weights, paths_best[None], freqs,
+            frame_mask=frame_mask, ant_offsets=offset, a1=a1, a2=a2,
+        )
+
+        return jnp.max(scan["z2"][0])
+
+    return jax.lax.map(one_draw, offsets)
+
+
+#: The core, compiled once per shape. Held at module level so a scan repeated
+#: over satellites -- or over the candidates of #191 -- pays for compilation
+#: once rather than per call.
+_tau_scan_jit = jax.jit(tau_scan)
+_null_draw_scores_jit = jax.jit(_null_draw_scores)
+
+
+def decohered_null(
+    vis: ArrayLike,
+    weights: ArrayLike,
+    paths_best: ArrayLike,
+    freqs: ArrayLike,
+    a1: ArrayLike,
+    a2: ArrayLike,
+    frame_mask=None,
+    n_draws: int = 200,
+    jitter_m: float = 50.0,
+    seed: int = 0,
+) -> Array:
+    """What the statistic scores when the geometry is not real.
+
+    The same sums at the same offset, with each antenna's path pushed by an
+    independent ``U(0, jitter_m)``. Tens of metres are tens of wavelengths at
+    metre wavelengths, so every baseline enters with an unrelated phase and the
+    coherent sum collapses to an incoherent one -- which is what "no satellite
+    on that trajectory" looks like, measured on *these* data, with their own
+    weights, flagging, baseline set and residual sky. That is why the null is
+    drawn rather than taken from a chi-squared: nothing about the real
+    distribution of ``z2`` here is analytic.
+
+    Drawn with ``jax.random`` from ``PRNGKey(seed)``, so a significance is
+    reproducible; walked with ``lax.map`` rather than ``vmap`` because a batched
+    draw would hold ``n_draws`` copies of the fringe model at once.
+
+    Parameters
+    ----------
+    vis, weights, freqs : Array
+        As :func:`tau_scan`.
+    paths_best : Array (n_bl, n_time, n_fine)
+        Path differences at the best offset.
+    a1, a2 : Array (n_bl,)
+        Antenna indices; their maximum sizes the offset vector.
+    frame_mask : Array (n_time,), optional
+        See :func:`coherence_scores`.
+    n_draws : int, default 200
+        Scrambles to draw.
+    jitter_m : float, default 50.0
+        Upper end of the per-antenna offset, in metres.
+    seed : int, default 0
+        PRNG seed.
+
+    Returns
+    -------
+    Array (n_draws,)
+        ``max``-over-channel ``z2`` for each draw.
+    """
+    a1 = np.asarray(a1)
+    a2 = np.asarray(a2)
+    n_ant = int(max(a1.max(initial=0), a2.max(initial=0))) + 1
+
+    offsets = jax.random.uniform(
+        jax.random.PRNGKey(int(seed)),
+        (int(n_draws), n_ant),
+        minval=0.0,
+        maxval=float(jitter_m),
+    )
+
+    return _null_draw_scores_jit(
+        vis, weights, jnp.asarray(paths_best), freqs, offsets, a1, a2, frame_mask
+    )
+
+
+# ---------------------------------------------------------------------------
 # The matched filter
 # ---------------------------------------------------------------------------
 
@@ -596,6 +1171,382 @@ def matched_filter_light_curves(
 
 
 # ---------------------------------------------------------------------------
+# Fitting the along-track offset
+# ---------------------------------------------------------------------------
+
+def _no_offset_fit(taus, elevation, frames, n_freq, n_time, n_fine,
+                   sigma_transverse_m, n_null, times_jd) -> dict:
+    """The result shape for a pass there was nothing to measure.
+
+    A satellite that never rose -- or one whose every baseline the coherence cut
+    dropped -- is an answer, not a failure: the batched search will meet plenty
+    of them and must not stop on one. ``tau_best`` and the significance are
+    ``nan`` because nothing was measured, ``z2_best`` is 0 because that is what
+    the sum over no frame comes to, and ``r_best`` is ``nan`` throughout rather
+    than 0, since a zero correlation is a measurement.
+    """
+    return dict(
+        tau_grid=taus,
+        z2_tau=np.zeros((len(taus), n_freq)),
+        tau_best=float("nan"),
+        z2_best=0.0,
+        best_chan=-1,
+        best_freq=float("nan"),
+        r_best=np.full((n_freq, n_time), np.nan),
+        frames=frames,
+        elevation=elevation,
+        null=np.zeros(int(n_null)),
+        null_mean=float("nan"),
+        null_std=float("nan"),
+        significance=float("nan"),
+        n_bl_used=0,
+        range_m=float("nan"),
+        v_perp_m_s=float("nan"),
+        b_coh=float("nan"),
+        n_fine=int(n_fine),
+        sigma_transverse_m=float(sigma_transverse_m),
+        times_sec=(np.asarray(times_jd, dtype=np.float64) - times_jd[0]) * 86400.0,
+    )
+
+
+def fit_time_offset(
+    vis: NDArray,
+    record,
+    ants_itrf: NDArray,
+    times_jd: NDArray,
+    phase_centre: dict,
+    freqs: NDArray,
+    a1: NDArray,
+    a2: NDArray,
+    int_time: float,
+    noise=None,
+    flags: Optional[NDArray] = None,
+    taus_s=None,
+    n_fine: int = 40,
+    sigma_transverse_m: float = 300.0,
+    soft_weights: bool = False,
+    min_elevation: Optional[float] = 0.0,
+    exclude_autos: bool = True,
+    n_null: int = 200,
+    null_jitter_m: float = 50.0,
+    seed: int = 0,
+) -> dict:
+    """Measure one satellite's along-track time offset from the visibilities.
+
+    The single-satellite search of GitHub #190, end to end: window the
+    observation to the frames the satellite is up for, choose the baselines the
+    orbit is accurate enough to beam-form with, score every offset on the grid,
+    and calibrate the best score against a decohered-antenna null.
+
+    The statistic, per offset, channel and frame, is the normalised correlation
+    of :func:`coherence_scores` over the coherent baselines; frames are combined
+    incoherently into ``z2`` per channel and the best cell is the largest of
+    those over ``(tau, channel)``. Its significance is
+    ``(z2_best - null_mean) / null_std``.
+
+    **Two caveats on that significance, both deliberate.**
+
+    It carries no trials factor. The scan maximises over the whole offset grid
+    and every channel, while the null is drawn at the best offset and maximises
+    over channels only -- so the number is biased high, and grows with the size
+    of the grid it searched. The default threshold of 5 sigma
+    (:func:`is_detection`) is calibrated against the MWA Cen A case on the
+    default grid, and is a working cut rather than a false-alarm probability.
+
+    And the step has to resolve the peak. Its half-width scales like
+    ``lam r / (2 b_coh v_perp)`` -- about 0.1 s for a 600 m coherent array at
+    567 km -- so an offset grid coarser than that steps over the detection. The
+    0.25 s default matched the MWA curve, which decays over about +-2 s because
+    the sum there is dominated by the shortest baselines; a longer coherent
+    array needs a finer step, not a wider grid.
+
+    Parameters
+    ----------
+    vis : Array (n_bl, n_freq, n_time) complex
+        Visibilities to search.
+    record : dict
+        One orbit record.
+    ants_itrf : Array (n_ant, 3)
+        Antenna positions in the ITRF frame, in metres.
+    times_jd : Array (n_time,)
+        Integration centres as UTC Julian dates.
+    phase_centre : dict
+        ``{"ra": <deg>, "dec": <deg>}``.
+    freqs : Array (n_freq,)
+        Channel frequencies in Hz.
+    a1, a2 : Array (n_bl,)
+        Antenna indices of each baseline.
+    int_time : float
+        Integration (dump) time in seconds.
+    noise : float or Array, optional
+        Per-component noise standard deviation, in any of the shapes
+        :func:`matched_filter_light_curves` accepts. ``None`` weights every
+        baseline equally.
+    flags : Array, optional
+        ``True`` marks samples to exclude. Flagged visibilities are zeroed
+        before the sums, because an MS carries ``inf`` and ``nan`` in them and
+        ``0 * nan`` is ``nan``.
+    taus_s : Array (n_tau,), optional
+        Offsets to scan, in seconds. Defaults to :data:`DEFAULT_TAU_GRID`.
+    n_fine : int, default 40
+        Sub-steps per integration in the fringe model.
+    sigma_transverse_m : float, default 300.0
+        Transverse orbit error the coherence cut is sized by, in metres. Around
+        the middle of what a Starlink TLE carries.
+    soft_weights : bool, default False
+        Taper the marginal baselines rather than discarding them; see
+        :func:`coherent_baseline_mask`.
+    min_elevation : float, optional, default 0.0
+        Elevation in degrees below which the satellite is not searched for,
+        inclusive, as ``rfi.min_elevation`` is. ``None`` uses every frame. The
+        in-view window is *sliced* out before the scan, so nothing below the
+        horizon costs anything; the core's ``frame_mask`` is the equivalent for
+        callers whose shapes must stay static.
+    exclude_autos : bool, default True
+        Drop autocorrelations. They carry no path difference and so no fringe.
+    n_null : int, default 200
+        Draws in the decohered null.
+    null_jitter_m : float, default 50.0
+        Per-antenna scramble in the null, in metres.
+    seed : int, default 0
+        PRNG seed for the null.
+
+    Returns
+    -------
+    dict
+        ``tau_grid`` ``(n_tau,)``, ``z2_tau`` ``(n_tau, n_freq)``, ``tau_best``,
+        ``z2_best``, ``best_chan``, ``best_freq``, ``r_best``
+        ``(n_freq, n_time)`` on the **full** time axis with ``nan`` out of view,
+        ``frames`` ``(n_time,)`` bool, ``elevation`` ``(n_time,)`` deg,
+        ``times_sec`` ``(n_time,)``, ``null`` ``(n_null,)``, ``null_mean``,
+        ``null_std``, ``significance``, ``n_bl_used``, ``range_m``,
+        ``v_perp_m_s``, ``b_coh``, ``n_fine`` and ``sigma_transverse_m``.
+
+        The *decision* is not among them: it needs a threshold, and a dict
+        carrying one would have to guess what the caller means by a detection.
+        See :func:`is_detection`.
+    """
+    vis = np.asarray(vis)
+    ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
+    times_jd = np.asarray(times_jd, dtype=np.float64)
+    freqs = np.asarray(freqs, dtype=np.float64)
+    a1 = np.asarray(a1)
+    a2 = np.asarray(a2)
+    n_freq, n_time = vis.shape[1], vis.shape[2]
+
+    taus = (
+        DEFAULT_TAU_GRID.copy()
+        if taus_s is None
+        else np.atleast_1d(np.asarray(taus_s, dtype=np.float64))
+    )
+
+    elevation = np.asarray(
+        get_satellite_elevations([record], times_jd, ants_itrf)
+    )[0]
+    frames = (
+        np.ones(n_time, dtype=bool)
+        if min_elevation is None
+        else elevation >= min_elevation
+    )
+    empty = dict(
+        taus=taus, elevation=elevation, frames=frames, n_freq=n_freq, n_time=n_time,
+        n_fine=n_fine, sigma_transverse_m=sigma_transverse_m, n_null=n_null,
+        times_jd=times_jd,
+    )
+    name = record.get("NORAD_CAT_ID", "?")
+
+    if not frames.any():
+        print(
+            f"Warning: satellite {name} never reaches {min_elevation} degrees "
+            "elevation over this observation, so there is no along-track offset "
+            "to measure and no detection to report."
+        )
+        return _no_offset_fit(**empty)
+
+    times_w = times_jd[frames]
+    vis_w = vis[:, :, frames]
+
+    # Weights: the noise the MS reports, zeroed on the flags and the
+    # autocorrelations, tapered (or cut) by the coherence of each baseline.
+    weights = _weight_source(noise, vis.shape)
+    weights = weights[:, :, frames] if weights.shape[2] > 1 else weights
+    weights = np.broadcast_to(weights, vis_w.shape).astype(np.float64)
+    if flags is not None:
+        flagged = np.broadcast_to(np.asarray(flags, dtype=bool), vis.shape)[:, :, frames]
+        weights = np.where(flagged, 0.0, weights)
+
+    non_auto = (a1 != a2) if exclude_autos else np.ones(len(a1), dtype=bool)
+    bl_len = np.asarray(baseline_lengths(ants_itrf, a1, a2), dtype=np.float64)
+    range_m, v_perp = satellite_range_and_speed(record, ants_itrf, times_w)
+    # One frequency for the cut, at the middle of the band: b_coh scales as
+    # lambda, so a band spanning a few percent moves it by a few percent, far
+    # less than the order-of-magnitude uncertainty on the orbit error does.
+    mean_freq = float(np.mean(freqs))
+    # The phase tracking turns the w term at the sidereal rate whatever the
+    # satellite does, so the fringe a baseline sees is not the satellite's
+    # motion alone. That term is bounded by Omega_e * r -- some 41 m/s at
+    # 570 km, 0.6 % of a LEO's transverse speed and the whole of a
+    # geostationary emitter's -- and only the fringe-rate ceiling cares.
+    v_fringe = v_perp + Omega_e * range_m
+    coherence = np.asarray(
+        coherent_baseline_mask(
+            bl_len, mean_freq, range_m, sigma_transverse_m, n_fine, int_time,
+            v_fringe, soft=soft_weights,
+        ),
+        dtype=np.float64,
+    )
+    b_coh = float(
+        jnp.minimum(
+            tle_coherence_length(mean_freq, range_m, sigma_transverse_m),
+            fringe_rate_coherence_length(
+                mean_freq, range_m, n_fine, int_time, v_fringe
+            ),
+        )
+    )
+
+    # Baselines that contribute nothing are dropped rather than carried at zero
+    # weight: the paths are the largest array in the scan and there is no point
+    # building them for a baseline the cut has already answered for. With a soft
+    # cut that only removes the ones whose taper has underflowed to zero.
+    used = np.flatnonzero((coherence > 0.0) & non_auto)
+    n_bl_used = int(used.size)
+
+    if n_bl_used == 0:
+        print(
+            f"Warning: no baseline is coherent for satellite {name} at "
+            f"{sigma_transverse_m:g} m of transverse orbit error and a "
+            f"{b_coh:.1f} m coherence length, so there is nothing to search."
+        )
+        return _no_offset_fit(**empty)
+
+    vis_w = vis_w[used]
+    weights = weights[used] * coherence[used][:, None, None]
+    a1_used, a2_used = a1[used], a2[used]
+    # A flagged visibility can be anything at all, and 0 * nan is nan.
+    vis_w = np.where(weights > 0.0, vis_w, 0.0)
+
+    paths = near_field_baseline_paths(
+        record, ants_itrf, times_w, phase_centre, a1_used, a2_used, n_fine,
+        int_time, taus_s=taus,
+    )
+    scan = _tau_scan_jit(vis_w, weights, paths, freqs)
+
+    z2_tau = np.asarray(scan["z2"], dtype=np.float64)
+    i_tau, i_chan = np.unravel_index(int(np.argmax(z2_tau)), z2_tau.shape)
+    z2_best = float(z2_tau[i_tau, i_chan])
+
+    # Back onto the full time axis, so the diagnostic shows a blank where the
+    # satellite was not up rather than a dark band that reads as a measurement.
+    r_best = np.full((n_freq, n_time), np.nan)
+    r_best[:, frames] = np.asarray(scan["r"], dtype=np.float64)[i_tau]
+
+    null = np.asarray(
+        decohered_null(
+            vis_w, weights, paths[i_tau], freqs, a1_used, a2_used,
+            n_draws=n_null, jitter_m=null_jitter_m, seed=seed,
+        ),
+        dtype=np.float64,
+    )
+    null_mean, null_std = float(null.mean()), float(null.std())
+
+    return dict(
+        tau_grid=taus,
+        z2_tau=z2_tau,
+        tau_best=float(taus[i_tau]),
+        z2_best=z2_best,
+        best_chan=int(i_chan),
+        best_freq=float(freqs[i_chan]),
+        r_best=r_best,
+        frames=frames,
+        elevation=elevation,
+        times_sec=(times_jd - times_jd[0]) * 86400.0,
+        null=null,
+        null_mean=null_mean,
+        null_std=null_std,
+        significance=(
+            float((z2_best - null_mean) / null_std) if null_std > 0 else float("nan")
+        ),
+        n_bl_used=n_bl_used,
+        range_m=range_m,
+        v_perp_m_s=v_perp,
+        b_coh=b_coh,
+        n_fine=int(n_fine),
+        sigma_transverse_m=float(sigma_transverse_m),
+    )
+
+
+def is_detection(fit: dict, threshold_sigma: float = 5.0) -> bool:
+    """Whether a fit clears the null by ``threshold_sigma``.
+
+    Kept out of :func:`fit_time_offset` on purpose: the fit measures, the caller
+    decides. A pass that was never in view has a ``nan`` significance and is not
+    a detection at any threshold.
+    """
+    significance = float(fit["significance"])
+
+    return bool(np.isfinite(significance) and significance >= float(threshold_sigma))
+
+
+def offset_fit_summary(norad_id, fit: dict, threshold_sigma: float = 5.0) -> str:
+    """One line per satellite: what was measured, and whether it counts.
+
+    ``DETECTED`` in upper case and ``not detected`` in lower, so a log can be
+    grepped for the one without matching the other.
+    """
+    verdict = "DETECTED" if is_detection(fit, threshold_sigma) else "not detected"
+    chan = fit["best_chan"]
+    freq_mhz = float(fit["best_freq"]) / 1e6
+
+    return (
+        f"  {norad_id:<9} tau {fit['tau_best']:+6.2f} s  "
+        f"chan {chan:>3} ({freq_mhz:9.4f} MHz)  "
+        f"z2 {fit['z2_best']:.4f}  "
+        f"null {fit['null_mean']:.4f} +/- {fit['null_std']:.4f}  "
+        f"{fit['significance']:6.1f} sigma  {verdict}"
+    )
+
+
+def fit_time_offsets(
+    orbit_records: list,
+    norad_ids: list,
+    vis: NDArray,
+    ants_itrf: NDArray,
+    times_jd: NDArray,
+    phase_centre: dict,
+    freqs: NDArray,
+    a1: NDArray,
+    a2: NDArray,
+    int_time: float,
+    threshold_sigma: float = 5.0,
+    **kwargs,
+) -> list:
+    """Fit and report one along-track offset per satellite, in order.
+
+    A loop over :func:`fit_time_offset` that prints
+    :func:`offset_fit_summary` as each satellite is measured, so a long run says
+    what it found while it is still running. Every other keyword goes straight
+    to the fit.
+    """
+    fits = []
+    for norad_id, record in zip(norad_ids, orbit_records):
+        fit = fit_time_offset(
+            vis, record, ants_itrf, times_jd, phase_centre, freqs, a1, a2,
+            int_time, **kwargs,
+        )
+        print(offset_fit_summary(norad_id, fit, threshold_sigma))
+        fits.append(fit)
+
+    return fits
+
+
+def _fitted_offsets(fits: list) -> list:
+    """The offsets to extract curves at: the fitted one, or 0 where there is none."""
+    return [
+        float(fit["tau_best"]) if np.isfinite(fit["tau_best"]) else 0.0 for fit in fits
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Drivers
 # ---------------------------------------------------------------------------
 
@@ -712,6 +1663,7 @@ def light_curves_from_config(
     vis: Optional[NDArray] = None,
     exclude_autos: bool = True,
     max_mem_gb: float = 1.0,
+    offset_fit: Optional[dict] = None,
 ) -> dict:
     """Matched-filter light curves from an already-loaded :class:`TabConfig`.
 
@@ -738,6 +1690,10 @@ def light_curves_from_config(
         Visibilities to filter; defaults to ``tab_config.vis_obs``.
     exclude_autos : bool, default True
     max_mem_gb : float, default 1.0
+    offset_fit : dict, optional
+        Settings for the along-track offset search; see
+        :func:`attach_offset_fits`. With it, each satellite's ``tau`` is measured
+        first and the curves are extracted at the offset it found.
 
     Returns
     -------
@@ -752,12 +1708,32 @@ def light_curves_from_config(
     records = list(tab_config.orbit_records[:n_real])
 
     times_jd = np.asarray(tab_config.times_jd)
+    ants_itrf = np.asarray(tab_config.ants_itrf)
+
+    flags = getattr(tab_config, "flags", None)
+    flags = None if flags is None else np.asarray(flags)
+
+    fits = None
+    if offset_fit is not None:
+        fits = fit_time_offsets(
+            records, norad_ids, np.asarray(vis), ants_itrf, times_jd,
+            tab_config.phase_centre, np.asarray(tab_config.freqs),
+            np.asarray(tab_config.a1), np.asarray(tab_config.a2),
+            float(tab_config.int_time),
+            noise=getattr(tab_config, "noise", None), flags=flags,
+            min_elevation=getattr(tab_config, "min_elevation", None),
+            exclude_autos=exclude_autos, **offset_fit,
+        )
+
+    # See _filter_visibilities: without a fit this is the call it has always been.
+    offsets = {} if fits is None else {"time_offsets_s": _fitted_offsets(fits)}
     rfi_phase = rfi_phase_from_records(
         records,
-        np.asarray(tab_config.ants_itrf),
+        ants_itrf,
         times_jd,
         tab_config.phase_centre,
         np.asarray(tab_config.freqs),
+        **offsets,
     )
 
     # The mask the run already built, when it built one; otherwise the elevations
@@ -772,9 +1748,6 @@ def light_curves_from_config(
     else:
         in_view = np.asarray(rfi_mask, dtype=bool)[:n_real]
 
-    flags = getattr(tab_config, "flags", None)
-    flags = None if flags is None else np.asarray(flags)
-
     light_curves, error = matched_filter_light_curves(
         np.asarray(vis),
         rfi_phase,
@@ -787,7 +1760,7 @@ def light_curves_from_config(
         max_mem_gb=max_mem_gb,
     )
 
-    return _lc_result(
+    result = _lc_result(
         light_curves,
         error,
         norad_ids,
@@ -796,6 +1769,15 @@ def light_curves_from_config(
         tab_config.args["data"]["data_col"],
         tab_config.args["data"]["corr"],
         in_view=in_view,
+    )
+
+    if fits is None:
+        return result
+
+    result["orbit_records"] = records
+
+    return attach_offset_fits(
+        result, fits, offset_fit.get("threshold_sigma", 5.0)
     )
 
 
@@ -831,6 +1813,7 @@ def extract_light_curves_from_ms(
     extra_orbit_dir: Optional[str] = None,
     min_elevation: Optional[float] = 0.0,
     max_mem_gb: float = 1.0,
+    offset_fit: Optional[dict] = None,
 ) -> dict:
     """Extract matched-filter RFI light curves from any column of an MS.
 
@@ -862,6 +1845,10 @@ def extract_light_curves_from_ms(
         disables the cut.
     max_mem_gb : float, default 1.0
         Memory budget for the matched-filter time-chunk loop.
+    offset_fit : dict, optional
+        Settings for the along-track offset search; see
+        :func:`attach_offset_fits`. With it, each satellite's ``tau`` is measured
+        first and the curves are extracted at the offset it found.
 
     Returns
     -------
@@ -885,19 +1872,34 @@ def extract_light_curves_from_ms(
         exclude_autos,
         min_elevation,
         max_mem_gb,
+        offset_fit=offset_fit,
     )
 
 
 def _filter_visibilities(
     vis, ms, records, norad_ids, times_jd, data_col, corr,
-    exclude_autos, min_elevation, max_mem_gb,
+    exclude_autos, min_elevation, max_mem_gb, offset_fit=None,
 ):
     """Shared tail of the two MS-backed drivers."""
     phase_centre = {"ra": float(ms["ra"]), "dec": float(ms["dec"])}
     ants_itrf = np.asarray(ms["ants_itrf"])
+    flags = None if ms.get("flags") is None else np.asarray(ms["flags"])
 
+    fits = None
+    if offset_fit is not None:
+        fits = fit_time_offsets(
+            records, norad_ids, vis, ants_itrf, times_jd, phase_centre,
+            np.asarray(ms["freqs"]), np.asarray(ms["a1"]), np.asarray(ms["a2"]),
+            float(ms["int_time"]), noise=ms.get("noise"), flags=flags,
+            min_elevation=min_elevation, exclude_autos=exclude_autos,
+            **offset_fit,
+        )
+
+    # The keyword is supplied only where an offset was actually measured, so the
+    # unfitted path stays the call it has always been, argument for argument.
+    offsets = {} if fits is None else {"time_offsets_s": _fitted_offsets(fits)}
     rfi_phase = rfi_phase_from_records(
-        records, ants_itrf, times_jd, phase_centre, np.asarray(ms["freqs"])
+        records, ants_itrf, times_jd, phase_centre, np.asarray(ms["freqs"]), **offsets
     )
     in_view = _elevation_mask(records, times_jd, ants_itrf, min_elevation)
 
@@ -907,13 +1909,13 @@ def _filter_visibilities(
         np.asarray(ms["a1"]),
         np.asarray(ms["a2"]),
         noise=_resolve_noise(ms.get("noise"), "the MS partition"),
-        flags=None if ms.get("flags") is None else np.asarray(ms["flags"]),
+        flags=flags,
         in_view=in_view,
         exclude_autos=exclude_autos,
         max_mem_gb=max_mem_gb,
     )
 
-    return _lc_result(
+    result = _lc_result(
         light_curves,
         error,
         norad_ids,
@@ -922,6 +1924,15 @@ def _filter_visibilities(
         data_col,
         corr,
         in_view=in_view,
+    )
+
+    if fits is None:
+        return result
+
+    result["orbit_records"] = list(records)
+
+    return attach_offset_fits(
+        result, fits, offset_fit.get("threshold_sigma", 5.0)
     )
 
 
@@ -1083,6 +2094,7 @@ def extract_light_curves_from_zarr(
     extra_orbit_dir: Optional[str] = None,
     min_elevation: Optional[float] = 0.0,
     max_mem_gb: float = 1.0,
+    offset_fit: Optional[dict] = None,
 ) -> dict:
     """Matched-filter the residual of a tabascal run, taken from its results zarr.
 
@@ -1133,7 +2145,124 @@ def extract_light_curves_from_zarr(
         exclude_autos,
         min_elevation,
         max_mem_gb,
+        offset_fit=offset_fit,
     )
+
+
+# ---------------------------------------------------------------------------
+# Carrying the offset fit through a light-curve result
+# ---------------------------------------------------------------------------
+
+#: Per-source entries of a light-curve result, keyed on the first axis by the
+#: source. :func:`select_sources` restricts every one of them together; anything
+#: not listed here -- the frequencies, the time axis, the offset grid, the
+#: threshold -- describes the observation rather than a source and is left alone.
+_PER_SOURCE_KEYS = (
+    "light_curves", "error", "z", "in_view", "norad_ids", "titles",
+    "tau_best", "z2_tau", "z2_best", "best_chan", "significance",
+    "null_mean", "null_std", "detected", "r_best", "offset_fits",
+    "orbit_records",
+)
+
+#: Offset-fit arrays :func:`save_light_curves_npz` writes beside the curves.
+#: ``r_best`` is not among them: it is transposed on the way out, like the
+#: curves themselves.
+_OFFSET_FIT_KEYS = (
+    "tau_best", "tau_grid", "z2_tau", "z2_best", "best_chan", "significance",
+    "null_mean", "null_std", "detected", "offset_threshold_sigma",
+)
+
+
+def attach_offset_fits(result: dict, fits: list, threshold_sigma: float) -> dict:
+    """Add a per-satellite offset fit to a light-curve result.
+
+    The output artifact has to record the offset the curves were measured at, or
+    a later run cannot reproduce the trajectory that produced them -- so the
+    scan's answers travel with the curves, stacked along the same source axis,
+    and :func:`save_light_curves_npz` writes them into the ``.npz``.
+
+    ``detected`` is decided here, once, against ``threshold_sigma``, and the
+    threshold is recorded alongside it so a file says what it was judged by.
+
+    Parameters
+    ----------
+    result : dict
+        A light-curve result (see :func:`_lc_result`).
+    fits : list of dict, length n_src
+        Fits from :func:`fit_time_offset`, in the result's source order.
+    threshold_sigma : float
+        Significance above the null at which a fit counts as a detection.
+
+    Returns
+    -------
+    dict
+        A copy of ``result`` carrying ``tau_best`` ``(n_src,)``, ``tau_grid``
+        ``(n_tau,)``, ``z2_tau`` ``(n_src, n_tau, n_freq)``, ``z2_best``,
+        ``best_chan``, ``significance``, ``null_mean``, ``null_std``,
+        ``detected`` ``(n_src,)`` bool, ``r_best`` ``(n_src, n_freq, n_time)``,
+        ``offset_threshold_sigma``, and the fits themselves under
+        ``offset_fits`` for the diagnostics to draw from.
+    """
+    out = dict(result)
+    if not fits:
+        return out
+
+    out.update(
+        tau_grid=np.asarray(fits[0]["tau_grid"], dtype=np.float64),
+        tau_best=np.array([f["tau_best"] for f in fits], dtype=np.float64),
+        z2_tau=np.stack([np.asarray(f["z2_tau"], dtype=np.float64) for f in fits]),
+        z2_best=np.array([f["z2_best"] for f in fits], dtype=np.float64),
+        best_chan=np.array([f["best_chan"] for f in fits], dtype=int),
+        significance=np.array([f["significance"] for f in fits], dtype=np.float64),
+        null_mean=np.array([f["null_mean"] for f in fits], dtype=np.float64),
+        null_std=np.array([f["null_std"] for f in fits], dtype=np.float64),
+        detected=np.array(
+            [is_detection(f, threshold_sigma) for f in fits], dtype=bool
+        ),
+        r_best=np.stack([np.asarray(f["r_best"], dtype=np.float64) for f in fits]),
+        offset_threshold_sigma=float(threshold_sigma),
+        offset_fits=list(fits),
+    )
+
+    return out
+
+
+def select_sources(result: dict, keep) -> dict:
+    """A light-curve result restricted to some of its sources.
+
+    Threshold-gated saving is a selection along the source axis, and it has to be
+    made in one place: a per-source array left behind would mislabel every curve
+    after the first one dropped.
+
+    Parameters
+    ----------
+    result : dict
+        A light-curve result, with or without an offset fit attached.
+    keep : Array (n_src,) bool, or Array of int
+        A mask or an index array over the sources, read the same way either way.
+
+    Returns
+    -------
+    dict
+        A copy carrying only the selected sources. The coordinates -- the
+        frequencies, the times, the offset grid -- are not per source and come
+        through untouched.
+    """
+    keep = np.asarray(keep)
+    index = np.flatnonzero(keep) if keep.dtype == bool else keep.astype(int)
+
+    out = dict(result)
+    for key in _PER_SOURCE_KEYS:
+        value = result.get(key)
+        if value is None:
+            continue
+        out[key] = (
+            value[index]
+            if isinstance(value, np.ndarray)
+            else [value[int(i)] for i in index]
+        )
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1162,6 +2291,12 @@ def save_light_curves_npz(path: str, result: dict) -> None:
     complex array. The native complex estimate is kept alongside it under
     ``light_curves_complex``, together with the noise floor (``error``), the
     z statistic and the in-view mask. Readers of the format ignore the extras.
+
+    Where an along-track offset was fitted (:func:`attach_offset_fits`) its
+    answers are written too -- ``tau_best`` above all, without which a later run
+    cannot reproduce the trajectory these curves were measured on -- with
+    ``r_best`` swapped into the file's ``(n_src, n_time, n_freq)`` orientation
+    like the curves themselves.
 
     Parameters
     ----------
@@ -1193,7 +2328,157 @@ def save_light_curves_npz(path: str, result: dict) -> None:
     if result.get("in_view") is not None:
         arrays["in_view"] = np.asarray(result["in_view"], dtype=bool)
 
+    for key in _OFFSET_FIT_KEYS:
+        if key in result:
+            arrays[key] = np.asarray(result[key])
+    if "r_best" in result:
+        arrays["r_best"] = np.swapaxes(np.asarray(result["r_best"]), 1, 2)
+
     np.savez(path, **arrays)
+
+
+# ---------------------------------------------------------------------------
+# Epoch-shifted orbit records
+# ---------------------------------------------------------------------------
+
+#: Resolution of a TLE line-1 epoch field, in days: eight decimal days, 0.86 ms,
+#: about 7 m along a LEO track.
+_TLE_EPOCH_DECIMALS = 8
+
+
+def _tle_epoch_field(epoch_jd: float):
+    """``(year, day_of_year)`` as a TLE line-1 epoch field can hold them.
+
+    The two halves of ``YYDDD.DDDDDDDD`` are one number, so they have to be
+    derived from the same instant *at the same precision*. Rounding the day to
+    the field's eight decimals while taking the year from the unrounded epoch
+    lets them disagree within half a quantum (0.43 ms) of a New Year: the day
+    rounds up to ``366.00000000`` while the year still reads the old one, and
+    2025 has no day 366. That is not a date, and the parser rejects the pair
+    outright -- so a file written for a later run could not be read back at all.
+
+    Quantise first, then carry: if the rounded day reaches the year's length
+    plus one it is the first instant of the next year, which is where it is
+    written. One carry is always enough, since the unrounded day is inside its
+    own year by construction and rounding moves it by at most half a quantum.
+    """
+    year = jd_to_datetime(epoch_jd).year
+    day_of_year = round(
+        epoch_jd - datetime_to_jd(datetime(year, 1, 1)) + 1.0, _TLE_EPOCH_DECIMALS
+    )
+
+    days_in_year = 366 if calendar.isleap(year) else 365
+    if day_of_year >= days_in_year + 1.0:
+        day_of_year -= days_in_year
+        year += 1
+
+    return year, day_of_year
+
+
+def shift_orbit_record_epoch(record, tau_s: float) -> dict:
+    """A copy of ``record`` whose epoch is moved by ``-tau_s`` seconds.
+
+    The zero-code-change way to use a fitted offset. ``tau`` is measured as the
+    time the *satellite* is evaluated at, so a positive one means the elements
+    are late -- the satellite is where they say it will be ``tau`` seconds later
+    -- and the record has to *become* that trajectory: propagating the shifted
+    elements at ``t`` reproduces the original at ``t + tau``. Hence the minus.
+
+    Written into a directory by :func:`write_shifted_orbits`, the result is
+    picked up by ``--extra-orbit-dir`` and nothing else in tabascal has to know
+    about the search at all.
+
+    A TLE's line-1 epoch field (columns 19-32, ``YYDDD.DDDDDDDD``) is rewritten
+    and the modulo-10 checksum recomputed, since a rewritten field invalidates it
+    and the parser rejects a bad one -- as it should, that being how a
+    single-character corruption is caught. Nothing else on either line moves. The
+    field quantises to ``1e-8`` days, 0.86 ms, which is about 7 m along a LEO
+    track; an OMM has no fixed-width field and keeps the epoch to the
+    microsecond, so it is the format to shift where there is a choice. Either
+    way the record's own ``EPOCH`` column is moved with it, since a record whose
+    column disagreed with its own elements would be read one way by the age
+    policy and another by the propagator.
+
+    Parameters
+    ----------
+    record : dict
+        A TLE or OMM orbit record.
+    tau_s : float
+        The measured along-track offset in seconds. Zero returns the record's own
+        epoch unchanged, not a re-encoding of it.
+
+    Returns
+    -------
+    dict
+        A copy; the record handed in is not edited under the caller.
+    """
+    out = dict(record)
+    epoch_jd = record_epoch_jd(record) - float(tau_s) / 86400.0
+
+    if record_kind(record) == KIND_TLE:
+        # The day of year comes off the Julian Dates rather than the datetime,
+        # whose microsecond resolution would round the field's last digit and
+        # leave tau = 0 a no-op only by luck.
+        year, day_of_year = _tle_epoch_field(epoch_jd)
+        line1 = record["TLE_LINE1"]
+        body = line1[:18] + f"{year % 100:02d}{day_of_year:012.8f}" + line1[32:68]
+        out["TLE_LINE1"] = body + str(tle_checksum(body))
+        # The column names what the *lines* encode, not what was asked for, so
+        # the quantised epoch and the text agree exactly.
+        epoch_jd = datetime_to_jd(datetime(year, 1, 1)) + day_of_year - 1.0
+
+    out["EPOCH"] = jd_to_datetime(epoch_jd).isoformat()
+
+    return out
+
+
+def write_shifted_orbits(
+    directory: str,
+    norad_ids,
+    records: list,
+    taus_s,
+    filename: str = "shifted_orbits.json",
+) -> str:
+    """Write epoch-shifted orbit records where a later run can pick them up.
+
+    One file in ``extra_orbit_dir`` format (:func:`tabascal.orbit.save_orbits_for_reuse`),
+    so ``tabascal run --extra-orbit-dir <directory>`` reproduces the trajectories
+    the search measured -- with the default unlimited age ceiling, and
+    independently of what SatChecker serves by then.
+
+    Parameters
+    ----------
+    directory : str
+        Directory to write into; created if it does not exist.
+    norad_ids : sequence of int
+        Catalogue IDs, aligned with ``records``.
+    records : sequence of dict
+        The orbit records to shift.
+    taus_s : float or sequence of float
+        Offsets in seconds, one per record or one for all of them.
+    filename : str, default "shifted_orbits.json"
+        Name of the file inside ``directory``.
+
+    Returns
+    -------
+    str
+        The path written.
+    """
+    from tabascal.orbit import save_orbits_for_reuse
+
+    taus = np.atleast_1d(np.asarray(taus_s, dtype=np.float64))
+    if taus.size == 1:
+        taus = np.repeat(taus, len(records))
+
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, filename)
+    save_orbits_for_reuse(
+        path,
+        [int(n) for n in norad_ids],
+        [shift_orbit_record_epoch(r, float(t)) for r, t in zip(records, taus)],
+    )
+
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -1424,6 +2709,124 @@ def plot_z_spectrograms(  # pragma: no cover - matplotlib output, not unit-teste
 
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    return save_path
+
+
+def plot_offset_diagnostics(  # pragma: no cover - matplotlib output, not unit-tested
+    fit: dict,
+    save_path: str,
+    title: Optional[str] = None,
+) -> str:
+    """The three panels an along-track detection is judged by eye on.
+
+    Top, the frame-by-channel correlation ``|r|`` at the best offset, with the
+    satellite's elevation over it: a real detection is a band that lights up
+    while the satellite is up and goes out when it sets, on one channel, not a
+    scatter of warm cells. Bottom left, the per-channel ``z2`` at that offset
+    against the decohered null's mean and spread, which is the comparison the
+    significance is. Bottom right, the scan itself for the best channel, with the
+    other channels' range shaded behind it: a single peak that decays back into
+    that band is what makes the best cell a measurement rather than the largest
+    of many sidelobes.
+
+    Parameters
+    ----------
+    fit : dict
+        A result from :func:`fit_time_offset`.
+    save_path : str
+        Output PNG path.
+    title : str, optional
+        Prefix for the figure title, usually the NORAD ID.
+
+    Returns
+    -------
+    str
+        ``save_path``.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    r = np.asarray(fit["r_best"], dtype=float)  # (n_freq, n_time)
+    taus = np.asarray(fit["tau_grid"], dtype=float)
+    z2_tau = np.asarray(fit["z2_tau"], dtype=float)
+    elevation = np.asarray(fit["elevation"], dtype=float)
+    n_freq, n_time = r.shape
+
+    times = np.asarray(
+        fit.get("times_sec", np.arange(n_time, dtype=float)), dtype=float
+    )
+    chan = int(fit["best_chan"])
+    i_tau = int(np.argmin(np.abs(taus - fit["tau_best"]))) if np.isfinite(
+        fit["tau_best"]
+    ) else 0
+    null_mean, null_std = float(fit["null_mean"]), float(fit["null_std"])
+
+    fig = plt.figure(figsize=(12, 8.5))
+    grid = fig.add_gridspec(2, 2, height_ratios=[1.15, 1], hspace=0.32, wspace=0.24)
+
+    ax = fig.add_subplot(grid[0, :])
+    step = float(np.mean(np.diff(times))) if n_time > 1 else 1.0
+    extent = [times[0] - step / 2, times[-1] + step / 2, -0.5, n_freq - 0.5]
+    image = ax.imshow(
+        r, origin="lower", aspect="auto", extent=extent, cmap="inferno",
+        interpolation="nearest", vmin=0.0,
+    )
+    bar = fig.colorbar(image, ax=ax, pad=0.09)
+    bar.set_label("per-frame matched-filter correlation |r|")
+    if 0 <= chan < n_freq:
+        ax.axhline(chan, color="cyan", ls="--", lw=1, alpha=0.8)
+    ax.set_xlabel("Time since the first frame [s]")
+    ax.set_ylabel("Channel")
+    twin = ax.twinx()
+    twin.plot(times, elevation, color="w", lw=1.5, alpha=0.85)
+    twin.set_ylabel("elevation [deg]", color="gray")
+    ax.set_title(
+        f"Near-field matched filter over {fit['n_bl_used']} coherent baselines "
+        rf"($b \leq {fit['b_coh']:.0f}$ m), $\tau = {fit['tau_best']:+.2f}$ s"
+    )
+
+    ax = fig.add_subplot(grid[1, 0])
+    channels = np.arange(n_freq)
+    ax.bar(
+        channels, z2_tau[i_tau],
+        color=["C3" if c == chan else "C0" for c in channels],
+    )
+    ax.axhspan(
+        null_mean - null_std, null_mean + null_std, color="gray", alpha=0.3,
+        label=f"decohered null ({null_mean:.3f}$\\pm${null_std:.3f})",
+    )
+    ax.axhline(null_mean, color="gray", lw=1)
+    ax.set_xlabel("Channel")
+    ax.set_ylabel(r"$z^2$ (combined over frames)")
+    ax.set_title(
+        f"Per-channel score at the best offset: "
+        f"{fit['significance']:.1f}$\\sigma$ above the null"
+    )
+    ax.legend(fontsize=8)
+
+    ax = fig.add_subplot(grid[1, 1])
+    ax.plot(taus, z2_tau[:, chan], "o-", color="C3", ms=3, label=f"chan {chan}")
+    others = np.delete(z2_tau, chan, axis=1)
+    if others.size:
+        ax.fill_between(
+            taus, others.min(axis=1), others.max(axis=1), color="C0", alpha=0.25,
+            label="all other channels (range)",
+        )
+    ax.axvline(fit["tau_best"], color="k", ls="--", lw=1)
+    ax.set_xlabel(r"along-track time offset $\tau$ [s]")
+    ax.set_ylabel(r"$z^2$")
+    ax.set_title(rf"Along-track scan, best $\tau = {fit['tau_best']:+.2f}$ s")
+    ax.legend(fontsize=8)
+
+    fig.suptitle(
+        f"{title + ': ' if title else ''}along-track matched-filter evidence",
+        y=0.99, fontsize=13,
+    )
+    fig.savefig(save_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
 
     return save_path

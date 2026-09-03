@@ -90,7 +90,11 @@ via `--extra-orbit-dir` reproduces the run's trajectory priors exactly. For the
 two archives and the handover between them, the full caching behaviour, the age
 policies, what validation each format does and does not give you, and how to
 supply records manually (e.g. from Space-Track) when SatChecker cannot provide
-them, see [Satellite orbit records](orbits.md).
+them, see [Satellite orbit records](orbits.md). `tabascal light-curve
+--fit-offset --write-shifted-tle DIR` writes records of the same kind with a
+fitted along-track offset folded into their epochs, consumed the same way
+through `--extra-orbit-dir` — see
+[Records with a fitted time offset](orbits.md#records-with-a-fitted-time-offset).
 
 Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
 Space-Track and requires a `spacetrack_login.yaml`. That requirement applies only
@@ -259,6 +263,57 @@ that nobody stated, and a z built on it would look like a detection at any flux.
 An MS with no usable noise column is not an error here, unlike a `tabascal run`
 that has to weight a likelihood by it: the curves are still measured, and come
 back unweighted with NaN errors and no coverage table, as above.
+
+### Fitting the along-track time offset
+
+A TLE's dominant error is along-track — kilometres to tens of kilometres of drag
+mismodelling and unannounced manoeuvres — and along the track an error is very
+nearly a pure *time offset*. `--fit-offset` measures it: for each satellite it
+scans `tau`, evaluating the orbit at `t + tau`, builds the near-field fringe
+model on a fine grid inside each integration, and coherently correlates it
+against the data over the baselines the orbit is accurate enough to steer. Frames
+are combined into a per-channel score `z²`, the best cell over offset and channel
+is the answer, and its significance is measured against a null in which every
+antenna's path is scrambled by tens of metres — an empirical null, on these data,
+with their own weights, flagging and residual sky.
+
+```bash
+tabascal light-curve -ms path/to/ms/file.ms -n 46344 --fit-offset --only-detections --write-shifted-tle path/to/shifted_orbits
+```
+
+One line is printed per satellite — the best `tau`, the best channel, `z²`, the
+null's mean and spread, the significance, and `DETECTED` or `not detected`
+against `--threshold` (default 5 sigma). **That threshold carries no trials
+factor**: the scan maximises over the whole grid and every channel while the null
+is drawn at the best offset only, so it is a working cut calibrated on the MWA
+Cen A case rather than a false-alarm rate. The grid is `--tau-max` ±4 s in
+`--tau-step` 0.25 s steps by default — the step times the integers out to the
+half-width, so `tau = 0` is always on it and a half-width that is not a whole
+number of steps is rounded down rather than overshot. A grid of more than a million points is
+refused with a message naming `--tau-step`: the peak is a fraction of a second
+wide, so a step that fine buys nothing, and the remedy is a coarser step. The step has to resolve
+the peak, which narrows as the coherent array grows, so a longer array needs a
+finer step rather than a wider grid.
+
+The scan runs in single precision by default — a fringe model on a path
+difference of a few kilometres needs no more, and with `-ms` there is no config
+to ask — which `--precision {single,double}` overrides; with `-c` the config's
+`model.precision` decides unless the flag is given.
+
+The curves are then extracted at the offset that was measured, not at `tau = 0`,
+and the fit travels with them into the `.npz`: `tau_best`, `tau_grid`, `z2_tau`,
+`z2_best`, `best_chan`, `significance`, `null_mean`, `null_std`, `detected` and
+the frame-by-channel `r_best` spectrogram. Recording `tau_best` is the point —
+without it a later run cannot reproduce the trajectory the curves were measured
+on. `--only-detections` drops the satellites that did not clear the threshold
+from the saved curves, though every fit is still reported: a curve extracted at
+an offset that is not a detection is a curve extracted at noise.
+`--write-shifted-tle DIR` writes the **detected** satellites' orbit records with
+their epochs moved by `-tau` into `DIR`, which a later run picks up with
+`--extra-orbit-dir` and so reproduces the measured trajectory with no further
+configuration. With `-p`, each saved satellite also gets a
+`<output>_offset_<norad>.png`: the `|r|` spectrogram with the elevation curve
+over it, the per-channel `z²` against the null band, and the scan curve itself.
 
 To read one channel instead of the whole band, pass `-f` with a frequency in Hz.
 The nearest channel is used, and the request must land inside it — a frequency
