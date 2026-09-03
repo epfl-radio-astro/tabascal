@@ -38,14 +38,19 @@ runs:
           ${{ runner.os }}-pip-${{ inputs.python-version }}-
           ${{ runner.os }}-pip-
 
+    # The v2 marker retires every cache entry saved before the pipeline tests
+    # stopped running against the downloaded sim in place. Those runs wrote their
+    # results, plots and logs into the snapshot and rewrote files of the dataset
+    # itself, and the restore-keys carried the damage forward from one key to the
+    # next. Bump the marker again if anything is ever found writing there.
     - name: Cache HuggingFace datasets
       uses: actions/cache@v4
       with:
         path: ~/.cache/huggingface
-        key: ${{ runner.os }}-huggingface-tabsim-${{ steps.tabsim-version.outputs.version }}-${{ hashFiles('tests/data/*.yaml') }}
+        key: ${{ runner.os }}-huggingface-v2-tabsim-${{ steps.tabsim-version.outputs.version }}-${{ hashFiles('tests/data/*.yaml') }}
         restore-keys: |
-          ${{ runner.os }}-huggingface-tabsim-${{ steps.tabsim-version.outputs.version }}-
-          ${{ runner.os }}-huggingface-
+          ${{ runner.os }}-huggingface-v2-tabsim-${{ steps.tabsim-version.outputs.version }}-
+          ${{ runner.os }}-huggingface-v2-
 
     - name: Install dependencies
       shell: bash

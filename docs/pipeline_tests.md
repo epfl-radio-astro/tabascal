@@ -5,9 +5,10 @@ compares the result against recorded reference values. These are the tests that
 catch a change in what tabascal actually infers, as opposed to the unit tests,
 which check individual functions.
 
-Each case runs `run_tabascal.py` in a **subprocess** against a simulation
-downloaded from the `epfl-radio-astro/rfi-simulations` HuggingFace dataset, then
-parses the run's stdout.
+Each case runs `run_tabascal.py` in a **subprocess** against its own temporary
+copy of a simulation downloaded from the `epfl-radio-astro/rfi-simulations`
+HuggingFace dataset — the cached download itself is treated as read-only, and a
+fixture fails any test that changes it — then parses the run's stdout.
 
 ```bash
 pixi run -e dev pytest tests/test_tabascal_pipeline.py            # double precision
