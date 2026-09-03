@@ -276,6 +276,36 @@ accepted. In particular, TABASCAL's `used_orbits_<name>.json` replay files can
 be placed directly in this directory. Other files and subdirectories are
 ignored; only `*.json` files immediately inside `extra_orbit_dir` are read.
 
+### Records with a fitted time offset
+
+A TLE's dominant error is along-track, and along the track an error is very
+nearly a pure time offset: the satellite is where the elements say it will be
+$\tau$ seconds later. `tabascal light-curve --fit-offset` measures that $\tau$
+against the visibilities, and `--write-shifted-tle DIR` writes each *detected*
+satellite's record into `DIR` with its epoch moved by $-\tau$ — the minus
+because the record has to *become* the trajectory that was measured, so that
+propagating the shifted elements at $t$ reproduces the original at $t + \tau$.
+For a TLE the line-1 epoch field is rewritten and the modulo-10 checksum
+recomputed; for an OMM the `EPOCH` field is moved. Nothing else on either record
+changes — same satellite, same elements, read at another instant.
+
+A run consumes the directory like any other: point `satellites.extra_orbit_dir`
+at it (or pass `--extra-orbit-dir`), and each shifted record wins outright for
+its own NORAD id, ahead of the managed cache and SatChecker, under the default
+unlimited `extra_orbit_max_age_days`. The run log's per-satellite provenance line
+says `from extra_orbit_dir`, and `used_orbits_<name>.json` records the lines
+actually propagated, so what was modelled can be read back afterwards.
+
+Three things to keep in mind. The TLE epoch field holds eight decimal days, so a
+shift is quantised to 0.86 ms — about 6 m along a LEO track — while an OMM has no
+fixed-width field and carries the shift exactly; prefer the OMM where there is a
+choice. A refreshed SatChecker record does not carry the correction, so keep the
+directory named in the config for as long as the fit is wanted. And do **not**
+leave the original, unshifted record for the same satellite in the same
+directory: the two epochs differ only by $\tau$, a matter of seconds, and the
+nearest-epoch rule would pick whichever happens to sit closer to the
+observation — which may well be the uncorrected one.
+
 ### Obtaining compatible JSON from Space-Track
 
 Space-Track's `gp` and `gp_history` JSON responses include `NORAD_CAT_ID`,
