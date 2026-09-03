@@ -466,14 +466,14 @@ def calculate_rfi_vis_blocked(
     a2: Array,
     n_int_freq: int,
     n_int_time: int,
-    block_size: int,
+    block_size,
 ) -> Array:
     """Calculates the visibilities on the data grid, a block of baselines at a time.
 
     The same quantity as :func:`calculate_rfi_vis_fine` followed by the mean over
     each data cell's integration samples, but the baseline axis is walked in
-    blocks of ``block_size`` under ``checkpoint``, so the fine grid is never held
-    for every baseline at once.
+    blocks of ``block_size`` under ``checkpoint``, so the fine grid is held for a
+    block of baselines rather than for the whole axis.
 
     :func:`calculate_rfi_vis_fine` gathers ``(n_ant, n_rfi, ...)`` up to ``(n_bl,
     n_rfi, n_freq_fine, n_time_fine)``, and the product and the ``exp`` each
@@ -493,7 +493,9 @@ def calculate_rfi_vis_blocked(
     would bound the forward peak and leave the tape roughly where it was.
 
     ``block_size`` is the memory/step-count trade and nothing else: baselines are
-    independent, so the result does not depend on it. ``None`` is every baseline
+    independent, so the result does not depend on it. It is clamped to ``n_bl``,
+    so a block at or above the axis -- ``None`` included -- is one step over all
+    of it, and the grid is then formed whole. ``None`` is every baseline
     in one step, which keeps the ``checkpoint`` -- so the fine grid is still
     recomputed rather than stored -- but forms it whole, and therefore bounds the
     tape without bounding the peak.
@@ -513,8 +515,8 @@ def calculate_rfi_vis_blocked(
     n_int_time : int
         The number of fine time samples per time step of the data grid.
     block_size : int or None
-        The number of baselines calculated per scan step. ``None`` puts every
-        baseline in a single step.
+        The number of baselines calculated per scan step, clamped to ``n_bl``.
+        ``None`` puts every baseline in a single step.
 
     Returns
     -------

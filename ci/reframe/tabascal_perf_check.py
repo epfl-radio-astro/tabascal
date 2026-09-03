@@ -324,9 +324,10 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     # The Riemann references were re-measured on Daint (JAX 0.6.0) from this
     # pipeline's own perf job after #114 put the baseline axis under a scan and
     # jax.checkpoint, alongside the single-GPU references above. Peak memory
-    # falls 10.1x in single and 10.9x in double, onto the FFI kernel's own
-    # figures to the printed precision, since the fine grid was the whole of the
-    # difference. The optimiser pays 1.39x and 1.22x, less than the single-GPU
+    # falls 10.1x in single and 10.9x in double, onto what the FFI kernel measured
+    # beside it in the same run -- 0.325 and 0.647 GB, equal to the printed
+    # precision -- since the fine grid was the whole of the difference between
+    # them. (The FFI references below are older measurements, 0.306 and 0.614.) The optimiser pays 1.39x and 1.22x, less than the single-GPU
     # 1.6-1.7x: sharding the RFI axis already divides the work the scan
     # recomputes. Tolerances are unchanged and the RiemannFFI references are
     # untouched.

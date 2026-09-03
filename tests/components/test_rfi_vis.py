@@ -201,8 +201,8 @@ def test_mixed_precision_rejected():
 #
 # RiemannVis walks the baseline axis in blocks of rfi.baseline_block_size under
 # jax.checkpoint, so the (n_bl, n_rfi, n_freq_fine, n_time_fine) fine grid the
-# Riemann sum is built from is never formed for every baseline at once, and is
-# recomputed in the backward pass rather than kept. Baselines are independent, so
+# Riemann sum is built from is formed a block at a time rather than for the whole
+# axis, and is recomputed in the backward pass rather than kept. Baselines are independent, so
 # the block size is a memory strategy and nothing else: the tests below pin that
 # it changes neither the value nor the gradient, and that the fine grid really
 # does stay off the tape.
@@ -461,8 +461,9 @@ def test_a_null_block_size_keeps_the_tape_bounded():
     its body is still there, so the fine grid stays off the tape and the
     residuals match a small block's. What null gives up is the bound on the
     array itself -- the backward pass rebuilds every baseline at once rather
-    than one block at a time -- which is a peak rather than a tape and so is
-    measured in the reference numbers, not here.
+    than one block at a time -- which is a peak rather than a tape, and was
+    measured on a GPU rather than here: the ReFrame references are recorded at
+    the default block, not at null.
     """
     sizes = (64, 4, 8, 4, 4, 2)
     real_dtype = _session_dtype()

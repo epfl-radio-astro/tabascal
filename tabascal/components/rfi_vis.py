@@ -29,7 +29,9 @@ class RiemannVis(Component):
     of the fine grid is live at once, and how many scan steps that takes. A null
     block size is every baseline in a single step: the fine grid is still
     recomputed rather than stored, so the tape stays small, but it is formed
-    whole and the peak is what it was before the scan.
+    whole. Measured on one GH200 that peaks where the unscanned kernel did, and
+    across four it is well under it, the tape being per-device memory that the
+    collective does not divide.
     """
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
