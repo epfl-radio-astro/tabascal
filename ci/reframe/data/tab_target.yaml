@@ -80,6 +80,10 @@ rfi:
   time_pad_factor: 2.0
   n_int_freq: 1
   time_int_factor: 5
+  # TEMPORARY, for one Daint measurement: a single block over every baseline,
+  # i.e. the checkpoint without the scan. Revert to the shipped default (128)
+  # once the perf job has reported the peak this setting reaches.
+  baseline_block_size: null
   pow_spec:
     p0: 1e3
     k0s: [1e0, 1e-2]
