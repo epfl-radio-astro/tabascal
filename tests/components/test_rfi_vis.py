@@ -250,7 +250,7 @@ def state_bytes(state):
 # n_bl for these sizes is 1, 6 and 2016, so the block sizes below span "one
 # baseline at a time", blocks that do and do not divide n_bl, blocks larger than
 # the whole axis, and None -- a single block, which is the setting that keeps the
-# checkpoint and drops the scan.
+# checkpoint and leaves the scan a single step.
 block_sizes = [1, 5, 128, 4096, None]
 
 
@@ -428,8 +428,8 @@ def test_a_null_block_size_is_one_block_over_every_baseline():
 
     The two are the same computation -- a block size at or above ``n_bl`` clamps
     to it -- so this pins the spelling, which is the point of the setting: it
-    says "no scan" without the config having to know how many baselines there
-    are.
+    asks for one step over the whole axis without the config having to know how
+    many baselines there are.
     """
     sizes = (64, 4, 8, 4, 4, 2)
     real_dtype = _session_dtype()
@@ -506,11 +506,18 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
 
 _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
     """
+    import os
+
     import jax
     import jax.numpy as jnp
     from types import SimpleNamespace
 
-    jax.config.update("jax_enable_x64", True)
+    # The precision of the session that launched this, so the sharded path is
+    # exercised in whichever one CI is running -- complex64 under --x64 false is
+    # a different kernel from complex128, and the FFI comparison tests only cover
+    # the unsharded one.
+    x64 = os.environ["TAB_TEST_X64"] == "1"
+    jax.config.update("jax_enable_x64", x64)
 
     from tabascal.components.rfi_vis import RiemannVis
     from tabascal.distributed import sharding_enabled
@@ -524,14 +531,25 @@ _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
     n_bl = int(a1.shape[0])
 
     shape = (n_rfi, n_ant, n_freq * n_int_freq, n_time * n_int_time)
-    keys = jax.random.split(jax.random.PRNGKey(0), 3)
+    keys = jax.random.split(jax.random.PRNGKey(0), 6)
+    real = jnp.float64 if x64 else jnp.float32
+    cplx = jnp.complex128 if x64 else jnp.complex64
     state = {
-        "rfi_A": jax.random.normal(keys[0], shape)
-        + 1j * jax.random.normal(keys[1], shape),
-        "rfi_phase": jax.random.uniform(keys[2], shape),
-        "vis_rfi": jnp.zeros((n_bl, n_freq, n_time), complex),
+        "rfi_A": (
+            jax.random.normal(keys[0], shape) + 1j * jax.random.normal(keys[1], shape)
+        ).astype(cplx),
+        "rfi_phase": jax.random.uniform(keys[2], shape).astype(real),
+        "vis_rfi": jnp.zeros((n_bl, n_freq, n_time), cplx),
     }
-    cotangent = jnp.ones((n_bl, n_freq, n_time), complex)
+    tangent = {
+        "rfi_A": (
+            jax.random.normal(keys[3], shape) + 1j * jax.random.normal(keys[4], shape)
+        ).astype(cplx),
+        "rfi_phase": jax.random.uniform(keys[5], shape).astype(real),
+        "vis_rfi": jnp.zeros((n_bl, n_freq, n_time), cplx),
+    }
+    cotangent = jnp.ones((n_bl, n_freq, n_time), cplx)
+    atol = 1e-10 if x64 else 1e-4
 
     def run(block_size):
         config = SimpleNamespace(
@@ -545,17 +563,20 @@ _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
             f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()
         }
         forward = comp.build_forward()
-        primal, vjp = jax.vjp(lambda s: forward({}, s, constants)["vis_rfi"], state)
+        f = lambda s: forward({}, s, constants)["vis_rfi"]
+        primal, vjp = jax.vjp(f, state)
         (grads,) = vjp(cotangent)
+        _, tangent_out = jax.jvp(f, (state,), (tangent,))
 
-        return primal, grads
+        return primal, grads, tangent_out
 
-    ref_vis, ref_grads = run(4)
+    ref_vis, ref_grads, ref_tangent = run(4)
     for block_size in (None, n_bl, 128):
-        vis, grads = run(block_size)
-        assert jnp.allclose(vis, ref_vis, atol=1e-10), block_size
+        vis, grads, tangent_out = run(block_size)
+        assert jnp.allclose(vis, ref_vis, atol=atol), block_size
+        assert jnp.allclose(tangent_out, ref_tangent, atol=atol), block_size
         for key in ("rfi_A", "rfi_phase"):
-            assert jnp.allclose(grads[key], ref_grads[key], atol=1e-10), (block_size, key)
+            assert jnp.allclose(grads[key], ref_grads[key], atol=atol), (block_size, key)
 
     print("SHARDED_BLOCK_OK")
     """
@@ -568,12 +589,17 @@ def test_every_block_size_agrees_with_the_rfi_axis_split_across_devices():
     A null block size is the case worth spending a subprocess on: it is the one
     where the body holds every baseline at once, which is also what the psum
     that follows has to keep coarse-grid sized. Run under two devices, since
-    sharding is decided by the device count at import.
+    sharding is decided by the device count at import, and in the session's own
+    precision, since the sharded path is otherwise only ever seen in double.
+
+    Value, JVP and VJP, because the checkpoint and the psum each have their own
+    rule and a defect in one need not show in the others.
     """
     env = {
         **os.environ,
         "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
         "JAX_PLATFORMS": "cpu",
+        "TAB_TEST_X64": "1" if active_precision() == "double" else "0",
     }
     env.pop("CUDA_VISIBLE_DEVICES", None)
 

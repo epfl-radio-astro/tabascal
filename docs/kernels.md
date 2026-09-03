@@ -49,7 +49,8 @@ inputs, so nothing of that size is kept for the backward pass either.
 
 {class}`~tabascal.components.rfi_vis.RiemannVis` reaches the same bound by
 scanning the baseline axis under `jax.checkpoint`: each step forms the fine grid
-for `rfi.baseline_block_size` baselines only, averages it onto the data grid, and
+for `rfi.baseline_block_size` baselines at a time, or for the whole axis where
+it is shorter than that, averages it onto the data grid, and
 lets the backward pass recompute it. The block size is the memory/recomputation
 trade and does not change the result — see
 [`baseline_block_size`](config.md#rfi-signal). It remains the slower of the two
