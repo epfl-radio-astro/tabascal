@@ -789,7 +789,16 @@ def read_ms(
         # for. A string or a list gets no further either: np.isfinite raises a
         # TypeError or an ambiguous-truth-value error from in here, which says
         # nothing about the key the user set. Use `chans` for several channels.
-        if isinstance(freq, bool) or not isinstance(freq, Real) or not isfinite(freq):
+        # By type first: isfinite() on a string raises TypeError and on a very
+        # large Python int OverflowError, neither of which names the key.
+        if isinstance(freq, bool) or not isinstance(freq, Real):
+            finite = False
+        else:
+            try:
+                finite = isfinite(freq)
+            except OverflowError:
+                finite = False
+        if not finite:
             raise ValueError(
                 f"data.freq is {freq!r}. It is a single frequency in Hz to read "
                 f"from {ms_path}, whose {len(freqs)} channels run "

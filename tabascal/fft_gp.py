@@ -1,8 +1,11 @@
 """FFT-based Gaussian Process utilities."""
 
 import functools
+from collections.abc import Mapping, Set as AbstractSet
 from functools import reduce
-from typing import Any, Callable, List, Tuple
+from math import isfinite
+from numbers import Real
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -10,6 +13,200 @@ import numpy as np
 from jax import Array
 
 from tabascal.timing import measure_runtime
+
+
+# ---------------------------------------------------------------------------
+# Configuring a power spectrum
+# ---------------------------------------------------------------------------
+#
+# Every Fourier-domain GP in the model -- the RFI signal components and the
+# astronomical visibility one -- is configured by the same four ideas: a power
+# at the origin, a knee, a roll-off exponent per axis, and a relative cutoff
+# below which a mode is dropped. They are validated here, in the module that
+# consumes them, rather than separately in each component, so that a bad value
+# is refused the same way and with the same words wherever it is written.
+#
+# What differs between the sections is only which keys are live: the RFI prior
+# derives its knee from corr_freq/corr_time and renormalises its p0 away, while
+# the astronomical one takes both. That is expressed as the rules a caller
+# passes, not as a second copy of these checks.
+
+
+def _pow_spec_number(value, where: str) -> float:
+    """A finite, strictly positive float, or a ValueError naming ``where``.
+
+    ``numbers.Real`` rather than ``(int, float)`` so a config assembled in
+    Python can carry numpy scalars. ``bool`` is a Real and is excluded first:
+    ``True`` is not a roll-off exponent.
+    """
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"Config parameter ({where}: {value!r}) is not a number.")
+
+    try:
+        value = float(value)
+    except OverflowError:
+        # A Python int has no bound, and float() on one past the double range
+        # raises OverflowError -- which names neither the key nor the section.
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is too large to be a "
+            "floating-point number."
+        ) from None
+
+    if not isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) must be finite and greater "
+            "than zero."
+        )
+
+    return value
+
+
+def _pow_spec_pair(value, where: str) -> List[float]:
+    """An ordered pair of positive numbers, one per axis.
+
+    Ordered specifically. Anything keyed rather than ordered -- a mapping, a
+    set, a dataframe -- passes a ``len()``/``__getitem__`` check of length two
+    and is then read as its keys, in an order that means nothing, while the two
+    entries name the frequency and time axes in that order. ``np.asarray``
+    settles it: a keyed thing comes back 0-d (object) or 2-D, an ordered pair
+    comes back 1-D of length two, and a list, a tuple and a numpy pair all say
+    it.
+    """
+    # Named types rather than a duck-typed shape test. The shape test this
+    # replaces let through anything keyed that is also 1-D of length two -- a
+    # pandas Series, an xarray DataArray -- whose entries would then be read in
+    # whatever order its index happens to be in, silently swapping the two axes
+    # if the user wrote time first. A masked array is excluded for the same
+    # reason in miniature: np.asarray drops the mask, so an entry marked absent
+    # would come back as the data underneath it.
+    ordered = None
+    if isinstance(value, (list, tuple, np.ndarray, jax.Array)) and not np.ma.isMaskedArray(value):
+        try:
+            as_array = np.asarray(value, dtype=object)
+        except Exception:
+            as_array = None
+        if as_array is not None and as_array.ndim == 1:
+            # Ordered, so the count is worth saying on its own -- it is the
+            # likeliest mistake and the vaguer message below would hide it.
+            if as_array.size != 2:
+                raise ValueError(
+                    f"{where} has {as_array.size} entries; it takes 2, one for "
+                    "the frequency axis and one for the time axis, in that order."
+                )
+            ordered = list(as_array)
+
+    if ordered is None:
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is not a pair. It takes one "
+            "value for the frequency axis and one for the time axis, in that "
+            "order, e.g. [3, 3]."
+        )
+
+    return [_pow_spec_number(entry, where) for entry in ordered]
+
+
+def _pow_spec_cutoff(value, where: str) -> float:
+    """A relative cutoff: positive, and below 1.
+
+    It is compared against the largest mode on each axis and the comparison in
+    :func:`pk_cut` is strict, so at 1 or above every mode is cut and there is
+    nothing left to fit. That is caught here, where the key can be named, as
+    well as in :func:`pk_cut`, which is where a value that only reaches 1 after
+    rounding into the working precision arrives.
+    """
+    cutoff = _pow_spec_number(value, where)
+    if cutoff >= 1.0:
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is a power relative to the "
+            "largest mode on each axis, so it must be below 1. At 1 or above "
+            "every mode is cut and no parameters are left to fit."
+        )
+
+    return cutoff
+
+
+#: The kinds of value a power-spectrum key can take, by name, for the ``rules``
+#: a caller of :func:`validate_pow_spec` passes.
+POW_SPEC_KINDS = {
+    "number": _pow_spec_number,
+    "pair": _pow_spec_pair,
+    "cutoff": _pow_spec_cutoff,
+}
+
+
+def validate_pow_spec(
+    pow_spec,
+    section: str,
+    rules: Dict[str, str],
+    derived: Optional[Dict[str, str]] = None,
+    optional: Tuple[str, ...] = (),
+) -> Dict:
+    """Normalise and check one ``<section>.pow_spec`` config block.
+
+    Parameters
+    ----------
+    pow_spec
+        The block as the config carries it, or ``None`` for a config that has
+        none.
+    section
+        The config section it came from, for the error messages: ``"rfi"`` or
+        ``"ast"``.
+    rules
+        Key to kind, naming an entry of :data:`POW_SPEC_KINDS`. These and only
+        these are read; anything else in the block is refused by name, since a
+        key nobody reads is a key somebody will tune.
+    derived
+        Keys that are refused *with a reason*, for values that are computed
+        rather than set. Distinguished from unknown keys because they were
+        plausible enough for someone to have written them down.
+    optional
+        Keys that may be absent or ``null``, and come back as ``None`` for the
+        caller to fill in. Every other key in ``rules`` must be present.
+    """
+    derived = derived or {}
+
+    if pow_spec is None:
+        pow_spec = {}
+    elif not isinstance(pow_spec, Mapping):
+        raise ValueError(
+            f"Config parameter ({section}.pow_spec: {pow_spec!r}) is not a "
+            f"mapping. It takes {sorted(rules)}."
+        )
+
+    for key, why in derived.items():
+        if key in pow_spec:
+            raise ValueError(
+                f"{section}.pow_spec.{key} is not a setting: {why}. Remove it. "
+                f"The keys read here are {sorted(rules)}."
+            )
+
+    # key=repr because a config's keys need not all be strings, and a bare
+    # sorted() over a mixed set raises TypeError from in here rather than
+    # telling the user which key is wrong.
+    unknown = sorted(set(pow_spec) - set(rules), key=repr)
+    if unknown:
+        raise ValueError(
+            f"{section}.pow_spec has no key(s) {unknown}. It takes "
+            f"{sorted(rules)}."
+        )
+
+    out = {}
+    for key, kind in rules.items():
+        value = pow_spec.get(key)
+        where = f"{section}.pow_spec.{key}"
+
+        if value is None:
+            if key not in optional:
+                raise ValueError(
+                    f"{where} is required and is unset. It takes a "
+                    f"{kind}; see the base configuration for its default."
+                )
+            out[key] = None
+            continue
+
+        out[key] = POW_SPEC_KINDS[kind](value, where)
+
+    return out
 
 
 @measure_runtime
@@ -339,8 +536,8 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
     tuple[list[slice], list[tuple[int, int]]]
         The indexes and pads to remove/add Fourier modes relative to the cutoff.
     """
-    # Create a mask where ANY dimension's max power is above cutoff
-    # This ensures we keep modes that are significant in at least one direction
+    # A mode is kept only where it clears the cutoff relative to the largest
+    # mode along *every* axis -- the reduce below is logical_and, not or.
     masks = [pk > cutoff * pk.max(axis=i, keepdims=True) for i in range(pk.ndim)]
     cond = reduce(jnp.logical_and, masks)
 
@@ -354,10 +551,32 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
     # the working precision, which is why this is here and not only in the
     # config validation that rejects the obvious cases early.
     if idx[0].size == 0:
+        # Which of the ways it is empty, because the advice differs. A cutoff at
+        # or above 1 is the one the config validation catches by name; a cutoff
+        # that only reaches 1 after rounding into the working precision is not,
+        # and a power spectrum that is degenerate is not about the cutoff at all.
+        largest = float(jnp.max(pk)) if pk.size else 0.0
+        if not np.isfinite(cutoff):
+            why = f"the cutoff is {cutoff!r}"
+        elif not np.isfinite(largest):
+            why = f"the power spectrum is not finite (its largest mode is {largest})"
+        elif largest <= 0.0:
+            why = (
+                "the power spectrum is everywhere zero, which usually means its "
+                "power at the origin underflowed -- check p0, and the variance it "
+                "is scaled to"
+            )
+        else:
+            why = (
+                f"a cutoff of {cutoff!r} is at or above 1 in the working "
+                "precision, and nothing clears it"
+            )
+
         raise ValueError(
-            f"A power spectrum cutoff of {cutoff!r} leaves no Fourier modes: it is "
-            "relative to the largest mode on each axis, and the comparison is "
-            "strict, so nothing survives at 1 or above. Lower it."
+            f"A power spectrum cutoff of {cutoff!r} leaves no Fourier modes: {why}. "
+            "The cutoff is a power relative to the largest mode on each axis, and "
+            "the comparison is strict. Set it below 1 -- see rfi.pow_spec.cutoff "
+            "and ast.pow_spec.cutoff."
         )
 
     # Calculate bounding box slices and padding to restore size

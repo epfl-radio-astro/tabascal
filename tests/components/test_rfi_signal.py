@@ -1894,10 +1894,8 @@ class TestPowSpecIsRead:
         kept = setup_with_pow_spec(cls, {"cutoff": 1e-9})
         cut = setup_with_pow_spec(cls, {"cutoff": 1e-2})
 
-        assert (cut.n_k_freq_rfi, cut.n_k_time_rfi) < (
-            kept.n_k_freq_rfi,
-            kept.n_k_time_rfi,
-        )
+        assert cut.n_k_freq_rfi < kept.n_k_freq_rfi
+        assert cut.n_k_time_rfi < kept.n_k_time_rfi
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_a_steeper_roll_off_drops_k_modes(self, cls):
@@ -1905,10 +1903,8 @@ class TestPowSpecIsRead:
         shallow = setup_with_pow_spec(cls, {"gammas": [3, 3], "cutoff": 1e-9})
         steep = setup_with_pow_spec(cls, {"gammas": [8, 8], "cutoff": 1e-9})
 
-        assert (steep.n_k_freq_rfi, steep.n_k_time_rfi) < (
-            shallow.n_k_freq_rfi,
-            shallow.n_k_time_rfi,
-        )
+        assert steep.n_k_freq_rfi < shallow.n_k_freq_rfi
+        assert steep.n_k_time_rfi < shallow.n_k_time_rfi
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_one_key_given_leaves_the_other_on_its_default(self, cls):
@@ -1921,12 +1917,15 @@ class TestPowSpecIsRead:
         """They were in the old blocks and are not settings; saying so beats ignoring."""
         message = pow_spec_error(ComplexRFIVarAnt, {key: 1.0})
 
-        assert f"pow_spec.{key}" in message
+        assert f"rfi.pow_spec.{key} is not a setting" in message
 
     def test_an_unknown_key_is_refused_by_name(self):
+        """Asserted against the offending-key list, not the whole message: every
+        message ends "It takes ['gammas', 'cutoff']", so a bare `"gamma" in
+        message` passes for a validator that names nothing."""
         message = pow_spec_error(ComplexRFIVarAnt, {"gamma": 3})
 
-        assert "gamma" in message
+        assert "no key(s) ['gamma']" in message
 
     @pytest.mark.parametrize(
         "gammas", [3, "3", [3], [3, 3, 3], [0, 3], [-1, 3], [True, 3], [float("inf"), 3], [float("nan"), 3]]
@@ -1961,15 +1960,27 @@ class TestPowSpecIsRead:
         assert 1 <= comp.n_k_time_rfi < default.n_k_time_rfi
 
     def test_a_cutoff_that_only_empties_the_grid_in_the_working_precision(self):
-        """The config bound cannot catch this one: 0.99999999 is below 1 as a
-        Python float and rounds to exactly 1.0 in single precision, cutting every
-        mode. pk_cut is the backstop, and it names the cutoff."""
+        """The config bound cannot catch this one, so pk_cut is the backstop.
+
+        0.99999999 is below 1 as a Python float, so ``cutoff < 1`` accepts it,
+        and it is exactly 1.0 as a float32 -- so in single precision every mode
+        is cut. The value has to be the near-1 one and the grid has to be
+        float32, or the test is about the case the config validator already
+        rejects. pk_cut is called directly because that is where the backstop is;
+        through a component the error arrives wrapped in RuntimeError.
+        """
         from tabascal.fft_gp import pk_cut
 
-        pk = jnp.ones((4, 4), dtype=jnp.float32)
+        near_one = 0.99999999
+        assert near_one < 1.0 and np.float32(near_one) == np.float32(1.0)
 
         with pytest.raises(ValueError, match="no Fourier modes"):
-            pk_cut(pk, 1.0)
+            pk_cut(jnp.ones((4, 4), dtype=jnp.float32), near_one)
+
+        # And it is genuinely a precision effect: the same value on a float64
+        # grid keeps the largest mode.
+        idxs, _ = pk_cut(jnp.ones((4, 4), dtype=jnp.float64), near_one)
+        assert all(idx.stop > idx.start for idx in idxs)
 
     @pytest.mark.parametrize(
         "gammas", [np.array([3.0, 3.0]), (3, 3), [np.float32(3), np.float64(3)]]
@@ -1982,13 +1993,44 @@ class TestPowSpecIsRead:
         assert comp.gp_pow_spec()[0] == [3.0, 3.0]
 
     def test_gammas_given_as_something_keyed_rather_than_ordered_is_refused(self):
-        """A DataFrame of two columns has len 2 and __getitem__, and reads as its
-        column labels. It stands in here for everything keyed that a duck-typed
-        check would let through -- the axes this indexes are ordered."""
-        pd = pytest.importorskip("pandas")
-        frame = pd.DataFrame([[9, 9], [9, 9]], columns=[3, 4])
+        """Keyed things are refused whatever shape they take.
 
-        assert "gammas" in pow_spec_error(ComplexRFIVarAnt, {"gammas": frame})
+        A pandas Series is the realistic instance -- keyed, 1-D, length two, so
+        every shape-based check accepts it and reads its values in index order,
+        silently swapping the axes if the user wrote time first. pandas is not a
+        declared dependency, so the contract is pinned here with a stand-in of
+        the same shape and confirmed against the real thing below.
+        """
+
+        class KeyedPair:
+            """len 2, indexable, iterable -- and keyed, which is the point."""
+
+            def __init__(self, **entries):
+                self._entries = dict(entries)
+
+            def keys(self):
+                return self._entries.keys()
+
+            def __len__(self):
+                return len(self._entries)
+
+            def __iter__(self):
+                return iter(self._entries.values())
+
+            def __getitem__(self, key):
+                return list(self._entries.values())[key]
+
+        keyed = KeyedPair(time=3.0, freq=4.0)
+        assert len(keyed) == 2 and keyed[0] == 3.0
+
+        assert "gammas" in pow_spec_error(ComplexRFIVarAnt, {"gammas": keyed})
+
+    def test_a_pandas_series_is_refused(self):
+        """The real instance of the case above, when pandas is installed."""
+        pd = pytest.importorskip("pandas")
+        series = pd.Series({"time": 3.0, "freq": 4.0})
+
+        assert "gammas" in pow_spec_error(ComplexRFIVarAnt, {"gammas": series})
 
     @pytest.mark.parametrize("gammas", [{3: None, 4: None}, {3, 4}])
     def test_gammas_given_as_an_unordered_pair_are_refused(self, gammas):
@@ -2002,7 +2044,7 @@ class TestPowSpecIsRead:
         inside the validator instead of saying which key is wrong."""
         message = pow_spec_error(ComplexRFIVarAnt, {1: 2, "gamma": 3})
 
-        assert "gamma" in message
+        assert "'gamma'" in message and "1" in message
         assert "not supported between instances" not in message
 
     def test_the_base_config_ships_the_key_unset(self):

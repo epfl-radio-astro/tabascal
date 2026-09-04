@@ -1,8 +1,5 @@
 import warnings
 from abc import abstractmethod
-from collections.abc import Mapping, Set as AbstractSet
-from math import isfinite
-from numbers import Real
 
 from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
@@ -13,7 +10,7 @@ from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
 from tabascal.ms import get_observation_data_type
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, validate_pow_spec
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -410,127 +407,32 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
         return jnp.zeros((xds.tle_sat_src.data[0], xds.n_ant, xds.n_freq, xds.n_time), dtype=complex)
 
 
-#: The ``rfi.pow_spec`` keys the model reads. ``p0`` and ``k0s`` are deliberately
-#: not among them: ``p0`` cancels, since ``latent_to_signal_init`` renormalises the
-#: spectrum to ``rfi.var``, and ``k0s`` is derived from ``rfi.corr_freq`` and
-#: ``rfi.corr_time`` rather than set independently. A config carrying either is
-#: refused by name rather than ignored -- they were in the shipped example configs
-#: for a long time while nothing read them (#111), and silently accepting them
-#: again would be the same trap.
-_POW_SPEC_KEYS = ("gammas", "cutoff")
+#: The ``rfi.pow_spec`` keys the model reads, and what each may be. Validated by
+#: :func:`tabascal.fft_gp.validate_pow_spec`, which every Fourier-domain GP in
+#: the model shares, so a bad value is refused the same way wherever it is
+#: written. Both are optional: unset means this component's own default, since
+#: the two Fourier components do not agree on theirs -- see
+#: ``BaseGPRFI.default_gammas`` / ``default_pk_cutoff``.
+_POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
+
+#: Keys that were in the shipped example configs for a long time while nothing
+#: read them (#111), and that are computed rather than set. Refused by name
+#: rather than ignored: silently accepting them again would be the same trap.
 _POW_SPEC_DERIVED = {
     "p0": "the spectrum is renormalised to rfi.var, so p0 has no effect",
     "k0s": "the knee is derived from rfi.corr_freq and rfi.corr_time",
 }
 
 
-def _positive_float(value, key: str) -> float:
-    """A finite, strictly positive float, or a ValueError naming the key.
-
-    ``numbers.Real`` rather than ``(int, float)`` so a config assembled in Python
-    -- as the tests' mock configs are -- can carry numpy scalars. ``bool`` is a
-    Real and is excluded first: ``True`` is not a roll-off exponent.
-    """
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise ValueError(
-            f"Config parameter (rfi:\n\tpow_spec:\n\t\t{key}: {value!r}) is not "
-            "a number."
-        )
-    value = float(value)
-    if not isfinite(value) or value <= 0.0:
-        raise ValueError(
-            f"Config parameter (rfi:\n\tpow_spec:\n\t\t{key}: {value!r}) must be "
-            "finite and greater than zero."
-        )
-    return value
-
-
 def _validate_pow_spec(pow_spec) -> Dict:
-    """Normalise ``rfi.pow_spec`` to a dict of the keys the model reads.
-
-    Both keys are optional and default to ``None``, meaning "whatever this
-    component's own default is" -- the two Fourier components do not currently
-    agree on theirs, and that difference is preserved rather than quietly
-    unified here. See ``BaseGPRFI.default_gammas`` / ``default_pk_cutoff``.
-    """
-    if pow_spec is None:
-        return {key: None for key in _POW_SPEC_KEYS}
-
-    if not isinstance(pow_spec, dict):
-        raise ValueError(
-            f"Config parameter (rfi:\n\tpow_spec: {pow_spec!r}) is not a mapping. "
-            f"It takes {list(_POW_SPEC_KEYS)}."
-        )
-
-    for key, why in _POW_SPEC_DERIVED.items():
-        if key in pow_spec:
-            raise ValueError(
-                f"rfi.pow_spec.{key} is not a setting: {why}. Remove it. The keys "
-                f"read here are {list(_POW_SPEC_KEYS)}."
-            )
-
-    # key=repr because a YAML mapping's keys need not all be strings, and a
-    # bare sorted() over a mixed set raises TypeError from in here rather than
-    # telling the user which key is wrong.
-    unknown = sorted(set(pow_spec) - set(_POW_SPEC_KEYS), key=repr)
-    if unknown:
-        raise ValueError(
-            f"rfi.pow_spec has no key(s) {unknown}. It takes "
-            f"{list(_POW_SPEC_KEYS)}."
-        )
-
-    out = {key: pow_spec.get(key) for key in _POW_SPEC_KEYS}
-
-    if out["gammas"] is not None:
-        gammas = out["gammas"]
-        # An *ordered* pair of numbers, asked as that rather than duck-typed.
-        # Anything keyed rather than ordered -- a mapping, a set, a DataFrame --
-        # passes a len()/__getitem__ check of length two and is then read as its
-        # keys, in an order that means nothing, while the two entries name the
-        # frequency and time axes in that order. np.asarray settles it: a keyed
-        # thing comes back 0-d (object) or 2-D, an ordered pair comes back
-        # 1-D of length 2, and a list, a tuple and a numpy pair all say it.
-        ordered = None
-        if not isinstance(gammas, (str, bytes, Mapping, AbstractSet)):
-            try:
-                as_array = np.asarray(gammas, dtype=object)
-            except Exception:
-                as_array = None
-            if as_array is not None and as_array.ndim == 1:
-                # Ordered, so the count is worth saying on its own -- it is the
-                # likeliest mistake and the vaguer message below would hide it.
-                if as_array.size != 2:
-                    raise ValueError(
-                        f"rfi.pow_spec.gammas has {as_array.size} entries; it "
-                        "takes 2, the roll-off exponent on the frequency and time "
-                        "axes in that order."
-                    )
-                ordered = list(as_array)
-
-        if ordered is None:
-            raise ValueError(
-                f"Config parameter (rfi:\n\tpow_spec:\n\t\tgammas: {gammas!r}) is "
-                "not a pair. It is the roll-off exponent on each of the frequency "
-                "and time axes, in that order, e.g. [3, 3]."
-            )
-        out["gammas"] = [_positive_float(g, "gammas") for g in ordered]
-
-    if out["cutoff"] is not None:
-        cutoff = _positive_float(out["cutoff"], "cutoff")
-        # Relative to the largest mode along each axis, and the comparison in
-        # pk_cut is strict, so 1.0 keeps nothing at all. The empty latent grid
-        # then surfaces from inside fft_gp as "zero-size array to reduction
-        # operation min", which names neither the key nor the reason.
-        if cutoff >= 1.0:
-            raise ValueError(
-                f"Config parameter (rfi:\n\tpow_spec:\n\t\tcutoff: {cutoff!r}) is "
-                "a power relative to the largest mode on each axis, so it must be "
-                "below 1. At 1 or above every mode is cut and no RFI parameters "
-                "are left to fit."
-            )
-        out["cutoff"] = cutoff
-
-    return out
+    """Normalise ``rfi.pow_spec`` to the keys the RFI components read."""
+    return validate_pow_spec(
+        pow_spec,
+        "rfi",
+        _POW_SPEC_RULES,
+        derived=_POW_SPEC_DERIVED,
+        optional=tuple(_POW_SPEC_RULES),
+    )
 
 
 def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
@@ -616,7 +518,12 @@ class BaseGPRFI(Component):
     #: because the two Fourier components have never agreed on it: the difference
     #: looks historical rather than intentional (#111), and is preserved here
     #: rather than unified, which would be a model change for one of them.
-    default_gammas = [3.0, 3.0]
+    #: Written as ints, which is what these were before they were configurable:
+    #: jax routes an integer exponent through ``lax.integer_pow`` and a float one
+    #: through ``lax.pow``, and the two differ in the last bit. That is far below
+    #: anything the model cares about, but it is the difference between "the
+    #: default path is unchanged" and "the default path is nearly unchanged".
+    default_gammas = [3, 3]
 
     #: Relative power below which a k-mode is dropped from the latent grid, used
     #: when ``rfi.pow_spec.cutoff`` is not set. Sets the latent dimension, so a

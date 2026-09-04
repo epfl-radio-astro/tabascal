@@ -357,3 +357,91 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     message = setup_error(ast_config(tmp_path, baseline_block_size=block_size))
 
     assert "baseline_block_size" in message
+
+
+# ---------------------------------------------------------------------------
+# ast.pow_spec
+# ---------------------------------------------------------------------------
+
+
+def pow_spec_config(tmp_path, **overrides):
+    """A config whose ``ast.pow_spec`` block carries ``overrides``."""
+    config = ast_config(tmp_path)
+    config.args["ast"]["pow_spec"] = {
+        **config.args["ast"]["pow_spec"],
+        **overrides,
+    }
+    return config
+
+
+class TestAstPowSpecIsValidated:
+    """``ast.pow_spec`` went straight to the Fourier machinery unchecked.
+
+    A negative exponent, a string, or a cutoff of 1 -- which cuts every mode --
+    surfaced from inside ``fft_gp`` with a message about array shapes, if it
+    surfaced at all. The RFI prior is checked by the same validator, so these
+    tests are the astronomical half of one contract rather than a second one.
+    """
+
+    def test_the_shipped_defaults_still_set_up(self, tmp_path):
+        """The base config's own block has to pass its own validation."""
+        comp = setup_ast(pow_spec_config(tmp_path))
+
+        assert comp.n_k_freq_ast >= 1 and comp.n_k_time_ast >= 1
+
+    @pytest.mark.parametrize("key", ["p0", "k0_freq", "cutoff"])
+    @pytest.mark.parametrize("value", [0, -1, "3e3", True, float("inf"), float("nan")])
+    def test_a_scalar_key_that_is_not_a_positive_number_is_refused(
+        self, tmp_path, key, value
+    ):
+        message = setup_error(pow_spec_config(tmp_path, **{key: value}))
+
+        assert f"ast.pow_spec.{key}" in message
+
+    @pytest.mark.parametrize("cutoff", [1.0, 2.0])
+    def test_a_cutoff_that_cuts_every_mode_is_refused(self, tmp_path, cutoff):
+        """Relative to the largest mode on each axis, and the comparison is
+        strict, so 1 leaves nothing to fit. Unchecked it reached fft_gp and came
+        back as a zero-size reduction."""
+        message = setup_error(pow_spec_config(tmp_path, cutoff=cutoff))
+
+        assert "ast.pow_spec.cutoff" in message
+        assert "below 1" in message
+
+    @pytest.mark.parametrize(
+        "gammas", [5, "55", [5], [5, 5, 5], [-1, 5], [0, 5], {5: None, 6: None}, {5, 6}]
+    )
+    def test_gammas_that_are_not_an_ordered_pair_of_positives_are_refused(
+        self, tmp_path, gammas
+    ):
+        assert "gammas" in setup_error(pow_spec_config(tmp_path, gammas=gammas))
+
+    @pytest.mark.parametrize("gammas", [(5, 5), np.array([5.0, 5.0])])
+    def test_an_ordered_pair_is_accepted_however_it_is_spelled(self, tmp_path, gammas):
+        comp = setup_ast(pow_spec_config(tmp_path, gammas=gammas))
+
+        assert comp.gammas == [5.0, 5.0]
+
+    def test_an_unknown_key_is_refused_by_name(self, tmp_path):
+        """`gamma` for `gammas` is the mistake this catches."""
+        message = setup_error(pow_spec_config(tmp_path, gamma=5))
+
+        assert "gamma" in message
+
+    def test_fov_deg_may_be_null_and_the_others_may_not(self, tmp_path):
+        """null fov_deg means the telescope's own beam; the rest have no such
+        fallback, and an unset one is a config that cannot be run rather than a
+        default to invent."""
+        setup_ast(pow_spec_config(tmp_path, fov_deg=None))
+
+        for key in ("p0", "k0_freq", "gammas", "cutoff"):
+            message = setup_error(pow_spec_config(tmp_path, **{key: None}))
+            assert f"ast.pow_spec.{key}" in message
+            assert "required" in message
+
+    def test_the_validation_is_the_one_the_rfi_prior_uses(self):
+        """One contract, not two: the sections differ in which keys are live."""
+        from tabascal.components.ast_vis import validate_pow_spec as ast_validator
+        from tabascal.components.rfi_signal import validate_pow_spec as rfi_validator
+
+        assert ast_validator is rfi_validator

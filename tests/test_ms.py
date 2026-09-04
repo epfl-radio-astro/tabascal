@@ -1863,7 +1863,9 @@ class TestReadMSFrequencyRequest:
         with pytest.raises(ValueError, match="data.freq"):
             read_ms("fake.ms", freq=freq)
 
-    @pytest.mark.parametrize("freq", ["1400000000", [1.4e9, 1.41e9], True])
+    @pytest.mark.parametrize(
+        "freq", ["1400000000", [1.4e9, 1.41e9], True, 10**400]
+    )
     def test_a_frequency_that_is_not_a_single_number_is_refused(self, channel_ms, freq):
         """A string or a list gets no further than the type check.
 
@@ -1876,12 +1878,15 @@ class TestReadMSFrequencyRequest:
         with pytest.raises(ValueError, match="data.freq"):
             read_ms("fake.ms", freq=freq)
 
-    def test_an_infinite_frequency_is_refused(self, channel_ms):
-        """Infinity fails the range check on its own; pinned so the new guard
-        above cannot be the only thing standing between it and a silent read."""
+    def test_an_infinite_frequency_is_refused_by_name(self, channel_ms):
+        """Infinity would fail the band check on its own, so a bare
+        ``pytest.raises(ValueError)`` here would pass with or without the type
+        guard. What is asserted is therefore *which* rejection fires: the guard
+        runs first, so the message names the key rather than the band.
+        """
         _, freqs, _ = channel_ms()
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="data.freq"):
             read_ms("fake.ms", freq=float("inf"))
 
     def test_a_frequency_inside_the_edge_channel_is_accepted(self, channel_ms):

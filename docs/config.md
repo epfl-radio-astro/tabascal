@@ -278,6 +278,8 @@ ast:
   `auto` exists because a block that does not bind costs scan steps for nothing. On a single-channel observation, where the padded grid is 1 by 180, a fixed block of `128` split 4560 baselines into 36 steps and cost 13 % of the optimiser's time with no memory saved; sized from the grid, the same observation runs in one step, and a wide band still blocks.
 * `pow_spec`: This is the section that defines the prior covariance of the signal. The signal is modelled in the Fourier domain so the prior covariance is given by the power spectrum of the signal.
 
+  Every value in this block is checked at setup, by the same validator the [RFI power spectrum](#rfi-signal) uses: each of `p0`, `k0_freq` and `fov_deg` must be a finite positive number, `gammas` an ordered pair of them — one for the frequency axis and one for the time axis, in that order — and `cutoff` a positive number **below 1**, since it is relative to the largest mode on each axis and at 1 every mode is cut. Only `fov_deg` may be `null`, meaning the telescope's own primary beam. A key the section does not read is refused by name rather than ignored, so a `gamma` written for `gammas` is caught rather than silently doing nothing.
+
 The parameters for the power spectrum are defined as
 
 * `p0`: Mean power of the signal.
@@ -392,13 +394,15 @@ The only additional parameters are
 * `pow_spec`: The shape of the prior power spectrum over the RFI signal. Two keys are read, and both are optional:
 
   * `gammas`: the roll-off exponent on the frequency and time axes, in that order.
-  * `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit.
+  * `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit. Below 1 is necessary rather than sufficient: a value near enough to 1 to round to it in the working precision cuts everything too, which the run refuses with a message naming the cutoff rather than a shape error from inside the transform.
 
   Left unset (`null`, the shipped default) each takes the component's own value: `[3, 3]` and `1e-9` for `rfi_signal:ComplexRFIVarAnt`, `[100, 100]` and `1e-6` for `rfi_signal:ComplexRFIConstAnt`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
 
   **These keys were read by nothing before this release.** Configurations written earlier may carry an `rfi.pow_spec` block — the shipped examples did, with `gammas: [5, 5]` and `cutoff: 1e-6` — which had no effect on the run. They now do, so such a block changes the prior and the latent dimension: to reproduce an earlier run, delete it or set the values above.
 
-  The other two keys those older blocks carried are refused by name rather than ignored, because neither is a setting: `p0` has no effect, since the spectrum is renormalised to `rfi.var`, and `k0s` is derived from `corr_freq` and `corr_time`, which are where the knee is set.
+  The other two keys those older blocks carried are refused by name rather than ignored, because neither is a setting: `p0` has no effect, since the spectrum is renormalised to `rfi.var`, and `k0s` is derived from `corr_freq` and `corr_time`, which are where the knee is set. Any other unknown key is refused the same way.
+
+  The values are checked by the validator both Fourier-domain priors share, so `gammas` and `cutoff` are held to the same rules here as under [`ast.pow_spec`](#astronomical-signal) — the two sections differ only in which keys are live.
 
 * `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
