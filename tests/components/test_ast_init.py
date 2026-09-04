@@ -315,8 +315,13 @@ def test_the_baseline_block_size_changes_neither_value_nor_gradient(
         )
 
 
-def test_the_default_baseline_block_size_comes_from_the_base_config(tmp_path):
-    """A config predating the key still builds, on the base default of 128."""
+def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path):
+    """A config predating the key still builds, on the base default of ``auto``.
+
+    The point of ``auto`` is that a block which does not bind is pure overhead,
+    so on a grid this small it has to come out as a single step over the whole
+    axis rather than as some fixed count.
+    """
 
     args = base_args(tmp_path)
     del args["ast"]["baseline_block_size"]
@@ -325,7 +330,24 @@ def test_the_default_baseline_block_size_comes_from_the_base_config(tmp_path):
     comp = GPVisAst()
     comp.setup(config)
 
-    assert comp.baseline_block_size == 128
+    assert comp.baseline_block_size_setting == "auto"
+    assert comp.baseline_block_size == config.n_bl
+
+
+def test_auto_blocks_a_padded_grid_that_does_not_fit_the_budget(tmp_path):
+    """And binds where the grid is large, which is the case it exists for."""
+
+    comp = setup_ast(ast_config(tmp_path, baseline_block_size="auto"))
+    padded = 1
+    for dim, (lo, hi) in zip((comp.n_k_freq_ast, comp.n_k_time_ast), comp.pads):
+        padded *= dim + lo + hi
+
+    # The same arithmetic the component does, against a budget cut so far that
+    # the grid cannot fit: the block has to fall well short of the axis.
+    comp._BLOCK_BUDGET_BYTES = 8 * padded
+    comp._resolve_baseline_block_size()
+
+    assert 1 <= comp.baseline_block_size < comp.n_bl
 
 
 def test_the_baseline_axis_is_not_split_unless_the_config_asks(tmp_path):

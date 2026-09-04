@@ -61,8 +61,8 @@ class GPVisAst(Component):
             # would turn 1.9 into 1 without a word, and the finiteness test
             # comes before it because yaml spells .inf and .nan, on which int()
             # raises with a message about floats rather than about the key.
-            block_size = config.args["ast"].get("baseline_block_size", 128)
-            if block_size is not None and (
+            block_size = config.args["ast"].get("baseline_block_size", "auto")
+            if block_size not in ("auto", None) and (
                 isinstance(block_size, bool)
                 or not isinstance(block_size, (int, float))
                 or not isfinite(block_size)
@@ -72,12 +72,10 @@ class GPVisAst(Component):
                 raise ValueError(
                     "ast.baseline_block_size is the number of baselines "
                     "transformed per scan step: a whole number of at least 1, "
-                    f"or null for a single block over every baseline, got "
-                    f"{block_size!r}."
+                    "'auto' to size it from the padded grid, or null for a "
+                    f"single block over every baseline, got {block_size!r}."
                 )
-            self.baseline_block_size = (
-                None if block_size is None else int(block_size)
-            )
+            self.baseline_block_size_setting = block_size
 
             # Off by default, and measured rather than assumed: on a
             # single-channel benchmark, whose padded grid is (1, 180), splitting
@@ -99,6 +97,7 @@ class GPVisAst(Component):
 
             # Do expensive setup operations once
             self._compute_gp_params()
+            self._resolve_baseline_block_size()
             self._compute_prior_params(config.args["ast"]["mean"], config.vis_obs)
 
             if config.args["plots"]["truth"] or config.args["ast"]["init"] == "truth":
@@ -115,6 +114,38 @@ class GPVisAst(Component):
 
         except Exception as e:
             raise RuntimeError(f"GPVisAst setup failed: {e}")
+
+    #: How much of a padded Fourier grid one scan step may build, in bytes. The
+    #: block is sized from this under ``baseline_block_size: auto``. Three arrays
+    #: of that size are live at the peak -- the pad, the shift and the transform
+    #: -- so the budget is the transform's transient, not the model's.
+    #:
+    #: It exists because a block that does not bind costs scan steps for nothing:
+    #: on a single-channel observation, whose padded grid is (1, 180), a fixed
+    #: block of 128 split 4560 baselines into 36 steps and cost 13 % of the
+    #: optimiser's time on the cheaper of the two RFI kernels, with no memory to
+    #: show for it. At this budget that observation runs in one step, and a wide
+    #: band -- where the grid is the largest array in the model -- still blocks.
+    _BLOCK_BUDGET_BYTES = 64 * 1024**2
+
+    def _resolve_baseline_block_size(self):
+        """Turn the ``baseline_block_size`` setting into a block, or ``None``."""
+
+        setting = self.baseline_block_size_setting
+        if setting != "auto":
+            self.baseline_block_size = None if setting is None else int(setting)
+            return
+
+        # One baseline's padded grid, in the precision the run is in.
+        padded = 1
+        for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
+            padded *= dim + lo + hi
+        per_baseline = padded * jnp.zeros((), dtype=complex).dtype.itemsize
+
+        block = max(1, self._BLOCK_BUDGET_BYTES // max(1, per_baseline))
+        # A block at or above the axis is one step over all of it, which is what
+        # the whole grid fitting the budget should mean.
+        self.baseline_block_size = min(int(block), self.n_bl)
 
     def build_set_params(self):
         n_bl = self.n_bl
