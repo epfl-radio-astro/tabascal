@@ -568,7 +568,10 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
         # that only reaches 1 after rounding into the working precision is not,
         # and a power spectrum that is degenerate is not about the cutoff at all.
         largest = float(jnp.max(pk))
-        finite = bool(np.isfinite(np.asarray(pk)).all())
+        # Reduced on the device: np.asarray would pull the whole grid back to
+        # the host to answer a yes/no question, which on a large GPU grid is
+        # hundreds of megabytes moved to explain an error.
+        finite = bool(jnp.isfinite(pk).all())
 
         if not np.isfinite(cutoff):
             why = f"the cutoff is {cutoff!r}"

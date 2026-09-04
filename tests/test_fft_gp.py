@@ -630,17 +630,51 @@ class TestPkCutRefusesAnEmptySelection:
 
     def test_a_negative_spectrum_is_not_called_an_underflow(self):
         """`largest <= 0` covers both, but they are not the same thing."""
-        with pytest.raises(ValueError, match="no positive power"):
+        with pytest.raises(ValueError) as excinfo:
             pk_cut(jnp.array([-2.0, -1.0]), 0.5)
 
+        message = str(excinfo.value)
+        assert "no positive power" in message
+        assert "Set it below 1" not in message
+
     def test_a_non_finite_spectrum_is_named_as_such(self):
-        """Even where the largest value is not the non-finite one."""
+        """Even where the largest value is not the non-finite one, and the
+        advice has to point away from the cutoff rather than at it."""
         with pytest.raises(ValueError) as excinfo:
             pk_cut(jnp.array([0.0, -jnp.inf]), 0.5)
 
-        assert "not finite" in str(excinfo.value)
-        assert "no positive power" not in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "power spectrum is not finite" in message
+        assert "no positive power" not in message
+        assert "cutoff is not what is wrong" in message
 
     def test_a_non_finite_cutoff_is_named_as_such(self):
-        with pytest.raises(ValueError, match="the cutoff is nan"):
+        """And is the one non-finite case where the cutoff *is* the problem, so
+        this and the test above have to end differently."""
+        with pytest.raises(ValueError) as excinfo:
             pk_cut(jnp.ones((2, 2)), float("nan"))
+
+        message = str(excinfo.value)
+        assert "the cutoff is nan" in message
+        assert "Set a finite cutoff below 1" in message
+
+    def test_each_cause_carries_its_own_advice(self):
+        """The contract, in one place: four causes, four different answers.
+
+        Asserted as a set rather than per test because what went wrong before
+        was that the diagnosis branched and the advice did not -- every cause
+        ended "Set it below 1", including the two no cutoff can fix.
+        """
+        advice = {}
+        for name, pk, cutoff in (
+            ("at one", jnp.ones((4, 4)), 1.0),
+            ("no power", jnp.zeros((2, 2)), 0.5),
+            ("not finite", jnp.array([0.0, -jnp.inf]), 0.5),
+            ("bad cutoff", jnp.ones((2, 2)), float("nan")),
+        ):
+            with pytest.raises(ValueError) as excinfo:
+                pk_cut(pk, cutoff)
+            # The last sentence is the advice.
+            advice[name] = str(excinfo.value).rsplit("strict. ", 1)[-1]
+
+        assert len(set(advice.values())) == 4, advice
