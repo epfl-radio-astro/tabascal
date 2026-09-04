@@ -1,6 +1,8 @@
 import warnings
 from abc import abstractmethod
+from collections.abc import Mapping, Set as AbstractSet
 from math import isfinite
+from numbers import Real
 
 from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
@@ -423,8 +425,13 @@ _POW_SPEC_DERIVED = {
 
 
 def _positive_float(value, key: str) -> float:
-    """A finite, strictly positive float, or a ValueError naming the key."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    """A finite, strictly positive float, or a ValueError naming the key.
+
+    ``numbers.Real`` rather than ``(int, float)`` so a config assembled in Python
+    -- as the tests' mock configs are -- can carry numpy scalars. ``bool`` is a
+    Real and is excluded first: ``True`` is not a roll-off exponent.
+    """
+    if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(
             f"Config parameter (rfi:\n\tpow_spec:\n\t\t{key}: {value!r}) is not "
             "a number."
@@ -476,10 +483,16 @@ def _validate_pow_spec(pow_spec) -> Dict:
 
     if out["gammas"] is not None:
         gammas = out["gammas"]
-        # A sequence specifically: a mapping or a set of length two would pass a
-        # bare len() check and then be read as its keys, in an order that means
-        # nothing, while the axes this indexes are ordered.
-        if not isinstance(gammas, (list, tuple)):
+        # An *ordered* pair. Mappings and sets are turned away by name rather
+        # than by an allow-list of list/tuple: both would pass a bare len() check
+        # and be read as their keys, in an order that means nothing, while the
+        # two entries name the frequency and time axes in that order -- but an
+        # ordered numpy pair is a perfectly good way to say the same thing.
+        if (
+            isinstance(gammas, (str, bytes, Mapping, AbstractSet))
+            or not hasattr(gammas, "__len__")
+            or not hasattr(gammas, "__getitem__")
+        ):
             raise ValueError(
                 f"Config parameter (rfi:\n\tpow_spec:\n\t\tgammas: {gammas!r}) is "
                 "not a pair. It is the roll-off exponent on each of the frequency "

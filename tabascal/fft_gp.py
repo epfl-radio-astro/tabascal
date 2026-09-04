@@ -346,6 +346,20 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
 
     idx = jnp.where(cond)
 
+    # Every route to an empty selection ends here, and the reductions below would
+    # report it as "zero-size array to reduction operation min", naming neither
+    # the cutoff nor the fact that nothing survived it. The comparison above is
+    # strict and relative to each axis's largest mode, so a cutoff at or above 1
+    # cuts everything -- including one that only reaches 1 after rounding into
+    # the working precision, which is why this is here and not only in the
+    # config validation that rejects the obvious cases early.
+    if idx[0].size == 0:
+        raise ValueError(
+            f"A power spectrum cutoff of {cutoff!r} leaves no Fourier modes: it is "
+            "relative to the largest mode on each axis, and the comparison is "
+            "strict, so nothing survives at 1 or above. Lower it."
+        )
+
     # Calculate bounding box slices and padding to restore size
     idxs = []
     pads = []

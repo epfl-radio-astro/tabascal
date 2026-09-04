@@ -36,6 +36,8 @@ gain ``g = k ** -0.5``.
 import os
 import shutil
 import warnings
+from math import isfinite
+from numbers import Real
 from collections.abc import Mapping
 from typing import NamedTuple, Optional
 
@@ -781,13 +783,16 @@ def read_ms(
     # array rather than a jax one -- it indexes dask columns, and a scalar index
     # would silently drop the channel axis it is meant to narrow.
     if chans is None and freq is not None:
-        # Before the band check, because NaN would walk straight through it: every
-        # comparison against NaN is False, so the offset test below would pass and
-        # channel 0 would be read as though it had been asked for.
-        if not np.isfinite(freq):
+        # Before the band check, and by type before by value. NaN would walk
+        # straight through the offset test below -- every comparison against NaN
+        # is False -- and channel 0 would be read as though it had been asked
+        # for. A string or a list gets no further either: np.isfinite raises a
+        # TypeError or an ambiguous-truth-value error from in here, which says
+        # nothing about the key the user set. Use `chans` for several channels.
+        if isinstance(freq, bool) or not isinstance(freq, Real) or not isfinite(freq):
             raise ValueError(
-                f"data.freq is {freq!r}. It is a frequency in Hz to read from "
-                f"{ms_path}, whose {len(freqs)} channels run "
+                f"data.freq is {freq!r}. It is a single frequency in Hz to read "
+                f"from {ms_path}, whose {len(freqs)} channels run "
                 f"{freqs[0] / 1e6:.4f} - {freqs[-1] / 1e6:.4f} MHz."
             )
         nearest = int(np.argmin(np.abs(freq - freqs)))

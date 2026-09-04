@@ -1951,10 +1951,35 @@ class TestPowSpecIsRead:
         assert "cutoff" in pow_spec_error(ComplexRFIVarAnt, {"cutoff": cutoff})
 
     def test_a_cutoff_just_below_one_is_still_accepted(self):
-        """The bound is at 1, not near it: a single surviving mode is legal."""
+        """The bound is at 1, not near it. Asserted as "fewer modes than the
+        default, and at least one", rather than an exact shape, which is a
+        property of this fixture's grid and not of the bound."""
         comp = setup_with_pow_spec(ComplexRFIVarAnt, {"cutoff": 0.999999})
+        default = setup_with_pow_spec(ComplexRFIVarAnt, _ABSENT)
 
-        assert (comp.n_k_freq_rfi, comp.n_k_time_rfi) == (1, 1)
+        assert 1 <= comp.n_k_freq_rfi < default.n_k_freq_rfi
+        assert 1 <= comp.n_k_time_rfi < default.n_k_time_rfi
+
+    def test_a_cutoff_that_only_empties_the_grid_in_the_working_precision(self):
+        """The config bound cannot catch this one: 0.99999999 is below 1 as a
+        Python float and rounds to exactly 1.0 in single precision, cutting every
+        mode. pk_cut is the backstop, and it names the cutoff."""
+        from tabascal.fft_gp import pk_cut
+
+        pk = jnp.ones((4, 4), dtype=jnp.float32)
+
+        with pytest.raises(ValueError, match="no Fourier modes"):
+            pk_cut(pk, 1.0)
+
+    @pytest.mark.parametrize(
+        "gammas", [np.array([3.0, 3.0]), (3, 3), [np.float32(3), np.float64(3)]]
+    )
+    def test_an_ordered_pair_is_accepted_however_it_is_spelled(self, gammas):
+        """A config assembled in Python carries numpy; only *unordered* pairs are
+        the problem, and those are refused by name."""
+        comp = setup_with_pow_spec(ComplexRFIVarAnt, {"gammas": gammas})
+
+        assert comp.gp_pow_spec()[0] == [3.0, 3.0]
 
     @pytest.mark.parametrize("gammas", [{3: None, 4: None}, {3, 4}])
     def test_gammas_given_as_an_unordered_pair_are_refused(self, gammas):
