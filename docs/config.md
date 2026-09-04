@@ -392,7 +392,7 @@ The only additional parameters are
 * `pow_spec`: The shape of the prior power spectrum over the RFI signal. Two keys are read, and both are optional:
 
   * `gammas`: the roll-off exponent on the frequency and time axes, in that order.
-  * `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values.
+  * `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit.
 
   Left unset (`null`, the shipped default) each takes the component's own value: `[3, 3]` and `1e-9` for `rfi_signal:ComplexRFIVarAnt`, `[100, 100]` and `1e-6` for `rfi_signal:ComplexRFIConstAnt`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
 

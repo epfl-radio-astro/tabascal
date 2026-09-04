@@ -462,7 +462,10 @@ def _validate_pow_spec(pow_spec) -> Dict:
                 f"read here are {list(_POW_SPEC_KEYS)}."
             )
 
-    unknown = sorted(set(pow_spec) - set(_POW_SPEC_KEYS))
+    # key=repr because a YAML mapping's keys need not all be strings, and a
+    # bare sorted() over a mixed set raises TypeError from in here rather than
+    # telling the user which key is wrong.
+    unknown = sorted(set(pow_spec) - set(_POW_SPEC_KEYS), key=repr)
     if unknown:
         raise ValueError(
             f"rfi.pow_spec has no key(s) {unknown}. It takes "
@@ -473,7 +476,10 @@ def _validate_pow_spec(pow_spec) -> Dict:
 
     if out["gammas"] is not None:
         gammas = out["gammas"]
-        if isinstance(gammas, (str, bytes)) or not hasattr(gammas, "__len__"):
+        # A sequence specifically: a mapping or a set of length two would pass a
+        # bare len() check and then be read as its keys, in an order that means
+        # nothing, while the axes this indexes are ordered.
+        if not isinstance(gammas, (list, tuple)):
             raise ValueError(
                 f"Config parameter (rfi:\n\tpow_spec:\n\t\tgammas: {gammas!r}) is "
                 "not a pair. It is the roll-off exponent on each of the frequency "
@@ -487,7 +493,19 @@ def _validate_pow_spec(pow_spec) -> Dict:
         out["gammas"] = [_positive_float(g, "gammas") for g in gammas]
 
     if out["cutoff"] is not None:
-        out["cutoff"] = _positive_float(out["cutoff"], "cutoff")
+        cutoff = _positive_float(out["cutoff"], "cutoff")
+        # Relative to the largest mode along each axis, and the comparison in
+        # pk_cut is strict, so 1.0 keeps nothing at all. The empty latent grid
+        # then surfaces from inside fft_gp as "zero-size array to reduction
+        # operation min", which names neither the key nor the reason.
+        if cutoff >= 1.0:
+            raise ValueError(
+                f"Config parameter (rfi:\n\tpow_spec:\n\t\tcutoff: {cutoff!r}) is "
+                "a power relative to the largest mode on each axis, so it must be "
+                "below 1. At 1 or above every mode is cut and no RFI parameters "
+                "are left to fit."
+            )
+        out["cutoff"] = cutoff
 
     return out
 

@@ -1849,6 +1849,28 @@ class TestReadMSFrequencyRequest:
         assert f"{freqs[0] / 1e6:.4f}" in message      # and the band it is not in
         assert f"{freqs[-1] / 1e6:.4f}" in message
 
+    @pytest.mark.parametrize("freq", [float("nan"), float("-nan")])
+    def test_a_non_finite_frequency_is_refused(self, channel_ms, freq):
+        """NaN walks through the range check rather than failing it.
+
+        Every comparison against NaN is False, so ``offset > half a channel`` is
+        False too and the request is accepted -- silently, on channel 0, which
+        ``argmin`` returns for a NaN distance. It has to be caught before the
+        band check rather than by it.
+        """
+        _, freqs, _ = channel_ms()
+
+        with pytest.raises(ValueError, match="data.freq"):
+            read_ms("fake.ms", freq=freq)
+
+    def test_an_infinite_frequency_is_refused(self, channel_ms):
+        """Infinity fails the range check on its own; pinned so the new guard
+        above cannot be the only thing standing between it and a silent read."""
+        _, freqs, _ = channel_ms()
+
+        with pytest.raises(ValueError):
+            read_ms("fake.ms", freq=float("inf"))
+
     def test_a_frequency_inside_the_edge_channel_is_accepted(self, channel_ms):
         """Half a channel past the last centre is still that channel."""
         _, freqs, widths = channel_ms()

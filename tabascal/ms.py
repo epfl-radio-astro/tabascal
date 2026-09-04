@@ -781,6 +781,15 @@ def read_ms(
     # array rather than a jax one -- it indexes dask columns, and a scalar index
     # would silently drop the channel axis it is meant to narrow.
     if chans is None and freq is not None:
+        # Before the band check, because NaN would walk straight through it: every
+        # comparison against NaN is False, so the offset test below would pass and
+        # channel 0 would be read as though it had been asked for.
+        if not np.isfinite(freq):
+            raise ValueError(
+                f"data.freq is {freq!r}. It is a frequency in Hz to read from "
+                f"{ms_path}, whose {len(freqs)} channels run "
+                f"{freqs[0] / 1e6:.4f} - {freqs[-1] / 1e6:.4f} MHz."
+            )
         nearest = int(np.argmin(np.abs(freq - freqs)))
         offset = abs(float(freq) - float(freqs[nearest]))
         # argmin always lands on a channel, so the *request* has to be checked

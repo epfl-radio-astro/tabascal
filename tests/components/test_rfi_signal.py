@@ -1943,6 +1943,34 @@ class TestPowSpecIsRead:
     def test_a_pow_spec_that_is_not_a_mapping_is_refused(self):
         assert "pow_spec" in pow_spec_error(ComplexRFIVarAnt, [3, 3])
 
+    @pytest.mark.parametrize("cutoff", [1.0, 2.0])
+    def test_a_cutoff_that_cuts_everything_is_refused(self, cutoff):
+        """It is relative to the largest mode and the comparison is strict, so 1
+        keeps nothing. Left to fft_gp it surfaces as "zero-size array to reduction
+        operation min", which names neither the key nor the reason."""
+        assert "cutoff" in pow_spec_error(ComplexRFIVarAnt, {"cutoff": cutoff})
+
+    def test_a_cutoff_just_below_one_is_still_accepted(self):
+        """The bound is at 1, not near it: a single surviving mode is legal."""
+        comp = setup_with_pow_spec(ComplexRFIVarAnt, {"cutoff": 0.999999})
+
+        assert (comp.n_k_freq_rfi, comp.n_k_time_rfi) == (1, 1)
+
+    @pytest.mark.parametrize("gammas", [{3: None, 4: None}, {3, 4}])
+    def test_gammas_given_as_an_unordered_pair_are_refused(self, gammas):
+        """A mapping or a set of length two passes len() and iterates to its keys,
+        in an order that means nothing -- but the two entries name the frequency
+        and time axes, in that order."""
+        assert "gammas" in pow_spec_error(ComplexRFIVarAnt, {"gammas": gammas})
+
+    def test_unknown_keys_that_are_not_all_strings_still_name_themselves(self):
+        """YAML keys need not be strings, and sorting a mixed set raises from
+        inside the validator instead of saying which key is wrong."""
+        message = pow_spec_error(ComplexRFIVarAnt, {1: 2, "gamma": 3})
+
+        assert "gamma" in message
+        assert "not supported between instances" not in message
+
     def test_the_base_config_ships_the_key_unset(self):
         """So that upgrading changes nothing until someone sets a value."""
         from tabascal.config import yaml_load
