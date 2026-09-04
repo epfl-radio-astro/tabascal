@@ -1977,9 +1977,19 @@ class TestPowSpecIsRead:
         with pytest.raises(ValueError, match="no Fourier modes"):
             pk_cut(jnp.ones((4, 4), dtype=jnp.float32), near_one)
 
-        # And it is genuinely a precision effect: the same value on a float64
-        # grid keeps the largest mode.
-        idxs, _ = pk_cut(jnp.ones((4, 4), dtype=jnp.float64), near_one)
+    @pytest.mark.requires_double
+    def test_the_same_cutoff_is_harmless_in_double_precision(self):
+        """The other half of the one above: it is a precision effect, not a bound.
+
+        Marked ``requires_double`` rather than asking for float64 inline --
+        under ``--x64 false`` jax truncates a requested float64 to float32 with
+        only a warning, so an unguarded version of this asserts the opposite of
+        what it says and fails in single precision, which is how it reached CI.
+        """
+        from tabascal.fft_gp import pk_cut
+
+        idxs, _ = pk_cut(jnp.ones((4, 4), dtype=jnp.float64), 0.99999999)
+
         assert all(idx.stop > idx.start for idx in idxs)
 
     @pytest.mark.parametrize(
