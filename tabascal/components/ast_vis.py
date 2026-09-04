@@ -224,6 +224,17 @@ class GPVisAst(Component):
             )
             n_pad = -n_local % n_block
 
+            if n_block >= n_local:
+                # One step: the scan would stack a single block and reshape it
+                # back, which is a copy for nothing. This is the path a padded
+                # grid that fits the budget takes, and it is the transform as it
+                # was before the scan existed.
+                return block_signal(
+                    forward_transform(ast_k_base, sigma_ast_k, mu_ast_k),
+                    pads,
+                    ss_idxs,
+                )
+
             def block_vis(carry, block):
                 k_base, sigma, mu = block
 
