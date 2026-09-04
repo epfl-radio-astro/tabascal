@@ -1,5 +1,6 @@
 import warnings
 from abc import abstractmethod
+from math import isfinite
 
 from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
@@ -407,6 +408,90 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
         return jnp.zeros((xds.tle_sat_src.data[0], xds.n_ant, xds.n_freq, xds.n_time), dtype=complex)
 
 
+#: The ``rfi.pow_spec`` keys the model reads. ``p0`` and ``k0s`` are deliberately
+#: not among them: ``p0`` cancels, since ``latent_to_signal_init`` renormalises the
+#: spectrum to ``rfi.var``, and ``k0s`` is derived from ``rfi.corr_freq`` and
+#: ``rfi.corr_time`` rather than set independently. A config carrying either is
+#: refused by name rather than ignored -- they were in the shipped example configs
+#: for a long time while nothing read them (#111), and silently accepting them
+#: again would be the same trap.
+_POW_SPEC_KEYS = ("gammas", "cutoff")
+_POW_SPEC_DERIVED = {
+    "p0": "the spectrum is renormalised to rfi.var, so p0 has no effect",
+    "k0s": "the knee is derived from rfi.corr_freq and rfi.corr_time",
+}
+
+
+def _positive_float(value, key: str) -> float:
+    """A finite, strictly positive float, or a ValueError naming the key."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"Config parameter (rfi:\n\tpow_spec:\n\t\t{key}: {value!r}) is not "
+            "a number."
+        )
+    value = float(value)
+    if not isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"Config parameter (rfi:\n\tpow_spec:\n\t\t{key}: {value!r}) must be "
+            "finite and greater than zero."
+        )
+    return value
+
+
+def _validate_pow_spec(pow_spec) -> Dict:
+    """Normalise ``rfi.pow_spec`` to a dict of the keys the model reads.
+
+    Both keys are optional and default to ``None``, meaning "whatever this
+    component's own default is" -- the two Fourier components do not currently
+    agree on theirs, and that difference is preserved rather than quietly
+    unified here. See ``BaseGPRFI.default_gammas`` / ``default_pk_cutoff``.
+    """
+    if pow_spec is None:
+        return {key: None for key in _POW_SPEC_KEYS}
+
+    if not isinstance(pow_spec, dict):
+        raise ValueError(
+            f"Config parameter (rfi:\n\tpow_spec: {pow_spec!r}) is not a mapping. "
+            f"It takes {list(_POW_SPEC_KEYS)}."
+        )
+
+    for key, why in _POW_SPEC_DERIVED.items():
+        if key in pow_spec:
+            raise ValueError(
+                f"rfi.pow_spec.{key} is not a setting: {why}. Remove it. The keys "
+                f"read here are {list(_POW_SPEC_KEYS)}."
+            )
+
+    unknown = sorted(set(pow_spec) - set(_POW_SPEC_KEYS))
+    if unknown:
+        raise ValueError(
+            f"rfi.pow_spec has no key(s) {unknown}. It takes "
+            f"{list(_POW_SPEC_KEYS)}."
+        )
+
+    out = {key: pow_spec.get(key) for key in _POW_SPEC_KEYS}
+
+    if out["gammas"] is not None:
+        gammas = out["gammas"]
+        if isinstance(gammas, (str, bytes)) or not hasattr(gammas, "__len__"):
+            raise ValueError(
+                f"Config parameter (rfi:\n\tpow_spec:\n\t\tgammas: {gammas!r}) is "
+                "not a pair. It is the roll-off exponent on each of the frequency "
+                "and time axes, in that order, e.g. [3, 3]."
+            )
+        if len(gammas) != 2:
+            raise ValueError(
+                f"rfi.pow_spec.gammas has {len(gammas)} entries; it takes 2, the "
+                "roll-off exponent on the frequency and time axes in that order."
+            )
+        out["gammas"] = [_positive_float(g, "gammas") for g in gammas]
+
+    if out["cutoff"] is not None:
+        out["cutoff"] = _positive_float(out["cutoff"], "cutoff")
+
+    return out
+
+
 def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
     """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
 
@@ -440,6 +525,8 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
         gp_time_l = rfi_config["corr_time"]
     except Exception as e:
         raise ValueError(f"RFI signal configuration validation failed.")
+
+    rfi_config["pow_spec"] = _validate_pow_spec(rfi_config.get("pow_spec"))
 
     if not r_seed: # Set Default
         rfi_config["r_seed"] = 1
@@ -483,6 +570,30 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
 class BaseGPRFI(Component):
 
+    #: Roll-off exponent of the RFI prior power spectrum on the frequency and time
+    #: axes, used when ``rfi.pow_spec.gammas`` is not set. Declared per component
+    #: because the two Fourier components have never agreed on it: the difference
+    #: looks historical rather than intentional (#111), and is preserved here
+    #: rather than unified, which would be a model change for one of them.
+    default_gammas = [3.0, 3.0]
+
+    #: Relative power below which a k-mode is dropped from the latent grid, used
+    #: when ``rfi.pow_spec.cutoff`` is not set. Sets the latent dimension, so a
+    #: change here changes the number of fitted parameters.
+    default_pk_cutoff = 1e-9
+
+    def gp_pow_spec(self):
+        """``(gammas, cutoff)`` for this component: the config's, else its own.
+
+        The config keys are validated in :func:`rfi_signal_config_validation`, so
+        anything reaching here is either ``None`` or already the right shape.
+        """
+        pow_spec = self.rfi_config.get("pow_spec") or {}
+        gammas = pow_spec.get("gammas") or list(self.default_gammas)
+        cutoff = pow_spec.get("cutoff") or self.default_pk_cutoff
+
+        return list(gammas), float(cutoff)
+
     # The required state parameter needed in the forward model for this component to function
     required_inputs = {}  # No inputs needed
 
@@ -499,6 +610,10 @@ class BaseGPRFI(Component):
         # Validate config and set defaults
         rfi_config = rfi_signal_config_validation(
             tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
+
+        # The validated rfi section, kept whole: gp_pow_spec reads its pow_spec
+        # block, which is optional and falls back to this component's defaults.
+        self.rfi_config = rfi_config
 
         # Random seed used for random sampling such as initial parameters drawn from the prior
         self.r_seed = rfi_config["r_seed"]
@@ -867,10 +982,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
         k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
         p0 = self.gp_var #* self.n_time * self.n_freq
-        # gammas = [1e2, 1e2]
-        # gammas = [5, 5]
-        gammas = [3, 3]
-        pk_cutoff = 1e-9
+        gammas, pk_cutoff = self.gp_pow_spec()
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,
@@ -910,6 +1022,9 @@ class ComplexRFIVarAnt(BaseGPRFI):
         print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
         print(f"(n_freq, n_time): ({self.n_freq}, {self.n_time})")
         print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
+        # The latent dimension printed above is what these two set, so they are
+        # printed beside it rather than with the other rfi keys.
+        print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
 
         scale_norm = self.gp_var / jnp.sum(self.pk)
         self.pk = scale_norm * self.pk
@@ -1025,6 +1140,10 @@ class ComplexRFIVarAnt(BaseGPRFI):
 
 
 class ComplexRFIConstAnt(BaseGPRFI):
+
+    # Its own historical values, unchanged by the wiring: see BaseGPRFI.
+    default_gammas = [1e2, 1e2]
+    default_pk_cutoff = 1e-6
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -1149,8 +1268,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
         k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
         p0 = self.gp_var
-        gammas = [1e2, 1e2]
-        pk_cutoff = 1e-6
+        gammas, pk_cutoff = self.gp_pow_spec()
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,
@@ -1190,6 +1308,9 @@ class ComplexRFIConstAnt(BaseGPRFI):
         print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
         print(f"(n_freq, n_time): ({self.n_freq}, {self.n_time})")
         print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
+        # The latent dimension printed above is what these two set, so they are
+        # printed beside it rather than with the other rfi keys.
+        print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
 
         scale_norm = self.gp_var / jnp.sum(self.pk)
         self.pk = scale_norm * self.pk

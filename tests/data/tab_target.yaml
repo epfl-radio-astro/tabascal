@@ -53,10 +53,8 @@ rfi:
   n_int_freq: 1
   time_int_factor: 5
   pow_spec:
-    p0: 1e3
-    k0s: [1e0, 1e-2]
-    gammas: [5, 5]
-    cutoff: 1e-6
+    gammas: [3, 3]        # Roll-off exponent on the frequency and time axes
+    cutoff: 1e-9          # Relative power below which a k-mode is dropped
 
 satellites:
   norad_ids: [20452, 38833, 45854]

@@ -1828,3 +1828,128 @@ class TestMaskIsolatesNonFiniteSamples:
         masked = np.asarray(comp.build_masked_signal()(rfi_A, constants))
         assert np.all(np.isfinite(masked)), "a masked nan survived the mask"
         assert np.all(masked[0, :, :, mask[0]] == 1.0)
+
+
+# ---------------------------------------------------------------------------
+# rfi.pow_spec
+# ---------------------------------------------------------------------------
+
+
+def setup_with_pow_spec(cls, pow_spec, n_freq=8, n_time=16, **kwargs):
+    """Set a component up with an ``rfi.pow_spec`` block, or without one."""
+    config = make_rfi_config(
+        n_rfi=2, n_rfi_real=2, n_ant=3, n_freq=n_freq, n_time=n_time, **kwargs
+    )
+    if pow_spec is not _ABSENT:
+        config.args["rfi"]["pow_spec"] = pow_spec
+
+    comp = cls()
+    comp.setup(config)
+
+    return comp
+
+
+def pow_spec_error(cls, pow_spec):
+    """The message from a rejected ``rfi.pow_spec``, as one string."""
+    with pytest.raises(RuntimeError) as excinfo:
+        setup_with_pow_spec(cls, pow_spec)
+
+    return str(excinfo.value)
+
+
+#: Distinguishes "no block at all" from an explicit ``pow_spec: null``, which are
+#: different config files and must behave the same.
+_ABSENT = object()
+
+
+class TestPowSpecIsRead:
+    """``rfi.pow_spec`` was in the shipped configs and read by nothing (#111).
+
+    The tests that matter here are the ones that would fail if it went back to
+    being ignored: setting a key has to move the latent dimension, which is what
+    the cutoff and the roll-off exponent between them decide.
+    """
+
+    @pytest.mark.parametrize("absent", [_ABSENT, None])
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_no_block_means_the_components_own_default(self, cls, absent):
+        """A config predating the key runs exactly as it did."""
+        comp = setup_with_pow_spec(cls, absent)
+
+        assert comp.gp_pow_spec() == (
+            [float(g) for g in cls.default_gammas],
+            float(cls.default_pk_cutoff),
+        )
+
+    def test_the_two_components_keep_their_own_defaults(self):
+        """Preserved rather than unified: making them agree is a model change."""
+        assert ComplexRFIVarAnt.default_gammas != ComplexRFIConstAnt.default_gammas
+        assert (
+            ComplexRFIVarAnt.default_pk_cutoff != ComplexRFIConstAnt.default_pk_cutoff
+        )
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_a_cutoff_that_bites_drops_k_modes(self, cls):
+        """The key is live: a coarser cutoff leaves fewer fitted parameters."""
+        kept = setup_with_pow_spec(cls, {"cutoff": 1e-9})
+        cut = setup_with_pow_spec(cls, {"cutoff": 1e-2})
+
+        assert (cut.n_k_freq_rfi, cut.n_k_time_rfi) < (
+            kept.n_k_freq_rfi,
+            kept.n_k_time_rfi,
+        )
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_a_steeper_roll_off_drops_k_modes(self, cls):
+        """The other half of the same statement, for gammas."""
+        shallow = setup_with_pow_spec(cls, {"gammas": [3, 3], "cutoff": 1e-9})
+        steep = setup_with_pow_spec(cls, {"gammas": [8, 8], "cutoff": 1e-9})
+
+        assert (steep.n_k_freq_rfi, steep.n_k_time_rfi) < (
+            shallow.n_k_freq_rfi,
+            shallow.n_k_time_rfi,
+        )
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_one_key_given_leaves_the_other_on_its_default(self, cls):
+        comp = setup_with_pow_spec(cls, {"cutoff": 1e-4})
+
+        assert comp.gp_pow_spec() == ([float(g) for g in cls.default_gammas], 1e-4)
+
+    @pytest.mark.parametrize("key", ["p0", "k0s"])
+    def test_the_derived_keys_are_refused_by_name(self, key):
+        """They were in the old blocks and are not settings; saying so beats ignoring."""
+        message = pow_spec_error(ComplexRFIVarAnt, {key: 1.0})
+
+        assert f"pow_spec.{key}" in message
+
+    def test_an_unknown_key_is_refused_by_name(self):
+        message = pow_spec_error(ComplexRFIVarAnt, {"gamma": 3})
+
+        assert "gamma" in message
+
+    @pytest.mark.parametrize(
+        "gammas", [3, "3", [3], [3, 3, 3], [0, 3], [-1, 3], [True, 3], [float("inf"), 3], [float("nan"), 3]]
+    )
+    def test_gammas_that_are_not_a_pair_of_positive_numbers_are_refused(self, gammas):
+        assert "gammas" in pow_spec_error(ComplexRFIVarAnt, {"gammas": gammas})
+
+    @pytest.mark.parametrize(
+        "cutoff", [0, -1e-6, "1e-6", True, float("inf"), float("nan"), [1e-6]]
+    )
+    def test_a_cutoff_that_is_not_a_positive_number_is_refused(self, cutoff):
+        assert "cutoff" in pow_spec_error(ComplexRFIVarAnt, {"cutoff": cutoff})
+
+    def test_a_pow_spec_that_is_not_a_mapping_is_refused(self):
+        assert "pow_spec" in pow_spec_error(ComplexRFIVarAnt, [3, 3])
+
+    def test_the_base_config_ships_the_key_unset(self):
+        """So that upgrading changes nothing until someone sets a value."""
+        from tabascal.config import yaml_load
+        from importlib.resources import files
+
+        base = yaml_load(
+            str(files("tabascal.data.config").joinpath("tab_config_base.yaml"))
+        )
+
+        assert base["rfi"]["pow_spec"] == {"gammas": None, "cutoff": None}

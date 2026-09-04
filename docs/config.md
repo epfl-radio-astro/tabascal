@@ -98,7 +98,7 @@ data:
   sim_dir:
   ms_path: path/to/ms_file.ms
   data_col: DATA
-  freq: 0
+  freq:
   corr: xx
   noise:
   gain_table:
@@ -108,7 +108,6 @@ data:
 * `sim_dir`: Simulation directory created when using `sim-vis` to simulate a dataset. This can also be given at runtime of `tabascal` with the `-s` flag.
 * `ms_path`: Path to the Measurement Set (MS) to run on. This can also be given at runtime of `tabascal` with the `-ms` flag.
 * `data_col`: The data column within the MS file to use as the observed data. Default is `DATA` but can be any column that exists in the MS file.
-* `freq`: This is the frequency channel to run on. Default is to run on all frequency channels.
 * `corr`: This is the correlation product to run on, default `xx`. It is matched against the MS's `POLARIZATION::CORR_TYPE` **by identity, not by position**, so it names the correlation you want rather than an axis index: `yy` selects YY whether the MS holds all four correlations or only that one. Linear (`xx`, `xy`, `yx`, `yy`), circular (`rr`, `rl`, `lr`, `ll`) and Stokes (`i`, `q`, `u`, `v`) names are accepted. Requesting a correlation the MS does not hold is an error naming what it does hold.
 * `freq`: A single frequency in Hz to read instead of the whole band; the nearest channel is used. The request must fall inside the band — a frequency more than half a channel beyond the nearest centre is an error rather than a silent read of the edge channel, since `argmin` always returns a channel and a units slip would otherwise pass unnoticed. `null` (the default) reads every channel. `SIGMA_SPECTRUM` is narrowed to the same channel, so the noise cannot come back on a channel the visibilities did not.
 * `noise`: The per-visibility noise in Jy. **Leave it null to use the MS's own noise columns**, which are read *per baseline*, and *per channel* where the MS resolves them that far, rather than averaged to one number: the antennas of a real array differ in sensitivity and a bandpass is not flat, so a single value mis-weights every visibility. On a real low-frequency array the per-baseline `SIGMA` has been measured to span a factor of ~30, so a scalar under-weights the quietest baselines by up to ~200x. It matters most when fitting gains, because the per-antenna noise correlates with the per-antenna gain (on the same data, `sigma_a ~ amplitude_a^0.76`, R = 0.96) — a uniform-noise likelihood cannot tell a loud antenna from a noisy one, so the fitted gain absorbs the noise structure.
@@ -380,10 +379,8 @@ rfi:
   time_int_factor: 1
   baseline_block_size: 128
   pow_spec:
-    p0: 1e3
-    k0s: [1e0, 1e-2]
-    gammas: [5, 5]
-    cutoff: 1e-6
+    gammas: [3, 3]
+    cutoff: 1e-9
 ```
 
 All parameters in this section that overlap with those of the `ast` section have the same definition, except that `init` and `mean` accept one more value:
@@ -391,6 +388,17 @@ All parameters in this section that overlap with those of the `ast` section have
 * `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `rfi.est`, and no matching of light curves to satellites by name, since the estimator is handed `satellites.norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
 
 The only additional parameters are
+
+* `pow_spec`: The shape of the prior power spectrum over the RFI signal. Two keys are read, and both are optional:
+
+  * `gammas`: the roll-off exponent on the frequency and time axes, in that order.
+  * `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values.
+
+  Left unset (`null`, the shipped default) each takes the component's own value: `[3, 3]` and `1e-9` for `rfi_signal:ComplexRFIVarAnt`, `[100, 100]` and `1e-6` for `rfi_signal:ComplexRFIConstAnt`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
+
+  **These keys were read by nothing before this release.** Configurations written earlier may carry an `rfi.pow_spec` block — the shipped examples did, with `gammas: [5, 5]` and `cutoff: 1e-6` — which had no effect on the run. They now do, so such a block changes the prior and the latent dimension: to reproduce an earlier run, delete it or set the values above.
+
+  The other two keys those older blocks carried are refused by name rather than ignored, because neither is a setting: `p0` has no effect, since the spectrum is renormalised to `rfi.var`, and `k0s` is derived from `corr_freq` and `corr_time`, which are where the knee is set.
 
 * `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
