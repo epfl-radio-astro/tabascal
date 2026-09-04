@@ -317,9 +317,19 @@ def tabascal_subtraction(
             # the whole optimization (gradients and optimizer state included) from here
             # on. (vis_obs/flags/noise were already globalized in TabConfig, before
             # Model captured them in closures.)
-            n_bl = tab_config.n_bl
+            # Only when the astronomical component was asked to split its axis:
+            # sharding arrays whose forward is not sharded would gain nothing and
+            # cost a resharding on every step.
+            n_bl = (
+                tab_config.n_bl
+                if config["ast"].get("shard_baselines", False)
+                else None
+            )
             trees = (model.init_params, model.state, model.constants)
-            n_bl_arrays = sum(len(bl_axis_leaves(tree, n_bl)) for tree in trees)
+            n_bl_arrays = (
+                0 if n_bl is None
+                else sum(len(bl_axis_leaves(tree, n_bl)) for tree in trees)
+            )
             model.init_params = shard_pytree(model.init_params, tab_config.n_rfi, n_bl)
             model.state = shard_pytree(model.state, tab_config.n_rfi, n_bl)
             model.constants = shard_pytree(model.constants, tab_config.n_rfi, n_bl)

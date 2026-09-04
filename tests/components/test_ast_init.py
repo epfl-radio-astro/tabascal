@@ -328,6 +328,20 @@ def test_the_default_baseline_block_size_comes_from_the_base_config(tmp_path):
     assert comp.baseline_block_size == 128
 
 
+def test_the_baseline_axis_is_not_split_unless_the_config_asks(tmp_path):
+    """Off by default: splitting costs memory where the padded grid is small."""
+
+    assert setup_ast(ast_config(tmp_path)).shard_baselines is False
+    assert setup_ast(ast_config(tmp_path, shard_baselines=True)).shard_baselines is True
+
+
+@pytest.mark.parametrize("value", [1, "true", None, 0.0])
+def test_a_shard_baselines_that_is_not_a_boolean_is_rejected(tmp_path, value):
+    """A yes/no option, rejected by name for anything else."""
+
+    assert "shard_baselines" in setup_error(ast_config(tmp_path, shard_baselines=value))
+
+
 @pytest.mark.parametrize(
     "block_size", [0, -1, 1.5, True, "128", float("inf"), float("nan")]
 )
@@ -369,7 +383,7 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
     freqs = jnp.linspace(1.4e9, 1.41e9, n_freq)
     times = jnp.linspace(0.0, 120.0, n_time)
 
-    def build(n_ant, block_size):
+    def build(n_ant, block_size, shard=True):
         a1, a2 = jnp.triu_indices(n_ant, 1)
         n_bl = len(a1)
         rng = np.random.default_rng(0)
@@ -379,6 +393,7 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
             + 1j * rng.normal(size=(n_bl, n_freq, n_time))
         )
         args["ast"]["baseline_block_size"] = block_size
+        args["ast"]["shard_baselines"] = shard
         config = SimpleNamespace(
             n_ant=n_ant, n_bl=n_bl, n_freq=n_freq, n_time=n_time,
             freqs=freqs, chan_width=float(freqs[1] - freqs[0]),
@@ -451,6 +466,19 @@ _SHARDED_AST_SCRIPT = textwrap.dedent(
         # live on another process -- which is how this was found, in the two-rank
         # pipeline test rather than here.
         assert component(params).sharding.spec == P(), n_bl
+
+    # Default off: the component then runs replicated, as it did before the
+    # option existed, which is what the single-channel benchmark wants.
+    comp, n_bl = build(4, 2, shard=False)
+    assert comp.shard_baselines is False
+    constants = {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
+    params = dist.shard_pytree(dict(comp.init_params_base), 0, None)
+    constants = dist.shard_pytree(constants, 0, None)
+    assert params["ast_k_r_base"].sharding.is_fully_replicated
+    out = comp.build_forward()(params, dict(comp.state_outputs), constants)["vis_ast"]
+    assert out.sharding.is_fully_replicated
+    ref = reference(comp, params)
+    np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-10, atol=1e-10)
 
     print("SHARDED_AST_OK")
     """

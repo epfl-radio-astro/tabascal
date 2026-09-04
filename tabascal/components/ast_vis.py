@@ -79,6 +79,20 @@ class GPVisAst(Component):
                 None if block_size is None else int(block_size)
             )
 
+            # Off by default, and measured rather than assumed: on a
+            # single-channel benchmark, whose padded grid is (1, 180), splitting
+            # the axis cost 4 % of peak memory in single precision and 11 % in
+            # double across four GPUs and saved nothing -- with no padded grid
+            # worth dividing, the gather of the visibilities is all that is
+            # left. It pays where that grid is large, which is what it is for.
+            shard_baselines = config.args["ast"].get("shard_baselines", False)
+            if not isinstance(shard_baselines, bool):
+                raise ValueError(
+                    "ast.shard_baselines says whether to split the baseline axis "
+                    f"across devices: true or false, got {shard_baselines!r}."
+                )
+            self.shard_baselines = shard_baselines
+
             self.xs = [self.freqs, self.times]
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
             self.ss_factors = [1, 1]
@@ -150,20 +164,22 @@ class GPVisAst(Component):
         The affine transform runs inside the body, on the block, so that neither
         it nor the padded grid is ever formed for every baseline at once.
 
-        Under sharding the whole of that runs per device on that device's slice
-        of the baseline axis, through :func:`map_over_baselines`: each device
-        holds one slice of the latents, of their optimizer state and of the
-        padded grids built from them, and the block scan divides the last of
-        those again. Baselines are independent, so the transform itself needs no
-        collective; the visibilities are gathered back at the end of the forward,
-        because every host-side consumer of them reads the whole array on
-        process 0.
+        With ``ast.shard_baselines`` the whole of that runs per device on that
+        device's slice of the baseline axis, through :func:`map_over_baselines`:
+        each device holds one slice of the latents, of their optimizer state and
+        of the padded grids built from them, and the block scan divides the last
+        of those again. Baselines are independent, so the transform itself needs
+        no collective; the visibilities are gathered back at the end of the
+        forward, because every host-side consumer of them reads the whole array
+        on process 0. That gather, and the split itself, cost memory where the
+        padded grid is small, which is why the option is off by default.
         """
         prefix = self.prefix
         pads = self.pads
         ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
         n_bl = self.n_bl
+        shard_baselines = self.shard_baselines
         block_size = self.baseline_block_size
 
         block_signal = vmap(latent_to_signal, (0, None, None), 0)
@@ -209,11 +225,14 @@ class GPVisAst(Component):
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
-            vis_ast = map_over_baselines(local_vis, n_bl)(
-                ast_k_base, sigma_ast_k, mu_ast_k
+            # Not map_over_baselines(local_vis, 0): a zero baseline count
+            # divides any mesh, so the switch has to be the option itself.
+            mapped = (
+                map_over_baselines(local_vis, n_bl) if shard_baselines else local_vis
             )
+            vis_ast = mapped(ast_k_base, sigma_ast_k, mu_ast_k)
 
-            if sharding_enabled():
+            if shard_baselines and sharding_enabled():
                 # Gathered before it leaves the component. What is split is
                 # everything upstream of this line -- the latents, the optimizer
                 # state derived from them and the padded grids built from them,
