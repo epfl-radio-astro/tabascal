@@ -17,8 +17,6 @@ from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.distributed import (
     barrier,
-    baselines_shardable,
-    bl_axis_leaves,
     is_process_0,
     make_global,
     replicated_sharding,
@@ -95,7 +93,7 @@ def print_devices():
     """Print a table of every *global* JAX device the run is spread over.
 
     Global rather than local: under multi-process only process 0 prints, and the
-    model is sharded over the full mesh (:func:`device_mesh` spans ``jax.devices()``),
+    model is sharded over the full mesh (:func:`rfi_mesh` spans ``jax.devices()``),
     so a local listing would understate what the job is actually using. The process
     column is what distinguishes the one-GPU-per-process layout from a
     single-process multi-GPU one at a glance.
@@ -311,43 +309,14 @@ def tabascal_subtraction(
                 )
 
         if sharding_enabled():
-            # Split every leading-RFI-axis array and every leading-baseline-axis one
-            # across the device mesh, and replicate the rest. _map_step takes all of
-            # these as traced jit arguments, so GSPMD propagates the shardings through
-            # the whole optimization (gradients and optimizer state included) from here
-            # on. (vis_obs/flags/noise were already globalized in TabConfig, before
-            # Model captured them in closures.)
-            # Only when the astronomical component was asked to split its axis:
-            # sharding arrays whose forward is not sharded would gain nothing and
-            # cost a resharding on every step.
-            n_bl = (
-                tab_config.n_bl
-                if config["ast"].get("shard_baselines", False)
-                else None
-            )
-            trees = (model.init_params, model.state, model.constants)
-            n_bl_arrays = (
-                0 if n_bl is None
-                else sum(len(bl_axis_leaves(tree, n_bl)) for tree in trees)
-            )
-            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi, n_bl)
-            model.state = shard_pytree(model.state, tab_config.n_rfi, n_bl)
-            model.constants = shard_pytree(model.constants, tab_config.n_rfi, n_bl)
-
-            # The header above names the RFI axis, which every model has. This line is
-            # printed only for a model that has arrays on the baseline axis, and says
-            # which way that went: a count that does not divide the mesh leaves them
-            # replicated, which is worth reading rather than inferring.
-            if n_bl_arrays and baselines_shardable(n_bl):
-                print(
-                    f"Splitting {n_bl} baselines over {jax.device_count()} devices: "
-                    f"{n_bl_arrays} astronomical arrays"
-                )
-            elif n_bl_arrays:
-                print(
-                    f"Astronomical arrays replicated: {n_bl} baselines do not divide "
-                    f"{jax.device_count()} devices"
-                )
+            # Split every leading-RFI-axis array across the device mesh and replicate
+            # the rest. _map_step takes all of these as traced jit arguments, so GSPMD
+            # propagates the shardings through the whole optimization (gradients and
+            # optimizer state included) from here on. (vis_obs/flags/noise were already
+            # globalized in TabConfig, before Model captured them in closures.)
+            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
+            model.state = shard_pytree(model.state, tab_config.n_rfi)
+            model.constants = shard_pytree(model.constants, tab_config.n_rfi)
 
         _print_model_summary(tab_config, model, start_time)
 

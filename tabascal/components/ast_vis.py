@@ -5,11 +5,6 @@ import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
-from tabascal.distributed import (
-    map_over_baselines,
-    replicated_sharding,
-    sharding_enabled,
-)
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
 from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
 from tabascal.timing import measure_runtime
@@ -76,20 +71,6 @@ class GPVisAst(Component):
                     f"single block over every baseline, got {block_size!r}."
                 )
             self.baseline_block_size_setting = block_size
-
-            # Off by default, and measured rather than assumed: on a
-            # single-channel benchmark, whose padded grid is (1, 180), splitting
-            # the axis cost 4 % of peak memory in single precision and 11 % in
-            # double across four GPUs and saved nothing -- with no padded grid
-            # worth dividing, the gather of the visibilities is all that is
-            # left. It pays where that grid is large, which is what it is for.
-            shard_baselines = config.args["ast"].get("shard_baselines", False)
-            if not isinstance(shard_baselines, bool):
-                raise ValueError(
-                    "ast.shard_baselines says whether to split the baseline axis "
-                    f"across devices: true or false, got {shard_baselines!r}."
-                )
-            self.shard_baselines = shard_baselines
 
             self.xs = [self.freqs, self.times]
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
@@ -180,9 +161,9 @@ class GPVisAst(Component):
         vmap over every baseline holds ``(n_bl, n_freq_pad, n_time_pad)`` three
         times over -- at the default padding each axis is about twice the data
         one, so about four times the elements of the visibilities, and the crop
-        throws all of that away. The scan replaces ``n_bl`` in
-        that shape with the block, which is the whole of the term this component
-        contributes to peak memory.
+        throws all of that away. The scan replaces ``n_bl`` in that shape with
+        the block, which is the whole of the term this component contributes to
+        peak memory.
 
         There is deliberately no ``checkpoint`` on the body, unlike the RFI
         components' scans. The chain from the latent parameters to ``vis_ast`` is
@@ -195,36 +176,30 @@ class GPVisAst(Component):
         The affine transform runs inside the body, on the block, so that neither
         it nor the padded grid is ever formed for every baseline at once.
 
-        With ``ast.shard_baselines`` the whole of that runs per device on that
-        device's slice of the baseline axis, through :func:`map_over_baselines`:
-        each device holds one slice of the latents, of their optimizer state and
-        of the padded grids built from them, and the block scan divides the last
-        of those again. Baselines are independent, so the transform itself needs
-        no collective; the visibilities are gathered back at the end of the
-        forward, because every host-side consumer of them reads the whole array
-        on process 0. That gather, and the split itself, cost memory where the
-        padded grid is small, which is why the option is off by default.
+        Splitting the baseline axis across devices was measured alongside this
+        and is deliberately not here: on the astronomical benchmark the scan
+        takes the value-and-gradient peak from 1008 MB to 163.5 MB on its own,
+        and adding the split takes it back up to 174.5 MB, because the gather
+        the visibilities need on the way out makes the backward pass scatter a
+        cotangent the forward has just collected. See issue #209 for the change
+        that would remove the padded grid altogether.
         """
         prefix = self.prefix
         pads = self.pads
         ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
-        n_bl = self.n_bl
-        shard_baselines = self.shard_baselines
         block_size = self.baseline_block_size
 
         block_signal = vmap(latent_to_signal, (0, None, None), 0)
 
-        def local_vis(ast_k_base, sigma_ast_k, mu_ast_k):
-            # Sizes come off the arrays, not off the config: inside the shard_map
-            # body these are the device's own slice of the baseline axis.
-            n_local = ast_k_base.shape[0]
-            n_block = max(
-                1, n_local if block_size is None else min(block_size, n_local)
-            )
-            n_pad = -n_local % n_block
+        def blocked_vis(ast_k_base, sigma_ast_k, mu_ast_k):
+            # The size comes off the array rather than off the config, so the
+            # body says what it walks.
+            n_bl = ast_k_base.shape[0]
+            n_block = max(1, n_bl if block_size is None else min(block_size, n_bl))
+            n_pad = -n_bl % n_block
 
-            if n_block >= n_local:
+            if n_block >= n_bl:
                 # One step: the scan would stack a single block and reshape it
                 # back, which is a copy for nothing. This is the path a padded
                 # grid that fits the budget takes, and it is the transform as it
@@ -258,7 +233,7 @@ class GPVisAst(Component):
             # lax.scan stacks along axis 0, which is the baseline axis of the
             # result already, so the blocks are flattened rather than transposed.
 
-            return jnp.reshape(vis_ast, (-1,) + vis_ast.shape[2:])[:n_local]
+            return jnp.reshape(vis_ast, (-1,) + vis_ast.shape[2:])[:n_bl]
 
         def forward(params, state, constants):
             # Pure JAX operations only
@@ -267,25 +242,7 @@ class GPVisAst(Component):
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
-            # Not map_over_baselines(local_vis, 0): a zero baseline count
-            # divides any mesh, so the switch has to be the option itself.
-            mapped = (
-                map_over_baselines(local_vis, n_bl) if shard_baselines else local_vis
-            )
-            vis_ast = mapped(ast_k_base, sigma_ast_k, mu_ast_k)
-
-            if shard_baselines and sharding_enabled():
-                # Gathered before it leaves the component. What is split is
-                # everything upstream of this line -- the latents, the optimizer
-                # state derived from them and the padded grids built from them,
-                # which is where the memory is. The visibilities themselves are
-                # read on process 0 by the truth metrics, the results writer and
-                # the plots, and a multi-process run cannot fetch an array whose
-                # shards live on another process, so this is where the split
-                # stops until those consumers move onto the same axis.
-                vis_ast = lax.with_sharding_constraint(
-                    vis_ast, replicated_sharding()
-                )
+            vis_ast = blocked_vis(ast_k_base, sigma_ast_k, mu_ast_k)
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 

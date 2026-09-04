@@ -111,9 +111,8 @@ def process_count() -> int:
 # ---------------------------------------------------------------------------
 
 # Array names whose *leading* axis is the RFI-source axis and which should therefore be
-# split across devices. The astronomical latents have an axis of their own -- see
-# BL_AXIS_NAMES below -- and everything else (per-baseline data, per-antenna gains, the
-# remaining component constants) is replicated. Constants are keyed "<prefix>/<name>" in
+# split across devices. Everything else (per-baseline data, per-antenna gains, ast
+# params, component constants) is replicated. Constants are keyed "<prefix>/<name>" in
 # the model, so matching happens on the part after the last "/". Membership here is not
 # sufficient on its own: shard_pytree additionally requires leaf.shape[0] == n_rfi, so
 # a constant whose leading dimension is a basis size of its own could not be sharded
@@ -134,40 +133,25 @@ RFI_AXIS_NAMES = frozenset({
 
 
 @lru_cache(maxsize=None)
-def device_mesh() -> Mesh:
-    """The single 1-D device mesh everything is sharded over.
+def rfi_mesh() -> Mesh:
+    """The single 1-D device mesh used for RFI-axis sharding.
 
-    Spans *all* global devices with one axis named ``"dev"``, which covers both the
+    Spans *all* global devices with one axis named ``"rfi"``, which covers both the
     single-process multi-GPU layout and the multi-process one-GPU-per-process layout
     uniformly. Cached: every caller must use the same mesh object so shardings compare
     equal and jit avoids spurious recompiles.
-
-    The axis is named for the devices rather than for what rides on it, because two
-    different quantities do: the RFI arrays split along their source axis, the
-    astronomical ones along their baseline axis. Which axis of a given array the split
-    walks is a property of that array, not of the mesh.
     """
-    return Mesh(np.array(jax.devices()), ("dev",))
-
-
-def leading_axis_sharding() -> NamedSharding:
-    """Sharding that splits an array's leading axis across the mesh."""
-    return NamedSharding(device_mesh(), P("dev"))
+    return Mesh(np.array(jax.devices()), ("rfi",))
 
 
 def rfi_sharding() -> NamedSharding:
     """Sharding that splits an array's leading (RFI-source) axis across the mesh."""
-    return leading_axis_sharding()
-
-
-def bl_sharding() -> NamedSharding:
-    """Sharding that splits an array's leading (baseline) axis across the mesh."""
-    return leading_axis_sharding()
+    return NamedSharding(rfi_mesh(), P("rfi"))
 
 
 def replicated_sharding() -> NamedSharding:
     """Sharding that replicates an array on every device of the mesh."""
-    return NamedSharding(device_mesh(), P())
+    return NamedSharding(rfi_mesh(), P())
 
 
 def padded_rfi_count(n_rfi: int) -> int:
@@ -201,12 +185,8 @@ def _wants_rfi_axis(key: str, leaf, n_rfi: int) -> bool:
     return name in RFI_AXIS_NAMES and np.ndim(leaf) >= 1 and np.shape(leaf)[0] == n_rfi
 
 
-def shard_pytree(tree: dict, n_rfi: int, n_bl: int = None) -> dict:
-    """Device-put a flat dict of arrays: axis entries sharded, the rest replicated.
-
-    Two axes ride the one mesh: RFI-source-leading arrays split along their source
-    axis, and -- when ``n_bl`` is given and divides the mesh -- baseline-leading
-    astronomical arrays split along theirs. Everything else is replicated.
+def shard_pytree(tree: dict, n_rfi: int) -> dict:
+    """Device-put a flat dict of arrays: RFI-axis entries sharded, the rest replicated.
 
     Identity when sharding is off. Leaves that already carry the requested sharding
     (e.g. placeholders created via :func:`sharded_rfi_zeros`) are passed through
@@ -216,16 +196,9 @@ def shard_pytree(tree: dict, n_rfi: int, n_bl: int = None) -> dict:
     if not sharding_enabled():
         return tree
 
-    shard_bl = n_bl is not None and baselines_shardable(n_bl)
-
     out = {}
     for key, leaf in tree.items():
-        if _wants_rfi_axis(key, leaf, n_rfi):
-            want = rfi_sharding()
-        elif shard_bl and _wants_bl_axis(key, leaf, n_bl):
-            want = bl_sharding()
-        else:
-            want = replicated_sharding()
+        want = rfi_sharding() if _wants_rfi_axis(key, leaf, n_rfi) else replicated_sharding()
         if isinstance(leaf, jax.Array) and leaf.sharding == want:
             out[key] = leaf
         else:
@@ -290,104 +263,17 @@ def psum_over_rfi(local_fn: Callable) -> Callable:
         return local_fn
 
     def summed(rfi_A, rfi_phase):
-        return lax.psum(local_fn(rfi_A, rfi_phase), "dev")
+        return lax.psum(local_fn(rfi_A, rfi_phase), "rfi")
 
     # Varying-axis type checking must be off: the FFI kernel's custom JVP/transpose
-    # rules produce cotangents without the {V:dev} annotation, which trips the check
+    # rules produce cotangents without the {V:rfi} annotation, which trips the check
     # under value_and_grad. The out_specs still hold -- the psum makes the result
     # replicated -- the checker just cannot prove it for custom primitives.
-    kwargs = dict(mesh=device_mesh(), in_specs=(P("dev"), P("dev")), out_specs=P())
+    kwargs = dict(mesh=rfi_mesh(), in_specs=(P("rfi"), P("rfi")), out_specs=P())
     try:
         return shard_map(summed, check_vma=False, **kwargs)
     except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
         return shard_map(summed, check_rep=False, **kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Baseline-axis sharding
-# ---------------------------------------------------------------------------
-
-# Array names whose *leading* axis is the baseline axis and which are therefore split
-# across devices, so that each device holds one slice of the astronomical latent grid
-# and transforms only that slice. Matched the same way as RFI_AXIS_NAMES -- on the part
-# after the last "/", and only when the leading dimension really is n_bl.
-#
-# The visibilities themselves are deliberately not here: vis_obs, flags and noise are
-# closed over by the likelihood before the model exists, and the RFI path produces a
-# replicated vis_rfi, so splitting the coarse grid buys nothing until that side moves
-# too. What this list covers is the term that is large: the latent parameters, their
-# optimizer state, and the padded Fourier grid built from them.
-BL_AXIS_NAMES = frozenset({
-    # latent params (optimized)
-    "ast_k_r_base", "ast_k_i_base",
-    # constants of the same shape, applied to the latents inside the transform
-    "sigma_ast_k", "mu_ast_k",
-})
-
-
-def baselines_shardable(n_bl: int) -> bool:
-    """Whether the baseline axis divides evenly across the mesh.
-
-    ``shard_map`` needs the axis to divide, and unlike the RFI-source axis there is
-    nothing to pad here: a baseline is a row of the data, and inventing rows would
-    mean inventing visibilities for the likelihood to fit. A count that does not
-    divide therefore leaves the astronomical arrays replicated, which is what the
-    model did before this axis existed.
-    """
-    return sharding_enabled() and n_bl % jax.device_count() == 0
-
-
-def _wants_bl_axis(key: str, leaf, n_bl: int) -> bool:
-    name = key.rsplit("/", 1)[-1]
-    return name in BL_AXIS_NAMES and np.ndim(leaf) >= 1 and np.shape(leaf)[0] == n_bl
-
-
-def bl_axis_leaves(tree: dict, n_bl: int) -> list:
-    """The keys of ``tree`` that carry the baseline axis, in order.
-
-    What the run reports when it says which arrays it split, and empty for a model
-    with no astronomical Fourier component at all -- which is the case where saying
-    anything about a baseline axis would be misleading.
-    """
-    return [key for key, leaf in tree.items() if _wants_bl_axis(key, leaf, n_bl)]
-
-
-def map_over_baselines(local_fn: Callable, n_bl: int) -> Callable:
-    """Map a per-baseline-shard function over the mesh, keeping the result split.
-
-    ``local_fn(*arrays) -> vis`` must take arrays whose leading axis is the baseline
-    axis and return one of the same kind: it runs per device on that device's slice,
-    and the result stays sharded rather than being gathered, so nothing of baseline
-    size is ever formed whole inside it. The counterpart of :func:`psum_over_rfi` for
-    an axis that is not reduced over -- there is no collective here at all, baselines
-    being independent all the way to the likelihood.
-
-    Identity when sharding is off or when the axis does not divide the mesh, which
-    keeps the single-device path bitwise identical.
-    """
-    if not baselines_shardable(n_bl):
-        return local_fn
-
-    def mapped(*arrays):
-        # The specs are built per call rather than fixed at wrap time so that the
-        # arity is the body's business: every argument carries the baseline axis
-        # and so takes the same spec.
-        kwargs = dict(
-            mesh=device_mesh(),
-            in_specs=tuple(P("dev") for _ in arrays),
-            out_specs=P("dev"),
-        )
-        # check_vma off for the same reason as psum_over_rfi: the varying-axis
-        # checker cannot prove what it needs to for every primitive under a
-        # custom transform.
-        try:
-            fn = shard_map(local_fn, check_vma=False, **kwargs)
-        except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
-            fn = shard_map(local_fn, check_rep=False, **kwargs)
-
-        return fn(*arrays)
-
-    return mapped
 
 
 # ---------------------------------------------------------------------------

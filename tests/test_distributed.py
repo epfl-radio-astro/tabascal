@@ -152,37 +152,20 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
 
     # shard_pytree: rfi-axis leaves split, others replicated, values preserved
     n_rfi = 4
-    n_bl = 8
     rng = np.random.default_rng(0)
     tree = {
         "rfi_k_r_base": rng.normal(size=(n_rfi, 2, 3)),
         "_c/ComplexRFIVarAnt/mu_rfi_k": rng.normal(size=(n_rfi, 2, 3)),
         "_c/ConstGains/amp_basis": rng.normal(size=(4, 3)),  # name-excluded
-        "ast_k_r_base": rng.normal(size=(n_bl, 3)),
+        "ast_k_r_base": rng.normal(size=(6, 3)),
     }
     sharded = dist.shard_pytree(tree, n_rfi)
     for key, val in tree.items():
         np.testing.assert_array_equal(np.asarray(sharded[key]), val)
-    assert sharded["rfi_k_r_base"].sharding.spec == P("dev")
-    assert sharded["_c/ComplexRFIVarAnt/mu_rfi_k"].sharding.spec == P("dev")
+    assert sharded["rfi_k_r_base"].sharding.spec == P("rfi")
+    assert sharded["_c/ComplexRFIVarAnt/mu_rfi_k"].sharding.spec == P("rfi")
     assert sharded["_c/ConstGains/amp_basis"].sharding.spec == P()
-    # no n_bl given: the baseline axis is not sharded at all
     assert sharded["ast_k_r_base"].sharding.spec == P()
-
-    # ... and with it, the astronomical latents split along the baseline axis
-    with_bl = dist.shard_pytree(tree, n_rfi, n_bl)
-    for key, val in tree.items():
-        np.testing.assert_array_equal(np.asarray(with_bl[key]), val)
-    assert with_bl["ast_k_r_base"].sharding.spec == P("dev")
-    assert with_bl["rfi_k_r_base"].sharding.spec == P("dev")
-    assert with_bl["_c/ConstGains/amp_basis"].sharding.spec == P()
-
-    # a baseline count that does not divide the mesh stays replicated: there is
-    # nothing to pad a baseline axis with
-    assert dist.baselines_shardable(n_bl)
-    assert not dist.baselines_shardable(6)
-    ragged = {"ast_k_r_base": rng.normal(size=(6, 3))}
-    assert dist.shard_pytree(ragged, n_rfi, 6)["ast_k_r_base"].sharding.spec == P()
 
     # pre-sharded leaves pass through untouched
     again = dist.shard_pytree(sharded, n_rfi)
@@ -191,7 +174,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     # sharded_rfi_zeros: correct global shape/value, one shard per device
     z = dist.sharded_rfi_zeros((n_rfi, 5), complex)
     assert z.shape == (n_rfi, 5)
-    assert z.sharding.spec == P("dev")
+    assert z.sharding.spec == P("rfi")
     np.testing.assert_array_equal(np.asarray(z), 0)
     assert all(s.data.shape == (1, 5) for s in z.addressable_shards)
 
@@ -216,44 +199,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
 
     g = jax.jit(jax.grad(loss))(A_s)
     assert g.shape == A.shape
-    assert g.sharding.spec == P("dev")
-
-    # map_over_baselines: no collective, the result stays split, and value and
-    # gradient match the unsharded computation
-    K = rng.normal(size=(n_bl, 2, 3))
-    S = rng.normal(size=(n_bl, 2, 3))
-    M = rng.normal(size=(n_bl, 2, 3))
-
-    def local_ast(k, s, m):
-        # toy per-baseline transform: elementwise, then a reduction that keeps
-        # the baseline axis, as the real one does
-        return jnp.sum(s * k + m, axis=(1, 2))
-
-    expect = np.asarray(local_ast(jnp.asarray(K), jnp.asarray(S), jnp.asarray(M)))
-    K_s = dist.make_global(K, dist.bl_sharding())
-    S_s = dist.make_global(S, dist.bl_sharding())
-    M_s = dist.make_global(M, dist.bl_sharding())
-    got = dist.map_over_baselines(local_ast, n_bl)(K_s, S_s, M_s)
-    assert got.sharding.spec == P("dev")
-    np.testing.assert_allclose(np.asarray(got), expect, rtol=1e-12)
-
-    def ast_loss(k):
-        return jnp.sum(dist.map_over_baselines(local_ast, n_bl)(k, S_s, M_s) ** 2)
-
-    def plain_loss(k):
-        return jnp.sum(local_ast(k, jnp.asarray(S), jnp.asarray(M)) ** 2)
-
-    g_ast = jax.jit(jax.grad(ast_loss))(K_s)
-    assert g_ast.shape == K.shape
-    assert g_ast.sharding.spec == P("dev")
-    # The values too, not only the shape and the sharding: the transpose of a
-    # shard_map is its own rule, and a wrong one keeps both of those.
-    np.testing.assert_allclose(
-        np.asarray(g_ast), np.asarray(jax.grad(plain_loss)(jnp.asarray(K))), rtol=1e-12
-    )
-
-    # a ragged baseline count falls back to running the body unsharded
-    assert dist.map_over_baselines(local_ast, 6) is local_ast
+    assert g.sharding.spec == P("rfi")
 
     # constrain_rfi_state inside jit keeps the rfi sharding
     def f(state):
@@ -261,7 +207,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
         return dist.constrain_rfi_state(state, n_rfi)
 
     out = jax.jit(f)({"rfi_A": A_s})
-    assert out["rfi_A"].sharding.spec == P("dev")
+    assert out["rfi_A"].sharding.spec == P("rfi")
 
     print("MULTI_DEVICE_OK")
     """

@@ -89,16 +89,6 @@ kernels](kernels.md)) run in either precision, as do the astronomical Gaussian
 process `ast_vis:GPVisAst` and both gain components, `gains:ConstGains` and
 `gains:UnitaryGains`.
 
-### Splitting the work across devices
-
-With more than one device visible, the run splits two different axes over the same mesh.
-
-The RFI arrays split along their **source** axis: each device holds a slice of the satellites and their fine grids, and the per-source visibilities are summed across devices once per forward pass. The satellite list is padded to a multiple of the device count with dark dummies so the axis divides.
-
-With `ast.shard_baselines` set, the astronomical latent parameters — and their optimiser state, and the padded Fourier grids built from them — split along their **baseline** axis. Baselines are independent, so each device transforms its own slice with nothing summed across devices; the resulting visibilities are then gathered, because everything that reads a prediction afterwards — the truth metrics, the results writer, the plots — reads the whole array on one process. The split is therefore over the transform and its parameters, not over the visibilities. There is nothing to pad a baseline axis with, a baseline being a row of the data rather than a modelling choice, so when the baseline count does not divide the device count the astronomical arrays stay replicated and the run proceeds as it did before, whole on each device. The run prints which of the two happened. Without the option the astronomical arrays stay replicated, as they were before it existed.
-
-The two are the same physical split of the same devices; which axis of a given array it walks is a property of that array.
-
 ## Data
 
 The `data` section of the configuration file includes only a few options to select the data to use. An exhaustive example is given below.
@@ -272,7 +262,6 @@ ast:
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   baseline_block_size: auto
-  shard_baselines: false
   pow_spec:
     p0: 3e3
     k0_freq: 1
@@ -287,8 +276,7 @@ ast:
 * `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`.
 * `baseline_block_size`: The number of baselines `GPVisAst` transforms per step of its scan over the baseline axis: `auto`, the default, sizes the block so that one step's padded grid stays inside a fixed budget; a whole number sets it outright; `null` puts every baseline in a single step. Turning the latent modes back into visibilities means padding them up to the padded Fourier grid, transforming, and cropping the padding away again, so doing every baseline at once holds an `(n_bl, n_freq_pad, n_time_pad)` array several times over — most of it discarded by the crop. Each padded axis is `n + 2 * floor(n * (pad_factor - 1) / 2)`, so at the default factor of `2.0` it is about twice the data axis. The scan replaces `n_bl` in that shape with the block. It is purely a memory strategy: baselines are independent, so the result does not depend on it, and unlike the RFI scans there is no checkpoint on the body — the transform is affine in the parameters, so its derivative is a linear map with no primal intermediates to store.
 
-  `auto` exists because a block that does not bind costs scan steps for nothing. On a single-channel observation, where the padded grid is 1 by 180, a fixed block of `128` split 4560 baselines into 36 steps and cost 13 % of the optimiser's time with no memory saved; sized from the grid, the same observation runs in one step, and a wide band still blocks. Across several devices the scan runs on each device's own slice of the baseline axis; see [Splitting the work across devices](#splitting-the-work-across-devices).
-* `shard_baselines`: Whether to split `GPVisAst`'s baseline axis across the visible devices, so that each device holds one slice of the latent parameters, of the optimiser state derived from them, and of the padded Fourier grids built from them. `false` by default, and ignored on a single device. It is off by default because it only pays where the padded grid is large: on the single-channel benchmark of the [performance checks](performance.md), whose grid is 1 by 180, it saved nothing and cost 4 % of peak memory in single precision and 12 % in double across four GH200s — with no grid worth dividing, what is left is the gather of the visibilities. Turn it on for a wide band, where that grid is the largest array in the model. See [Splitting the work across devices](#splitting-the-work-across-devices).
+  `auto` exists because a block that does not bind costs scan steps for nothing. On a single-channel observation, where the padded grid is 1 by 180, a fixed block of `128` split 4560 baselines into 36 steps and cost 13 % of the optimiser's time with no memory saved; sized from the grid, the same observation runs in one step, and a wide band still blocks.
 * `pow_spec`: This is the section that defines the prior covariance of the signal. The signal is modelled in the Fourier domain so the prior covariance is given by the power spectrum of the signal.
 
 The parameters for the power spectrum are defined as
@@ -375,7 +363,6 @@ The visibility equation above is written for the baseline $b = \mathrm{ANTENNA2}
 Getting it wrong is not obvious from the fit. Negating all three axes conjugates every visibility, which is the sky mirrored through the phase centre: the fixed sources sit in the wrong place, and since that corruption is smooth it is largely what a gain solved against a fixed sky will absorb, leaving the optimisation looking converged. The correct value is a property of the dataset rather than of the model, so it is worth establishing once per instrument or pipeline — for instance by checking the `UVW` column against the antenna positions and `ANTENNA1`/`ANTENNA2` of the same row, or by imaging a bright known source and confirming it is not reflected through the phase centre.
 
 Note that the catalogue fluxes are in the same scale as the data the model is fit to. With data calibrated to Jy these are physical Jy; without that, the data are in raw correlator units and a Jy catalogue flux is meaningless.
-
 
 
 ## RFI signal
