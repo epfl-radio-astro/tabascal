@@ -1,3 +1,5 @@
+from math import isfinite
+
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
 
@@ -49,12 +51,34 @@ class GPVisAst(Component):
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]
 
+            # null is a setting, not a missing value: every baseline in one
+            # step, which is the padded transform at full width. int() alone
+            # would turn 1.9 into 1 without a word, and the finiteness test
+            # comes before it because yaml spells .inf and .nan, on which int()
+            # raises with a message about floats rather than about the key.
+            block_size = config.args["ast"].get("baseline_block_size", "auto")
+            if block_size not in ("auto", None) and (
+                isinstance(block_size, bool)
+                or not isinstance(block_size, (int, float))
+                or not isfinite(block_size)
+                or block_size != int(block_size)
+                or block_size < 1
+            ):
+                raise ValueError(
+                    "ast.baseline_block_size is the number of baselines "
+                    "transformed per scan step: a whole number of at least 1, "
+                    "'auto' to size it from the padded grid, or null for a "
+                    f"single block over every baseline, got {block_size!r}."
+                )
+            self.baseline_block_size_setting = block_size
+
             self.xs = [self.freqs, self.times]
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
             self.ss_factors = [1, 1]
 
             # Do expensive setup operations once
             self._compute_gp_params()
+            self._resolve_baseline_block_size()
             self._compute_prior_params(config.args["ast"]["mean"], config.vis_obs)
 
             if config.args["plots"]["truth"] or config.args["ast"]["init"] == "truth":
@@ -71,6 +95,38 @@ class GPVisAst(Component):
 
         except Exception as e:
             raise RuntimeError(f"GPVisAst setup failed: {e}")
+
+    #: How much of a padded Fourier grid one scan step may build, in bytes. The
+    #: block is sized from this under ``baseline_block_size: auto``. Three arrays
+    #: of that size are live at the peak -- the pad, the shift and the transform
+    #: -- so the budget is the transform's transient, not the model's.
+    #:
+    #: It exists because a block that does not bind costs scan steps for nothing:
+    #: on a single-channel observation, whose padded grid is (1, 180), a fixed
+    #: block of 128 split 4560 baselines into 36 steps and cost 13 % of the
+    #: optimiser's time on the cheaper of the two RFI kernels, with no memory to
+    #: show for it. At this budget that observation runs in one step, and a wide
+    #: band -- where the grid is the largest array in the model -- still blocks.
+    _BLOCK_BUDGET_BYTES = 64 * 1024**2
+
+    def _resolve_baseline_block_size(self):
+        """Turn the ``baseline_block_size`` setting into a block, or ``None``."""
+
+        setting = self.baseline_block_size_setting
+        if setting != "auto":
+            self.baseline_block_size = None if setting is None else int(setting)
+            return
+
+        # One baseline's padded grid, in the precision the run is in.
+        padded = 1
+        for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
+            padded *= dim + lo + hi
+        per_baseline = padded * jnp.zeros((), dtype=complex).dtype.itemsize
+
+        block = max(1, self._BLOCK_BUDGET_BYTES // max(1, per_baseline))
+        # A block at or above the axis is one step over all of it, which is what
+        # the whole grid fitting the budget should mean.
+        self.baseline_block_size = min(int(block), self.n_bl)
 
     def build_set_params(self):
         n_bl = self.n_bl
@@ -97,11 +153,87 @@ class GPVisAst(Component):
         }
 
     def build_forward(self):
-        """Return pure, JIT-compatible function"""
+        """Return pure, JIT-compatible function
+
+        The baseline axis is walked in blocks of ``ast.baseline_block_size``
+        rather than vmapped whole. ``latent_to_signal`` pads the latent block up
+        to the padded k-grid, shifts, inverse-transforms and crops back, so a
+        vmap over every baseline holds ``(n_bl, n_freq_pad, n_time_pad)`` three
+        times over -- at the default padding each axis is about twice the data
+        one, so about four times the elements of the visibilities, and the crop
+        throws all of that away. The scan replaces ``n_bl`` in that shape with
+        the block, which is the whole of the term this component contributes to
+        peak memory.
+
+        There is deliberately no ``checkpoint`` on the body, unlike the RFI
+        components' scans. The chain from the latent parameters to ``vis_ast`` is
+        affine -- an elementwise ``sigma * base + mu``, then pad, shift, ifftn and
+        crop, every one of them linear -- so reverse mode is its transpose and
+        stores no primal intermediates to begin with. Issue #153 records the
+        measurement; a remat here would be a no-op today and a silent
+        recomputation if the chain ever stopped being linear.
+
+        The affine transform runs inside the body, on the block, so that neither
+        it nor the padded grid is ever formed for every baseline at once.
+
+        Splitting the baseline axis across devices was measured alongside this
+        and is deliberately not here: on the astronomical benchmark the scan
+        takes the value-and-gradient peak from 1008 MB to 163.5 MB on its own,
+        and adding the split takes it back up to 174.5 MB, because the gather
+        the visibilities need on the way out makes the backward pass scatter a
+        cotangent the forward has just collected. See issue #209 for the change
+        that would remove the padded grid altogether.
+        """
         prefix = self.prefix
         pads = self.pads
         ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
+        block_size = self.baseline_block_size
+
+        block_signal = vmap(latent_to_signal, (0, None, None), 0)
+
+        def blocked_vis(ast_k_base, sigma_ast_k, mu_ast_k):
+            # The size comes off the array rather than off the config, so the
+            # body says what it walks.
+            n_bl = ast_k_base.shape[0]
+            n_block = max(1, n_bl if block_size is None else min(block_size, n_bl))
+            n_pad = -n_bl % n_block
+
+            if n_block >= n_bl:
+                # One step: the scan would stack a single block and reshape it
+                # back, which is a copy for nothing. This is the path a padded
+                # grid that fits the budget takes, and it is the transform as it
+                # was before the scan existed.
+                return block_signal(
+                    forward_transform(ast_k_base, sigma_ast_k, mu_ast_k),
+                    pads,
+                    ss_idxs,
+                )
+
+            def block_vis(carry, block):
+                k_base, sigma, mu = block
+
+                return carry, block_signal(
+                    forward_transform(k_base, sigma, mu), pads, ss_idxs
+                )
+
+            # The padding baselines of the last block carry a zero latent, a zero
+            # sigma and a zero mu, so they transform to zero; the slice below
+            # drops them, and being linear it drops their gradient with them.
+            def bl_blocks(x):
+                padded = jnp.pad(x, ((0, n_pad), (0, 0), (0, 0)))
+
+                return jnp.reshape(padded, (-1, n_block) + x.shape[1:])
+
+            _, vis_ast = lax.scan(
+                block_vis,
+                None,
+                tuple(bl_blocks(x) for x in (ast_k_base, sigma_ast_k, mu_ast_k)),
+            )
+            # lax.scan stacks along axis 0, which is the baseline axis of the
+            # result already, so the blocks are flattened rather than transposed.
+
+            return jnp.reshape(vis_ast, (-1,) + vis_ast.shape[2:])[:n_bl]
 
         def forward(params, state, constants):
             # Pure JAX operations only
@@ -110,9 +242,7 @@ class GPVisAst(Component):
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
-            ast_k = forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
-
-            vis_ast = vmap(latent_to_signal, (0, None, None), 0)(ast_k, pads, ss_idxs)
+            vis_ast = blocked_vis(ast_k_base, sigma_ast_k, mu_ast_k)
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 

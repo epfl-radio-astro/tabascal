@@ -16,6 +16,7 @@ astronomical visibility of zero, through the forward the model actually runs.
 import re
 from importlib.resources import files
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -255,3 +256,104 @@ def test_ast_mean_zero_and_zeros_are_the_same_prior(tmp_path):
     np.testing.assert_array_equal(numeric.mu_ast_k, named.mu_ast_k)
     for key, value in numeric.init_params_base.items():
         np.testing.assert_array_equal(value, named.init_params_base[key])
+
+
+# ---------------------------------------------------------------------------
+# The baseline block scan
+#
+# latent_to_signal pads the latent grid up to the padded k-grid, transforms and
+# crops back, so vmapping it over every baseline holds (n_bl, n_freq_pad,
+# n_time_pad) several times over -- padding the crop then throws away. The
+# component walks the baseline axis in blocks of ast.baseline_block_size
+# instead. Baselines are independent, so the block changes memory and nothing
+# else; these tests are what holds that.
+# ---------------------------------------------------------------------------
+
+#: 6 baselines at n_ant=4, so these span one baseline per step, blocks that do
+#: and do not divide the axis, a block wider than it, and null (a single block).
+BLOCK_SIZES = [1, 4, 6, 128, None]
+
+
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+def test_the_baseline_block_size_changes_neither_value_nor_gradient(
+    tmp_path, block_size
+):
+    """The scanned transform reproduces the unblocked one, block for block.
+
+    Value and gradient both: the scan carries the affine transform into its body
+    and pads its last block, either of which could go wrong in a way that only
+    reverse mode would show.
+    """
+
+    def value_and_grad(block):
+        comp = setup_ast(ast_config(tmp_path, baseline_block_size=block))
+        constants = make_constants(comp)
+        forward = comp.build_forward()
+        state = dict(comp.state_outputs)
+
+        def loss(params):
+            vis = forward(params, state, constants)["vis_ast"]
+            return jnp.sum(jnp.abs(vis) ** 2)
+
+        params = comp.init_params_base
+        vis = forward(params, state, constants)["vis_ast"]
+
+        return np.asarray(vis), jax.grad(loss)(params)
+
+    # The reference is the whole axis in one step, i.e. the vmap this replaced.
+    ref_vis, ref_grads = value_and_grad(None)
+    vis, grads = value_and_grad(block_size)
+
+    np.testing.assert_allclose(vis, ref_vis, rtol=1e-12, atol=1e-12)
+    for key in ref_grads:
+        np.testing.assert_allclose(
+            np.asarray(grads[key]), np.asarray(ref_grads[key]), rtol=1e-12, atol=1e-12
+        )
+
+
+def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path):
+    """A config predating the key still builds, on the base default of ``auto``.
+
+    The point of ``auto`` is that a block which does not bind is pure overhead,
+    so on a grid this small it has to come out as a single step over the whole
+    axis rather than as some fixed count.
+    """
+
+    args = base_args(tmp_path)
+    del args["ast"]["baseline_block_size"]
+
+    config = make_ast_config(args)
+    comp = GPVisAst()
+    comp.setup(config)
+
+    assert comp.baseline_block_size_setting == "auto"
+    assert comp.baseline_block_size == config.n_bl
+
+
+def test_auto_blocks_a_padded_grid_that_does_not_fit_the_budget(tmp_path):
+    """And binds where the grid is large, which is the case it exists for."""
+
+    comp = setup_ast(ast_config(tmp_path, baseline_block_size="auto"))
+    padded = 1
+    for dim, (lo, hi) in zip((comp.n_k_freq_ast, comp.n_k_time_ast), comp.pads):
+        padded *= dim + lo + hi
+
+    # The same arithmetic the component does, against a budget cut so far that
+    # the grid cannot fit: the block has to fall well short of the axis.
+    comp._BLOCK_BUDGET_BYTES = 8 * padded
+    comp._resolve_baseline_block_size()
+
+    assert 1 <= comp.baseline_block_size < comp.n_bl
+
+
+@pytest.mark.parametrize(
+    "block_size", [0, -1, 1.5, True, "128", float("inf"), float("nan")]
+)
+def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
+    tmp_path, block_size
+):
+    """Rejected in setup, by name. ``None`` is not here: null is a setting."""
+
+    message = setup_error(ast_config(tmp_path, baseline_block_size=block_size))
+
+    assert "baseline_block_size" in message

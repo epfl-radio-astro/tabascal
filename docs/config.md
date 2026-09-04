@@ -261,6 +261,7 @@ ast:
   mean: 0
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
+  baseline_block_size: auto
   pow_spec:
     p0: 3e3
     k0_freq: 1
@@ -273,6 +274,9 @@ ast:
 * `mean`: The mean of the prior distribution: `0` (equivalently `zeros`), the default, or `data`, the observed visibilities.
 * `freq_pad_factor`: This defines the size of the padding used when modelling the signal in the Fourier domain. The signal is modelled in the Fourier domain where periodicity is assumed on some interval. If `freq_pad_factor: 1.0` is given then the interval is the interval of the data itself and will lead to periodic solutions.
 * `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`.
+* `baseline_block_size`: The number of baselines `GPVisAst` transforms per step of its scan over the baseline axis: `auto`, the default, sizes the block so that one step's padded grid stays inside a fixed budget; a whole number sets it outright; `null` puts every baseline in a single step. Turning the latent modes back into visibilities means padding them up to the padded Fourier grid, transforming, and cropping the padding away again, so doing every baseline at once holds an `(n_bl, n_freq_pad, n_time_pad)` array several times over — most of it discarded by the crop. Each padded axis is `n + 2 * floor(n * (pad_factor - 1) / 2)`, so at the default factor of `2.0` it is about twice the data axis. The scan replaces `n_bl` in that shape with the block. It is purely a memory strategy: baselines are independent, so the result does not depend on it, and unlike the RFI scans there is no checkpoint on the body — the transform is affine in the parameters, so its derivative is a linear map with no primal intermediates to store.
+
+  `auto` exists because a block that does not bind costs scan steps for nothing. On a single-channel observation, where the padded grid is 1 by 180, a fixed block of `128` split 4560 baselines into 36 steps and cost 13 % of the optimiser's time with no memory saved; sized from the grid, the same observation runs in one step, and a wide band still blocks.
 * `pow_spec`: This is the section that defines the prior covariance of the signal. The signal is modelled in the Fourier domain so the prior covariance is given by the power spectrum of the signal.
 
 The parameters for the power spectrum are defined as
