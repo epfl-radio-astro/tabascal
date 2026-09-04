@@ -483,27 +483,37 @@ def _validate_pow_spec(pow_spec) -> Dict:
 
     if out["gammas"] is not None:
         gammas = out["gammas"]
-        # An *ordered* pair. Mappings and sets are turned away by name rather
-        # than by an allow-list of list/tuple: both would pass a bare len() check
-        # and be read as their keys, in an order that means nothing, while the
-        # two entries name the frequency and time axes in that order -- but an
-        # ordered numpy pair is a perfectly good way to say the same thing.
-        if (
-            isinstance(gammas, (str, bytes, Mapping, AbstractSet))
-            or not hasattr(gammas, "__len__")
-            or not hasattr(gammas, "__getitem__")
-        ):
+        # An *ordered* pair of numbers, asked as that rather than duck-typed.
+        # Anything keyed rather than ordered -- a mapping, a set, a DataFrame --
+        # passes a len()/__getitem__ check of length two and is then read as its
+        # keys, in an order that means nothing, while the two entries name the
+        # frequency and time axes in that order. np.asarray settles it: a keyed
+        # thing comes back 0-d (object) or 2-D, an ordered pair comes back
+        # 1-D of length 2, and a list, a tuple and a numpy pair all say it.
+        ordered = None
+        if not isinstance(gammas, (str, bytes, Mapping, AbstractSet)):
+            try:
+                as_array = np.asarray(gammas, dtype=object)
+            except Exception:
+                as_array = None
+            if as_array is not None and as_array.ndim == 1:
+                # Ordered, so the count is worth saying on its own -- it is the
+                # likeliest mistake and the vaguer message below would hide it.
+                if as_array.size != 2:
+                    raise ValueError(
+                        f"rfi.pow_spec.gammas has {as_array.size} entries; it "
+                        "takes 2, the roll-off exponent on the frequency and time "
+                        "axes in that order."
+                    )
+                ordered = list(as_array)
+
+        if ordered is None:
             raise ValueError(
                 f"Config parameter (rfi:\n\tpow_spec:\n\t\tgammas: {gammas!r}) is "
                 "not a pair. It is the roll-off exponent on each of the frequency "
                 "and time axes, in that order, e.g. [3, 3]."
             )
-        if len(gammas) != 2:
-            raise ValueError(
-                f"rfi.pow_spec.gammas has {len(gammas)} entries; it takes 2, the "
-                "roll-off exponent on the frequency and time axes in that order."
-            )
-        out["gammas"] = [_positive_float(g, "gammas") for g in gammas]
+        out["gammas"] = [_positive_float(g, "gammas") for g in ordered]
 
     if out["cutoff"] is not None:
         cutoff = _positive_float(out["cutoff"], "cutoff")

@@ -1981,6 +1981,15 @@ class TestPowSpecIsRead:
 
         assert comp.gp_pow_spec()[0] == [3.0, 3.0]
 
+    def test_gammas_given_as_something_keyed_rather_than_ordered_is_refused(self):
+        """A DataFrame of two columns has len 2 and __getitem__, and reads as its
+        column labels. It stands in here for everything keyed that a duck-typed
+        check would let through -- the axes this indexes are ordered."""
+        pd = pytest.importorskip("pandas")
+        frame = pd.DataFrame([[9, 9], [9, 9]], columns=[3, 4])
+
+        assert "gammas" in pow_spec_error(ComplexRFIVarAnt, {"gammas": frame})
+
     @pytest.mark.parametrize("gammas", [{3: None, 4: None}, {3, 4}])
     def test_gammas_given_as_an_unordered_pair_are_refused(self, gammas):
         """A mapping or a set of length two passes len() and iterates to its keys,
