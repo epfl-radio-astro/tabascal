@@ -423,10 +423,16 @@ class TestAstPowSpecIsValidated:
         assert comp.gammas == [5.0, 5.0]
 
     def test_an_unknown_key_is_refused_by_name(self, tmp_path):
-        """`gamma` for `gammas` is the mistake this catches."""
+        """`gamma` for `gammas` is the mistake this catches.
+
+        Asserted against the offending-key list rather than the whole message:
+        every message ends "It takes [... 'gammas' ...]", so a bare
+        `"gamma" in message` passes for a validator that names nothing. The same
+        trap was fixed on the RFI side and then walked into again here.
+        """
         message = setup_error(pow_spec_config(tmp_path, gamma=5))
 
-        assert "gamma" in message
+        assert "no key(s) ['gamma']" in message
 
     def test_fov_deg_may_be_null_and_the_others_may_not(self, tmp_path):
         """null fov_deg means the telescope's own beam; the rest have no such

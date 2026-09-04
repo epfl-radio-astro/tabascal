@@ -593,3 +593,54 @@ class TestNumericalAccuracy:
         # Check that uncut has same shape as original and kept modes match
         assert Y_uncut.shape == Y_orig.shape
         assert jnp.allclose(Y_uncut[idxs[0]], Y_orig[idxs[0]], rtol=1e-5)
+
+
+class TestPkCutRefusesAnEmptySelection:
+    """``pk_cut`` reports *why* nothing survived, because the advice differs.
+
+    Before this it fell through to ``idx[i].min()`` and came back as "zero-size
+    array to reduction operation min", which names neither the cutoff nor the
+    cause. The four causes need four different answers, and telling someone to
+    lower a cutoff that is already valid is worse than saying nothing.
+    """
+
+    def test_an_empty_grid_says_so_before_any_reduction(self):
+        """Checked first: the per-axis max would otherwise raise its own
+        zero-size error before the diagnosis could be reached."""
+        with pytest.raises(ValueError, match="power spectrum is empty"):
+            pk_cut(jnp.empty((0, 2)), 0.5)
+
+    def test_a_cutoff_at_one_names_the_cutoff_and_says_to_lower_it(self):
+        with pytest.raises(ValueError) as excinfo:
+            pk_cut(jnp.ones((4, 4)), 1.0)
+
+        assert "at or above 1" in str(excinfo.value)
+        assert "Set it below 1" in str(excinfo.value)
+
+    def test_a_spectrum_with_no_positive_power_does_not_blame_the_cutoff(self):
+        """A valid cutoff and an underflowed spectrum: no cutoff can help, and
+        the message has to say that rather than repeat "lower it"."""
+        with pytest.raises(ValueError) as excinfo:
+            pk_cut(jnp.zeros((2, 2)), 0.5)
+
+        message = str(excinfo.value)
+        assert "no positive power" in message
+        assert "No cutoff can help" in message
+        assert "Set it below 1" not in message
+
+    def test_a_negative_spectrum_is_not_called_an_underflow(self):
+        """`largest <= 0` covers both, but they are not the same thing."""
+        with pytest.raises(ValueError, match="no positive power"):
+            pk_cut(jnp.array([-2.0, -1.0]), 0.5)
+
+    def test_a_non_finite_spectrum_is_named_as_such(self):
+        """Even where the largest value is not the non-finite one."""
+        with pytest.raises(ValueError) as excinfo:
+            pk_cut(jnp.array([0.0, -jnp.inf]), 0.5)
+
+        assert "not finite" in str(excinfo.value)
+        assert "no positive power" not in str(excinfo.value)
+
+    def test_a_non_finite_cutoff_is_named_as_such(self):
+        with pytest.raises(ValueError, match="the cutoff is nan"):
+            pk_cut(jnp.ones((2, 2)), float("nan"))

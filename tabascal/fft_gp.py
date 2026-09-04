@@ -79,8 +79,13 @@ def _pow_spec_pair(value, where: str) -> List[float]:
     # if the user wrote time first. A masked array is excluded for the same
     # reason in miniature: np.asarray drops the mask, so an entry marked absent
     # would come back as the data underneath it.
+    # `type(...) is np.ndarray` rather than isinstance: an ndarray *subclass*
+    # carries meaning that np.asarray then throws away -- the mask of a masked
+    # array, the units of an astropy Quantity, the index of anything keyed --
+    # and stripping it silently is how the wrong two numbers become the two
+    # exponents.
     ordered = None
-    if isinstance(value, (list, tuple, np.ndarray, jax.Array)) and not np.ma.isMaskedArray(value):
+    if isinstance(value, (list, tuple, jax.Array)) or type(value) is np.ndarray:
         try:
             as_array = np.asarray(value, dtype=object)
         except Exception:
@@ -536,6 +541,13 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
     tuple[list[slice], list[tuple[int, int]]]
         The indexes and pads to remove/add Fourier modes relative to the cutoff.
     """
+    if pk.size == 0:
+        raise ValueError(
+            f"The power spectrum is empty (shape {tuple(pk.shape)}), so there are "
+            "no Fourier modes to cut. This is a degenerate grid rather than a "
+            "cutoff that is set wrongly."
+        )
+
     # A mode is kept only where it clears the cutoff relative to the largest
     # mode along *every* axis -- the reduce below is logical_and, not or.
     masks = [pk > cutoff * pk.max(axis=i, keepdims=True) for i in range(pk.ndim)]
@@ -555,28 +567,39 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
         # or above 1 is the one the config validation catches by name; a cutoff
         # that only reaches 1 after rounding into the working precision is not,
         # and a power spectrum that is degenerate is not about the cutoff at all.
-        largest = float(jnp.max(pk)) if pk.size else 0.0
+        largest = float(jnp.max(pk))
+        finite = bool(np.isfinite(np.asarray(pk)).all())
+
         if not np.isfinite(cutoff):
             why = f"the cutoff is {cutoff!r}"
-        elif not np.isfinite(largest):
-            why = f"the power spectrum is not finite (its largest mode is {largest})"
+            fix = "Set a finite cutoff below 1 -- see rfi.pow_spec.cutoff and ast.pow_spec.cutoff."
+        elif not finite:
+            why = "the power spectrum is not finite"
+            fix = (
+                "The cutoff is not what is wrong here: check p0 and the variance "
+                "the spectrum is scaled to."
+            )
         elif largest <= 0.0:
             why = (
-                "the power spectrum is everywhere zero, which usually means its "
-                "power at the origin underflowed -- check p0, and the variance it "
-                "is scaled to"
+                f"the power spectrum has no positive power at all (its largest "
+                f"value is {largest})"
+            )
+            fix = (
+                "No cutoff can help: the comparison is strict, so nothing clears "
+                "a threshold of zero. Check p0 and the variance the spectrum is "
+                "scaled to -- an underflow to zero looks like this."
             )
         else:
             why = (
                 f"a cutoff of {cutoff!r} is at or above 1 in the working "
                 "precision, and nothing clears it"
             )
+            fix = "Set it below 1 -- see rfi.pow_spec.cutoff and ast.pow_spec.cutoff."
 
         raise ValueError(
-            f"A power spectrum cutoff of {cutoff!r} leaves no Fourier modes: {why}. "
-            "The cutoff is a power relative to the largest mode on each axis, and "
-            "the comparison is strict. Set it below 1 -- see rfi.pow_spec.cutoff "
-            "and ast.pow_spec.cutoff."
+            f"A power spectrum cutoff of {cutoff!r} leaves no Fourier modes: "
+            f"{why}. The cutoff is a power relative to the largest mode on each "
+            f"axis, and the comparison is strict. {fix}"
         )
 
     # Calculate bounding box slices and padding to restore size
