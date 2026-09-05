@@ -60,12 +60,17 @@ untouched.
 values are seconds or days; TABASCAL works in MJD days.
 :func:`~tabascal.ms.read_time_unit` returns the declaration and
 :func:`~tabascal.ms.times_to_mjd` applies it, falling back — for the columns
-that carry no declaration — on the spacing of consecutive samples: an
-integration is seconds long, so a gap above half a day can only be seconds. A
-single-integration MS has no spacing to read and its unit comes from magnitude
-instead, an MJD day number being at most ~1e5 in any plausible observing era
-against ~1e9 for the same instant in seconds. Both thresholds are strict: a
-spacing of exactly 0.5, or a magnitude of exactly 1e5, reads as days.
+that carry no declaration — on the magnitude of the times: an MJD day number is
+at most ~1e5 in any plausible observing era against ~1e9 for the same instant in
+seconds, and nothing an MS can store falls between. The threshold is strict: a
+magnitude of exactly 1e5 reads as days.
+
+The spacing of consecutive samples used to decide this instead. It could not:
+a day-numbered column stepping by a day has a spacing above the half-day
+threshold too and was read as seconds, and the threshold was strict, so an
+integration of exactly 0.5 s — a common correlator dump time — was read as days.
+Magnitude parts every column the spacing rule parted correctly, so the rule is
+gone rather than repaired.
 
 Both :func:`~tabascal.ms.read_ms` and the preflight observation-epoch helper
 convert here, so the heuristic cannot classify one MS two ways — including for
@@ -73,8 +78,8 @@ an MS whose timestep blocks do not ascend, since the classification sorts. What
 they can still differ on is a *declared* unit: the preflight helper reads the
 ``TIME`` column through casacore and takes only its ``MEASINFO`` record from the
 keywords, not its ``QuantumUnits``, so an MS whose ``QuantumUnits`` contradicts
-the spacing of the times it stores is read on the declared unit by ``read_ms``
-and on the inferred one by the TLE age checks.
+the unit its times are inferred to be in is read on the declared unit by
+``read_ms`` and on the inferred one by the TLE age checks.
 
 CASA calibration tables
 -----------------------

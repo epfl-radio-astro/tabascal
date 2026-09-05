@@ -2,7 +2,7 @@
 # Data parameters
 ##################
 data:
-  sim_dir: null           # Optional - Can be provided when running tabascal   
+  sim_dir: null           # Required - Where the run writes its plots and results, and where a simulation's MS and truth zarr are looked for. Can be given instead with -s
   ms_path: null           # Optional - Can be provided when running tabascal 
   freq: null              # Optional - A single frequency in Hz to run on, resolved to the nearest channel and refused if it falls outside the band. null, the default, reads every channel
   data_col: DATA          # Optional - Defaults to 'DATA'

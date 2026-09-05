@@ -353,7 +353,7 @@ class TestTimeUnits:
 
         return (self.MJD if mjd is None else mjd) + np.arange(n_time) * step / 86400.0
 
-    # -- the spacing rule, on a normal multi-integration MS -----------------
+    # -- the magnitude rule, on a normal multi-integration MS ---------------
 
     def test_seconds_are_converted_to_days(self):
         days = self._days()
@@ -373,19 +373,19 @@ class TestTimeUnits:
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
     def test_a_long_integration_is_still_seconds(self):
-        """0.5 is the threshold in *days*: no integration is 12 hours long."""
+        """An hour-long sample: the cadence has no say, only the magnitude."""
         days = self._days(step=3600.0)
 
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
 
-    def test_two_integrations_are_enough_to_read_a_spacing(self):
-        """The shortest column the spacing rule applies to at all."""
+    def test_two_integrations_are_read_like_any_other_column(self):
+        """One rule for every length of column; nothing special happens here."""
         days = self._days(n_time=2)
 
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
-    # -- a spacing of 0.5 or below settles nothing, so magnitude decides ----
+    # -- the cases a spacing rule got wrong, in both directions -------------
 
     @pytest.mark.parametrize("step", [0.5, 0.25, 0.008])
     def test_a_short_integration_is_still_seconds(self, step):
@@ -401,24 +401,27 @@ class TestTimeUnits:
 
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
 
-    def test_a_half_day_cadence_in_days_is_still_days(self):
-        """The case the old strict threshold protected; magnitude keeps it.
+    @pytest.mark.parametrize("cadence", [0.5, 1.0, 7.0])
+    def test_a_coarse_cadence_in_days_is_still_days(self, cadence):
+        """The other direction, and the reason the spacing rule went entirely.
 
         A day-numbered column stepping by half a day has the same spacing as a
-        0.5 s integration in seconds, so the spacing cannot part them. Their
-        magnitudes are ~6e4 against ~5e9, which can.
+        0.5 s integration in seconds, so no spacing test can part those two. A
+        column stepping by a day or a week -- nights concatenated -- steps well
+        past the old half-day threshold and was read as seconds outright: MJD
+        60676 came back as MJD 0.7, wrong by the whole of the common era.
+        Magnitude parts all of them: ~6e4 against ~5e9.
         """
-        half_day_apart = self.MJD + np.arange(3) * 0.5
+        days = self.MJD + np.arange(3) * cadence
 
-        np.testing.assert_array_equal(times_to_mjd(half_day_apart), half_day_apart)
+        np.testing.assert_array_equal(times_to_mjd(days), days)
 
-    def test_a_half_day_cadence_in_seconds_is_still_seconds(self):
-        """The same column stored in the other unit, told apart by magnitude."""
-        half_day_apart = self.MJD + np.arange(3) * 0.5
+    @pytest.mark.parametrize("cadence", [0.5, 1.0, 7.0])
+    def test_a_coarse_cadence_in_seconds_is_still_seconds(self, cadence):
+        """The same columns stored in the other unit, told apart by magnitude."""
+        days = self.MJD + np.arange(3) * cadence
 
-        np.testing.assert_allclose(
-            times_to_mjd(half_day_apart * 86400.0), half_day_apart, rtol=1e-15
-        )
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
 
     def test_the_rule_does_not_depend_on_row_order(self):
         """``ms_layout`` permits timestep blocks that do not ascend."""
@@ -427,7 +430,7 @@ class TestTimeUnits:
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
-    # -- the magnitude fallback, when there is no spacing to read -----------
+    # -- a single integration, which is no different -----------------------
 
     @pytest.mark.parametrize("mjd_name", ["MJD", "MJD_1965", "MJD_1800"])
     def test_single_integration_in_seconds(self, mjd_name):

@@ -95,7 +95,7 @@ The `data` section of the configuration file includes only a few options to sele
 
 ```yaml
 data:
-  sim_dir:
+  sim_dir: path/to/output_dir
   ms_path: path/to/ms_file.ms
   data_col: DATA
   freq:
@@ -105,7 +105,7 @@ data:
   save_rfi_per_sat: false
 ```
 
-* `sim_dir`: Simulation directory created when using `sim-vis` to simulate a dataset. This can also be given at runtime of `tabascal` with the `-s` flag.
+* `sim_dir`: **Required**, from this key or the `-s` flag. Where the run writes: `plots/`, `results/` and the `used_orbits` file. For a simulation it is the directory `sim-vis` created, and the MS and the truth zarr are looked for inside it. For real data it is only an output location — name the MS with `ms_path` and point `sim_dir` wherever the products should go. Note that `-s` moves the outputs and the truth zarr but *not* the MS when `ms_path` names one; `-ms` is how a run is moved onto other visibilities. ([#207](https://github.com/epfl-radio-astro/tabascal/issues/207) tracks renaming this key to an output directory and defaulting it to the MS's parent.)
 * `ms_path`: Path to the Measurement Set (MS) to run on. This can also be given at runtime of `tabascal` with the `-ms` flag, which takes precedence over the config. Leave both unset and the MS is looked for at `<sim_dir>/<sim_dir name>.ms`, the layout `sim-vis` writes — so a simulation needs neither. Real data almost always does, since an MS taken from a telescope has no relationship to the name of the directory it happens to sit in.
 * `data_col`: The data column within the MS file to use as the observed data. Default is `DATA` but can be any column that exists in the MS file.
 * `corr`: This is the correlation product to run on, default `xx`. It is matched against the MS's `POLARIZATION::CORR_TYPE` **by identity, not by position**, so it names the correlation you want rather than an axis index: `yy` selects YY whether the MS holds all four correlations or only that one. Linear (`xx`, `xy`, `yx`, `yy`), circular (`rr`, `rl`, `lr`, `ll`) and Stokes (`i`, `q`, `u`, `v`) names are accepted. Requesting a correlation the MS does not hold is an error naming what it does hold.

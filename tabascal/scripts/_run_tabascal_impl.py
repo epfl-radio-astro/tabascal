@@ -170,6 +170,25 @@ class _RunPaths:
     used_orbits_path: str
 
 
+def _config_path(value, key: str) -> str:
+    """A path from the config, absolute, or a message naming the key it came from.
+
+    ``os.path.abspath`` raises ``TypeError: expected str, bytes or os.PathLike
+    object, not int`` on anything else, which names neither the key nor the
+    config it was read from. Nothing validates the ``data`` section's types, and
+    ``data.gain_table`` beside these two keys genuinely accepts a list, so a
+    list here is a plausible slip rather than a perverse one.
+    """
+
+    if not isinstance(value, (str, os.PathLike)):
+        raise SystemExit(
+            f"Config parameter ({key}: {value!r}) is not a path. Give it as a "
+            "string naming a file or directory."
+        )
+
+    return os.path.abspath(value)
+
+
 def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path=None):
     """Resolve the run's directory layout and write derived paths into ``config``.
 
@@ -183,6 +202,17 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     the same visibilities. The config key used to be read and then written over
     by the derived path, which named a Measurement Set appearing nowhere in the
     config whenever the run was pointed at real data rather than a simulation.
+
+    A consequence worth stating: ``-s`` no longer moves the MS when the config
+    names one. It moves the outputs and the truth zarr, which are what
+    ``sim_dir`` means once the visibilities are named separately, and an
+    ``ms_path`` that deliberately points outside ``sim_dir`` is the whole case
+    real data needs. ``-ms`` is how a run is moved onto other visibilities.
+
+    ``sim_dir`` itself has no fallback: it is where the run writes, so it is
+    required from the flag or the config rather than guessed. Issue #207 carries
+    the wider change -- renaming it to an output directory and defaulting it to
+    the MS's parent -- which is not attempted here.
     """
     if suffix:
         suffix = "_" + suffix
@@ -194,8 +224,16 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
 
     if sim_dir:
         sim_dir = os.path.abspath(sim_dir)
+    elif config["data"].get("sim_dir"):
+        sim_dir = _config_path(config["data"]["sim_dir"], "data.sim_dir")
     else:
-        sim_dir = os.path.abspath(config["data"]["sim_dir"])
+        raise SystemExit(
+            "No output directory given. Provide -s/--sim_dir or data.sim_dir: it "
+            "is where this run writes its plots, results and used_orbits file. On "
+            "a simulation it is also where the MS and the truth zarr are looked "
+            "for; on real data name the MS with data.ms_path and point sim_dir "
+            "wherever the outputs should go."
+        )
     config["data"]["sim_dir"] = sim_dir
     config["model"]["name"] = model_name
 
@@ -205,7 +243,7 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     if ms_path:
         ms_path = os.path.abspath(ms_path)
     elif config["data"].get("ms_path"):
-        ms_path = os.path.abspath(config["data"]["ms_path"])
+        ms_path = _config_path(config["data"]["ms_path"], "data.ms_path")
     else:
         ms_path = os.path.join(sim_dir, f"{f_name}.ms")
     config["data"]["ms_path"] = ms_path

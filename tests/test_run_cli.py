@@ -552,8 +552,9 @@ class TestResolveMSPath:
             "model": {},
         }
         paths = impl._resolve_paths(config, None, ms_path, "", None)
-        # The bundle and the config have to name one MS: TabConfig reads the
-        # config, the orbit preflight reads the bundle.
+        # The run reads the bundle; the config is written back so the archived
+        # tab_config_<run_id>.yaml records the MS the run actually used. They
+        # have to be the one path or that record is a fiction.
         assert config["data"]["ms_path"] == paths.ms_path
         return paths.ms_path
 
@@ -617,6 +618,62 @@ class TestResolveMSPath:
         impl._resolve_paths(config, None, None, "", None)
 
         assert config["data"]["zarr_path"] == str(tmp_path / "obs" / "obs.zarr")
+
+
+class TestResolvePathsRefusesWhatItCannotUse:
+    """A message naming the key, rather than a traceback out of ``posixpath``.
+
+    Nothing type-checks the ``data`` section, and these two keys are the ones
+    that reach path arithmetic. ``os.path.abspath`` reports only the type it was
+    handed -- "expected str, bytes or os.PathLike object, not NoneType" names
+    neither the key nor the config it came from.
+    """
+
+    @staticmethod
+    def _resolve(impl, data):
+        return impl._resolve_paths({"data": data, "model": {}}, None, None, "", None)
+
+    @pytest.mark.parametrize("data", [{}, {"sim_dir": None}, {"sim_dir": ""}])
+    def test_no_output_directory_is_reported_as_one(self, impl, data):
+        """``sim_dir`` is where the run writes, so it is required, not guessed.
+
+        It used to reach ``abspath(None)``. Issue #207 carries the wider change
+        -- renaming it and defaulting it to the MS's parent -- which is why it
+        is a message here and not a default.
+        """
+        with pytest.raises(SystemExit, match=r"data\.sim_dir"):
+            self._resolve(impl, data)
+
+    def test_the_message_says_what_the_directory_is_for(self, impl):
+        with pytest.raises(SystemExit) as excinfo:
+            self._resolve(impl, {})
+
+        message = str(excinfo.value)
+        assert "-s/--sim_dir" in message  # both ways of giving it
+        assert "plots" in message and "results" in message
+
+    @pytest.mark.parametrize("value", [1227000000, ["a.ms", "b.ms"], 3.5])
+    def test_a_config_ms_path_that_is_not_a_path_names_itself(
+        self, impl, tmp_path, value
+    ):
+        """An obs ID pasted in, or the list form ``data.gain_table`` accepts."""
+        data = {"sim_dir": str(tmp_path / "obs"), "ms_path": value}
+
+        with pytest.raises(SystemExit, match=r"data\.ms_path"):
+            self._resolve(impl, data)
+
+    @pytest.mark.parametrize("value", [1227000000, ["a", "b"]])
+    def test_a_config_sim_dir_that_is_not_a_path_names_itself(self, impl, value):
+        with pytest.raises(SystemExit, match=r"data\.sim_dir"):
+            self._resolve(impl, {"sim_dir": value})
+
+    def test_a_path_like_object_is_accepted(self, impl, tmp_path):
+        """``Path`` is what a caller building a config in Python would pass."""
+        paths = self._resolve(
+            impl, {"sim_dir": tmp_path / "obs", "ms_path": tmp_path / "real.ms"}
+        )
+
+        assert paths.ms_path == str(tmp_path / "real.ms")
 
 
 class TestRunReporting:

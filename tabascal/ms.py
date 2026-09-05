@@ -317,8 +317,8 @@ def read_time_unit(column_keywords: dict, column: str = "TIME") -> Optional[str]
 
 
 #: Largest ``|MJD|`` in days that an observation could plausibly carry: MJD 1e5
-#: is the year 2132, and -1e5 is 1585. Used wherever the spacing of the times
-#: does not settle their unit; see :func:`times_to_mjd`.
+#: is the year 2132, and -1e5 is 1585. The whole of the unit heuristic; see
+#: :func:`times_to_mjd`.
 _MJD_DAY_LIMIT = 1e5
 
 
@@ -330,43 +330,49 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     declaration (:func:`read_time_unit`) and it is honoured; pass ``None`` and
     the unit is inferred, because not every writer fills the keyword in.
 
-    The inference reads the *spacing* of consecutive samples in preference to
-    their magnitude, because a spacing is decisive where it is large: an
-    integration is seconds long, so a gap above 0.5 can only be seconds, where
-    times stored in days step by ~1e-4. Spacing also stays positive for a
-    pre-1858 epoch, whose MJD day number is negative.
+    The inference reads the *magnitude* of the times, and nothing else. An MJD
+    day number is at most ~1e5 in any plausible observing era -- 1e5 is the year
+    2132 and -1e5 is 1585 -- while the same instant in seconds is ~1e9. No MS
+    can plausibly store a value between the two, so one comparison settles it,
+    for a single integration and a full observation alike. The test is strict: a
+    magnitude of exactly 1e5 reads as days.
 
-    A spacing of 0.5 or below decides nothing, because seconds and days both
-    produce one: 0.5 s is a common correlator dump time, and so is anything
-    shorter. The unit then comes from magnitude instead -- the same rule a
-    single-integration MS uses, having no spacing to read at all. An MJD day
-    number is at most ~1e5 in any plausible observing era, while the same
-    instant in seconds is ~1e9, so the two are never close. The magnitude test
-    is strict: a magnitude of exactly 1e5 reads as days.
+    The *spacing* of consecutive samples used to decide this instead, on the
+    reasoning that an integration is seconds long, so a gap above 0.5 could only
+    be seconds. It could not. A day-numbered column whose samples are a day
+    apart -- a concatenation of nights, say -- has a spacing above 0.5 too, and
+    was read as seconds: MJD 60676 came back as MJD 0.7. The threshold was also
+    strict, so every integration of 0.5 s or shorter, 0.5 s being a common
+    correlator dump time, was read as days (issue #208).
 
-    The classification looks at the *sorted* distinct values, and so does not
-    depend on the order the times arrive in -- :func:`ms_layout` permits an MS
-    whose timestep blocks do not ascend, and
+    Magnitude subsumes the rule rather than merely replacing it. For a spacing
+    test to decide anything magnitude does not, a column stored in seconds would
+    have to carry ``|TIME| <= 1e5``, putting the observation within 1.16 days of
+    1858-11-16. So the branch could no longer be right about a real MS, only
+    wrong about one, and it is gone.
+
+    The value read is the smallest, taken from the *sorted distinct* values, so
+    the decision does not depend on the order the times arrive in --
+    :func:`ms_layout` permits an MS whose timestep blocks do not ascend, and
     ``orbit_config.ms_integration_times_mjd`` reads the same column through
-    ``np.unique``. Reading the raw leading pair instead would let those two
-    classify one MS two different ways. The values come back in the order they
-    were given, sorted or not: only the unit decision looks at them sorted.
+    ``np.unique``. Sorting also puts any NaN last, leaving the smallest real
+    time to classify the column. The values come back in the order they were
+    given, sorted or not: only the unit decision looks at them sorted.
 
-    So the heuristic is one rule for both callers. A *declared* unit can still
-    part them, because only :func:`read_ms` passes one: an MS whose
-    ``QuantumUnits`` contradicts the spacing of the times it stores is read on
-    the declaration there and on the spacing by the preflight epoch check.
+    So the heuristic is one rule for every caller. A *declared* unit can still
+    part them, because only some callers pass one -- :func:`read_ms` and
+    ``write._observation_grid`` do, the preflight epoch check does not: an MS
+    whose ``QuantumUnits`` contradicts the unit its times are inferred to be in
+    is read on the declaration by the first two and on the inference by the
+    third.
     """
 
     times = np.asarray(times, dtype=float)
 
     if unit is None and times.size:
-        ordered = np.unique(times)
+        smallest = np.unique(times)[0]
 
-        if ordered.size > 1 and (ordered[1] - ordered[0]) > 0.5:
-            unit = "s"
-        else:
-            unit = "s" if abs(ordered[0]) > _MJD_DAY_LIMIT else "d"
+        unit = "s" if abs(smallest) > _MJD_DAY_LIMIT else "d"
 
     return times / DAY_SECS if unit == "s" else times
 
