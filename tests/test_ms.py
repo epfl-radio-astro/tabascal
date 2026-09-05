@@ -489,24 +489,28 @@ class TestTimeUnits:
     def test_the_reader_and_the_preflight_check_agree_on_a_valid_layout(self):
         """The two callers deduplicate differently and must still agree.
 
-        ``orbit_config._integration_times_mjd`` deduplicates before converting;
-        ``read_ms`` and the results writer pass
-        ``TIME.reshape(n_time, n_bl)[:, 0]``. On any MS ``ms_layout`` accepts
-        those are the same multiset -- ``n_time`` *is* the number of distinct
-        times, so each block carries its own and the slice has no duplicates
-        for ``np.unique`` to remove. This pins that, rather than trusting the
-        reduction to paper over a difference.
+        ``orbit_config._integration_times_mjd`` deduplicates; ``read_ms`` and
+        the results writer pass ``TIME.reshape(n_time, n_bl)[:, 0]``. On any MS
+        ``ms_layout`` accepts those are the same multiset -- ``n_time`` *is* the
+        number of distinct times and every block must hold one constant time,
+        so two blocks cannot share one and the slice has no duplicates. This
+        goes through ``ms_layout`` rather than assuming the layout, so a
+        weakening of those checks shows up here too.
         """
-        n_bl = 5
-        days = self._days(n_time=4, step=0.5)
+        n_ant, n_time = 4, 4
+        a1_bl, a2_bl = np.triu_indices(n_ant, k=1)
+        n_bl = len(a1_bl)
+        days = self._days(n_time=n_time, step=0.5)
         column = np.repeat(days * 86400.0, n_bl)
 
-        from_reader = column.reshape(len(days), n_bl)[:, 0]
-        from_preflight = np.unique(column)
+        layout = ms_layout(
+            _FakeRows(np.tile(a1_bl, n_time), np.tile(a2_bl, n_time), column)
+        )
 
-        np.testing.assert_array_equal(from_reader, from_preflight)
+        assert (layout.n_time, layout.n_bl) == (n_time, n_bl)
+        from_reader = column.reshape(layout.n_time, layout.n_bl)[:, 0]
+        np.testing.assert_array_equal(from_reader, np.unique(column))
         np.testing.assert_allclose(times_to_mjd(from_reader), days, rtol=1e-15)
-        np.testing.assert_allclose(times_to_mjd(from_preflight), days, rtol=1e-15)
 
     def test_two_stray_sentinels_do_not_decide_the_column(self):
         """Why the reduction keeps duplicates: frequency is the whole guarantee.
@@ -519,6 +523,25 @@ class TestTimeUnits:
         seconds = np.array([0.0, 1.0] + [self.MJD * 86400.0] * 6)
 
         np.testing.assert_allclose(times_to_mjd(seconds)[2:], self.MJD, rtol=1e-15)
+
+    def test_the_preflight_path_counts_the_duplicates_too(self):
+        """It deduplicates, so it has to convert first or lose the vote.
+
+        Deduplicating before converting is the same column reduced to
+        ``[0, 1, t]``, whose median is 1: the preflight epoch check would read
+        a column of seconds as days and overflow on it, which is issue #208
+        again on the path that reported it. The order matters only for the
+        vote -- scaling by a positive constant is injective and
+        order-preserving, so the times that come back are the same either way.
+        """
+        from tabascal import orbit_config
+
+        seconds = np.array([0.0, 1.0] + [self.MJD * 86400.0] * 6)
+
+        integrations = orbit_config._integration_times_mjd(seconds, "in-memory.ms")
+
+        np.testing.assert_allclose(integrations[-1], self.MJD, rtol=1e-15)
+        assert integrations.size == 3  # still one row per distinct time
 
     def test_a_stray_timestamp_in_the_other_unit_does_not_decide_the_column(self):
         """Why the median and not the largest magnitude.

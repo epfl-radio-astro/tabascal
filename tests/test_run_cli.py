@@ -990,6 +990,19 @@ class TestDocumentedCommands:
         assert [page for page, _ in from_readme] == ["README.md"] * len(from_readme)
         assert any(argv[:2] == ["tabascal", "run"] for _, argv in from_readme)
 
+    @staticmethod
+    def _run_options(argv):
+        """What ``tabascal run`` would actually receive, per argparse.
+
+        Matching argv tokens meant re-implementing option parsing and getting
+        it wrong twice: ``--ms_path=data.ms`` was not recognised as naming an
+        MS, ``--sim_dir=`` was accepted as naming a directory when it is the
+        empty string _resolve_paths treats as unset, and argparse's own
+        abbreviations (``--sim_d=out``) matched nothing. The parser knows.
+        """
+
+        return build_parser().parse_args(argv[1:])
+
     def test_every_documented_run_on_an_external_ms_names_an_output_dir(self):
         """Parsing is not enough: -s is optional to argparse and required to run.
 
@@ -999,21 +1012,14 @@ class TestDocumentedCommands:
         and then aborts with "No output directory given". A command that names
         its MS with -ms is not leaning on a config for the directory either.
         """
-        def names(argv, *flags):
-            # argparse takes --flag=value as well as --flag value, so match the
-            # option rather than the token: --ms_path=x is an -ms run too.
-            return any(
-                arg == flag or arg.startswith(flag + "=") for arg in argv
-                for flag in flags
-            )
-
         offenders = []
         for page, argv in documented_commands():
             if argv[:2] != ["tabascal", "run"] or "-h" in argv:
                 continue
-            if not names(argv, "-ms", "--ms_path"):
+            options = self._run_options(argv)
+            if not options.ms_path:
                 continue  # a simulation run, which takes both from -s
-            if not names(argv, "-s", "--sim_dir"):
+            if not options.sim_dir:
                 offenders.append(f"{page}: {' '.join(argv)}")
 
         assert not offenders, (
@@ -1021,6 +1027,27 @@ class TestDocumentedCommands:
             f"directory: {offenders}. If one of these deliberately leans on a "
             "config for data.sim_dir, say so on the page and exempt it here."
         )
+
+    @pytest.mark.parametrize(
+        "tail, flagged",
+        [
+            ("-ms x.ms -s out", False),
+            ("--ms_path x.ms --sim_dir out", False),
+            ("--ms_path=x.ms --sim_dir=out", False),
+            ("--ms_p=x.ms --sim_d=out", False),  # argparse abbreviations
+            ("-ms x.ms", True),
+            ("--ms_path=x.ms", True),
+            ("--ms_path=x.ms --sim_dir=", True),  # empty is unset, not a path
+            ("-c only.yaml", False),  # no MS named: a simulation run
+        ],
+    )
+    def test_the_output_dir_check_reads_the_options_not_the_tokens(
+        self, tail, flagged
+    ):
+        """The spellings the token matcher got wrong, pinned rather than tried."""
+        options = self._run_options(["tabascal", "run", "-c", "c.yaml", *tail.split()])
+
+        assert bool(options.ms_path and not options.sim_dir) is flagged
 
     def test_every_documented_command_parses(self):
         for page, argv in documented_commands():

@@ -336,12 +336,22 @@ def _ms_times_and_scale(ms_path: str) -> tuple:
 
 
 def _integration_times_mjd(times: np.ndarray, ms_path: str) -> np.ndarray:
-    """One time per integration, in MJD days, from an already-read column."""
+    """One time per integration, in MJD days, from an already-read column.
 
-    times = np.unique(times)
+    Converted before it is deduplicated, not after. The unit heuristic in
+    :func:`tabascal.ms.times_to_mjd` weighs the times by how often they occur --
+    that is what lets a handful of unfilled rows be outvoted -- and
+    deduplicating first throws exactly that away: a column of one real
+    timestamp per baseline plus stray rows at 0 and 1 reduces to three values
+    whose median is 1, and the whole observation reads as days. Scaling by a
+    positive constant is order-preserving and injective, so the two orders
+    agree on the result whenever they agree on the unit; only the vote differs.
+    """
+
+    times = np.asarray(times)
     if times.size == 0:
         raise TLEError(f"Measurement Set has an empty TIME column: {ms_path}")
-    return times_to_mjd(times)
+    return np.unique(times_to_mjd(times))
 
 
 def ms_integration_times_mjd(ms_path: str) -> np.ndarray:

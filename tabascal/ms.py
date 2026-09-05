@@ -360,15 +360,21 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     is 1, so a column of seconds would read as days.
 
     That leaves the callers to agree by construction rather than by
-    construction of the statistic. They do, for every MS
+    construction of the statistic. Within one partition they do, for every MS
     :func:`ms_layout` accepts: it derives ``n_time`` as the number of distinct
-    times and requires the rows to be that many blocks of a fixed baseline
-    sequence, so each block carries its own time and the
+    times and requires the rows to be that many blocks each holding one
+    constant time, so two blocks cannot share one and the
     ``TIME.reshape(n_time, n_bl)[:, 0]`` that :func:`read_ms` and
     ``write._observation_grid`` pass holds no duplicates for
     ``orbit_config._integration_times_mjd``'s ``np.unique`` to remove. A column
     whose blocks repeat a time can part them, but its reshape has already
     stopped landing on block boundaries, so the unit is the least of it.
+
+    The scopes still differ: the preflight helper reads the whole main table
+    through casacore while :func:`read_ms` takes one ``xds_from_ms``
+    partition, so a multi-field or multi-SPW MS reaches them as different
+    columns entirely. Weighing by frequency is what makes that survivable --
+    the rows of another field are a minority of a column, not half of it.
     The values come back in the order they were given: only the decision
     reduces them.
 

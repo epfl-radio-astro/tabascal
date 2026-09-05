@@ -93,11 +93,13 @@ already.
 preflight observation-epoch helper all convert here, so the heuristic cannot
 classify one MS two ways — including for an MS whose timestep blocks do not
 ascend, since a median does not depend on the order its values arrive in. The
-preflight helper deduplicates before converting and the other two do not, but on
-any MS :func:`~tabascal.ms.ms_layout` accepts they are handed the same multiset
-anyway: ``n_time`` is the number of distinct times, so each block of rows
-carries its own and the reader's slice holds nothing for ``np.unique`` to
-remove. What
+preflight helper deduplicates and the other two do not, but it converts before
+it deduplicates, and on any MS :func:`~tabascal.ms.ms_layout` accepts the three
+are handed the same multiset anyway: ``n_time`` is the number of distinct times
+and every block must hold one constant time, so the reader's slice holds nothing
+for ``np.unique`` to remove. Their *scopes* still differ — the preflight helper
+reads the whole main table and the reader one partition — which weighing the
+times by frequency is what makes survivable. What
 they can still differ on is a *declared* unit: the preflight helper reads the
 ``TIME`` column through casacore and takes only its ``MEASINFO`` record from the
 keywords, not its ``QuantumUnits``, so an MS whose ``QuantumUnits`` contradicts
