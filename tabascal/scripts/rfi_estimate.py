@@ -62,9 +62,9 @@ def build_parser(parser=None):
         "it from data.ms_path instead.",
     )
     parser.add_argument(
-        "-s", "--sim_dir", default=None,
+        "-od", "--out_dir", default=None,
         help="Directory a simulation's MS is looked for in, when neither -ms nor "
-        "data.ms_path names one: <sim_dir>/<sim_dir name>.ms. Light curves then "
+        "data.ms_path names one: <out_dir>/<out_dir name>.ms. Light curves then "
         "default beside that MS, so this directory is written to as well.",
     )
     parser.add_argument(
@@ -308,20 +308,20 @@ def resolve_ms_path(args, config):
         if not config_is_unset(ms_path):
             return config_path(ms_path, "data.ms_path")
 
-    config_sim_dir = (config or {}).get("data", {}).get("sim_dir")
-    if args.sim_dir:
-        sim_dir = os.path.abspath(args.sim_dir)
-    elif not config_is_unset(config_sim_dir):
-        sim_dir = config_path(config_sim_dir, "data.sim_dir")
+    config_out_dir = (config or {}).get("data", {}).get("out_dir")
+    if args.out_dir:
+        out_dir = os.path.abspath(args.out_dir)
+    elif not config_is_unset(config_out_dir):
+        out_dir = config_path(config_out_dir, "data.out_dir")
     else:
-        sim_dir = None
+        out_dir = None
 
-    if sim_dir:
-        return os.path.join(sim_dir, f"{os.path.basename(sim_dir)}.ms")
+    if out_dir:
+        return os.path.join(out_dir, f"{os.path.basename(out_dir)}.ms")
 
     raise SystemExit(
-        "No Measurement Set given. Provide -ms/--ms_path, -s/--sim_dir, or a "
-        "config with data.ms_path or data.sim_dir set."
+        "No Measurement Set given. Provide -ms/--ms_path, -od/--out_dir, or a "
+        "config with data.ms_path or data.out_dir set."
     )
 
 

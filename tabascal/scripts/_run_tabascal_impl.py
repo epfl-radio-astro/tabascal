@@ -171,7 +171,7 @@ class _RunPaths:
     used_orbits_path: str
 
 
-def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path=None):
+def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path=None):
     """Resolve the run's directory layout and write derived paths into ``config``.
 
     Creates the plot and results directories and records the sim, zarr and MS
@@ -179,30 +179,33 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     the run needs so the orchestration below stays free of path arithmetic.
 
     The MS comes from the ``-ms`` flag, else ``data.ms_path``, else the
-    simulation layout ``<sim_dir>/<basename>.ms`` -- the precedence
-    ``rfi_estimate.resolve_ms_path`` already uses, so one config points both at
-    the same visibilities. The config key used to be read and then written over
-    by the derived path, which named a Measurement Set appearing nowhere in the
-    config whenever the run was pointed at real data rather than a simulation.
+    simulation layout ``<out_dir>/<basename>.ms`` -- the precedence
+    ``rfi_estimate.resolve_ms_path`` also uses, so one config points a run and
+    the light-curve extractor at the same visibilities. The config key used to
+    be read and then written over by the derived path, which named a
+    Measurement Set appearing nowhere in the config whenever the run was
+    pointed at real data rather than a simulation (issue #207).
 
-    A consequence worth stating: ``-s`` no longer moves the MS when the config
-    names one. It moves the outputs and the truth zarr, which are what
-    ``sim_dir`` means once the visibilities are named separately, and an
-    ``ms_path`` that deliberately points outside ``sim_dir`` is the whole case
-    real data needs. ``-ms`` is how a run is moved onto other visibilities.
+    ``out_dir`` is where the run writes: ``plots/`` and ``results/``. It was
+    called ``sim_dir`` and documented as the directory ``sim-vis`` creates,
+    which is what it is on a simulation -- the MS and the truth zarr are looked
+    for inside it -- but a real observation has no such directory, and an MS
+    taken from a telescope bears no relation to the name of the folder it sits
+    in. So the two are separate now: name the MS and the outputs go beside it,
+    name the directory and the simulation layout is read out of it, or name
+    both and neither is guessed.
 
-    ``sim_dir`` itself has no fallback: it is where the run writes, so it is
-    required from the flag or the config rather than guessed. Issue #207 carries
-    the wider change -- renaming it to an output directory and defaulting it to
-    the MS's parent -- which is not attempted here.
+    A consequence worth stating: ``-o`` does not move the MS when the config
+    names one. It moves the outputs and the truth zarr, and an ``ms_path``
+    pointing outside the output directory is the whole case real data needs.
+    ``-ms`` is how a run is moved onto other visibilities.
 
-    One more consequence, of the write-back rather than of the precedence. The
-    resolved ``ms_path`` is recorded on ``config`` whether it was given or
-    derived, and the run archives that config to its plot directory, so an
-    archived config now names a Measurement Set and is read on it. That is what
-    makes the archive a record of the run rather than of the intent, and it is
-    why re-running one after moving the data needs ``-ms``: ``-s`` moves the
-    outputs and would once have moved the MS with them.
+    One more, of the write-back rather than of the precedence. The resolved
+    ``ms_path`` is recorded on ``config`` whether it was given or derived, and
+    the run archives that config to its plot directory, so an archived config
+    names a Measurement Set and is read on it. That is what makes the archive a
+    record of the run rather than of the intent, and it is why re-running one
+    after moving the data needs ``-ms``.
     """
     if suffix:
         suffix = "_" + suffix
@@ -212,36 +215,60 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     model_name = "Custom"
     results_name = f"{model_name}{suffix}"
 
-    config_sim_dir = config["data"].get("sim_dir")
-    if sim_dir:
-        sim_dir = os.path.abspath(sim_dir)
-    elif not config_is_unset(config_sim_dir):
-        sim_dir = config_path(config_sim_dir, "data.sim_dir")
-    else:
-        raise SystemExit(
-            "No output directory given. Provide -s/--sim_dir or data.sim_dir: it "
-            "is where this run writes its plots/ and results/ directories. On a "
-            "simulation it is also where the MS and the truth zarr are looked "
-            "for; on real data name the MS with data.ms_path and point sim_dir "
-            "wherever the outputs should go."
-        )
-    config["data"]["sim_dir"] = sim_dir
-    config["model"]["name"] = model_name
-
-    f_name = os.path.split(sim_dir)[1]
-    config["data"]["zarr_path"] = os.path.join(sim_dir, f"{f_name}.zarr")
-
+    # The MS first, because the output directory can default to its parent but
+    # nothing can default the MS except the simulation layout, which needs the
+    # directory. Resolving in this order keeps the two from being circular.
     config_ms_path = config["data"].get("ms_path")
     if ms_path:
         ms_path = os.path.abspath(ms_path)
     elif not config_is_unset(config_ms_path):
         ms_path = config_path(config_ms_path, "data.ms_path")
     else:
-        ms_path = os.path.join(sim_dir, f"{f_name}.ms")
+        ms_path = None
+
+    config_out_dir = config["data"].get("out_dir")
+    if out_dir:
+        out_dir = os.path.abspath(out_dir)
+    elif not config_is_unset(config_out_dir):
+        out_dir = config_path(config_out_dir, "data.out_dir")
+    elif ms_path:
+        out_dir = os.path.dirname(ms_path)
+    else:
+        raise SystemExit(
+            "Nothing to run on and nowhere to write. Provide -ms/--ms_path or "
+            "data.ms_path to name the Measurement Set, and -od/--out_dir or "
+            "data.out_dir to say where this run's plots/ and results/ should "
+            "go. Either implies the other: an MS alone writes beside itself, "
+            "and a directory alone is read as a tab-sim simulation, whose MS "
+            "and truth zarr are looked for inside it."
+        )
+    config["data"]["out_dir"] = out_dir
+    config["model"]["name"] = model_name
+
+    # The run's name, and the simulation layout's stem. Taken from the MS so
+    # that a real-data run is named for its visibilities rather than for
+    # whichever directory it happens to write to -- and identical to the old
+    # basename(sim_dir) on a simulation, where the MS is <dir>/<dir name>.ms.
+    if ms_path:
+        f_name = os.path.splitext(os.path.basename(ms_path))[0]
+    else:
+        f_name = os.path.basename(out_dir)
+        ms_path = os.path.join(out_dir, f"{f_name}.ms")
     config["data"]["ms_path"] = ms_path
 
-    plot_dir = os.path.join(sim_dir, f"plots/{suffix[1:]}")
-    results_dir = os.path.join(sim_dir, "results")
+    # Only ast.init: truth and plots.truth read it, and only a simulation has
+    # one. Named explicitly where it is not beside the outputs, which is every
+    # real-data run and any simulation whose products go elsewhere.
+    config_truth_zarr = config["data"].get("truth_zarr")
+    if not config_is_unset(config_truth_zarr):
+        zarr_path = config_path(config_truth_zarr, "data.truth_zarr")
+    else:
+        zarr_path = os.path.join(out_dir, f"{f_name}.zarr")
+    config["data"]["truth_zarr"] = zarr_path
+    config["data"]["zarr_path"] = zarr_path
+
+    plot_dir = os.path.join(out_dir, f"plots/{suffix[1:]}")
+    results_dir = os.path.join(out_dir, "results")
     for directory in (plot_dir, results_dir):
         os.makedirs(directory, exist_ok=True)
 
@@ -273,8 +300,9 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
 def _print_run_header(model_name, f_name, ms_path, start_time):
     """The run's identity, including which visibilities it is about to read.
 
-    ``f_name`` is the output directory's name, which used to determine the MS
-    as well -- it was ``<sim_dir>/<f_name>.ms`` and nothing else. Now that
+    ``f_name`` is the MS's name, which used to be the output directory's and to
+    determine the MS
+    as well -- it was ``<out_dir>/<f_name>.ms`` and nothing else. Now that
     ``data.ms_path`` can name one anywhere, a header without it would leave a
     log unable to say where its visibilities came from, and a stale ms_path in
     a config swept over several ``-s`` directories would go unremarked.
@@ -313,9 +341,9 @@ def _print_model_summary(tab_config, model, start_time):
 
 @measure_runtime
 def tabascal_subtraction(
-    config, sim_dir, ms_path=None, suffix="", extra_orbit_dir=None, norad_path=None, log=True
+    config, out_dir, ms_path=None, suffix="", extra_orbit_dir=None, norad_path=None, log=True
 ):
-    paths = _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path)
+    paths = _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path)
     ms_path = paths.ms_path
 
     with _stdout_logger(paths.log_path, log):
@@ -490,7 +518,7 @@ def run(args):
         with suppress_worker_stdout():
             tabascal_subtraction(
                 config,
-                args.sim_dir,
+                args.out_dir,
                 args.ms_path,
                 args.suffix,
                 extra_orbit_dir=args.extra_orbit_dir,

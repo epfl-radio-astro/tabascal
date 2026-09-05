@@ -3,6 +3,18 @@
 # ---------------------------------------------------------------------------
 
 def _run_cmd(args):
+    # Before anything expensive: -s named the simulation directory, which meant
+    # the inputs and the outputs at once. Accepting it silently would write
+    # where the user meant and read where they did not.
+    if getattr(args, "sim_dir", None):
+        raise SystemExit(
+            "-s/--sim_dir was renamed -od/--out_dir. It is only where the run "
+            "writes now: name the Measurement Set with -ms/--ms_path or "
+            "data.ms_path, and a tab-sim simulation's truth zarr with "
+            "data.truth_zarr. Passing -od alone still reads a simulation "
+            "directory the way -s did."
+        )
+
     # Multi-process bring-up must precede everything jax-related: the distributed
     # runtime has to exist before the device backend initializes, and the impl module
     # import pulls in the whole jax/numpyro stack. Memory-on-demand likewise has to be
@@ -71,12 +83,16 @@ def build_parser():
     run_parser = subparsers.add_parser("run", help="Apply tabascal to a simulation.")
     run_parser.add_argument("-c", "--config", required=True, help="Path to the config file.")
     run_parser.add_argument(
-        "-s",
-        "--sim_dir",
-        help="Required, here or as data.sim_dir. Directory the run writes its "
-        "plots/ and results/ to, and where a simulation's MS and truth zarr are "
-        "looked for. Does not move the MS when data.ms_path names one; use -ms.",
+        "-od",
+        "--out_dir",
+        help="Directory the run writes its plots/ and results/ to. Defaults to "
+        "the Measurement Set's own directory. Given without -ms, it is read as "
+        "a tab-sim simulation directory and the MS and truth zarr are looked "
+        "for inside it. Does not move the MS when data.ms_path names one.",
     )
+    # Renamed, not dropped: argparse would otherwise answer a -s with
+    # "unrecognized arguments", which says nothing about where it went.
+    run_parser.add_argument("-s", "--sim_dir", help=argparse.SUPPRESS)
     run_parser.add_argument("-ms", "--ms_path", help="Path to Measurement Set.")
     run_parser.add_argument(
         "-np", "--norad-path",

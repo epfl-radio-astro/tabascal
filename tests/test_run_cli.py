@@ -103,11 +103,11 @@ def _raise(error):
 
 class TestRunSubcommand:
 
-    def test_config_and_sim_dir(self):
-        args = _parse("run", "-c", "tab_target.yaml", "-s", "sim_dir")
+    def test_config_and_out_dir(self):
+        args = _parse("run", "-c", "tab_target.yaml", "-od", "out_dir")
         assert args.command == "run"
         assert args.config == "tab_target.yaml"
-        assert args.sim_dir == "sim_dir"
+        assert args.out_dir == "out_dir"
 
     def test_config_and_ms_path(self):
         args = _parse("run", "-c", "config.yaml", "-ms", "file.ms")
@@ -148,9 +148,9 @@ class TestLightCurveSubcommand:
         assert args.norad_ids is None and args.norad_path is None
 
     def test_a_config_can_be_pointed_at_a_measurement_set(self):
-        args = _parse("light-curve", "-c", "c.yaml", "-ms", "obs.ms", "-s", "sim")
+        args = _parse("light-curve", "-c", "c.yaml", "-ms", "obs.ms", "-od", "sim")
         assert args.ms_path == "obs.ms"
-        assert args.sim_dir == "sim"
+        assert args.out_dir == "sim"
 
     @pytest.mark.parametrize("flag", ["-n", "--norad-ids"])
     def test_ids_can_be_given_directly(self, flag):
@@ -346,12 +346,12 @@ class TestLightCurveInputs:
 
     def test_the_ms_comes_from_the_config_when_not_given(self):
         args = _parse("light-curve", "-c", "c.yaml")
-        config = {"data": {"ms_path": "/data/obs.ms", "sim_dir": None}}
+        config = {"data": {"ms_path": "/data/obs.ms", "out_dir": None}}
         assert self._mod().resolve_ms_path(args, config) == "/data/obs.ms"
 
     def test_the_ms_is_derived_from_the_simulation_directory(self):
-        args = _parse("light-curve", "-c", "c.yaml", "-s", "/data/sim_run")
-        config = {"data": {"ms_path": None, "sim_dir": None}}
+        args = _parse("light-curve", "-c", "c.yaml", "-od", "/data/sim_run")
+        config = {"data": {"ms_path": None, "out_dir": None}}
         assert self._mod().resolve_ms_path(args, config).endswith(
             "sim_run/sim_run.ms"
         )
@@ -367,15 +367,15 @@ class TestLightCurveInputs:
         to the sim-dir fallback.
         """
         args = _parse("light-curve", "-c", "c.yaml")
-        config = {"data": {"ms_path": value, "sim_dir": None}}
+        config = {"data": {"ms_path": value, "out_dir": None}}
 
         with pytest.raises(SystemExit, match=r"data\.ms_path.*is not a path"):
             self._mod().resolve_ms_path(args, config)
 
     def test_an_unset_config_ms_path_still_falls_through(self):
         """``null`` and ``""`` remain the way to say the key is not in use."""
-        args = _parse("light-curve", "-c", "c.yaml", "-s", "/data/sim_run")
-        config = {"data": {"ms_path": "", "sim_dir": None}}
+        args = _parse("light-curve", "-c", "c.yaml", "-od", "/data/sim_run")
+        config = {"data": {"ms_path": "", "out_dir": None}}
 
         assert self._mod().resolve_ms_path(args, config).endswith("sim_run/sim_run.ms")
 
@@ -522,7 +522,7 @@ class TestRunLogPath:
 
     @staticmethod
     def _resolve(impl, tmp_path, suffix=""):
-        config = {"data": {"sim_dir": str(tmp_path / "obs")}, "model": {}}
+        config = {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}
         return impl._resolve_paths(config, None, None, suffix, None)
 
     @staticmethod
@@ -588,7 +588,7 @@ class TestResolveMSPath:
     """Which Measurement Set a run reads: the flag, the config, the sim layout.
 
     Issue #207. ``data.ms_path`` was read from the config and then written over
-    by ``<sim_dir>/<basename(sim_dir)>.ms``, the layout ``sim-vis`` leaves
+    by ``<out_dir>/<basename(out_dir)>.ms``, the layout ``sim-vis`` leaves
     behind. On a simulation the two agree and nothing shows; on real data,
     where the MS's name has no relation to its parent directory's, a config
     that named its MS failed reporting a table the user had never mentioned.
@@ -597,7 +597,7 @@ class TestResolveMSPath:
     @staticmethod
     def _resolve(impl, tmp_path, ms_path=None, config_ms_path=None):
         config = {
-            "data": {"sim_dir": str(tmp_path / "obs"), "ms_path": config_ms_path},
+            "data": {"out_dir": str(tmp_path / "obs"), "ms_path": config_ms_path},
             "model": {},
         }
         paths = impl._resolve_paths(config, None, ms_path, "", None)
@@ -635,7 +635,7 @@ class TestResolveMSPath:
 
     def test_a_missing_config_key_falls_through(self, impl, tmp_path):
         """A hand-written config need not carry every key of the base one."""
-        config = {"data": {"sim_dir": str(tmp_path / "obs")}, "model": {}}
+        config = {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}
 
         paths = impl._resolve_paths(config, None, None, "", None)
 
@@ -654,7 +654,7 @@ class TestResolveMSPath:
         assert os.path.isabs(resolved)
         assert resolved == str(tmp_path / "obs.ms")
 
-    def test_the_sim_dir_flag_does_not_move_the_ms(self, impl, tmp_path):
+    def test_the_out_dir_flag_does_not_move_the_ms(self, impl, tmp_path):
         """The branch's headline consequence, and the one worth a test.
 
         ``-s`` used to be the single "which dataset" knob, because the MS was
@@ -665,19 +665,19 @@ class TestResolveMSPath:
         """
         named_ms = str(tmp_path / "elsewhere" / "real.ms")
         config = {
-            "data": {"sim_dir": str(tmp_path / "obs"), "ms_path": named_ms},
+            "data": {"out_dir": str(tmp_path / "obs"), "ms_path": named_ms},
             "model": {},
         }
 
         paths = impl._resolve_paths(config, str(tmp_path / "other"), None, "", None)
 
         assert paths.ms_path == named_ms
-        assert config["data"]["sim_dir"] == str(tmp_path / "other")
+        assert config["data"]["out_dir"] == str(tmp_path / "other")
         assert paths.plot_dir.startswith(str(tmp_path / "other"))
 
-    def test_the_sim_dir_flag_beats_the_config(self, impl, tmp_path):
-        """It still wins for everything sim_dir does name."""
-        config = {"data": {"sim_dir": str(tmp_path / "from_config")}, "model": {}}
+    def test_the_out_dir_flag_beats_the_config(self, impl, tmp_path):
+        """It still wins for everything out_dir does name."""
+        config = {"data": {"out_dir": str(tmp_path / "from_config")}, "model": {}}
 
         paths = impl._resolve_paths(config, str(tmp_path / "from_flag"), None, "", None)
 
@@ -686,23 +686,62 @@ class TestResolveMSPath:
             tmp_path / "from_flag" / "from_flag.zarr"
         )
 
-    def test_the_zarr_path_still_follows_the_sim_dir(self, impl, tmp_path):
-        """The simulation truth keeps its own layout; only the MS moved.
+    def test_the_truth_zarr_defaults_beside_the_outputs(self, impl, tmp_path):
+        """Named for the MS, which on a simulation is the directory's own name.
 
-        ``ast.init: truth`` and ``plots.truth`` read it, and it is a zarr
-        beside the simulation, not beside an arbitrary MS.
+        ``ast.init: truth`` and ``plots.truth`` are the only readers, and a
+        simulation is the only thing that has one -- ``sim-vis`` leaves it at
+        ``<dir>/<dir name>.zarr`` beside the MS of the same stem, so deriving
+        it from the MS's name reproduces that exactly.
         """
+        config = {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}
+
+        impl._resolve_paths(config, None, None, "", None)
+
+        assert config["data"]["truth_zarr"] == str(tmp_path / "obs" / "obs.zarr")
+        assert config["data"]["zarr_path"] == config["data"]["truth_zarr"]
+
+    def test_an_explicit_truth_zarr_wins(self, impl, tmp_path):
+        """The point of naming it: a simulation whose products go elsewhere.
+
+        Deriving it from the output directory could only ever find the truth
+        when the run wrote into the simulation, which is the assumption #207
+        is about.
+        """
+        truth = str(tmp_path / "sim" / "pnt_src_obs.zarr")
         config = {
             "data": {
-                "sim_dir": str(tmp_path / "obs"),
-                "ms_path": str(tmp_path / "elsewhere" / "real.ms"),
+                "out_dir": str(tmp_path / "scratch"),
+                "ms_path": str(tmp_path / "sim" / "pnt_src_obs.ms"),
+                "truth_zarr": truth,
             },
             "model": {},
         }
 
         impl._resolve_paths(config, None, None, "", None)
 
-        assert config["data"]["zarr_path"] == str(tmp_path / "obs" / "obs.zarr")
+        assert config["data"]["zarr_path"] == truth
+
+    def test_a_real_data_run_derives_a_truth_zarr_that_simply_is_not_there(
+        self, impl, tmp_path
+    ):
+        """And that is fine: truth loading guards on existence and says so.
+
+        Worth pinning that it is derived rather than left unset, because
+        ``truth.py`` reads the key and a missing one would be a KeyError where
+        an absent file is a printed line.
+        """
+        config = {
+            "data": {"ms_path": str(tmp_path / "mwa" / "mwa_large_ch28.ms")},
+            "model": {},
+        }
+
+        impl._resolve_paths(config, None, None, "", None)
+
+        assert config["data"]["zarr_path"] == str(
+            tmp_path / "mwa" / "mwa_large_ch28.zarr"
+        )
+        assert not os.path.exists(config["data"]["zarr_path"])
 
 
 class TestResolvePathsRefusesWhatItCannotUse:
@@ -718,39 +757,70 @@ class TestResolvePathsRefusesWhatItCannotUse:
     def _resolve(impl, data):
         return impl._resolve_paths({"data": data, "model": {}}, None, None, "", None)
 
-    @pytest.mark.parametrize("data", [{}, {"sim_dir": None}, {"sim_dir": ""}])
-    def test_no_output_directory_is_reported_as_one(self, impl, data):
-        """``sim_dir`` is where the run writes, so it is required, not guessed.
+    @pytest.mark.parametrize("data", [{}, {"out_dir": None}, {"out_dir": ""}])
+    def test_naming_neither_the_ms_nor_the_directory_is_reported(self, impl, data):
+        """Each implies the other, so only naming *neither* is unanswerable.
 
-        It used to reach ``abspath(None)``. Issue #207 carries the wider change
-        -- renaming it and defaulting it to the MS's parent -- which is why it
-        is a message here and not a default.
+        ``sim_dir`` used to reach ``abspath(None)`` here and report the type it
+        was handed. Now a run with an MS writes beside it and a run with a
+        directory reads the simulation layout out of it -- there is nothing
+        left to guess from only when both are absent.
         """
-        with pytest.raises(SystemExit, match=r"No output directory given"):
+        with pytest.raises(SystemExit, match=r"Nothing to run on and nowhere"):
             self._resolve(impl, data)
 
-    def test_the_message_says_what_the_directory_is_for(self, impl):
+    def test_the_message_names_both_ways_out(self, impl):
         with pytest.raises(SystemExit) as excinfo:
             self._resolve(impl, {})
 
         message = str(excinfo.value)
-        assert "-s/--sim_dir" in message  # both ways of giving it
+        assert "-ms/--ms_path" in message and "-od/--out_dir" in message
         assert "plots" in message and "results" in message
+
+    def test_an_ms_alone_writes_beside_itself(self, impl, tmp_path):
+        """The case #207 was reported for: real data, no simulation directory.
+
+        ``sim_dir`` was required, and named the MS as well, so an observation
+        that had never been near ``sim-vis`` had to be given a directory whose
+        name the run would then look for the visibilities under.
+        """
+        ms = tmp_path / "mwa" / "mwa_large_ch28.ms"
+
+        paths = impl._resolve_paths(
+            {"data": {"ms_path": str(ms)}, "model": {}}, None, None, "", None
+        )
+
+        assert paths.ms_path == str(ms)
+        assert paths.plot_dir.startswith(str(tmp_path / "mwa"))
+        assert paths.f_name == "mwa_large_ch28"  # named for the data, not the dir
+
+    def test_a_directory_alone_is_read_as_a_simulation(self, impl, tmp_path):
+        """What ``sim_dir`` meant, unchanged, for the runs that were using it."""
+        paths = impl._resolve_paths(
+            {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}},
+            None,
+            None,
+            "",
+            None,
+        )
+
+        assert paths.ms_path == str(tmp_path / "obs" / "obs.ms")
+        assert paths.f_name == "obs"
 
     @pytest.mark.parametrize("value", [1227000000, ["a.ms", "b.ms"], 3.5])
     def test_a_config_ms_path_that_is_not_a_path_names_itself(
         self, impl, tmp_path, value
     ):
         """An obs ID pasted in, or the list form ``data.gain_table`` accepts."""
-        data = {"sim_dir": str(tmp_path / "obs"), "ms_path": value}
+        data = {"out_dir": str(tmp_path / "obs"), "ms_path": value}
 
         with pytest.raises(SystemExit, match=r"data\.ms_path.*is not a path"):
             self._resolve(impl, data)
 
     @pytest.mark.parametrize("value", [1227000000, ["a", "b"]])
-    def test_a_config_sim_dir_that_is_not_a_path_names_itself(self, impl, value):
-        with pytest.raises(SystemExit, match=r"data\.sim_dir.*is not a path"):
-            self._resolve(impl, {"sim_dir": value})
+    def test_a_config_out_dir_that_is_not_a_path_names_itself(self, impl, value):
+        with pytest.raises(SystemExit, match=r"data\.out_dir.*is not a path"):
+            self._resolve(impl, {"out_dir": value})
 
     @pytest.mark.parametrize("value", [0, [], False])
     def test_a_falsy_non_path_is_reported_rather_than_ignored(
@@ -759,17 +829,17 @@ class TestResolvePathsRefusesWhatItCannotUse:
         """Only ``null`` and ``""`` mean unset; the rest are values someone wrote.
 
         Gating the type check on truthiness would let these fall through to
-        ``<sim_dir>/<basename>.ms`` in silence -- the config naming one MS and
+        ``<out_dir>/<basename>.ms`` in silence -- the config naming one MS and
         the run reading another, which is the bug this branch exists to fix.
         """
-        data = {"sim_dir": str(tmp_path / "obs"), "ms_path": value}
+        data = {"out_dir": str(tmp_path / "obs"), "ms_path": value}
 
         with pytest.raises(SystemExit, match=r"data\.ms_path.*is not a path"):
             self._resolve(impl, data)
 
     def test_the_type_message_quotes_the_value(self, impl, tmp_path):
         """So a reader can see the obs ID or list they wrote, not just the key."""
-        data = {"sim_dir": str(tmp_path / "obs"), "ms_path": 1227000000}
+        data = {"out_dir": str(tmp_path / "obs"), "ms_path": 1227000000}
 
         with pytest.raises(SystemExit) as excinfo:
             self._resolve(impl, data)
@@ -779,7 +849,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
     def test_a_path_like_object_is_accepted(self, impl, tmp_path):
         """``Path`` is what a caller building a config in Python would pass."""
         paths = self._resolve(
-            impl, {"sim_dir": tmp_path / "obs", "ms_path": tmp_path / "real.ms"}
+            impl, {"out_dir": tmp_path / "obs", "ms_path": tmp_path / "real.ms"}
         )
 
         assert paths.ms_path == str(tmp_path / "real.ms")
@@ -788,7 +858,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
 class TestRunHeaderNamesTheMS:
     """The log has to say which visibilities the run read.
 
-    It did not have to before: the MS was ``<sim_dir>/<basename>.ms``, so the
+    It did not have to before: the MS was ``<out_dir>/<basename>.ms``, so the
     directory in the header named the data. Now that ``data.ms_path`` can name
     one anywhere, a config carrying a stale ``ms_path`` and swept over several
     ``-s`` directories would write to each in turn while reading the same
@@ -1000,61 +1070,57 @@ class TestDocumentedCommands:
 
         Matching argv tokens meant re-implementing option parsing and getting
         it wrong twice: ``--ms_path=data.ms`` was not recognised as naming an
-        MS, ``--sim_dir=`` was accepted as naming a directory when it is the
+        MS, ``--out_dir=`` was accepted as naming a directory when it is the
         empty string _resolve_paths treats as unset, and argparse's own
         abbreviations (``--sim_d=out``) matched nothing. The parser knows.
         """
 
         return build_parser().parse_args(argv[1:])
 
-    def test_every_documented_run_on_an_external_ms_names_an_output_dir(self):
-        """Parsing is not enough: -s is optional to argparse and required to run.
+    def test_every_documented_run_names_an_ms_or_a_directory(self):
+        """Parsing is not enough: neither flag is required, but one of them is.
 
-        ``data.sim_dir`` may supply it, so argparse cannot demand it, and the
-        shipped configs leave it null -- which is how the README and two docs
-        pages came to show `tabascal run -c ... -ms ...`, a command that parses
-        and then aborts with "No output directory given". A command that names
-        its MS with -ms is not leaning on a config for the directory either.
+        Each implies the other -- an MS writes beside itself, a directory is
+        read as a simulation -- so argparse cannot demand either, and a command
+        naming neither parses and then aborts with "Nothing to run on and
+        nowhere to write". That is how the README and two docs pages came to
+        show `tabascal run -c ... -ms ...` against a `sim_dir` that was
+        required: correct again now, but only a check can keep it so.
         """
         offenders = []
         for page, argv in documented_commands():
             if argv[:2] != ["tabascal", "run"] or "-h" in argv:
                 continue
             options = self._run_options(argv)
-            if not options.ms_path:
-                continue  # a simulation run, which takes both from -s
-            if not options.sim_dir:
+            if not (options.ms_path or options.out_dir):
                 offenders.append(f"{page}: {' '.join(argv)}")
 
         assert not offenders, (
-            "documented `tabascal run` commands that name an MS but no output "
-            f"directory: {offenders}. If one of these deliberately leans on a "
-            "config for data.sim_dir, say so on the page and exempt it here."
+            "documented `tabascal run` commands naming neither a Measurement "
+            f"Set nor an output directory: {offenders}. If one of these "
+            "deliberately leans on a config for data.ms_path or data.out_dir, "
+            "say so on the page and exempt it here."
         )
 
     @pytest.mark.parametrize(
         "tail, flagged",
         [
-            ("-ms x.ms -s out", False),
-            ("--ms_path x.ms --sim_dir out", False),
-            ("--ms_path=x.ms --sim_dir=out", False),
-            ("--ms_p=x.ms --sim_d=out", False),  # argparse abbreviations
-            ("-ms x.ms", True),
-            ("--ms_path=x.ms", True),
-            ("--ms_path=x.ms --sim_dir=", True),  # empty is unset, not a path
-            ('--ms_path=x.ms --sim_dir ""', True),  # the shell's empty, likewise
-            ('-ms x.ms -s "output dir"', False),  # one argument, not two
-            ("-c only.yaml", False),  # no MS named: a simulation run
+            ("-ms x.ms", False),  # writes beside the MS
+            ("-od out", False),  # read as a simulation directory
+            ("-ms x.ms -od out", False),
+            ("--ms_path=x.ms --out_dir=out", False),
+            ("--ms_p=x.ms --out_d=out", False),  # argparse abbreviations
+            ('-ms x.ms -od "output dir"', False),  # one argument, not two
+            ("-c only.yaml", True),  # neither: the one unresolvable case
+            ('--out_dir=""', True),  # the shell's empty is unset, not a path
         ],
     )
-    def test_the_output_dir_check_reads_the_options_not_the_tokens(
-        self, tail, flagged
-    ):
-        """The spellings the token matcher got wrong, pinned rather than tried."""
+    def test_the_check_reads_the_options_not_the_tokens(self, tail, flagged):
+        """The spellings a token matcher got wrong, pinned rather than tried."""
         argv = shlex.split(f"tabascal run -c c.yaml {tail}")
         options = self._run_options(argv)
 
-        assert bool(options.ms_path and not options.sim_dir) is flagged
+        assert bool(not (options.ms_path or options.out_dir)) is flagged
 
     def test_every_documented_command_parses(self):
         for page, argv in documented_commands():
