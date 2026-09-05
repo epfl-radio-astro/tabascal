@@ -366,7 +366,7 @@ class TestTimeUnits:
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
     def test_a_pre_1858_epoch_is_read_in_either_unit(self):
-        """Its MJD day number is negative; the spacing the rule reads is not."""
+        """Its MJD day number is negative; the magnitude the rule reads is not."""
         days = self._days(mjd=self.MJD_1800)
 
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
@@ -418,10 +418,50 @@ class TestTimeUnits:
 
     @pytest.mark.parametrize("cadence", [0.5, 1.0, 7.0])
     def test_a_coarse_cadence_in_seconds_is_still_seconds(self, cadence):
-        """The same columns stored in the other unit, told apart by magnitude."""
+        """The same columns in the other unit. A guard, not a discriminator.
+
+        The old spacing rule read these as seconds too, so this passes either
+        side of the change; it is here so that the pairing above cannot be
+        satisfied by a rule that simply calls everything days.
+        """
         days = self.MJD + np.arange(3) * cadence
 
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+
+    # -- one entry does not decide a column ---------------------------------
+
+    def test_an_unfilled_row_does_not_turn_seconds_into_days(self):
+        """casacore leaves TIME at zero in a row added and never filled.
+
+        Reading the *smallest* magnitude, that row alone would have read a
+        column of seconds as days -- issue #208's overflow again, by another
+        door. The median needs half the column before it moves.
+        """
+        seconds = self._days(n_time=8, step=0.5) * 86400.0
+        with_unfilled_row = np.concatenate([[0.0], seconds])
+
+        converted = times_to_mjd(with_unfilled_row)
+
+        np.testing.assert_allclose(converted[1:], seconds / 86400.0, rtol=1e-15)
+
+    @pytest.mark.parametrize("sentinel", [np.inf, -np.inf, np.nan])
+    def test_a_non_finite_entry_does_not_decide_the_unit(self, sentinel):
+        """Dropped rather than ranked, so it reaches neither end of the order."""
+        days = self._days(n_time=8)
+        with_sentinel = np.concatenate([[sentinel], days])
+
+        np.testing.assert_array_equal(times_to_mjd(with_sentinel)[1:], days)
+        np.testing.assert_allclose(
+            times_to_mjd(np.concatenate([[sentinel], days * 86400.0]))[1:],
+            days,
+            rtol=1e-15,
+        )
+
+    def test_a_column_of_nothing_but_sentinels_reads_as_days(self):
+        """Garbage in: left as it arrived rather than scaled by 86400."""
+        all_nan = np.full(4, np.nan)
+
+        assert np.isnan(times_to_mjd(all_nan)).all()
 
     def test_the_rule_does_not_depend_on_row_order(self):
         """``ms_layout`` permits timestep blocks that do not ascend."""

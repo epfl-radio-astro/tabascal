@@ -28,6 +28,7 @@ from tabascal.imports import import_components
 from tabascal.write import write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
+from tabascal.scripts._config_paths import config_is_unset, config_path
 
 import jax
 
@@ -170,25 +171,6 @@ class _RunPaths:
     used_orbits_path: str
 
 
-def _config_path(value, key: str) -> str:
-    """A path from the config, absolute, or a message naming the key it came from.
-
-    ``os.path.abspath`` raises ``TypeError: expected str, bytes or os.PathLike
-    object, not int`` on anything else, which names neither the key nor the
-    config it was read from. Nothing validates the ``data`` section's types, and
-    ``data.gain_table`` beside these two keys genuinely accepts a list, so a
-    list here is a plausible slip rather than a perverse one.
-    """
-
-    if not isinstance(value, (str, os.PathLike)):
-        raise SystemExit(
-            f"Config parameter ({key}: {value!r}) is not a path. Give it as a "
-            "string naming a file or directory."
-        )
-
-    return os.path.abspath(value)
-
-
 def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path=None):
     """Resolve the run's directory layout and write derived paths into ``config``.
 
@@ -222,10 +204,11 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     model_name = "Custom"
     results_name = f"{model_name}{suffix}"
 
+    config_sim_dir = config["data"].get("sim_dir")
     if sim_dir:
         sim_dir = os.path.abspath(sim_dir)
-    elif config["data"].get("sim_dir"):
-        sim_dir = _config_path(config["data"]["sim_dir"], "data.sim_dir")
+    elif not config_is_unset(config_sim_dir):
+        sim_dir = config_path(config_sim_dir, "data.sim_dir")
     else:
         raise SystemExit(
             "No output directory given. Provide -s/--sim_dir or data.sim_dir: it "
@@ -240,10 +223,11 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     f_name = os.path.split(sim_dir)[1]
     config["data"]["zarr_path"] = os.path.join(sim_dir, f"{f_name}.zarr")
 
+    config_ms_path = config["data"].get("ms_path")
     if ms_path:
         ms_path = os.path.abspath(ms_path)
-    elif config["data"].get("ms_path"):
-        ms_path = _config_path(config["data"]["ms_path"], "data.ms_path")
+    elif not config_is_unset(config_ms_path):
+        ms_path = config_path(config_ms_path, "data.ms_path")
     else:
         ms_path = os.path.join(sim_dir, f"{f_name}.ms")
     config["data"]["ms_path"] = ms_path

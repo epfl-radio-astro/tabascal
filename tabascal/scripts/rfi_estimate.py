@@ -28,6 +28,8 @@ parser, and ``tabascal -h`` must not pay for the run stack.
 import argparse
 import os
 
+from tabascal.scripts._config_paths import config_is_unset, config_path
+
 
 def _parse_norad_ids(text):
     return [int(x) for x in text.replace(",", " ").split()]
@@ -292,19 +294,27 @@ def resolve_ms_path(args, config):
     """The MS to read: the flag, the config's ``data.ms_path``, or the sim dir.
 
     The same precedence ``tabascal run`` uses, so a config that runs points the
-    extractor at the same visibilities without being told twice.
+    extractor at the same visibilities without being told twice -- and read
+    through the same helpers, so one config cannot be refused here with a
+    traceback and there with a message naming the key.
     """
     if args.ms_path:
         return os.path.abspath(args.ms_path)
 
     if config is not None:
         ms_path = config.get("data", {}).get("ms_path")
-        if ms_path:
-            return os.path.abspath(ms_path)
+        if not config_is_unset(ms_path):
+            return config_path(ms_path, "data.ms_path")
 
-    sim_dir = args.sim_dir or (config or {}).get("data", {}).get("sim_dir")
+    config_sim_dir = (config or {}).get("data", {}).get("sim_dir")
+    if args.sim_dir:
+        sim_dir = os.path.abspath(args.sim_dir)
+    elif not config_is_unset(config_sim_dir):
+        sim_dir = config_path(config_sim_dir, "data.sim_dir")
+    else:
+        sim_dir = None
+
     if sim_dir:
-        sim_dir = os.path.abspath(sim_dir)
         return os.path.join(sim_dir, f"{os.path.basename(sim_dir)}.ms")
 
     raise SystemExit(

@@ -333,8 +333,8 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     The inference reads the *magnitude* of the times, and nothing else. An MJD
     day number is at most ~1e5 in any plausible observing era -- 1e5 is the year
     2132 and -1e5 is 1585 -- while the same instant in seconds is ~1e9. No MS
-    can plausibly store a value between the two, so one comparison settles it,
-    for a single integration and a full observation alike. The test is strict: a
+    can plausibly sit between the two, so one comparison settles it, for a
+    single integration and a full observation alike. The test is strict: a
     magnitude of exactly 1e5 reads as days.
 
     The *spacing* of consecutive samples used to decide this instead, on the
@@ -347,17 +347,29 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
 
     Magnitude subsumes the rule rather than merely replacing it. For a spacing
     test to decide anything magnitude does not, a column stored in seconds would
-    have to carry ``|TIME| <= 1e5``, putting the observation within 1.16 days of
-    1858-11-16. So the branch could no longer be right about a real MS, only
-    wrong about one, and it is gone.
+    have to have a typical ``|TIME| <= 1e5``, putting the observation within
+    1.16 days of 1858-11-16. So the branch could no longer be right about a real
+    MS, only wrong about one, and it is gone.
 
-    The value read is the smallest, taken from the *sorted distinct* values, so
-    the decision does not depend on the order the times arrive in --
+    The value compared is the *median* of the finite magnitudes, which is a
+    statement about the column rather than about any one of its entries. A
+    single row can be neither: casacore leaves ``TIME`` at zero in a row that
+    was added and never filled, and one such row in a column of seconds drags
+    the smallest magnitude to zero -- read as days, the observation then
+    overflows the preflight epoch check exactly as issue #208 did. The largest
+    magnitude is no better, since ``+inf`` reaches it. Half the column has to be
+    wrong before a median is.
+
+    Non-finite entries are dropped rather than ranked, so an ``inf`` cannot
+    decide the unit from either end. A column with no finite time at all reads
+    as days and stays NaN downstream, which is the same nothing it arrived as.
+
+    A median does not depend on the order the times arrive in --
     :func:`ms_layout` permits an MS whose timestep blocks do not ascend, and
     ``orbit_config.ms_integration_times_mjd`` reads the same column through
-    ``np.unique``. Sorting also puts any NaN last, leaving the smallest real
-    time to classify the column. The values come back in the order they were
-    given, sorted or not: only the unit decision looks at them sorted.
+    ``np.unique``, so the two see one column in two orders and must not part
+    over it. The values come back in the order they were given: only the unit
+    decision reduces them.
 
     So the heuristic is one rule for every caller. A *declared* unit can still
     part them, because only some callers pass one -- :func:`read_ms` and
@@ -370,9 +382,10 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     times = np.asarray(times, dtype=float)
 
     if unit is None and times.size:
-        smallest = np.unique(times)[0]
+        finite = np.abs(times[np.isfinite(times)])
+        typical = np.median(finite) if finite.size else 0.0
 
-        unit = "s" if abs(smallest) > _MJD_DAY_LIMIT else "d"
+        unit = "s" if typical > _MJD_DAY_LIMIT else "d"
 
     return times / DAY_SECS if unit == "s" else times
 

@@ -62,8 +62,11 @@ values are seconds or days; TABASCAL works in MJD days.
 :func:`~tabascal.ms.times_to_mjd` applies it, falling back — for the columns
 that carry no declaration — on the magnitude of the times: an MJD day number is
 at most ~1e5 in any plausible observing era against ~1e9 for the same instant in
-seconds, and nothing an MS can store falls between. The threshold is strict: a
-magnitude of exactly 1e5 reads as days.
+seconds, and no observation falls between. What is compared is the *median* of
+the finite magnitudes, so no single entry decides the column — a row casacore
+added and never filled leaves ``TIME`` at zero, and the smallest magnitude would
+read a column of seconds as days on the strength of it. The threshold is strict:
+a magnitude of exactly 1e5 reads as days.
 
 The spacing of consecutive samples used to decide this instead. It could not:
 a day-numbered column stepping by a day has a spacing above the half-day

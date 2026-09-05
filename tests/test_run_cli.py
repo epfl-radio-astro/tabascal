@@ -330,6 +330,29 @@ class TestLightCurveInputs:
             "sim_run/sim_run.ms"
         )
 
+    @pytest.mark.parametrize("value", [1227000000, ["a.ms", "b.ms"], 0, []])
+    def test_a_config_ms_path_that_is_not_a_path_names_itself(self, value):
+        """The same config, refused the same way as by ``tabascal run``.
+
+        ``resolve_ms_path`` and ``_resolve_paths`` read the same two keys with
+        the same precedence, so they read them through the same helpers. This
+        one used to hand the value straight to ``os.path.abspath`` (a bare
+        TypeError out of posixpath) or, for the falsy ones, ignore it and go on
+        to the sim-dir fallback.
+        """
+        args = _parse("light-curve", "-c", "c.yaml")
+        config = {"data": {"ms_path": value, "sim_dir": None}}
+
+        with pytest.raises(SystemExit, match=r"data\.ms_path.*is not a path"):
+            self._mod().resolve_ms_path(args, config)
+
+    def test_an_unset_config_ms_path_still_falls_through(self):
+        """``null`` and ``""`` remain the way to say the key is not in use."""
+        args = _parse("light-curve", "-c", "c.yaml", "-s", "/data/sim_run")
+        config = {"data": {"ms_path": "", "sim_dir": None}}
+
+        assert self._mod().resolve_ms_path(args, config).endswith("sim_run/sim_run.ms")
+
     def test_the_flag_beats_the_config_for_the_elevation_cut(self):
         args = _parse("light-curve", "-c", "c.yaml", "--min-elevation", "20")
         assert self._mod().resolve_min_elevation(args, {"rfi": {"min_elevation": 0}}) == 20.0
@@ -641,7 +664,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
         -- renaming it and defaulting it to the MS's parent -- which is why it
         is a message here and not a default.
         """
-        with pytest.raises(SystemExit, match=r"data\.sim_dir"):
+        with pytest.raises(SystemExit, match=r"No output directory given"):
             self._resolve(impl, data)
 
     def test_the_message_says_what_the_directory_is_for(self, impl):
@@ -659,13 +682,37 @@ class TestResolvePathsRefusesWhatItCannotUse:
         """An obs ID pasted in, or the list form ``data.gain_table`` accepts."""
         data = {"sim_dir": str(tmp_path / "obs"), "ms_path": value}
 
-        with pytest.raises(SystemExit, match=r"data\.ms_path"):
+        with pytest.raises(SystemExit, match=r"data\.ms_path.*is not a path"):
             self._resolve(impl, data)
 
     @pytest.mark.parametrize("value", [1227000000, ["a", "b"]])
     def test_a_config_sim_dir_that_is_not_a_path_names_itself(self, impl, value):
-        with pytest.raises(SystemExit, match=r"data\.sim_dir"):
+        with pytest.raises(SystemExit, match=r"data\.sim_dir.*is not a path"):
             self._resolve(impl, {"sim_dir": value})
+
+    @pytest.mark.parametrize("value", [0, [], False])
+    def test_a_falsy_non_path_is_reported_rather_than_ignored(
+        self, impl, tmp_path, value
+    ):
+        """Only ``null`` and ``""`` mean unset; the rest are values someone wrote.
+
+        Gating the type check on truthiness would let these fall through to
+        ``<sim_dir>/<basename>.ms`` in silence -- the config naming one MS and
+        the run reading another, which is the bug this branch exists to fix.
+        """
+        data = {"sim_dir": str(tmp_path / "obs"), "ms_path": value}
+
+        with pytest.raises(SystemExit, match=r"data\.ms_path.*is not a path"):
+            self._resolve(impl, data)
+
+    def test_the_type_message_quotes_the_value(self, impl, tmp_path):
+        """So a reader can see the obs ID or list they wrote, not just the key."""
+        data = {"sim_dir": str(tmp_path / "obs"), "ms_path": 1227000000}
+
+        with pytest.raises(SystemExit) as excinfo:
+            self._resolve(impl, data)
+
+        assert "1227000000" in str(excinfo.value)
 
     def test_a_path_like_object_is_accepted(self, impl, tmp_path):
         """``Path`` is what a caller building a config in Python would pass."""

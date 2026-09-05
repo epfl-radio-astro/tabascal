@@ -70,7 +70,13 @@ def build_parser():
     # -- run --
     run_parser = subparsers.add_parser("run", help="Apply tabascal to a simulation.")
     run_parser.add_argument("-c", "--config", required=True, help="Path to the config file.")
-    run_parser.add_argument("-s", "--sim_dir", help="Path to the directory of the simulation.")
+    run_parser.add_argument(
+        "-s",
+        "--sim_dir",
+        help="Required, here or as data.sim_dir. Directory the run writes its "
+        "plots and results to, and where a simulation's MS and truth zarr are "
+        "looked for. Does not move the MS when data.ms_path names one; use -ms.",
+    )
     run_parser.add_argument("-ms", "--ms_path", help="Path to Measurement Set.")
     run_parser.add_argument(
         "-np", "--norad-path",
