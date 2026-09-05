@@ -6,9 +6,27 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd, validate_pow_spec
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
+
+
+#: The ``ast.pow_spec`` keys and what each may be, for
+#: :func:`tabascal.fft_gp.validate_pow_spec`. Unlike the RFI prior, this section
+#: sets both the power at the origin and the frequency-axis knee itself: ``p0``
+#: is not renormalised away here, and ``k0_freq`` is not derived from anything.
+_POW_SPEC_RULES = {
+    "p0": "number",
+    "k0_freq": "number",
+    "fov_deg": "number",
+    "gammas": "pair",
+    "cutoff": "cutoff",
+}
+
+#: ``fov_deg`` alone may be null: unset means the telescope's own primary beam,
+#: 2 * 1.22 * lambda / D from the dish diameter in the measurement set, rather
+#: than a field of view chosen by hand.
+_POW_SPEC_OPTIONAL = ("fov_deg",)
 
 
 class GPVisAst(Component):
@@ -42,11 +60,24 @@ class GPVisAst(Component):
             self.freqs = config.freqs
             self.times = config.times
 
-            self.p0 = config.args["ast"]["pow_spec"]["p0"]
-            self.gammas = config.args["ast"]["pow_spec"]["gammas"]
-            self.fov_deg = config.args["ast"]["pow_spec"]["fov_deg"]
-            self.k0_freq = config.args["ast"]["pow_spec"]["k0_freq"]
-            self.pk_cutoff = config.args["ast"]["pow_spec"]["cutoff"]
+            # Checked rather than indexed: these went straight to the Fourier
+            # machinery, so a negative gamma, a string, or a cutoff of 1 -- which
+            # cuts every mode -- surfaced from inside fft_gp with a message about
+            # array shapes, if it surfaced at all. The same validator serves the
+            # RFI prior; the sections differ only in which keys are live.
+            pow_spec = validate_pow_spec(
+                config.args["ast"].get("pow_spec"),
+                "ast",
+                _POW_SPEC_RULES,
+                optional=_POW_SPEC_OPTIONAL,
+            )
+            config.args["ast"]["pow_spec"] = pow_spec
+
+            self.p0 = pow_spec["p0"]
+            self.gammas = pow_spec["gammas"]
+            self.fov_deg = pow_spec["fov_deg"]
+            self.k0_freq = pow_spec["k0_freq"]
+            self.pk_cutoff = pow_spec["cutoff"]
 
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]
