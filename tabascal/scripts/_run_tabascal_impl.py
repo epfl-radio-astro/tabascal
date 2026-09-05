@@ -262,9 +262,9 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
         ms_path = os.path.join(out_dir, f"{f_name}.ms")
     config["data"]["ms_path"] = ms_path
 
-    # Only ast.init: truth and plots.truth read it, and only a simulation has
-    # one. Named explicitly where it is not beside the outputs, which is every
-    # real-data run and any simulation whose products go elsewhere.
+    # Read by ast.init: truth, rfi.init: truth and plots.truth, and only a
+    # simulation has one. Named explicitly where it is not beside the MS, which
+    # is any simulation whose truth has been moved away from its visibilities.
     config_truth_zarr = config["data"].get("truth_zarr")
     if not config_is_unset(config_truth_zarr):
         zarr_path = config_path(config_truth_zarr, "data.truth_zarr")

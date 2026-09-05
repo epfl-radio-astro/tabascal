@@ -686,11 +686,11 @@ class TestResolveMSPath:
             tmp_path / "from_flag" / "from_flag.zarr"
         )
 
-    def test_the_truth_zarr_defaults_beside_the_outputs(self, impl, tmp_path):
+    def test_the_truth_zarr_defaults_beside_the_ms(self, impl, tmp_path):
         """Named for the MS, which on a simulation is the directory's own name.
 
-        ``ast.init: truth`` and ``plots.truth`` are the only readers, and a
-        simulation is the only thing that has one -- ``sim-vis`` leaves it at
+        ``ast.init: truth``, ``rfi.init: truth`` and ``plots.truth`` read it,
+        and a simulation is the only thing that has one -- ``sim-vis`` leaves it at
         ``<dir>/<dir name>.zarr`` beside the MS of the same stem, so deriving
         it from the MS's name reproduces that exactly.
         """
