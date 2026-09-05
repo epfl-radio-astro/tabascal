@@ -1,5 +1,6 @@
 """Tests for tabascal.ms — row layout, correlation resolution, time scales."""
 
+import warnings
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -458,10 +459,33 @@ class TestTimeUnits:
         )
 
     def test_a_column_of_nothing_but_sentinels_reads_as_days(self):
-        """Garbage in: left as it arrived rather than scaled by 86400."""
+        """Garbage in: left as it arrived rather than scaled by 86400.
+
+        Filtering can empty the column, and ``np.median([])`` is a NaN and a
+        ``RuntimeWarning``. The NaN would classify it as days anyway, so the
+        guard exists for the warning -- which is the half a test that only
+        asserts the unit cannot see.
+        """
         all_nan = np.full(4, np.nan)
 
-        assert np.isnan(times_to_mjd(all_nan)).all()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            converted = times_to_mjd(all_nan)
+
+        assert np.isnan(converted).all()
+
+    def test_a_stray_timestamp_in_the_other_unit_does_not_decide_the_column(self):
+        """Why the median and not the largest magnitude.
+
+        Filtering the non-finite entries first means an ``inf`` can no longer
+        reach a maximum, so the case against taking one is a finite value in
+        the wrong unit -- a seconds timestamp left in a column of days, which
+        is larger than every real entry around it.
+        """
+        days = self._days(n_time=8)
+        with_stray_seconds = np.concatenate([days, [self.MJD * 86400.0]])
+
+        np.testing.assert_array_equal(times_to_mjd(with_stray_seconds)[:-1], days)
 
     def test_the_rule_does_not_depend_on_row_order(self):
         """``ms_layout`` permits timestep blocks that do not ascend."""
@@ -498,13 +522,13 @@ class TestTimeUnits:
 
     # -- a declared unit outranks the heuristic -----------------------------
 
-    def test_a_declared_day_unit_beats_the_spacing_rule(self):
-        """Spacing says seconds; the MS says days, and the MS is authoritative."""
+    def test_a_declared_day_unit_beats_the_heuristic(self):
+        """Magnitude says seconds; the MS says days, and the MS is authoritative."""
         days = self._days()
 
         np.testing.assert_array_equal(times_to_mjd(days * 86400.0, "d"), days * 86400.0)
 
-    def test_a_declared_second_unit_beats_the_spacing_rule(self):
+    def test_a_declared_second_unit_beats_the_heuristic(self):
         days = self._days()
 
         np.testing.assert_allclose(times_to_mjd(days, "s"), days / 86400.0, rtol=1e-15)
@@ -570,14 +594,14 @@ class TestTimeUnits:
         np.testing.assert_allclose(data["times_mjd"], days, rtol=1e-15)
 
     def test_read_ms_reads_a_single_integration_ms(self, run_reader):
-        """The IndexError of issue #148: one integration has no spacing to read."""
+        """The IndexError of issue #148: a column of one, reduced like any other."""
         data = run_reader(np.array([self.MJD * 86400.0]))
 
         assert data["n_time"] == 1
         np.testing.assert_allclose(data["times_mjd"], [self.MJD], rtol=1e-15)
 
     def test_read_ms_honours_the_declared_unit(self, run_reader):
-        """Declared seconds, spacing of days: the reader follows the declaration."""
+        """Declared seconds, magnitude of days: the reader follows the declaration."""
         times = self._days(n_time=3)
 
         data = run_reader(times, keywords=_keywords("UTC", units=["s"]))

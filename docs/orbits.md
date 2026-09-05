@@ -197,7 +197,7 @@ Every run saves the exact records it used to
 priors, copy or retain that file and pass its directory to a later run:
 
 ```bash
-tabascal run -c path/to/config.yaml -ms path/to/data.ms --extra-orbit-dir /path/to/saved-run
+tabascal run -c path/to/config.yaml -ms path/to/data.ms -s path/to/output_dir --extra-orbit-dir /path/to/saved-run
 ```
 
 The default `extra_orbit_max_age_days: null` deliberately exempts explicit

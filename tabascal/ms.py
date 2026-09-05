@@ -357,8 +357,9 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     was added and never filled, and one such row in a column of seconds drags
     the smallest magnitude to zero -- read as days, the observation then
     overflows the preflight epoch check exactly as issue #208 did. The largest
-    magnitude is no better, since ``+inf`` reaches it. Half the column has to be
-    wrong before a median is.
+    magnitude is no better: a stray value in the *other* unit, a seconds
+    timestamp left in a column of days, reaches it just as easily. Half the
+    column has to be wrong before a median is.
 
     Non-finite entries are dropped rather than ranked, so an ``inf`` cannot
     decide the unit from either end. A column with no finite time at all reads

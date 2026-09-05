@@ -195,6 +195,14 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     required from the flag or the config rather than guessed. Issue #207 carries
     the wider change -- renaming it to an output directory and defaulting it to
     the MS's parent -- which is not attempted here.
+
+    One more consequence, of the write-back rather than of the precedence. The
+    resolved ``ms_path`` is recorded on ``config`` whether it was given or
+    derived, and the run archives that config to its plot directory, so an
+    archived config now names a Measurement Set and is read on it. That is what
+    makes the archive a record of the run rather than of the intent, and it is
+    why re-running one after moving the data needs ``-ms``: ``-s`` moves the
+    outputs and would once have moved the MS with them.
     """
     if suffix:
         suffix = "_" + suffix

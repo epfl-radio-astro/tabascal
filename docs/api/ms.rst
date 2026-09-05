@@ -71,13 +71,15 @@ a magnitude of exactly 1e5 reads as days.
 The spacing of consecutive samples used to decide this instead. It could not:
 a day-numbered column stepping by a day has a spacing above the half-day
 threshold too and was read as seconds, and the threshold was strict, so an
-integration of exactly 0.5 s — a common correlator dump time — was read as days.
+integration of 0.5 s or shorter — 0.5 s being a common correlator dump time —
+was read as days.
 Magnitude parts every column the spacing rule parted correctly, so the rule is
 gone rather than repaired.
 
 Both :func:`~tabascal.ms.read_ms` and the preflight observation-epoch helper
 convert here, so the heuristic cannot classify one MS two ways — including for
-an MS whose timestep blocks do not ascend, since the classification sorts. What
+an MS whose timestep blocks do not ascend, since a median does not depend on the
+order its values arrive in. What
 they can still differ on is a *declared* unit: the preflight helper reads the
 ``TIME`` column through casacore and takes only its ``MEASINFO`` record from the
 keywords, not its ``QuantumUnits``, so an MS whose ``QuantumUnits`` contradicts

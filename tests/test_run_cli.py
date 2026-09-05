@@ -624,6 +624,51 @@ class TestResolveMSPath:
         assert os.path.isabs(resolved)
         assert resolved == str(tmp_path / "obs.ms")
 
+    def test_the_sim_dir_flag_does_not_move_the_ms(self, impl, tmp_path):
+        """The branch's headline consequence, and the one worth a test.
+
+        ``-s`` used to be the single "which dataset" knob, because the MS was
+        re-derived from it. It now moves the outputs and the truth zarr while
+        the MS stays where the config named it -- which is the whole point on
+        real data, where the visibilities do not live in the output directory.
+        ``-ms`` is how a run is moved onto other visibilities.
+        """
+        named_ms = str(tmp_path / "elsewhere" / "real.ms")
+        config = {
+            "data": {"sim_dir": str(tmp_path / "obs"), "ms_path": named_ms},
+            "model": {},
+        }
+
+        paths = impl._resolve_paths(config, str(tmp_path / "other"), None, "", None)
+
+        assert paths.ms_path == named_ms
+        assert config["data"]["sim_dir"] == str(tmp_path / "other")
+        assert paths.plot_dir.startswith(str(tmp_path / "other"))
+
+    def test_the_sim_dir_flag_beats_the_config(self, impl, tmp_path):
+        """It still wins for everything sim_dir does name."""
+        config = {"data": {"sim_dir": str(tmp_path / "from_config")}, "model": {}}
+
+        paths = impl._resolve_paths(config, str(tmp_path / "from_flag"), None, "", None)
+
+        assert paths.ms_path == str(tmp_path / "from_flag" / "from_flag.ms")
+        assert config["data"]["zarr_path"] == str(
+            tmp_path / "from_flag" / "from_flag.zarr"
+        )
+
+    def test_the_derived_ms_is_recorded_on_the_config(self, impl, tmp_path):
+        """So the archived tab_config_<run_id>.yaml is a record, not an intent.
+
+        The consequence is that re-running an archived config reads the MS that
+        run read, ``-s`` or no ``-s``. Moving the data means passing ``-ms``.
+        """
+        config = {"data": {"sim_dir": str(tmp_path / "obs")}, "model": {}}
+
+        paths = impl._resolve_paths(config, None, None, "", None)
+
+        assert config["data"]["ms_path"] == paths.ms_path
+        assert paths.ms_path == str(tmp_path / "obs" / "obs.ms")
+
     def test_the_zarr_path_still_follows_the_sim_dir(self, impl, tmp_path):
         """The simulation truth keeps its own layout; only the MS moved.
 
