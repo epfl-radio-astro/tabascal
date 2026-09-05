@@ -321,6 +321,32 @@ def read_time_unit(column_keywords: dict, column: str = "TIME") -> Optional[str]
 _MJD_DAY_LIMIT = 1e5
 
 
+def infer_time_unit(times) -> str:
+    """``"s"`` or ``"d"`` for a ``TIME`` column that declares no unit.
+
+    Split out from :func:`times_to_mjd` so that a caller which wants to reduce
+    one array and convert another can. ``orbit_config._integration_times_mjd``
+    is the one that does: the unit has to be read from every row, because the
+    reduction weighs the times by how often they occur, while the values it
+    returns are the distinct ones. Converting first and deduplicating after
+    would do both, but it scales the whole column to do it -- 2.3x its size
+    against 1.3x, on a main table that can run to gigabytes -- and division is
+    not injective in binary64, so two raw timestamps can land on one MJD and
+    leave the mean epoch weighted differently.
+
+    Works in place on its own copy of the finite times, which no caller shares.
+    """
+
+    times = np.asarray(times, dtype=float)
+    finite = times[np.isfinite(times)]
+    if not finite.size:
+        return "d"
+
+    np.abs(finite, out=finite)
+
+    return "s" if np.median(finite, overwrite_input=True) > _MJD_DAY_LIMIT else "d"
+
+
 def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     """An MS ``TIME`` column as Modified Julian Dates in days.
 
@@ -394,10 +420,7 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     times = np.asarray(times, dtype=float)
 
     if unit is None and times.size:
-        finite = np.abs(times[np.isfinite(times)])
-        typical = np.median(finite) if finite.size else 0.0
-
-        unit = "s" if typical > _MJD_DAY_LIMIT else "d"
+        unit = infer_time_unit(times)
 
     return times / DAY_SECS if unit == "s" else times
 

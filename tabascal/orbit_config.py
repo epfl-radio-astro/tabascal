@@ -38,7 +38,7 @@ from typing import Optional
 import numpy as np
 
 from satchecker_client import SatCheckerError as TLEError
-from tabascal.ms import read_time_scale, times_to_mjd
+from tabascal.ms import infer_time_unit, read_time_scale, times_to_mjd
 from tabascal.time import mjd_to_jd, to_utc_jd
 
 
@@ -338,20 +338,21 @@ def _ms_times_and_scale(ms_path: str) -> tuple:
 def _integration_times_mjd(times: np.ndarray, ms_path: str) -> np.ndarray:
     """One time per integration, in MJD days, from an already-read column.
 
-    Converted before it is deduplicated, not after. The unit heuristic in
-    :func:`tabascal.ms.times_to_mjd` weighs the times by how often they occur --
-    that is what lets a handful of unfilled rows be outvoted -- and
-    deduplicating first throws exactly that away: a column of one real
-    timestamp per baseline plus stray rows at 0 and 1 reduces to three values
-    whose median is 1, and the whole observation reads as days. Scaling by a
-    positive constant is order-preserving and injective, so the two orders
-    agree on the result whenever they agree on the unit; only the vote differs.
+    The unit is read from every row and the values from the distinct ones. The
+    heuristic in :func:`tabascal.ms.infer_time_unit` weighs the times by how
+    often they occur -- that is what lets a handful of unfilled rows be
+    outvoted -- and deduplicating before it runs throws exactly that away: a
+    column of one real timestamp per baseline plus stray rows at 0 and 1 is
+    three distinct values whose median is 1, and the whole observation reads as
+    days. Only the vote needs the duplicates, so only the vote gets them; this
+    is the whole main table, and scaling it to reach the same answer would cost
+    both the memory and the exactness of deduplicating the raw values.
     """
 
     times = np.asarray(times)
     if times.size == 0:
         raise TLEError(f"Measurement Set has an empty TIME column: {ms_path}")
-    return np.unique(times_to_mjd(times))
+    return times_to_mjd(np.unique(times), infer_time_unit(times))
 
 
 def ms_integration_times_mjd(ms_path: str) -> np.ndarray:

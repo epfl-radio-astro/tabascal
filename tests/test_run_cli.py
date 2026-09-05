@@ -9,6 +9,7 @@ tests import that module lazily and stub the run itself out.
 
 import os
 import re
+import shlex
 from datetime import datetime
 from pathlib import Path
 
@@ -80,7 +81,10 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
                 continue
             # Strip trailing comments used to annotate help invocations.
             line = re.split(r"\s+#", line, maxsplit=1)[0]
-            commands.append((page.name, line.split()))
+            # shlex, not split(): a shell hands `-s ""` an empty argument and
+            # `-s "output dir"` a single one, and a check that reads the parsed
+            # options has to see what the shell would have passed.
+            commands.append((page.name, shlex.split(line)))
     return commands
 
 
@@ -1038,6 +1042,8 @@ class TestDocumentedCommands:
             ("-ms x.ms", True),
             ("--ms_path=x.ms", True),
             ("--ms_path=x.ms --sim_dir=", True),  # empty is unset, not a path
+            ('--ms_path=x.ms --sim_dir ""', True),  # the shell's empty, likewise
+            ('-ms x.ms -s "output dir"', False),  # one argument, not two
             ("-c only.yaml", False),  # no MS named: a simulation run
         ],
     )
@@ -1045,7 +1051,8 @@ class TestDocumentedCommands:
         self, tail, flagged
     ):
         """The spellings the token matcher got wrong, pinned rather than tried."""
-        options = self._run_options(["tabascal", "run", "-c", "c.yaml", *tail.split()])
+        argv = shlex.split(f"tabascal run -c c.yaml {tail}")
+        options = self._run_options(argv)
 
         assert bool(options.ms_path and not options.sim_dir) is flagged
 
