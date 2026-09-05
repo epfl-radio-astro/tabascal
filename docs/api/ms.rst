@@ -92,7 +92,11 @@ already.
 :func:`~tabascal.ms.read_ms`, the results writer's observation grid and the
 preflight observation-epoch helper all convert here, so the heuristic cannot
 classify one MS two ways — including for an MS whose timestep blocks do not
-ascend, since a median does not depend on the order its values arrive in. What
+ascend, since a median does not depend on the order its values arrive in, and
+including one where they do not agree on how many times there are, since the
+median is taken over the *distinct* times. The preflight helper deduplicates
+before converting and the other two do not, so a column with several unfilled
+timestep blocks reaches them as different multisets. What
 they can still differ on is a *declared* unit: the preflight helper reads the
 ``TIME`` column through casacore and takes only its ``MEASINFO`` record from the
 keywords, not its ``QuantumUnits``, so an MS whose ``QuantumUnits`` contradicts

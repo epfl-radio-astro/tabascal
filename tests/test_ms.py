@@ -486,6 +486,30 @@ class TestTimeUnits:
 
         assert np.isnan(converted).all()
 
+    def test_the_reader_and_the_preflight_check_agree_on_repeated_blocks(self):
+        """The two callers deduplicate differently and must still agree.
+
+        ``orbit_config._integration_times_mjd`` deduplicates before calling;
+        ``read_ms`` passes ``TIME.reshape(n_time, n_bl)[:, 0]``, which repeats a
+        value when two timestep blocks share one -- which is what unfilled
+        blocks left at zero do. Reducing over the rows as given, this column
+        reads as days for the reader and seconds for the preflight check, so
+        the check would pass and the run would then use the times unconverted.
+        ``ms_layout`` does not reject it: 15 rows over 3 distinct times is a
+        whole 5 baselines per timestep.
+        """
+        column = np.array([0.0] * 9 + [self.MJD * 86400.0] * 6)
+        from_reader = column.reshape(3, 5)[:, 0]
+        from_preflight = np.unique(column)
+
+        assert from_reader.tolist() != from_preflight.tolist()  # or nothing is shown
+        np.testing.assert_allclose(
+            times_to_mjd(from_reader)[-1], self.MJD, rtol=1e-15
+        )
+        np.testing.assert_allclose(
+            times_to_mjd(from_preflight)[-1], self.MJD, rtol=1e-15
+        )
+
     def test_a_stray_timestamp_in_the_other_unit_does_not_decide_the_column(self):
         """Why the median and not the largest magnitude.
 

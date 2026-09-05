@@ -990,6 +990,28 @@ class TestDocumentedCommands:
         assert [page for page, _ in from_readme] == ["README.md"] * len(from_readme)
         assert any(argv[:2] == ["tabascal", "run"] for _, argv in from_readme)
 
+    def test_every_documented_run_on_an_external_ms_names_an_output_dir(self):
+        """Parsing is not enough: -s is optional to argparse and required to run.
+
+        ``data.sim_dir`` may supply it, so argparse cannot demand it, and the
+        shipped configs leave it null -- which is how the README and two docs
+        pages came to show `tabascal run -c ... -ms ...`, a command that parses
+        and then aborts with "No output directory given". A command that names
+        its MS with -ms is not leaning on a config for the directory either.
+        """
+        offenders = []
+        for page, argv in documented_commands():
+            if argv[:2] != ["tabascal", "run"] or "-h" in argv:
+                continue
+            if not {"-ms", "--ms_path"} & set(argv):
+                continue  # a simulation run, which takes both from -s
+            if not {"-s", "--sim_dir"} & set(argv):
+                offenders.append(f"{page}: {' '.join(argv)}")
+
+        assert not offenders, "documented -ms runs with no output directory: " + str(
+            offenders
+        )
+
     def test_every_documented_command_parses(self):
         for page, argv in documented_commands():
             argv = argv[1:]  # drop the program name
