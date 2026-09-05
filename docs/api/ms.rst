@@ -73,13 +73,13 @@ a day-numbered column stepping by a day has a spacing above the half-day
 threshold too and was read as seconds, and the threshold was strict, so an
 integration of 0.5 s or shorter — 0.5 s being a common correlator dump time —
 was read as days.
-Magnitude parts every column the spacing rule parted correctly, so the rule is
-gone rather than repaired.
+Magnitude parts every column the spacing rule parted correctly inside the era
+the threshold already assumes, so the rule is gone rather than repaired.
 
-Both :func:`~tabascal.ms.read_ms` and the preflight observation-epoch helper
-convert here, so the heuristic cannot classify one MS two ways — including for
-an MS whose timestep blocks do not ascend, since a median does not depend on the
-order its values arrive in. What
+:func:`~tabascal.ms.read_ms`, the results writer's observation grid and the
+preflight observation-epoch helper all convert here, so the heuristic cannot
+classify one MS two ways — including for an MS whose timestep blocks do not
+ascend, since a median does not depend on the order its values arrive in. What
 they can still differ on is a *declared* unit: the preflight helper reads the
 ``TIME`` column through casacore and takes only its ``MEASINFO`` record from the
 keywords, not its ``QuantumUnits``, so an MS whose ``QuantumUnits`` contradicts

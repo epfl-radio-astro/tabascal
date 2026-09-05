@@ -614,6 +614,10 @@ class TestResolveMSPath:
         paths = impl._resolve_paths(config, None, None, "", None)
 
         assert paths.ms_path == str(tmp_path / "obs" / "obs.ms")
+        # Recorded even when derived, so the archived tab_config_<run_id>.yaml
+        # is a record of the run and not of the intent -- which is why
+        # re-running one after moving the data needs -ms and not -s.
+        assert config["data"]["ms_path"] == paths.ms_path
 
     def test_a_relative_config_path_is_made_absolute(self, impl, tmp_path, monkeypatch):
         """As the flag already was: a run must not depend on its working dir."""
@@ -655,19 +659,6 @@ class TestResolveMSPath:
         assert config["data"]["zarr_path"] == str(
             tmp_path / "from_flag" / "from_flag.zarr"
         )
-
-    def test_the_derived_ms_is_recorded_on_the_config(self, impl, tmp_path):
-        """So the archived tab_config_<run_id>.yaml is a record, not an intent.
-
-        The consequence is that re-running an archived config reads the MS that
-        run read, ``-s`` or no ``-s``. Moving the data means passing ``-ms``.
-        """
-        config = {"data": {"sim_dir": str(tmp_path / "obs")}, "model": {}}
-
-        paths = impl._resolve_paths(config, None, None, "", None)
-
-        assert config["data"]["ms_path"] == paths.ms_path
-        assert paths.ms_path == str(tmp_path / "obs" / "obs.ms")
 
     def test_the_zarr_path_still_follows_the_sim_dir(self, impl, tmp_path):
         """The simulation truth keeps its own layout; only the MS moved.

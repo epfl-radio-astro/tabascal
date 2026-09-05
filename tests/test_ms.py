@@ -447,7 +447,14 @@ class TestTimeUnits:
 
     @pytest.mark.parametrize("sentinel", [np.inf, -np.inf, np.nan])
     def test_a_non_finite_entry_does_not_decide_the_unit(self, sentinel):
-        """Dropped rather than ranked, so it reaches neither end of the order."""
+        """A median shrugs off the infinities; only the NaN needs the filter.
+
+        ``np.median`` propagates a NaN, so a single one would classify every
+        column as days without the ``isfinite`` guard -- that case is the one
+        this pins. The infinities pass either way and are here as guards: they
+        were the failure mode of the min and max the rule might have used
+        instead, so a rule that reverted to one of those would be caught.
+        """
         days = self._days(n_time=8)
         with_sentinel = np.concatenate([[sentinel], days])
 

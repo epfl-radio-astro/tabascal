@@ -64,7 +64,8 @@ def build_parser(parser=None):
     parser.add_argument(
         "-s", "--sim_dir", default=None,
         help="Directory a simulation's MS is looked for in, when neither -ms nor "
-        "data.ms_path names one. Unlike `tabascal run`, nothing is written here.",
+        "data.ms_path names one: <sim_dir>/<sim_dir name>.ms. Light curves then "
+        "default beside that MS, so this directory is written to as well.",
     )
     parser.add_argument(
         "-z", "--zarr", default=None,

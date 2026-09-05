@@ -220,8 +220,8 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     else:
         raise SystemExit(
             "No output directory given. Provide -s/--sim_dir or data.sim_dir: it "
-            "is where this run writes its plots, results and used_orbits file. On "
-            "a simulation it is also where the MS and the truth zarr are looked "
+            "is where this run writes its plots/ and results/ directories. On a "
+            "simulation it is also where the MS and the truth zarr are looked "
             "for; on real data name the MS with data.ms_path and point sim_dir "
             "wherever the outputs should go."
         )
@@ -270,12 +270,23 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     )
 
 
-def _print_run_header(model_name, f_name, start_time):
+def _print_run_header(model_name, f_name, ms_path, start_time):
+    """The run's identity, including which visibilities it is about to read.
+
+    ``f_name`` is the output directory's name, which used to determine the MS
+    as well -- it was ``<sim_dir>/<f_name>.ms`` and nothing else. Now that
+    ``data.ms_path`` can name one anywhere, a header without it would leave a
+    log unable to say where its visibilities came from, and a stale ms_path in
+    a config swept over several ``-s`` directories would go unremarked.
+    ``tabascal search`` names its MS for the same reason.
+    """
+
     print()
     print(f"Start Time : {start_time}")
     print(f"Model : {model_name}")
     print()
     print(f_name)
+    print(f"MS : {ms_path}")
     print()
 
 
@@ -311,7 +322,7 @@ def tabascal_subtraction(
         start_time = datetime.now()
         key, _ = random.split(random.PRNGKey(1))
 
-        _print_run_header(paths.model_name, paths.f_name, start_time)
+        _print_run_header(paths.model_name, paths.f_name, paths.ms_path, start_time)
 
         if sharding_enabled():
             print(f"Sharding RFI sources over {jax.device_count()} devices:")

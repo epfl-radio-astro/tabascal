@@ -316,9 +316,8 @@ def read_time_unit(column_keywords: dict, column: str = "TIME") -> Optional[str]
     return unit
 
 
-#: Largest ``|MJD|`` in days that an observation could plausibly carry: MJD 1e5
-#: is the year 2132, and -1e5 is 1585. The whole of the unit heuristic; see
-#: :func:`times_to_mjd`.
+#: Largest ``|MJD|`` in days that an observation could plausibly carry, and the
+#: whole of the unit heuristic; see :func:`times_to_mjd`.
 _MJD_DAY_LIMIT = 1e5
 
 
@@ -345,11 +344,15 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     strict, so every integration of 0.5 s or shorter, 0.5 s being a common
     correlator dump time, was read as days (issue #208).
 
-    Magnitude subsumes the rule rather than merely replacing it. For a spacing
-    test to decide anything magnitude does not, a column stored in seconds would
-    have to have a typical ``|TIME| <= 1e5``, putting the observation within
-    1.16 days of 1858-11-16. So the branch could no longer be right about a real
-    MS, only wrong about one, and it is gone.
+    Magnitude subsumes the rule for every column inside the era bound the
+    threshold already assumes. Outside it the spacing rule was the better of the
+    two -- a day-numbered column past 2132 has ``|TIME| > 1e5`` and reads as
+    seconds, where a spacing of ~1e-4 would have read it right -- but a
+    heuristic whose constant is an era bound has conceded that case already.
+    Inside it, for a spacing test to decide anything magnitude does not, a
+    column stored in seconds would need a typical ``|TIME| <= 1e5``, putting the
+    observation within 1.16 days of 1858-11-16. So the branch could no longer be
+    right about an MS anyone will read, only wrong about one, and it is gone.
 
     The value compared is the *median* of the finite magnitudes, which is a
     statement about the column rather than about any one of its entries. A
@@ -365,12 +368,17 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     decide the unit from either end. A column with no finite time at all reads
     as days and stays NaN downstream, which is the same nothing it arrived as.
 
-    A median does not depend on the order the times arrive in --
-    :func:`ms_layout` permits an MS whose timestep blocks do not ascend, and
-    ``orbit_config.ms_integration_times_mjd`` reads the same column through
-    ``np.unique``, so the two see one column in two orders and must not part
-    over it. The values come back in the order they were given: only the unit
-    decision reduces them.
+    A median does not depend on the order the times arrive in, which matters
+    because the callers do not agree on one. :func:`ms_layout` permits an MS
+    whose timestep blocks do not ascend, so :func:`read_ms` hands over
+    ``TIME.reshape(n_time, n_bl)[:, 0]`` in block order, while
+    ``orbit_config.ms_integration_times_mjd`` hands over ``np.unique`` of the
+    whole column, sorted -- and on an MS whose row count is not a multiple of
+    the baseline count those are not even the same values. Neither difference
+    can move a median off the unit: it would take about half the column.
+
+    The values come back in the order they were given: only the unit decision
+    reduces them.
 
     So the heuristic is one rule for every caller. A *declared* unit can still
     part them, because only some callers pass one -- :func:`read_ms` and

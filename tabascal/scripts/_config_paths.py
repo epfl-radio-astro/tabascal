@@ -1,10 +1,11 @@
 """Reading a path out of a config, for the entry points that take one.
 
-``tabascal run`` and ``rfi-estimate`` read the same ``data.sim_dir`` and
+``tabascal run`` and ``tabascal light-curve`` read the same ``data.sim_dir`` and
 ``data.ms_path`` keys with the same precedence, so they answer for them the same
 way here rather than each in its own idiom. Kept free of imports beyond ``os``:
-``rfi_estimate`` holds its JAX/NumPyro imports back so that parsing arguments
-costs nothing, and this is reached from argument resolution.
+``rfi_estimate``, which implements the light-curve subcommand, holds its
+JAX/NumPyro imports back so that parsing arguments costs nothing, and this is
+reached from argument resolution.
 """
 
 import os

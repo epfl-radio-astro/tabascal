@@ -74,7 +74,7 @@ def build_parser():
         "-s",
         "--sim_dir",
         help="Required, here or as data.sim_dir. Directory the run writes its "
-        "plots and results to, and where a simulation's MS and truth zarr are "
+        "plots/ and results/ to, and where a simulation's MS and truth zarr are "
         "looked for. Does not move the MS when data.ms_path names one; use -ms.",
     )
     run_parser.add_argument("-ms", "--ms_path", help="Path to Measurement Set.")
