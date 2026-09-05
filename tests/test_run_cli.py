@@ -999,17 +999,27 @@ class TestDocumentedCommands:
         and then aborts with "No output directory given". A command that names
         its MS with -ms is not leaning on a config for the directory either.
         """
+        def names(argv, *flags):
+            # argparse takes --flag=value as well as --flag value, so match the
+            # option rather than the token: --ms_path=x is an -ms run too.
+            return any(
+                arg == flag or arg.startswith(flag + "=") for arg in argv
+                for flag in flags
+            )
+
         offenders = []
         for page, argv in documented_commands():
             if argv[:2] != ["tabascal", "run"] or "-h" in argv:
                 continue
-            if not {"-ms", "--ms_path"} & set(argv):
+            if not names(argv, "-ms", "--ms_path"):
                 continue  # a simulation run, which takes both from -s
-            if not {"-s", "--sim_dir"} & set(argv):
+            if not names(argv, "-s", "--sim_dir"):
                 offenders.append(f"{page}: {' '.join(argv)}")
 
-        assert not offenders, "documented -ms runs with no output directory: " + str(
-            offenders
+        assert not offenders, (
+            "documented `tabascal run` commands that name an MS but no output "
+            f"directory: {offenders}. If one of these deliberately leans on a "
+            "config for data.sim_dir, say so on the page and exempt it here."
         )
 
     def test_every_documented_command_parses(self):

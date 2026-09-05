@@ -486,29 +486,39 @@ class TestTimeUnits:
 
         assert np.isnan(converted).all()
 
-    def test_the_reader_and_the_preflight_check_agree_on_repeated_blocks(self):
+    def test_the_reader_and_the_preflight_check_agree_on_a_valid_layout(self):
         """The two callers deduplicate differently and must still agree.
 
-        ``orbit_config._integration_times_mjd`` deduplicates before calling;
-        ``read_ms`` passes ``TIME.reshape(n_time, n_bl)[:, 0]``, which repeats a
-        value when two timestep blocks share one -- which is what unfilled
-        blocks left at zero do. Reducing over the rows as given, this column
-        reads as days for the reader and seconds for the preflight check, so
-        the check would pass and the run would then use the times unconverted.
-        ``ms_layout`` does not reject it: 15 rows over 3 distinct times is a
-        whole 5 baselines per timestep.
+        ``orbit_config._integration_times_mjd`` deduplicates before converting;
+        ``read_ms`` and the results writer pass
+        ``TIME.reshape(n_time, n_bl)[:, 0]``. On any MS ``ms_layout`` accepts
+        those are the same multiset -- ``n_time`` *is* the number of distinct
+        times, so each block carries its own and the slice has no duplicates
+        for ``np.unique`` to remove. This pins that, rather than trusting the
+        reduction to paper over a difference.
         """
-        column = np.array([0.0] * 9 + [self.MJD * 86400.0] * 6)
-        from_reader = column.reshape(3, 5)[:, 0]
+        n_bl = 5
+        days = self._days(n_time=4, step=0.5)
+        column = np.repeat(days * 86400.0, n_bl)
+
+        from_reader = column.reshape(len(days), n_bl)[:, 0]
         from_preflight = np.unique(column)
 
-        assert from_reader.tolist() != from_preflight.tolist()  # or nothing is shown
-        np.testing.assert_allclose(
-            times_to_mjd(from_reader)[-1], self.MJD, rtol=1e-15
-        )
-        np.testing.assert_allclose(
-            times_to_mjd(from_preflight)[-1], self.MJD, rtol=1e-15
-        )
+        np.testing.assert_array_equal(from_reader, from_preflight)
+        np.testing.assert_allclose(times_to_mjd(from_reader), days, rtol=1e-15)
+        np.testing.assert_allclose(times_to_mjd(from_preflight), days, rtol=1e-15)
+
+    def test_two_stray_sentinels_do_not_decide_the_column(self):
+        """Why the reduction keeps duplicates: frequency is the whole guarantee.
+
+        Reducing over the *distinct* times instead, an unfilled row at 0 and
+        another at 1 are two of the three values in a single-integration column
+        and their median is 1 -- so a column of seconds would read as days,
+        however many real rows stood beside them.
+        """
+        seconds = np.array([0.0, 1.0] + [self.MJD * 86400.0] * 6)
+
+        np.testing.assert_allclose(times_to_mjd(seconds)[2:], self.MJD, rtol=1e-15)
 
     def test_a_stray_timestamp_in_the_other_unit_does_not_decide_the_column(self):
         """Why the median and not the largest magnitude.

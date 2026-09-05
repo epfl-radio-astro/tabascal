@@ -352,16 +352,23 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     days, so it goes downstream exactly as it arrived -- the same nothing, not a
     nothing scaled by 86400.
 
-    The reduction is over the *distinct* times, which is what lets the callers
-    disagree about duplicates without disagreeing about the unit. They do:
-    ``orbit_config._integration_times_mjd`` deduplicates before calling, while
-    :func:`read_ms` and ``write._observation_grid`` pass
-    ``TIME.reshape(n_time, n_bl)[:, 0]``, which repeats a value whenever two
-    timestep blocks carry one -- as they do when several are left unfilled at
-    zero. Reducing over the rows as given, a column with more unfilled blocks
-    than real ones would read as days for the reader and seconds for the
-    preflight check, which would pass and then hand the run times it had
-    itself judged to be in the other unit.
+    The reduction is over the times as given, duplicates included, so that
+    frequency counts -- which is what "half the column" means, and what makes a
+    handful of corrupt rows survivable. The alternative, reducing over the
+    distinct values, buys nothing here and costs that: two sentinel rows at 0
+    and 1 beside any number of real ones are three distinct values whose median
+    is 1, so a column of seconds would read as days.
+
+    That leaves the callers to agree by construction rather than by
+    construction of the statistic. They do, for every MS
+    :func:`ms_layout` accepts: it derives ``n_time`` as the number of distinct
+    times and requires the rows to be that many blocks of a fixed baseline
+    sequence, so each block carries its own time and the
+    ``TIME.reshape(n_time, n_bl)[:, 0]`` that :func:`read_ms` and
+    ``write._observation_grid`` pass holds no duplicates for
+    ``orbit_config._integration_times_mjd``'s ``np.unique`` to remove. A column
+    whose blocks repeat a time can part them, but its reshape has already
+    stopped landing on block boundaries, so the unit is the least of it.
     The values come back in the order they were given: only the decision
     reduces them.
 
@@ -381,8 +388,7 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     times = np.asarray(times, dtype=float)
 
     if unit is None and times.size:
-        distinct = np.unique(times)
-        finite = np.abs(distinct[np.isfinite(distinct)])
+        finite = np.abs(times[np.isfinite(times)])
         typical = np.median(finite) if finite.size else 0.0
 
         unit = "s" if typical > _MJD_DAY_LIMIT else "d"
