@@ -174,7 +174,7 @@ class _RunPaths:
 def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path=None):
     """Resolve the run's directory layout and write derived paths into ``config``.
 
-    Creates the plot/results/memory directories and records the sim, zarr and MS
+    Creates the plot and results directories and records the sim, zarr and MS
     paths back onto ``config``. Returns a :class:`_RunPaths` bundling everything
     the run needs so the orchestration below stays free of path arithmetic.
 

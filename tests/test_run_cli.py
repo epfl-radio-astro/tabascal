@@ -35,23 +35,28 @@ def impl():
     return _run_tabascal_impl
 
 
-def _documented_pages(docs_dir):
+#: The README shows the same commands and is the first thing a new user copies,
+#: but it lived outside the docs glob -- so its "run it on a Measurement Set"
+#: example went on naming a form of the command that no longer worked.
+_README = _REPO / "README.md"
+
+
+def _documented_pages(docs_dir, readme):
     """The pages to scan: every docs page, and the README beside them.
 
-    The README shows the same commands and is the first thing a new user
-    copies, but it lived outside the glob -- so its "run it on a Measurement
-    Set" example went on naming a form of the command that no longer worked.
+    ``readme`` is passed rather than derived from ``docs_dir``, which the
+    scraper's own tests point at a ``tmp_path``: deriving it would make those
+    tests scrape whatever README happened to sit in pytest's basetemp.
     """
 
     pages = sorted(docs_dir.glob("*.md"))
-    readme = docs_dir.parent / "README.md"
-    if readme.exists():
+    if readme is not None and readme.exists():
         pages.append(readme)
 
     return pages
 
 
-def documented_commands(docs_dir=_DOCS):
+def documented_commands(docs_dir=_DOCS, readme=_README):
     """Every ``tabascal ...`` command in the docs' fenced code blocks.
 
     Only fenced code is scanned. A prose sentence that happens to start a line
@@ -60,7 +65,7 @@ def documented_commands(docs_dir=_DOCS):
     """
 
     commands = []
-    for page in _documented_pages(docs_dir):
+    for page in _documented_pages(docs_dir, readme):
         in_code = False
         for line in page.read_text().splitlines():
             line = line.strip()
@@ -934,8 +939,9 @@ class TestDocumentedCommandScraper:
     """The scraper reads commands, and only commands, out of the docs."""
 
     def _page(self, tmp_path, text):
+        """One page, and no README: these assert on the whole scrape result."""
         (tmp_path / "page.md").write_text(text)
-        return documented_commands(tmp_path)
+        return documented_commands(tmp_path, readme=None)
 
     def test_reads_a_fenced_command(self, tmp_path):
         found = self._page(tmp_path, "```bash\ntabascal run -c c.yaml\n```\n")
@@ -974,7 +980,15 @@ class TestDocumentedCommands:
     """Every ``tabascal ...`` invocation in the docs must parse."""
 
     def test_docs_contain_tabascal_commands(self):
-        assert documented_commands(), "no tabascal commands found in docs/"
+        """The docs themselves, not the README, which is scraped alongside."""
+        assert documented_commands(readme=None), "no tabascal commands found in docs/"
+
+    def test_the_readme_is_scraped_too(self, tmp_path):
+        """Its run command was broken for a release without any test noticing."""
+        from_readme = documented_commands(docs_dir=tmp_path)
+
+        assert [page for page, _ in from_readme] == ["README.md"] * len(from_readme)
+        assert any(argv[:2] == ["tabascal", "run"] for _, argv in from_readme)
 
     def test_every_documented_command_parses(self):
         for page, argv in documented_commands():

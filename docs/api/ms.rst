@@ -74,15 +74,20 @@ seconds. It could not. The threshold was strict, so an integration of exactly
 0.5 s — a common correlator dump time — read as days, and so did anything
 shorter; that is issue #208, which showed up as an ``OverflowError`` out of the
 preflight TLE epoch check, times of ~5e9 having been taken for day numbers. And
-in the other direction a day-numbered column stepping by a day, nights
-concatenated say, steps past the half-day threshold too and read as seconds:
-MJD 60676 came back as MJD 0.7.
+in the other direction a day-numbered column stepping past the half-day
+threshold read as seconds: MJD 60676 came back as MJD 0.7. The rule compared the
+two *smallest* distinct times rather than a representative cadence, so this
+needed every sample to be at least half a day from the next — a column carrying
+one row per day, not merely an observation spread over several.
 
 Magnitude parts every column the spacing rule parted correctly inside the era
-the threshold already assumes, so the rule is gone rather than repaired. Outside
-it — a day-numbered column past 2132, whose ``|TIME|`` exceeds 1e5 — spacing was
-the better of the two, but a heuristic whose constant is an era bound has
-conceded that case already.
+the threshold already assumes, so the rule is gone rather than repaired: for a
+spacing test to decide anything magnitude does not, a column stored in seconds
+would need a typical ``|TIME|`` of 1e5 or less, putting the observation within
+1.16 days of the MJD epoch of 1858-11-17. Outside the era bound — a day-numbered
+column past 2132, whose ``|TIME|`` exceeds 1e5 — spacing was the better of the
+two, but a heuristic whose constant is an era bound has conceded that case
+already.
 
 :func:`~tabascal.ms.read_ms`, the results writer's observation grid and the
 preflight observation-epoch helper all convert here, so the heuristic cannot

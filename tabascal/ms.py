@@ -348,8 +348,9 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     which no caller here guarantees.
 
     Non-finite entries are dropped rather than ranked, so an ``inf`` cannot
-    decide the unit from either end. A column with no finite time at all reads
-    as days and stays NaN downstream, which is the same nothing it arrived as.
+    decide the unit from either end. A column with no finite time at all reads as
+    days, so it goes downstream exactly as it arrived -- the same nothing, not a
+    nothing scaled by 86400.
     The values come back in the order they were given: only the decision
     reduces them.
 
@@ -357,8 +358,9 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     issue #208; ``docs/api/ms.rst`` records why it could not. In short, an
     integration of exactly 0.5 s read as days, and so did anything shorter.
 
-    So the heuristic is one rule for every caller. A *declared* unit can still
-    part them, because only some callers pass one -- :func:`read_ms` and
+    Inferred, the unit is one rule for every caller: this is the only converter,
+    and the reduction above does not care which of them is calling. A *declared*
+    unit can still part them, because only some callers pass one -- read_ms and
     ``write._observation_grid`` do, the preflight epoch check does not: an MS
     whose ``QuantumUnits`` contradicts the unit its times are inferred to be in
     is read on the declaration by the first two and on the inference by the

@@ -408,10 +408,15 @@ class TestTimeUnits:
 
         A day-numbered column stepping by half a day has the same spacing as a
         0.5 s integration in seconds, so no spacing test can part those two. A
-        column stepping by a day or a week -- nights concatenated -- steps well
-        past the old half-day threshold and was read as seconds outright: MJD
-        60676 came back as MJD 0.7, wrong by the whole of the common era.
-        Magnitude parts all of them: ~6e4 against ~5e9.
+        column stepping by a day or a week steps well past the old half-day
+        threshold and was read as seconds outright: MJD 60676 came back as MJD
+        0.7, wrong by the whole of the common era. Magnitude parts all of them:
+        ~6e4 against ~5e9.
+
+        Note it takes one row *per* day to reach that, not an observation
+        spread over days: the old rule compared the two smallest distinct
+        times, so a night of ordinary integrations put a ~1e-4 gap first and
+        was classified correctly however many nights followed it.
         """
         days = self.MJD + np.arange(3) * cadence
 
