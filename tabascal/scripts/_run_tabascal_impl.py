@@ -195,10 +195,11 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
     name the directory and the simulation layout is read out of it, or name
     both and neither is guessed.
 
-    A consequence worth stating: ``-o`` does not move the MS when the config
-    names one. It moves the outputs and the truth zarr, and an ``ms_path``
-    pointing outside the output directory is the whole case real data needs.
-    ``-ms`` is how a run is moved onto other visibilities.
+    A consequence worth stating: ``-od`` does not move the MS when the config
+    names one, and it no longer moves the truth zarr either -- that follows the
+    MS, which is where sim-vis writes it. It moves the products, and an
+    ``ms_path`` pointing outside the output directory is the whole case real
+    data needs. ``-ms`` is how a run is moved onto other visibilities.
 
     One more, of the write-back rather than of the precedence. The resolved
     ``ms_path`` is recorded on ``config`` whether it was given or derived, and

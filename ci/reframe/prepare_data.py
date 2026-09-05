@@ -142,7 +142,7 @@ def main():
     if sim_dir is None:
         raise RuntimeError(f"No pnt_src* directory found in {input_dir}")
 
-    # Still the tab-sim simulation directory, which is what -o is given:
+    # Still the tab-sim simulation directory, which is what -od is given:
     # without an ms_path it is read as one, the layout the perf job relies on.
     (workdir / "sim_dir.txt").write_text(str(sim_dir))
 

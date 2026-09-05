@@ -3,7 +3,7 @@
 ##################
 data:
   out_dir: null           # Optional - Where the run writes its plots/ and results/ directories. Defaults to the directory ms_path names. Given without ms_path, a tab-sim simulation directory: the MS and truth zarr are looked for inside it. Can be given instead with -od
-  truth_zarr: null        # Optional - tab-sim simulation truth, read only by ast.init 'truth' and plots.truth. Defaults to <out_dir>/<MS name>.zarr, which is where sim-vis leaves it
+  truth_zarr: null        # Optional - tab-sim simulation truth, read by ast.init 'truth', rfi.init 'truth' and plots.truth, and required when any of them is set. Defaults to <MS directory>/<MS name>.zarr, where sim-vis writes it beside the MS
   ms_path: null           # Optional - Can be provided when running tabascal 
   freq: null              # Optional - A single frequency in Hz to run on, resolved to the nearest channel and refused if it falls outside the band. null, the default, reads every channel
   data_col: DATA          # Optional - Defaults to 'DATA'

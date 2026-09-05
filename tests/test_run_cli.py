@@ -658,10 +658,10 @@ class TestResolveMSPath:
         """The branch's headline consequence, and the one worth a test.
 
         ``-s`` used to be the single "which dataset" knob, because the MS was
-        re-derived from it. It now moves the outputs and the truth zarr while
-        the MS stays where the config named it -- which is the whole point on
-        real data, where the visibilities do not live in the output directory.
-        ``-ms`` is how a run is moved onto other visibilities.
+        re-derived from it. ``-od`` moves the products alone: the MS stays where
+        the config named it, and so does the truth zarr, which follows the MS.
+        That is the whole point on real data, where the visibilities do not live
+        in the output directory. ``-ms`` moves a run onto other visibilities.
         """
         named_ms = str(tmp_path / "elsewhere" / "real.ms")
         config = {
