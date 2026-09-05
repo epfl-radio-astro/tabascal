@@ -524,6 +524,56 @@ class TestTimeUnits:
 
         np.testing.assert_allclose(times_to_mjd(seconds)[2:], self.MJD, rtol=1e-15)
 
+    def test_the_preflight_check_honours_a_declared_unit(self):
+        """It reads QuantumUnits now, as the reader always has.
+
+        It deliberately did not, so that both paths would share the heuristic
+        and could not classify one MS two ways. But the reader honours a
+        declaration, so leaving it unread was what created that divergence
+        rather than what closed it: an MS declaring days while storing numbers
+        the size of seconds was read one way by the run and another by the TLE
+        age checks.
+        """
+        from tabascal import orbit_config
+
+        seconds_sized = self._days() * 86400.0
+
+        declared = orbit_config._integration_times_mjd(
+            seconds_sized, "in-memory.ms", "d"
+        )
+        inferred = orbit_config._integration_times_mjd(seconds_sized, "in-memory.ms")
+
+        np.testing.assert_array_equal(declared, np.unique(seconds_sized))
+        np.testing.assert_allclose(inferred, seconds_sized / 86400.0, rtol=1e-15)
+
+    def test_the_reader_and_the_preflight_check_obey_one_declaration(
+        self, run_reader, monkeypatch
+    ):
+        """The divergence the old comment admitted to, closed end to end.
+
+        A column of day numbers that declares seconds is a contradiction, and
+        which way it is resolved matters less than the two paths resolving it
+        the same way: the run fitting on one epoch while the age checks pick
+        TLEs for another is the failure worth ruling out.
+        """
+        from tabascal import orbit_config
+
+        days = self._days(n_time=3)
+        n_bl = len(np.triu_indices(3, k=1)[0])
+        monkeypatch.setattr(
+            orbit_config,
+            "_ms_times_and_scale",
+            lambda ms: (np.repeat(days, n_bl), "utc", "s"),
+        )
+
+        from_reader = run_reader(days, keywords=_keywords("UTC", units=["s"]))
+        from_preflight = orbit_config.ms_integration_times_mjd("in-memory.ms")
+
+        np.testing.assert_allclose(
+            np.sort(from_reader["times_mjd"]), from_preflight, rtol=1e-15
+        )
+        np.testing.assert_allclose(from_preflight, days / 86400.0, rtol=1e-15)
+
     def test_the_preflight_path_counts_the_duplicates_too(self):
         """It deduplicates, so it has to convert first or lose the vote.
 
@@ -695,7 +745,7 @@ class TestTimeUnits:
         monkeypatch.setattr(
             orbit_config,
             "_ms_times_and_scale",
-            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc"),
+            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc", None),
         )
 
         from_reader = run_reader(days * 86400.0)["times_mjd"]
@@ -724,7 +774,7 @@ class TestTimeUnits:
         monkeypatch.setattr(
             orbit_config,
             "_ms_times_and_scale",
-            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc"),
+            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc", None),
         )
 
         epoch_jd = orbit_config.ms_observation_epoch_jd("in-memory.ms")
@@ -869,7 +919,7 @@ class TestDeclaredTimeScale:
         monkeypatch.setattr(
             orbit_config,
             "_ms_times_and_scale",
-            lambda ms: (np.repeat(times, n_bl), "tai"),
+            lambda ms: (np.repeat(times, n_bl), "tai", None),
         )
         preflight_epoch = orbit_config.ms_observation_epoch_jd("in-memory.ms")
 

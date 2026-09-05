@@ -38,7 +38,12 @@ from typing import Optional
 import numpy as np
 
 from satchecker_client import SatCheckerError as TLEError
-from tabascal.ms import infer_time_unit, read_time_scale, times_to_mjd
+from tabascal.ms import (
+    infer_time_unit,
+    read_time_scale,
+    read_time_unit,
+    times_to_mjd,
+)
 from tabascal.time import mjd_to_jd, to_utc_jd
 
 
@@ -315,30 +320,42 @@ def normalise_tle_config(
 # ---------------------------------------------------------------------------
 
 def _ms_times_and_scale(ms_path: str) -> tuple:
-    """Raw ``TIME`` column of *ms_path*, and the time scale it declares.
+    """Raw ``TIME`` column of *ms_path*, and the scale and unit it declares.
 
-    Both come out of one casacore open, so preflight still reaches the
+    All three come out of one casacore open, so preflight still reaches the
     Measurement Set through a single seam — the one tests patch to run offline.
     The scale is read rather than assumed for the same reason
     :func:`tabascal.ms.read_ms` reads it: an epoch on the wrong scale is a wrong
     instant, not a rounding difference.
 
-    The column's declared ``QuantumUnits`` are deliberately *not* read, even
-    though they are in reach here; see :func:`ms_integration_times_mjd`.
+    The unit is read for the same reason again, and the two keywords come out of
+    the one ``getcolkeywords`` call. It used to be deliberately left unread here
+    so that this path and ``read_ms`` would share the heuristic and could not
+    classify one MS two ways -- but ``read_ms`` honours a declaration, so not
+    reading it was what created that divergence rather than what closed it. An
+    MS declaring seconds while storing day numbers was read on the declaration
+    by the run and on the magnitudes by the TLE age checks.
+
+    ``None`` where the MS declares nothing usable, which is the case the
+    heuristic exists for.
     """
     from casacore.tables import table as _ms_table
 
     with _ms_table(str(ms_path), readonly=True, ack=False) as t:
         times = np.asarray(t.getcol("TIME"), dtype=float)
-        scale = read_time_scale({"TIME": t.getcolkeywords("TIME")})
+        keywords = {"TIME": t.getcolkeywords("TIME")}
 
-    return times, scale
+    return times, read_time_scale(keywords), read_time_unit(keywords)
 
 
-def _integration_times_mjd(times: np.ndarray, ms_path: str) -> np.ndarray:
+def _integration_times_mjd(
+    times: np.ndarray, ms_path: str, unit: Optional[str] = None
+) -> np.ndarray:
     """One time per integration, in MJD days, from an already-read column.
 
-    The unit is read from every row and the values from the distinct ones. The
+    A declared *unit* is honoured, as :func:`tabascal.ms.read_ms` honours one.
+    Inferred, it is read from every row and the values from the distinct ones.
+    The
     heuristic in :func:`tabascal.ms.infer_time_unit` weighs the times by how
     often they occur -- that is what lets a handful of unfilled rows be
     outvoted -- and deduplicating before it runs throws exactly that away: a
@@ -352,7 +369,8 @@ def _integration_times_mjd(times: np.ndarray, ms_path: str) -> np.ndarray:
     times = np.asarray(times)
     if times.size == 0:
         raise TLEError(f"Measurement Set has an empty TIME column: {ms_path}")
-    return times_to_mjd(np.unique(times), infer_time_unit(times))
+
+    return times_to_mjd(np.unique(times), unit or infer_time_unit(times))
 
 
 def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
@@ -369,17 +387,15 @@ def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
     ``times_mjd``: this reports the column, and only the *epoch* below —
     a physical instant — is moved onto UTC.
 
-    The column's declared ``QuantumUnits`` are not read, so the unit always
-    comes from ``times_to_mjd``'s heuristic. That heuristic is order-insensitive
-    and shared, so it cannot classify an MS one way here and another in
-    ``read_ms``, whatever order the MS stores its timestep blocks in. The one
-    case the two can still differ on is an MS whose declaration contradicts the
-    unit its times are inferred to be in: ``read_ms`` honours the declaration,
-    this does not.
+    The column's declared ``QuantumUnits`` are read here as ``read_ms`` reads
+    them, so the declaration settles the unit for both and the shared heuristic
+    is what is left for an MS that declares nothing. The heuristic is
+    order-insensitive, so neither path can be swayed by the order an MS stores
+    its timestep blocks in either.
     """
-    times, _ = _ms_times_and_scale(ms_path)
+    times, _, unit = _ms_times_and_scale(ms_path)
 
-    return _integration_times_mjd(times, ms_path)
+    return _integration_times_mjd(times, ms_path, unit)
 
 
 def ms_observation_epoch_jd(ms_path: str) -> float:
@@ -397,8 +413,8 @@ def ms_observation_epoch_jd(ms_path: str) -> float:
     across a leap second, where averaging first and shifting once would differ
     by up to half a second.
     """
-    times, scale = _ms_times_and_scale(ms_path)
-    times_mjd = _integration_times_mjd(times, ms_path)
+    times, scale, unit = _ms_times_and_scale(ms_path)
+    times_mjd = _integration_times_mjd(times, ms_path, unit)
 
     return observation_epoch_jd(to_utc_jd(mjd_to_jd(times_mjd), scale))
 

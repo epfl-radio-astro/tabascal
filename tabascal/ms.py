@@ -408,13 +408,15 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     issue #208; ``docs/api/ms.rst`` records why it could not. In short, an
     integration of exactly 0.5 s read as days, and so did anything shorter.
 
-    Inferred, the unit is one rule for every caller: this is the only converter,
-    and the reduction above does not care which of them is calling. A *declared*
-    unit can still part them, because only some callers pass one -- read_ms and
-    ``write._observation_grid`` do, the preflight epoch check does not: an MS
-    whose ``QuantumUnits`` contradicts the unit its times are inferred to be in
-    is read on the declaration by the first two and on the inference by the
-    third.
+    One rule for every caller, declared or inferred. All three pass what
+    :func:`read_time_unit` gave them -- :func:`read_ms`,
+    ``write._observation_grid`` and the preflight epoch check -- so a
+    declaration settles the unit for all of them and this reduction is what is
+    left for an MS that declares nothing. The preflight check used to leave the
+    declaration unread on the reasoning that a shared heuristic could not
+    classify one MS two ways; since the other two honour a declaration, that is
+    what made an MS whose ``QuantumUnits`` contradicts its magnitudes read one
+    way by the run and another by the TLE age checks.
     """
 
     times = np.asarray(times, dtype=float)

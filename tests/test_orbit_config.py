@@ -202,11 +202,15 @@ class TestMeasurementSetEpoch:
         base = (_OBS - 2400000.5) * 86400.0
         return np.repeat(base + np.arange(n_time) * 8.0, n_bl)
 
-    def _column(self, monkeypatch, times, scale="utc"):
-        """Patch the one casacore seam with a TIME column and its declared scale."""
+    def _column(self, monkeypatch, times, scale="utc", unit=None):
+        """Patch the one seam with a TIME column and what it declares.
+
+        ``unit=None`` is an MS that declares no ``QuantumUnits``, which is the
+        case the magnitude heuristic exists for.
+        """
 
         monkeypatch.setattr(
-            tle_config, "_ms_times_and_scale", lambda ms: (times, scale)
+            tle_config, "_ms_times_and_scale", lambda ms: (times, scale, unit)
         )
 
     def test_matches_read_ms_row_selection_and_unit_guard(self, monkeypatch):
@@ -259,9 +263,9 @@ class TestMeasurementSetEpochScale:
         base = (_OBS - 2400000.5) * 86400.0
         return np.repeat(base + np.arange(n_time) * 8.0, n_bl)
 
-    def _epoch(self, monkeypatch, times, scale):
+    def _epoch(self, monkeypatch, times, scale, unit=None):
         monkeypatch.setattr(
-            tle_config, "_ms_times_and_scale", lambda ms: (times, scale)
+            tle_config, "_ms_times_and_scale", lambda ms: (times, scale, unit)
         )
         return tle_config.ms_observation_epoch_jd("ms")
 
@@ -310,7 +314,7 @@ class TestMeasurementSetEpochScale:
         """
         times = self._times_seconds()
         monkeypatch.setattr(
-            tle_config, "_ms_times_and_scale", lambda ms: (times, "tai")
+            tle_config, "_ms_times_and_scale", lambda ms: (times, "tai", None)
         )
 
         np.testing.assert_allclose(

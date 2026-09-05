@@ -99,12 +99,16 @@ are handed the same multiset anyway: ``n_time`` is the number of distinct times
 and every block must hold one constant time, so the reader's slice holds nothing
 for ``np.unique`` to remove. Their *scopes* still differ — the preflight helper
 reads the whole main table and the reader one partition — which weighing the
-times by frequency is what makes survivable. What
-they can still differ on is a *declared* unit: the preflight helper reads the
-``TIME`` column through casacore and takes only its ``MEASINFO`` record from the
-keywords, not its ``QuantumUnits``, so an MS whose ``QuantumUnits`` contradicts
-the unit its times are inferred to be in is read on the declared unit by
-``read_ms`` and on the inferred one by the TLE age checks.
+times by frequency is what makes survivable.
+
+A *declared* unit cannot part them either. The preflight helper reads
+``QuantumUnits`` from the same ``getcolkeywords`` call it takes ``MEASINFO``
+from, so all three converters honour a declaration and the heuristic is what is
+left for an MS carrying none. It deliberately did not, once, so that both paths
+would share the heuristic — but the reader honours a declaration, so leaving it
+unread was what created the divergence rather than what closed it: an MS
+declaring seconds while storing day numbers was read on the declaration by the
+run and on the magnitudes by the TLE age checks.
 
 CASA calibration tables
 -----------------------
