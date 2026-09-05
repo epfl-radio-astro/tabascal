@@ -68,13 +68,21 @@ added and never filled leaves ``TIME`` at zero, and the smallest magnitude would
 read a column of seconds as days on the strength of it. The threshold is strict:
 a magnitude of exactly 1e5 reads as days.
 
-The spacing of consecutive samples used to decide this instead. It could not:
-a day-numbered column stepping by a day has a spacing above the half-day
-threshold too and was read as seconds, and the threshold was strict, so an
-integration of 0.5 s or shorter — 0.5 s being a common correlator dump time —
-was read as days.
+The spacing of consecutive samples used to decide this instead, on the reasoning
+that an integration is seconds long and so a gap above half a day could only be
+seconds. It could not. The threshold was strict, so an integration of exactly
+0.5 s — a common correlator dump time — read as days, and so did anything
+shorter; that is issue #208, which showed up as an ``OverflowError`` out of the
+preflight TLE epoch check, times of ~5e9 having been taken for day numbers. And
+in the other direction a day-numbered column stepping by a day, nights
+concatenated say, steps past the half-day threshold too and read as seconds:
+MJD 60676 came back as MJD 0.7.
+
 Magnitude parts every column the spacing rule parted correctly inside the era
-the threshold already assumes, so the rule is gone rather than repaired.
+the threshold already assumes, so the rule is gone rather than repaired. Outside
+it — a day-numbered column past 2132, whose ``|TIME|`` exceeds 1e5 — spacing was
+the better of the two, but a heuristic whose constant is an era bound has
+conceded that case already.
 
 :func:`~tabascal.ms.read_ms`, the results writer's observation grid and the
 preflight observation-epoch helper all convert here, so the heuristic cannot

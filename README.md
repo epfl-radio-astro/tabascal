@@ -60,8 +60,12 @@ TABASCAL runs are defined by a YAML configuration file. To run it on a
 Measurement Set:
 
 ```bash
-tabascal run -c path/to/config.yaml -ms path/to/file.ms
+tabascal run -c path/to/config.yaml -ms path/to/file.ms -s path/to/output_dir
 ```
+
+`-s` is the directory the run writes its `plots/` and `results/` to; it is
+required, and for a Measurement Set from another source it is only an output
+location. Set `data.sim_dir` in the config instead and the flag can be dropped.
 
 The results are written to a `.zarr` file and then transferred into the
 Measurement Set as the `TAB_AST_DATA`, `TAB_RFI_DATA`, `TAB_AST_RES`,

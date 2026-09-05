@@ -336,49 +336,26 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     single integration and a full observation alike. The test is strict: a
     magnitude of exactly 1e5 reads as days.
 
-    The *spacing* of consecutive samples used to decide this instead, on the
-    reasoning that an integration is seconds long, so a gap above 0.5 could only
-    be seconds. It could not. A day-numbered column whose samples are a day
-    apart -- a concatenation of nights, say -- has a spacing above 0.5 too, and
-    was read as seconds: MJD 60676 came back as MJD 0.7. The threshold was also
-    strict, so every integration of 0.5 s or shorter, 0.5 s being a common
-    correlator dump time, was read as days (issue #208).
-
-    Magnitude subsumes the rule for every column inside the era bound the
-    threshold already assumes. Outside it the spacing rule was the better of the
-    two -- a day-numbered column past 2132 has ``|TIME| > 1e5`` and reads as
-    seconds, where a spacing of ~1e-4 would have read it right -- but a
-    heuristic whose constant is an era bound has conceded that case already.
-    Inside it, for a spacing test to decide anything magnitude does not, a
-    column stored in seconds would need a typical ``|TIME| <= 1e5``, putting the
-    observation within 1.16 days of 1858-11-16. So the branch could no longer be
-    right about an MS anyone will read, only wrong about one, and it is gone.
-
     The value compared is the *median* of the finite magnitudes, which is a
     statement about the column rather than about any one of its entries. A
     single row can be neither: casacore leaves ``TIME`` at zero in a row that
     was added and never filled, and one such row in a column of seconds drags
     the smallest magnitude to zero -- read as days, the observation then
-    overflows the preflight epoch check exactly as issue #208 did. The largest
-    magnitude is no better: a stray value in the *other* unit, a seconds
-    timestamp left in a column of days, reaches it just as easily. Half the
-    column has to be wrong before a median is.
+    overflows the preflight epoch check. The largest magnitude is no better: a
+    stray value in the *other* unit, a seconds timestamp left in a column of
+    days, reaches it just as easily. Half the column has to be wrong before a
+    median is, and a median is indifferent to the order its values arrive in,
+    which no caller here guarantees.
 
     Non-finite entries are dropped rather than ranked, so an ``inf`` cannot
     decide the unit from either end. A column with no finite time at all reads
     as days and stays NaN downstream, which is the same nothing it arrived as.
-
-    A median does not depend on the order the times arrive in, which matters
-    because the callers do not agree on one. :func:`ms_layout` permits an MS
-    whose timestep blocks do not ascend, so :func:`read_ms` hands over
-    ``TIME.reshape(n_time, n_bl)[:, 0]`` in block order, while
-    ``orbit_config.ms_integration_times_mjd`` hands over ``np.unique`` of the
-    whole column, sorted -- and on an MS whose row count is not a multiple of
-    the baseline count those are not even the same values. Neither difference
-    can move a median off the unit: it would take about half the column.
-
-    The values come back in the order they were given: only the unit decision
+    The values come back in the order they were given: only the decision
     reduces them.
+
+    The *spacing* of consecutive samples used to decide the unit instead, until
+    issue #208; ``docs/api/ms.rst`` records why it could not. In short, an
+    integration of exactly 0.5 s read as days, and so did anything shorter.
 
     So the heuristic is one rule for every caller. A *declared* unit can still
     part them, because only some callers pass one -- :func:`read_ms` and

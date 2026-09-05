@@ -16,7 +16,8 @@ import pytest
 
 from tabascal.scripts.run_tabascal import build_parser
 
-_DOCS = Path(__file__).parent.parent / "docs"
+_REPO = Path(__file__).parent.parent
+_DOCS = _REPO / "docs"
 
 # A shell prompt some docs put in front of a command.
 _PROMPT = re.compile(r"^\$\s+")
@@ -34,6 +35,22 @@ def impl():
     return _run_tabascal_impl
 
 
+def _documented_pages(docs_dir):
+    """The pages to scan: every docs page, and the README beside them.
+
+    The README shows the same commands and is the first thing a new user
+    copies, but it lived outside the glob -- so its "run it on a Measurement
+    Set" example went on naming a form of the command that no longer worked.
+    """
+
+    pages = sorted(docs_dir.glob("*.md"))
+    readme = docs_dir.parent / "README.md"
+    if readme.exists():
+        pages.append(readme)
+
+    return pages
+
+
 def documented_commands(docs_dir=_DOCS):
     """Every ``tabascal ...`` command in the docs' fenced code blocks.
 
@@ -43,7 +60,7 @@ def documented_commands(docs_dir=_DOCS):
     """
 
     commands = []
-    for page in sorted(docs_dir.glob("*.md")):
+    for page in _documented_pages(docs_dir):
         in_code = False
         for line in page.read_text().splitlines():
             line = line.strip()
@@ -757,6 +774,38 @@ class TestResolvePathsRefusesWhatItCannotUse:
         )
 
         assert paths.ms_path == str(tmp_path / "real.ms")
+
+
+class TestRunHeaderNamesTheMS:
+    """The log has to say which visibilities the run read.
+
+    It did not have to before: the MS was ``<sim_dir>/<basename>.ms``, so the
+    directory in the header named the data. Now that ``data.ms_path`` can name
+    one anywhere, a config carrying a stale ``ms_path`` and swept over several
+    ``-s`` directories would write to each in turn while reading the same
+    visibilities throughout, with nothing in the log to show it.
+    """
+
+    @staticmethod
+    def _header(impl, ms_path):
+        import io
+        from contextlib import redirect_stdout
+
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            impl._print_run_header("Custom", "obs", ms_path, "2026-01-02T03:04:05")
+
+        return buffer.getvalue()
+
+    def test_the_ms_is_in_the_header(self, impl):
+        assert "/data/mwa/real.ms" in self._header(impl, "/data/mwa/real.ms")
+
+    def test_the_output_directory_is_still_named_too(self, impl):
+        """Both, because on real data they are no longer the same place."""
+        header = self._header(impl, "/data/mwa/real.ms")
+
+        assert "obs" in header
+        assert "Custom" in header
 
 
 class TestRunReporting:
