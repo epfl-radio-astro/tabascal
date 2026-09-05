@@ -316,10 +316,35 @@ def read_time_unit(column_keywords: dict, column: str = "TIME") -> Optional[str]
     return unit
 
 
-#: Largest ``|MJD|`` in days that an observation could plausibly carry: MJD 1e5
-#: is the year 2132, and -1e5 is 1585. Only used where there is a single
-#: timestamp and so no spacing to read; see :func:`times_to_mjd`.
+#: Largest ``|MJD|`` in days that an observation could plausibly carry, and the
+#: whole of the unit heuristic; see :func:`times_to_mjd`.
 _MJD_DAY_LIMIT = 1e5
+
+
+def infer_time_unit(times) -> str:
+    """``"s"`` or ``"d"`` for a ``TIME`` column that declares no unit.
+
+    Split out from :func:`times_to_mjd` so that a caller which wants to reduce
+    one array and convert another can. ``orbit_config._integration_times_mjd``
+    is the one that does: the unit has to be read from every row, because the
+    reduction weighs the times by how often they occur, while the values it
+    returns are the distinct ones. Converting first and deduplicating after
+    would do both, but it scales the whole column to do it -- 2.3x its size
+    against 1.3x, on a main table that can run to gigabytes -- and division is
+    not injective in binary64, so two raw timestamps can land on one MJD and
+    leave the mean epoch weighted differently.
+
+    Works in place on its own copy of the finite times, which no caller shares.
+    """
+
+    times = np.asarray(times, dtype=float)
+    finite = times[np.isfinite(times)]
+    if not finite.size:
+        return "d"
+
+    np.abs(finite, out=finite)
+
+    return "s" if np.median(finite, overwrite_input=True) > _MJD_DAY_LIMIT else "d"
 
 
 def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
@@ -330,40 +355,74 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     declaration (:func:`read_time_unit`) and it is honoured; pass ``None`` and
     the unit is inferred, because not every writer fills the keyword in.
 
-    The inference reads the *spacing* of consecutive samples rather than their
-    magnitude: an integration is seconds long, so a gap above 0.5 can only be
-    seconds, where times stored in days step by ~1e-4. Spacing also stays
-    positive for a pre-1858 epoch, whose MJD day number is negative. The
-    threshold is strict, so a spacing of exactly 0.5 reads as days.
-
-    A single-integration MS has no spacing to read, so its unit comes from
-    magnitude after all: an MJD day number is at most ~1e5 in any plausible
-    observing era, while the same instant in seconds is ~1e9. Strict again: a
+    The inference reads the *magnitude* of the times, and nothing else. An MJD
+    day number is at most ~1e5 in any plausible observing era -- 1e5 is the year
+    2132 and -1e5 is 1585 -- while the same instant in seconds is ~1e9. No MS
+    can plausibly sit between the two, so one comparison settles it, for a
+    single integration and a full observation alike. The test is strict: a
     magnitude of exactly 1e5 reads as days.
 
-    The classification looks at the *sorted* distinct values, and so does not
-    depend on the order the times arrive in -- :func:`ms_layout` permits an MS
-    whose timestep blocks do not ascend, and
-    ``orbit_config.ms_integration_times_mjd`` reads the same column through
-    ``np.unique``. Reading the raw leading pair instead would let those two
-    classify one MS two different ways. The values come back in the order they
-    were given, sorted or not: only the unit decision looks at them sorted.
+    The value compared is the *median* of the finite magnitudes, which is a
+    statement about the column rather than about any one of its entries. A
+    single row can be neither: casacore leaves ``TIME`` at zero in a row that
+    was added and never filled, and one such row in a column of seconds drags
+    the smallest magnitude to zero -- read as days, the observation then
+    overflows the preflight epoch check. The largest magnitude is no better: a
+    stray value in the *other* unit, a seconds timestamp left in a column of
+    days, reaches it just as easily. Half the column has to be wrong before a
+    median is, and a median is indifferent to the order its values arrive in,
+    which no caller here guarantees.
 
-    So the heuristic is one rule for both callers. A *declared* unit can still
-    part them, because only :func:`read_ms` passes one: an MS whose
-    ``QuantumUnits`` contradicts the spacing of the times it stores is read on
-    the declaration there and on the spacing by the preflight epoch check.
+    Non-finite entries are dropped rather than ranked, so an ``inf`` cannot
+    decide the unit from either end. A column with no finite time at all reads as
+    days, so it goes downstream exactly as it arrived -- the same nothing, not a
+    nothing scaled by 86400.
+
+    The reduction is over the times as given, duplicates included, so that
+    frequency counts -- which is what "half the column" means, and what makes a
+    handful of corrupt rows survivable. The alternative, reducing over the
+    distinct values, buys nothing here and costs that: two sentinel rows at 0
+    and 1 beside any number of real ones are three distinct values whose median
+    is 1, so a column of seconds would read as days.
+
+    That leaves the callers to agree by construction rather than by
+    construction of the statistic. Within one partition they do, for every MS
+    :func:`ms_layout` accepts: it derives ``n_time`` as the number of distinct
+    times and requires the rows to be that many blocks each holding one
+    constant time, so two blocks cannot share one and the
+    ``TIME.reshape(n_time, n_bl)[:, 0]`` that :func:`read_ms` and
+    ``write._observation_grid`` pass holds no duplicates for
+    ``orbit_config._integration_times_mjd``'s ``np.unique`` to remove. A column
+    whose blocks repeat a time can part them, but its reshape has already
+    stopped landing on block boundaries, so the unit is the least of it.
+
+    The scopes still differ: the preflight helper reads the whole main table
+    through casacore while :func:`read_ms` takes one ``xds_from_ms``
+    partition, so a multi-field or multi-SPW MS reaches them as different
+    columns entirely. Weighing by frequency is what makes that survivable --
+    the rows of another field are a minority of a column, not half of it.
+    The values come back in the order they were given: only the decision
+    reduces them.
+
+    The *spacing* of consecutive samples used to decide the unit instead, until
+    issue #208; ``docs/api/ms.rst`` records why it could not. In short, an
+    integration of exactly 0.5 s read as days, and so did anything shorter.
+
+    One rule for every caller, declared or inferred. All three pass what
+    :func:`read_time_unit` gave them -- :func:`read_ms`,
+    ``write._observation_grid`` and the preflight epoch check -- so a
+    declaration settles the unit for all of them and this reduction is what is
+    left for an MS that declares nothing. The preflight check used to leave the
+    declaration unread on the reasoning that a shared heuristic could not
+    classify one MS two ways; since the other two honour a declaration, that is
+    what made an MS whose ``QuantumUnits`` contradicts its magnitudes read one
+    way by the run and another by the TLE age checks.
     """
 
     times = np.asarray(times, dtype=float)
 
     if unit is None and times.size:
-        ordered = np.unique(times)
-
-        if ordered.size > 1:
-            unit = "s" if (ordered[1] - ordered[0]) > 0.5 else "d"
-        else:
-            unit = "s" if abs(ordered[0]) > _MJD_DAY_LIMIT else "d"
+        unit = infer_time_unit(times)
 
     return times / DAY_SECS if unit == "s" else times
 

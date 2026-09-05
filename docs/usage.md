@@ -85,7 +85,7 @@ incomplete RFI model. The remedies are to supply the missing records via
 or to remove the satellite from `satellites.norad_ids`.
 
 Every run also saves the records it actually used to
-`<sim_dir>/results/used_orbits_<name>.json`; passing that file's directory back
+`<out_dir>/results/used_orbits_<name>.json`; passing that file's directory back
 via `--extra-orbit-dir` reproduces the run's trajectory priors exactly. For the
 two archives and the handover between them, the full caching behaviour, the age
 policies, what validation each format does and does not give you, and how to
@@ -146,7 +146,7 @@ sim-vis -h
 RFI subtraction (TABASCAL) runs are also defined by YAML configuration files and can be run in much the same way. Given the simulation dataset created in the previous step, we can run TABASCAL on it using
 
 ```bash
-tabascal run -c tab_target.yaml -s data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
+tabascal run -c tab_target.yaml -od data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
 ```
 
 The output of a successful run with TABASCAL will show lines like
@@ -165,6 +165,10 @@ If you have a Measurement Set from another source you can run TABASCAL on that d
 ```bash
 tabascal run -c path/to/config.yaml -ms path/to/ms/file.ms
 ```
+
+The run writes its `plots/` and `results/` beside the Measurement Set. Pass
+`-od path/to/output_dir`, or set `data.out_dir`, to send them somewhere else —
+a read-only or shared data directory being the usual reason.
 
 ## Extracting RFI light curves
 

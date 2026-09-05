@@ -1703,7 +1703,7 @@ def stub_config_mode(monkeypatch, obs, record, tmp_path):
     import tabascal.scripts._run_tabascal_impl as impl
 
     config = {
-        "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+        "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
                  "data_col": "DATA", "corr": "xx", "freq": None},
         "rfi": {"min_elevation": 0},
         "satellites": {},

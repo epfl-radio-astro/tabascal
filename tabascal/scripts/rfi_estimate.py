@@ -28,6 +28,8 @@ parser, and ``tabascal -h`` must not pay for the run stack.
 import argparse
 import os
 
+from tabascal.scripts._config_paths import config_is_unset, config_path
+
 
 def _parse_norad_ids(text):
     return [int(x) for x in text.replace(",", " ").split()]
@@ -60,8 +62,10 @@ def build_parser(parser=None):
         "it from data.ms_path instead.",
     )
     parser.add_argument(
-        "-s", "--sim_dir", default=None,
-        help="Path to the directory of the simulation, as for `tabascal run`.",
+        "-od", "--out_dir", default=None,
+        help="Directory a simulation's MS is looked for in, when neither -ms nor "
+        "data.ms_path names one: <out_dir>/<out_dir name>.ms. Light curves then "
+        "default beside that MS, so this directory is written to as well.",
     )
     parser.add_argument(
         "-z", "--zarr", default=None,
@@ -93,6 +97,10 @@ def build_parser(parser=None):
         "-f", "--freq", type=float, default=None,
         help="Use only the single channel nearest this frequency (Hz).",
     )
+    # Renamed, not dropped: a bare -s would otherwise abbreviation-match -sx
+    # below and be taken as the run tag, which os.path.join then reads as an
+    # absolute output path. run_tabascal._reject_sim_dir answers it.
+    parser.add_argument("-s", "--sim_dir", help=argparse.SUPPRESS)
     parser.add_argument(
         "-sx", "--tag", default=None,
         help="Run tag/suffix (e.g. the tabascal -sx). Names the output so "
@@ -292,24 +300,32 @@ def resolve_ms_path(args, config):
     """The MS to read: the flag, the config's ``data.ms_path``, or the sim dir.
 
     The same precedence ``tabascal run`` uses, so a config that runs points the
-    extractor at the same visibilities without being told twice.
+    extractor at the same visibilities without being told twice -- and read
+    through the same helpers, so one config cannot be refused here with a
+    traceback and there with a message naming the key.
     """
     if args.ms_path:
         return os.path.abspath(args.ms_path)
 
     if config is not None:
         ms_path = config.get("data", {}).get("ms_path")
-        if ms_path:
-            return os.path.abspath(ms_path)
+        if not config_is_unset(ms_path):
+            return config_path(ms_path, "data.ms_path")
 
-    sim_dir = args.sim_dir or (config or {}).get("data", {}).get("sim_dir")
-    if sim_dir:
-        sim_dir = os.path.abspath(sim_dir)
-        return os.path.join(sim_dir, f"{os.path.basename(sim_dir)}.ms")
+    config_out_dir = (config or {}).get("data", {}).get("out_dir")
+    if args.out_dir:
+        out_dir = os.path.abspath(args.out_dir)
+    elif not config_is_unset(config_out_dir):
+        out_dir = config_path(config_out_dir, "data.out_dir")
+    else:
+        out_dir = None
+
+    if out_dir:
+        return os.path.join(out_dir, f"{os.path.basename(out_dir)}.ms")
 
     raise SystemExit(
-        "No Measurement Set given. Provide -ms/--ms_path, -s/--sim_dir, or a "
-        "config with data.ms_path or data.sim_dir set."
+        "No Measurement Set given. Provide -ms/--ms_path, -od/--out_dir, or a "
+        "config with data.ms_path or data.out_dir set."
     )
 
 

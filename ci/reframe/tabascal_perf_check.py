@@ -158,7 +158,7 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
             "run",
             "-c",
             f"{workdir}/tab_target.yaml",
-            "-s",
+            "-od",
             f"$(cat {workdir}/sim_dir.txt)",
             "--extra-orbit-dir",
             f"{_src_root}/tabascal/data/tles",

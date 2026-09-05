@@ -95,7 +95,8 @@ The `data` section of the configuration file includes only a few options to sele
 
 ```yaml
 data:
-  sim_dir:
+  out_dir:
+  truth_zarr:
   ms_path: path/to/ms_file.ms
   data_col: DATA
   freq:
@@ -105,8 +106,9 @@ data:
   save_rfi_per_sat: false
 ```
 
-* `sim_dir`: Simulation directory created when using `sim-vis` to simulate a dataset. This can also be given at runtime of `tabascal` with the `-s` flag.
-* `ms_path`: Path to the Measurement Set (MS) to run on. This can also be given at runtime of `tabascal` with the `-ms` flag.
+* `out_dir`: Where the run writes: `plots/` and `results/`, the latter holding the `used_orbits` file. Also available as the `-od` flag, which takes precedence. Defaults to the directory `ms_path` names, so a run on real data needs neither — products land beside the visibilities. Given *without* an `ms_path` it is read as a tab-sim simulation directory, and the MS and truth zarr are looked for inside it at `<out_dir>/<out_dir name>.ms` and `.zarr`, which is the layout `sim-vis` writes. Naming neither an MS nor a directory is the one combination that cannot be resolved. Note that `-od` moves the outputs but *not* the MS when `ms_path` names one; `-ms` is how a run is moved onto other visibilities. (Renamed from `sim_dir`, which meant the inputs and the outputs at once — see [#207](https://github.com/epfl-radio-astro/tabascal/issues/207).)
+* `truth_zarr`: The tab-sim simulation truth, read by `ast.init: truth`, `rfi.init: truth` and `plots.truth`. Defaults to `<MS directory>/<MS name>.zarr` — beside the visibilities, which is where `sim-vis` writes the two together — so a simulation needs it only when its truth has been moved away from its MS. A real observation has none: with any of those three options set, a missing truth stops the run before it fits, naming which option asked for it; with none of them set it is a printed "No tab-sim truth available" and the run proceeds.
+* `ms_path`: Path to the Measurement Set (MS) to run on. This can also be given at runtime of `tabascal` with the `-ms` flag, which takes precedence over the config. Leave both unset and the MS is looked for at `<out_dir>/<out_dir name>.ms`, the layout `sim-vis` writes — so a simulation can name the directory instead. Real data wants this key, since an MS taken from a telescope has no relationship to the name of the directory it happens to sit in.
 * `data_col`: The data column within the MS file to use as the observed data. Default is `DATA` but can be any column that exists in the MS file.
 * `corr`: This is the correlation product to run on, default `xx`. It is matched against the MS's `POLARIZATION::CORR_TYPE` **by identity, not by position**, so it names the correlation you want rather than an axis index: `yy` selects YY whether the MS holds all four correlations or only that one. Linear (`xx`, `xy`, `yx`, `yy`), circular (`rr`, `rl`, `lr`, `ll`) and Stokes (`i`, `q`, `u`, `v`) names are accepted. Requesting a correlation the MS does not hold is an error naming what it does hold.
 * `freq`: A single frequency in Hz to read instead of the whole band; the nearest channel is used. The request must fall inside the band — a frequency more than half a channel beyond the nearest centre is an error rather than a silent read of the edge channel, since `argmin` always returns a channel and a units slip would otherwise pass unnoticed. `null` (the default) reads every channel. `SIGMA_SPECTRUM` is narrowed to the same channel, so the noise cannot come back on a channel the visibilities did not.
