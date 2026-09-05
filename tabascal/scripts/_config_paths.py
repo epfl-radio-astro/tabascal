@@ -1,6 +1,6 @@
 """Reading a path out of a config, for the entry points that take one.
 
-``tabascal run`` and ``tabascal light-curve`` read the same ``data.sim_dir`` and
+``tabascal run`` and ``tabascal light-curve`` read the same ``data.out_dir`` and
 ``data.ms_path`` keys with the same precedence, so they answer for them the same
 way here rather than each in its own idiom. Kept free of imports beyond ``os``:
 ``rfi_estimate``, which implements the light-curve subcommand, holds its

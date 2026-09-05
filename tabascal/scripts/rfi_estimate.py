@@ -97,6 +97,10 @@ def build_parser(parser=None):
         "-f", "--freq", type=float, default=None,
         help="Use only the single channel nearest this frequency (Hz).",
     )
+    # Renamed, not dropped: a bare -s would otherwise abbreviation-match -sx
+    # below and be taken as the run tag, which os.path.join then reads as an
+    # absolute output path. run_tabascal._reject_sim_dir answers it.
+    parser.add_argument("-s", "--sim_dir", help=argparse.SUPPRESS)
     parser.add_argument(
         "-sx", "--tag", default=None,
         help="Run tag/suffix (e.g. the tabascal -sx). Names the output so "

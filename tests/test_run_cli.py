@@ -701,6 +701,49 @@ class TestResolveMSPath:
         assert config["data"]["truth_zarr"] == str(tmp_path / "obs" / "obs.zarr")
         assert config["data"]["zarr_path"] == config["data"]["truth_zarr"]
 
+    def test_the_truth_zarr_follows_the_ms_not_the_outputs(self, impl, tmp_path):
+        """sim-vis writes the MS and the truth together; only the products move.
+
+        Deriving it from the output directory found the truth only when the run
+        wrote into the simulation -- which is the assumption #207 is about, and
+        the opposite of the split the docs recommend for a read-only archive.
+        """
+        config = {
+            "data": {
+                "out_dir": str(tmp_path / "scratch"),
+                "ms_path": str(tmp_path / "sim" / "pnt_src_obs.ms"),
+            },
+            "model": {},
+        }
+
+        impl._resolve_paths(config, None, None, "", None)
+
+        assert config["data"]["truth_zarr"] == str(
+            tmp_path / "sim" / "pnt_src_obs.zarr"
+        )
+
+    def test_an_unwritable_output_directory_is_reported_as_one(self, impl, tmp_path):
+        """It defaults to the MS's own directory, and an archive is often read-only.
+
+        A raw PermissionError out of makedirs names a plots/ path the user
+        never chose, and nothing about the flag that would move it.
+        """
+        archive = tmp_path / "archive"
+        archive.mkdir()
+        (archive / "obs.ms").touch()
+        archive.chmod(0o500)
+        try:
+            with pytest.raises(SystemExit, match=r"-od/--out_dir"):
+                impl._resolve_paths(
+                    {"data": {"ms_path": str(archive / "obs.ms")}, "model": {}},
+                    None,
+                    None,
+                    "",
+                    None,
+                )
+        finally:
+            archive.chmod(0o700)
+
     def test_an_explicit_truth_zarr_wins(self, impl, tmp_path):
         """The point of naming it: a simulation whose products go elsewhere.
 

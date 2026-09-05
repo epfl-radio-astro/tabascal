@@ -194,7 +194,7 @@ def _run_pipeline(
             "run",
             "-c",
             str(config_path),
-            "-o",
+            "-od",
             str(input_src_dir),
             "--extra-orbit-dir",
             bundled_tle_dir,
@@ -718,7 +718,7 @@ def test_pipeline_log_is_written_in_the_plot_directory(
         [
             sys.executable, str(script), "run",
             "-c", str(config_path),
-            "-o", str(out_dir),
+            "-od", str(out_dir),
             "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
             "-sx", "runA",
         ],
@@ -799,7 +799,7 @@ def _prepare_sharded_run(
     cmd = [
         sys.executable, str(script), "run",
         "-c", str(config_path),
-        "-o", str(out_dir),
+        "-od", str(out_dir),
         "--extra-orbit-dir", tle_dir,
         "-nl",
     ]

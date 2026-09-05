@@ -250,7 +250,12 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
     # whichever directory it happens to write to -- and identical to the old
     # basename(sim_dir) on a simulation, where the MS is <dir>/<dir name>.ms.
     if ms_path:
-        f_name = os.path.splitext(os.path.basename(ms_path))[0]
+        # Only a .ms suffix is an extension. splitext splits on the last dot,
+        # and an MS need not carry one: a directory named for its parameters,
+        # as tab-sim's are, would otherwise be cut at "...-1.500e+08" and the
+        # run named "1".
+        stem, extension = os.path.splitext(os.path.basename(ms_path))
+        f_name = stem if extension.lower() == ".ms" else os.path.basename(ms_path)
     else:
         f_name = os.path.basename(out_dir)
         ms_path = os.path.join(out_dir, f"{f_name}.ms")
@@ -263,14 +268,28 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
     if not config_is_unset(config_truth_zarr):
         zarr_path = config_path(config_truth_zarr, "data.truth_zarr")
     else:
-        zarr_path = os.path.join(out_dir, f"{f_name}.zarr")
+        # Beside the MS, not beside the outputs: sim-vis writes the two
+        # together, and the two are only the same directory when the run
+        # happens to write into the simulation. Identical there, and right for
+        # the split that docs/usage.md recommends for a read-only archive.
+        zarr_path = os.path.join(os.path.dirname(ms_path), f"{f_name}.zarr")
     config["data"]["truth_zarr"] = zarr_path
     config["data"]["zarr_path"] = zarr_path
 
     plot_dir = os.path.join(out_dir, f"plots/{suffix[1:]}")
     results_dir = os.path.join(out_dir, "results")
     for directory in (plot_dir, results_dir):
-        os.makedirs(directory, exist_ok=True)
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as error:
+            # Reachable in a way it was not when the directory had to be given:
+            # it now defaults to the MS's own, and an archive is often read-only.
+            raise SystemExit(
+                f"Cannot create {directory}: {error.strerror or error}. That is "
+                f"under {out_dir}, which is where this run writes. Give "
+                "-od/--out_dir or data.out_dir to write somewhere else -- it "
+                "defaults to the Measurement Set's own directory."
+            ) from error
 
     if extra_orbit_dir:
         config["satellites"]["extra_orbit_dir"] = extra_orbit_dir
@@ -305,7 +324,7 @@ def _print_run_header(model_name, f_name, ms_path, start_time):
     as well -- it was ``<out_dir>/<f_name>.ms`` and nothing else. Now that
     ``data.ms_path`` can name one anywhere, a header without it would leave a
     log unable to say where its visibilities came from, and a stale ms_path in
-    a config swept over several ``-s`` directories would go unremarked.
+    a config swept over several ``-od`` directories would go unremarked.
     ``tabascal search`` names its MS for the same reason.
     """
 

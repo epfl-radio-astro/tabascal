@@ -278,6 +278,38 @@ class TestSimDirWasRenamed:
         assert data["out_dir"] is None
         assert data["truth_zarr"] is None
 
+    @pytest.mark.parametrize("subcommand", ["run", "light-curve"])
+    def test_both_subcommands_refuse_it(self, subcommand):
+        """light-curve especially, where a bare -s is worse than unrecognised.
+
+        ``-sx/--tag`` is the only surviving ``-s`` option there, so argparse
+        abbreviation-matches ``-s`` to it: the directory became the run tag,
+        and an absolute tag makes ``os.path.join`` discard the directory it was
+        being joined to, so the light curves were written to a file named after
+        the simulation instead of into ``light_curves/`` beside the MS.
+        """
+        from tabascal.scripts.run_tabascal import build_parser
+        from tabascal.scripts import run_tabascal
+
+        args = build_parser().parse_args(
+            [subcommand, "-c", "c.yaml", "-s", "/data/pnt_src_sim"]
+        )
+
+        assert args.sim_dir == "/data/pnt_src_sim"  # not absorbed by --tag
+        assert getattr(args, "tag", None) is None
+        with pytest.raises(SystemExit, match=r"-s/--sim_dir was renamed"):
+            run_tabascal._reject_sim_dir(args)
+
+    def test_an_empty_value_is_refused_too(self):
+        """``-s ""`` was still given; truthiness would swallow it."""
+        from tabascal.scripts.run_tabascal import build_parser
+        from tabascal.scripts import run_tabascal
+
+        args = build_parser().parse_args(["run", "-c", "c.yaml", "-s", ""])
+
+        with pytest.raises(SystemExit, match=r"-s/--sim_dir was renamed"):
+            run_tabascal._reject_sim_dir(args)
+
     def test_the_flag_is_renamed_too_and_says_so(self):
         """argparse would answer a -s with "unrecognized arguments" otherwise.
 
