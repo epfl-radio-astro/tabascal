@@ -176,6 +176,13 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
     Creates the plot/results/memory directories and records the sim, zarr and MS
     paths back onto ``config``. Returns a :class:`_RunPaths` bundling everything
     the run needs so the orchestration below stays free of path arithmetic.
+
+    The MS comes from the ``-ms`` flag, else ``data.ms_path``, else the
+    simulation layout ``<sim_dir>/<basename>.ms`` -- the precedence
+    ``rfi_estimate.resolve_ms_path`` already uses, so one config points both at
+    the same visibilities. The config key used to be read and then written over
+    by the derived path, which named a Measurement Set appearing nowhere in the
+    config whenever the run was pointed at real data rather than a simulation.
     """
     if suffix:
         suffix = "_" + suffix
@@ -197,6 +204,8 @@ def _resolve_paths(config, sim_dir, ms_path, suffix, extra_orbit_dir, norad_path
 
     if ms_path:
         ms_path = os.path.abspath(ms_path)
+    elif config["data"].get("ms_path"):
+        ms_path = os.path.abspath(config["data"]["ms_path"])
     else:
         ms_path = os.path.join(sim_dir, f"{f_name}.ms")
     config["data"]["ms_path"] = ms_path

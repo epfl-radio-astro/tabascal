@@ -1,5 +1,7 @@
 """Tests for tabascal.ms — row layout, correlation resolution, time scales."""
 
+from datetime import datetime, timedelta
+
 import numpy as np
 import pytest
 
@@ -383,11 +385,40 @@ class TestTimeUnits:
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
-    def test_the_spacing_boundary_is_strict(self):
-        """A spacing of exactly 0.5 reads as days: the test is ``> 0.5``."""
+    # -- a spacing of 0.5 or below settles nothing, so magnitude decides ----
+
+    @pytest.mark.parametrize("step", [0.5, 0.25, 0.008])
+    def test_a_short_integration_is_still_seconds(self, step):
+        """Issue #208: 0.5 s is a common correlator dump time, not a half day.
+
+        A spacing at or below 0.5 used to read as days outright, so an MS with
+        0.5 s integrations came back unconverted -- ``TIME`` values of ~5.16e9
+        taken for day numbers, which overflowed ``timedelta`` in the preflight
+        TLE epoch check. Every integration shorter than 0.5 s was misread the
+        same way.
+        """
+        days = self._days(step=step)
+
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+
+    def test_a_half_day_cadence_in_days_is_still_days(self):
+        """The case the old strict threshold protected; magnitude keeps it.
+
+        A day-numbered column stepping by half a day has the same spacing as a
+        0.5 s integration in seconds, so the spacing cannot part them. Their
+        magnitudes are ~6e4 against ~5e9, which can.
+        """
         half_day_apart = self.MJD + np.arange(3) * 0.5
 
         np.testing.assert_array_equal(times_to_mjd(half_day_apart), half_day_apart)
+
+    def test_a_half_day_cadence_in_seconds_is_still_seconds(self):
+        """The same column stored in the other unit, told apart by magnitude."""
+        half_day_apart = self.MJD + np.arange(3) * 0.5
+
+        np.testing.assert_allclose(
+            times_to_mjd(half_day_apart * 86400.0), half_day_apart, rtol=1e-15
+        )
 
     def test_the_rule_does_not_depend_on_row_order(self):
         """``ms_layout`` permits timestep blocks that do not ascend."""
@@ -536,6 +567,41 @@ class TestTimeUnits:
 
         np.testing.assert_allclose(from_reader, days, rtol=1e-15)
         np.testing.assert_allclose(np.sort(from_reader), from_preflight, rtol=1e-15)
+
+    def test_the_preflight_epoch_of_a_half_second_ms_is_the_observation(
+        self, run_reader, monkeypatch
+    ):
+        """Issue #208 as it was actually met: an OverflowError out of the epoch.
+
+        The unit misread as days made ``ms_observation_epoch_jd`` return a
+        Julian Date of ~5.16e9, which ``jd_to_datetime`` cannot express --
+        ``OverflowError: Python int too large to convert to C int``, raised
+        before the run had read a visibility. The epoch has to be the instant
+        the MS was taken, not merely a number the conversion survives, so this
+        checks the datetime and not just the absence of the raise.
+        """
+        from tabascal import orbit_config
+        from tabascal.time import jd_to_datetime
+
+        days = self._days(n_time=4, step=0.5)
+        n_bl = len(np.triu_indices(3, k=1)[0])
+        monkeypatch.setattr(
+            orbit_config,
+            "_ms_times_and_scale",
+            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc"),
+        )
+
+        epoch_jd = orbit_config.ms_observation_epoch_jd("in-memory.ms")
+
+        # The conversion first, so an unconverted column raises here as it did
+        # in the field, rather than being caught a line earlier as a number.
+        # Not exact: a JD is ~2.46e6 days, so a double resolves it to ~50 us,
+        # which is far below an integration and far above a millisecond.
+        instant = jd_to_datetime(epoch_jd)
+        assert abs(instant - datetime(2025, 1, 1, 0, 0, 0, 750000)) < timedelta(
+            milliseconds=1
+        )
+        np.testing.assert_allclose(epoch_jd, mjd_to_jd(days.mean()), rtol=1e-15)
 
 
 class TestDeclaredTimeScale:

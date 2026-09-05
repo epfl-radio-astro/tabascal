@@ -363,8 +363,8 @@ def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
     and shared, so it cannot classify an MS one way here and another in
     ``read_ms``, whatever order the MS stores its timestep blocks in. The one
     case the two can still differ on is an MS whose declaration contradicts the
-    spacing of the times it stores: ``read_ms`` honours the declaration, this
-    does not.
+    unit its times are inferred to be in: ``read_ms`` honours the declaration,
+    this does not.
     """
     times, _ = _ms_times_and_scale(ms_path)
 

@@ -535,6 +535,90 @@ class TestRunLogPath:
         assert run_a.log_path == run_a_again.log_path
 
 
+class TestResolveMSPath:
+    """Which Measurement Set a run reads: the flag, the config, the sim layout.
+
+    Issue #207. ``data.ms_path`` was read from the config and then written over
+    by ``<sim_dir>/<basename(sim_dir)>.ms``, the layout ``sim-vis`` leaves
+    behind. On a simulation the two agree and nothing shows; on real data,
+    where the MS's name has no relation to its parent directory's, a config
+    that named its MS failed reporting a table the user had never mentioned.
+    """
+
+    @staticmethod
+    def _resolve(impl, tmp_path, ms_path=None, config_ms_path=None):
+        config = {
+            "data": {"sim_dir": str(tmp_path / "obs"), "ms_path": config_ms_path},
+            "model": {},
+        }
+        paths = impl._resolve_paths(config, None, ms_path, "", None)
+        # The bundle and the config have to name one MS: TabConfig reads the
+        # config, the orbit preflight reads the bundle.
+        assert config["data"]["ms_path"] == paths.ms_path
+        return paths.ms_path
+
+    def test_the_config_names_the_ms(self, impl, tmp_path):
+        """A config with no ``-ms`` flag beside it, which used to be ignored."""
+        ms = str(tmp_path / "elsewhere" / "mwa_large_ch28.ms")
+
+        assert self._resolve(impl, tmp_path, config_ms_path=ms) == ms
+
+    def test_the_flag_beats_the_config(self, impl, tmp_path):
+        """``-ms`` is how a run is pointed at one MS of many without editing."""
+        flag = str(tmp_path / "from_flag.ms")
+        config = str(tmp_path / "from_config.ms")
+
+        assert self._resolve(impl, tmp_path, flag, config) == flag
+
+    def test_the_sim_layout_is_the_fallback(self, impl, tmp_path):
+        """Neither given: the simulation layout, exactly as before."""
+        resolved = self._resolve(impl, tmp_path)
+
+        assert resolved == str(tmp_path / "obs" / "obs.ms")
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_an_unset_config_key_falls_through(self, impl, tmp_path, empty):
+        """The base config ships ``ms_path`` as a bare key, so it arrives None."""
+        resolved = self._resolve(impl, tmp_path, config_ms_path=empty)
+
+        assert resolved == str(tmp_path / "obs" / "obs.ms")
+
+    def test_a_missing_config_key_falls_through(self, impl, tmp_path):
+        """A hand-written config need not carry every key of the base one."""
+        config = {"data": {"sim_dir": str(tmp_path / "obs")}, "model": {}}
+
+        paths = impl._resolve_paths(config, None, None, "", None)
+
+        assert paths.ms_path == str(tmp_path / "obs" / "obs.ms")
+
+    def test_a_relative_config_path_is_made_absolute(self, impl, tmp_path, monkeypatch):
+        """As the flag already was: a run must not depend on its working dir."""
+        monkeypatch.chdir(tmp_path)
+
+        resolved = self._resolve(impl, tmp_path, config_ms_path="obs.ms")
+
+        assert os.path.isabs(resolved)
+        assert resolved == str(tmp_path / "obs.ms")
+
+    def test_the_zarr_path_still_follows_the_sim_dir(self, impl, tmp_path):
+        """The simulation truth keeps its own layout; only the MS moved.
+
+        ``ast.init: truth`` and ``plots.truth`` read it, and it is a zarr
+        beside the simulation, not beside an arbitrary MS.
+        """
+        config = {
+            "data": {
+                "sim_dir": str(tmp_path / "obs"),
+                "ms_path": str(tmp_path / "elsewhere" / "real.ms"),
+            },
+            "model": {},
+        }
+
+        impl._resolve_paths(config, None, None, "", None)
+
+        assert config["data"]["zarr_path"] == str(tmp_path / "obs" / "obs.zarr")
+
+
 class TestRunReporting:
     """``run()`` reports peak memory however the run ends; timings only on success."""
 

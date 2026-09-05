@@ -317,8 +317,8 @@ def read_time_unit(column_keywords: dict, column: str = "TIME") -> Optional[str]
 
 
 #: Largest ``|MJD|`` in days that an observation could plausibly carry: MJD 1e5
-#: is the year 2132, and -1e5 is 1585. Only used where there is a single
-#: timestamp and so no spacing to read; see :func:`times_to_mjd`.
+#: is the year 2132, and -1e5 is 1585. Used wherever the spacing of the times
+#: does not settle their unit; see :func:`times_to_mjd`.
 _MJD_DAY_LIMIT = 1e5
 
 
@@ -330,16 +330,19 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     declaration (:func:`read_time_unit`) and it is honoured; pass ``None`` and
     the unit is inferred, because not every writer fills the keyword in.
 
-    The inference reads the *spacing* of consecutive samples rather than their
-    magnitude: an integration is seconds long, so a gap above 0.5 can only be
-    seconds, where times stored in days step by ~1e-4. Spacing also stays
-    positive for a pre-1858 epoch, whose MJD day number is negative. The
-    threshold is strict, so a spacing of exactly 0.5 reads as days.
+    The inference reads the *spacing* of consecutive samples in preference to
+    their magnitude, because a spacing is decisive where it is large: an
+    integration is seconds long, so a gap above 0.5 can only be seconds, where
+    times stored in days step by ~1e-4. Spacing also stays positive for a
+    pre-1858 epoch, whose MJD day number is negative.
 
-    A single-integration MS has no spacing to read, so its unit comes from
-    magnitude after all: an MJD day number is at most ~1e5 in any plausible
-    observing era, while the same instant in seconds is ~1e9. Strict again: a
-    magnitude of exactly 1e5 reads as days.
+    A spacing of 0.5 or below decides nothing, because seconds and days both
+    produce one: 0.5 s is a common correlator dump time, and so is anything
+    shorter. The unit then comes from magnitude instead -- the same rule a
+    single-integration MS uses, having no spacing to read at all. An MJD day
+    number is at most ~1e5 in any plausible observing era, while the same
+    instant in seconds is ~1e9, so the two are never close. The magnitude test
+    is strict: a magnitude of exactly 1e5 reads as days.
 
     The classification looks at the *sorted* distinct values, and so does not
     depend on the order the times arrive in -- :func:`ms_layout` permits an MS
@@ -360,8 +363,8 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     if unit is None and times.size:
         ordered = np.unique(times)
 
-        if ordered.size > 1:
-            unit = "s" if (ordered[1] - ordered[0]) > 0.5 else "d"
+        if ordered.size > 1 and (ordered[1] - ordered[0]) > 0.5:
+            unit = "s"
         else:
             unit = "s" if abs(ordered[0]) > _MJD_DAY_LIMIT else "d"
 
