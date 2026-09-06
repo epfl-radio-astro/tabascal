@@ -77,19 +77,41 @@ def _without_comment(line):
 
     Tracking the quote state costs a dozen lines and gets all four right,
     including ``-c a#b.yaml``, where the hash is mid-word and a shell keeps it.
+
+    A backslash outside single quotes escapes the next character, so
+    ``-c it\\'s.yaml # note`` is one word and a comment rather than an
+    unterminated quote. Word boundaries are ASCII space and tab only, because
+    that is what ``shlex`` splits on: treating a non-breaking space as one --
+    ``str.isspace`` does -- would cut a comment the shell would have kept, and
+    let a broken line past the check.
     """
 
     quote = None
+    escaped = False
     for i, char in enumerate(line):
-        if quote is not None:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote is not None:
             if char == quote:
                 quote = None
         elif char in "\"'":
             quote = char
-        elif char == "#" and (i == 0 or line[i - 1].isspace()):
+        elif char == "#" and (i == 0 or line[i - 1] in " \t"):
             return line[:i]
 
     return line
+
+
+def _continues(line):
+    """True when a shell would read the next line as part of this one.
+
+    An odd number of trailing backslashes: the last escapes the newline. An
+    even number is escaped backslashes, and the line stands on its own.
+    """
+
+    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
 
 
 def _command_tokens(line):
@@ -152,8 +174,15 @@ def _documented_pages(docs_dir, readme):
     """
 
     # rglob: docs/components/ and docs/concepts/ are pages like any other, and
-    # a command shown in one of them was never being checked.
-    pages = sorted(docs_dir.rglob("*.md"))
+    # a command shown in one of them was never being checked. Build output and
+    # hidden trees are not pages -- rglob descends into both -- and scraping a
+    # generated copy would check the same command twice and report the wrong
+    # file when it broke.
+    pages = [
+        page
+        for page in sorted(docs_dir.rglob("*.md"))
+        if not any(part == "_build" or part.startswith(".") for part in page.parts)
+    ]
     if readme is not None and readme.exists():
         pages.append(readme)
 
@@ -172,9 +201,17 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
     for page in _documented_pages(docs_dir, readme):
         shell = False
         in_code = False
-        for line in page.read_text().splitlines():
-            line = line.strip()
+        # A command wrapped over several lines with a trailing backslash, and
+        # where it started. The docs already wrap `pixi`, `reframe` and `curl`
+        # that way, and those are dropped only because their first word is not
+        # `tabascal`: the first person to wrap a long `tabascal run` would
+        # otherwise have hit an error about quoting.
+        pending = ""
+        started_at = 0
+        for number, raw in enumerate(page.read_text().splitlines(), start=1):
+            line = raw.strip()
             if line.startswith("```"):
+                pending = ""
                 # An untagged fence counts: the docs use bare fences, `bash`
                 # and `console` for commands, so only the languages that are
                 # definitely not shell are excluded. The first word of the info
@@ -186,14 +223,26 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
                 continue
             if not shell:
                 continue
+
             line = _without_comment(_PROMPT.sub("", line))
+            if pending:
+                line = f"{pending} {line}"
+            else:
+                started_at = number
+            if _continues(line):
+                pending = line.rstrip("\\").rstrip()
+                continue
+            pending = ""
+
             try:
                 tokens = _command_tokens(line)
             except ValueError as error:
-                # shlex says "No closing quotation" and nothing else. Which
-                # page and which line is the whole of what a reader needs.
+                # shlex says "No closing quotation" from inside its own module
+                # and nothing else. Where to look is the whole of what a reader
+                # needs, so the page and the line number come first.
                 raise ValueError(
-                    f"{page.name}: {line!r} does not tokenize as a command"
+                    f"{page.name}:{started_at}: {line!r} does not tokenize as "
+                    "a shell command"
                 ) from error
             if tokens is not None:
                 commands.append((page.name, tokens))
@@ -595,39 +644,70 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         The subprocess above proves the ordering along the run path, but it can
         only see as far as the frame it stubs: an assignment inside ``run``
         itself, or in a module imported after it, is past the last point it
-        watches. Every test of this kind has that horizon. This one has none --
-        it reads the package rather than running it, so it holds for code no
-        test exercises at all.
+        watches. Every test of this kind has that horizon. This one reads the
+        package rather than running it, so it holds for code no test exercises.
+
+        It looks for the spellings this codebase would plausibly use rather
+        than for one literal. ``_device_memory`` exports ``PREALLOCATE_ENV`` so
+        that callers name the variable through it, which makes
+        ``os.environ[PREALLOCATE_ENV] = ...`` the *likeliest* way the bug comes
+        back -- and a check that only matched the string literal would not have
+        seen it. Any variable as the key counts for the same reason: there is
+        no legitimate one today, so one appearing is worth a look either way.
         """
         import ast
         import pathlib
 
         import tabascal
 
+        def is_environ(node):
+            """``os.environ``, or ``environ`` after ``from os import environ``."""
+
+            return (
+                isinstance(node, ast.Attribute) and node.attr == "environ"
+            ) or (isinstance(node, ast.Name) and node.id == "environ")
+
+        def names_the_variable(key):
+            """The literal, or any name -- which could be holding it."""
+
+            if isinstance(key, ast.Constant):
+                return key.value == self._ENV
+            return isinstance(key, ast.Name)
+
         root = pathlib.Path(tabascal.__file__).parent
         offenders = []
         for path in sorted(root.rglob("*.py")):
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Assign):
                     targets = node.targets
                 elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
                     targets = [node.target]
+                elif isinstance(node, ast.Call):
+                    # os.environ.update({...}) and os.putenv(...) reach the
+                    # same place without being an assignment at all. Neither
+                    # takes a readable key here, so any use is reported.
+                    called = node.func
+                    if isinstance(called, ast.Attribute) and (
+                        (called.attr == "update" and is_environ(called.value))
+                        or called.attr == "putenv"
+                    ):
+                        offenders.append(
+                            f"{path.relative_to(root)}:{node.lineno} ({called.attr})"
+                        )
+                    continue
                 else:
                     continue
+
                 for target in targets:
                     if (
                         isinstance(target, ast.Subscript)
-                        and isinstance(target.value, ast.Attribute)
-                        and target.value.attr == "environ"
-                        and isinstance(target.slice, ast.Constant)
-                        and target.slice.value == self._ENV
+                        and is_environ(target.value)
+                        and names_the_variable(target.slice)
                     ):
-                        offenders.append(
-                            f"{path.relative_to(root)}:{node.lineno}"
-                        )
+                        offenders.append(f"{path.relative_to(root)}:{node.lineno}")
 
         assert offenders == [], (
-            f"{self._ENV} is assigned, not defaulted, at: {offenders}"
+            f"{self._ENV} must be defaulted, never assigned; found: {offenders}"
         )
 
 
@@ -1512,11 +1592,54 @@ class TestDocumentedCommandScraper:
         found = self._page(tmp_path, '```bash\ntabascal run -c "#c.yaml"\n```\n')
         assert found == [("page.md", ["tabascal", "run", "-c", "#c.yaml"])]
 
-    def test_a_hash_is_a_comment_only_where_a_shell_says_so(self, tmp_path):
-        """Which is why the comment goes after tokenizing, not before.
+    def test_a_backslash_escaped_quote_is_not_a_quote(self, tmp_path):
+        """Checked against a real bash, which is the only authority here.
 
-        A regex over the line truncated a quoted argument at its hash, turning
-        a valid documented command into an unbalanced quote.
+        Without escape handling the apostrophe in ``it\'s.yaml`` opened a quote
+        the shell never opened, so the comment after it was swallowed into the
+        command -- and with an apostrophe in the comment text as well, a line
+        bash runs without complaint failed the scrape outright.
+        """
+        found = self._page(
+            tmp_path,
+            "```bash\ntabascal run -c it\\'s.yaml   # don't do this\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "it's.yaml"])]
+
+    def test_a_command_wrapped_over_lines_is_read_as_one(self, tmp_path):
+        """A trailing backslash continues the command, as it does in a shell.
+
+        The docs already wrap `pixi`, `reframe` and `curl` invocations this
+        way; those are dropped only because their first word is not
+        ``tabascal``. Wrapping a long ``tabascal run`` would otherwise have
+        failed with an error about quoting.
+        """
+        found = self._page(
+            tmp_path,
+            "```bash\ntabascal run -c c.yaml \\\n    -ms file.ms\n```\n",
+        )
+        assert found == [
+            ("page.md", ["tabascal", "run", "-c", "c.yaml", "-ms", "file.ms"])
+        ]
+
+    def test_a_line_that_will_not_tokenize_says_where_it_is(self, tmp_path):
+        """``shlex`` names its own module and nothing else.
+
+        Where to look is the whole of what a reader needs, so the page and the
+        line number come before the text.
+        """
+        with pytest.raises(ValueError, match=r"page\.md:3:"):
+            self._page(
+                tmp_path,
+                "intro\n```bash\ntabascal run -c \"c.yaml\n```\n",
+            )
+
+    def test_a_hash_is_a_comment_only_where_a_shell_says_so(self, tmp_path):
+        """Which is why the cut reads the quotes rather than a regex or tokens.
+
+        A regex over the line truncated the quoted argument at its hash and
+        made a valid command unparseable; cutting on the tokens instead lost
+        the quoting that says which hash is a comment at all.
         """
         found = self._page(
             tmp_path,
