@@ -49,6 +49,10 @@ def _command_word(line):
 
     lexer = shlex.shlex(line, posix=True)
     lexer.whitespace_split = True
+    # shlex.split leaves comments to the caller, and so must this: the comment
+    # is already off by the time either is asked, and disagreeing here would
+    # make one of them call a line a command that the other could not split.
+    lexer.commenters = ""
     try:
         for token in lexer:
             if not _ASSIGNMENT.match(token):
@@ -59,19 +63,33 @@ def _command_word(line):
     return None
 
 
-def _without_trailing_comment(tokens):
-    """Drop the comment some docs put after a command, as a shell would.
+def _without_comment(line):
+    r"""``line`` up to the first unquoted ``#`` that starts a word, as a shell cuts it.
 
-    From the first *word* that starts with ``#``, so an unquoted ``a#b.yaml``
-    keeps its hash and a quoted ``"tles #1"`` keeps its space. Doing this after
-    tokenizing rather than with a regex over the line is what gets both right.
+    On the raw line, and before tokenizing, because both of the alternatives
+    lose something. A regex (``\s+#``) cannot see quotes, so it truncated
+    ``--tle-dir "tles #1"`` mid-quote and made a valid command unparseable.
+    Cutting after tokenizing cannot see them either -- quoting is gone by then
+    -- so a quoted ``"#c.yaml"`` looked like a comment and its argument was
+    dropped in silence. And leaving the comment on for ``shlex`` to handle
+    means an apostrophe in ordinary English ("# don't preallocate") fails the
+    split, which turns an innocuous docs edit into a parse error.
+
+    Tracking the quote state costs a dozen lines and gets all four right,
+    including ``-c a#b.yaml``, where the hash is mid-word and a shell keeps it.
     """
 
-    for i, token in enumerate(tokens):
-        if token.startswith("#"):
-            return tokens[:i]
+    quote = None
+    for i, char in enumerate(line):
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
 
-    return tokens
+    return line
 
 
 def _command_tokens(line):
@@ -99,8 +117,6 @@ def _command_tokens(line):
         if _command_word(line) == "tabascal":
             raise
         return None
-
-    tokens = _without_trailing_comment(tokens)
 
     while tokens and _ASSIGNMENT.match(tokens[0]):
         tokens.pop(0)
@@ -135,7 +151,9 @@ def _documented_pages(docs_dir, readme):
     tests scrape whatever README happened to sit in pytest's basetemp.
     """
 
-    pages = sorted(docs_dir.glob("*.md"))
+    # rglob: docs/components/ and docs/concepts/ are pages like any other, and
+    # a command shown in one of them was never being checked.
+    pages = sorted(docs_dir.rglob("*.md"))
     if readme is not None and readme.exists():
         pages.append(readme)
 
@@ -168,8 +186,15 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
                 continue
             if not shell:
                 continue
-            line = _PROMPT.sub("", line)
-            tokens = _command_tokens(line)
+            line = _without_comment(_PROMPT.sub("", line))
+            try:
+                tokens = _command_tokens(line)
+            except ValueError as error:
+                # shlex says "No closing quotation" and nothing else. Which
+                # page and which line is the whole of what a reader needs.
+                raise ValueError(
+                    f"{page.name}: {line!r} does not tokenize as a command"
+                ) from error
             if tokens is not None:
                 commands.append((page.name, tokens))
 
@@ -558,10 +583,52 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         )
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout.split("\n")[:2] == [
-            "after import: true",
-            "at the fit: true",
-        ], result.stdout
+        # Membership, not position: a library banner on stdout would otherwise
+        # fail this with a message about nothing to do with preallocation.
+        printed = result.stdout.splitlines()
+        assert "after import: true" in printed, result.stdout
+        assert "at the fit: true" in printed, result.stdout
+
+    def test_nothing_in_the_package_assigns_it(self):
+        """Only ever ``setdefault``, everywhere, said directly.
+
+        The subprocess above proves the ordering along the run path, but it can
+        only see as far as the frame it stubs: an assignment inside ``run``
+        itself, or in a module imported after it, is past the last point it
+        watches. Every test of this kind has that horizon. This one has none --
+        it reads the package rather than running it, so it holds for code no
+        test exercises at all.
+        """
+        import ast
+        import pathlib
+
+        import tabascal
+
+        root = pathlib.Path(tabascal.__file__).parent
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                    targets = [node.target]
+                else:
+                    continue
+                for target in targets:
+                    if (
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Attribute)
+                        and target.value.attr == "environ"
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == self._ENV
+                    ):
+                        offenders.append(
+                            f"{path.relative_to(root)}:{node.lineno}"
+                        )
+
+        assert offenders == [], (
+            f"{self._ENV} is assigned, not defaulted, at: {offenders}"
+        )
 
 
 class TestLightCurveInputs:
@@ -1421,6 +1488,29 @@ class TestDocumentedCommandScraper:
                 "```yaml\nast:\n"
                 "```bash\ntabascal run -c c.yaml\n```\n",
             )
+
+    def test_an_apostrophe_in_a_comment_does_not_break_the_command(self, tmp_path):
+        """The most ordinary annotation there is, and it used to fail the split.
+
+        The comment has to come off before ``shlex`` sees the line: leaving it
+        on meant "don't" was an unbalanced quote, and a docs edit no shell
+        would blink at raised from inside ``shlex``.
+        """
+        found = self._page(
+            tmp_path,
+            "```bash\ntabascal run -c c.yaml   # don't preallocate\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_a_quoted_hash_is_an_argument_not_a_comment(self, tmp_path):
+        """Cutting on the tokens instead dropped this argument in silence.
+
+        Quoting is gone by the time the tokens exist, so a word that begins
+        with a hash is indistinguishable from a comment there -- and the
+        command that got checked was no longer the command the docs show.
+        """
+        found = self._page(tmp_path, '```bash\ntabascal run -c "#c.yaml"\n```\n')
+        assert found == [("page.md", ["tabascal", "run", "-c", "#c.yaml"])]
 
     def test_a_hash_is_a_comment_only_where_a_shell_says_so(self, tmp_path):
         """Which is why the comment goes after tokenizing, not before.
