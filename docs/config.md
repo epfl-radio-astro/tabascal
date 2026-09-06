@@ -265,7 +265,7 @@ ast:
   baseline_block_size: auto
   pow_spec:
     p0: 3e3
-    k0_freq: 1
+    corr_freq: null
     fov_deg: 5
     gammas: [5, 5]
     cutoff: 1e-6
@@ -280,14 +280,18 @@ ast:
   `auto` exists because a block that does not bind costs scan steps for nothing. On a single-channel observation, where the padded grid is 1 by 180, a fixed block of `128` split 4560 baselines into 36 steps and cost 13 % of the optimiser's time with no memory saved; sized from the grid, the same observation runs in one step, and a wide band still blocks.
 * `pow_spec`: This is the section that defines the prior covariance of the signal. The signal is modelled in the Fourier domain so the prior covariance is given by the power spectrum of the signal.
 
-  Every value in this block is checked at setup, by the same validator the [RFI power spectrum](#rfi-signal) uses: each of `p0`, `k0_freq` and `fov_deg` must be a finite positive number, `gammas` an ordered pair of them — one for the frequency axis and one for the time axis, in that order — and `cutoff` a positive number **below 1**, since it is relative to the largest mode on each axis and at 1 every mode is cut. Only `fov_deg` may be `null`, meaning the telescope's own primary beam. A key the section does not read is refused by name rather than ignored, so a `gamma` written for `gammas` is caught rather than silently doing nothing.
+  Every value in this block is checked at setup, by the same validator the [RFI power spectrum](#rfi-signal) uses: each of `p0`, `corr_freq` and `fov_deg` must be a finite positive number, `gammas` an ordered pair of them — one for the frequency axis and one for the time axis, in that order — and `cutoff` a positive number **below 1**, since it is relative to the largest mode on each axis and at 1 every mode is cut. The two knees, `corr_freq` and `fov_deg`, may be `null`, and mean different things by it — see each below. A key the section does not read is refused by name rather than ignored, so a `gamma` written for `gammas` is caught rather than silently doing nothing.
 
 The parameters for the power spectrum are defined as
 
 * `p0`: Mean power of the signal.
-* `k0_freq`: Inverse correlation scale along the frequency axis.
+* `corr_freq`: The bandwidth, in Hz, over which the astronomical signal stays correlated. It sets the knee along the frequency axis, and that axis is a **delay**: the modes there are `fftfreq(n_freq, chan_width)`, in inverse Hz, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `rfi.corr_freq` makes. `null`, the default, is no roll-off along that axis at all: every delay mode is kept and none is preferred.
+
+  It has **no effect on a single-channel observation**, where the only delay mode is zero, which is why every shipped config leaves it unset. On a wide band it is worth setting: the sky is smooth in frequency, so its power belongs at low delay, and the value to give is a bandwidth comparable to the one observed rather than a narrow one. A useful sanity check: the delay axis only runs out to `1 / (2 * chan_width)` — 2.4 µs for 209 kHz channels, whatever the channel count — so the knee falls off the end of it, and rolls nothing off, for any `corr_freq` below `chan_width / pi`, about 67 kHz for those channels. A correlation bandwidth of one observed band puts the knee at `1 / (pi * n_freq)` of the axis, keeping the lowest delays and cutting the rest, which is what a sky smooth in frequency should look like.
+
+  This key was called `k0_freq` and held the knee itself, the delay in seconds. The two are reciprocals, so a config carrying the old name is refused with the conversion rather than read as if the number meant the same thing.
 * `fov_deg`: The field of view in degrees used to set the maximum astronomical fringe rate (the knee `k0` of the time-axis power spectrum). It is the *full* field of view, i.e. the angular diameter out to the first null of the primary beam; the maximum source offset from the phase centre is `fov_deg / 2`. When omitted, it defaults to the primary-beam field of view of the telescope, `2 * 1.22 * lambda / D` (null-to-null), from the dish diameter `D` and frequency read from the MS file.
-* `gammas`: The rate of drop off in the power spectrum. As $\gamma \rightarrow \infty$, the power spectrum tends to a Gaussian with width given by `k0_freq` in the frequency axis and inferred from `fov_deg` in the time axis.
+* `gammas`: The rate of drop off in the power spectrum. As $\gamma \rightarrow \infty$, the power spectrum tends to a Gaussian with width set by `corr_freq` in the frequency axis and inferred from `fov_deg` in the time axis.
 * `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and then Fourier components, where the power spectrum value is less than `p0 * cutoff`, are removed and not modelled. This reduces the number of parameters to fit.
 
 ### A fixed sky of discrete sources

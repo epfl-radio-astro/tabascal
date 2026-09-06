@@ -6,27 +6,54 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd, validate_pow_spec
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, validate_pow_spec
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
 
 #: The ``ast.pow_spec`` keys and what each may be, for
 #: :func:`tabascal.fft_gp.validate_pow_spec`. Unlike the RFI prior, this section
-#: sets both the power at the origin and the frequency-axis knee itself: ``p0``
-#: is not renormalised away here, and ``k0_freq`` is not derived from anything.
+#: sets the power at the origin itself: ``p0`` is not renormalised away here.
 _POW_SPEC_RULES = {
     "p0": "number",
-    "k0_freq": "number",
+    "corr_freq": "number",
     "fov_deg": "number",
     "gammas": "pair",
     "cutoff": "cutoff",
 }
 
-#: ``fov_deg`` alone may be null: unset means the telescope's own primary beam,
-#: 2 * 1.22 * lambda / D from the dish diameter in the measurement set, rather
-#: than a field of view chosen by hand.
-_POW_SPEC_OPTIONAL = ("fov_deg",)
+#: Both knees may be null, and mean different things by it. ``fov_deg`` unset is
+#: the telescope's own primary beam, 2 * 1.22 * lambda / D from the dish
+#: diameter in the measurement set, rather than a field of view chosen by hand.
+#: ``corr_freq`` unset is no roll-off along the frequency axis at all -- see
+#: :data:`_NO_FREQ_ROLLOFF`.
+_POW_SPEC_OPTIONAL = ("fov_deg", "corr_freq")
+
+#: ``k0_freq`` was the same knee expressed as its own reciprocal, and that is
+#: why it cannot be an alias: read as a bandwidth, the shipped ``k0_freq: 1``
+#: becomes 1 Hz instead of the 0.16 Hz it means, and any hand-set value moves
+#: by however far it sat from ``1 / (2 pi)``. A key whose units invert has to
+#: be refused and converted by hand.
+_POW_SPEC_RENAMED = {
+    "k0_freq": (
+        "corr_freq",
+        "It is the same knee the other way up: k0_freq was a delay in seconds, "
+        "corr_freq is the correlation bandwidth in Hz that delay corresponds "
+        "to, corr_freq = 1 / (2 pi k0_freq). This is not an alias and the value "
+        "does not carry over -- converting it for you would change the prior "
+        "silently. The shipped k0_freq: 1 was a knee at one second, which is "
+        "far beyond the largest delay any observation can represent (the axis "
+        "runs to 1 / (2 * chan_width), 2.4 us for 209 kHz channels), so it "
+        "never rolled anything off. Leave corr_freq unset for that, which says "
+        "so.",
+    ),
+}
+
+#: ``corr_freq: null`` is no roll-off along the frequency axis --
+#: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee, and
+#: the power spectrum is flat there. That reproduces the ``k0_freq: 1`` it
+#: replaces to 1.6e-11 relative, below single precision's epsilon, and exactly
+#: on a single channel, where the only delay mode is zero.
 
 
 class GPVisAst(Component):
@@ -70,14 +97,20 @@ class GPVisAst(Component):
                 "ast",
                 _POW_SPEC_RULES,
                 optional=_POW_SPEC_OPTIONAL,
+                renamed=_POW_SPEC_RENAMED,
             )
             config.args["ast"]["pow_spec"] = pow_spec
 
             self.p0 = pow_spec["p0"]
             self.gammas = pow_spec["gammas"]
             self.fov_deg = pow_spec["fov_deg"]
-            self.k0_freq = pow_spec["k0_freq"]
             self.pk_cutoff = pow_spec["cutoff"]
+
+            # corr_freq is the bandwidth over which the sky stays correlated;
+            # the knee is the delay conjugate to it. Shared with the RFI prior
+            # so the two sections cannot drift; null is no roll-off.
+            self.corr_freq = pow_spec["corr_freq"]
+            self.k0_freq = knee_from_corr_scale(self.corr_freq)
 
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]

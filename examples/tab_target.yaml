@@ -55,11 +55,8 @@ ast:
   mean: 0
   # mean: data
   pow_spec:
-    # P0: 3e3
-    # k0: 1e-3
-    # gamma: 1.2
     p0: 3e3
-    k0_freq: 1
+    corr_freq: null   # no frequency roll-off; these observations are single channel
     fov_deg: 5
     gammas: [5, 5]
     cutoff: 1e-6
