@@ -123,8 +123,9 @@ def require_truth(config: Dict) -> None:
         reasons = ", ".join(sorted(set(required.values())))
         raise TruthError(
             f"Configuration requires simulation truth ({reasons}), but no tab-sim "
-            f"zarr was found at {path!r}. Provide a tab-sim simulation directory, or "
-            f"change the offending init/plot options."
+            f"zarr was found at {path!r}. Name it with data.truth_zarr -- it is "
+            "looked for beside the Measurement Set otherwise, which is where "
+            "sim-vis leaves it -- or change the offending init/plot options."
         )
 
     have = available_truth(config)

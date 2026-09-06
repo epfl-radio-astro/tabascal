@@ -60,21 +60,55 @@ untouched.
 values are seconds or days; TABASCAL works in MJD days.
 :func:`~tabascal.ms.read_time_unit` returns the declaration and
 :func:`~tabascal.ms.times_to_mjd` applies it, falling back — for the columns
-that carry no declaration — on the spacing of consecutive samples: an
-integration is seconds long, so a gap above half a day can only be seconds. A
-single-integration MS has no spacing to read and its unit comes from magnitude
-instead, an MJD day number being at most ~1e5 in any plausible observing era
-against ~1e9 for the same instant in seconds. Both thresholds are strict: a
-spacing of exactly 0.5, or a magnitude of exactly 1e5, reads as days.
+that carry no declaration — on the magnitude of the times: an MJD day number is
+at most ~1e5 in any plausible observing era against ~1e9 for the same instant in
+seconds, and no observation falls between. What is compared is the *median* of
+the finite magnitudes, so no single entry decides the column — a row casacore
+added and never filled leaves ``TIME`` at zero, and the smallest magnitude would
+read a column of seconds as days on the strength of it. The threshold is strict:
+a magnitude of exactly 1e5 reads as days.
 
-Both :func:`~tabascal.ms.read_ms` and the preflight observation-epoch helper
-convert here, so the heuristic cannot classify one MS two ways — including for
-an MS whose timestep blocks do not ascend, since the classification sorts. What
-they can still differ on is a *declared* unit: the preflight helper reads the
-``TIME`` column through casacore and takes only its ``MEASINFO`` record from the
-keywords, not its ``QuantumUnits``, so an MS whose ``QuantumUnits`` contradicts
-the spacing of the times it stores is read on the declared unit by ``read_ms``
-and on the inferred one by the TLE age checks.
+The spacing of consecutive samples used to decide this instead, on the reasoning
+that an integration is seconds long and so a gap above half a day could only be
+seconds. It could not. The threshold was strict, so an integration of exactly
+0.5 s — a common correlator dump time — read as days, and so did anything
+shorter; that is issue #208, which showed up as an ``OverflowError`` out of the
+preflight TLE epoch check, times of ~5e9 having been taken for day numbers. And
+in the other direction a day-numbered column stepping past the half-day
+threshold read as seconds: MJD 60676 came back as MJD 0.7. The rule compared the
+two *smallest* distinct times rather than a representative cadence, so this
+needed every sample to be at least half a day from the next — a column carrying
+one row per day, not merely an observation spread over several.
+
+Magnitude parts every column the spacing rule parted correctly inside the era
+the threshold already assumes, so the rule is gone rather than repaired: for a
+spacing test to decide anything magnitude does not, a column stored in seconds
+would need a typical ``|TIME|`` of 1e5 or less, putting the observation within
+1.16 days of the MJD epoch of 1858-11-17. Outside the era bound — a day-numbered
+column past 2132, whose ``|TIME|`` exceeds 1e5 — spacing was the better of the
+two, but a heuristic whose constant is an era bound has conceded that case
+already.
+
+:func:`~tabascal.ms.read_ms`, the results writer's observation grid and the
+preflight observation-epoch helper all convert here, so the heuristic cannot
+classify one MS two ways — including for an MS whose timestep blocks do not
+ascend, since a median does not depend on the order its values arrive in. The
+preflight helper deduplicates and the other two do not, but it converts before
+it deduplicates, and on any MS :func:`~tabascal.ms.ms_layout` accepts the three
+are handed the same multiset anyway: ``n_time`` is the number of distinct times
+and every block must hold one constant time, so the reader's slice holds nothing
+for ``np.unique`` to remove. Their *scopes* still differ — the preflight helper
+reads the whole main table and the reader one partition — which weighing the
+times by frequency is what makes survivable.
+
+A *declared* unit cannot part them either. The preflight helper reads
+``QuantumUnits`` from the same ``getcolkeywords`` call it takes ``MEASINFO``
+from, so all three converters honour a declaration and the heuristic is what is
+left for an MS carrying none. It deliberately did not, once, so that both paths
+would share the heuristic — but the reader honours a declaration, so leaving it
+unread was what created the divergence rather than what closed it: an MS
+declaring seconds while storing day numbers was read on the declaration by the
+run and on the magnitudes by the TLE age checks.
 
 CASA calibration tables
 -----------------------

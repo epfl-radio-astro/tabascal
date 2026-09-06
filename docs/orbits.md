@@ -193,7 +193,7 @@ accuracy. The observation-specific replacement is tracked in
 ## Exact replay
 
 Every run saves the exact records it used to
-`<sim_dir>/results/used_orbits_<name>.json`. To reproduce those trajectory
+`<out_dir>/results/used_orbits_<name>.json`. To reproduce those trajectory
 priors, copy or retain that file and pass its directory to a later run:
 
 ```bash

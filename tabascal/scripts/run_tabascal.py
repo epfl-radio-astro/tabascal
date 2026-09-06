@@ -2,7 +2,34 @@
 # 'run' subcommand
 # ---------------------------------------------------------------------------
 
+def _reject_sim_dir(args):
+    """Stop a ``-s`` that used to name the simulation directory.
+
+    It meant the inputs and the outputs at once, so accepting it silently would
+    write where the user meant and read where they did not. Registered
+    suppressed on both subparsers rather than dropped, because argparse would
+    otherwise answer with "unrecognized arguments" -- and worse on
+    ``light-curve``, where ``-sx/--tag`` is the only surviving ``-s`` option and
+    a bare ``-s`` abbreviation-matches it, taking the directory as the run tag
+    and writing the light curves to a file named after it.
+
+    ``is not None`` rather than truthiness: ``-s ""`` was given.
+    """
+
+    if getattr(args, "sim_dir", None) is not None:
+        raise SystemExit(
+            "-s/--sim_dir was renamed -od/--out_dir. It is only where a run "
+            "writes now: name the Measurement Set with -ms/--ms_path or "
+            "data.ms_path, and a tab-sim simulation's truth zarr with "
+            "data.truth_zarr. Passing -od alone still reads a simulation "
+            "directory the way -s did."
+        )
+
+
 def _run_cmd(args):
+    # Before anything expensive.
+    _reject_sim_dir(args)
+
     # Multi-process bring-up must precede everything jax-related: the distributed
     # runtime has to exist before the device backend initializes, and the impl module
     # import pulls in the whole jax/numpyro stack. Memory-on-demand likewise has to be
@@ -24,6 +51,8 @@ def _run_cmd(args):
 # ---------------------------------------------------------------------------
 
 def _light_curve_cmd(args):
+    _reject_sim_dir(args)
+
     # Imported lazily so --help and the parser tests don't pay the JAX cost. The
     # parser itself comes from the same module and imports nothing heavy.
     from tabascal.scripts.rfi_estimate import run
@@ -70,7 +99,17 @@ def build_parser():
     # -- run --
     run_parser = subparsers.add_parser("run", help="Apply tabascal to a simulation.")
     run_parser.add_argument("-c", "--config", required=True, help="Path to the config file.")
-    run_parser.add_argument("-s", "--sim_dir", help="Path to the directory of the simulation.")
+    run_parser.add_argument(
+        "-od",
+        "--out_dir",
+        help="Directory the run writes its plots/ and results/ to. Defaults to "
+        "the Measurement Set's own directory. Given without -ms, it is read as "
+        "a tab-sim simulation directory and the MS and truth zarr are looked "
+        "for inside it. Does not move the MS when data.ms_path names one.",
+    )
+    # Renamed, not dropped: argparse would otherwise answer a -s with
+    # "unrecognized arguments", which says nothing about where it went.
+    run_parser.add_argument("-s", "--sim_dir", help=argparse.SUPPRESS)
     run_parser.add_argument("-ms", "--ms_path", help="Path to Measurement Set.")
     run_parser.add_argument(
         "-np", "--norad-path",

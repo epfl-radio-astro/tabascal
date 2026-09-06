@@ -1725,7 +1725,7 @@ class TestCommandLine:
         from tabascal.scripts.rfi_estimate import run
 
         config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
                      "data_col": "DATA", "corr": "xx", "freq": None},
             "rfi": {"min_elevation": 0},
             "satellites": {},
@@ -1774,7 +1774,7 @@ class TestCommandLine:
         from tabascal.scripts.rfi_estimate import run
 
         config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
                      "data_col": "TAB_RES_DATA", "corr": "yy", "freq": None},
             "rfi": {"min_elevation": None},
             "satellites": {},
@@ -1868,7 +1868,7 @@ class TestCommandLine:
         )
 
         config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
                      "data_col": "DATA", "corr": "xx", "freq": float(band[chan])},
             "rfi": {"min_elevation": None},
             "satellites": {},
@@ -1906,7 +1906,7 @@ class TestCommandLine:
         ).to_zarr(zarr_path)
 
         config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
                      "data_col": "DATA", "corr": "xx", "freq": None},
             "rfi": {"min_elevation": None},
             "satellites": {},
@@ -1933,7 +1933,7 @@ class TestCommandLine:
         from tabascal.scripts.rfi_estimate import run
 
         config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
                      "data_col": "DATA", "corr": "xx", "freq": None},
             "rfi": {"min_elevation": None},
             "satellites": {},
@@ -1958,7 +1958,7 @@ class TestCommandLine:
         from tabascal.scripts.rfi_estimate import run
 
         config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
                      "data_col": "DATA", "corr": "xx", "freq": None},
             "rfi": {"min_elevation": 0},
             "satellites": {},
@@ -1988,7 +1988,7 @@ class TestCommandLine:
         from tabascal.scripts.rfi_estimate import run
 
         config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "sim_dir": None,
+            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
                      "data_col": "DATA", "corr": "xx", "freq": None},
             "rfi": {"min_elevation": 20.0},
             "satellites": {},

@@ -248,6 +248,85 @@ class TestBaseConfigAstKeys:
         np.testing.assert_allclose(comp.k0_time, expected, rtol=exact_rtol)
 
 
+class TestSimDirWasRenamed:
+    """``data.sim_dir`` meant the inputs and the outputs at once; it is split.
+
+    tabascal only ever ran on simulations, so one directory could name where the
+    products went *and* where the MS and the truth zarr were found. A real
+    observation has neither relation: issue #207. ``data.out_dir`` is only where
+    the run writes, the MS is ``data.ms_path``, and the truth is
+    ``data.truth_zarr``.
+    """
+
+    def test_a_config_setting_the_old_name_stops_and_names_the_new_one(self, tmp_path):
+        """Not an alias: it would keep meaning both things for whoever kept it."""
+
+        path = tmp_path / "user.yaml"
+        path.write_text("data:\n  sim_dir: /some/where\n")
+
+        with pytest.raises(ValueError) as excinfo:
+            load_config(str(path))
+
+        message = str(excinfo.value)
+        assert "data.sim_dir" in message
+        assert "data.out_dir" in message
+
+    def test_the_base_ships_the_new_names(self, tmp_path):
+        data = base_args(tmp_path)["data"]
+
+        assert "sim_dir" not in data
+        assert data["out_dir"] is None
+        assert data["truth_zarr"] is None
+
+    @pytest.mark.parametrize("subcommand", ["run", "light-curve"])
+    def test_both_subcommands_refuse_it(self, subcommand):
+        """light-curve especially, where a bare -s is worse than unrecognised.
+
+        ``-sx/--tag`` is the only surviving ``-s`` option there, so argparse
+        abbreviation-matches ``-s`` to it: the directory became the run tag,
+        and an absolute tag makes ``os.path.join`` discard the directory it was
+        being joined to, so the light curves were written to a file named after
+        the simulation instead of into ``light_curves/`` beside the MS.
+        """
+        from tabascal.scripts.run_tabascal import build_parser
+        from tabascal.scripts import run_tabascal
+
+        args = build_parser().parse_args(
+            [subcommand, "-c", "c.yaml", "-s", "/data/pnt_src_sim"]
+        )
+
+        assert args.sim_dir == "/data/pnt_src_sim"  # not absorbed by --tag
+        assert getattr(args, "tag", None) is None
+        with pytest.raises(SystemExit, match=r"-s/--sim_dir was renamed"):
+            run_tabascal._reject_sim_dir(args)
+
+    def test_an_empty_value_is_refused_too(self):
+        """``-s ""`` was still given; truthiness would swallow it."""
+        from tabascal.scripts.run_tabascal import build_parser
+        from tabascal.scripts import run_tabascal
+
+        args = build_parser().parse_args(["run", "-c", "c.yaml", "-s", ""])
+
+        with pytest.raises(SystemExit, match=r"-s/--sim_dir was renamed"):
+            run_tabascal._reject_sim_dir(args)
+
+    def test_the_flag_is_renamed_too_and_says_so(self):
+        """argparse would answer a -s with "unrecognized arguments" otherwise.
+
+        Which says nothing about where it went, for a flag every existing script
+        and every older doc passes.
+        """
+        from tabascal.scripts.run_tabascal import build_parser, _run_cmd
+
+        args = build_parser().parse_args(["run", "-c", "c.yaml", "-s", "/some/where"])
+
+        with pytest.raises(SystemExit) as excinfo:
+            _run_cmd(args)
+
+        message = str(excinfo.value)
+        assert "-s/--sim_dir" in message and "-od/--out_dir" in message
+
+
 class TestBaseConfigIntegrationSampleCounts:
     """One spelling per axis for the RFI fine-grid sample counts.
 

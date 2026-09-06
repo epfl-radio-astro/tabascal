@@ -194,6 +194,89 @@ class TestNoradIdFile:
 # Measurement Set observation epoch
 # ---------------------------------------------------------------------------
 
+class _FakeTimeColumn:
+    """A casacore table stripped to the one column the seam reads.
+
+    ``_ms_times_and_scale`` is the only place preflight touches casacore, and
+    every other test patches it out -- so the extraction itself, which is what
+    decides whether a declaration is honoured at all, needs a fake one level
+    lower to be pinned.
+    """
+
+    def __init__(self, times, keywords):
+        self.times = np.asarray(times, dtype=float)
+        self.keywords = keywords
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def getcol(self, name):
+        assert name == "TIME"
+        return self.times
+
+    def getcolkeywords(self, name):
+        assert name == "TIME"
+        return self.keywords
+
+
+class TestTheCasacoreSeamReadsWhatTheColumnDeclares:
+    """That the keywords are read at all, not merely threaded once read.
+
+    Both are taken from one ``getcolkeywords`` call: the scale because an epoch
+    on the wrong scale is a wrong instant, and the unit because ``read_ms``
+    honours a declaration and a path that ignored one would part from it.
+    """
+
+    @staticmethod
+    def _seam(monkeypatch, times, keywords):
+        import casacore.tables
+
+        monkeypatch.setattr(
+            casacore.tables,
+            "table",
+            lambda *args, **kwargs: _FakeTimeColumn(times, keywords),
+        )
+
+        return tle_config._ms_times_and_scale("in-memory.ms")
+
+    def test_the_declared_unit_comes_back(self, monkeypatch):
+        keywords = {"MEASINFO": {"type": "epoch", "Ref": "UTC"}, "QuantumUnits": ["d"]}
+
+        times, scale, unit = self._seam(monkeypatch, [59775.4, 59775.5], keywords)
+
+        assert (scale, unit) == ("utc", "d")
+        np.testing.assert_array_equal(times, [59775.4, 59775.5])
+
+    def test_a_column_declaring_nothing_leaves_the_unit_unset(self, monkeypatch):
+        """``None``, which is what sends the caller to the heuristic."""
+        keywords = {"MEASINFO": {"type": "epoch", "Ref": "UTC"}}
+
+        _, scale, unit = self._seam(monkeypatch, [1.0, 2.0], keywords)
+
+        assert (scale, unit) == ("utc", None)
+
+    def test_the_declaration_reaches_the_integration_times(self, monkeypatch):
+        """End to end through the real seam: seconds-sized numbers, declared days."""
+        keywords = {"MEASINFO": {"type": "epoch", "Ref": "UTC"}, "QuantumUnits": ["d"]}
+        seconds_sized = np.array([5.24e9, 5.24e9 + 0.5])
+
+        import casacore.tables
+
+        monkeypatch.setattr(
+            casacore.tables,
+            "table",
+            lambda *args, **kwargs: _FakeTimeColumn(seconds_sized, keywords),
+        )
+
+        # Left alone: the declaration says these numbers are already days.
+        np.testing.assert_array_equal(
+            tle_config.ms_integration_times_mjd("in-memory.ms"), seconds_sized
+        )
+
+
 class TestMeasurementSetEpoch:
     """The one MS epoch helper both preflight and execution derive their epoch from."""
 
@@ -202,11 +285,15 @@ class TestMeasurementSetEpoch:
         base = (_OBS - 2400000.5) * 86400.0
         return np.repeat(base + np.arange(n_time) * 8.0, n_bl)
 
-    def _column(self, monkeypatch, times, scale="utc"):
-        """Patch the one casacore seam with a TIME column and its declared scale."""
+    def _column(self, monkeypatch, times, scale="utc", unit=None):
+        """Patch the one seam with a TIME column and what it declares.
+
+        ``unit=None`` is an MS that declares no ``QuantumUnits``, which is the
+        case the magnitude heuristic exists for.
+        """
 
         monkeypatch.setattr(
-            tle_config, "_ms_times_and_scale", lambda ms: (times, scale)
+            tle_config, "_ms_times_and_scale", lambda ms: (times, scale, unit)
         )
 
     def test_matches_read_ms_row_selection_and_unit_guard(self, monkeypatch):
@@ -259,9 +346,9 @@ class TestMeasurementSetEpochScale:
         base = (_OBS - 2400000.5) * 86400.0
         return np.repeat(base + np.arange(n_time) * 8.0, n_bl)
 
-    def _epoch(self, monkeypatch, times, scale):
+    def _epoch(self, monkeypatch, times, scale, unit=None):
         monkeypatch.setattr(
-            tle_config, "_ms_times_and_scale", lambda ms: (times, scale)
+            tle_config, "_ms_times_and_scale", lambda ms: (times, scale, unit)
         )
         return tle_config.ms_observation_epoch_jd("ms")
 
@@ -310,7 +397,7 @@ class TestMeasurementSetEpochScale:
         """
         times = self._times_seconds()
         monkeypatch.setattr(
-            tle_config, "_ms_times_and_scale", lambda ms: (times, "tai")
+            tle_config, "_ms_times_and_scale", lambda ms: (times, "tai", None)
         )
 
         np.testing.assert_allclose(

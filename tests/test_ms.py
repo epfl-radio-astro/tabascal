@@ -1,5 +1,8 @@
 """Tests for tabascal.ms — row layout, correlation resolution, time scales."""
 
+import warnings
+from datetime import datetime, timedelta
+
 import numpy as np
 import pytest
 
@@ -351,7 +354,7 @@ class TestTimeUnits:
 
         return (self.MJD if mjd is None else mjd) + np.arange(n_time) * step / 86400.0
 
-    # -- the spacing rule, on a normal multi-integration MS -----------------
+    # -- the magnitude rule, on a normal multi-integration MS ---------------
 
     def test_seconds_are_converted_to_days(self):
         days = self._days()
@@ -364,30 +367,244 @@ class TestTimeUnits:
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
     def test_a_pre_1858_epoch_is_read_in_either_unit(self):
-        """Its MJD day number is negative; the spacing the rule reads is not."""
+        """Its MJD day number is negative; the magnitude the rule reads is not."""
         days = self._days(mjd=self.MJD_1800)
 
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
     def test_a_long_integration_is_still_seconds(self):
-        """0.5 is the threshold in *days*: no integration is 12 hours long."""
+        """An hour-long sample: the cadence has no say, only the magnitude."""
         days = self._days(step=3600.0)
 
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
 
-    def test_two_integrations_are_enough_to_read_a_spacing(self):
-        """The shortest column the spacing rule applies to at all."""
+    def test_two_integrations_are_read_like_any_other_column(self):
+        """One rule for every length of column; nothing special happens here."""
         days = self._days(n_time=2)
 
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
-    def test_the_spacing_boundary_is_strict(self):
-        """A spacing of exactly 0.5 reads as days: the test is ``> 0.5``."""
-        half_day_apart = self.MJD + np.arange(3) * 0.5
+    # -- the cases a spacing rule got wrong, in both directions -------------
 
-        np.testing.assert_array_equal(times_to_mjd(half_day_apart), half_day_apart)
+    @pytest.mark.parametrize("step", [0.5, 0.25, 0.008])
+    def test_a_short_integration_is_still_seconds(self, step):
+        """Issue #208: 0.5 s is a common correlator dump time, not a half day.
+
+        A spacing at or below 0.5 used to read as days outright, so an MS with
+        0.5 s integrations came back unconverted -- ``TIME`` values of ~5.16e9
+        taken for day numbers, which overflowed ``timedelta`` in the preflight
+        TLE epoch check. Every integration shorter than 0.5 s was misread the
+        same way.
+        """
+        days = self._days(step=step)
+
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+
+    @pytest.mark.parametrize("cadence", [0.5, 1.0, 7.0])
+    def test_a_coarse_cadence_in_days_is_still_days(self, cadence):
+        """The other direction, and the reason the spacing rule went entirely.
+
+        A day-numbered column stepping by half a day has the same spacing as a
+        0.5 s integration in seconds, so no spacing test can part those two. A
+        column stepping by a day or a week steps well past the old half-day
+        threshold and was read as seconds outright: MJD 60676 came back as MJD
+        0.7, wrong by the whole of the common era. Magnitude parts all of them:
+        ~6e4 against ~5e9.
+
+        Note it takes one row *per* day to reach that, not an observation
+        spread over days: the old rule compared the two smallest distinct
+        times, so a night of ordinary integrations put a ~1e-4 gap first and
+        was classified correctly however many nights followed it.
+        """
+        days = self.MJD + np.arange(3) * cadence
+
+        np.testing.assert_array_equal(times_to_mjd(days), days)
+
+    @pytest.mark.parametrize("cadence", [0.5, 1.0, 7.0])
+    def test_a_coarse_cadence_in_seconds_is_still_seconds(self, cadence):
+        """The same columns in the other unit. A guard, not a discriminator.
+
+        The old spacing rule read these as seconds too, so this passes either
+        side of the change; it is here so that the pairing above cannot be
+        satisfied by a rule that simply calls everything days.
+        """
+        days = self.MJD + np.arange(3) * cadence
+
+        np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
+
+    # -- one entry does not decide a column ---------------------------------
+
+    def test_an_unfilled_row_does_not_turn_seconds_into_days(self):
+        """casacore leaves TIME at zero in a row added and never filled.
+
+        Reading the *smallest* magnitude, that row alone would have read a
+        column of seconds as days -- issue #208's overflow again, by another
+        door. The median needs half the column before it moves.
+        """
+        seconds = self._days(n_time=8, step=0.5) * 86400.0
+        with_unfilled_row = np.concatenate([[0.0], seconds])
+
+        converted = times_to_mjd(with_unfilled_row)
+
+        np.testing.assert_allclose(converted[1:], seconds / 86400.0, rtol=1e-15)
+
+    @pytest.mark.parametrize("sentinel", [np.inf, -np.inf, np.nan])
+    def test_a_non_finite_entry_does_not_decide_the_unit(self, sentinel):
+        """A median shrugs off the infinities; only the NaN needs the filter.
+
+        ``np.median`` propagates a NaN, so a single one would classify every
+        column as days without the ``isfinite`` guard -- that case is the one
+        this pins. The infinities pass either way and are here as guards: they
+        were the failure mode of the min and max the rule might have used
+        instead, so a rule that reverted to one of those would be caught.
+        """
+        days = self._days(n_time=8)
+        with_sentinel = np.concatenate([[sentinel], days])
+
+        np.testing.assert_array_equal(times_to_mjd(with_sentinel)[1:], days)
+        np.testing.assert_allclose(
+            times_to_mjd(np.concatenate([[sentinel], days * 86400.0]))[1:],
+            days,
+            rtol=1e-15,
+        )
+
+    def test_a_column_of_nothing_but_sentinels_reads_as_days(self):
+        """Garbage in: left as it arrived rather than scaled by 86400.
+
+        Filtering can empty the column, and ``np.median([])`` is a NaN and a
+        ``RuntimeWarning``. The NaN would classify it as days anyway, so the
+        guard exists for the warning -- which is the half a test that only
+        asserts the unit cannot see.
+        """
+        all_nan = np.full(4, np.nan)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            converted = times_to_mjd(all_nan)
+
+        assert np.isnan(converted).all()
+
+    def test_the_reader_and_the_preflight_check_agree_on_a_valid_layout(self):
+        """The two callers deduplicate differently and must still agree.
+
+        ``orbit_config._integration_times_mjd`` deduplicates; ``read_ms`` and
+        the results writer pass ``TIME.reshape(n_time, n_bl)[:, 0]``. On any MS
+        ``ms_layout`` accepts those are the same multiset -- ``n_time`` *is* the
+        number of distinct times and every block must hold one constant time,
+        so two blocks cannot share one and the slice has no duplicates. This
+        goes through ``ms_layout`` rather than assuming the layout, so a
+        weakening of those checks shows up here too.
+        """
+        n_ant, n_time = 4, 4
+        a1_bl, a2_bl = np.triu_indices(n_ant, k=1)
+        n_bl = len(a1_bl)
+        days = self._days(n_time=n_time, step=0.5)
+        column = np.repeat(days * 86400.0, n_bl)
+
+        layout = ms_layout(
+            _FakeRows(np.tile(a1_bl, n_time), np.tile(a2_bl, n_time), column)
+        )
+
+        assert (layout.n_time, layout.n_bl) == (n_time, n_bl)
+        from_reader = column.reshape(layout.n_time, layout.n_bl)[:, 0]
+        np.testing.assert_array_equal(from_reader, np.unique(column))
+        np.testing.assert_allclose(times_to_mjd(from_reader), days, rtol=1e-15)
+
+    def test_two_stray_sentinels_do_not_decide_the_column(self):
+        """Why the reduction keeps duplicates: frequency is the whole guarantee.
+
+        Reducing over the *distinct* times instead, an unfilled row at 0 and
+        another at 1 are two of the three values in a single-integration column
+        and their median is 1 -- so a column of seconds would read as days,
+        however many real rows stood beside them.
+        """
+        seconds = np.array([0.0, 1.0] + [self.MJD * 86400.0] * 6)
+
+        np.testing.assert_allclose(times_to_mjd(seconds)[2:], self.MJD, rtol=1e-15)
+
+    def test_the_preflight_check_honours_a_declared_unit(self):
+        """It reads QuantumUnits now, as the reader always has.
+
+        It deliberately did not, so that both paths would share the heuristic
+        and could not classify one MS two ways. But the reader honours a
+        declaration, so leaving it unread was what created that divergence
+        rather than what closed it: an MS declaring days while storing numbers
+        the size of seconds was read one way by the run and another by the TLE
+        age checks.
+        """
+        from tabascal import orbit_config
+
+        seconds_sized = self._days() * 86400.0
+
+        declared = orbit_config._integration_times_mjd(
+            seconds_sized, "in-memory.ms", "d"
+        )
+        inferred = orbit_config._integration_times_mjd(seconds_sized, "in-memory.ms")
+
+        np.testing.assert_array_equal(declared, np.unique(seconds_sized))
+        np.testing.assert_allclose(inferred, seconds_sized / 86400.0, rtol=1e-15)
+
+    def test_the_reader_and_the_preflight_check_obey_one_declaration(
+        self, run_reader, monkeypatch
+    ):
+        """The divergence the old comment admitted to, closed end to end.
+
+        A column of day numbers that declares seconds is a contradiction, and
+        which way it is resolved matters less than the two paths resolving it
+        the same way: the run fitting on one epoch while the age checks pick
+        TLEs for another is the failure worth ruling out.
+        """
+        from tabascal import orbit_config
+
+        days = self._days(n_time=3)
+        n_bl = len(np.triu_indices(3, k=1)[0])
+        monkeypatch.setattr(
+            orbit_config,
+            "_ms_times_and_scale",
+            lambda ms: (np.repeat(days, n_bl), "utc", "s"),
+        )
+
+        from_reader = run_reader(days, keywords=_keywords("UTC", units=["s"]))
+        from_preflight = orbit_config.ms_integration_times_mjd("in-memory.ms")
+
+        np.testing.assert_allclose(
+            np.sort(from_reader["times_mjd"]), from_preflight, rtol=1e-15
+        )
+        np.testing.assert_allclose(from_preflight, days / 86400.0, rtol=1e-15)
+
+    def test_the_preflight_path_counts_the_duplicates_too(self):
+        """It deduplicates, so it has to convert first or lose the vote.
+
+        Deduplicating before converting is the same column reduced to
+        ``[0, 1, t]``, whose median is 1: the preflight epoch check would read
+        a column of seconds as days and overflow on it, which is issue #208
+        again on the path that reported it. The order matters only for the
+        vote -- scaling by a positive constant is injective and
+        order-preserving, so the times that come back are the same either way.
+        """
+        from tabascal import orbit_config
+
+        seconds = np.array([0.0, 1.0] + [self.MJD * 86400.0] * 6)
+
+        integrations = orbit_config._integration_times_mjd(seconds, "in-memory.ms")
+
+        np.testing.assert_allclose(integrations[-1], self.MJD, rtol=1e-15)
+        assert integrations.size == 3  # still one row per distinct time
+
+    def test_a_stray_timestamp_in_the_other_unit_does_not_decide_the_column(self):
+        """Why the median and not the largest magnitude.
+
+        Filtering the non-finite entries first means an ``inf`` can no longer
+        reach a maximum, so the case against taking one is a finite value in
+        the wrong unit -- a seconds timestamp left in a column of days, which
+        is larger than every real entry around it.
+        """
+        days = self._days(n_time=8)
+        with_stray_seconds = np.concatenate([days, [self.MJD * 86400.0]])
+
+        np.testing.assert_array_equal(times_to_mjd(with_stray_seconds)[:-1], days)
 
     def test_the_rule_does_not_depend_on_row_order(self):
         """``ms_layout`` permits timestep blocks that do not ascend."""
@@ -396,7 +613,7 @@ class TestTimeUnits:
         np.testing.assert_allclose(times_to_mjd(days * 86400.0), days, rtol=1e-15)
         np.testing.assert_array_equal(times_to_mjd(days), days)
 
-    # -- the magnitude fallback, when there is no spacing to read -----------
+    # -- a single integration, which is no different -----------------------
 
     @pytest.mark.parametrize("mjd_name", ["MJD", "MJD_1965", "MJD_1800"])
     def test_single_integration_in_seconds(self, mjd_name):
@@ -424,13 +641,13 @@ class TestTimeUnits:
 
     # -- a declared unit outranks the heuristic -----------------------------
 
-    def test_a_declared_day_unit_beats_the_spacing_rule(self):
-        """Spacing says seconds; the MS says days, and the MS is authoritative."""
+    def test_a_declared_day_unit_beats_the_heuristic(self):
+        """Magnitude says seconds; the MS says days, and the MS is authoritative."""
         days = self._days()
 
         np.testing.assert_array_equal(times_to_mjd(days * 86400.0, "d"), days * 86400.0)
 
-    def test_a_declared_second_unit_beats_the_spacing_rule(self):
+    def test_a_declared_second_unit_beats_the_heuristic(self):
         days = self._days()
 
         np.testing.assert_allclose(times_to_mjd(days, "s"), days / 86400.0, rtol=1e-15)
@@ -496,14 +713,14 @@ class TestTimeUnits:
         np.testing.assert_allclose(data["times_mjd"], days, rtol=1e-15)
 
     def test_read_ms_reads_a_single_integration_ms(self, run_reader):
-        """The IndexError of issue #148: one integration has no spacing to read."""
+        """The IndexError of issue #148: a column of one, reduced like any other."""
         data = run_reader(np.array([self.MJD * 86400.0]))
 
         assert data["n_time"] == 1
         np.testing.assert_allclose(data["times_mjd"], [self.MJD], rtol=1e-15)
 
     def test_read_ms_honours_the_declared_unit(self, run_reader):
-        """Declared seconds, spacing of days: the reader follows the declaration."""
+        """Declared seconds, magnitude of days: the reader follows the declaration."""
         times = self._days(n_time=3)
 
         data = run_reader(times, keywords=_keywords("UTC", units=["s"]))
@@ -528,7 +745,7 @@ class TestTimeUnits:
         monkeypatch.setattr(
             orbit_config,
             "_ms_times_and_scale",
-            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc"),
+            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc", None),
         )
 
         from_reader = run_reader(days * 86400.0)["times_mjd"]
@@ -536,6 +753,41 @@ class TestTimeUnits:
 
         np.testing.assert_allclose(from_reader, days, rtol=1e-15)
         np.testing.assert_allclose(np.sort(from_reader), from_preflight, rtol=1e-15)
+
+    def test_the_preflight_epoch_of_a_half_second_ms_is_the_observation(
+        self, run_reader, monkeypatch
+    ):
+        """Issue #208 as it was actually met: an OverflowError out of the epoch.
+
+        The unit misread as days made ``ms_observation_epoch_jd`` return a
+        Julian Date of ~5.16e9, which ``jd_to_datetime`` cannot express --
+        ``OverflowError: Python int too large to convert to C int``, raised
+        before the run had read a visibility. The epoch has to be the instant
+        the MS was taken, not merely a number the conversion survives, so this
+        checks the datetime and not just the absence of the raise.
+        """
+        from tabascal import orbit_config
+        from tabascal.time import jd_to_datetime
+
+        days = self._days(n_time=4, step=0.5)
+        n_bl = len(np.triu_indices(3, k=1)[0])
+        monkeypatch.setattr(
+            orbit_config,
+            "_ms_times_and_scale",
+            lambda ms: (np.repeat(days * 86400.0, n_bl), "utc", None),
+        )
+
+        epoch_jd = orbit_config.ms_observation_epoch_jd("in-memory.ms")
+
+        # The conversion first, so an unconverted column raises here as it did
+        # in the field, rather than being caught a line earlier as a number.
+        # Not exact: a JD is ~2.46e6 days, so a double resolves it to ~50 us,
+        # which is far below an integration and far above a millisecond.
+        instant = jd_to_datetime(epoch_jd)
+        assert abs(instant - datetime(2025, 1, 1, 0, 0, 0, 750000)) < timedelta(
+            milliseconds=1
+        )
+        np.testing.assert_allclose(epoch_jd, mjd_to_jd(days.mean()), rtol=1e-15)
 
 
 class TestDeclaredTimeScale:
@@ -667,7 +919,7 @@ class TestDeclaredTimeScale:
         monkeypatch.setattr(
             orbit_config,
             "_ms_times_and_scale",
-            lambda ms: (np.repeat(times, n_bl), "tai"),
+            lambda ms: (np.repeat(times, n_bl), "tai", None),
         )
         preflight_epoch = orbit_config.ms_observation_epoch_jd("in-memory.ms")
 

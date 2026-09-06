@@ -194,7 +194,7 @@ def _run_pipeline(
             "run",
             "-c",
             str(config_path),
-            "-s",
+            "-od",
             str(input_src_dir),
             "--extra-orbit-dir",
             bundled_tle_dir,
@@ -669,9 +669,9 @@ def _copy_sim(provide_test_data: Path, work_dir: Path) -> Path:
     input_dir = Path(provide_test_data) / input_hash
     src = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
     assert src, f"No pnt_src* directory found in {input_dir}"
-    sim_dir = work_dir / src.name
-    shutil.copytree(src, sim_dir)
-    return sim_dir
+    out_dir = work_dir / src.name
+    shutil.copytree(src, out_dir)
+    return out_dir
 
 
 def test_pipeline_log_is_written_in_the_plot_directory(
@@ -687,7 +687,7 @@ def test_pipeline_log_is_written_in_the_plot_directory(
 
     One iteration: what is under test is where the run writes, not what it fits.
     """
-    sim_dir = _copy_sim(provide_test_data, tmp_path)
+    out_dir = _copy_sim(provide_test_data, tmp_path)
     # The cached sim the copy comes from collects a log from every run the tests
     # above make against it in place, so what *this* run wrote is the difference
     # rather than everything that is there.
@@ -718,7 +718,7 @@ def test_pipeline_log_is_written_in_the_plot_directory(
         [
             sys.executable, str(script), "run",
             "-c", str(config_path),
-            "-s", str(sim_dir),
+            "-od", str(out_dir),
             "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
             "-sx", "runA",
         ],
@@ -735,7 +735,7 @@ def test_pipeline_log_is_written_in_the_plot_directory(
     assert len(written) == 1, f"expected one new log, found {written}"
 
     log = written.pop()
-    assert log.parent == sim_dir / "plots" / "runA"
+    assert log.parent == out_dir / "plots" / "runA"
     assert log.name.startswith("log_tab_runA_")
     assert "Start Time :" in log.read_text()
 
@@ -774,7 +774,7 @@ def _prepare_sharded_run(
     save_rfi_per_sat: bool = False,
 ) -> tuple[list[str], Path]:
     """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command."""
-    sim_dir = _copy_sim(provide_test_data, work_dir)
+    out_dir = _copy_sim(provide_test_data, work_dir)
     data_dir = Path(__file__).parent / "data"
 
     config_path = work_dir / "tab_target.yaml"
@@ -799,11 +799,11 @@ def _prepare_sharded_run(
     cmd = [
         sys.executable, str(script), "run",
         "-c", str(config_path),
-        "-s", str(sim_dir),
+        "-od", str(out_dir),
         "--extra-orbit-dir", tle_dir,
         "-nl",
     ]
-    return cmd, sim_dir
+    return cmd, out_dir
 
 
 def _extract_chi2(stdout: str, point: str) -> float:
@@ -891,7 +891,7 @@ def test_pipeline_sharded_equivalence(
     _assert_chi2(shard.stdout, _SHARDED_CHI2_REF)
 
 
-def _assert_per_sat_results(sim_dir: Path) -> None:
+def _assert_per_sat_results(out_dir: Path) -> None:
     """What a ``save_rfi_per_sat`` run must have left in its results zarr.
 
     Written once, holding only the *real* satellites -- the sharded runs pad 3
@@ -902,7 +902,7 @@ def _assert_per_sat_results(sim_dir: Path) -> None:
     import numpy as np
     import xarray as xr
 
-    with xr.open_zarr(str(sim_dir / "results" / "map_pred_Custom.zarr")) as xds:
+    with xr.open_zarr(str(out_dir / "results" / "map_pred_Custom.zarr")) as xds:
         assert xds.rfi_vis_src.dims == ("sample", "src", "bl", "freq", "time")
         assert xds.sizes["src"] == 3
         assert len({int(nid) for nid in xds.norad_id.values}) == 3
@@ -938,7 +938,7 @@ def test_pipeline_sharded_per_sat(
     if precision != "double":
         pytest.skip("uses components that require double precision")
 
-    cmd, sim_dir = _prepare_sharded_run(
+    cmd, out_dir = _prepare_sharded_run(
         provide_test_data, tmp_path, save_rfi_per_sat=True
     )
     run = subprocess.run(
@@ -949,7 +949,7 @@ def test_pipeline_sharded_per_sat(
     assert "Padded 3 RFI sources to 4" in run.stdout
     assert "Sharding RFI sources over 2 devices:" in run.stdout
 
-    _assert_per_sat_results(sim_dir)
+    _assert_per_sat_results(out_dir)
 
 
 def _run_two_processes(cmd: list[str], work_dir: Path) -> list[tuple[str, str]]:
@@ -1014,7 +1014,7 @@ def test_pipeline_multiprocess(
     if precision != "double":
         pytest.skip("uses components that require double precision")
 
-    cmd, sim_dir = _prepare_sharded_run(provide_test_data, tmp_path)
+    cmd, out_dir = _prepare_sharded_run(provide_test_data, tmp_path)
     outs = _run_two_processes(cmd, tmp_path)
 
     rank0_out = outs[0][0]
@@ -1031,7 +1031,7 @@ def test_pipeline_multiprocess(
         if not line.startswith("[Gloo]")
     )
     assert worker_out == "", f"rank 1 was not silent:\n{worker_out}"
-    assert (sim_dir / "results" / "map_pred_Custom.zarr").is_dir()
+    assert (out_dir / "results" / "map_pred_Custom.zarr").is_dir()
 
 
 def test_pipeline_multiprocess_per_sat(
@@ -1051,7 +1051,7 @@ def test_pipeline_multiprocess_per_sat(
     if precision != "double":
         pytest.skip("uses components that require double precision")
 
-    cmd, sim_dir = _prepare_sharded_run(
+    cmd, out_dir = _prepare_sharded_run(
         provide_test_data, tmp_path, save_rfi_per_sat=True
     )
     outs = _run_two_processes(cmd, tmp_path)
@@ -1059,4 +1059,4 @@ def test_pipeline_multiprocess_per_sat(
     assert "Padded 3 RFI sources to 4" in outs[0][0]
 
     # Written once, by rank 0, and holding only the real satellites.
-    _assert_per_sat_results(sim_dir)
+    _assert_per_sat_results(out_dir)

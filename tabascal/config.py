@@ -121,6 +121,13 @@ def yaml_load(path):
 #: model on a value the user did not ask for.
 RENAMED_KEYS = {
     "rfi.freq_int_samples": "rfi.n_int_freq",
+    # sim_dir was the directory sim-vis creates, and tabascal only ever ran on
+    # simulations, so one name covered the inputs and the outputs. On real data
+    # it covers neither: there is no simulation directory, and an MS from a
+    # telescope has no relation to the name of the folder it sits in. out_dir
+    # is only where the run writes; the MS is named by data.ms_path and the
+    # truth zarr, where there is one, by data.truth_zarr.
+    "data.sim_dir": "data.out_dir",
 }
 
 

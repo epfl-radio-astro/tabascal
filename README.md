@@ -63,6 +63,9 @@ Measurement Set:
 tabascal run -c path/to/config.yaml -ms path/to/file.ms
 ```
 
+Products go to `plots/` and `results/` beside the Measurement Set. Pass
+`-od path/to/output_dir`, or set `data.out_dir`, to write them elsewhere.
+
 The results are written to a `.zarr` file and then transferred into the
 Measurement Set as the `TAB_AST_DATA`, `TAB_RFI_DATA`, `TAB_AST_RES`,
 `TAB_RFI_RES` and `TAB_RES_DATA` columns.
