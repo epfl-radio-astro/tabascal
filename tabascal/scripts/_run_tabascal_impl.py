@@ -1,6 +1,14 @@
 import os
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# Memory on demand rather than the 75 % of the device JAX grabs up front, set
+# before the imports below bring the backend up. setdefault, not assignment: a
+# user who exports XLA_PYTHON_CLIENT_PREALLOCATE=true has asked for the
+# preallocating allocator -- the usual reason being a long run that fragments
+# the pool -- and the CLI has already deferred to them in run_tabascal.main by
+# the time this module is imported, so assigning here would take that back a
+# few lines later. This is also the default for anything importing the module
+# directly rather than through the CLI.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import sys
 from contextlib import contextmanager, redirect_stdout

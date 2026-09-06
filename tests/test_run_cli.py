@@ -23,6 +23,12 @@ _DOCS = _REPO / "docs"
 # A shell prompt some docs put in front of a command.
 _PROMPT = re.compile(r"^\$\s+")
 
+#: A leading ``NAME=value``, the way a shell reads it: environment for the one
+#: command that follows rather than part of it. Stripped so such a line is still
+#: scraped -- matching on ``tabascal`` alone skipped it, which would let a
+#: documented command go unchecked for exactly as long as it stayed broken.
+_ENV_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(\"[^\"]*\"|'[^']*'|\S*)\s+")
+
 
 @pytest.fixture
 def impl():
@@ -76,6 +82,8 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
             if not in_code:
                 continue
             line = _PROMPT.sub("", line)
+            while (env := _ENV_PREFIX.match(line)) is not None:
+                line = line[env.end():]
             # `tabascal ...` as a command, not `tabascal/` in a directory tree.
             if not re.match(r"^tabascal(\s|$)", line):
                 continue
@@ -313,6 +321,92 @@ class TestRfiPerSatSubcommand:
 
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "[]", result.stdout
+
+
+class TestDeviceMemoryIsOnDemandUnlessAsked:
+    """Who decides whether JAX preallocates the device.
+
+    TABASCAL asks for memory on demand, so a run can share a GPU and a failed
+    one lets go of the card. ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` is the
+    user's way of overriding that -- the preallocating allocator does not
+    fragment the pool over a long run -- and it used to survive
+    ``run_tabascal.main`` only to be assigned away a few lines later when the
+    implementation module was imported.
+    """
+
+    def _main_with(self, monkeypatch, argv):
+        """``main()`` up to the point of dispatch, reporting the environment."""
+        import sys
+
+        from tabascal.scripts import run_tabascal
+
+        seen = {}
+        for name in ("_run_cmd", "_light_curve_cmd", "_rfi_per_sat_cmd"):
+            monkeypatch.setattr(
+                run_tabascal,
+                name,
+                lambda args, _s=seen: _s.setdefault(
+                    "preallocate", os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE")
+                ),
+            )
+        monkeypatch.setattr(sys, "argv", ["tabascal", *argv])
+        run_tabascal.main()
+        return seen["preallocate"]
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("run", "-c", "c.yaml"),
+            ("light-curve", "-ms", "o.ms", "-n", "12345"),
+            ("rfi-per-sat", "-m", "o.ms", "-z", "r.zarr"),
+        ],
+        ids=["run", "light-curve", "rfi-per-sat"],
+    )
+    def test_default_is_memory_on_demand(self, monkeypatch, argv):
+        """Every subcommand, because every one of them reaches JAX eventually.
+
+        ``run`` gets there through ``init_distributed``, the others through
+        their estimator and writer imports, so the default has to be set once
+        before the dispatch rather than on the one path that used to set it.
+        """
+        monkeypatch.delenv("XLA_PYTHON_CLIENT_PREALLOCATE", raising=False)
+
+        assert self._main_with(monkeypatch, argv) == "false"
+
+    @pytest.mark.parametrize("asked", ["true", "false"])
+    def test_an_explicit_setting_is_left_alone(self, monkeypatch, asked):
+        """Including ``false``: it is still the user's word, not our default."""
+        monkeypatch.setenv("XLA_PYTHON_CLIENT_PREALLOCATE", asked)
+
+        assert self._main_with(monkeypatch, ("run", "-c", "c.yaml")) == asked
+
+    def test_importing_the_run_implementation_does_not_reassign_it(self):
+        """The regression itself, and it can only be caught in a clean process.
+
+        The module sets the variable at import, so by the time any test runs it
+        has been imported and the statement will not run again. A subprocess
+        that exports the variable first and then imports the module is the only
+        place the claim can be made.
+        """
+        import subprocess
+        import sys
+
+        env = dict(os.environ, XLA_PYTHON_CLIENT_PREALLOCATE="true")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os\n"
+                "import tabascal.scripts._run_tabascal_impl\n"
+                "print(os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'])\n",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "true", result.stdout
 
 
 class TestLightCurveInputs:
@@ -1090,6 +1184,27 @@ class TestDocumentedCommandScraper:
 
     def test_ignores_a_directory_tree_entry(self, tmp_path):
         found = self._page(tmp_path, "```\ntabascal/\n  write.py\n```\n")
+        assert found == []
+
+    def test_reads_past_an_environment_prefix(self, tmp_path):
+        """``VAR=value tabascal ...`` is a command with environment on it."""
+        found = self._page(
+            tmp_path,
+            "```bash\nXLA_PYTHON_CLIENT_PREALLOCATE=true tabascal run -c c.yaml\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_reads_past_several_environment_prefixes(self, tmp_path):
+        """Including a quoted value, which a shell hands over as one word."""
+        found = self._page(
+            tmp_path,
+            '```bash\nA=1 B="two words" tabascal run -c c.yaml\n```\n',
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_an_environment_prefix_on_something_else_is_still_ignored(self, tmp_path):
+        """The prefix does not make a non-command into one."""
+        found = self._page(tmp_path, "```bash\nA=1 sim-vis -c sim.yaml\n```\n")
         assert found == []
 
 

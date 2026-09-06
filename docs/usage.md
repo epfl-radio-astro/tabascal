@@ -170,6 +170,24 @@ The run writes its `plots/` and `results/` beside the Measurement Set. Pass
 `-od path/to/output_dir`, or set `data.out_dir`, to send them somewhere else —
 a read-only or shared data directory being the usual reason.
 
+### GPU memory
+
+By default JAX claims 75% of the device the moment it initialises. TABASCAL
+asks for memory on demand instead, so a run can share a GPU and a run that
+fails lets go of the card. Preallocation is the faster choice for a long run on
+a card it has to itself — one arena, taken once, that cannot fragment — so it
+is available by exporting the JAX environment variable before the run:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=true tabascal run -c config.yaml -ms file.ms
+```
+
+Whatever the variable is set to is left alone; TABASCAL only supplies the
+default when it is unset. `XLA_PYTHON_CLIENT_MEM_FRACTION` then sets how much
+of the device is taken, and the rest of
+[JAX's memory-allocation options](https://docs.jax.dev/en/latest/gpu_memory_allocation.html)
+apply unchanged.
+
 ## Extracting RFI light curves
 
 `tabascal light-curve` measures each satellite's apparent flux over time and
