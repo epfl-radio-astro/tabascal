@@ -640,6 +640,13 @@ def run(args) -> int:
 def main():
     import sys
 
+    # Reached as `tabascal search` the entry point has already done this;
+    # reached as `python -m tabascal.scripts.sat_search` nothing has. See
+    # scripts/_device_memory.
+    from tabascal.scripts._device_memory import default_memory_on_demand
+
+    default_memory_on_demand()
+
     sys.exit(run(build_parser().parse_args()))
 
 

@@ -27,7 +27,7 @@ _PROMPT = re.compile(r"^\$\s+")
 #: docs write commands in bare fences and in ``bash`` and ``console`` ones, so
 #: excluding by language is the only filter that does not lose any of them.
 _NOT_SHELL = frozenset(
-    {"python", "py", "yaml", "yml", "json", "toml", "ini", "text", "output"}
+    {"python", "py", "pycon", "yaml", "yml", "json", "toml", "ini", "text", "output"}
 )
 
 #: One token of the ``NAME=value`` environment a shell may put in front of a
@@ -37,11 +37,41 @@ _NOT_SHELL = frozenset(
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
-#: Enough of a command to insist that it split: the same shape ``shlex`` is
-#: about to be asked for, matched loosely against the raw line. Its only job is
-#: to decide whether a line that will not tokenize is a broken documented
-#: command or fenced prose.
-_LOOKS_LIKE_COMMAND = re.compile(r"^(?:\S+=\S*\s+)*tabascal(\s|$)")
+def _command_word(line):
+    """The word a shell would run, or None -- reading as far as the lexer gets.
+
+    Used only on a line that will not tokenize, to say what it was going to run
+    before its quoting broke. Reading token by token is what makes the answer
+    agree with :func:`shlex.split`: a regex over the raw line cannot see past a
+    quoted value with a space in it, so ``A="two words" tabascal ...`` looked
+    like no command at all and a broken one was dropped in silence.
+    """
+
+    lexer = shlex.shlex(line, posix=True)
+    lexer.whitespace_split = True
+    try:
+        for token in lexer:
+            if not _ASSIGNMENT.match(token):
+                return token
+    except ValueError:
+        pass
+
+    return None
+
+
+def _without_trailing_comment(tokens):
+    """Drop the comment some docs put after a command, as a shell would.
+
+    From the first *word* that starts with ``#``, so an unquoted ``a#b.yaml``
+    keeps its hash and a quoted ``"tles #1"`` keeps its space. Doing this after
+    tokenizing rather than with a regex over the line is what gets both right.
+    """
+
+    for i, token in enumerate(tokens):
+        if token.startswith("#"):
+            return tokens[:i]
+
+    return tokens
 
 
 def _command_tokens(line):
@@ -60,13 +90,17 @@ def _command_tokens(line):
     try:
         tokens = shlex.split(line)
     except ValueError:
-        # A line that will not tokenize is either a documented command with an
-        # unbalanced quote -- copy-paste that fails for a reader, and so has to
-        # be raised on rather than quietly dropped from the checked set -- or
-        # prose in a fence, which is allowed its apostrophe.
-        if _LOOKS_LIKE_COMMAND.match(line):
+        # A line that will not tokenize is either a documented command whose
+        # quoting is broken -- copy-paste that fails for the reader too, so it
+        # has to be raised on rather than dropped out of the checked set -- or
+        # prose inside a fence. Nothing tells the two apart, so the tie goes to
+        # raising: that is loud and one edit away from fixed, where dropping a
+        # command is silent and lasts as long as the command stays broken.
+        if _command_word(line) == "tabascal":
             raise
         return None
+
+    tokens = _without_trailing_comment(tokens)
 
     while tokens and _ASSIGNMENT.match(tokens[0]):
         tokens.pop(0)
@@ -125,18 +159,27 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
             if line.startswith("```"):
                 # An untagged fence counts: the docs use bare fences, `bash`
                 # and `console` for commands, so only the languages that are
-                # definitely not shell are excluded.
-                shell = not in_code and line[3:].strip().lower() not in _NOT_SHELL
+                # definitely not shell are excluded. The first word of the info
+                # string is the language -- the rest is attributes, and taking
+                # the whole string would let `python title="x"` past the set.
+                language = line[3:].strip().lower().split()
+                shell = not in_code and (not language or language[0] not in _NOT_SHELL)
                 in_code = not in_code
                 continue
             if not shell:
                 continue
             line = _PROMPT.sub("", line)
-            # Strip trailing comments used to annotate help invocations.
-            line = re.split(r"\s+#", line, maxsplit=1)[0]
             tokens = _command_tokens(line)
             if tokens is not None:
                 commands.append((page.name, tokens))
+
+        # An unclosed fence silently rewrites the rest of the page: prose is
+        # read as commands, or -- worse, because it is quiet -- the next real
+        # bash block's opening fence is read as this one's close and every
+        # command in it leaves the checked set.
+        if in_code:
+            raise ValueError(f"unclosed code fence in {page.name}")
+
     return commands
 
 
@@ -373,8 +416,8 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
     JAX takes 75 % of it on the first operation. TABASCAL asks for memory on
     demand instead, so a run takes only what it needs and can share a card.
     ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` is how a user says otherwise --
-    preallocation minimises fragmentation, which is the case for a long run on
-    a card it owns -- and it used to survive ``run_tabascal.main`` only to be
+    preallocation minimises fragmentation, which is what a run filling most of
+    the card needs -- and it used to survive ``run_tabascal.main`` only to be
     assigned away a few lines later when the implementation module was
     imported.
     """
@@ -437,18 +480,23 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         [
             ("results_to_MS", ["tab2MS", "-m", "o.ms", "-z", "r.zarr"]),
             ("rfi_per_sat_to_MS", ["tab2MS-persat", "-m", "o.ms", "-z", "r.zarr"]),
+            ("rfi_estimate", ["light-curve", "-ms", "o.ms", "-n", "12345"]),
+            ("sat_search", ["search", "-ms", "o.ms", "--tle-dir", "d"]),
         ],
     )
-    def test_the_standalone_export_commands_default_it_too(
+    def test_every_module_with_its_own_main_defaults_it_too(
         self, monkeypatch, module_name, argv
     ):
-        """They have their own entry points and never reach ``main()`` above.
+        """Four modules carry a ``main()`` that never reaches the one above.
 
-        ``tab2MS-persat`` and ``tabascal rfi-per-sat`` are the same tool under
-        two names. Both import ``tabascal.write``, so a default set only in
-        ``run_tabascal.main`` would give identical work a different share of
-        the device depending on which name was typed.
+        Two are installed commands: ``tab2MS-persat`` and ``tabascal
+        rfi-per-sat`` are the same tool under two names, and a default set only
+        in ``run_tabascal.main`` would give identical work a different share of
+        the device depending on which name was typed. The other two are
+        reachable as ``python -m tabascal.scripts.<name>``, which is how the
+        estimator and the search get run directly.
         """
+        import contextlib
         import importlib
         import sys
 
@@ -463,49 +511,29 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         )
         monkeypatch.setattr(sys, "argv", argv)
 
-        module.main()
+        # sat_search exits with the status its run returns.
+        with contextlib.suppress(SystemExit):
+            module.main()
 
         assert seen["preallocate"] == "false"
 
-    def test_the_run_path_does_not_reassign_it_before_reaching_jax(
-        self, monkeypatch, impl
-    ):
-        """``_run_cmd`` for real rather than stubbed: the assignment lived here.
+    def test_nothing_on_the_run_path_reassigns_it(self):
+        """The whole of `tabascal run` up to the fit, in a clean process.
 
-        A dispatch-level test cannot say this -- it replaces the very function
-        that used to do the assigning. Both of the calls ``_run_cmd`` makes are
-        watched, because neither alone is the moment that matters:
-        ``init_distributed`` returns without touching JAX outside a
-        multi-process launch, and the run itself is simply the last thing in
-        the function, so between them they cover every line of it.
-        """
-        import tabascal.distributed as distributed
+        In-process this cannot be said. The variable is read when the device
+        backend initialises, which has already happened by the time any test
+        runs, and a test that patches the calls ``_run_cmd`` makes is blind to
+        what those calls do -- an assignment inside ``init_distributed``, whose
+        own docstring says it must run before any JAX array exists, is exactly
+        an assignment that still takes effect and exactly one such a test
+        cannot see.
 
-        from tabascal.scripts import run_tabascal
-
-        monkeypatch.setenv(self._ENV, "true")
-
-        seen = {}
-        monkeypatch.setattr(
-            distributed,
-            "init_distributed",
-            lambda: seen.__setitem__("at_distributed", os.environ.get(self._ENV)),
-        )
-        monkeypatch.setattr(
-            impl, "run", lambda args: seen.__setitem__("at_run", os.environ.get(self._ENV))
-        )
-
-        run_tabascal._run_cmd(_parse("run", "-c", "c.yaml"))
-
-        assert seen == {"at_distributed": "true", "at_run": "true"}
-
-    def test_importing_the_run_implementation_does_not_reassign_it(self):
-        """The regression itself, and it can only be caught in a clean process.
-
-        The module sets the variable at import, so by the time any test runs it
-        has been imported and the statement will not run again. A subprocess
-        that exports the variable first and then imports the module is the only
-        place the claim can be made.
+        So: export ``true``, then drive the real ``_run_cmd`` with only the fit
+        itself replaced. Everything between the import of the implementation
+        module and the call to ``run`` is the real thing, and both points are
+        reported -- the import, which is where the assignment used to be, and
+        the last moment before the fit, which is after every line that could
+        put another one back.
         """
         import subprocess
         import sys
@@ -516,8 +544,13 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
                 sys.executable,
                 "-c",
                 "import os\n"
-                "import tabascal.scripts._run_tabascal_impl\n"
-                "print(os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'])\n",
+                "from tabascal.scripts import _run_tabascal_impl, run_tabascal\n"
+                "env = lambda: os.environ.get('XLA_PYTHON_CLIENT_PREALLOCATE')\n"
+                "print('after import:', env())\n"
+                "_run_tabascal_impl.run = lambda args: print('at the fit:', env())\n"
+                "run_tabascal._run_cmd(\n"
+                "    run_tabascal.build_parser().parse_args(['run', '-c', 'c.yaml'])\n"
+                ")\n",
             ],
             capture_output=True,
             text=True,
@@ -525,7 +558,10 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         )
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "true", result.stdout
+        assert result.stdout.split("\n")[:2] == [
+            "after import: true",
+            "at the fit: true",
+        ], result.stdout
 
 
 class TestLightCurveInputs:
@@ -1355,6 +1391,50 @@ class TestDocumentedCommandScraper:
         """A python or yaml block is not somewhere commands are run."""
         found = self._page(tmp_path, "```python\ntabascal = 1\n```\n")
         assert found == []
+
+    def test_a_non_shell_fence_with_attributes_is_still_not_shell(self, tmp_path):
+        """The language is the first word of the info string, not all of it."""
+        found = self._page(tmp_path, '```python title="demo.py"\ntabascal = 1\n```\n')
+        assert found == []
+
+    def test_a_malformed_command_behind_a_quoted_value_is_raised_on(self, tmp_path):
+        """The case a regex over the raw line could not see.
+
+        ``\\S+=\\S*`` cannot span ``A="two words"``, so the guard decided the line
+        was not a command and the broken command was dropped without a sound.
+        """
+        with pytest.raises(ValueError):
+            self._page(
+                tmp_path,
+                '```bash\nA="two words" tabascal run -c "c.yaml\n```\n',
+            )
+
+    def test_an_unclosed_fence_is_an_error(self, tmp_path):
+        """Because of what it does silently to everything after it.
+
+        The next real fence's opening line is read as this one's close, so a
+        whole block of commands stops being scanned and nothing says so.
+        """
+        with pytest.raises(ValueError, match="unclosed code fence"):
+            self._page(
+                tmp_path,
+                "```yaml\nast:\n"
+                "```bash\ntabascal run -c c.yaml\n```\n",
+            )
+
+    def test_a_hash_is_a_comment_only_where_a_shell_says_so(self, tmp_path):
+        """Which is why the comment goes after tokenizing, not before.
+
+        A regex over the line truncated a quoted argument at its hash, turning
+        a valid documented command into an unbalanced quote.
+        """
+        found = self._page(
+            tmp_path,
+            '```bash\ntabascal search -ms o.ms --tle-dir "tles #1"   # note\n```\n',
+        )
+        assert found == [
+            ("page.md", ["tabascal", "search", "-ms", "o.ms", "--tle-dir", "tles #1"])
+        ]
 
     def test_an_environment_prefix_on_something_else_is_still_ignored(self, tmp_path):
         """The prefix does not make a non-command into one."""

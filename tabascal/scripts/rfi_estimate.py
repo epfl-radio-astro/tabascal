@@ -855,6 +855,13 @@ def run(args):
 
 
 def main():
+    # Reached as `tabascal light-curve` the entry point has already done this;
+    # reached as `python -m tabascal.scripts.rfi_estimate` nothing has. See
+    # scripts/_device_memory.
+    from tabascal.scripts._device_memory import default_memory_on_demand
+
+    default_memory_on_demand()
+
     run(build_parser().parse_args())
 
 

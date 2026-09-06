@@ -6,11 +6,13 @@ run cannot share a GPU with anything, and a command that only copies a zarr
 into a Measurement Set takes three quarters of the device to do it. Every
 tabascal entry point therefore asks for memory on demand instead.
 
-``setdefault``, never assignment. Preallocation minimises fragmentation, so a
-long run on a card it owns is exactly the case for turning it back on, and
-``XLA_PYTHON_CLIENT_PREALLOCATE=true`` is how JAX says to do that. Assigning
-over it -- which ``_run_tabascal_impl`` used to do at import, a few lines after
-the CLI had already deferred to the user -- takes that choice away silently.
+``setdefault``, never assignment. Preallocation minimises fragmentation, and
+JAX warns that with it off a program using most of the available GPU memory may
+run out of it -- so a run that fills the card is exactly the case for turning
+it back on, which ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` is how JAX says to do.
+Assigning over it -- which ``_run_tabascal_impl`` used to do at import, a few
+lines after the CLI had already deferred to the user -- takes that choice away
+silently.
 
 Imports nothing but ``os``: it is called before the parser on entry points that
 must not pay for the JAX import to answer ``-h``.
