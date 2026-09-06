@@ -145,6 +145,7 @@ def validate_pow_spec(
     rules: Dict[str, str],
     derived: Optional[Dict[str, str]] = None,
     optional: Tuple[str, ...] = (),
+    renamed: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Dict:
     """Normalise and check one ``<section>.pow_spec`` config block.
 
@@ -167,8 +168,16 @@ def validate_pow_spec(
     optional
         Keys that may be absent or ``null``, and come back as ``None`` for the
         caller to fill in. Every other key in ``rules`` must be present.
+    renamed
+        Old key to ``(new key, how to convert the value)``. Refused rather than
+        accepted as an alias, which is the safe direction whenever the new
+        spelling is not the same quantity: silently reading a knee as the
+        bandwidth it is the reciprocal of moves it by ``1 / (2 pi v^2)``, and
+        the user is told none of it. The conversion goes in the message so the
+        fix is mechanical.
     """
     derived = derived or {}
+    renamed = renamed or {}
 
     if pow_spec is None:
         pow_spec = {}
@@ -183,6 +192,13 @@ def validate_pow_spec(
             raise ValueError(
                 f"{section}.pow_spec.{key} is not a setting: {why}. Remove it. "
                 f"The keys read here are {sorted(rules)}."
+            )
+
+    for old_key, (new_key, how) in renamed.items():
+        if old_key in pow_spec:
+            raise ValueError(
+                f"{section}.pow_spec.{old_key} was renamed "
+                f"{section}.pow_spec.{new_key}. {how}"
             )
 
     # key=repr because a config's keys need not all be strings, and a bare
@@ -724,6 +740,31 @@ def domain_ss(
     xs_pad_ss = supersample_domain(ns_padded, dxs, x0s_padded, ss_factors)
 
     return [x[idx] for x, idx in zip(xs_pad_ss, idxs_pad_ss)]
+
+def knee_from_corr_scale(corr_scale):
+    """The power-spectrum knee conjugate to a correlation scale.
+
+    A signal correlated over ``corr_scale`` in one domain has its power below
+    ``1 / (2 pi corr_scale)`` in the conjugate one. Which units that is depends
+    on the axis, and both directions are in use here: a correlation *bandwidth*
+    in Hz gives a knee in seconds, a delay, because the frequency axis
+    transforms to ``fftfreq(n_freq, chan_width)``; a correlation *time* in
+    seconds gives one in Hz, a fringe rate.
+
+    ``rfi.corr_freq``, ``rfi.corr_time`` and ``ast.pow_spec.corr_freq`` are read
+    through here so that the three cannot drift apart -- the same conversion
+    written out three times is how the astronomical and RFI priors came to
+    disagree about what their frequency knee even meant (GitHub #117).
+
+    ``None`` is no roll-off on that axis. :func:`pow_spec` tends to ``p0`` as
+    the knee grows, so an infinite knee keeps every mode and prefers none.
+    """
+
+    if corr_scale is None:
+        return float("inf")
+
+    return 1 / (2 * jnp.pi * jnp.asarray(corr_scale))
+
 
 # Used in final function
 @measure_runtime

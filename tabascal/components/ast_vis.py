@@ -6,27 +6,61 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, pow_spec_nd, validate_pow_spec
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, validate_pow_spec
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
 
 #: The ``ast.pow_spec`` keys and what each may be, for
 #: :func:`tabascal.fft_gp.validate_pow_spec`. Unlike the RFI prior, this section
-#: sets both the power at the origin and the frequency-axis knee itself: ``p0``
-#: is not renormalised away here, and ``k0_freq`` is not derived from anything.
+#: sets the power at the origin itself: ``p0`` is not renormalised away here.
 _POW_SPEC_RULES = {
     "p0": "number",
-    "k0_freq": "number",
+    "corr_freq": "number",
     "fov_deg": "number",
     "gammas": "pair",
     "cutoff": "cutoff",
 }
 
-#: ``fov_deg`` alone may be null: unset means the telescope's own primary beam,
-#: 2 * 1.22 * lambda / D from the dish diameter in the measurement set, rather
-#: than a field of view chosen by hand.
-_POW_SPEC_OPTIONAL = ("fov_deg",)
+#: Both knees may be null, and mean different things by it. ``fov_deg`` unset is
+#: the telescope's own primary beam, 2 * 1.22 * lambda / D from the dish
+#: diameter in the measurement set, rather than a field of view chosen by hand.
+#: ``corr_freq`` unset is no roll-off along the frequency axis at all, which
+#: the comment above :class:`GPVisAst` explains.
+_POW_SPEC_OPTIONAL = ("fov_deg", "corr_freq")
+
+#: ``k0_freq`` was the same knee expressed as its own reciprocal, and that is
+#: why it cannot be an alias: reading a value ``v`` as a bandwidth puts the knee
+#: at ``1 / (2 pi v)`` where it used to be ``v``, so it moves by
+#: ``1 / (2 pi v^2)`` -- a factor of 6.28 for the shipped ``k0_freq: 1``, and
+#: unchanged only at ``v = 1 / sqrt(2 pi)``, which is nobody's setting. A key
+#: whose units invert has to be refused and converted by hand.
+_POW_SPEC_RENAMED = {
+    "k0_freq": (
+        "corr_freq",
+        "It is the same knee the other way up: k0_freq was a delay in seconds, "
+        "corr_freq is the correlation bandwidth in Hz that delay corresponds "
+        "to, corr_freq = 1 / (2 pi k0_freq). This is not an alias and the value "
+        "does not carry over -- read as a bandwidth it would move the knee by "
+        "1 / (2 pi k0_freq^2), a factor of 6.28 for the shipped k0_freq: 1, "
+        "without a word. That shipped value was a knee at one second, against "
+        "a delay axis running to 1 / (2 * chan_width) -- 2.4 us for the 209 kHz "
+        "channels of these configurations -- so it rolled nothing off. Leave "
+        "corr_freq unset for that, which says so.",
+    ),
+}
+
+#: ``corr_freq: null`` is no roll-off along the frequency axis:
+#: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee and
+#: the power spectrum is flat there.
+#:
+#: That is what the ``k0_freq: 1`` it replaces amounted to. On a single channel
+#: the two are bit-identical at any channel width -- the only delay mode is
+#: zero -- and on a wide band they agree to 1.6e-11 relative at the 209 kHz
+#: channels of the shipped configurations. The gap grows as the channels narrow,
+#: as ``chan_width^-2``, so it is worth saying that the figure belongs to those
+#: channels rather than to the change: it reaches 7e-7 at 1 kHz channels and
+#: stops being negligible somewhere below 10 Hz, which no radio observation has.
 
 
 class GPVisAst(Component):
@@ -70,14 +104,24 @@ class GPVisAst(Component):
                 "ast",
                 _POW_SPEC_RULES,
                 optional=_POW_SPEC_OPTIONAL,
+                renamed=_POW_SPEC_RENAMED,
             )
             config.args["ast"]["pow_spec"] = pow_spec
 
             self.p0 = pow_spec["p0"]
             self.gammas = pow_spec["gammas"]
             self.fov_deg = pow_spec["fov_deg"]
-            self.k0_freq = pow_spec["k0_freq"]
             self.pk_cutoff = pow_spec["cutoff"]
+
+            # corr_freq is the bandwidth over which the sky stays correlated;
+            # the knee is the delay conjugate to it. Shared with the RFI prior
+            # so the two sections cannot drift; null is no roll-off.
+            self.corr_freq = pow_spec["corr_freq"]
+            # float(), so the knee is one type whether or not corr_freq was set
+            # and is computed at host precision: the helper returns a jax scalar
+            # for a value and a Python float for None, and under x32 the former
+            # would carry the reciprocal in float32 for no reason.
+            self.k0_freq = float(knee_from_corr_scale(self.corr_freq))
 
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]

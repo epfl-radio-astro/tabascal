@@ -374,6 +374,101 @@ def pow_spec_config(tmp_path, **overrides):
     return config
 
 
+class TestTheFrequencyKneeIsAskedForAsABandwidth:
+    """``k0_freq`` was the knee itself, a delay in seconds, and read as one.
+
+    Nothing about the name said so, and the shipped ``k0_freq: 1`` looked like
+    an ordinary setting while being a knee at one second -- against a delay
+    axis running to ``1 / (2 * chan_width)``, 2.4 us for the 209 kHz channels
+    of those configs. Five orders of magnitude past the end, so it rolled
+    nothing off, and only ever looked reasonable because every shipped
+    observation is single channel and has no delay axis to speak of.
+
+    ``corr_freq`` is the same knee as the bandwidth it is the reciprocal of,
+    which is the spelling ``rfi.corr_freq`` already uses and the one a wrong
+    value is visible in.
+    """
+
+    def test_the_old_name_is_refused_rather_than_aliased(self, tmp_path):
+        """Because the two are reciprocals, an alias would be a silent change.
+
+        Read as a bandwidth, the shipped ``k0_freq: 1`` becomes 1 Hz instead of
+        the 0.16 Hz it means, and every hand-set value moves by however far it
+        sat from ``1 / (2 pi)``. The conversion goes in the message so the fix
+        is mechanical.
+        """
+        message = setup_error(pow_spec_config(tmp_path, k0_freq=1))
+
+        assert "ast.pow_spec.k0_freq was renamed ast.pow_spec.corr_freq" in message
+        assert "corr_freq = 1 / (2 pi k0_freq)" in message
+
+    def test_the_knee_is_the_reciprocal_of_the_bandwidth(self, tmp_path):
+        """Pinned by a test rather than inferred from the name.
+
+        The same conversion ``rfi_signal`` makes from ``rfi.corr_freq``, and
+        the reason the two sections can be read side by side.
+        """
+        comp = setup_ast(pow_spec_config(tmp_path, corr_freq=1e6))
+
+        assert comp.k0_freq == pytest.approx(1 / (2 * np.pi * 1e6))
+
+    def test_it_is_the_conversion_the_rfi_prior_uses(self, tmp_path):
+        """One conversion, called from both, rather than two that agree today.
+
+        The astronomical and RFI priors disagreeing about what their frequency
+        knee meant is the whole of GitHub #117, and it happened because the
+        same arithmetic was written out in both places.
+        """
+        from tabascal.fft_gp import knee_from_corr_scale
+
+        comp = setup_ast(pow_spec_config(tmp_path, corr_freq=1e6))
+
+        assert comp.k0_freq == knee_from_corr_scale(1e6)
+
+    def test_null_is_no_roll_off_along_the_frequency_axis(self, tmp_path):
+        """Which is what the shipped default has always done, said out loud.
+
+        The power spectrum tends to ``p0`` as the knee grows, so an infinite
+        knee keeps every delay mode and prefers none.
+        """
+        comp = setup_ast(pow_spec_config(tmp_path, corr_freq=None))
+
+        assert comp.k0_freq == float("inf")
+
+    def test_null_reproduces_the_default_it_replaces(self):
+        """The rename moves no result, and this is the measurement saying so.
+
+        On a single channel the two are bit-identical -- the only delay mode is
+        zero -- and on a wide band they differ by less than single precision's
+        epsilon, so no shipped configuration and no reference moves.
+        """
+        from tabascal.fft_gp import knee_from_corr_scale, latent_to_signal_init
+
+        def pk(k0_freq, n_freq):
+            spectrum, *_ = latent_to_signal_init(
+                [n_freq, 120], [209e3, 2.0], [2.0, 2.0], [1, 1],
+                3e3, [k0_freq, 1e-3], [5.0, 5.0], 1e-6,
+            )
+            return np.asarray(spectrum)
+
+        # Through the helper, not a literal infinity: the claim is about what
+        # `corr_freq: null` does. Comparing the two alone would be satisfied by
+        # a null path that had simply become the old default, so the flatness
+        # it is supposed to produce is asserted first and separately.
+        unset = knee_from_corr_scale(None)
+
+        flat = pk(unset, 32)
+        assert np.allclose(flat, flat[0, :][None, :], rtol=1e-12), (
+            "an unset corr_freq must leave the frequency axis flat"
+        )
+
+        assert np.array_equal(pk(1.0, 1), pk(unset, 1))
+
+        was, now = pk(1.0, 32), flat
+        assert was.shape == now.shape
+        assert np.max(np.abs(was - now) / now) < np.finfo(np.float32).eps
+
+
 class TestAstPowSpecIsValidated:
     """``ast.pow_spec`` went straight to the Fourier machinery unchecked.
 
@@ -389,7 +484,7 @@ class TestAstPowSpecIsValidated:
 
         assert comp.n_k_freq_ast >= 1 and comp.n_k_time_ast >= 1
 
-    @pytest.mark.parametrize("key", ["p0", "k0_freq", "cutoff"])
+    @pytest.mark.parametrize("key", ["p0", "corr_freq", "cutoff"])
     @pytest.mark.parametrize("value", [0, -1, "3e3", True, float("inf"), float("nan")])
     def test_a_scalar_key_that_is_not_a_positive_number_is_refused(
         self, tmp_path, key, value
@@ -434,13 +529,17 @@ class TestAstPowSpecIsValidated:
 
         assert "no key(s) ['gamma']" in message
 
-    def test_fov_deg_may_be_null_and_the_others_may_not(self, tmp_path):
-        """null fov_deg means the telescope's own beam; the rest have no such
-        fallback, and an unset one is a config that cannot be run rather than a
-        default to invent."""
-        setup_ast(pow_spec_config(tmp_path, fov_deg=None))
+    def test_the_two_knees_may_be_null_and_the_others_may_not(self, tmp_path):
+        """And they mean different things by it.
 
-        for key in ("p0", "k0_freq", "gammas", "cutoff"):
+        null fov_deg is the telescope's own beam; null corr_freq is no roll-off
+        along the frequency axis at all. The rest have no such fallback, and an
+        unset one is a config that cannot be run rather than a default to
+        invent."""
+        setup_ast(pow_spec_config(tmp_path, fov_deg=None))
+        setup_ast(pow_spec_config(tmp_path, corr_freq=None))
+
+        for key in ("p0", "gammas", "cutoff"):
             message = setup_error(pow_spec_config(tmp_path, **{key: None}))
             assert f"ast.pow_spec.{key}" in message
             assert "required" in message

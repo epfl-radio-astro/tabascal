@@ -10,7 +10,7 @@ from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
 from tabascal.ms import get_observation_data_type
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, validate_pow_spec
+from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, validate_pow_spec
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -928,7 +928,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
-        k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
+        k0s = knee_from_corr_scale([self.corr_freq, self.corr_time])
         p0 = self.gp_var #* self.n_time * self.n_freq
         gammas, pk_cutoff = self.gp_pow_spec()
 
@@ -1214,7 +1214,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
-        k0s = 1 / (2 * jnp.pi * jnp.array([self.corr_freq, self.corr_time]))
+        k0s = knee_from_corr_scale([self.corr_freq, self.corr_time])
         p0 = self.gp_var
         gammas, pk_cutoff = self.gp_pow_spec()
 
