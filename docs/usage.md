@@ -170,6 +170,38 @@ The run writes its `plots/` and `results/` beside the Measurement Set. Pass
 `-od path/to/output_dir`, or set `data.out_dir`, to send them somewhere else —
 a read-only or shared data directory being the usual reason.
 
+### GPU memory
+
+JAX preallocates 75% of the total GPU memory when the first JAX operation
+runs. Every TABASCAL command asks for memory as it goes instead, which
+potentially decreases the memory a run uses overall and is what lets it share a
+card.
+
+The trade is fragmentation, which preallocating minimises: JAX warns that with
+preallocation off, a program using most of the available GPU memory may run out
+of it. If that is the program you have, turn preallocation back on with JAX's
+own switch:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=true tabascal run -c config.yaml -ms file.ms
+```
+
+TABASCAL supplies the default only when the variable is unset, so whatever you
+export is what you get. With preallocation enabled,
+`XLA_PYTHON_CLIENT_MEM_FRACTION` sets the fraction taken instead of 75%. For
+two processes sharing one card JAX offers that and preallocation-off as the two
+options — the second being what you already have here by default.
+
+The rest of
+[JAX's memory-allocation options](https://docs.jax.dev/en/latest/gpu_memory_allocation.html)
+apply unchanged. `XLA_PYTHON_CLIENT_ALLOCATOR=platform` is the one worth
+knowing about even though JAX calls it very slow and does not recommend it for
+general use: it is the only setting under which JAX gives memory back to the
+device rather than holding it for reuse, which makes it the way to see the
+smallest footprint a run really needs and to find out where an out-of-memory
+error comes from. It frees only what is no longer live, so it will not make two
+overlapping peaks fit.
+
 ## Extracting RFI light curves
 
 `tabascal light-curve` measures each satellite's apparent flux over time and

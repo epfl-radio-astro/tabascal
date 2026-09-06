@@ -23,6 +23,129 @@ _DOCS = _REPO / "docs"
 # A shell prompt some docs put in front of a command.
 _PROMPT = re.compile(r"^\$\s+")
 
+#: Fence languages whose contents are not shell, and so hold no commands. The
+#: docs write commands in bare fences and in ``bash`` and ``console`` ones, so
+#: excluding by language is the only filter that does not lose any of them.
+_NOT_SHELL = frozenset(
+    {"python", "py", "pycon", "yaml", "yml", "json", "toml", "ini", "text", "output"}
+)
+
+#: One token of the ``NAME=value`` environment a shell may put in front of a
+#: command. Consumed after ``shlex`` has split the line rather than matched
+#: against the raw text, so quoting and escapes are the shell's business and
+#: not this regex's.
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _command_word(line):
+    """The word a shell would run, or None -- reading as far as the lexer gets.
+
+    Used only on a line that will not tokenize, to say what it was going to run
+    before its quoting broke. Reading token by token is what makes the answer
+    agree with :func:`shlex.split`: a regex over the raw line cannot see past a
+    quoted value with a space in it, so ``A="two words" tabascal ...`` looked
+    like no command at all and a broken one was dropped in silence.
+    """
+
+    lexer = shlex.shlex(line, posix=True)
+    lexer.whitespace_split = True
+    # shlex.split leaves comments to the caller, and so must this: the comment
+    # is already off by the time either is asked, and disagreeing here would
+    # make one of them call a line a command that the other could not split.
+    lexer.commenters = ""
+    try:
+        for token in lexer:
+            if not _ASSIGNMENT.match(token):
+                return token
+    except ValueError:
+        pass
+
+    return None
+
+
+def _without_comment(line):
+    r"""``line`` up to the first unquoted ``#`` that starts a word, as a shell cuts it.
+
+    On the raw line, and before tokenizing, because both of the alternatives
+    lose something. A regex (``\s+#``) cannot see quotes, so it truncated
+    ``--tle-dir "tles #1"`` mid-quote and made a valid command unparseable.
+    Cutting after tokenizing cannot see them either -- quoting is gone by then
+    -- so a quoted ``"#c.yaml"`` looked like a comment and its argument was
+    dropped in silence. And leaving the comment on for ``shlex`` to handle
+    means an apostrophe in ordinary English ("# don't preallocate") fails the
+    split, which turns an innocuous docs edit into a parse error.
+
+    Tracking the quote state costs a dozen lines and gets all four right,
+    including ``-c a#b.yaml``, where the hash is mid-word and a shell keeps it.
+
+    A backslash outside single quotes escapes the next character, so
+    ``-c it\\'s.yaml # note`` is one word and a comment rather than an
+    unterminated quote. Word boundaries are ASCII space and tab only, because
+    that is what ``shlex`` splits on: treating a non-breaking space as one --
+    ``str.isspace`` does -- would cut a comment the shell would have kept, and
+    let a broken line past the check.
+    """
+
+    quote = None
+    escaped = False
+    for i, char in enumerate(line):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote is not None:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+
+    return line
+
+
+def _continues(line):
+    """True when a shell would read the next line as part of this one.
+
+    An odd number of trailing backslashes: the last escapes the newline. An
+    even number is escaped backslashes, and the line stands on its own.
+    """
+
+    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
+
+
+def _command_tokens(line):
+    """``line`` as a shell would hand it to ``tabascal``, or None if it would not.
+
+    A leading ``VAR=value`` is environment for the one command that follows, not
+    part of it, so it is dropped: without that, a line setting a variable failed
+    the ``tabascal`` match and was skipped, and the one documented command that
+    sets one would have gone unchecked for as long as it stayed broken.
+
+    ``shlex``, not ``split()``: a shell hands ``-od ""`` an empty argument and
+    ``-od "output dir"`` a single one, and a check that reads the parsed options
+    has to see what the shell would have passed.
+    """
+
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        # A line that will not tokenize is either a documented command whose
+        # quoting is broken -- copy-paste that fails for the reader too, so it
+        # has to be raised on rather than dropped out of the checked set -- or
+        # prose inside a fence. Nothing tells the two apart, so the tie goes to
+        # raising: that is loud and one edit away from fixed, where dropping a
+        # command is silent and lasts as long as the command stays broken.
+        if _command_word(line) == "tabascal":
+            raise
+        return None
+
+    while tokens and _ASSIGNMENT.match(tokens[0]):
+        tokens.pop(0)
+
+    # `tabascal ...` as a command, not `tabascal/` in a directory tree.
+    return tokens if tokens[:1] == ["tabascal"] else None
+
 
 @pytest.fixture
 def impl():
@@ -50,7 +173,16 @@ def _documented_pages(docs_dir, readme):
     tests scrape whatever README happened to sit in pytest's basetemp.
     """
 
-    pages = sorted(docs_dir.glob("*.md"))
+    # rglob: docs/components/ and docs/concepts/ are pages like any other, and
+    # a command shown in one of them was never being checked. Build output and
+    # hidden trees are not pages -- rglob descends into both -- and scraping a
+    # generated copy would check the same command twice and report the wrong
+    # file when it broke.
+    pages = [
+        page
+        for page in sorted(docs_dir.rglob("*.md"))
+        if not any(part == "_build" or part.startswith(".") for part in page.parts)
+    ]
     if readme is not None and readme.exists():
         pages.append(readme)
 
@@ -67,24 +199,61 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
 
     commands = []
     for page in _documented_pages(docs_dir, readme):
+        shell = False
         in_code = False
-        for line in page.read_text().splitlines():
-            line = line.strip()
+        # A command wrapped over several lines with a trailing backslash, and
+        # where it started. The docs already wrap `pixi`, `reframe` and `curl`
+        # that way, and those are dropped only because their first word is not
+        # `tabascal`: the first person to wrap a long `tabascal run` would
+        # otherwise have hit an error about quoting.
+        pending = ""
+        started_at = 0
+        for number, raw in enumerate(page.read_text().splitlines(), start=1):
+            line = raw.strip()
             if line.startswith("```"):
+                pending = ""
+                # An untagged fence counts: the docs use bare fences, `bash`
+                # and `console` for commands, so only the languages that are
+                # definitely not shell are excluded. The first word of the info
+                # string is the language -- the rest is attributes, and taking
+                # the whole string would let `python title="x"` past the set.
+                language = line[3:].strip().lower().split()
+                shell = not in_code and (not language or language[0] not in _NOT_SHELL)
                 in_code = not in_code
                 continue
-            if not in_code:
+            if not shell:
                 continue
-            line = _PROMPT.sub("", line)
-            # `tabascal ...` as a command, not `tabascal/` in a directory tree.
-            if not re.match(r"^tabascal(\s|$)", line):
+
+            line = _without_comment(_PROMPT.sub("", line))
+            if pending:
+                line = f"{pending} {line}"
+            else:
+                started_at = number
+            if _continues(line):
+                pending = line.rstrip("\\").rstrip()
                 continue
-            # Strip trailing comments used to annotate help invocations.
-            line = re.split(r"\s+#", line, maxsplit=1)[0]
-            # shlex, not split(): a shell hands `-s ""` an empty argument and
-            # `-s "output dir"` a single one, and a check that reads the parsed
-            # options has to see what the shell would have passed.
-            commands.append((page.name, shlex.split(line)))
+            pending = ""
+
+            try:
+                tokens = _command_tokens(line)
+            except ValueError as error:
+                # shlex says "No closing quotation" from inside its own module
+                # and nothing else. Where to look is the whole of what a reader
+                # needs, so the page and the line number come first.
+                raise ValueError(
+                    f"{page.name}:{started_at}: {line!r} does not tokenize as "
+                    "a shell command"
+                ) from error
+            if tokens is not None:
+                commands.append((page.name, tokens))
+
+        # An unclosed fence silently rewrites the rest of the page: prose is
+        # read as commands, or -- worse, because it is quiet -- the next real
+        # bash block's opening fence is read as this one's close and every
+        # command in it leaves the checked set.
+        if in_code:
+            raise ValueError(f"unclosed code fence in {page.name}")
+
     return commands
 
 
@@ -313,6 +482,233 @@ class TestRfiPerSatSubcommand:
 
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "[]", result.stdout
+
+
+class TestDeviceMemoryIsOnDemandUnlessAsked:
+    """Who decides whether JAX preallocates the device.
+
+    JAX takes 75 % of it on the first operation. TABASCAL asks for memory on
+    demand instead, so a run takes only what it needs and can share a card.
+    ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` is how a user says otherwise --
+    preallocation minimises fragmentation, which is what a run filling most of
+    the card needs -- and it used to survive ``run_tabascal.main`` only to be
+    assigned away a few lines later when the implementation module was
+    imported.
+    """
+
+    _ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
+
+    def _main_with(self, monkeypatch, argv):
+        """``main()`` as far as the dispatch, reporting the environment there."""
+        import contextlib
+        import sys
+
+        from tabascal.scripts import run_tabascal
+
+        seen = {}
+
+        def record(args):
+            seen.setdefault("preallocate", os.environ.get(self._ENV))
+            # `search` is exited with whatever its dispatcher returns.
+            return 0
+
+        for name in ("_run_cmd", "_light_curve_cmd", "_search_cmd", "_rfi_per_sat_cmd"):
+            monkeypatch.setattr(run_tabascal, name, record)
+        monkeypatch.setattr(sys, "argv", ["tabascal", *argv])
+
+        with contextlib.suppress(SystemExit):
+            run_tabascal.main()
+
+        return seen["preallocate"]
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("run", "-c", "c.yaml"),
+            ("light-curve", "-ms", "o.ms", "-n", "12345"),
+            ("search", "-ms", "o.ms", "--tle-dir", "d"),
+            ("rfi-per-sat", "-m", "o.ms", "-z", "r.zarr"),
+        ],
+        ids=["run", "light-curve", "search", "rfi-per-sat"],
+    )
+    def test_default_is_memory_on_demand(self, monkeypatch, argv):
+        """Every subcommand, because every one of them reaches JAX eventually.
+
+        ``run`` gets there through ``init_distributed``, the others through
+        their estimator and writer imports, so the default has to be set once
+        before the dispatch rather than on the one path that used to set it.
+        """
+        monkeypatch.delenv(self._ENV, raising=False)
+
+        assert self._main_with(monkeypatch, argv) == "false"
+
+    @pytest.mark.parametrize("asked", ["true", "false"])
+    def test_an_explicit_setting_is_left_alone(self, monkeypatch, asked):
+        """Including ``false``: it is still the user's word, not our default."""
+        monkeypatch.setenv(self._ENV, asked)
+
+        assert self._main_with(monkeypatch, ("run", "-c", "c.yaml")) == asked
+
+    @pytest.mark.parametrize(
+        "module_name, argv",
+        [
+            ("results_to_MS", ["tab2MS", "-m", "o.ms", "-z", "r.zarr"]),
+            ("rfi_per_sat_to_MS", ["tab2MS-persat", "-m", "o.ms", "-z", "r.zarr"]),
+            ("rfi_estimate", ["light-curve", "-ms", "o.ms", "-n", "12345"]),
+            ("sat_search", ["search", "-ms", "o.ms", "--tle-dir", "d"]),
+        ],
+    )
+    def test_every_module_with_its_own_main_defaults_it_too(
+        self, monkeypatch, module_name, argv
+    ):
+        """Four modules carry a ``main()`` that never reaches the one above.
+
+        Two are installed commands: ``tab2MS-persat`` and ``tabascal
+        rfi-per-sat`` are the same tool under two names, and a default set only
+        in ``run_tabascal.main`` would give identical work a different share of
+        the device depending on which name was typed. The other two are
+        reachable as ``python -m tabascal.scripts.<name>``, which is how the
+        estimator and the search get run directly.
+        """
+        import contextlib
+        import importlib
+        import sys
+
+        module = importlib.import_module(f"tabascal.scripts.{module_name}")
+        monkeypatch.delenv(self._ENV, raising=False)
+
+        seen = {}
+        monkeypatch.setattr(
+            module,
+            "run",
+            lambda args: seen.setdefault("preallocate", os.environ.get(self._ENV)),
+        )
+        monkeypatch.setattr(sys, "argv", argv)
+
+        # sat_search exits with the status its run returns.
+        with contextlib.suppress(SystemExit):
+            module.main()
+
+        assert seen["preallocate"] == "false"
+
+    def test_nothing_on_the_run_path_reassigns_it(self):
+        """The whole of `tabascal run` up to the fit, in a clean process.
+
+        In-process this cannot be said. The variable is read when the device
+        backend initialises, which has already happened by the time any test
+        runs, and a test that patches the calls ``_run_cmd`` makes is blind to
+        what those calls do -- an assignment inside ``init_distributed``, whose
+        own docstring says it must run before any JAX array exists, is exactly
+        an assignment that still takes effect and exactly one such a test
+        cannot see.
+
+        So: export ``true``, then drive the real ``_run_cmd`` with only the fit
+        itself replaced. Everything between the import of the implementation
+        module and the call to ``run`` is the real thing, and both points are
+        reported -- the import, which is where the assignment used to be, and
+        the last moment before the fit, which is after every line that could
+        put another one back.
+        """
+        import subprocess
+        import sys
+
+        env = dict(os.environ, XLA_PYTHON_CLIENT_PREALLOCATE="true")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os\n"
+                "from tabascal.scripts import _run_tabascal_impl, run_tabascal\n"
+                "env = lambda: os.environ.get('XLA_PYTHON_CLIENT_PREALLOCATE')\n"
+                "print('after import:', env())\n"
+                "_run_tabascal_impl.run = lambda args: print('at the fit:', env())\n"
+                "run_tabascal._run_cmd(\n"
+                "    run_tabascal.build_parser().parse_args(['run', '-c', 'c.yaml'])\n"
+                ")\n",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        # Membership, not position: a library banner on stdout would otherwise
+        # fail this with a message about nothing to do with preallocation.
+        printed = result.stdout.splitlines()
+        assert "after import: true" in printed, result.stdout
+        assert "at the fit: true" in printed, result.stdout
+
+    def test_nothing_in_the_package_assigns_it(self):
+        """Only ever ``setdefault``, everywhere, said directly.
+
+        The subprocess above proves the ordering along the run path, but it can
+        only see as far as the frame it stubs: an assignment inside ``run``
+        itself, or in a module imported after it, is past the last point it
+        watches. Every test of this kind has that horizon. This one reads the
+        package rather than running it, so it holds for code no test exercises.
+
+        It looks for the spellings this codebase would plausibly use rather
+        than for one literal. ``_device_memory`` exports ``PREALLOCATE_ENV`` so
+        that callers name the variable through it, which makes
+        ``os.environ[PREALLOCATE_ENV] = ...`` the *likeliest* way the bug comes
+        back -- and a check that only matched the string literal would not have
+        seen it. Any variable as the key counts for the same reason: there is
+        no legitimate one today, so one appearing is worth a look either way.
+        """
+        import ast
+        import pathlib
+
+        import tabascal
+
+        def is_environ(node):
+            """``os.environ``, or ``environ`` after ``from os import environ``."""
+
+            return (
+                isinstance(node, ast.Attribute) and node.attr == "environ"
+            ) or (isinstance(node, ast.Name) and node.id == "environ")
+
+        def names_the_variable(key):
+            """The literal, or any name -- which could be holding it."""
+
+            if isinstance(key, ast.Constant):
+                return key.value == self._ENV
+            return isinstance(key, ast.Name)
+
+        root = pathlib.Path(tabascal.__file__).parent
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                    targets = [node.target]
+                elif isinstance(node, ast.Call):
+                    # os.environ.update({...}) and os.putenv(...) reach the
+                    # same place without being an assignment at all. Neither
+                    # takes a readable key here, so any use is reported.
+                    called = node.func
+                    if isinstance(called, ast.Attribute) and (
+                        (called.attr == "update" and is_environ(called.value))
+                        or called.attr == "putenv"
+                    ):
+                        offenders.append(
+                            f"{path.relative_to(root)}:{node.lineno} ({called.attr})"
+                        )
+                    continue
+                else:
+                    continue
+
+                for target in targets:
+                    if (
+                        isinstance(target, ast.Subscript)
+                        and is_environ(target.value)
+                        and names_the_variable(target.slice)
+                    ):
+                        offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+
+        assert offenders == [], (
+            f"{self._ENV} must be defaulted, never assigned; found: {offenders}"
+        )
 
 
 class TestLightCurveInputs:
@@ -1090,6 +1486,172 @@ class TestDocumentedCommandScraper:
 
     def test_ignores_a_directory_tree_entry(self, tmp_path):
         found = self._page(tmp_path, "```\ntabascal/\n  write.py\n```\n")
+        assert found == []
+
+    def test_reads_past_an_environment_prefix(self, tmp_path):
+        """``VAR=value tabascal ...`` is a command with environment on it."""
+        found = self._page(
+            tmp_path,
+            "```bash\nXLA_PYTHON_CLIENT_PREALLOCATE=true tabascal run -c c.yaml\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_reads_past_several_environment_prefixes(self, tmp_path):
+        """Including a quoted value, which a shell hands over as one word."""
+        found = self._page(
+            tmp_path,
+            '```bash\nA=1 B="two words" tabascal run -c c.yaml\n```\n',
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_an_escaped_space_in_a_value_is_handled_by_the_shell_splitting(self, tmp_path):
+        """Which is why the assignment is matched after splitting, not before.
+
+        A regex over the raw line would have to reimplement quoting to get
+        this right; ``shlex`` has already done it by the time the assignment is
+        recognised.
+        """
+        found = self._page(
+            tmp_path,
+            "```bash\nA=one\\ word tabascal run -c c.yaml\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_an_unbalanced_quote_in_prose_is_skipped(self, tmp_path):
+        """A fenced line that is not a command is allowed its apostrophe."""
+        found = self._page(
+            tmp_path,
+            "```bash\n# it doesn't run anything\ntabascal run -c c.yaml\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_an_unbalanced_quote_in_a_command_is_raised_on(self, tmp_path):
+        """Because a reader would copy it and get the same error.
+
+        Dropping it instead would take a broken documented command out of the
+        checked set for exactly as long as it stayed broken.
+        """
+        with pytest.raises(ValueError):
+            self._page(tmp_path, '```bash\ntabascal run -c "c.yaml\n```\n')
+
+    def test_a_command_in_a_non_shell_fence_is_not_scraped(self, tmp_path):
+        """A python or yaml block is not somewhere commands are run."""
+        found = self._page(tmp_path, "```python\ntabascal = 1\n```\n")
+        assert found == []
+
+    def test_a_non_shell_fence_with_attributes_is_still_not_shell(self, tmp_path):
+        """The language is the first word of the info string, not all of it."""
+        found = self._page(tmp_path, '```python title="demo.py"\ntabascal = 1\n```\n')
+        assert found == []
+
+    def test_a_malformed_command_behind_a_quoted_value_is_raised_on(self, tmp_path):
+        """The case a regex over the raw line could not see.
+
+        ``\\S+=\\S*`` cannot span ``A="two words"``, so the guard decided the line
+        was not a command and the broken command was dropped without a sound.
+        """
+        with pytest.raises(ValueError):
+            self._page(
+                tmp_path,
+                '```bash\nA="two words" tabascal run -c "c.yaml\n```\n',
+            )
+
+    def test_an_unclosed_fence_is_an_error(self, tmp_path):
+        """Because of what it does silently to everything after it.
+
+        The next real fence's opening line is read as this one's close, so a
+        whole block of commands stops being scanned and nothing says so.
+        """
+        with pytest.raises(ValueError, match="unclosed code fence"):
+            self._page(
+                tmp_path,
+                "```yaml\nast:\n"
+                "```bash\ntabascal run -c c.yaml\n```\n",
+            )
+
+    def test_an_apostrophe_in_a_comment_does_not_break_the_command(self, tmp_path):
+        """The most ordinary annotation there is, and it used to fail the split.
+
+        The comment has to come off before ``shlex`` sees the line: leaving it
+        on meant "don't" was an unbalanced quote, and a docs edit no shell
+        would blink at raised from inside ``shlex``.
+        """
+        found = self._page(
+            tmp_path,
+            "```bash\ntabascal run -c c.yaml   # don't preallocate\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_a_quoted_hash_is_an_argument_not_a_comment(self, tmp_path):
+        """Cutting on the tokens instead dropped this argument in silence.
+
+        Quoting is gone by the time the tokens exist, so a word that begins
+        with a hash is indistinguishable from a comment there -- and the
+        command that got checked was no longer the command the docs show.
+        """
+        found = self._page(tmp_path, '```bash\ntabascal run -c "#c.yaml"\n```\n')
+        assert found == [("page.md", ["tabascal", "run", "-c", "#c.yaml"])]
+
+    def test_a_backslash_escaped_quote_is_not_a_quote(self, tmp_path):
+        """Checked against a real bash, which is the only authority here.
+
+        Without escape handling the apostrophe in ``it\'s.yaml`` opened a quote
+        the shell never opened, so the comment after it was swallowed into the
+        command -- and with an apostrophe in the comment text as well, a line
+        bash runs without complaint failed the scrape outright.
+        """
+        found = self._page(
+            tmp_path,
+            "```bash\ntabascal run -c it\\'s.yaml   # don't do this\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "it's.yaml"])]
+
+    def test_a_command_wrapped_over_lines_is_read_as_one(self, tmp_path):
+        """A trailing backslash continues the command, as it does in a shell.
+
+        The docs already wrap `pixi`, `reframe` and `curl` invocations this
+        way; those are dropped only because their first word is not
+        ``tabascal``. Wrapping a long ``tabascal run`` would otherwise have
+        failed with an error about quoting.
+        """
+        found = self._page(
+            tmp_path,
+            "```bash\ntabascal run -c c.yaml \\\n    -ms file.ms\n```\n",
+        )
+        assert found == [
+            ("page.md", ["tabascal", "run", "-c", "c.yaml", "-ms", "file.ms"])
+        ]
+
+    def test_a_line_that_will_not_tokenize_says_where_it_is(self, tmp_path):
+        """``shlex`` names its own module and nothing else.
+
+        Where to look is the whole of what a reader needs, so the page and the
+        line number come before the text.
+        """
+        with pytest.raises(ValueError, match=r"page\.md:3:"):
+            self._page(
+                tmp_path,
+                "intro\n```bash\ntabascal run -c \"c.yaml\n```\n",
+            )
+
+    def test_a_hash_is_a_comment_only_where_a_shell_says_so(self, tmp_path):
+        """Which is why the cut reads the quotes rather than a regex or tokens.
+
+        A regex over the line truncated the quoted argument at its hash and
+        made a valid command unparseable; cutting on the tokens instead lost
+        the quoting that says which hash is a comment at all.
+        """
+        found = self._page(
+            tmp_path,
+            '```bash\ntabascal search -ms o.ms --tle-dir "tles #1"   # note\n```\n',
+        )
+        assert found == [
+            ("page.md", ["tabascal", "search", "-ms", "o.ms", "--tle-dir", "tles #1"])
+        ]
+
+    def test_an_environment_prefix_on_something_else_is_still_ignored(self, tmp_path):
+        """The prefix does not make a non-command into one."""
+        found = self._page(tmp_path, "```bash\nA=1 sim-vis -c sim.yaml\n```\n")
         assert found == []
 
 

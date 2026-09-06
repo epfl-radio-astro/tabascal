@@ -32,11 +32,8 @@ def _run_cmd(args):
 
     # Multi-process bring-up must precede everything jax-related: the distributed
     # runtime has to exist before the device backend initializes, and the impl module
-    # import pulls in the whole jax/numpyro stack. Memory-on-demand likewise has to be
-    # set before the backend grabs the GPU (the impl module also sets it, but by then
-    # only for the single-process path -- here it must land before init_distributed).
-    import os
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    # import pulls in the whole jax/numpyro stack. Memory-on-demand is already set,
+    # by main() before it dispatched here, which is what puts it ahead of this call.
     from tabascal.distributed import init_distributed
     init_distributed()
 
@@ -176,6 +173,14 @@ def build_parser():
 
 def main():
     import sys
+
+    # Once, here, rather than on the one path that used to do it: every
+    # subcommand below reaches JAX eventually -- `run` through
+    # init_distributed, the others through their estimator and writer imports
+    # -- and this has to land before whichever of them gets there first.
+    from tabascal.scripts._device_memory import default_memory_on_demand
+
+    default_memory_on_demand()
 
     args = build_parser().parse_args()
 

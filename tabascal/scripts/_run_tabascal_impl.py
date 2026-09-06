@@ -1,7 +1,17 @@
+# Before every other import in this file: the imports below bring the JAX
+# backend up, and this is read when it initialises. The helper imports nothing
+# but os, so putting it above them costs nothing.
+#
+# It setdefaults rather than assigns. This line used to assign, and since an
+# entry point had already deferred to XLA_PYTHON_CLIENT_PREALLOCATE by the time
+# it imported this module, that took the user's choice back a few lines later.
+# Called here as well as from the entry points so that importing this module
+# directly still gets the default.
+from tabascal.scripts._device_memory import default_memory_on_demand
+
+default_memory_on_demand()
+
 import os
-
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-
 import sys
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass

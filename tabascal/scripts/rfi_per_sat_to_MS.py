@@ -66,6 +66,13 @@ def run(args):
 
 
 def main():
+    # `tabascal rfi-per-sat` and this command are the same tool under two
+    # names, so they have to claim the device the same way; see
+    # scripts/_device_memory.
+    from tabascal.scripts._device_memory import default_memory_on_demand
+
+    default_memory_on_demand()
+
     run(build_parser().parse_args())
 
 
