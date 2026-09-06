@@ -23,11 +23,38 @@ _DOCS = _REPO / "docs"
 # A shell prompt some docs put in front of a command.
 _PROMPT = re.compile(r"^\$\s+")
 
-#: A leading ``NAME=value``, the way a shell reads it: environment for the one
-#: command that follows rather than part of it. Stripped so such a line is still
-#: scraped -- matching on ``tabascal`` alone skipped it, which would let a
-#: documented command go unchecked for exactly as long as it stayed broken.
-_ENV_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(\"[^\"]*\"|'[^']*'|\S*)\s+")
+#: One token of the ``NAME=value`` environment a shell may put in front of a
+#: command. Consumed after ``shlex`` has split the line rather than matched
+#: against the raw text, so quoting and escapes are the shell's business and
+#: not this regex's.
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _command_tokens(line):
+    """``line`` as a shell would hand it to ``tabascal``, or None if it would not.
+
+    A leading ``VAR=value`` is environment for the one command that follows, not
+    part of it, so it is dropped: without that, a line setting a variable failed
+    the ``tabascal`` match and was skipped, and the one documented command that
+    sets one would have gone unchecked for as long as it stayed broken.
+
+    ``shlex``, not ``split()``: a shell hands ``-od ""`` an empty argument and
+    ``-od "output dir"`` a single one, and a check that reads the parsed options
+    has to see what the shell would have passed. An unbalanced quote is prose
+    inside a fence rather than a command -- fenced output is allowed an
+    apostrophe -- so it is skipped rather than raised on.
+    """
+
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        return None
+
+    while tokens and _ASSIGNMENT.match(tokens[0]):
+        tokens.pop(0)
+
+    # `tabascal ...` as a command, not `tabascal/` in a directory tree.
+    return tokens if tokens[:1] == ["tabascal"] else None
 
 
 @pytest.fixture
@@ -82,17 +109,11 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
             if not in_code:
                 continue
             line = _PROMPT.sub("", line)
-            while (env := _ENV_PREFIX.match(line)) is not None:
-                line = line[env.end():]
-            # `tabascal ...` as a command, not `tabascal/` in a directory tree.
-            if not re.match(r"^tabascal(\s|$)", line):
-                continue
             # Strip trailing comments used to annotate help invocations.
             line = re.split(r"\s+#", line, maxsplit=1)[0]
-            # shlex, not split(): a shell hands `-s ""` an empty argument and
-            # `-s "output dir"` a single one, and a check that reads the parsed
-            # options has to see what the shell would have passed.
-            commands.append((page.name, shlex.split(line)))
+            tokens = _command_tokens(line)
+            if tokens is not None:
+                commands.append((page.name, tokens))
     return commands
 
 
@@ -326,31 +347,38 @@ class TestRfiPerSatSubcommand:
 class TestDeviceMemoryIsOnDemandUnlessAsked:
     """Who decides whether JAX preallocates the device.
 
-    TABASCAL asks for memory on demand, so a run can share a GPU and a failed
-    one lets go of the card. ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` is the
-    user's way of overriding that -- the preallocating allocator does not
-    fragment the pool over a long run -- and it used to survive
-    ``run_tabascal.main`` only to be assigned away a few lines later when the
-    implementation module was imported.
+    JAX takes 75 % of it on the first operation. TABASCAL asks for memory on
+    demand instead, so a run takes only what it needs and can share a card.
+    ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` is how a user says otherwise --
+    preallocation minimises fragmentation, which is the case for a long run on
+    a card it owns -- and it used to survive ``run_tabascal.main`` only to be
+    assigned away a few lines later when the implementation module was
+    imported.
     """
 
+    _ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
+
     def _main_with(self, monkeypatch, argv):
-        """``main()`` up to the point of dispatch, reporting the environment."""
+        """``main()`` as far as the dispatch, reporting the environment there."""
+        import contextlib
         import sys
 
         from tabascal.scripts import run_tabascal
 
         seen = {}
-        for name in ("_run_cmd", "_light_curve_cmd", "_rfi_per_sat_cmd"):
-            monkeypatch.setattr(
-                run_tabascal,
-                name,
-                lambda args, _s=seen: _s.setdefault(
-                    "preallocate", os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE")
-                ),
-            )
+
+        def record(args):
+            seen.setdefault("preallocate", os.environ.get(self._ENV))
+            # `search` is exited with whatever its dispatcher returns.
+            return 0
+
+        for name in ("_run_cmd", "_light_curve_cmd", "_search_cmd", "_rfi_per_sat_cmd"):
+            monkeypatch.setattr(run_tabascal, name, record)
         monkeypatch.setattr(sys, "argv", ["tabascal", *argv])
-        run_tabascal.main()
+
+        with contextlib.suppress(SystemExit):
+            run_tabascal.main()
+
         return seen["preallocate"]
 
     @pytest.mark.parametrize(
@@ -358,9 +386,10 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         [
             ("run", "-c", "c.yaml"),
             ("light-curve", "-ms", "o.ms", "-n", "12345"),
+            ("search", "-ms", "o.ms", "--tle-dir", "d"),
             ("rfi-per-sat", "-m", "o.ms", "-z", "r.zarr"),
         ],
-        ids=["run", "light-curve", "rfi-per-sat"],
+        ids=["run", "light-curve", "search", "rfi-per-sat"],
     )
     def test_default_is_memory_on_demand(self, monkeypatch, argv):
         """Every subcommand, because every one of them reaches JAX eventually.
@@ -369,16 +398,79 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         their estimator and writer imports, so the default has to be set once
         before the dispatch rather than on the one path that used to set it.
         """
-        monkeypatch.delenv("XLA_PYTHON_CLIENT_PREALLOCATE", raising=False)
+        monkeypatch.delenv(self._ENV, raising=False)
 
         assert self._main_with(monkeypatch, argv) == "false"
 
     @pytest.mark.parametrize("asked", ["true", "false"])
     def test_an_explicit_setting_is_left_alone(self, monkeypatch, asked):
         """Including ``false``: it is still the user's word, not our default."""
-        monkeypatch.setenv("XLA_PYTHON_CLIENT_PREALLOCATE", asked)
+        monkeypatch.setenv(self._ENV, asked)
 
         assert self._main_with(monkeypatch, ("run", "-c", "c.yaml")) == asked
+
+    @pytest.mark.parametrize(
+        "module_name, argv",
+        [
+            ("results_to_MS", ["tab2MS", "-m", "o.ms", "-z", "r.zarr"]),
+            ("rfi_per_sat_to_MS", ["tab2MS-persat", "-m", "o.ms", "-z", "r.zarr"]),
+        ],
+    )
+    def test_the_standalone_export_commands_default_it_too(
+        self, monkeypatch, module_name, argv
+    ):
+        """They have their own entry points and never reach ``main()`` above.
+
+        ``tab2MS-persat`` and ``tabascal rfi-per-sat`` are the same tool under
+        two names. Both import ``tabascal.write``, so a default set only in
+        ``run_tabascal.main`` would give identical work a different share of
+        the device depending on which name was typed.
+        """
+        import importlib
+        import sys
+
+        module = importlib.import_module(f"tabascal.scripts.{module_name}")
+        monkeypatch.delenv(self._ENV, raising=False)
+
+        seen = {}
+        monkeypatch.setattr(
+            module,
+            "run",
+            lambda args: seen.setdefault("preallocate", os.environ.get(self._ENV)),
+        )
+        monkeypatch.setattr(sys, "argv", argv)
+
+        module.main()
+
+        assert seen["preallocate"] == "false"
+
+    def test_the_run_path_does_not_reassign_it_before_reaching_jax(
+        self, monkeypatch, impl
+    ):
+        """``_run_cmd`` for real rather than stubbed: the assignment lived here.
+
+        ``init_distributed`` is where the run path first brings the device
+        backend up, and the variable is read then, so the environment as that
+        call sees it is the one that decides. A dispatch-level test cannot say
+        this -- it replaces the very function that used to do the assigning.
+        """
+        import tabascal.distributed as distributed
+
+        from tabascal.scripts import run_tabascal
+
+        monkeypatch.setenv(self._ENV, "true")
+
+        seen = {}
+        monkeypatch.setattr(
+            distributed,
+            "init_distributed",
+            lambda: seen.setdefault("at_backend_init", os.environ.get(self._ENV)),
+        )
+        monkeypatch.setattr(impl, "run", lambda args: None)
+
+        run_tabascal._run_cmd(_parse("run", "-c", "c.yaml"))
+
+        assert seen["at_backend_init"] == "true"
 
     def test_importing_the_run_implementation_does_not_reassign_it(self):
         """The regression itself, and it can only be caught in a clean process.
@@ -1199,6 +1291,28 @@ class TestDocumentedCommandScraper:
         found = self._page(
             tmp_path,
             '```bash\nA=1 B="two words" tabascal run -c c.yaml\n```\n',
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_an_escaped_space_in_a_value_is_handled_by_the_shell_splitting(self, tmp_path):
+        """Which is why the assignment is matched after splitting, not before.
+
+        A regex over the raw line would have to reimplement quoting to get
+        this right; ``shlex`` has already done it by the time the assignment is
+        recognised.
+        """
+        found = self._page(
+            tmp_path,
+            "```bash\nA=one\\ word tabascal run -c c.yaml\n```\n",
+        )
+        assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_an_unbalanced_quote_is_skipped_rather_than_raised_on(self, tmp_path):
+        """Fenced prose is allowed an apostrophe without failing the scrape."""
+        found = self._page(
+            tmp_path,
+            "```text\nit doesn't parse as a command\n```\n"
+            "```bash\ntabascal run -c c.yaml\n```\n",
         )
         assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
 

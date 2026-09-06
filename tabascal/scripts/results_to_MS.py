@@ -104,6 +104,14 @@ def _gain_tables(values):
 
 
 def main():
+    # A standalone entry point, so nothing above has done this: copying a
+    # results zarr into an MS pulls in tabascal.write and with it JAX, and
+    # taking three quarters of the device to do it is not on. See
+    # scripts/_device_memory.
+    from tabascal.scripts._device_memory import default_memory_on_demand
+
+    default_memory_on_demand()
+
     run(build_parser().parse_args())
 
 

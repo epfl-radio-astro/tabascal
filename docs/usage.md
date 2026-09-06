@@ -172,21 +172,28 @@ a read-only or shared data directory being the usual reason.
 
 ### GPU memory
 
-By default JAX claims 75% of the device the moment it initialises. TABASCAL
-asks for memory on demand instead, so a run can share a GPU and a run that
-fails lets go of the card. Preallocation is the faster choice for a long run on
-a card it has to itself — one arena, taken once, that cannot fragment — so it
-is available by exporting the JAX environment variable before the run:
+JAX preallocates 75% of the device on its first operation. Every TABASCAL
+command asks for memory on demand instead, so a run takes only what it needs
+and can share a card with something else.
+
+The trade is fragmentation: preallocation takes its memory once and so
+minimises it, while allocating on demand is more prone to it over a long run.
+If that is the run you have — a long one, on a card it owns — turn
+preallocation back on with JAX's own switch:
 
 ```bash
 XLA_PYTHON_CLIENT_PREALLOCATE=true tabascal run -c config.yaml -ms file.ms
 ```
 
-Whatever the variable is set to is left alone; TABASCAL only supplies the
-default when it is unset. `XLA_PYTHON_CLIENT_MEM_FRACTION` then sets how much
-of the device is taken, and the rest of
+TABASCAL supplies the default only when the variable is unset, so whatever you
+export is what you get. With preallocation enabled,
+`XLA_PYTHON_CLIENT_MEM_FRACTION` sets the fraction taken instead of 75%; the
+rest of
 [JAX's memory-allocation options](https://docs.jax.dev/en/latest/gpu_memory_allocation.html)
-apply unchanged.
+apply unchanged, `XLA_PYTHON_CLIENT_ALLOCATOR=platform` among them — the one
+setting under which JAX gives memory back to the device rather than reusing it,
+which is slow but is the way to make a run coexist with something it keeps
+running out of memory beside.
 
 ## Extracting RFI light curves
 

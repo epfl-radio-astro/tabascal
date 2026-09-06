@@ -171,24 +171,16 @@ def build_parser():
     return parser
 
 
-#: JAX preallocates 75 % of the device on the first backend init. Memory on
-#: demand instead, which is what lets a run share a GPU and what keeps a failed
-#: run from holding the card. Set here, once, because every subcommand below
-#: reaches JAX eventually -- ``run`` through init_distributed, ``light-curve``
-#: and ``search`` through their estimator imports -- and it has to land before
-#: whichever of them gets there first.
-#:
-#: setdefault: exporting XLA_PYTHON_CLIENT_PREALLOCATE=true asks for the
-#: preallocating allocator, usually to stop a long run fragmenting the pool, and
-#: that is the user's call to make.
-_PREALLOCATE_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
-
-
 def main():
-    import os
     import sys
 
-    os.environ.setdefault(_PREALLOCATE_ENV, "false")
+    # Once, here, rather than on the one path that used to do it: every
+    # subcommand below reaches JAX eventually -- `run` through
+    # init_distributed, the others through their estimator and writer imports
+    # -- and this has to land before whichever of them gets there first.
+    from tabascal.scripts._device_memory import default_memory_on_demand
+
+    default_memory_on_demand()
 
     args = build_parser().parse_args()
 
