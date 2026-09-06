@@ -5,7 +5,7 @@
 I leave this out". That only holds while the keys it ships and the keys the
 components read are the same set. They drifted once already: the base shipped
 ``ast.pow_spec.P0``/``gamma``/``k0`` long after :class:`GPVisAst` had moved to
-``p0``/``gammas``/``fov_deg``/``corr_freq``/``cutoff``, so a config omitting the
+``std``/``gammas``/``fov_deg``/``corr_freq``/``cutoff``, so a config omitting the
 power spectrum died with a ``KeyError`` wrapped in "GPVisAst setup failed" while
 the base config sat there apparently supplying a default for it.
 
@@ -208,7 +208,7 @@ class TestBaseConfigAstKeys:
         ast = base_args(tmp_path)["ast"]
         pow_spec = ast["pow_spec"]
 
-        assert pow_spec["p0"] == pytest.approx(3e3)
+        assert pow_spec["std"] == pytest.approx(26.0)
         # null, and meaning it: no roll-off along the frequency axis.
         assert pow_spec["corr_freq"] is None
         assert pow_spec["gammas"] == pytest.approx([5.0, 5.0])

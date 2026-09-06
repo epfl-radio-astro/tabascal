@@ -1,4 +1,4 @@
-from math import isfinite
+from math import isfinite, sqrt
 
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
@@ -12,10 +12,9 @@ from tabascal.truth import read_true_vis_ast
 
 
 #: The ``ast.pow_spec`` keys and what each may be, for
-#: :func:`tabascal.fft_gp.validate_pow_spec`. Unlike the RFI prior, this section
-#: sets the power at the origin itself: ``p0`` is not renormalised away here.
+#: :func:`tabascal.fft_gp.validate_pow_spec`.
 _POW_SPEC_RULES = {
-    "p0": "number",
+    "std": "number",
     "corr_freq": "number",
     "fov_deg": "number",
     "gammas": "pair",
@@ -29,13 +28,34 @@ _POW_SPEC_RULES = {
 #: the comment above :class:`GPVisAst` explains.
 _POW_SPEC_OPTIONAL = ("fov_deg", "corr_freq")
 
-#: ``k0_freq`` was the same knee expressed as its own reciprocal, and that is
-#: why it cannot be an alias: reading a value ``v`` as a bandwidth puts the knee
+#: Neither of these is an alias, and for the same reason in both cases: the old
+#: key and the new one are not the same quantity, so carrying a value over would
+#: change the prior without saying so. ``p0`` differs from ``std`` by a factor
+#: that depends on the rest of the block, which is why no conversion is offered
+#: for it at all.
+#:
+#: ``k0_freq`` was the same knee expressed as its own reciprocal: reading a value ``v`` as a bandwidth puts the knee
 #: at ``1 / (2 pi v)`` where it used to be ``v``, so it moves by
 #: ``1 / (2 pi v^2)`` -- a factor of 6.28 for the shipped ``k0_freq: 1``, and
 #: unchanged only at ``v = 1 / sqrt(2 pi)``, which is nobody's setting. A key
 #: whose units invert has to be refused and converted by hand.
 _POW_SPEC_RENAMED = {
+    "p0": (
+        "std",
+        "std is the width of the prior on the astronomical visibilities, a "
+        "standard deviation in Jy, and it is that width because the power "
+        "spectrum is normalised to it. p0 was the power at k=0 of a spectrum "
+        "that was not normalised, so the width it produced was p0 times a "
+        "constant that depended on gammas, cutoff and fov_deg and was not "
+        "written down anywhere: on the shipped 8A configuration p0: 3e3 is a "
+        "prior 26 Jy wide (25.8 to 31.7 across its baselines), which is "
+        "neither 3e3 nor its square root, and raising cutoff alone -- an "
+        "efficiency setting -- widened it by 34 %. There is no "
+        "conversion to offer you because it is not one number. Set std to the "
+        "visibility amplitude you see in a channel with no RFI in it: that "
+        "puts the true sky within 1 sigma of the prior, and unlike p0 it stays "
+        "true when you change gammas, cutoff or fov_deg.",
+    ),
     "k0_freq": (
         "corr_freq",
         "It is the same knee the other way up: k0_freq was a delay in seconds, "
@@ -49,6 +69,24 @@ _POW_SPEC_RENAMED = {
         "corr_freq unset for that, which says so.",
     ),
 }
+
+#: The power spectrum is used for its shape alone -- which modes survive
+#: ``cutoff``, and their relative weight -- and the amplitude is applied by
+#: normalising the mode standard deviations to ``std``. This is the ``p0`` the
+#: shape is evaluated with; any positive value gives the same shape and the
+#: same surviving modes, so it is 1.
+_SHAPE_ONLY = 1.0
+
+#: ``sqrt(E|z|^2)`` for the latent :meth:`GPVisAst.build_set_params` draws: a
+#: real and an imaginary standard normal, so the complex latent carries twice
+#: the variance of the unit circularly-symmetric one and the signal comes out
+#: ``sqrt(2)`` wider than the mode variances alone. Dividing it out is what
+#: makes ``std`` the width of the visibility rather than of its real part.
+#:
+#: ``math``, not ``jnp``: this module is imported before ``set_precision`` runs,
+#: so a jax scalar here would be built in float32 and a double run would carry a
+#: float32 sqrt(2) into its prior.
+_LATENT_WIDTH = sqrt(2.0)
 
 #: ``corr_freq: null`` is no roll-off along the frequency axis:
 #: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee and
@@ -108,7 +146,7 @@ class GPVisAst(Component):
             )
             config.args["ast"]["pow_spec"] = pow_spec
 
-            self.p0 = pow_spec["p0"]
+            self.std = pow_spec["std"]
             self.gammas = pow_spec["gammas"]
             self.fov_deg = pow_spec["fov_deg"]
             self.pk_cutoff = pow_spec["cutoff"]
@@ -351,12 +389,20 @@ class GPVisAst(Component):
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]
 
+        # 1.0, not the amplitude: both of these want the *shape* of the power
+        # spectrum, and use it only to decide which modes survive `cutoff`. That
+        # test is `pk > cutoff * pk.max(axis=i)` on each axis, and `pow_spec_nd`
+        # applies p0 as one final multiply, so both sides scale together and the
+        # surviving set is the same for any positive p0 -- exactly so in double,
+        # and in single for everything except a spectrum that underflows, which
+        # is what passing 1.0 rather than the amplitude rules out. The amplitude
+        # is applied afterwards, by normalising sigma.
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,
             dxs,
             self.pad_factors,
             self.ss_factors,
-            self.p0,
+            _SHAPE_ONLY,
             self.k0s,
             self.gammas,
             self.pk_cutoff,
@@ -367,7 +413,7 @@ class GPVisAst(Component):
             ns,
             dxs,
             self.pad_factors,
-            self.p0,
+            _SHAPE_ONLY,
             self.k0s,
             self.gammas,
             self.pk_cutoff,
@@ -382,10 +428,40 @@ class GPVisAst(Component):
 
         self.n_k_freq_ast, self.n_k_time_ast = self.pk.shape
 
-        sigma = lambda k0: jnp.sqrt(
-            pow_spec_nd(self.ks, self.p0, [self.k0_freq, k0], self.gammas)
-            / self.pk.size
-        )
+        def sigma(k0):
+            """Mode standard deviations that make ``std`` the width of vis_ast.
+
+            The modes are independent, so the variance of the signal they build
+            is the sum of theirs. Dividing the shape by its own sum makes that
+            sum one; the remaining ``sqrt(2)`` is the latent.
+            :meth:`build_set_params` draws ``ast_k_r_base`` and ``ast_k_i_base``
+            as two independent standard normals, so the complex latent has
+            ``E|z|^2 = 2`` rather than 1, and the visibility comes out
+            ``sqrt(2)`` wider than the mode variances alone would say.
+
+            With it, ``std`` is the width of the *complex* visibility --
+            ``rms|vis_ast|`` -- so "set it to the amplitude you see in a clean
+            channel" is literally true rather than true after dividing by
+            ``sqrt(2)``. That is the property the key exists to have. It is not
+            the convention ``rfi`` uses, which normalises per component, and
+            the two were never the same thing anyway: ``rfi`` normalises
+            ``rfi_A``, which the visibility is quadratic in.
+
+            What this replaces divided by ``pk.size`` instead, leaving the width
+            as ``p0`` times a factor that moved with every other setting. On the
+            shipped 8A configuration ``p0: 3e3`` is a prior 26 Jy wide, and
+            raising ``cutoff`` from 1e-6 to 1e-3 -- which is there to drop
+            modes, not to change the sky -- widened it by 34 %, while shallower
+            ``gammas`` narrowed it by 22 %.
+
+            Per baseline, because ``k0`` is that baseline's own maximum fringe
+            rate: normalising each one separately is what makes the configured
+            width the width on every baseline rather than on an average one.
+            """
+
+            shape = pow_spec_nd(self.ks, _SHAPE_ONLY, [self.k0_freq, k0], self.gammas)
+
+            return (self.std / _LATENT_WIDTH) * jnp.sqrt(shape / jnp.sum(shape))
 
         self.sigma_ast_k = vmap(sigma, (0), 0)(self.k0_time)
 

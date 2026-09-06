@@ -374,6 +374,144 @@ def pow_spec_config(tmp_path, **overrides):
     return config
 
 
+class TestThePriorAmplitudeIsTheWidthItClaims:
+    """``p0`` was the power at k=0 of a spectrum nothing normalised.
+
+    The width it produced was ``p0`` times a factor that depended on
+    ``gammas``, on ``cutoff`` and on the grid, and was written down nowhere: on
+    the shipped 8A configuration ``p0: 3e3`` is a prior 26 Jy wide, 25.8 to
+    31.7 across its baselines, which is neither 3e3 nor its square root. Worse,
+    ``cutoff`` exists to drop modes that carry no power -- an efficiency
+    setting -- and raising it to 1e-3 widened the prior by 34 %.
+
+    ``std`` is that width, in Jy, because the spectrum is normalised to it.
+    """
+
+    def _realised_std(self, tmp_path, draws=400, seed=0, **overrides):
+        """The width of the prior these settings actually produce, sampled.
+
+        Through the component's real ``build_forward``, so the pad, the scan
+        over the baseline axis and the crop are all in the path -- a helper
+        that redid the transform by hand would not have caught a block sized
+        wrongly or a per-baseline sigma paired with the wrong baseline. And
+        over *every* baseline, not baseline 0, since the normalisation is per
+        baseline and one of them tells you nothing about the rest.
+
+        The latent is drawn the way :meth:`GPVisAst.build_set_params` draws it
+        -- a real and an imaginary standard normal -- and not as one complex
+        normal. They are not the same distribution: JAX's complex normal is
+        circularly symmetric with ``E|z|^2 = 1``, the model's carries 2, and a
+        check that draws the first while measuring a complex width gets the
+        right answer from two errors of ``sqrt(2)`` cancelling.
+        """
+        from jax import random
+
+        comp = setup_ast(pow_spec_config(tmp_path, **overrides))
+        forward = comp.build_forward()
+        shape = (comp.n_bl, comp.n_k_freq_ast, comp.n_k_time_ast)
+
+        total, count = 0.0, 0
+        for draw in range(draws):
+            keys = random.split(random.PRNGKey(seed + draw), 2)
+            params = {
+                "ast_k_r_base": random.normal(keys[0], shape),
+                "ast_k_i_base": random.normal(keys[1], shape),
+            }
+            vis = forward(params, dict(comp.state_outputs), make_constants(comp))[
+                "vis_ast"
+            ]
+            total += float(jnp.sum(jnp.abs(vis) ** 2))
+            count += vis.size
+
+        # rms|V|, which is what `std` is defined as -- the same quantity a user
+        # reads off a clean channel.
+        return float(np.sqrt(total / count))
+
+    def test_the_configured_number_is_the_prior_width(self, tmp_path):
+        """Not its square, not its square root, and not times a constant.
+
+        ``rms|V|`` specifically, which is the quantity the guidance names: read
+        the amplitude off a channel with no RFI in it and put that number here.
+        """
+        assert self._realised_std(tmp_path, std=30.0) == pytest.approx(30.0, rel=0.02)
+
+    def test_it_is_the_complex_width_and_not_the_real_part(self, tmp_path):
+        """The factor of sqrt(2) that the first version of this got wrong.
+
+        The two differ by exactly that, so a prior normalised per component
+        would sit here at 30 / sqrt(2); asserting both ends pins which one the
+        key means and would catch the factor going missing again.
+        """
+        from jax import random, vmap
+        from tabascal.fft_gp import latent_to_signal
+
+        comp = setup_ast(pow_spec_config(tmp_path, std=30.0))
+        sigma = comp.sigma_ast_k[0]
+        keys = random.split(random.PRNGKey(0), 2)
+        shape = (6000, *sigma.shape)
+        base = random.normal(keys[0], shape) + 1j * random.normal(keys[1], shape)
+        vis = vmap(latent_to_signal, (0, None, None), 0)(
+            sigma * base, comp.pads, comp.ss_idxs
+        )
+
+        assert float(jnp.sqrt(jnp.mean(jnp.abs(vis) ** 2))) == pytest.approx(30.0, rel=0.02)
+        assert float(jnp.std(vis.real)) == pytest.approx(30.0 / jnp.sqrt(2.0), rel=0.02)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            # Both of these actually drop modes on this fixture: 0.5 keeps 40
+            # of 128 and 0.1 keeps 120. A cutoff below about 0.02 keeps all
+            # of them here, so the 1e-3/1e-9 pair this started with was
+            # re-running the baseline case without varying the one thing it is
+            # here to vary.
+            {"cutoff": 0.5},
+            {"cutoff": 0.1},
+            {"gammas": [3.0, 3.0]},
+            {"gammas": [8.0, 8.0]},
+            {"fov_deg": 2.0},
+        ],
+        ids=["cutoff keeps 40/128", "cutoff keeps 120/128", "shallow gammas", "steep gammas", "narrow fov"],
+    )
+    def test_the_width_survives_the_other_settings(self, tmp_path, overrides):
+        """The property ``p0`` did not have, and the reason for the change.
+
+        Each of these changes which modes are fitted or how they are weighted.
+        None of them is a statement about how bright the sky is, so none of
+        them may move the width of the prior on it.
+        """
+        assert self._realised_std(tmp_path, std=30.0, **overrides) == pytest.approx(
+            30.0, rel=0.02
+        )
+
+    def test_every_baseline_gets_the_configured_width(self, tmp_path):
+        """Each baseline's knee is its own maximum fringe rate.
+
+        Normalising per baseline is what makes ``std`` the width everywhere
+        rather than on an average baseline: unnormalised, the shipped
+        configuration spans a factor of 1.23 across its baselines.
+        """
+        comp = setup_ast(pow_spec_config(tmp_path, std=30.0))
+
+        # The realised variance, which is twice the sum of the mode variances:
+        # the latent carries E|z|^2 = 2. Asserting the sum alone would pin the
+        # arithmetic without saying what it is for.
+        realised = 2 * jnp.sum(comp.sigma_ast_k**2, axis=(1, 2))
+
+        assert np.allclose(np.asarray(realised), 30.0**2, rtol=1e-5)
+
+    def test_the_old_name_is_refused_with_the_guidance(self, tmp_path):
+        """No conversion is offered because there is not one to offer.
+
+        The factor between them depends on the other settings, so a number
+        carried over would be a different prior on a different config.
+        """
+        message = setup_error(pow_spec_config(tmp_path, p0=3e3))
+
+        assert "ast.pow_spec.p0 was renamed ast.pow_spec.std" in message
+        assert "channel with no RFI in it" in message
+
+
 class TestTheFrequencyKneeIsAskedForAsABandwidth:
     """``k0_freq`` was the knee itself, a delay in seconds, and read as one.
 
@@ -484,7 +622,7 @@ class TestAstPowSpecIsValidated:
 
         assert comp.n_k_freq_ast >= 1 and comp.n_k_time_ast >= 1
 
-    @pytest.mark.parametrize("key", ["p0", "corr_freq", "cutoff"])
+    @pytest.mark.parametrize("key", ["std", "corr_freq", "cutoff"])
     @pytest.mark.parametrize("value", [0, -1, "3e3", True, float("inf"), float("nan")])
     def test_a_scalar_key_that_is_not_a_positive_number_is_refused(
         self, tmp_path, key, value
@@ -539,7 +677,7 @@ class TestAstPowSpecIsValidated:
         setup_ast(pow_spec_config(tmp_path, fov_deg=None))
         setup_ast(pow_spec_config(tmp_path, corr_freq=None))
 
-        for key in ("p0", "gammas", "cutoff"):
+        for key in ("std", "gammas", "cutoff"):
             message = setup_error(pow_spec_config(tmp_path, **{key: None}))
             assert f"ast.pow_spec.{key}" in message
             assert "required" in message

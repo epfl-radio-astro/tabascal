@@ -55,7 +55,7 @@ ast:
   mean: 0
   # mean: data
   pow_spec:
-    p0: 3e3
+    std: 26           # prior width in Jy, as rms|V|; see docs/config.md
     corr_freq: null   # no frequency roll-off; these observations are single channel
     fov_deg: 5
     gammas: [5, 5]

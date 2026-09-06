@@ -502,8 +502,9 @@ class TabConfig:
         gains are applied once at read time instead of on every forward pass,
         and everything downstream (priors, RFI/AST models, chi^2, and the
         results written back to the MS) lives in one frame: the calibrated one.
-        That retires the manual "scale the noise by k and ``ast.pow_spec.p0`` by
-        k^2" workaround.
+        That retires the manual "scale the noise by k and ``ast.pow_spec.std`` by
+        k" workaround -- by k, not k^2, since std is a standard deviation in Jy
+        and scales with the data rather than with its square.
 
         The noise is carried with the data -- ``sigma_cal = sigma / |g_p
         conj(g_q)|`` -- which is the point of using a table rather than scaling

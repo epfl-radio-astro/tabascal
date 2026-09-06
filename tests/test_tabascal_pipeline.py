@@ -132,8 +132,11 @@ class PipelineTestConfig:
             x86 was still at ~1.13 there), which forced wide ``(lo, hi)`` bounds for
             single. The current Fourier model converges to the same point in fp32 as
             in fp64 -- measured agreement is 2.4e-5 relative, ~400x inside the 1%
-            tolerance, and ARM/x86/GPU agree with each other to ~1e-7 in both
-            precisions -- so the split bought nothing and was removed.
+            tolerance, and ARM/x86/GPU agreed with each other to ~1e-7 in both
+            precisions when all three were last measured together -- so the split
+            bought nothing and was removed. The fp32/fp64 figure is current; the
+            cross-architecture one predates the ast.pow_spec.std re-recording, for
+            which only ARM was measured.
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
         config_overrides: Dictionary of overrides to the tabascal config file
@@ -384,14 +387,19 @@ trajectory_configs = [
             # requires_double (phase trajectory needs fp64), so this runs in fp64 only.
             # Measured opt-point values, double precision (gains identity -> RMSE 0):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8875838768982116 |     0.2615       1.1      |     0.4274       0.2
-            #   x86  | 0.8875838755053758 |     0.2615       1.1      |     0.4274       0.2
-            #   GPU  | 0.8875838811609812 |     0.2615       1.1      |     0.4274       0.2
-            # (re-recorded for the exact astronomical fringe rate, which sets the k0 knee of
-            # the ast power-spectrum prior. ARM = Apple silicon CPU, x86 = x86_64 CPU,
-            # GPU = NVIDIA. The three agree to 6e-9 relative, far inside the 1% tolerance,
-            # so the asserted value being the ARM one is immaterial.)
-            chi2_ref=0.8875838768982116,
+            #   ARM  | 0.8876575517827784 |     0.2611       1.1      |     0.4274       0.2
+            #   x86  | 0.8875838755053758 |     0.2615       1.1      |     0.4274       0.2  (stale)
+            #   GPU  | 0.8875838811609812 |     0.2615       1.1      |     0.4274       0.2  (stale)
+            # (ARM = Apple silicon CPU, x86 = x86_64 CPU, GPU = NVIDIA. Before the
+            # std re-recording the three agreed to 6e-9 relative, far inside the 1%
+            # tolerance, so the asserted value being the ARM one was immaterial;
+            # that is the expectation the stale rows should meet again when they
+            # are re-measured.)
+            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # visibilities is normalised to rms|V| in Jy now, so it is a different
+            # prior. Only the ARM rows are measured here; x86 and GPU are the values
+            # from before the change and are stale until someone re-measures them.
+            chi2_ref=0.8876575517827784,
             requires_double=True,
             metrics_ref={
                 "ast": {"NRMSE(noise)": (0.24, 0.28), "bias_significance": (0.0, 2.0)},
@@ -418,10 +426,14 @@ trajectory_configs = [
             # Measured opt-point values, double precision (gains identity -> RMSE 0); see the
             # note on the FixedOrbit case for what ARM/x86/GPU are:
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8686239283739090 |     0.2874       0.9      |     0.4916       0.7
-            #   x86  | 0.8686239181926775 |     0.2874       0.9      |     0.4916       0.7
-            #   GPU  | 0.8686239279264559 |     0.2874       0.9      |     0.4916       0.7
-            chi2_ref=0.868623928373909,
+            #   ARM  | 0.8687068167900761 |     0.2871       0.9      |     0.4915       0.7
+            #   x86  | 0.8686239181926775 |     0.2874       0.9      |     0.4916       0.7  (stale)
+            #   GPU  | 0.8686239279264559 |     0.2874       0.9      |     0.4916       0.7  (stale)
+            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # visibilities is normalised to rms|V| in Jy now, so it is a different
+            # prior. Only the ARM rows are measured here; x86 and GPU are the values
+            # from before the change and are stale until someone re-measures them.
+            chi2_ref=0.8687068167900761,
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
             metrics_ref={
@@ -449,11 +461,16 @@ trajectory_configs = [
             # Measured opt-point values, double precision (gains identity -> RMSE 0; matches
             # NoDragOrbit -- same orbit to fp precision):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8686239149667875 |     0.2874       0.9      |     0.4916       0.7
-            #   x86  | 0.8686238995457578 |     0.2874       0.9      |     0.4916       0.7
-            #   GPU  | 0.8686239471235949 |     0.2874       0.9      |     0.4916       0.7
-            # (widest spread of any case, and still only 5.5e-8 relative.)
-            chi2_ref=0.8686239149667875,
+            #   ARM  | 0.8687067516297720 |     0.2871       0.9      |     0.4915       0.7
+            #   x86  | 0.8686238995457578 |     0.2874       0.9      |     0.4916       0.7  (stale)
+            #   GPU  | 0.8686239471235949 |     0.2874       0.9      |     0.4916       0.7  (stale)
+            # (widest spread of any case, and still only 5.5e-8 relative -- measured
+            # before the std re-recording, across the three rows as they then were.)
+            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # visibilities is normalised to rms|V| in Jy now, so it is a different
+            # prior. Only the ARM rows are measured here; x86 and GPU are the values
+            # from before the change and are stale until someone re-measures them.
+            chi2_ref=0.8687067516297720,
             requires_double=True,
             config_overrides={"opt": {"max_iter": 200}},
             metrics_ref={
@@ -489,7 +506,11 @@ rfi_vis_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            chi2_ref=0.8874370375849675,
+            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # visibilities is normalised to rms|V| in Jy now, so it is a different
+            # prior. Only the ARM rows are measured here; x86 and GPU are the values
+            # from before the change and are stale until someone re-measures them.
+            chi2_ref=0.8875105389233869,
             # Truth-based metrics at the opt point. ast/rfi assert NRMSE(noise) -- the residual
             # against the thermal-noise floor, the science-meaningful yardstick (< 1 means
             # sub-noise) and the most architecture-stable normalisation -- plus
@@ -498,22 +519,23 @@ rfi_vis_configs = [
             # coherent bias" guard, not a tight value: the bias is ~1 sigma here (N_eff ~ 50),
             # so the upper bound only trips on gross RFI->ast leakage.
             #
-            # Measured opt-point values (UnitaryGains -> identity gains, so gains RMSE ~0),
-            # re-recorded for the exact astronomical fringe rate on all three platforms in
-            # both precisions:
+            # Measured opt-point values (UnitaryGains -> identity gains, so gains RMSE ~0).
+            # Only the ARM rows are current: see the note above on ast.pow_spec.std.
             #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | chi2
-            #   double  ARM    |      0.2617        1.1     |      0.4277       0.2     | 0.8874370376
-            #   double  x86    |      0.2617        1.1     |      0.4277       0.2     | 0.8874370374
-            #   double  GPU    |      0.2617        1.1     |      0.4277       0.2     | 0.8874370374
-            #   single  ARM    |      0.2617        1.1     |      0.4277       0.2     | 0.8874580860
-            #   single  x86    |      0.2617        1.1     |      0.4277       0.2     | 0.8874580860
-            #   single  GPU    |      0.2617        1.1     |      0.4277       0.2     | 0.8874580264
+            #   double  ARM    |      0.2614        1.1     |      0.4277       0.2     | 0.8875105389
+            #   double  x86    |      0.2617        1.1     |      0.4277       0.2     | 0.8874370374  (stale)
+            #   double  GPU    |      0.2617        1.1     |      0.4277       0.2     | 0.8874370374  (stale)
+            #   single  ARM    |      0.2614        1.1     |      0.4277       0.2     | 0.8875315785
+            #   single  x86    |      0.2617        1.1     |      0.4277       0.2     | 0.8874580860  (stale)
+            #   single  GPU    |      0.2617        1.1     |      0.4277       0.2     | 0.8874580264  (stale)
             # fp32 and fp64 agree to 2.4e-5 on chi2 and to the printed precision on the
-            # metrics, on every platform tested, so a single set of references covers both
-            # and there is no per-precision split. The fp32 offset is the same 2.4e-5 on
-            # ARM, x86 and CUDA alike, i.e. a precision effect rather than an architecture
-            # one; the cross-architecture spread is <=1.7e-10 in double and <=6.7e-8 in
-            # single. That is what makes one scalar at 1% tolerance safe for both.
+            # metrics, so a single set of references covers both and there is no
+            # per-precision split; that is what makes one scalar at 1% tolerance safe for
+            # both. Before the std re-recording the fp32 offset was the same 2.4e-5 on ARM,
+            # x86 and CUDA alike -- a precision effect rather than an architecture one --
+            # with a cross-architecture spread <=1.7e-10 in double and <=6.7e-8 in single.
+            # That is the expectation the stale rows should meet again when re-measured;
+            # the gap they show now is this change, not an architecture difference.
             metrics_ref={
                 "ast": {"NRMSE(noise)": (0.24, 0.28), "bias_significance": (0.0, 2.0)},
                 "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
@@ -536,13 +558,17 @@ rfi_vis_configs = [
             # match the non-FFI RiemannVis case above. Measured opt-point
             # values (gains identity -> RMSE 0):
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   double  ARM    | 0.8874370376 |     0.2617       1.1      |     0.4277       0.2
-            #   double  x86    | 0.8874370374 |     0.2617       1.1      |     0.4277       0.2
-            #   double  GPU    | 0.8874370374 |     0.2617       1.1      |     0.4277       0.2
-            #   single  ARM    | 0.8874580264 |     0.2617       1.1      |     0.4277       0.2
-            #   single  x86    | 0.8874580860 |     0.2617       1.1      |     0.4277       0.2
-            #   single  GPU    | 0.8874580264 |     0.2617       1.1      |     0.4277       0.2
-            chi2_ref=0.8874370375849675,
+            #   double  ARM    | 0.8875105389 |     0.2614       1.1      |     0.4277       0.2
+            #   double  x86    | 0.8874370374 |     0.2617       1.1      |     0.4277       0.2  (stale)
+            #   double  GPU    | 0.8874370374 |     0.2617       1.1      |     0.4277       0.2  (stale)
+            #   single  ARM    | 0.8875315785 |     0.2614       1.1      |     0.4277       0.2
+            #   single  x86    | 0.8874580860 |     0.2617       1.1      |     0.4277       0.2  (stale)
+            #   single  GPU    | 0.8874580264 |     0.2617       1.1      |     0.4277       0.2  (stale)
+            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # visibilities is normalised to rms|V| in Jy now, so it is a different
+            # prior. Only the ARM rows are measured here; x86 and GPU are the values
+            # from before the change and are stale until someone re-measures them.
+            chi2_ref=0.8875105389233868,
         ),
         id="RiemannVisFFI",
     ),
@@ -762,9 +788,12 @@ def _sharded_components(rfi_vis: str) -> list[str]:
 
 
 # Same case as FixedOrbit+PhaseCalculationRFI above (double precision), so it shares that
-# case's re-recorded reference. Verified on ARM CPU, x86 CPU and an NVIDIA GPU (the sharded
-# child is pinned to CPU by this test either way; the reference run uses whatever is there).
-_SHARDED_CHI2_REF = 0.8875838768982116
+# case's re-recorded reference and has to move with it -- the 1% tolerance is wide enough to
+# hide a missed update here, so it is worth checking the two match when either changes.
+# Verified on ARM CPU, x86 CPU and an NVIDIA GPU before the ast.pow_spec.std re-recording
+# (the sharded child is pinned to CPU by this test either way; the reference run uses
+# whatever is there); only ARM is current now, as in the case blocks above.
+_SHARDED_CHI2_REF = 0.8876575517827784
 
 
 def _prepare_sharded_run(
