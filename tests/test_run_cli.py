@@ -23,11 +23,25 @@ _DOCS = _REPO / "docs"
 # A shell prompt some docs put in front of a command.
 _PROMPT = re.compile(r"^\$\s+")
 
+#: Fence languages whose contents are not shell, and so hold no commands. The
+#: docs write commands in bare fences and in ``bash`` and ``console`` ones, so
+#: excluding by language is the only filter that does not lose any of them.
+_NOT_SHELL = frozenset(
+    {"python", "py", "yaml", "yml", "json", "toml", "ini", "text", "output"}
+)
+
 #: One token of the ``NAME=value`` environment a shell may put in front of a
 #: command. Consumed after ``shlex`` has split the line rather than matched
 #: against the raw text, so quoting and escapes are the shell's business and
 #: not this regex's.
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+#: Enough of a command to insist that it split: the same shape ``shlex`` is
+#: about to be asked for, matched loosely against the raw line. Its only job is
+#: to decide whether a line that will not tokenize is a broken documented
+#: command or fenced prose.
+_LOOKS_LIKE_COMMAND = re.compile(r"^(?:\S+=\S*\s+)*tabascal(\s|$)")
 
 
 def _command_tokens(line):
@@ -40,14 +54,18 @@ def _command_tokens(line):
 
     ``shlex``, not ``split()``: a shell hands ``-od ""`` an empty argument and
     ``-od "output dir"`` a single one, and a check that reads the parsed options
-    has to see what the shell would have passed. An unbalanced quote is prose
-    inside a fence rather than a command -- fenced output is allowed an
-    apostrophe -- so it is skipped rather than raised on.
+    has to see what the shell would have passed.
     """
 
     try:
         tokens = shlex.split(line)
     except ValueError:
+        # A line that will not tokenize is either a documented command with an
+        # unbalanced quote -- copy-paste that fails for a reader, and so has to
+        # be raised on rather than quietly dropped from the checked set -- or
+        # prose in a fence, which is allowed its apostrophe.
+        if _LOOKS_LIKE_COMMAND.match(line):
+            raise
         return None
 
     while tokens and _ASSIGNMENT.match(tokens[0]):
@@ -100,13 +118,18 @@ def documented_commands(docs_dir=_DOCS, readme=_README):
 
     commands = []
     for page in _documented_pages(docs_dir, readme):
+        shell = False
         in_code = False
         for line in page.read_text().splitlines():
             line = line.strip()
             if line.startswith("```"):
+                # An untagged fence counts: the docs use bare fences, `bash`
+                # and `console` for commands, so only the languages that are
+                # definitely not shell are excluded.
+                shell = not in_code and line[3:].strip().lower() not in _NOT_SHELL
                 in_code = not in_code
                 continue
-            if not in_code:
+            if not shell:
                 continue
             line = _PROMPT.sub("", line)
             # Strip trailing comments used to annotate help invocations.
@@ -449,10 +472,12 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
     ):
         """``_run_cmd`` for real rather than stubbed: the assignment lived here.
 
-        ``init_distributed`` is where the run path first brings the device
-        backend up, and the variable is read then, so the environment as that
-        call sees it is the one that decides. A dispatch-level test cannot say
-        this -- it replaces the very function that used to do the assigning.
+        A dispatch-level test cannot say this -- it replaces the very function
+        that used to do the assigning. Both of the calls ``_run_cmd`` makes are
+        watched, because neither alone is the moment that matters:
+        ``init_distributed`` returns without touching JAX outside a
+        multi-process launch, and the run itself is simply the last thing in
+        the function, so between them they cover every line of it.
         """
         import tabascal.distributed as distributed
 
@@ -464,13 +489,15 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         monkeypatch.setattr(
             distributed,
             "init_distributed",
-            lambda: seen.setdefault("at_backend_init", os.environ.get(self._ENV)),
+            lambda: seen.__setitem__("at_distributed", os.environ.get(self._ENV)),
         )
-        monkeypatch.setattr(impl, "run", lambda args: None)
+        monkeypatch.setattr(
+            impl, "run", lambda args: seen.__setitem__("at_run", os.environ.get(self._ENV))
+        )
 
         run_tabascal._run_cmd(_parse("run", "-c", "c.yaml"))
 
-        assert seen["at_backend_init"] == "true"
+        assert seen == {"at_distributed": "true", "at_run": "true"}
 
     def test_importing_the_run_implementation_does_not_reassign_it(self):
         """The regression itself, and it can only be caught in a clean process.
@@ -1307,14 +1334,27 @@ class TestDocumentedCommandScraper:
         )
         assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
 
-    def test_an_unbalanced_quote_is_skipped_rather_than_raised_on(self, tmp_path):
-        """Fenced prose is allowed an apostrophe without failing the scrape."""
+    def test_an_unbalanced_quote_in_prose_is_skipped(self, tmp_path):
+        """A fenced line that is not a command is allowed its apostrophe."""
         found = self._page(
             tmp_path,
-            "```text\nit doesn't parse as a command\n```\n"
-            "```bash\ntabascal run -c c.yaml\n```\n",
+            "```bash\n# it doesn't run anything\ntabascal run -c c.yaml\n```\n",
         )
         assert found == [("page.md", ["tabascal", "run", "-c", "c.yaml"])]
+
+    def test_an_unbalanced_quote_in_a_command_is_raised_on(self, tmp_path):
+        """Because a reader would copy it and get the same error.
+
+        Dropping it instead would take a broken documented command out of the
+        checked set for exactly as long as it stayed broken.
+        """
+        with pytest.raises(ValueError):
+            self._page(tmp_path, '```bash\ntabascal run -c "c.yaml\n```\n')
+
+    def test_a_command_in_a_non_shell_fence_is_not_scraped(self, tmp_path):
+        """A python or yaml block is not somewhere commands are run."""
+        found = self._page(tmp_path, "```python\ntabascal = 1\n```\n")
+        assert found == []
 
     def test_an_environment_prefix_on_something_else_is_still_ignored(self, tmp_path):
         """The prefix does not make a non-command into one."""

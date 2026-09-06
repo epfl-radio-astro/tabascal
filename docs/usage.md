@@ -187,13 +187,17 @@ XLA_PYTHON_CLIENT_PREALLOCATE=true tabascal run -c config.yaml -ms file.ms
 
 TABASCAL supplies the default only when the variable is unset, so whatever you
 export is what you get. With preallocation enabled,
-`XLA_PYTHON_CLIENT_MEM_FRACTION` sets the fraction taken instead of 75%; the
-rest of
+`XLA_PYTHON_CLIENT_MEM_FRACTION` sets the fraction taken instead of 75%, which
+is the usual way to fit two processes on one card.
+
+The rest of
 [JAX's memory-allocation options](https://docs.jax.dev/en/latest/gpu_memory_allocation.html)
-apply unchanged, `XLA_PYTHON_CLIENT_ALLOCATOR=platform` among them — the one
-setting under which JAX gives memory back to the device rather than reusing it,
-which is slow but is the way to make a run coexist with something it keeps
-running out of memory beside.
+apply unchanged. `XLA_PYTHON_CLIENT_ALLOCATOR=platform` is worth knowing about:
+it is the only setting under which JAX returns memory to the device instead of
+holding it for reuse, which makes it useful for the smallest possible footprint
+and for finding out where an out-of-memory error really comes from. It is slow,
+and it frees only what is no longer live — it cannot make two overlapping peaks
+fit.
 
 ## Extracting RFI light curves
 

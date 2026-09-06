@@ -1,17 +1,17 @@
-import os
-
-# Memory on demand rather than the 75 % of the device JAX grabs up front, set
-# before the imports below bring the backend up. Spelled out rather than
-# calling scripts._device_memory, which would be an import above the one line
-# that has to run before every other import in the file.
+# Before every other import in this file: the imports below bring the JAX
+# backend up, and this is read when it initialises. The helper imports nothing
+# but os, so putting it above them costs nothing.
 #
-# setdefault, not assignment. This used to assign, and since the CLI had
-# already deferred to XLA_PYTHON_CLIENT_PREALLOCATE in run_tabascal.main by the
-# time it imported this module, that took the user's choice back a few lines
-# later. It is still the default for anything importing this module directly
-# rather than through an entry point.
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+# It setdefaults rather than assigns. This line used to assign, and since an
+# entry point had already deferred to XLA_PYTHON_CLIENT_PREALLOCATE by the time
+# it imported this module, that took the user's choice back a few lines later.
+# Called here as well as from the entry points so that importing this module
+# directly still gets the default.
+from tabascal.scripts._device_memory import default_memory_on_demand
 
+default_memory_on_demand()
+
+import os
 import sys
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
