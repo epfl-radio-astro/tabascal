@@ -25,35 +25,42 @@ _POW_SPEC_RULES = {
 #: Both knees may be null, and mean different things by it. ``fov_deg`` unset is
 #: the telescope's own primary beam, 2 * 1.22 * lambda / D from the dish
 #: diameter in the measurement set, rather than a field of view chosen by hand.
-#: ``corr_freq`` unset is no roll-off along the frequency axis at all -- see
-#: :data:`_NO_FREQ_ROLLOFF`.
+#: ``corr_freq`` unset is no roll-off along the frequency axis at all, which
+#: the comment above :class:`GPVisAst` explains.
 _POW_SPEC_OPTIONAL = ("fov_deg", "corr_freq")
 
 #: ``k0_freq`` was the same knee expressed as its own reciprocal, and that is
-#: why it cannot be an alias: read as a bandwidth, the shipped ``k0_freq: 1``
-#: becomes 1 Hz instead of the 0.16 Hz it means, and any hand-set value moves
-#: by however far it sat from ``1 / (2 pi)``. A key whose units invert has to
-#: be refused and converted by hand.
+#: why it cannot be an alias: reading a value ``v`` as a bandwidth puts the knee
+#: at ``1 / (2 pi v)`` where it used to be ``v``, so it moves by
+#: ``1 / (2 pi v^2)`` -- a factor of 6.28 for the shipped ``k0_freq: 1``, and
+#: unchanged only at ``v = 1 / sqrt(2 pi)``, which is nobody's setting. A key
+#: whose units invert has to be refused and converted by hand.
 _POW_SPEC_RENAMED = {
     "k0_freq": (
         "corr_freq",
         "It is the same knee the other way up: k0_freq was a delay in seconds, "
         "corr_freq is the correlation bandwidth in Hz that delay corresponds "
         "to, corr_freq = 1 / (2 pi k0_freq). This is not an alias and the value "
-        "does not carry over -- converting it for you would change the prior "
-        "silently. The shipped k0_freq: 1 was a knee at one second, which is "
-        "far beyond the largest delay any observation can represent (the axis "
-        "runs to 1 / (2 * chan_width), 2.4 us for 209 kHz channels), so it "
-        "never rolled anything off. Leave corr_freq unset for that, which says "
-        "so.",
+        "does not carry over -- read as a bandwidth it would move the knee by "
+        "1 / (2 pi k0_freq^2), a factor of 6.28 for the shipped k0_freq: 1, "
+        "without a word. That shipped value was a knee at one second, against "
+        "a delay axis running to 1 / (2 * chan_width) -- 2.4 us for the 209 kHz "
+        "channels of these configurations -- so it rolled nothing off. Leave "
+        "corr_freq unset for that, which says so.",
     ),
 }
 
-#: ``corr_freq: null`` is no roll-off along the frequency axis --
-#: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee, and
-#: the power spectrum is flat there. That reproduces the ``k0_freq: 1`` it
-#: replaces to 1.6e-11 relative, below single precision's epsilon, and exactly
-#: on a single channel, where the only delay mode is zero.
+#: ``corr_freq: null`` is no roll-off along the frequency axis:
+#: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee and
+#: the power spectrum is flat there.
+#:
+#: That is what the ``k0_freq: 1`` it replaces amounted to. On a single channel
+#: the two are bit-identical at any channel width -- the only delay mode is
+#: zero -- and on a wide band they agree to 1.6e-11 relative at the 209 kHz
+#: channels of the shipped configurations. The gap grows as the channels narrow,
+#: as ``chan_width^-2``, so it is worth saying that the figure belongs to those
+#: channels rather than to the change: it reaches 7e-7 at 1 kHz channels and
+#: stops being negligible somewhere below 10 Hz, which no radio observation has.
 
 
 class GPVisAst(Component):
@@ -110,7 +117,11 @@ class GPVisAst(Component):
             # the knee is the delay conjugate to it. Shared with the RFI prior
             # so the two sections cannot drift; null is no roll-off.
             self.corr_freq = pow_spec["corr_freq"]
-            self.k0_freq = knee_from_corr_scale(self.corr_freq)
+            # float(), so the knee is one type whether or not corr_freq was set
+            # and is computed at host precision: the helper returns a jax scalar
+            # for a value and a Python float for None, and under x32 the former
+            # would carry the reciprocal in float32 for no reason.
+            self.k0_freq = float(knee_from_corr_scale(self.corr_freq))
 
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]

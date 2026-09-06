@@ -172,9 +172,9 @@ def validate_pow_spec(
         Old key to ``(new key, how to convert the value)``. Refused rather than
         accepted as an alias, which is the safe direction whenever the new
         spelling is not the same quantity: silently reading a knee as the
-        bandwidth it is the reciprocal of would change the prior by orders of
-        magnitude without a word. The conversion is in the message so the fix
-        is mechanical.
+        bandwidth it is the reciprocal of moves it by ``1 / (2 pi v^2)``, and
+        the user is told none of it. The conversion goes in the message so the
+        fix is mechanical.
     """
     derived = derived or {}
     renamed = renamed or {}
@@ -741,8 +741,6 @@ def domain_ss(
 
     return [x[idx] for x, idx in zip(xs_pad_ss, idxs_pad_ss)]
 
-# Used in final function
-@measure_runtime
 def knee_from_corr_scale(corr_scale):
     """The power-spectrum knee conjugate to a correlation scale.
 
@@ -768,6 +766,8 @@ def knee_from_corr_scale(corr_scale):
     return 1 / (2 * jnp.pi * jnp.asarray(corr_scale))
 
 
+# Used in final function
+@measure_runtime
 def pow_spec(k: Array, p0: float, k0: float, gamma: float) -> Array:
     """
     1-D power spectrum of the form:

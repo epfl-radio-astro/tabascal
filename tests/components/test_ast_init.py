@@ -442,7 +442,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         zero -- and on a wide band they differ by less than single precision's
         epsilon, so no shipped configuration and no reference moves.
         """
-        from tabascal.fft_gp import latent_to_signal_init
+        from tabascal.fft_gp import knee_from_corr_scale, latent_to_signal_init
 
         def pk(k0_freq, n_freq):
             spectrum, *_ = latent_to_signal_init(
@@ -451,9 +451,20 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
             )
             return np.asarray(spectrum)
 
-        assert np.array_equal(pk(1.0, 1), pk(float("inf"), 1))
+        # Through the helper, not a literal infinity: the claim is about what
+        # `corr_freq: null` does. Comparing the two alone would be satisfied by
+        # a null path that had simply become the old default, so the flatness
+        # it is supposed to produce is asserted first and separately.
+        unset = knee_from_corr_scale(None)
 
-        was, now = pk(1.0, 32), pk(float("inf"), 32)
+        flat = pk(unset, 32)
+        assert np.allclose(flat, flat[0, :][None, :], rtol=1e-12), (
+            "an unset corr_freq must leave the frequency axis flat"
+        )
+
+        assert np.array_equal(pk(1.0, 1), pk(unset, 1))
+
+        was, now = pk(1.0, 32), flat
         assert was.shape == now.shape
         assert np.max(np.abs(was - now) / now) < np.finfo(np.float32).eps
 
