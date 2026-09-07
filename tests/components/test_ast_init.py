@@ -375,16 +375,12 @@ def pow_spec_config(tmp_path, **overrides):
 
 
 class TestThePriorAmplitudeIsTheWidthItClaims:
-    """``p0`` was the power at k=0 of a spectrum nothing normalised.
+    """``std`` is the width of the prior, in Jy, and nothing else moves it.
 
-    The width it produced was ``p0`` times a factor that depended on
-    ``gammas``, on ``cutoff`` and on the grid, and was written down nowhere: on
-    the shipped 8A configuration ``p0: 3e3`` is a prior 26 Jy wide, 25.8 to
-    31.7 across its baselines, which is neither 3e3 nor its square root. Worse,
-    ``cutoff`` exists to drop modes that carry no power -- an efficiency
-    setting -- and raising it to 1e-3 widened the prior by 34 %.
-
-    ``std`` is that width, in Jy, because the spectrum is normalised to it.
+    The spectrum is normalised to it, so the configured number is the realised
+    width -- not its square, not its square root, not a constant times it. That
+    is what lets the guidance be "read the amplitude off a clean channel and
+    put it here", and what these tests pin.
     """
 
     def _realised_std(self, tmp_path, draws=400, seed=0, **overrides):
@@ -474,9 +470,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         ids=["cutoff keeps 40/128", "cutoff keeps 120/128", "shallow gammas", "steep gammas", "narrow fov"],
     )
     def test_the_width_survives_the_other_settings(self, tmp_path, overrides):
-        """The property ``p0`` did not have, and the reason for the change.
-
-        Each of these changes which modes are fitted or how they are weighted.
+        """Each of these changes which modes are fitted or how they are weighted.
         None of them is a statement about how bright the sky is, so none of
         them may move the width of the prior on it.
         """
@@ -593,45 +587,15 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         assert "ast.pow_spec.std" in message
         assert "'data'" in message
 
-    def test_the_old_name_is_refused_with_the_guidance(self, tmp_path):
-        """No conversion is offered because there is not one to offer.
-
-        The factor between them depends on the other settings, so a number
-        carried over would be a different prior on a different config.
-        """
-        message = setup_error(pow_spec_config(tmp_path, p0=3e3))
-
-        assert "ast.pow_spec.p0 was renamed ast.pow_spec.std" in message
-        assert "channel with no RFI in it" in message
-
 
 class TestTheFrequencyKneeIsAskedForAsABandwidth:
-    """``k0_freq`` was the knee itself, a delay in seconds, and read as one.
+    """``corr_freq`` is a correlation bandwidth in Hz, not a knee.
 
-    Nothing about the name said so, and the shipped ``k0_freq: 1`` looked like
-    an ordinary setting while being a knee at one second -- against a delay
-    axis running to ``1 / (2 * chan_width)``, 2.4 us for the 209 kHz channels
-    of those configs. Five orders of magnitude past the end, so it rolled
-    nothing off, and only ever looked reasonable because every shipped
-    observation is single channel and has no delay axis to speak of.
-
-    ``corr_freq`` is the same knee as the bandwidth it is the reciprocal of,
-    which is the spelling ``rfi.corr_freq`` already uses and the one a wrong
-    value is visible in.
+    The knee it sets is a delay -- the frequency axis transforms to
+    ``fftfreq(n_freq, chan_width)``, whose units are inverse Hz -- and a delay
+    is not a quantity anyone has intuition for at a glance. A bandwidth is, and
+    it is the spelling ``rfi.corr_freq`` already uses.
     """
-
-    def test_the_old_name_is_refused_rather_than_aliased(self, tmp_path):
-        """Because the two are reciprocals, an alias would be a silent change.
-
-        Read as a bandwidth, the shipped ``k0_freq: 1`` becomes 1 Hz instead of
-        the 0.16 Hz it means, and every hand-set value moves by however far it
-        sat from ``1 / (2 pi)``. The conversion goes in the message so the fix
-        is mechanical.
-        """
-        message = setup_error(pow_spec_config(tmp_path, k0_freq=1))
-
-        assert "ast.pow_spec.k0_freq was renamed ast.pow_spec.corr_freq" in message
-        assert "corr_freq = 1 / (2 pi k0_freq)" in message
 
     def test_the_knee_is_the_reciprocal_of_the_bandwidth(self, tmp_path):
         """Pinned by a test rather than inferred from the name.

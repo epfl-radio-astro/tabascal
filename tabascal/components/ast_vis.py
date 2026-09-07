@@ -28,52 +28,6 @@ _POW_SPEC_RULES = {
 #: the comment above :class:`GPVisAst` explains.
 _POW_SPEC_OPTIONAL = ("fov_deg", "corr_freq")
 
-#: Neither of these is an alias, and for the same reason in both cases: the old
-#: key and the new one are not the same quantity, so carrying a value over would
-#: change the prior without saying so. ``p0`` differs from ``std`` by a factor
-#: that depends on the rest of the block, which is why no conversion is offered
-#: for it at all.
-#:
-#: ``k0_freq`` was the same knee expressed as its own reciprocal: reading a value ``v`` as a bandwidth puts the knee
-#: at ``1 / (2 pi v)`` where it used to be ``v``, so it moves by
-#: ``1 / (2 pi v^2)`` -- a factor of 6.28 for the shipped ``k0_freq: 1``, and
-#: unchanged only at ``v = 1 / sqrt(2 pi)``, which is nobody's setting. A key
-#: whose units invert has to be refused and converted by hand.
-_POW_SPEC_RENAMED = {
-    "p0": (
-        "std",
-        "std is the width of the prior on the astronomical visibilities, a "
-        "standard deviation in Jy, and it is that width because the power "
-        "spectrum is normalised to it. p0 was the power at k=0 of a spectrum "
-        "that was not normalised, so the width it produced was sqrt(p0) times "
-        "a factor -- sqrt(2 * sum(shape) / n_modes) -- that depended on "
-        "gammas, cutoff, fov_deg, corr_freq and the padded grid, differed from "
-        "baseline to baseline, and was written down nowhere: on the shipped "
-        "8A configuration p0: 3e3 is a "
-        "prior 26 Jy wide (25.8 to 31.7 across its baselines), which is "
-        "neither 3e3 nor its square root, and raising cutoff alone -- an "
-        "efficiency setting -- widened it by 34 %. Your old width can be "
-        "computed from your MS and the rest of the block, but it cannot be "
-        "carried over: it was a different number on every baseline, and std "
-        "is one width for all of them. Set std to the visibility amplitude "
-        "you see in a channel with no RFI in it -- that is the same quantity, "
-        "so it puts the true sky within 1 sigma, and unlike p0 it stays that "
-        "way when you change gammas, cutoff or fov_deg.",
-    ),
-    "k0_freq": (
-        "corr_freq",
-        "It is the same knee the other way up: k0_freq was a delay in seconds, "
-        "corr_freq is the correlation bandwidth in Hz that delay corresponds "
-        "to, corr_freq = 1 / (2 pi k0_freq). This is not an alias and the value "
-        "does not carry over -- read as a bandwidth it would move the knee by "
-        "1 / (2 pi k0_freq^2), a factor of 6.28 for the shipped k0_freq: 1, "
-        "without a word. That shipped value was a knee at one second, against "
-        "a delay axis running to 1 / (2 * chan_width) -- 2.4 us for the 209 kHz "
-        "channels of these configurations -- so it rolled nothing off. Leave "
-        "corr_freq unset for that, which says so.",
-    ),
-}
-
 #: The power spectrum is used for its shape alone -- which modes survive
 #: ``cutoff``, and their relative weight -- and the amplitude is applied by
 #: normalising the mode standard deviations to ``std``. This is the ``p0`` the
@@ -96,13 +50,9 @@ _LATENT_WIDTH = sqrt(2.0)
 #: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee and
 #: the power spectrum is flat there.
 #:
-#: That is what the ``k0_freq: 1`` it replaces amounted to. On a single channel
-#: the two are bit-identical at any channel width -- the only delay mode is
-#: zero -- and on a wide band they agree to 1.6e-11 relative at the 209 kHz
-#: channels of the shipped configurations. The gap grows as the channels narrow,
-#: as ``chan_width^-2``, so it is worth saying that the figure belongs to those
-#: channels rather than to the change: it reaches 7e-7 at 1 kHz channels and
-#: stops being negligible somewhere below 10 Hz, which no radio observation has.
+#: On a single channel it makes no difference what the knee is at all -- the
+#: only delay mode is zero -- which is why every shipped configuration leaves it
+#: unset.
 
 
 class GPVisAst(Component):
@@ -146,7 +96,6 @@ class GPVisAst(Component):
                 "ast",
                 _POW_SPEC_RULES,
                 optional=_POW_SPEC_OPTIONAL,
-                renamed=_POW_SPEC_RENAMED,
             )
             config.args["ast"]["pow_spec"] = pow_spec
 
@@ -460,12 +409,10 @@ class GPVisAst(Component):
             component, and the two were never the same thing anyway: ``rfi``
             normalises ``rfi_A``, which the visibility is quadratic in.
 
-            What this replaces divided by ``pk.size`` instead, leaving the width
-            as ``p0`` times a factor that moved with every other setting. On the
-            shipped 8A configuration ``p0: 3e3`` is a prior 26 Jy wide, and
-            raising ``cutoff`` from 1e-6 to 1e-3 -- which is there to drop
-            modes, not to change the sky -- widened it by 34 %, while shallower
-            ``gammas`` narrowed it by 22 %.
+            Dividing by the sum rather than by the mode count is what makes
+            the width independent of ``cutoff`` and ``gammas``: those decide
+            which modes are fitted and how they are weighted relative to each
+            other, neither of which is a statement about how bright the sky is.
 
             Per baseline, because ``k0`` is that baseline's own maximum fringe
             rate: normalising each one separately is what makes the configured

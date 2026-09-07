@@ -174,7 +174,6 @@ def validate_pow_spec(
     rules: Dict[str, str],
     derived: Optional[Dict[str, str]] = None,
     optional: Tuple[str, ...] = (),
-    renamed: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Dict:
     """Normalise and check one ``<section>.pow_spec`` config block.
 
@@ -197,16 +196,8 @@ def validate_pow_spec(
     optional
         Keys that may be absent or ``null``, and come back as ``None`` for the
         caller to fill in. Every other key in ``rules`` must be present.
-    renamed
-        Old key to ``(new key, how to convert the value)``. Refused rather than
-        accepted as an alias, which is the safe direction whenever the new
-        spelling is not the same quantity: silently reading a knee as the
-        bandwidth it is the reciprocal of moves it by ``1 / (2 pi v^2)``, and
-        the user is told none of it. The conversion goes in the message so the
-        fix is mechanical.
     """
     derived = derived or {}
-    renamed = renamed or {}
 
     if pow_spec is None:
         pow_spec = {}
@@ -221,13 +212,6 @@ def validate_pow_spec(
             raise ValueError(
                 f"{section}.pow_spec.{key} is not a setting: {why}. Remove it. "
                 f"The keys read here are {sorted(rules)}."
-            )
-
-    for old_key, (new_key, how) in renamed.items():
-        if old_key in pow_spec:
-            raise ValueError(
-                f"{section}.pow_spec.{old_key} was renamed "
-                f"{section}.pow_spec.{new_key}. {how}"
             )
 
     # key=repr because a config's keys need not all be strings, and a bare
