@@ -161,13 +161,23 @@ than a per-precision split.
 Measured across ARM (Apple silicon), x86 CPU and an NVIDIA GPU, in both
 precisions:
 
-- **Double is architecture-stable** to 5.5e-8 relative in the worst case (the
+- **Double is architecture-stable** to 1.6e-6 relative in the worst case (the
   two SGP4 orbit cases, where the propagation amplifies rounding; the non-orbit
-  cases agree to ~1.7e-10), and the printed truth metrics agree to every digit
-  shown.
-- **fp32 agrees with fp64** to 2.4e-5 relative on `chi2`, and to the printed
-  precision on every truth metric. The offset is the *same* 2.4e-5 on ARM, x86
-  and CUDA alike — a precision effect, not an architecture one.
+  cases agree to ~2.5e-9), and the printed truth metrics agree to every digit
+  shown. That worst case widened twentyfold when the astronomical prior was
+  tightened to the sky's own amplitude — a better-conditioned prior does not
+  mean a better-conditioned optimum — and is still four orders inside the
+  tolerance.
+- **fp32 agrees with fp64** to 2.7e-5 relative on `chi2`, and to the printed
+  precision on every truth metric. The offset is the *same* 2.7e-5 on ARM, x86
+  and CUDA alike — a precision effect, not an architecture one. Across
+  architectures fp32 spreads to 1.3e-7.
+
+These figures were last re-measured on all three architectures for the
+`ast.pow_spec.std` change. When a change moves the references, re-measure them
+rather than assuming they still hold: an architecture row left behind is not
+visible in a passing test, because the 1% tolerance is four orders wider than
+any of these spreads.
 
 So a reference recorded on any platform in either precision is canonical for all
 of them. Prefer the CI/x86 value when you have it, since that is what gates the
@@ -182,8 +192,9 @@ reintroduce a component whose fp32 convergence is architecture-dependent, that
 split has to come back — measure both precisions on at least two architectures
 before collapsing a reference to a scalar.
 
-If a double value differs between two machines by much more than 1e-6, suspect a
-stale reference rather than an architecture difference. That is what the earlier
+If a double value differs between two machines by much more than the spreads
+above — 1.6e-6 on the SGP4 orbit cases, ~2.5e-9 on the rest — suspect a stale
+reference rather than an architecture difference. That is what the earlier
 "ARM runs ~0.7% high" comments in this file turned out to be: the references had
 drifted while staying inside the 1% tolerance, so nothing failed until a real
 change pushed them over.

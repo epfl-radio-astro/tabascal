@@ -1,4 +1,4 @@
-from math import isfinite
+from math import isfinite, sqrt
 
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
@@ -6,16 +6,15 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, validate_pow_spec
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, validate_pow_spec
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
 
 #: The ``ast.pow_spec`` keys and what each may be, for
-#: :func:`tabascal.fft_gp.validate_pow_spec`. Unlike the RFI prior, this section
-#: sets the power at the origin itself: ``p0`` is not renormalised away here.
+#: :func:`tabascal.fft_gp.validate_pow_spec`.
 _POW_SPEC_RULES = {
-    "p0": "number",
+    "std": "amplitude",
     "corr_freq": "number",
     "fov_deg": "number",
     "gammas": "pair",
@@ -29,38 +28,31 @@ _POW_SPEC_RULES = {
 #: the comment above :class:`GPVisAst` explains.
 _POW_SPEC_OPTIONAL = ("fov_deg", "corr_freq")
 
-#: ``k0_freq`` was the same knee expressed as its own reciprocal, and that is
-#: why it cannot be an alias: reading a value ``v`` as a bandwidth puts the knee
-#: at ``1 / (2 pi v)`` where it used to be ``v``, so it moves by
-#: ``1 / (2 pi v^2)`` -- a factor of 6.28 for the shipped ``k0_freq: 1``, and
-#: unchanged only at ``v = 1 / sqrt(2 pi)``, which is nobody's setting. A key
-#: whose units invert has to be refused and converted by hand.
-_POW_SPEC_RENAMED = {
-    "k0_freq": (
-        "corr_freq",
-        "It is the same knee the other way up: k0_freq was a delay in seconds, "
-        "corr_freq is the correlation bandwidth in Hz that delay corresponds "
-        "to, corr_freq = 1 / (2 pi k0_freq). This is not an alias and the value "
-        "does not carry over -- read as a bandwidth it would move the knee by "
-        "1 / (2 pi k0_freq^2), a factor of 6.28 for the shipped k0_freq: 1, "
-        "without a word. That shipped value was a knee at one second, against "
-        "a delay axis running to 1 / (2 * chan_width) -- 2.4 us for the 209 kHz "
-        "channels of these configurations -- so it rolled nothing off. Leave "
-        "corr_freq unset for that, which says so.",
-    ),
-}
+#: The power spectrum is used for its shape alone -- which modes survive
+#: ``cutoff``, and their relative weight -- and the amplitude is applied by
+#: normalising the mode standard deviations to ``std``. This is the ``p0`` the
+#: shape is evaluated with; any positive value gives the same shape and the
+#: same surviving modes, so it is 1.
+_SHAPE_ONLY = 1.0
+
+#: ``sqrt(E|z|^2)`` for the latent :meth:`GPVisAst.build_set_params` draws: a
+#: real and an imaginary standard normal, so the complex latent carries twice
+#: the variance of the unit circularly-symmetric one and the signal comes out
+#: ``sqrt(2)`` wider than the mode variances alone. Dividing it out is what
+#: makes ``std`` the width of the visibility rather than of its real part.
+#:
+#: ``math``, not ``jnp``: this module is imported before ``set_precision`` runs,
+#: so a jax scalar here would be built in float32 and a double run would carry a
+#: float32 sqrt(2) into its prior.
+_LATENT_WIDTH = sqrt(2.0)
 
 #: ``corr_freq: null`` is no roll-off along the frequency axis:
 #: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee and
 #: the power spectrum is flat there.
 #:
-#: That is what the ``k0_freq: 1`` it replaces amounted to. On a single channel
-#: the two are bit-identical at any channel width -- the only delay mode is
-#: zero -- and on a wide band they agree to 1.6e-11 relative at the 209 kHz
-#: channels of the shipped configurations. The gap grows as the channels narrow,
-#: as ``chan_width^-2``, so it is worth saying that the figure belongs to those
-#: channels rather than to the change: it reaches 7e-7 at 1 kHz channels and
-#: stops being negligible somewhere below 10 Hz, which no radio observation has.
+#: On a single channel it makes no difference what the knee is at all -- the
+#: only delay mode is zero -- which is why every shipped configuration leaves it
+#: unset.
 
 
 class GPVisAst(Component):
@@ -104,11 +96,14 @@ class GPVisAst(Component):
                 "ast",
                 _POW_SPEC_RULES,
                 optional=_POW_SPEC_OPTIONAL,
-                renamed=_POW_SPEC_RENAMED,
             )
             config.args["ast"]["pow_spec"] = pow_spec
 
-            self.p0 = pow_spec["p0"]
+            self.std = pow_spec["std"]
+            if self.std == FROM_DATA:
+                self.std = self._std_from_data(
+                    config.vis_obs, config.estimator_flags
+                )
             self.gammas = pow_spec["gammas"]
             self.fov_deg = pow_spec["fov_deg"]
             self.pk_cutoff = pow_spec["cutoff"]
@@ -351,12 +346,20 @@ class GPVisAst(Component):
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]
 
+        # 1.0, not the amplitude: both of these want the *shape* of the power
+        # spectrum, and use it only to decide which modes survive `cutoff`. That
+        # test is `pk > cutoff * pk.max(axis=i)` on each axis, and `pow_spec_nd`
+        # applies p0 as one final multiply, so both sides scale together and the
+        # surviving set is the same for any positive p0 -- exactly so in double,
+        # and in single for everything except a spectrum that underflows, which
+        # is what passing 1.0 rather than the amplitude rules out. The amplitude
+        # is applied afterwards, by normalising sigma.
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
             ns,
             dxs,
             self.pad_factors,
             self.ss_factors,
-            self.p0,
+            _SHAPE_ONLY,
             self.k0s,
             self.gammas,
             self.pk_cutoff,
@@ -367,7 +370,7 @@ class GPVisAst(Component):
             ns,
             dxs,
             self.pad_factors,
-            self.p0,
+            _SHAPE_ONLY,
             self.k0s,
             self.gammas,
             self.pk_cutoff,
@@ -382,12 +385,76 @@ class GPVisAst(Component):
 
         self.n_k_freq_ast, self.n_k_time_ast = self.pk.shape
 
-        sigma = lambda k0: jnp.sqrt(
-            pow_spec_nd(self.ks, self.p0, [self.k0_freq, k0], self.gammas)
-            / self.pk.size
-        )
+        def sigma(k0, std):
+            """Mode standard deviations that make ``std`` the width of vis_ast.
 
-        self.sigma_ast_k = vmap(sigma, (0), 0)(self.k0_time)
+            The modes are independent, so the variance of the signal they build
+            is the sum of theirs. Dividing the shape by its own sum makes that
+            sum one; the remaining ``sqrt(2)`` is the latent.
+            :meth:`build_set_params` draws ``ast_k_r_base`` and ``ast_k_i_base``
+            as two independent standard normals, so the complex latent has
+            ``E|z|^2 = 2`` rather than 1, and the visibility comes out
+            ``sqrt(2)`` wider than the mode variances alone would say.
+
+            With it, ``std`` is the width of the *complex* visibility about
+            its prior mean, ``sqrt(E|vis_ast - mu|^2)``. At the default
+            ``ast.mean: 0`` the mean is zero and that is exactly
+            ``rms|vis_ast|``, so "set it to the amplitude you see in a clean
+            channel" is literally true rather than true after dividing by
+            ``sqrt(2)``. That is the property the key exists to have. Under
+            ``ast.mean: data`` the prior is centred on the observed
+            visibilities and ``std`` is the scatter allowed around them, not
+            the total amplitude -- ``rms|vis_ast|`` is then
+            ``sqrt(std^2 + |mu|^2)``.
+
+            It is not the convention ``rfi`` uses, which normalises per
+            component, and the two were never the same thing anyway: ``rfi``
+            normalises ``rfi_A``, which the visibility is quadratic in.
+
+            Dividing by the sum rather than by the mode count is what makes
+            the width independent of ``cutoff`` and ``gammas``: those decide
+            which modes are fitted and how they are weighted relative to each
+            other, neither of which is a statement about how bright the sky is.
+
+            Per baseline, because ``k0`` is that baseline's own maximum fringe
+            rate: normalising each one separately is what makes the configured
+            width the width on every baseline rather than on an average one.
+            """
+
+            shape = pow_spec_nd(self.ks, _SHAPE_ONLY, [self.k0_freq, k0], self.gammas)
+
+            return (std / _LATENT_WIDTH) * jnp.sqrt(shape / jnp.sum(shape))
+
+        # std is a scalar when it was configured and one per baseline when it
+        # was measured, so it is broadcast to the baseline axis and mapped
+        # alongside the knee. The width is per baseline either way; the two
+        # cases differ only in whether the baselines were given the same one.
+        std_bl = jnp.broadcast_to(jnp.asarray(self.std), jnp.shape(self.k0_time))
+
+        self.sigma_ast_k = vmap(sigma, (0, 0), 0)(self.k0_time, std_bl)
+
+        # validate_pow_spec accepts any finite positive float, but sigma is
+        # built in the run's own precision: std = 1e-50 flushes it to zero in
+        # float32 and std = 1e40 overflows it, and either way the first thing
+        # that divides by sigma -- inv_transform, encoding the initial sky --
+        # produces non-finite parameters. Shape validation does not look at
+        # values, so without this the run starts and fails later somewhere that
+        # says nothing about std.
+        if not jnp.all(jnp.isfinite(self.sigma_ast_k)) or jnp.any(
+            self.sigma_ast_k <= 0
+        ):
+            reported = (
+                self.std if jnp.ndim(self.std) == 0
+                else f"{float(jnp.min(self.std)):.4g}..{float(jnp.max(self.std)):.4g}"
+            )
+            raise ValueError(
+                f"ast.pow_spec.std ({reported}) is not representable in this "
+                f"run's precision: the mode standard deviations it gives come "
+                f"out {'non-finite' if not jnp.all(jnp.isfinite(self.sigma_ast_k)) else 'zero'}. "
+                f"std is a visibility amplitude in Jy, so it should be within "
+                f"a few orders of magnitude of the data; check the units it "
+                f"was set from, or run in double precision."
+            )
 
     @measure_runtime
     def _compute_true_params(self, zarr_path, data_col):
@@ -418,6 +485,96 @@ class GPVisAst(Component):
         self.state_outputs = {
             "vis_ast": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
+
+    def _std_from_data(self, vis_obs, estimator_flags):
+        """``rms|V|`` per baseline over the samples nothing has flagged.
+
+        ``std`` is defined as that quantity, so this is not a proxy for the
+        prior width -- it is the prior width, read off the data instead of
+        guessed. Per baseline because that is what the data offers; the model
+        then has one width per baseline rather than one for all of them.
+
+        The mask is ``estimator_flags`` -- everything known to be bad, the
+        MS's own flags and the samples no gain table could calibrate -- and
+        not the likelihood's. Those answer different questions and this is
+        where the difference shows: a strong emitter flagged by some other
+        task is data tabascal is here to recover, so ``data.flags: false``
+        keeps it in the fit, and it is still the wrong place to measure a
+        clean sky amplitude from. An uncalibratable visibility is worse: it
+        carries a unity gain where its neighbours were divided by a real one,
+        so it is not even on the same flux scale.
+
+        **It measures whatever is in the unflagged data, including RFI.** That
+        is the point of taking only unflagged samples, and it is why an MS that
+        flags nothing gets a warning rather than a silent estimate: on the
+        shipped 8A simulation, whose RFI is unflagged because modelling it is
+        the job, this returns about 11 Jy where the true sky is under 3. Where
+        the RFI *is* flagged, the estimate is the sky. See GitHub #220 for
+        making it use the RFI model's own view of which samples are
+        contaminated, which is what would fix the unflagged case.
+        """
+
+        vis_obs = jnp.asarray(vis_obs)
+        keep = ~jnp.asarray(estimator_flags)
+        n_kept = jnp.sum(keep, axis=(1, 2))
+
+        if not bool(jnp.any(keep)):
+            raise ValueError(
+                "ast.pow_spec.std: data has nothing to measure -- every "
+                "visibility is flagged. Set a width in Jy instead."
+            )
+        if not bool(jnp.any(~keep)):
+            print(
+                "Warning: ast.pow_spec.std: data is measuring every "
+                "visibility, because nothing flags any of them. Whatever "
+                "RFI is in them is in the prior width too, so it will be "
+                "wider than the sky by however much RFI there is. Flag the "
+                "contaminated samples in the MS -- this reads those flags "
+                "whatever data.flags says, so flagging them does not stop "
+                "tabascal fitting them -- or set ast.pow_spec.std to a width "
+                "in Jy."
+            )
+
+        # Scaled before squaring: |V| of 1e20 squares to 1e40, which is inf in
+        # float32 even though both the visibility and its rms are perfectly
+        # representable, and 1e-30 squares to zero. Dividing by the baseline's
+        # own largest sample first bounds the squares to 1 and puts the scale
+        # back afterwards.
+        # where, not a multiply: an MS routinely leaves a NaN or an infinity in
+        # a cell it has flagged, and NaN * False is NaN in numpy. XLA happens
+        # to lower a boolean multiply to a select and give 0, so both spellings
+        # measure the same thing here -- this one says so rather than resting
+        # on that.
+        kept_abs = jnp.where(keep, jnp.abs(vis_obs), 0.0)
+        scale = jnp.max(kept_abs, axis=(1, 2))
+        safe = jnp.where(scale > 0, scale, 1.0)
+        mean_sq = jnp.sum((kept_abs / safe[:, None, None]) ** 2, axis=(1, 2)) / jnp.maximum(
+            n_kept, 1
+        )
+        std = safe * jnp.sqrt(mean_sq)
+
+        if not bool(jnp.all(jnp.isfinite(std))):
+            raise ValueError(
+                "ast.pow_spec.std: data cannot measure a width: the unflagged "
+                "visibilities of at least one baseline are not finite. Flag "
+                "them, or set a width in Jy."
+            )
+
+        # Only a baseline with nothing left to measure falls back, and it falls
+        # back to the median of the ones that measured something -- the
+        # least-committal stand-in, and it keeps a zero out of a denominator
+        # downstream. Anything else non-finite is the error above rather than
+        # something the median quietly covers for.
+        measured = n_kept > 0
+        std = jnp.where(measured, std, jnp.median(std[measured]))
+
+        print(
+            f"Using ast.pow_spec.std from data: {float(jnp.min(std)):.4g} to "
+            f"{float(jnp.max(std)):.4g} Jy across baselines "
+            f"(median {float(jnp.median(std)):.4g})"
+        )
+
+        return std
 
     def forward_transform(self, base_params, sigma, mu):
 

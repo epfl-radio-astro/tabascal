@@ -107,7 +107,7 @@ class TestEmptySectionMerge:
         config = merged(tmp_path, "ast:\n  pow_spec:\n" + _MINIMAL_CONFIG)
 
         assert config["ast"] == defaults
-        assert config["ast"]["pow_spec"]["p0"] == pytest.approx(3e3)
+        assert config["ast"]["pow_spec"]["std"] == "data"
 
     def test_a_value_under_a_bare_section_still_overrides(self, tmp_path):
         """Writing the header is only inert while nothing is under it."""

@@ -374,33 +374,321 @@ def pow_spec_config(tmp_path, **overrides):
     return config
 
 
-class TestTheFrequencyKneeIsAskedForAsABandwidth:
-    """``k0_freq`` was the knee itself, a delay in seconds, and read as one.
+class TestThePriorAmplitudeIsTheWidthItClaims:
+    """``std`` is the width of the prior, in Jy, and nothing else moves it.
 
-    Nothing about the name said so, and the shipped ``k0_freq: 1`` looked like
-    an ordinary setting while being a knee at one second -- against a delay
-    axis running to ``1 / (2 * chan_width)``, 2.4 us for the 209 kHz channels
-    of those configs. Five orders of magnitude past the end, so it rolled
-    nothing off, and only ever looked reasonable because every shipped
-    observation is single channel and has no delay axis to speak of.
-
-    ``corr_freq`` is the same knee as the bandwidth it is the reciprocal of,
-    which is the spelling ``rfi.corr_freq`` already uses and the one a wrong
-    value is visible in.
+    The spectrum is normalised to it, so the configured number is the realised
+    width -- not its square, not its square root, not a constant times it. That
+    is what lets the guidance be "read the amplitude off a clean channel and
+    put it here", and what these tests pin.
     """
 
-    def test_the_old_name_is_refused_rather_than_aliased(self, tmp_path):
-        """Because the two are reciprocals, an alias would be a silent change.
+    def _realised_std(self, tmp_path, draws=400, seed=0, **overrides):
+        """The width of the prior these settings actually produce, sampled.
 
-        Read as a bandwidth, the shipped ``k0_freq: 1`` becomes 1 Hz instead of
-        the 0.16 Hz it means, and every hand-set value moves by however far it
-        sat from ``1 / (2 pi)``. The conversion goes in the message so the fix
-        is mechanical.
+        Through the component's real ``build_forward``, so the pad, the scan
+        over the baseline axis and the crop are all in the path -- a helper
+        that redid the transform by hand would not have caught a block sized
+        wrongly or a per-baseline sigma paired with the wrong baseline. And
+        over *every* baseline, not baseline 0, since the normalisation is per
+        baseline and one of them tells you nothing about the rest.
+
+        The latent is drawn the way :meth:`GPVisAst.build_set_params` draws it
+        -- a real and an imaginary standard normal -- and not as one complex
+        normal. They are not the same distribution: JAX's complex normal is
+        circularly symmetric with ``E|z|^2 = 1``, the model's carries 2, and a
+        check that draws the first while measuring a complex width gets the
+        right answer from two errors of ``sqrt(2)`` cancelling.
         """
-        message = setup_error(pow_spec_config(tmp_path, k0_freq=1))
+        from jax import random
 
-        assert "ast.pow_spec.k0_freq was renamed ast.pow_spec.corr_freq" in message
-        assert "corr_freq = 1 / (2 pi k0_freq)" in message
+        comp = setup_ast(pow_spec_config(tmp_path, **overrides))
+        forward = comp.build_forward()
+        shape = (comp.n_bl, comp.n_k_freq_ast, comp.n_k_time_ast)
+
+        total, count = 0.0, 0
+        for draw in range(draws):
+            keys = random.split(random.PRNGKey(seed + draw), 2)
+            params = {
+                "ast_k_r_base": random.normal(keys[0], shape),
+                "ast_k_i_base": random.normal(keys[1], shape),
+            }
+            vis = forward(params, dict(comp.state_outputs), make_constants(comp))[
+                "vis_ast"
+            ]
+            total += float(jnp.sum(jnp.abs(vis) ** 2))
+            count += vis.size
+
+        # rms|V|, which is what `std` is defined as -- the same quantity a user
+        # reads off a clean channel.
+        return float(np.sqrt(total / count))
+
+    def test_the_configured_number_is_the_prior_width(self, tmp_path):
+        """Not its square, not its square root, and not times a constant.
+
+        ``rms|V|`` specifically, which is the quantity the guidance names: read
+        the amplitude off a channel with no RFI in it and put that number here.
+        """
+        assert self._realised_std(tmp_path, std=30.0) == pytest.approx(30.0, rel=0.02)
+
+    def test_it_is_the_complex_width_and_not_the_real_part(self, tmp_path):
+        """The factor of sqrt(2) that the first version of this got wrong.
+
+        The two differ by exactly that, so a prior normalised per component
+        would sit here at 30 / sqrt(2); asserting both ends pins which one the
+        key means and would catch the factor going missing again.
+        """
+        from jax import random, vmap
+        from tabascal.fft_gp import latent_to_signal
+
+        comp = setup_ast(pow_spec_config(tmp_path, std=30.0))
+        sigma = comp.sigma_ast_k[0]
+        keys = random.split(random.PRNGKey(0), 2)
+        shape = (6000, *sigma.shape)
+        base = random.normal(keys[0], shape) + 1j * random.normal(keys[1], shape)
+        vis = vmap(latent_to_signal, (0, None, None), 0)(
+            sigma * base, comp.pads, comp.ss_idxs
+        )
+
+        assert float(jnp.sqrt(jnp.mean(jnp.abs(vis) ** 2))) == pytest.approx(30.0, rel=0.02)
+        assert float(jnp.std(vis.real)) == pytest.approx(30.0 / jnp.sqrt(2.0), rel=0.02)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            # Both of these actually drop modes on this fixture: 0.5 keeps 40
+            # of 128 and 0.1 keeps 120. A cutoff below about 0.02 keeps all
+            # of them here, so the 1e-3/1e-9 pair this started with was
+            # re-running the baseline case without varying the one thing it is
+            # here to vary.
+            {"cutoff": 0.5},
+            {"cutoff": 0.1},
+            {"gammas": [3.0, 3.0]},
+            {"gammas": [8.0, 8.0]},
+            {"fov_deg": 2.0},
+        ],
+        ids=["cutoff keeps 40/128", "cutoff keeps 120/128", "shallow gammas", "steep gammas", "narrow fov"],
+    )
+    def test_the_width_survives_the_other_settings(self, tmp_path, overrides):
+        """Each of these changes which modes are fitted or how they are weighted.
+        None of them is a statement about how bright the sky is, so none of
+        them may move the width of the prior on it.
+        """
+        assert self._realised_std(tmp_path, std=30.0, **overrides) == pytest.approx(
+            30.0, rel=0.02
+        )
+
+    def test_every_baseline_gets_the_configured_width(self, tmp_path):
+        """Each baseline's knee is its own maximum fringe rate.
+
+        Normalising per baseline is what makes ``std`` the width everywhere
+        rather than on an average baseline: unnormalised, the shipped
+        configuration spans a factor of 1.23 across its baselines.
+        """
+        comp = setup_ast(pow_spec_config(tmp_path, std=30.0))
+
+        # The realised variance, which is twice the sum of the mode variances:
+        # the latent carries E|z|^2 = 2. Asserting the sum alone would pin the
+        # arithmetic without saying what it is for.
+        realised = 2 * jnp.sum(comp.sigma_ast_k**2, axis=(1, 2))
+
+        assert np.allclose(np.asarray(realised), 30.0**2, rtol=1e-5)
+
+    @pytest.mark.skipif(
+        jax.config.jax_enable_x64,
+        reason="float64 holds every std the validator accepts, so the guard "
+        "cannot fire: any finite positive float is representable there",
+    )
+    @pytest.mark.parametrize("std", [1e-50, 1e40], ids=["underflows", "overflows"])
+    def test_a_std_the_precision_cannot_hold_is_refused(self, tmp_path, std):
+        """Finite and positive is not the same as representable.
+
+        The validator takes any finite positive float, but sigma is built in
+        the run's own precision. In float32 these flush to zero and to
+        infinity, and the first thing that divides by sigma -- encoding the
+        initial sky -- then yields non-finite parameters, with setup already
+        past and nothing left pointing at std. Single precision only, because
+        float64 holds anything the validator lets through.
+        """
+        message = setup_error(pow_spec_config(tmp_path, std=std))
+
+        assert "ast.pow_spec.std" in message
+        assert "representable" in message
+
+    def test_data_measures_the_width_per_baseline(self, tmp_path, capsys):
+        """``std: data`` is not an estimate of the width -- it is the width.
+
+        ``std`` is defined as rms|V|, and that is exactly what this measures,
+        so the number the data gives is the number the prior gets, per
+        baseline, with no conversion in between.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        comp = setup_ast(config)
+
+        expected = np.sqrt(
+            np.mean(np.abs(np.asarray(config.vis_obs)) ** 2, axis=(1, 2))
+        )
+        realised = np.sqrt(np.asarray(2 * jnp.sum(comp.sigma_ast_k**2, axis=(1, 2))))
+
+        assert np.allclose(realised, expected, rtol=1e-5)
+        assert realised.shape == (comp.n_bl,)
+        # One width per baseline, and they differ -- otherwise this would pass
+        # against a scalar too.
+        assert realised.std() > 0
+
+    def test_data_ignores_what_is_flagged(self, tmp_path):
+        """Which is the whole reason to take the mask rather than the array.
+
+        Half the samples are given an amplitude ten times the rest and then
+        flagged; the width has to come back as the unflagged half alone.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        vis = np.asarray(config.vis_obs).copy()
+        flags = np.zeros(vis.shape, dtype=bool)
+        flags[:, :, ::2] = True
+        vis[:, :, ::2] *= 10.0
+        config.vis_obs = jnp.asarray(vis)
+        config.ms_flags = jnp.asarray(flags)
+        config.estimator_flags = jnp.asarray(flags)
+
+        comp = setup_ast(config)
+
+        kept = np.sqrt(np.mean(np.abs(vis[:, :, 1::2]) ** 2, axis=(1, 2)))
+        realised = np.sqrt(np.asarray(2 * jnp.sum(comp.sigma_ast_k**2, axis=(1, 2))))
+
+        assert np.allclose(realised, kept, rtol=1e-5)
+
+    def test_data_reads_the_ms_flags_even_when_the_fit_ignores_them(self, tmp_path):
+        """The case the two masks exist to tell apart.
+
+        A strong emitter flagged by some other task is data tabascal is here to
+        recover, so ``data.flags: false`` leaves it in the likelihood -- and it
+        is still the wrong place to measure a clean sky amplitude from. The
+        width comes off ``ms_flags``, the fit runs on ``flags``, and here they
+        disagree completely.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        vis = np.asarray(config.vis_obs).copy()
+        contaminated = np.zeros(vis.shape, dtype=bool)
+        contaminated[:, :, ::2] = True
+        vis[:, :, ::2] *= 50.0
+        config.vis_obs = jnp.asarray(vis)
+        config.ms_flags = jnp.asarray(contaminated)
+        # set_flags derives this from ms_flags whatever data.flags says.
+        config.estimator_flags = jnp.asarray(contaminated)
+        # What the likelihood excludes: nothing. data.flags: false.
+        config.flags = jnp.zeros(vis.shape, dtype=bool)
+
+        comp = setup_ast(config)
+
+        clean = np.sqrt(np.mean(np.abs(vis[:, :, 1::2]) ** 2, axis=(1, 2)))
+        assert np.allclose(np.asarray(comp.std), clean, rtol=1e-5)
+        # And emphatically not the width of everything, which the emitter
+        # would have inflated by a factor of ~35.
+        everything = np.sqrt(np.mean(np.abs(vis) ** 2, axis=(1, 2)))
+        assert np.all(np.asarray(comp.std) < 0.1 * everything)
+
+    def test_a_flagged_sample_cannot_poison_the_measurement(self, tmp_path):
+        """An MS leaves whatever it likes in a cell it has flagged.
+
+        NaN and infinity both turn up in flagged cells of real data, and a
+        mask that multiplies rather than selects would carry a NaN through the
+        maximum and lose the whole baseline -- in numpy, NaN * False is NaN.
+        The flagged cell is excluded, so what it holds cannot matter.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        vis = np.asarray(config.vis_obs).copy()
+        flags = np.zeros(vis.shape, dtype=bool)
+        flags[:, :, 0] = True
+        vis[0, :, 0] = np.nan
+        vis[1:, :, 0] = np.inf
+        config.vis_obs = jnp.asarray(vis)
+        config.estimator_flags = jnp.asarray(flags)
+
+        comp = setup_ast(config)
+
+        clean = np.sqrt(np.mean(np.abs(vis[:, :, 1:]) ** 2, axis=(1, 2)))
+        assert np.all(np.isfinite(np.asarray(comp.std)))
+        assert np.allclose(np.asarray(comp.std), clean, rtol=1e-5)
+
+    def test_data_says_so_when_nothing_is_flagged(self, tmp_path, capsys):
+        """Because then it is measuring the RFI as well as the sky.
+
+        On the shipped 8A simulation, whose RFI is unflagged because modelling
+        it is the job, this returns about 11 Jy against a true sky under 3. The
+        estimate is only the sky where the contamination has been flagged, and
+        nothing else in the run will say so.
+        """
+        setup_ast(pow_spec_config(tmp_path, std="data"))
+
+        printed = capsys.readouterr().out
+        assert "nothing flags any of them" in printed
+        assert "RFI" in printed
+        # And it points at the fix that does not cost the run anything: the MS
+        # flags are read here whatever data.flags decides for the likelihood.
+        assert "whatever data.flags says" in printed
+
+    @pytest.mark.parametrize("amplitude", [1e20, 1e-30], ids=["huge", "tiny"])
+    def test_data_measures_amplitudes_the_square_would_lose(self, tmp_path, amplitude):
+        """rms|V| is representable in float32 well past where |V|^2 is not.
+
+        1e20 squares to 1e40, which is inf there, and 1e-30 squares to zero --
+        so squaring before averaging threw away visibilities whose rms the
+        precision could hold perfectly well, and setup then blamed std.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        config.vis_obs = jnp.asarray(config.vis_obs) * amplitude
+
+        comp = setup_ast(config)
+
+        # In float64 before squaring, not merely accumulated there: `dtype=`
+        # picks the accumulator, so squaring a float32 1e21 still overflows to
+        # inf on the way in -- which is the bug under test, in the check.
+        wide = np.asarray(config.vis_obs).astype(np.complex128)
+        expected = np.sqrt(np.mean(np.abs(wide) ** 2, axis=(1, 2)))
+        assert np.allclose(np.asarray(comp.std), expected, rtol=1e-5)
+
+    def test_data_refuses_a_visibility_that_is_not_finite(self, tmp_path):
+        """Rather than quietly handing that baseline the median of the others.
+
+        The fallback exists for a baseline with nothing left after flagging.
+        A NaN nobody flagged is a different thing, and covering for it here
+        only moves the failure somewhere that cannot name its cause.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        vis = np.asarray(config.vis_obs).copy()
+        vis[0, 0, 0] = np.nan
+        config.vis_obs = jnp.asarray(vis)
+
+        message = setup_error(config)
+
+        assert "not finite" in message
+
+    def test_data_with_everything_flagged_is_refused(self, tmp_path):
+        """There is nothing to measure, and a zero width is not a prior."""
+        config = pow_spec_config(tmp_path, std="data")
+        config.estimator_flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
+
+        message = setup_error(config)
+
+        assert "nothing to measure" in message
+
+    def test_a_word_other_than_data_is_refused(self, tmp_path):
+        """`data` is the only word; anything else is a typo, not a setting."""
+        message = setup_error(pow_spec_config(tmp_path, std="truth"))
+
+        assert "ast.pow_spec.std" in message
+        assert "'data'" in message
+
+
+class TestTheFrequencyKneeIsAskedForAsABandwidth:
+    """``corr_freq`` is a correlation bandwidth in Hz, not a knee.
+
+    The knee it sets is a delay -- the frequency axis transforms to
+    ``fftfreq(n_freq, chan_width)``, whose units are inverse Hz -- and a delay
+    is not a quantity anyone has intuition for at a glance. A bandwidth is, and
+    it is the spelling ``rfi.corr_freq`` already uses.
+    """
 
     def test_the_knee_is_the_reciprocal_of_the_bandwidth(self, tmp_path):
         """Pinned by a test rather than inferred from the name.
@@ -484,7 +772,7 @@ class TestAstPowSpecIsValidated:
 
         assert comp.n_k_freq_ast >= 1 and comp.n_k_time_ast >= 1
 
-    @pytest.mark.parametrize("key", ["p0", "corr_freq", "cutoff"])
+    @pytest.mark.parametrize("key", ["std", "corr_freq", "cutoff"])
     @pytest.mark.parametrize("value", [0, -1, "3e3", True, float("inf"), float("nan")])
     def test_a_scalar_key_that_is_not_a_positive_number_is_refused(
         self, tmp_path, key, value
@@ -539,7 +827,7 @@ class TestAstPowSpecIsValidated:
         setup_ast(pow_spec_config(tmp_path, fov_deg=None))
         setup_ast(pow_spec_config(tmp_path, corr_freq=None))
 
-        for key in ("p0", "gammas", "cutoff"):
+        for key in ("std", "gammas", "cutoff"):
             message = setup_error(pow_spec_config(tmp_path, **{key: None}))
             assert f"ast.pow_spec.{key}" in message
             assert "required" in message

@@ -27,9 +27,11 @@ from tabascal.timing import measure_runtime
 # is refused the same way and with the same words wherever it is written.
 #
 # What differs between the sections is only which keys are live: the RFI prior
-# derives its knee from corr_freq/corr_time and renormalises its p0 away, while
-# the astronomical one takes both. That is expressed as the rules a caller
-# passes, not as a second copy of these checks.
+# derives its knee from corr_freq/corr_time, where the astronomical one is given
+# a corr_freq and derives its time knee from fov_deg. Both normalise their
+# amplitude away -- rfi to rfi.var, ast to ast.pow_spec.std -- so neither reads
+# a p0. That is expressed as the rules a caller passes, not as a second copy of
+# these checks.
 
 
 def _pow_spec_number(value, where: str) -> float:
@@ -59,6 +61,32 @@ def _pow_spec_number(value, where: str) -> float:
         )
 
     return value
+
+
+#: The literal a power-spectrum amplitude may take instead of a number, meaning
+#: "measure it from the observed visibilities rather than making me guess".
+FROM_DATA = "data"
+
+
+def _pow_spec_amplitude(value, where: str):
+    """A positive number, or the literal ``"data"``.
+
+    An amplitude is the one entry in these blocks that is a property of the
+    observation rather than of the model, so it is the one that can be measured
+    instead of set. Everything else -- a roll-off exponent, a truncation, a
+    correlation scale -- describes what shape the prior has, and no amount of
+    looking at the data settles those.
+    """
+
+    if isinstance(value, str):
+        if value == FROM_DATA:
+            return FROM_DATA
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is not a number and not "
+            f"{FROM_DATA!r}, which is the only word it takes."
+        )
+
+    return _pow_spec_number(value, where)
 
 
 def _pow_spec_pair(value, where: str) -> List[float]:
@@ -134,6 +162,7 @@ def _pow_spec_cutoff(value, where: str) -> float:
 #: a caller of :func:`validate_pow_spec` passes.
 POW_SPEC_KINDS = {
     "number": _pow_spec_number,
+    "amplitude": _pow_spec_amplitude,
     "pair": _pow_spec_pair,
     "cutoff": _pow_spec_cutoff,
 }
@@ -145,7 +174,6 @@ def validate_pow_spec(
     rules: Dict[str, str],
     derived: Optional[Dict[str, str]] = None,
     optional: Tuple[str, ...] = (),
-    renamed: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Dict:
     """Normalise and check one ``<section>.pow_spec`` config block.
 
@@ -168,16 +196,8 @@ def validate_pow_spec(
     optional
         Keys that may be absent or ``null``, and come back as ``None`` for the
         caller to fill in. Every other key in ``rules`` must be present.
-    renamed
-        Old key to ``(new key, how to convert the value)``. Refused rather than
-        accepted as an alias, which is the safe direction whenever the new
-        spelling is not the same quantity: silently reading a knee as the
-        bandwidth it is the reciprocal of moves it by ``1 / (2 pi v^2)``, and
-        the user is told none of it. The conversion goes in the message so the
-        fix is mechanical.
     """
     derived = derived or {}
-    renamed = renamed or {}
 
     if pow_spec is None:
         pow_spec = {}
@@ -192,13 +212,6 @@ def validate_pow_spec(
             raise ValueError(
                 f"{section}.pow_spec.{key} is not a setting: {why}. Remove it. "
                 f"The keys read here are {sorted(rules)}."
-            )
-
-    for old_key, (new_key, how) in renamed.items():
-        if old_key in pow_spec:
-            raise ValueError(
-                f"{section}.pow_spec.{old_key} was renamed "
-                f"{section}.pow_spec.{new_key}. {how}"
             )
 
     # key=repr because a config's keys need not all be strings, and a bare
@@ -595,8 +608,12 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
         elif not finite:
             why = "the power spectrum is not finite"
             fix = (
-                "The cutoff is not what is wrong here: check p0 and the variance "
-                "the spectrum is scaled to."
+                "The cutoff is not what is wrong here. Look at the knees and "
+                "the k grid -- a zero or non-finite corr_time, corr_freq or "
+                "fov_deg, or a zero-length baseline, gives 0/0 -- and, on the "
+                "RFI path, at rfi.var, which is the p0 this is scaled by. The "
+                "astronomical spectrum is built at unit amplitude and scaled "
+                "afterwards, so there the amplitude cannot be the cause."
             )
         elif largest <= 0.0:
             why = (
@@ -604,9 +621,10 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
                 f"value is {largest})"
             )
             fix = (
-                "No cutoff can help: the comparison is strict, so nothing clears "
-                "a threshold of zero. Check p0 and the variance the spectrum is "
-                "scaled to -- an underflow to zero looks like this."
+                "No cutoff can help: the comparison is strict, so nothing "
+                "clears a threshold of zero. Check the knees, and the variance "
+                "the spectrum is scaled to where the caller supplies one "
+                "(rfi.var) -- an underflow to zero looks like this."
             )
         else:
             why = (

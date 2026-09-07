@@ -5,7 +5,7 @@
 I leave this out". That only holds while the keys it ships and the keys the
 components read are the same set. They drifted once already: the base shipped
 ``ast.pow_spec.P0``/``gamma``/``k0`` long after :class:`GPVisAst` had moved to
-``p0``/``gammas``/``fov_deg``/``corr_freq``/``cutoff``, so a config omitting the
+``std``/``gammas``/``fov_deg``/``corr_freq``/``cutoff``, so a config omitting the
 power spectrum died with a ``KeyError`` wrapped in "GPVisAst setup failed" while
 the base config sat there apparently supplying a default for it.
 
@@ -129,6 +129,22 @@ def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5):
     return TabConfig(config, "never/read.ms"), sizes
 
 
+def _stub_vis(n_bl, n_freq, n_time):
+    """Deterministic complex visibilities of unit rms, one per baseline.
+
+    Non-zero because ``ast.pow_spec.std`` defaults to ``data`` and measures
+    ``rms|V|`` off this: an all-zero stub would make the default width zero,
+    which the component refuses.
+    """
+
+    rng = np.random.default_rng(1)
+    shape = (n_bl, n_freq, n_time)
+
+    return jnp.asarray(
+        rng.normal(scale=2**-0.5, size=shape) + 1j * rng.normal(scale=2**-0.5, size=shape)
+    )
+
+
 def make_ast_config(args, n_ant=4, n_freq=4, n_time=8, dish_d=13.5):
     """A minimal mock TabConfig carrying ``args``, enough for ``GPVisAst.setup``."""
 
@@ -153,7 +169,16 @@ def make_ast_config(args, n_ant=4, n_freq=4, n_time=8, dish_d=13.5):
         dish_d=dish_d,
         uvw=uvw,
         phase_centre={"ra": 30.0, "dec": -30.0},
-        vis_obs=jnp.zeros((n_bl, n_freq, n_time), dtype=complex),
+        # Non-zero, because ast.pow_spec.std defaults to `data` and measures
+        # rms|V| off this: an all-zero stub would make the default width zero.
+        # Deterministic, and scaled so the measured width is ~1 Jy per baseline.
+        vis_obs=_stub_vis(n_bl, n_freq, n_time),
+        # Three masks: ms_flags is what the MS marked, flags is what the
+        # likelihood excludes, and estimator_flags is everything known to be
+        # bad. The prior width is measured from the last.
+        ms_flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
+        flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
+        estimator_flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
         args=args,
     )
 
@@ -198,17 +223,20 @@ class TestBaseConfigAstKeys:
     def test_base_ast_defaults_are_the_values_the_example_configs_use(self, tmp_path):
         """The numbers themselves, not merely that a number is there.
 
-        These are the values every config that omits them runs with, taken from
-        ``examples/tab_target.yaml`` (which ``tests/data`` and ``ci/reframe``
-        match). Pinning the presence of a key only catches half of a stray edit;
-        a changed value is still a valid float and would otherwise move every
-        such run in silence.
+        These are the values every config that omits them runs with. Pinning the
+        presence of a key only catches half of a stray edit; a changed value is
+        still a valid float and would otherwise move every such run in silence.
+
+        ``std`` is the exception and is deliberately not the example configs'
+        value: it is a prior width in Jy, so it belongs to the observation
+        rather than to the model, and the shipped configs each set the one that
+        covers their own simulation. The base default measures it instead.
         """
 
         ast = base_args(tmp_path)["ast"]
         pow_spec = ast["pow_spec"]
 
-        assert pow_spec["p0"] == pytest.approx(3e3)
+        assert pow_spec["std"] == "data"
         # null, and meaning it: no roll-off along the frequency axis.
         assert pow_spec["corr_freq"] is None
         assert pow_spec["gammas"] == pytest.approx([5.0, 5.0])

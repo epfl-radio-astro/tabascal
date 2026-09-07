@@ -36,7 +36,7 @@ ast:
   init: truth
   mean: 0
   pow_spec:
-    p0: 3e3
+    std: 1.5           # Widest true-sky baseline in the 8A simulation is rms|V| = 2.897 Jy, which this puts at 1.93 sigma - every baseline's sky inside 2 sigma, and measurably better recovery than covering the widest at 1 sigma; see docs/config.md
     corr_freq: null   # no frequency roll-off; these observations are single channel
     fov_deg: 5
     gammas: [5, 5]
