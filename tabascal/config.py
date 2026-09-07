@@ -318,6 +318,7 @@ class TabConfig:
             # before any component sees them.
             self.vis_obs = make_global(self.vis_obs, replicated_sharding())
             self.flags = make_global(self.flags, replicated_sharding())
+            self.ms_flags = make_global(self.ms_flags, replicated_sharding())
             # Was float(self.noise), which a resolved noise array cannot survive.
             # Replicated rather than sharded: it is one array indexed by baseline
             # (and channel, and timestep where the MS resolves the noise that
@@ -581,16 +582,31 @@ class TabConfig:
             print(f"  {100 * bad.mean():.2f} % of visibilities have no gain (flagged)")
 
     def set_flags(self, include_flags: bool):
+        """Build the likelihood mask. ``self.ms_flags`` is left as the MS wrote it."""
 
-        if not include_flags:
-            self.flags = jnp.zeros_like(self.flags, dtype=bool)
+        self.flags = (
+            jnp.asarray(self.ms_flags)
+            if include_flags
+            else jnp.zeros_like(self.ms_flags, dtype=bool)
+        )
 
         # A visibility with no valid gain was never calibrated, so it is excluded
         # even when data.flags is false -- see apply_gain_table.
         if getattr(self, "gain_flags", None) is not None:
             self.flags = self.flags | self.gain_flags
 
-        print(f"\n{100*self.flags.mean():.1f} % Data Flagged (Not Included in Likelihood)\n")
+        known = float(jnp.asarray(self.ms_flags).mean())
+        excluded = float(self.flags.mean())
+        print(f"\n{100 * excluded:.1f} % Data Flagged (Not Included in Likelihood)")
+        if known and not include_flags:
+            # Worth saying: the run is deliberately fitting data something else
+            # marked bad, which is often the point, and the estimators that
+            # want a clean sample still know which those are.
+            print(
+                f"{100 * known:.1f} % is flagged in the MS and is being fitted "
+                "anyway (data.flags: false)"
+            )
+        print()
 
     def read_ms_params(self, freq: float, corr: str, data_col: str):
 
@@ -601,6 +617,13 @@ class TabConfig:
         self.ants_itrf = ms_params["ants_itrf"]
         self.vis_obs = ms_params["vis_obs"]
         self.uvw = ms_params["uvw"]
+        # What the MS says is contaminated, kept whatever data.flags decides to
+        # do with it. The two are different questions: whether a sample is
+        # known to be bad, and whether tabascal declines to fit it. A strong
+        # emitter flagged by some other task is exactly the data tabascal is
+        # here to recover, so it belongs in the likelihood -- but it is still
+        # the wrong place to measure a clean sky amplitude from.
+        self.ms_flags = ms_params["flags"]
         self.flags = ms_params["flags"]
 
         self.n_ant = ms_params["n_ant"]

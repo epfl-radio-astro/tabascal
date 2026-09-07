@@ -467,8 +467,7 @@ trajectory_configs = [
             #   ARM  | 0.8767098298475181 |     0.2401       1.1      |     0.4806       1.0
             #   x86  | 0.8767101993544267 |     0.2401       1.1      |     0.4806       1.0
             #   GPU  | 0.8767110791411511 |     0.2401       1.1      |     0.4806       1.0
-            # (widest spread of any case, and still only 5.5e-8 relative -- measured
-            # before the std re-recording, across the three rows as they then were.)
+            # (widest spread of any case, at 1.6e-6 relative across the three rows.)
             # Re-recorded for ast.pow_spec.std: the prior on the astronomical
             # visibilities is normalised to a width in Jy now, so it is a different
             # prior. All three architectures re-measured on the branch -- ARM on an
@@ -525,7 +524,6 @@ rfi_vis_configs = [
             # so the upper bound only trips on gross RFI->ast leakage.
             #
             # Measured opt-point values (UnitaryGains -> identity gains, so gains RMSE ~0).
-            # Only the ARM rows are current: see the note above on ast.pow_spec.std.
             #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | chi2
             #   double  ARM    |      0.1787        1.2     |      0.4176       0.3     | 0.8965724354
             #   double  x86    |      0.1787        1.2     |      0.4176       0.3     | 0.8965724353
@@ -795,9 +793,8 @@ def _sharded_components(rfi_vis: str) -> list[str]:
 # Same case as FixedOrbit+PhaseCalculationRFI above (double precision), so it shares that
 # case's re-recorded reference and has to move with it -- the 1% tolerance is wide enough to
 # hide a missed update here, so it is worth checking the two match when either changes.
-# Verified on ARM CPU, x86 CPU and an NVIDIA GPU before the ast.pow_spec.std re-recording
-# (the sharded child is pinned to CPU by this test either way; the reference run uses
-# whatever is there); only ARM is current now, as in the case blocks above.
+# Verified on ARM CPU, x86 CPU and an NVIDIA GPU (the sharded child is pinned to CPU by
+# this test either way; the reference run uses whatever is there).
 _SHARDED_CHI2_REF = 0.8967103833231144
 
 

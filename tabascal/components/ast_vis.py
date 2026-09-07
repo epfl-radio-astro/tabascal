@@ -101,7 +101,7 @@ class GPVisAst(Component):
 
             self.std = pow_spec["std"]
             if self.std == FROM_DATA:
-                self.std = self._std_from_data(config.vis_obs, config.flags)
+                self.std = self._std_from_data(config.vis_obs, config.ms_flags)
             self.gammas = pow_spec["gammas"]
             self.fov_deg = pow_spec["fov_deg"]
             self.pk_cutoff = pow_spec["cutoff"]
@@ -492,15 +492,22 @@ class GPVisAst(Component):
         guessed. Per baseline because that is what the data offers; the model
         then has one width per baseline rather than one for all of them.
 
+        The mask is the MS's own, ``ms_flags``, and not the likelihood's.
+        Those answer different questions and this is where the difference
+        shows: a strong emitter flagged by some other task is data tabascal is
+        here to recover, so ``data.flags: false`` keeps it in the fit -- and it
+        is still the wrong place to measure a clean sky amplitude from. Reading
+        the MS's flags here costs nothing to a run that declines to honour them
+        elsewhere.
+
         **It measures whatever is in the unflagged data, including RFI.** That
-        is the point of taking only unflagged samples, and it is why an
-        observation with an empty flag mask gets a warning rather than a
-        silent estimate: on the shipped 8A simulation, whose RFI is unflagged
-        because modelling it is the job, this returns about 11 Jy where the
-        true sky is 1.7. Where the RFI *is* flagged, the estimate is the sky.
-        See GitHub #220 for making the estimate use the RFI model's own
-        knowledge of which samples are contaminated, which is what would fix
-        the unflagged case.
+        is the point of taking only unflagged samples, and it is why an MS that
+        flags nothing gets a warning rather than a silent estimate: on the
+        shipped 8A simulation, whose RFI is unflagged because modelling it is
+        the job, this returns about 11 Jy where the true sky is under 3. Where
+        the RFI *is* flagged, the estimate is the sky. See GitHub #220 for
+        making it use the RFI model's own view of which samples are
+        contaminated, which is what would fix the unflagged case.
         """
 
         vis_obs = jnp.asarray(vis_obs)
@@ -515,18 +522,42 @@ class GPVisAst(Component):
         if not bool(jnp.any(~keep)):
             print(
                 "Warning: ast.pow_spec.std: data is measuring every "
-                "visibility, because none is flagged. Whatever RFI is in "
-                "them is in the prior width too, which will be wider than "
-                "the sky by however much RFI there is. Flag the "
-                "contaminated samples, or set a width in Jy."
+                "visibility, because the MS flags none of them. Whatever "
+                "RFI is in them is in the prior width too, so it will be "
+                "wider than the sky by however much RFI there is. Flag the "
+                "contaminated samples in the MS -- this reads those flags "
+                "whatever data.flags says, so flagging them does not stop "
+                "tabascal fitting them -- or set ast.pow_spec.std to a width "
+                "in Jy."
             )
 
-        power = jnp.sum(jnp.abs(vis_obs) ** 2 * keep, axis=(1, 2))
-        # A baseline flagged out entirely has nothing of its own to go on; the
-        # median of the ones that do is the least-committal stand-in, and it
-        # keeps a zero out of a denominator downstream.
-        std = jnp.where(n_kept > 0, jnp.sqrt(power / jnp.maximum(n_kept, 1)), jnp.nan)
-        std = jnp.where(jnp.isnan(std), jnp.nanmedian(std), std)
+        # Scaled before squaring: |V| of 1e20 squares to 1e40, which is inf in
+        # float32 even though both the visibility and its rms are perfectly
+        # representable, and 1e-30 squares to zero. Dividing by the baseline's
+        # own largest sample first bounds the squares to 1 and puts the scale
+        # back afterwards.
+        kept_abs = jnp.abs(vis_obs) * keep
+        scale = jnp.max(kept_abs, axis=(1, 2))
+        safe = jnp.where(scale > 0, scale, 1.0)
+        mean_sq = jnp.sum((kept_abs / safe[:, None, None]) ** 2, axis=(1, 2)) / jnp.maximum(
+            n_kept, 1
+        )
+        std = safe * jnp.sqrt(mean_sq)
+
+        if not bool(jnp.all(jnp.isfinite(std))):
+            raise ValueError(
+                "ast.pow_spec.std: data cannot measure a width: the unflagged "
+                "visibilities of at least one baseline are not finite. Flag "
+                "them, or set a width in Jy."
+            )
+
+        # Only a baseline with nothing left to measure falls back, and it falls
+        # back to the median of the ones that measured something -- the
+        # least-committal stand-in, and it keeps a zero out of a denominator
+        # downstream. Anything else non-finite is the error above rather than
+        # something the median quietly covers for.
+        measured = n_kept > 0
+        std = jnp.where(measured, std, jnp.median(std[measured]))
 
         print(
             f"Using ast.pow_spec.std from data: {float(jnp.min(std)):.4g} to "

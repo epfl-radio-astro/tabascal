@@ -192,8 +192,9 @@ reintroduce a component whose fp32 convergence is architecture-dependent, that
 split has to come back — measure both precisions on at least two architectures
 before collapsing a reference to a scalar.
 
-If a double value differs between two machines by much more than 1e-6, suspect a
-stale reference rather than an architecture difference. That is what the earlier
+If a double value differs between two machines by much more than the spreads
+above — 1.6e-6 on the SGP4 orbit cases, ~2.5e-9 on the rest — suspect a stale
+reference rather than an architecture difference. That is what the earlier
 "ARM runs ~0.7% high" comments in this file turned out to be: the references had
 drifted while staying inside the 1% tolerance, so nothing failed until a real
 change pushed them over.

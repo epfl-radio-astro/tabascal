@@ -548,7 +548,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         flags[:, :, ::2] = True
         vis[:, :, ::2] *= 10.0
         config.vis_obs = jnp.asarray(vis)
-        config.flags = jnp.asarray(flags)
+        config.ms_flags = jnp.asarray(flags)
 
         comp = setup_ast(config)
 
@@ -557,24 +557,91 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
 
         assert np.allclose(realised, kept, rtol=1e-5)
 
+    def test_data_reads_the_ms_flags_even_when_the_fit_ignores_them(self, tmp_path):
+        """The case the two masks exist to tell apart.
+
+        A strong emitter flagged by some other task is data tabascal is here to
+        recover, so ``data.flags: false`` leaves it in the likelihood -- and it
+        is still the wrong place to measure a clean sky amplitude from. The
+        width comes off ``ms_flags``, the fit runs on ``flags``, and here they
+        disagree completely.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        vis = np.asarray(config.vis_obs).copy()
+        contaminated = np.zeros(vis.shape, dtype=bool)
+        contaminated[:, :, ::2] = True
+        vis[:, :, ::2] *= 50.0
+        config.vis_obs = jnp.asarray(vis)
+        config.ms_flags = jnp.asarray(contaminated)
+        # What the likelihood excludes: nothing. data.flags: false.
+        config.flags = jnp.zeros(vis.shape, dtype=bool)
+
+        comp = setup_ast(config)
+
+        clean = np.sqrt(np.mean(np.abs(vis[:, :, 1::2]) ** 2, axis=(1, 2)))
+        assert np.allclose(np.asarray(comp.std), clean, rtol=1e-5)
+        # And emphatically not the width of everything, which the emitter
+        # would have inflated by a factor of ~35.
+        everything = np.sqrt(np.mean(np.abs(vis) ** 2, axis=(1, 2)))
+        assert np.all(np.asarray(comp.std) < 0.1 * everything)
+
     def test_data_says_so_when_nothing_is_flagged(self, tmp_path, capsys):
         """Because then it is measuring the RFI as well as the sky.
 
         On the shipped 8A simulation, whose RFI is unflagged because modelling
-        it is the job, this returns about 11 Jy against a true sky of 1.7. The
+        it is the job, this returns about 11 Jy against a true sky under 3. The
         estimate is only the sky where the contamination has been flagged, and
         nothing else in the run will say so.
         """
         setup_ast(pow_spec_config(tmp_path, std="data"))
 
         printed = capsys.readouterr().out
-        assert "none is flagged" in printed
+        assert "the MS flags none of them" in printed
         assert "RFI" in printed
+        # And it points at the fix that does not cost the run anything: the MS
+        # flags are read here whatever data.flags decides for the likelihood.
+        assert "whatever data.flags says" in printed
+
+    @pytest.mark.parametrize("amplitude", [1e20, 1e-30], ids=["huge", "tiny"])
+    def test_data_measures_amplitudes_the_square_would_lose(self, tmp_path, amplitude):
+        """rms|V| is representable in float32 well past where |V|^2 is not.
+
+        1e20 squares to 1e40, which is inf there, and 1e-30 squares to zero --
+        so squaring before averaging threw away visibilities whose rms the
+        precision could hold perfectly well, and setup then blamed std.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        config.vis_obs = jnp.asarray(config.vis_obs) * amplitude
+
+        comp = setup_ast(config)
+
+        # In float64 before squaring, not merely accumulated there: `dtype=`
+        # picks the accumulator, so squaring a float32 1e21 still overflows to
+        # inf on the way in -- which is the bug under test, in the check.
+        wide = np.asarray(config.vis_obs).astype(np.complex128)
+        expected = np.sqrt(np.mean(np.abs(wide) ** 2, axis=(1, 2)))
+        assert np.allclose(np.asarray(comp.std), expected, rtol=1e-5)
+
+    def test_data_refuses_a_visibility_that_is_not_finite(self, tmp_path):
+        """Rather than quietly handing that baseline the median of the others.
+
+        The fallback exists for a baseline with nothing left after flagging.
+        A NaN nobody flagged is a different thing, and covering for it here
+        only moves the failure somewhere that cannot name its cause.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        vis = np.asarray(config.vis_obs).copy()
+        vis[0, 0, 0] = np.nan
+        config.vis_obs = jnp.asarray(vis)
+
+        message = setup_error(config)
+
+        assert "not finite" in message
 
     def test_data_with_everything_flagged_is_refused(self, tmp_path):
         """There is nothing to measure, and a zero width is not a prior."""
         config = pow_spec_config(tmp_path, std="data")
-        config.flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
+        config.ms_flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
 
         message = setup_error(config)
 

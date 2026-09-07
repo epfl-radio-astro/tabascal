@@ -625,6 +625,12 @@ def _tab_config(vis_obs, noise, flags=None):
     config.vis_obs = jnp.asarray(vis_obs)
     config.noise = noise
     config.noise_scalar = None if noise is None else 1.0
+    # Both, as read_ms_params sets them: ms_flags is what the MS marked, flags
+    # is what the likelihood excludes, and set_flags derives the second from
+    # the first.
+    config.ms_flags = (
+        jnp.zeros(np.shape(vis_obs), dtype=bool) if flags is None else jnp.asarray(flags)
+    )
     config.flags = (
         jnp.zeros(np.shape(vis_obs), dtype=bool) if flags is None else jnp.asarray(flags)
     )
@@ -946,6 +952,8 @@ class TestInitOrdering:
                 "noise": None,
                 "noise_scalar": None,
                 "vis_obs": np.zeros((1, N_FREQ, 1), dtype=complex),
+                # Both, as the real read_ms_params sets them.
+                "ms_flags": np.zeros((1, N_FREQ, 1), dtype=bool),
                 "flags": np.zeros((1, N_FREQ, 1), dtype=bool),
             },
             "set_noise": {"noise": 0.7, "noise_scalar": 0.7},
