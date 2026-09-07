@@ -63,6 +63,32 @@ def _pow_spec_number(value, where: str) -> float:
     return value
 
 
+#: The literal a power-spectrum amplitude may take instead of a number, meaning
+#: "measure it from the observed visibilities rather than making me guess".
+FROM_DATA = "data"
+
+
+def _pow_spec_amplitude(value, where: str):
+    """A positive number, or the literal ``"data"``.
+
+    An amplitude is the one entry in these blocks that is a property of the
+    observation rather than of the model, so it is the one that can be measured
+    instead of set. Everything else -- a roll-off exponent, a truncation, a
+    correlation scale -- describes what shape the prior has, and no amount of
+    looking at the data settles those.
+    """
+
+    if isinstance(value, str):
+        if value == FROM_DATA:
+            return FROM_DATA
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is not a number and not "
+            f"{FROM_DATA!r}, which is the only word it takes."
+        )
+
+    return _pow_spec_number(value, where)
+
+
 def _pow_spec_pair(value, where: str) -> List[float]:
     """An ordered pair of positive numbers, one per axis.
 
@@ -136,6 +162,7 @@ def _pow_spec_cutoff(value, where: str) -> float:
 #: a caller of :func:`validate_pow_spec` passes.
 POW_SPEC_KINDS = {
     "number": _pow_spec_number,
+    "amplitude": _pow_spec_amplitude,
     "pair": _pow_spec_pair,
     "cutoff": _pow_spec_cutoff,
 }

@@ -521,6 +521,78 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         assert "ast.pow_spec.std" in message
         assert "representable" in message
 
+    def test_data_measures_the_width_per_baseline(self, tmp_path, capsys):
+        """``std: data`` is not an estimate of the width -- it is the width.
+
+        ``std`` is defined as rms|V|, and that is exactly what this measures,
+        so the number the data gives is the number the prior gets, per
+        baseline, with no conversion in between.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        comp = setup_ast(config)
+
+        expected = np.sqrt(
+            np.mean(np.abs(np.asarray(config.vis_obs)) ** 2, axis=(1, 2))
+        )
+        realised = np.sqrt(np.asarray(2 * jnp.sum(comp.sigma_ast_k**2, axis=(1, 2))))
+
+        assert np.allclose(realised, expected, rtol=1e-5)
+        assert realised.shape == (comp.n_bl,)
+        # One width per baseline, and they differ -- otherwise this would pass
+        # against a scalar too.
+        assert realised.std() > 0
+
+    def test_data_ignores_what_is_flagged(self, tmp_path):
+        """Which is the whole reason to take the mask rather than the array.
+
+        Half the samples are given an amplitude ten times the rest and then
+        flagged; the width has to come back as the unflagged half alone.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        vis = np.asarray(config.vis_obs).copy()
+        flags = np.zeros(vis.shape, dtype=bool)
+        flags[:, :, ::2] = True
+        vis[:, :, ::2] *= 10.0
+        config.vis_obs = jnp.asarray(vis)
+        config.flags = jnp.asarray(flags)
+
+        comp = setup_ast(config)
+
+        kept = np.sqrt(np.mean(np.abs(vis[:, :, 1::2]) ** 2, axis=(1, 2)))
+        realised = np.sqrt(np.asarray(2 * jnp.sum(comp.sigma_ast_k**2, axis=(1, 2))))
+
+        assert np.allclose(realised, kept, rtol=1e-5)
+
+    def test_data_says_so_when_nothing_is_flagged(self, tmp_path, capsys):
+        """Because then it is measuring the RFI as well as the sky.
+
+        On the shipped 8A simulation, whose RFI is unflagged because modelling
+        it is the job, this returns about 11 Jy against a true sky of 1.7. The
+        estimate is only the sky where the contamination has been flagged, and
+        nothing else in the run will say so.
+        """
+        setup_ast(pow_spec_config(tmp_path, std="data"))
+
+        printed = capsys.readouterr().out
+        assert "none is flagged" in printed
+        assert "RFI" in printed
+
+    def test_data_with_everything_flagged_is_refused(self, tmp_path):
+        """There is nothing to measure, and a zero width is not a prior."""
+        config = pow_spec_config(tmp_path, std="data")
+        config.flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
+
+        message = setup_error(config)
+
+        assert "nothing to measure" in message
+
+    def test_a_word_other_than_data_is_refused(self, tmp_path):
+        """`data` is the only word; anything else is a typo, not a setting."""
+        message = setup_error(pow_spec_config(tmp_path, std="truth"))
+
+        assert "ast.pow_spec.std" in message
+        assert "'data'" in message
+
     def test_the_old_name_is_refused_with_the_guidance(self, tmp_path):
         """No conversion is offered because there is not one to offer.
 

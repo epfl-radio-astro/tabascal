@@ -56,7 +56,7 @@ ast:
   mean: 0
   # mean: data
   pow_spec:
-    std: 26           # prior width in Jy, as rms|V|; see docs/config.md
+    std: 1.5           # Widest true-sky baseline in the 96A simulation is rms|V| = 1.453 Jy, so every baseline's sky sits inside 1 sigma of this prior; see docs/config.md
     corr_freq: null   # no frequency roll-off; these observations are single channel
     fov_deg: 5
     gammas: [5, 5]

@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, validate_pow_spec
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, validate_pow_spec
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
@@ -14,7 +14,7 @@ from tabascal.truth import read_true_vis_ast
 #: The ``ast.pow_spec`` keys and what each may be, for
 #: :func:`tabascal.fft_gp.validate_pow_spec`.
 _POW_SPEC_RULES = {
-    "std": "number",
+    "std": "amplitude",
     "corr_freq": "number",
     "fov_deg": "number",
     "gammas": "pair",
@@ -151,6 +151,8 @@ class GPVisAst(Component):
             config.args["ast"]["pow_spec"] = pow_spec
 
             self.std = pow_spec["std"]
+            if self.std == FROM_DATA:
+                self.std = self._std_from_data(config.vis_obs, config.flags)
             self.gammas = pow_spec["gammas"]
             self.fov_deg = pow_spec["fov_deg"]
             self.pk_cutoff = pow_spec["cutoff"]
@@ -432,7 +434,7 @@ class GPVisAst(Component):
 
         self.n_k_freq_ast, self.n_k_time_ast = self.pk.shape
 
-        def sigma(k0):
+        def sigma(k0, std):
             """Mode standard deviations that make ``std`` the width of vis_ast.
 
             The modes are independent, so the variance of the signal they build
@@ -472,9 +474,15 @@ class GPVisAst(Component):
 
             shape = pow_spec_nd(self.ks, _SHAPE_ONLY, [self.k0_freq, k0], self.gammas)
 
-            return (self.std / _LATENT_WIDTH) * jnp.sqrt(shape / jnp.sum(shape))
+            return (std / _LATENT_WIDTH) * jnp.sqrt(shape / jnp.sum(shape))
 
-        self.sigma_ast_k = vmap(sigma, (0), 0)(self.k0_time)
+        # std is a scalar when it was configured and one per baseline when it
+        # was measured, so it is broadcast to the baseline axis and mapped
+        # alongside the knee. The width is per baseline either way; the two
+        # cases differ only in whether the baselines were given the same one.
+        std_bl = jnp.broadcast_to(jnp.asarray(self.std), jnp.shape(self.k0_time))
+
+        self.sigma_ast_k = vmap(sigma, (0, 0), 0)(self.k0_time, std_bl)
 
         # validate_pow_spec accepts any finite positive float, but sigma is
         # built in the run's own precision: std = 1e-50 flushes it to zero in
@@ -486,8 +494,12 @@ class GPVisAst(Component):
         if not jnp.all(jnp.isfinite(self.sigma_ast_k)) or jnp.any(
             self.sigma_ast_k <= 0
         ):
+            reported = (
+                self.std if jnp.ndim(self.std) == 0
+                else f"{float(jnp.min(self.std)):.4g}..{float(jnp.max(self.std)):.4g}"
+            )
             raise ValueError(
-                f"ast.pow_spec.std ({self.std}) is not representable in this "
+                f"ast.pow_spec.std ({reported}) is not representable in this "
                 f"run's precision: the mode standard deviations it gives come "
                 f"out {'non-finite' if not jnp.all(jnp.isfinite(self.sigma_ast_k)) else 'zero'}. "
                 f"std is a visibility amplitude in Jy, so it should be within "
@@ -524,6 +536,58 @@ class GPVisAst(Component):
         self.state_outputs = {
             "vis_ast": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
+
+    def _std_from_data(self, vis_obs, flags):
+        """``rms|V|`` per baseline over the samples nothing has flagged.
+
+        ``std`` is defined as that quantity, so this is not a proxy for the
+        prior width -- it is the prior width, read off the data instead of
+        guessed. Per baseline because that is what the data offers; the model
+        then has one width per baseline rather than one for all of them.
+
+        **It measures whatever is in the unflagged data, including RFI.** That
+        is the point of taking only unflagged samples, and it is why an
+        observation with an empty flag mask gets a warning rather than a
+        silent estimate: on the shipped 8A simulation, whose RFI is unflagged
+        because modelling it is the job, this returns about 11 Jy where the
+        true sky is 1.7. Where the RFI *is* flagged, the estimate is the sky.
+        See GitHub #220 for making the estimate use the RFI model's own
+        knowledge of which samples are contaminated, which is what would fix
+        the unflagged case.
+        """
+
+        vis_obs = jnp.asarray(vis_obs)
+        keep = ~jnp.asarray(flags)
+        n_kept = jnp.sum(keep, axis=(1, 2))
+
+        if not bool(jnp.any(keep)):
+            raise ValueError(
+                "ast.pow_spec.std: data has nothing to measure -- every "
+                "visibility is flagged. Set a width in Jy instead."
+            )
+        if not bool(jnp.any(~keep)):
+            print(
+                "Warning: ast.pow_spec.std: data is measuring every "
+                "visibility, because none is flagged. Whatever RFI is in "
+                "them is in the prior width too, which will be wider than "
+                "the sky by however much RFI there is. Flag the "
+                "contaminated samples, or set a width in Jy."
+            )
+
+        power = jnp.sum(jnp.abs(vis_obs) ** 2 * keep, axis=(1, 2))
+        # A baseline flagged out entirely has nothing of its own to go on; the
+        # median of the ones that do is the least-committal stand-in, and it
+        # keeps a zero out of a denominator downstream.
+        std = jnp.where(n_kept > 0, jnp.sqrt(power / jnp.maximum(n_kept, 1)), jnp.nan)
+        std = jnp.where(jnp.isnan(std), jnp.nanmedian(std), std)
+
+        print(
+            f"Using ast.pow_spec.std from data: {float(jnp.min(std)):.4g} to "
+            f"{float(jnp.max(std)):.4g} Jy across baselines "
+            f"(median {float(jnp.median(std)):.4g})"
+        )
+
+        return std
 
     def forward_transform(self, base_params, sigma, mu):
 
