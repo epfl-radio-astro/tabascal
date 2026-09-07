@@ -843,6 +843,45 @@ class TestApplyGainTable:
         # data.flags: false, so only the gain flags are in it.
         assert not np.asarray(config.flags)[0, 0, 0]
 
+    def test_the_width_a_partial_table_leaves_is_the_calibrated_one(
+        self, casacore, tmp_path, gains, vis_obs
+    ):
+        """The consequence, in Jy, of the mask the two tests above wire up.
+
+        Real gains, one antenna unsolved, and the uncalibratable samples made
+        enormous. The width has to come off the calibrated samples alone; if
+        the estimator saw the raw frame it would read the emitter instead.
+        """
+        from tabascal.components.ast_vis import GPVisAst
+
+        dead = np.asarray(gains).copy()
+        dead[2] = np.nan
+        path = _write_table(tmp_path, dead)
+
+        raw = np.asarray(vis_obs).copy()
+        touches_2 = (A1 == 2) | (A2 == 2)
+        raw[touches_2] *= 1e4
+        config = _tab_config(raw, noise=0.5)
+
+        config.apply_gain_table(path)
+        config.set_flags(False)
+
+        std = np.asarray(
+            GPVisAst.__new__(GPVisAst)._std_from_data(
+                config.vis_obs, config.estimator_flags
+            )
+        )
+        calibrated = np.asarray(config.vis_obs)
+        expected = np.sqrt(np.mean(np.abs(calibrated) ** 2, axis=(1, 2)))
+        # The calibratable baselines measure themselves; the rest have nothing
+        # left and take the median of those, which is the documented fallback.
+        assert np.allclose(std[~touches_2], expected[~touches_2], rtol=1e-5)
+        assert np.allclose(
+            std[touches_2], np.median(std[~touches_2]), rtol=1e-5
+        )
+        # And nowhere near the 1e4 the uncalibratable samples carry.
+        assert np.all(std < np.max(np.abs(calibrated[touches_2])) / 100)
+
     def test_the_ms_flags_are_still_only_what_the_ms_wrote(
         self, casacore, tmp_path, gains, vis_obs
     ):

@@ -540,7 +540,12 @@ class GPVisAst(Component):
         # representable, and 1e-30 squares to zero. Dividing by the baseline's
         # own largest sample first bounds the squares to 1 and puts the scale
         # back afterwards.
-        kept_abs = jnp.abs(vis_obs) * keep
+        # where, not a multiply: an MS routinely leaves a NaN or an infinity in
+        # a cell it has flagged, and NaN * False is NaN in numpy. XLA happens
+        # to lower a boolean multiply to a select and give 0, so both spellings
+        # measure the same thing here -- this one says so rather than resting
+        # on that.
+        kept_abs = jnp.where(keep, jnp.abs(vis_obs), 0.0)
         scale = jnp.max(kept_abs, axis=(1, 2))
         safe = jnp.where(scale > 0, scale, 1.0)
         mean_sq = jnp.sum((kept_abs / safe[:, None, None]) ** 2, axis=(1, 2)) / jnp.maximum(

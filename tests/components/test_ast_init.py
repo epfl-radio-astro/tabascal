@@ -588,6 +588,29 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         everything = np.sqrt(np.mean(np.abs(vis) ** 2, axis=(1, 2)))
         assert np.all(np.asarray(comp.std) < 0.1 * everything)
 
+    def test_a_flagged_sample_cannot_poison_the_measurement(self, tmp_path):
+        """An MS leaves whatever it likes in a cell it has flagged.
+
+        NaN and infinity both turn up in flagged cells of real data, and a
+        mask that multiplies rather than selects would carry a NaN through the
+        maximum and lose the whole baseline -- in numpy, NaN * False is NaN.
+        The flagged cell is excluded, so what it holds cannot matter.
+        """
+        config = pow_spec_config(tmp_path, std="data")
+        vis = np.asarray(config.vis_obs).copy()
+        flags = np.zeros(vis.shape, dtype=bool)
+        flags[:, :, 0] = True
+        vis[0, :, 0] = np.nan
+        vis[1:, :, 0] = np.inf
+        config.vis_obs = jnp.asarray(vis)
+        config.estimator_flags = jnp.asarray(flags)
+
+        comp = setup_ast(config)
+
+        clean = np.sqrt(np.mean(np.abs(vis[:, :, 1:]) ** 2, axis=(1, 2)))
+        assert np.all(np.isfinite(np.asarray(comp.std)))
+        assert np.allclose(np.asarray(comp.std), clean, rtol=1e-5)
+
     def test_data_says_so_when_nothing_is_flagged(self, tmp_path, capsys):
         """Because then it is measuring the RFI as well as the sky.
 

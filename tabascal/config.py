@@ -585,7 +585,12 @@ class TabConfig:
             print(f"  {100 * bad.mean():.2f} % of visibilities have no gain (flagged)")
 
     def set_flags(self, include_flags: bool):
-        """Build the likelihood mask. ``self.ms_flags`` is left as the MS wrote it."""
+        """Derive the likelihood and estimator masks; ``ms_flags`` is left alone.
+
+        ``flags`` is what the fit declines to touch and ``estimator_flags`` is
+        what an estimator declines to measure from. Both are built here;
+        ``ms_flags`` stays as the MS wrote it.
+        """
 
         self.flags = (
             jnp.asarray(self.ms_flags)
