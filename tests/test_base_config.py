@@ -426,9 +426,6 @@ class TestTheTimeCountIsNotAConfigKey:
         assert tab_config.n_time_fine == sizes.n_time * expected
 
 
-#: The gain Gaussian process's correlation lengths, removed with the component
-#: that read them.
-
 
 class TestTheGainsSectionHasNoCorrelationLengths:
     """No gain component has a kernel, so the section has no length scales.

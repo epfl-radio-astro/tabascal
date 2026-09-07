@@ -4,8 +4,6 @@ import inspect
 import pkgutil
 from typing import Iterable, List, Type
 
-#: Where the migration table lives. Quoted in every failure to resolve a
-#: component reference, since a stale config is the likeliest reason for one.
 def _is_class(obj) -> bool:
     """Whether ``obj`` really is a class, on every supported Python.
 
@@ -79,7 +77,7 @@ def _listing(label: str, names: List[str]) -> str:
 
 def _missing_class_message(ref: str, cls_name: str, module) -> str:
     return (
-        f"'{ref}': module '{module.__name__}' has no class '{cls_name}'."
+        f"'{ref}': module '{module.__name__}' has no class '{cls_name}'. "
         + _listing("It defines", _offered_classes(module))
     )
 
@@ -96,7 +94,7 @@ def _missing_module_message(
 ) -> str:
     where = f" in '{base_package}', and none at top level" if base_package else ""
     return (
-        f"'{ref}': there is no module '{mod_path}'{where}."
+        f"'{ref}': there is no module '{mod_path}'{where}. "
         + _listing(f"'{base_package}' holds", _offered_modules(base_package))
     )
 

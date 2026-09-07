@@ -1140,11 +1140,10 @@ def test_base_config_carries_the_new_keys():
 
 
 def test_the_correlation_lengths_are_not_read_here():
-    """The gain correlation lengths went with ``gains:GPGains`` (#129).
+    """``ConstGains`` fits one gain per antenna, constant over the observation.
 
-    A config carrying them is stopped at load by
-    :func:`~tabascal.config.check_removed_keys`; what is pinned here is the other
-    half of that, namely that nothing on the ``ConstGains`` path would look for one.
+    There is no kernel, so there is no length scale: nothing on this path looks
+    for a correlation length, and the section it reads carries none.
     """
     cfg = make_const_gains_config()
 

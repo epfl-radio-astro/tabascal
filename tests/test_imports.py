@@ -21,11 +21,6 @@ from tabascal.imports import (
 )
 
 
-#: The page the failures point at, read once.
-
-#: Just the section the pointer names -- from its heading to the next one at the
-#: same level -- so that a name is checked where the user is sent, not anywhere
-#: on a long page.
 def message(*refs):
     """The error text from trying to import ``refs``."""
     with pytest.raises(ImportError) as excinfo:
@@ -88,6 +83,27 @@ class TestAnUnknownClassInAKnownModule:
     def test_an_abstract_base_is_not_offered(self):
         """``BaseGPRFI`` cannot be listed in a config, so suggesting it misleads."""
         assert "BaseGPRFI" not in message(self.ref)
+
+
+class TestTheMessageReadsAsProse:
+    """The parts are concatenated, so each has to bring its own separator.
+
+    Pinned because losing one is invisible to every test that asks whether a
+    name appears in the message: `'X'.It defines:` contains both halves and
+    reads as neither.
+    """
+
+    def test_a_missing_class_message_has_a_space_between_its_sentences(self):
+        text = message("rfi_signal:NoSuchComponent")
+
+        assert ".It defines" not in text
+        assert ". It defines" in text
+
+    def test_a_missing_module_message_does_too(self):
+        text = message("no_such_module:Thing")
+
+        assert "level.'tabascal" not in text
+        assert "level. 'tabascal" in text
 
 
 class TestAnUnknownModule:

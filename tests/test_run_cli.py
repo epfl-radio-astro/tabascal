@@ -814,6 +814,29 @@ class TestLightCurveInputs:
             "light_curves/runA.npz"
         )
 
+    def test_a_tag_that_is_a_path_is_refused(self):
+        """A tag is a label; os.path.join would silently obey it instead.
+
+        An absolute component makes join discard everything before it, so a
+        tag of ``/data/sim`` writes ``/data/sim.npz`` and not a file under
+        ``light_curves/`` at all. It is reachable by accident: ``-sx``
+        prefix-matches ``-s``, so a mistyped flag arrives here as a tag.
+        """
+        args = _parse(
+            "light-curve", "-ms", "/data/obs.ms", "-n", "1", "-s", "/data/sim"
+        )
+        assert args.tag == "/data/sim"  # argparse really does hand it over
+
+        with pytest.raises(SystemExit, match=r"-sx/--tag .* is a path"):
+            self._mod().resolve_output(args, "/data/obs.ms", "DATA")
+
+    def test_a_relative_tag_with_a_separator_is_refused_too(self):
+        """It escapes light_curves/ without being absolute."""
+        args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-sx", "a/b")
+
+        with pytest.raises(SystemExit, match=r"-sx/--tag .* is a path"):
+            self._mod().resolve_output(args, "/data/obs.ms", "DATA")
+
     def test_an_explicit_output_wins(self, tmp_path):
         out = str(tmp_path / "curves.npz")
         args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-o", out)
