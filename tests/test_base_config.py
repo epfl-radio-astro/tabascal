@@ -30,8 +30,7 @@ from tabascal.components.ast_vis import GPVisAst
 from tabascal.components.rfi_vis import RiemannVis
 from tabascal.config import (
     TabConfig,
-    check_removed_keys,
-    check_renamed_keys,
+    check_unknown_keys,
     load_config,
 )
 from tabascal.interferometry import get_strides_and_idxs, max_ast_fringe_rate
@@ -298,7 +297,7 @@ class TestSimDirWasRenamed:
 
         message = str(excinfo.value)
         assert "data.sim_dir" in message
-        assert "data.out_dir" in message
+        assert "out_dir" in message
 
     def test_the_base_ships_the_new_names(self, tmp_path):
         data = base_args(tmp_path)["data"]
@@ -306,54 +305,6 @@ class TestSimDirWasRenamed:
         assert "sim_dir" not in data
         assert data["out_dir"] is None
         assert data["truth_zarr"] is None
-
-    @pytest.mark.parametrize("subcommand", ["run", "light-curve"])
-    def test_both_subcommands_refuse_it(self, subcommand):
-        """light-curve especially, where a bare -s is worse than unrecognised.
-
-        ``-sx/--tag`` is the only surviving ``-s`` option there, so argparse
-        abbreviation-matches ``-s`` to it: the directory became the run tag,
-        and an absolute tag makes ``os.path.join`` discard the directory it was
-        being joined to, so the light curves were written to a file named after
-        the simulation instead of into ``light_curves/`` beside the MS.
-        """
-        from tabascal.scripts.run_tabascal import build_parser
-        from tabascal.scripts import run_tabascal
-
-        args = build_parser().parse_args(
-            [subcommand, "-c", "c.yaml", "-s", "/data/pnt_src_sim"]
-        )
-
-        assert args.sim_dir == "/data/pnt_src_sim"  # not absorbed by --tag
-        assert getattr(args, "tag", None) is None
-        with pytest.raises(SystemExit, match=r"-s/--sim_dir was renamed"):
-            run_tabascal._reject_sim_dir(args)
-
-    def test_an_empty_value_is_refused_too(self):
-        """``-s ""`` was still given; truthiness would swallow it."""
-        from tabascal.scripts.run_tabascal import build_parser
-        from tabascal.scripts import run_tabascal
-
-        args = build_parser().parse_args(["run", "-c", "c.yaml", "-s", ""])
-
-        with pytest.raises(SystemExit, match=r"-s/--sim_dir was renamed"):
-            run_tabascal._reject_sim_dir(args)
-
-    def test_the_flag_is_renamed_too_and_says_so(self):
-        """argparse would answer a -s with "unrecognized arguments" otherwise.
-
-        Which says nothing about where it went, for a flag every existing script
-        and every older doc passes.
-        """
-        from tabascal.scripts.run_tabascal import build_parser, _run_cmd
-
-        args = build_parser().parse_args(["run", "-c", "c.yaml", "-s", "/some/where"])
-
-        with pytest.raises(SystemExit) as excinfo:
-            _run_cmd(args)
-
-        message = str(excinfo.value)
-        assert "-s/--sim_dir" in message and "-od/--out_dir" in message
 
 
 class TestBaseConfigIntegrationSampleCounts:
@@ -398,9 +349,9 @@ class TestBaseConfigIntegrationSampleCounts:
 
         message = str(excinfo.value)
         assert "rfi.freq_int_samples" in message
-        assert "rfi.n_int_freq" in message
+        assert "n_int_freq" in message
 
-    def test_an_empty_section_is_not_a_rename_hit(self):
+    def test_an_empty_section_is_not_a_rename_hit(self, tmp_path):
         """``rfi:`` with nothing under it parses as None, which ``in`` cannot search.
 
         The check runs on every load, so a section that is merely empty has to
@@ -411,7 +362,7 @@ class TestBaseConfigIntegrationSampleCounts:
         ``tests/test_config_yaml.py``); this check only has to survive one.
         """
 
-        check_renamed_keys({"rfi": None}, "user.yaml")
+        check_unknown_keys({"rfi": None}, base_args(tmp_path), "user.yaml")
 
     def test_the_frequency_default_survives_the_merge(self, tmp_path):
         """A config overriding nothing of ``rfi`` still carries the count.
@@ -518,7 +469,7 @@ class TestTheTimeCountIsNotAConfigKey:
 
         message = str(excinfo.value)
         assert "rfi.n_int_time" in message
-        assert "rfi.time_int_factor" in message
+        assert "time_int_factor" in message
 
     def test_a_null_value_is_still_a_hit(self, tmp_path):
         """Presence, not value.
@@ -536,12 +487,12 @@ class TestTheTimeCountIsNotAConfigKey:
 
         assert "rfi.n_int_time" in str(excinfo.value)
 
-    def test_an_empty_section_is_not_a_removed_hit(self):
+    def test_an_empty_section_is_not_a_removed_hit(self, tmp_path):
         """``rfi:`` with nothing under it parses as None, which ``in`` cannot
         search. The check runs on every load, so a merely empty section has to
         pass through it rather than raise a ``TypeError`` from the machinery."""
 
-        check_removed_keys({"rfi": None}, "user.yaml")
+        check_unknown_keys({"rfi": None}, base_args(tmp_path), "user.yaml")
 
     def test_the_count_still_comes_from_the_estimator(self, tmp_path, monkeypatch):
         """The default path, end to end, unmoved by the key going away.
@@ -608,8 +559,8 @@ class TestTheGainCorrelationLengthsAreGone:
 
         message = str(excinfo.value)
         assert f"gains.{key}" in message
-        assert "GPGains" in message
-        assert "#129" in message
+        # What it does take, so the reader can see the key is not among them.
+        assert "amp_std" in message and "phase_std" in message
 
     @pytest.mark.parametrize("key", GAIN_CORR_KEYS)
     def test_a_null_value_is_still_a_hit(self, tmp_path, key):
@@ -624,10 +575,10 @@ class TestTheGainCorrelationLengthsAreGone:
 
         assert f"gains.{key}" in str(excinfo.value)
 
-    def test_an_empty_gains_section_is_not_a_hit(self):
+    def test_an_empty_gains_section_is_not_a_hit(self, tmp_path):
         """``gains:`` with nothing under it is no override, not a removed key."""
 
-        check_removed_keys({"gains": None}, "user.yaml")
+        check_unknown_keys({"gains": None}, base_args(tmp_path), "user.yaml")
 
     def test_the_keys_the_gains_section_still_ships(self, tmp_path):
         """What is left is the prior over a constant gain, and nothing else."""

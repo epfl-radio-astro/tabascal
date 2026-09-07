@@ -13,8 +13,6 @@ the module.
 
 import re
 import sys
-import textwrap
-from pathlib import Path
 
 import pytest
 
@@ -22,24 +20,15 @@ from tabascal.components import in_tree_components
 from tabascal.components.rfi_signal import ComplexRFIConstAnt, ComplexRFIVarAnt
 from tabascal.components.rfi_vis import RiemannVis
 from tabascal.imports import (
-    MIGRATION_DOCS,
-    REMOVED_COMPONENTS,
-    RENAMED_COMPONENTS,
     import_components,
 )
 
 
 #: The page the failures point at, read once.
-CONFIG_DOCS = (Path(__file__).resolve().parents[1] / "docs" / "config.md").read_text()
 
 #: Just the section the pointer names -- from its heading to the next one at the
 #: same level -- so that a name is checked where the user is sent, not anywhere
 #: on a long page.
-MIGRATION_SECTION = CONFIG_DOCS.split("### Renamed and removed components\n", 1)[
-    -1
-].split("\n### ", 1)[0]
-
-
 def message(*refs):
     """The error text from trying to import ``refs``."""
     with pytest.raises(ImportError) as excinfo:
@@ -103,135 +92,6 @@ class TestAnUnknownClassInAKnownModule:
         """``BaseGPRFI`` cannot be listed in a config, so suggesting it misleads."""
         assert "BaseGPRFI" not in message(self.ref)
 
-    def test_the_migration_table_is_pointed_at(self):
-        assert MIGRATION_DOCS in message(self.ref)
-
-    def test_an_unknown_name_gets_no_invented_replacement(self):
-        """Only the known old names carry a rename note."""
-        text = message(self.ref)
-        assert "was renamed to" not in text
-        assert "was deleted" not in text
-
-
-class TestTheGainComponentDeletedIn129:
-    """``gains:GPGains`` is gone, and the failure has to say so and where to go.
-
-    The one entry in the maps that did not come from #106, so it is also what
-    proves the note cites the change it belongs to rather than a fixed number.
-    """
-
-    def test_it_names_the_constant_gain_as_the_nearest(self):
-        text = message("gains:GPGains")
-
-        assert "GPGains" in text
-        assert "gains:ConstGains" in text
-
-    def test_it_cites_the_removal_and_not_106(self):
-        text = message("gains:GPGains")
-
-        assert "#129" in text
-        assert "#106" not in text
-
-    def test_it_still_fails(self):
-        """Naming the nearest component is not resolving it."""
-        with pytest.raises(ImportError):
-            import_components(["gains:GPGains"])
-
-
-#: ``old name -> current reference``, both maps together and without the issue
-#: or pull request numbers, for the cases that only care about the two names.
-CHANGED_COMPONENTS = {
-    old: ref
-    for old, (ref, _) in {**RENAMED_COMPONENTS, **REMOVED_COMPONENTS}.items()
-}
-
-
-class TestTheKnownOldNames:
-    """Every name that changed says what it became, and where it changed."""
-
-    @pytest.mark.parametrize(
-        "old,new,changed_in",
-        sorted((old, new, ref) for old, (new, ref) in RENAMED_COMPONENTS.items()),
-    )
-    def test_a_renamed_component_names_its_replacement(self, old, new, changed_in):
-        module = new.split(":")[0]
-        text = message(f"{module}:{old}")
-        assert old in text
-        assert new in text
-        assert changed_in in text
-        assert "was renamed to" in text
-
-    @pytest.mark.parametrize(
-        "old,nearest,changed_in",
-        sorted((old, ref, where) for old, (ref, where) in REMOVED_COMPONENTS.items()),
-    )
-    def test_a_deleted_component_says_so_and_names_the_nearest(
-        self, old, nearest, changed_in
-    ):
-        module = nearest.split(":")[0]
-        text = message(f"{module}:{old}")
-        assert old in text
-        assert nearest in text
-        assert changed_in in text
-        assert "was deleted" in text
-        assert "no successor" in text
-
-    @pytest.mark.parametrize("old,new", sorted(CHANGED_COMPONENTS.items()))
-    def test_a_known_old_name_still_fails(self, old, new):
-        """The map is message-only. Naming the replacement is not resolving it."""
-        module = new.split(":")[0]
-        with pytest.raises(ImportError):
-            import_components([f"{module}:{old}"])
-
-    @pytest.mark.parametrize(
-        "replacement", sorted(set(CHANGED_COMPONENTS.values()))
-    )
-    def test_every_replacement_is_a_real_component(self, replacement):
-        """A later rename must not leave the migration table pointing at nothing."""
-        assert replacement in in_tree_components()
-
-    def test_the_rows_of_the_documented_table_are_covered(self):
-        """The names the maps have to carry, whatever else is added to them."""
-        documented = {
-            "FourierGPRFI",
-            "FourierGPRFIConstAnt",
-            "RiemannVisTimeFreqCalculation",
-            "RiemannVisTimeFreqCalculationFFI",
-            "FourierTimeFreqGPAst",
-            "SGP4LEONoDragOrbit",
-            "ComplexRFI",
-            "RealRFI",
-            "GPGains",
-        }
-        assert documented <= set(RENAMED_COMPONENTS) | set(REMOVED_COMPONENTS)
-
-
-class TestTheDocumentedTable:
-    """The importer and the migration table have to say the same thing.
-
-    Every failure points the user at that table, so a name the importer knows
-    about but the table does not -- or a replacement the two spell differently --
-    sends them to a page that cannot answer the question they arrived with.
-    """
-
-    @pytest.mark.parametrize("old,new", sorted(CHANGED_COMPONENTS.items()))
-    def test_every_name_the_importer_knows_is_documented(self, old, new):
-        # Whole words, inside the section the error points at: 'ComplexRFI' is a
-        # prefix of a current class name and occurs all over the page, so a
-        # substring search anywhere in the file passes without the row existing.
-        assert re.search(rf"\b{re.escape(old)}\b", MIGRATION_SECTION)
-        assert re.search(rf"\b{re.escape(new)}\b", MIGRATION_SECTION)
-
-    def test_the_pointer_lands_on_the_section_that_holds_it(self):
-        """The anchor in the URL is the heading, slugified. Keep them together."""
-        anchor = MIGRATION_DOCS.split("#")[1].replace("-", " ")
-        assert f"### {anchor.capitalize()}\n" in CONFIG_DOCS
-
-    def test_the_section_was_actually_found(self):
-        """Guards the two above: an empty slice would pass nothing, silently."""
-        assert "ComplexRFIVarAnt" in MIGRATION_SECTION
-        assert len(MIGRATION_SECTION) < len(CONFIG_DOCS)
-
 
 class TestAnUnknownModule:
     """A module that is not there gets the same treatment as a missing class."""
@@ -246,13 +106,6 @@ class TestAnUnknownModule:
         text = message(self.ref)
         assert "rfi_signal" in text
         assert "trajectory" in text
-
-    def test_the_migration_table_is_pointed_at(self):
-        assert MIGRATION_DOCS in message(self.ref)
-
-    def test_a_stale_class_in_an_unknown_module_still_names_its_replacement(self):
-        text = message("rfi_signals:FourierGPRFI")
-        assert "rfi_signal:ComplexRFIVarAnt" in text
 
 
 class TestAModuleThatCannotBeImported:
