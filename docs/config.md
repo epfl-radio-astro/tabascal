@@ -384,9 +384,11 @@ All parameters in this section that overlap with those of the `ast` section have
 
   The spectrum is normalised to `std` after the cut and after the roll-off, so — exactly as on the astronomical side — `gammas` and `cutoff` change which modes are fitted and how they correlate, not how much RFI the prior expects. (`sum(pk)` is `std / 2`; the factor is the complex latent, see `_LATENT_POWER`.)
 
-  **It is one source's width, and it is stated for `rfi_signal:ComplexRFIVarAnt`.** Two factors sit between it and the RFI a run actually realises, and neither is corrected for — they are properties of the model, and correcting them would make the same number mean different widths in different configurations:
+  **It is one source's width, it is stated for `rfi_signal:ComplexRFIVarAnt`, and it is approximate.** The normalisation `sum(pk) = std / 2` is exact, but what the forward pass realises is within about 20 % of `std` rather than equal to it: `latent_to_signal` builds the signal on a zero-padded k-grid and crops it, which does not carry `sum(pk)` through unchanged. The spread is over spectrum shape, padding factor and grid size. It is a prior width, so 20 % is not a problem — but it is not an identity either.
 
-  * **N satellites realise $\sqrt{N}$ times it.** The width applies to each source and their visibilities add, so three satellites at `std: 10` expect a total RFI near 17 Jy.
+  Two further factors sit between it and the RFI a run realises, and neither is corrected for. They are properties of the model, and correcting them would make the same number mean different widths in different configurations:
+
+  * **N satellites realise $\sqrt{N}$ times it**, for `ComplexRFIVarAnt`. The width applies to each source and their visibilities add — in quadrature, because each source has zero mean visibility. Three satellites at `std: 10` expect a total RFI near 17 Jy. `ComplexRFIConstAnt`'s sources do *not* add in quadrature: each has a non-zero mean visibility $E[V_s] = \texttt{std}\,e^{i\phi_s}$, so they add coherently by however much the geometric phases align.
   * **`rfi_signal:ComplexRFIConstAnt` realises another $\sqrt{2}$.** It broadcasts one amplitude to every antenna, so its visibility is $\lvert A\rvert^2$ where `ComplexRFIVarAnt`'s is $A_p A_q^*$ with independent draws, and $E\lvert A\rvert^4 = 2(E\lvert A\rvert^2)^2$.
 
   Both are pinned by tests that sample each component through its own antenna structure.
@@ -400,7 +402,7 @@ All parameters in this section that overlap with those of the `ast` section have
 
   It is also an upper bound on the RFI itself: the sky and the noise are in the visibilities too. A good one exactly where it matters — RFI that dominates the sky dominates the measurement — and far too wide where the RFI is faint, which is the mirror of the astronomical estimate's own limitation. [#220](https://github.com/epfl-radio-astro/tabascal/issues/220) is what fixes both.
 
-  On the shipped 8A simulation, whose three satellites give a true RFI `rms|V|` of 11.0 Jy: `data` measures 11.2 and the prior realises about 19, against the null default's 46.4. Both factors together still leave it 2.4x closer.
+  On the shipped 8A simulation, whose three satellites give a true RFI `rms|V|` of 11.0 Jy: `data` measures 11.2 per source and the prior realises about 19. The null default sets 46.4 per source, which carries the same $\sqrt{3}$ and realises about 80. Roughly **1.8x** the true RFI against **7.3x** — both figures on the same footing, which is the comparison that matters.
 
   When `null` it is twice the largest visibility in the observation. That is a *maximum* where this key says *typical* — 46.4 Jy against a true RFI `rms|V|` of 11.0 on the shipped 8A simulation, where `data` gives 11.2. [#227](https://github.com/epfl-radio-astro/tabascal/issues/227) tracks making it a statistic this key's name describes.
 

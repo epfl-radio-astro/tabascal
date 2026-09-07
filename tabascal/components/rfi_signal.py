@@ -427,16 +427,26 @@ _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 #: The complex latent is drawn as two independent standard normals, so it
 #: carries ``E|z|^2 = 2``. A linear model halves that in the width (the
 #: astronomical prior divides by ``sqrt(2)``); a quadratic one passes it
-#: through undiminished, so ``sum(sigma_rfi_k**2) = rfi.std / 2`` is what makes
-#: the realised ``rms|V|`` equal ``rfi.std``.
+#: through undiminished, so ``sum(sigma_rfi_k**2) = rfi.std / 2``.
+#:
+#: That normalisation is exact. What the forward pass realises is close to
+#: ``rfi.std`` and not equal to it: ``latent_to_signal`` builds the signal on a
+#: zero-padded k-grid and crops it, which does not carry ``sum(sigma^2)``
+#: through unchanged. Measured across the shipped spectrum shapes, padding
+#: factors and grid sizes, the realised ``rms|V|`` lands within about 20 %
+#: either way. Wide enough to matter to nobody setting a prior width, and too
+#: wide to call an identity.
 #:
 #: **Per source, and for this antenna structure.** ``rfi.std`` is one source's
 #: width, and two known factors sit between it and the visibility a run
 #: realises. ``ComplexRFIConstAnt`` broadcasts one amplitude to every antenna,
 #: so its visibility is ``|A|^2`` rather than ``A_p conj(A_q)`` and
 #: ``E|A|^4 = 2 (E|A|^2)^2`` makes it ``sqrt(2)`` wider. And the width applies
-#: to each satellite while their visibilities sum, so N sources realise
-#: ``sqrt(N)`` times it. Neither is corrected for: they are properties of the
+#: to each satellite while their visibilities sum, so N *VarAnt* sources
+#: realise ``sqrt(N)`` times it -- in quadrature because each has zero mean
+#: visibility, which ConstAnt's sources do not, so those add coherently by
+#: however much their geometric phases align. Neither is corrected for: they
+#: are properties of the
 #: model rather than of the key, and correcting them would make the same
 #: number mean different widths in different configurations.
 #:
@@ -494,10 +504,9 @@ def _std_from_data(vis_obs, gain_flags) -> float:
 
     It measures the *total* RFI and hands it to each source, and does not
     correct for either factor in :data:`_LATENT_POWER`: N satellites at this
-    width realise ``sqrt(N)`` times it. That is deliberate -- a number and a
-    measurement that produce different priors would be worse -- and it means
-    the estimate is ``sqrt(N)`` wide on an N-satellite run, 1.7x on the
-    shipped 8A simulation's three.
+    width realise about ``sqrt(N)`` times it. That is deliberate -- a number
+    and a measurement that produce different priors would be worse -- and it
+    means the estimate is ``sqrt(N)`` wide on an N-satellite run.
 
     It is also an upper bound on the RFI itself, since the sky and the noise
     are in the visibilities: 11.2 Jy on that simulation against a true RFI
@@ -506,8 +515,11 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     and is far too wide, which is the mirror of ``ast.pow_spec.std: data``'s
     own limitation and what GitHub #220 fixes for both.
 
-    Both together still beat the width they replace: 1.7x against the null
-    default's 4.2x on that simulation.
+    Both together still beat the width they replace, and by more than the
+    measurement alone suggests, because the null default carries the same
+    ``sqrt(N)``: on that simulation's three satellites, 11.2 Jy per source
+    realises about 19 Jy against a true 11.0, where the default's 46.4 realises
+    about 80. Roughly 1.8x against 7.3x.
     """
 
     bad = (
