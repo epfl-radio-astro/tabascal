@@ -2129,3 +2129,86 @@ class TestTheStdIsTheWidthItClaims:
         comp = setup_component(cls, std=6.0)
 
         assert float(jnp.sum(jnp.asarray(comp.sigma_rfi_k)[0, 0] ** 2)) == pytest.approx(3.0)
+
+
+class TestTheStdCanBeMeasuredFromTheData:
+    """``rfi.std: data`` is the same measurement ``ast.pow_spec.std: data`` is.
+
+    Literally the same function; what each prior owns is which samples it can
+    use and how far it reduces. The differences are asserted here rather than
+    described, because they are the part that is easy to get backwards --
+    the symmetry that looks right (each prior takes its own half of the mask)
+    is wrong, and the asymmetry that looks arbitrary is the correct one.
+    """
+
+    #: The observation grid the validator needs and this class does not vary.
+    GRID = (jnp.linspace(1.4e9, 1.41e9, 4), 1e6, jnp.linspace(0.0, 120.0, 8), 8.0)
+
+    def _validate(self, vis, gain_flags=None, **kwargs):
+        cfg = {"r_seed": 1, "std": "data", "corr_freq": 5e6, "corr_time": 60.0}
+        cfg.update(kwargs)
+        freqs, chan_width, times, int_time = self.GRID
+        return rfi_signal_config_validation(
+            cfg, vis, freqs, chan_width, times, int_time, gain_flags
+        )
+
+    def test_it_measures_the_rms_of_the_visibilities(self):
+        vis = jnp.asarray(
+            np.random.default_rng(0).normal(size=(4, 3, 5))
+            + 1j * np.random.default_rng(1).normal(size=(4, 3, 5))
+        )
+        result = self._validate(vis)
+
+        expected = float(np.sqrt(np.mean(np.abs(np.asarray(vis)) ** 2)))
+        assert result["std"] == pytest.approx(expected, rel=1e-5)
+
+    def test_it_is_a_scalar_and_not_a_width_per_baseline(self):
+        """The astronomical model carries one width per baseline; this does not."""
+        vis = jnp.ones((4, 3, 5), dtype=complex)
+        result = self._validate(vis)
+
+        assert isinstance(result["std"], float)
+
+    def test_the_ms_flags_are_kept_because_that_is_where_the_rfi_is(self):
+        """The one place this and the astronomical estimate genuinely differ.
+
+        A flag says something is wrong, not that RFI is there, and the
+        astronomical prior excludes it because whatever it means the sample is
+        not clean sky. Reading it the other way round would assume every flag
+        is RFI -- and would measure the bright half, since flagging is a
+        threshold.
+        """
+        vis = np.ones((4, 3, 5), dtype=complex)
+        vis[:, :, ::2] *= 50.0  # the loud half, as an MS would flag it
+        result = self._validate(jnp.asarray(vis))
+
+        everything = float(np.sqrt(np.mean(np.abs(vis) ** 2)))
+        loud_only = float(np.sqrt(np.mean(np.abs(vis[:, :, ::2]) ** 2)))
+        assert result["std"] == pytest.approx(everything, rel=1e-5)
+        assert result["std"] < loud_only
+
+    def test_an_uncalibratable_sample_is_dropped(self):
+        """The exclusion that does apply to both priors.
+
+        apply_gain_table leaves these under a unity gain, so they are on a
+        different flux scale from everything around them and are no basis for
+        anybody's amplitude.
+        """
+        vis = np.ones((4, 3, 5), dtype=complex)
+        gain_flags = np.zeros(vis.shape, dtype=bool)
+        gain_flags[0] = True
+        vis[0] = 1e4  # raw frame, unity gain
+
+        result = self._validate(jnp.asarray(vis), jnp.asarray(gain_flags))
+
+        assert result["std"] == pytest.approx(1.0, rel=1e-5)
+
+    def test_everything_flagged_by_the_gain_table_is_refused(self):
+        vis = jnp.ones((4, 3, 5), dtype=complex)
+        with pytest.raises(ValueError, match="nothing to measure"):
+            self._validate(vis, jnp.ones(vis.shape, dtype=bool))
+
+    def test_a_value_that_is_neither_a_number_nor_data_is_refused_by_name(self):
+        vis = jnp.ones((4, 3, 5), dtype=complex)
+        with pytest.raises(ValueError, match="rfi"):
+            self._validate(vis, std="widish")

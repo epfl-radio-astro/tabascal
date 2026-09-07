@@ -68,6 +68,72 @@ def _pow_spec_number(value, where: str) -> float:
 FROM_DATA = "data"
 
 
+def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
+    """``rms|V|`` over the samples ``keep`` selects, in Jy.
+
+    The measurement both ``std: data`` options are: ``ast.pow_spec.std`` and
+    ``rfi.std`` name the same quantity, so they read it off the data the same
+    way and differ only in which samples they take and how far they reduce.
+
+    ``keep`` is the caller's, and it is where the two part company. The
+    astronomical prior wants the sky, so it keeps what nothing has flagged.
+    The RFI prior wants the RFI, so where an MS marks contamination it keeps
+    exactly that. Opposite halves of one mask, each measured the same way.
+
+    ``per_baseline`` gives the astronomical prior one width per baseline,
+    which is what its model carries. The RFI prior's is a scalar, so it
+    reduces over everything.
+
+    Raises rather than guesses when there is nothing to measure or what there
+    is is not finite; a baseline that kept nothing takes the median of those
+    that did, which is the least-committal stand-in and keeps a zero out of a
+    denominator downstream.
+    """
+
+    vis_obs = jnp.asarray(vis_obs)
+    keep = jnp.asarray(keep)
+
+    if not bool(jnp.any(keep)):
+        raise ValueError(
+            f"{key}: data has nothing to measure -- no visibility is left "
+            "once the mask is applied. Set a width in Jy instead."
+        )
+
+    axes = (1, 2) if per_baseline else None
+    n_kept = jnp.sum(keep, axis=axes)
+
+    # Scaled before squaring: |V| of 1e20 squares to 1e40, which is inf in
+    # float32 even though both the visibility and its rms are perfectly
+    # representable, and 1e-30 squares to zero. Dividing by the largest kept
+    # sample first bounds the squares to 1 and puts the scale back afterwards.
+    # where, not a multiply: an MS routinely leaves a NaN or an infinity in a
+    # cell it has flagged, and NaN * False is NaN in numpy. XLA happens to
+    # lower a boolean multiply to a select and give 0, so both spellings
+    # measure the same thing here -- this one says so rather than resting on
+    # that.
+    kept_abs = jnp.where(keep, jnp.abs(vis_obs), 0.0)
+    scale = jnp.max(kept_abs, axis=axes)
+    safe = jnp.where(scale > 0, scale, 1.0)
+    scaled = kept_abs / (safe[:, None, None] if per_baseline else safe)
+    mean_sq = jnp.sum(scaled**2, axis=axes) / jnp.maximum(n_kept, 1)
+    std = safe * jnp.sqrt(mean_sq)
+
+    if not bool(jnp.all(jnp.isfinite(std))):
+        raise ValueError(
+            f"{key}: data cannot measure a width: the visibilities it is "
+            "measuring are not finite. Flag them, or set a width in Jy."
+        )
+
+    if per_baseline:
+        # Only a baseline with nothing left to measure falls back. Anything
+        # else non-finite is the error above rather than something the median
+        # quietly covers for.
+        measured = n_kept > 0
+        std = jnp.where(measured, std, jnp.median(std[measured]))
+
+    return std
+
+
 def _pow_spec_amplitude(value, where: str):
     """A positive number, or the literal ``"data"``.
 

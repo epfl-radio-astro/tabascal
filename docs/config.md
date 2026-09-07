@@ -384,7 +384,14 @@ All parameters in this section that overlap with those of the `ast` section have
 
   The spectrum is normalised to `std` after the cut and after the roll-off, so — exactly as on the astronomical side — `gammas` and `cutoff` change which modes are fitted and how they correlate, not how much RFI the prior expects.
 
-  When `null` it is twice the largest visibility in the observation. That is a *maximum* where this key says *typical*, and on an observation with a bright pass it is a good deal wider than the RFI it is a prior on; [#227](https://github.com/epfl-radio-astro/tabascal/issues/227) tracks giving it a statistic its own name describes.
+  `data` measures it from the observed visibilities, the same measurement `ast.pow_spec.std: data` makes — the same function, in fact. Two things differ, and only one of them is a choice:
+
+  * It is a **scalar**, since this prior normalises a single spectrum where the astronomical model carries a width per baseline.
+  * **The MS's flags are kept.** The astronomical estimate excludes them because whatever a flag means, the sample is not clean sky. The reverse does not follow: a flag says *something is wrong here*, not *RFI is here*, and a dead antenna is neither RFI nor a scale to set an RFI prior from. Measuring the flagged samples is also biased high even when they are RFI, since flagging is a threshold and the flagged half is the bright half — on the shipped 8A simulation that returns 1.54x the true RFI where measuring everything returns 1.015x. Samples no gain table could calibrate *are* dropped, which is the one exclusion both priors share.
+
+  It is an upper bound: the sky and the noise are in the visibilities too. A good one exactly where it matters — RFI that dominates the sky dominates the measurement — and too wide where the RFI is faint, which is the mirror of the astronomical estimate's own limitation. [#220](https://github.com/epfl-radio-astro/tabascal/issues/220) is what fixes both.
+
+  When `null` it is twice the largest visibility in the observation. That is a *maximum* where this key says *typical* — 46.4 Jy against a true RFI `rms|V|` of 11.0 on the shipped 8A simulation, where `data` gives 11.2. [#227](https://github.com/epfl-radio-astro/tabascal/issues/227) tracks making it a statistic this key's name describes.
 
 * `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `rfi.est`, and no matching of light curves to satellites by name, since the estimator is handed `satellites.norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
 

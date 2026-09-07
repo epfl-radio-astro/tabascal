@@ -10,7 +10,7 @@ from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
 from tabascal.ms import get_observation_data_type
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, validate_pow_spec
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_pow_spec
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -452,7 +452,68 @@ def _validate_pow_spec(pow_spec) -> Dict:
     )
 
 
-def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
+def _std_from_data(vis_obs, gain_flags) -> float:
+    """``rms|V|`` of the observed visibilities, in Jy, as the RFI's width.
+
+    The same measurement as ``ast.pow_spec.std: data`` -- literally, they call
+    the same :func:`tabascal.fft_gp.rms_vis`. What differs is which samples
+    each prior can use, and there is one real difference, not the symmetry it
+    looks like from a distance.
+
+    **The MS's flags are kept.** They are excluded from the astronomical
+    estimate because whatever a flag means, it means the sample is not clean
+    sky. They cannot be used the other way round: a flag does not say "RFI
+    here", it says "something is wrong here", and a dead antenna or a
+    correlator glitch is neither RFI nor a scale to set an RFI prior from.
+    Measuring the flagged samples instead is also biased high even when they
+    *are* RFI -- flagging is a threshold, so the flagged half is the bright
+    half, and its rms sits above the typical amplitude the prior wants. On the
+    shipped 8A simulation, flagging the brightest 30 % and measuring those
+    returns 1.54x the true RFI where measuring everything returns 1.015x.
+
+    **Uncalibratable samples are dropped**, which is the one exclusion that
+    applies to both priors: ``apply_gain_table`` leaves them under a unity
+    gain, so they are not on the same flux scale as the data around them and
+    carry no usable amplitude for anybody.
+
+    A scalar rather than one per baseline, because that is what this prior
+    carries: the astronomical model has a width per baseline, ``rfi.std``
+    normalises a single spectrum.
+
+    It is an upper bound -- the sky and the noise are in it too -- and a good
+    one exactly when it matters. On the shipped 8A simulation it returns 11.2
+    Jy against a true RFI ``rms|V|`` of 11.0, because RFI that dominates the
+    sky by 7x dominates the measurement as well. Where the RFI is faint this
+    measures the sky instead and is too wide, which is the mirror of
+    ``ast.pow_spec.std: data``'s own limitation and what GitHub #220 fixes for
+    both.
+    """
+
+    bad = (
+        jnp.zeros(jnp.shape(vis_obs), dtype=bool)
+        if gain_flags is None
+        else jnp.asarray(gain_flags)
+    )
+    keep = ~bad
+
+    std = float(rms_vis(vis_obs, keep, "rfi.std", per_baseline=False))
+
+    dropped = float(jnp.mean(bad))
+    where = (
+        f", over the {100 * (1 - dropped):.1f} % of visibilities a gain table "
+        "could calibrate"
+        if dropped
+        else ""
+    )
+    print(
+        f"Using RFI std from data: {std:.4g} Jy (rms|V|){where}. An upper "
+        "bound: the sky and the noise are in it as well as the RFI."
+    )
+
+    return std
+
+
+def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float, gain_flags: Array = None) -> Dict:
     """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
 
     Parameters
@@ -495,7 +556,9 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     else:
         raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
 
-    if not rfi_std: # Set Default
+    if rfi_std == FROM_DATA:
+        rfi_config["std"] = _std_from_data(vis_obs, gain_flags)
+    elif not rfi_std: # Set Default
         # _LATENT_POWER times the largest visibility, which is the prior this
         # default has always set -- the key it was written for meant half of
         # what rfi.std means. It is a maximum where the key says typical, which
@@ -504,7 +567,10 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     elif isinstance(rfi_std, (float, int)):
         rfi_config["std"] = float(rfi_std)
     else:
-        raise ValueError(f"Config parameter (rfi:\n\tstd: {rfi_std}) is not of type float or int.")
+        raise ValueError(
+            f"Config parameter (rfi:\n\tstd: {rfi_std}) is not a number, "
+            f"'{FROM_DATA}', or null."
+        )
     
     if not gp_freq_l: # Set Default
         est_gp_freq_l = extent(freqs, chan_width) / 2
@@ -577,7 +643,11 @@ class BaseGPRFI(Component):
 
         # Validate config and set defaults
         rfi_config = rfi_signal_config_validation(
-            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
+            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time,
+            # Only the uncalibratable samples: the MS's own flags stay in,
+            # because that is where the RFI is. Read by std: data alone --
+            # see _std_from_data.
+            getattr(tab_config, "gain_flags", None))
 
         # The validated rfi section, kept whole: gp_pow_spec reads its pow_spec
         # block, which is optional and falls back to this component's defaults.
