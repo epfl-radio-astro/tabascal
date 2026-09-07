@@ -11,8 +11,14 @@ Both are reachable by accident rather than only by misuse: argparse matches a
 short option by prefix, so a bare ``-s`` on either subcommand arrives here as
 the label.
 
-Imports nothing but ``os``: the parsers are built before the JAX import, so that
-``-h`` does not pay for it.
+Windows names -- a colon's alternate data stream, a reserved device like ``NUL``
+-- are not policed: tabascal ships for macOS and Linux only (its casacore
+dependency has no Windows build), so a label cannot reach a filesystem that
+reads them that way. The backslash is refused anyway, because it is never a
+deliberate part of a label.
+
+Imports nothing but ``os`` and ``ntpath``, both standard library: the parsers
+are built before the JAX import, so that ``-h`` does not pay for it.
 """
 
 import ntpath

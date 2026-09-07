@@ -1769,7 +1769,26 @@ class TestALabelIsNotAPath:
 
     @pytest.mark.parametrize("subcommand", ["run", "light-curve"])
     @pytest.mark.parametrize(
-        "value", ["/data/sim", "../../escaped", "a/b", "..", "."]
+        "value",
+        [
+            "/data/sim",
+            "../../escaped",
+            "a/b",
+            "..",
+            ".",
+            # Refused on every platform, though only Windows would split on it.
+            r"a\b",
+            # A drive prefix carries no separator at all. splitdrive is the
+            # platform's own, so this is a plain filename on posix and the
+            # case is pinned for what the guard does here rather than there.
+            pytest.param(
+                "D:sim",
+                marks=pytest.mark.skipif(
+                    os.path.splitdrive("D:sim")[0] == "",
+                    reason="no drive letters on this platform",
+                ),
+            ),
+        ],
     )
     def test_it_is_refused_at_the_command_line(self, subcommand, value):
         """At parse time, so the run stops before the work it would misplace."""
