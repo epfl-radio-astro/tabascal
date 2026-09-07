@@ -30,7 +30,6 @@ from tabascal.components.ast_vis import GPVisAst
 from tabascal.components.rfi_vis import RiemannVis
 from tabascal.config import (
     TabConfig,
-    check_unknown_keys,
     load_config,
 )
 from tabascal.interferometry import get_strides_and_idxs, max_ast_fringe_rate
@@ -276,30 +275,15 @@ class TestBaseConfigAstKeys:
         np.testing.assert_allclose(comp.k0_time, expected, rtol=exact_rtol)
 
 
-class TestSimDirWasRenamed:
-    """``data.sim_dir`` meant the inputs and the outputs at once; it is split.
+class TestWhereTheRunReadsAndWrites:
+    """Three keys, three jobs, none of them a simulation directory.
 
-    tabascal only ever ran on simulations, so one directory could name where the
-    products went *and* where the MS and the truth zarr were found. A real
-    observation has neither relation: issue #207. ``data.out_dir`` is only where
-    the run writes, the MS is ``data.ms_path``, and the truth is
-    ``data.truth_zarr``.
+    ``data.out_dir`` is only where the run writes; the MS is named by
+    ``data.ms_path`` and a tab-sim truth zarr by ``data.truth_zarr``. A real
+    observation has no directory that means all three at once.
     """
 
-    def test_a_config_setting_the_old_name_stops_and_names_the_new_one(self, tmp_path):
-        """Not an alias: it would keep meaning both things for whoever kept it."""
-
-        path = tmp_path / "user.yaml"
-        path.write_text("data:\n  sim_dir: /some/where\n")
-
-        with pytest.raises(ValueError) as excinfo:
-            load_config(str(path))
-
-        message = str(excinfo.value)
-        assert "data.sim_dir" in message
-        assert "out_dir" in message
-
-    def test_the_base_ships_the_new_names(self, tmp_path):
+    def test_the_base_ships_each_of_them(self, tmp_path):
         data = base_args(tmp_path)["data"]
 
         assert "sim_dir" not in data
@@ -328,41 +312,6 @@ class TestBaseConfigIntegrationSampleCounts:
 
         assert rfi["n_int_freq"] == 1
         assert rfi["time_int_factor"] == pytest.approx(1)
-
-    def test_the_removed_frequency_spelling_is_gone_from_the_base(self, tmp_path):
-        """Nothing may reintroduce the second spelling as a default."""
-
-        assert "freq_int_samples" not in base_args(tmp_path)["rfi"]
-
-    def test_a_config_setting_the_old_name_stops_and_names_the_new_one(self, tmp_path):
-        """A stale config fails loudly at load, pointing at the replacement.
-
-        Not an alias: silently accepting the old name is how the two spellings
-        got to disagree in the first place.
-        """
-
-        path = tmp_path / "user.yaml"
-        path.write_text("rfi:\n  freq_int_samples: 4\n")
-
-        with pytest.raises(ValueError) as excinfo:
-            load_config(str(path))
-
-        message = str(excinfo.value)
-        assert "rfi.freq_int_samples" in message
-        assert "n_int_freq" in message
-
-    def test_an_empty_section_is_not_a_rename_hit(self, tmp_path):
-        """``rfi:`` with nothing under it parses as None, which ``in`` cannot search.
-
-        The check runs on every load, so a section that is merely empty has to
-        pass through it — not raise a ``TypeError`` from the rename machinery
-        about a config that contains no renamed key at all. What an empty
-        section means for the merged config is ``deep_update``'s business (it
-        reads as no override, leaving the defaults under it in place — see
-        ``tests/test_config_yaml.py``); this check only has to survive one.
-        """
-
-        check_unknown_keys({"rfi": None}, base_args(tmp_path), "user.yaml")
 
     def test_the_frequency_default_survives_the_merge(self, tmp_path):
         """A config overriding nothing of ``rfi`` still carries the count.
@@ -440,59 +389,14 @@ class TestBaseConfigIntegrationSampleCounts:
 
 
 class TestTheTimeCountIsNotAConfigKey:
-    """``rfi.n_int_time`` is gone: nothing ever read it.
+    """The two fine-grid axes are configured differently, because only one can
+    be estimated.
 
-    ``TabConfig.__init__`` bound it and ``estimate_rfi_sampling`` then
-    overwrote it unconditionally, on both of its branches, so a value written
-    there had no effect in any release. The two axes are configured differently
-    because only one of them can be estimated: the frequency count is a free
-    choice with no observable to derive it from, while the time count follows
-    from the RFI fringe rate, the noise and the per-baseline stride binning.
-    ``rfi.time_int_factor`` scales that derivation, which is the knob a config
-    setting ``n_int_time`` was reaching for.
+    The frequency count is a free choice with no observable to derive it from,
+    so ``rfi.n_int_freq`` sets it outright. The time count follows from the RFI
+    fringe rate, the noise and the per-baseline stride binning, so there is
+    nothing to set: ``rfi.time_int_factor`` scales that derivation instead.
     """
-
-    def test_the_base_no_longer_ships_it(self, tmp_path):
-        """Nothing may reintroduce it as a default, which would make a config
-        setting it merge cleanly and be ignored all over again."""
-
-        assert "n_int_time" not in base_args(tmp_path)["rfi"]
-
-    def test_a_config_setting_it_stops_and_names_the_factor(self, tmp_path):
-        """A stale config fails at load, pointing at the supported knob."""
-
-        path = tmp_path / "user.yaml"
-        path.write_text("rfi:\n  n_int_time: 4\n")
-
-        with pytest.raises(ValueError) as excinfo:
-            load_config(str(path))
-
-        message = str(excinfo.value)
-        assert "rfi.n_int_time" in message
-        assert "time_int_factor" in message
-
-    def test_a_null_value_is_still_a_hit(self, tmp_path):
-        """Presence, not value.
-
-        Every config that carried the key wrote it as ``n_int_time:`` --- the
-        base default was ``null`` --- so a check that let ``null`` through would
-        pass exactly the files that need editing.
-        """
-
-        path = tmp_path / "user.yaml"
-        path.write_text("rfi:\n  n_int_time:\n")
-
-        with pytest.raises(ValueError) as excinfo:
-            load_config(str(path))
-
-        assert "rfi.n_int_time" in str(excinfo.value)
-
-    def test_an_empty_section_is_not_a_removed_hit(self, tmp_path):
-        """``rfi:`` with nothing under it parses as None, which ``in`` cannot
-        search. The check runs on every load, so a merely empty section has to
-        pass through it rather than raise a ``TypeError`` from the machinery."""
-
-        check_unknown_keys({"rfi": None}, base_args(tmp_path), "user.yaml")
 
     def test_the_count_still_comes_from_the_estimator(self, tmp_path, monkeypatch):
         """The default path, end to end, unmoved by the key going away.
@@ -524,61 +428,15 @@ class TestTheTimeCountIsNotAConfigKey:
 
 #: The gain Gaussian process's correlation lengths, removed with the component
 #: that read them.
-GAIN_CORR_KEYS = (
-    "amp_corr_freq",
-    "amp_corr_time",
-    "phase_corr_freq",
-    "phase_corr_time",
-)
 
 
-class TestTheGainCorrelationLengthsAreGone:
-    """The four ``gains`` correlation lengths went with ``gains:GPGains`` (#129).
+class TestTheGainsSectionHasNoCorrelationLengths:
+    """No gain component has a kernel, so the section has no length scales.
 
-    They were the length scales of a squared-exponential kernel over the gains,
-    and no surviving gain component has a kernel: ``gains:ConstGains`` fits one
-    constant gain per antenna and ``gains:UnitaryGains`` fits none at all. There
-    is nothing to point a config at, so the failure says the keys are gone rather
-    than offering a replacement that would mean something different.
+    ``gains:ConstGains`` fits one constant gain per antenna and
+    ``gains:UnitaryGains`` fits none at all; neither varies over time or
+    frequency, so there is no correlation length to configure.
     """
-
-    @pytest.mark.parametrize("key", GAIN_CORR_KEYS)
-    def test_the_base_no_longer_ships_it(self, tmp_path, key):
-        """A default left behind would let a stale config merge cleanly and be
-        ignored, which is the state the removal exists to make impossible."""
-
-        assert key not in base_args(tmp_path)["gains"]
-
-    @pytest.mark.parametrize("key", GAIN_CORR_KEYS)
-    def test_a_config_setting_it_stops_and_says_what_happened(self, tmp_path, key):
-        path = tmp_path / "user.yaml"
-        path.write_text(f"gains:\n  {key}: 180\n")
-
-        with pytest.raises(ValueError) as excinfo:
-            load_config(str(path))
-
-        message = str(excinfo.value)
-        assert f"gains.{key}" in message
-        # What it does take, so the reader can see the key is not among them.
-        assert "amp_std" in message and "phase_std" in message
-
-    @pytest.mark.parametrize("key", GAIN_CORR_KEYS)
-    def test_a_null_value_is_still_a_hit(self, tmp_path, key):
-        """Presence, not value: the base default was ``null``, so every config
-        that carried these keys is likely to have written them that way."""
-
-        path = tmp_path / "user.yaml"
-        path.write_text(f"gains:\n  {key}:\n")
-
-        with pytest.raises(ValueError) as excinfo:
-            load_config(str(path))
-
-        assert f"gains.{key}" in str(excinfo.value)
-
-    def test_an_empty_gains_section_is_not_a_hit(self, tmp_path):
-        """``gains:`` with nothing under it is no override, not a removed key."""
-
-        check_unknown_keys({"gains": None}, base_args(tmp_path), "user.yaml")
 
     def test_the_keys_the_gains_section_still_ships(self, tmp_path):
         """What is left is the prior over a constant gain, and nothing else."""

@@ -150,11 +150,10 @@ def import_components(
     (e.g., 'foo:Foo' -> 'tabascal.components.foo.Foo') and then falls
     back to absolute imports if that fails.
 
-    A reference that does not resolve raises, always: the components that have
-    been renamed and deleted have no aliases, so a config predating one of those
-    changes is broken and has to be edited. The failure carries what is needed to
-    do that -- the current name where the old one is known, what the module does
-    offer, and the migration table.
+    A reference that does not resolve raises, always: there are no aliases, so
+    a name nothing defines is a config to edit rather than something to guess
+    at. The failure names the reference that did not resolve and lists what the
+    module does offer.
     """
     classes: List[Type] = []
     errors: list[str] = []

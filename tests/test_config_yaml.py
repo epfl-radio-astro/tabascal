@@ -138,18 +138,19 @@ class TestEmptySectionMerge:
 
         assert config[section][key] is None
 
-    def test_a_null_the_base_has_no_key_for_is_refused(self, tmp_path):
-        """An unknown key is refused whatever its value, ``None`` included.
+    def test_a_null_the_base_has_no_key_for_is_stored(self, tmp_path):
+        """An unknown key is carried into the merged config whatever its value.
 
-        The boundary of the rule above: an empty section header is inert where
-        the base has a section to keep, and is an unknown key where it does
-        not. A name nothing reads is a mistake at either value.
+        Nothing validates the key set, so ``None`` under a name the base does
+        not have has no base value to keep and is stored like any other unknown
+        key. Pinned because it is the boundary of the rule above, and because
+        it is what makes a key nothing reads invisible -- see GitHub #226.
         """
 
-        with pytest.raises(ValueError) as excinfo:
-            merged(tmp_path, "not_a_section:\n" + _MINIMAL_CONFIG)
+        config = merged(tmp_path, "not_a_section:\n" + _MINIMAL_CONFIG)
 
-        assert "not_a_section" in str(excinfo.value)
+        assert "not_a_section" in config
+        assert config["not_a_section"] is None
 
 
 class TestDeepUpdate:
@@ -168,76 +169,3 @@ class TestDeepUpdate:
         assert deep_update({"a": {"b": 1, "c": 2}}, {"a": {"c": 3}}) == {
             "a": {"b": 1, "c": 3}
         }
-
-
-class TestUnknownKeysAreRefused:
-    """A key nothing reads is a mistake, and the only question is which one.
-
-    A misspelling, a setting that has been renamed, and one that has been
-    deleted all arrive here identically: a name the base config -- which is the
-    schema, since every key tabascal reads has a default in it -- has never
-    heard of. There is no table of historical names, because the answer does
-    not depend on which of the three it was. rfi.pow_spec sat in the shipped
-    configs unread for as long as it did precisely because nothing asked this
-    question (#212).
-    """
-
-    def test_a_misspelling_is_named_with_what_the_section_takes(self, tmp_path):
-        with pytest.raises(ValueError) as excinfo:
-            merged(tmp_path, "gains:\n  amp_stdd: 0.1\n" + _MINIMAL_CONFIG)
-
-        message = str(excinfo.value)
-        assert "gains.amp_stdd" in message
-        assert "amp_std" in message
-
-    def test_a_nested_section_is_reached(self, tmp_path):
-        """Two levels down, and the listing is that section's, not the top's."""
-
-        with pytest.raises(ValueError) as excinfo:
-            merged(tmp_path, "ast:\n  pow_spec:\n    stdev: 3\n" + _MINIMAL_CONFIG)
-
-        message = str(excinfo.value)
-        assert "ast.pow_spec.stdev" in message
-        assert "'std'" in message
-        assert "'gammas'" in message
-
-    def test_every_offending_key_is_reported_not_just_the_first(self, tmp_path):
-        """Editing a stale config one error at a time is the slow way to do it."""
-
-        with pytest.raises(ValueError) as excinfo:
-            merged(
-                tmp_path,
-                "gains:\n  amp_corr_freq: 3600\n  phase_corr_time: 60\n"
-                "data:\n  sim_dir: /some/where\n" + _MINIMAL_CONFIG,
-            )
-
-        message = str(excinfo.value)
-        assert "gains.amp_corr_freq" in message
-        assert "gains.phase_corr_time" in message
-        assert "data.sim_dir" in message
-        assert "3 key(s)" in message
-
-    def test_a_section_the_base_does_not_have_is_named_as_itself(self, tmp_path):
-        """Not each of its children: the section is the thing that is wrong."""
-
-        with pytest.raises(ValueError) as excinfo:
-            merged(tmp_path, "telescope:\n  n_ant: 64\n" + _MINIMAL_CONFIG)
-
-        message = str(excinfo.value)
-        assert "telescope" in message
-        assert "telescope.n_ant" not in message
-
-    def test_the_shipped_configs_pass_it(self):
-        """The check is worth nothing if the repository's own files trip it."""
-
-        for path in (
-            "tests/data/tab_target.yaml",
-            "examples/tab_target.yaml",
-            "ci/reframe/data/tab_target.yaml",
-        ):
-            load_config(path)
-
-    def test_a_config_setting_nothing_at_all_is_fine(self, tmp_path):
-        """Every key has a default, so the empty config is a valid one."""
-
-        assert merged(tmp_path, _MINIMAL_CONFIG)

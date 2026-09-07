@@ -1,14 +1,11 @@
-"""Resolving ``model.components`` references, and what a stale one has to say.
+"""Resolving ``model.components`` references, and what a bad one has to say.
 
-PR #106 renamed most components and deleted six of them, and #129 deleted the
-Gaussian process gain. There are no aliases and none are coming: a config
-written before one of those changes is expected to fail, and the user is
-expected to edit it. What is pinned here is that the failure explains itself --
-it names the reference that failed, says what to write instead when the name is
-one of the known old ones and where it changed, lists what the module actually
-offers, and points at the migration table. What it used to say
-named neither the rename nor the valid options: only that the class was not in
-the module.
+There are no aliases: a reference naming something no module defines is a
+config to edit, and the run stops. What is pinned here is that the failure
+explains itself rather than saying only that a class was not found -- it names
+the reference that failed, distinguishes a missing module from a missing class
+from a module whose own imports are broken, and lists what is actually on
+offer at whichever of those levels went wrong.
 """
 
 import re

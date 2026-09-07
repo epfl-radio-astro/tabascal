@@ -389,8 +389,6 @@ The only additional parameters are
   Left unset (`null`, the shipped default) each takes the component's own value: `[3, 3]` and `1e-9` for `rfi_signal:ComplexRFIVarAnt`, `[100, 100]` and `1e-6` for `rfi_signal:ComplexRFIConstAnt`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
 
 
-  `p0` and `k0s` are refused by name rather than ignored, because neither is a setting: `p0` has no effect, since the spectrum is renormalised to `rfi.var`, and `k0s` is derived from `corr_freq` and `corr_time`, which are where the knee is set. Any other unknown key is refused the same way.
-
   The values are checked by the validator both Fourier-domain priors share, so `gammas` and `cutoff` are held to the same rules here as under [`ast.pow_spec`](#astronomical-signal) — the two sections differ only in which keys are live.
 
 * `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.

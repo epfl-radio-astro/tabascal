@@ -58,10 +58,7 @@ def deep_update(d: Dict, u: Dict) -> Dict:
     A ``None`` anywhere else is a value like any other. It overrides a scalar,
     which is what ``data.noise: null`` and ``rfi.min_elevation: null`` are for,
     and under a key the base does not have — where there is no default to keep
-    — it is stored, as an unknown key of any other value would be. Whether a
-    config is allowed to carry such a key at all is :func:`check_unknown_keys`'s
-    question, asked before the merge; this function only says what the merge
-    does with one.
+    — it is stored, as an unknown key of any other value would be.
 
     Parameters
     ----------
@@ -118,56 +115,6 @@ def yaml_load(path):
         return yaml.load(f, Loader=_TabSafeLoader)
 
 
-def _unknown_keys(config: Dict, base: Dict, path: str = "") -> list:
-    """Dotted names in ``config`` that ``base`` does not declare.
-
-    The base config is the schema: every key tabascal reads has a default
-    there, so a key the base has never heard of is one nothing will read.
-    Sections are walked only where both sides hold a mapping -- a section the
-    user fills in below a scalar default is that scalar's business, not this
-    function's.
-    """
-
-    unknown = []
-    for key, value in (config or {}).items():
-        here = f"{path}.{key}" if path else key
-        if key not in base:
-            unknown.append(here)
-        elif isinstance(value, dict) and isinstance(base[key], dict):
-            unknown.extend(_unknown_keys(value, base[key], here))
-    return unknown
-
-
-def check_unknown_keys(config: Dict, base: Dict, path: str):
-    """Stop on a config setting a key nothing reads.
-
-    A key that is silently ignored is the worst kind: it looks like a setting,
-    it is not one, and nothing says so -- rfi.pow_spec sat unread in the
-    shipped configs for exactly that reason (#212). A misspelling and a
-    setting that no longer exists are the same mistake from here, and get the
-    same answer: the name, and what the section does take.
-    """
-
-    unknown = _unknown_keys(config, base)
-    if not unknown:
-        return
-
-    lines = []
-    for name in unknown:
-        section = name.rsplit(".", 1)[0] if "." in name else ""
-        offered = base
-        for part in section.split(".") if section else []:
-            offered = offered.get(part, {})
-        takes = sorted(offered) if isinstance(offered, dict) else []
-        where = section or "the top level"
-        lines.append(f"  {name} -- {where} takes {takes}")
-
-    raise ValueError(
-        f"{path} sets {len(unknown)} key(s) that nothing reads:\n"
-        + "\n".join(lines)
-    )
-
-
 def load_config(path: str) -> Dict:
     """Load a configuration file and populate default parameters where needed.
 
@@ -186,18 +133,9 @@ def load_config(path: str) -> Dict:
     base_config = yaml_load(tab_base_config_path)
 
     try:
-        user_config = yaml_load(path)
+        return deep_update(base_config, yaml_load(path))
     except Exception as e:
         raise IOError(f"Configuration file could not be loaded from {path}") from e
-
-    # Before the merge, and against the user's file alone: deep_update writes
-    # into base_config, so afterwards the base holds the user's unknown keys
-    # too and has nothing left to compare against. Outside the try as well, so
-    # an unknown key is reported as itself rather than as a file that could
-    # not be loaded.
-    check_unknown_keys(user_config, base_config, path)
-
-    return deep_update(base_config, user_config)
 
     
 class TabConfig:
@@ -445,10 +383,9 @@ class TabConfig:
                         "estimate."
                     )
 
-                # A zero used to read as "no override" and silently keep the MS
-                # estimate, which is neither of the things a user writing
-                # `noise: 0` could have meant. Zero noise is not a noise: it
-                # divides the likelihood by nothing.
+                # Zero noise is not a noise: it divides the likelihood by
+                # nothing. Refused rather than read as "no override", which is
+                # not what a user writing `noise: 0` could have meant either.
                 try:
                     value = float(noise)
                 except (TypeError, ValueError) as err:

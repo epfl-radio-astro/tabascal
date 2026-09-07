@@ -329,12 +329,10 @@ def _ms_times_and_scale(ms_path: str) -> tuple:
     instant, not a rounding difference.
 
     The unit is read for the same reason again, and the two keywords come out of
-    the one ``getcolkeywords`` call. It used to be deliberately left unread here
-    so that this path and ``read_ms`` would share the heuristic and could not
-    classify one MS two ways -- but ``read_ms`` honours a declaration, so not
-    reading it was what created that divergence rather than what closed it. An
-    MS declaring seconds while storing day numbers was read on the declaration
-    by the run and on the magnitudes by the TLE age checks.
+    the one ``getcolkeywords`` call. Reading it is what keeps this path and
+    ``read_ms`` on the same answer: ``read_ms`` honours a declaration, so an MS
+    declaring seconds while storing day numbers would otherwise be read on the
+    declaration by the run and on the magnitudes by the TLE age checks.
 
     ``None`` where the MS declares nothing usable, which is the case the
     heuristic exists for.

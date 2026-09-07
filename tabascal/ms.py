@@ -412,11 +412,10 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
     :func:`read_time_unit` gave them -- :func:`read_ms`,
     ``write._observation_grid`` and the preflight epoch check -- so a
     declaration settles the unit for all of them and this reduction is what is
-    left for an MS that declares nothing. The preflight check used to leave the
-    declaration unread on the reasoning that a shared heuristic could not
-    classify one MS two ways; since the other two honour a declaration, that is
-    what made an MS whose ``QuantumUnits`` contradicts its magnitudes read one
-    way by the run and another by the TLE age checks.
+    left for an MS that declares nothing. Every caller honouring the
+    declaration is what keeps an MS whose ``QuantumUnits`` contradicts its
+    magnitudes from reading one way to the run and another to the TLE age
+    checks.
     """
 
     times = np.asarray(times, dtype=float)
