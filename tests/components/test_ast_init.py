@@ -549,6 +549,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         vis[:, :, ::2] *= 10.0
         config.vis_obs = jnp.asarray(vis)
         config.ms_flags = jnp.asarray(flags)
+        config.estimator_flags = jnp.asarray(flags)
 
         comp = setup_ast(config)
 
@@ -573,6 +574,8 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         vis[:, :, ::2] *= 50.0
         config.vis_obs = jnp.asarray(vis)
         config.ms_flags = jnp.asarray(contaminated)
+        # set_flags derives this from ms_flags whatever data.flags says.
+        config.estimator_flags = jnp.asarray(contaminated)
         # What the likelihood excludes: nothing. data.flags: false.
         config.flags = jnp.zeros(vis.shape, dtype=bool)
 
@@ -596,7 +599,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         setup_ast(pow_spec_config(tmp_path, std="data"))
 
         printed = capsys.readouterr().out
-        assert "the MS flags none of them" in printed
+        assert "nothing flags any of them" in printed
         assert "RFI" in printed
         # And it points at the fix that does not cost the run anything: the MS
         # flags are read here whatever data.flags decides for the likelihood.
@@ -641,7 +644,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
     def test_data_with_everything_flagged_is_refused(self, tmp_path):
         """There is nothing to measure, and a zero width is not a prior."""
         config = pow_spec_config(tmp_path, std="data")
-        config.ms_flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
+        config.estimator_flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
 
         message = setup_error(config)
 

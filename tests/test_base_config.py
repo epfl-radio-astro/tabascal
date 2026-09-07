@@ -173,10 +173,12 @@ def make_ast_config(args, n_ant=4, n_freq=4, n_time=8, dish_d=13.5):
         # rms|V| off this: an all-zero stub would make the default width zero.
         # Deterministic, and scaled so the measured width is ~1 Jy per baseline.
         vis_obs=_stub_vis(n_bl, n_freq, n_time),
-        # ms_flags is what the MS marked; flags is what the likelihood
-        # excludes. The prior width is measured from the first.
+        # Three masks: ms_flags is what the MS marked, flags is what the
+        # likelihood excludes, and estimator_flags is everything known to be
+        # bad. The prior width is measured from the last.
         ms_flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
         flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
+        estimator_flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
         args=args,
     )
 

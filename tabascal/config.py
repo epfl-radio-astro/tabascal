@@ -319,6 +319,9 @@ class TabConfig:
             self.vis_obs = make_global(self.vis_obs, replicated_sharding())
             self.flags = make_global(self.flags, replicated_sharding())
             self.ms_flags = make_global(self.ms_flags, replicated_sharding())
+            self.estimator_flags = make_global(
+                self.estimator_flags, replicated_sharding()
+            )
             # Was float(self.noise), which a resolved noise array cannot survive.
             # Replicated rather than sharded: it is one array indexed by baseline
             # (and channel, and timestep where the MS resolves the noise that
@@ -594,6 +597,19 @@ class TabConfig:
         # even when data.flags is false -- see apply_gain_table.
         if getattr(self, "gain_flags", None) is not None:
             self.flags = self.flags | self.gain_flags
+
+        # Three masks, three questions. ms_flags: does something already know
+        # this sample is bad? flags: does tabascal decline to fit it?
+        # estimator_flags: is it a fair place to measure an amplitude from?
+        # The third is the union of what is known bad, because an estimator
+        # wants the cleanest sample there is -- and an uncalibratable
+        # visibility, which apply_gain_table left in the raw frame under a
+        # unity gain, is on a different flux scale from every calibrated one
+        # beside it. Not the likelihood mask: data.flags: false empties that
+        # deliberately, and it would take the MS's knowledge with it.
+        self.estimator_flags = jnp.asarray(self.ms_flags)
+        if getattr(self, "gain_flags", None) is not None:
+            self.estimator_flags = self.estimator_flags | self.gain_flags
 
         known = float(jnp.asarray(self.ms_flags).mean())
         excluded = float(self.flags.mean())

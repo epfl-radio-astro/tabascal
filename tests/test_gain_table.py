@@ -807,6 +807,58 @@ class TestApplyGainTable:
         assert flags[0, 0, 0]
         assert flags[(A1 == 2) | (A2 == 2)].all()
 
+    def test_an_uncalibratable_sample_is_kept_out_of_the_estimators_too(
+        self, casacore, tmp_path, gains, vis_obs
+    ):
+        """It is not on the same flux scale as the data beside it.
+
+        apply_gain_table divides every calibratable visibility by its gain and
+        leaves the rest under a unity gain, so an uncalibratable sample sits in
+        the raw frame among calibrated neighbours. The likelihood excludes it;
+        anything measuring an amplitude off the data has to exclude it as well,
+        or a run whose gains are far from unity reads a width off a frame it
+        does not use.
+        """
+
+        dead = np.asarray(gains).copy()
+        dead[2] = np.nan
+        ms_flags = np.zeros((N_BL, N_FREQ, N_TIME), dtype=bool)
+        ms_flags[0, 0, 0] = True
+
+        path = _write_table(tmp_path, dead)
+        config = _tab_config(vis_obs, noise=0.5, flags=ms_flags)
+
+        config.apply_gain_table(path)
+        # data.flags: false -- the likelihood declines to honour the MS, and
+        # the estimator mask keeps that knowledge regardless.
+        config.set_flags(False)
+
+        touches_2 = (A1 == 2) | (A2 == 2)
+        estimator = np.asarray(config.estimator_flags)
+        assert estimator[0, 0, 0], "the MS's own flag has to survive"
+        assert estimator[touches_2].all(), "and the uncalibratable samples"
+        clean = ~touches_2[:, None, None] & ~ms_flags
+        assert not estimator[clean].any()
+        # The likelihood mask is a different question and answers it its way:
+        # data.flags: false, so only the gain flags are in it.
+        assert not np.asarray(config.flags)[0, 0, 0]
+
+    def test_the_ms_flags_are_still_only_what_the_ms_wrote(
+        self, casacore, tmp_path, gains, vis_obs
+    ):
+        """The gain flags reach the other two masks and not this one."""
+
+        dead = np.asarray(gains).copy()
+        dead[2] = np.nan
+        path = _write_table(tmp_path, dead)
+        config = _tab_config(vis_obs, noise=0.5)
+
+        config.apply_gain_table(path)
+        config.set_flags(True)
+
+        assert not np.asarray(config.ms_flags).any()
+        assert np.asarray(config.estimator_flags)[(A1 == 2) | (A2 == 2)].all()
+
     def test_the_ms_times_round_trip_through_the_writer(
         self, casacore, tmp_path, gains, vis_obs, capsys
     ):
@@ -956,6 +1008,9 @@ class TestInitOrdering:
                 "ms_flags": np.zeros((1, N_FREQ, 1), dtype=bool),
                 "flags": np.zeros((1, N_FREQ, 1), dtype=bool),
             },
+            # The third mask, as the real set_flags derives it -- make_global
+            # globalises all three and would not find this one otherwise.
+            "set_flags": {"estimator_flags": np.zeros((1, N_FREQ, 1), dtype=bool)},
             "set_noise": {"noise": 0.7, "noise_scalar": 0.7},
             "get_orbital_elements": {"n_rfi": 0},
         }

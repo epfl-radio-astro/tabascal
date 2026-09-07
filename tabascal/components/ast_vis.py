@@ -101,7 +101,9 @@ class GPVisAst(Component):
 
             self.std = pow_spec["std"]
             if self.std == FROM_DATA:
-                self.std = self._std_from_data(config.vis_obs, config.ms_flags)
+                self.std = self._std_from_data(
+                    config.vis_obs, config.estimator_flags
+                )
             self.gammas = pow_spec["gammas"]
             self.fov_deg = pow_spec["fov_deg"]
             self.pk_cutoff = pow_spec["cutoff"]
@@ -484,7 +486,7 @@ class GPVisAst(Component):
             "vis_ast": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
 
-    def _std_from_data(self, vis_obs, flags):
+    def _std_from_data(self, vis_obs, estimator_flags):
         """``rms|V|`` per baseline over the samples nothing has flagged.
 
         ``std`` is defined as that quantity, so this is not a proxy for the
@@ -492,13 +494,15 @@ class GPVisAst(Component):
         guessed. Per baseline because that is what the data offers; the model
         then has one width per baseline rather than one for all of them.
 
-        The mask is the MS's own, ``ms_flags``, and not the likelihood's.
-        Those answer different questions and this is where the difference
-        shows: a strong emitter flagged by some other task is data tabascal is
-        here to recover, so ``data.flags: false`` keeps it in the fit -- and it
-        is still the wrong place to measure a clean sky amplitude from. Reading
-        the MS's flags here costs nothing to a run that declines to honour them
-        elsewhere.
+        The mask is ``estimator_flags`` -- everything known to be bad, the
+        MS's own flags and the samples no gain table could calibrate -- and
+        not the likelihood's. Those answer different questions and this is
+        where the difference shows: a strong emitter flagged by some other
+        task is data tabascal is here to recover, so ``data.flags: false``
+        keeps it in the fit, and it is still the wrong place to measure a
+        clean sky amplitude from. An uncalibratable visibility is worse: it
+        carries a unity gain where its neighbours were divided by a real one,
+        so it is not even on the same flux scale.
 
         **It measures whatever is in the unflagged data, including RFI.** That
         is the point of taking only unflagged samples, and it is why an MS that
@@ -511,7 +515,7 @@ class GPVisAst(Component):
         """
 
         vis_obs = jnp.asarray(vis_obs)
-        keep = ~jnp.asarray(flags)
+        keep = ~jnp.asarray(estimator_flags)
         n_kept = jnp.sum(keep, axis=(1, 2))
 
         if not bool(jnp.any(keep)):
@@ -522,7 +526,7 @@ class GPVisAst(Component):
         if not bool(jnp.any(~keep)):
             print(
                 "Warning: ast.pow_spec.std: data is measuring every "
-                "visibility, because the MS flags none of them. Whatever "
+                "visibility, because nothing flags any of them. Whatever "
                 "RFI is in them is in the prior width too, so it will be "
                 "wider than the sky by however much RFI there is. Flag the "
                 "contaminated samples in the MS -- this reads those flags "
