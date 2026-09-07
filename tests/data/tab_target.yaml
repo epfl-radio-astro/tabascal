@@ -55,7 +55,6 @@ rfi:
 
 satellites:
   norad_ids: [20452, 38833, 45854]
-  ric_std: 1e2
 
 
 # True gains

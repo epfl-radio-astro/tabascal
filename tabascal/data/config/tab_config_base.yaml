@@ -112,7 +112,6 @@ gains:
 # # Model parameters
 # ###################
 model:
+  components: []        # Required - The forward model, as an ordered list of 'module:ClassName' references resolved against tabascal.components. An empty list builds no model
   precision: single
-#   func: fixed_orbit_rfi_full_fft_standard_model
-#   name: fixed_orbit_rfi
   

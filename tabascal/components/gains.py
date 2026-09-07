@@ -90,13 +90,11 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
     :class:`UnitaryGains` fits no gain and reads nothing from the gains section
     at all.
 
-    A key is defaulted when, and only when, it is ``None`` or absent. This is a
-    BEHAVIOUR CHANGE for a config that writes a literal 0: ``r_seed: 0`` is now the
-    seed it says rather than the default seed, and a zero ``amp_std`` or
-    ``phase_std`` is an error rather than the default width — a zero-width prior
-    pins every gain to its mean, which is a mistake worth naming rather than a
-    default worth guessing. ``phase_mean: 0`` is unaffected: the default it used to
-    be replaced by is also 0.
+    A key is defaulted when, and only when, it is ``None`` or absent, so a
+    literal 0 is taken at its word: ``r_seed: 0`` is the seed it says, and a
+    zero ``amp_std`` or ``phase_std`` is an error rather than a width — a
+    zero-width prior pins every gain to its mean, which is a mistake worth
+    naming rather than a default worth guessing.
     """
 
     try:

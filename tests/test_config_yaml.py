@@ -143,7 +143,8 @@ class TestEmptySectionMerge:
 
         Nothing validates the key set, so ``None`` under a name the base does
         not have has no base value to keep and is stored like any other unknown
-        key. Pinned because it is the boundary of the rule above.
+        key. Pinned because it is the boundary of the rule above, and because
+        it is what makes a key nothing reads invisible -- see GitHub #226.
         """
 
         config = merged(tmp_path, "not_a_section:\n" + _MINIMAL_CONFIG)

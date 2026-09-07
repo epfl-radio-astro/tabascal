@@ -29,37 +29,6 @@ The components should be given in order of dependency. For example, `trajectory:
 
 That order is checked when the model is assembled, before anything is computed. Each component declares the state keys it reads and the keys it writes, and a list that leaves out a component — or holds the right ones in the wrong order — is rejected by name, saying which key is missing, what produces it, and whether that producer is absent or merely listed too late.
 
-### Renamed and removed components
-
-Component classes were renamed to a consistent scheme in [PR #106](https://github.com/epfl-radio-astro/tabascal/pull/106), and the matrix-GP RFI-signal components were deleted there in favour of the Fourier ones. One more component has gone since, under [issue #129](https://github.com/epfl-radio-astro/tabascal/issues/129). **There are no aliases and none are planned.** A configuration file written before either change will not run: every stale `model.components` entry has to be edited by hand to the current name below. The failure is loud — the importer names the reference that did not resolve, where it changed, what the module does offer, and, for the names in these tables, what replaced it.
-
-| Name before #106 | Now |
-|---|---|
-| `rfi_signal:FourierGPRFI` | `rfi_signal:ComplexRFIVarAnt` |
-| `rfi_signal:FourierGPRFIConstAnt` | `rfi_signal:ComplexRFIConstAnt` |
-| `rfi_vis:RiemannVisTimeFreqCalculation` | `rfi_vis:RiemannVis` |
-| `rfi_vis:RiemannVisTimeFreqCalculationFFI` | `rfi_vis:RiemannVisFFI` |
-| `rfi_vis:RiemannVisTimeFreqVariable` | `rfi_vis:RiemannVisVariable` |
-| `rfi_vis:RiemannVisTimeFreqVariableFFI` | `rfi_vis:RiemannVisVariableFFI` |
-| `ast_vis:FourierTimeFreqGPAst` | `ast_vis:GPVisAst` |
-| `trajectory:SGP4LEONoDragOrbit` | `trajectory:NoDragOrbit` |
-| `trajectory:SGP4LEOOrbit` | `trajectory:Orbit` |
-
-The components below were deleted outright. None has a drop-in successor, so replacing one is a modelling choice rather than a substitution; the "nearest" column is the component that now covers the same place in the model, not an equivalent of what was there.
-
-| Deleted in #106 | Nearest current component | What changed |
-|---|---|---|
-| `rfi_signal:ComplexRFI` | `rfi_signal:ComplexRFIVarAnt` | The GP over the RFI amplitude moves from a real-space covariance matrix to the Fourier domain, and gains a fine frequency axis. |
-| `rfi_signal:RealRFI` | `rfi_signal:ComplexRFIVarAnt` | The same replacement, and the amplitude becomes complex rather than real. Both matrix-GP components went on numerical-stability grounds: the Cholesky jitter is absolute, so at the RFI prior's variance it regularises far too weakly and returns NaN in single precision. |
-| `rfi_vis:RiemannVisCalculation` | `rfi_vis:RiemannVis` | The Riemann sum integrates the frequency axis as well as the time axis, so the RFI signal it consumes is on a fine grid in both. |
-| `ast_vis:FourierTimeAst`, `ast_vis:FourierTimeConstFreqAst`, `ast_vis:FourierTimeFreqAst` | `ast_vis:GPVisAst` | The plain Fourier astronomical models are gone; the GP over time and frequency is the free-form sky model that replaces them. (The other astronomical visibility model, [`ast_vis:DiscreteSkyVis`](#a-fixed-sky-of-discrete-sources), is a rigid catalogue sky rather than a replacement for these.) |
-
-The Gaussian process gain went the same way, in a later release:
-
-| Deleted in #129 | Nearest current component | What changed |
-|---|---|---|
-| `gains:GPGains` | `gains:ConstGains` | The gain no longer varies over the observation: `gains:ConstGains` fits one complex gain per antenna, constant over time and frequency. That is a modelling change and not a substitution, so it is worth reading [A constant gain per antenna](#a-constant-gain-per-antenna) before making it — in particular the identifiability rules, which a time-variable gain did not have. `gains:GPGains` was the last model built on a dense covariance matrix; the Fourier-domain Gaussian processes (`rfi_signal:ComplexRFIVarAnt`, `ast_vis:GPVisAst`) are unaffected. Its four correlation-length keys were removed with it — see [Gains](#gains). |
-
 ### Precision
 
 TABASCAL runs in **single precision (fp32) by default**. It is set in the same
@@ -389,6 +358,8 @@ Note that the catalogue fluxes are in the same scale as the data the model is fi
 
 The `rfi` section defines the prior distribution over the RFI signal. An example of this section is given below.
 
+The prior is a Gaussian process in the Fourier domain rather than over a dense covariance matrix. That is a numerical requirement and not a preference: a Cholesky factorisation's jitter is absolute, so at the variance this prior carries it regularises far too weakly and returns NaN in single precision.
+
 ```yaml
 rfi:
   init: sample
@@ -417,15 +388,12 @@ The only additional parameters are
 
   Left unset (`null`, the shipped default) each takes the component's own value: `[3, 3]` and `1e-9` for `rfi_signal:ComplexRFIVarAnt`, `[100, 100]` and `1e-6` for `rfi_signal:ComplexRFIConstAnt`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
 
-  **These keys were read by nothing before this release.** Configurations written earlier may carry an `rfi.pow_spec` block — the shipped examples did, with `gammas: [5, 5]` and `cutoff: 1e-6` — which had no effect on the run. They now do, so such a block changes the prior and the latent dimension: to reproduce an earlier run, delete it or set the values above.
-
-  The other two keys those older blocks carried are refused by name rather than ignored, because neither is a setting: `p0` has no effect, since the spectrum is renormalised to `rfi.var`, and `k0s` is derived from `corr_freq` and `corr_time`, which are where the knee is set. Any other unknown key is refused the same way.
 
   The values are checked by the validator both Fourier-domain priors share, so `gammas` and `cutoff` are held to the same rules here as under [`ast.pow_spec`](#astronomical-signal) — the two sections differ only in which keys are live.
 
 * `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
-  The default is the one the base configuration ships, so **omitting the key means `0`, not no mask**. A configuration written before the option existed leaves it out and used to run unmasked; replayed against a current release it gains the horizon cut, and needs an explicit `min_elevation: null` to behave as it did.
+  The default is the one the base configuration ships, so **omitting the key means `0`, not no mask**. Running with no mask at all takes an explicit `min_elevation: null`.
 
   While a satellite is below the horizon it contributes no signal, but an unmasked model still carries a full set of free parameters for it over those times. Those parameters have no signal of their own to constrain them, so they are free to absorb signal that belongs elsewhere — the astronomical sky, or another RFI source — to the extent that the RFI signal prior admits it and the fringe rates overlap. Masking removes the parameters rather than relying on the fit to leave them alone. This is why `0` rather than `null` is the default: a satellite below the horizon is not a modelling choice, it is simply not there. It shows in the image domain: an unmasked run can reconstruct a static feature near the horizon out of those parameters, which the mask removes.
 
@@ -433,7 +401,7 @@ The only additional parameters are
 
   Raising the cut above `0` additionally excludes the low-elevation part of each pass, where the fringe rate is lowest and the overlap with other components is therefore greatest. How far to raise it is observation-dependent and is not currently calibrated, so no value above `0` is recommended here. Note that masking is about which parameters exist, not about subtraction quality, and reduced $\chi^2$ is largely insensitive to it — judge the effect on the recovered sky model.
 
-The RFI signal is modelled on a grid finer than the data, then averaged back down onto it. The fine grid is `n_freq * n_int_freq` by `n_time * n_int_time`, where each count is the number of fine samples per data cell on that axis. The two axes are configured differently, because only one of them can be estimated: there is no observable that fixes the frequency count, so `n_int_freq` is given directly, while the time count follows from how fast the RFI fringe winds and is therefore derived rather than written down. `time_int_factor` scales that derivation. **There is no `rfi.n_int_time` key**; a configuration that sets one is rejected at load, naming `rfi.time_int_factor`. Earlier releases shipped the key but never read it — `TabConfig` bound it and the estimator overwrote it on every path — so a configuration that set it was already running on the estimated count, and deleting the line changes nothing about the run.
+The RFI signal is modelled on a grid finer than the data, then averaged back down onto it. The fine grid is `n_freq * n_int_freq` by `n_time * n_int_time`, where each count is the number of fine samples per data cell on that axis. The two axes are configured differently, because only one of them can be estimated: there is no observable that fixes the frequency count, so `n_int_freq` is given directly, while the time count follows from how fast the RFI fringe winds and is therefore derived rather than written down. `time_int_factor` scales that derivation. **There is no `rfi.n_int_time` key.** The time count is derived, not chosen, so there is nothing to set: `rfi.time_int_factor` scales the derivation instead.
 
 * `n_int_freq`: This is the amount of over-sampling in the frequency domain that is used and then averaged back down to the data sampling rate. It therefore determines the number of samples per frequency channel that are used in the averaging to correctly calculate the fringe-winding loss (band-smearing). Band-smearing can be caused by both the phase variation over the channel width due to the geometric phase as well as the intrinsic signal of the RFI sources. The default is `1`, i.e. no over-sampling.
 * `time_int_factor`: In the time axis the number of integration samples needed to accurately model fringe-winding loss (time-smearing) is calculated based solely on the fringe rate due to the movement of the RFI source as well as the signal to noise ratio with
@@ -530,7 +498,6 @@ satellites:
   extra_orbit_max_age_days: null
   remote_max_age_days: 3
   cache_reuse_max_age_days: 1
-  ric_std: 1e2
 ```
 
 * `norad_ids`: List of the NORAD IDs of the satellites to include. TABASCAL requests the record whose epoch is closest to the observation from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service (via the [satchecker-client](https://satchecker-client.readthedocs.io/) package) — its `get-nearest-omm` endpoint for observations from 2026-07-12 onwards and `get-nearest-tle` before that, falling back to the other archive if the first has nothing acceptable. Cache misses run concurrently with a bounded five-worker pool; no account or credentials are required. **Every ID listed here must resolve to an acceptable record**: otherwise preflight stops before reading the visibilities and names each failure. TABASCAL never silently drops a configured satellite from the RFI model.
@@ -545,7 +512,6 @@ satellites:
 
   **The default of `3` is provisional.** It is a hard backstop against obviously unsuitable remote records — for one observation, SatChecker's per-satellite fallback silently returned records ~31 days old, worth ~9,663 km of ISS position error — and *not* a claim that a three-day-old element set gives adequate positional accuracy. The calibrated, observation-specific suitability policy that should replace it is tracked in [issue #101](https://github.com/epfl-radio-astro/tabascal/issues/101); it may end up rejecting records younger than three days for some orbits and baselines, or accepting older ones where independently justified.
 * `cache_reuse_max_age_days`: Request-avoidance threshold for the per-NORAD cache (default `1`). A cached record this close to the observation avoids a request. An older cached record triggers an exact-epoch nearest lookup — including against the fallback archive, since holding a stale record is not the same as the archive having answered — but remains an offline fallback if it is within `remote_max_age_days`. A response replaces it only when strictly closer to the observation. `null` always reuses the nearest acceptable cached record. When both limits are set, this value must not exceed the hard ceiling.
-* `ric_std`: The error in the orbital elements is not provided as part of the element sets. When estimated positions are analysed the error is calculated in a local reference frame of the satellite. This is the radial, in-track, and cross-track (RIC) frame. This parameter gives a factor by which to scale the RIC covariance that is stored internally which is taken from a paper where the average errors are calculated.
 
 ## Gains
 
@@ -570,9 +536,8 @@ gains:
 * `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
 * `r_seed`: The random seed the gain component draws with.
 
-**`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. It used to be any *falsy* value that triggered the default, so a literal `0` was read as "I did not set this": `r_seed: 0` silently became the default seed, and `amp_std: 0` or `phase_std: 0` silently became the default width. A zero seed is now the seed it says. A zero width is now an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason, where before they passed straight through. `phase_mean: 0` is the one member of the group that behaves exactly as it always did, the default it was being replaced by being `0.0` itself. A config that relied on any of the silent substitutions above will now stop and say which key it is, rather than run with a scale nobody chose.
+**`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. A zero seed is the seed it says. A zero width is an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason.
 
-**The correlation lengths are gone.** `amp_corr_freq`, `amp_corr_time`, `phase_corr_freq` and `phase_corr_time` were the length scales of the Gaussian process gain `gains:GPGains`, [removed in #129](#renamed-and-removed-components). They have no replacement — `gains:ConstGains` fits a gain that is constant over time and frequency, and `gains:UnitaryGains` fits none — so a config still setting any of them stops at load naming the key, rather than carrying a setting nothing reads.
 
 ### The default prior widths
 
@@ -621,7 +586,7 @@ gains:
 
 Both directions are removed from the **parameters**, not just from the value they map to. Writing $n_\text{ant}$ amplitude parameters and subtracting their mean would give the same gains and the same prior, but would leave the all-ones direction of that latent space invisible to every visibility: flat in the likelihood however much data there is, curved only by the prior. Such a coordinate wrecks the conditioning of the optimisation and makes a likelihood-only Fisher matrix singular, so there is no such coordinate.
 
-The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the **median** of that prior — its centre in log space, and the value the fit starts at — rather than its arithmetic mean, which is the slightly larger $\texttt{amp\_mean} \cdot e^{\sigma^2/2}$ for $\sigma$ the log-space spread. And it is that **only when the flux scale is free**: under the zero-sum gauge the geometric mean of $|g|$ is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so. A value that is not positive and finite is an error rather than a default — `amp_mean: 0` used to be read as "unset" and silently become 1.0.
+The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the **median** of that prior — its centre in log space, and the value the fit starts at — rather than its arithmetic mean, which is the slightly larger $\texttt{amp\_mean} \cdot e^{\sigma^2/2}$ for $\sigma$ the log-space spread. And it is that **only when the flux scale is free**: under the zero-sum gauge the geometric mean of $|g|$ is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so. A value that is not positive and finite is an error rather than a default.
 
 * `ref_ant`: The antenna whose phase is pinned to 0. `null` (the default) selects the first antenna with any unflagged data. An antenna every one of whose baselines is flagged everywhere is not constrained by any visibility, so it cannot be the reference the others are measured against, and naming one explicitly is an error rather than a silently unpinned fit.
 

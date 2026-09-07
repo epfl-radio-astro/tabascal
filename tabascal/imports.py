@@ -4,64 +4,6 @@ import inspect
 import pkgutil
 from typing import Iterable, List, Type
 
-#: Where the migration table lives. Quoted in every failure to resolve a
-#: component reference, since a stale config is the likeliest reason for one.
-MIGRATION_DOCS = (
-    "https://tabascal.readthedocs.io/en/latest/config.html"
-    "#renamed-and-removed-components"
-)
-
-#: Components that were renamed, as ``old class name -> (current reference, the
-#: issue or pull request it was renamed in)``. Message-only: nothing here is ever
-#: resolved, so an old config still fails -- the map exists so that the failure
-#: can say what to write instead. Keyed on the class name alone because that is
-#: what identifies the component; the module a config happens to name it under
-#: does not have to be right for the hint to be. Where it changed is carried per
-#: entry rather than stated once: the table outlived the release that started it.
-RENAMED_COMPONENTS = {
-    "FourierGPRFI": ("rfi_signal:ComplexRFIVarAnt", "#106"),
-    "FourierGPRFIConstAnt": ("rfi_signal:ComplexRFIConstAnt", "#106"),
-    "FourierTimeFreqGPAst": ("ast_vis:GPVisAst", "#106"),
-    "RiemannVisTimeFreqCalculation": ("rfi_vis:RiemannVis", "#106"),
-    "RiemannVisTimeFreqCalculationFFI": ("rfi_vis:RiemannVisFFI", "#106"),
-    "RiemannVisTimeFreqVariable": ("rfi_vis:RiemannVisVariable", "#106"),
-    "RiemannVisTimeFreqVariableFFI": ("rfi_vis:RiemannVisVariableFFI", "#106"),
-    "SGP4LEONoDragOrbit": ("trajectory:NoDragOrbit", "#106"),
-    "SGP4LEOOrbit": ("trajectory:Orbit", "#106"),
-}
-
-#: Components that were deleted, as ``old class name -> (nearest current
-#: reference, the issue or pull request it was deleted in)``. Nearest, not
-#: equivalent: none of these has a drop-in successor, so a config using one has a
-#: modelling decision to make, not a substitution.
-REMOVED_COMPONENTS = {
-    "ComplexRFI": ("rfi_signal:ComplexRFIVarAnt", "#106"),
-    "FourierTimeAst": ("ast_vis:GPVisAst", "#106"),
-    "FourierTimeConstFreqAst": ("ast_vis:GPVisAst", "#106"),
-    "FourierTimeFreqAst": ("ast_vis:GPVisAst", "#106"),
-    "GPGains": ("gains:ConstGains", "#129"),
-    "RealRFI": ("rfi_signal:ComplexRFIVarAnt", "#106"),
-    "RiemannVisCalculation": ("rfi_vis:RiemannVis", "#106"),
-}
-
-
-def _migration_note(cls_name: str) -> str:
-    """What became of ``cls_name``, if it is one of the names that changed."""
-    if cls_name in RENAMED_COMPONENTS:
-        new, changed_in = RENAMED_COMPONENTS[cls_name]
-        return (
-            f"'{cls_name}' was renamed to '{new}' in {changed_in}; "
-            "there are no aliases, so update the config by hand."
-        )
-    if cls_name in REMOVED_COMPONENTS:
-        nearest, changed_in = REMOVED_COMPONENTS[cls_name]
-        return (
-            f"'{cls_name}' was deleted in {changed_in} with no successor; the nearest "
-            f"current component is '{nearest}'."
-        )
-    return ""
-
-
 def _is_class(obj) -> bool:
     """Whether ``obj`` really is a class, on every supported Python.
 
@@ -133,16 +75,10 @@ def _listing(label: str, names: List[str]) -> str:
     return _sentence(f"{label}: {', '.join(names)}." if names else "")
 
 
-def _pointer() -> str:
-    return f"Renamed and removed components: {MIGRATION_DOCS}"
-
-
 def _missing_class_message(ref: str, cls_name: str, module) -> str:
     return (
         f"'{ref}': module '{module.__name__}' has no class '{cls_name}'. "
-        + _sentence(_migration_note(cls_name))
         + _listing("It defines", _offered_classes(module))
-        + _pointer()
     )
 
 
@@ -154,14 +90,12 @@ def _broken_module_message(ref: str, module_name: str, exc: Exception) -> str:
 
 
 def _missing_module_message(
-    ref: str, mod_path: str, cls_name: str, base_package: str | None
+    ref: str, mod_path: str, base_package: str | None
 ) -> str:
     where = f" in '{base_package}', and none at top level" if base_package else ""
     return (
         f"'{ref}': there is no module '{mod_path}'{where}. "
-        + _sentence(_migration_note(cls_name))
         + _listing(f"'{base_package}' holds", _offered_modules(base_package))
-        + _pointer()
     )
 
 
@@ -180,7 +114,7 @@ def _absent(module_name: str, exc: ModuleNotFoundError) -> bool:
     )
 
 
-def _import_module(ref: str, mod_path: str, cls_name: str, base_package: str | None):
+def _import_module(ref: str, mod_path: str, base_package: str | None):
     """Import ``mod_path``, relative to ``base_package`` first if there is one."""
     candidates = ([f"{base_package}.{mod_path}"] if base_package else []) + [mod_path]
     for name in candidates:
@@ -199,7 +133,7 @@ def _import_module(ref: str, mod_path: str, cls_name: str, base_package: str | N
             # missing name, so it is reported the same way rather than reaching
             # the caller as a bare exception with no reference attached.
             raise ImportError(_broken_module_message(ref, name, e)) from e
-    raise ImportError(_missing_module_message(ref, mod_path, cls_name, base_package))
+    raise ImportError(_missing_module_message(ref, mod_path, base_package))
 
 
 def import_components(
@@ -214,11 +148,10 @@ def import_components(
     (e.g., 'foo:Foo' -> 'tabascal.components.foo.Foo') and then falls
     back to absolute imports if that fails.
 
-    A reference that does not resolve raises, always: the components that have
-    been renamed and deleted have no aliases, so a config predating one of those
-    changes is broken and has to be edited. The failure carries what is needed to
-    do that -- the current name where the old one is known, what the module does
-    offer, and the migration table.
+    A reference that does not resolve raises, always: there are no aliases, so
+    a name nothing defines is a config to edit rather than something to guess
+    at. The failure names the reference that did not resolve and lists what the
+    module does offer.
     """
     classes: List[Type] = []
     errors: list[str] = []
@@ -237,7 +170,7 @@ def import_components(
         try:
             mod_path, cls_name = _split(ref)
 
-            module = _import_module(ref, mod_path, cls_name, base_package)
+            module = _import_module(ref, mod_path, base_package)
 
             try:
                 cls = getattr(module, cls_name)

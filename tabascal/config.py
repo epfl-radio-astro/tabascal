@@ -115,81 +115,6 @@ def yaml_load(path):
         return yaml.load(f, Loader=_TabSafeLoader)
 
 
-#: Config keys that have been renamed, old dotted name -> new dotted name.
-#: Checked rather than aliased: a config carrying the old name is loaded with
-#: the base default for the new one, so accepting it silently would run the
-#: model on a value the user did not ask for.
-RENAMED_KEYS = {
-    "rfi.freq_int_samples": "rfi.n_int_freq",
-    # sim_dir was the directory sim-vis creates, and tabascal only ever ran on
-    # simulations, so one name covered the inputs and the outputs. On real data
-    # it covers neither: there is no simulation directory, and an MS from a
-    # telescope has no relation to the name of the folder it sits in. out_dir
-    # is only where the run writes; the MS is named by data.ms_path and the
-    # truth zarr, where there is one, by data.truth_zarr.
-    "data.sim_dir": "data.out_dir",
-}
-
-
-#: Why the four gain correlation lengths are gone, shared by all of them. There is
-#: nothing to point a config at: they were length scales of a covariance function,
-#: and no gain component has one any more.
-_GAIN_CORR_REMOVED = (
-    "it was a correlation length of the gain Gaussian process fitted by "
-    "gains:GPGains, which was removed in #129. There is no replacement: "
-    "gains:ConstGains fits one gain per antenna, constant over time and frequency, "
-    "and gains:UnitaryGains fits none at all, so neither has a correlation length"
-)
-
-#: Config keys that have been removed, old dotted name -> (what to set instead or
-#: None where nothing replaces it, why the key is gone). Checked rather than
-#: ignored, for the same reason as RENAMED_KEYS: a key nothing reads still looks
-#: like a setting in the file, and leaving it there is how it stayed unread for as
-#: long as it did.
-REMOVED_KEYS = {
-    "rfi.n_int_time": (
-        "rfi.time_int_factor",
-        "the number of time integration samples is estimated from the RFI fringe "
-        "rate and the noise, never given directly - nothing has ever read this key",
-    ),
-    "gains.amp_corr_freq": (None, _GAIN_CORR_REMOVED),
-    "gains.amp_corr_time": (None, _GAIN_CORR_REMOVED),
-    "gains.phase_corr_freq": (None, _GAIN_CORR_REMOVED),
-    "gains.phase_corr_time": (None, _GAIN_CORR_REMOVED),
-}
-
-
-def check_renamed_keys(config: Dict, path: str):
-    """Stop on a config still using a key that has been renamed."""
-
-    for old, new in RENAMED_KEYS.items():
-        section, key = old.split(".")
-        # `or {}` rather than a default: a yaml section header with nothing
-        # under it parses as None, which `in` cannot search.
-        if key in (config.get(section) or {}):
-            raise ValueError(
-                f"{old} was renamed {new}. Update {path}: the two named the same "
-                "quantity and only the new name is read."
-            )
-
-
-def check_removed_keys(config: Dict, path: str):
-    """Stop on a config still setting a key that has been removed."""
-
-    for old, (new, why) in REMOVED_KEYS.items():
-        section, key = old.split(".")
-        # Presence, not value: every config that carried a removed key is one
-        # that needs editing, whatever it set the key to.
-        if key in (config.get(section) or {}):
-            # A successor is named where there is one. Where there is not, the
-            # error says only to delete the key: offering the nearest surviving
-            # setting would be inviting the user to write something else.
-            instead = f" and set {new} instead" if new else ""
-            raise ValueError(
-                f"{old} has been removed. Delete it from {path}{instead}: {why}."
-            )
-
-
 def load_config(path: str) -> Dict:
     """Load a configuration file and populate default parameters where needed.
 
@@ -208,17 +133,9 @@ def load_config(path: str) -> Dict:
     base_config = yaml_load(tab_base_config_path)
 
     try:
-        config = deep_update(base_config, yaml_load(path))
+        return deep_update(base_config, yaml_load(path))
     except Exception as e:
         raise IOError(f"Configuration file could not be loaded from {path}") from e
-
-    # After the merge, not inside it: the base ships none of the old names, so a
-    # hit here can only have come from the user's file, and the error says so
-    # rather than being wrapped in "could not be loaded".
-    check_renamed_keys(config, path)
-    check_removed_keys(config, path)
-
-    return config
 
     
 class TabConfig:
@@ -466,10 +383,9 @@ class TabConfig:
                         "estimate."
                     )
 
-                # A zero used to read as "no override" and silently keep the MS
-                # estimate, which is neither of the things a user writing
-                # `noise: 0` could have meant. Zero noise is not a noise: it
-                # divides the likelihood by nothing.
+                # Zero noise is not a noise: it divides the likelihood by
+                # nothing. Refused rather than read as "no override", which is
+                # not what a user writing `noise: 0` could have meant either.
                 try:
                     value = float(noise)
                 except (TypeError, ValueError) as err:
