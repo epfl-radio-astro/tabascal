@@ -415,11 +415,28 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
 #: ``BaseGPRFI.default_gammas`` / ``default_pk_cutoff``.
 _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 
+#: What the spectrum is normalised to, per unit of ``rfi.std``.
+#:
+#: ``rfi.std`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
+#: ``ast.pow_spec.std``, read off the data the same way. The two get there by
+#: different arithmetic, and this is the whole of the difference: ``vis_ast``
+#: *is* the modelled quantity and is linear in its latent, while ``rfi_A`` is a
+#: per-antenna amplitude and the visibility is quadratic in it,
+#: ``vis_rfi ~ rfi_A[a1] * conj(rfi_A[a2])``.
+#:
+#: The complex latent is drawn as two independent standard normals, so it
+#: carries ``E|z|^2 = 2``. A linear model halves that in the width (the
+#: astronomical prior divides by ``sqrt(2)``); a quadratic one passes it
+#: through undiminished, so ``sum(sigma_rfi_k**2) = rfi.std / 2`` is what makes
+#: the realised ``rms|V|`` equal ``rfi.std``. Measured, not derived:
+#: ``tests/components/test_rfi_signal.py`` samples the prior and checks it.
+_LATENT_POWER = 2.0
+
 #: Keys that were in the shipped example configs for a long time while nothing
 #: read them (#111), and that are computed rather than set. Refused by name
 #: rather than ignored: silently accepting them again would be the same trap.
 _POW_SPEC_DERIVED = {
-    "p0": "the spectrum is renormalised to rfi.var, so p0 has no effect",
+    "p0": "the spectrum is renormalised to rfi.std, so p0 has no effect",
     "k0s": "the knee is derived from rfi.corr_freq and rfi.corr_time",
 }
 
@@ -463,7 +480,7 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
     try:
         r_seed = rfi_config["r_seed"]
-        gp_var = rfi_config["var"]
+        rfi_std = rfi_config["std"]
         gp_freq_l = rfi_config["corr_freq"]
         gp_time_l = rfi_config["corr_time"]
     except Exception as e:
@@ -478,13 +495,16 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     else:
         raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
 
-    if not gp_var: # Set Default
-        est_gp_var = float(jnp.max(jnp.abs(vis_obs)))
-        rfi_config["var"] = est_gp_var
-    elif isinstance(gp_var, (float, int)):
-        rfi_config["var"] = float(gp_var)
+    if not rfi_std: # Set Default
+        # _LATENT_POWER times the largest visibility, which is the prior this
+        # default has always set -- the key it was written for meant half of
+        # what rfi.std means. It is a maximum where the key says typical, which
+        # is GitHub #227 rather than something to change under a rename.
+        rfi_config["std"] = _LATENT_POWER * float(jnp.max(jnp.abs(vis_obs)))
+    elif isinstance(rfi_std, (float, int)):
+        rfi_config["std"] = float(rfi_std)
     else:
-        raise ValueError(f"Config parameter (rfi:\n\tvar: {gp_var}) is not of type float or int.")
+        raise ValueError(f"Config parameter (rfi:\n\tstd: {rfi_std}) is not of type float or int.")
     
     if not gp_freq_l: # Set Default
         est_gp_freq_l = extent(freqs, chan_width) / 2
@@ -503,7 +523,7 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
         raise ValueError(f"Config parameter (rfi:\n\tcorr_time: {gp_time_l}) is not of type float or int.")    
     
     print()
-    print(f"Using RFI var : {rfi_config['var']:.1e} Jy")
+    print(f"Using RFI std : {rfi_config['std']:.1e} Jy (rms|V|)")
     print(f"Using RFI corr_freq : {rfi_config['corr_freq']/1e3:.1f} kHz")
     print(f"Using RFI corr_time : {rfi_config['corr_time']:.1f} s")
 
@@ -596,7 +616,10 @@ class BaseGPRFI(Component):
         self.est_times_mjd = to_utc_mjd(tab_config.times_mjd, tab_config.time_scale)
         self.int_time = tab_config.int_time
 
-        self.gp_var = rfi_config["var"]
+        # The spectrum normalises to this; rfi.std is what it produces. See
+        # _LATENT_POWER for why the two differ by exactly that factor.
+        self.rfi_std = rfi_config["std"]
+        self.gp_var = self.rfi_std / _LATENT_POWER
         self.corr_freq = rfi_config["corr_freq"]
         self.corr_time = rfi_config["corr_time"]
 

@@ -29,7 +29,7 @@ from tabascal.timing import measure_runtime
 # What differs between the sections is only which keys are live: the RFI prior
 # derives its knee from corr_freq/corr_time, where the astronomical one is given
 # a corr_freq and derives its time knee from fov_deg. Both normalise their
-# amplitude away -- rfi to rfi.var, ast to ast.pow_spec.std -- so neither reads
+# amplitude away -- rfi to rfi.std, ast to ast.pow_spec.std -- so neither reads
 # a p0. That is expressed as the rules a caller passes, not as a second copy of
 # these checks.
 
@@ -611,7 +611,7 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
                 "The cutoff is not what is wrong here. Look at the knees and "
                 "the k grid -- a zero or non-finite corr_time, corr_freq or "
                 "fov_deg, or a zero-length baseline, gives 0/0 -- and, on the "
-                "RFI path, at rfi.var, which is the p0 this is scaled by. The "
+                "RFI path, at rfi.std, which is the p0 this is scaled by. The "
                 "astronomical spectrum is built at unit amplitude and scaled "
                 "afterwards, so there the amplitude cannot be the cause."
             )
@@ -624,7 +624,7 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
                 "No cutoff can help: the comparison is strict, so nothing "
                 "clears a threshold of zero. Check the knees, and the variance "
                 "the spectrum is scaled to where the caller supplies one "
-                "(rfi.var) -- an underflow to zero looks like this."
+                "(rfi.std) -- an underflow to zero looks like this."
             )
         else:
             why = (

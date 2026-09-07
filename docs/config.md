@@ -267,7 +267,7 @@ The parameters for the power spectrum are defined as
 
   It is a deliberately weak, generic prior rather than a model of the sky: a real sky puts more correlated flux on short baselines than on long ones, which resolve it out, so giving every baseline the width you read off the shortest ones is permissive on the longest. That permissiveness is what lets an astronomical model absorb RFI, so it is worth knowing about; [#219](https://github.com/epfl-radio-astro/tabascal/issues/219) tracks giving the width a baseline-length envelope. The alternative — letting the width fall out of each baseline's fringe-rate knee — is not better: that varies with temporal bandwidth, which is not sky amplitude either.
 
-  Note that this is not the convention [`rfi.var`](#rfi-signal) uses, which normalises per component. The two were never the same quantity: `rfi.var` is the variance of `rfi_A`, a per-antenna amplitude that the visibility is *quadratic* in, whereas `vis_ast` is the modelled visibility itself. Here the whole point is that the number you read off the data is the number you write down, so it is the complex width.
+  [`rfi.std`](#rfi-signal) means the same thing — the typical `rms|V|` in Jy — so one measurement sets either prior. What differs is internal: `vis_ast` is the modelled quantity, while `rfi_A` is a per-antenna amplitude the visibility is quadratic in, so the RFI prior takes a square root that this one does not. In both sections the number you read off the data is the number you write down.
 * `corr_freq`: The bandwidth, in Hz, over which the astronomical signal stays correlated. It sets the knee along the frequency axis, and that axis is a **delay**: the modes there are `fftfreq(n_freq, chan_width)`, in inverse Hz, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `rfi.corr_freq` makes. `null`, the default, is no roll-off along that axis at all: every delay mode is kept and none is preferred.
 
   It has **no effect on a single-channel observation**, where the only delay mode is zero, which is why every shipped config leaves it unset. On a wide band it is worth setting: the sky is smooth in frequency, so its power belongs at low delay, and the value to give is a bandwidth comparable to the one observed rather than a narrow one. A useful sanity check: the delay axis only runs out to `1 / (2 * chan_width)` — 2.4 µs for 209 kHz channels, whatever the channel count — and the knee sits at `k0 = 1 / (2 * pi * corr_freq)`. Comparing the two says how much of the axis the roll-off touches. At `corr_freq = chan_width / pi` (67 kHz for those channels) the knee lands exactly on the far end, where the outermost mode is still suppressed to 0.32 of the peak: that is where the roll-off bites hardest across the band, not where it stops mattering. It takes about ten times smaller — under 7 kHz — before the outermost mode is within 3 % of the peak and the axis is effectively flat. A correlation bandwidth of one observed band puts the knee at `1 / (pi * n_freq)` of the axis, keeping the lowest delays and cutting the rest, which is what a sky smooth in frequency should look like.
@@ -364,6 +364,7 @@ The prior is a Gaussian process in the Fourier domain rather than over a dense c
 rfi:
   init: sample
   mean: 0
+  std: null
   min_elevation: 0
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
@@ -376,6 +377,14 @@ rfi:
 ```
 
 All parameters in this section that overlap with those of the `ast` section have the same definition, except that `init` and `mean` accept one more value:
+
+* `std`: The width of the prior on the RFI signal, in Jy: the RFI's typical `rms|V|`. **The same quantity as [`ast.pow_spec.std`](#astronomical-signal)** — read an amplitude off the data and write it here, for either prior.
+
+  The two get there by different arithmetic, and that is the only difference between them. `vis_ast` *is* the modelled quantity, so the astronomical prior's width is the latent's width. `rfi_A` is a per-antenna amplitude and the visibility is quadratic in it ($V^\text{RFI}_{pq} = A_p A_q^*e^{i\Delta\phi}$), so the per-antenna width is $\sqrt{\texttt{std}}$ and carries units of $\sqrt{\text{Jy}}$. Both translations are internal: the number you write is `rms|V|` in Jy in both sections.
+
+  The spectrum is normalised to `std` after the cut and after the roll-off, so — exactly as on the astronomical side — `gammas` and `cutoff` change which modes are fitted and how they correlate, not how much RFI the prior expects.
+
+  When `null` it is twice the largest visibility in the observation. That is a *maximum* where this key says *typical*, and on an observation with a bright pass it is a good deal wider than the RFI it is a prior on; [#227](https://github.com/epfl-radio-astro/tabascal/issues/227) tracks giving it a statistic its own name describes.
 
 * `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `rfi.est`, and no matching of light curves to satellites by name, since the estimator is handed `satellites.norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
 
@@ -455,7 +464,7 @@ Both are strict because their failure modes are silent. A light curve attached t
 
 Times are absolute (MJD on a stated scale) rather than seconds from the start of a particular observation, so a light curve is interpretable on its own and can be reused across measurement sets covering the same pass. Both halves of that matter, and the stated scale is **UTC**. A Julian day number is a number until a scale says what it counts: a Measurement Set declares the scale of its `TIME` column in a `MEASINFO` record and is free to declare TAI, whose numbers name instants 37 s from the ones the same numbers name on UTC. An axis written on whatever the measuring MS happened to declare would be reusable only against another MS that happened to declare the same thing — and would be resampled by the difference without anything raising. tabascal reads the observation's own times onto UTC before sampling an estimate, and `tabascal light-curve` writes them the same way, so both ends of the format are on one scale.
 
-`light_curves` is a **flux in Jy**, not the modelled amplitude `rfi_A`. The RFI visibility is quadratic in `rfi_A` ($V^\text{RFI}_{pq} = A_p A_q^* e^{i\Delta\phi}$), so `rfi_A` carries units of $\sqrt{\text{Jy}}$ and the estimate is seeded with $\sqrt{\lvert \text{light\_curves} \rvert}$. Supplying an amplitude where a flux is expected is squared away silently, so the value is wrong rather than the shape — give the flux the source would show in the visibilities, on the same scale as `rfi.var`.
+`light_curves` is a **flux in Jy**, not the modelled amplitude `rfi_A`. The RFI visibility is quadratic in `rfi_A` ($V^\text{RFI}_{pq} = A_p A_q^* e^{i\Delta\phi}$), so `rfi_A` carries units of $\sqrt{\text{Jy}}$ and the estimate is seeded with $\sqrt{\lvert \text{light\_curves} \rvert}$. Supplying an amplitude where a flux is expected is squared away silently, so the value is wrong rather than the shape — give the flux the source would show in the visibilities, on the same scale as `rfi.std`.
 
 Some further details:
 

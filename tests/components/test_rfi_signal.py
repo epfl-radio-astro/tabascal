@@ -83,7 +83,7 @@ def make_rfi_config(
     mean="zeros",
     est=None,
     r_seed=1,
-    var=1.0,
+    std=1.0,
     corr_freq=5e6,
     corr_time=60.0,
     pad_factor=2,
@@ -135,7 +135,7 @@ def make_rfi_config(
         args={
             "rfi": {
                 "r_seed": r_seed,
-                "var": var,
+                "std": std,
                 "corr_freq": corr_freq,
                 "corr_time": corr_time,
                 "init": init,
@@ -242,12 +242,12 @@ class TestRfiSignalConfigValidation:
         """All-None config picks up defaults derived from the data and the observation grid."""
         freqs, times = self._grid()
         vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": None, "var": None, "corr_freq": None, "corr_time": None}
+        cfg = {"r_seed": None, "std": None, "corr_freq": None, "corr_time": None}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         assert result["r_seed"] == 1
-        assert result["var"] == pytest.approx(3.0)  # max |vis_obs|
+        assert result["std"] == pytest.approx(6.0)  # 2 x max |vis_obs|
         assert result["corr_freq"] == pytest.approx(float(freqs[-1] - freqs[0]) / 2)
         assert result["corr_time"] == pytest.approx(float(times[-1] - times[0]) / 2)
 
@@ -259,7 +259,7 @@ class TestRfiSignalConfigValidation:
         """
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": None, "corr_time": None}
+        cfg = {"r_seed": 1, "std": 1.0, "corr_freq": None, "corr_time": None}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -274,12 +274,12 @@ class TestRfiSignalConfigValidation:
         """Explicit numeric values survive validation and are coerced to float."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 42, "var": 7, "corr_freq": 5e6, "corr_time": 60}
+        cfg = {"r_seed": 42, "std": 7, "corr_freq": 5e6, "corr_time": 60}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         assert result["r_seed"] == 42
-        assert isinstance(result["var"], float) and result["var"] == pytest.approx(7.0)
+        assert isinstance(result["std"], float) and result["std"] == pytest.approx(7.0)
         assert result["corr_freq"] == pytest.approx(5e6)
         assert isinstance(result["corr_time"], float)
         assert result["corr_time"] == pytest.approx(60.0)
@@ -288,17 +288,17 @@ class TestRfiSignalConfigValidation:
         """A config missing one of the four required keys raises ValueError."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": 5e6}  # no corr_time
+        cfg = {"r_seed": 1, "std": 1.0, "corr_freq": 5e6}  # no corr_time
 
         with pytest.raises(ValueError):
             rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
-    @pytest.mark.parametrize("key", ["r_seed", "var", "corr_freq", "corr_time"])
+    @pytest.mark.parametrize("key", ["r_seed", "std", "corr_freq", "corr_time"])
     def test_non_numeric_value_raises(self, key):
         """A non-numeric value for any tunable raises ValueError."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": 5e6, "corr_time": 60.0}
+        cfg = {"r_seed": 1, "std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}
         cfg[key] = "not a number"
 
         with pytest.raises(ValueError):
@@ -308,7 +308,7 @@ class TestRfiSignalConfigValidation:
         """With a zero-extent grid the defaults fall back to the step sizes, not zero."""
         freqs, times = jnp.array([1.4e9]), jnp.array([0.0])
         vis_obs = jnp.ones((6, 1, 1), dtype=complex)
-        cfg = {"r_seed": None, "var": None, "corr_freq": None, "corr_time": None}
+        cfg = {"r_seed": None, "std": None, "corr_freq": None, "corr_time": None}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -972,7 +972,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     time_scale="utc",
         vis_obs=jnp.ones((3, n_freq, n_time), dtype=complex),
         args={
-            "rfi": {"r_seed": 1, "var": 1.0, "corr_freq": 5e6, "corr_time": 60.0,
+            "rfi": {"r_seed": 1, "std": 1.0, "corr_freq": 5e6, "corr_time": 60.0,
                     "init": "sample", "mean": "zeros", "est": None,
                     "time_pad_factor": 2, "freq_pad_factor": 2},
             "plots": {"truth": False},
@@ -2067,3 +2067,65 @@ class TestPowSpecIsRead:
         )
 
         assert base["rfi"]["pow_spec"] == {"gammas": None, "cutoff": None}
+
+
+class TestTheStdIsTheWidthItClaims:
+    """``rfi.std`` is the RFI's typical ``rms|V|`` in Jy, and nothing else moves it.
+
+    The same quantity as ``ast.pow_spec.std``, so "read the amplitude off the
+    data and put it here" is one instruction for both priors. The arithmetic
+    getting there differs, and that difference is the whole point of
+    :data:`~tabascal.components.rfi_signal._LATENT_POWER`: ``vis_ast`` *is* the
+    modelled quantity, while ``rfi_A`` is a per-antenna amplitude the
+    visibility is quadratic in.
+
+    Measured by sampling the prior through the component's own spectrum and
+    forming the visibility, rather than by repeating the algebra the component
+    used -- a test that recomputes the implementation cannot tell a factor of
+    two from a factor of one.
+    """
+
+    @staticmethod
+    def _realised_rms_vis(comp, draws=4000, seed=0):
+        """``rms|V|`` of a prior draw, through sigma_rfi_k and the quadratic."""
+        sigma = jnp.asarray(comp.sigma_rfi_k)[0, 0]
+        key_r, key_i = jax.random.split(jax.random.PRNGKey(seed))
+        shape = (draws,) + sigma.shape
+        # Two independent standard normals, as the component's own latent is.
+        latent = jax.random.normal(key_r, shape) + 1j * jax.random.normal(key_i, shape)
+        rfi_A = jnp.sum(latent * sigma, axis=(1, 2))
+        # vis_rfi ~ rfi_A[a1] * conj(rfi_A[a2]): two antennas, independent draws.
+        vis = rfi_A[: draws // 2] * jnp.conjugate(rfi_A[draws // 2 :])
+        return float(jnp.sqrt(jnp.mean(jnp.abs(vis) ** 2)))
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    @pytest.mark.parametrize("std", [0.5, 3.0, 40.0])
+    def test_the_realised_rms_visibility_is_the_configured_std(self, cls, std):
+        comp = setup_component(cls, std=std)
+
+        assert self._realised_rms_vis(comp) == pytest.approx(std, rel=0.05)
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_the_width_scales_with_std_and_not_with_anything_else(self, cls):
+        """Doubling std doubles the width; changing the spectrum's shape does not.
+
+        The normalisation happens after the cut and after the roll-off, so
+        gammas and cutoff set which modes are fitted and how they correlate,
+        not how much RFI the prior expects.
+        """
+        base = self._realised_rms_vis(setup_component(cls, std=2.0))
+        doubled = self._realised_rms_vis(setup_component(cls, std=4.0))
+
+        assert doubled / base == pytest.approx(2.0, rel=0.02)
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_the_spectrum_normalises_to_half_the_std(self, cls):
+        """The internal half, stated once where it is easy to check.
+
+        ``sum(sigma^2) = std / 2`` is what the sampling above comes out of; if
+        this moves and that does not, one of the two is measuring the wrong
+        thing.
+        """
+        comp = setup_component(cls, std=6.0)
+
+        assert float(jnp.sum(jnp.asarray(comp.sigma_rfi_k)[0, 0] ** 2)) == pytest.approx(3.0)
