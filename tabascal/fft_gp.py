@@ -597,11 +597,12 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
         elif not finite:
             why = "the power spectrum is not finite"
             fix = (
-                "The cutoff is not what is wrong here. The amplitude cannot "
-                "cause it -- the astronomical spectrum is built at unit "
-                "amplitude and scaled afterwards -- so look at the k grid and "
-                "the knees: a zero or non-finite corr_time, corr_freq or "
-                "fov_deg, or a zero-length baseline, gives 0/0 here."
+                "The cutoff is not what is wrong here. Look at the knees and "
+                "the k grid -- a zero or non-finite corr_time, corr_freq or "
+                "fov_deg, or a zero-length baseline, gives 0/0 -- and, on the "
+                "RFI path, at rfi.var, which is the p0 this is scaled by. The "
+                "astronomical spectrum is built at unit amplitude and scaled "
+                "afterwards, so there the amplitude cannot be the cause."
             )
         elif largest <= 0.0:
             why = (
@@ -610,9 +611,9 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
             )
             fix = (
                 "No cutoff can help: the comparison is strict, so nothing "
-                "clears a threshold of zero. Check the knees and the variance "
-                "the spectrum is scaled to -- an underflow to zero looks like "
-                "this."
+                "clears a threshold of zero. Check the knees, and the variance "
+                "the spectrum is scaled to where the caller supplies one "
+                "(rfi.var) -- an underflow to zero looks like this."
             )
         else:
             why = (

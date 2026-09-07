@@ -500,6 +500,27 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
 
         assert np.allclose(np.asarray(realised), 30.0**2, rtol=1e-5)
 
+    @pytest.mark.skipif(
+        jax.config.jax_enable_x64,
+        reason="float64 holds every std the validator accepts, so the guard "
+        "cannot fire: any finite positive float is representable there",
+    )
+    @pytest.mark.parametrize("std", [1e-50, 1e40], ids=["underflows", "overflows"])
+    def test_a_std_the_precision_cannot_hold_is_refused(self, tmp_path, std):
+        """Finite and positive is not the same as representable.
+
+        The validator takes any finite positive float, but sigma is built in
+        the run's own precision. In float32 these flush to zero and to
+        infinity, and the first thing that divides by sigma -- encoding the
+        initial sky -- then yields non-finite parameters, with setup already
+        past and nothing left pointing at std. Single precision only, because
+        float64 holds anything the validator lets through.
+        """
+        message = setup_error(pow_spec_config(tmp_path, std=std))
+
+        assert "ast.pow_spec.std" in message
+        assert "representable" in message
+
     def test_the_old_name_is_refused_with_the_guidance(self, tmp_path):
         """No conversion is offered because there is not one to offer.
 

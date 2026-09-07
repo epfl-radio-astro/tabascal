@@ -161,13 +161,20 @@ than a per-precision split.
 Measured across ARM (Apple silicon), x86 CPU and an NVIDIA GPU, in both
 precisions:
 
-- **Double is architecture-stable** to 5.5e-8 relative in the worst case (the
+- **Double is architecture-stable** to 8.7e-8 relative in the worst case (the
   two SGP4 orbit cases, where the propagation amplifies rounding; the non-orbit
-  cases agree to ~1.7e-10), and the printed truth metrics agree to every digit
+  cases agree to ~2.6e-9), and the printed truth metrics agree to every digit
   shown.
 - **fp32 agrees with fp64** to 2.4e-5 relative on `chi2`, and to the printed
   precision on every truth metric. The offset is the *same* 2.4e-5 on ARM, x86
-  and CUDA alike — a precision effect, not an architecture one.
+  and CUDA alike — a precision effect, not an architecture one. Across
+  architectures fp32 spreads a little wider than fp64, to 1.3e-7.
+
+These figures were last re-measured on all three architectures for the
+`ast.pow_spec.std` change. When a change moves the references, re-measure them
+rather than assuming they still hold: an architecture row left behind is not
+visible in a passing test, because the 1% tolerance is four orders wider than
+any of these spreads.
 
 So a reference recorded on any platform in either precision is canonical for all
 of them. Prefer the CI/x86 value when you have it, since that is what gates the

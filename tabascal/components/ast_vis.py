@@ -45,16 +45,20 @@ _POW_SPEC_RENAMED = {
         "std is the width of the prior on the astronomical visibilities, a "
         "standard deviation in Jy, and it is that width because the power "
         "spectrum is normalised to it. p0 was the power at k=0 of a spectrum "
-        "that was not normalised, so the width it produced was p0 times a "
-        "constant that depended on gammas, cutoff and fov_deg and was not "
-        "written down anywhere: on the shipped 8A configuration p0: 3e3 is a "
+        "that was not normalised, so the width it produced was sqrt(p0) times "
+        "a factor -- sqrt(2 * sum(shape) / n_modes) -- that depended on "
+        "gammas, cutoff, fov_deg, corr_freq and the padded grid, differed from "
+        "baseline to baseline, and was written down nowhere: on the shipped "
+        "8A configuration p0: 3e3 is a "
         "prior 26 Jy wide (25.8 to 31.7 across its baselines), which is "
         "neither 3e3 nor its square root, and raising cutoff alone -- an "
-        "efficiency setting -- widened it by 34 %. There is no "
-        "conversion to offer you because it is not one number. Set std to the "
-        "visibility amplitude you see in a channel with no RFI in it: that "
-        "puts the true sky within 1 sigma of the prior, and unlike p0 it stays "
-        "true when you change gammas, cutoff or fov_deg.",
+        "efficiency setting -- widened it by 34 %. Your old width can be "
+        "computed from your MS and the rest of the block, but it cannot be "
+        "carried over: it was a different number on every baseline, and std "
+        "is one width for all of them. Set std to the visibility amplitude "
+        "you see in a channel with no RFI in it -- that is the same quantity, "
+        "so it puts the true sky within 1 sigma, and unlike p0 it stays that "
+        "way when you change gammas, cutoff or fov_deg.",
     ),
     "k0_freq": (
         "corr_freq",
@@ -439,13 +443,20 @@ class GPVisAst(Component):
             ``E|z|^2 = 2`` rather than 1, and the visibility comes out
             ``sqrt(2)`` wider than the mode variances alone would say.
 
-            With it, ``std`` is the width of the *complex* visibility --
-            ``rms|vis_ast|`` -- so "set it to the amplitude you see in a clean
+            With it, ``std`` is the width of the *complex* visibility about
+            its prior mean, ``sqrt(E|vis_ast - mu|^2)``. At the default
+            ``ast.mean: 0`` the mean is zero and that is exactly
+            ``rms|vis_ast|``, so "set it to the amplitude you see in a clean
             channel" is literally true rather than true after dividing by
-            ``sqrt(2)``. That is the property the key exists to have. It is not
-            the convention ``rfi`` uses, which normalises per component, and
-            the two were never the same thing anyway: ``rfi`` normalises
-            ``rfi_A``, which the visibility is quadratic in.
+            ``sqrt(2)``. That is the property the key exists to have. Under
+            ``ast.mean: data`` the prior is centred on the observed
+            visibilities and ``std`` is the scatter allowed around them, not
+            the total amplitude -- ``rms|vis_ast|`` is then
+            ``sqrt(std^2 + |mu|^2)``.
+
+            It is not the convention ``rfi`` uses, which normalises per
+            component, and the two were never the same thing anyway: ``rfi``
+            normalises ``rfi_A``, which the visibility is quadratic in.
 
             What this replaces divided by ``pk.size`` instead, leaving the width
             as ``p0`` times a factor that moved with every other setting. On the
@@ -464,6 +475,25 @@ class GPVisAst(Component):
             return (self.std / _LATENT_WIDTH) * jnp.sqrt(shape / jnp.sum(shape))
 
         self.sigma_ast_k = vmap(sigma, (0), 0)(self.k0_time)
+
+        # validate_pow_spec accepts any finite positive float, but sigma is
+        # built in the run's own precision: std = 1e-50 flushes it to zero in
+        # float32 and std = 1e40 overflows it, and either way the first thing
+        # that divides by sigma -- inv_transform, encoding the initial sky --
+        # produces non-finite parameters. Shape validation does not look at
+        # values, so without this the run starts and fails later somewhere that
+        # says nothing about std.
+        if not jnp.all(jnp.isfinite(self.sigma_ast_k)) or jnp.any(
+            self.sigma_ast_k <= 0
+        ):
+            raise ValueError(
+                f"ast.pow_spec.std ({self.std}) is not representable in this "
+                f"run's precision: the mode standard deviations it gives come "
+                f"out {'non-finite' if not jnp.all(jnp.isfinite(self.sigma_ast_k)) else 'zero'}. "
+                f"std is a visibility amplitude in Jy, so it should be within "
+                f"a few orders of magnitude of the data; check the units it "
+                f"was set from, or run in double precision."
+            )
 
     @measure_runtime
     def _compute_true_params(self, zarr_path, data_col):
