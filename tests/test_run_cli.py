@@ -13,7 +13,11 @@ import shlex
 from datetime import datetime
 from pathlib import Path
 
+import argparse
+
 import pytest
+
+from types import SimpleNamespace
 
 from tabascal.scripts.run_tabascal import build_parser
 
@@ -814,27 +818,15 @@ class TestLightCurveInputs:
             "light_curves/runA.npz"
         )
 
-    def test_a_tag_that_is_a_path_is_refused(self):
-        """A tag is a label; os.path.join would silently obey it instead.
+    def test_a_tag_that_is_a_path_is_refused_by_the_resolver(self):
+        """The rule again for a caller that did not come through the parser.
 
-        An absolute component makes join discard everything before it, so a
-        tag of ``/data/sim`` writes ``/data/sim.npz`` and not a file under
-        ``light_curves/`` at all. It is reachable by accident: ``-sx``
-        prefix-matches ``-s``, so a mistyped flag arrives here as a tag.
+        The same validator, so the same error: a namespace built by hand gets
+        the answer the command line would have given.
         """
-        args = _parse(
-            "light-curve", "-ms", "/data/obs.ms", "-n", "1", "-s", "/data/sim"
-        )
-        assert args.tag == "/data/sim"  # argparse really does hand it over
+        args = SimpleNamespace(tag="/data/sim", output=None)
 
-        with pytest.raises(SystemExit, match=r"-sx/--tag .* is a path"):
-            self._mod().resolve_output(args, "/data/obs.ms", "DATA")
-
-    def test_a_relative_tag_with_a_separator_is_refused_too(self):
-        """It escapes light_curves/ without being absolute."""
-        args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1", "-sx", "a/b")
-
-        with pytest.raises(SystemExit, match=r"-sx/--tag .* is a path"):
+        with pytest.raises(argparse.ArgumentTypeError, match="is a path"):
             self._mod().resolve_output(args, "/data/obs.ms", "DATA")
 
     def test_an_explicit_output_wins(self, tmp_path):
@@ -1759,3 +1751,45 @@ class TestDocumentedCommands:
                 build_parser().parse_args(argv)
             except SystemExit as e:  # pragma: no cover - failure path
                 pytest.fail(f"{page}: `tabascal {' '.join(argv)}` does not parse ({e})")
+
+
+class TestALabelIsNotAPath:
+    """``-sx`` names an output file; it does not place one.
+
+    Both subcommands interpolate it into paths the run then *creates* --
+    ``light_curves/<tag>.npz``, ``results/<name>_<suffix>.zarr`` and
+    ``plots/<suffix>`` -- so a path here is obeyed rather than rejected:
+    ``os.path.join`` drops everything before an absolute component, and
+    ``os.makedirs`` and zarr happily create whatever a relative one names.
+    ``../..`` walks out of the output directory entirely.
+
+    Reachable by accident rather than only by misuse: argparse matches a short
+    option by prefix, so a bare ``-s`` on either subcommand lands here.
+    """
+
+    @pytest.mark.parametrize("subcommand", ["run", "light-curve"])
+    @pytest.mark.parametrize(
+        "value", ["/data/sim", "../../escaped", "a/b", "..", "."]
+    )
+    def test_it_is_refused_at_the_command_line(self, subcommand, value):
+        """At parse time, so the run stops before the work it would misplace."""
+        with pytest.raises(SystemExit) as excinfo:
+            _parse(subcommand, "-c", "c.yaml", "-sx", value)
+
+        assert excinfo.value.code == 2
+
+    @pytest.mark.parametrize("subcommand", ["run", "light-curve"])
+    def test_a_bare_s_is_the_way_in(self, subcommand):
+        """``-s`` prefix-matches ``-sx`` on both, which is what makes it a trap."""
+        with pytest.raises(SystemExit):
+            _parse(subcommand, "-c", "c.yaml", "-s", "/data/pnt_src_sim")
+
+    @pytest.mark.parametrize(
+        "value", ["runA", "v1.2.3", "a b", "TAB_RES", "sim-2026"]
+    )
+    def test_an_ordinary_label_still_goes_through(self, value):
+        assert _parse("run", "-c", "c.yaml", "-sx", value).suffix == value
+
+    def test_the_default_is_no_label_and_not_a_path(self):
+        """argparse runs type() over a string default too, and it is ``""``."""
+        assert _parse("run", "-c", "c.yaml").suffix == ""

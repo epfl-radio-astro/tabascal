@@ -61,6 +61,8 @@ def build_parser():
     """
     import argparse
 
+    from tabascal.scripts._labels import label as _label
+
     parser = argparse.ArgumentParser(description="tabascal CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -87,7 +89,12 @@ def build_parser():
             "satellites.norad_ids in the config file."
         ),
     )
-    run_parser.add_argument("-sx", "--suffix", default="", help="Image name suffix.")
+    # A label, not a path: it is interpolated into the results filenames and
+    # into plots/<suffix>, both of which are created rather than resolved, so a
+    # path here silently places the run's whole output somewhere else.
+    run_parser.add_argument(
+        "-sx", "--suffix", default="", type=_label, help="Image name suffix."
+    )
     run_parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
     run_parser.add_argument(
         "-nl", "--no-log",

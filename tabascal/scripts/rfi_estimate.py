@@ -28,6 +28,8 @@ parser, and ``tabascal -h`` must not pay for the run stack.
 import argparse
 import os
 
+from tabascal.scripts._labels import label as _label
+
 from tabascal.scripts._config_paths import config_is_unset, config_path
 
 
@@ -98,7 +100,7 @@ def build_parser(parser=None):
         help="Use only the single channel nearest this frequency (Hz).",
     )
     parser.add_argument(
-        "-sx", "--tag", default=None,
+        "-sx", "--tag", default=None, type=_label,
         help="Run tag/suffix (e.g. the tabascal -sx). Names the output so "
         "residuals of different runs do not collide. Default: the column.",
     )
@@ -536,20 +538,15 @@ def resolve_output(args, ms_path, data_col):
     to write ``curves`` it writes ``curves.npz``, and a path reported without it
     names a file that is not there.
 
-    A tag naming a path is refused rather than joined. ``os.path.join`` drops
-    everything before an absolute component, so a tag like ``/data/sim`` would
-    silently write to ``/data/sim.npz`` instead of under ``light_curves/`` --
-    and ``-sx`` prefix-matches ``-s``, so a mistyped flag lands here as a tag.
-    ``-o/--output`` is how a path is given.
+    A tag naming a path is refused rather than joined: ``os.path.join`` drops
+    everything before an absolute component, so ``/data/sim`` would write
+    ``/data/sim.npz`` and not a file under ``light_curves/`` at all. The parser
+    refuses it first, through :func:`tabascal.scripts._labels.label`; this is
+    the same rule for a caller arriving with its own namespace.
     """
+    if args.tag is not None:
+        _label(args.tag)
     label = args.tag or data_col
-    separators = tuple(c for c in (os.sep, os.altsep) if c)
-    if args.tag is not None and any(c in args.tag for c in separators):
-        raise SystemExit(
-            f"-sx/--tag = {args.tag!r} is a path, and a tag is a label: it names "
-            "the output file under light_curves/ beside the MS. Use -o/--output "
-            "to write somewhere else."
-        )
     ms_dir = os.path.dirname(os.path.abspath(str(ms_path).rstrip("/")))
     path = args.output or os.path.join(ms_dir, "light_curves", f"{label}.npz")
 

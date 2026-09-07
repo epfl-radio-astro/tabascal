@@ -13,11 +13,6 @@ The tests below fail in either direction of that drift: a key the component
 reads and the base does not supply raises out of ``setup``, and a key the base
 supplies that the component never reads is caught by the recorded-read
 comparison.
-
-The same file is also where a key that was *renamed* or *removed* is checked: a
-config still setting one must stop, naming what to write instead, rather than
-fall through to a base default under a name that is no longer read -- or, worse,
-sit in the config looking like a setting while nothing reads it at all.
 """
 
 from types import SimpleNamespace
