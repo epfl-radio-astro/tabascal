@@ -428,8 +428,20 @@ _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 #: carries ``E|z|^2 = 2``. A linear model halves that in the width (the
 #: astronomical prior divides by ``sqrt(2)``); a quadratic one passes it
 #: through undiminished, so ``sum(sigma_rfi_k**2) = rfi.std / 2`` is what makes
-#: the realised ``rms|V|`` equal ``rfi.std``. Measured, not derived:
-#: ``tests/components/test_rfi_signal.py`` samples the prior and checks it.
+#: the realised ``rms|V|`` equal ``rfi.std``.
+#:
+#: **Per source, and for this antenna structure.** ``rfi.std`` is one source's
+#: width, and two known factors sit between it and the visibility a run
+#: realises. ``ComplexRFIConstAnt`` broadcasts one amplitude to every antenna,
+#: so its visibility is ``|A|^2`` rather than ``A_p conj(A_q)`` and
+#: ``E|A|^4 = 2 (E|A|^2)^2`` makes it ``sqrt(2)`` wider. And the width applies
+#: to each satellite while their visibilities sum, so N sources realise
+#: ``sqrt(N)`` times it. Neither is corrected for: they are properties of the
+#: model rather than of the key, and correcting them would make the same
+#: number mean different widths in different configurations.
+#:
+#: Measured, not derived: ``tests/components/test_rfi_signal.py`` samples each
+#: component through its own antenna structure and checks all three.
 _LATENT_POWER = 2.0
 
 #: Keys that were in the shipped example configs for a long time while nothing
@@ -480,13 +492,22 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     carries: the astronomical model has a width per baseline, ``rfi.std``
     normalises a single spectrum.
 
-    It is an upper bound -- the sky and the noise are in it too -- and a good
-    one exactly when it matters. On the shipped 8A simulation it returns 11.2
-    Jy against a true RFI ``rms|V|`` of 11.0, because RFI that dominates the
-    sky by 7x dominates the measurement as well. Where the RFI is faint this
-    measures the sky instead and is too wide, which is the mirror of
-    ``ast.pow_spec.std: data``'s own limitation and what GitHub #220 fixes for
-    both.
+    It measures the *total* RFI and hands it to each source, and does not
+    correct for either factor in :data:`_LATENT_POWER`: N satellites at this
+    width realise ``sqrt(N)`` times it. That is deliberate -- a number and a
+    measurement that produce different priors would be worse -- and it means
+    the estimate is ``sqrt(N)`` wide on an N-satellite run, 1.7x on the
+    shipped 8A simulation's three.
+
+    It is also an upper bound on the RFI itself, since the sky and the noise
+    are in the visibilities: 11.2 Jy on that simulation against a true RFI
+    ``rms|V|`` of 11.0, because RFI that dominates the sky by 7x dominates the
+    measurement as well. Where the RFI is faint it measures the sky instead
+    and is far too wide, which is the mirror of ``ast.pow_spec.std: data``'s
+    own limitation and what GitHub #220 fixes for both.
+
+    Both together still beat the width they replace: 1.7x against the null
+    default's 4.2x on that simulation.
     """
 
     bad = (

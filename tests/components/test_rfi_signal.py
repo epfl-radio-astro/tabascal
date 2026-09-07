@@ -2070,57 +2070,115 @@ class TestPowSpecIsRead:
 
 
 class TestTheStdIsTheWidthItClaims:
-    """``rfi.std`` is the RFI's typical ``rms|V|`` in Jy, and nothing else moves it.
+    """``rfi.std`` is the width of one source's prior, in Jy, as ``rms|V|``.
 
-    The same quantity as ``ast.pow_spec.std``, so "read the amplitude off the
-    data and put it here" is one instruction for both priors. The arithmetic
-    getting there differs, and that difference is the whole point of
+    The same quantity as ``ast.pow_spec.std``, so one measurement sets either
+    prior. The arithmetic getting there differs, and that difference is
     :data:`~tabascal.components.rfi_signal._LATENT_POWER`: ``vis_ast`` *is* the
     modelled quantity, while ``rfi_A`` is a per-antenna amplitude the
     visibility is quadratic in.
 
-    Measured by sampling the prior through the component's own spectrum and
-    forming the visibility, rather than by repeating the algebra the component
-    used -- a test that recomputes the implementation cannot tell a factor of
-    two from a factor of one.
+    **Per source, and per this antenna structure.** Two factors sit between
+    the key and the visibility a run actually realises, and both are asserted
+    here rather than described:
+
+    * ``ComplexRFIConstAnt`` broadcasts one amplitude to every antenna, so its
+      visibility is ``|A|^2`` where ``ComplexRFIVarAnt``'s is
+      ``A_p conj(A_q)`` with independent draws. ``E|A|^4 = 2 (E|A|^2)^2``, so
+      it realises ``sqrt(2)`` times the width.
+    * The width applies to each satellite and their visibilities sum, so N
+      independent sources realise ``sqrt(N)`` times it.
+
+    Measured by sampling each component's own ``sigma_rfi_k`` through its own
+    antenna structure, rather than by repeating the algebra the component
+    used: a test that recomputes the implementation cannot tell a factor of
+    two from a factor of one, and one that draws independent antennas for
+    both classes silently tests VarAnt's model twice.
     """
 
+    DRAWS = 20000
+
     @staticmethod
-    def _realised_rms_vis(comp, draws=4000, seed=0):
-        """``rms|V|`` of a prior draw, through sigma_rfi_k and the quadratic."""
+    def _amplitudes(comp, draws, seed):
+        """``rfi_A`` for ``draws`` prior samples, from the component's spectrum."""
         sigma = jnp.asarray(comp.sigma_rfi_k)[0, 0]
         key_r, key_i = jax.random.split(jax.random.PRNGKey(seed))
         shape = (draws,) + sigma.shape
-        # Two independent standard normals, as the component's own latent is.
+        # Two independent standard normals, as the component's latent is.
         latent = jax.random.normal(key_r, shape) + 1j * jax.random.normal(key_i, shape)
-        rfi_A = jnp.sum(latent * sigma, axis=(1, 2))
-        # vis_rfi ~ rfi_A[a1] * conj(rfi_A[a2]): two antennas, independent draws.
-        vis = rfi_A[: draws // 2] * jnp.conjugate(rfi_A[draws // 2 :])
+        return jnp.sum(latent * sigma, axis=(1, 2))
+
+    @classmethod
+    def _rms_vis(cls, comp, cls_under_test, draws=None, seed=0):
+        """``rms|V|`` for one source, through that class's antenna structure."""
+        draws = draws or cls.DRAWS
+        a_p = cls._amplitudes(comp, draws, seed)
+        if cls_under_test is ComplexRFIConstAnt:
+            # One amplitude, broadcast to every antenna: V = |A|^2.
+            vis = a_p * jnp.conjugate(a_p)
+        else:
+            a_q = cls._amplitudes(comp, draws, seed + 1000)
+            vis = a_p * jnp.conjugate(a_q)
         return float(jnp.sqrt(jnp.mean(jnp.abs(vis) ** 2)))
 
-    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     @pytest.mark.parametrize("std", [0.5, 3.0, 40.0])
-    def test_the_realised_rms_visibility_is_the_configured_std(self, cls, std):
-        comp = setup_component(cls, std=std)
+    def test_a_var_ant_source_realises_the_configured_std(self, std):
+        """The class the contract is stated for, and every shipped config uses."""
+        comp = setup_component(ComplexRFIVarAnt, std=std)
 
-        assert self._realised_rms_vis(comp) == pytest.approx(std, rel=0.05)
+        assert self._rms_vis(comp, ComplexRFIVarAnt) == pytest.approx(std, rel=0.05)
+
+    @pytest.mark.parametrize("std", [0.5, 3.0, 40.0])
+    def test_a_const_ant_source_realises_sqrt_two_times_it(self, std):
+        """Not a defect: one amplitude on both antennas makes V = |A|^2.
+
+        Pinned so the factor is a documented property of the component rather
+        than something a reader has to derive, and so that a change to either
+        component's antenna structure fails here.
+        """
+        comp = setup_component(ComplexRFIConstAnt, std=std)
+
+        assert self._rms_vis(comp, ComplexRFIConstAnt) == pytest.approx(
+            np.sqrt(2) * std, rel=0.05
+        )
+
+    @pytest.mark.parametrize("n_sources", [1, 3, 4])
+    def test_n_sources_realise_sqrt_n_times_it(self, n_sources):
+        """The width is per satellite and their visibilities add.
+
+        So a run modelling three satellites at ``std: 10`` expects a total RFI
+        of about 17 Jy, not 10. This is what ``rfi.std: data`` does not correct
+        for: it measures the total and hands it to each source.
+        """
+        comp = setup_component(ComplexRFIVarAnt, std=3.0)
+        per_source = [
+            self._rms_vis(comp, ComplexRFIVarAnt, seed=2 * i) for i in range(n_sources)
+        ]
+
+        # Independent sources add in quadrature.
+        total = float(np.sqrt(np.sum(np.square(per_source))))
+        assert total == pytest.approx(np.sqrt(n_sources) * 3.0, rel=0.05)
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
-    def test_the_width_scales_with_std_and_not_with_anything_else(self, cls):
-        """Doubling std doubles the width; changing the spectrum's shape does not.
+    def test_the_width_scales_with_std_and_nothing_else_does(self, cls):
+        """Doubling std doubles the width, whatever the spectrum's shape.
 
         The normalisation happens after the cut and after the roll-off, so
         gammas and cutoff set which modes are fitted and how they correlate,
         not how much RFI the prior expects.
         """
-        base = self._realised_rms_vis(setup_component(cls, std=2.0))
-        doubled = self._realised_rms_vis(setup_component(cls, std=4.0))
+        base = self._rms_vis(setup_component(cls, std=2.0), cls)
+        doubled = self._rms_vis(setup_component(cls, std=4.0), cls)
+        shaped = self._rms_vis(
+            setup_with_pow_spec(cls, {"gammas": [1, 1], "cutoff": 1e-3}, std=2.0), cls
+        )
 
         assert doubled / base == pytest.approx(2.0, rel=0.02)
+        assert shaped == pytest.approx(base, rel=0.05)
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_the_spectrum_normalises_to_half_the_std(self, cls):
-        """The internal half, stated once where it is easy to check.
+        """The internal half, stated once where it is cheap to check.
 
         ``sum(sigma^2) = std / 2`` is what the sampling above comes out of; if
         this moves and that does not, one of the two is measuring the wrong
@@ -2128,7 +2186,9 @@ class TestTheStdIsTheWidthItClaims:
         """
         comp = setup_component(cls, std=6.0)
 
-        assert float(jnp.sum(jnp.asarray(comp.sigma_rfi_k)[0, 0] ** 2)) == pytest.approx(3.0)
+        assert float(
+            jnp.sum(jnp.asarray(comp.sigma_rfi_k)[0, 0] ** 2)
+        ) == pytest.approx(3.0)
 
 
 class TestTheStdCanBeMeasuredFromTheData:

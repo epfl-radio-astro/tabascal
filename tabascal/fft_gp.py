@@ -77,8 +77,9 @@ def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
 
     ``keep`` is the caller's, and it is where the two part company. The
     astronomical prior wants the sky, so it keeps what nothing has flagged.
-    The RFI prior wants the RFI, so where an MS marks contamination it keeps
-    exactly that. Opposite halves of one mask, each measured the same way.
+    The RFI prior keeps the MS's flags -- a flag says something is wrong, not
+    that RFI is there -- and drops only what no gain table could calibrate.
+    What is shared is this measurement, not the mask.
 
     ``per_baseline`` gives the astronomical prior one width per baseline,
     which is what its model carries. The RFI prior's is a scalar, so it
@@ -121,7 +122,9 @@ def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
     if not bool(jnp.all(jnp.isfinite(std))):
         raise ValueError(
             f"{key}: data cannot measure a width: the visibilities it is "
-            "measuring are not finite. Flag them, or set a width in Jy."
+            "measuring are not finite. Set a width in Jy -- flagging them "
+            "helps only where the caller's mask reads the MS's flags, which "
+            "ast.pow_spec.std does and rfi.std does not."
         )
 
     if per_baseline:

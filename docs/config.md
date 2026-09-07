@@ -380,16 +380,27 @@ All parameters in this section that overlap with those of the `ast` section have
 
 * `std`: The width of the prior on the RFI signal, in Jy: the RFI's typical `rms|V|`. **The same quantity as [`ast.pow_spec.std`](#astronomical-signal)** — read an amplitude off the data and write it here, for either prior.
 
-  The two get there by different arithmetic, and that is the only difference between them. `vis_ast` *is* the modelled quantity, so the astronomical prior's width is the latent's width. `rfi_A` is a per-antenna amplitude and the visibility is quadratic in it ($V^\text{RFI}_{pq} = A_p A_q^*e^{i\Delta\phi}$), so the per-antenna width is $\sqrt{\texttt{std}}$ and carries units of $\sqrt{\text{Jy}}$. Both translations are internal: the number you write is `rms|V|` in Jy in both sections.
+  The two get there by different arithmetic, and this is the only difference in what the number *means*. `vis_ast` *is* the modelled quantity, so the astronomical prior's width is the latent's width. `rfi_A` is a per-antenna amplitude and the visibility is quadratic in it ($V^\text{RFI}_{pq} = A_p A_q^*e^{i\Delta\phi}$), so the per-antenna width is $\sqrt{\texttt{std}}$ and carries units of $\sqrt{\text{Jy}}$. Both translations are internal: the number you write is `rms|V|` in Jy in both sections.
 
-  The spectrum is normalised to `std` after the cut and after the roll-off, so — exactly as on the astronomical side — `gammas` and `cutoff` change which modes are fitted and how they correlate, not how much RFI the prior expects.
+  The spectrum is normalised to `std` after the cut and after the roll-off, so — exactly as on the astronomical side — `gammas` and `cutoff` change which modes are fitted and how they correlate, not how much RFI the prior expects. (`sum(pk)` is `std / 2`; the factor is the complex latent, see `_LATENT_POWER`.)
+
+  **It is one source's width, and it is stated for `rfi_signal:ComplexRFIVarAnt`.** Two factors sit between it and the RFI a run actually realises, and neither is corrected for — they are properties of the model, and correcting them would make the same number mean different widths in different configurations:
+
+  * **N satellites realise $\sqrt{N}$ times it.** The width applies to each source and their visibilities add, so three satellites at `std: 10` expect a total RFI near 17 Jy.
+  * **`rfi_signal:ComplexRFIConstAnt` realises another $\sqrt{2}$.** It broadcasts one amplitude to every antenna, so its visibility is $\lvert A\rvert^2$ where `ComplexRFIVarAnt`'s is $A_p A_q^*$ with independent draws, and $E\lvert A\rvert^4 = 2(E\lvert A\rvert^2)^2$.
+
+  Both are pinned by tests that sample each component through its own antenna structure.
 
   `data` measures it from the observed visibilities, the same measurement `ast.pow_spec.std: data` makes — the same function, in fact. Two things differ, and only one of them is a choice:
 
   * It is a **scalar**, since this prior normalises a single spectrum where the astronomical model carries a width per baseline.
   * **The MS's flags are kept.** The astronomical estimate excludes them because whatever a flag means, the sample is not clean sky. The reverse does not follow: a flag says *something is wrong here*, not *RFI is here*, and a dead antenna is neither RFI nor a scale to set an RFI prior from. Measuring the flagged samples is also biased high even when they are RFI, since flagging is a threshold and the flagged half is the bright half — on the shipped 8A simulation that returns 1.54x the true RFI where measuring everything returns 1.015x. Samples no gain table could calibrate *are* dropped, which is the one exclusion both priors share.
 
-  It is an upper bound: the sky and the noise are in the visibilities too. A good one exactly where it matters — RFI that dominates the sky dominates the measurement — and too wide where the RFI is faint, which is the mirror of the astronomical estimate's own limitation. [#220](https://github.com/epfl-radio-astro/tabascal/issues/220) is what fixes both.
+  It measures the **total** RFI and hands it to each source, so it does not correct for the $\sqrt{N}$ above: on an N-satellite run the prior is that much wider than what was measured. Deliberate — a number and a measurement that produced different priors would be worse — and stated here because it is the one place the two `std: data` options differ in effect rather than only in mask.
+
+  It is also an upper bound on the RFI itself: the sky and the noise are in the visibilities too. A good one exactly where it matters — RFI that dominates the sky dominates the measurement — and far too wide where the RFI is faint, which is the mirror of the astronomical estimate's own limitation. [#220](https://github.com/epfl-radio-astro/tabascal/issues/220) is what fixes both.
+
+  On the shipped 8A simulation, whose three satellites give a true RFI `rms|V|` of 11.0 Jy: `data` measures 11.2 and the prior realises about 19, against the null default's 46.4. Both factors together still leave it 2.4x closer.
 
   When `null` it is twice the largest visibility in the observation. That is a *maximum* where this key says *typical* — 46.4 Jy against a true RFI `rms|V|` of 11.0 on the shipped 8A simulation, where `data` gives 11.2. [#227](https://github.com/epfl-radio-astro/tabascal/issues/227) tracks making it a statistic this key's name describes.
 

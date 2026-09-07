@@ -1047,6 +1047,9 @@ class TestInitOrdering:
                 "ms_flags": np.zeros((1, N_FREQ, 1), dtype=bool),
                 "flags": np.zeros((1, N_FREQ, 1), dtype=bool),
             },
+            # apply_gain_table sets this before it does anything else, and
+            # the globalisation block reads it.
+            "apply_gain_table": {"gain_flags": None},
             # The third mask, as the real set_flags derives it -- make_global
             # globalises all three and would not find this one otherwise.
             "set_flags": {"estimator_flags": np.zeros((1, N_FREQ, 1), dtype=bool)},

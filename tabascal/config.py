@@ -239,6 +239,13 @@ class TabConfig:
             self.estimator_flags = make_global(
                 self.estimator_flags, replicated_sharding()
             )
+            # rfi.std: data reads this one directly, against vis_obs above, so
+            # it has to be global for the same reason the others are. None
+            # where no gain table was configured, which make_global cannot take.
+            if self.gain_flags is not None:
+                self.gain_flags = make_global(
+                    self.gain_flags, replicated_sharding()
+                )
             # Was float(self.noise), which a resolved noise array cannot survive.
             # Replicated rather than sharded: it is one array indexed by baseline
             # (and channel, and timestep where the MS resolves the noise that
