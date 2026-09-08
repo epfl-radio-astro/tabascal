@@ -966,8 +966,6 @@ class ComplexRFIVarAnt(BaseGPRFI):
                     tab_config.args["data"]["zarr_path"], tab_config.args["data"]["data_col"]
                 )
 
-            # if tab_config.args["rfi"]["init"] == "est":
-
             self._compute_init_params(
                 tab_config.args["rfi"]["init"],
                 tab_config.args["rfi"]["est"],
@@ -1273,8 +1271,6 @@ class ComplexRFIConstAnt(BaseGPRFI):
                 self._compute_true_params(
                     tab_config.args["data"]["zarr_path"], tab_config.args["data"]["data_col"]
                 )
-
-            # if tab_config.args["rfi"]["init"] == "est":
 
             self._compute_init_params(
                 tab_config.args["rfi"]["init"],

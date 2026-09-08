@@ -69,11 +69,6 @@ from satchecker_client import SatCheckerError as TLEError  # noqa: F401  back-co
 # The TLE parser lives in satchecker_client.tle_parse so cache validation and
 # element extraction exercise the *same* code; re-exported here under this
 # module's historical names.
-from satchecker_client.tle_parse import (
-    parse_tle_elements,  # noqa: F401  re-export
-    tle_epoch_jd as _tle_epoch_jd,  # noqa: F401  re-export
-    validate_tle_pair,  # noqa: F401  re-export
-)
 # Format dispatch. Nothing below this line asks whether a record is a TLE or an
 # OMM: it asks for its epoch, its elements, or whether it is valid, and these
 # three answer for either kind.
@@ -94,7 +89,6 @@ from tabascal.orbit_config import (  # noqa: F401  re-exported for callers
     TLEConfigurationError,
     ms_observation_epoch_jd,
     normalise_norad_ids,
-    normalise_tle_config,
     observation_epoch_jd,
     validate_age_days,
 )
@@ -165,10 +159,6 @@ def orbit_cache_dir() -> Path:
         pass
     return p
 
-
-# ---------------------------------------------------------------------------
-# Configuration validation (back-compat shim over tabascal.orbit_config)
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Resolution results

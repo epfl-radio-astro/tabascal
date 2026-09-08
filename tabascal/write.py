@@ -1576,8 +1576,6 @@ def write_results_xds(
     # replicated on every process; per-RFI arrays (rfi_A/rfi_phase) are sharded
     # and must not be materialized here without a process_allgather.
     if failure is None and is_process_0():
-
-
         try:
             map_xds = xr.Dataset(
                 data_vars={
@@ -1585,10 +1583,6 @@ def write_results_xds(
                     "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
                     "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
                     "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
-                    # "rfi_A": (
-                    # ),
-                    # "rfi_phase": (
-                    # ),
                 },
                 coords={
                     # SEAM: `time` is seconds from the start of the observation,

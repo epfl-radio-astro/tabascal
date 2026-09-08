@@ -85,7 +85,6 @@ class RiemannVis(Component):
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
-
     def build_set_params(self):
 
         def set_params(params):
@@ -161,7 +160,6 @@ class RiemannVisFFI(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
 
     def build_set_params(self):
 
@@ -243,7 +241,6 @@ class RiemannVisVariable(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
 
     def build_set_params(self):
 
