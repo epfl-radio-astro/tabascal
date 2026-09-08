@@ -920,11 +920,18 @@ def fetch_standard_orbital_elements(
     tles_df = _pad_rfi_sources(tles_df)
 
     # tles_df carries the OMM-style element columns derived locally by
+    # satchecker_client.records.record_elements (degrees, rev/day, km), plus
     # NORAD_CAT_ID, EPOCH_JD, and whichever raw columns the record's kind has.
 
     # SGP4 MINIMUM REQUIREMENTS:
     # To propagate an orbit using SGP4, you need:
     # - EPOCH (reference time)
+    # - MEAN_MOTION (revolutions/day)
+    # - ECCENTRICITY (0-1)
+    # - INCLINATION (degrees)
+    # - RA_OF_ASC_NODE (degrees)
+    # - ARG_OF_PERICENTER (degrees)
+    # - MEAN_ANOMALY (degrees)
     # - BSTAR (drag term, 1/ER)
     # - NORAD_CAT_ID (for identification)
 
@@ -946,6 +953,7 @@ def fetch_standard_orbital_elements(
     elements = elements.at[:, -1].set(jnp.deg2rad(elements[:, -1]))
     elements = elements.at[:, -2].set(elements[:, -2] / rev_per_day_to_rad_per_min)
     # bstar, ecco, argpo, inclo, mo, no_kozai, nodeo
+    # (inclo, nodeo, ecco, argpo, mo, no_kozai)
     elements = jnp.stack([
         elements[:,0], 
         elements[:,3], elements[:,6], 
