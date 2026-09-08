@@ -117,7 +117,7 @@ data:
   sigma_cal = SIGMA / |g_p conj(g_q)|
   ```
 
-  so everything downstream — priors, the RFI and astronomical models, chi², and the results written back to the MS — lives in one frame, the calibrated one, and the gains are applied once instead of on every forward pass. Carrying the noise with the data is the point of using a table rather than scaling the data by hand: get it wrong and chi² is off by `|g|²`. Scale `ast.pow_spec.std` by k alongside it if you are setting a width by hand rather than measuring it.
+  so everything downstream — priors, the RFI and astronomical models, chi², and the results written back to the MS — lives in one frame, the calibrated one, and the gains are applied once instead of on every forward pass. Carrying the noise with the data is the point of using a table rather than scaling the data by hand: get it wrong and chi² is off by `|g|²`. Scale `ast.gp_cov.std` by k alongside it if you are setting a width by hand rather than measuring it.
 
   The division happens in memory, so `data_col` on disk is untouched and still raw. The results writer therefore removes the same layer again when it writes the `TAB_*` columns and the weights; the run hands it this list automatically, and `tab2MS` takes it as `-gt` — see [Output](output.md).
 
@@ -216,12 +216,12 @@ ast:
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   baseline_block_size: auto
-  pow_spec:
+  cutoff: 1e-6
+  gp_cov:
     std: data
     corr_freq: null
     fov_deg: 5
     gammas: [5, 5]
-    cutoff: 1e-6
 ```
 
 * `init`: Where the parameters start. `sample`, the default, draws one realisation of the prior's *shape* — note that it is narrower than the prior itself by a factor of √2, which [#217](https://github.com/epfl-radio-astro/tabascal/issues/217) tracks; `prior` starts at the prior mean, i.e. at whatever `mean` is set to; `data` starts at the observed visibilities themselves, RFI and all, attributed to the sky; `zeros` starts at an identically zero sky; and `truth` starts at the simulated astronomical visibilities. `zeros` and `prior` are the same starting point at the default `mean: 0`, and part company once the prior mean is the data. `truth` reads the tab-sim `.zarr` beside the measurement set, so it is only possible on a dataset simulated with `sim-vis` — as is `plots.truth`, which reads the same truth; a config asking for either without a readable zarr stops before the run starts rather than deep inside component setup.
@@ -231,11 +231,14 @@ ast:
 * `baseline_block_size`: The number of baselines `GPVisAst` transforms per step of its scan over the baseline axis: `auto`, the default, sizes the block so that one step's padded grid stays inside a fixed budget; a whole number sets it outright; `null` puts every baseline in a single step. Turning the latent modes back into visibilities means padding them up to the padded Fourier grid, transforming, and cropping the padding away again, so doing every baseline at once holds an `(n_bl, n_freq_pad, n_time_pad)` array several times over — most of it discarded by the crop. Each padded axis is `n + 2 * floor(n * (pad_factor - 1) / 2)`, so at the default factor of `2.0` it is about twice the data axis. The scan replaces `n_bl` in that shape with the block. It is purely a memory strategy: baselines are independent, so the result does not depend on it, and unlike the RFI scans there is no checkpoint on the body — the transform is affine in the parameters, so its derivative is a linear map with no primal intermediates to store.
 
   `auto` exists because a block that does not bind costs scan steps for nothing. On a single-channel observation, where the padded grid is 1 by 180, a fixed block of `128` split 4560 baselines into 36 steps and cost 13 % of the optimiser's time with no memory saved; sized from the grid, the same observation runs in one step, and a wide band still blocks.
-* `pow_spec`: This is the section that defines the prior covariance of the signal. The signal is modelled in the Fourier domain so the prior covariance is given by the power spectrum of the signal.
+* `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and a mode is kept when its value is above `cutoff` times the largest **on each axis**, reducing the number of parameters to fit. It does not change the *width* of the prior: the normalisation to `std` happens after the cut, so changing it changes how many modes are fitted, and with them the correlation structure the prior can express, but not how much sky flux it expects. That is why it sits out here with `freq_pad_factor` and `baseline_block_size` — the other knobs on the size of the problem — rather than inside `gp_cov`, which is about its statistics. It must be a positive number **below 1**, since it is relative to the largest mode on each axis and at 1 every mode is cut. `null` is `1e-6`.
+* `gp_cov`: The prior covariance of the astronomical visibilities: a width, the correlation scales that set the knee, and the roll-off past it. It is diagonal in the Fourier domain, which is how it is applied, and its diagonal is a power spectral density — but what you are setting here is the covariance of a Gaussian process, not the power spectrum an observation is trying to measure.
 
-  Every value in this block is checked at setup, by the same validator the [RFI power spectrum](#rfi-signal) uses: each of `std`, `corr_freq` and `fov_deg` must be a finite positive number, `gammas` an ordered pair of them — one for the frequency axis and one for the time axis, in that order — and `cutoff` a positive number **below 1**, since it is relative to the largest mode on each axis and at 1 every mode is cut. The two knees, `corr_freq` and `fov_deg`, may be `null`, and mean different things by it — see each below. A key the section does not read is refused by name rather than ignored, so a `gamma` written for `gammas` is caught rather than silently doing nothing.
+  [`rfi.gp_cov`](#rfi-signal) takes the same keys at the same level, and the same validator checks both: each of `std`, `corr_freq`, `corr_time` and `fov_deg` must be a finite positive number, and `gammas` an ordered pair of them — one for the frequency axis and one for the time axis, in that order. A key the section does not read is refused by name rather than ignored, so a `gamma` written for `gammas` is caught rather than silently doing nothing.
 
-The parameters for the power spectrum are defined as
+  The two sections differ in exactly two ways, and both are stated rather than left to be inferred from where a key sits. This one takes its time scale as a **field of view**, because a sky source's coherence time is its fringe rate — a consequence of how far off axis it is, rather than a number to pick — where an emitter's is a property of the emitter and is given directly as `corr_time`. And the two read `corr_freq: null` differently: no roll-off at all here, half the observed band for the RFI. Both are defaults for a signal that is not there to be characterised, and they decline to commit in different ways: the astronomical null names no delay scale at all, while the RFI null names half the observed band.
+
+The parameters of the covariance are defined as
 
 * `std`: The width of the prior on the astronomical visibilities, in Jy — the standard deviation of the *complex* visibility about its prior mean, $\sqrt{E|V-\mu|^2}$. At the default `mean: 0` that is exactly `rms|V|`. Under `mean: data` the prior is centred on the observed visibilities and `std` is the scatter allowed around them rather than the total amplitude, which is then $\sqrt{\mathtt{std}^2 + |\mu|^2}$. The power spectrum is normalised to it, so this *is* the prior width: not its square, not its square root, and not a constant times it.
 
@@ -251,14 +254,13 @@ The parameters for the power spectrum are defined as
 
   It is a deliberately weak, generic prior rather than a model of the sky: a real sky puts more correlated flux on short baselines than on long ones, which resolve it out, so giving every baseline the width you read off the shortest ones is permissive on the longest. That permissiveness is what lets an astronomical model absorb RFI, so it is worth knowing about; [#219](https://github.com/epfl-radio-astro/tabascal/issues/219) tracks giving the width a baseline-length envelope. The alternative — letting the width fall out of each baseline's fringe-rate knee — is not better: that varies with temporal bandwidth, which is not sky amplitude either.
 
-  [`rfi.std`](#rfi-signal) means the same thing — the typical `rms|V|` in Jy — so one measurement sets either prior. What differs is internal: `vis_ast` is the modelled quantity, while `rfi_A` is a per-antenna amplitude the visibility is quadratic in, so the RFI prior takes a square root that this one does not. In both sections the number you read off the data is the number you write down.
-* `corr_freq`: The bandwidth, in Hz, over which the astronomical signal stays correlated. It sets the knee along the frequency axis, and that axis is a **delay**: the modes there are `fftfreq(n_freq, chan_width)`, in inverse Hz, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `rfi.corr_freq` makes. `null`, the default, is no roll-off along that axis at all: every delay mode is kept and none is preferred.
+  [`rfi.gp_cov.std`](#rfi-signal) means the same thing — the typical `rms|V|` in Jy — so one measurement sets either prior. What differs is internal: `vis_ast` is the modelled quantity, while `rfi_A` is a per-antenna amplitude the visibility is quadratic in, so the RFI prior takes a square root that this one does not. In both sections the number you read off the data is the number you write down.
+* `corr_freq`: The bandwidth, in Hz, over which the astronomical signal stays correlated. It sets the knee along the frequency axis, and that axis is a **delay**: the modes there are `fftfreq(n_freq, chan_width)`, in inverse Hz, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `rfi.gp_cov.corr_freq` makes. `null`, the default, is no roll-off along that axis at all: every delay mode is kept and none is preferred.
 
   It has **no effect on a single-channel observation**, where the only delay mode is zero, which is why every shipped config leaves it unset. On a wide band it is worth setting: the sky is smooth in frequency, so its power belongs at low delay, and the value to give is a bandwidth comparable to the one observed rather than a narrow one. A useful sanity check: the delay axis only runs out to `1 / (2 * chan_width)` — 2.4 µs for 209 kHz channels, whatever the channel count — and the knee sits at `k0 = 1 / (2 * pi * corr_freq)`. Comparing the two says how much of the axis the roll-off touches. At `corr_freq = chan_width / pi` (67 kHz for those channels) the knee lands exactly on the far end, where the outermost mode is still suppressed to 0.32 of the peak: that is where the roll-off bites hardest across the band, not where it stops mattering. It takes about ten times smaller — under 7 kHz — before the outermost mode is within 3 % of the peak and the axis is effectively flat. A correlation bandwidth of one observed band puts the knee at `1 / (pi * n_freq)` of the axis, keeping the lowest delays and cutting the rest, which is what a sky smooth in frequency should look like.
 
 * `fov_deg`: The field of view in degrees used to set the maximum astronomical fringe rate (the knee `k0` of the time-axis power spectrum). It is the *full* field of view, i.e. the angular diameter out to the first null of the primary beam; the maximum source offset from the phase centre is `fov_deg / 2`. When omitted, it defaults to the primary-beam field of view of the telescope, `2 * 1.22 * lambda / D` (null-to-null), from the dish diameter `D` and frequency read from the MS file.
 * `gammas`: The rate of drop off in the power spectrum. As $\gamma \rightarrow \infty$, the power spectrum tends to a Gaussian with width set by `corr_freq` in the frequency axis and inferred from `fov_deg` in the time axis.
-* `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and a mode is kept when its value is above `cutoff` times the largest **on each axis**, reducing the number of parameters to fit. It no longer changes the *width* of the prior: the normalisation to `std` happens after the cut, so changing it changes how many modes are fitted, and with them the correlation structure the prior can express, but not how much sky flux it expects.
 
 ### A fixed sky of discrete sources
 
@@ -348,21 +350,23 @@ The prior is a Gaussian process in the Fourier domain rather than over a dense c
 rfi:
   init: sample
   mean: 0
-  std: null
   min_elevation: 0
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
   n_int_freq: 1
   time_int_factor: 1
   baseline_block_size: 128
-  pow_spec:
+  cutoff: 1e-9
+  gp_cov:
+    std: null
+    corr_freq: 1e6
+    corr_time: 24
     gammas: [3, 3]
-    cutoff: 1e-9
 ```
 
 All parameters in this section that overlap with those of the `ast` section have the same definition, except that `init` and `mean` accept one more value:
 
-* `std`: The width of the prior on the RFI signal, in Jy: the RFI's typical `rms|V|`. **The same quantity as [`ast.pow_spec.std`](#astronomical-signal)** — read an amplitude off the data and write it here, for either prior.
+* `gp_cov.std`: The width of the prior on the RFI signal, in Jy: the RFI's typical `rms|V|`. **The same quantity as [`ast.gp_cov.std`](#astronomical-signal)** — read an amplitude off the data and write it here, for either prior.
 
   The two get there by different arithmetic, and this is where what the number *means* differs. `vis_ast` *is* the modelled quantity, so the astronomical prior's width is the latent's width. `rfi_A` is a per-antenna amplitude and the visibility is quadratic in it ($V^\text{RFI}_{pq} = A_p A_q^*e^{i\Delta\phi}$), so the per-antenna width is $\sqrt{\texttt{std}}$ and carries units of $\sqrt{\text{Jy}}$. Both translations are internal: the number you write is `rms|V|` in Jy in both sections.
 
@@ -385,7 +389,7 @@ All parameters in this section that overlap with those of the `ast` section have
 
   Both are pinned by tests that sample each component through its own antenna structure.
 
-  `data` measures it from the observed visibilities, the same measurement `ast.pow_spec.std: data` makes — the same function, in fact. Two things differ, and only one of them is a choice:
+  `data` measures it from the observed visibilities, the same measurement `ast.gp_cov.std: data` makes — the same function, in fact. Two things differ, and only one of them is a choice:
 
   * It is a **scalar**, since this prior normalises a single spectrum where the astronomical model carries a width per baseline.
   * **The MS's flags are kept.** The astronomical estimate excludes them because whatever a flag means, the sample is not clean sky. The reverse does not follow: a flag says *something is wrong here*, not *RFI is here*, and a dead antenna is neither RFI nor a scale to set an RFI prior from. Measuring the flagged samples is also biased high even when they are RFI, wherever the flagger thresholds on amplitude: the flagged half is then the bright half — on the shipped 8A simulation that returns 1.54x the true RFI where measuring everything returns 1.015x. Samples no gain table could calibrate *are* dropped, which is the one exclusion both priors share.
@@ -402,15 +406,13 @@ All parameters in this section that overlap with those of the `ast` section have
 
 The only additional parameters are
 
-* `pow_spec`: The shape of the prior power spectrum over the RFI signal. Two keys are read, and both are optional:
+* `gp_cov`: The prior covariance of the RFI signal, taking the same keys as [`ast.gp_cov`](#astronomical-signal) at the same level and checked by the same validator: `std`, `corr_freq`, `corr_time` and `gammas`. Every one of them is optional, and each `null` has its own meaning, given below.
 
-  * `gammas`: the roll-off exponent on the frequency and time axes, in that order.
-  * `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit. Below 1 is necessary rather than sufficient: a value near enough to 1 to round to it in the working precision cuts everything too, which the run refuses with a message naming the cutoff rather than a shape error from inside the transform.
+  * `corr_freq`: the bandwidth, in Hz, over which the RFI signal stays correlated, setting the knee along the frequency axis. That axis is a delay, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `ast.gp_cov.corr_freq` makes. `null` is **half the observed band**, which is *not* what the astronomical `corr_freq: null` means: that one is no roll-off at all. The difference is which default declines to commit. Note that a flat delay spectrum is **not** a smooth signal: equal power at every delay leaves the channels uncorrelated, its normalised channel covariance being `[1, 0, 0, ...]`. So the astronomical null states no frequency structure rather than gentle structure — which costs nothing on the single-channel observations every shipped config runs, and is exactly why [`ast.gp_cov.corr_freq`](#astronomical-signal) tells you to set a value on a wide band. An emitter is coherent over some band by construction, so here half the observation is the least-committal guess that is still a coherence scale.
+  * `corr_time`: the time, in seconds, over which the RFI signal stays correlated, setting the knee along the time axis. `null` is half the observation. It is given as a time where the astronomical block asks for `fov_deg`, because an emitter's coherence time is a property of the emitter, while a sky source's is its fringe rate — a consequence of how far off axis it sits rather than a number to pick.
+  * `gammas`: the roll-off exponent on the frequency and time axes, in that order. `null` takes the component's own value: `[3, 3]` for `rfi_signal:ComplexRFIVarAnt`, `[100, 100]` for `rfi_signal:ComplexRFIConstAnt`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
 
-  Left unset (`null`, the shipped default) each takes the component's own value: `[3, 3]` and `1e-9` for `rfi_signal:ComplexRFIVarAnt`, `[100, 100]` and `1e-6` for `rfi_signal:ComplexRFIConstAnt`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
-
-
-  The values are checked by the validator both Fourier-domain priors share, so `gammas` and `cutoff` are held to the same rules here as under [`ast.pow_spec`](#astronomical-signal) — the two sections differ only in which keys are live.
+* `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values — and nothing about what the prior believes, since the spectrum is normalised to `gp_cov.std` after the cut. That is why it sits beside `freq_pad_factor` and `baseline_block_size` rather than inside `gp_cov`, exactly as `ast.cutoff` does. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit. Below 1 is necessary rather than sufficient: a value near enough to 1 to round to it in the working precision cuts everything too, which the run refuses with a message naming the cutoff rather than a shape error from inside the transform. `null` takes the component's own value: `1e-9` for `rfi_signal:ComplexRFIVarAnt`, `1e-6` for `rfi_signal:ComplexRFIConstAnt`.
 
 * `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
@@ -476,7 +478,7 @@ Both are strict because their failure modes are silent. A light curve attached t
 
 Times are absolute (MJD on a stated scale) rather than seconds from the start of a particular observation, so a light curve is interpretable on its own and can be reused across measurement sets covering the same pass. Both halves of that matter, and the stated scale is **UTC**. A Julian day number is a number until a scale says what it counts: a Measurement Set declares the scale of its `TIME` column in a `MEASINFO` record and is free to declare TAI, whose numbers name instants 37 s from the ones the same numbers name on UTC. An axis written on whatever the measuring MS happened to declare would be reusable only against another MS that happened to declare the same thing — and would be resampled by the difference without anything raising. tabascal reads the observation's own times onto UTC before sampling an estimate, and `tabascal light-curve` writes them the same way, so both ends of the format are on one scale.
 
-`light_curves` is a **flux in Jy**, not the modelled amplitude `rfi_A`. The RFI visibility is quadratic in `rfi_A` ($V^\text{RFI}_{pq} = A_p A_q^* e^{i\Delta\phi}$), so `rfi_A` carries units of $\sqrt{\text{Jy}}$ and the estimate is seeded with $\sqrt{\lvert \text{light\_curves} \rvert}$. Supplying an amplitude where a flux is expected is squared away silently, so the value is wrong rather than the shape — give the flux the source would show in the visibilities, on the same scale as `rfi.std`.
+`light_curves` is a **flux in Jy**, not the modelled amplitude `rfi_A`. The RFI visibility is quadratic in `rfi_A` ($V^\text{RFI}_{pq} = A_p A_q^* e^{i\Delta\phi}$), so `rfi_A` carries units of $\sqrt{\text{Jy}}$ and the estimate is seeded with $\sqrt{\lvert \text{light\_curves} \rvert}$. Supplying an amplitude where a flux is expected is squared away silently, so the value is wrong rather than the shape — give the flux the source would show in the visibilities, on the same scale as `rfi.gp_cov.std`.
 
 Some further details:
 

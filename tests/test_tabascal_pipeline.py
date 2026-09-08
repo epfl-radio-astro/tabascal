@@ -135,7 +135,7 @@ class PipelineTestConfig:
             tolerance, and ARM/x86/GPU agree with each other to within 1.6e-6 in
             double and 1.3e-7 in single -- so the split bought nothing and was
             removed. All of those figures are current: every architecture was
-            re-measured for the ast.pow_spec.std change.
+            re-measured for the ast.gp_cov.std change.
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
         config_overrides: Dictionary of overrides to the tabascal config file
@@ -396,7 +396,7 @@ trajectory_configs = [
             # 20x wider than before the prior was tightened to the sky's own
             # amplitude, which is what a shallower optimum looks like, and still
             # four orders inside the tolerance.)
-            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # Re-recorded for ast.gp_cov.std: the prior on the astronomical
             # visibilities is normalised to a width in Jy now, so it is a different
             # prior. All three architectures re-measured on the branch -- ARM on an
             # Apple-silicon laptop, x86 on a desktop GPU box forced to CPU, GPU on a
@@ -431,7 +431,7 @@ trajectory_configs = [
             #   ARM  | 0.8767109952752573 |     0.2401       1.1      |     0.4806       1.0
             #   x86  | 0.8767113498565474 |     0.2401       1.1      |     0.4806       1.0
             #   GPU  | 0.8767099792385425 |     0.2401       1.1      |     0.4806       1.0
-            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # Re-recorded for ast.gp_cov.std: the prior on the astronomical
             # visibilities is normalised to a width in Jy now, so it is a different
             # prior. All three architectures re-measured on the branch -- ARM on an
             # Apple-silicon laptop, x86 on a desktop GPU box forced to CPU, GPU on a
@@ -468,7 +468,7 @@ trajectory_configs = [
             #   x86  | 0.8767101993544267 |     0.2401       1.1      |     0.4806       1.0
             #   GPU  | 0.8767110791411511 |     0.2401       1.1      |     0.4806       1.0
             # (widest spread of any case, at 1.6e-6 relative across the three rows.)
-            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # Re-recorded for ast.gp_cov.std: the prior on the astronomical
             # visibilities is normalised to a width in Jy now, so it is a different
             # prior. All three architectures re-measured on the branch -- ARM on an
             # Apple-silicon laptop, x86 on a desktop GPU box forced to CPU, GPU on a
@@ -509,7 +509,7 @@ rfi_vis_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # Re-recorded for ast.gp_cov.std: the prior on the astronomical
             # visibilities is normalised to a width in Jy now, so it is a different
             # prior. All three architectures re-measured on the branch -- ARM on an
             # Apple-silicon laptop, x86 on a desktop GPU box forced to CPU, GPU on a
@@ -566,7 +566,7 @@ rfi_vis_configs = [
             #   single  ARM    | 0.8965966105 |     0.1787       1.2      |     0.4176       0.3
             #   single  x86    | 0.8965965509 |     0.1787       1.2      |     0.4176       0.3
             #   single  GPU    | 0.8965966105 |     0.1787       1.2      |     0.4176       0.3
-            # Re-recorded for ast.pow_spec.std: the prior on the astronomical
+            # Re-recorded for ast.gp_cov.std: the prior on the astronomical
             # visibilities is normalised to a width in Jy now, so it is a different
             # prior. All three architectures re-measured on the branch -- ARM on an
             # Apple-silicon laptop, x86 on a desktop GPU box forced to CPU, GPU on a

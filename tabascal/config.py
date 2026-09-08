@@ -238,7 +238,7 @@ class TabConfig:
             self.estimator_flags = make_global(
                 self.estimator_flags, replicated_sharding()
             )
-            # rfi.std: data reads this one directly, against vis_obs above, so
+            # rfi.gp_cov.std: data reads this one directly, against vis_obs above, so
             # it has to be global for the same reason the others are. None
             # where no gain table was configured, which make_global cannot take.
             if self.gain_flags is not None:
@@ -428,7 +428,7 @@ class TabConfig:
         gains are applied once at read time instead of on every forward pass,
         and everything downstream (priors, RFI/AST models, chi^2, and the
         results written back to the MS) lives in one frame: the calibrated one.
-        That retires the manual "scale the noise by k and ``ast.pow_spec.std`` by
+        That retires the manual "scale the noise by k and ``ast.gp_cov.std`` by
         k" workaround -- by k, not k^2, since std is a standard deviation in Jy
         and scales with the data rather than with its square.
 

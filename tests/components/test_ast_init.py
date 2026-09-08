@@ -360,15 +360,28 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
 
 
 # ---------------------------------------------------------------------------
-# ast.pow_spec
+# ast.gp_cov
 # ---------------------------------------------------------------------------
 
 
-def pow_spec_config(tmp_path, **overrides):
-    """A config whose ``ast.pow_spec`` block carries ``overrides``."""
+#: Distinguishes ``cutoff: null`` from no ``cutoff`` key at all.
+_ABSENT_CUTOFF = object()
+
+
+def gp_cov_config(tmp_path, **overrides):
+    """A config whose ``ast.gp_cov`` block carries ``overrides``.
+
+    ``cutoff`` is lifted out to ``ast.cutoff``, which is where it lives: these
+    tests write it alongside the covariance keys because they are chosen
+    together, and this helper is the one place that has to know the two sit at
+    different levels.
+    """
     config = ast_config(tmp_path)
-    config.args["ast"]["pow_spec"] = {
-        **config.args["ast"]["pow_spec"],
+    overrides = dict(overrides)
+    if "cutoff" in overrides:
+        config.args["ast"]["cutoff"] = overrides.pop("cutoff")
+    config.args["ast"]["gp_cov"] = {
+        **config.args["ast"]["gp_cov"],
         **overrides,
     }
     return config
@@ -402,7 +415,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         """
         from jax import random
 
-        comp = setup_ast(pow_spec_config(tmp_path, **overrides))
+        comp = setup_ast(gp_cov_config(tmp_path, **overrides))
         forward = comp.build_forward()
         shape = (comp.n_bl, comp.n_k_freq_ast, comp.n_k_time_ast)
 
@@ -441,7 +454,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         from jax import random, vmap
         from tabascal.fft_gp import latent_to_signal
 
-        comp = setup_ast(pow_spec_config(tmp_path, std=30.0))
+        comp = setup_ast(gp_cov_config(tmp_path, std=30.0))
         sigma = comp.sigma_ast_k[0]
         keys = random.split(random.PRNGKey(0), 2)
         shape = (6000, *sigma.shape)
@@ -485,7 +498,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         rather than on an average baseline: unnormalised, the shipped
         configuration spans a factor of 1.23 across its baselines.
         """
-        comp = setup_ast(pow_spec_config(tmp_path, std=30.0))
+        comp = setup_ast(gp_cov_config(tmp_path, std=30.0))
 
         # The realised variance, which is twice the sum of the mode variances:
         # the latent carries E|z|^2 = 2. Asserting the sum alone would pin the
@@ -510,9 +523,9 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         past and nothing left pointing at std. Single precision only, because
         float64 holds anything the validator lets through.
         """
-        message = setup_error(pow_spec_config(tmp_path, std=std))
+        message = setup_error(gp_cov_config(tmp_path, std=std))
 
-        assert "ast.pow_spec.std" in message
+        assert "ast.gp_cov.std" in message
         assert "representable" in message
 
     def test_data_measures_the_width_per_baseline(self, tmp_path, capsys):
@@ -522,7 +535,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         so the number the data gives is the number the prior gets, per
         baseline, with no conversion in between.
         """
-        config = pow_spec_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std="data")
         comp = setup_ast(config)
 
         expected = np.sqrt(
@@ -542,7 +555,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         Half the samples are given an amplitude ten times the rest and then
         flagged; the width has to come back as the unflagged half alone.
         """
-        config = pow_spec_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std="data")
         vis = np.asarray(config.vis_obs).copy()
         flags = np.zeros(vis.shape, dtype=bool)
         flags[:, :, ::2] = True
@@ -567,7 +580,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         width comes off ``ms_flags``, the fit runs on ``flags``, and here they
         disagree completely.
         """
-        config = pow_spec_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std="data")
         vis = np.asarray(config.vis_obs).copy()
         contaminated = np.zeros(vis.shape, dtype=bool)
         contaminated[:, :, ::2] = True
@@ -596,7 +609,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         maximum and lose the whole baseline -- in numpy, NaN * False is NaN.
         The flagged cell is excluded, so what it holds cannot matter.
         """
-        config = pow_spec_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std="data")
         vis = np.asarray(config.vis_obs).copy()
         flags = np.zeros(vis.shape, dtype=bool)
         flags[:, :, 0] = True
@@ -619,7 +632,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         estimate is only the sky where the contamination has been flagged, and
         nothing else in the run will say so.
         """
-        setup_ast(pow_spec_config(tmp_path, std="data"))
+        setup_ast(gp_cov_config(tmp_path, std="data"))
 
         printed = capsys.readouterr().out
         assert "nothing flags any of them" in printed
@@ -636,7 +649,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         so squaring before averaging threw away visibilities whose rms the
         precision could hold perfectly well, and setup then blamed std.
         """
-        config = pow_spec_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std="data")
         config.vis_obs = jnp.asarray(config.vis_obs) * amplitude
 
         comp = setup_ast(config)
@@ -655,7 +668,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         A NaN nobody flagged is a different thing, and covering for it here
         only moves the failure somewhere that cannot name its cause.
         """
-        config = pow_spec_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std="data")
         vis = np.asarray(config.vis_obs).copy()
         vis[0, 0, 0] = np.nan
         config.vis_obs = jnp.asarray(vis)
@@ -666,7 +679,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
 
     def test_data_with_everything_flagged_is_refused(self, tmp_path):
         """There is nothing to measure, and a zero width is not a prior."""
-        config = pow_spec_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std="data")
         config.estimator_flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
 
         message = setup_error(config)
@@ -675,9 +688,9 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
 
     def test_a_word_other_than_data_is_refused(self, tmp_path):
         """`data` is the only word; anything else is a typo, not a setting."""
-        message = setup_error(pow_spec_config(tmp_path, std="truth"))
+        message = setup_error(gp_cov_config(tmp_path, std="truth"))
 
-        assert "ast.pow_spec.std" in message
+        assert "ast.gp_cov.std" in message
         assert "'data'" in message
 
 
@@ -687,16 +700,16 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
     The knee it sets is a delay -- the frequency axis transforms to
     ``fftfreq(n_freq, chan_width)``, whose units are inverse Hz -- and a delay
     is not a quantity anyone has intuition for at a glance. A bandwidth is, and
-    it is the spelling ``rfi.corr_freq`` already uses.
+    it is the spelling ``rfi.gp_cov.corr_freq`` already uses.
     """
 
     def test_the_knee_is_the_reciprocal_of_the_bandwidth(self, tmp_path):
         """Pinned by a test rather than inferred from the name.
 
-        The same conversion ``rfi_signal`` makes from ``rfi.corr_freq``, and
+        The same conversion ``rfi_signal`` makes from ``rfi.gp_cov.corr_freq``, and
         the reason the two sections can be read side by side.
         """
-        comp = setup_ast(pow_spec_config(tmp_path, corr_freq=1e6))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=1e6))
 
         assert comp.k0_freq == pytest.approx(1 / (2 * np.pi * 1e6))
 
@@ -709,7 +722,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         """
         from tabascal.fft_gp import knee_from_corr_scale
 
-        comp = setup_ast(pow_spec_config(tmp_path, corr_freq=1e6))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=1e6))
 
         assert comp.k0_freq == knee_from_corr_scale(1e6)
 
@@ -719,7 +732,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         The power spectrum tends to ``p0`` as the knee grows, so an infinite
         knee keeps every delay mode and prefers none.
         """
-        comp = setup_ast(pow_spec_config(tmp_path, corr_freq=None))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=None))
 
         assert comp.k0_freq == float("inf")
 
@@ -757,8 +770,8 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         assert np.max(np.abs(was - now) / now) < np.finfo(np.float32).eps
 
 
-class TestAstPowSpecIsValidated:
-    """``ast.pow_spec`` went straight to the Fourier machinery unchecked.
+class TestAstGpCovIsValidated:
+    """``ast.gp_cov`` went straight to the Fourier machinery unchecked.
 
     A negative exponent, a string, or a cutoff of 1 -- which cuts every mode --
     surfaced from inside ``fft_gp`` with a message about array shapes, if it
@@ -768,27 +781,55 @@ class TestAstPowSpecIsValidated:
 
     def test_the_shipped_defaults_still_set_up(self, tmp_path):
         """The base config's own block has to pass its own validation."""
-        comp = setup_ast(pow_spec_config(tmp_path))
+        comp = setup_ast(gp_cov_config(tmp_path))
 
         assert comp.n_k_freq_ast >= 1 and comp.n_k_time_ast >= 1
 
-    @pytest.mark.parametrize("key", ["std", "corr_freq", "cutoff"])
+    @pytest.mark.parametrize("cutoff", [None, _ABSENT_CUTOFF])
+    def test_an_unset_cutoff_is_this_number(self, tmp_path, cutoff):
+        """1e-6, and the two ways of not setting it agree.
+
+        Since the key moved out of the covariance block it may be omitted, where
+        an unset cutoff used to be a configuration error, so the default is now
+        load-bearing. It sets the latent dimension, and with it how many
+        parameters every run fits, which is worth failing over rather than
+        discovering from a shifted result. Pinned as the literal because an
+        assertion against the module constant would move with it.
+        """
+        config = gp_cov_config(tmp_path)
+        if cutoff is None:
+            config.args["ast"]["cutoff"] = None
+        else:
+            config.args["ast"].pop("cutoff", None)
+
+        assert setup_ast(config).pk_cutoff == 1e-6
+
+    # cutoff is named ast.cutoff, outside the covariance block, and is held to
+    # the same rules there.
+    @pytest.mark.parametrize(
+        "key, where",
+        [
+            ("std", "ast.gp_cov.std"),
+            ("corr_freq", "ast.gp_cov.corr_freq"),
+            ("cutoff", "ast.cutoff"),
+        ],
+    )
     @pytest.mark.parametrize("value", [0, -1, "3e3", True, float("inf"), float("nan")])
     def test_a_scalar_key_that_is_not_a_positive_number_is_refused(
-        self, tmp_path, key, value
+        self, tmp_path, key, where, value
     ):
-        message = setup_error(pow_spec_config(tmp_path, **{key: value}))
+        message = setup_error(gp_cov_config(tmp_path, **{key: value}))
 
-        assert f"ast.pow_spec.{key}" in message
+        assert where in message
 
     @pytest.mark.parametrize("cutoff", [1.0, 2.0])
     def test_a_cutoff_that_cuts_every_mode_is_refused(self, tmp_path, cutoff):
         """Relative to the largest mode on each axis, and the comparison is
         strict, so 1 leaves nothing to fit. Unchecked it reached fft_gp and came
         back as a zero-size reduction."""
-        message = setup_error(pow_spec_config(tmp_path, cutoff=cutoff))
+        message = setup_error(gp_cov_config(tmp_path, cutoff=cutoff))
 
-        assert "ast.pow_spec.cutoff" in message
+        assert "ast.cutoff" in message
         assert "below 1" in message
 
     @pytest.mark.parametrize(
@@ -797,11 +838,11 @@ class TestAstPowSpecIsValidated:
     def test_gammas_that_are_not_an_ordered_pair_of_positives_are_refused(
         self, tmp_path, gammas
     ):
-        assert "gammas" in setup_error(pow_spec_config(tmp_path, gammas=gammas))
+        assert "gammas" in setup_error(gp_cov_config(tmp_path, gammas=gammas))
 
     @pytest.mark.parametrize("gammas", [(5, 5), np.array([5.0, 5.0])])
     def test_an_ordered_pair_is_accepted_however_it_is_spelled(self, tmp_path, gammas):
-        comp = setup_ast(pow_spec_config(tmp_path, gammas=gammas))
+        comp = setup_ast(gp_cov_config(tmp_path, gammas=gammas))
 
         assert comp.gammas == [5.0, 5.0]
 
@@ -813,7 +854,7 @@ class TestAstPowSpecIsValidated:
         `"gamma" in message` passes for a validator that names nothing. The same
         trap was fixed on the RFI side and then walked into again here.
         """
-        message = setup_error(pow_spec_config(tmp_path, gamma=5))
+        message = setup_error(gp_cov_config(tmp_path, gamma=5))
 
         assert "no key(s) ['gamma']" in message
 
@@ -824,17 +865,17 @@ class TestAstPowSpecIsValidated:
         along the frequency axis at all. The rest have no such fallback, and an
         unset one is a config that cannot be run rather than a default to
         invent."""
-        setup_ast(pow_spec_config(tmp_path, fov_deg=None))
-        setup_ast(pow_spec_config(tmp_path, corr_freq=None))
+        setup_ast(gp_cov_config(tmp_path, fov_deg=None))
+        setup_ast(gp_cov_config(tmp_path, corr_freq=None))
 
-        for key in ("std", "gammas", "cutoff"):
-            message = setup_error(pow_spec_config(tmp_path, **{key: None}))
-            assert f"ast.pow_spec.{key}" in message
+        for key in ("std", "gammas"):
+            message = setup_error(gp_cov_config(tmp_path, **{key: None}))
+            assert f"ast.gp_cov.{key}" in message
             assert "required" in message
 
     def test_the_validation_is_the_one_the_rfi_prior_uses(self):
         """One contract, not two: the sections differ in which keys are live."""
-        from tabascal.components.ast_vis import validate_pow_spec as ast_validator
-        from tabascal.components.rfi_signal import validate_pow_spec as rfi_validator
+        from tabascal.components.ast_vis import validate_gp_cov as ast_validator
+        from tabascal.components.rfi_signal import validate_gp_cov as rfi_validator
 
         assert ast_validator is rfi_validator
