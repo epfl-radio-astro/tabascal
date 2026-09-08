@@ -1943,6 +1943,24 @@ class TestGpCovIsRead:
             float(cls.default_pk_cutoff),
         )
 
+    @pytest.mark.parametrize("absent", [_ABSENT, None])
+    @pytest.mark.parametrize(
+        "cls, gammas, cutoff",
+        [(ComplexRFIVarAnt, [3.0, 3.0], 1e-9), (ComplexRFIConstAnt, [100.0, 100.0], 1e-6)],
+    )
+    def test_the_defaults_are_these_numbers(self, cls, gammas, cutoff, absent):
+        """The values themselves, not merely that the component's own are used.
+
+        The test above compares against ``cls.default_pk_cutoff``, so it moves
+        with the constant and would pass just as well if the default changed.
+        The cutoff sets the latent dimension, so changing one is a change to how
+        many parameters every run of that component fits -- worth failing over
+        rather than discovering from a shifted result.
+        """
+        comp = setup_with_gp_cov(cls, absent)
+
+        assert comp.gp_cov_params() == (gammas, cutoff)
+
     def test_the_two_components_keep_their_own_defaults(self):
         """Preserved rather than unified: making them agree is a model change."""
         assert ComplexRFIVarAnt.default_gammas != ComplexRFIConstAnt.default_gammas

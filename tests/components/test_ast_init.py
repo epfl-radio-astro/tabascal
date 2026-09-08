@@ -364,6 +364,10 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
 # ---------------------------------------------------------------------------
 
 
+#: Distinguishes ``cutoff: null`` from no ``cutoff`` key at all.
+_ABSENT_CUTOFF = object()
+
+
 def gp_cov_config(tmp_path, **overrides):
     """A config whose ``ast.gp_cov`` block carries ``overrides``.
 
@@ -780,6 +784,25 @@ class TestAstGpCovIsValidated:
         comp = setup_ast(gp_cov_config(tmp_path))
 
         assert comp.n_k_freq_ast >= 1 and comp.n_k_time_ast >= 1
+
+    @pytest.mark.parametrize("cutoff", [None, _ABSENT_CUTOFF])
+    def test_an_unset_cutoff_is_this_number(self, tmp_path, cutoff):
+        """1e-6, and the two ways of not setting it agree.
+
+        Since the key moved out of the covariance block it may be omitted, where
+        an unset cutoff used to be a configuration error, so the default is now
+        load-bearing. It sets the latent dimension, and with it how many
+        parameters every run fits, which is worth failing over rather than
+        discovering from a shifted result. Pinned as the literal because an
+        assertion against the module constant would move with it.
+        """
+        config = gp_cov_config(tmp_path)
+        if cutoff is None:
+            config.args["ast"]["cutoff"] = None
+        else:
+            config.args["ast"].pop("cutoff", None)
+
+        assert setup_ast(config).pk_cutoff == 1e-6
 
     # cutoff is named ast.cutoff, outside the covariance block, and is held to
     # the same rules there.
