@@ -445,7 +445,7 @@ _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 #: which is the width the prior is on rather than a prediction of what a run
 #: will see. Three model steps sit between the two, all of them intended:
 #:
-#: * A non-zero ``rfi.mean`` -- ``est``, ``matched-filter``, ``truth`` -- adds
+#: * A non-zero ``rfi.mean`` -- ``data``, ``est``, ``matched-filter`` -- adds
 #:   its own power: ``E|V_pq|^2 = (std + |m_p|^2)(std + |m_q|^2)`` for the mean
 #:   amplitudes ``m``. Sources then carry non-zero mean visibilities too, so
 #:   their total stops scaling as ``sqrt(N)``.
@@ -522,13 +522,15 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     normalises a single spectrum.
 
     It measures the *total* RFI and hands it to each source, and does not
-    correct for either factor in :data:`_LATENT_POWER`: N satellites at this
-    width realise about ``sqrt(N)`` times it. That is deliberate -- a number
-    and a measurement that produce different priors would be worse -- and it
-    means the estimate is ``sqrt(N)`` wide on an N-satellite run.
+    correct for either factor in :data:`_LATENT_POWER`: N zero-mean satellites
+    at this width realise about ``sqrt(N)`` times it, before masking and
+    integration have their own say. That is deliberate -- a number and a
+    measurement that produce different priors would be worse.
 
-    It is also an upper bound on the RFI itself, since the sky and the noise
-    are in the visibilities: 11.2 Jy on that simulation against a true RFI
+    It also tends above the RFI itself, since the sky and the noise are in
+    the visibilities -- tends to, not always, since the sky and the RFI can
+    cancel coherently on a sample: 11.2 Jy on that simulation against a true
+    RFI
     ``rms|V|`` of 11.0, because RFI that dominates the sky by 7x dominates the
     measurement as well. Where the RFI is faint it measures the sky instead
     and is far too wide, which is the mirror of ``ast.pow_spec.std: data``'s
@@ -558,8 +560,8 @@ def _std_from_data(vis_obs, gain_flags) -> float:
         else ""
     )
     print(
-        f"Using RFI std from data: {std:.4g} Jy (rms|V|){where}. An upper "
-        "bound: the sky and the noise are in it as well as the RFI."
+        f"Using RFI std from data: {std:.4g} Jy (rms|V|){where}. The sky and "
+        "the noise are in it as well as the RFI."
     )
 
     return std

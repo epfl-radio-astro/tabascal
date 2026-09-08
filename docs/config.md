@@ -390,7 +390,7 @@ All parameters in this section that overlap with those of the `ast` section have
 
   It is also the **instantaneous** visibility of a **zero-mean, unmasked** source: the width the prior is on, not a prediction of what a run will see. Three model steps sit in between, all of them deliberate:
 
-  * A non-zero `mean` — `est`, `matched-filter`, `truth` — adds its own power, $E\lvert V_{pq}\rvert^2 = (\texttt{std} + \lvert m_p\rvert^2)(\texttt{std} + \lvert m_q\rvert^2)$ for mean amplitudes $m$. Sources then carry non-zero mean visibilities as well, so their total stops scaling as $\sqrt{N}$.
+  * A non-zero `mean` — `data`, `est`, `matched-filter` — adds its own power, $E\lvert V_{pq}\rvert^2 = (\texttt{std} + \lvert m_p\rvert^2)(\texttt{std} + \lvert m_q\rvert^2)$ for mean amplitudes $m$. Sources then carry non-zero mean visibilities as well, so their total stops scaling as $\sqrt{N}$.
   * `min_elevation` zeroes a source while it is below the cut, so one visible for a fraction $f$ of the observation shows $\texttt{std}\sqrt{f}$ across the whole of it — and one that never rises, exactly zero.
   * The visibility kernels average the fine grid, and fringes that turn within an integration cancel there.
 
