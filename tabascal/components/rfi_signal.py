@@ -615,11 +615,15 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
         # key says typical, which is GitHub #227.
         gp_cov["std"] = _LATENT_POWER * float(jnp.max(jnp.abs(vis_obs)))
 
-    # Half the observed extent on each axis, where the astronomical prior reads
-    # the same null on corr_freq as no roll-off at all. The difference is the
-    # signal: an emitter is coherent over some band and some time, and half the
-    # observation is the least-committal guess at both, where the sky is smooth
-    # in frequency and a flat spectrum says so.
+    # Half the observed extent on each axis. The astronomical prior reads the
+    # same null on corr_freq as no roll-off at all, and the difference is which
+    # default is the uninformative one. A flat delay spectrum is not a smooth
+    # signal -- equal power at every delay leaves the channels uncorrelated, so
+    # it states no frequency structure rather than a gentle one. That costs
+    # nothing on the single-channel observations the shipped configs run, where
+    # the only delay mode is zero. Here the emitter is coherent over some band
+    # by construction, so half the observation is the least-committal guess that
+    # is still a coherence scale, rather than declining to name one.
     if gp_cov["corr_freq"] is None:
         gp_cov["corr_freq"] = extent(freqs, chan_width) / 2
     if gp_cov["corr_time"] is None:

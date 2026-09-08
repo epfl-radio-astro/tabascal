@@ -1023,7 +1023,8 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     time_scale="utc",
         vis_obs=jnp.ones((3, n_freq, n_time), dtype=complex),
         args={
-            "rfi": {"r_seed": 1, "std": 1.0, "corr_freq": 5e6, "corr_time": 60.0,
+            "rfi": {"r_seed": 1,
+                    "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0},
                     "init": "sample", "mean": "zeros", "est": None,
                     "time_pad_factor": 2, "freq_pad_factor": 2},
             "plots": {"truth": False},
