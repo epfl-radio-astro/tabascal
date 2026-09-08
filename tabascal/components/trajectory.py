@@ -10,7 +10,6 @@ from tabascal.distributed import (
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
-from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
 from tabascal.time import gast_deg, skyfield_time, timescale
@@ -185,8 +184,6 @@ class PhaseCalculationRFI(Component):
             jnp.floor(self.times_jd_fine), 
             self.times_jd_fine - jnp.floor(self.times_jd_fine)
         )
-        # self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        # self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
         self.ants_uvw = jnp.transpose(
             itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
@@ -386,10 +383,7 @@ class NoDragOrbit(Component):
             self.n_time_fine = config.n_time_fine
 
             self.n_rfi = config.n_rfi
-            # self.elements = config.elements
-            # self.epoch_jd = config.epoch_jd
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
-            # self.ric_std = config.args["satellites"]["ric_std"]
 
             # Reuse the resolution the preflight check already made and enforced
             # coverage on: re-resolving here could reach a different satellite set
@@ -434,7 +428,6 @@ class NoDragOrbit(Component):
 
             return sat_rec
 
-        # ecco, argpo, inclo, mo, no_kozai, nodeo = elements.T
         inclo, nodeo, ecco, argpo, mo, no_kozai = elements.T
 
         sats = vmap(sat_init)(
@@ -568,10 +561,7 @@ class Orbit(Component):
             self.n_time_fine = config.n_time_fine
 
             self.n_rfi = config.n_rfi
-            # self.elements = config.elements
-            # self.epoch_jd = config.epoch_jd
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
-            # self.ric_std = config.args["satellites"]["ric_std"]
 
             # Reuse the resolution the preflight check already made and enforced
             # coverage on: re-resolving here could reach a different satellite set

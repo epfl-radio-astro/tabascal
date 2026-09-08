@@ -43,19 +43,6 @@ def _zarr_path(config: Dict) -> Optional[str]:
     return config.get("data", {}).get("zarr_path")
 
 
-def _open_zarr(config: Dict):
-    """Open the sim zarr, raising a clear :class:`TruthError` if it cannot be read."""
-    path = _zarr_path(config)
-    if not path or not os.path.exists(path):
-        raise TruthError(
-            f"No tab-sim truth available: simulation zarr not found at {path!r}."
-        )
-    try:
-        return xr.open_zarr(path)
-    except Exception as e:  # pragma: no cover - corrupt/unreadable store
-        raise TruthError(f"Could not open simulation zarr at {path!r}: {e}") from e
-
-
 def _first_present(xds, candidates: List[str]) -> Optional[str]:
     for name in candidates:
         if name in xds:

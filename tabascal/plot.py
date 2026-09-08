@@ -115,10 +115,6 @@ def plot_complex_real_imag(
 ):
 
     n_params = min(param.shape[1], max_plots)
-    # idx = np.random.permutation(param.shape[1])
-    # print(param.shape, true.shape)
-    # param = param[:, idx]
-    # true = true[idx]
     mean_r = param.real.mean(axis=0)
     mean_i = param.imag.mean(axis=0)
     std_r = param.real.std(axis=0)
@@ -155,10 +151,6 @@ def plot_complex_amp_phase(
     save_dir: str = "plots/",
 ):
     n_params = min(param.shape[1], max_plots)
-    # idx = np.random.permutation(param.shape[1])
-    # print(param.shape, true.shape)
-    # param = param[:, idx]
-    # true = true[idx]
     mean_amp = jnp.abs(param).mean(axis=0)
     mean_phase = jnp.rad2deg(jnp.angle(param)).mean(axis=0)
     std_amp = jnp.abs(param).std(axis=0)

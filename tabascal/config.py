@@ -154,7 +154,6 @@ class TabConfig:
         require_in_view: bool = True,
     ):
 
-        # self.config = config
         self.args = config
         self.precision = config.get("model", {}).get("precision", "single")
         self.ms_path = ms_path

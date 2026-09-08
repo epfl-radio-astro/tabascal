@@ -1576,17 +1576,6 @@ def write_results_xds(
     # replicated on every process; per-RFI arrays (rfi_A/rfi_phase) are sharded
     # and must not be materialized here without a process_allgather.
     if failure is None and is_process_0():
-        # print(vi_pred.keys())
-        # print(vi_pred["rfi_vis"].shape)
-        # print(vi_pred["rfi_vis"])
-
-        # print(da.asarray(vi_pred["ast_vis"]))
-        # print(da.asarray(vi_pred["gains"]))
-        # print(da.asarray(vi_pred["rfi_vis"]))
-        # print(da.asarray(vi_pred["vis_obs"]))
-        # print(da.asarray(vi_pred["rfi_A"]))
-        # print(da.asarray(args["rfi_phase"]))
-
         try:
             map_xds = xr.Dataset(
                 data_vars={
@@ -1594,14 +1583,6 @@ def write_results_xds(
                     "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
                     "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
                     "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
-                    # "rfi_A": (
-                    #     ["sample", "src", "ant", "rfi_time"],
-                    #     da.asarray(vi_pred["rfi_A"]),
-                    # ),
-                    # "rfi_phase": (
-                    #     ["src", "ant", "time_mjd_fine"],
-                    #     da.asarray(args["rfi_phase"]),
-                    # ),
                 },
                 coords={
                     # SEAM: `time` is seconds from the start of the observation,
@@ -1622,7 +1603,6 @@ def write_results_xds(
                 # cannot tell where the results belong on a multi-correlation MS.
                 attrs={"corr": tab_config.args["data"]["corr"]},
             )
-            # print(map_xds)
 
             # Appended to the store the decomposition was streamed into, rather
             # than creating one: with per_sat on, the store already exists and

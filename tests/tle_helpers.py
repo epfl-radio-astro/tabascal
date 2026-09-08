@@ -1,7 +1,7 @@
 """Shared builders for the offline SatChecker / TLE tests.
 
 Everything here is synthetic and offline: TLE lines are derived from a real ISS
-template (so they parse through :func:`tabascal.orbit.parse_tle_elements`), with
+template (so they parse through :func:`satchecker_client.tle_parse.parse_tle_elements`), with
 only the NORAD ID and epoch varied. No network access is involved.
 
 :func:`block_network` enforces that. Import it into a test module and it becomes
@@ -209,12 +209,6 @@ def _raw_rows(pairs) -> list[dict]:
     return rows
 
 
-def make_nearest_json(pairs) -> bytes:
-    import json
-
-    return json.dumps({"orbital_data": _raw_rows(pairs)}).encode()
-
-
 def _raw_omm_rows(pairs) -> list[dict]:
     """Raw ``get-nearest-omm`` rows, shaped as the live service returns them.
 
@@ -260,16 +254,6 @@ def _raw_omm_rows(pairs) -> list[dict]:
             }
         )
     return rows
-
-
-def make_nearest_omm_json(pairs) -> bytes:
-    """A ``get-nearest-omm`` payload, in the single-element-list wrapping the
-    live service uses."""
-    import json
-
-    return json.dumps(
-        [{"orbital_data": _raw_omm_rows(pairs), "version": "1.7.0"}]
-    ).encode()
 
 
 def make_omm_catalogue_df(pairs) -> pd.DataFrame:

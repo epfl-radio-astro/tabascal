@@ -80,17 +80,10 @@ class RiemannVis(Component):
                 None if block_size is None else int(block_size)
             )
 
-            # Validate dimensions
             self._set_outputs()
-            # self._validate_dimensions()
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    # def _validate_dimensions(self):
-    #     """Ensure all setup operations completed successfully"""
-
-    #     assert hasattr(self, "")
 
     def build_set_params(self):
 
@@ -163,17 +156,10 @@ class RiemannVisFFI(Component):
             self.n_ant = config.n_ant
             self.n_rfi = config.n_rfi
 
-            # Validate dimensions
             self._set_outputs()
-            # self._validate_dimensions()
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    # def _validate_dimensions(self):
-    #     """Ensure all setup operations completed successfully"""
-
-    #     assert hasattr(self, "")
 
     def build_set_params(self):
 
@@ -223,7 +209,6 @@ class RiemannVisFFI(Component):
         }
 
 
-
 class RiemannVisVariable(Component):
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
@@ -256,7 +241,6 @@ class RiemannVisVariable(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
 
     def build_set_params(self):
 

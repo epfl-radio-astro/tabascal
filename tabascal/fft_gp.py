@@ -1,11 +1,11 @@
 """FFT-based Gaussian Process utilities."""
 
 import functools
-from collections.abc import Mapping, Set as AbstractSet
+from collections.abc import Mapping
 from functools import reduce
 from math import isfinite
 from numbers import Real
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp

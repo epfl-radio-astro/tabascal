@@ -1,9 +1,22 @@
 from tqdm import trange
 
-from numpyro.optim import optax_to_numpyro
-from numpyro.infer import Predictive, SVI, autoguide, Trace_ELBO
+from numpyro.infer import Predictive, SVI
 
 import optax
+
+from collections import namedtuple
+
+#: What :func:`run_custom_svi` returns.
+SVIRunResult = namedtuple("SVIRunResult", ["params", "losses"])
+"""A :func:`~collections.namedtuple` of:
+
+ - **params** -- the optimised parameters.
+ - **losses** -- the loss at every step.
+
+numpyro's own ``SVI.run`` result carries a ``state`` between these two, for
+resuming the optimiser. This one does not: ``run_custom_svi`` never built one,
+so the field was always ``None`` and no caller ever read it.
+"""
 
 import jax
 import jax.numpy as jnp
@@ -12,7 +25,6 @@ from jax.tree_util import tree_map
 
 from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
-from tabascal.opt import SVIRunResult
 from tabascal.timing import measure_runtime
 from tabascal.write import write_results_ms, write_results_xds
 
@@ -286,16 +298,6 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
         print(f"  {' ' * len(label)} | " + row("bias", me, sig))
 
 
-def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
-
-    k_ = k / k0
-    Pk = P0 * 0.5 * (jnp.exp(-(k_**2)) + (1.0 + k_**2) ** -gamma)
-    # Pk = P0 / (1.0 + k_**2) ** gamma
-    # Pk = P0 * jnp.exp(-(k_**2)) # Leads to NaN values after division
-
-    return Pk
-
-
 def fix_padding(config: dict, n_freq):
 
     try:
@@ -309,62 +311,6 @@ def fix_padding(config: dict, n_freq):
         print("freq_pad_factor is not defined")
 
     return config
-
-
-@measure_runtime
-def run_svi(
-    prob_model: Callable,
-    obs_data: jax.Array,
-    max_iter=1_000,
-    guide_family="AutoDelta",
-    init_params=None,
-    epsilon=1e-3,
-    key=random.PRNGKey(1),
-    dual_run=True,
-    state=None,
-    constants=None,
-):
-    if guide_family == "AutoDelta":
-        guide = autoguide.AutoDelta(prob_model)
-    elif guide_family == "AutoDiagonalNormal":
-        guide = autoguide.AutoDiagonalNormal(prob_model)
-    elif guide_family == "AutoLaplaceApproximation":
-        guide = autoguide.AutoLaplaceApproximation(prob_model)
-    elif guide_family == "AutoMultivariateNormal":
-        guide = autoguide.AutoMultivariateNormal(prob_model)
-    else:
-        raise ValueError(f"Unknown guide_family: {guide_family}")
-
-    # optimizer = numpyro.optim.Adam(epsilon)
-    optimizer = optax_to_numpyro(optax.adabelief(epsilon))
-    svi = SVI(prob_model, guide, optimizer, Trace_ELBO())
-    svi_results = svi.run(
-        key,
-        max_iter,
-        obs_data=obs_data,
-        state=state,
-        constants=constants,
-        init_params=init_params,
-    )
-    losses = svi_results.losses / obs_data.size
-    svi_results = SVIRunResult(svi_results.params, svi_results.state, losses)
-
-    if dual_run:
-        optimizer = optax_to_numpyro(optax.adabelief(epsilon / 10))
-        svi = SVI(prob_model, guide, optimizer, Trace_ELBO())
-
-        svi_results = svi.run(
-            key,
-            max_iter,
-            obs_data=obs_data,
-            state=state,
-            constants=constants,
-            init_params=svi_results.params,
-        )
-        losses = jnp.concatenate([losses, svi_results.losses / obs_data.size])
-        svi_results = SVIRunResult(svi_results.params, svi_results.state, losses)
-
-    return svi_results, guide
 
 
 def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
@@ -636,25 +582,7 @@ def run_custom_svi(
 
     # Add _auto_loc suffix to match AutoDelta convention expected by downstream code
     params_out = {k + "_auto_loc": v for k, v in params.items()}
-    return SVIRunResult(params_out, None, jnp.array(losses))
-
-
-@measure_runtime
-def svi_predict(
-    prob_model: Callable,
-    guide: autoguide.AutoGuide,
-    vi_params: dict,
-    num_samples=100,
-    key=random.PRNGKey(2),
-    state=None,
-    constants=None,
-):
-    predictive = Predictive(
-        model=prob_model, guide=guide, params=vi_params, num_samples=num_samples
-    )
-    predictions = predictive(key, state=state, constants=constants)
-
-    return predictions
+    return SVIRunResult(params_out, jnp.array(losses))
 
 
 @measure_runtime
@@ -727,7 +655,6 @@ def run_opt(
     )(subkeys[1], obs_data=tab_config.vis_obs, state=state, constants=constants)
     
     write_results_xds(vi_pred, tab_config, map_path)
-    # write_params_xds(vi_params, gp_params, ms_params, params_path, overwrite=True)
 
     print()
     print(f"Optimization Run Time : {datetime.now() - start}")
@@ -758,28 +685,3 @@ def run_opt(
     )
 
     return vi_pred, vi_results.losses, vi_params, rchi2
-
-
-#: Names that moved to :mod:`tabascal.ms`. Kept importable from here so an
-#: existing ``from tabascal.tab_tools import read_ms`` keeps working, with a
-#: warning pointing at the new home. Resolved lazily through ``__getattr__`` so
-#: nothing is imported until one is actually used, which also avoids a cycle.
-_MOVED_TO_MS = ("read_ms", "get_observation_data_type")
-
-
-def __getattr__(name: str):
-    if name in _MOVED_TO_MS:
-        import warnings
-
-        from tabascal import ms
-
-        warnings.warn(
-            f"tabascal.tab_tools.{name} has moved to tabascal.ms.{name}. The alias "
-            "here will be removed in a future release; import from tabascal.ms.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        return getattr(ms, name)
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

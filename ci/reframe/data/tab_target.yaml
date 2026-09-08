@@ -31,20 +31,14 @@ plots:
   prior_samples: 100
 
 inference:
-  mcmc: False
   opt: True
   # opt: False
-  fisher: False
 
 opt:
   epsilon: 1e-3
   max_iter: 1000
   dual_run: True
   guide: map
-
-fisher:
-  n_samples: 1
-  max_cg_iter: 10_000
 
 # Priors and Initialization
 ast:
