@@ -16,25 +16,31 @@ from tabascal.timing import measure_runtime
 
 
 # ---------------------------------------------------------------------------
-# Configuring a power spectrum
+# Configuring a GP covariance
 # ---------------------------------------------------------------------------
 #
 # Every Fourier-domain GP in the model -- the RFI signal components and the
-# astronomical visibility one -- is configured by the same four ideas: a power
-# at the origin, a knee, a roll-off exponent per axis, and a relative cutoff
-# below which a mode is dropped. They are validated here, in the module that
-# consumes them, rather than separately in each component, so that a bad value
-# is refused the same way and with the same words wherever it is written.
+# astronomical visibility one -- is a Gaussian process, and its <section>.gp_cov
+# block is the covariance: a width, the correlation scales that set the knee,
+# and the roll-off exponent past it on each axis. They are validated here, in
+# the module that consumes them, rather than separately in each component, so
+# that a bad value is refused the same way and with the same words wherever it
+# is written.
 #
-# What differs between the sections is only which keys are live: the RFI prior
-# derives its knee from corr_freq/corr_time, where the astronomical one is given
-# a corr_freq and derives its time knee from fov_deg. Both normalise their
-# amplitude away -- rfi to rfi.std, ast to ast.pow_spec.std -- so neither reads
-# a p0. That is expressed as the rules a caller passes, not as a second copy of
-# these checks.
+# Both sections take the same keys and read them at the same level. Two things
+# genuinely differ, and both are stated in the base configuration rather than
+# left to be inferred: the astronomical prior takes its time scale as a field of
+# view, since a sky source's coherence time is a fringe rate rather than a
+# number to pick, and the two read corr_freq: null differently -- no roll-off at
+# all for the sky, half the observed extent for the RFI.
+#
+# Neither reads a p0: both normalise their amplitude away, to gp_cov.std. What
+# the cutoff sets is the number of fitted modes rather than the covariance, so
+# it sits outside the block with the other knobs on the size of the problem --
+# see validate_cutoff.
 
 
-def _pow_spec_number(value, where: str) -> float:
+def _gp_cov_number(value, where: str) -> float:
     """A finite, strictly positive float, or a ValueError naming ``where``.
 
     ``numbers.Real`` rather than ``(int, float)`` so a config assembled in
@@ -71,8 +77,8 @@ FROM_DATA = "data"
 def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
     """``rms|V|`` over the samples ``keep`` selects, in Jy.
 
-    The measurement both ``std: data`` options are: ``ast.pow_spec.std`` and
-    ``rfi.std`` name the same quantity, so they read it off the data the same
+    The measurement both ``std: data`` options are: ``ast.gp_cov.std`` and
+    ``rfi.gp_cov.std`` name the same quantity, so they read it off the data the same
     way and differ only in which samples they take and how far they reduce.
 
     ``keep`` is the caller's, and it is where the two part company. The
@@ -125,7 +131,7 @@ def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
             f"{key}: data cannot measure a width: the visibilities it is "
             "measuring are not finite. Set a width in Jy -- flagging them "
             "helps only where the caller's mask reads the MS's flags, which "
-            "ast.pow_spec.std does and rfi.std does not."
+            "ast.gp_cov.std does and rfi.gp_cov.std does not."
         )
 
     if per_baseline:
@@ -138,7 +144,7 @@ def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
     return std
 
 
-def _pow_spec_amplitude(value, where: str):
+def _gp_cov_amplitude(value, where: str):
     """A positive number, or the literal ``"data"``.
 
     An amplitude is the one entry in these blocks that is a property of the
@@ -156,10 +162,10 @@ def _pow_spec_amplitude(value, where: str):
             f"{FROM_DATA!r}, which is the only word it takes."
         )
 
-    return _pow_spec_number(value, where)
+    return _gp_cov_number(value, where)
 
 
-def _pow_spec_pair(value, where: str) -> List[float]:
+def _gp_cov_pair(value, where: str) -> List[float]:
     """An ordered pair of positive numbers, one per axis.
 
     Ordered specifically. Anything keyed rather than ordered -- a mapping, a
@@ -205,10 +211,10 @@ def _pow_spec_pair(value, where: str) -> List[float]:
             "order, e.g. [3, 3]."
         )
 
-    return [_pow_spec_number(entry, where) for entry in ordered]
+    return [_gp_cov_number(entry, where) for entry in ordered]
 
 
-def _pow_spec_cutoff(value, where: str) -> float:
+def _gp_cov_cutoff(value, where: str) -> float:
     """A relative cutoff: positive, and below 1.
 
     It is compared against the largest mode on each axis and the comparison in
@@ -217,7 +223,7 @@ def _pow_spec_cutoff(value, where: str) -> float:
     well as in :func:`pk_cut`, which is where a value that only reaches 1 after
     rounding into the working precision arrives.
     """
-    cutoff = _pow_spec_number(value, where)
+    cutoff = _gp_cov_number(value, where)
     if cutoff >= 1.0:
         raise ValueError(
             f"Config parameter ({where}: {value!r}) is a power relative to the "
@@ -228,76 +234,85 @@ def _pow_spec_cutoff(value, where: str) -> float:
     return cutoff
 
 
-#: The kinds of value a power-spectrum key can take, by name, for the ``rules``
-#: a caller of :func:`validate_pow_spec` passes.
-POW_SPEC_KINDS = {
-    "number": _pow_spec_number,
-    "amplitude": _pow_spec_amplitude,
-    "pair": _pow_spec_pair,
-    "cutoff": _pow_spec_cutoff,
+#: The kinds of value a covariance key can take, by name, for the ``rules`` a
+#: caller of :func:`validate_gp_cov` passes.
+GP_COV_KINDS = {
+    "number": _gp_cov_number,
+    "amplitude": _gp_cov_amplitude,
+    "pair": _gp_cov_pair,
 }
 
 
-def validate_pow_spec(
-    pow_spec,
+def validate_cutoff(value, where: str, default: float) -> float:
+    """``<section>.cutoff``, or ``default`` for the section that leaves it null.
+
+    Outside the covariance block, and validated on its own, because it is not a
+    covariance parameter: it drops the k-modes whose power falls below it, which
+    sets how many parameters are fitted and nothing about what the prior
+    believes. Since the spectrum is normalised after the cut it does not even
+    change the prior's width. It belongs with ``freq_pad_factor`` and
+    ``baseline_block_size``, which are the other knobs on the size of the
+    problem rather than on its statistics.
+    """
+    if value is None:
+        return float(default)
+
+    return _gp_cov_cutoff(value, where)
+
+
+def validate_gp_cov(
+    gp_cov,
     section: str,
     rules: Dict[str, str],
-    derived: Optional[Dict[str, str]] = None,
     optional: Tuple[str, ...] = (),
 ) -> Dict:
-    """Normalise and check one ``<section>.pow_spec`` config block.
+    """Normalise and check one ``<section>.gp_cov`` config block.
+
+    Both Fourier-domain priors are Gaussian processes and this block is their
+    covariance: an amplitude, the correlation scales that set the knee, and the
+    roll-off past it. Both sections take the same keys, and the two places they
+    differ -- the astronomical prior takes its time scale as a field of view,
+    and the two read ``corr_freq: null`` differently -- are stated in the base
+    configuration rather than left to be inferred from where a key sits.
 
     Parameters
     ----------
-    pow_spec
+    gp_cov
         The block as the config carries it, or ``None`` for a config that has
         none.
     section
         The config section it came from, for the error messages: ``"rfi"`` or
         ``"ast"``.
     rules
-        Key to kind, naming an entry of :data:`POW_SPEC_KINDS`. These and only
+        Key to kind, naming an entry of :data:`GP_COV_KINDS`. These and only
         these are read; anything else in the block is refused by name, since a
         key nobody reads is a key somebody will tune.
-    derived
-        Keys that are refused *with a reason*, for values that are computed
-        rather than set. Distinguished from unknown keys because they were
-        plausible enough for someone to have written them down.
     optional
         Keys that may be absent or ``null``, and come back as ``None`` for the
         caller to fill in. Every other key in ``rules`` must be present.
     """
-    derived = derived or {}
-
-    if pow_spec is None:
-        pow_spec = {}
-    elif not isinstance(pow_spec, Mapping):
+    if gp_cov is None:
+        gp_cov = {}
+    elif not isinstance(gp_cov, Mapping):
         raise ValueError(
-            f"Config parameter ({section}.pow_spec: {pow_spec!r}) is not a "
+            f"Config parameter ({section}.gp_cov: {gp_cov!r}) is not a "
             f"mapping. It takes {sorted(rules)}."
         )
-
-    for key, why in derived.items():
-        if key in pow_spec:
-            raise ValueError(
-                f"{section}.pow_spec.{key} is not a setting: {why}. Remove it. "
-                f"The keys read here are {sorted(rules)}."
-            )
 
     # key=repr because a config's keys need not all be strings, and a bare
     # sorted() over a mixed set raises TypeError from in here rather than
     # telling the user which key is wrong.
-    unknown = sorted(set(pow_spec) - set(rules), key=repr)
+    unknown = sorted(set(gp_cov) - set(rules), key=repr)
     if unknown:
         raise ValueError(
-            f"{section}.pow_spec has no key(s) {unknown}. It takes "
+            f"{section}.gp_cov has no key(s) {unknown}. It takes "
             f"{sorted(rules)}."
         )
 
     out = {}
     for key, kind in rules.items():
-        value = pow_spec.get(key)
-        where = f"{section}.pow_spec.{key}"
+        value = gp_cov.get(key)
+        where = f"{section}.gp_cov.{key}"
 
         if value is None:
             if key not in optional:
@@ -308,7 +323,7 @@ def validate_pow_spec(
             out[key] = None
             continue
 
-        out[key] = POW_SPEC_KINDS[kind](value, where)
+        out[key] = GP_COV_KINDS[kind](value, where)
 
     return out
 
@@ -674,14 +689,14 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
 
         if not np.isfinite(cutoff):
             why = f"the cutoff is {cutoff!r}"
-            fix = "Set a finite cutoff below 1 -- see rfi.pow_spec.cutoff and ast.pow_spec.cutoff."
+            fix = "Set a finite cutoff below 1 -- see rfi.cutoff and ast.cutoff."
         elif not finite:
             why = "the power spectrum is not finite"
             fix = (
                 "The cutoff is not what is wrong here. Look at the knees and "
                 "the k grid -- a zero or non-finite corr_time, corr_freq or "
                 "fov_deg, or a zero-length baseline, gives 0/0 -- and, on the "
-                "RFI path, at rfi.std / 2, which is the p0 this is scaled by. The "
+                "RFI path, at rfi.gp_cov.std / 2, which is the p0 this is scaled by. The "
                 "astronomical spectrum is built at unit amplitude and scaled "
                 "afterwards, so there the amplitude cannot be the cause."
             )
@@ -694,14 +709,14 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
                 "No cutoff can help: the comparison is strict, so nothing "
                 "clears a threshold of zero. Check the knees, and the variance "
                 "the spectrum is scaled to where the caller supplies one "
-                "(rfi.std) -- an underflow to zero looks like this."
+                "(rfi.gp_cov.std) -- an underflow to zero looks like this."
             )
         else:
             why = (
                 f"a cutoff of {cutoff!r} is at or above 1 in the working "
                 "precision, and nothing clears it"
             )
-            fix = "Set it below 1 -- see rfi.pow_spec.cutoff and ast.pow_spec.cutoff."
+            fix = "Set it below 1 -- see rfi.cutoff and ast.cutoff."
 
         raise ValueError(
             f"A power spectrum cutoff of {cutoff!r} leaves no Fourier modes: "
@@ -839,7 +854,7 @@ def knee_from_corr_scale(corr_scale):
     transforms to ``fftfreq(n_freq, chan_width)``; a correlation *time* in
     seconds gives one in Hz, a fringe rate.
 
-    ``rfi.corr_freq``, ``rfi.corr_time`` and ``ast.pow_spec.corr_freq`` are read
+    ``rfi.gp_cov.corr_freq``, ``rfi.gp_cov.corr_time`` and ``ast.gp_cov.corr_freq`` are read
     through here so that the three cannot drift apart -- the same conversion
     written out three times is how the astronomical and RFI priors came to
     disagree about what their frequency knee even meant (GitHub #117).

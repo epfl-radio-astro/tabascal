@@ -6,27 +6,34 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_pow_spec
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
 
-#: The ``ast.pow_spec`` keys and what each may be, for
-#: :func:`tabascal.fft_gp.validate_pow_spec`.
-_POW_SPEC_RULES = {
+#: The ``ast.gp_cov`` keys and what each may be, for
+#: :func:`tabascal.fft_gp.validate_gp_cov`. The same keys the RFI prior takes,
+#: except that the time scale is given as a field of view: a sky source's
+#: coherence time is its fringe rate, which follows from how far off axis it is
+#: and not from a number to pick, so the key asks for the angle.
+_GP_COV_RULES = {
     "std": "amplitude",
     "corr_freq": "number",
     "fov_deg": "number",
     "gammas": "pair",
-    "cutoff": "cutoff",
 }
 
 #: Both knees may be null, and mean different things by it. ``fov_deg`` unset is
 #: the telescope's own primary beam, 2 * 1.22 * lambda / D from the dish
 #: diameter in the measurement set, rather than a field of view chosen by hand.
 #: ``corr_freq`` unset is no roll-off along the frequency axis at all, which
-#: the comment above :class:`GPVisAst` explains.
-_POW_SPEC_OPTIONAL = ("fov_deg", "corr_freq")
+#: the comment above :class:`GPVisAst` explains -- where the RFI prior reads the
+#: same null as half the observed band.
+_GP_COV_OPTIONAL = ("fov_deg", "corr_freq")
+
+#: ``ast.cutoff`` when it is left null. What every shipped configuration sets,
+#: kept as the default now that the key may be omitted.
+_DEFAULT_PK_CUTOFF = 1e-6
 
 #: The power spectrum is used for its shape alone -- which modes survive
 #: ``cutoff``, and their relative weight -- and the amplitude is applied by
@@ -91,27 +98,34 @@ class GPVisAst(Component):
             # cuts every mode -- surfaced from inside fft_gp with a message about
             # array shapes, if it surfaced at all. The same validator serves the
             # RFI prior; the sections differ only in which keys are live.
-            pow_spec = validate_pow_spec(
-                config.args["ast"].get("pow_spec"),
+            gp_cov = validate_gp_cov(
+                config.args["ast"].get("gp_cov"),
                 "ast",
-                _POW_SPEC_RULES,
-                optional=_POW_SPEC_OPTIONAL,
+                _GP_COV_RULES,
+                optional=_GP_COV_OPTIONAL,
             )
-            config.args["ast"]["pow_spec"] = pow_spec
+            config.args["ast"]["gp_cov"] = gp_cov
 
-            self.std = pow_spec["std"]
+            self.std = gp_cov["std"]
             if self.std == FROM_DATA:
                 self.std = self._std_from_data(
                     config.vis_obs, config.estimator_flags
                 )
-            self.gammas = pow_spec["gammas"]
-            self.fov_deg = pow_spec["fov_deg"]
-            self.pk_cutoff = pow_spec["cutoff"]
+            self.gammas = gp_cov["gammas"]
+            self.fov_deg = gp_cov["fov_deg"]
+
+            # Outside the covariance block: it sets how many modes are fitted,
+            # not what the prior believes, and since the spectrum is normalised
+            # after the cut it does not change the width either.
+            self.pk_cutoff = validate_cutoff(
+                config.args["ast"].get("cutoff"), "ast.cutoff", _DEFAULT_PK_CUTOFF
+            )
+            config.args["ast"]["cutoff"] = self.pk_cutoff
 
             # corr_freq is the bandwidth over which the sky stays correlated;
             # the knee is the delay conjugate to it. Shared with the RFI prior
             # so the two sections cannot drift; null is no roll-off.
-            self.corr_freq = pow_spec["corr_freq"]
+            self.corr_freq = gp_cov["corr_freq"]
             # float(), so the knee is one type whether or not corr_freq was set
             # and is computed at host precision: the helper returns a jax scalar
             # for a value and a Python float for None, and under x32 the former
@@ -406,7 +420,7 @@ class GPVisAst(Component):
             the total amplitude -- ``rms|vis_ast|`` is then
             ``sqrt(std^2 + |mu|^2)``.
 
-            ``rfi.std`` names the same quantity in the same units, at
+            ``rfi.gp_cov.std`` names the same quantity in the same units, at
             ``rfi.mean: 0``. It gets there differently, since it normalises
             ``rfi_A``, which the visibility is quadratic in -- and a non-zero
             ``rfi.mean`` adds power to the RFI visibility rather than merely
@@ -434,7 +448,7 @@ class GPVisAst(Component):
 
         self.sigma_ast_k = vmap(sigma, (0, 0), 0)(self.k0_time, std_bl)
 
-        # validate_pow_spec accepts any finite positive float, but sigma is
+        # validate_gp_cov accepts any finite positive float, but sigma is
         # built in the run's own precision: std = 1e-50 flushes it to zero in
         # float32 and std = 1e40 overflows it, and either way the first thing
         # that divides by sigma -- inv_transform, encoding the initial sky --
@@ -449,7 +463,7 @@ class GPVisAst(Component):
                 else f"{float(jnp.min(self.std)):.4g}..{float(jnp.max(self.std)):.4g}"
             )
             raise ValueError(
-                f"ast.pow_spec.std ({reported}) is not representable in this "
+                f"ast.gp_cov.std ({reported}) is not representable in this "
                 f"run's precision: the mode standard deviations it gives come "
                 f"out {'non-finite' if not jnp.all(jnp.isfinite(self.sigma_ast_k)) else 'zero'}. "
                 f"std is a visibility amplitude in Jy, so it should be within "
@@ -496,7 +510,7 @@ class GPVisAst(Component):
         then has one width per baseline rather than one for all of them.
 
         The measurement is :func:`tabascal.fft_gp.rms_vis`, shared with
-        ``rfi.std: data``. What is here is the policy: which samples this
+        ``rfi.gp_cov.std: data``. What is here is the policy: which samples this
         prior wants, and what to say when the mask cannot give them.
 
         The mask is ``estimator_flags`` -- everything known to be bad, the
@@ -523,27 +537,27 @@ class GPVisAst(Component):
 
         if not bool(jnp.any(keep)):
             raise ValueError(
-                "ast.pow_spec.std: data has nothing to measure -- every "
+                "ast.gp_cov.std: data has nothing to measure -- every "
                 "visibility is flagged. Set a width in Jy instead."
             )
         if not bool(jnp.any(~keep)):
             print(
-                "Warning: ast.pow_spec.std: data is measuring every "
+                "Warning: ast.gp_cov.std: data is measuring every "
                 "visibility, because nothing flags any of them. Whatever "
                 "RFI is in them is in the prior width too, so it will be "
                 "wider than the sky by however much RFI there is. Flag the "
                 "contaminated samples in the MS -- this reads those flags "
                 "whatever data.flags says, so flagging them does not stop "
-                "tabascal fitting them -- or set ast.pow_spec.std to a width "
+                "tabascal fitting them -- or set ast.gp_cov.std to a width "
                 "in Jy."
             )
 
-        # The measurement itself is rfi.std: data's as well; only the mask and
+        # The measurement itself is rfi.gp_cov.std: data's as well; only the mask and
         # the reduction differ. See fft_gp.rms_vis.
-        std = rms_vis(vis_obs, keep, "ast.pow_spec.std", per_baseline=True)
+        std = rms_vis(vis_obs, keep, "ast.gp_cov.std", per_baseline=True)
 
         print(
-            f"Using ast.pow_spec.std from data: {float(jnp.min(std)):.4g} to "
+            f"Using ast.gp_cov.std from data: {float(jnp.min(std)):.4g} to "
             f"{float(jnp.max(std)):.4g} Jy across baselines "
             f"(median {float(jnp.median(std)):.4g})"
         )

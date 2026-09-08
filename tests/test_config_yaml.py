@@ -100,14 +100,14 @@ class TestEmptySectionMerge:
         assert config["rfi"]["n_int_freq"] == 1
 
     def test_a_bare_nested_section_keeps_its_defaults(self, tmp_path):
-        """The same rule one level down: ``ast.pow_spec`` written bare."""
+        """The same rule one level down: ``ast.gp_cov`` written bare."""
 
         defaults = merged(tmp_path, _MINIMAL_CONFIG)["ast"]
 
-        config = merged(tmp_path, "ast:\n  pow_spec:\n" + _MINIMAL_CONFIG)
+        config = merged(tmp_path, "ast:\n  gp_cov:\n" + _MINIMAL_CONFIG)
 
         assert config["ast"] == defaults
-        assert config["ast"]["pow_spec"]["std"] == "data"
+        assert config["ast"]["gp_cov"]["std"] == "data"
 
     def test_a_value_under_a_bare_section_still_overrides(self, tmp_path):
         """Writing the header is only inert while nothing is under it."""

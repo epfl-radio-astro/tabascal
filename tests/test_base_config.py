@@ -4,7 +4,7 @@
 (:func:`tabascal.config.load_config`), so it is the answer to "what happens when
 I leave this out". That only holds while the keys it ships and the keys the
 components read are the same set. They drifted once already: the base shipped
-``ast.pow_spec.P0``/``gamma``/``k0`` long after :class:`GPVisAst` had moved to
+``ast.gp_cov.P0``/``gamma``/``k0`` long after :class:`GPVisAst` had moved to
 ``std``/``gammas``/``fov_deg``/``corr_freq``/``cutoff``, so a config omitting the
 power spectrum died with a ``KeyError`` wrapped in "GPVisAst setup failed" while
 the base config sat there apparently supplying a default for it.
@@ -125,7 +125,7 @@ def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5):
 def _stub_vis(n_bl, n_freq, n_time):
     """Deterministic complex visibilities of unit rms, one per baseline.
 
-    Non-zero because ``ast.pow_spec.std`` defaults to ``data`` and measures
+    Non-zero because ``ast.gp_cov.std`` defaults to ``data`` and measures
     ``rms|V|`` off this: an all-zero stub would make the default width zero,
     which the component refuses.
     """
@@ -162,7 +162,7 @@ def make_ast_config(args, n_ant=4, n_freq=4, n_time=8, dish_d=13.5):
         dish_d=dish_d,
         uvw=uvw,
         phase_centre={"ra": 30.0, "dec": -30.0},
-        # Non-zero, because ast.pow_spec.std defaults to `data` and measures
+        # Non-zero, because ast.gp_cov.std defaults to `data` and measures
         # rms|V| off this: an all-zero stub would make the default width zero.
         # Deterministic, and scaled so the measured width is ~1 Jy per baseline.
         vis_obs=_stub_vis(n_bl, n_freq, n_time),
@@ -197,21 +197,21 @@ class TestBaseConfigAstKeys:
         assert comp.init_params_base["ast_k_i_base"].shape == latent_shape
         assert np.all(np.isfinite(comp.init_params_base["ast_k_r_base"]))
 
-    def test_base_pow_spec_keys_are_exactly_what_gpvisast_reads(self, tmp_path):
+    def test_base_gp_cov_keys_are_exactly_what_gpvisast_reads(self, tmp_path):
         """No dead key in the base, and no key read that the base does not ship.
 
-        ``ast.pow_spec`` has exactly one reader, so the two sets are comparable.
+        ``ast.gp_cov`` has exactly one reader, so the two sets are comparable.
         A key the base ships that nothing reads is a default that silently does
         nothing — which is what ``P0``/``gamma``/``k0`` were.
         """
 
         args = base_args(tmp_path)
-        pow_spec = RecordingDict(args["ast"]["pow_spec"])
-        args["ast"]["pow_spec"] = pow_spec
+        gp_cov = RecordingDict(args["ast"]["gp_cov"])
+        args["ast"]["gp_cov"] = gp_cov
 
         GPVisAst().setup(make_ast_config(args))
 
-        assert pow_spec.read == set(pow_spec.keys())
+        assert gp_cov.read == set(gp_cov.keys())
 
     def test_base_ast_defaults_are_the_values_the_example_configs_use(self, tmp_path):
         """The numbers themselves, not merely that a number is there.
@@ -227,18 +227,20 @@ class TestBaseConfigAstKeys:
         """
 
         ast = base_args(tmp_path)["ast"]
-        pow_spec = ast["pow_spec"]
+        gp_cov = ast["gp_cov"]
 
-        assert pow_spec["std"] == "data"
+        assert gp_cov["std"] == "data"
         # null, and meaning it: no roll-off along the frequency axis.
-        assert pow_spec["corr_freq"] is None
-        assert pow_spec["gammas"] == pytest.approx([5.0, 5.0])
-        assert pow_spec["cutoff"] == pytest.approx(1e-6)
+        assert gp_cov["corr_freq"] is None
+        assert gp_cov["gammas"] == pytest.approx([5.0, 5.0])
+        # Outside the covariance: it sets how many modes are fitted, not
+        # what the prior believes.
+        assert ast["cutoff"] == pytest.approx(1e-6)
         assert ast["freq_pad_factor"] == pytest.approx(2.0)
         assert ast["time_pad_factor"] == pytest.approx(2.0)
 
     def test_base_supplies_the_ast_pad_factors(self, tmp_path):
-        """The Fourier padding is read off the top of the ast section, not pow_spec."""
+        """The Fourier padding is read off the top of the ast section, not gp_cov."""
 
         args = base_args(tmp_path)
         ast = RecordingDict(args["ast"])
@@ -258,7 +260,7 @@ class TestBaseConfigAstKeys:
         """
 
         args = base_args(tmp_path)
-        assert args["ast"]["pow_spec"]["fov_deg"] is None
+        assert args["ast"]["gp_cov"]["fov_deg"] is None
 
         config = make_ast_config(args)
         comp = GPVisAst()

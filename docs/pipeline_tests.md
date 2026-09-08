@@ -174,7 +174,7 @@ precisions:
   architectures fp32 spreads to 1.3e-7.
 
 These figures were last re-measured on all three architectures for the
-`ast.pow_spec.std` change. When a change moves the references, re-measure them
+`ast.gp_cov.std` change. When a change moves the references, re-measure them
 rather than assuming they still hold: an architecture row left behind is not
 visible in a passing test, because the 1% tolerance is four orders wider than
 any of these spreads.
