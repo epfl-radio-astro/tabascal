@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, validate_pow_spec
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_pow_spec
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
@@ -407,9 +407,11 @@ class GPVisAst(Component):
             the total amplitude -- ``rms|vis_ast|`` is then
             ``sqrt(std^2 + |mu|^2)``.
 
-            It is not the convention ``rfi`` uses, which normalises per
-            component, and the two were never the same thing anyway: ``rfi``
-            normalises ``rfi_A``, which the visibility is quadratic in.
+            ``rfi.std`` names the same quantity in the same units, at
+            ``rfi.mean: 0``. It gets there differently, since it normalises
+            ``rfi_A``, which the visibility is quadratic in -- and a non-zero
+            ``rfi.mean`` adds power to the RFI visibility rather than merely
+            shifting it, so the two stop matching there.
 
             Dividing by the sum rather than by the mode count is what makes
             the width independent of ``cutoff`` and ``gammas``: those decide
@@ -494,6 +496,10 @@ class GPVisAst(Component):
         guessed. Per baseline because that is what the data offers; the model
         then has one width per baseline rather than one for all of them.
 
+        The measurement is :func:`tabascal.fft_gp.rms_vis`, shared with
+        ``rfi.std: data``. What is here is the policy: which samples this
+        prior wants, and what to say when the mask cannot give them.
+
         The mask is ``estimator_flags`` -- everything known to be bad, the
         MS's own flags and the samples no gain table could calibrate -- and
         not the likelihood's. Those answer different questions and this is
@@ -514,9 +520,7 @@ class GPVisAst(Component):
         contaminated, which is what would fix the unflagged case.
         """
 
-        vis_obs = jnp.asarray(vis_obs)
         keep = ~jnp.asarray(estimator_flags)
-        n_kept = jnp.sum(keep, axis=(1, 2))
 
         if not bool(jnp.any(keep)):
             raise ValueError(
@@ -535,38 +539,9 @@ class GPVisAst(Component):
                 "in Jy."
             )
 
-        # Scaled before squaring: |V| of 1e20 squares to 1e40, which is inf in
-        # float32 even though both the visibility and its rms are perfectly
-        # representable, and 1e-30 squares to zero. Dividing by the baseline's
-        # own largest sample first bounds the squares to 1 and puts the scale
-        # back afterwards.
-        # where, not a multiply: an MS routinely leaves a NaN or an infinity in
-        # a cell it has flagged, and NaN * False is NaN in numpy. XLA happens
-        # to lower a boolean multiply to a select and give 0, so both spellings
-        # measure the same thing here -- this one says so rather than resting
-        # on that.
-        kept_abs = jnp.where(keep, jnp.abs(vis_obs), 0.0)
-        scale = jnp.max(kept_abs, axis=(1, 2))
-        safe = jnp.where(scale > 0, scale, 1.0)
-        mean_sq = jnp.sum((kept_abs / safe[:, None, None]) ** 2, axis=(1, 2)) / jnp.maximum(
-            n_kept, 1
-        )
-        std = safe * jnp.sqrt(mean_sq)
-
-        if not bool(jnp.all(jnp.isfinite(std))):
-            raise ValueError(
-                "ast.pow_spec.std: data cannot measure a width: the unflagged "
-                "visibilities of at least one baseline are not finite. Flag "
-                "them, or set a width in Jy."
-            )
-
-        # Only a baseline with nothing left to measure falls back, and it falls
-        # back to the median of the ones that measured something -- the
-        # least-committal stand-in, and it keeps a zero out of a denominator
-        # downstream. Anything else non-finite is the error above rather than
-        # something the median quietly covers for.
-        measured = n_kept > 0
-        std = jnp.where(measured, std, jnp.median(std[measured]))
+        # The measurement itself is rfi.std: data's as well; only the mask and
+        # the reduction differ. See fft_gp.rms_vis.
+        std = rms_vis(vis_obs, keep, "ast.pow_spec.std", per_baseline=True)
 
         print(
             f"Using ast.pow_spec.std from data: {float(jnp.min(std)):.4g} to "

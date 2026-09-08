@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 
+from tabascal.interferometry import calculate_rfi_vis_fine
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
     ComplexRFIConstAnt,
@@ -83,7 +84,7 @@ def make_rfi_config(
     mean="zeros",
     est=None,
     r_seed=1,
-    var=1.0,
+    std=1.0,
     corr_freq=5e6,
     corr_time=60.0,
     pad_factor=2,
@@ -135,7 +136,7 @@ def make_rfi_config(
         args={
             "rfi": {
                 "r_seed": r_seed,
-                "var": var,
+                "std": std,
                 "corr_freq": corr_freq,
                 "corr_time": corr_time,
                 "init": init,
@@ -242,12 +243,12 @@ class TestRfiSignalConfigValidation:
         """All-None config picks up defaults derived from the data and the observation grid."""
         freqs, times = self._grid()
         vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": None, "var": None, "corr_freq": None, "corr_time": None}
+        cfg = {"r_seed": None, "std": None, "corr_freq": None, "corr_time": None}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         assert result["r_seed"] == 1
-        assert result["var"] == pytest.approx(3.0)  # max |vis_obs|
+        assert result["std"] == pytest.approx(6.0)  # 2 x max |vis_obs|
         assert result["corr_freq"] == pytest.approx(float(freqs[-1] - freqs[0]) / 2)
         assert result["corr_time"] == pytest.approx(float(times[-1] - times[0]) / 2)
 
@@ -259,7 +260,7 @@ class TestRfiSignalConfigValidation:
         """
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": None, "corr_time": None}
+        cfg = {"r_seed": 1, "std": 1.0, "corr_freq": None, "corr_time": None}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -274,12 +275,12 @@ class TestRfiSignalConfigValidation:
         """Explicit numeric values survive validation and are coerced to float."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 42, "var": 7, "corr_freq": 5e6, "corr_time": 60}
+        cfg = {"r_seed": 42, "std": 7, "corr_freq": 5e6, "corr_time": 60}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         assert result["r_seed"] == 42
-        assert isinstance(result["var"], float) and result["var"] == pytest.approx(7.0)
+        assert isinstance(result["std"], float) and result["std"] == pytest.approx(7.0)
         assert result["corr_freq"] == pytest.approx(5e6)
         assert isinstance(result["corr_time"], float)
         assert result["corr_time"] == pytest.approx(60.0)
@@ -288,17 +289,17 @@ class TestRfiSignalConfigValidation:
         """A config missing one of the four required keys raises ValueError."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": 5e6}  # no corr_time
+        cfg = {"r_seed": 1, "std": 1.0, "corr_freq": 5e6}  # no corr_time
 
         with pytest.raises(ValueError):
             rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
-    @pytest.mark.parametrize("key", ["r_seed", "var", "corr_freq", "corr_time"])
+    @pytest.mark.parametrize("key", ["r_seed", "std", "corr_freq", "corr_time"])
     def test_non_numeric_value_raises(self, key):
         """A non-numeric value for any tunable raises ValueError."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "var": 1.0, "corr_freq": 5e6, "corr_time": 60.0}
+        cfg = {"r_seed": 1, "std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}
         cfg[key] = "not a number"
 
         with pytest.raises(ValueError):
@@ -308,7 +309,7 @@ class TestRfiSignalConfigValidation:
         """With a zero-extent grid the defaults fall back to the step sizes, not zero."""
         freqs, times = jnp.array([1.4e9]), jnp.array([0.0])
         vis_obs = jnp.ones((6, 1, 1), dtype=complex)
-        cfg = {"r_seed": None, "var": None, "corr_freq": None, "corr_time": None}
+        cfg = {"r_seed": None, "std": None, "corr_freq": None, "corr_time": None}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -972,7 +973,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     time_scale="utc",
         vis_obs=jnp.ones((3, n_freq, n_time), dtype=complex),
         args={
-            "rfi": {"r_seed": 1, "var": 1.0, "corr_freq": 5e6, "corr_time": 60.0,
+            "rfi": {"r_seed": 1, "std": 1.0, "corr_freq": 5e6, "corr_time": 60.0,
                     "init": "sample", "mean": "zeros", "est": None,
                     "time_pad_factor": 2, "freq_pad_factor": 2},
             "plots": {"truth": False},
@@ -1837,9 +1838,10 @@ class TestMaskIsolatesNonFiniteSamples:
 
 def setup_with_pow_spec(cls, pow_spec, n_freq=8, n_time=16, **kwargs):
     """Set a component up with an ``rfi.pow_spec`` block, or without one."""
-    config = make_rfi_config(
-        n_rfi=2, n_rfi_real=2, n_ant=3, n_freq=n_freq, n_time=n_time, **kwargs
-    )
+    kwargs.setdefault("n_rfi", 2)
+    kwargs.setdefault("n_rfi_real", 2)
+    kwargs.setdefault("n_ant", 3)
+    config = make_rfi_config(n_freq=n_freq, n_time=n_time, **kwargs)
     if pow_spec is not _ABSENT:
         config.args["rfi"]["pow_spec"] = pow_spec
 
@@ -2067,3 +2069,244 @@ class TestPowSpecIsRead:
         )
 
         assert base["rfi"]["pow_spec"] == {"gammas": None, "cutoff": None}
+
+
+class TestTheStdIsTheWidthItClaims:
+    """``rfi.std`` is the width of one source's prior, in Jy, as ``rms|V|``.
+
+    The same quantity as ``ast.pow_spec.std``, so one measurement sets either
+    prior. The arithmetic getting there differs, and that difference is
+    :data:`~tabascal.components.rfi_signal._LATENT_POWER`: ``vis_ast`` *is* the
+    modelled quantity, while ``rfi_A`` is a per-antenna amplitude the
+    visibility is quadratic in.
+
+    **Per source, and per this antenna structure.** Two factors sit between
+    the key and the visibility a run actually realises, and both are asserted
+    here rather than described:
+
+    * ``ComplexRFIConstAnt`` broadcasts one amplitude to every antenna, so its
+      visibility is ``|A|^2`` where ``ComplexRFIVarAnt``'s is
+      ``A_p conj(A_q)`` with independent draws. ``E|A|^4 = 2 (E|A|^2)^2``, so
+      it realises ``sqrt(2)`` times the width.
+    * The width applies to each satellite and their visibilities sum, so N
+      independent zero-mean VarAnt sources realise ``sqrt(N)`` times it.
+      Independence is not enough on its own: a non-zero mean leaves cross
+      terms, and ConstAnt has one.
+
+    Measured by sampling each component's own ``sigma_rfi_k`` through its own
+    antenna structure, rather than by repeating the algebra the component
+    used: a test that recomputes the implementation cannot tell a factor of
+    two from a factor of one, and one that draws independent antennas for
+    both classes silently tests VarAnt's model twice.
+    """
+
+    #: Prior draws per case. The grid is correlated, so this buys far fewer
+    #: independent samples than points; the tolerances below are what that
+    #: leaves, not what the normalisation is worth.
+    SEEDS = range(24)
+
+    @classmethod
+    def _rms_vis(cls, comp, n_rfi_real=1):
+        """``rms|V|`` of the visibility the component's own forward pass builds.
+
+        Through ``build_forward``, not through a re-derivation of it: the
+        antenna structure and the sum over sources are the component's, so a
+        change to either fails here. Instantaneous, on the fine grid, with no
+        integration and no elevation mask -- which is the contract.
+        """
+
+        samples = []
+        for seed in cls.SEEDS:
+            rfi_A = run_forward(comp, random_params(comp, seed=seed))
+            # V_pq = sum_s A[s, p] conj(A[s, q]), over every baseline: the GP
+            # is correlated along the grid, so the effective sample count is
+            # far below the point count and the pairs are what make this
+            # converge in a test-sized number of draws.
+            # Through the production reduction, not a reimplementation of it:
+            # calculate_rfi_vis_fine is what sums the sources and forms the
+            # baseline product, so a model that averaged its sources instead
+            # of adding them fails here. Zero phase, since the geometry is not
+            # what is under test -- every baseline over every antenna pair.
+            n_ant = rfi_A.shape[1]
+            a1, a2 = np.triu_indices(n_ant, k=1)
+            vis = calculate_rfi_vis_fine(
+                rfi_A[:n_rfi_real],
+                jnp.zeros_like(rfi_A[:n_rfi_real], dtype=float),
+                jnp.asarray(a1),
+                jnp.asarray(a2),
+            )
+            # Second moments, pooled across draws before the root is taken
+            # at the end. The pooled mean is unbiased; its root is not, but a
+            # root of the pool is far less biased than a mean of the roots,
+            # and what is left is inside the tolerances.
+            samples.append(jnp.mean(jnp.abs(vis) ** 2))
+        return float(jnp.sqrt(jnp.mean(jnp.stack(samples))))
+
+    @pytest.mark.parametrize("std", [0.5, 3.0, 40.0])
+    def test_a_var_ant_source_realises_the_configured_std(self, std):
+        """Exactly, in expectation; the tolerance here is sampling, not error.
+
+        ``E|V_pq|^2 = std^2`` holds through the transform, which pads, inverts
+        with ``norm="forward"`` and crops -- operations that change which modes
+        exist and how they correlate, not the amplitude.
+
+        What a finite number of draws measures scatters around that, and by
+        more than the point count suggests: the GP is correlated along the
+        grid, so most points are not independent samples. The tolerance is
+        that scatter at these draws and this grid, not a claim about the
+        normalisation, and it tightens with draws rather than converging on
+        something else -- at 800 it is inside 4 %.
+        """
+        comp = setup_component(ComplexRFIVarAnt, std=std, n_rfi=1, n_rfi_real=1)
+
+        assert self._rms_vis(comp) == pytest.approx(std, rel=0.25)
+
+    def test_a_const_ant_source_is_wider_than_a_var_ant_one_by_about_sqrt_two(self):
+        """Not a defect: one amplitude on both antennas makes V = |A|^2.
+
+        ``E|A|^4 = 2 (E|A|^2)^2`` for a circular complex Gaussian, hence
+        ``sqrt(2)``. Bounded rather than approximated, because this ratio is
+        the one quantity here that cannot be measured tightly at test cost:
+        ConstAnt gives every antenna the same amplitude, so every baseline
+        carries the *same* ``|A|^2`` and the extra pairs above buy nothing,
+        leaving a fourth-moment estimator with heavy tails. The bounds still
+        separate ``sqrt(2)`` from both 1 (the antenna structures made equal)
+        and 2 (the factor applied twice), which is what this has to catch.
+        """
+        kwargs = dict(std=3.0, n_rfi=1, n_rfi_real=1)
+        var_ant = self._rms_vis(setup_component(ComplexRFIVarAnt, **kwargs))
+        const_ant = self._rms_vis(setup_component(ComplexRFIConstAnt, **kwargs))
+
+        assert 1.2 < const_ant / var_ant < 1.75
+
+    @pytest.mark.parametrize("n_sources", [2, 4])
+    def test_n_var_ant_sources_realise_sqrt_n_times_one(self, n_sources):
+        """The width is per satellite, and the model sums their visibilities.
+
+        Summed by the forward pass, not by the test: a model that averaged its
+        sources instead of adding them would fail here. Against the one-source
+        width for the same reason as above.
+
+        VarAnt only -- ConstAnt's sources do not add in quadrature, since each
+        carries a non-zero mean visibility and those add coherently, by however
+        much the geometric phases happen to align.
+        """
+        one = self._rms_vis(
+            setup_component(ComplexRFIVarAnt, std=3.0, n_rfi=1, n_rfi_real=1)
+        )
+        many = self._rms_vis(
+            setup_component(
+                ComplexRFIVarAnt, std=3.0, n_rfi=n_sources, n_rfi_real=n_sources
+            ),
+            n_rfi_real=n_sources,
+        )
+
+        assert many / one == pytest.approx(np.sqrt(n_sources), rel=0.15)
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_the_width_scales_with_std(self, cls):
+        """Doubling std doubles the realised width, exactly.
+
+        std is a scale on sigma and the same seeds are drawn either side, so
+        this ratio is deterministic where the absolute width is sampled.
+        """
+        base = self._rms_vis(setup_component(cls, std=2.0, n_rfi=1, n_rfi_real=1))
+        doubled = self._rms_vis(setup_component(cls, std=4.0, n_rfi=1, n_rfi_real=1))
+        assert doubled / base == pytest.approx(2.0, rel=0.02)
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_the_spectrum_normalises_to_half_the_std(self, cls):
+        """The internal half, stated once where it is cheap to check.
+
+        ``sum(sigma^2) = std / 2`` is what the sampling above comes out of; if
+        this moves and that does not, one of the two is measuring the wrong
+        thing.
+        """
+        comp = setup_component(cls, std=6.0)
+
+        assert float(
+            jnp.sum(jnp.asarray(comp.sigma_rfi_k)[0, 0] ** 2)
+        ) == pytest.approx(3.0)
+
+
+class TestTheStdCanBeMeasuredFromTheData:
+    """``rfi.std: data`` is the same measurement ``ast.pow_spec.std: data`` is.
+
+    Literally the same function; what each prior owns is which samples it can
+    use and how far it reduces. The differences are asserted here rather than
+    described, because they are the part that is easy to get backwards --
+    the symmetry that looks right (each prior takes its own half of the mask)
+    is wrong, and the asymmetry that looks arbitrary is the correct one.
+    """
+
+    #: The observation grid the validator needs and this class does not vary.
+    GRID = (jnp.linspace(1.4e9, 1.41e9, 4), 1e6, jnp.linspace(0.0, 120.0, 8), 8.0)
+
+    def _validate(self, vis, gain_flags=None, **kwargs):
+        cfg = {"r_seed": 1, "std": "data", "corr_freq": 5e6, "corr_time": 60.0}
+        cfg.update(kwargs)
+        freqs, chan_width, times, int_time = self.GRID
+        return rfi_signal_config_validation(
+            cfg, vis, freqs, chan_width, times, int_time, gain_flags
+        )
+
+    def test_it_measures_the_rms_of_the_visibilities(self):
+        vis = jnp.asarray(
+            np.random.default_rng(0).normal(size=(4, 3, 5))
+            + 1j * np.random.default_rng(1).normal(size=(4, 3, 5))
+        )
+        result = self._validate(vis)
+
+        expected = float(np.sqrt(np.mean(np.abs(np.asarray(vis)) ** 2)))
+        assert result["std"] == pytest.approx(expected, rel=1e-5)
+
+    def test_it_is_a_scalar_and_not_a_width_per_baseline(self):
+        """The astronomical model carries one width per baseline; this does not."""
+        vis = jnp.ones((4, 3, 5), dtype=complex)
+        result = self._validate(vis)
+
+        assert isinstance(result["std"], float)
+
+    def test_the_ms_flags_are_kept_rather_than_read_as_rfi(self):
+        """The one place this and the astronomical estimate genuinely differ.
+
+        A flag says something is wrong, not that RFI is there, and the
+        astronomical prior excludes it because whatever it means the sample is
+        not clean sky. Reading it the other way round would assume every flag
+        is RFI -- and would measure the bright half, since flagging is a
+        threshold.
+        """
+        vis = np.ones((4, 3, 5), dtype=complex)
+        vis[:, :, ::2] *= 50.0  # the loud half, as an MS would flag it
+        result = self._validate(jnp.asarray(vis))
+
+        everything = float(np.sqrt(np.mean(np.abs(vis) ** 2)))
+        loud_only = float(np.sqrt(np.mean(np.abs(vis[:, :, ::2]) ** 2)))
+        assert result["std"] == pytest.approx(everything, rel=1e-5)
+        assert result["std"] < loud_only
+
+    def test_an_uncalibratable_sample_is_dropped(self):
+        """The exclusion that does apply to both priors.
+
+        apply_gain_table leaves these under a unity gain, so they are on a
+        different flux scale from everything around them and are no basis for
+        anybody's amplitude.
+        """
+        vis = np.ones((4, 3, 5), dtype=complex)
+        gain_flags = np.zeros(vis.shape, dtype=bool)
+        gain_flags[0] = True
+        vis[0] = 1e4  # raw frame, unity gain
+
+        result = self._validate(jnp.asarray(vis), jnp.asarray(gain_flags))
+
+        assert result["std"] == pytest.approx(1.0, rel=1e-5)
+
+    def test_everything_flagged_by_the_gain_table_is_refused(self):
+        vis = jnp.ones((4, 3, 5), dtype=complex)
+        with pytest.raises(ValueError, match="nothing to measure"):
+            self._validate(vis, jnp.ones(vis.shape, dtype=bool))
+
+    def test_a_value_that_is_neither_a_number_nor_data_is_refused_by_name(self):
+        vis = jnp.ones((4, 3, 5), dtype=complex)
+        with pytest.raises(ValueError, match="rfi"):
+            self._validate(vis, std="widish")

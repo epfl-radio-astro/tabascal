@@ -10,7 +10,7 @@ from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.transform import affine_transform_full
 from tabascal.ms import get_observation_data_type
-from tabascal.fft_gp import latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, validate_pow_spec
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_pow_spec
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -415,11 +415,70 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
 #: ``BaseGPRFI.default_gammas`` / ``default_pk_cutoff``.
 _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 
+#: What the spectrum is normalised to, per unit of ``rfi.std``.
+#:
+#: ``rfi.std`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
+#: ``ast.pow_spec.std``, read off the data the same way. The two get there by
+#: different arithmetic, and this is where it differs: ``vis_ast``
+#: *is* the modelled quantity and is linear in its latent, while ``rfi_A`` is a
+#: per-antenna amplitude and the visibility is quadratic in it,
+#: ``vis_rfi ~ rfi_A[a1] * conj(rfi_A[a2])``.
+#:
+#: The complex latent is drawn as two independent standard normals, so it
+#: carries ``E|z|^2 = 2``. A linear model takes the square root of that into
+#: its width, so the astronomical prior divides by ``sqrt(2)``; a quadratic one
+#: passes the power through undiminished, so
+#: ``sum(sigma_rfi_k**2) = rfi.std / 2``.
+#:
+#: And that carries through the transform exactly. ``latent_to_signal`` pads
+#: the coefficients, inverts with ``norm="forward"`` and crops, so every
+#: retained coefficient reaches every output point with unit magnitude:
+#: ``E|A|^2 = 2 sum(sigma^2) = rfi.std``, and for the independent antennas of
+#: ``ComplexRFIVarAnt``, ``E|V_pq|^2 = rfi.std^2``. Padding and cropping change
+#: which modes exist and how they correlate, not the amplitude.
+#:
+#: It is an expectation, so a measured realisation scatters around it, by more
+#: where the correlation structure leaves fewer independent samples in the
+#: grid. Any test of it is a sampling problem rather than a check on the
+#: normalisation.
+#:
+#: And it is the *instantaneous* visibility of a *zero-mean, unmasked* source,
+#: which is the width the prior is on rather than a prediction of what a run
+#: will see. Three model steps sit between the two, all of them intended:
+#:
+#: * A non-zero ``rfi.mean`` -- ``data``, ``est``, ``matched-filter`` -- adds
+#:   its own power: ``E|V_pq|^2 = (std + |m_p|^2)(std + |m_q|^2)`` for the mean
+#:   amplitudes ``m``. Sources then carry non-zero mean visibilities too, so
+#:   their total no longer generally scales as ``sqrt(N)``.
+#: * ``rfi.min_elevation`` zeroes a source while it is below the cut, so one
+#:   visible for a fraction ``f`` of the observation has ``std * sqrt(f)`` over
+#:   the whole of it, and a source that never rises has exactly zero.
+#: * The visibility kernels average the fine grid, and fringes that turn within
+#:   an integration cancel there. How much depends on the spectrum's own
+#:   correlation in time and frequency.
+#:
+#: **Per source, and for this antenna structure.** ``rfi.std`` is one source's
+#: width, and two known factors sit between it and the visibility a run
+#: realises. ``ComplexRFIConstAnt`` broadcasts one amplitude to every antenna,
+#: so its visibility is ``|A|^2`` rather than ``A_p conj(A_q)`` and
+#: ``E|A|^4 = 2 (E|A|^2)^2`` makes it ``sqrt(2)`` wider. And the width applies
+#: to each satellite while their visibilities sum, so N *VarAnt* sources
+#: realise ``sqrt(N)`` times it -- in quadrature because each has zero mean
+#: visibility, which ConstAnt's sources do not, so those add coherently by
+#: however much their geometric phases align. Neither is corrected for: they
+#: are properties of the
+#: model rather than of the key, and correcting them would make the same
+#: number mean different widths in different configurations.
+#:
+#: Measured, not derived: ``tests/components/test_rfi_signal.py`` samples each
+#: component through its own antenna structure and checks all three.
+_LATENT_POWER = 2.0
+
 #: Keys that were in the shipped example configs for a long time while nothing
 #: read them (#111), and that are computed rather than set. Refused by name
 #: rather than ignored: silently accepting them again would be the same trap.
 _POW_SPEC_DERIVED = {
-    "p0": "the spectrum is renormalised to rfi.var, so p0 has no effect",
+    "p0": "the spectrum is renormalised to rfi.std, so p0 has no effect",
     "k0s": "the knee is derived from rfi.corr_freq and rfi.corr_time",
 }
 
@@ -435,7 +494,82 @@ def _validate_pow_spec(pow_spec) -> Dict:
     )
 
 
-def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float) -> Dict:
+def _std_from_data(vis_obs, gain_flags) -> float:
+    """``rms|V|`` of the observed visibilities, in Jy, as the RFI's width.
+
+    The same measurement as ``ast.pow_spec.std: data`` -- literally, they call
+    the same :func:`tabascal.fft_gp.rms_vis`. What differs is which samples
+    each prior can use, and there is one real difference, not the symmetry it
+    looks like from a distance.
+
+    **The MS's flags are kept.** They are excluded from the astronomical
+    estimate because whatever a flag means, it means the sample is not clean
+    sky. They cannot be used the other way round: a flag does not say "RFI
+    here", it says "something is wrong here", and a dead antenna or a
+    correlator glitch is neither RFI nor a scale to set an RFI prior from.
+    Measuring the flagged samples instead is also biased high even when they
+    *are* RFI, wherever the flagger thresholds on amplitude: the flagged half
+    is then the bright half, and its rms sits above the typical amplitude the
+    prior wants. On the
+    shipped 8A simulation, flagging the brightest 30 % and measuring those
+    returns 1.54x the true RFI where measuring everything returns 1.015x.
+
+    **Uncalibratable samples are dropped**, which is the one exclusion that
+    applies to both priors: ``apply_gain_table`` leaves them under a unity
+    gain, so they are not on the same flux scale as the data around them and
+    carry no usable amplitude for anybody.
+
+    A scalar rather than one per baseline, because that is what this prior
+    carries: the astronomical model has a width per baseline, ``rfi.std``
+    normalises a single spectrum.
+
+    It measures the *total* RFI and hands it to each source, and does not
+    correct for either factor in :data:`_LATENT_POWER`: N zero-mean satellites
+    at this width realise about ``sqrt(N)`` times it, before masking and
+    integration have their own say. That is deliberate -- a number and a
+    measurement that produce different priors would be worse.
+
+    It also tends above the RFI itself, since the sky and the noise are in
+    the visibilities -- tends to, not always, since the sky and the RFI can
+    cancel coherently on a sample: 11.2 Jy on that simulation against a true
+    RFI
+    ``rms|V|`` of 11.0, because RFI that dominates the sky by 7x dominates the
+    measurement as well. Where the RFI is faint it measures the sky instead
+    and is far too wide, which is the mirror of ``ast.pow_spec.std: data``'s
+    own limitation and what GitHub #220 fixes for both.
+
+    Both together still beat the width they replace, and by more than the
+    measurement alone suggests, because the null default carries the same
+    ``sqrt(N)``: on that simulation's three satellites, 11.2 Jy per source
+    realises about 19 Jy against a true 11.0, where the default's 46.4 realises
+    about 80. Roughly 1.8x against 7.3x.
+    """
+
+    bad = (
+        jnp.zeros(jnp.shape(vis_obs), dtype=bool)
+        if gain_flags is None
+        else jnp.asarray(gain_flags)
+    )
+    keep = ~bad
+
+    std = float(rms_vis(vis_obs, keep, "rfi.std", per_baseline=False))
+
+    dropped = float(jnp.mean(bad))
+    where = (
+        f", over the {100 * (1 - dropped):.1f} % of visibilities a gain table "
+        "could calibrate"
+        if dropped
+        else ""
+    )
+    print(
+        f"Using RFI std from data: {std:.4g} Jy (rms|V|){where}. The sky and "
+        "the noise are in it as well as the RFI."
+    )
+
+    return std
+
+
+def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float, gain_flags: Array = None) -> Dict:
     """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
 
     Parameters
@@ -463,7 +597,7 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
     try:
         r_seed = rfi_config["r_seed"]
-        gp_var = rfi_config["var"]
+        rfi_std = rfi_config["std"]
         gp_freq_l = rfi_config["corr_freq"]
         gp_time_l = rfi_config["corr_time"]
     except Exception as e:
@@ -478,13 +612,21 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     else:
         raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
 
-    if not gp_var: # Set Default
-        est_gp_var = float(jnp.max(jnp.abs(vis_obs)))
-        rfi_config["var"] = est_gp_var
-    elif isinstance(gp_var, (float, int)):
-        rfi_config["var"] = float(gp_var)
+    if rfi_std == FROM_DATA:
+        rfi_config["std"] = _std_from_data(vis_obs, gain_flags)
+    elif not rfi_std: # Set Default
+        # _LATENT_POWER times the largest visibility, which is the prior this
+        # default has always set -- the key it was written for meant half of
+        # what rfi.std means. It is a maximum where the key says typical, which
+        # is GitHub #227 rather than something to change under a rename.
+        rfi_config["std"] = _LATENT_POWER * float(jnp.max(jnp.abs(vis_obs)))
+    elif isinstance(rfi_std, (float, int)):
+        rfi_config["std"] = float(rfi_std)
     else:
-        raise ValueError(f"Config parameter (rfi:\n\tvar: {gp_var}) is not of type float or int.")
+        raise ValueError(
+            f"Config parameter (rfi:\n\tstd: {rfi_std}) is not a number, "
+            f"'{FROM_DATA}', or null."
+        )
     
     if not gp_freq_l: # Set Default
         est_gp_freq_l = extent(freqs, chan_width) / 2
@@ -503,7 +645,7 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
         raise ValueError(f"Config parameter (rfi:\n\tcorr_time: {gp_time_l}) is not of type float or int.")    
     
     print()
-    print(f"Using RFI var : {rfi_config['var']:.1e} Jy")
+    print(f"Using RFI std : {rfi_config['std']:.1e} Jy (rms|V|)")
     print(f"Using RFI corr_freq : {rfi_config['corr_freq']/1e3:.1f} kHz")
     print(f"Using RFI corr_time : {rfi_config['corr_time']:.1f} s")
 
@@ -557,7 +699,11 @@ class BaseGPRFI(Component):
 
         # Validate config and set defaults
         rfi_config = rfi_signal_config_validation(
-            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time)
+            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time,
+            # Only the uncalibratable samples: the MS's own flags stay in,
+            # since a flag does not say the RFI is there. Read by std: data
+            # alone -- see _std_from_data.
+            getattr(tab_config, "gain_flags", None))
 
         # The validated rfi section, kept whole: gp_pow_spec reads its pow_spec
         # block, which is optional and falls back to this component's defaults.
@@ -596,7 +742,10 @@ class BaseGPRFI(Component):
         self.est_times_mjd = to_utc_mjd(tab_config.times_mjd, tab_config.time_scale)
         self.int_time = tab_config.int_time
 
-        self.gp_var = rfi_config["var"]
+        # The spectrum normalises to this; rfi.std is what it produces. See
+        # _LATENT_POWER for why the two differ by exactly that factor.
+        self.rfi_std = rfi_config["std"]
+        self.gp_var = self.rfi_std / _LATENT_POWER
         self.corr_freq = rfi_config["corr_freq"]
         self.corr_time = rfi_config["corr_time"]
 

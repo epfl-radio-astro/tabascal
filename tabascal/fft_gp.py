@@ -29,7 +29,7 @@ from tabascal.timing import measure_runtime
 # What differs between the sections is only which keys are live: the RFI prior
 # derives its knee from corr_freq/corr_time, where the astronomical one is given
 # a corr_freq and derives its time knee from fov_deg. Both normalise their
-# amplitude away -- rfi to rfi.var, ast to ast.pow_spec.std -- so neither reads
+# amplitude away -- rfi to rfi.std, ast to ast.pow_spec.std -- so neither reads
 # a p0. That is expressed as the rules a caller passes, not as a second copy of
 # these checks.
 
@@ -66,6 +66,76 @@ def _pow_spec_number(value, where: str) -> float:
 #: The literal a power-spectrum amplitude may take instead of a number, meaning
 #: "measure it from the observed visibilities rather than making me guess".
 FROM_DATA = "data"
+
+
+def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
+    """``rms|V|`` over the samples ``keep`` selects, in Jy.
+
+    The measurement both ``std: data`` options are: ``ast.pow_spec.std`` and
+    ``rfi.std`` name the same quantity, so they read it off the data the same
+    way and differ only in which samples they take and how far they reduce.
+
+    ``keep`` is the caller's, and it is where the two part company. The
+    astronomical prior wants the sky, so it keeps what nothing has flagged.
+    The RFI prior keeps the MS's flags -- a flag says something is wrong, not
+    that RFI is there -- and drops only what no gain table could calibrate.
+    What is shared is this measurement, not the mask.
+
+    ``per_baseline`` gives the astronomical prior one width per baseline,
+    which is what its model carries. The RFI prior's is a scalar, so it
+    reduces over everything.
+
+    Raises rather than guesses when there is nothing to measure or what there
+    is is not finite; a baseline that kept nothing takes the median of those
+    that did, which is the least-committal stand-in available -- not a
+    guarantee of a positive width, since the ones that measured something can
+    all have measured zero.
+    """
+
+    vis_obs = jnp.asarray(vis_obs)
+    keep = jnp.asarray(keep)
+
+    if not bool(jnp.any(keep)):
+        raise ValueError(
+            f"{key}: data has nothing to measure -- no visibility is left "
+            "once the mask is applied. Set a width in Jy instead."
+        )
+
+    axes = (1, 2) if per_baseline else None
+    n_kept = jnp.sum(keep, axis=axes)
+
+    # Scaled before squaring: |V| of 1e20 squares to 1e40, which is inf in
+    # float32 even though both the visibility and its rms are perfectly
+    # representable, and 1e-30 squares to zero. Dividing by the largest kept
+    # sample first bounds the squares to 1 and puts the scale back afterwards.
+    # where, not a multiply: an MS routinely leaves a NaN or an infinity in a
+    # cell it has flagged, and NaN * False is NaN in numpy. XLA happens to
+    # lower a boolean multiply to a select and give 0, so both spellings
+    # measure the same thing here -- this one says so rather than resting on
+    # that.
+    kept_abs = jnp.where(keep, jnp.abs(vis_obs), 0.0)
+    scale = jnp.max(kept_abs, axis=axes)
+    safe = jnp.where(scale > 0, scale, 1.0)
+    scaled = kept_abs / (safe[:, None, None] if per_baseline else safe)
+    mean_sq = jnp.sum(scaled**2, axis=axes) / jnp.maximum(n_kept, 1)
+    std = safe * jnp.sqrt(mean_sq)
+
+    if not bool(jnp.all(jnp.isfinite(std))):
+        raise ValueError(
+            f"{key}: data cannot measure a width: the visibilities it is "
+            "measuring are not finite. Set a width in Jy -- flagging them "
+            "helps only where the caller's mask reads the MS's flags, which "
+            "ast.pow_spec.std does and rfi.std does not."
+        )
+
+    if per_baseline:
+        # Only a baseline with nothing left to measure falls back. Anything
+        # else non-finite is the error above rather than something the median
+        # quietly covers for.
+        measured = n_kept > 0
+        std = jnp.where(measured, std, jnp.median(std[measured]))
+
+    return std
 
 
 def _pow_spec_amplitude(value, where: str):
@@ -611,7 +681,7 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
                 "The cutoff is not what is wrong here. Look at the knees and "
                 "the k grid -- a zero or non-finite corr_time, corr_freq or "
                 "fov_deg, or a zero-length baseline, gives 0/0 -- and, on the "
-                "RFI path, at rfi.var, which is the p0 this is scaled by. The "
+                "RFI path, at rfi.std / 2, which is the p0 this is scaled by. The "
                 "astronomical spectrum is built at unit amplitude and scaled "
                 "afterwards, so there the amplitude cannot be the cause."
             )
@@ -624,7 +694,7 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
                 "No cutoff can help: the comparison is strict, so nothing "
                 "clears a threshold of zero. Check the knees, and the variance "
                 "the spectrum is scaled to where the caller supplies one "
-                "(rfi.var) -- an underflow to zero looks like this."
+                "(rfi.std) -- an underflow to zero looks like this."
             )
         else:
             why = (

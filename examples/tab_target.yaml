@@ -70,7 +70,7 @@ rfi:
   mean: 0
   # mean: est
   # mean: truth
-  # var: 100        # Jy
+  # std: 200        # Jy, as rms|V|
   corr_time: 24   # seconds
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
