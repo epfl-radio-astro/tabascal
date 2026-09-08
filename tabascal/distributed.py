@@ -417,16 +417,6 @@ def rank0_first(name: str):
 # Host materialization
 # ---------------------------------------------------------------------------
 
-def to_host(arr) -> np.ndarray:
-    """Materialize a (possibly sharded) device array as a full host numpy array.
-
-    With RFI-axis sharding the written results (per-baseline ``vis_*``, per-antenna
-    ``gains``) are replicated and fully addressable on every process, so this is just
-    ``np.asarray``; per-RFI arrays are not written to disk.
-    """
-    return np.asarray(arr)
-
-
 # ---------------------------------------------------------------------------
 # Process-0 IO guards
 # ---------------------------------------------------------------------------

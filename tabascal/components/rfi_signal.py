@@ -8,7 +8,6 @@ from tabascal.components import Component, assert_attr_shape
 from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
-from tabascal.transform import affine_transform_full
 from tabascal.ms import get_observation_data_type
 from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_pow_spec
 from tabascal.time import to_utc_mjd

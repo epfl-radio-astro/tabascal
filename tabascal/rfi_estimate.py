@@ -144,7 +144,6 @@ from tabascal.time import (
     datetime_to_jd,
     gast_deg,
     jd_to_datetime,
-    mjd_to_jd,
     to_utc_mjd,
 )
 

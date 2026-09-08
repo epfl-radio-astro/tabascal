@@ -10,7 +10,6 @@ from tabascal.distributed import (
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
-from tabascal.fft_gp import domain_ss
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
 from tabascal.time import gast_deg, skyfield_time, timescale

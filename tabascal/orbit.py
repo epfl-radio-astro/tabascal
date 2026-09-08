@@ -170,11 +170,6 @@ def orbit_cache_dir() -> Path:
 # Configuration validation (back-compat shim over tabascal.orbit_config)
 # ---------------------------------------------------------------------------
 
-def _validate_max_age(extra_orbit_max_age_days) -> Optional[float]:
-    """Validate ``extra_orbit_max_age_days``: ``None`` or a non-negative number."""
-    return validate_age_days(extra_orbit_max_age_days, "extra_orbit_max_age_days")
-
-
 # ---------------------------------------------------------------------------
 # Resolution results
 # ---------------------------------------------------------------------------

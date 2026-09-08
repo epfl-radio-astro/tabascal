@@ -1,9 +1,20 @@
 from tqdm import trange
 
-from numpyro.optim import optax_to_numpyro
-from numpyro.infer import Predictive, SVI, autoguide, Trace_ELBO
+from numpyro.infer import Predictive, SVI
 
 import optax
+
+from collections import namedtuple
+
+#: What :func:`run_custom_svi` returns, matching the shape of numpyro's own
+#: ``SVI.run`` result so the two are interchangeable to a caller.
+SVIRunResult = namedtuple("SVIRunResult", ["params", "state", "losses"])
+"""A :func:`~collections.namedtuple` of:
+
+ - **params** -- the optimized parameters.
+ - **state** -- the last ``SVIState``.
+ - **losses** -- the losses collected at every step.
+"""
 
 import jax
 import jax.numpy as jnp
@@ -12,7 +23,6 @@ from jax.tree_util import tree_map
 
 from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
-from tabascal.opt import SVIRunResult
 from tabascal.timing import measure_runtime
 from tabascal.write import write_results_ms, write_results_xds
 
@@ -311,62 +321,6 @@ def fix_padding(config: dict, n_freq):
     return config
 
 
-@measure_runtime
-def run_svi(
-    prob_model: Callable,
-    obs_data: jax.Array,
-    max_iter=1_000,
-    guide_family="AutoDelta",
-    init_params=None,
-    epsilon=1e-3,
-    key=random.PRNGKey(1),
-    dual_run=True,
-    state=None,
-    constants=None,
-):
-    if guide_family == "AutoDelta":
-        guide = autoguide.AutoDelta(prob_model)
-    elif guide_family == "AutoDiagonalNormal":
-        guide = autoguide.AutoDiagonalNormal(prob_model)
-    elif guide_family == "AutoLaplaceApproximation":
-        guide = autoguide.AutoLaplaceApproximation(prob_model)
-    elif guide_family == "AutoMultivariateNormal":
-        guide = autoguide.AutoMultivariateNormal(prob_model)
-    else:
-        raise ValueError(f"Unknown guide_family: {guide_family}")
-
-    # optimizer = numpyro.optim.Adam(epsilon)
-    optimizer = optax_to_numpyro(optax.adabelief(epsilon))
-    svi = SVI(prob_model, guide, optimizer, Trace_ELBO())
-    svi_results = svi.run(
-        key,
-        max_iter,
-        obs_data=obs_data,
-        state=state,
-        constants=constants,
-        init_params=init_params,
-    )
-    losses = svi_results.losses / obs_data.size
-    svi_results = SVIRunResult(svi_results.params, svi_results.state, losses)
-
-    if dual_run:
-        optimizer = optax_to_numpyro(optax.adabelief(epsilon / 10))
-        svi = SVI(prob_model, guide, optimizer, Trace_ELBO())
-
-        svi_results = svi.run(
-            key,
-            max_iter,
-            obs_data=obs_data,
-            state=state,
-            constants=constants,
-            init_params=svi_results.params,
-        )
-        losses = jnp.concatenate([losses, svi_results.losses / obs_data.size])
-        svi_results = SVIRunResult(svi_results.params, svi_results.state, losses)
-
-    return svi_results, guide
-
-
 def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
     """Path to dump the optimiser trace to, or None when tracing is off.
 
@@ -637,24 +591,6 @@ def run_custom_svi(
     # Add _auto_loc suffix to match AutoDelta convention expected by downstream code
     params_out = {k + "_auto_loc": v for k, v in params.items()}
     return SVIRunResult(params_out, None, jnp.array(losses))
-
-
-@measure_runtime
-def svi_predict(
-    prob_model: Callable,
-    guide: autoguide.AutoGuide,
-    vi_params: dict,
-    num_samples=100,
-    key=random.PRNGKey(2),
-    state=None,
-    constants=None,
-):
-    predictive = Predictive(
-        model=prob_model, guide=guide, params=vi_params, num_samples=num_samples
-    )
-    predictions = predictive(key, state=state, constants=constants)
-
-    return predictions
 
 
 @measure_runtime

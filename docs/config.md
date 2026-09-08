@@ -164,13 +164,9 @@ The `inference` section defines the type of inference that will be done. An exam
 ```yaml
 inference:
   opt: True
-  mcmc: False
-  fisher: False
 ```
 
-* `opt`: Optimisation will be done to find the maximum a posteriori (MAP) point.
-* `mcmc`: Markov Chain Monte Carlo (MCMC) will be run to draw samples from the posterior after some number of warmup iterations. If `opt` is `True` then the MCMC chains will be initialised from the MAP point, otherwise initialisation will be done according to the definitions in the appropriate sections.
-* `fisher`: A Laplace approximation of the covariance will be performed about the MAP point.
+* `opt`: Optimisation will be done to find the maximum a posteriori (MAP) point. It is the only inference this section offers.
 
 ## Optimisation
 
@@ -208,18 +204,6 @@ The file is written once, at the end of the run, and holds one array per key, ea
 | `vis_rfi_nrmse` | with truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |
 
 The `nrmse` keys need a truth to score against, so they appear only on a dataset simulated with `sim-vis`. Every entry is recorded at the parameters that produced that iteration's gradient, i.e. *before* its update — so the first entry is the value at the initialisation, and the last is one update behind the reported optimum.
-
-## Fisher
-
-This section gives the parameters for the Laplace approximation. An example is given below.
-
-```yaml
-fisher:
-  n_samples: 1
-  max_cg_iter: 10_000
-```
-
-The covariance approximation is not performed in the traditional way of evaluating the negastive inverse Hessian. Rather, the Gaussian approximation of the posterior is sampled around the MAP point. The inverse of the posterior covariance is implicitly defined and then applied to samples from $\mathcal{N}(\boldsymbol{0}, \boldsymbol{\Sigma}^{-1})$. Therefore, the number of samples is defined in `n_samples` and when applying the inverse covariance to the samples the conjugate gradient method is used when `max_cg_iter` defines the number of iteration used in the conjugate gradient method. Increasing both of these values leads to a greater computational load but also improves the accuracy of the resulting posterior samples.
 
 ## Astronomical Signal
 

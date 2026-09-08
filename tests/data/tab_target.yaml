@@ -21,9 +21,7 @@ plots:
   prior_samples: 100
 
 inference:
-  mcmc: False
   opt: True
-  fisher: False
 
 opt:
   epsilon: 1e-3
