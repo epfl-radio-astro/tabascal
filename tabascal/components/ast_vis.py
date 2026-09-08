@@ -407,9 +407,9 @@ class GPVisAst(Component):
             the total amplitude -- ``rms|vis_ast|`` is then
             ``sqrt(std^2 + |mu|^2)``.
 
-            It is not the convention ``rfi`` uses, which normalises per
-            component, and the two were never the same thing anyway: ``rfi``
-            normalises ``rfi_A``, which the visibility is quadratic in.
+            ``rfi.std`` names the same quantity in the same units. It gets
+            there differently, since it normalises ``rfi_A``, which the
+            visibility is quadratic in.
 
             Dividing by the sum rather than by the mode count is what makes
             the width independent of ``cutoff`` and ``gammas``: those decide

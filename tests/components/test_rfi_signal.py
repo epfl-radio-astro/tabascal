@@ -2098,7 +2098,9 @@ class TestTheStdIsTheWidthItClaims:
     both classes silently tests VarAnt's model twice.
     """
 
-    #: Enough independent prior draws for a 5 % check on an rms.
+    #: Prior draws per case. The grid is correlated, so this buys far fewer
+    #: independent samples than points; the tolerances below are what that
+    #: leaves, not what the normalisation is worth.
     SEEDS = range(24)
 
     @classmethod
@@ -2131,8 +2133,10 @@ class TestTheStdIsTheWidthItClaims:
                 jnp.asarray(a1),
                 jnp.asarray(a2),
             )
-            # E|V|^2 rather than its root: the mean is unbiased where the
-            # square root of it is not, and the contract is a second moment.
+            # Second moments, pooled across draws before the root is taken
+            # at the end. The pooled mean is unbiased; its root is not, but a
+            # root of the pool is far less biased than a mean of the roots,
+            # and what is left is inside the tolerances.
             samples.append(jnp.mean(jnp.abs(vis) ** 2))
         return float(jnp.sqrt(jnp.mean(jnp.stack(samples))))
 
@@ -2201,9 +2205,8 @@ class TestTheStdIsTheWidthItClaims:
     def test_the_width_scales_with_std(self, cls):
         """Doubling std doubles the realised width, exactly.
 
-        std is a scale on sigma, so it passes through the padded transform
-        untouched however much of sum(sigma^2) that transform carries -- which
-        is why this ratio is exact where the absolute width above is not.
+        std is a scale on sigma and the same seeds are drawn either side, so
+        this ratio is deterministic where the absolute width is sampled.
         """
         base = self._rms_vis(setup_component(cls, std=2.0, n_rfi=1, n_rfi_real=1))
         doubled = self._rms_vis(setup_component(cls, std=4.0, n_rfi=1, n_rfi_real=1))

@@ -441,6 +441,21 @@ _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 #: grid. Any test of it is a sampling problem rather than a check on the
 #: normalisation.
 #:
+#: And it is the *instantaneous* visibility of a *zero-mean, unmasked* source,
+#: which is the width the prior is on rather than a prediction of what a run
+#: will see. Three model steps sit between the two, all of them intended:
+#:
+#: * A non-zero ``rfi.mean`` -- ``est``, ``matched-filter``, ``truth`` -- adds
+#:   its own power: ``E|V_pq|^2 = (std + |m_p|^2)(std + |m_q|^2)`` for the mean
+#:   amplitudes ``m``. Sources then carry non-zero mean visibilities too, so
+#:   their total stops scaling as ``sqrt(N)``.
+#: * ``rfi.min_elevation`` zeroes a source while it is below the cut, so one
+#:   visible for a fraction ``f`` of the observation has ``std * sqrt(f)`` over
+#:   the whole of it, and a source that never rises has exactly zero.
+#: * The visibility kernels average the fine grid, and fringes that turn within
+#:   an integration cancel there. How much depends on the spectrum's own
+#:   correlation in time and frequency.
+#:
 #: **Per source, and for this antenna structure.** ``rfi.std`` is one source's
 #: width, and two known factors sit between it and the visibility a run
 #: realises. ``ComplexRFIConstAnt`` broadcasts one amplitude to every antenna,

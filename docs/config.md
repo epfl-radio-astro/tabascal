@@ -388,7 +388,13 @@ All parameters in this section that overlap with those of the `ast` section have
 
   It is an *expectation*, so any one observation scatters around it — by more where the correlation structure leaves fewer independent samples in the grid, which is a property of the spectrum rather than of the normalisation.
 
-  Two further factors sit between it and the RFI a run realises, and neither is corrected for. They are properties of the model, and correcting them would make the same number mean different widths in different configurations:
+  It is also the **instantaneous** visibility of a **zero-mean, unmasked** source: the width the prior is on, not a prediction of what a run will see. Three model steps sit in between, all of them deliberate:
+
+  * A non-zero `mean` — `est`, `matched-filter`, `truth` — adds its own power, $E\lvert V_{pq}\rvert^2 = (\texttt{std} + \lvert m_p\rvert^2)(\texttt{std} + \lvert m_q\rvert^2)$ for mean amplitudes $m$. Sources then carry non-zero mean visibilities as well, so their total stops scaling as $\sqrt{N}$.
+  * `min_elevation` zeroes a source while it is below the cut, so one visible for a fraction $f$ of the observation shows $\texttt{std}\sqrt{f}$ across the whole of it — and one that never rises, exactly zero.
+  * The visibility kernels average the fine grid, and fringes that turn within an integration cancel there.
+
+  Two further factors sit between it and the RFI a run realises even at zero mean, and neither is corrected for. They are properties of the model, and correcting them would make the same number mean different widths in different configurations:
 
   * **N satellites realise $\sqrt{N}$ times it**, for `ComplexRFIVarAnt`. The width applies to each source and their visibilities add — in quadrature, because each source has zero mean visibility. Three satellites at `std: 10` expect a total RFI near 17 Jy. `ComplexRFIConstAnt`'s sources do *not* add in quadrature: each has a non-zero mean visibility $E[V_s] = \texttt{std}\,e^{i\phi_s}$, so they add coherently by however much the geometric phases align.
   * **`rfi_signal:ComplexRFIConstAnt` realises another $\sqrt{2}$.** It broadcasts one amplitude to every antenna, so its visibility is $\lvert A\rvert^2$ where `ComplexRFIVarAnt`'s is $A_p A_q^*$ with independent draws, and $E\lvert A\rvert^4 = 2(E\lvert A\rvert^2)^2$.
@@ -402,7 +408,7 @@ All parameters in this section that overlap with those of the `ast` section have
 
   It measures the **total** RFI and hands it to each source, so it does not correct for the $\sqrt{N}$ above: on an N-satellite run the prior is that much wider than what was measured. Deliberate — a number and a measurement that produced different priors would be worse — and stated here because it is the one place the two `std: data` options differ in effect rather than only in mask.
 
-  It is also an upper bound on the RFI itself: the sky and the noise are in the visibilities too. A good one exactly where it matters — RFI that dominates the sky dominates the measurement — and far too wide where the RFI is faint, which is the mirror of the astronomical estimate's own limitation. [#220](https://github.com/epfl-radio-astro/tabascal/issues/220) is what fixes both.
+  It also tends to sit above the RFI itself, since the sky and the noise are in the visibilities too — tends to, not always: the sky and the RFI can cancel coherently on a given sample. A good one exactly where it matters — RFI that dominates the sky dominates the measurement — and far too wide where the RFI is faint, which is the mirror of the astronomical estimate's own limitation. [#220](https://github.com/epfl-radio-astro/tabascal/issues/220) is what fixes both.
 
   On the shipped 8A simulation, whose three satellites give a true RFI `rms|V|` of 11.0 Jy: `data` measures 11.2 per source and the prior realises about 19. The null default sets 46.4 per source, which carries the same $\sqrt{3}$ and realises about 80. Roughly **1.8x** the true RFI against **7.3x** — both figures on the same footing, which is the comparison that matters.
 
