@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 
+from tabascal.interferometry import calculate_rfi_vis_fine
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
     ComplexRFIConstAnt,
@@ -2117,29 +2118,38 @@ class TestTheStdIsTheWidthItClaims:
             # is correlated along the grid, so the effective sample count is
             # far below the point count and the pairs are what make this
             # converge in a test-sized number of draws.
-            vis = jnp.einsum(
-                "spft,sqft->pqft", rfi_A[:n_rfi_real], jnp.conjugate(rfi_A[:n_rfi_real])
+            # Through the production reduction, not a reimplementation of it:
+            # calculate_rfi_vis_fine is what sums the sources and forms the
+            # baseline product, so a model that averaged its sources instead
+            # of adding them fails here. Zero phase, since the geometry is not
+            # what is under test -- every baseline over every antenna pair.
+            n_ant = rfi_A.shape[1]
+            a1, a2 = np.triu_indices(n_ant, k=1)
+            vis = calculate_rfi_vis_fine(
+                rfi_A[:n_rfi_real],
+                jnp.zeros_like(rfi_A[:n_rfi_real], dtype=float),
+                jnp.asarray(a1),
+                jnp.asarray(a2),
             )
-            pairs = jnp.triu_indices(vis.shape[0], k=1)
-            samples.append(jnp.mean(jnp.abs(vis[pairs]) ** 2))
+            # E|V|^2 rather than its root: the mean is unbiased where the
+            # square root of it is not, and the contract is a second moment.
+            samples.append(jnp.mean(jnp.abs(vis) ** 2))
         return float(jnp.sqrt(jnp.mean(jnp.stack(samples))))
 
     @pytest.mark.parametrize("std", [0.5, 3.0, 40.0])
-    def test_a_var_ant_source_realises_about_the_configured_std(self, std):
-        """About, not exactly, and the difference has a cause worth knowing.
+    def test_a_var_ant_source_realises_the_configured_std(self, std):
+        """Exactly, in expectation; the tolerance here is sampling, not error.
 
-        The normalisation is exact in the marginal -- ``sum(sigma^2) = std/2``
-        below, to floating point. What the forward pass then realises is close
-        to ``std`` but not equal to it: ``latent_to_signal`` builds the signal
-        on a zero-padded k-grid and crops it, and that does not carry
-        ``sum(sigma^2)`` through unchanged. Measured across the shipped
-        spectrum shapes, padding factors and grid sizes it lands within about
-        20 % either way -- 0.87x at ``time_pad_factor: 3``, 1.11x at ``1``,
-        0.79x for a heavily truncated spectrum.
+        ``E|V_pq|^2 = std^2`` holds through the transform, which pads, inverts
+        with ``norm="forward"`` and crops -- operations that change which modes
+        exist and how they correlate, not the amplitude.
 
-        Wide enough to matter to nobody setting a prior width and too wide to
-        claim as an identity, so the tolerance here says what was measured
-        rather than what would be tidy.
+        What a finite number of draws measures scatters around that, and by
+        more than the point count suggests: the GP is correlated along the
+        grid, so most points are not independent samples. The tolerance is
+        that scatter at these draws and this grid, not a claim about the
+        normalisation, and it tightens with draws rather than converging on
+        something else -- at 800 it is inside 4 %.
         """
         comp = setup_component(ComplexRFIVarAnt, std=std, n_rfi=1, n_rfi_real=1)
 

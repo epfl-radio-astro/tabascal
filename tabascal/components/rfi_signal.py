@@ -429,13 +429,17 @@ _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 #: astronomical prior divides by ``sqrt(2)``); a quadratic one passes it
 #: through undiminished, so ``sum(sigma_rfi_k**2) = rfi.std / 2``.
 #:
-#: That normalisation is exact. What the forward pass realises is close to
-#: ``rfi.std`` and not equal to it: ``latent_to_signal`` builds the signal on a
-#: zero-padded k-grid and crops it, which does not carry ``sum(sigma^2)``
-#: through unchanged. Measured across the shipped spectrum shapes, padding
-#: factors and grid sizes, the realised ``rms|V|`` lands within about 20 %
-#: either way. Wide enough to matter to nobody setting a prior width, and too
-#: wide to call an identity.
+#: And that carries through the transform exactly. ``latent_to_signal`` pads
+#: the coefficients, inverts with ``norm="forward"`` and crops, so every
+#: retained coefficient reaches every output point with unit magnitude:
+#: ``E|A|^2 = 2 sum(sigma^2) = rfi.std``, and for the independent antennas of
+#: ``ComplexRFIVarAnt``, ``E|V_pq|^2 = rfi.std^2``. Padding and cropping change
+#: which modes exist and how they correlate, not the amplitude.
+#:
+#: It is an expectation, so a measured realisation scatters around it, by more
+#: where the correlation structure leaves fewer independent samples in the
+#: grid. Any test of it is a sampling problem rather than a check on the
+#: normalisation.
 #:
 #: **Per source, and for this antenna structure.** ``rfi.std`` is one source's
 #: width, and two known factors sit between it and the visibility a run

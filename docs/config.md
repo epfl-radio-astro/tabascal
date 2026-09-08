@@ -384,7 +384,9 @@ All parameters in this section that overlap with those of the `ast` section have
 
   The spectrum is normalised to `std` after the cut and after the roll-off, so — exactly as on the astronomical side — `gammas` and `cutoff` change which modes are fitted and how they correlate, not how much RFI the prior expects. (`sum(pk)` is `std / 2`; the factor is the complex latent, see `_LATENT_POWER`.)
 
-  **It is one source's width, it is stated for `rfi_signal:ComplexRFIVarAnt`, and it is approximate.** The normalisation `sum(pk) = std / 2` is exact, but what the forward pass realises is within about 20 % of `std` rather than equal to it: `latent_to_signal` builds the signal on a zero-padded k-grid and crops it, which does not carry `sum(pk)` through unchanged. The spread is over spectrum shape, padding factor and grid size. It is a prior width, so 20 % is not a problem — but it is not an identity either.
+  **It is one source's width, and it is stated for `rfi_signal:ComplexRFIVarAnt`.** The normalisation `sum(pk) = std / 2` is exact and survives the transform: `latent_to_signal` pads the coefficients, inverts with `norm="forward"` and crops, so each retained coefficient reaches every output point with unit magnitude and $E\lvert A\rvert^2 = 2\sum \texttt{pk} = \texttt{std}$. For independent antennas that gives $E\lvert V_{pq}\rvert^2 = \texttt{std}^2$. Padding and cropping change which modes exist and how they correlate, not the amplitude.
+
+  It is an *expectation*, so any one observation scatters around it — by more where the correlation structure leaves fewer independent samples in the grid, which is a property of the spectrum rather than of the normalisation.
 
   Two further factors sit between it and the RFI a run realises, and neither is corrected for. They are properties of the model, and correcting them would make the same number mean different widths in different configurations:
 
