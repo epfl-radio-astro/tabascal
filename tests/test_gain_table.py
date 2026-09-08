@@ -20,13 +20,10 @@ import numpy as np
 import pytest
 
 from tabascal.gain_table import (
-    DEAD,
     EDGE_HELD,
     EXACT,
-    INTERPOLATED,
     Coverage,
     compose_gains,
-    gains_from_tables,
     interpolate_gains,
     normalise_gain_tables,
 )
