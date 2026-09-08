@@ -64,11 +64,9 @@ from satchecker_client import (
     TextOrbitCache,
     read_legacy_tle_records,
 )
-from satchecker_client import SatCheckerError as TLEError  # noqa: F401  back-compat alias
+# The error every orbit path raises, under this module's name for it.
+from satchecker_client import SatCheckerError as TLEError
 
-# The TLE parser lives in satchecker_client.tle_parse so cache validation and
-# element extraction exercise the *same* code; re-exported here under this
-# module's historical names.
 # Format dispatch. Nothing below this line asks whether a record is a TLE or an
 # OMM: it asks for its epoch, its elements, or whether it is valid, and these
 # three answer for either kind.
