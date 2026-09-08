@@ -6,14 +6,16 @@ import optax
 
 from collections import namedtuple
 
-#: What :func:`run_custom_svi` returns, matching the shape of numpyro's own
-#: ``SVI.run`` result so the two are interchangeable to a caller.
-SVIRunResult = namedtuple("SVIRunResult", ["params", "state", "losses"])
+#: What :func:`run_custom_svi` returns.
+SVIRunResult = namedtuple("SVIRunResult", ["params", "losses"])
 """A :func:`~collections.namedtuple` of:
 
- - **params** -- the optimized parameters.
- - **state** -- the last ``SVIState``.
- - **losses** -- the losses collected at every step.
+ - **params** -- the optimised parameters.
+ - **losses** -- the loss at every step.
+
+numpyro's own ``SVI.run`` result carries a ``state`` between these two, for
+resuming the optimiser. This one does not: ``run_custom_svi`` never built one,
+so the field was always ``None`` and no caller ever read it.
 """
 
 import jax
@@ -580,7 +582,7 @@ def run_custom_svi(
 
     # Add _auto_loc suffix to match AutoDelta convention expected by downstream code
     params_out = {k + "_auto_loc": v for k, v in params.items()}
-    return SVIRunResult(params_out, None, jnp.array(losses))
+    return SVIRunResult(params_out, jnp.array(losses))
 
 
 @measure_runtime
