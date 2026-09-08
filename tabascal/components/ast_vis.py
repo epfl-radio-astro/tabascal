@@ -410,8 +410,8 @@ class GPVisAst(Component):
             ``rfi.std`` names the same quantity in the same units, at
             ``rfi.mean: 0``. It gets there differently, since it normalises
             ``rfi_A``, which the visibility is quadratic in -- and a non-zero
-            ``rfi.mean`` adds power to the RFI visibility rather than shifting
-            it, so the two stop matching there.
+            ``rfi.mean`` adds power to the RFI visibility rather than merely
+            shifting it, so the two stop matching there.
 
             Dividing by the sum rather than by the mode count is what makes
             the width independent of ``cutoff`` and ``gammas``: those decide

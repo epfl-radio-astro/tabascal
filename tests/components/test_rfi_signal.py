@@ -2089,7 +2089,9 @@ class TestTheStdIsTheWidthItClaims:
       ``A_p conj(A_q)`` with independent draws. ``E|A|^4 = 2 (E|A|^2)^2``, so
       it realises ``sqrt(2)`` times the width.
     * The width applies to each satellite and their visibilities sum, so N
-      independent sources realise ``sqrt(N)`` times it.
+      independent zero-mean VarAnt sources realise ``sqrt(N)`` times it.
+      Independence is not enough on its own: a non-zero mean leaves cross
+      terms, and ConstAnt has one.
 
     Measured by sampling each component's own ``sigma_rfi_k`` through its own
     antenna structure, rather than by repeating the algebra the component
@@ -2265,7 +2267,7 @@ class TestTheStdCanBeMeasuredFromTheData:
 
         assert isinstance(result["std"], float)
 
-    def test_the_ms_flags_are_kept_because_that_is_where_the_rfi_is(self):
+    def test_the_ms_flags_are_kept_rather_than_read_as_rfi(self):
         """The one place this and the astronomical estimate genuinely differ.
 
         A flag says something is wrong, not that RFI is there, and the

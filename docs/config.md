@@ -380,7 +380,7 @@ All parameters in this section that overlap with those of the `ast` section have
 
 * `std`: The width of the prior on the RFI signal, in Jy: the RFI's typical `rms|V|`. **The same quantity as [`ast.pow_spec.std`](#astronomical-signal)** — read an amplitude off the data and write it here, for either prior.
 
-  The two get there by different arithmetic, and this is the only difference in what the number *means*. `vis_ast` *is* the modelled quantity, so the astronomical prior's width is the latent's width. `rfi_A` is a per-antenna amplitude and the visibility is quadratic in it ($V^\text{RFI}_{pq} = A_p A_q^*e^{i\Delta\phi}$), so the per-antenna width is $\sqrt{\texttt{std}}$ and carries units of $\sqrt{\text{Jy}}$. Both translations are internal: the number you write is `rms|V|` in Jy in both sections.
+  The two get there by different arithmetic, and this is where what the number *means* differs. `vis_ast` *is* the modelled quantity, so the astronomical prior's width is the latent's width. `rfi_A` is a per-antenna amplitude and the visibility is quadratic in it ($V^\text{RFI}_{pq} = A_p A_q^*e^{i\Delta\phi}$), so the per-antenna width is $\sqrt{\texttt{std}}$ and carries units of $\sqrt{\text{Jy}}$. Both translations are internal: the number you write is `rms|V|` in Jy in both sections.
 
   The spectrum is normalised to `std` after the cut and after the roll-off, so — exactly as on the astronomical side — `gammas` and `cutoff` change which modes are fitted and how they correlate, not how much RFI the prior expects. (`sum(pk)` is `std / 2`; the factor is the complex latent, see `_LATENT_POWER`.)
 
@@ -390,7 +390,7 @@ All parameters in this section that overlap with those of the `ast` section have
 
   It is also the **instantaneous** visibility of a **zero-mean, unmasked** source: the width the prior is on, not a prediction of what a run will see. Three model steps sit in between, all of them deliberate:
 
-  * A non-zero `mean` — `data`, `est`, `matched-filter` — adds its own power, $E\lvert V_{pq}\rvert^2 = (\texttt{std} + \lvert m_p\rvert^2)(\texttt{std} + \lvert m_q\rvert^2)$ for mean amplitudes $m$. Sources then carry non-zero mean visibilities as well, so their total stops scaling as $\sqrt{N}$.
+  * A non-zero `mean` — `data`, `est`, `matched-filter` — adds its own power, $E\lvert V_{pq}\rvert^2 = (\texttt{std} + \lvert m_p\rvert^2)(\texttt{std} + \lvert m_q\rvert^2)$ for mean amplitudes $m$. Sources then carry non-zero mean visibilities as well, so their total no longer generally scales as $\sqrt{N}$.
   * `min_elevation` zeroes a source while it is below the cut, so one visible for a fraction $f$ of the observation shows $\texttt{std}\sqrt{f}$ across the whole of it — and one that never rises, exactly zero.
   * The visibility kernels average the fine grid, and fringes that turn within an integration cancel there.
 
@@ -404,7 +404,7 @@ All parameters in this section that overlap with those of the `ast` section have
   `data` measures it from the observed visibilities, the same measurement `ast.pow_spec.std: data` makes — the same function, in fact. Two things differ, and only one of them is a choice:
 
   * It is a **scalar**, since this prior normalises a single spectrum where the astronomical model carries a width per baseline.
-  * **The MS's flags are kept.** The astronomical estimate excludes them because whatever a flag means, the sample is not clean sky. The reverse does not follow: a flag says *something is wrong here*, not *RFI is here*, and a dead antenna is neither RFI nor a scale to set an RFI prior from. Measuring the flagged samples is also biased high even when they are RFI, since flagging is a threshold and the flagged half is the bright half — on the shipped 8A simulation that returns 1.54x the true RFI where measuring everything returns 1.015x. Samples no gain table could calibrate *are* dropped, which is the one exclusion both priors share.
+  * **The MS's flags are kept.** The astronomical estimate excludes them because whatever a flag means, the sample is not clean sky. The reverse does not follow: a flag says *something is wrong here*, not *RFI is here*, and a dead antenna is neither RFI nor a scale to set an RFI prior from. Measuring the flagged samples is also biased high even when they are RFI, wherever the flagger thresholds on amplitude: the flagged half is then the bright half — on the shipped 8A simulation that returns 1.54x the true RFI where measuring everything returns 1.015x. Samples no gain table could calibrate *are* dropped, which is the one exclusion both priors share.
 
   It measures the **total** RFI and hands it to each source, so it does not correct for the $\sqrt{N}$ above: on an N-satellite run the prior is that much wider than what was measured. Deliberate — a number and a measurement that produced different priors would be worse — and stated here because it is the one place the two `std: data` options differ in effect rather than only in mask.
 

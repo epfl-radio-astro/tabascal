@@ -419,15 +419,16 @@ _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 #:
 #: ``rfi.std`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
 #: ``ast.pow_spec.std``, read off the data the same way. The two get there by
-#: different arithmetic, and this is the whole of the difference: ``vis_ast``
+#: different arithmetic, and this is where it differs: ``vis_ast``
 #: *is* the modelled quantity and is linear in its latent, while ``rfi_A`` is a
 #: per-antenna amplitude and the visibility is quadratic in it,
 #: ``vis_rfi ~ rfi_A[a1] * conj(rfi_A[a2])``.
 #:
 #: The complex latent is drawn as two independent standard normals, so it
-#: carries ``E|z|^2 = 2``. A linear model halves that in the width (the
-#: astronomical prior divides by ``sqrt(2)``); a quadratic one passes it
-#: through undiminished, so ``sum(sigma_rfi_k**2) = rfi.std / 2``.
+#: carries ``E|z|^2 = 2``. A linear model takes the square root of that into
+#: its width, so the astronomical prior divides by ``sqrt(2)``; a quadratic one
+#: passes the power through undiminished, so
+#: ``sum(sigma_rfi_k**2) = rfi.std / 2``.
 #:
 #: And that carries through the transform exactly. ``latent_to_signal`` pads
 #: the coefficients, inverts with ``norm="forward"`` and crops, so every
@@ -448,7 +449,7 @@ _POW_SPEC_RULES = {"gammas": "pair", "cutoff": "cutoff"}
 #: * A non-zero ``rfi.mean`` -- ``data``, ``est``, ``matched-filter`` -- adds
 #:   its own power: ``E|V_pq|^2 = (std + |m_p|^2)(std + |m_q|^2)`` for the mean
 #:   amplitudes ``m``. Sources then carry non-zero mean visibilities too, so
-#:   their total stops scaling as ``sqrt(N)``.
+#:   their total no longer generally scales as ``sqrt(N)``.
 #: * ``rfi.min_elevation`` zeroes a source while it is below the cut, so one
 #:   visible for a fraction ``f`` of the observation has ``std * sqrt(f)`` over
 #:   the whole of it, and a source that never rises has exactly zero.
@@ -507,8 +508,9 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     here", it says "something is wrong here", and a dead antenna or a
     correlator glitch is neither RFI nor a scale to set an RFI prior from.
     Measuring the flagged samples instead is also biased high even when they
-    *are* RFI -- flagging is a threshold, so the flagged half is the bright
-    half, and its rms sits above the typical amplitude the prior wants. On the
+    *are* RFI, wherever the flagger thresholds on amplitude: the flagged half
+    is then the bright half, and its rms sits above the typical amplitude the
+    prior wants. On the
     shipped 8A simulation, flagging the brightest 30 % and measuring those
     returns 1.54x the true RFI where measuring everything returns 1.015x.
 
@@ -699,8 +701,8 @@ class BaseGPRFI(Component):
         rfi_config = rfi_signal_config_validation(
             tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time,
             # Only the uncalibratable samples: the MS's own flags stay in,
-            # because that is where the RFI is. Read by std: data alone --
-            # see _std_from_data.
+            # since a flag does not say the RFI is there. Read by std: data
+            # alone -- see _std_from_data.
             getattr(tab_config, "gain_flags", None))
 
         # The validated rfi section, kept whole: gp_pow_spec reads its pow_spec

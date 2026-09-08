@@ -87,8 +87,9 @@ def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
 
     Raises rather than guesses when there is nothing to measure or what there
     is is not finite; a baseline that kept nothing takes the median of those
-    that did, which is the least-committal stand-in and keeps a zero out of a
-    denominator downstream.
+    that did, which is the least-committal stand-in available -- not a
+    guarantee of a positive width, since the ones that measured something can
+    all have measured zero.
     """
 
     vis_obs = jnp.asarray(vis_obs)
@@ -680,7 +681,7 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
                 "The cutoff is not what is wrong here. Look at the knees and "
                 "the k grid -- a zero or non-finite corr_time, corr_freq or "
                 "fov_deg, or a zero-length baseline, gives 0/0 -- and, on the "
-                "RFI path, at rfi.std, which is the p0 this is scaled by. The "
+                "RFI path, at rfi.std / 2, which is the p0 this is scaled by. The "
                 "astronomical spectrum is built at unit amplitude and scaled "
                 "afterwards, so there the amplitude cannot be the cause."
             )
