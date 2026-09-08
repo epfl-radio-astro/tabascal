@@ -156,7 +156,6 @@ class GPVisAst(Component):
                     config.args["data"]["zarr_path"], config.args["data"]["data_col"]
                 )
 
-            # self._compute_init_params(config.args["ast"]["init"])
             self._compute_init_params(config.args["ast"]["init"], config.vis_obs)
             self._set_outputs()
 

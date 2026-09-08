@@ -184,8 +184,6 @@ class PhaseCalculationRFI(Component):
             jnp.floor(self.times_jd_fine), 
             self.times_jd_fine - jnp.floor(self.times_jd_fine)
         )
-        # self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        # self.ants_xyz = jnp.transpose(itrf_to_xyz(self.ants_itrf, gsa), axes=(1, 0, 2))
         self.ants_uvw = jnp.transpose(
             itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
@@ -385,10 +383,7 @@ class NoDragOrbit(Component):
             self.n_time_fine = config.n_time_fine
 
             self.n_rfi = config.n_rfi
-            # self.elements = config.elements
-            # self.epoch_jd = config.epoch_jd
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
-            # self.ric_std = config.args["satellites"]["ric_std"]
 
             # Reuse the resolution the preflight check already made and enforced
             # coverage on: re-resolving here could reach a different satellite set
@@ -433,7 +428,6 @@ class NoDragOrbit(Component):
 
             return sat_rec
 
-        # ecco, argpo, inclo, mo, no_kozai, nodeo = elements.T
         inclo, nodeo, ecco, argpo, mo, no_kozai = elements.T
 
         sats = vmap(sat_init)(
@@ -567,10 +561,7 @@ class Orbit(Component):
             self.n_time_fine = config.n_time_fine
 
             self.n_rfi = config.n_rfi
-            # self.elements = config.elements
-            # self.epoch_jd = config.epoch_jd
             self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
-            # self.ric_std = config.args["satellites"]["ric_std"]
 
             # Reuse the resolution the preflight check already made and enforced
             # coverage on: re-resolving here could reach a different satellite set
@@ -929,18 +920,11 @@ def fetch_standard_orbital_elements(
     tles_df = _pad_rfi_sources(tles_df)
 
     # tles_df carries the OMM-style element columns derived locally by
-    # satchecker_client.records.record_elements (degrees, rev/day, km), plus
     # NORAD_CAT_ID, EPOCH_JD, and whichever raw columns the record's kind has.
 
     # SGP4 MINIMUM REQUIREMENTS:
     # To propagate an orbit using SGP4, you need:
     # - EPOCH (reference time)
-    # - MEAN_MOTION (revolutions/day)
-    # - ECCENTRICITY (0-1)
-    # - INCLINATION (degrees)
-    # - RA_OF_ASC_NODE (degrees)
-    # - ARG_OF_PERICENTER (degrees)
-    # - MEAN_ANOMALY (degrees)
     # - BSTAR (drag term, 1/ER)
     # - NORAD_CAT_ID (for identification)
 
@@ -962,7 +946,6 @@ def fetch_standard_orbital_elements(
     elements = elements.at[:, -1].set(jnp.deg2rad(elements[:, -1]))
     elements = elements.at[:, -2].set(elements[:, -2] / rev_per_day_to_rad_per_min)
     # bstar, ecco, argpo, inclo, mo, no_kozai, nodeo
-    # (inclo, nodeo, ecco, argpo, mo, no_kozai)
     elements = jnp.stack([
         elements[:,0], 
         elements[:,3], elements[:,6], 

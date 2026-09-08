@@ -651,7 +651,6 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     return rfi_config
 
 
-
 class BaseGPRFI(Component):
 
     #: Roll-off exponent of the RFI prior power spectrum on the frequency and time
@@ -968,7 +967,6 @@ class ComplexRFIVarAnt(BaseGPRFI):
                 )
 
             # if tab_config.args["rfi"]["init"] == "est":
-            #     self._estimate_params(tab_config.fringe_freqs)
 
             self._compute_init_params(
                 tab_config.args["rfi"]["init"],
@@ -1277,7 +1275,6 @@ class ComplexRFIConstAnt(BaseGPRFI):
                 )
 
             # if tab_config.args["rfi"]["init"] == "est":
-            #     self._estimate_params(tab_config.fringe_freqs)
 
             self._compute_init_params(
                 tab_config.args["rfi"]["init"],

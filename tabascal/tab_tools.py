@@ -296,16 +296,6 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
         print(f"  {' ' * len(label)} | " + row("bias", me, sig))
 
 
-def pow_spec(k, P0=1e7, k0=1e-3, gamma=1.0):
-
-    k_ = k / k0
-    Pk = P0 * 0.5 * (jnp.exp(-(k_**2)) + (1.0 + k_**2) ** -gamma)
-    # Pk = P0 / (1.0 + k_**2) ** gamma
-    # Pk = P0 * jnp.exp(-(k_**2)) # Leads to NaN values after division
-
-    return Pk
-
-
 def fix_padding(config: dict, n_freq):
 
     try:
@@ -663,7 +653,6 @@ def run_opt(
     )(subkeys[1], obs_data=tab_config.vis_obs, state=state, constants=constants)
     
     write_results_xds(vi_pred, tab_config, map_path)
-    # write_params_xds(vi_params, gp_params, ms_params, params_path, overwrite=True)
 
     print()
     print(f"Optimization Run Time : {datetime.now() - start}")
@@ -694,28 +683,3 @@ def run_opt(
     )
 
     return vi_pred, vi_results.losses, vi_params, rchi2
-
-
-#: Names that moved to :mod:`tabascal.ms`. Kept importable from here so an
-#: existing ``from tabascal.tab_tools import read_ms`` keeps working, with a
-#: warning pointing at the new home. Resolved lazily through ``__getattr__`` so
-#: nothing is imported until one is actually used, which also avoids a cycle.
-_MOVED_TO_MS = ("read_ms", "get_observation_data_type")
-
-
-def __getattr__(name: str):
-    if name in _MOVED_TO_MS:
-        import warnings
-
-        from tabascal import ms
-
-        warnings.warn(
-            f"tabascal.tab_tools.{name} has moved to tabascal.ms.{name}. The alias "
-            "here will be removed in a future release; import from tabascal.ms.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        return getattr(ms, name)
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
