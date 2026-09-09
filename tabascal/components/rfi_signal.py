@@ -658,6 +658,50 @@ class BaseGPRFI(Component):
     #: change here changes the number of fitted parameters.
     default_pk_cutoff = 1e-9
 
+    #: The grid ``rfi_A`` is written on. ``"fine"`` is the integration grid,
+    #: ``(n_freq_fine, n_time_fine)``, which the transform supersamples onto by
+    #: zero-padding the latent spectrum and which the Riemann-sum kernels read.
+    #: ``"coarse"`` is the data grid, ``(n_freq, n_time)``, one value per cell at
+    #: its centre, for ``rfi_vis:GPInterpVis`` to interpolate under the same
+    #: prior or ``rfi_vis:PolyInterpVis`` through a polynomial. The ``*Coarse``
+    #: subclasses set it; nothing else about them differs.
+    signal_grid = "fine"
+
+    @property
+    def coarse(self) -> bool:
+        return self.signal_grid == "coarse"
+
+    @property
+    def ss_factors(self) -> List[int]:
+        """Supersampling factors of the transform: none on the data grid."""
+        return [1, 1] if self.coarse else [self.n_int_freq, self.n_int_time]
+
+    @property
+    def signal_shape(self) -> Tuple[int, int]:
+        """The ``(freq, time)`` shape of ``rfi_A`` on the grid this component writes."""
+        if self.coarse:
+            return (self.n_freq, self.n_time)
+        return (self.n_freq_fine, self.n_time_fine)
+
+    def _publish_prior_spectrum(self, tab_config) -> None:
+        """Leave the sampled prior's spectrum on the config, for the data-grid visibility components.
+
+        ``rfi_vis:GPInterpVis`` interpolates the data-grid signal as the
+        conditional mean of *this* Gaussian process, and ``rfi_vis:PolyInterpVis``
+        draws the coefficients of its polynomial above the interpolating degree
+        from the same prior, so they need the covariance this component samples
+        from: the inverse transform of ``pk`` on ``ks``, the padded and
+        cut k-grid the latent lives on, which are exactly what the transform
+        carries. Handed over through the config the components are set up
+        against, in list order, so the reader finds it there when its own setup
+        runs. In float64 whatever the run's precision: the weights are a solve
+        on a block of that covariance, and the working precision would not do.
+        """
+        tab_config.rfi_prior_spectrum = {
+            "pk": np.asarray(self.pk, dtype=np.float64),
+            "ks": [np.asarray(k, dtype=np.float64) for k in self.ks],
+        }
+
     def gp_cov_params(self):
         """``(gammas, cutoff)`` for this component: the config's, else its own.
 
@@ -773,6 +817,18 @@ class BaseGPRFI(Component):
         self.rfi_mask_fine = (
             None if rfi_mask_fine is None else jnp.asarray(rfi_mask_fine, dtype=bool)
         )
+        # The mask on the grid this component writes: the fine one as it is, or
+        # its data-grid ancestor read back off it -- TabConfig repeats each time
+        # step's flag over its integration samples, so every n_int_time-th sample
+        # is the step's own. Named for the grid, since the constant is sharded by
+        # name (see distributed.RFI_AXIS_NAMES).
+        if self.rfi_mask_fine is None:
+            self.signal_mask = None
+        elif self.coarse:
+            self.signal_mask = self.rfi_mask_fine[:, :: self.n_int_time]
+        else:
+            self.signal_mask = self.rfi_mask_fine
+        self.signal_mask_name = "rfi_mask" if self.coarse else "rfi_mask_fine"
 
         # Ordered as the n_rfi axis. The tail entries are sharding duplicates, so
         # consumers matching against a file slice to [:n_rfi_real] first.
@@ -788,9 +844,9 @@ class BaseGPRFI(Component):
         captured array would instead be replicated, pulling ``rfi_A`` back to a
         full copy on every device.
         """
-        if self.rfi_mask_fine is None:
+        if self.signal_mask is None:
             return {}
-        return {"rfi_mask_fine": self.rfi_mask_fine}
+        return {self.signal_mask_name: self.signal_mask}
 
     def build_masked_signal(self) -> Callable:
         """Return the signal-domain mask to apply at the end of a forward.
@@ -811,14 +867,16 @@ class BaseGPRFI(Component):
         antenna axis broadcast rather than materialised can mask the smaller
         ``(n_rfi, n_freq_fine, n_time_fine)`` array before expanding it.
         """
-        if self.rfi_mask_fine is None:
+        if self.signal_mask is None:
             return lambda rfi_A, constants: rfi_A
 
         prefix = self.prefix
+        mask_name = self.signal_mask_name
 
         def masked_signal(rfi_A: Array, constants: dict) -> Array:
-            mask = constants[f"{prefix}/rfi_mask_fine"]
-            # (n_rfi, n_time_fine) -> (n_rfi, 1, ..., 1, n_time_fine)
+            mask = constants[f"{prefix}/{mask_name}"]
+            # (n_rfi, n_time_out) -> (n_rfi, 1, ..., 1, n_time_out), on whichever
+            # grid the signal is written on.
             shape = (mask.shape[0], *(1,) * (rfi_A.ndim - 2), mask.shape[1])
             # where, not a multiply by 0/1: a masked sample is then exactly zero
             # even where rfi_A is non-finite, since 0 * inf and 0 * nan are nan and
@@ -915,7 +973,7 @@ class BaseGPRFI(Component):
         # ever allocates its own RFI shard (never the full array).
         self.state_outputs = {
             "rfi_A": sharded_rfi_zeros(
-                (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine), complex
+                (self.n_rfi, self.n_ant) + self.signal_shape, complex
             ),
         }
 
@@ -963,6 +1021,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
 
             # Do expensive setup operations once
             self._compute_gp_params()
+            self._publish_prior_spectrum(tab_config)
             self._compute_prior_params(
                 tab_config.args["rfi"]["mean"],
                 tab_config.vis_obs,
@@ -1090,7 +1149,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
             ns,
             dxs,
             pad_factors,
-            [self.n_int_freq, self.n_int_time],
+            self.ss_factors,
             p0,
             k0s,
             gammas,
@@ -1269,6 +1328,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
 
             # Do expensive setup operations once
             self._compute_gp_params()
+            self._publish_prior_spectrum(tab_config)
             self._compute_prior_params(
                 tab_config.args["rfi"]["mean"],
                 tab_config.vis_obs,
@@ -1325,8 +1385,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
         ss_idxs = self.ss_idxs
         n_rfi = self.n_rfi
         n_ant = self.n_ant
-        n_freq_fine = self.n_freq_fine
-        n_time_fine = self.n_time_fine
+        n_freq_out, n_time_out = self.signal_shape
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -1346,7 +1405,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
             rfi_A = masked_signal(rfi_A, constants)
             # Avoids allocating a full grid of ones and a multiply.
             rfi_A = jnp.broadcast_to(
-                rfi_A[:, None], (n_rfi, n_ant, n_freq_fine, n_time_fine)
+                rfi_A[:, None], (n_rfi, n_ant, n_freq_out, n_time_out)
             )
 
             state = {**state, "rfi_A": rfi_A}
@@ -1373,7 +1432,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
             ns,
             dxs,
             pad_factors,
-            [self.n_int_freq, self.n_int_time],
+            self.ss_factors,
             p0,
             k0s,
             gammas,
@@ -1536,3 +1595,45 @@ class ComplexRFIConstAnt(BaseGPRFI):
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
+
+
+class ComplexRFIVarAntCoarse(ComplexRFIVarAnt):
+    """:class:`ComplexRFIVarAnt` written on the data grid, for the interpolating visibility components.
+
+    The same latent, prior, parameters and initialisation as
+    :class:`ComplexRFIVarAnt` -- ``rfi_k_r_base`` and ``rfi_k_i_base`` of the
+    same shape, drawn under the same spectrum -- and the same transform without
+    its supersampling: the latent is inverted onto the data grid alone, one
+    value per channel and time step at the centre of the cell it stands for. The
+    fine samples the visibility integral needs are left to
+    :class:`~tabascal.components.rfi_vis.GPInterpVis`, which forms them from this
+    grid as the conditional mean of the same Gaussian process, or to
+    :class:`~tabascal.components.rfi_vis.PolyInterpVis`, which reads them off a
+    polynomial through the neighbouring values; the spectrum this component
+    leaves on the config is for them. Pair it with one of those: the
+    Riemann-sum kernels read the fine grid and refuse this one by shape.
+
+    Where the two grids overlap they agree exactly: the supersampled grid passes
+    through the coarse points, so the sample at the centre of each cell of the
+    fine-grid component *is* this component's value there.
+    """
+
+    signal_grid = "coarse"
+
+    output_shapes = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+    }
+
+
+class ComplexRFIConstAntCoarse(ComplexRFIConstAnt):
+    """:class:`ComplexRFIConstAnt` written on the data grid, for the interpolating visibility components.
+
+    See :class:`ComplexRFIVarAntCoarse`: the same relation to its fine-grid
+    parent, for the one-amplitude-per-source model.
+    """
+
+    signal_grid = "coarse"
+
+    output_shapes = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+    }

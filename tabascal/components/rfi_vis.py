@@ -8,6 +8,15 @@ from tabascal.interferometry import (
     calculate_rfi_vis_variable,
 )
 from tabascal.components import Component
+from tabascal.gp_interp import (
+    fine_offsets,
+    gp_interp_rfi_vis,
+    gp_interp_rfi_vis_path,
+    interpolation_weights,
+    stencil_offsets,
+)
+from tabascal.poly_interp import polynomial_weights
+from tabascal.rfi_path import fine_frequency_terms, taylor_powers
 from ri_kernels.jax_api import RFIVisOp
 
 
@@ -57,28 +66,8 @@ class RiemannVis(Component):
 
             # null is a setting, not a missing value: one block over every
             # baseline, which keeps the checkpoint and leaves the scan a single
-            # step. int() alone would turn 1.9 into 1 without a word: one
-            # baseline per scan step, dressed up as a valid setting. The
-            # finiteness test guards int() against yaml's .inf and .nan, which
-            # raise there with a message about floats rather than about the key;
-            # it is asked of floats only, since an int is finite by construction
-            # and float() on a big enough one raises in its turn.
-            block_size = config.args["rfi"].get("baseline_block_size", 128)
-            if block_size is not None and (
-                isinstance(block_size, bool)
-                or not isinstance(block_size, (int, float))
-                or (isinstance(block_size, float) and not isfinite(block_size))
-                or block_size != int(block_size)
-                or block_size < 1
-            ):
-                raise ValueError(
-                    "rfi.baseline_block_size is the number of baselines handled "
-                    "per scan step: a whole number of at least 1, or null for a "
-                    f"single block over every baseline, got {block_size!r}."
-                )
-            self.baseline_block_size = (
-                None if block_size is None else int(block_size)
-            )
+            # step. See _baseline_block_size for what is refused and why.
+            self.baseline_block_size = _baseline_block_size(config)
 
             self._set_outputs()
 
@@ -446,3 +435,355 @@ class RiemannVisVariableFFI(Component):
         self.state_outputs = {
             "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
+
+
+def _whole_number(value, key: str, *, minimum: int, null_ok: bool):
+    """A config count: a whole number of at least ``minimum``, or ``None`` where allowed.
+
+    ``int()`` alone would turn 1.9 into 1 without a word, and accept ``True``;
+    the finiteness test guards it against yaml's ``.inf`` and ``.nan``, which
+    raise there with a message about floats rather than about the key.
+    """
+    if value is None and null_ok:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or (isinstance(value, float) and not isfinite(value))
+        or value != int(value)
+        or value < minimum
+    ):
+        what = f"a whole number of at least {minimum}"
+        if null_ok:
+            what += ", or null"
+        raise ValueError(f"rfi.{key} must be {what}, got {value!r}.")
+    return int(value)
+
+
+def _baseline_block_size(config):
+    """``rfi.baseline_block_size``: baselines per scan step, or ``None`` for one block.
+
+    null is a setting, not a missing value: one block over every baseline, which
+    keeps the checkpoint and leaves the scan a single step.
+    """
+    return _whole_number(
+        config.args["rfi"].get("baseline_block_size", 128),
+        "baseline_block_size",
+        minimum=1,
+        null_ok=True,
+    )
+
+
+class GPInterpVis(Component):
+    """Riemann-sum RFI visibilities from a data-grid signal, interpolated by its own prior.
+
+    The other kernels read ``rfi_A`` on the fine integration grid, which the
+    signal component supersamples onto by zero-padding its latent spectrum. This
+    one reads it on the data grid -- one value per channel and time step, at the
+    centre of the cell it stands for, from ``rfi_signal:ComplexRFIVarAntCoarse``
+    or ``rfi_signal:ComplexRFIConstAntCoarse`` -- and forms the fine samples of
+    each cell itself, as the conditional mean of the signal's Gaussian process
+    given the block of coarse values around the cell (``rfi.gp_interp_stencil``
+    cells on every side: 1 is the 3 x 3 block, nine values, a 9 x 9 covariance).
+    The covariance is the prior's own, the inverse transform of the spectrum the
+    signal component samples, which it leaves on the config for this component
+    to read; the weights are one host-side solve at setup, shared by every cell
+    with the same neighbours. See :mod:`tabascal.gp_interp`.
+
+    The visibility is then the same Riemann sum ``RiemannVis`` forms, through the
+    same blocked kernel, so the two agree wherever the interpolation reproduces
+    the supersampled grid -- which, for a signal drawn from the prior, it does
+    to the extent the block of neighbours determines the sample. What changes is
+    what has to exist at once: the interpolation is local, so the fine grid can
+    be formed a block of time steps at a time (``rfi.time_block_size``), where
+    the Fourier supersampling needed the whole axis, and the signal state the
+    optimiser carries between components is the data grid rather than the fine
+    one.
+
+    An axis with a single integration sample is left out of the stencil whatever
+    the setting: its one fine sample is the coarse value itself, so the prior's
+    product form puts every weight on that value already. The default
+    configuration, which supersamples time alone, therefore interpolates along
+    time only, from three neighbouring time steps.
+
+    The phase can arrive on either grid. From ``FixedOrbit`` or
+    ``PhaseCalculationRFI`` it is the fine grid, sliced per block. From
+    ``FixedOrbitCoarse`` or ``PathCalculationRFI`` it is the data grid -- the
+    wrapped phase at the channel and cell centres -- beside ``rfi_path``, the
+    path and its time derivatives, and each block's fine phase is rebuilt from
+    the two inside the scan: exactly across frequency, where the phase is linear
+    in it, and by the Taylor series across time (see :mod:`tabascal.rfi_path`).
+    Then neither fine grid exists beyond a block.
+    """
+
+    # Accumulates into vis_rfi, which Model zeroes before the components run.
+    required_inputs = {
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
+    }
+    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+
+    parameters = {}
+
+    #: The signal components that write ``rfi_A`` on the grid this reads.
+    coarse_signal_refs = (
+        "rfi_signal:ComplexRFIVarAntCoarse",
+        "rfi_signal:ComplexRFIConstAntCoarse",
+    )
+
+    def setup(self, config):
+        """All validation and error-prone operations here"""
+        try:
+            self.a1 = config.a1
+            self.a2 = config.a2
+            self.n_int_time = int(config.n_int_time)
+            self.n_int_freq = int(config.n_int_freq)
+            self.n_time = int(config.n_time)
+            self.n_bl = int(config.n_bl)
+            self.n_freq = int(config.n_freq)
+
+            rfi_args = config.args["rfi"]
+            self.baseline_block_size = _baseline_block_size(config)
+            self.time_block_size = _whole_number(
+                rfi_args.get("time_block_size"), "time_block_size", minimum=1, null_ok=True
+            )
+            self.half_width = _whole_number(
+                rfi_args.get("gp_interp_stencil", 1), "gp_interp_stencil", minimum=0, null_ok=False
+            )
+            # An axis with one sample per cell needs no neighbours: its sample is
+            # the coarse value, on which the product prior puts the whole weight.
+            self.stencil = [
+                self.half_width if n_int > 1 else 0
+                for n_int in (self.n_int_freq, self.n_int_time)
+            ]
+            self.offsets = stencil_offsets(self.stencil)
+            self.weights = self._interpolation_weights(config, rfi_args)
+
+            # The terms that rebuild a block's fine phase from a data-grid one:
+            # the fine frequencies and their channel offsets, and the powers of
+            # the fine time offsets. Built from the same formula TabConfig lays
+            # the fine grid out with, so they land on the samples the phase
+            # would have been evaluated at. The powers are cut to the order the
+            # path arrives with, in the forward.
+            self.freqs_fine, self.dnu = fine_frequency_terms(
+                config.freqs, self.n_int_freq, config.chan_width
+            )
+            self.tau = fine_offsets(self.n_int_time, config.int_time)
+
+            self._set_outputs()
+
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}") from e
+
+    def _prior_spectrum(self, config, why: str):
+        """The spectrum the signal component left on the config, or a setup error saying which to list."""
+        spectrum = getattr(config, "rfi_prior_spectrum", None)
+        if spectrum is None:
+            raise ValueError(
+                f"no RFI prior spectrum on the config. {self.__class__.__name__} {why}, "
+                "which the signal component leaves on the config when it is set up: "
+                f"list one of {list(self.coarse_signal_refs)} before it in "
+                "model.components."
+            )
+        return spectrum
+
+    def _interpolation_weights(self, config, rfi_args):
+        """The ``(n_freq, n_time, n_int_freq, n_int_time, n_stencil)`` weights, from the prior."""
+        spectrum = self._prior_spectrum(
+            config, "interpolates under the covariance of the signal it reads"
+        )
+        return interpolation_weights(
+            spectrum["pk"],
+            spectrum["ks"],
+            [config.chan_width, config.int_time],
+            [self.n_int_freq, self.n_int_time],
+            self.stencil,
+            [self.n_freq, self.n_time],
+        )
+
+    def build_set_params(self):
+
+        def set_params(params):
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        # The weights are solved in float64 (see gp_interp) and applied in the
+        # working precision, which jnp.asarray settles.
+        return {
+            "a1": self.a1,
+            "a2": self.a2,
+            "weights": jnp.asarray(self.weights),
+            "freqs_fine": jnp.asarray(self.freqs_fine),
+            "dnu": jnp.asarray(self.dnu),
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        n_int_time = self.n_int_time
+        n_int_freq = self.n_int_freq
+        n_freq, n_time = self.n_freq, self.n_time
+        baseline_block_size = self.baseline_block_size
+        time_block_size = self.time_block_size
+        offsets = self.offsets
+        stencil = self.stencil
+        signal_refs = self.coarse_signal_refs
+        name = self.__class__.__name__
+        n_freq_fine = n_freq * n_int_freq
+        n_time_fine = n_time * n_int_time
+        tau = self.tau
+
+        def forward(params, state, constants):
+            # Pure JAX operations only
+            a1 = constants[f"{prefix}/a1"]
+            a2 = constants[f"{prefix}/a2"]
+            weights = constants[f"{prefix}/weights"]
+
+            rfi_A = state["rfi_A"]
+            rfi_phase = state["rfi_phase"]
+            phase_grid = tuple(rfi_phase.shape[-2:])
+            # A data-grid phase comes with the path's derivatives; a fine-grid
+            # one comes alone. When the two grids coincide (one sample per cell
+            # on both axes) the path decides, and either reads the same.
+            if phase_grid == (n_freq, n_time) and "rfi_path" in state:
+                path_route = True
+            elif phase_grid == (n_freq_fine, n_time_fine):
+                path_route = False
+            elif phase_grid == (n_freq, n_time):
+                raise ValueError(
+                    f"{name} got rfi_phase on the data grid, {tuple(rfi_phase.shape)}, "
+                    "without the rfi_path that goes with it. A data-grid phase comes "
+                    "from trajectory:FixedOrbitCoarse or trajectory:PathCalculationRFI, "
+                    "which write both."
+                )
+            else:
+                raise ValueError(
+                    f"{name} reads rfi_phase on the fine grid, (..., {n_freq_fine}, "
+                    f"{n_time_fine}), or on the data grid, (..., {n_freq}, {n_time}), "
+                    f"and got {tuple(rfi_phase.shape)}."
+                )
+            # The state key is the one the fine-grid signal components write too,
+            # so the order check cannot tell the two apart; the shape can, and it
+            # is static at trace time.
+            if tuple(rfi_A.shape[-2:]) != (n_freq, n_time):
+                raise ValueError(
+                    f"{name} reads rfi_A on the data grid, (..., {n_freq}, "
+                    f"{n_time}), and got {tuple(rfi_A.shape)}. Pair it with a "
+                    f"data-grid signal component -- one of {list(signal_refs)} -- "
+                    "rather than a fine-grid one."
+                )
+
+            # Per-RFI-shard body (any leading RFI count); psum-ed across devices
+            # under sharding. The interpolation, the phase reconstruction and the
+            # fine->coarse mean all run per shard, so the collective is only
+            # coarse-grid sized.
+            if path_route:
+                freqs_fine = constants[f"{prefix}/freqs_fine"]
+                dnu = constants[f"{prefix}/dnu"]
+                order = state["rfi_path"].shape[-1] - 1
+                powers = jnp.asarray(taylor_powers(tau, order))
+
+                def local_vis(rfi_A, rfi_phase, rfi_path):
+                    return gp_interp_rfi_vis_path(
+                        rfi_A,
+                        rfi_phase,
+                        rfi_path,
+                        freqs_fine,
+                        dnu,
+                        powers,
+                        weights,
+                        offsets,
+                        stencil,
+                        a1,
+                        a2,
+                        n_int_freq,
+                        n_int_time,
+                        baseline_block_size,
+                        time_block_size,
+                    )
+
+                vis_rfi = psum_over_rfi(local_vis)(rfi_A, rfi_phase, state["rfi_path"])
+            else:
+
+                def local_vis(rfi_A, rfi_phase):
+                    return gp_interp_rfi_vis(
+                        rfi_A,
+                        rfi_phase,
+                        weights,
+                        offsets,
+                        stencil,
+                        a1,
+                        a2,
+                        n_int_freq,
+                        n_int_time,
+                        baseline_block_size,
+                        time_block_size,
+                    )
+
+                vis_rfi = psum_over_rfi(local_vis)(rfi_A, rfi_phase)
+            # vis_rfi is shape (n_bl, n_freq, n_time)
+            state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
+
+            return state
+
+        return forward
+
+    def _set_outputs(self):
+
+        self.state_outputs = {
+            "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
+        }
+
+
+class PolyInterpVis(GPInterpVis):
+    """:class:`GPInterpVis` with a polynomial through the stencil in place of the conditional mean.
+
+    The same component -- the data-grid signal, the stencil of
+    ``rfi.gp_interp_stencil`` cells on every side, the time-blocked Riemann sum,
+    the phase on either grid -- with the fine samples of each cell read off the
+    polynomial through the block of coarse values around it rather than off the
+    conditional mean of the prior given them. The interpolating polynomial is
+    unique, of degree ``2h`` on each axis, so by default the weights are its
+    Lagrange basis at the fine offsets: no solve, nothing read from the prior,
+    and the same conditioning whatever the correlation scale. It is what the
+    conditional mean tends to for a prior that is smooth on the scale of the
+    stencil, and on draws from the prior it sits ten to thirty percent further
+    from the supersampled grid than the conditional mean does, on average. See
+    :mod:`tabascal.poly_interp`.
+
+    ``rfi.poly_interp_degree`` raises the degree above the interpolating one.
+    The polynomial still passes through the stencil values, and its extra
+    coefficients are what the prior expects of them given those values: the
+    prior on the coefficients is the covariance of the process's derivatives at
+    the cell centre, the spectral moments of the spectrum the signal component
+    leaves on the config. As the degree grows the weights converge to
+    ``GPInterpVis``'s, and so does the conditioning of the solve; at the default
+    stencil degree 3 reproduces its accuracy, the 5-point stencil takes 8.
+    """
+
+    def _interpolation_weights(self, config, rfi_args):
+        degree = _whole_number(
+            rfi_args.get("poly_interp_degree"),
+            "poly_interp_degree",
+            minimum=2 * self.half_width,
+            null_ok=True,
+        )
+        spectrum = None
+        if degree is not None and any(degree > 2 * h > 0 for h in self.stencil):
+            spectrum = self._prior_spectrum(
+                config,
+                f"takes the coefficients of a degree-{degree} polynomial beyond the "
+                f"{2 * self.half_width + 1} stencil values from the prior of the signal it reads",
+            )
+        return polynomial_weights(
+            [self.n_int_freq, self.n_int_time],
+            self.stencil,
+            [self.n_freq, self.n_time],
+            degree=degree,
+            pk=None if spectrum is None else spectrum["pk"],
+            ks=None if spectrum is None else spectrum["ks"],
+            dxs=None if spectrum is None else [config.chan_width, config.int_time],
+        )

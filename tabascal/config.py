@@ -830,6 +830,11 @@ class Model:
 
             numpyro.deterministic("rfi_phase", state["rfi_phase"])
             numpyro.deterministic("rfi_A", state["rfi_A"])
+            # Present only with a data-grid phase (FixedOrbitCoarse or
+            # PathCalculationRFI); the per-satellite decomposition needs it
+            # beside the phase it goes with.
+            if "rfi_path" in state:
+                numpyro.deterministic("rfi_path", state["rfi_path"])
 
             numpyro.deterministic("vis_rfi", state["vis_rfi"])
             numpyro.deterministic("vis_ast", state["vis_ast"])

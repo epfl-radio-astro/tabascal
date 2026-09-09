@@ -28,6 +28,18 @@ The metrics compared against references are `total_runtime`,
 `optimizer_runtime` and `memory_usage`. Metrics without a reference entry are
 reported but not asserted.
 
+The data-grid route -- `rfi_vis:GPInterpVis` with the signal and phase on the
+data grid; `rfi_vis:PolyInterpVis` runs the same forward on weights of the same
+shape, so it has no variant of its own -- has its own checks in
+[`ci/reframe/tabascal_gp_interp_check.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/ci/reframe/tabascal_gp_interp_check.py),
+the same two classes over the variants `GPInterp` (fine grids formed whole in
+the forward) and `GPInterpBlocked` (`rfi.time_block_size` set, so they exist a
+block of time steps at a time). They carry no references and run in their own
+CI job, `perf_job_gp_interp`, beside `perf_job`; the measurements recorded in
+the file were taken beside the fine-grid variants of the same commit, which is
+the comparison that means something. A variant's config keys beyond its
+components go through `prepare_data.py --config-overrides`.
+
 The `Riemann` references describe a deliberate trade rather than a target: that
 component bounds its peak memory by scanning the baseline axis and recomputing
 each block in the backward pass (see

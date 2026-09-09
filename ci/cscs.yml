@@ -99,6 +99,30 @@ perf_job:
   rules:
     - if: $CRON_RUN != "true"
 
+# The data-grid route (rfi_vis:GPInterpVis), reported rather than asserted:
+# ci/reframe/tabascal_gp_interp_check.py carries no references. Its own job
+# rather than more variants in perf_job, whose serial runs already fill most
+# of the 30-minute limit; measured 19 minutes on their own.
+perf_job_gp_interp:
+  extends: .perf_job_template
+  parallel:
+    matrix:
+      - JAX_VERSION: ["0.6.0"]
+  rules:
+    - if: $CRON_RUN != "true"
+  script:
+    - cd /tabascal/src
+    - >
+      reframe
+      -C ci/reframe/settings.py
+      -c ci/reframe/tabascal_gp_interp_check.py
+      --system=daint:gpu
+      --exec-policy=serial
+      --run
+      --performance-report
+      --report-file=reframe_gp_interp_results.json
+      -S strict_check=0
+
 perf_job_cron:
   extends: .perf_job_template
   parallel:

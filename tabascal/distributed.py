@@ -121,14 +121,18 @@ RFI_AXIS_NAMES = frozenset({
     # latent params (optimized)
     "rfi_k_r_base", "rfi_k_i_base",
     "rfi_orbit_base",
-    # state buffers
-    "rfi_A", "rfi_phase", "rfi_xyz", "elements",
+    # state buffers. rfi_path is the data-grid path and its time derivatives
+    # beside a data-grid rfi_phase (see tabascal.rfi_path).
+    "rfi_A", "rfi_phase", "rfi_path", "rfi_xyz", "elements",
     # constants
     "mu_rfi_k", "mu_rfi_orbit", "L_rfi_orbit",
     # (n_rfi, n_time_fine) elevation mask, multiplied into rfi_A in the signal
     # forwards. Sharded rather than replicated so that multiply stays elementwise
     # within each shard -- replicated, it would pull rfi_A back to a full copy.
+    # rfi_mask is its (n_rfi, n_time) counterpart for the data-grid signal
+    # components, applied to a data-grid rfi_A for the same reason.
     "rfi_mask_fine",
+    "rfi_mask",
 })
 
 
@@ -252,28 +256,38 @@ def constrain_rfi_state(state: dict, n_rfi: int) -> dict:
 def psum_over_rfi(local_fn: Callable) -> Callable:
     """Map a per-RFI-shard visibility function over the mesh and sum across shards.
 
-    ``local_fn(rfi_A, rfi_phase) -> vis`` must accept any leading RFI count and return
-    an array with **no** RFI axis (its local sources already summed). Under sharding it
-    runs per device on the local shard via ``shard_map`` -- which is also what lets the
-    FFI custom op participate, since GSPMD cannot partition a custom call -- and the
-    small coarse-grid results are ``psum``-ed into a replicated total. Unsharded it is
+    ``local_fn(rfi_A, rfi_phase, ...) -> vis`` takes any number of arrays whose
+    leading axis is the RFI source axis -- the amplitude and the phase, and the
+    path derivatives where the phase arrives on the data grid -- must accept any
+    leading RFI count, and returns an array with **no** RFI axis (its local
+    sources already summed). Under sharding it runs per device on the local
+    shard via ``shard_map`` -- which is also what lets the FFI custom op
+    participate, since GSPMD cannot partition a custom call -- and the small
+    coarse-grid results are ``psum``-ed into a replicated total. Unsharded it is
     ``local_fn`` itself, keeping the single-device path bitwise identical.
     """
     if not sharding_enabled():
         return local_fn
 
-    def summed(rfi_A, rfi_phase):
-        return lax.psum(local_fn(rfi_A, rfi_phase), "rfi")
+    def summed(*arrays):
+        return lax.psum(local_fn(*arrays), "rfi")
 
-    # Varying-axis type checking must be off: the FFI kernel's custom JVP/transpose
-    # rules produce cotangents without the {V:rfi} annotation, which trips the check
-    # under value_and_grad. The out_specs still hold -- the psum makes the result
-    # replicated -- the checker just cannot prove it for custom primitives.
-    kwargs = dict(mesh=rfi_mesh(), in_specs=(P("rfi"), P("rfi")), out_specs=P())
-    try:
-        return shard_map(summed, check_vma=False, **kwargs)
-    except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
-        return shard_map(summed, check_rep=False, **kwargs)
+    def mapped(*arrays):
+        # Varying-axis type checking must be off: the FFI kernel's custom
+        # JVP/transpose rules produce cotangents without the {V:rfi} annotation,
+        # which trips the check under value_and_grad. The out_specs still hold
+        # -- the psum makes the result replicated -- the checker just cannot
+        # prove it for custom primitives.
+        kwargs = dict(
+            mesh=rfi_mesh(), in_specs=(P("rfi"),) * len(arrays), out_specs=P()
+        )
+        try:
+            fn = shard_map(summed, check_vma=False, **kwargs)
+        except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
+            fn = shard_map(summed, check_rep=False, **kwargs)
+        return fn(*arrays)
+
+    return mapped
 
 
 # ---------------------------------------------------------------------------

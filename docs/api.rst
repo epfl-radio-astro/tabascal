@@ -8,6 +8,9 @@ API Reference
    api/trajectory
    api/rfi_signal
    api/rfi_vis
+   api/gp_interp
+   api/poly_interp
+   api/rfi_path
    api/ast_signal
    api/ast_vis
    api/gains
