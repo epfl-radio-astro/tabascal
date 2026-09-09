@@ -143,10 +143,14 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
 
         self.prerun_cmds = ["set -e"]
 
+        # The CI container's conda environment, where it exists: the checks are
+        # also run by hand on a Daint node from a pixi environment, whose
+        # python is already on the path, and there the activation has nothing
+        # to activate and must not stop the script under set -e.
         if self.current_partition.fullname == "daint:gpu":
             self.prerun_cmds += [
-                ". /opt/conda/etc/profile.d/conda.sh",
-                "conda activate tab",
+                "if [ -f /opt/conda/etc/profile.d/conda.sh ]; then"
+                " . /opt/conda/etc/profile.d/conda.sh && conda activate tab; fi",
             ]
 
         self.prerun_cmds += self.gpu_setup_cmds()
