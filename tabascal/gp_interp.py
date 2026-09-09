@@ -261,6 +261,27 @@ def _axis_weights(
     return table, case, dropped
 
 
+def assemble_axis_weights(
+    tables: Sequence[np.ndarray], cases: Sequence[np.ndarray], hs: Sequence[int]
+) -> np.ndarray:
+    """The ``(n_freq, n_time, n_int_freq, n_int_time, n_stencil)`` array from two per-axis tables.
+
+    ``tables[a][c, q, d + h]`` and ``cases[a][j]`` are what :func:`_axis_weights`
+    returns for axis ``a``; the weight on a stencil point is the product of the
+    two axes' weights on its offsets, the stencil being the outer grid of the
+    axes' offsets in the order of :func:`stencil_offsets`. Shared with
+    :mod:`tabascal.poly_interp`, whose per-axis tables have the same shape.
+    """
+    (table_f, table_t), (case_f, case_t) = tables, cases
+    h_f, h_t = (int(h) for h in hs)
+    offsets = stencil_offsets((h_f, h_t))
+    d_f, d_t = offsets[:, 0], offsets[:, 1]
+    # (n_f, n_int_f, S) and (n_t, n_int_t, S), then the outer product.
+    W_f = table_f[case_f][:, :, d_f + h_f]
+    W_t = table_t[case_t][:, :, d_t + h_t]
+    return np.ascontiguousarray(W_f[:, None, :, None, :] * W_t[None, :, None, :, :])
+
+
 def interpolation_weights(
     pk,
     ks: Sequence,
@@ -318,10 +339,7 @@ def interpolation_weights(
         table_t, case_t, dropped_t = _axis_weights(pk_t, ks[1], dx_t, n_int_t, h_t, n_t)
         _warn_if_degenerate(dropped_f, "on the frequency axis")
         _warn_if_degenerate(dropped_t, "on the time axis")
-        # (n_f, n_int_f, S) and (n_t, n_int_t, S), then the outer product.
-        W_f = table_f[case_f][:, :, d_f + h_f]
-        W_t = table_t[case_t][:, :, d_t + h_t]
-        return np.ascontiguousarray(W_f[:, None, :, None, :] * W_t[None, :, None, :, :])
+        return assemble_axis_weights((table_f, table_t), (case_f, case_t), (h_f, h_t))
 
     # The joint solve, for a spectrum that is not a product over the axes.
     # Coarse-coarse lags, (d - d') * dx for d - d' in -2h..2h, and fine-coarse

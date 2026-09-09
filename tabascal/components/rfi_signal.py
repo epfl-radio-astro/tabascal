@@ -663,7 +663,8 @@ class BaseGPRFI(Component):
     #: zero-padding the latent spectrum and which the Riemann-sum kernels read.
     #: ``"coarse"`` is the data grid, ``(n_freq, n_time)``, one value per cell at
     #: its centre, for ``rfi_vis:GPInterpVis`` to interpolate under the same
-    #: prior. The ``*Coarse`` subclasses set it; nothing else about them differs.
+    #: prior or ``rfi_vis:PolyInterpVis`` through a polynomial. The ``*Coarse``
+    #: subclasses set it; nothing else about them differs.
     signal_grid = "fine"
 
     @property
@@ -683,11 +684,13 @@ class BaseGPRFI(Component):
         return (self.n_freq_fine, self.n_time_fine)
 
     def _publish_prior_spectrum(self, tab_config) -> None:
-        """Leave the sampled prior's spectrum on the config, for ``rfi_vis:GPInterpVis``.
+        """Leave the sampled prior's spectrum on the config, for the data-grid visibility components.
 
-        That component interpolates the data-grid signal as the conditional mean
-        of *this* Gaussian process, so it needs the covariance this component
-        samples from: the inverse transform of ``pk`` on ``ks``, the padded and
+        ``rfi_vis:GPInterpVis`` interpolates the data-grid signal as the
+        conditional mean of *this* Gaussian process, and ``rfi_vis:PolyInterpVis``
+        draws the coefficients of its polynomial above the interpolating degree
+        from the same prior, so they need the covariance this component samples
+        from: the inverse transform of ``pk`` on ``ks``, the padded and
         cut k-grid the latent lives on, which are exactly what the transform
         carries. Handed over through the config the components are set up
         against, in list order, so the reader finds it there when its own setup
@@ -1595,7 +1598,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
 
 
 class ComplexRFIVarAntCoarse(ComplexRFIVarAnt):
-    """:class:`ComplexRFIVarAnt` written on the data grid, for ``rfi_vis:GPInterpVis``.
+    """:class:`ComplexRFIVarAnt` written on the data grid, for the interpolating visibility components.
 
     The same latent, prior, parameters and initialisation as
     :class:`ComplexRFIVarAnt` -- ``rfi_k_r_base`` and ``rfi_k_i_base`` of the
@@ -1604,10 +1607,11 @@ class ComplexRFIVarAntCoarse(ComplexRFIVarAnt):
     value per channel and time step at the centre of the cell it stands for. The
     fine samples the visibility integral needs are left to
     :class:`~tabascal.components.rfi_vis.GPInterpVis`, which forms them from this
-    grid as the conditional mean of the same Gaussian process; that is what the
-    spectrum this component leaves on the config is for. Pair it with that
-    component: the Riemann-sum kernels read the fine grid and refuse this one by
-    shape.
+    grid as the conditional mean of the same Gaussian process, or to
+    :class:`~tabascal.components.rfi_vis.PolyInterpVis`, which reads them off a
+    polynomial through the neighbouring values; the spectrum this component
+    leaves on the config is for them. Pair it with one of those: the
+    Riemann-sum kernels read the fine grid and refuse this one by shape.
 
     Where the two grids overlap they agree exactly: the supersampled grid passes
     through the coarse points, so the sample at the centre of each cell of the
@@ -1622,7 +1626,7 @@ class ComplexRFIVarAntCoarse(ComplexRFIVarAnt):
 
 
 class ComplexRFIConstAntCoarse(ComplexRFIConstAnt):
-    """:class:`ComplexRFIConstAnt` written on the data grid, for ``rfi_vis:GPInterpVis``.
+    """:class:`ComplexRFIConstAnt` written on the data grid, for the interpolating visibility components.
 
     See :class:`ComplexRFIVarAntCoarse`: the same relation to its fine-grid
     parent, for the one-amplitude-per-source model.

@@ -29,7 +29,8 @@ The metrics compared against references are `total_runtime`,
 reported but not asserted.
 
 The data-grid route -- `rfi_vis:GPInterpVis` with the signal and phase on the
-data grid -- has its own checks in
+data grid; `rfi_vis:PolyInterpVis` runs the same forward on weights of the same
+shape, so it has no variant of its own -- has its own checks in
 [`ci/reframe/tabascal_gp_interp_check.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/ci/reframe/tabascal_gp_interp_check.py),
 the same two classes over the variants `GPInterp` (fine grids formed whole in
 the forward) and `GPInterpBlocked` (`rfi.time_block_size` set, so they exist a

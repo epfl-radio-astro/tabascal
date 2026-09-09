@@ -624,6 +624,49 @@ data_grid_configs = [
         ),
         id="GPInterpVis",
     ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbitCoarse",
+                "rfi_signal:ComplexRFIVarAntCoarse",
+                "rfi_vis:PolyInterpVis",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The GPInterpVis case with the fine samples read off the quadratic
+            # through each cell and its two neighbours (rfi.poly_interp_degree
+            # null, the base default) rather than off the conditional mean of
+            # the prior: the same forward on different weights, so the same
+            # memory and runtime, and an interpolation that needs no solve and
+            # nothing from the prior. It is the smooth-prior limit of the other,
+            # and sits a fraction further from the supersampled grid, so it has
+            # its own references.
+            #
+            # Measured opt-point values (UnitaryGains -> identity gains, RMSE 0):
+            #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   double  ARM    | 0.8965724453 |     0.1787       1.2      |     0.4175       0.3
+            #   single  ARM    | 0.8995813131 |     0.1795       1.1      |     0.4215       0.3
+            # Against the RiemannVis case's 0.8965724354 in double: 1e-8 apart,
+            # where the GPInterpVis case is 7e-6 away. Not the GP solve's
+            # round-off -- at this sampling (12 per 2 s step, 24 s correlation)
+            # its stencil covariance is well conditioned, smallest eigenvalue
+            # 5e-6 of the largest, nothing dropped -- but the shape of the
+            # weights, which differ from the quadratic's by 1e-3: the quadratic
+            # map fits the simulated signal better, as the smooth-prior limit
+            # would if that signal is smoother than the prior. The fp32 offset, 3.0e-3,
+            # is the GPInterpVis case's 3.4e-3 rather than the fine-grid route's
+            # 2.7e-5: it belongs to the data-grid route -- the rebuilt phase, the
+            # data-grid state -- and not to the interpolation weights.
+            chi2_ref=0.8965724452590493,
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
+        ),
+        id="PolyInterpVis",
+    ),
 ]
 
 

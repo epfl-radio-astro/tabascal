@@ -15,6 +15,7 @@ from tabascal.gp_interp import (
     interpolation_weights,
     stencil_offsets,
 )
+from tabascal.poly_interp import polynomial_weights
 from tabascal.rfi_path import fine_frequency_terms, taylor_powers
 from ri_kernels.jax_api import RFIVisOp
 
@@ -547,32 +548,17 @@ class GPInterpVis(Component):
             self.time_block_size = _whole_number(
                 rfi_args.get("time_block_size"), "time_block_size", minimum=1, null_ok=True
             )
-            half_width = _whole_number(
+            self.half_width = _whole_number(
                 rfi_args.get("gp_interp_stencil", 1), "gp_interp_stencil", minimum=0, null_ok=False
             )
             # An axis with one sample per cell needs no neighbours: its sample is
             # the coarse value, on which the product prior puts the whole weight.
             self.stencil = [
-                half_width if n_int > 1 else 0 for n_int in (self.n_int_freq, self.n_int_time)
+                self.half_width if n_int > 1 else 0
+                for n_int in (self.n_int_freq, self.n_int_time)
             ]
             self.offsets = stencil_offsets(self.stencil)
-
-            spectrum = getattr(config, "rfi_prior_spectrum", None)
-            if spectrum is None:
-                raise ValueError(
-                    "no RFI prior spectrum on the config. GPInterpVis interpolates "
-                    "under the covariance of the signal it reads, which the signal "
-                    "component leaves on the config when it is set up: list one of "
-                    f"{list(self.coarse_signal_refs)} before it in model.components."
-                )
-            self.weights = interpolation_weights(
-                spectrum["pk"],
-                spectrum["ks"],
-                [config.chan_width, config.int_time],
-                [self.n_int_freq, self.n_int_time],
-                self.stencil,
-                [self.n_freq, self.n_time],
-            )
+            self.weights = self._interpolation_weights(config, rfi_args)
 
             # The terms that rebuild a block's fine phase from a data-grid one:
             # the fine frequencies and their channel offsets, and the powers of
@@ -589,6 +575,32 @@ class GPInterpVis(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}") from e
+
+    def _prior_spectrum(self, config, why: str):
+        """The spectrum the signal component left on the config, or a setup error saying which to list."""
+        spectrum = getattr(config, "rfi_prior_spectrum", None)
+        if spectrum is None:
+            raise ValueError(
+                f"no RFI prior spectrum on the config. {self.__class__.__name__} {why}, "
+                "which the signal component leaves on the config when it is set up: "
+                f"list one of {list(self.coarse_signal_refs)} before it in "
+                "model.components."
+            )
+        return spectrum
+
+    def _interpolation_weights(self, config, rfi_args):
+        """The ``(n_freq, n_time, n_int_freq, n_int_time, n_stencil)`` weights, from the prior."""
+        spectrum = self._prior_spectrum(
+            config, "interpolates under the covariance of the signal it reads"
+        )
+        return interpolation_weights(
+            spectrum["pk"],
+            spectrum["ks"],
+            [config.chan_width, config.int_time],
+            [self.n_int_freq, self.n_int_time],
+            self.stencil,
+            [self.n_freq, self.n_time],
+        )
 
     def build_set_params(self):
 
@@ -619,6 +631,7 @@ class GPInterpVis(Component):
         offsets = self.offsets
         stencil = self.stencil
         signal_refs = self.coarse_signal_refs
+        name = self.__class__.__name__
         n_freq_fine = n_freq * n_int_freq
         n_time_fine = n_time * n_int_time
         tau = self.tau
@@ -641,14 +654,14 @@ class GPInterpVis(Component):
                 path_route = False
             elif phase_grid == (n_freq, n_time):
                 raise ValueError(
-                    f"GPInterpVis got rfi_phase on the data grid, {tuple(rfi_phase.shape)}, "
+                    f"{name} got rfi_phase on the data grid, {tuple(rfi_phase.shape)}, "
                     "without the rfi_path that goes with it. A data-grid phase comes "
                     "from trajectory:FixedOrbitCoarse or trajectory:PathCalculationRFI, "
                     "which write both."
                 )
             else:
                 raise ValueError(
-                    f"GPInterpVis reads rfi_phase on the fine grid, (..., {n_freq_fine}, "
+                    f"{name} reads rfi_phase on the fine grid, (..., {n_freq_fine}, "
                     f"{n_time_fine}), or on the data grid, (..., {n_freq}, {n_time}), "
                     f"and got {tuple(rfi_phase.shape)}."
                 )
@@ -657,7 +670,7 @@ class GPInterpVis(Component):
             # is static at trace time.
             if tuple(rfi_A.shape[-2:]) != (n_freq, n_time):
                 raise ValueError(
-                    f"GPInterpVis reads rfi_A on the data grid, (..., {n_freq}, "
+                    f"{name} reads rfi_A on the data grid, (..., {n_freq}, "
                     f"{n_time}), and got {tuple(rfi_A.shape)}. Pair it with a "
                     f"data-grid signal component -- one of {list(signal_refs)} -- "
                     "rather than a fine-grid one."
@@ -723,3 +736,54 @@ class GPInterpVis(Component):
         self.state_outputs = {
             "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
+
+
+class PolyInterpVis(GPInterpVis):
+    """:class:`GPInterpVis` with a polynomial through the stencil in place of the conditional mean.
+
+    The same component -- the data-grid signal, the stencil of
+    ``rfi.gp_interp_stencil`` cells on every side, the time-blocked Riemann sum,
+    the phase on either grid -- with the fine samples of each cell read off the
+    polynomial through the block of coarse values around it rather than off the
+    conditional mean of the prior given them. The interpolating polynomial is
+    unique, of degree ``2h`` on each axis, so by default the weights are its
+    Lagrange basis at the fine offsets: no solve, nothing read from the prior,
+    and the same conditioning whatever the correlation scale. It is what the
+    conditional mean tends to for a prior that is smooth on the scale of the
+    stencil, and on draws from the prior it sits ten to thirty percent further
+    from the supersampled grid than the conditional mean does, on average. See
+    :mod:`tabascal.poly_interp`.
+
+    ``rfi.poly_interp_degree`` raises the degree above the interpolating one.
+    The polynomial still passes through the stencil values, and its extra
+    coefficients are what the prior expects of them given those values: the
+    prior on the coefficients is the covariance of the process's derivatives at
+    the cell centre, the spectral moments of the spectrum the signal component
+    leaves on the config. As the degree grows the weights converge to
+    ``GPInterpVis``'s, and so does the conditioning of the solve; at the default
+    stencil degree 3 reproduces its accuracy, the 5-point stencil takes 8.
+    """
+
+    def _interpolation_weights(self, config, rfi_args):
+        degree = _whole_number(
+            rfi_args.get("poly_interp_degree"),
+            "poly_interp_degree",
+            minimum=2 * self.half_width,
+            null_ok=True,
+        )
+        spectrum = None
+        if degree is not None and any(degree > 2 * h > 0 for h in self.stencil):
+            spectrum = self._prior_spectrum(
+                config,
+                f"takes the coefficients of a degree-{degree} polynomial beyond the "
+                f"{2 * self.half_width + 1} stencil values from the prior of the signal it reads",
+            )
+        return polynomial_weights(
+            [self.n_int_freq, self.n_int_time],
+            self.stencil,
+            [self.n_freq, self.n_time],
+            degree=degree,
+            pk=None if spectrum is None else spectrum["pk"],
+            ks=None if spectrum is None else spectrum["ks"],
+            dxs=None if spectrum is None else [config.chan_width, config.int_time],
+        )

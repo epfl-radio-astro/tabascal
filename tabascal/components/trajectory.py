@@ -1008,10 +1008,11 @@ class FixedOrbitCoarse(FixedOrbit):
     ``rfi_path``, the path differential to the array mean with its first
     ``rfi.path_order`` time derivatives at the cell centres, from a polynomial
     through a window of fine samples around each. Both are constants, computed
-    once in float64. ``rfi_vis:GPInterpVis`` rebuilds the fine phase from them a
-    block of time steps at a time, exactly across frequency and by the Taylor
-    series across time; see :mod:`tabascal.rfi_path`. Nothing else reads a
-    data-grid phase, so pair it with that component.
+    once in float64. ``rfi_vis:GPInterpVis`` and ``rfi_vis:PolyInterpVis``
+    rebuild the fine phase from them a block of time steps at a time, exactly
+    across frequency and by the Taylor series across time; see
+    :mod:`tabascal.rfi_path`. Nothing else reads a data-grid phase, so pair it
+    with one of them.
 
     ``rfi_xyz`` stays on the fine time grid: it carries no antenna or frequency
     axis, so it is small, and it is what the derivatives are taken from.
@@ -1109,7 +1110,7 @@ class PathCalculationRFI(PhaseCalculationRFI):
     path is evaluated at a window of fine samples around each cell centre
     rather than at every fine sample, and the phase is never formed on the
     fine grid here at all. Double precision, as its parent. Pair it with
-    ``rfi_vis:GPInterpVis``.
+    ``rfi_vis:GPInterpVis`` or ``rfi_vis:PolyInterpVis``.
     """
 
     required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}

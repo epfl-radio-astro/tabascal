@@ -2,7 +2,8 @@
 
 The same pipeline as :mod:`tabascal_perf_check`, on the same 96-antenna
 simulation, with the RFI signal and phase carried on the data grid and the
-fine grid rebuilt inside ``rfi_vis:GPInterpVis`` -- see
+fine grid rebuilt inside ``rfi_vis:GPInterpVis`` (``rfi_vis:PolyInterpVis``
+runs the same forward on weights of the same shape, so has no variant) -- see
 ``docs/components/rfi_vis.md``. Two variants:
 
 * ``GPInterp``: every time step at once, so the fine grids are formed whole

@@ -5,7 +5,8 @@ The interpolation :class:`~tabascal.components.rfi_vis.GPInterpVis` makes from
 a data-grid RFI signal onto the fine integration grid, under the covariance of
 the signal's own prior: the geometry of the fine samples, the covariance and
 the conditional-mean weights on the host side, and their application and the
-time-blocked visibility in JAX.
+time-blocked visibility in JAX. :mod:`tabascal.poly_interp` builds its
+weights on the same geometry and applies them through the same functions.
 
 .. automodule:: tabascal.gp_interp
     :members:
