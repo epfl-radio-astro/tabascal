@@ -579,6 +579,55 @@ rfi_vis_configs = [
 
 
 # ---------------------------------------------------------------------------
+# Data-grid components — the signal and the phase both on the data grid
+# ---------------------------------------------------------------------------
+
+data_grid_configs = [
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbitCoarse",
+                "rfi_signal:ComplexRFIVarAntCoarse",
+                "rfi_vis:GPInterpVis",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The same model as the RiemannVis case evaluated the other way round:
+            # the signal is written on the data grid and interpolated onto the
+            # integration grid under its own prior, and the phase is rebuilt from
+            # its data-grid value and the path's time derivatives (rfi.path_order
+            # 3, rfi.gp_interp_stencil 1, no time blocking -- the base defaults).
+            # Neither fine grid is model state. It is not the identical
+            # computation, so it has its own references rather than the
+            # RiemannVis case's: the interpolation differs from the Fourier
+            # supersampling by the prior's scatter within a cell, and the rebuilt
+            # phase from the propagated one by the ~20 us jitter of the fine
+            # grid's float64 dates.
+            #
+            # Measured opt-point values (UnitaryGains -> identity gains, RMSE 0):
+            #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   double  ARM    | 0.8965787973 |     0.1787       1.2      |     0.4175       0.3
+            #   single  ARM    | 0.8995882869 |     0.1795       1.1      |     0.4215       0.3
+            # Against the RiemannVis case's 0.8965724354 in double: 7e-6 apart,
+            # and the truth metrics agree to the printed precision, so the two
+            # routes reach the same optimum. The fp32 offset is 3.4e-3 here where
+            # the RiemannVis case's is 2.7e-5 -- inside the 1% tolerance, but a
+            # hundred times the fine-grid route's, and not yet measured on x86 or
+            # GPU; see the PR that added this case.
+            chi2_ref=0.8965787973002197,
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
+        ),
+        id="GPInterpVis",
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 # Astronomical sky signal components — upstream fixed to FixedOrbit
 # ---------------------------------------------------------------------------
 
@@ -607,7 +656,7 @@ gains_configs = []
 # All pipeline tests — single parametrized function
 # ---------------------------------------------------------------------------
 
-all_configs = trajectory_configs + rfi_signal_configs + rfi_vis_configs + ast_signal_configs + ast_vis_configs + gains_configs
+all_configs = trajectory_configs + rfi_signal_configs + rfi_vis_configs + data_grid_configs + ast_signal_configs + ast_vis_configs + gains_configs
 
 
 def _report_measured(case_id: str, precision: str, stdout: str) -> None:
@@ -780,10 +829,19 @@ def test_pipeline_log_is_written_in_the_plot_directory(
 # 3 satellites, so a 2-device mesh also exercises the dark-dummy padding (3 -> 4).
 
 def _sharded_components(rfi_vis: str) -> list[str]:
+    # GPInterpVis reads the signal and the phase on the data grid, so it takes the
+    # data-grid producers: PathCalculationRFI writes rfi_phase and rfi_path from
+    # the rfi_xyz FixedOrbit puts in the state, as PhaseCalculationRFI writes the
+    # fine-grid phase from it for the other two. Three per-source arrays then go
+    # through psum_over_rfi's shard_map rather than two.
+    if rfi_vis == "GPInterpVis":
+        phase, signal = "trajectory:PathCalculationRFI", "rfi_signal:ComplexRFIVarAntCoarse"
+    else:
+        phase, signal = "trajectory:PhaseCalculationRFI", "rfi_signal:ComplexRFIVarAnt"
     return [
         "trajectory:FixedOrbit",
-        "trajectory:PhaseCalculationRFI",
-        "rfi_signal:ComplexRFIVarAnt",
+        phase,
+        signal,
         f"rfi_vis:{rfi_vis}",
         "ast_vis:GPVisAst",
         "gains:UnitaryGains",
@@ -869,9 +927,13 @@ def _cpu_env(n_devices: int) -> dict:
     [
         # The plain variant runs entirely through GSPMD+shard_map on pure JAX ops;
         # the FFI variant additionally exercises the custom C kernel inside
-        # shard_map (the reason for check_vma=False in psum_over_rfi).
+        # shard_map (the reason for check_vma=False in psum_over_rfi). The
+        # data-grid variant shards two more per-source arrays -- the path
+        # derivatives and the data-grid elevation mask -- and a three-argument
+        # shard_map.
         "RiemannVis",
         "RiemannVisFFI",
+        "GPInterpVis",
     ],
 )
 def test_pipeline_sharded_equivalence(
@@ -919,7 +981,11 @@ def test_pipeline_sharded_equivalence(
     assert _extract_chi2(shard.stdout, "init") == pytest.approx(
         _extract_chi2(ref.stdout, "init"), rel=1e-8
     )
-    _assert_chi2(shard.stdout, _SHARDED_CHI2_REF)
+    # The fine-grid variants are the FixedOrbit+PhaseCalculationRFI case and share
+    # its reference; the data-grid one is its own model (see the GPInterpVis
+    # case), and here it is held to its single-device run alone.
+    if rfi_vis != "GPInterpVis":
+        _assert_chi2(shard.stdout, _SHARDED_CHI2_REF)
 
 
 def _assert_per_sat_results(out_dir: Path) -> None:

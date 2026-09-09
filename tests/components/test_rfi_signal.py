@@ -28,7 +28,9 @@ import numpyro
 from tabascal.interferometry import calculate_rfi_vis_fine
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
+    ComplexRFIVarAntCoarse,
     ComplexRFIConstAnt,
+    ComplexRFIConstAntCoarse,
     read_light_curves,
     rfi_signal_config_validation,
 )
@@ -52,8 +54,25 @@ N_RFI, N_RFI_REAL, N_ANT, N_FREQ, N_TIME = 4, 3, 3, 4, 8
 _TEST_EPOCH_JD = 2460000.5
 _TEST_EPOCH_MJD = _TEST_EPOCH_JD - 2400000.5
 
-ALL_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
-FOURIER_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
+# The data-grid variants are their parents with the supersampling left out, so
+# every contract below holds for them too; only the grid a fine-grid check
+# expects differs, and those read it off ``cls.signal_grid``.
+ALL_CLASSES = [
+    ComplexRFIVarAnt,
+    ComplexRFIConstAnt,
+    ComplexRFIVarAntCoarse,
+    ComplexRFIConstAntCoarse,
+]
+FOURIER_CLASSES = list(ALL_CLASSES)
+COARSE_PAIRS = [
+    (ComplexRFIVarAnt, ComplexRFIVarAntCoarse),
+    (ComplexRFIConstAnt, ComplexRFIConstAntCoarse),
+]
+
+
+def n_time_out(cls, n_int_time):
+    """The time axis a class writes for ``n_int_time`` samples per step."""
+    return N_TIME * n_int_time if cls.signal_grid == "fine" else N_TIME
 
 # Init modes every class accepts. "truth" is excluded throughout: it goes through
 # read_true_rfi_A, which needs a real simulation .zarr store.
@@ -545,11 +564,15 @@ class TestComponentContract:
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_supersampled_fine_grid(self, cls):
-        """With n_int_time > 1 the forward returns the supersampled time grid."""
+        """With n_int_time > 1 the forward returns the supersampled time grid.
+
+        Or, for a data-grid class, the data grid still: the supersampling is
+        exactly what those leave out.
+        """
         comp = setup_component(cls, n_int_time=2)
         rfi_A = run_forward(comp, random_params(comp))
 
-        assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, 2 * N_TIME)
+        assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, n_time_out(cls, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -869,9 +892,11 @@ class TestElevationMask:
         )
         rfi_A = run_forward(comp, random_params(comp))
 
-        assert rfi_A.shape[-1] == N_TIME * n_int_time
-        assert jnp.max(jnp.abs(rfi_A[0, :, :, N_TIME:])) == 0.0
-        assert jnp.max(jnp.abs(rfi_A[0, :, :, :N_TIME])) > 0
+        # The cut falls at fine sample N_TIME, which is time step N_TIME / n_int_time.
+        down_from = N_TIME if cls.signal_grid == "fine" else N_TIME // n_int_time
+        assert rfi_A.shape[-1] == n_time_out(cls, n_int_time)
+        assert jnp.max(jnp.abs(rfi_A[0, :, :, down_from:])) == 0.0
+        assert jnp.max(jnp.abs(rfi_A[0, :, :, :down_from])) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -2386,3 +2411,92 @@ class TestTheStdCanBeMeasuredFromTheData:
         vis = jnp.ones((4, 3, 5), dtype=complex)
         with pytest.raises(ValueError, match="rfi"):
             self._validate(vis, std="widish")
+
+
+# ---------------------------------------------------------------------------
+# The data-grid variants
+# ---------------------------------------------------------------------------
+
+class TestCoarseGridVariants:
+    """The ``*Coarse`` classes write the data grid and are otherwise their parents.
+
+    Everything above already runs on them; what is specific to them is the grid
+    -- and that it is the fine grid at the cell centres -- the mask on that
+    grid, and the spectrum they leave for ``rfi_vis:GPInterpVis``.
+    """
+
+    @pytest.mark.parametrize("fine_cls, coarse_cls", COARSE_PAIRS)
+    def test_the_output_is_on_the_data_grid(self, fine_cls, coarse_cls):
+        comp = setup_component(coarse_cls, n_int_time=3, n_int_freq=2)
+
+        assert comp.state_outputs["rfi_A"].shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
+        assert run_forward(comp, random_params(comp)).shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
+
+    @pytest.mark.parametrize("fine_cls, coarse_cls", COARSE_PAIRS)
+    def test_it_is_the_fine_grid_at_the_cell_centres(self, fine_cls, coarse_cls):
+        """The supersampled grid passes through the coarse points.
+
+        Sample ``n_int // 2`` of every cell is its centre (see
+        ``TabConfig._set_freqs_times``), and the zero-padded inverse transform
+        reproduces the original grid there exactly.
+        """
+        n_int_freq, n_int_time = 2, 3
+        fine = setup_component(fine_cls, n_int_freq=n_int_freq, n_int_time=n_int_time)
+        coarse = setup_component(coarse_cls, n_int_freq=n_int_freq, n_int_time=n_int_time)
+        params = random_params(fine)
+
+        rfi_A_fine = run_forward(fine, params)
+        rfi_A_coarse = run_forward(coarse, params)
+
+        centres = rfi_A_fine[..., n_int_freq // 2 :: n_int_freq, n_int_time // 2 :: n_int_time]
+        assert jnp.allclose(centres, rfi_A_coarse, atol=tol() * jnp.max(jnp.abs(rfi_A_coarse)))
+
+    @pytest.mark.parametrize("fine_cls, coarse_cls", COARSE_PAIRS)
+    def test_the_parameters_and_prior_are_the_parents(self, fine_cls, coarse_cls):
+        fine = setup_component(fine_cls, n_int_time=3)
+        coarse = setup_component(coarse_cls, n_int_time=3)
+
+        assert coarse.parameter_shapes == fine.parameter_shapes
+        assert {k: v.shape for k, v in coarse.init_params_base.items()} == {
+            k: v.shape for k, v in fine.init_params_base.items()
+        }
+        assert jnp.allclose(coarse.sigma_rfi_k, fine.sigma_rfi_k)
+        assert jnp.allclose(coarse.mu_rfi_k, fine.mu_rfi_k)
+        assert jnp.allclose(coarse.init_rfi_k_base, fine.init_rfi_k_base)
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_the_spectrum_is_left_on_the_config(self, cls):
+        """Fine or coarse, each leaves what it samples for the interpolating vis component."""
+        config = make_rfi_config(n_int_time=3)
+        comp = cls()
+        comp.setup(config)
+
+        spectrum = config.rfi_prior_spectrum
+
+        assert set(spectrum) == {"pk", "ks"}
+        assert spectrum["pk"].dtype == np.float64
+        assert spectrum["pk"].shape == comp.pk.shape
+        assert np.allclose(spectrum["pk"], np.asarray(comp.pk), rtol=1e-6)
+        assert [k.shape for k in spectrum["ks"]] == [k.shape for k in comp.ks]
+        assert all(k.dtype == np.float64 for k in spectrum["ks"])
+
+    @pytest.mark.parametrize("fine_cls, coarse_cls", COARSE_PAIRS)
+    def test_the_mask_is_on_the_data_grid(self, fine_cls, coarse_cls):
+        """The elevation mask reaches the data-grid signal as one flag per time step.
+
+        Read back off the fine mask TabConfig builds, and carried under its own
+        name so it is sharded like the fine one.
+        """
+        n_int_time = 2
+        comp = setup_component(
+            coarse_cls,
+            n_int_time=n_int_time,
+            rfi_mask_fine=elevation_mask(n_time_fine=N_TIME * n_int_time, down_from=N_TIME),
+        )
+        constants = comp.build_constants()
+
+        assert "rfi_mask_fine" not in constants
+        assert constants["rfi_mask"].shape == (N_RFI, N_TIME)
+        rfi_A = run_forward(comp, random_params(comp))
+        assert jnp.max(jnp.abs(rfi_A[0, :, :, N_TIME // n_int_time :])) == 0.0
+        assert jnp.max(jnp.abs(rfi_A[0, :, :, : N_TIME // n_int_time])) > 0

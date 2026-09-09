@@ -905,3 +905,178 @@ class TestSatelliteElevations:
             "elevations are identical under both latitude conventions; the "
             "geodetic site is not being used"
         )
+
+
+# ---------------------------------------------------------------------------
+# The data-grid phase: FixedOrbitCoarse and PathCalculationRFI
+# ---------------------------------------------------------------------------
+
+from tabascal.components.trajectory import FixedOrbitCoarse, PathCalculationRFI
+from tabascal.gp_interp import fine_offsets
+from tabascal.rfi_path import (
+    coarse_phase_and_path,
+    fine_frequency_terms,
+    fine_phase_from_path,
+    taylor_powers,
+)
+
+
+def make_coarse_config(n_ant=6, n_rfi=1, n_freq=2, n_time=6, n_int_time=16, n_int_freq=1,
+                       int_time=8.0, chan_width=1e6, path_order=3, precision=None):
+    """``make_trajectory_config`` with a fine grid laid out as TabConfig lays it.
+
+    The plain mock's fine dates are a linspace unrelated to ``n_int_time``; the
+    path derivatives are taken at the fine grid's own sample times, so the
+    dates have to be the cell centres and their fine offsets.
+    """
+    cfg = make_trajectory_config(
+        n_ant=n_ant, n_rfi=n_rfi, n_freq=n_freq, n_time=n_time,
+        n_int_time=n_int_time, n_int_freq=n_int_freq, precision=precision,
+    )
+    times = np.arange(n_time) * int_time
+    times_fine = (times[:, None] + fine_offsets(n_int_time, int_time)[None, :]).ravel()
+    freqs = 1.4e9 + np.arange(n_freq) * chan_width
+    freqs_fine, _ = fine_frequency_terms(freqs, n_int_freq, chan_width)
+    # numpy float64 throughout, as TabConfig keeps them: a Julian date near
+    # 2.45e6 in float32 resolves hours, and jnp.asarray would make it one under
+    # --x64 false.
+    cfg.int_time, cfg.chan_width = int_time, chan_width
+    cfg.times, cfg.times_fine = times, times_fine
+    cfg.times_jd = _EPOCH_JD + times / 86400.0
+    cfg.times_jd_fine = _EPOCH_JD + times_fine / 86400.0
+    cfg.freqs, cfg.freqs_fine = freqs, freqs_fine
+    cfg.args = {"rfi": {"path_order": path_order}}
+    return cfg
+
+
+def _wrap(x):
+    return (x + np.pi) % (2 * np.pi) - np.pi
+
+
+def _differential(phase):
+    return phase[:, :, None] - phase[:, None, :]
+
+
+def _rebuilt_fine_phase(cfg, comp):
+    freqs_fine, dnu = fine_frequency_terms(cfg.freqs, cfg.n_int_freq, cfg.chan_width)
+    powers = taylor_powers(fine_offsets(cfg.n_int_time, cfg.int_time), comp.rfi_path.shape[-1] - 1)
+    return np.asarray(fine_phase_from_path(
+        comp.rfi_phase, comp.rfi_path, jnp.asarray(freqs_fine), jnp.asarray(dnu), jnp.asarray(powers)
+    ))
+
+
+class TestFixedOrbitCoarse:
+
+    def test_shapes_and_state_keys(self):
+        cfg = make_coarse_config(path_order=3)
+        comp = FixedOrbitCoarse()
+        comp.setup(cfg)
+
+        assert comp.rfi_xyz.shape == (cfg.n_rfi, cfg.n_time_fine, 3)
+        assert comp.rfi_phase.shape == (cfg.n_rfi, cfg.n_ant, cfg.n_freq, cfg.n_time)
+        assert comp.rfi_path.shape == (cfg.n_rfi, cfg.n_ant, cfg.n_time, 4)
+        out = comp.build_forward()({}, {}, make_constants(comp))
+        assert set(out) == {"rfi_xyz", "rfi_phase", "rfi_path"}
+        assert set(comp.state_outputs) == {"rfi_xyz", "rfi_phase", "rfi_path"}
+        assert jnp.array_equal(out["rfi_path"], comp.rfi_path)
+
+    def test_the_phase_is_the_fine_grid_phase_at_the_cell_centres(self):
+        cfg = make_coarse_config()
+        fine, coarse = FixedOrbit(), FixedOrbitCoarse()
+        fine.setup(cfg)
+        coarse.setup(cfg)
+
+        centres = np.asarray(fine.rfi_phase)[..., cfg.n_int_freq // 2 :: cfg.n_int_freq, cfg.n_int_time // 2 :: cfg.n_int_time]
+        assert np.abs(_wrap(centres - np.asarray(coarse.rfi_phase))).max() < 1e-5
+
+    @pytest.mark.parametrize("int_time", [2.0, 8.0])
+    def test_the_rebuilt_fine_phase_follows_the_fringe(self, int_time):
+        """Against FixedOrbit's fine grid, on the same propagated positions.
+
+        Differential phase, since the path is carried differential to the
+        array mean. The floor is the ~20 us jitter of the fine grid's own float64
+        dates, at a hundredth of a degree here; order 1 sits well above it and
+        order 3 on it.
+        """
+        cfg = make_coarse_config(int_time=int_time)
+        fine = FixedOrbit()
+        fine.setup(cfg)
+
+        def error(order):
+            cfg.args["rfi"]["path_order"] = order
+            comp = FixedOrbitCoarse()
+            comp.setup(cfg)
+            got = _rebuilt_fine_phase(cfg, comp)
+            return np.degrees(np.abs(_wrap(_differential(got) - _differential(np.asarray(fine.rfi_phase)))).max())
+
+        assert error(3) < 0.05
+        assert error(1) > error(3)
+
+    @pytest.mark.parametrize("value", [-1, 1.5, True, "3"])
+    def test_the_order_is_validated_by_name(self, value):
+        cfg = make_coarse_config(path_order=value)
+        with pytest.raises(RuntimeError, match="path_order"):
+            FixedOrbitCoarse().setup(cfg)
+
+    def test_order_zero_holds_the_path_at_its_centre_value(self):
+        cfg = make_coarse_config(path_order=0)
+        comp = FixedOrbitCoarse()
+        comp.setup(cfg)
+        assert comp.rfi_path.shape[-1] == 1
+
+
+@pytest.mark.requires_double
+class TestPathCalculationRFI:
+
+    def test_forward_writes_the_data_grid_phase_and_the_path(self):
+        cfg = make_coarse_config(precision="double")
+        comp = PathCalculationRFI()
+        comp.setup(cfg)
+        rfi_xyz = FixedOrbitCoarse()
+        rfi_xyz.setup(cfg)
+
+        out = comp.build_forward()({}, {"rfi_xyz": jnp.asarray(rfi_xyz.rfi_xyz)}, make_constants(comp))
+
+        assert out["rfi_phase"].shape == (cfg.n_rfi, cfg.n_ant, cfg.n_freq, cfg.n_time)
+        assert out["rfi_path"].shape == (cfg.n_rfi, cfg.n_ant, cfg.n_time, 4)
+        assert "rfi_xyz" in out
+        assert set(comp.state_outputs) == {"rfi_phase", "rfi_path"}
+
+    def test_it_is_the_numpy_computation_on_its_own_geometry(self):
+        """The same function under jax as under numpy, on the same antenna positions.
+
+        Its antenna positions come from sgp4jax's frame conversion where
+        FixedOrbit's come from skyfield's, and the two differ at the level that
+        moves a phase by turns -- as they do between the fine-grid components --
+        so the comparison is on this component's own constants.
+        """
+        cfg = make_coarse_config(precision="double")
+        comp = PathCalculationRFI()
+        comp.setup(cfg)
+        positions = FixedOrbitCoarse()
+        positions.setup(cfg)
+        constants = make_constants(comp)
+
+        out = comp.build_forward()({}, {"rfi_xyz": jnp.asarray(positions.rfi_xyz)}, constants)
+        want_phase, want_path = coarse_phase_and_path(
+            positions.rfi_xyz, np.asarray(comp.ants_uvw), np.asarray(comp.ants_xyz), comp.freqs,
+            comp.windows, comp.centres, comp.weights,
+        )
+
+        assert np.abs(_wrap(np.asarray(out["rfi_phase"]) - want_phase)).max() < 1e-6
+        assert np.allclose(np.asarray(out["rfi_path"]), want_path, rtol=1e-9, atol=1e-7)
+
+    def test_it_differentiates_with_respect_to_the_positions(self):
+        cfg = make_coarse_config(precision="double")
+        comp = PathCalculationRFI()
+        comp.setup(cfg)
+        positions = FixedOrbitCoarse()
+        positions.setup(cfg)
+        constants = make_constants(comp)
+        forward = comp.build_forward()
+
+        grad = jax.grad(lambda x: jnp.sum(jnp.abs(forward({}, {"rfi_xyz": x}, constants)["rfi_path"])))(
+            jnp.asarray(positions.rfi_xyz)
+        )
+        assert grad.shape == positions.rfi_xyz.shape
+        assert jnp.all(jnp.isfinite(grad))

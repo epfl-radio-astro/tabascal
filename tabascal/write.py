@@ -1184,9 +1184,13 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     constants = {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
     forward = comp.build_forward()
 
-    rfi_A, rfi_phase = vi_pred["rfi_A"], vi_pred["rfi_phase"]
+    # Every per-source array the op reads: the amplitude and the phase, and the
+    # path derivatives that go with a data-grid phase (see tabascal.rfi_path).
+    per_source = {
+        key: vi_pred[key] for key in ("rfi_A", "rfi_phase", "rfi_path") if key in vi_pred
+    }
     vis_rfi = vi_pred["vis_rfi"]
-    n_sample, n_rfi = rfi_A.shape[:2]
+    n_sample, n_rfi = per_source["rfi_A"].shape[:2]
     shape, dtype, norad_ids = per_sat_layout(vi_pred, tab_config)
     n_real = shape[1]
 
@@ -1195,7 +1199,7 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     # reshape the op makes of rfi_A anyway, instead of leaving a second
     # full-size copy of the fine grid resident beside it.
     @jax.jit
-    def one_source(mask, rfi_A, rfi_phase, vis_zero):
+    def one_source(mask, arrays, vis_zero):
         # where, not a multiply by 0/1: a masked source is then exactly zero even
         # where the fitted grid is not finite, since 0 * inf and 0 * nan are nan
         # and one bad source would poison every other source's column -- the same
@@ -1203,11 +1207,8 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
         # for the same reason and not only the amplitude: the kernels form
         # exp(i * phase) before multiplying by it, so a non-finite phase gives a
         # non-finite factor whatever the amplitude is.
-        state = {
-            "rfi_A": jnp.where(mask, rfi_A, 0),
-            "rfi_phase": jnp.where(mask, rfi_phase, 0),
-            "vis_rfi": vis_zero,
-        }
+        state = {key: jnp.where(mask, value, 0) for key, value in arrays.items()}
+        state["vis_rfi"] = vis_zero
 
         return forward({}, constrain_rfi_state(state, n_rfi), constants)["vis_rfi"]
 
@@ -1229,7 +1230,9 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
         vis_zero = jnp.zeros_like(vis_rfi[s])
         for r in range(n_real):
             vis = one_source(
-                _source_mask(r, n_rfi), rfi_A[s], rfi_phase[s], vis_zero
+                _source_mask(r, n_rfi),
+                {key: value[s] for key, value in per_source.items()},
+                vis_zero,
             )
 
             # The evaluation is unconditional; only what happens to the block is

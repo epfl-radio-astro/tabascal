@@ -11,6 +11,7 @@ from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
 from tabascal.components import Component, assert_attr_shape
+from tabascal.rfi_path import coarse_phase_and_path, path_derivative_weights
 from tabascal.timing import measure_runtime
 from tabascal.time import gast_deg, skyfield_time, timescale
 
@@ -313,24 +314,34 @@ class FixedOrbit(Component):
         """Call this before using in JIT context"""
         pass
 
-    @measure_runtime
-    def _compute_rfi_phase(self):
+    def _compute_geometry(self):
+        """Source and antenna positions on the fine time grid, host-side float64.
 
+        One-shot setup, so numpy/skyfield in both precisions: faster than the jax
+        path (no JIT compile) and accurate at these magnitudes. Shared with
+        ``FixedOrbitCoarse``, which differs only in what it derives from them.
+        """
         self.rfi_xyz = np.asarray(
             get_satellite_positions(self.orbit_records, list(self.times_jd_fine))
         )
 
         self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
 
-        # rfi_phase is one-shot setup producing a forward constant, so compute it in
-        # numpy/skyfield (f64) in both precisions — faster than the jax path (no JIT
-        # compile) and accurate. jnp.array casts to the active precision (f64/f32).
         gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
         gh0 = (gsa - self.phase_centre["ra"]) % 360
 
         self.ants_uvw = np.transpose(
             itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
+
+    @measure_runtime
+    def _compute_rfi_phase(self):
+
+        self._compute_geometry()
+
+        # rfi_phase is one-shot setup producing a forward constant, so compute it in
+        # numpy/skyfield (f64) in both precisions — faster than the jax path (no JIT
+        # compile) and accurate. jnp.array casts to the active precision (f64/f32).
         # Fine-grid constant and the biggest array of this component: under sharding
         # it is created directly with the RFI-axis sharding so the full array only
         # ever exists in host numpy, never on a single device.
@@ -966,3 +977,197 @@ def fetch_standard_orbital_elements(
     orbit_records = _orbit_records(tles_df)
 
     return elements, epoch_jd, norad_ids, orbit_records
+
+
+def _path_order(config) -> int:
+    """``rfi.path_order``: the order of the time expansion of the path, default 3.
+
+    A whole number; 0 is a path held at its centre value, which is only right
+    where nothing turns within an integration.
+    """
+    order = config.args["rfi"].get("path_order", 3)
+    if (
+        isinstance(order, bool)
+        or not isinstance(order, (int, float))
+        or (isinstance(order, float) and not np.isfinite(order))
+        or order != int(order)
+        or order < 0
+    ):
+        raise ValueError(
+            "rfi.path_order is the order of the time expansion of the RFI path "
+            f"within an integration: a whole number of at least 0, got {order!r}."
+        )
+    return int(order)
+
+
+class FixedOrbitCoarse(FixedOrbit):
+    """:class:`FixedOrbit` writing the phase on the data grid, with the path's derivatives.
+
+    The same propagated orbit, from which it derives ``rfi_phase`` at the channel
+    and cell centres only -- the fine-grid phase at exactly those samples -- and
+    ``rfi_path``, the path differential to the array mean with its first
+    ``rfi.path_order`` time derivatives at the cell centres, from a polynomial
+    through a window of fine samples around each. Both are constants, computed
+    once in float64. ``rfi_vis:GPInterpVis`` rebuilds the fine phase from them a
+    block of time steps at a time, exactly across frequency and by the Taylor
+    series across time; see :mod:`tabascal.rfi_path`. Nothing else reads a
+    data-grid phase, so pair it with that component.
+
+    ``rfi_xyz`` stays on the fine time grid: it carries no antenna or frequency
+    axis, so it is small, and it is what the derivatives are taken from.
+    """
+
+    output_shapes = {
+        "rfi_xyz": ("n_rfi", "n_time_fine", 3),
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time"),
+        "rfi_path": ("n_rfi", "n_ant", "n_time", "n_path"),
+    }
+
+    def setup(self, config):
+        try:
+            self.path_order = _path_order(config)
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}") from e
+        super().setup(config)
+
+    @measure_runtime
+    def _compute_rfi_phase(self):
+
+        self._compute_geometry()
+
+        windows, centres, weights = path_derivative_weights(
+            self.times_jd_fine, self.n_time, self.n_int_time, self.path_order
+        )
+        rfi_phase_np, rfi_path_np = coarse_phase_and_path(
+            self.rfi_xyz,
+            self.ants_uvw,
+            self.ants_xyz,
+            np.asarray(self.freqs, dtype=np.float64),
+            windows,
+            centres,
+            weights,
+            xp=np,
+        )
+        if sharding_enabled():
+            dtype = jnp.zeros((), dtype=None).dtype  # match the active precision
+            self.rfi_phase = make_global(rfi_phase_np.astype(dtype), rfi_sharding())
+            self.rfi_path = make_global(rfi_path_np.astype(dtype), rfi_sharding())
+        else:
+            self.rfi_phase = jnp.array(rfi_phase_np)
+            self.rfi_path = jnp.array(rfi_path_np)
+
+    def build_constants(self):
+        return {
+            "rfi_xyz": self.rfi_xyz,
+            "rfi_phase": self.rfi_phase,
+            "rfi_path": self.rfi_path,
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+
+        def forward(params, state, constants):
+            return {
+                **state,
+                "rfi_xyz": constants[f"{prefix}/rfi_xyz"],
+                "rfi_phase": constants[f"{prefix}/rfi_phase"],
+                "rfi_path": constants[f"{prefix}/rfi_path"],
+            }
+
+        return forward
+
+    def _set_outputs(self):
+
+        self.state_outputs = {
+            "rfi_xyz": self.rfi_xyz,
+            "rfi_phase": self.rfi_phase,
+            "rfi_path": self.rfi_path,
+        }
+
+    def _validate_dimensions(self):
+        """Ensure all setup operations completed successfully"""
+
+        assert_attr_shape(self, "rfi_xyz", (self.n_rfi, self.n_time_fine, 3))
+        assert_attr_shape(
+            self, "rfi_phase", (self.n_rfi, self.n_ant, self.n_freq, self.n_time)
+        )
+        assert self.rfi_path.shape[:3] == (self.n_rfi, self.n_ant, self.n_time), (
+            f"Expected rfi_path to start (n_rfi, n_ant, n_time), got {self.rfi_path.shape}."
+        )
+
+
+class PathCalculationRFI(PhaseCalculationRFI):
+    """:class:`PhaseCalculationRFI` writing the phase on the data grid, with the path's derivatives.
+
+    The differentiable counterpart of :class:`FixedOrbitCoarse`: from the
+    ``rfi_xyz`` an orbit component puts in the state -- on the fine time grid,
+    where it is small -- it forms ``rfi_phase`` at the channel and cell centres
+    and ``rfi_path``, the differential path with its first ``rfi.path_order``
+    time derivatives, through the same code as the fixed-orbit component but
+    in JAX, so the derivatives with respect to the orbit flow through. The
+    path is evaluated at a window of fine samples around each cell centre
+    rather than at every fine sample, and the phase is never formed on the
+    fine grid here at all. Double precision, as its parent. Pair it with
+    ``rfi_vis:GPInterpVis``.
+    """
+
+    required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
+    output_shapes = {
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time"),
+        "rfi_path": ("n_rfi", "n_ant", "n_time", "n_path"),
+    }
+
+    def setup(self, config):
+        try:
+            self.n_freq = config.n_freq
+            self.n_time = config.n_time
+            self.n_int_time = config.n_int_time
+            self.freqs = np.asarray(config.freqs, dtype=np.float64)
+            self.path_order = _path_order(config)
+            self.windows, self.centres, self.weights = path_derivative_weights(
+                config.times_jd_fine, self.n_time, self.n_int_time, self.path_order
+            )
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}") from e
+        super().setup(config)
+
+    def build_constants(self):
+        return {
+            "ants_uvw": self.ants_uvw,
+            "ants_xyz": self.ants_xyz,
+            "freqs": self.freqs,
+            "windows": self.windows,
+            "centres": self.centres,
+            "weights": self.weights,
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+
+        def forward(params, state, constants):
+            rfi_phase, rfi_path = coarse_phase_and_path(
+                state["rfi_xyz"],
+                constants[f"{prefix}/ants_uvw"],
+                constants[f"{prefix}/ants_xyz"],
+                constants[f"{prefix}/freqs"],
+                constants[f"{prefix}/windows"],
+                constants[f"{prefix}/centres"],
+                constants[f"{prefix}/weights"],
+                xp=jnp,
+            )
+            return {**state, "rfi_phase": rfi_phase, "rfi_path": rfi_path}
+
+        return forward
+
+    def _set_outputs(self):
+
+        self.state_outputs = {
+            "rfi_phase": sharded_rfi_zeros(
+                (self.n_rfi, self.n_ant, self.n_freq, self.n_time), None
+            ),
+            "rfi_path": sharded_rfi_zeros(
+                (self.n_rfi, self.n_ant, self.n_time, self.weights.shape[1]), None
+            ),
+        }

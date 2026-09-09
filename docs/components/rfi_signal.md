@@ -7,3 +7,7 @@ The RFI signal component models the complex-valued signal of each RFI source, at
 <!-- The combined signal should be  -->
 
 ## Fourier-domian - {class}`~tabascal.components.rfi_signal.ComplexRFIVarAnt`, {class}`~tabascal.components.rfi_signal.ComplexRFIConstAnt`
+
+## Data-grid variants - {class}`~tabascal.components.rfi_signal.ComplexRFIVarAntCoarse`, {class}`~tabascal.components.rfi_signal.ComplexRFIConstAntCoarse`
+
+The same two priors, written on the data grid rather than the fine integration grid: one value per channel and time step, at the centre of the cell it stands for. Latent, spectrum, parameters and initialisation are their parents' -- the transform simply leaves out the supersampling, so where the two grids overlap they agree exactly. They exist for {class}`~tabascal.components.rfi_vis.GPInterpVis`, which forms the fine samples the visibility integral needs from this grid under the same Gaussian process; each leaves the spectrum it samples on the configuration for that component to read. The Riemann-sum kernels read the fine grid and refuse a data-grid `rfi_A` by shape.
