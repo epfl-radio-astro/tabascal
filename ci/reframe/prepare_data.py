@@ -74,6 +74,15 @@ def main():
         default=1000,
         help="Value for opt.max_iter in the generated config (default: 1000)",
     )
+    parser.add_argument(
+        "--config-overrides",
+        default=None,
+        help=(
+            "JSON object deep-merged into the generated config after the "
+            "components and precision are set, e.g. "
+            "'{\"rfi\": {\"time_block_size\": 10}}' (default: none)"
+        ),
+    )
     args = parser.parse_args()
 
     workdir = Path(args.workdir)
@@ -154,6 +163,12 @@ def main():
     config = yaml_load(tab_template)
     config["model"] = {"components": components, "precision": args.precision}
     config.setdefault("opt", {})["max_iter"] = args.max_iter
+    if args.config_overrides:
+        import json
+
+        from tabascal.config import deep_update
+
+        config = deep_update(config, json.loads(args.config_overrides))
     config_out = workdir / "tab_target.yaml"
     with open(config_out, "w") as f:
         yaml.dump(config, f)

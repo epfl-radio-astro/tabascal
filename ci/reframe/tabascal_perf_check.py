@@ -1,5 +1,6 @@
 """ReFrame performance regression checks for the tabascal pipeline."""
 
+import json
 import os
 import re
 from pathlib import Path
@@ -70,6 +71,12 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     # Keyed by (variant, precision); metrics without an entry are reported but
     # not checked by ReFrame.
     _reference_by_variant: dict = {}
+
+    # Config keys a variant sets beyond its components, deep-merged into the
+    # generated config by prepare_data.py; a variant without an entry runs on
+    # the base defaults. See tabascal_gp_interp_check.py for the variants that
+    # use it.
+    _config_overrides_map: dict = {}
 
     _components_map = {
         "Riemann": [
@@ -144,12 +151,17 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
 
         self.prerun_cmds += self.gpu_setup_cmds()
 
+        overrides = self._config_overrides_map.get(self.variant)
+        overrides_opt = (
+            f" --config-overrides '{json.dumps(overrides)}'" if overrides else ""
+        )
         self.prerun_cmds.append(
             f"python {_src_root}/ci/reframe/prepare_data.py"
             f" --components '{components_str}'"
             f" --workdir {workdir}"
             f" --src-root {_src_root}"
             f" --precision {self.precision}"
+            f"{overrides_opt}"
         )
 
         self.executable = "python"
