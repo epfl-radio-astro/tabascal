@@ -39,10 +39,12 @@ so the two components agree exactly where the grids meet.
 {class}`~tabascal.components.trajectory.FixedOrbitCoarse` is `FixedOrbit`
 with the phase written at the channel and cell centres only, `rfi_phase` of
 shape `(n_rfi, n_ant, n_freq, n_time)`, plus what rebuilds it in between:
-`rfi_path` of shape `(n_rfi, n_ant, n_time, rfi.path_order + 1)`, the path
-from the source to each antenna (its range plus the antenna's `w`) and its
-first `rfi.path_order` time derivatives at each cell centre, from a
-least-squares polynomial through the cell's fine samples. Both are float64
+`rfi_delay_poly_us` of shape `(n_rfi, n_ant, n_time, rfi.path_order + 1)`, the
+geometric delay from the source to each antenna (its range plus the antenna's
+`w`, over `c`, in microseconds, relative to the array mean, with the sign
+that makes the phase `2 pi f tau` as the fine-grid route's `rfi_delay_us` has
+it) and its first `rfi.path_order` time derivatives at each cell centre, from
+a least-squares polynomial through the cell's fine samples. Both are float64
 host-side constants, as `FixedOrbit`'s phase is.
 
 {class}`~tabascal.components.rfi_vis.PolyInterpVis` builds two small tables
@@ -64,11 +66,11 @@ grid and the data-grid visibilities go out:
 |---|---|---|
 | `rfi_A` | `(n_rfi, n_ant, n_freq, n_time)` complex | the signal on the data grid, **the only differentiated input** |
 | `rfi_phase` | `(n_rfi, n_ant, n_freq, n_time)` | the phase at the channel and cell centre, reduced to one turn |
-| `rfi_path` | `(n_rfi, n_ant, n_time, n_path)` | the path (m) and its time derivatives (m/s^k) at the cell centre |
+| `rfi_delay_poly_us` | `(n_rfi, n_ant, n_time, n_path)` | the geometric delay relative to the array mean (microseconds) and its time derivatives (microseconds per second^k) at the cell centre |
 | `w_freq`, `start_freq` | `(n_freq, n_sf, n_int_freq)`, `(n_freq,)` | interpolation weights across each channel, and each stencil's first channel |
 | `w_time`, `start_time` | `(n_time, n_st, n_int_time)`, `(n_time,)` | the same across each cell |
-| `dnu`, `dt` | `(n_int_freq,)`, `(n_int_time,)` | the fine offsets from the channel and cell centres (Hz, s) |
-| `freqs` | `(n_freq,)` | channel centres (Hz) |
+| `dnu_mhz`, `dt` | `(n_int_freq,)`, `(n_int_time,)` | the fine offsets from the channel and cell centres (MHz, s) |
+| `freqs_mhz` | `(n_freq,)` | channel centres (MHz) |
 | `a1`, `a2` | `(n_bl,)` | the antennas of each baseline |
 | **output** `vis_rfi` | `(n_bl, n_freq, n_time)` complex | |
 
@@ -76,8 +78,8 @@ For one cell `(f, t)` and one of its fine samples `(u, v)`:
 
 ```
 A[r, a](u, v)   = sum_k sum_l w_freq[f, k, u] w_time[t, l, v] rfi_A[r, a, start_freq[f] + k, start_time[t] + l]
-dL[r, a](v)     = sum_{k >= 1} rfi_path[r, a, t, k] dt[v]^k / k!
-phi[r, a](u, v) = rfi_phase[r, a, f, t] - (2 pi / c) ((freqs[f] + dnu[u]) dL[r, a](v) + dnu[u] rfi_path[r, a, t, 0])
+dtau[r, a](v)   = sum_{k >= 1} rfi_delay_poly_us[r, a, t, k] dt[v]^k / k!
+phi[r, a](u, v) = rfi_phase[r, a, f, t] + 2 pi ((freqs_mhz[f] + dnu_mhz[u]) dtau[r, a](v) + dnu_mhz[u] rfi_delay_poly_us[r, a, t, 0])
 S[r, a](u, v)   = A[r, a](u, v) exp(i phi[r, a](u, v))
 vis_rfi[b, f, t] = mean_{u, v} sum_r S[r, a1[b]](u, v) conj(S[r, a2[b]](u, v))
 ```
@@ -107,11 +109,18 @@ Three things about that boundary are the point of the design:
   tables: a stencil-sized scatter-add onto the data grid. Nothing of the fine
   grid survives either.
 - **Precision is arranged, not hoped for.** The unreduced phase
-  `2 pi freqs L / c` is of order a million turns, which float32 cannot hold to
-  a fraction of a turn. `rfi_phase` carries it reduced, computed in float64 on
+  `2 pi f tau` is of order a million turns, which float32 cannot hold to a
+  fraction of a turn. `rfi_phase` carries it reduced, computed in float64 on
   the host; the kernel adds only the change across the cell and across the
-  channel, a few hundred radians at most. A kernel must not rebuild
-  `rfi_phase` from `rfi_path[..., 0]`.
+  channel, in MHz times microseconds, which is cycles. A kernel must not
+  rebuild `rfi_phase` from `rfi_delay_poly_us[..., 0]`. And that change is
+  small only because the delay is relative to the array mean: a term common
+  to every antenna cancels in a baseline's phase difference, so
+  `FixedOrbitCoarse` subtracts the mean over antennas at each fine sample
+  before fitting, leaving microseconds and tens of nanoseconds per second
+  where the full delay would change by 1e4 wavelengths across a cell, beyond
+  float32's reach. This is the convention of the fine-grid route's
+  `rfi_delay_us` (PR #144).
 
 A compiled kernel is validated as `ri_kernels` is: value, JVP and VJP against
 this function. `tests/test_coarse_rfi_vis.py` holds the function itself to the
@@ -153,23 +162,23 @@ kernel as in the pure-JAX reference; the operator's tests hold the
 single-precision kernels to the float64 reference at that level.
 
 Measured on the SKA-Low scaling simulations (150 integrations of 2 s, 32
-satellites, `rfi.time_int_factor: 0.3`, so 11 and 18 fine samples per
+satellites, `rfi.time_int_factor: 1`, so 37 and 59 fine samples per
 integration at 64 and 128 antennas), all three routes from one checkout and
 one environment:
 
-| 1 GH200, 100 iterations, single precision | RiemannVisFFI (fine grid) | PolyInterpVis (pure JAX) | PolyInterpVisFFI (prototype) |
+| 1 GH200, 100 iterations, single precision | RiemannVisFFI (fine grid) | PolyInterpVis (pure JAX) | PolyInterpVisFFI (staged kernel) |
 |---|---|---|---|
-| 8 ch, 64 A: optimiser | 7.7 s | 19.3 s | 15.8 s |
-| 8 ch, 64 A: peak memory | 2.18 GB | 0.64 GB | 0.66 GB |
-| 8 ch, 128 A: optimiser | 33.2 s | 127.4 s | 72.4 s |
-| 8 ch, 128 A: peak memory | 7.15 GB | 2.37 GB | 2.37 GB |
+| 8 ch, 64 A: optimiser | 15.8 s | 40.3 s | 10.8 s |
+| 8 ch, 64 A: peak memory | 6.14 GB | 0.64 GB | 0.66 GB |
+| 8 ch, 128 A: optimiser | 59.0 s | 270.9 s | 48.6 s |
+| 8 ch, 128 A: peak memory | 19.8 GB | 2.37 GB | 2.37 GB |
 
-The prototype keeps the data-grid route's memory and is 1.2 to 1.8 times
-faster than the pure-JAX reference, and 2 to 2.2 times slower than the
-fine-grid kernel, which is the cost of recomputing each antenna's samples per
-baseline. On an 8-antenna simulation on a GTX 1060 it matches the fine-grid
-kernel (1.2 s against 1.2 s, the reference at 2.7 s). All three reach the
-same optimum.
+The staged operator keeps the data-grid route's memory, a tenth of the
+fine-grid kernel's, and is faster than that kernel and four to six times
+faster than the pure-JAX reference. Its first version, which rebuilt both
+antennas' samples per baseline, sat between the two (at `time_int_factor:
+0.3`: 15.8 s against the fine-grid kernel's 7.7 s at 64 antennas, 72 s
+against 33 s at 128). All three reach the same optimum.
 
 ## What the reference is and is not
 

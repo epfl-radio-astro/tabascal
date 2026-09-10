@@ -123,9 +123,9 @@ RFI_AXIS_NAMES = frozenset({
     "rfi_orbit_base",
     # state buffers
     "rfi_A", "rfi_phase", "rfi_xyz", "elements",
-    # (n_rfi, n_ant, n_time, n_path) path derivatives of the data-grid route,
+    # (n_rfi, n_ant, n_time, n_path) delay polynomial of the data-grid route,
     # read beside rfi_A and rfi_phase by rfi_vis:PolyInterpVis
-    "rfi_path",
+    "rfi_delay_poly_us",
     # constants
     "mu_rfi_k", "mu_rfi_orbit", "L_rfi_orbit",
     # (n_rfi, n_time_fine) elevation mask, multiplied into rfi_A in the signal
@@ -257,7 +257,7 @@ def psum_over_rfi(local_fn: Callable) -> Callable:
 
     ``local_fn(*per_source_arrays) -> vis`` takes any number of arrays whose leading
     axis is the RFI source axis -- ``(rfi_A, rfi_phase)`` for the fine-grid
-    components, with ``rfi_path`` beside them for the data-grid one -- must accept
+    components, with ``rfi_delay_poly_us`` beside them for the data-grid one -- must accept
     any leading RFI count, and returns an array with **no** RFI axis (its local
     sources already summed). Under sharding it runs per device on the local shard via
     ``shard_map`` -- which is also what lets the FFI custom op participate, since

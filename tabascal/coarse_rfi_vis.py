@@ -21,16 +21,19 @@ Per source ``r``, antenna ``a``, channel ``f`` and time cell ``t``. Only
   the data grid.
 - ``rfi_phase`` ``(n_rfi, n_ant, n_freq, n_time)``: the phase at the channel
   and cell centre, reduced to one turn.
-- ``rfi_path`` ``(n_rfi, n_ant, n_time, n_path)``: the path ``L`` (m) and its
-  time derivatives ``L_k`` (m/s^k) at the cell centre.
+- ``rfi_delay_poly_us`` ``(n_rfi, n_ant, n_time, n_path)``: the geometric delay
+  ``tau`` (us) and its time derivatives ``tau_k`` (us/s^k) at the cell centre,
+  relative to the array mean (see below). The delay is ``-(range + w) / c``, so
+  the phase is ``2 pi f tau``: the fine-grid route's ``rfi_delay_us`` convention.
 - ``w_freq`` ``(n_freq, n_sf, n_int_freq)`` and ``start_freq`` ``(n_freq,)``:
   interpolation weights across each channel, and the first channel of each
   channel's stencil.
 - ``w_time`` ``(n_time, n_st, n_int_time)`` and ``start_time`` ``(n_time,)``:
   the same across each cell.
-- ``dnu`` ``(n_int_freq,)`` and ``dt`` ``(n_int_time,)``: the fine offsets from
-  the channel centre (Hz) and the cell centre (s).
-- ``freqs`` ``(n_freq,)``: channel centres (Hz).
+- ``dnu_mhz`` ``(n_int_freq,)`` and ``dt`` ``(n_int_time,)``: the fine offsets
+  from the channel centre (MHz) and the cell centre (s).
+- ``freqs_mhz`` ``(n_freq,)``: channel centres (MHz). MHz times microseconds
+  is cycles, so the phase is formed without a scaling constant.
 - ``a1``, ``a2`` ``(n_bl,)``: the two antennas of each baseline.
 
 Output: ``vis_rfi`` ``(n_bl, n_freq, n_time)``, complex.
@@ -42,10 +45,10 @@ speed of light::
 
     signal   A[r, a](u, v) = sum_k sum_l  w_freq[f, k, u] w_time[t, l, v]
                                           rfi_A[r, a, start_freq[f] + k, start_time[t] + l]
-    path     dL[r, a](v)   = sum_{k >= 1} rfi_path[r, a, t, k] dt[v]^k / k!
+    delay    dtau[r, a](v) = sum_{k >= 1} rfi_delay_poly_us[r, a, t, k] dt[v]^k / k!
     phase    phi[r, a](u, v) = rfi_phase[r, a, f, t]
-                               - (2 pi / c) ( (freqs[f] + dnu[u]) dL[r, a](v)
-                                              + dnu[u] rfi_path[r, a, t, 0] )
+                               + 2 pi ( (freqs_mhz[f] + dnu_mhz[u]) dtau[r, a](v)
+                                        + dnu_mhz[u] rfi_delay_poly_us[r, a, t, 0] )
     sample   S[r, a](u, v) = A[r, a](u, v) exp(i phi[r, a](u, v))
     result   vis_rfi[b, f, t] = mean_{u, v} sum_r S[r, a1[b]](u, v) conj(S[r, a2[b]](u, v))
 
@@ -68,13 +71,13 @@ The phase is arranged so that a single-precision kernel never forms a large
 number and then reduces it. The unreduced phase ``2 pi freqs L / c`` is of
 order a million turns, which float32 cannot hold to a fraction of a turn;
 ``rfi_phase`` carries it reduced, computed in float64 on the host. The kernel
-adds to it only the change across the cell and across the channel, at most a
-few hundred radians. Do not rebuild ``rfi_phase`` from ``rfi_path[..., 0]``
+adds to it only the change across the cell and across the channel. Do not
+rebuild ``rfi_phase`` from ``rfi_delay_poly_us[..., 0]``
 inside a kernel.
 
 Derivatives
 -----------
-``rfi_A`` is the only differentiated input; ``rfi_phase`` and ``rfi_path``
+``rfi_A`` is the only differentiated input; ``rfi_phase`` and ``rfi_delay_poly_us``
 come from a fixed orbit and the rest are tables. The result is bilinear in the
 fine samples ``S``, and ``S`` is linear in ``rfi_A`` (the interpolation is
 linear and the phase factor is a constant), so both derivatives are structural:
@@ -110,10 +113,6 @@ import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
-#: Speed of light in m/s, as :mod:`tabascal.interferometry` uses it.
-C_LIGHT = 299792458.0
-
-
 def fine_signal(
     rfi_A: Array, w_freq: Array, start_freq: Array, w_time: Array, start_time: Array
 ) -> Array:
@@ -139,29 +138,29 @@ def fine_signal(
 
 
 def fine_phase(
-    rfi_phase: Array, rfi_path: Array, freqs: Array, dnu: Array, dt: Array
+    rfi_phase: Array, rfi_delay: Array, freqs_mhz: Array, dnu_mhz: Array, dt: Array
 ) -> Array:
     """The fine phase of one time cell, for every source, antenna and channel.
 
-    ``rfi_phase`` ``(n_rfi, n_ant, n_freq)`` and ``rfi_path`` ``(n_rfi, n_ant,
-    n_path)`` are the cell's own slices.
+    ``rfi_phase`` ``(n_rfi, n_ant, n_freq)`` and ``rfi_delay`` ``(n_rfi, n_ant,
+    n_path)`` are the cell's own slices; the delay in microseconds and its
+    derivatives in microseconds per second^k, the frequencies in MHz.
 
     Returns ``(n_rfi, n_ant, n_freq, n_int_freq, n_int_time)``.
     """
-    # The path's change across the cell, from its Taylor series at the centre.
-    d_path = jnp.zeros(rfi_path.shape[:-1] + dt.shape, dtype=dt.dtype)
-    for k in range(1, rfi_path.shape[-1]):
-        d_path = d_path + rfi_path[..., k, None] * dt**k / math.factorial(k)
+    # The delay's change across the cell, from its Taylor series at the centre.
+    d_tau = jnp.zeros(rfi_delay.shape[:-1] + dt.shape, dtype=dt.dtype)
+    for k in range(1, rfi_delay.shape[-1]):
+        d_tau = d_tau + rfi_delay[..., k, None] * dt**k / math.factorial(k)
     # (n_rfi, n_ant, n_int_time)
 
-    nu = freqs[:, None] + dnu[None, :]  # (n_freq, n_int_freq)
-    across_cell = nu[None, None, :, :, None] * d_path[:, :, None, None, :]
+    nu = freqs_mhz[:, None] + dnu_mhz[None, :]  # (n_freq, n_int_freq), MHz
+    across_cell = nu[None, None, :, :, None] * d_tau[:, :, None, None, :]
     across_channel = (
-        dnu[None, None, None, :, None] * rfi_path[..., 0][:, :, None, None, None]
+        dnu_mhz[None, None, None, :, None] * rfi_delay[..., 0][:, :, None, None, None]
     )
-    return rfi_phase[..., None, None] - (2.0 * jnp.pi / C_LIGHT) * (
-        across_cell + across_channel
-    )
+    # MHz times microseconds is cycles.
+    return rfi_phase[..., None, None] + 2.0 * jnp.pi * (across_cell + across_channel)
 
 
 def cell_vis(S: Array, a1: Array, a2: Array) -> Array:
@@ -178,14 +177,14 @@ def cell_vis(S: Array, a1: Array, a2: Array) -> Array:
 def coarse_rfi_vis(
     rfi_A: Array,
     rfi_phase: Array,
-    rfi_path: Array,
+    rfi_delay: Array,
     w_freq: Array,
     start_freq: Array,
     w_time: Array,
     start_time: Array,
-    dnu: Array,
+    dnu_mhz: Array,
     dt: Array,
-    freqs: Array,
+    freqs_mhz: Array,
     a1: Array,
     a2: Array,
 ) -> Array:
@@ -201,7 +200,7 @@ def coarse_rfi_vis(
     @functools.partial(jax.checkpoint, prevent_cse=False)
     def one_cell(t):
         A = fine_signal(rfi_A, w_freq, start_freq, w_time[t], start_time[t])
-        phase = fine_phase(rfi_phase[..., t], rfi_path[:, :, t], freqs, dnu, dt)
+        phase = fine_phase(rfi_phase[..., t], rfi_delay[:, :, t], freqs_mhz, dnu_mhz, dt)
         return cell_vis(A * jnp.exp(1.0j * phase), a1, a2)
 
     vis = lax.map(one_cell, jnp.arange(n_time))  # (n_time, n_bl, n_freq)
