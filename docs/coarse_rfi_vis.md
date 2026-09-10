@@ -172,6 +172,8 @@ one environment:
 | 8 ch, 64 A: peak memory | 6.14 GB | 0.64 GB | 0.66 GB |
 | 8 ch, 128 A: optimiser | 59.0 s | 270.9 s | 48.6 s |
 | 8 ch, 128 A: peak memory | 19.8 GB | 2.37 GB | 2.37 GB |
+| 8 ch, 256 A: optimiser | out of memory | (not run) | 968 s |
+| 8 ch, 256 A: peak memory | 92.6 GB requested | | 8.87 GB |
 
 The staged operator keeps the data-grid route's memory, a tenth of the
 fine-grid kernel's, and is faster than that kernel and four to six times
@@ -179,6 +181,20 @@ faster than the pure-JAX reference. Its first version, which rebuilt both
 antennas' samples per baseline, sat between the two (at `time_int_factor:
 0.3`: 15.8 s against the fine-grid kernel's 7.7 s at 64 antennas, 72 s
 against 33 s at 128). All three reach the same optimum.
+
+## Variable sampling per baseline
+
+`rfi_vis:PolyInterpVisVariable` and `rfi_vis:PolyInterpVisVariableFFI` are the
+data-grid twins of `RiemannVisVariable` and its FFI form: the baselines are
+grouped by the fringe rate they need to resolve (`rfi.min_time_bins`,
+`rfi.max_time_bins`, the same estimate `TabConfig` makes for the fine-grid
+components), and a group with stride `s` integrates every `s`-th fine sample
+of the cell. On the data grid that needs little: the tables are per fine offset,
+so in the pure-JAX form a group is the reference function called on the
+group's baselines with the rows of every `s`-th offset of the time tables,
+and the operator takes a stride per baseline and does the subsampling itself,
+in one call with the whole tables. The slow baselines, which are most of a
+large array's, then cost a fraction of the fast ones.
 
 ## What the reference is and is not
 
