@@ -12,6 +12,11 @@ from typing import Any
 
 import pytest
 import tabsim
+
+try:
+    from ri_kernels.jax_api import RFIInterpVisOp as _RFI_INTERP_OP
+except ImportError:  # an ri_kernels release without the data-grid operator
+    _RFI_INTERP_OP = None
 import yaml
 from huggingface_hub import snapshot_download
 
@@ -605,6 +610,28 @@ rfi_vis_configs = [
             },
         ),
         id="PolyInterpVis",
+    ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbitCoarse",
+                "rfi_signal:ComplexRFIVarAntCoarse",
+                "rfi_vis:PolyInterpVisFFI",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The PolyInterpVis case through the compiled operator: the same
+            # tables and inputs, so it shares that case's reference. Only chi2
+            # is asserted -- the kernel is the unit under test. Measured on ARM
+            # CPU: 0.8965712031 double, 0.8965968490 single (1e-8 and 3e-6 from
+            # the reference function's, where the fp32 route rounds its phase).
+            chi2_ref=0.8965712134959265,
+        ),
+        id="PolyInterpVisFFI",
+        marks=pytest.mark.skipif(
+            _RFI_INTERP_OP is None, reason="the installed ri_kernels has no RFIInterpVisOp"
+        ),
     ),
 ]
 

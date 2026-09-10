@@ -119,6 +119,39 @@ fine-grid sum on the fine grid it forms, and its derivatives to finite
 differences; `tests/components/test_coarse_components.py` holds the three
 components to their fine-grid twins on one configuration.
 
+## The compiled operator
+
+`rfi_vis:PolyInterpVisFFI` is the same component with the one function
+replaced by `ri_kernels.jax_api.RFIInterpVisOp`: CPU and GPU kernels carrying
+the primal, the JVP and the transpose, from the `interp-vis` branch of
+[ri-kernels](https://github.com/epfl-radio-astro/ri-kernels). The operator's
+inputs are the reference function's, with the antenna axis first (the
+component transposes the three data-grid arrays on the way in, data-grid
+sized), and its tests hold it to a JAX transcription of that function in
+value, forward mode and reverse mode. A release of `ri_kernels` without the
+operator is refused at setup.
+
+```yaml
+model:
+  components:
+    - trajectory:FixedOrbitCoarse
+    - rfi_signal:ComplexRFIVarAntCoarse
+    - rfi_vis:PolyInterpVisFFI
+    - ast_vis:GPVisAst
+    - gains:UnitaryGains
+```
+
+The kernels are a prototype of the operator rather than a fast one: each
+baseline rebuilds both of its antennas' fine samples itself, with the cell's
+two weight rows in shared memory and everything else read per term, so an
+antenna's samples are recomputed once per baseline it is on. The transpose is
+deterministic, every output element written by one thread, at the cost of a
+scratch buffer of `n_sf * n_st` times the signal on the GPU. In single
+precision the phase change across a cell, `2 pi freqs L_1 dt / c`, is of order
+1e4 rad per antenna at orbital range rates and rounds at ~1e-3 rad, in the
+kernel as in the pure-JAX reference; the operator's tests hold the
+single-precision kernels to the float64 reference at that level.
+
 ## What the reference is and is not
 
 The reference forms one time cell at a time, `(n_bl, n_rfi, n_freq,

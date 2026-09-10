@@ -13,6 +13,11 @@ from tabascal.coarse_rfi_vis import coarse_rfi_vis
 from tabascal.poly_interp import fine_offsets, interp_tables
 from ri_kernels.jax_api import RFIVisOp
 
+try:
+    from ri_kernels.jax_api import RFIInterpVisOp
+except ImportError:  # an ri_kernels release without the data-grid operator
+    RFIInterpVisOp = None
+
 
 class RiemannVis(Component):
     """Riemann-sum RFI visibilities in pure JAX, scanned over the baseline axis.
@@ -329,6 +334,58 @@ class PolyInterpVis(Component):
         self.state_outputs = {
             "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
+
+
+class PolyInterpVisFFI(PolyInterpVis):
+    """:class:`PolyInterpVis` through the compiled ``ri_kernels`` operator.
+
+    The same tables, the same inputs and the same result as
+    :class:`PolyInterpVis`; the one function that component calls is replaced
+    by ``ri_kernels.jax_api.RFIInterpVisOp``, whose CPU and GPU kernels carry
+    the primal, the JVP and the transpose. The operator wants the antenna axis
+    first, so the three data-grid arrays are transposed on the way in -- data
+    grid sized, so cheap. Needs an ``ri_kernels`` build that has the operator;
+    a release without it is refused at setup rather than at the first forward.
+    """
+
+    def setup(self, config):
+        if RFIInterpVisOp is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} setup failed: the installed "
+                "ri_kernels has no RFIInterpVisOp. Build ri_kernels from the "
+                "interp-vis branch, or use rfi_vis:PolyInterpVis."
+            )
+        super().setup(config)
+        self.n_ant = config.n_ant
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        names = ("w_freq", "start_freq", "w_time", "start_time", "dnu", "dt", "freqs")
+        op = RFIInterpVisOp(self.n_ant, self.a1, self.a2)
+
+        def forward(params, state, constants):
+            tables = [constants[f"{prefix}/{name}"] for name in names]
+
+            # Per-RFI-shard body: the kernel runs unmodified per device inside
+            # shard_map (GSPMD cannot partition a custom call) and the results
+            # are psum-ed, as RiemannVisFFI does.
+            def local_vis(rfi_A, rfi_phase, rfi_path):
+                return op.eval(
+                    jnp.swapaxes(rfi_A, 0, 1),
+                    jnp.swapaxes(rfi_phase, 0, 1),
+                    jnp.swapaxes(rfi_path, 0, 1),
+                    *tables,
+                )
+
+            vis_rfi = psum_over_rfi(local_vis)(
+                state["rfi_A"], state["rfi_phase"], state["rfi_path"]
+            )
+            state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
+
+            return state
+
+        return forward
 
 
 class RiemannVisVariable(Component):
