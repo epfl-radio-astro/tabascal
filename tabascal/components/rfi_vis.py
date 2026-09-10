@@ -1,6 +1,7 @@
 from math import isfinite
 
 import jax.numpy as jnp
+import numpy as np
 
 from tabascal.distributed import psum_over_rfi, sharding_enabled
 from tabascal.interferometry import (
@@ -8,6 +9,8 @@ from tabascal.interferometry import (
     calculate_rfi_vis_variable,
 )
 from tabascal.components import Component
+from tabascal.coarse_rfi_vis import coarse_rfi_vis
+from tabascal.poly_interp import fine_offsets, interp_tables
 from ri_kernels.jax_api import RFIVisOp
 
 
@@ -196,6 +199,125 @@ class RiemannVisFFI(Component):
 
             vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
 
+            state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
+
+            return state
+
+        return forward
+
+    def _set_outputs(self):
+
+        self.state_outputs = {
+            "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
+        }
+
+
+class PolyInterpVis(Component):
+    """RFI visibilities from the data grid, through :func:`tabascal.coarse_rfi_vis.coarse_rfi_vis`.
+
+    Reads the signal, the phase and the path derivatives on the data grid --
+    from :class:`~tabascal.components.rfi_signal.ComplexRFIVarAntCoarse` and
+    :class:`~tabascal.components.trajectory.FixedOrbitCoarse` -- and rebuilds the
+    fine samples of each cell inside the visibility calculation instead of reading
+    them from fine-grid state. The signal is interpolated by the polynomial through
+    the ``2 * rfi.poly_interp_stencil + 1`` nearest cells on each axis; the phase
+    is rebuilt from its Taylor series across the cell.
+
+    This component does nothing but build the tables at setup and call the one
+    function. That function is the whole of what a compiled kernel replaces; its
+    module docstring is the specification, and the weight tables are inputs to
+    it, so a different interpolant is a different table through the same kernel.
+    """
+
+    # Accumulates into vis_rfi, which Model zeroes before the components run.
+    required_inputs = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time"),
+        "rfi_path": ("n_rfi", "n_ant", "n_time", "n_path"),
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
+    }
+    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+
+    parameters = {}
+
+    def setup(self, config):
+        """All validation and error-prone operations here"""
+        try:
+            self.a1 = config.a1
+            self.a2 = config.a2
+            self.n_time = config.n_time
+            self.n_freq = config.n_freq
+            self.n_bl = config.n_bl
+
+            half_width = config.args["rfi"].get("poly_interp_stencil", 1)
+            if isinstance(half_width, bool) or not isinstance(half_width, int) or half_width < 0:
+                raise ValueError(
+                    "rfi.poly_interp_stencil is the number of cells on either side "
+                    "of a cell that its interpolant runs through: a whole number "
+                    f"of at least 0, got {half_width!r}."
+                )
+
+            if config.args.get("data", {}).get("save_rfi_per_sat"):
+                raise ValueError(
+                    "data.save_rfi_per_sat re-evaluates the visibility op on the "
+                    "fine-grid state, which this component does not carry."
+                )
+
+            # Where each cell's fine samples sit, and the weights that put the
+            # nearest coarse samples there. Host-side float64, once.
+            int_time, chan_width = float(config.int_time), float(config.chan_width)
+            self.dt = fine_offsets(config.n_int_time, int_time)
+            self.dnu = fine_offsets(config.n_int_freq, chan_width)
+            self.w_time, self.start_time = interp_tables(
+                self.n_time, half_width, self.dt / int_time
+            )
+            self.w_freq, self.start_freq = interp_tables(
+                self.n_freq, half_width, self.dnu / chan_width
+            )
+            self.freqs = np.asarray(config.freqs, dtype=np.float64)
+
+            self._set_outputs()
+
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def build_set_params(self):
+
+        def set_params(params):
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        # jnp.asarray casts the float64 tables to the active precision.
+        return {
+            "a1": self.a1,
+            "a2": self.a2,
+            "w_freq": jnp.asarray(self.w_freq),
+            "start_freq": jnp.asarray(self.start_freq),
+            "w_time": jnp.asarray(self.w_time),
+            "start_time": jnp.asarray(self.start_time),
+            "dnu": jnp.asarray(self.dnu),
+            "dt": jnp.asarray(self.dt),
+            "freqs": jnp.asarray(self.freqs),
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        names = ("w_freq", "start_freq", "w_time", "start_time", "dnu", "dt", "freqs", "a1", "a2")
+
+        def forward(params, state, constants):
+            tables = [constants[f"{prefix}/{name}"] for name in names]
+
+            # Per-RFI-shard body, psum-ed across devices under sharding, as the
+            # fine-grid components do; the three per-source arrays shard alike.
+            def local_vis(rfi_A, rfi_phase, rfi_path):
+                return coarse_rfi_vis(rfi_A, rfi_phase, rfi_path, *tables)
+
+            vis_rfi = psum_over_rfi(local_vis)(
+                state["rfi_A"], state["rfi_phase"], state["rfi_path"]
+            )
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
             return state

@@ -575,6 +575,37 @@ rfi_vis_configs = [
         ),
         id="RiemannVisFFI",
     ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbitCoarse",
+                "rfi_signal:ComplexRFIVarAntCoarse",
+                "rfi_vis:PolyInterpVis",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The data-grid route: the same model as the RiemannVis case with the
+            # RFI signal and phase carried on the data grid and the fine samples
+            # rebuilt inside the visibility (see docs/coarse_rfi_vis.md). It is an
+            # approximation of that case -- the signal between the cells is the
+            # quadratic through the neighbours, not the Fourier supersampling --
+            # so it has its own reference, measured on ARM CPU:
+            #   precision | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   double    | 0.8965712135 |     0.1787       1.2      |     0.4176       0.3
+            #   single    | 0.8965938091 |     0.1787       1.2      |     0.4175       0.3
+            # 1.4e-6 from the RiemannVis case's optimum in double, with the truth
+            # metrics identical to the printed precision; the fp32 offset is 2.3e-5,
+            # the same as that case's, so one reference covers both precisions.
+            chi2_ref=0.8965712134959265,
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
+        ),
+        id="PolyInterpVis",
+    ),
 ]
 
 

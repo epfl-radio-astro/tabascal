@@ -946,6 +946,10 @@ class ComplexRFIVarAnt(BaseGPRFI):
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
     }
 
+    #: Whether the inverse transform supersamples onto the fine grid. The
+    #: data-grid twin, :class:`ComplexRFIVarAntCoarse`, turns it off.
+    supersample = True
+
     # Add parameter specifications
     parameter_shapes = {
         "rfi_k_r_base": ("n_rfi", "n_ant", "n_k_freq_rfi", "n_k_time_rfi"),
@@ -1090,7 +1094,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
             ns,
             dxs,
             pad_factors,
-            [self.n_int_freq, self.n_int_time],
+            [self.n_int_freq, self.n_int_time] if self.supersample else [1, 1],
             p0,
             k0s,
             gammas,
@@ -1239,6 +1243,40 @@ class ComplexRFIVarAnt(BaseGPRFI):
         )
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
+
+
+class ComplexRFIVarAntCoarse(ComplexRFIVarAnt):
+    """:class:`ComplexRFIVarAnt` with the supersampling left out.
+
+    The same latent, prior, parameters and initialisation; only the inverse
+    transform differs, landing on the data grid ``(n_rfi, n_ant, n_freq,
+    n_time)`` instead of the fine one. The value it gives a cell is the
+    fine-grid signal at that cell's own sample, so where the two grids meet the
+    two components agree exactly; the fine samples in between are rebuilt from
+    the data grid inside :class:`~tabascal.components.rfi_vis.PolyInterpVis`.
+    """
+
+    supersample = False
+    output_shapes = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+    }
+
+    def setup(self, tab_config):
+        super().setup(tab_config)
+        # The elevation mask on the data grid rather than the fine one. It keeps
+        # the fine mask's attribute and constant name: that is the name
+        # distributed.py shards along the source axis and build_masked_signal
+        # reads, and both are indifferent to the length of the time axis.
+        rfi_mask = getattr(tab_config, "rfi_mask", None)
+        self.rfi_mask_fine = None if rfi_mask is None else jnp.asarray(rfi_mask, dtype=bool)
+
+    def _set_outputs(self):
+
+        self.state_outputs = {
+            "rfi_A": sharded_rfi_zeros(
+                (self.n_rfi, self.n_ant, self.n_freq, self.n_time), complex
+            ),
+        }
 
 
 class ComplexRFIConstAnt(BaseGPRFI):
