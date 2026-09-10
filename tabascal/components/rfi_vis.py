@@ -390,6 +390,128 @@ class PolyInterpVisFFI(PolyInterpVis):
         return forward
 
 
+class PolyInterpVisVariable(PolyInterpVis):
+    """:class:`PolyInterpVis` with the fine sampling set per baseline group.
+
+    The data-grid twin of :class:`RiemannVisVariable`: the baselines are
+    grouped by the fringe rate they need to resolve (``rfi.min_time_bins``,
+    ``rfi.max_time_bins``, see ``TabConfig.estimate_rfi_sampling``), and a
+    group with stride ``s`` integrates every ``s``-th fine sample of the cell
+    only. Because the samples are rebuilt from the data grid inside the
+    visibility, that is the same function called on the group's baselines with
+    the rows of every ``s``-th offset of the time tables: nothing is
+    subsampled, the coarser quadrature is simply what the group's tables
+    describe. The slow baselines, which are most of a large array's, cost a
+    fraction of the fast ones.
+    """
+
+    def setup(self, config):
+        super().setup(config)
+        # The groups: which baselines, and every how-many-th fine sample. The
+        # subsampled offsets are the fine-grid route's, slice(s // 2, None, s).
+        self.time_sample_idxs = list(config.time_sample_idxs)
+        self.time_strides = [int(s) for s in config.time_strides]
+        self.group_offsets = [slice(s // 2, None, s) for s in self.time_strides]
+
+    def build_constants(self):
+        constants = super().build_constants()
+        for i, (idx, sub) in enumerate(zip(self.time_sample_idxs, self.group_offsets)):
+            constants[f"idx_{i}"] = jnp.asarray(idx)
+            constants[f"w_time_{i}"] = jnp.asarray(self.w_time[:, :, sub])
+            constants[f"dt_{i}"] = jnp.asarray(self.dt[sub])
+        return constants
+
+    def _group_vis(self, i):
+        """The visibility function of group ``i`` on its own tables."""
+        return coarse_rfi_vis
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        n_groups = len(self.time_sample_idxs)
+        n_bl, n_freq, n_time = self.n_bl, self.n_freq, self.n_time
+
+        def forward(params, state, constants):
+            c = lambda name: constants[f"{prefix}/{name}"]
+            a1, a2 = c("a1"), c("a2")
+            w_freq, start_freq, start_time = c("w_freq"), c("start_freq"), c("start_time")
+            dnu_mhz, freqs_mhz = c("dnu_mhz"), c("freqs_mhz")
+
+            def local_vis(rfi_A, rfi_phase, rfi_delay):
+                vis = jnp.zeros((n_bl, n_freq, n_time), dtype=rfi_A.dtype)
+                for i in range(n_groups):
+                    idx = c(f"idx_{i}")
+                    vis = vis.at[idx].set(
+                        self._group_vis(i)(
+                            rfi_A, rfi_phase, rfi_delay, w_freq, start_freq,
+                            c(f"w_time_{i}"), start_time, dnu_mhz, c(f"dt_{i}"), freqs_mhz,
+                            a1[idx], a2[idx],
+                        )
+                    )
+                return vis
+
+            vis_rfi = psum_over_rfi(local_vis)(
+                state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"]
+            )
+            state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
+
+            return state
+
+        return forward
+
+
+class PolyInterpVisVariableFFI(PolyInterpVisVariable):
+    """:class:`PolyInterpVisVariable` through the compiled ``ri_kernels`` operator.
+
+    One operator and one call: the operator takes a stride per baseline and
+    does the subsampling itself, so the groups collapse into an array of
+    strides and the tables go in whole. Inside, a baseline of stride ``s``
+    integrates every ``s``-th time sample of a cell, exactly what
+    :class:`PolyInterpVisVariable` computes group by group.
+    """
+
+    def setup(self, config):
+        if RFIInterpVisOp is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} setup failed: the installed "
+                "ri_kernels has no RFIInterpVisOp. Build ri_kernels from the "
+                "interp-vis branch, or use rfi_vis:PolyInterpVisVariable."
+            )
+        super().setup(config)
+        self.n_ant = config.n_ant
+        stride = np.ones(self.n_bl, dtype=np.int32)
+        for idx, s in zip(self.time_sample_idxs, self.time_strides):
+            stride[np.asarray(idx)] = s
+        self.stride = stride
+        self._op = RFIInterpVisOp(self.n_ant, self.a1, self.a2, stride=stride)
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        names = ("w_freq", "start_freq", "w_time", "start_time", "dnu_mhz", "dt", "freqs_mhz")
+        op = self._op
+
+        def forward(params, state, constants):
+            tables = [constants[f"{prefix}/{name}"] for name in names]
+
+            def local_vis(rfi_A, rfi_phase, rfi_delay):
+                return op.eval(
+                    jnp.swapaxes(rfi_A, 0, 1),
+                    jnp.swapaxes(rfi_phase, 0, 1),
+                    jnp.swapaxes(rfi_delay, 0, 1),
+                    *tables,
+                )
+
+            vis_rfi = psum_over_rfi(local_vis)(
+                state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"]
+            )
+            state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
+
+            return state
+
+        return forward
+
+
 class RiemannVisVariable(Component):
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
