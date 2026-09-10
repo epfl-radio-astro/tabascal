@@ -152,6 +152,25 @@ precision the phase change across a cell, `2 pi freqs L_1 dt / c`, is of order
 kernel as in the pure-JAX reference; the operator's tests hold the
 single-precision kernels to the float64 reference at that level.
 
+Measured on the SKA-Low scaling simulations (150 integrations of 2 s, 32
+satellites, `rfi.time_int_factor: 0.3`, so 11 and 18 fine samples per
+integration at 64 and 128 antennas), all three routes from one checkout and
+one environment:
+
+| 1 GH200, 100 iterations, single precision | RiemannVisFFI (fine grid) | PolyInterpVis (pure JAX) | PolyInterpVisFFI (prototype) |
+|---|---|---|---|
+| 8 ch, 64 A: optimiser | 7.7 s | 19.3 s | 15.8 s |
+| 8 ch, 64 A: peak memory | 2.18 GB | 0.64 GB | 0.66 GB |
+| 8 ch, 128 A: optimiser | 33.2 s | 127.4 s | 72.4 s |
+| 8 ch, 128 A: peak memory | 7.15 GB | 2.37 GB | 2.37 GB |
+
+The prototype keeps the data-grid route's memory and is 1.2 to 1.8 times
+faster than the pure-JAX reference, and 2 to 2.2 times slower than the
+fine-grid kernel, which is the cost of recomputing each antenna's samples per
+baseline. On an 8-antenna simulation on a GTX 1060 it matches the fine-grid
+kernel (1.2 s against 1.2 s, the reference at 2.7 s). All three reach the
+same optimum.
+
 ## What the reference is and is not
 
 The reference forms one time cell at a time, `(n_bl, n_rfi, n_freq,
