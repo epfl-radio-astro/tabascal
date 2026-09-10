@@ -79,5 +79,7 @@ whichever the config selects, so they impose no constraint of their own — see
 {class}`~tabascal.components.rfi_vis.PolyInterpVis` never forms the fine grid at
 all: the RFI signal and phase stay on the data grid and the fine samples of each
 cell are rebuilt inside the visibility calculation. It runs a pure-JAX reference
-today, written as the specification of a compiled kernel to come -- see
-[The data-grid RFI route and its kernel boundary](coarse_rfi_vis.md).
+written as the specification of a compiled kernel, and
+{class}`~tabascal.components.rfi_vis.PolyInterpVisFFI` runs the prototype of
+that kernel, `RFIInterpVisOp` from the `interp-vis` branch of `ri-kernels` --
+see [The data-grid RFI route and its kernel boundary](coarse_rfi_vis.md).

@@ -262,7 +262,7 @@ EXPECTED_LOCATIONS = {
     "tests/data/tab_target.yaml": 1,
     "docs/config.md": 3,
     "docs/kernels.md": 1,
-    "docs/coarse_rfi_vis.md": 1,
+    "docs/coarse_rfi_vis.md": 2,
 }
 
 _UPDATE_HINT = (
