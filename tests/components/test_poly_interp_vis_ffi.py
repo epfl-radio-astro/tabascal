@@ -91,6 +91,6 @@ def test_the_component_is_the_reference_with_the_operator():
     comp.setup(cfg)
     ref = PolyInterpVis()
     ref.setup(cfg)
-    for name in ("w_time", "start_time", "w_freq", "start_freq", "dt", "dnu", "freqs"):
+    for name in ("w_time", "start_time", "w_freq", "start_freq", "dt", "dnu_mhz", "freqs_mhz"):
         np.testing.assert_array_equal(getattr(comp, name), getattr(ref, name))
     assert comp.required_inputs == ref.required_inputs

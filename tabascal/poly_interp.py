@@ -9,7 +9,7 @@ Everything here runs once, on the host, in float64 numpy, and produces the
   takes the tables as data, so any other linear interpolant -- the conditional
   mean of a Gaussian process, a windowed sinc -- is the same kernel fed a
   different table.
-- :func:`fit_path`: the polynomial in time through each cell's propagated path
+- :func:`fit_path`: the polynomial in time through each cell's propagated delay
   samples, from whose coefficients the kernel rebuilds the fine phase.
 - :func:`fine_offsets`: where a cell's fine samples sit relative to its own
   data-grid sample.
@@ -89,7 +89,8 @@ def fit_path(path_fine: NDArray, offsets: NDArray, order: int) -> NDArray:
     Parameters
     ----------
     path_fine : Array (..., n_time, n_int)
-        The path at the fine samples of each cell, in metres.
+        The path -- or delay, or any quantity -- at the fine samples of each
+        cell, in whatever unit the caller keeps it in.
     offsets : Array (n_int,)
         Offsets of the fine samples from the cell centre, in seconds.
     order : int
@@ -101,7 +102,8 @@ def fit_path(path_fine: NDArray, offsets: NDArray, order: int) -> NDArray:
     -------
     Array (..., n_time, order + 1)
         Coefficients ``L_k`` with ``path(t_c + d) ~ sum_k L_k d^k / k!``: the
-        path and its first ``order`` time derivatives at each cell centre.
+        quantity and its first ``order`` time derivatives at each cell centre,
+        in its unit per second^k.
     """
     path_fine = np.asarray(path_fine, dtype=np.float64)
     offsets = np.asarray(offsets, dtype=np.float64)

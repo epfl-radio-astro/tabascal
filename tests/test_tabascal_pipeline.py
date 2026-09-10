@@ -597,19 +597,17 @@ rfi_vis_configs = [
             # quadratic through the neighbours, not the Fourier supersampling --
             # so it has its own reference, measured on ARM CPU:
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   double  ARM    | 0.8965712135 |     0.1787       1.2      |     0.4176       0.3
-            #   double  GPU    | 0.8965712355 |
-            #   double  x86GPU | 0.8965712189 |
-            #   single  ARM    | 0.8965938091 |     0.1787       1.2      |     0.4175       0.3
-            #   single  GPU    | 0.8965982199 |
-            #   single  x86GPU | 0.8965980411 |
-            # (GPU = a GH200 node, x86GPU = an x86_64 box with a GTX 1060; there
-            # the RiemannVisFFI case measures 0.8965724331 / 0.8965724353 double
-            # and 0.8965966105 single on both.)
-            # 1.4e-6 from the RiemannVis case's optimum in double, with the truth
-            # metrics identical to the printed precision; the fp32 offset is 2.3e-5,
-            # the same as that case's, so one reference covers both precisions.
-            chi2_ref=0.8965712134959265,
+            #   double  ARM    | 0.8965709350 |     0.1787       1.2      |     0.4176       0.3
+            #   single  ARM    | 0.8965295553 |     0.1787       1.2      |     0.4175       0.3
+            # (Re-recorded with the delay relative to the array mean and the centre
+            # phase from the cell's own sample: before that, 0.8965712135 double on
+            # ARM, 0.8965712355 on a GH200 and 0.8965712189 on a GTX 1060, so the
+            # three architectures sit within 3e-8 of each other; single 0.8965938091
+            # ARM. The RiemannVisFFI case measures 0.8965724331 double / 0.8965966105
+            # single on the GH200.) 1.7e-6 from the RiemannVis case's optimum in
+            # double, with the truth metrics identical to the printed precision; the
+            # fp32 offset is 4.6e-5, within the 1% a single reference covers.
+            chi2_ref=0.896570934972912,
             metrics_ref={
                 "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
                 "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
@@ -630,13 +628,13 @@ rfi_vis_configs = [
             ],
             # The PolyInterpVis case through the compiled operator: the same
             # tables and inputs, so it shares that case's reference. Only chi2
-            # is asserted -- the kernel is the unit under test. Measured:
-            #   double  ARM CPU  0.8965712031   GH200  0.8965712355   GTX 1060  0.8965712189
-            #   single  ARM CPU  0.8965968490   GH200  0.8965983391   GTX 1060  0.8965967298
-            # 1e-8 (double) and 3e-6 (single) from the reference function's on
-            # the CPU, and to 1e-14 in double on the GPU; the fp32 spread is the
-            # phase rounding across a cell, the same in kernel and reference.
-            chi2_ref=0.8965712134959265,
+            # is asserted -- the kernel is the unit under test. Measured on ARM
+            # CPU: 0.8965709350 double and 0.8965295553 single, both identical to
+            # the reference function's to every printed digit (before the delay
+            # was made relative to the array mean the two differed by 1e-8 in
+            # double and 3e-6 in single, the fp32 rounding of the full phase
+            # change across a cell, in kernel and reference alike).
+            chi2_ref=0.896570934972912,
         ),
         id="PolyInterpVisFFI",
         marks=pytest.mark.skipif(

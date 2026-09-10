@@ -220,7 +220,7 @@ class RiemannVisFFI(Component):
 class PolyInterpVis(Component):
     """RFI visibilities from the data grid, through :func:`tabascal.coarse_rfi_vis.coarse_rfi_vis`.
 
-    Reads the signal, the phase and the path derivatives on the data grid --
+    Reads the signal, the phase and the delay polynomial on the data grid --
     from :class:`~tabascal.components.rfi_signal.ComplexRFIVarAntCoarse` and
     :class:`~tabascal.components.trajectory.FixedOrbitCoarse` -- and rebuilds the
     fine samples of each cell inside the visibility calculation instead of reading
@@ -238,7 +238,7 @@ class PolyInterpVis(Component):
     required_inputs = {
         "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
         "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time"),
-        "rfi_path": ("n_rfi", "n_ant", "n_time", "n_path"),
+        "rfi_delay_poly_us": ("n_rfi", "n_ant", "n_time", "n_path"),
         "vis_rfi": ("n_bl", "n_freq", "n_time"),
     }
     output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
@@ -272,14 +272,16 @@ class PolyInterpVis(Component):
             # nearest coarse samples there. Host-side float64, once.
             int_time, chan_width = float(config.int_time), float(config.chan_width)
             self.dt = fine_offsets(config.n_int_time, int_time)
-            self.dnu = fine_offsets(config.n_int_freq, chan_width)
+            dnu = fine_offsets(config.n_int_freq, chan_width)
             self.w_time, self.start_time = interp_tables(
                 self.n_time, half_width, self.dt / int_time
             )
             self.w_freq, self.start_freq = interp_tables(
-                self.n_freq, half_width, self.dnu / chan_width
+                self.n_freq, half_width, dnu / chan_width
             )
-            self.freqs = np.asarray(config.freqs, dtype=np.float64)
+            # In MHz, against delays in microseconds: their product is cycles.
+            self.dnu_mhz = dnu / 1e6
+            self.freqs_mhz = np.asarray(config.freqs, dtype=np.float64) / 1e6
 
             self._set_outputs()
 
@@ -302,26 +304,26 @@ class PolyInterpVis(Component):
             "start_freq": jnp.asarray(self.start_freq),
             "w_time": jnp.asarray(self.w_time),
             "start_time": jnp.asarray(self.start_time),
-            "dnu": jnp.asarray(self.dnu),
+            "dnu_mhz": jnp.asarray(self.dnu_mhz),
             "dt": jnp.asarray(self.dt),
-            "freqs": jnp.asarray(self.freqs),
+            "freqs_mhz": jnp.asarray(self.freqs_mhz),
         }
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        names = ("w_freq", "start_freq", "w_time", "start_time", "dnu", "dt", "freqs", "a1", "a2")
+        names = ("w_freq", "start_freq", "w_time", "start_time", "dnu_mhz", "dt", "freqs_mhz", "a1", "a2")
 
         def forward(params, state, constants):
             tables = [constants[f"{prefix}/{name}"] for name in names]
 
             # Per-RFI-shard body, psum-ed across devices under sharding, as the
             # fine-grid components do; the three per-source arrays shard alike.
-            def local_vis(rfi_A, rfi_phase, rfi_path):
-                return coarse_rfi_vis(rfi_A, rfi_phase, rfi_path, *tables)
+            def local_vis(rfi_A, rfi_phase, rfi_delay):
+                return coarse_rfi_vis(rfi_A, rfi_phase, rfi_delay, *tables)
 
             vis_rfi = psum_over_rfi(local_vis)(
-                state["rfi_A"], state["rfi_phase"], state["rfi_path"]
+                state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"]
             )
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
@@ -361,7 +363,7 @@ class PolyInterpVisFFI(PolyInterpVis):
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        names = ("w_freq", "start_freq", "w_time", "start_time", "dnu", "dt", "freqs")
+        names = ("w_freq", "start_freq", "w_time", "start_time", "dnu_mhz", "dt", "freqs_mhz")
         op = RFIInterpVisOp(self.n_ant, self.a1, self.a2)
 
         def forward(params, state, constants):
@@ -370,16 +372,16 @@ class PolyInterpVisFFI(PolyInterpVis):
             # Per-RFI-shard body: the kernel runs unmodified per device inside
             # shard_map (GSPMD cannot partition a custom call) and the results
             # are psum-ed, as RiemannVisFFI does.
-            def local_vis(rfi_A, rfi_phase, rfi_path):
+            def local_vis(rfi_A, rfi_phase, rfi_delay):
                 return op.eval(
                     jnp.swapaxes(rfi_A, 0, 1),
                     jnp.swapaxes(rfi_phase, 0, 1),
-                    jnp.swapaxes(rfi_path, 0, 1),
+                    jnp.swapaxes(rfi_delay, 0, 1),
                     *tables,
                 )
 
             vis_rfi = psum_over_rfi(local_vis)(
-                state["rfi_A"], state["rfi_phase"], state["rfi_path"]
+                state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"]
             )
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 

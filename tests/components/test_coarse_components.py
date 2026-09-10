@@ -16,7 +16,7 @@ from tabascal.poly_interp import fine_offsets
 
 from .conftest import active_precision, make_constants
 from .test_rfi_signal import make_rfi_config
-from .test_trajectory import make_trajectory_config
+from .test_trajectory import _EPOCH_JD, make_trajectory_config
 
 
 def _offsets(n_int, spacing):
@@ -43,20 +43,22 @@ def make_config(
         n_int_freq=n_int_freq, n_int_time=n_int_time, corr_time=corr_time, corr_freq=1e9,
         init="sample",  # a signal, not the zero prior mean
     )
-    times = int_time * np.arange(n_time)
-    freqs = 1.4e9 + chan_width * np.arange(n_freq)
+    times = int_time * np.arange(n_time, dtype=np.float64)
+    freqs = 1.4e9 + chan_width * np.arange(n_freq, dtype=np.float64)
     dt, dnu = _offsets(n_int_time, int_time), _offsets(n_int_freq, chan_width)
-    epoch = float(traj.times_jd[0])
     a1, a2 = jnp.triu_indices(n_ant, 1)
 
     cfg = SimpleNamespace(**{**vars(sig), **vars(traj)})
     cfg.args = sig.args  # the trajectory stub's empty rfi section must not win
-    cfg.times = jnp.asarray(times)
-    cfg.times_fine = jnp.asarray((times[:, None] + dt).ravel())
-    cfg.times_jd = epoch + cfg.times / 86400.0
-    cfg.times_jd_fine = epoch + cfg.times_fine / 86400.0
-    cfg.freqs = jnp.asarray(freqs)
-    cfg.freqs_fine = jnp.asarray((freqs[:, None] + dnu).ravel())
+    # numpy float64 whatever the session precision, as TabConfig keeps them: a
+    # Julian date in float32 resolves a quarter of a day, and the fine grid
+    # only means anything if every sample has its own time.
+    cfg.times = times
+    cfg.times_fine = (times[:, None] + dt).ravel()
+    cfg.times_jd = _EPOCH_JD + times / 86400.0
+    cfg.times_jd_fine = _EPOCH_JD + cfg.times_fine / 86400.0
+    cfg.freqs = freqs
+    cfg.freqs_fine = (freqs[:, None] + dnu).ravel()
     cfg.int_time, cfg.chan_width = int_time, chan_width
     cfg.a1, cfg.a2, cfg.n_bl = a1.astype("int32"), a2.astype("int32"), len(a1)
     cfg.rfi_mask = rfi_mask
@@ -95,10 +97,10 @@ class TestFixedOrbitCoarse:
         comp = FixedOrbitCoarse()
         comp.setup(cfg)
         assert comp.rfi_phase.shape == (1, 4, 2, 6)
-        assert comp.rfi_path.shape == (1, 4, 6, 4)
+        assert comp.rfi_delay_poly_us.shape == (1, 4, 6, 4)
         assert comp.rfi_xyz.shape == (1, cfg.n_time_fine, 3)
         state = comp.build_forward()({}, {}, make_constants(comp))
-        assert set(state) == {"rfi_xyz", "rfi_phase", "rfi_path"}
+        assert set(state) == {"rfi_xyz", "rfi_phase", "rfi_delay_poly_us"}
 
     def test_the_phase_is_the_fine_grid_phase_at_the_cell_centre(self):
         """With an odd sample count one fine sample is the cell centre itself,
@@ -110,7 +112,9 @@ class TestFixedOrbitCoarse:
         fine, comp = FixedOrbit(), FixedOrbitCoarse()
         fine.setup(cfg)
         comp.setup(cfg)
-        assert float(comp.rfi_phase.min()) >= -2 * np.pi and float(comp.rfi_phase.max()) <= 0.0
+        assert float(comp.rfi_phase.min()) >= 0.0 and float(comp.rfi_phase.max()) <= 2 * np.pi
+        # relative to the array mean: no antenna carries the range to the satellite
+        assert float(jnp.abs(comp.rfi_delay_poly_us[..., 0]).max()) < 20.0  # microseconds
         a1, a2 = np.asarray(cfg.a1), np.asarray(cfg.a2)
         centre = np.asarray(fine.rfi_phase)[..., 5 // 2 :: 5]
         coarse = np.asarray(comp.rfi_phase)
@@ -130,9 +134,10 @@ class TestFixedOrbitCoarse:
             comp = FixedOrbitCoarse()
             comp.setup(cfg)
             dt = jnp.asarray(fine_offsets(n_int_time, cfg.int_time))
-            dnu = jnp.asarray(fine_offsets(n_int_freq, cfg.chan_width))
+            dnu_mhz = jnp.asarray(fine_offsets(n_int_freq, cfg.chan_width) / 1e6)
+            freqs_mhz = jnp.asarray(np.asarray(cfg.freqs) / 1e6)
             phase = np.stack(
-                [fine_phase(comp.rfi_phase[..., t], comp.rfi_path[:, :, t], cfg.freqs, dnu, dt) for t in range(cfg.n_time)],
+                [fine_phase(comp.rfi_phase[..., t], comp.rfi_delay_poly_us[:, :, t], freqs_mhz, dnu_mhz, dt) for t in range(cfg.n_time)],
                 -1,
             )
             phase = _fine_layout(phase, cfg.n_freq, n_int_freq, cfg.n_time, n_int_time)

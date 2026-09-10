@@ -29,6 +29,7 @@ def make_inputs(n_rfi=2, n_ant=4, n_freq=3, n_time=6, n_int_freq=2, n_int_time=5
     dt = _offsets(n_int_time, int_time)
     dnu = _offsets(n_int_freq, chan_width)
     freqs = 1.5e8 + chan_width * np.arange(n_freq)
+    dnu_mhz, freqs_mhz = dnu / 1e6, freqs / 1e6
     w_time, start_time = interp_tables(n_time, half_width, dt / int_time)
     w_freq, start_freq = interp_tables(n_freq, half_width, dnu / chan_width)
     a1, a2 = np.triu_indices(n_ant, 1)
@@ -36,16 +37,18 @@ def make_inputs(n_rfi=2, n_ant=4, n_freq=3, n_time=6, n_int_freq=2, n_int_time=5
     shape = (n_rfi, n_ant, n_freq, n_time)
     rfi_A = rng.normal(size=shape) + 1.0j * rng.normal(size=shape)
     rfi_phase = rng.uniform(-2 * np.pi, 0.0, size=shape)
-    rfi_path = np.stack(
+    # The delay relative to the array mean, in microseconds, as FixedOrbitCoarse
+    # writes it: a kilometre-scale array against a LEO satellite.
+    rfi_delay = np.stack(
         [
-            rng.uniform(1e6, 2e6, shape[:2] + (n_time,)),  # m
-            rng.normal(0.0, 7e3, shape[:2] + (n_time,)),  # m/s
-            rng.normal(0.0, 10.0, shape[:2] + (n_time,)),  # m/s^2
-            rng.normal(0.0, 1.0, shape[:2] + (n_time,)),  # m/s^3
+            rng.normal(0.0, 1.7, shape[:2] + (n_time,)),  # us
+            rng.normal(0.0, 0.07, shape[:2] + (n_time,)),  # us/s
+            rng.normal(0.0, 3e-4, shape[:2] + (n_time,)),  # us/s^2
+            rng.normal(0.0, 3e-6, shape[:2] + (n_time,)),  # us/s^3
         ],
         axis=-1,
     )
-    arrays = (rfi_A, rfi_phase, rfi_path, w_freq, start_freq, w_time, start_time, dnu, dt, freqs, a1, a2)
+    arrays = (rfi_A, rfi_phase, rfi_delay, w_freq, start_freq, w_time, start_time, dnu_mhz, dt, freqs_mhz, a1, a2)
     return [jnp.asarray(x) for x in arrays]
 
 
@@ -55,11 +58,11 @@ def fine_grid(args):
     Returned in the fine-grid components' layout, ``(n_rfi, n_ant, n_freq_fine,
     n_time_fine)``, so the fine-grid functions can be fed with them.
     """
-    rfi_A, rfi_phase, rfi_path, w_freq, start_freq, w_time, start_time, dnu, dt, freqs = args[:10]
+    rfi_A, rfi_phase, rfi_delay, w_freq, start_freq, w_time, start_time, dnu, dt, freqs = args[:10]
     n_rfi, n_ant, n_freq, n_time = rfi_A.shape
     n_int_freq, n_int_time = len(dnu), len(dt)
     A = np.stack([fine_signal(rfi_A, w_freq, start_freq, w_time[t], start_time[t]) for t in range(n_time)], -1)
-    phase = np.stack([fine_phase(rfi_phase[..., t], rfi_path[:, :, t], freqs, dnu, dt) for t in range(n_time)], -1)
+    phase = np.stack([fine_phase(rfi_phase[..., t], rfi_delay[:, :, t], freqs, dnu, dt) for t in range(n_time)], -1)
 
     def flat(x):  # (n_rfi, n_ant, n_freq, n_int_freq, n_int_time, n_time) -> fine-grid layout
         return jnp.asarray(np.transpose(x, (0, 1, 2, 3, 5, 4)).reshape(n_rfi, n_ant, n_freq * n_int_freq, n_time * n_int_time))
@@ -102,20 +105,21 @@ class TestValue:
 
     def test_the_phase_across_the_cell_is_the_taylor_series(self):
         args = make_inputs(n_int_freq=1)
-        rfi_phase, rfi_path, dt, freqs = args[1], args[2], args[8], args[9]
-        got = fine_phase(rfi_phase[..., 2], rfi_path[:, :, 2], freqs, args[7], dt)
-        L = rfi_path[:, :, 2]
-        d_path = L[..., 1, None] * dt + L[..., 2, None] * dt**2 / 2 + L[..., 3, None] * dt**3 / 6
-        expected = rfi_phase[..., 2][..., None, None] - 2 * jnp.pi * freqs[None, None, :, None, None] * d_path[:, :, None, None, :] / 299792458.0
+        rfi_phase, rfi_delay, dt, freqs_mhz = args[1], args[2], args[8], args[9]
+        got = fine_phase(rfi_phase[..., 2], rfi_delay[:, :, 2], freqs_mhz, args[7], dt)
+        tau = rfi_delay[:, :, 2]
+        d_tau = tau[..., 1, None] * dt + tau[..., 2, None] * dt**2 / 2 + tau[..., 3, None] * dt**3 / 6
+        # MHz times microseconds is cycles
+        expected = rfi_phase[..., 2][..., None, None] + 2 * jnp.pi * freqs_mhz[None, None, :, None, None] * d_tau[:, :, None, None, :]
         np.testing.assert_allclose(got, expected, rtol=_rtol(), atol=_rtol())
 
     def test_the_phase_across_the_channel_is_linear_in_frequency(self):
         args = make_inputs(n_int_time=1, n_int_freq=3)
-        rfi_phase, rfi_path, dnu, freqs = args[1], args[2], args[7], args[9]
-        got = fine_phase(rfi_phase[..., 0], rfi_path[:, :, 0], freqs, dnu, args[8])
-        # no change across the cell (dt = 0): only the channel's own slope, 2 pi L / c per Hz
-        slope = -2 * jnp.pi * rfi_path[:, :, 0, 0] / 299792458.0  # (n_rfi, n_ant)
-        expected = rfi_phase[..., 0][..., None, None] + slope[:, :, None, None, None] * dnu[None, None, None, :, None]
+        rfi_phase, rfi_delay, dnu_mhz, freqs_mhz = args[1], args[2], args[7], args[9]
+        got = fine_phase(rfi_phase[..., 0], rfi_delay[:, :, 0], freqs_mhz, dnu_mhz, args[8])
+        # no change across the cell (dt = 0): only the channel's own slope, 2 pi tau per MHz
+        slope = 2 * jnp.pi * rfi_delay[:, :, 0, 0]  # (n_rfi, n_ant), per MHz
+        expected = rfi_phase[..., 0][..., None, None] + slope[:, :, None, None, None] * dnu_mhz[None, None, None, :, None]
         np.testing.assert_allclose(got, expected, rtol=_rtol(), atol=_rtol())
 
     def test_cell_vis_is_the_summed_product_averaged_over_the_cell(self):
@@ -158,11 +162,11 @@ class TestDerivatives:
 
 def _bilinear(A, B, args):
     """mean sum_r S_A[a1] conj(S_B[a2]) with S_A, S_B built from A and B."""
-    rfi_phase, rfi_path, w_freq, start_freq, w_time, start_time, dnu, dt, freqs, a1, a2 = args[1:]
+    rfi_phase, rfi_delay, w_freq, start_freq, w_time, start_time, dnu, dt, freqs, a1, a2 = args[1:]
     n_time = A.shape[-1]
     out = []
     for t in range(n_time):
-        phase = fine_phase(rfi_phase[..., t], rfi_path[:, :, t], freqs, dnu, dt)
+        phase = fine_phase(rfi_phase[..., t], rfi_delay[:, :, t], freqs, dnu, dt)
         S_A = fine_signal(A, w_freq, start_freq, w_time[t], start_time[t]) * jnp.exp(1.0j * phase)
         S_B = fine_signal(B, w_freq, start_freq, w_time[t], start_time[t]) * jnp.exp(1.0j * phase)
         out.append(jnp.mean(jnp.sum(S_A[:, a1] * jnp.conj(S_B[:, a2]), axis=0), axis=(-2, -1)))
