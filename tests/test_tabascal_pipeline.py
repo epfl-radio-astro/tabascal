@@ -598,7 +598,9 @@ rfi_vis_configs = [
             # so it has its own reference, measured on ARM CPU:
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   double  ARM    | 0.8965709350 |     0.1787       1.2      |     0.4176       0.3
+            #   double  x86GPU | 0.8965709413 |
             #   single  ARM    | 0.8965295553 |     0.1787       1.2      |     0.4175       0.3
+            #   single  x86GPU | 0.8965295553 |
             # (Re-recorded with the delay relative to the array mean and the centre
             # phase from the cell's own sample: before that, 0.8965712135 double on
             # ARM, 0.8965712355 on a GH200 and 0.8965712189 on a GTX 1060, so the
@@ -630,7 +632,9 @@ rfi_vis_configs = [
             # tables and inputs, so it shares that case's reference. Only chi2
             # is asserted -- the kernel is the unit under test. Measured on ARM
             # CPU: 0.8965709350 double and 0.8965295553 single, both identical to
-            # the reference function's to every printed digit (before the delay
+            # the reference function's to every printed digit; on a GTX 1060,
+            # 0.8965709413 double (identical again) and 0.8965296149 single, 7e-8
+            # from the reference function's there (before the delay
             # was made relative to the array mean the two differed by 1e-8 in
             # double and 3e-6 in single, the fp32 rounding of the full phase
             # change across a cell, in kernel and reference alike).
