@@ -24,8 +24,11 @@ else:
 
 
 def _tols():
-    # A different summation order and sincos than the reference: 1e-9 apart in double.
-    return (1e-4, 1e-4) if active_precision() == "single" else (1e-7, 1e-9)
+    # A different summation order and sincos than the reference: 1e-9 apart in
+    # double. In single the phase change across a cell, ~1e4 rad per antenna
+    # at orbital range rates, rounds at ~1e-3 rad in both, in different places:
+    # see the operator's own tests, which hold it to the float64 reference.
+    return (5e-3, 5e-3) if active_precision() == "single" else (1e-7, 1e-9)
 
 
 def _route(vis_cls, cfg):
