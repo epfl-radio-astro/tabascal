@@ -94,3 +94,45 @@ def test_the_component_is_the_reference_with_the_operator():
     for name in ("w_time", "start_time", "w_freq", "start_freq", "dt", "dnu_mhz", "freqs_mhz"):
         np.testing.assert_array_equal(getattr(comp, name), getattr(ref, name))
     assert comp.required_inputs == ref.required_inputs
+
+
+def _route_from_trajectory(vis_cls, cfg):
+    """The route as a function of the trajectory's outputs: the phase and the
+    delay polynomial become inputs, as they would be with a fitted orbit."""
+    comps = [FixedOrbitCoarse(), ComplexRFIVarAntCoarse(), vis_cls()]
+    for comp in comps:
+        comp.setup(cfg)
+    constants = {k: v for comp in comps for k, v in make_constants(comp).items()}
+    forwards = [comp.build_forward() for comp in comps]
+    params = comps[1].init_params_base
+    state0 = forwards[0](params, {"vis_rfi": jnp.zeros((cfg.n_bl, cfg.n_freq, cfg.n_time), dtype=complex)}, constants)
+
+    def vis(rfi_phase, rfi_delay):
+        state = {**state0, "rfi_phase": rfi_phase, "rfi_delay_poly_us": rfi_delay}
+        for forward in forwards[1:]:
+            state = forward(params, state, constants)
+        return state["vis_rfi"]
+
+    return vis, (state0["rfi_phase"], state0["rfi_delay_poly_us"])
+
+
+def test_phase_and_delay_derivatives_match_the_reference():
+    """With the trajectory's outputs as inputs, the operator's JVP and VJP with
+    respect to the phase and the delay polynomial agree with the reference's,
+    which differentiates through them as plain JAX."""
+    cfg = make_config(n_ant=5, n_int_time=6)
+    ref, (phase, delay) = _route_from_trajectory(PolyInterpVis, cfg)
+    ffi, _ = _route_from_trajectory(PolyInterpVisFFI, cfg)
+    rng = np.random.default_rng(3)
+    phase_dot = jnp.asarray(rng.normal(size=phase.shape), phase.dtype)
+    delay_dot = jnp.asarray(rng.normal(size=delay.shape) * np.abs(np.asarray(delay)).mean(axis=(0, 1, 2)), delay.dtype)
+    rtol, atol = _tols()
+    vis, exp_t = jax.jvp(ref, (phase, delay), (phase_dot, delay_dot))
+    _, got_t = jax.jvp(ffi, (phase, delay), (phase_dot, delay_dot))
+    np.testing.assert_allclose(got_t, exp_t, rtol=rtol, atol=atol * float(jnp.abs(exp_t).max()))
+    cot = jnp.asarray(rng.normal(size=vis.shape) + 1j * rng.normal(size=vis.shape), vis.dtype)
+    _, ref_pb = jax.vjp(ref, phase, delay)
+    _, ffi_pb = jax.vjp(ffi, phase, delay)
+    for name, got, expected in zip(("rfi_phase", "rfi_delay_poly_us"), ffi_pb(cot), ref_pb(cot)):
+        scale = float(jnp.abs(expected).max())
+        np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol * scale, err_msg=name)
