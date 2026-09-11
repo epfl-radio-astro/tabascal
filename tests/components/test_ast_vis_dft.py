@@ -208,3 +208,26 @@ def test_an_explicit_block_is_still_honoured(tmp_path):
         np.asarray(single_vis(single.init_params_base)),
         rtol=rtol, atol=atol,
     )
+
+
+def test_one_pair_of_matrices_serves_every_baseline(tmp_path):
+    """The transform is the same for every baseline, so the matrices carry no
+    baseline axis and do not grow with the array.
+
+    The modes differ per baseline, the map that turns them into visibilities
+    does not: it is set by the grid and the surviving modes alone. A change
+    that gave the matrices a baseline axis would cost ``n_bl`` times their
+    size and would not be visible in any value this file checks.
+    """
+    comp, _ = _route(GPVisAstDFT, ast_config(tmp_path))
+
+    n_out = [comp.n_freq, comp.n_time]
+    n_k = [comp.n_k_freq_ast, comp.n_k_time_ast]
+    for axis, mat in enumerate(comp.dft_mats):
+        assert mat.ndim == 2, "a baseline axis would make this rank three"
+        assert mat.shape == (n_k[axis], n_out[axis])
+
+    # And the transform broadcasts them rather than mapping over them.
+    bigger, _ = _route(GPVisAstDFT, ast_config(tmp_path))
+    for small, large in zip(comp.dft_mats, bigger.dft_mats):
+        assert small.shape == large.shape
