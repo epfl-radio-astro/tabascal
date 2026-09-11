@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_cutoff, validate_gp_cov
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, latent_to_signal_dft_init, latent_to_signal_dft, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
@@ -192,6 +192,19 @@ class GPVisAst(Component):
     #: band -- where the grid is the largest array in the model -- still blocks.
     _BLOCK_BUDGET_BYTES = 64 * 1024**2
 
+    def _transform_bytes_per_baseline(self):
+        """What one baseline costs the transform at its peak, in bytes.
+
+        The padded Fourier grid: the pad, the shift and the inverse transform
+        are each of that size. Split out because a transform that does not
+        build it has a different budget -- see :class:`GPVisAstDFT`.
+        """
+        padded = 1
+        for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
+            padded *= dim + lo + hi
+
+        return padded * jnp.zeros((), dtype=complex).dtype.itemsize
+
     def _resolve_baseline_block_size(self):
         """Turn the ``baseline_block_size`` setting into a block, or ``None``."""
 
@@ -200,11 +213,7 @@ class GPVisAst(Component):
             self.baseline_block_size = None if setting is None else int(setting)
             return
 
-        # One baseline's padded grid, in the precision the run is in.
-        padded = 1
-        for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
-            padded *= dim + lo + hi
-        per_baseline = padded * jnp.zeros((), dtype=complex).dtype.itemsize
+        per_baseline = self._transform_bytes_per_baseline()
 
         block = max(1, self._BLOCK_BUDGET_BYTES // max(1, per_baseline))
         # A block at or above the axis is one step over all of it, which is what
@@ -268,12 +277,10 @@ class GPVisAst(Component):
         that would remove the padded grid altogether.
         """
         prefix = self.prefix
-        pads = self.pads
-        ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
         block_size = self.baseline_block_size
 
-        block_signal = vmap(latent_to_signal, (0, None, None), 0)
+        block_signal = self.build_block_signal()
 
         def blocked_vis(ast_k_base, sigma_ast_k, mu_ast_k):
             # The size comes off the array rather than off the config, so the
@@ -288,16 +295,14 @@ class GPVisAst(Component):
                 # grid that fits the budget takes, and it is the transform as it
                 # was before the scan existed.
                 return block_signal(
-                    forward_transform(ast_k_base, sigma_ast_k, mu_ast_k),
-                    pads,
-                    ss_idxs,
+                    forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
                 )
 
             def block_vis(carry, block):
                 k_base, sigma, mu = block
 
                 return carry, block_signal(
-                    forward_transform(k_base, sigma, mu), pads, ss_idxs
+                    forward_transform(k_base, sigma, mu)
                 )
 
             # The padding baselines of the last block carry a zero latent, a zero
@@ -332,6 +337,19 @@ class GPVisAst(Component):
             return state
 
         return forward
+
+    def build_block_signal(self):
+        """The latent-to-signal transform of one block of baselines.
+
+        Split out so a subclass can replace the transform and nothing else:
+        the priors, the initialisation and the blocking above are the same
+        whichever way the modes are turned into a signal.
+        """
+        pads = self.pads
+        ss_idxs = self.ss_idxs
+        transform = vmap(latent_to_signal, (0, None, None), 0)
+
+        return lambda Y_block: transform(Y_block, pads, ss_idxs)
 
     def validate_and_test(self):
         """Call this before using in JIT context"""
@@ -679,6 +697,95 @@ def radec_to_lmn(ra, dec, ra0, dec0):
     )
 
     return l, m, n, -2.0 * hav
+
+
+class GPVisAstDFT(GPVisAst):
+    """:class:`GPVisAst` with the padded grid never formed.
+
+    The prior, the initialisation and the blocking over baselines are the
+    parent's; only the step from the surviving Fourier modes to the
+    visibilities differs. :func:`~tabascal.fft_gp.latent_to_signal` pads those
+    modes back up to the padded grid, inverse-transforms the whole of it and
+    crops -- at the default padding, about four times the elements of the
+    visibilities formed and thrown away, per block, in the forward pass and
+    again in reverse. The chain is linear and separable, so the same values
+    come out of one small matrix per axis
+    (:func:`~tabascal.fft_gp.latent_to_signal_dft`), and the largest thing
+    formed is the size of the visibilities.
+
+    The modes of this component are set by the array's geometry rather than by
+    a choice, so the matrices are fixed at setup and shared by every baseline.
+
+    ```yaml
+    model:
+      components:
+        - ast_vis:GPVisAstDFT
+    ```
+    """
+
+    def _compute_gp_params(self):
+        super()._compute_gp_params()
+        # The same modes and the same spectrum as the parent -- checked below
+        # against its own pads and crop -- with the transform as matrices.
+        pk, ks, self.dft_mats, self.dft_first_axis = latent_to_signal_dft_init(
+            [self.n_freq, self.n_time],
+            [self.chan_width, self.int_time],
+            self.pad_factors,
+            self.ss_factors,
+            _SHAPE_ONLY,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
+        )
+        if pk.shape != self.pk.shape:
+            raise RuntimeError(
+                "The DFT transform kept a different set of Fourier modes than "
+                f"the FFT one: {pk.shape} against {self.pk.shape}. They are "
+                "built from the same power spectrum and cutoff, so this is a "
+                "bug rather than a configuration error."
+            )
+        n_out = [m.shape[1] for m in self.dft_mats]
+        if n_out != [self.n_freq, self.n_time]:
+            raise RuntimeError(
+                f"The DFT transform outputs {n_out} samples where the "
+                f"visibilities are ({self.n_freq}, {self.n_time})."
+            )
+
+    def _resolve_baseline_block_size(self):
+        """``auto`` is a single step over every baseline.
+
+        The block exists to bound the padded Fourier grid, and this component
+        builds none: its only transient is the intermediate of the two matrix
+        products, which is the modes in one axis and the visibilities in the
+        other. What the scan does still cost is the stack of its steps'
+        outputs, so on this transform blocking is worse on both counts.
+        Measured on one GH200, 2016 baselines at 150 integrations, value and
+        gradient together:
+
+        =========  =================  ==================  =================
+        channels   FFT, best block    FFT, single step    DFT, single step
+        =========  =================  ==================  =================
+        8          273.9 MB, 1.0 ms   441.2 MB, 1.0 ms    218.6 MB, 0.2 ms
+        32         828.6 MB, 4.0 ms   1711.2 MB, 3.3 ms   683.8 MB, 0.4 ms
+        128        2386.4 MB, 14.7 ms 5926.7 MB, 12.7 ms  1799.1 MB, 1.1 ms
+        =========  =================  ==================  =================
+
+        An explicit ``baseline_block_size`` is still honoured: it is the way
+        to trade this back if some other part of a model wants the room.
+        """
+        setting = self.baseline_block_size_setting
+        if setting != "auto":
+            self.baseline_block_size = None if setting is None else int(setting)
+            return
+
+        self.baseline_block_size = self.n_bl
+
+    def build_block_signal(self):
+        mats = self.dft_mats
+        first_axis = self.dft_first_axis
+        transform = vmap(latent_to_signal_dft, (0, None, None), 0)
+
+        return lambda Y_block: transform(Y_block, mats, first_axis)
 
 
 class DiscreteSkyVis(Component):
