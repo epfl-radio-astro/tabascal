@@ -150,37 +150,50 @@ model:
     - gains:UnitaryGains
 ```
 
-The kernels are a prototype of the operator rather than a fast one: each
-baseline rebuilds both of its antennas' fine samples itself, with the cell's
-two weight rows in shared memory and everything else read per term, so an
-antenna's samples are recomputed once per baseline it is on. The transpose is
-deterministic, every output element written by one thread, at the cost of a
-scratch buffer of `n_sf * n_st` times the signal on the GPU. In single
-precision the phase change across a cell, `2 pi freqs L_1 dt / c`, is of order
-1e4 rad per antenna at orbital range rates and rounds at ~1e-3 rad, in the
-kernel as in the pure-JAX reference; the operator's tests hold the
-single-precision kernels to the float64 reference at that level.
+The GPU kernels first materialise the fine samples of a chunk of time cells,
+once per cell and antenna, with contiguous reads of the data-grid arrays: a
+kernel that rebuilds them where they are used gathers a dozen scattered
+values per sample and repeats that once per tile pair the antenna sits in,
+and that traffic, not the products, was the cost. The antennas are then cut
+into tiles of 32, and a block works one unordered pair of tiles on one cell:
+per source and chunk of samples it loads the two tiles' samples into shared
+memory, contiguous runs, and forms the tile pair's baseline products from
+there, each pair once whatever orderings the baseline list holds. The
+transpose is the same block structure as the forward's mirror: from the tile
+pair's matrix of cotangent weights it forms each tile's cotangent samples as
+two small dense products, turns them by the antennas' phase factors and
+pushes them through the stencil weights into a per-tile-pair partial, which
+a gather sums per antenna in a fixed order. Every element is owned by one
+thread: no atomics, and the result is deterministic. Shared memory stays
+within the 48 KB every device offers whatever the stencil, and the scratch
+(samples, phase factors, partials) is chunked over time cells to at most a
+few hundred MB. In single precision the phase change across a cell,
+`2 pi freqs L_1 dt / c`, is of order 1e4 rad per antenna at orbital range
+rates and rounds at ~1e-3 rad, in the kernel as in the pure-JAX reference;
+the operator's tests hold the single-precision kernels to the float64
+reference at that level.
 
 Measured on the SKA-Low scaling simulations (150 integrations of 2 s, 32
-satellites, `rfi.time_int_factor: 1`, so 37 and 59 fine samples per
-integration at 64 and 128 antennas), all three routes from one checkout and
-one environment:
+satellites, `rfi.time_int_factor: 1`, so 37, 59 and 174 fine samples per
+integration at 64, 128 and 256 antennas), all three routes from one checkout
+and one environment:
 
-| 1 GH200, 100 iterations, single precision | RiemannVisFFI (fine grid) | PolyInterpVis (pure JAX) | PolyInterpVisFFI (staged kernel) |
+| 1 GH200, 100 iterations, single precision | RiemannVisFFI (fine grid) | PolyInterpVis (pure JAX) | PolyInterpVisFFI (staged kernels) |
 |---|---|---|---|
-| 8 ch, 64 A: optimiser | 15.8 s | 40.3 s | 10.8 s |
-| 8 ch, 64 A: peak memory | 6.14 GB | 0.64 GB | 0.66 GB |
-| 8 ch, 128 A: optimiser | 59.0 s | 270.9 s | 48.6 s |
+| 8 ch, 64 A: optimiser | 15.8 s | 40.3 s | 8.4 s |
+| 8 ch, 64 A: peak memory | 6.14 GB | 0.64 GB | 0.77 GB |
+| 8 ch, 128 A: optimiser | 59.0 s | 270.9 s | 28.6 s |
 | 8 ch, 128 A: peak memory | 19.8 GB | 2.37 GB | 2.37 GB |
-| 8 ch, 256 A: optimiser | out of memory | (not run) | 968 s |
+| 8 ch, 256 A: optimiser | out of memory | (not run) | 205 s |
 | 8 ch, 256 A: peak memory | 92.6 GB requested | | 8.87 GB |
 
-The staged operator keeps the data-grid route's memory, a tenth of the
-fine-grid kernel's, and is faster than that kernel and four to six times
-faster than the pure-JAX reference. Its first version, which rebuilt both
-antennas' samples per baseline, sat between the two (at `time_int_factor:
-0.3`: 15.8 s against the fine-grid kernel's 7.7 s at 64 antennas, 72 s
-against 33 s at 128). All three reach the same optimum.
+The operator keeps the data-grid route's memory, a tenth of the fine-grid
+kernel's, at twice that kernel's speed and five to nine times the pure-JAX
+reference's. All three reach the same optimum. The operator's own forward
+and VJP at these sizes (32 sources, 8 channels, 150 integrations) take 7 and
+16 ms at 64 antennas and 32 and 75 ms at 128 on the GH200, and 1.4 and 2.5 ms
+at 64 antennas on a GTX 1060; the first staged kernels, which rebuilt the
+samples in place, took 22 and 70 ms at 64 antennas on the GH200.
 
 ## Variable sampling per baseline
 
@@ -190,11 +203,30 @@ grouped by the fringe rate they need to resolve (`rfi.min_time_bins`,
 `rfi.max_time_bins`, the same estimate `TabConfig` makes for the fine-grid
 components), and a group with stride `s` integrates every `s`-th fine sample
 of the cell. On the data grid that needs little: the tables are per fine offset,
-so in the pure-JAX form a group is the reference function called on the
-group's baselines with the rows of every `s`-th offset of the time tables,
-and the operator takes a stride per baseline and does the subsampling itself,
-in one call with the whole tables. The slow baselines, which are most of a
-large array's, then cost a fraction of the fast ones.
+so a group is the same function, or the same operator, called on the group's
+baselines with the rows of every `s`-th offset of the time tables. The
+variable sampling is a difference in inputs only.
+
+Whether it pays is another matter. A stride per baseline inside the kernel
+was built and measured against per-group calls and against full sampling, on
+a GTX 1060 and a GH200, at 64 and 128 antennas with two stride distributions:
+neither variable route beat full sampling. The products a stride saves are
+the cheap part of the kernels once the samples are materialised, so
+in-kernel striding costs more bookkeeping than it saves, and per-group calls
+rebuild the samples once per group. The stride machinery was taken out of
+the kernels again; the per-group component stays as the way to sample
+variably should a cheaper sample build make it worthwhile.
+
+| 1 GH200, 100 iterations, single precision, variable sampling | RiemannVisVariableFFI (fine grid) | PolyInterpVisVariable (pure JAX) | PolyInterpVisVariableFFI (operator per group) | PolyInterpVisFFI (full sampling) |
+|---|---|---|---|---|
+| 8 ch, 64 A: optimiser | 11.9 s | 27.9 s | 8.7 s | 8.4 s |
+| 8 ch, 128 A: optimiser | 41.8 s | 115.0 s | 41.3 s | 28.6 s |
+
+The fine-grid and pure-JAX routes gain from the coarser sampling of the slow
+baselines because their cost is in the samples; the operator's is not, and
+its per-group form pays for the samples rebuilt per group. (The divisor-rich
+fine grid the grouping needs also has slightly more samples: 40 and 60
+against 37 and 59.)
 
 ## What the reference is and is not
 
