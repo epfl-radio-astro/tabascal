@@ -461,13 +461,15 @@ class PolyInterpVisVariable(PolyInterpVis):
 
 
 class PolyInterpVisVariableFFI(PolyInterpVisVariable):
-    """:class:`PolyInterpVisVariable` through the compiled ``ri_kernels`` operator.
+    """:class:`PolyInterpVisVariable` through the operator, one call per group.
 
-    One operator and one call: the operator takes a stride per baseline and
-    does the subsampling itself, so the groups collapse into an array of
-    strides and the tables go in whole. Inside, a baseline of stride ``s``
-    integrates every ``s``-th time sample of a cell, exactly what
-    :class:`PolyInterpVisVariable` computes group by group.
+    The operator knows nothing of the groups: each is a call on the group's
+    baselines with the time table and offsets cut to the group's samples,
+    exactly as the pure-JAX form does it. The variable sampling is a
+    difference in inputs only, tables of different lengths, at the price of
+    one operator call per group and the fine samples rebuilt once per group.
+    (A stride per baseline inside the kernel was measured and rejected: the
+    products it saves are the cheap part, see ``docs/coarse_rfi_vis.md``.)
     """
 
     def setup(self, config):
@@ -479,28 +481,33 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
             )
         super().setup(config)
         self.n_ant = config.n_ant
-        stride = np.ones(self.n_bl, dtype=np.int32)
-        for idx, s in zip(self.time_sample_idxs, self.time_strides):
-            stride[np.asarray(idx)] = s
-        self.stride = stride
-        self._op = RFIInterpVisOp(self.n_ant, self.a1, self.a2, stride=stride)
+        self._ops = [
+            RFIInterpVisOp(self.n_ant, self.a1[np.asarray(idx)], self.a2[np.asarray(idx)])
+            for idx in self.time_sample_idxs
+        ]
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        names = ("w_freq", "start_freq", "w_time", "start_time", "dnu_mhz", "dt", "freqs_mhz")
-        op = self._op
+        ops = self._ops
+        n_bl, n_freq, n_time = self.n_bl, self.n_freq, self.n_time
 
         def forward(params, state, constants):
-            tables = [constants[f"{prefix}/{name}"] for name in names]
+            c = lambda name: constants[f"{prefix}/{name}"]
+            w_freq, start_freq, start_time = c("w_freq"), c("start_freq"), c("start_time")
+            dnu_mhz, freqs_mhz = c("dnu_mhz"), c("freqs_mhz")
 
             def local_vis(rfi_A, rfi_phase, rfi_delay):
-                return op.eval(
-                    jnp.swapaxes(rfi_A, 0, 1),
-                    jnp.swapaxes(rfi_phase, 0, 1),
-                    jnp.swapaxes(rfi_delay, 0, 1),
-                    *tables,
-                )
+                amp, phase, delay = (jnp.swapaxes(x, 0, 1) for x in (rfi_A, rfi_phase, rfi_delay))
+                vis = jnp.zeros((n_bl, n_freq, n_time), dtype=rfi_A.dtype)
+                for i, op in enumerate(ops):
+                    vis = vis.at[c(f"idx_{i}")].set(
+                        op.eval(
+                            amp, phase, delay, w_freq, start_freq,
+                            c(f"w_time_{i}"), start_time, dnu_mhz, c(f"dt_{i}"), freqs_mhz,
+                        )
+                    )
+                return vis
 
             vis_rfi = psum_over_rfi(local_vis)(
                 state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"]

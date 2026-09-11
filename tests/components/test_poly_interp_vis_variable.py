@@ -136,6 +136,7 @@ class TestPolyInterpVisVariable:
 
 @pytest.mark.skipif(RFIInterpVisOp is None, reason="the installed ri_kernels has no RFIInterpVisOp")
 class TestPolyInterpVisVariableFFI:
+    """One stride-free operator call per group, tables cut to the group."""
 
     @pytest.fixture(autouse=True)
     def _needs_the_library(self):
@@ -150,38 +151,28 @@ class TestPolyInterpVisVariableFFI:
     def test_value_matches_the_pure_jax_variant(self):
         cfg = make_variable_config(n_ant=5)
         ref, comps = _route(PolyInterpVisVariable, cfg)
-        ffi, _ = _route(PolyInterpVisVariableFFI, cfg)
+        groups, _ = _route(PolyInterpVisVariableFFI, cfg)
         params = comps[1].init_params_base
         expected = ref(params)
         rtol, atol = self._tols()
-        np.testing.assert_allclose(ffi(params), expected, rtol=rtol, atol=atol * float(jnp.abs(expected).max()))
-        np.testing.assert_allclose(jax.jit(ffi)(params), expected, rtol=rtol, atol=atol * float(jnp.abs(expected).max()))
+        np.testing.assert_allclose(groups(params), expected, rtol=rtol, atol=atol * float(jnp.abs(expected).max()))
+        np.testing.assert_allclose(jax.jit(groups)(params), expected, rtol=rtol, atol=atol * float(jnp.abs(expected).max()))
 
     def test_jvp_and_vjp_match_the_pure_jax_variant(self):
         cfg = make_variable_config(n_ant=5)
         ref, comps = _route(PolyInterpVisVariable, cfg)
-        ffi, _ = _route(PolyInterpVisVariableFFI, cfg)
+        groups, _ = _route(PolyInterpVisVariableFFI, cfg)
         params = comps[1].init_params_base
         rng = np.random.default_rng(1)
         tangents = jax.tree.map(lambda p: jnp.asarray(rng.normal(size=p.shape), p.dtype), params)
         _, exp_t = jax.jvp(ref, (params,), (tangents,))
-        _, got_t = jax.jvp(ffi, (params,), (tangents,))
+        _, got_t = jax.jvp(groups, (params,), (tangents,))
         rtol, atol = self._tols()
         np.testing.assert_allclose(got_t, exp_t, rtol=rtol, atol=atol * float(jnp.abs(exp_t).max()))
         vis, ref_pb = jax.vjp(ref, params)
-        _, ffi_pb = jax.vjp(ffi, params)
+        _, got_pb = jax.vjp(groups, params)
         cot = jnp.asarray(rng.normal(size=vis.shape) + 1j * rng.normal(size=vis.shape), vis.dtype)
         (exp_g,) = ref_pb(cot)
-        (got_g,) = ffi_pb(cot)
+        (got_g,) = got_pb(cot)
         for name in exp_g:
             np.testing.assert_allclose(got_g[name], exp_g[name], rtol=rtol, atol=atol * float(jnp.abs(exp_g[name]).max()), err_msg=name)
-
-    def test_one_operator_with_a_stride_per_baseline(self):
-        cfg = make_variable_config()
-        comp = PolyInterpVisVariableFFI()
-        comp.setup(cfg)
-        stride = np.asarray(comp._op.stride)
-        assert stride.shape == (cfg.n_bl,)
-        for idx, s in zip(cfg.time_sample_idxs, cfg.time_strides):
-            assert (stride[np.asarray(idx)] == s).all()
-        assert int((np.asarray(comp._op.pair_index) >= 0).sum()) == cfg.n_bl
