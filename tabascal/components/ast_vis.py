@@ -759,16 +759,16 @@ class GPVisAstDFT(GPVisAst):
         products, which is the modes in one axis and the visibilities in the
         other. What the scan does still cost is the stack of its steps'
         outputs, so on this transform blocking is worse on both counts.
-        Measured on a 2016-baseline grid at 150 integrations, value and
+        Measured on one GH200, 2016 baselines at 150 integrations, value and
         gradient together:
 
-        =========  ==================  ==================
-        channels   FFT, best block     DFT, single step
-        =========  ==================  ==================
-        8          273.9 MB, 36.5 ms   190.6 MB, 3.4 ms
-        32         828.6 MB, 153.2 ms  683.8 MB, 25.2 ms
-        128        2386.4 MB, 596 ms   1799.1 MB, 86.1 ms
-        =========  ==================  ==================
+        =========  =================  ==================  =================
+        channels   FFT, best block    FFT, single step    DFT, single step
+        =========  =================  ==================  =================
+        8          273.9 MB, 1.0 ms   441.2 MB, 1.0 ms    218.6 MB, 0.2 ms
+        32         828.6 MB, 4.0 ms   1711.2 MB, 3.3 ms   683.8 MB, 0.4 ms
+        128        2386.4 MB, 14.7 ms 5926.7 MB, 12.7 ms  1799.1 MB, 1.1 ms
+        =========  =================  ==================  =================
 
         An explicit ``baseline_block_size`` is still honoured: it is the way
         to trade this back if some other part of a model wants the room.
