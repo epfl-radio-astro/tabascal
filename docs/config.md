@@ -230,13 +230,13 @@ ast:
 * `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`.
 * `baseline_block_size`: The number of baselines `GPVisAst` transforms per step of its scan over the baseline axis: `auto`, the default, sizes the block so that one step's padded grid stays inside a fixed budget; a whole number sets it outright; `null` puts every baseline in a single step. Turning the latent modes back into visibilities means padding them up to the padded Fourier grid, transforming, and cropping the padding away again, so doing every baseline at once holds an `(n_bl, n_freq_pad, n_time_pad)` array several times over — most of it discarded by the crop. Each padded axis is `n + 2 * floor(n * (pad_factor - 1) / 2)`, so at the default factor of `2.0` it is about twice the data axis. The scan replaces `n_bl` in that shape with the block. It is purely a memory strategy: baselines are independent, so the result does not depend on it, and unlike the RFI scans there is no checkpoint on the body — the transform is affine in the parameters, so its derivative is a linear map with no primal intermediates to store.
 
-    `ast_vis:GPVisAstDFT` is the same component with the padded grid never formed: the pad, the transform and the crop are one linear, separable map, so the same visibilities come out of one small matrix per axis, sized by the modes that survive `cutoff` rather than by the padded grid. Its only transient is the intermediate of two matrix products, so `auto` there is a single step over every baseline -- the scan has nothing large left to bound, and its stack of per-step outputs is a cost of its own. On a 2016-baseline grid at 150 integrations, value and gradient together, against `GPVisAst` at whichever block suited it best:
+    `ast_vis:GPVisAstDFT` is the same component with the padded grid never formed: the pad, the transform and the crop are one linear, separable map, so the same visibilities come out of one small matrix per axis, sized by the modes that survive `cutoff` rather than by the padded grid. Its only transient is the intermediate of two matrix products, so `auto` there is a single step over every baseline -- the scan has nothing large left to bound, and its stack of per-step outputs is a cost of its own. On one GH200, 2016 baselines at 150 integrations, value and gradient together, each case in its own process (the peak is a process high-water mark):
 
-    | channels | `GPVisAst` | `GPVisAstDFT` |
-    |---|---|---|
-    | 8 | 273.9 MB, 36.5 ms | 190.6 MB, 3.4 ms |
-    | 32 | 828.6 MB, 153.2 ms | 683.8 MB, 25.2 ms |
-    | 128 | 2386.4 MB, 596.0 ms | 1799.1 MB, 86.1 ms |
+    | channels | `GPVisAst`, best block | `GPVisAst`, unblocked | `GPVisAstDFT` |
+    |---|---|---|---|
+    | 8 | 273.9 MB, 1.0 ms | 441.2 MB, 1.0 ms | 218.6 MB, 0.2 ms |
+    | 32 | 828.6 MB, 4.0 ms | 1711.2 MB, 3.3 ms | 683.8 MB, 0.4 ms |
+    | 128 | 2386.4 MB, 14.7 ms | 5926.7 MB, 12.7 ms | 1799.1 MB, 1.1 ms |
 
     The two agree to round-off in value and in gradient, which is what its tests check. An explicit `baseline_block_size` is still honoured on both.
 
