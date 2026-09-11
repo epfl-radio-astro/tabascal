@@ -233,6 +233,10 @@ On CPU, where some groups will run this, the same three routes on the
 | Apple M4, 10 cores | 134.7 s | 203.2 s | 16.3 s |
 | Intel i5-8400, 6 cores (AVX2) | 352.2 s | 593.7 s | 53.0 s |
 
+At 128 antennas on the Grace CPU the same 20 iterations take 533.4 s on the
+fine-grid kernel against 50.2 s on the operator, so the ratio widens with the
+array as the fine grid does: it was 8.1 at 64 antennas and is 10.6 here.
+
 Before this arrangement the operator's CPU kernels rebuilt each antenna's
 samples once per baseline and were not vectorised, and the same runs took
 562 s on the M4 and 1770 s on the i5: the operator was several times slower
