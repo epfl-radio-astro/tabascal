@@ -64,7 +64,7 @@ grid and the data-grid visibilities go out:
 
 | input | shape | |
 |---|---|---|
-| `rfi_A` | `(n_rfi, n_ant, n_freq, n_time)` complex | the signal on the data grid, **the only differentiated input** |
+| `rfi_A` | `(n_rfi, n_ant, n_freq, n_time)` complex | the signal on the data grid; differentiated, as are the phase and the delay |
 | `rfi_phase` | `(n_rfi, n_ant, n_freq, n_time)` | the phase at the channel and cell centre, reduced to one turn |
 | `rfi_delay_poly_us` | `(n_rfi, n_ant, n_time, n_path)` | the geometric delay relative to the array mean (microseconds) and its time derivatives (microseconds per second^k) at the cell centre |
 | `w_freq`, `start_freq` | `(n_freq, n_sf, n_int_freq)`, `(n_freq,)` | interpolation weights across each channel, and each stencil's first channel |
@@ -97,17 +97,25 @@ Three things about that boundary are the point of the design:
   conditional mean of the Gaussian-process prior, a windowed sinc, or any
   other linear interpolant is a different table fed to the same kernel, and
   the stencil width is a table dimension, not a kernel constant.
-- **Only `rfi_A` carries a gradient.** The phase comes from a fixed orbit and
-  the rest are tables, so the kernel needs a JVP and a VJP with respect to one
-  input. Both are structural: the result is bilinear in the fine samples `S`,
-  and `S` is linear in `rfi_A`. The JVP is
-  `B(dS, S) + B(S, dS)` with `dS` the tangent pushed through the same
-  interpolation and phase factor. The VJP scatters the visibility cotangent to
-  the fine samples of each baseline's two antennas, each weighted by the other
-  antenna's sample, exactly as the fine-grid kernel's transpose does, then
-  multiplies by the conjugate phase factor and pushes back through the weight
-  tables: a stencil-sized scatter-add onto the data grid. Nothing of the fine
-  grid survives either.
+- **Derivatives are structural.** The result is bilinear in the fine samples
+  `S`, `S` is linear in `rfi_A`, and `S` changes as `i S` per unit of phase,
+  so every derivative the kernel needs is a small step from the products it
+  already forms. The JVP is `B(dS, S) + B(S, dS)` with `dS` the signal
+  tangent pushed through the same interpolation and phase factor, plus
+  `i dphi S` for a phase or delay tangent, `dphi` being the phase formula on
+  the tangents. The VJP scatters the visibility cotangent to the fine samples
+  of each baseline's two antennas, each weighted by the other antenna's
+  sample, exactly as the fine-grid kernel's transpose does: the signal's
+  cotangent is that factor times the conjugate phase factor pushed back
+  through the weight tables, a stencil-sized scatter-add onto the data grid;
+  the phase's is the imaginary part of the sample times the same factor,
+  summed over the cell's samples, and the delay's is that weighted by the
+  phase's derivative in each polynomial coefficient. Nothing of the fine
+  grid survives. The compiled operator carries two kernel pairs, one for the
+  signal alone and one with the phase and delay as well, and its JVP rule
+  picks the first whenever the phase and delay tangents are symbolic zeros:
+  a fixed orbit computes no phase derivative, a fitted one gets it without
+  a switch.
 - **Precision is arranged, not hoped for.** The unreduced phase
   `2 pi f tau` is of order a million turns, which float32 cannot hold to a
   fraction of a turn. `rfi_phase` carries it reduced, computed in float64 on
