@@ -12,6 +12,11 @@ from typing import Any
 
 import pytest
 import tabsim
+
+try:
+    from ri_kernels.jax_api import RFIInterpVisOp as _RFI_INTERP_OP
+except ImportError:  # an ri_kernels release without the data-grid operator
+    _RFI_INTERP_OP = None
 import yaml
 from huggingface_hub import snapshot_download
 
@@ -574,6 +579,72 @@ rfi_vis_configs = [
             chi2_ref=0.8965724353762747,
         ),
         id="RiemannVisFFI",
+    ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbitCoarse",
+                "rfi_signal:ComplexRFIVarAntCoarse",
+                "rfi_vis:PolyInterpVis",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The data-grid route: the same model as the RiemannVis case with the
+            # RFI signal and phase carried on the data grid and the fine samples
+            # rebuilt inside the visibility (see docs/coarse_rfi_vis.md). It is an
+            # approximation of that case -- the signal between the cells is the
+            # quadratic through the neighbours, not the Fourier supersampling --
+            # so it has its own reference, measured on ARM CPU:
+            #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
+            #   double  ARM    | 0.8965709350 |     0.1787       1.2      |     0.4176       0.3
+            #   double  GH200  | 0.8965709333 |
+            #   double  GTX1060| 0.8965709413 |
+            #   single  ARM    | 0.8965295553 |     0.1787       1.2      |     0.4175       0.3
+            #   single  GH200  | 0.8965295553 |
+            #   single  GTX1060| 0.8965294361 |
+            # (Re-recorded with the delay relative to the array mean and the centre
+            # phase from the cell's own sample: before that, 0.8965712135 double on
+            # ARM, 0.8965712355 on a GH200 and 0.8965712189 on a GTX 1060, so the
+            # three architectures sit within 3e-8 of each other; single 0.8965938091
+            # ARM. The RiemannVisFFI case measures 0.8965724331 double / 0.8965966105
+            # single on the GH200.) 1.7e-6 from the RiemannVis case's optimum in
+            # double, with the truth metrics identical to the printed precision; the
+            # fp32 offset is 4.6e-5, within the 1% a single reference covers.
+            chi2_ref=0.896570934972912,
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
+        ),
+        id="PolyInterpVis",
+    ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbitCoarse",
+                "rfi_signal:ComplexRFIVarAntCoarse",
+                "rfi_vis:PolyInterpVisFFI",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The PolyInterpVis case through the compiled operator: the same
+            # tables and inputs, so it shares that case's reference. Only chi2
+            # is asserted -- the kernel is the unit under test. Measured on ARM
+            # CPU: 0.8965709350 double and 0.8965295553 single, both identical to
+            # the reference function's to every printed digit; on a GH200
+            # 0.8965709333 double (identical) and 0.8965296149 single, on a GTX
+            # 1060 0.8965709413 double (identical) and 0.8965295553 single: the
+            # single-precision values sit within 2e-7 of the reference function's
+            # on the same machine, the fp32 summation order of the kernels.
+            chi2_ref=0.896570934972912,
+        ),
+        id="PolyInterpVisFFI",
+        marks=pytest.mark.skipif(
+            _RFI_INTERP_OP is None, reason="the installed ri_kernels has no RFIInterpVisOp"
+        ),
     ),
 ]
 

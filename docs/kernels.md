@@ -73,3 +73,13 @@ neither cost and remains the faster choice where it is available.
 The kernels are compiled for both single and double precision and run in
 whichever the config selects, so they impose no constraint of their own — see
 [Precision](config.md#precision).
+
+## The data-grid route
+
+{class}`~tabascal.components.rfi_vis.PolyInterpVis` never forms the fine grid at
+all: the RFI signal and phase stay on the data grid and the fine samples of each
+cell are rebuilt inside the visibility calculation. It runs a pure-JAX reference
+written as the specification of a compiled kernel, and
+{class}`~tabascal.components.rfi_vis.PolyInterpVisFFI` runs that kernel,
+`RFIInterpVisOp` from the `interp-vis` branch of `ri-kernels` --
+see [The data-grid RFI route and its kernel boundary](coarse_rfi_vis.md).

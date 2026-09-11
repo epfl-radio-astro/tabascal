@@ -9,7 +9,13 @@ from tabascal.distributed import (
 )
 from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
-from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
+from tabascal.interferometry import (
+    get_rfi_path_numpy,
+    get_rfi_phase,
+    get_rfi_phase_numpy,
+    itrf_to_uvw_numpy,
+)
+from tabascal.poly_interp import fine_offsets, fit_path
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
 from tabascal.time import gast_deg, skyfield_time, timescale
@@ -358,6 +364,183 @@ class FixedOrbit(Component):
             self,
             "rfi_phase",
             (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine),
+        )
+
+
+class FixedOrbitCoarse(Component):
+    """:class:`FixedOrbit` written on the data grid, with what rebuilds the fine phase.
+
+    The same propagated positions and the same geometric delay -- the range
+    from the source to each antenna plus the antenna's ``w``, over ``c`` -- but
+    instead of the phase at every fine sample, two smaller constants:
+
+    - ``rfi_phase`` ``(n_rfi, n_ant, n_freq, n_time)``: the phase at the channel
+      and cell centres, reduced to a turn.
+    - ``rfi_delay_poly_us`` ``(n_rfi, n_ant, n_time, rfi.path_order + 1)``: the
+      geometric delay in microseconds relative to the array mean and its first
+      ``rfi.path_order`` time derivatives at each cell centre, from a
+      least-squares polynomial through the cell's fine samples
+      (:func:`tabascal.poly_interp.fit_path`). Relative, because a term common
+      to every antenna cancels in a baseline's phase difference, and what
+      remains is small enough for float32 to carry across a cell -- the
+      convention of the fine-grid route's ``rfi_delay_us`` (PR #144), with the
+      sign that makes the phase ``2 pi f tau``.
+
+    :class:`~tabascal.components.rfi_vis.PolyInterpVis` rebuilds the fine phase
+    from the two inside each cell: linear in frequency, a Taylor series in time.
+    Everything is computed once here in float64, as :class:`FixedOrbit` does; a
+    fixed orbit has no parameters, so none of it carries a gradient.
+    """
+
+    required_inputs = {}
+    output_shapes = {
+        "rfi_xyz": ("n_rfi", "n_time_fine", 3),
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time"),
+        "rfi_delay_poly_us": ("n_rfi", "n_ant", "n_time", "n_path"),
+    }
+
+    parameters = {}
+
+    def setup(self, config):
+        """All validation and error-prone operations here"""
+        try:
+            self.orbit_records = config.orbit_records
+            self.n_rfi = config.n_rfi
+            self.n_ant = config.n_ant
+            self.n_freq = config.n_freq
+            self.n_time = config.n_time
+            self.n_time_fine = config.n_time_fine
+            self.n_int_time = config.n_int_time
+
+            self.ants_itrf = config.ants_itrf
+            self.phase_centre = config.phase_centre
+            self.freqs = np.asarray(config.freqs, dtype=np.float64)
+            self.int_time = float(config.int_time)
+            self.times_jd_fine = config.times_jd_fine
+
+            order = config.args["rfi"].get("path_order", 3)
+            if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+                raise ValueError(
+                    "rfi.path_order is the degree of the polynomial in time through "
+                    f"each cell's path: a whole number of at least 0, got {order!r}."
+                )
+            self.path_order = order
+
+            self._compute_rfi_path()
+            self._set_outputs()
+            self._validate_dimensions()
+
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def build_set_params(self):
+
+        def set_params(state):
+            return state
+
+        return set_params
+
+    def build_constants(self):
+        return {
+            "rfi_xyz": self.rfi_xyz,
+            "rfi_phase": self.rfi_phase,
+            "rfi_delay_poly_us": self.rfi_delay_poly_us,
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+
+        def forward(params, state, constants):
+            return {
+                **state,
+                "rfi_xyz": constants[f"{prefix}/rfi_xyz"],
+                "rfi_phase": constants[f"{prefix}/rfi_phase"],
+                "rfi_delay_poly_us": constants[f"{prefix}/rfi_delay_poly_us"],
+            }
+
+        return forward
+
+    def validate_and_test(self):
+        """Call this before using in JIT context"""
+        pass
+
+    @measure_runtime
+    def _compute_rfi_path(self):
+
+        # The fine-grid path, exactly as FixedOrbit forms the fine-grid phase.
+        self.rfi_xyz = np.asarray(
+            get_satellite_positions(self.orbit_records, list(self.times_jd_fine))
+        )
+        ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
+        gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
+        gh0 = (gsa - self.phase_centre["ra"]) % 360
+        ants_uvw = np.transpose(
+            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
+        )
+        # The geometric delay at the fine samples, in microseconds, with the
+        # sign that makes the phase 2 pi f tau -- as FixedOrbit's phase and the
+        # fine-grid route's rfi_delay_us (PR #144) have it.
+        c = 299792458.0
+        delay_fine = -get_rfi_path_numpy(self.rfi_xyz, ants_uvw, ants_xyz) / c * 1e6
+        # (n_rfi, n_ant, n_time_fine), microseconds
+
+        # The phase is reduced from the full delay, but the polynomial is of the
+        # delay *relative to the array mean* at each sample: a term common to
+        # every antenna cancels in the phase difference a baseline sees, and
+        # what is left -- microseconds, tens of nanoseconds per second -- is
+        # what a float32 kernel can carry across a cell to a fraction of a turn.
+        # The full delay's change across a cell is ~1e4 wavelengths.
+        delay_diff = delay_fine - delay_fine.mean(axis=1, keepdims=True)
+
+        # One polynomial per cell through its fine samples, at their nominal
+        # offsets from the cell centre. The times the positions were actually
+        # propagated at jitter about those -- the float64 JD resolves ~20 us,
+        # and in single precision the config's fine grid is coarser still --
+        # but a sample's jitter is the same for every antenna, so it cancels in
+        # the phase *difference* a visibility sees, to a fraction of a
+        # millimetre of differential path.
+        dt = fine_offsets(self.n_int_time, self.int_time)  # (n_int_time,), seconds
+        cells = delay_diff.reshape(self.n_rfi, self.n_ant, self.n_time, self.n_int_time)
+        rfi_delay_poly_us = fit_path(cells, dt, self.path_order)
+        # (n_rfi, n_ant, n_time, n_path)
+
+        # The reduced phase at the channel and cell centres, in float64, from
+        # the full delay at the cell's own sample: the unreduced phase is ~1e6
+        # turns, which is why the kernel is handed this and the delay's change
+        # separately rather than left to form it. MHz times microseconds is
+        # cycles; reduced to a turn, it is FixedOrbit's phase at that sample.
+        centre = delay_fine.reshape(self.n_rfi, self.n_ant, self.n_time, self.n_int_time)[..., self.n_int_time // 2]
+        turns = (self.freqs[None, None, :, None] / 1e6) * centre[:, :, None, :]
+        rfi_phase = 2.0 * np.pi * (turns % 1)
+        # (n_rfi, n_ant, n_freq, n_time)
+
+        if sharding_enabled():
+            dtype = jnp.zeros((), dtype=None).dtype  # match the active precision
+            self.rfi_phase = make_global(rfi_phase.astype(dtype), rfi_sharding())
+            self.rfi_delay_poly_us = make_global(rfi_delay_poly_us.astype(dtype), rfi_sharding())
+        else:
+            self.rfi_phase = jnp.array(rfi_phase)
+            self.rfi_delay_poly_us = jnp.array(rfi_delay_poly_us)
+        self.n_path = self.rfi_delay_poly_us.shape[-1]
+
+    def _set_outputs(self):
+
+        self.state_outputs = {
+            "rfi_xyz": self.rfi_xyz,
+            "rfi_phase": self.rfi_phase,
+            "rfi_delay_poly_us": self.rfi_delay_poly_us,
+        }
+
+    def _validate_dimensions(self):
+        """Ensure all setup operations completed successfully"""
+
+        assert_attr_shape(self, "rfi_xyz", (self.n_rfi, self.n_time_fine, 3))
+        assert_attr_shape(
+            self, "rfi_phase", (self.n_rfi, self.n_ant, self.n_freq, self.n_time)
+        )
+        assert_attr_shape(
+            self, "rfi_delay_poly_us", (self.n_rfi, self.n_ant, self.n_time, self.n_path)
         )
 
 
