@@ -201,7 +201,10 @@ reference's. All three reach the same optimum. The operator's own forward
 and VJP at these sizes (32 sources, 8 channels, 150 integrations) take 7 and
 16 ms at 64 antennas and 32 and 75 ms at 128 on the GH200, and 1.4 and 2.5 ms
 at 64 antennas on a GTX 1060; the first staged kernels, which rebuilt the
-samples in place, took 22 and 70 ms at 64 antennas on the GH200.
+samples in place, took 22 and 70 ms at 64 antennas on the GH200. Those VJPs
+are the signal-only ones a fixed orbit binds; the full VJP with the phase and
+delay cotangents, which a fitted trajectory would bind, takes 23 and 109 ms
+at 64 and 128 antennas on the GH200 and 3.8 ms at 64 on the GTX 1060.
 
 ## Variable sampling per baseline
 
