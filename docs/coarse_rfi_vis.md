@@ -181,6 +181,24 @@ rates and rounds at ~1e-3 rad, in the kernel as in the pure-JAX reference;
 the operator's tests hold the single-precision kernels to the float64
 reference at that level.
 
+The CPU kernels are the same idea without the tiles. A task takes a run of
+time cells (the transpose, one source and a run of output cells), and for
+each cell, channel and source it builds the fine samples of every antenna
+once; a baseline is then a dot product of its two antennas' samples in the
+forward, or a scatter of its cotangent onto them in the transpose. The
+per-cell work is vectorised with [Highway](https://github.com/google/highway)
+and dispatched at run time to whatever the machine supports, as the fine-grid
+kernels are. The fine samples are the only axis long enough to vectorise: the
+cell's interpolation weights, channel offsets and time-offset powers are
+built once per cell, the per-antenna and per-source quantities are broadcast
+scalars against them, and the sample buffers are split into real and
+imaginary parts and padded to whole vectors, so a load is a load rather than
+a load and a shuffle and no loop needs a scalar tail. In the transpose every
+task writes a disjoint slab of each output, recomputing the few cells on
+either side of its run that its stencils reach, so the result is
+deterministic with one parallel pass and no accumulation across tasks.
+
+
 Measured on the SKA-Low scaling simulations (150 integrations of 2 s, 32
 satellites, `rfi.time_int_factor: 1`, so 37, 59 and 174 fine samples per
 integration at 64, 128 and 256 antennas), all three routes from one checkout
@@ -205,6 +223,29 @@ samples in place, took 22 and 70 ms at 64 antennas on the GH200. Those VJPs
 are the signal-only ones a fixed orbit binds; the full VJP with the phase and
 delay cotangents, which a fitted trajectory would bind, takes 23 and 109 ms
 at 64 and 128 antennas on the GH200 and 3.8 ms at 64 on the GTX 1060.
+
+On CPU, where some groups will run this, the same three routes on the
+64-antenna simulation (20 optimiser iterations, single precision):
+
+| 8 ch, 64 A, 20 iterations | RiemannVisFFI (fine grid) | PolyInterpVis (pure JAX) | PolyInterpVisFFI (operator) |
+|---|---|---|---|
+| Grace, 72 cores (Neoverse-V2) | 143.7 s | 139.2 s | 17.7 s |
+| Apple M4, 10 cores | 134.7 s | 203.2 s | 16.3 s |
+| Intel i5-8400, 6 cores (AVX2) | 352.2 s | 593.7 s | 53.0 s |
+
+Before this arrangement the operator's CPU kernels rebuilt each antenna's
+samples once per baseline and were not vectorised, and the same runs took
+562 s on the M4 and 1770 s on the i5: the operator was several times slower
+than the fine-grid kernel on CPU where it is now some eight times faster.
+Against the GPU, the gap the operator has to make up is far smaller than the
+fine-grid route's. On one Grace-Hopper node, the same 20 iterations take
+6.1 s on the GH200 against 17.7 s on the node's own 72 CPU cores, where the
+fine-grid route takes 5.5 s against 143.7 s; per optimiser iteration, once
+the compilation both share is discounted, the GH200 is about 24 times the
+CPU. A GTX 1060 runs the operator in 15.3 s against 53.0 s on the six-core
+i5 beside it, and cannot run the fine-grid kernel at all at this size, which
+asks for more memory than the card has.
+
 
 ## Variable sampling per baseline
 
