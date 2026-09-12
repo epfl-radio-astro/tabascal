@@ -204,7 +204,7 @@ def test_gradient_reaches_the_latent_parameters():
     assert all(bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0 for g in grads.values())
 
 
-@pytest.mark.parametrize("options", [{"max_groups": 3}, {"split_at": 2.5}, {"unknown": {}}, None])
+@pytest.mark.parametrize("options", [{"max_groups": 0}, {"split_at": 2.5}, {"unknown": {}}, None])
 def test_invalid_config_is_refused_at_setup(options):
     cfg, _ = _compact_case()
     cfg.args["rfi"]["poly_time_sampling"] = options

@@ -91,9 +91,9 @@ def poly_time_groups(
     if (
         isinstance(max_groups, bool)
         or not isinstance(max_groups, (int, np.integer))
-        or max_groups not in (1, 2)
+        or max_groups < 1
     ):
-        raise ValueError("rfi.poly_time_sampling.max_groups must be 1 or 2")
+        raise ValueError("rfi.poly_time_sampling.max_groups must be a positive whole number")
     if split_at is not None and (
         isinstance(split_at, bool) or not isinstance(split_at, (int, np.integer)) or split_at < 1
     ):
@@ -151,10 +151,20 @@ def poly_time_groups(
             if score < best_score:
                 best_score, best_cut = score, cut
 
-    partitions = (
-        (np.arange(len(counts)),) if best_cut is None
-        else (order[:best_cut], order[best_cut:])
-    )
+    if max_groups > 2:
+        # More than two groups are cut at equal baseline counts rather than
+        # searched. Products pay the MEAN of the groups' resolutions and
+        # materialising pays their SUM, so the penalty grows linearly in the
+        # group count while the saving approaches the per-baseline ideal, and
+        # the two only meet at n_bl / n_ant groups -- 255 at 512 stations.
+        # Where to stop is a question for measurement, not for this search.
+        edges = [int(round(i * len(counts) / max_groups)) for i in range(max_groups + 1)]
+        partitions = tuple(order[lo:hi] for lo, hi in zip(edges[:-1], edges[1:]) if hi > lo)
+    else:
+        partitions = (
+            (np.arange(len(counts)),) if best_cut is None
+            else (order[:best_cut], order[best_cut:])
+        )
     return tuple(make_poly_time_group(requirements, a1, a2, idx) for idx in partitions)
 
 

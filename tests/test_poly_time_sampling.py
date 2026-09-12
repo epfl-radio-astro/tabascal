@@ -101,11 +101,29 @@ class TestPolyTimeGroups:
         assert len(poly_time_groups([3, 5], np.array([0, 0]), np.array([1, 1]), split_at=3)) == 1
 
     @pytest.mark.parametrize("options", [
-        {"max_groups": n} for n in (0, 3, True, 2.0, None)
+        {"max_groups": n} for n in (0, -1, True, 2.0, None)
     ] + [{"split_at": n} for n in (0, -1, True, 2.5, np.nan, "auto")])
     def test_bad_options_are_refused(self, options):
         with pytest.raises(ValueError, match="rfi.poly_time_sampling"):
             poly_time_groups([3], np.array([0]), np.array([1]), **options)
+
+    @pytest.mark.parametrize("k", [3, 4, 8])
+    def test_more_than_two_groups_are_cut_at_equal_baseline_counts(self, k):
+        """Beyond two the cut is not searched: products pay the mean of the
+        groups' resolutions and materialising their sum, so where to stop is a
+        question for measurement rather than for a score."""
+        n = 64
+        req = np.arange(1, n + 1, dtype=float)
+        a1 = np.arange(n) % 8
+        a2 = (a1 + 1 + np.arange(n) % 7) % 8
+        groups = poly_time_groups(req, a1, a2, max_groups=k)
+        assert len(groups) == k
+        sizes = sorted(len(g.baseline_indices) for g in groups)
+        assert sizes[-1] - sizes[0] <= 1
+        assert sum(len(g.baseline_indices) for g in groups) == n
+        assert [g.n_g for g in groups] == sorted(g.n_g for g in groups)
+        for g in groups:  # a group never integrates below what its members need
+            assert g.n_g >= int(np.ceil(req[g.baseline_indices].max()))
 
     @pytest.mark.parametrize("requirements", [[-1], [np.inf], [np.nan], [[3]]])
     def test_bad_requirements_are_refused(self, requirements):
