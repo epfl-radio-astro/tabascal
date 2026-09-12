@@ -253,25 +253,40 @@ asks for more memory than the card has.
 
 ## Variable sampling per baseline
 
-`rfi_vis:PolyInterpVisVariable` and `rfi_vis:PolyInterpVisVariableFFI` are the
-data-grid twins of `RiemannVisVariable` and its FFI form: the baselines are
-grouped by the fringe rate they need to resolve (`rfi.min_time_bins`,
-`rfi.max_time_bins`, the same estimate `TabConfig` makes for the fine-grid
-components), and a group with stride `s` integrates every `s`-th fine sample
-of the cell. On the data grid that needs little: the tables are per fine offset,
-so a group is the same function, or the same operator, called on the group's
-baselines with the rows of every `s`-th offset of the time tables. The
-variable sampling is a difference in inputs only.
+`rfi_vis:PolyInterpVisVariable` and `rfi_vis:PolyInterpVisVariableFFI` use
+`rfi.poly_time_sampling` to choose one or two baseline groups from the same
+fringe-rate requirements as the fine-grid route. Each group builds its own
+`interp_tables(n_time, h, fine_offsets(n_g, int_time) / int_time)`, with its
+largest requirement rounded up to an odd count. The even-count grid is shifted
+half a sample left of midpoint quadrature; in the constant-fringe regression,
+40 samples miss the analytic complex integral by more than 200 noise units,
+while rounding to 41 puts the error below one. The offset convention itself
+is unchanged, and one group reproduces the non-variable polynomial route,
+which uses the same maximum odd count.
 
-Whether it pays is another matter. A stride per baseline inside the kernel
-was built and measured against per-group calls and against full sampling, on
-a GTX 1060 and a GH200, at 64 and 128 antennas with two stride distributions:
-neither variable route beat full sampling. The products a stride saves are
-the cheap part of the kernels once the samples are materialised, so
-in-kernel striding costs more bookkeeping than it saves, and per-group calls
-rebuild the samples once per group. The stride machinery was taken out of
-the kernels again; the per-group component stays as the way to sample
-variably should a cheaper sample build make it worthwhile.
+Setup searches every threshold between distinct requirements, using prefix
+and suffix antenna incidence to score each partition by
+`sum(n_g * number_of_antennas_in_group)`. An antenna in both groups is counted
+twice. This is materialisation work, not predicted runtime. `max_groups: 1`
+uses a single group; `2` (the default) keeps a split only if it strictly saves
+work. `split_at` restricts the search to requirements at or below a given
+count versus those above it; `null` searches all thresholds. Empty or
+unhelpful splits fall back to one group, and ties favour fewer groups.
+
+Both implementations gather only the antennas each group needs and remap its
+baseline endpoints to that compact axis; an identity antenna map skips the
+gather. The FFI operator is constructed with the compact antenna count. In
+reverse mode the gathers add cotangents from both groups at shared antennas,
+which the CPU tests check against independent calls on the full antenna axis.
+The compiled GPU path and the runtime benefit still need hardware validation.
+
+The measurements below are from the earlier stride implementation, before
+independent grids and antenna compaction. A stride per baseline inside the
+kernel was also tried on a GTX 1060 and a GH200, at 64 and 128 antennas:
+neither variable route beat full sampling. Baseline products were the cheap
+part once antenna samples had been materialised, while the old per-group
+calls rebuilt every antenna's samples for every group. Those measurements
+motivate counting antenna work, but do not calibrate the new grouping score.
 
 | 1 GH200, 100 iterations, single precision, variable sampling | RiemannVisVariableFFI (fine grid) | PolyInterpVisVariable (pure JAX) | PolyInterpVisVariableFFI (operator per group) | PolyInterpVisFFI (full sampling) |
 |---|---|---|---|---|

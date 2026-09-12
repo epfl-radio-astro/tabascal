@@ -7,7 +7,6 @@ is only half of it: the RFI sampling estimate then has to survive them too.
 """
 
 import numpy as np
-from types import SimpleNamespace
 
 from tabascal.components.trajectory import fetch_orbital_elements
 from tabascal.config import TabConfig
@@ -39,7 +38,10 @@ def test_rfi_sampling_estimate_survives_zero_satellites():
     derives the sampling rate cannot run. There is nothing to sample, so the
     sampling estimate has to be skipped rather than computed from nothing.
     """
-    config = SimpleNamespace(n_rfi=0, n_bl=45, vis_obs=np.ones((4, 3), dtype=complex))
+    config = TabConfig.__new__(TabConfig)
+    config.n_rfi, config.n_bl = 0, 45
+    config.vis_obs = np.ones((4, 3), dtype=complex)
+    config.args = {"model": {"components": []}}
 
     TabConfig.estimate_rfi_sampling(config, 1.0, 1, 30, min_divisors=1)
 
@@ -57,7 +59,10 @@ def test_rfi_sampling_estimate_does_not_touch_the_satellite_path():
     or the antenna geometry would mean the empty-model path is still running the
     satellite computation.
     """
-    config = SimpleNamespace(n_rfi=0, n_bl=8, vis_obs=np.ones((2, 2), dtype=complex))
+    config = TabConfig.__new__(TabConfig)
+    config.n_rfi, config.n_bl = 0, 8
+    config.vis_obs = np.ones((2, 2), dtype=complex)
+    config.args = {"model": {"components": []}}
 
     TabConfig.estimate_rfi_sampling(config, 1.0, 1, 30, min_divisors=1)
 

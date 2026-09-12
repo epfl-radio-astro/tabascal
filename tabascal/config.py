@@ -29,6 +29,7 @@ from tabascal.interferometry import (
     itrf_to_uvw_numpy,
 )
 from tabascal.fft_gp import domain_ss
+from tabascal.poly_interp import poly_sample_counts
 from tabascal.time import DAY_SECS, secs_to_days, jd_to_mjd, gast_deg
 
 import jax.numpy as jnp
@@ -208,10 +209,12 @@ class TabConfig:
         # RiemannVisVariable / +FFI components, which split baselines into
         # multiple stride groups. For every other rfi_vis component it just
         # inflates n_int_time (the fine-grid time dimension) and slows the run,
-        # so only request it when a Variable component is actually selected.
+        # so only request it when a legacy stride component is selected. The
+        # polynomial pair builds independent quadrature grids for its groups.
         # min_divisors is an internal tuning parameter, not user-configurable.
         uses_variable = any(
-            "Variable" in comp for comp in config["model"]["components"]
+            comp in ("rfi_vis:RiemannVisVariable", "rfi_vis:RiemannVisVariableFFI")
+            for comp in config["model"]["components"]
         )
 
         self.estimate_rfi_sampling(
@@ -633,13 +636,8 @@ class TabConfig:
         # One sample per integration is the floor, which is what no RFI needs.
         if self.n_rfi == 0:
             self.max_rfi_vis = np.max(np.abs(self.vis_obs))
-            self.time_sample_idxs, self.time_strides, self.n_int_time = (
-                get_strides_and_idxs(
-                    np.ones(self.n_bl, dtype=int),
-                    min_time_bins,
-                    max_time_bins,
-                    min_divisors,
-                )
+            self._set_rfi_time_sampling(
+                np.ones(self.n_bl, dtype=int), min_time_bins, max_time_bins, min_divisors
             )
             return
 
@@ -678,12 +676,25 @@ class TabConfig:
         )
         n_int_times = np.ceil(time_int_factor * self.int_time * sample_freq_bl).astype(int)
 
-        # time_sample_idxs and time_strides are only used in RiemannVisVariable
-        self.time_sample_idxs, self.time_strides, self.n_int_time = (
-            get_strides_and_idxs(
-                n_int_times, min_time_bins, max_time_bins, min_divisors
+        self._set_rfi_time_sampling(n_int_times, min_time_bins, max_time_bins, min_divisors)
+
+    def _set_rfi_time_sampling(self, requirements, min_time_bins, max_time_bins, min_divisors):
+        self.rfi_time_requirements = np.asarray(requirements)
+        if any(
+            comp in (
+                "rfi_vis:PolyInterpVis", "rfi_vis:PolyInterpVisFFI",
+                "rfi_vis:PolyInterpVisVariable", "rfi_vis:PolyInterpVisVariableFFI",
             )
-        )
+            for comp in self.args["model"]["components"]
+        ):
+            # Both polynomial routes use the same maximum odd count, so one
+            # group reproduces the non-variable route. No divisor rounding is
+            # needed: each smaller group builds its own midpoint quadrature.
+            self.n_int_time = int(poly_sample_counts(requirements).max(initial=1))
+        else:
+            self.time_sample_idxs, self.time_strides, self.n_int_time = (
+                get_strides_and_idxs(requirements, min_time_bins, max_time_bins, min_divisors)
+            )
 
     def _set_freqs_times(self):
 

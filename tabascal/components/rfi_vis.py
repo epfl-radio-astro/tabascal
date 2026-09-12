@@ -10,7 +10,7 @@ from tabascal.interferometry import (
 )
 from tabascal.components import Component
 from tabascal.coarse_rfi_vis import coarse_rfi_vis
-from tabascal.poly_interp import fine_offsets, interp_tables
+from tabascal.poly_interp import fine_offsets, interp_tables, poly_time_groups
 from ri_kernels.jax_api import RFIVisOp
 
 try:
@@ -271,11 +271,8 @@ class PolyInterpVis(Component):
             # Where each cell's fine samples sit, and the weights that put the
             # nearest coarse samples there. Host-side float64, once.
             int_time, chan_width = float(config.int_time), float(config.chan_width)
-            self.dt = fine_offsets(config.n_int_time, int_time)
+            self._setup_time_tables(config, half_width, int_time)
             dnu = fine_offsets(config.n_int_freq, chan_width)
-            self.w_time, self.start_time = interp_tables(
-                self.n_time, half_width, self.dt / int_time
-            )
             self.w_freq, self.start_freq = interp_tables(
                 self.n_freq, half_width, dnu / chan_width
             )
@@ -287,6 +284,12 @@ class PolyInterpVis(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def _setup_time_tables(self, config, half_width, int_time):
+        self.dt = fine_offsets(config.n_int_time, int_time)
+        self.w_time, self.start_time = interp_tables(
+            self.n_time, half_width, self.dt / int_time
+        )
 
     def build_set_params(self):
 
@@ -302,11 +305,16 @@ class PolyInterpVis(Component):
             "a2": self.a2,
             "w_freq": jnp.asarray(self.w_freq),
             "start_freq": jnp.asarray(self.start_freq),
+            "dnu_mhz": jnp.asarray(self.dnu_mhz),
+            "freqs_mhz": jnp.asarray(self.freqs_mhz),
+            **self._time_constants(),
+        }
+
+    def _time_constants(self):
+        return {
             "w_time": jnp.asarray(self.w_time),
             "start_time": jnp.asarray(self.start_time),
-            "dnu_mhz": jnp.asarray(self.dnu_mhz),
             "dt": jnp.asarray(self.dt),
-            "freqs_mhz": jnp.asarray(self.freqs_mhz),
         }
 
     def build_forward(self):
@@ -393,59 +401,70 @@ class PolyInterpVisFFI(PolyInterpVis):
 class PolyInterpVisVariable(PolyInterpVis):
     """:class:`PolyInterpVis` with the fine sampling set per baseline group.
 
-    The data-grid twin of :class:`RiemannVisVariable`: the baselines are
-    grouped by the fringe rate they need to resolve (``rfi.min_time_bins``,
-    ``rfi.max_time_bins``, see ``TabConfig.estimate_rfi_sampling``), and a
-    group with stride ``s`` integrates every ``s``-th fine sample of the cell
-    only. Because the samples are rebuilt from the data grid inside the
-    visibility, that is the same function called on the group's baselines with
-    the rows of every ``s``-th offset of the time tables: nothing is
-    subsampled, the coarser quadrature is simply what the group's tables
-    describe. The slow baselines, which are most of a large array's, cost a
-    fraction of the fast ones.
+    ``rfi.poly_time_sampling`` chooses at most two groups from the per-baseline
+    fringe-rate requirements. Each group has its own odd quadrature count and
+    interpolation tables, built at ``fine_offsets`` for that count. One group
+    therefore evaluates the same grid as the non-variable route.
+
+    The split minimises the work of materialising antenna samples, including
+    antennas used by both groups. Only the antennas a group uses enter its
+    call, with baseline endpoints remapped to that compact axis. The gathers'
+    transposes add the cotangents from both calls at a shared antenna; an
+    identity antenna map bypasses the gather altogether.
     """
 
-    def setup(self, config):
-        super().setup(config)
-        # The groups: which baselines, and every how-many-th fine sample. The
-        # subsampled offsets are the fine-grid route's, slice(s // 2, None, s).
-        self.time_sample_idxs = list(config.time_sample_idxs)
-        self.time_strides = [int(s) for s in config.time_strides]
-        self.group_offsets = [slice(s // 2, None, s) for s in self.time_strides]
+    def _setup_time_tables(self, config, half_width, int_time):
+        options = config.args["rfi"].get("poly_time_sampling", {})
+        if not isinstance(options, dict) or options.keys() - {"max_groups", "split_at"}:
+            raise ValueError("rfi.poly_time_sampling accepts only max_groups and split_at")
+        self.groups = poly_time_groups(
+            config.rfi_time_requirements, self.a1, self.a2, **options
+        )
+        self.group_tables = []
+        self.identity_antennas = []
+        for group in self.groups:
+            dt = fine_offsets(group.n_g, int_time)
+            weights, start = interp_tables(self.n_time, half_width, dt / int_time)
+            self.group_tables.append((weights, start, dt))
+            self.identity_antennas.append(np.array_equal(group.antennas, np.arange(config.n_ant)))
 
-    def build_constants(self):
-        constants = super().build_constants()
-        for i, (idx, sub) in enumerate(zip(self.time_sample_idxs, self.group_offsets)):
-            constants[f"idx_{i}"] = jnp.asarray(idx)
-            constants[f"w_time_{i}"] = jnp.asarray(self.w_time[:, :, sub])
-            constants[f"dt_{i}"] = jnp.asarray(self.dt[sub])
+    def _time_constants(self):
+        constants = {}
+        for i, (group, (weights, start, dt)) in enumerate(zip(self.groups, self.group_tables)):
+            constants.update({
+                f"idx_{i}": jnp.asarray(group.baseline_indices),
+                f"antennas_{i}": jnp.asarray(group.antennas),
+                f"a1_{i}": jnp.asarray(group.a1),
+                f"a2_{i}": jnp.asarray(group.a2),
+                f"w_time_{i}": jnp.asarray(weights),
+                f"start_time_{i}": jnp.asarray(start),
+                f"dt_{i}": jnp.asarray(dt),
+            })
         return constants
-
-    def _group_vis(self, i):
-        """The visibility function of group ``i`` on its own tables."""
-        return coarse_rfi_vis
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        n_groups = len(self.time_sample_idxs)
+        identity_antennas = tuple(self.identity_antennas)
         n_bl, n_freq, n_time = self.n_bl, self.n_freq, self.n_time
 
         def forward(params, state, constants):
             c = lambda name: constants[f"{prefix}/{name}"]
-            a1, a2 = c("a1"), c("a2")
-            w_freq, start_freq, start_time = c("w_freq"), c("start_freq"), c("start_time")
+            w_freq, start_freq = c("w_freq"), c("start_freq")
             dnu_mhz, freqs_mhz = c("dnu_mhz"), c("freqs_mhz")
 
             def local_vis(rfi_A, rfi_phase, rfi_delay):
                 vis = jnp.zeros((n_bl, n_freq, n_time), dtype=rfi_A.dtype)
-                for i in range(n_groups):
+                for i, identity in enumerate(identity_antennas):
                     idx = c(f"idx_{i}")
+                    inputs = (rfi_A, rfi_phase, rfi_delay)
+                    if not identity:
+                        inputs = tuple(jnp.take(x, c(f"antennas_{i}"), axis=1) for x in inputs)
                     vis = vis.at[idx].set(
-                        self._group_vis(i)(
-                            rfi_A, rfi_phase, rfi_delay, w_freq, start_freq,
-                            c(f"w_time_{i}"), start_time, dnu_mhz, c(f"dt_{i}"), freqs_mhz,
-                            a1[idx], a2[idx],
+                        coarse_rfi_vis(
+                            *inputs, w_freq, start_freq,
+                            c(f"w_time_{i}"), c(f"start_time_{i}"), dnu_mhz, c(f"dt_{i}"), freqs_mhz,
+                            c(f"a1_{i}"), c(f"a2_{i}"),
                         )
                     )
                 return vis
@@ -463,13 +482,12 @@ class PolyInterpVisVariable(PolyInterpVis):
 class PolyInterpVisVariableFFI(PolyInterpVisVariable):
     """:class:`PolyInterpVisVariable` through the operator, one call per group.
 
-    The operator knows nothing of the groups: each is a call on the group's
-    baselines with the time table and offsets cut to the group's samples,
-    exactly as the pure-JAX form does it. The variable sampling is a
-    difference in inputs only, tables of different lengths, at the price of
-    one operator call per group and the fine samples rebuilt once per group.
-    (A stride per baseline inside the kernel was measured and rejected: the
-    products it saves are the cheap part, see ``docs/coarse_rfi_vis.md``.)
+    Each operator is constructed for the group's compact antenna axis and
+    local baseline endpoints. It receives independent time tables and only
+    that group's antenna inputs, transposed to the antenna-first layout the
+    operator expects. Shared antennas are gathered into both calls, so their
+    cotangents accumulate back onto the original data-grid signal. No kernel
+    change is needed: the groups differ only in input shapes and tables.
     """
 
     def setup(self, config):
@@ -480,31 +498,34 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
                 "interp-vis branch, or use rfi_vis:PolyInterpVisVariable."
             )
         super().setup(config)
-        self.n_ant = config.n_ant
         self._ops = [
-            RFIInterpVisOp(self.n_ant, self.a1[np.asarray(idx)], self.a2[np.asarray(idx)])
-            for idx in self.time_sample_idxs
+            RFIInterpVisOp(len(group.antennas), group.a1, group.a2)
+            for group in self.groups
         ]
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         ops = self._ops
+        identity_antennas = tuple(self.identity_antennas)
         n_bl, n_freq, n_time = self.n_bl, self.n_freq, self.n_time
 
         def forward(params, state, constants):
             c = lambda name: constants[f"{prefix}/{name}"]
-            w_freq, start_freq, start_time = c("w_freq"), c("start_freq"), c("start_time")
+            w_freq, start_freq = c("w_freq"), c("start_freq")
             dnu_mhz, freqs_mhz = c("dnu_mhz"), c("freqs_mhz")
 
             def local_vis(rfi_A, rfi_phase, rfi_delay):
-                amp, phase, delay = (jnp.swapaxes(x, 0, 1) for x in (rfi_A, rfi_phase, rfi_delay))
                 vis = jnp.zeros((n_bl, n_freq, n_time), dtype=rfi_A.dtype)
                 for i, op in enumerate(ops):
+                    inputs = (rfi_A, rfi_phase, rfi_delay)
+                    if not identity_antennas[i]:
+                        inputs = tuple(jnp.take(x, c(f"antennas_{i}"), axis=1) for x in inputs)
+                    amp, phase, delay = (jnp.swapaxes(x, 0, 1) for x in inputs)
                     vis = vis.at[c(f"idx_{i}")].set(
                         op.eval(
                             amp, phase, delay, w_freq, start_freq,
-                            c(f"w_time_{i}"), start_time, dnu_mhz, c(f"dt_{i}"), freqs_mhz,
+                            c(f"w_time_{i}"), c(f"start_time_{i}"), dnu_mhz, c(f"dt_{i}"), freqs_mhz,
                         )
                     )
                 return vis

@@ -13,12 +13,146 @@ Everything here runs once, on the host, in float64 numpy, and produces the
   samples, from whose coefficients the kernel rebuilds the fine phase.
 - :func:`fine_offsets`: where a cell's fine samples sit relative to its own
   data-grid sample.
+- :func:`poly_time_groups`: the baseline partition and compact antenna maps
+  that decide which independent time tables each variable call needs.
 """
 
+from dataclasses import dataclass
 from math import factorial
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+def poly_sample_counts(requirements: NDArray) -> NDArray:
+    """Round fringe-rate requirements up to positive odd quadrature counts.
+
+    The estimate bounds midpoint quadrature error. With ``fine_offsets`` an
+    even count instead shifts the grid half a sample to the left, introducing
+    a first-order phase error that rounding up alone does not control. Odd
+    counts keep that convention and sample the midpoints of equal sub-intervals.
+    """
+    requirements = np.asarray(requirements, dtype=np.float64)
+    if (
+        requirements.ndim != 1
+        or not np.all(np.isfinite(requirements))
+        or np.any(requirements < 0)
+    ):
+        raise ValueError("sampling requirements must be a finite, non-negative vector")
+    counts = np.maximum(1, np.ceil(requirements)).astype(np.int64)
+    return counts + (counts % 2 == 0)
+
+
+@dataclass(frozen=True)
+class PolyTimeGroup:
+    """Host-side baseline membership and compact antenna indices for one call."""
+
+    baseline_indices: NDArray
+    n_g: int
+    antennas: NDArray
+    a1: NDArray
+    a2: NDArray
+
+
+def poly_time_groups(
+    requirements: NDArray, a1: NDArray, a2: NDArray,
+    *, max_groups: int = 2, split_at: int | None = None,
+) -> tuple[PolyTimeGroup, ...]:
+    """Choose one or two groups by the work of materialising antenna samples.
+
+    Each group's count is the largest rounded requirement of its baselines.
+    Search every threshold between distinct requirements, scoring a partition by
+    ``sum(n_g * len(antennas_g))``. The source, channel and cell dimensions
+    multiply every candidate equally, so they need not enter the score. An
+    antenna shared by the two groups is materialised twice and counted twice.
+    This is work, not a runtime prediction for either implementation.
+
+    ``split_at`` restricts the search to requirements at or below that threshold
+    versus requirements above it. An empty side or a split that does not strictly
+    improve on one group falls back to one group; ties favour fewer groups.
+    Equal two-group scores choose the lowest threshold deterministically.
+
+    Sorting once and accumulating prefix/suffix antenna incidence gives all
+    candidate antenna counts without constructing a baseline mask per split.
+    Only the winning partition is materialised into static group records.
+    """
+    if (
+        isinstance(max_groups, bool)
+        or not isinstance(max_groups, (int, np.integer))
+        or max_groups not in (1, 2)
+    ):
+        raise ValueError("rfi.poly_time_sampling.max_groups must be 1 or 2")
+    if split_at is not None and (
+        isinstance(split_at, bool) or not isinstance(split_at, (int, np.integer)) or split_at < 1
+    ):
+        raise ValueError("rfi.poly_time_sampling.split_at must be null or a positive whole count")
+    counts = poly_sample_counts(requirements)
+    a1, a2 = np.asarray(a1), np.asarray(a2)
+    if any(
+        a.shape != counts.shape
+        or not np.issubdtype(a.dtype, np.integer)
+        or np.any(a < 0)
+        for a in (a1, a2)
+    ):
+        raise ValueError("a1 and a2 must be non-negative integer vectors matching requirements")
+    if not len(counts):
+        return ()
+
+    # Compress the labels for incidence storage too: an MS may omit antennas,
+    # and the largest label need not describe the size of the observed array.
+    antennas, inverse = np.unique(np.concatenate((a1, a2)), return_inverse=True)
+    endpoints = np.stack((inverse[:len(a1)], inverse[len(a1):]), axis=1)
+    # Distinct requirements can round to the same odd count. Their boundary
+    # still matters: moving a baseline can add antennas to one group without
+    # removing them from the other, even though the low group's count stays.
+    requirements = np.asarray(requirements, dtype=np.float64)
+    order = np.argsort(requirements, kind="stable")
+    sorted_requirements = requirements[order]
+    sorted_counts = counts[order]
+    best_score = int(sorted_counts[-1]) * len(antennas)
+    best_cut = None
+    if max_groups == 2:
+        def incidence(sequence):
+            seen = np.zeros(len(antennas), dtype=bool)
+            totals = np.empty(len(counts), dtype=np.int64)
+            total = 0
+            for i, b in enumerate(sequence):
+                for ant in endpoints[b]:
+                    if not seen[ant]:
+                        seen[ant] = True
+                        total += 1
+                totals[i] = total
+            return totals
+
+        prefix = incidence(order)
+        suffix = incidence(order[::-1])[::-1]
+        cuts = np.flatnonzero(sorted_requirements[:-1] != sorted_requirements[1:]) + 1
+        if split_at is not None:
+            cuts = [int(np.searchsorted(sorted_requirements, split_at, side="right"))]
+        for cut in cuts:
+            if cut == 0 or cut == len(counts):
+                continue
+            score = (
+                int(sorted_counts[cut - 1]) * int(prefix[cut - 1])
+                + int(sorted_counts[-1]) * int(suffix[cut])
+            )
+            if score < best_score:
+                best_score, best_cut = score, cut
+
+    partitions = (
+        (np.arange(len(counts)),) if best_cut is None
+        else (order[:best_cut], order[best_cut:])
+    )
+    groups = []
+    for idx in partitions:
+        idx = np.sort(idx).astype(np.int32)
+        ants = np.unique(np.concatenate((a1[idx], a2[idx]))).astype(np.int32)
+        groups.append(PolyTimeGroup(
+            idx, int(counts[idx].max()), ants,
+            np.searchsorted(ants, a1[idx]).astype(np.int32),
+            np.searchsorted(ants, a2[idx]).astype(np.int32),
+        ))
+    return tuple(groups)
 
 
 def lagrange_basis(nodes: NDArray, x: NDArray) -> NDArray:
