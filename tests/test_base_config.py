@@ -450,6 +450,7 @@ class TestTheGainsSectionHasNoCorrelationLengths:
 class TestPolynomialTimeSampling:
     @pytest.mark.parametrize("component", [
         "PolyInterpVis", "PolyInterpVisFFI", "PolyInterpVisVariable", "PolyInterpVisVariableFFI",
+        "PolyInterpVisHybrid",
     ])
     def test_polynomial_routes_bypass_legacy_binning(self, component, tmp_path, monkeypatch):
         config = base_args(tmp_path)

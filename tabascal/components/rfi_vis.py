@@ -9,8 +9,13 @@ from tabascal.interferometry import (
     calculate_rfi_vis_variable,
 )
 from tabascal.components import Component
-from tabascal.coarse_rfi_vis import coarse_rfi_vis
-from tabascal.poly_interp import fine_offsets, interp_tables, poly_time_groups
+from functools import partial
+
+from tabascal.coarse_rfi_vis import analytic_rfi_vis, coarse_rfi_vis
+from tabascal.poly_interp import (
+    analytic_sampling_cut, fine_offsets, interp_tables, make_poly_time_group,
+    monomial_tables, poly_sample_counts, poly_time_groups,
+)
 from ri_kernels.jax_api import RFIVisOp
 
 try:
@@ -442,10 +447,14 @@ class PolyInterpVisVariable(PolyInterpVis):
             })
         return constants
 
+    def _group_function(self, i):
+        return coarse_rfi_vis
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         identity_antennas = tuple(self.identity_antennas)
+        group_functions = tuple(self._group_function(i) for i in range(len(self.groups)))
         n_bl, n_freq, n_time = self.n_bl, self.n_freq, self.n_time
 
         def forward(params, state, constants):
@@ -461,7 +470,7 @@ class PolyInterpVisVariable(PolyInterpVis):
                     if not identity:
                         inputs = tuple(jnp.take(x, c(f"antennas_{i}"), axis=1) for x in inputs)
                     vis = vis.at[idx].set(
-                        coarse_rfi_vis(
+                        group_functions[i](
                             *inputs, w_freq, start_freq,
                             c(f"w_time_{i}"), c(f"start_time_{i}"), dnu_mhz, c(f"dt_{i}"), freqs_mhz,
                             c(f"a1_{i}"), c(f"a2_{i}"),
@@ -477,6 +486,65 @@ class PolyInterpVisVariable(PolyInterpVis):
             return state
 
         return forward
+
+
+class PolyInterpVisHybrid(PolyInterpVisVariable):
+    """Slow baselines use quadrature; fast baselines use an analytic cell integral.
+
+    ``rfi.poly_analytic.quadrature_limit`` is the crossover in samples per cell.
+    A null limit derives a conservative operation count from the stencil and
+    moment expansion. Both groups reuse the compact antenna maps and scatter
+    their results into MS order, so shared antennas accumulate both cotangents.
+    The fast group's time table holds monomial coefficients and its dt slot
+    holds the cell duration; it never constructs a fine time grid.
+
+    The analytic phase is quadratic with a perturbative cubic correction,
+    and carries the full interpolated amplitude polynomial. Splitting bounds
+    local curvature and cubic phase independently of winding; ``segments``,
+    ``terms`` and ``cubic_terms`` control those expansions and their accuracy.
+    """
+
+    def _setup_time_tables(self, config, half_width, int_time):
+        options = config.args["rfi"].get("poly_analytic", {})
+        if not isinstance(options, dict) or options.keys() - {"quadrature_limit", "segments", "terms", "cubic_terms"}:
+            raise ValueError("rfi.poly_analytic accepts quadrature_limit, segments, terms and cubic_terms")
+        self.segments, self.terms = options.get("segments", 4), options.get("terms", 16)
+        self.cubic_terms = options.get("cubic_terms", 3)
+        for name, value in (("segments", self.segments), ("terms", self.terms)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"rfi.poly_analytic.{name} must be a positive whole number")
+        if isinstance(self.cubic_terms, bool) or not isinstance(self.cubic_terms, int) or self.cubic_terms < 0:
+            raise ValueError("rfi.poly_analytic.cubic_terms must be a non-negative whole number")
+        effective_h = min(half_width, (self.n_time - 1) // 2)
+        limit = options.get("quadrature_limit")
+        if limit is None:
+            limit = analytic_sampling_cut(effective_h, self.segments, self.terms, self.cubic_terms)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("rfi.poly_analytic.quadrature_limit must be null or a non-negative whole count")
+        self.quadrature_limit = limit
+        counts = poly_sample_counts(config.rfi_time_requirements)
+        self.groups, self.analytic_groups = [], []
+        self.group_tables, self.identity_antennas = [], []
+        for analytic, mask in ((False, counts <= limit), (True, counts > limit)):
+            indices = np.flatnonzero(mask)
+            if not len(indices):
+                continue
+            group = make_poly_time_group(config.rfi_time_requirements, self.a1, self.a2, indices)
+            if analytic:
+                weights, start = monomial_tables(self.n_time, half_width)
+                dt = np.asarray(int_time)
+            else:
+                dt = fine_offsets(group.n_g, int_time)
+                weights, start = interp_tables(self.n_time, half_width, dt / int_time)
+            self.groups.append(group)
+            self.analytic_groups.append(analytic)
+            self.group_tables.append((weights, start, dt))
+            self.identity_antennas.append(np.array_equal(group.antennas, np.arange(config.n_ant)))
+
+    def _group_function(self, i):
+        if self.analytic_groups[i]:
+            return partial(analytic_rfi_vis, segments=self.segments, terms=self.terms, cubic_terms=self.cubic_terms)
+        return coarse_rfi_vis
 
 
 class PolyInterpVisVariableFFI(PolyInterpVisVariable):

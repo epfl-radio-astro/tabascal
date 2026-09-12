@@ -12,6 +12,12 @@ drops into ``RiemannVisFFI``. Nothing else in the route needs to change: the
 components that produce the inputs run on the host at setup or are a plain
 inverse FFT, and are the same for a compiled kernel as for this reference.
 
+:func:`analytic_rfi_vis` is the pure-JAX alternative for fast baselines. It
+uses the same coarse inputs and frequency quadrature, but integrates the
+amplitude polynomial against a quadratic phase, with a cubic correction. Its time
+table holds monomial coefficients rather than fine-sample weights, so the
+work has no Nyquist floor and does not grow with fringe winding.
+
 Inputs
 ------
 Per source ``r``, antenna ``a``, channel ``f`` and time cell ``t``. Only
@@ -205,3 +211,155 @@ def coarse_rfi_vis(
 
     vis = lax.map(one_cell, jnp.arange(n_time))  # (n_time, n_bl, n_freq)
     return jnp.moveaxis(vis, 0, -1)
+
+
+def linear_phase_moments(a: Array, degree: int) -> Array:
+    """The moments ``mean_{[-1,1]} x**m exp(i*a*x)``, through ``degree``.
+
+    Integration by parts divides by the large winding, so upward recurrence
+    is stable only while ``m <= |a|``. Above that point we run the same
+    identity downwards from a zero tail, 64 orders beyond the last requested
+    moment. The unwanted solution then contracts by ``|a|/m`` at every step.
+    This also supplies the zero-frequency limit without a division by zero or
+    a cancellation-prone Taylor series at moderate winding.
+    """
+    a = jnp.asarray(a)
+    positive, negative = jnp.exp(1j * a), jnp.exp(-1j * a)
+    safe_a = jnp.where(jnp.abs(a) >= 1, a, 1)
+    upward = [jnp.sinc(a / jnp.pi).astype(positive.dtype)]
+    for m in range(1, degree + 1):
+        value = ((positive - (-1)**m * negative) / 2 - m * upward[-1]) / (1j * safe_a)
+        upward.append(jnp.where(m <= jnp.abs(a), value, 0))
+
+    # Large a uses the upward result throughout. Giving the unused downward
+    # branch a benign argument keeps masked overflows out of differentiation.
+    down_a = jnp.where(jnp.abs(a) <= degree, a, 0)
+    ep, em = jnp.exp(1j * down_a), jnp.exp(-1j * down_a)
+    values = jnp.zeros(a.shape + (degree + 1,), dtype=positive.dtype)
+
+    def step(i, carry):
+        last, values = carry
+        m = degree + 64 - i
+        previous = ((ep - (-1.)**m * em) / 2 - 1j * down_a * last) / m
+        values = lax.cond(m <= degree + 1, lambda v: v.at[..., m - 1].set(previous), lambda v: v, values)
+        return previous, values
+
+    _, downward = lax.fori_loop(0, degree + 64, step, (jnp.zeros_like(positive), values))
+    return jnp.where(jnp.arange(degree + 1) <= jnp.abs(a)[..., None], jnp.stack(upward, -1), downward)
+
+
+def quadratic_phase_moments(a: Array, b: Array, degree: int, terms: int = 16) -> Array:
+    """Normalised moments on [-1, 1] of ``exp(i*(a*x+b*x*x))``.
+
+    Outside or beyond the neighbourhood of the stationary point, expand the
+    curvature about linear-phase moments. The caller splits the cell first:
+    with ``|b| <= 1`` per piece, 16 terms leave less than 2e-13 absolute
+    remainder. Near the stationary point the Fresnel seed and its upward
+    recurrence are stable, except at small b where division by b is itself
+    ill-conditioned. There the same convergent series supplies the continuous
+    limit instead.
+    """
+    from jax.scipy.special import fresnel
+
+    a, b = jnp.broadcast_arrays(a, b)
+    stationary = (jnp.abs(a) <= 2.5 * jnp.abs(b)) & (jnp.abs(b) >= 1)
+    series_a, series_b = jnp.where(stationary, 0., a), jnp.where(stationary, 0., b)
+    linear = linear_phase_moments(series_a, degree + 2 * (terms - 1))
+    series = jnp.zeros_like(linear[..., :degree + 1])
+    coefficient = jnp.ones_like(series_a, dtype=linear.dtype)
+    for k in range(terms):
+        series = series + coefficient[..., None] * linear[..., 2*k:2*k + degree + 1]
+        coefficient = coefficient * (1j * series_b) / (k + 1)
+
+    # Complete the square only near the stationary point: doing so at large
+    # winding subtracts almost equal Fresnel values with huge phase arguments.
+    fa, fb = jnp.where(stationary, a, 0.), jnp.where(stationary, b, 1.)
+    scale = jnp.sqrt(2 * jnp.abs(fb) / jnp.pi)
+    shift = fa / (2 * fb)
+    sp, cp = fresnel(scale * (1 + shift))
+    sm, cm = fresnel(scale * (-1 + shift))
+    zero = jnp.exp(-1j * fa * shift / 2) * ((cp - cm) + 1j * jnp.sign(fb) * (sp - sm)) / (2 * scale)
+    moments = [zero]
+    ep, em = jnp.exp(1j * (fa + fb)), jnp.exp(1j * (-fa + fb))
+    for m in range(1, degree + 1):
+        previous = (m - 1) * moments[m - 2] if m > 1 else 0
+        moments.append(((ep - (-1)**(m-1) * em) / 2 - previous - 1j * fa * moments[-1]) / (2j * fb))
+    return jnp.where(stationary[..., None], jnp.stack(moments, -1), series)
+
+
+def analytic_rfi_vis(
+    rfi_A: Array, rfi_phase: Array, rfi_delay: Array,
+    w_freq: Array, start_freq: Array, g_time: Array, start_time: Array,
+    dnu_mhz: Array, int_time: Array, freqs_mhz: Array, a1: Array, a2: Array,
+    *, segments: int = 4, terms: int = 16, cubic_terms: int = 3,
+) -> Array:
+    """Integrate the amplitude polynomial against the quadratic delay phase.
+
+    ``g_time[t,l,m]`` is the Lagrange basis in powers of x = 2*tau/T. The
+    frequency contraction is unchanged, so finite channel integration retains
+    exactly the reference's frequency offsets. Time integration is analytic:
+    multiply the antenna polynomials by convolution, then contract against
+    phase moments. The quadratic phase is integrated analytically and residual
+    cubic phase is expanded on each piece. Three terms suffice at the measured
+    cubic coefficients; zero deliberately drops cubic phase for comparison.
+    Derivatives above order three are omitted.
+
+    Equal pieces keep curvature small without imposing a Nyquist sample count.
+    Translation of both the amplitude and phase is exact, including the
+    constant phase of each piece. The working arrays carry polynomial degree,
+    not fringe winding. Only the data-grid amplitude is differentiated.
+    """
+    amp_degree = g_time.shape[-1] - 1
+    degree = 2 * amp_degree
+    n_cubic = max(1, cubic_terms)
+    moment_degree = degree + 3 * (n_cubic - 1)
+    radius = 1. / segments
+    nu = freqs_mhz[:, None] + dnu_mhz[None, :]
+
+    @functools.partial(jax.checkpoint, prevent_cse=False)
+    def one_cell(t):
+        amplitude = fine_signal(rfi_A, w_freq, start_freq, g_time[t], start_time[t])
+        p, q = amplitude[:, a1], amplitude[:, a2].conj()
+        product = jnp.stack([
+            sum(p[..., j] * q[..., m-j] for j in range(max(0, m-amp_degree), min(amp_degree, m)+1))
+            for m in range(degree + 1)
+        ], -1)
+        delay_cell, phase_cell = rfi_delay[:, :, t], rfi_phase[..., t]
+        delay = delay_cell[:, a1] - delay_cell[:, a2]
+        phi = phase_cell[:, a1] - phase_cell[:, a2]
+        phi0 = phi[..., None] + 2 * jnp.pi * dnu_mhz * delay[..., 0, None, None]
+        d1 = delay[..., 1] if rfi_delay.shape[-1] > 1 else jnp.zeros_like(delay[..., 0])
+        d2 = delay[..., 2] if rfi_delay.shape[-1] > 2 else jnp.zeros_like(delay[..., 0])
+        a = 2 * jnp.pi * nu * d1[..., None, None] * (int_time / 2)
+        b = jnp.pi * nu * d2[..., None, None] * (int_time / 2)**2
+        d3 = delay[..., 3] if rfi_delay.shape[-1] > 3 and cubic_terms else jnp.zeros_like(delay[..., 0])
+        c = (jnp.pi / 3) * nu * d3[..., None, None] * (int_time / 2)**3
+
+        def piece(i, total):
+            centre = -1 + (2 * i + 1) * radius
+            # x = centre + radius*y. Keeping coefficients dimensionless avoids
+            # powers of a seconds-valued T in the moment recurrence.
+            shifted = jnp.stack([
+                sum(math.comb(m, j) * centre**(m-j) * radius**j * product[..., m] for m in range(j, degree+1))
+                for j in range(degree+1)
+            ], -1)
+            moments = quadratic_phase_moments(
+                (a + 2*b*centre + 3*c*centre**2)*radius,
+                (b + 3*c*centre)*radius**2, moment_degree, terms,
+            )
+            # Translate the cubic exactly too. Only the residual c*r^3*y^3
+            # needs expansion; its constant, linear and quadratic parts are
+            # already in the phase and moments. The residual coefficient
+            # falls with the cube of the piece width.
+            coefficient = jnp.ones_like(a, dtype=product.dtype)
+            integral = jnp.zeros_like(coefficient)
+            for k in range(n_cubic):
+                integral = integral + coefficient * jnp.sum(shifted * moments[..., 3*k:3*k+degree+1], axis=-1)
+                coefficient = coefficient * (1j * c * radius**3) / (k + 1)
+            phase = phi0 + a*centre + b*centre**2 + c*centre**3
+            return total + jnp.exp(1j * phase) * integral / segments
+
+        result = lax.fori_loop(0, segments, piece, jnp.zeros(product.shape[:-1], dtype=product.dtype))
+        return jnp.sum(jnp.mean(result, axis=-1), axis=0)
+
+    return jnp.moveaxis(lax.map(one_cell, jnp.arange(rfi_A.shape[-1])), 0, -1)

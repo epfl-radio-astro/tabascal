@@ -251,7 +251,73 @@ i5 beside it, and cannot run the fine-grid kernel at all at this size, which
 asks for more memory than the card has.
 
 
-## Variable sampling per baseline
+## Analytic integration for fast baselines
+
+Use `rfi_vis:PolyInterpVisHybrid` with the same coarse signal and trajectory
+components to put slow baselines through quadrature and fast baselines through
+`analytic_rfi_vis`. Quadrature has a sample count proportional to fringe
+winding; rebuilding its tables independently does not remove that floor. The
+fast group instead integrates a polynomial amplitude times a quadratic-phase
+exponential over the centred cell, with a perturbative cubic correction. It
+retains the reference's frequency quadrature, including its exact `fine_offsets` convention.
+
+`monomial_tables` replaces each time basis's sampled values with its monomial
+coefficients in `x = 2*tau/T`. The same `fine_signal` contraction then produces
+an amplitude polynomial per antenna. Convolving the two antenna polynomials
+produces the baseline amplitude, of degree `P = 4h`; holding the amplitude
+constant fails even as the fringe winds faster.
+
+On each of four equal pieces, translation of both polynomials is exact. The
+phase has a constant term, a linear coefficient and a quadratic coefficient.
+Outside the stationary region, expand the curvature exponential and contract
+against linear-phase moments. Their integration-by-parts recurrence runs
+upwards only through degrees below the winding; above that it runs downwards
+from a distant tail. Near the stationary point, seed the quadratic recurrence
+with JAX's [Fresnel integrals](https://docs.jax.dev/en/latest/_autosummary/jax.scipy.special.fresnel.html).
+At small curvature, where division by curvature is ill-conditioned even near
+a stationary point, use the convergent series instead. No time samples or
+large-winding Fresnel subtraction enter the analytic result.
+
+The cut is exposed as `rfi.poly_analytic.quadrature_limit`. Its default is an
+arithmetic estimate, not a calibrated runtime prediction. With `S` pieces,
+`K` curvature terms, `J` cubic terms, product degree `P=4h`, required moment
+degree `D=P+3(J-1)` and `M = D + 2(K-1)`, it is
+`S * (2M + 64 + K(D+1) + J(P+1) + (2h+1)^2)`: upward and downward recurrence
+stages, curvature and cubic contractions, and amplitude products, each
+charged as one quadrature sample. This conservative starting comparison
+gives **1376** with `h=1`, `S=4`, `K=16`, `J=3`; odd counts at 1377 and above
+go to the analytic group.
+A measured crossover should replace it through the explicit setting. The
+existing group records, compact antenna maps, identity bypass and output
+scatter are shared with the quadrature pair. Neither an overlap score nor
+an empty-group fallback can send an expensive baseline back to quadrature.
+
+The default expansion is tested through 3 curvature turns at the cell edge
+and 1000 noninteger winding turns, in single and double precision. Increase
+`segments` for larger curvature: the local quadratic coefficient falls as
+`1/S^2`. Dense-reference tests dropping cubic phase using the supplied
+256A, 384A, 512A median and 512A p99 coefficients give errors of approximately
+0.19%, 0.66%, 0.67% and 0.44% of the noise at instantaneous signal/noise 54,
+even interpreting the supplied cubic turns conservatively as turns at the
+cell edge. That alone would justify omission, but a group's membership comes
+from its maximum requirement over sources and cells. A cell inside the fast
+group can still wind slowly: at 1.13 or 10.37 winding turns with the p99 cubic
+coefficient, omission costs 14–72% of the noise. The default therefore retains
+three terms of the residual cubic exponential on each piece. Translation of
+the cubic's constant, linear and quadratic parts is exact; only its residual
+coefficient, reduced by `1/S^3`, needs expansion. `cubic_terms: 0` deliberately
+drops it for comparison. Derivatives above cubic are still omitted.
+
+The polynomial-amplitude test also agrees with an independent integral to
+near roundoff in double precision. This validates the supplied coefficient
+range, not all orbits or arbitrary higher derivatives.
+
+This is a pure-JAX implementation. Hardware measurements still need to check
+compiled execution through JAX, shared-antenna gradients under source sharding,
+peak memory and the actual crossover; there is no FFI implementation of the
+analytic operator yet.
+
+## Quadrature-only variable sampling
 
 `rfi_vis:PolyInterpVisVariable` and `rfi_vis:PolyInterpVisVariableFFI` use
 `rfi.poly_time_sampling` to choose one or two baseline groups from the same

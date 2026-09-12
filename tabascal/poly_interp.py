@@ -54,6 +54,18 @@ class PolyTimeGroup:
     a2: NDArray
 
 
+def make_poly_time_group(requirements, a1, a2, indices) -> PolyTimeGroup:
+    """Materialise a chosen partition with the same compact maps on every route."""
+    a1, a2 = np.asarray(a1), np.asarray(a2)
+    idx = np.sort(indices).astype(np.int32)
+    antennas = np.unique(np.concatenate((a1[idx], a2[idx]))).astype(np.int32)
+    return PolyTimeGroup(
+        idx, int(poly_sample_counts(np.asarray(requirements)[idx]).max()), antennas,
+        np.searchsorted(antennas, a1[idx]).astype(np.int32),
+        np.searchsorted(antennas, a2[idx]).astype(np.int32),
+    )
+
+
 def poly_time_groups(
     requirements: NDArray, a1: NDArray, a2: NDArray,
     *, max_groups: int = 2, split_at: int | None = None,
@@ -143,16 +155,50 @@ def poly_time_groups(
         (np.arange(len(counts)),) if best_cut is None
         else (order[:best_cut], order[best_cut:])
     )
-    groups = []
-    for idx in partitions:
-        idx = np.sort(idx).astype(np.int32)
-        ants = np.unique(np.concatenate((a1[idx], a2[idx]))).astype(np.int32)
-        groups.append(PolyTimeGroup(
-            idx, int(counts[idx].max()), ants,
-            np.searchsorted(ants, a1[idx]).astype(np.int32),
-            np.searchsorted(ants, a2[idx]).astype(np.int32),
-        ))
-    return tuple(groups)
+    return tuple(make_poly_time_group(requirements, a1, a2, idx) for idx in partitions)
+
+
+def monomial_tables(n_cells: int, half_width: int) -> tuple[NDArray, NDArray]:
+    """Lagrange coefficients in x = 2*tau/T, including the shifted edge stencils.
+
+    These occupy the time-table slot of ``fine_signal``: the identical stencil
+    contraction now yields polynomial coefficients rather than sampled values.
+    No Vandermonde fit is needed; multiplying each basis's linear factors gives
+    its monomials directly on the host in double precision.
+    """
+    _, starts = interp_tables(n_cells, half_width, np.zeros(1))
+    degree = 2 * min(half_width, (n_cells - 1) // 2)
+    coefficients = np.zeros((n_cells, degree + 1, degree + 1))
+    for cell, start in enumerate(starts):
+        nodes = 2 * (np.arange(degree + 1) + start - cell)
+        for k, node in enumerate(nodes):
+            polynomial = np.polynomial.Polynomial([1.])
+            for j, other in enumerate(nodes):
+                if j != k:
+                    polynomial *= np.polynomial.Polynomial([-other, 1.]) / (node - other)
+            coefficients[cell, k, :len(polynomial.coef)] = polynomial.coef
+    return coefficients, starts
+
+
+def analytic_sampling_cut(half_width: int, segments: int, terms: int, cubic_terms: int = 3) -> int:
+    """A conservative operation-count crossover, in quadrature samples.
+
+    For product degree P=4h and J cubic terms, moments reach D=P+3(J-1),
+    and the linear recurrence reaches M=D+2(K-1). Per piece it takes M upward
+    and M+64 downward stages, K(D+1) curvature and J(P+1) cubic contractions,
+    and (2h+1)^2 amplitude products. Counting each as one sample
+    is deliberately conservative: a quadrature sample also interpolates and
+    exponentiates. It gives a reproducible starting cut, not a runtime model;
+    hardware measurements should set the explicit override.
+    """
+    product_degree = 4 * half_width
+    n_cubic = max(1, cubic_terms)
+    degree = product_degree + 3 * (n_cubic - 1)
+    moment_degree = degree + 2 * (terms - 1)
+    return segments * (
+        2 * moment_degree + 64 + terms * (degree + 1)
+        + n_cubic * (product_degree + 1) + (2 * half_width + 1)**2
+    )
 
 
 def lagrange_basis(nodes: NDArray, x: NDArray) -> NDArray:
