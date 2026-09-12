@@ -1,6 +1,7 @@
 """The data-grid route's components: FixedOrbitCoarse, ComplexRFIVarAntCoarse
 and PolyInterpVis, against their fine-grid twins on the same configuration."""
 
+from math import factorial
 from types import SimpleNamespace
 
 import jax
@@ -98,9 +99,49 @@ class TestFixedOrbitCoarse:
         comp.setup(cfg)
         assert comp.rfi_phase.shape == (1, 4, 2, 6)
         assert comp.rfi_delay_poly_us.shape == (1, 4, 6, 4)
-        assert comp.rfi_xyz.shape == (1, cfg.n_time_fine, 3)
+        assert comp.rfi_xyz.shape == (1, cfg.n_time, 3)
         state = comp.build_forward()({}, {}, make_constants(comp))
         assert set(state) == {"rfi_xyz", "rfi_phase", "rfi_delay_poly_us"}
+
+    def test_the_node_fit_is_the_fine_grid_fit(self):
+        """The nodes are laid out like a cell's fine samples, so asking for
+        n_int_time of them *is* the fine grid, and that is what this component
+        used to fit through. The default handful has to give back the same
+        polynomial, judged where it is used: the delay it reconstructs at every
+        fine sample of every cell."""
+        n_int_time = 41
+        cfg = make_config(n_int_time=n_int_time, rfi_args={"path_nodes": n_int_time})
+        full = FixedOrbitCoarse()
+        full.setup(cfg)
+        cfg_nodes = make_config(n_int_time=n_int_time)  # the default node count
+        nodes = FixedOrbitCoarse()
+        nodes.setup(cfg_nodes)
+        assert nodes.n_path_nodes == 13 and full.n_path_nodes == n_int_time
+
+        dt = fine_offsets(n_int_time, cfg.int_time)
+        ks = np.arange(full.rfi_delay_poly_us.shape[-1])
+        basis = dt[:, None] ** ks / np.array([float(factorial(k)) for k in ks])
+        delay_full = np.asarray(full.rfi_delay_poly_us) @ basis.T
+        delay_nodes = np.asarray(nodes.rfi_delay_poly_us) @ basis.T
+        # Microseconds of differential path. 1e-6 us is 0.3 mm, far below what
+        # the propagation times themselves resolve.
+        assert np.abs(delay_full - delay_nodes).max() < 1e-6
+
+    def test_a_node_count_below_the_degree_is_refused(self):
+        """Fewer nodes than coefficients leaves the polynomial undetermined."""
+        for bad in (3, 0, -1, 2.5, True):
+            cfg = make_config(rfi_args={"path_order": 3, "path_nodes": bad})
+            with pytest.raises(RuntimeError, match="rfi.path_nodes"):
+                FixedOrbitCoarse().setup(cfg)
+
+    def test_a_short_cell_never_asks_for_more_nodes_than_it_has(self):
+        """The node count is capped at the cell's fine samples: a cell cannot be
+        propagated at more places than the grid it stands for has."""
+        cfg = make_config(n_int_time=3)
+        comp = FixedOrbitCoarse()
+        comp.setup(cfg)
+        assert comp.n_path_nodes == 3
+        assert comp.rfi_delay_poly_us.shape[-1] == 3  # fit_path drops the degree
 
     def test_the_phase_is_the_fine_grid_phase_at_the_cell_centre(self):
         """With an odd sample count one fine sample is the cell centre itself,

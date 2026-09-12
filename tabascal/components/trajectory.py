@@ -18,7 +18,7 @@ from tabascal.interferometry import (
 from tabascal.poly_interp import fine_offsets, fit_path
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
-from tabascal.time import gast_deg, skyfield_time, timescale
+from tabascal.time import gast_deg, secs_to_days, skyfield_time, timescale
 
 import sgp4jax
 from sgp4jax import WGS72 as gravity
@@ -379,7 +379,7 @@ class FixedOrbitCoarse(Component):
     - ``rfi_delay_poly_us`` ``(n_rfi, n_ant, n_time, rfi.path_order + 1)``: the
       geometric delay in microseconds relative to the array mean and its first
       ``rfi.path_order`` time derivatives at each cell centre, from a
-      least-squares polynomial through the cell's fine samples
+      least-squares polynomial through a few nodes spanning the cell
       (:func:`tabascal.poly_interp.fit_path`). Relative, because a term common
       to every antenna cancels in a baseline's phase difference, and what
       remains is small enough for float32 to carry across a cell -- the
@@ -390,11 +390,22 @@ class FixedOrbitCoarse(Component):
     from the two inside each cell: linear in frequency, a Taylor series in time.
     Everything is computed once here in float64, as :class:`FixedOrbit` does; a
     fixed orbit has no parameters, so none of it carries a gradient.
+
+    The fine grid is never resolved. A degree-``path_order`` series about a
+    cell's centre is settled by a handful of samples spanning that cell, so the
+    path is propagated at ``rfi.path_nodes`` nodes per cell rather than at every
+    one of the ``n_int_time`` fine samples. The count the estimate asks for
+    climbs steeply with the array's extent -- 37, 59, 174, 1065 and 6570 fine
+    samples per cell at 64, 128, 256, 384 and 512 SKA-Low stations -- and the
+    range calculation it feeds is ``(n_rfi, n_ant, n_time * n_int_time, 3)``,
+    which is 361 GiB at 512 stations for the same four coefficients per cell.
+    ``rfi_xyz`` is therefore the source position at each cell centre rather than
+    at each fine sample; nothing on the data grid reads it at fine resolution.
     """
 
     required_inputs = {}
     output_shapes = {
-        "rfi_xyz": ("n_rfi", "n_time_fine", 3),
+        "rfi_xyz": ("n_rfi", "n_time", 3),
         "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time"),
         "rfi_delay_poly_us": ("n_rfi", "n_ant", "n_time", "n_path"),
     }
@@ -416,7 +427,7 @@ class FixedOrbitCoarse(Component):
             self.phase_centre = config.phase_centre
             self.freqs = np.asarray(config.freqs, dtype=np.float64)
             self.int_time = float(config.int_time)
-            self.times_jd_fine = config.times_jd_fine
+            self.times_jd = np.asarray(config.times_jd, dtype=np.float64)
 
             order = config.args["rfi"].get("path_order", 3)
             if isinstance(order, bool) or not isinstance(order, int) or order < 0:
@@ -425,6 +436,22 @@ class FixedOrbitCoarse(Component):
                     f"each cell's path: a whole number of at least 0, got {order!r}."
                 )
             self.path_order = order
+
+            # Nodes per cell for that fit. The default oversamples the degree
+            # several times over, which costs nothing next to the fine grid and
+            # keeps the fit close to the least-squares one over the whole cell
+            # rather than an interpolation through the fewest points that fix a
+            # polynomial. A cell never has more nodes than it has fine samples.
+            nodes = config.args["rfi"].get("path_nodes", None)
+            if nodes is None:  # the base config carries the key as null
+                nodes = 4 * order + 1
+            if isinstance(nodes, bool) or not isinstance(nodes, int) or nodes < order + 1:
+                raise ValueError(
+                    "rfi.path_nodes is how many samples per cell the path polynomial is "
+                    f"fitted through: a whole number of at least rfi.path_order + 1 = "
+                    f"{order + 1}, got {nodes!r}."
+                )
+            self.n_path_nodes = min(nodes, self.n_int_time)
 
             self._compute_rfi_path()
             self._set_outputs()
@@ -468,22 +495,33 @@ class FixedOrbitCoarse(Component):
     @measure_runtime
     def _compute_rfi_path(self):
 
-        # The fine-grid path, exactly as FixedOrbit forms the fine-grid phase.
-        self.rfi_xyz = np.asarray(
-            get_satellite_positions(self.orbit_records, list(self.times_jd_fine))
+        # The path at the fit's nodes, the same way FixedOrbit forms it at the
+        # fine samples. The nodes are laid out like a cell's fine samples --
+        # fine_offsets puts the cell's own sample at index n // 2, at offset
+        # zero -- so the centre node is the expansion point exactly, and the
+        # node times at that offset are the data-grid times themselves.
+        dt = fine_offsets(self.n_path_nodes, self.int_time)  # (n_nodes,), seconds
+        times_jd_nodes = (self.times_jd[:, None] + secs_to_days(dt)[None, :]).ravel()
+        rfi_xyz_nodes = np.asarray(
+            get_satellite_positions(self.orbit_records, list(times_jd_nodes))
         )
-        ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
-        gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
+        ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, times_jd_nodes)
+        gsa = gast_deg(times_jd_nodes)  # GAST in degrees (UTC convention)
         gh0 = (gsa - self.phase_centre["ra"]) % 360
         ants_uvw = np.transpose(
             itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
         )
-        # The geometric delay at the fine samples, in microseconds, with the
-        # sign that makes the phase 2 pi f tau -- as FixedOrbit's phase and the
-        # fine-grid route's rfi_delay_us (PR #144) have it.
+        # The geometric delay at the nodes, in microseconds, with the sign that
+        # makes the phase 2 pi f tau -- as FixedOrbit's phase and the fine-grid
+        # route's rfi_delay_us (PR #144) have it.
         c = 299792458.0
-        delay_fine = -get_rfi_path_numpy(self.rfi_xyz, ants_uvw, ants_xyz) / c * 1e6
-        # (n_rfi, n_ant, n_time_fine), microseconds
+        delay_nodes = -get_rfi_path_numpy(rfi_xyz_nodes, ants_uvw, ants_xyz) / c * 1e6
+        # (n_rfi, n_ant, n_time * n_nodes), microseconds
+        # The source position at each cell centre: the data-grid counterpart of
+        # FixedOrbit's fine-grid rfi_xyz, and all the data grid has a use for.
+        self.rfi_xyz = rfi_xyz_nodes.reshape(self.n_rfi, self.n_time, self.n_path_nodes, 3)[
+            :, :, self.n_path_nodes // 2
+        ]
 
         # The phase is reduced from the full delay, but the polynomial is of the
         # delay *relative to the array mean* at each sample: a term common to
@@ -491,7 +529,7 @@ class FixedOrbitCoarse(Component):
         # what is left -- microseconds, tens of nanoseconds per second -- is
         # what a float32 kernel can carry across a cell to a fraction of a turn.
         # The full delay's change across a cell is ~1e4 wavelengths.
-        delay_diff = delay_fine - delay_fine.mean(axis=1, keepdims=True)
+        delay_diff = delay_nodes - delay_nodes.mean(axis=1, keepdims=True)
 
         # One polynomial per cell through its fine samples, at their nominal
         # offsets from the cell centre. The times the positions were actually
@@ -500,8 +538,7 @@ class FixedOrbitCoarse(Component):
         # but a sample's jitter is the same for every antenna, so it cancels in
         # the phase *difference* a visibility sees, to a fraction of a
         # millimetre of differential path.
-        dt = fine_offsets(self.n_int_time, self.int_time)  # (n_int_time,), seconds
-        cells = delay_diff.reshape(self.n_rfi, self.n_ant, self.n_time, self.n_int_time)
+        cells = delay_diff.reshape(self.n_rfi, self.n_ant, self.n_time, self.n_path_nodes)
         rfi_delay_poly_us = fit_path(cells, dt, self.path_order)
         # (n_rfi, n_ant, n_time, n_path)
 
@@ -510,7 +547,9 @@ class FixedOrbitCoarse(Component):
         # turns, which is why the kernel is handed this and the delay's change
         # separately rather than left to form it. MHz times microseconds is
         # cycles; reduced to a turn, it is FixedOrbit's phase at that sample.
-        centre = delay_fine.reshape(self.n_rfi, self.n_ant, self.n_time, self.n_int_time)[..., self.n_int_time // 2]
+        centre = delay_nodes.reshape(self.n_rfi, self.n_ant, self.n_time, self.n_path_nodes)[
+            ..., self.n_path_nodes // 2
+        ]
         turns = (self.freqs[None, None, :, None] / 1e6) * centre[:, :, None, :]
         rfi_phase = 2.0 * np.pi * (turns % 1)
         # (n_rfi, n_ant, n_freq, n_time)
@@ -535,7 +574,7 @@ class FixedOrbitCoarse(Component):
     def _validate_dimensions(self):
         """Ensure all setup operations completed successfully"""
 
-        assert_attr_shape(self, "rfi_xyz", (self.n_rfi, self.n_time_fine, 3))
+        assert_attr_shape(self, "rfi_xyz", (self.n_rfi, self.n_time, 3))
         assert_attr_shape(
             self, "rfi_phase", (self.n_rfi, self.n_ant, self.n_freq, self.n_time)
         )
