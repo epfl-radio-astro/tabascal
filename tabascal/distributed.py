@@ -242,7 +242,7 @@ def constrain_rfi_state(state: dict, n_rfi: int) -> dict:
     fine-grid memory hogs) split across devices instead of ever materializing a
     replicated copy. No-op when sharding is off.
     """
-    if not sharding_enabled():
+    if not sharding_enabled() or sharding_baselines():
         return state
     sharding = rfi_sharding()
     out = dict(state)
@@ -265,7 +265,9 @@ def psum_over_rfi(local_fn: Callable) -> Callable:
     ``psum``-ed into a replicated total. Unsharded it is ``local_fn`` itself, keeping
     the single-device path bitwise identical.
     """
-    if not sharding_enabled():
+    if not sharding_enabled() or sharding_baselines():
+        # Under baseline sharding every device holds the whole source axis and
+        # computes only its own baselines, so there is nothing to sum.
         return local_fn
 
     def summed(*per_source):
@@ -282,6 +284,29 @@ def psum_over_rfi(local_fn: Callable) -> Callable:
         return shard_map(summed, check_vma=False, **kwargs)
     except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
         return shard_map(summed, check_rep=False, **kwargs)
+
+
+def shard_axis() -> str:
+    """Which axis a sharded run splits: ``"source"`` (the default) or ``"baseline"``.
+
+    Set by ``TABASCAL_SHARD_AXIS``. The source axis is what shipped, and it is
+    kept the default until the baseline axis is measured to beat it -- on four
+    GH200s at 512 stations it turned 486.84 s of sharded work into 133.05 s but
+    left peak memory on the limiting device slightly *worse*, 36.02 GB against
+    37.80, because the visibility-shaped arrays carry no source axis and stay
+    replicated.
+    """
+    value = os.environ.get("TABASCAL_SHARD_AXIS", "source").strip().lower()
+    if value not in ("source", "baseline"):
+        raise ValueError(
+            f"TABASCAL_SHARD_AXIS is {value!r}; it takes 'source' or 'baseline'"
+        )
+    return value
+
+
+def sharding_baselines() -> bool:
+    """True when this run shards baselines rather than sources."""
+    return sharding_enabled() and shard_axis() == "baseline"
 
 
 @lru_cache(maxsize=None)
