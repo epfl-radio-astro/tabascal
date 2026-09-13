@@ -123,6 +123,9 @@ RFI_AXIS_NAMES = frozenset({
     "rfi_orbit_base",
     # state buffers
     "rfi_A", "rfi_phase", "rfi_xyz", "elements",
+    # (n_rfi, n_ant, n_time, n_path) delay polynomial of the data-grid route,
+    # read beside rfi_A and rfi_phase by rfi_vis:PolyInterpVis
+    "rfi_delay_poly_us",
     # constants
     "mu_rfi_k", "mu_rfi_orbit", "L_rfi_orbit",
     # (n_rfi, n_time_fine) elevation mask, multiplied into rfi_A in the signal
@@ -252,24 +255,29 @@ def constrain_rfi_state(state: dict, n_rfi: int) -> dict:
 def psum_over_rfi(local_fn: Callable) -> Callable:
     """Map a per-RFI-shard visibility function over the mesh and sum across shards.
 
-    ``local_fn(rfi_A, rfi_phase) -> vis`` must accept any leading RFI count and return
-    an array with **no** RFI axis (its local sources already summed). Under sharding it
-    runs per device on the local shard via ``shard_map`` -- which is also what lets the
-    FFI custom op participate, since GSPMD cannot partition a custom call -- and the
-    small coarse-grid results are ``psum``-ed into a replicated total. Unsharded it is
-    ``local_fn`` itself, keeping the single-device path bitwise identical.
+    ``local_fn(*per_source_arrays) -> vis`` takes any number of arrays whose leading
+    axis is the RFI source axis -- ``(rfi_A, rfi_phase)`` for the fine-grid
+    components, with ``rfi_delay_poly_us`` beside them for the data-grid one -- must accept
+    any leading RFI count, and returns an array with **no** RFI axis (its local
+    sources already summed). Under sharding it runs per device on the local shard via
+    ``shard_map`` -- which is also what lets the FFI custom op participate, since
+    GSPMD cannot partition a custom call -- and the small coarse-grid results are
+    ``psum``-ed into a replicated total. Unsharded it is ``local_fn`` itself, keeping
+    the single-device path bitwise identical.
     """
     if not sharding_enabled():
         return local_fn
 
-    def summed(rfi_A, rfi_phase):
-        return lax.psum(local_fn(rfi_A, rfi_phase), "rfi")
+    def summed(*per_source):
+        return lax.psum(local_fn(*per_source), "rfi")
 
     # Varying-axis type checking must be off: the FFI kernel's custom JVP/transpose
     # rules produce cotangents without the {V:rfi} annotation, which trips the check
     # under value_and_grad. The out_specs still hold -- the psum makes the result
     # replicated -- the checker just cannot prove it for custom primitives.
-    kwargs = dict(mesh=rfi_mesh(), in_specs=(P("rfi"), P("rfi")), out_specs=P())
+    # A single spec is a prefix of the whole argument tuple: every array is
+    # split along its leading, source, axis.
+    kwargs = dict(mesh=rfi_mesh(), in_specs=P("rfi"), out_specs=P())
     try:
         return shard_map(summed, check_vma=False, **kwargs)
     except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
