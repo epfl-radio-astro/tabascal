@@ -452,6 +452,10 @@ def tabascal_subtraction(
             from tabascal.plot import plot_init
             plot_init(tab_config, init_pred, truth, paths.model_name, paths.plot_dir)
 
+        # These visibility cubes have been saved and plotted; retaining them
+        # through optimization needlessly keeps another prediction on every GPU.
+        del init_pred
+
         key, subkey = random.split(key)
         if config["plots"]["prior"]:
             if jax.process_count() > 1:

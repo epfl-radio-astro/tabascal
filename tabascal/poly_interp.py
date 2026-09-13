@@ -146,10 +146,10 @@ def device_groups(
     reordered: the observed visibilities, the flags and the noise are simply
     sharded along the axis they already have, and every array downstream keeps
     that split all the way to the likelihood. A device therefore never needs
-    anyone else's baselines and nothing is gathered back together -- only the
-    scalar likelihood is reduced across devices. For indivisible totals the
-    last block extends past the real array; the caller trims those rows and
-    uses replicated placement at component boundaries.
+    anyone else's visibility rows. Likelihood scalars and reverse-mode
+    gradients of shared per-antenna inputs still need reductions. For
+    indivisible totals the last block extends past the real array; the caller
+    trims those rows and uses replicated placement at component boundaries.
 
     Which of a group's baselines land on a device is then whatever the data
     ordering puts there, so the counts differ between devices. ``shard_map``

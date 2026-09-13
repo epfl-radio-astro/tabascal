@@ -8,6 +8,7 @@ from tabascal.distributed import (
     constrain_rfi_state,
     make_global,
     replicated_sharding,
+    shard_pytree,
     sharding_baselines,
     sharding_enabled,
 )
@@ -801,6 +802,14 @@ class Model:
 
         for comp in components:
             comp.setup(tab_config)
+            if sharding_baselines():
+                # Components retain their output placeholders after assembly.
+                # Placing only Model.state later leaves those full visibility
+                # cubes alive on device 0. Place the retained originals too,
+                # before the model and forward closures take references.
+                comp.state_outputs = shard_pytree(
+                    comp.state_outputs, self.n_rfi, tab_config.n_bl
+                )
 
         init_params = [comp.init_params_base for comp in components]
         self.init_params = {k: v for d in init_params for k, v in d.items()}

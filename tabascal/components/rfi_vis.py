@@ -744,6 +744,7 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
         one block per device. That is the difference from the source route,
         which has every device compute every baseline for a few sources and
         then ``psum`` the whole array back together on each iteration.
+        Reverse mode still reduces gradients of the shared per-antenna signal.
 
         The block carries one spare row. Padded ghost baselines scatter into
         it and it is dropped, so every device writes the same number of rows
