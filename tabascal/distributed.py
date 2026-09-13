@@ -284,6 +284,63 @@ def psum_over_rfi(local_fn: Callable) -> Callable:
         return shard_map(summed, check_rep=False, **kwargs)
 
 
+@lru_cache(maxsize=None)
+def baseline_mesh() -> Mesh:
+    """The device mesh used for baseline-axis sharding, one axis named ``"bl"``.
+
+    A second mesh over the same devices as :func:`rfi_mesh`, differing only in
+    the axis name. The two are never live at once: a run shards one axis or the
+    other, and the name is what the specs in either route refer to.
+    """
+    return Mesh(np.array(jax.devices()), ("bl",))
+
+
+def baseline_sharding() -> NamedSharding:
+    """Split a ``(n_bl, ...)`` array over devices along its leading axis."""
+    return NamedSharding(baseline_mesh(), P("bl"))
+
+
+def baselines_divide(n_bl: int) -> bool:
+    """Whether the baseline count splits evenly over the devices.
+
+    ``shard_map`` requires it. It holds for a full array: ``n(n-1)/2`` for 256,
+    384 and 512 stations is 32640, 73536 and 130816, each a multiple of four.
+    It need not hold for a flagged or selected subset, which is why the caller
+    has to ask rather than assume.
+    """
+    return sharding_enabled() and n_bl % jax.device_count() == 0
+
+
+def map_over_baselines(local_fn: Callable, in_specs, out_specs=P("bl")) -> Callable:
+    """Map a per-baseline-shard function over the mesh, with no reduction.
+
+    The counterpart to :func:`psum_over_rfi`, and cheaper in the one way that
+    matters: sharding sources leaves every visibility-shaped array replicated
+    and needs a ``psum`` of the whole ``(n_bl, n_freq, n_time)`` array on every
+    iteration, whereas sharding baselines divides those arrays and leaves each
+    device holding the baselines it computed. Nothing has to be summed across
+    devices here at all -- only the scalar likelihood does, later.
+
+    ``in_specs`` says which arguments carry the baseline axis: ``P("bl")`` for
+    the per-baseline index arrays and the visibilities, ``P()`` for the
+    per-antenna signal, which every device needs in full. The operator itself
+    needs no change for this -- it already takes its index arrays as traced
+    arguments and sizes its output from ``a1.shape[0]``, so inside the map each
+    device sees its own baselines and produces exactly them.
+
+    Unsharded it is ``local_fn`` itself, keeping the single-device path
+    bitwise identical, as the source-axis route does.
+    """
+    if not sharding_enabled():
+        return local_fn
+
+    kwargs = dict(mesh=baseline_mesh(), in_specs=in_specs, out_specs=out_specs)
+    try:
+        return shard_map(local_fn, check_vma=False, **kwargs)
+    except TypeError:  # pragma: no cover - jax < 0.7 spells it check_rep
+        return shard_map(local_fn, check_rep=False, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Multi-process coordination
 # ---------------------------------------------------------------------------
