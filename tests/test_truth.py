@@ -21,7 +21,12 @@ from tabascal.truth import (
     read_true_vis_ast,
     has_truth,
 )
-from tabascal.tab_tools import rmse, print_truth_metrics, _effective_sample_size
+from tabascal.tab_tools import (
+    rmse,
+    print_truth_metrics,
+    _effective_sample_size,
+    _integrated_autocorr_time,
+)
 
 
 N_TIME, N_BL, N_FREQ, N_ANT = 4, 3, 2, 5
@@ -181,3 +186,100 @@ def test_effective_sample_size_tracks_correlation():
 
     # A single constant offset everywhere is fully coherent -> one effective sample.
     assert _effective_sample_size(np.full((n_row, n_freq, n_time), 1.0 + 1j)) == 1.0
+
+
+def test_effective_sample_size_matches_the_explicit_gram():
+    """The column-sum shortcut equals the full correlation matrix it replaces.
+
+    ``N_eff_row`` wants only the *total* of the row correlation matrix, and that
+    total factors through the column sums, so the matrix is never formed. It would
+    be n_bl x n_bl -- tens of gigabytes at the sizes this runs at -- so the identity
+    is what makes the metric affordable. Check it against the explicit Gram at a
+    size where forming one is still cheap.
+    """
+    rng = np.random.default_rng(3)
+    for shape in ((37, 3, 11), (9, 1, 5), (64, 2, 2)):
+        y = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+        n_row = shape[0]
+
+        # Reproduce the pre-image of the shortcut exactly as the function builds it.
+        yc = y - y.mean()
+        yr = yc.reshape(n_row, -1)
+        yr = yr - yr.mean(axis=1, keepdims=True)
+        nrm = np.sqrt(np.sum(np.abs(yr) ** 2, axis=1))
+        good = nrm > 0
+        yg = yr[good] / nrm[good][:, None]
+
+        explicit = (yg @ yg.conj().T).real.sum()
+        shortcut = float(np.sum(np.abs(yg.sum(axis=0)) ** 2))
+        assert np.isclose(shortcut, explicit, rtol=1e-9, atol=0)
+
+        # And through the public function, against a reference built the old way.
+        neff_row = good.sum() ** 2 / explicit
+        expected = min(
+            max(
+                (shape[2] / _integrated_autocorr_time(yc, 2))
+                * (shape[1] / _integrated_autocorr_time(yc, 1))
+                * neff_row,
+                1.0,
+            ),
+            y.size,
+        )
+        assert np.isclose(_effective_sample_size(y), expected, rtol=1e-9, atol=0)
+
+
+def test_autocorr_matches_explicit_lags():
+    """FFT lags preserve the overlap normalisation and first-negative window."""
+    rng = np.random.default_rng(42)
+    for shape in ((7, 3, 11), (2, 5, 150), (4, 1, 3)):
+        for complex_data in (False, True):
+            arr = rng.normal(size=shape)
+            if complex_data:
+                arr = arr + 1j * rng.normal(size=shape)
+            for data in (arr, np.cumsum(arr, axis=-1), np.ones(shape), np.zeros(shape)):
+                for axis in range(3):
+                    n = shape[axis]
+                    m = np.moveaxis(data, axis, -1).reshape(-1, n)
+                    g0 = np.mean(np.sum(np.abs(m) ** 2, axis=1))
+                    expected = 1.0
+                    if n >= 4 and g0 > 0:
+                        for k in range(1, n):
+                            rho = np.mean(np.sum(m[:, :n-k] * np.conj(m[:, k:]), axis=1).real) / g0
+                            if rho <= 0:
+                                break
+                            expected += 2 * (1 - k / n) * rho
+                    np.testing.assert_allclose(_integrated_autocorr_time(data, axis), expected, rtol=1e-12)
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_autocorr_matches_long_correlated_window(dtype):
+    """Correlated residuals exercise many lags before the Sokal window closes.
+
+    White noise can stop at lag one, hiding the cost this FFT replaces. A smooth
+    complex oscillation has zero time mean and stays positively correlated for
+    roughly a quarter of the 150-sample series, in either production precision.
+    """
+    n = 150
+    rng = np.random.default_rng(17)
+    amplitude = rng.normal(size=(4, 3, 1)) + 1j * rng.normal(size=(4, 3, 1))
+    residual = (amplitude * np.exp(2j * np.pi * np.arange(n) / n)).astype(dtype)
+    residual -= residual.mean()
+    m = residual.reshape(-1, n)
+    g0 = np.mean(np.sum(np.abs(m) ** 2, axis=1))
+    expected = 1.0
+    positive_lags = 0
+    for k in range(1, n):
+        rho = np.mean(np.sum(m[:, :n-k] * np.conj(m[:, k:]), axis=1).real) / g0
+        if rho <= 0:
+            break
+        positive_lags += 1
+        expected += 2 * (1 - k / n) * rho
+
+    # Pin the long window as well as the result, so this cannot silently become
+    # another early-exit white-noise test when the residual fixture changes.
+    assert n // 5 < positive_lags < n // 3
+    assert expected > 20
+    tolerance = 1e-6 if dtype == np.complex64 else 1e-12
+    np.testing.assert_allclose(
+        _integrated_autocorr_time(residual, axis=2), expected, rtol=tolerance,
+    )

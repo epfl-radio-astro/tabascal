@@ -959,7 +959,7 @@ class TestDeclaredTimeScale:
         # Leaves the in-memory MS patched in behind ``read_ms`` for the call below.
         data = run_reader(self._times(), keywords=_keywords("TAI"))
 
-        config = SimpleNamespace(ms_path="in-memory.ms")
+        config = SimpleNamespace(ms_path="in-memory.ms", args={"data": {}})
         TabConfig.read_ms_params(config, None, "xx", "DATA")
 
         assert config.time_scale == "tai"

@@ -553,7 +553,15 @@ class TabConfig:
 
     def read_ms_params(self, freq: float, corr: str, data_col: str):
 
-        ms_params = read_ms(self.ms_path, freq, None, corr, data_col)
+        # Read off the config if there is one. This method is deliberately
+        # callable unbound, on an object carrying nothing but an ms_path --
+        # tests/test_noise.py does exactly that -- so the chunk is an optional
+        # tuning knob here rather than a required attribute.
+        data_args = getattr(self, "args", {}).get("data", {})
+        ms_params = read_ms(
+            self.ms_path, freq, None, corr, data_col,
+            row_chunk=data_args.get("row_chunk"),
+        )
 
         self.phase_centre = {"ra": ms_params["ra"], "dec": ms_params["dec"]}
         self.dish_d = ms_params["dish_d"]
