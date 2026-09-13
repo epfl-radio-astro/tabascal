@@ -3,6 +3,7 @@ from tabascal.components import validate_component_order
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
     baseline_sharding,
+    baselines_divide,
     constrain_baseline_state,
     constrain_rfi_state,
     make_global,
@@ -244,7 +245,9 @@ class TabConfig:
             # the way to the likelihood. The source route has no baseline axis
             # to divide and leaves them whole on every device.
             vis_sharding = (
-                baseline_sharding() if sharding_baselines() else replicated_sharding()
+                baseline_sharding()
+                if sharding_baselines() and baselines_divide(self.n_bl)
+                else replicated_sharding()
             )
             self.vis_obs = make_global(self.vis_obs, vis_sharding)
             self.flags = make_global(self.flags, vis_sharding)

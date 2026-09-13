@@ -177,3 +177,46 @@ def test_the_operator_axis_matches_the_signal_it_is_given(monkeypatch, cls):
         expected = len(comp.groups[i].antennas) + int(comp.group_has_ghost[i])
         assert widened == expected
         assert not comp.group_has_ghost[i], "this case was meant to need no ghosts"
+
+
+@pytest.mark.parametrize("n_ant,n_bl,split", [(16, 120, False), (16, 119, False), (32, 496, False), (32, 495, False), (40, 780, True), (4, 3, False)])
+def test_analytic_values_and_derivatives_across_device_shapes(monkeypatch, n_ant, n_bl, split):
+    _needs_analytic(PolyInterpVisHybridFFI)
+    requirements = np.where(np.arange(n_bl) < n_bl // 4, 30, 2) if split else np.full(n_bl, 30)
+    cfg, state = _case(n_ant=n_ant, n_bl=n_bl, requirements=requirements, cls=PolyInterpVisHybridFFI)
+    if not split:
+        cfg.args["rfi"]["poly_analytic"] = {}  # default must exercise analytic-only
+    amp = state["rfi_A"]
+    tangent = jnp.conj(amp) * 0.13
+    cot = jnp.arange(n_bl * cfg.n_freq * cfg.n_time).reshape(n_bl, cfg.n_freq, cfg.n_time) / 1000
+    def evaluate(sharded):
+        with monkeypatch.context() as patch:
+            patch.setenv("TABASCAL_SHARD_AXIS", "baseline")
+            patch.setattr(rfi_vis, "sharding_baselines", dist.sharding_baselines if sharded else lambda: False)
+            patch.setattr(rfi_vis, "psum_over_rfi", lambda fn: fn)
+            call, comp = _component_call(PolyInterpVisHybridFFI, cfg, state)
+            value, jvp = jax.jit(lambda x, dx: jax.jvp(call, (x,), (dx,)))(amp, tangent)
+            grad = jax.jit(jax.grad(lambda x: jnp.real(jnp.sum(call(x) * cot))))(amp)
+            return tuple(np.asarray(x) for x in (value, jvp, grad)), comp
+    want, _ = evaluate(False)
+    got, comp = evaluate(True)
+    for actual, expected in zip(got, want):
+        np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
+    assert got[0].shape == (n_bl, cfg.n_freq, cfg.n_time)
+    if split:
+        assert max(comp.group_n_ghost) > 1
+    else:
+        assert comp.analytic_groups == [True]
+
+
+def test_analytic_sharding_does_not_require_quadrature_seam(monkeypatch):
+    cfg, _ = _case(requirements=np.full(8, 30), cls=PolyInterpVisHybridFFI)
+    cfg.args["rfi"]["poly_analytic"] = {}
+    monkeypatch.setenv("TABASCAL_SHARD_AXIS", "baseline")
+    monkeypatch.setattr(rfi_vis, "eval_with_indices", None)
+    comp = PolyInterpVisHybridFFI()
+    comp.setup(cfg)
+    assert comp.analytic_groups == [True]
+    monkeypatch.setattr(rfi_vis, "analytic_eval_with_indices", None)
+    with pytest.raises(RuntimeError, match="eval_with_indices"):
+        PolyInterpVisHybridFFI().setup(cfg)

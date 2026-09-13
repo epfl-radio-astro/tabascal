@@ -116,11 +116,10 @@ def split_group_over_devices(group: PolyTimeGroup, n_dev: int) -> tuple[PolyTime
 class DeviceGroup:
     """One device's share of a group, shaped identically on every device.
 
-    ``a1``/``a2`` index the group's antenna axis extended by one: the last
-    index is a ghost antenna carrying no signal. ``n_real`` rows of the
-    operator's output are real baselines and the rest are ghosts, which are
-    sliced off before anything is written, so they never reach the visibility
-    array. ``positions`` says where the real rows belong in the device's own
+    ``a1``/``a2`` index the group's antenna axis extended by
+    ``n_ghost_antennas`` dark antennas, the same count on every device.
+    ``n_real`` output rows are real baselines; ghosts scatter to a spare row
+    that is discarded before returning the visibility array. ``positions`` says where the real rows belong in the device's own
     block of it.
     """
 
@@ -128,6 +127,7 @@ class DeviceGroup:
     a1: NDArray
     a2: NDArray
     n_real: int
+    n_ghost_antennas: int = 0
 
     @property
     def n_padded(self) -> int:
@@ -140,18 +140,21 @@ def device_groups(
 ) -> tuple[DeviceGroup, ...]:
     """Split a group by which device owns each baseline, padding to one shape.
 
-    Device ``d`` owns the contiguous range ``[d*block, (d+1)*block)`` of the
+    With ``block = ceil(n_bl_total / n_dev)``, device ``d`` owns the
+    contiguous range ``[d*block, (d+1)*block)`` of the
     visibility array in the order the data already has, so nothing is
     reordered: the observed visibilities, the flags and the noise are simply
     sharded along the axis they already have, and every array downstream keeps
     that split all the way to the likelihood. A device therefore never needs
     anyone else's baselines and nothing is gathered back together -- only the
-    scalar likelihood is reduced across devices.
+    scalar likelihood is reduced across devices. For indivisible totals the
+    last block extends past the real array; the caller trims those rows and
+    uses replicated placement at component boundaries.
 
     Which of a group's baselines land on a device is then whatever the data
     ordering puts there, so the counts differ between devices. ``shard_map``
     runs one program, so they are padded up to a common count with dark ghost
-    baselines: pairs ``(j, ghost)`` against an antenna carrying no signal,
+    baselines: distinct pairs against extra antennas carrying no signal,
     which collide with no real baseline, stay distinct from each other, and
     contribute neither visibility nor gradient -- the same device
     :func:`~tabascal.distributed.padded_rfi_count` uses on the source axis.
@@ -166,12 +169,9 @@ def device_groups(
     """
     if isinstance(n_dev, bool) or not isinstance(n_dev, (int, np.integer)) or n_dev < 1:
         raise ValueError("n_dev must be a positive whole number")
-    if n_bl_total % n_dev:
-        raise ValueError(
-            f"cannot split {n_bl_total} baselines evenly over {n_dev} devices "
-            f"({n_bl_total % n_dev} left over); shard_map needs one block size"
-        )
-    block = n_bl_total // n_dev
+    if n_bl_total < 1:
+        raise ValueError("n_bl_total must be positive")
+    block = (n_bl_total + n_dev - 1) // n_dev
     idx = np.asarray(group.baseline_indices)
     owner = idx // block
     shares = [idx[owner == d] for d in range(n_dev)]
@@ -180,24 +180,27 @@ def device_groups(
 
     per = max((len(s) for s in shares), default=0)
     ghost = len(group.antennas)
-    if per - min((len(s) for s in shares), default=0) > len(group.antennas):
-        raise ValueError(
-            f"a device needs up to {per - min(len(s) for s in shares)} ghost "
-            f"baselines but the group's antenna axis is only {len(group.antennas)} "
-            "wide, so they cannot all be distinct pairs"
-        )
+    max_pad = per - min((len(s) for s in shares), default=0)
+    # Each extra dark antenna supplies `ghost` distinct real/dark pairs.
+    # Size this from ownership imbalance, which can be much larger than n_ant.
+    n_ghost = (max_pad + ghost - 1) // ghost if max_pad else 0
 
     out = []
     for d in range(n_dev):
         real = len(shares[d])
         pad = per - real
-        a1 = np.concatenate((mine_a1[d], np.arange(pad, dtype=np.asarray(group.a1).dtype)))
-        a2 = np.concatenate((mine_a2[d], np.full(pad, ghost, dtype=np.asarray(group.a2).dtype)))
+        ghost_rows = np.arange(pad)
+        a1 = np.concatenate((
+            mine_a1[d], (ghost_rows % ghost).astype(np.asarray(group.a1).dtype),
+        ))
+        a2 = np.concatenate((
+            mine_a2[d], (ghost + ghost_rows // ghost).astype(np.asarray(group.a2).dtype),
+        ))
         # Ghost rows are scattered to `block`, the spare row the caller adds
         # and discards, so every device scatters the same number of rows.
         rows = (shares[d] - d * block).astype(np.int32) + offset
         out.append(DeviceGroup(
-            np.concatenate((rows, np.full(pad, block, dtype=np.int32))), a1, a2, real,
+            np.concatenate((rows, np.full(pad, block, dtype=np.int32))), a1, a2, real, n_ghost,
         ))
     return tuple(out)
 

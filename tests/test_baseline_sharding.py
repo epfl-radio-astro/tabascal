@@ -267,11 +267,13 @@ class TestGhostPaddedDeviceGroups:
         for shard in device_groups(group, 4, n_bl_total=28):
             assert shard.n_real == len(shard.a1) == 7
 
-    def test_an_indivisible_total_is_refused(self):
+    def test_an_indivisible_total_rounds_up_the_internal_blocks(self):
         from tabascal.poly_interp import device_groups
         group = self.a_group()
-        with pytest.raises(ValueError, match="left over"):
-            device_groups(group, 4, n_bl_total=66)
+        shards = device_groups(group, 4, n_bl_total=66)
+        assert [s.n_real for s in shards] == [17, 17, 17, 15]
+        assert all(s.n_padded == 17 for s in shards)
+        assert sum(s.n_real for s in shards) == 66
 
     def test_one_device_leaves_the_group_untouched(self):
         from tabascal.poly_interp import device_groups
@@ -279,3 +281,59 @@ class TestGhostPaddedDeviceGroups:
         only, = device_groups(group, 1, n_bl_total=66)
         assert only.n_real == len(group.baseline_indices)
         assert np.array_equal(only.a1, group.a1)
+
+
+def test_production_ownership_imbalance_adds_enough_dark_antennas():
+    from tabascal.poly_interp import device_groups, make_poly_time_group
+    a1, a2 = np.triu_indices(512, k=1)
+    block = len(a1) // 4
+    group = make_poly_time_group(np.ones(len(a1)), a1, a2, np.arange(block))
+    shards = device_groups(group, 4, len(a1))
+    assert [s.n_real for s in shards] == [block, 0, 0, 0]
+    assert all(s.n_ghost_antennas == 64 for s in shards)
+    for shard in shards:
+        assert shard.n_padded == block
+        assert len(set(zip(shard.a1, shard.a2))) == block
+        assert np.all(shard.a1 < 512)
+        assert np.all(shard.a2 < 576)
+        assert np.all(shard.a2[shard.n_real:] >= 512)
+
+
+def test_initialization_preserves_baselines_and_replicates_sources():
+    assert "OK" in run_on_four_devices('''
+    os.environ["TABASCAL_SHARD_AXIS"] = "baseline"
+    from tabascal.distributed import (
+        shard_pytree, baseline_sharding, make_global, constrain_baseline_state,
+        replicated_sharding, sharded_rfi_zeros, padded_rfi_count,
+    )
+    x = make_global(np.ones((8, 3, 2)), baseline_sharding())
+    tree = {"ast_k_r_base": x, "ast_vis/mu_ast_k": x,
+            "vis_ast": x, "rfi_A": jnp.ones((3, 8, 2)),
+            "gains": jnp.ones((8, 3, 2))}
+    placed = shard_pytree(tree, 3, 8)
+    for key in ("ast_k_r_base", "ast_vis/mu_ast_k", "vis_ast"):
+        assert placed[key] is x
+    assert placed["rfi_A"].sharding == replicated_sharding()
+    assert placed["gains"].sharding == replicated_sharding()
+    assert sharded_rfi_zeros((3, 8, 2), complex).sharding == replicated_sharding()
+    assert padded_rfi_count(3) == 3
+    grad = jax.jit(jax.grad(lambda p: jnp.sum(p ** 2)))(placed["ast_k_r_base"])
+    assert grad.sharding == baseline_sharding()
+    # Changing layout must use a device reshard, not a numpy host roundtrip.
+    old_asarray = np.asarray
+    def no_host(value, *args, **kwargs):
+        if isinstance(value, jax.Array):
+            raise AssertionError("global array was fetched through numpy")
+        return old_asarray(value, *args, **kwargs)
+    np.asarray = no_host
+    y = make_global(x, replicated_sharding())
+    np.asarray = old_asarray
+    np.testing.assert_array_equal(y, x)
+    assert y.sharding == replicated_sharding()
+    # An antenna count equal to n_bl must not select the gains for sharding.
+    constrained = jax.jit(lambda t: constrain_baseline_state(t, 8))(placed)
+    assert constrained["gains"].sharding == replicated_sharding()
+    odd = shard_pytree({"vis_ast": jnp.ones((7, 2))}, 3, 7)
+    assert odd["vis_ast"].sharding == replicated_sharding()
+    print("OK")
+    ''')

@@ -154,24 +154,24 @@ def rfi_sharding() -> NamedSharding:
 
 def replicated_sharding() -> NamedSharding:
     """Sharding that replicates an array on every device of the mesh."""
-    return NamedSharding(rfi_mesh(), P())
+    return NamedSharding(baseline_mesh() if sharding_baselines() else rfi_mesh(), P())
 
 
 def padded_rfi_count(n_rfi: int) -> int:
-    """Smallest multiple of the device count >= ``n_rfi``; ``n_rfi`` when not sharding.
+    """Pad sources only when splitting the source axis across devices.
 
     The RFI axis must divide evenly across the mesh, so TabConfig pads the satellite
     list up to this count with dark dummy sources (zero prior mean and zero init on
     their signal latents, hence exactly zero signal and zero gradient forever).
     """
-    if not sharding_enabled():
+    if not sharding_enabled() or sharding_baselines():
         return n_rfi
     n_dev = jax.device_count()
     return n_rfi + (-n_rfi) % n_dev
 
 
 def make_global(x, sharding: NamedSharding) -> jax.Array:
-    """Build a (possibly multi-process) global array from a full per-process host copy.
+    """Globalize a full local copy, or collectively reshard an existing global array.
 
     Every process holds the complete array (they all read the same MS / run the same
     setup), so the callback just slices the requested shard out of the local copy. This
@@ -179,6 +179,15 @@ def make_global(x, sharding: NamedSharding) -> jax.Array:
     multi-process layouts, unlike ``jax.device_put`` which historically rejects
     cross-process shardings.
     """
+    if isinstance(x, jax.Array):
+        if x.sharding == sharding:
+            return x
+        # A global array may only be partly addressable on this process.
+        # Reshard collectively instead of trying to fetch it through numpy.
+        if not x.is_fully_addressable or sharding.is_fully_addressable:
+            return jax.jit(lambda value: value, out_shardings=sharding)(x)
+        # Setup also supplies full process-local device arrays. These are
+        # host-backed inputs to a global mesh, not existing global arrays.
     x_np = np.asarray(x)
     return jax.make_array_from_callback(x_np.shape, sharding, lambda idx: x_np[idx])
 
@@ -188,8 +197,26 @@ def _wants_rfi_axis(key: str, leaf, n_rfi: int) -> bool:
     return name in RFI_AXIS_NAMES and np.ndim(leaf) >= 1 and np.shape(leaf)[0] == n_rfi
 
 
-def shard_pytree(tree: dict, n_rfi: int) -> dict:
-    """Device-put a flat dict of arrays: RFI-axis entries sharded, the rest replicated.
+BASELINE_AXIS_NAMES = frozenset({
+    "ast_k_r_base", "ast_k_i_base", "sigma_ast_k", "mu_ast_k",
+    "vis_ast", "vis_rfi", "vis_obs", "flags", "noise",
+})
+
+
+def _wants_baseline_axis(key: str, leaf, n_bl: int | None) -> bool:
+    return (
+        n_bl is not None and key.rsplit("/", 1)[-1] in BASELINE_AXIS_NAMES
+        and np.ndim(leaf) >= 1 and np.shape(leaf)[0] == n_bl
+        and baselines_divide(n_bl)
+    )
+
+
+def shard_pytree(tree: dict, n_rfi: int, n_bl: int | None = None) -> dict:
+    """Place model arrays on the selected source or baseline layout.
+
+    Baseline parameters, constants and state share the same layout, so optimizer
+    buffers follow it too. An indivisible visibility axis stays replicated at
+    component boundaries; the FFI map pads its internal work and trims it.
 
     Identity when sharding is off. Leaves that already carry the requested sharding
     (e.g. placeholders created via :func:`sharded_rfi_zeros`) are passed through
@@ -201,7 +228,10 @@ def shard_pytree(tree: dict, n_rfi: int) -> dict:
 
     out = {}
     for key, leaf in tree.items():
-        want = rfi_sharding() if _wants_rfi_axis(key, leaf, n_rfi) else replicated_sharding()
+        if sharding_baselines():
+            want = baseline_sharding() if _wants_baseline_axis(key, leaf, n_bl) else replicated_sharding()
+        else:
+            want = rfi_sharding() if _wants_rfi_axis(key, leaf, n_rfi) else replicated_sharding()
         if isinstance(leaf, jax.Array) and leaf.sharding == want:
             out[key] = leaf
         else:
@@ -214,7 +244,8 @@ def sharded_rfi_zeros(shape: tuple, dtype) -> jax.Array:
 
     Used for the big ``rfi_A``/``rfi_phase`` state placeholders: each device only ever
     allocates its own shard, which is what lets a run hold more RFI sources than one
-    GPU fits. Plain ``jnp.zeros`` when sharding is off.
+    GPU fits. Baseline sharding replicates the source axis. Plain ``jnp.zeros``
+    when sharding is off.
     """
     if not sharding_enabled():
         return jnp.zeros(shape, dtype=dtype)
@@ -222,7 +253,7 @@ def sharded_rfi_zeros(shape: tuple, dtype) -> jax.Array:
     # under f32): numpy would otherwise hand the callback f64/c128 buffers that
     # disagree with the array dtype jax expects when x64 is off.
     dtype = jnp.zeros((), dtype=dtype).dtype
-    sharding = rfi_sharding()
+    sharding = replicated_sharding() if sharding_baselines() else rfi_sharding()
     return jax.make_array_from_callback(
         tuple(shape), sharding, lambda idx: np.zeros(_index_shape(shape, idx), dtype=dtype)
     )
@@ -289,10 +320,9 @@ def constrain_baseline_state(state: dict, n_bl: int) -> dict:
     sharding = baseline_sharding()
     out = dict(state)
     for key, leaf in state.items():
-        value = getattr(leaf, "shape", None)
-        # Only the arrays that actually lead with the baseline axis; the
-        # per-antenna and per-source entries are replicated on purpose.
-        if value and value[0] == n_bl:
+        # Match both the name and shape: an antenna/source count can equal
+        # the baseline count without making that dimension a baseline axis.
+        if _wants_baseline_axis(key, leaf, n_bl):
             out[key] = lax.with_sharding_constraint(leaf, sharding)
     return out
 
