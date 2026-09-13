@@ -252,6 +252,33 @@ def constrain_rfi_state(state: dict, n_rfi: int) -> dict:
     return out
 
 
+def constrain_baseline_state(state: dict, n_bl: int) -> dict:
+    """Pin every per-baseline state entry to the baseline sharding.
+
+    The RFI visibility comes out of ``map_over_baselines`` already divided,
+    but the astronomical model and the gains are ordinary JAX and are built
+    from parameters that arrive replicated, so XLA has no reason to divide
+    what they produce -- it computes a whole ``(n_bl, n_freq, n_time)`` array
+    on every device and then reshards it to add the two together. Saying where
+    these belong, between components, is what keeps the whole forward on one
+    layout.
+
+    The counterpart of :func:`constrain_rfi_state` for the other axis, and a
+    no-op unless this run shards baselines.
+    """
+    if not sharding_baselines():
+        return state
+    sharding = baseline_sharding()
+    out = dict(state)
+    for key, leaf in state.items():
+        value = getattr(leaf, "shape", None)
+        # Only the arrays that actually lead with the baseline axis; the
+        # per-antenna and per-source entries are replicated on purpose.
+        if value and value[0] == n_bl:
+            out[key] = lax.with_sharding_constraint(leaf, sharding)
+    return out
+
+
 def psum_over_rfi(local_fn: Callable) -> Callable:
     """Map a per-RFI-shard visibility function over the mesh and sum across shards.
 

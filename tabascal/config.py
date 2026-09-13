@@ -3,6 +3,7 @@ from tabascal.components import validate_component_order
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
     baseline_sharding,
+    constrain_baseline_state,
     constrain_rfi_state,
     make_global,
     replicated_sharding,
@@ -822,11 +823,18 @@ class Model:
     def build_forward(self):
         forwards = [comp.build_forward() for comp in self.components]
         n_rfi = self.n_rfi
+        # The baseline count the visibilities carry, taken from the array
+        # itself rather than a config the model does not keep.
+        n_bl = self.state["vis_obs"].shape[0]
 
         def forward(params, state, constants):
 
             for sub_forward in forwards:
                 state = sub_forward(params, state, constants)
+                # Under the baseline route the visibilities stay divided from
+                # one component to the next, so the sky model is computed on
+                # each device's own rows rather than whole and then resharded.
+                state = constrain_baseline_state(state, n_bl)
                 # Keep the per-RFI fine grids (rfi_A/rfi_phase -- the memory hogs)
                 # pinned to the RFI sharding between components, so XLA never
                 # materializes a replicated copy. No-op on a single device.

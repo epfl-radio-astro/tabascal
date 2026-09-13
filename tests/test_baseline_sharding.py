@@ -40,6 +40,10 @@ def run_on_four_devices(body: str):
     return out.stdout
 
 
+@pytest.mark.skipif(
+    __import__("jax").device_count() > 1,
+    reason="asserts the no-sharding path; the suite was launched with several devices",
+)
 class TestSingleDevice:
     """With one device the map must vanish, exactly as the source route does."""
 
