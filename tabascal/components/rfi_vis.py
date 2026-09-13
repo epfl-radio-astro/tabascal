@@ -29,9 +29,9 @@ except ImportError:  # an ri_kernels release without the data-grid operator
     RFIInterpVisOp = None
 
 try:
-    from ri_kernels.jax_api import eval_with_indices
+    from ri_kernels.jax_api import analytic_eval_with_indices, eval_with_indices
 except ImportError:  # an ri_kernels release that keeps its indices to itself
-    eval_with_indices = None
+    analytic_eval_with_indices = eval_with_indices = None
 
 try:
     from ri_kernels.jax_api import RFIAnalyticVisOp
@@ -597,6 +597,14 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
                 for group in self.groups
             ]
 
+    def _device_op_class(self, i):
+        """The operator this group's baselines go through. Quadrature here."""
+        return RFIInterpVisOp
+
+    def _group_eval_with_indices(self, i):
+        """The seam that takes a device's own index arrays for this group."""
+        return eval_with_indices
+
     def _setup_device_ops(self):
         """Build one operator per group *per device*, and stack their indices.
 
@@ -627,10 +635,10 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
         ]
         self._device_ops = [
             tuple(
-                RFIInterpVisOp(len(group.antennas) + 1, shard.a1, shard.a2)
+                self._device_op_class(i)(len(group.antennas) + 1, shard.a1, shard.a2)
                 for shard in shards
             )
-            for group, shards in zip(self.groups, self._device_groups)
+            for i, (group, shards) in enumerate(zip(self.groups, self._device_groups))
         ]
         # A ghost row is only needed where a group actually had to be padded.
         self.group_has_ghost = [
@@ -736,6 +744,7 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
         groups = tuple(range(len(self.groups)))
         identity = tuple(self.identity_antennas)
         has_ghost = tuple(self.group_has_ghost)
+        evals = tuple(self._group_eval_with_indices(i) for i in groups)
         names = ("a1", "a1_sorter", "a1_start", "a2", "a2_sorter", "a2_start",
                  "pair_index", "tile_pairs")
         per_baseline = (0, 1, 3, 4)
@@ -789,7 +798,7 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
                         )
                     w_time, start_time, dt = tab[i]
                     vis = vis.at[idx[f"pos_{i}"]].set(
-                        eval_with_indices(
+                        evals[i](
                             idx[i], amp, phase, delay, w_freq, start_freq,
                             w_time, start_time, dnu_mhz, dt, freqs_mhz,
                         )
@@ -812,8 +821,24 @@ class PolyInterpVisHybridFFI(PolyInterpVisHybrid):
     fixed trajectory inputs. Requires ri_kernels from the interp-analytic branch.
     """
 
+    def _device_op_class(self, i):
+        return RFIAnalyticVisOp if self.analytic_groups[i] else RFIInterpVisOp
+
+    def _group_eval_with_indices(self, i):
+        if self.analytic_groups[i]:
+            return partial(
+                analytic_eval_with_indices, segments=self.segments,
+                terms=self.terms, cubic_terms=self.cubic_terms,
+            )
+        return eval_with_indices
+
     def setup(self, config):
         super().setup(config)
+        if sharding_baselines():
+            # The same per-device operators the quadrature route builds, but
+            # each group takes whichever of the two kernels its cut chose.
+            self._setup_device_ops()
+            return
         self._ops = []
         for group, analytic in zip(self.groups, self.analytic_groups):
             op_cls = RFIAnalyticVisOp if analytic else RFIInterpVisOp
@@ -833,6 +858,10 @@ class PolyInterpVisHybridFFI(PolyInterpVisHybrid):
         return evaluate
 
     build_forward = PolyInterpVisVariableFFI.build_forward
+    _setup_device_ops = PolyInterpVisVariableFFI._setup_device_ops
+    _device_constants = PolyInterpVisVariableFFI._device_constants
+    _extra_constants = PolyInterpVisVariableFFI._extra_constants
+    _build_sharded_vis = PolyInterpVisVariableFFI._build_sharded_vis
 
 
 class RiemannVisVariable(Component):

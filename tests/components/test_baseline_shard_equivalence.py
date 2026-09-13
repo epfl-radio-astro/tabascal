@@ -17,7 +17,9 @@ import pytest
 
 import tabascal.distributed as dist
 from tabascal.components import rfi_vis
-from tabascal.components.rfi_vis import PolyInterpVisVariableFFI, eval_with_indices
+from tabascal.components.rfi_vis import (
+    PolyInterpVisHybridFFI, PolyInterpVisVariableFFI, eval_with_indices,
+)
 from .test_poly_interp_vis_variable import _component_call
 
 pytestmark = [
@@ -32,7 +34,7 @@ pytestmark = [
 ]
 
 
-def _case(n_ant=8, n_bl=8, requirements=None):
+def _case(n_ant=8, n_bl=8, requirements=None, cls=None):
     """A case whose baseline count divides over four devices.
 
     ``requirements`` splits the baselines into groups with different sampling,
@@ -48,6 +50,12 @@ def _case(n_ant=8, n_bl=8, requirements=None):
         int_time=2., chan_width=1e6, freqs=np.array([1.4e9, 1.401e9, 1.402e9]),
         args={"rfi": {}}, rfi_time_requirements=np.asarray(requirements),
     )
+    if cls is PolyInterpVisHybridFFI:
+        # Without a cut the hybrid puts everything on quadrature, which is one
+        # group that divides evenly -- so the split would never need a ghost
+        # and the padding would go untested. This sends the fast baselines to
+        # the closed form instead, which is what the benchmark runs.
+        cfg.args["rfi"]["poly_analytic"] = {"quadrature_limit": 10}
     rng = np.random.default_rng(7)
     shape = (2, n_ant, cfg.n_freq, cfg.n_time)
     state = {
@@ -59,15 +67,38 @@ def _case(n_ant=8, n_bl=8, requirements=None):
     return cfg, state
 
 
-def _unsharded(monkeypatch, cfg, state):
+# The quadrature route and the hybrid one, which sends the fast baselines
+# through the closed form instead. The benchmark configuration is all analytic,
+# so the hybrid is the route that actually has to shard.
+ROUTES = [PolyInterpVisVariableFFI, PolyInterpVisHybridFFI]
+ROUTE_IDS = ["quadrature", "hybrid"]
+
+
+def _needs_analytic(cls):
+    """Skip the hybrid route where the closed-form kernel is not in the build.
+
+    The class can be importable while the shared library has no analytic
+    kernels -- the same check the other hybrid tests make.
+    """
+    if cls is not PolyInterpVisHybridFFI:
+        return
+    if rfi_vis.RFIAnalyticVisOp is None:
+        pytest.skip("the hybrid cut needs ri_kernels with RFIAnalyticVisOp")
+    from ri_kernels.jax_api import rfi_analytic_vis_op as analytic
+    suffix = "_GPU" if jax.default_backend() == "gpu" else ""
+    if getattr(analytic, "_TAB_LIB_ANALYTIC" + suffix) is None:
+        pytest.skip("the analytic kernels are not built for this backend")
+
+
+def _unsharded(monkeypatch, cfg, state, cls):
     """One device's answer: no map, no padding, no ghosts."""
     monkeypatch.setattr(rfi_vis, "sharding_baselines", lambda: False)
     monkeypatch.setattr(rfi_vis, "psum_over_rfi", lambda fn: fn)
-    call, comp = _component_call(PolyInterpVisVariableFFI, cfg, state)
+    call, comp = _component_call(cls, cfg, state)
     return np.asarray(jax.jit(call)(state["rfi_A"])), comp
 
 
-def _baseline_sharded(monkeypatch, cfg, state):
+def _baseline_sharded(monkeypatch, cfg, state, cls):
     # Undo whatever the reference patched: monkeypatch lasts to the end of the
     # test, so leaving it in place would build the unsharded component again
     # and compare it with itself.
@@ -75,31 +106,35 @@ def _baseline_sharded(monkeypatch, cfg, state):
     monkeypatch.setattr(rfi_vis, "psum_over_rfi", dist.psum_over_rfi)
     monkeypatch.setenv("TABASCAL_SHARD_AXIS", "baseline")
     dist.baseline_mesh.cache_clear()
-    call, comp = _component_call(PolyInterpVisVariableFFI, cfg, state)
+    call, comp = _component_call(cls, cfg, state)
     # If this is missing the sharded path was not taken and any agreement below
     # would be vacuous.
     assert hasattr(comp, "_device_groups"), "the sharded path was not built"
     return np.asarray(jax.jit(call)(state["rfi_A"])), comp
 
 
-def test_four_devices_compute_what_one_computes(monkeypatch):
-    cfg, state = _case()
-    want, _ = _unsharded(monkeypatch, cfg, state)
-    got, comp = _baseline_sharded(monkeypatch, cfg, state)
+@pytest.mark.parametrize("cls", ROUTES, ids=ROUTE_IDS)
+def test_four_devices_compute_what_one_computes(monkeypatch, cls):
+    _needs_analytic(cls)
+    cfg, state = _case(cls=cls)
+    want, _ = _unsharded(monkeypatch, cfg, state, cls)
+    got, comp = _baseline_sharded(monkeypatch, cfg, state, cls)
     assert got.shape == want.shape == (cfg.n_bl, cfg.n_freq, cfg.n_time)
     np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-8)
 
 
-def test_the_ghosts_were_real_and_changed_nothing(monkeypatch):
+@pytest.mark.parametrize("cls", ROUTES, ids=ROUTE_IDS)
+def test_the_ghosts_were_real_and_changed_nothing(monkeypatch, cls):
+    _needs_analytic(cls)
     """The padding has to be exercised, not merely available.
 
     A ghost landing on a real row would be wrong in a way no shape check
     catches, so assert the split actually needed padding and that the answer
     still matches the unpadded one.
     """
-    cfg, state = _case()
-    want, _ = _unsharded(monkeypatch, cfg, state)
-    got, comp = _baseline_sharded(monkeypatch, cfg, state)
+    cfg, state = _case(cls=cls)
+    want, _ = _unsharded(monkeypatch, cfg, state, cls)
+    got, comp = _baseline_sharded(monkeypatch, cfg, state, cls)
     padded = [
         shard.n_padded - shard.n_real
         for shards in comp._device_groups for shard in shards
@@ -108,11 +143,14 @@ def test_the_ghosts_were_real_and_changed_nothing(monkeypatch):
     np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-8)
 
 
-def test_an_even_split_needs_no_ghosts_and_still_agrees(monkeypatch):
+@pytest.mark.parametrize("cls", ROUTES, ids=ROUTE_IDS)
+def test_an_even_split_needs_no_ghosts_and_still_agrees(monkeypatch, cls):
+    _needs_analytic(cls)
     """The other half of the same claim: padding is absent when unnecessary."""
     cfg, state = _case(requirements=np.full(8, 30))     # one group, 8 over 4
-    want, _ = _unsharded(monkeypatch, cfg, state)
-    got, comp = _baseline_sharded(monkeypatch, cfg, state)
+    # No cut: both routes see a single group here, which is the point.
+    want, _ = _unsharded(monkeypatch, cfg, state, cls)
+    got, comp = _baseline_sharded(monkeypatch, cfg, state, cls)
     padded = [
         shard.n_padded - shard.n_real
         for shards in comp._device_groups for shard in shards
