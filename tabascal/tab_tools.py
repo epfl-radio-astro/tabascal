@@ -217,13 +217,24 @@ def _effective_sample_size(resid: np.ndarray) -> float:
 
     # Row axis is unordered (baseline/antenna index is not a sequence), so use the full
     # correlation matrix rather than an autocorrelation: N_eff_row = n_row^2 / sum(rho_ij).
+    # Only the *total* of that matrix is wanted, and it factors:
+    #
+    #     sum_ij (Y Y^H)_ij = sum_ij sum_k Y_ik conj(Y_jk) = sum_k |sum_i Y_ik|^2
+    #
+    # so the column sums give it without forming the matrix. That matters at scale:
+    # the row axis is baselines, so the Gram is n_bl x n_bl -- 73536^2 (43 GB) at 384
+    # stations and 130816^2 (137 GB) at 512, on the host, twice per fit. Summing the
+    # columns instead is linear in the rows and keeps nothing but one feature vector.
     yr = y.reshape(n_row, -1)
     yr = yr - yr.mean(axis=1, keepdims=True)
     nrm = np.sqrt(np.sum(np.abs(yr) ** 2, axis=1))
     good = nrm > 0
     if good.sum() >= 2:
         yg = yr[good] / nrm[good][:, None]
-        neff_row = good.sum() ** 2 / (yg @ yg.conj().T).real.sum()
+        # Real by construction: a sum of squared magnitudes. Guard the degenerate
+        # case where the normalised rows cancel, which no correlation can undo.
+        total = float(np.sum(np.abs(yg.sum(axis=0)) ** 2))
+        neff_row = good.sum() ** 2 / total if total > 0 else float(good.sum())
     else:
         neff_row = float(n_row)
 

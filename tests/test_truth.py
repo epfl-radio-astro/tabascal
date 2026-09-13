@@ -21,7 +21,12 @@ from tabascal.truth import (
     read_true_vis_ast,
     has_truth,
 )
-from tabascal.tab_tools import rmse, print_truth_metrics, _effective_sample_size
+from tabascal.tab_tools import (
+    rmse,
+    print_truth_metrics,
+    _effective_sample_size,
+    _integrated_autocorr_time,
+)
 
 
 N_TIME, N_BL, N_FREQ, N_ANT = 4, 3, 2, 5
@@ -181,3 +186,43 @@ def test_effective_sample_size_tracks_correlation():
 
     # A single constant offset everywhere is fully coherent -> one effective sample.
     assert _effective_sample_size(np.full((n_row, n_freq, n_time), 1.0 + 1j)) == 1.0
+
+
+def test_effective_sample_size_matches_the_explicit_gram():
+    """The column-sum shortcut equals the full correlation matrix it replaces.
+
+    ``N_eff_row`` wants only the *total* of the row correlation matrix, and that
+    total factors through the column sums, so the matrix is never formed. It would
+    be n_bl x n_bl -- tens of gigabytes at the sizes this runs at -- so the identity
+    is what makes the metric affordable. Check it against the explicit Gram at a
+    size where forming one is still cheap.
+    """
+    rng = np.random.default_rng(3)
+    for shape in ((37, 3, 11), (9, 1, 5), (64, 2, 2)):
+        y = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+        n_row = shape[0]
+
+        # Reproduce the pre-image of the shortcut exactly as the function builds it.
+        yc = y - y.mean()
+        yr = yc.reshape(n_row, -1)
+        yr = yr - yr.mean(axis=1, keepdims=True)
+        nrm = np.sqrt(np.sum(np.abs(yr) ** 2, axis=1))
+        good = nrm > 0
+        yg = yr[good] / nrm[good][:, None]
+
+        explicit = (yg @ yg.conj().T).real.sum()
+        shortcut = float(np.sum(np.abs(yg.sum(axis=0)) ** 2))
+        assert np.isclose(shortcut, explicit, rtol=1e-9, atol=0)
+
+        # And through the public function, against a reference built the old way.
+        neff_row = good.sum() ** 2 / explicit
+        expected = min(
+            max(
+                (shape[2] / _integrated_autocorr_time(yc, 2))
+                * (shape[1] / _integrated_autocorr_time(yc, 1))
+                * neff_row,
+                1.0,
+            ),
+            y.size,
+        )
+        assert np.isclose(_effective_sample_size(y), expected, rtol=1e-9, atol=0)
