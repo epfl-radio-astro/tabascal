@@ -252,6 +252,24 @@ def constrain_rfi_state(state: dict, n_rfi: int) -> dict:
     return out
 
 
+def constrain_baseline_axis(x, axis: int):
+    """Pin an array whose baseline axis is not the leading one.
+
+    The likelihood stacks the real and imaginary parts before comparing them,
+    which puts the baseline axis second, and a constraint written for the
+    leading axis cannot see it. Everything downstream of that stack -- the
+    log-probability, the mask, and the cotangents of all three, which is the
+    expensive half -- is then free to be computed whole on every device.
+    """
+    if not sharding_baselines():
+        return x
+    spec = [None] * len(x.shape)
+    spec[axis] = "bl"
+    return lax.with_sharding_constraint(
+        x, NamedSharding(baseline_mesh(), P(*spec))
+    )
+
+
 def constrain_baseline_state(state: dict, n_bl: int) -> dict:
     """Pin every per-baseline state entry to the baseline sharding.
 
