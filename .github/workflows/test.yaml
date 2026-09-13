@@ -153,3 +153,34 @@ jobs:
           print(f'- Line Coverage: {line_rate:.1f}%')
           print(f'- Branch Coverage: {branch_rate:.1f}%')
           " >> $GITHUB_STEP_SUMMARY || echo "Coverage parsing failed"
+
+  build:
+    # Catches metadata problems at PR time rather than at release time, when the
+    # tag is already pushed and a bad upload cannot be replaced on PyPI. The
+    # release workflow (release.yaml) builds the same distributions on publish.
+    name: Build and check distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build twine
+          python -m build
+
+      - name: Check metadata
+        run: twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          retention-days: 7
