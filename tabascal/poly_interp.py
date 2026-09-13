@@ -66,6 +66,52 @@ def make_poly_time_group(requirements, a1, a2, indices) -> PolyTimeGroup:
     )
 
 
+def split_group_over_devices(group: PolyTimeGroup, n_dev: int) -> tuple[PolyTimeGroup, ...]:
+    """Divide one group's baselines evenly over devices, keeping its antennas.
+
+    Each device computes a share of the group's baselines and none of anyone
+    else's, so nothing has to be summed across devices -- unlike sharding the
+    source axis, where every device computes every baseline for a few sources
+    and the partial visibilities must be added back together.
+
+    The antenna set is deliberately *not* recompacted per device, which is what
+    separates this from :func:`make_poly_time_group`. Every device keeps the
+    whole group's antennas, so the per-antenna signal is identical on all of
+    them and enters the map replicated; recompacting would give each device a
+    different antenna count, and ``shard_map`` runs one program with one set of
+    shapes. The signal is small -- 0.24 GB at 512 stations against 1.256 GB for
+    a single visibility array -- so replicating it costs far less than the
+    visibilities it lets us divide.
+
+    ``a1`` and ``a2`` stay indices into the group's compact antenna axis, and
+    ``baseline_indices`` stay indices into the *global* visibility array, so a
+    device knows where its own results belong.
+
+    Raises when the count does not divide: ``shard_map`` needs one shape for
+    every device, and a silent remainder would drop baselines.
+    """
+    if isinstance(n_dev, bool) or not isinstance(n_dev, (int, np.integer)) or n_dev < 1:
+        raise ValueError("n_dev must be a positive whole number")
+    n_bl = len(group.baseline_indices)
+    if n_bl % n_dev:
+        raise ValueError(
+            f"cannot split {n_bl} baselines evenly over {n_dev} devices "
+            f"({n_bl % n_dev} left over). Every device must take the same "
+            "number for shard_map to run one program over them."
+        )
+    per = n_bl // n_dev
+    return tuple(
+        PolyTimeGroup(
+            group.baseline_indices[d * per:(d + 1) * per],
+            group.n_g,
+            group.antennas,
+            group.a1[d * per:(d + 1) * per],
+            group.a2[d * per:(d + 1) * per],
+        )
+        for d in range(n_dev)
+    )
+
+
 def poly_time_groups(
     requirements: NDArray, a1: NDArray, a2: NDArray,
     *, max_groups: int = 2, split_at: int | None = None,

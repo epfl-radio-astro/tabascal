@@ -121,3 +121,71 @@ class TestFourDevices:
         # Were these the same, slicing the global sorter would be safe. It is not.
         assert not np.array_equal(per_device, sliced)
         assert per_device.max() < 4  # local indices stay inside their own shard
+
+
+class TestSplittingAGroupOverDevices:
+    """Each device takes a share of the baselines and keeps the whole antenna set."""
+
+    @staticmethod
+    def a_group(n_ant=8):
+        from tabascal.poly_interp import make_poly_time_group
+        a1, a2 = np.triu_indices(n_ant, k=1)
+        req = np.full(len(a1), 9.0)
+        return make_poly_time_group(req, a1, a2, np.arange(len(a1)))
+
+    def test_every_baseline_lands_on_exactly_one_device(self):
+        from tabascal.poly_interp import split_group_over_devices
+        group = self.a_group()                      # 28 baselines over 8 antennas
+        shards = split_group_over_devices(group, 4)
+        assert len(shards) == 4
+        seen = np.concatenate([s.baseline_indices for s in shards])
+        # A partition: nothing computed twice, nothing dropped.
+        assert np.array_equal(np.sort(seen), np.sort(group.baseline_indices))
+        assert len(np.unique(seen)) == len(seen)
+
+    def test_the_shards_are_the_same_shape(self):
+        from tabascal.poly_interp import split_group_over_devices
+        shards = split_group_over_devices(self.a_group(), 4)
+        # shard_map runs one program: differing shapes would not compile.
+        assert len({len(s.baseline_indices) for s in shards}) == 1
+        assert len({len(s.a1) for s in shards}) == 1
+
+    def test_the_antenna_axis_is_shared_not_recompacted(self):
+        """The signal must be identical on every device, so it enters replicated."""
+        from tabascal.poly_interp import split_group_over_devices
+        group = self.a_group()
+        for shard in split_group_over_devices(group, 4):
+            assert np.array_equal(shard.antennas, group.antennas)
+            assert shard.n_g == group.n_g
+
+    def test_endpoints_follow_their_own_baselines(self):
+        from tabascal.poly_interp import split_group_over_devices
+        group = self.a_group()
+        shards = split_group_over_devices(group, 4)
+        per = len(group.baseline_indices) // 4
+        for d, shard in enumerate(shards):
+            want = slice(d * per, (d + 1) * per)
+            assert np.array_equal(shard.a1, group.a1[want])
+            assert np.array_equal(shard.a2, group.a2[want])
+
+    def test_a_remainder_is_refused_rather_than_dropped(self):
+        from tabascal.poly_interp import split_group_over_devices
+        group = self.a_group()                      # 28 baselines
+        with pytest.raises(ValueError, match="left over"):
+            split_group_over_devices(group, 8)      # 28 / 8 leaves 4
+        # The message must name the numbers, so a config error is actionable.
+        with pytest.raises(ValueError, match="28 baselines evenly over 3"):
+            split_group_over_devices(group, 3)
+
+    @pytest.mark.parametrize("bad", [0, -1, True, 2.0])
+    def test_a_nonsensical_device_count_is_refused(self, bad):
+        from tabascal.poly_interp import split_group_over_devices
+        with pytest.raises(ValueError, match="positive whole number"):
+            split_group_over_devices(self.a_group(), bad)
+
+    def test_one_device_is_the_group_itself(self):
+        from tabascal.poly_interp import split_group_over_devices
+        group = self.a_group()
+        only, = split_group_over_devices(group, 1)
+        assert np.array_equal(only.baseline_indices, group.baseline_indices)
+        assert np.array_equal(only.a1, group.a1)
