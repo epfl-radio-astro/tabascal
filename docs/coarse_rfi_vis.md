@@ -251,27 +251,131 @@ i5 beside it, and cannot run the fine-grid kernel at all at this size, which
 asks for more memory than the card has.
 
 
-## Variable sampling per baseline
+## Analytic integration for fast baselines
 
-`rfi_vis:PolyInterpVisVariable` and `rfi_vis:PolyInterpVisVariableFFI` are the
-data-grid twins of `RiemannVisVariable` and its FFI form: the baselines are
-grouped by the fringe rate they need to resolve (`rfi.min_time_bins`,
-`rfi.max_time_bins`, the same estimate `TabConfig` makes for the fine-grid
-components), and a group with stride `s` integrates every `s`-th fine sample
-of the cell. On the data grid that needs little: the tables are per fine offset,
-so a group is the same function, or the same operator, called on the group's
-baselines with the rows of every `s`-th offset of the time tables. The
-variable sampling is a difference in inputs only.
+Use `rfi_vis:PolyInterpVisHybridFFI` (compiled) or
+`rfi_vis:PolyInterpVisHybrid` (pure JAX) with the same coarse signal and trajectory
+components to put slow baselines through quadrature and fast baselines through
+`analytic_rfi_vis`. Quadrature has a sample count proportional to fringe
+winding; rebuilding its tables independently does not remove that floor. The
+fast group instead integrates a polynomial amplitude times a quadratic-phase
+exponential over the centred cell, with a perturbative cubic correction. It
+retains the reference's frequency quadrature, including its exact `fine_offsets` convention.
 
-Whether it pays is another matter. A stride per baseline inside the kernel
-was built and measured against per-group calls and against full sampling, on
-a GTX 1060 and a GH200, at 64 and 128 antennas with two stride distributions:
-neither variable route beat full sampling. The products a stride saves are
-the cheap part of the kernels once the samples are materialised, so
-in-kernel striding costs more bookkeeping than it saves, and per-group calls
-rebuild the samples once per group. The stride machinery was taken out of
-the kernels again; the per-group component stays as the way to sample
-variably should a cheaper sample build make it worthwhile.
+`monomial_tables` replaces each time basis's sampled values with its monomial
+coefficients in `x = 2*tau/T`. The same `fine_signal` contraction then produces
+an amplitude polynomial per antenna. Convolving the two antenna polynomials
+produces the baseline amplitude, of degree `P = 4h`; holding the amplitude
+constant fails even as the fringe winds faster.
+
+On each of two equal pieces by default, translation of both polynomials is
+exact. The phase has a constant term, a linear coefficient and a quadratic coefficient.
+Outside the stationary region, expand the curvature exponential and contract
+against linear-phase moments. Their integration-by-parts recurrence runs
+upwards only through degrees below the winding; above that it runs downwards
+from a distant tail. Near the stationary point, seed the quadratic recurrence
+with JAX's [Fresnel integrals](https://docs.jax.dev/en/latest/_autosummary/jax.scipy.special.fresnel.html).
+At small curvature, where division by curvature is ill-conditioned even near
+a stationary point, use the convergent series instead. No time samples or
+large-winding Fresnel subtraction enter the analytic result.
+
+The cut is exposed as `rfi.poly_analytic.quadrature_limit`. Its default is the
+measured GH200 VJP crossover at 256 antennas: **166 samples in single precision,
+56 in double**. The optimiser runs the transpose every iteration. The forward
+crossovers were about 385 and 110 respectively. These numbers should be
+re-measured on very different hardware. Operation counts overestimate the cut
+because quadrature is dominated by memory traffic. An explicit non-negative
+limit overrides it; `0` sends everything analytic, and a limit above the largest
+requirement sends everything through quadrature.
+The existing group records, compact antenna maps, identity bypass and output
+scatter are shared with the quadrature pair. Neither an overlap score nor
+an empty-group fallback can send an expensive baseline back to quadrature.
+
+The defaults are `segments: 2`, `terms: 6`, `cubic_terms: 3`. The measured
+accuracy was 1.21e-5 at a fifth of the cost of 4/16. The broader stress tests
+through 3 curvature turns at the cell edge and 1000 noninteger winding turns
+use an explicit 4/16 expansion, in single and double precision. Increase
+`segments` for larger curvature: the local quadratic coefficient falls as
+`1/S^2`. Dense-reference tests dropping cubic phase using the supplied
+256A, 384A, 512A median and 512A p99 coefficients give errors of approximately
+0.19%, 0.66%, 0.67% and 0.44% of the noise at instantaneous signal/noise 54,
+even interpreting the supplied cubic turns conservatively as turns at the
+cell edge. That alone would justify omission, but a group's membership comes
+from its maximum requirement over sources and cells. A cell inside the fast
+group can still wind slowly: at 1.13 or 10.37 winding turns with the p99 cubic
+coefficient, omission costs 14–72% of the noise. The default therefore retains
+three terms of the residual cubic exponential on each piece. Translation of
+the cubic's constant, linear and quadratic parts is exact; only its residual
+coefficient, reduced by `1/S^3`, needs expansion. `cubic_terms: 0` deliberately
+drops it for comparison. Derivatives above cubic are still omitted.
+
+The polynomial-amplitude test with 4/16 also agrees with an independent integral
+to near roundoff in double precision. This validates the supplied coefficient
+range, not all orbits or arbitrary higher derivatives.
+
+`PolyInterpVisHybridFFI` uses `RFIInterpVisOp` for quadrature and
+`RFIAnalyticVisOp` for analytic integration, from the `interp-analytic` branch of
+`ri_kernels`. It reuses compact antenna maps, per-group tables, source-shard
+sums and the baseline scatter. Only nonempty groups construct operators.
+The analytic time-table slot carries monomial coefficients, and its offset
+slot carries the scalar cell duration. Amplitude JVPs and VJPs propagate
+through both groups, adding contributions at shared antennas; the analytic
+operator treats phase and delay as fixed trajectory inputs.
+
+At 512 antennas, 6571 samples per cell and float64 on a GH200, compiled analytic
+forward took 16.9 ms against 944.3 ms for compiled quadrature (56x); VJP took
+19.6 ms against 4734.9 ms (241x). Below about 100 samples quadrature remains
+several times cheaper. The median requirement at 512 stations was 445, placing
+most baselines on the analytic side with these defaults. Source-sharded GPU
+execution and peak memory still need validation on the GPU hosts.
+
+Run the component comparisons on a host with that kernel build:
+
+```sh
+python -m pytest tests/components/test_poly_interp_vis_hybrid_ffi.py --no-cov
+```
+
+The file explicitly exercises both float32 and float64, including the
+all-quadrature identity against `PolyInterpVisFFI`. Compiled cases skip when
+the required backend libraries are absent; CPU reference-operator cases test
+the wrapper wiring separately.
+
+## Quadrature-only variable sampling
+
+`rfi_vis:PolyInterpVisVariable` and `rfi_vis:PolyInterpVisVariableFFI` use
+`rfi.poly_time_sampling` to choose one or two baseline groups from the same
+fringe-rate requirements as the fine-grid route. Each group builds its own
+`interp_tables(n_time, h, fine_offsets(n_g, int_time) / int_time)`, with its
+largest requirement rounded up to an odd count. The even-count grid is shifted
+half a sample left of midpoint quadrature; in the constant-fringe regression,
+40 samples miss the analytic complex integral by more than 200 noise units,
+while rounding to 41 puts the error below one. The offset convention itself
+is unchanged, and one group reproduces the non-variable polynomial route,
+which uses the same maximum odd count.
+
+Setup searches every threshold between distinct requirements, using prefix
+and suffix antenna incidence to score each partition by
+`sum(n_g * number_of_antennas_in_group)`. An antenna in both groups is counted
+twice. This is materialisation work, not predicted runtime. `max_groups: 1`
+uses a single group; `2` (the default) keeps a split only if it strictly saves
+work. `split_at` restricts the search to requirements at or below a given
+count versus those above it; `null` searches all thresholds. Empty or
+unhelpful splits fall back to one group, and ties favour fewer groups.
+
+Both implementations gather only the antennas each group needs and remap its
+baseline endpoints to that compact axis; an identity antenna map skips the
+gather. The FFI operator is constructed with the compact antenna count. In
+reverse mode the gathers add cotangents from both groups at shared antennas,
+which the CPU tests check against independent calls on the full antenna axis.
+The compiled GPU path and the runtime benefit still need hardware validation.
+
+The measurements below are from the earlier stride implementation, before
+independent grids and antenna compaction. A stride per baseline inside the
+kernel was also tried on a GTX 1060 and a GH200, at 64 and 128 antennas:
+neither variable route beat full sampling. Baseline products were the cheap
+part once antenna samples had been materialised, while the old per-group
+calls rebuilt every antenna's samples for every group. Those measurements
+motivate counting antenna work, but do not calibrate the new grouping score.
 
 | 1 GH200, 100 iterations, single precision, variable sampling | RiemannVisVariableFFI (fine grid) | PolyInterpVisVariable (pure JAX) | PolyInterpVisVariableFFI (operator per group) | PolyInterpVisFFI (full sampling) |
 |---|---|---|---|---|

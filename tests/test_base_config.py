@@ -445,3 +445,62 @@ class TestTheGainsSectionHasNoCorrelationLengths:
             "phase_std",
             "r_seed",
         }
+
+
+class TestPolynomialTimeSampling:
+    @pytest.mark.parametrize("component", [
+        "PolyInterpVis", "PolyInterpVisFFI", "PolyInterpVisVariable", "PolyInterpVisVariableFFI",
+        "PolyInterpVisHybrid", "PolyInterpVisHybridFFI",
+    ])
+    def test_polynomial_routes_bypass_legacy_binning(self, component, tmp_path, monkeypatch):
+        config = base_args(tmp_path)
+        config["model"]["components"] = [f"rfi_vis:{component}"]
+        config["rfi"]["min_time_bins"] = 10
+        config["rfi"]["max_time_bins"] = 30
+        assert config["rfi"]["poly_time_sampling"] == {"max_groups": 2, "split_at": None}
+        assert config["rfi"]["poly_analytic"] == {
+            "quadrature_limit": None, "segments": 2, "terms": 6, "cubic_terms": 3,
+        }
+        tab_config, sizes = build_stubbed_tab_config(config, monkeypatch)
+        assert tab_config.n_int_time == 1
+        np.testing.assert_array_equal(tab_config.rfi_time_requirements, np.ones(sizes.n_bl))
+        # A maximum whose ceiling is even rounds to the next odd count in
+        # every polynomial route, independently of the legacy bin settings.
+        tab_config._set_rfi_time_sampling(np.array([0, 2.1, 42]), 10, 30, 8)
+        assert tab_config.n_int_time == 43
+        assert not hasattr(tab_config, "time_strides")
+
+    @pytest.mark.parametrize("component", ["RiemannVis", "RiemannVisVariable", "RiemannVisVariableFFI"])
+    def test_legacy_counts_and_strides_are_unchanged(self, component, tmp_path, monkeypatch):
+        config = base_args(tmp_path)
+        config["model"]["components"] = [f"rfi_vis:{component}"]
+        config["rfi"]["poly_time_sampling"] = {"max_groups": 1, "split_at": 3}
+        tab_config, _ = build_stubbed_tab_config(config, monkeypatch)
+        requirements = np.array([3, 10, 42])
+        divisors = 8 if "Variable" in component else 1
+        tab_config._set_rfi_time_sampling(requirements, 1, 30, divisors)
+        idxs, strides, count = get_strides_and_idxs(requirements, 1, 30, divisors)
+        assert tab_config.n_int_time == count
+        assert tab_config.time_strides == strides
+        for got, expected in zip(tab_config.time_sample_idxs, idxs):
+            np.testing.assert_array_equal(got, expected)
+
+    def test_fringe_estimator_retains_the_per_baseline_requirements(self, monkeypatch):
+        cfg = TabConfig.__new__(TabConfig)
+        cfg.args = {"model": {"components": ["rfi_vis:PolyInterpVisVariable"]}}
+        cfg.n_rfi, cfg.n_bl = 1, 3
+        cfg.times_jd = np.array([2460000.5, 2460000.501])
+        cfg.orbit_records = [None]
+        cfg.phase_centre = {"ra": 0, "dec": 0}
+        cfg.ants_itrf = np.zeros((3, 3))
+        cfg.freqs, cfg.int_time = np.array([1e9]), 2.
+        cfg.vis_obs, cfg.noise_scalar = np.ones((3, 2, 2)) * 100, 1.
+        fringe = np.array([[0., 1., 2.], [0., -2., 1.]])
+        monkeypatch.setattr("tabascal.config.get_satellite_positions", lambda *a: np.zeros((1, 2, 3)))
+        monkeypatch.setattr("tabascal.config.gast_deg", lambda times: np.zeros(len(times)))
+        monkeypatch.setattr("tabascal.config.itrf_to_uvw_numpy", lambda *a: np.zeros((2, 3, 3)))
+        monkeypatch.setattr("tabascal.config.calculate_fringe_frequency_numpy", lambda *a: fringe)
+        cfg.estimate_rfi_sampling(1.5, 1, 30)
+        expected = np.ceil(1.5 * 2 * np.pi * np.array([0, 2, 2]) * np.sqrt(100 / 6)).astype(int)
+        np.testing.assert_array_equal(cfg.rfi_time_requirements, expected)
+        assert cfg.n_int_time == 77
