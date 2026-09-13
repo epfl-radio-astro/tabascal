@@ -229,8 +229,13 @@ class TestGhostPaddedDeviceGroups:
         for d, shard in enumerate(shards):
             mine = keep[keep // 17 == d]
             # A device writes into its own rows, counted from its block's start.
-            assert np.array_equal(shard.positions, mine - d * 17)
-            assert np.all(shard.positions < 17)
+            assert np.array_equal(shard.positions[: shard.n_real], mine - d * 17)
+            assert np.all(shard.positions[: shard.n_real] < 17)
+            # Ghost rows go to the spare row the caller adds and discards, so
+            # they can never land on a real baseline.
+            assert np.all(shard.positions[shard.n_real:] == 17)
+            # One shape for every device, which is what shard_map needs.
+            assert len(shard.positions) == shard.n_padded
 
     def test_the_real_baselines_are_a_partition(self):
         from tabascal.poly_interp import device_groups

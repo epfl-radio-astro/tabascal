@@ -129,6 +129,11 @@ class DeviceGroup:
     a2: NDArray
     n_real: int
 
+    @property
+    def n_padded(self) -> int:
+        """Rows the operator is asked for, real and ghost, the same on every device."""
+        return len(self.a1)
+
 
 def device_groups(
     group: PolyTimeGroup, n_dev: int, n_bl_total: int, offset: int = 0,
@@ -152,8 +157,12 @@ def device_groups(
     :func:`~tabascal.distributed.padded_rfi_count` uses on the source axis.
 
     ``positions`` are local to the owning device's block, so a group writes
-    into the device's own rows. ``offset`` is where this group's share starts
-    within that block, since several groups share it.
+    into the device's own rows, and are padded to the same length as ``a1``
+    with ``block`` -- one past the block's last row. The caller gives its local
+    visibility array that one extra row, lets the ghosts land in it and drops
+    it, so the scatter has a fixed shape and a ghost can never overwrite a real
+    baseline. ``offset`` is where this group's share starts within that block,
+    since several groups share it.
     """
     if isinstance(n_dev, bool) or not isinstance(n_dev, (int, np.integer)) or n_dev < 1:
         raise ValueError("n_dev must be a positive whole number")
@@ -166,8 +175,8 @@ def device_groups(
     idx = np.asarray(group.baseline_indices)
     owner = idx // block
     shares = [idx[owner == d] for d in range(n_dev)]
-    local = [np.asarray(group.a1)[owner == d] for d in range(n_dev)]
-    local2 = [np.asarray(group.a2)[owner == d] for d in range(n_dev)]
+    mine_a1 = [np.asarray(group.a1)[owner == d] for d in range(n_dev)]
+    mine_a2 = [np.asarray(group.a2)[owner == d] for d in range(n_dev)]
 
     per = max((len(s) for s in shares), default=0)
     ghost = len(group.antennas)
@@ -182,10 +191,13 @@ def device_groups(
     for d in range(n_dev):
         real = len(shares[d])
         pad = per - real
-        a1 = np.concatenate((local[d], np.arange(pad, dtype=np.asarray(group.a1).dtype)))
-        a2 = np.concatenate((local2[d], np.full(pad, ghost, dtype=np.asarray(group.a2).dtype)))
+        a1 = np.concatenate((mine_a1[d], np.arange(pad, dtype=np.asarray(group.a1).dtype)))
+        a2 = np.concatenate((mine_a2[d], np.full(pad, ghost, dtype=np.asarray(group.a2).dtype)))
+        # Ghost rows are scattered to `block`, the spare row the caller adds
+        # and discards, so every device scatters the same number of rows.
+        rows = (shares[d] - d * block).astype(np.int32) + offset
         out.append(DeviceGroup(
-            (shares[d] - d * block).astype(np.int32) + offset, a1, a2, real,
+            np.concatenate((rows, np.full(pad, block, dtype=np.int32))), a1, a2, real,
         ))
     return tuple(out)
 
