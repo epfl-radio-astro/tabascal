@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from tabascal.components.rfi_vis import PolyInterpVisHybrid
-from tabascal.poly_interp import analytic_sampling_cut
 from .test_poly_interp_vis_variable import _compact_case, _component_call, _uncompacted_call
 
 
@@ -18,18 +17,29 @@ def _case(limit=10):
     return cfg, state
 
 
-def test_the_default_cut_is_derived_from_the_work():
-    cfg, state = _case(None)
-    cfg.rfi_time_requirements = np.array([1400, 1375])
-    _, comp = _component_call(PolyInterpVisHybrid, cfg, state)
-    assert comp.quadrature_limit == analytic_sampling_cut(1, 4, 16) == 1376
-    assert comp.analytic_groups == [False, True]
-    assert [g.n_g for g in comp.groups] == [1375, 1401]
-    constants = comp.build_constants()
-    assert constants['w_time_0'].shape[-1] == 1375
-    assert constants['w_time_1'].shape[-1] == 3
-    assert constants['dt_1'].ndim == 0
-    assert comp.identity_antennas == [False, False]
+@pytest.mark.parametrize("x64,limit", [(False, 166), (True, 56)])
+@pytest.mark.parametrize("options", [{}, {"quadrature_limit": None}, {"segments": 4, "terms": 16}])
+def test_default_cut_uses_measured_vjp_crossover(x64, limit, options):
+    previous = jax.config.x64_enabled
+    jax.config.update("jax_enable_x64", x64)
+    try:
+        cfg, state = _case()
+        cfg.args["rfi"]["poly_analytic"] = options
+        cfg.rfi_time_requirements = np.array([limit, limit-1])
+        _, comp = _component_call(PolyInterpVisHybrid, cfg, state)
+        assert comp.quadrature_limit == limit
+        assert (comp.segments, comp.terms, comp.cubic_terms) == (
+            options.get("segments", 2), options.get("terms", 6), 3,
+        )
+        assert comp.analytic_groups == [False, True]
+        assert [g.n_g for g in comp.groups] == [limit-1, limit+1]
+        constants = comp.build_constants()
+        assert constants['w_time_0'].shape[-1] == limit-1
+        assert constants['w_time_1'].shape[-1] == 3
+        assert constants['dt_1'].ndim == 0
+        assert comp.identity_antennas == [False, False]
+    finally:
+        jax.config.update("jax_enable_x64", previous)
 
 
 @pytest.mark.parametrize("limit,analytic", [(0, True), (100000, False)])

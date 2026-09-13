@@ -684,7 +684,7 @@ class TabConfig:
             comp in (
                 "rfi_vis:PolyInterpVis", "rfi_vis:PolyInterpVisFFI",
                 "rfi_vis:PolyInterpVisVariable", "rfi_vis:PolyInterpVisVariableFFI",
-                "rfi_vis:PolyInterpVisHybrid",
+                "rfi_vis:PolyInterpVisHybrid", "rfi_vis:PolyInterpVisHybridFFI",
             )
             for comp in self.args["model"]["components"]
         ):

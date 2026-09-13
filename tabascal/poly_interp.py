@@ -198,8 +198,8 @@ def analytic_sampling_cut(half_width: int, segments: int, terms: int, cubic_term
     and M+64 downward stages, K(D+1) curvature and J(P+1) cubic contractions,
     and (2h+1)^2 amplitude products. Counting each as one sample
     is deliberately conservative: a quadrature sample also interpolates and
-    exponentiates. It gives a reproducible starting cut, not a runtime model;
-    hardware measurements should set the explicit override.
+    exponentiates. This is an arithmetic diagnostic, not a runtime model. The hybrid
+    components use measured precision-dependent VJP crossovers instead.
     """
     product_degree = 4 * half_width
     n_cubic = max(1, cubic_terms)

@@ -117,6 +117,7 @@ import math
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array, lax
 
 def fine_signal(
@@ -226,10 +227,16 @@ def linear_phase_moments(a: Array, degree: int) -> Array:
     a = jnp.asarray(a)
     positive, negative = jnp.exp(1j * a), jnp.exp(-1j * a)
     safe_a = jnp.where(jnp.abs(a) >= 1, a, 1)
-    upward = [jnp.sinc(a / jnp.pi).astype(positive.dtype)]
-    for m in range(1, degree + 1):
-        value = ((positive - (-1)**m * negative) / 2 - m * upward[-1]) / (1j * safe_a)
-        upward.append(jnp.where(m <= jnp.abs(a), value, 0))
+    zero = jnp.sinc(a / jnp.pi).astype(positive.dtype)
+
+    def upward_step(last, m):
+        sign = jnp.where(m % 2 == 0, 1, -1)
+        value = ((positive - sign * negative) / 2 - m * last) / (1j * safe_a)
+        value = jnp.where(m <= jnp.abs(a), value, 0)
+        return value, value
+
+    _, upward = lax.scan(upward_step, zero, jnp.arange(1, degree + 1))
+    upward = jnp.concatenate((zero[..., None], jnp.moveaxis(upward, 0, -1)), axis=-1)
 
     # Large a uses the upward result throughout. Giving the unused downward
     # branch a benign argument keeps masked overflows out of differentiation.
@@ -237,15 +244,16 @@ def linear_phase_moments(a: Array, degree: int) -> Array:
     ep, em = jnp.exp(1j * down_a), jnp.exp(-1j * down_a)
     values = jnp.zeros(a.shape + (degree + 1,), dtype=positive.dtype)
 
-    def step(i, carry):
+    def step(carry, m):
         last, values = carry
-        m = degree + 64 - i
         previous = ((ep - (-1.)**m * em) / 2 - 1j * down_a * last) / m
         values = lax.cond(m <= degree + 1, lambda v: v.at[..., m - 1].set(previous), lambda v: v, values)
-        return previous, values
+        return (previous, values), None
 
-    _, downward = lax.fori_loop(0, degree + 64, step, (jnp.zeros_like(positive), values))
-    return jnp.where(jnp.arange(degree + 1) <= jnp.abs(a)[..., None], jnp.stack(upward, -1), downward)
+    (_, downward), _ = lax.scan(
+        step, (jnp.zeros_like(positive), values), jnp.arange(degree + 64, 0, -1), unroll=1,
+    )
+    return jnp.where(jnp.arange(degree + 1) <= jnp.abs(a)[..., None], upward, downward)
 
 
 def quadratic_phase_moments(a: Array, b: Array, degree: int, terms: int = 16) -> Array:
@@ -267,9 +275,15 @@ def quadratic_phase_moments(a: Array, b: Array, degree: int, terms: int = 16) ->
     linear = linear_phase_moments(series_a, degree + 2 * (terms - 1))
     series = jnp.zeros_like(linear[..., :degree + 1])
     coefficient = jnp.ones_like(series_a, dtype=linear.dtype)
-    for k in range(terms):
-        series = series + coefficient[..., None] * linear[..., 2*k:2*k + degree + 1]
+
+    def series_step(carry, k):
+        series, coefficient = carry
+        window = lax.dynamic_slice_in_dim(linear, 2*k, degree + 1, axis=-1)
+        series = series + coefficient[..., None] * window
         coefficient = coefficient * (1j * series_b) / (k + 1)
+        return (series, coefficient), None
+
+    (series, _), _ = lax.scan(series_step, (series, coefficient), jnp.arange(terms), unroll=1)
 
     # Complete the square only near the stationary point: doing so at large
     # winding subtracts almost equal Fresnel values with huge phase arguments.
@@ -279,19 +293,25 @@ def quadratic_phase_moments(a: Array, b: Array, degree: int, terms: int = 16) ->
     sp, cp = fresnel(scale * (1 + shift))
     sm, cm = fresnel(scale * (-1 + shift))
     zero = jnp.exp(-1j * fa * shift / 2) * ((cp - cm) + 1j * jnp.sign(fb) * (sp - sm)) / (2 * scale)
-    moments = [zero]
     ep, em = jnp.exp(1j * (fa + fb)), jnp.exp(1j * (-fa + fb))
-    for m in range(1, degree + 1):
-        previous = (m - 1) * moments[m - 2] if m > 1 else 0
-        moments.append(((ep - (-1)**(m-1) * em) / 2 - previous - 1j * fa * moments[-1]) / (2j * fb))
-    return jnp.where(stationary[..., None], jnp.stack(moments, -1), series)
+
+    def moment_step(carry, m):
+        before_last, last = carry
+        previous = (m - 1) * before_last
+        sign = jnp.where((m - 1) % 2 == 0, 1, -1)
+        value = ((ep - sign * em) / 2 - previous - 1j * fa * last) / (2j * fb)
+        return (last, value), value
+
+    _, moments = lax.scan(moment_step, (jnp.zeros_like(zero), zero), jnp.arange(1, degree + 1))
+    moments = jnp.concatenate((zero[..., None], jnp.moveaxis(moments, 0, -1)), axis=-1)
+    return jnp.where(stationary[..., None], moments, series)
 
 
 def analytic_rfi_vis(
     rfi_A: Array, rfi_phase: Array, rfi_delay: Array,
     w_freq: Array, start_freq: Array, g_time: Array, start_time: Array,
     dnu_mhz: Array, int_time: Array, freqs_mhz: Array, a1: Array, a2: Array,
-    *, segments: int = 4, terms: int = 16, cubic_terms: int = 3,
+    *, segments: int = 2, terms: int = 6, cubic_terms: int = 3,
 ) -> Array:
     """Integrate the amplitude polynomial against the quadratic delay phase.
 
@@ -315,15 +335,28 @@ def analytic_rfi_vis(
     moment_degree = degree + 3 * (n_cubic - 1)
     radius = 1. / segments
     nu = freqs_mhz[:, None] + dnu_mhz[None, :]
+    orders = jnp.arange(degree + 1)
+    binomial = [
+        [math.comb(m, j) if j <= m else 0 for j in range(degree + 1)]
+        for m in range(degree + 1)
+    ]
+    radius_powers = np.power(radius, np.arange(degree + 1))
 
     @functools.partial(jax.checkpoint, prevent_cse=False)
     def one_cell(t):
         amplitude = fine_signal(rfi_A, w_freq, start_freq, g_time[t], start_time[t])
         p, q = amplitude[:, a1], amplitude[:, a2].conj()
-        product = jnp.stack([
-            sum(p[..., j] * q[..., m-j] for j in range(max(0, m-amp_degree), min(amp_degree, m)+1))
-            for m in range(degree + 1)
-        ], -1)
+        if amp_degree == 0:
+            product = p * q
+        else:
+            # Each row holds q[m-j], with zeros outside its polynomial. Contract
+            # all output degrees together, retaining full float32 precision on GPU.
+            indices = orders[:, None] - jnp.arange(amp_degree + 1)
+            shifted_q = jnp.where(
+                (indices >= 0) & (indices <= amp_degree),
+                q[..., jnp.clip(indices, 0, amp_degree)], 0,
+            )
+            product = jnp.einsum("...j,...mj->...m", p, shifted_q, precision=lax.Precision.HIGHEST)
         delay_cell, phase_cell = rfi_delay[:, :, t], rfi_phase[..., t]
         delay = delay_cell[:, a1] - delay_cell[:, a2]
         phi = phase_cell[:, a1] - phase_cell[:, a2]
@@ -335,14 +368,22 @@ def analytic_rfi_vis(
         d3 = delay[..., 3] if rfi_delay.shape[-1] > 3 and cubic_terms else jnp.zeros_like(delay[..., 0])
         c = (jnp.pi / 3) * nu * d3[..., None, None] * (int_time / 2)**3
 
-        def piece(i, total):
+        def piece(total, i):
             centre = -1 + (2 * i + 1) * radius
             # x = centre + radius*y. Keeping coefficients dimensionless avoids
             # powers of a seconds-valued T in the moment recurrence.
-            shifted = jnp.stack([
-                sum(math.comb(m, j) * centre**(m-j) * radius**j * product[..., m] for m in range(j, degree+1))
-                for j in range(degree+1)
-            ], -1)
+            # Form all powers together, then sum each translated coefficient
+            # from left to right in the source degree.
+            centre_powers = centre**orders
+            combinations = jnp.asarray(binomial, dtype=centre.dtype)
+            radii = jnp.asarray(radius_powers, dtype=centre.dtype)
+
+            def translate(shifted, m):
+                power = centre_powers[jnp.maximum(m - orders, 0)]
+                value = combinations[m] * power * radii * product[..., m, None]
+                return jnp.where(orders <= m, shifted + value, shifted), None
+
+            shifted, _ = lax.scan(translate, jnp.zeros_like(product), orders, unroll=1)
             moments = quadratic_phase_moments(
                 (a + 2*b*centre + 3*c*centre**2)*radius,
                 (b + 3*c*centre)*radius**2, moment_degree, terms,
@@ -353,13 +394,23 @@ def analytic_rfi_vis(
             # falls with the cube of the piece width.
             coefficient = jnp.ones_like(a, dtype=product.dtype)
             integral = jnp.zeros_like(coefficient)
-            for k in range(n_cubic):
-                integral = integral + coefficient * jnp.sum(shifted * moments[..., 3*k:3*k+degree+1], axis=-1)
-                coefficient = coefficient * (1j * c * radius**3) / (k + 1)
-            phase = phi0 + a*centre + b*centre**2 + c*centre**3
-            return total + jnp.exp(1j * phase) * integral / segments
 
-        result = lax.fori_loop(0, segments, piece, jnp.zeros(product.shape[:-1], dtype=product.dtype))
+            def cubic_step(carry, k):
+                integral, coefficient = carry
+                window = lax.dynamic_slice_in_dim(moments, 3*k, degree + 1, axis=-1)
+                integral = integral + coefficient * jnp.sum(shifted * window, axis=-1)
+                coefficient = coefficient * (1j * c * radius**3) / (k + 1)
+                return (integral, coefficient), None
+
+            (integral, _), _ = lax.scan(
+                cubic_step, (integral, coefficient), jnp.arange(n_cubic), unroll=1,
+            )
+            phase = phi0 + a*centre + b*centre**2 + c*centre**3
+            return total + jnp.exp(1j * phase) * integral / segments, None
+
+        result, _ = lax.scan(
+            piece, jnp.zeros(product.shape[:-1], dtype=product.dtype), jnp.arange(segments), unroll=1,
+        )
         return jnp.sum(jnp.mean(result, axis=-1), axis=0)
 
     return jnp.moveaxis(lax.map(one_cell, jnp.arange(rfi_A.shape[-1])), 0, -1)

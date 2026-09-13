@@ -80,11 +80,17 @@ def cell_inputs(turns=10.37, curvature=.11, cubic=0., n_int=65537, half_width=1)
 
 
 @pytest.mark.parametrize("turns", [1.13, 10.37, 100.23, 1000.41])
-@pytest.mark.parametrize("curvature", [.001, .1, 1., 3.])
-def test_cell_integral_agrees_with_dense_reference(turns, curvature):
+@pytest.mark.parametrize("curvature,options", [
+    (.001, {}), (.1, {}),
+    (.001, {"segments": 4, "terms": 16}), (.1, {"segments": 4, "terms": 16}),
+    (1., {"segments": 4, "terms": 16}), (3., {"segments": 4, "terms": 16}),
+])
+def test_cell_integral_agrees_with_dense_reference(turns, curvature, options):
     analytic, dense = cell_inputs(turns, curvature)
     expected = coarse_rfi_vis(*dense)
-    got = jax.jit(analytic_rfi_vis)(*analytic)
+    got = jax.jit(lambda *args: analytic_rfi_vis(*args, **options))(*analytic)
+    # The 2/6 default targets measured runtime/accuracy; the high-curvature
+    # stress cases retain the explicit 4/16 expansion and their original bound.
     # Dense midpoint quadrature still has O(N^-2) error. The single-precision
     # reference also forms thousands of radians before exponentiation.
     np.testing.assert_allclose(got, expected, atol=2e-5 if not _double() else 2e-7, rtol=0)
@@ -126,14 +132,14 @@ def test_amplitude_gradients_match_dense_jvp_and_vjp():
 ])
 def test_cubic_omission_on_the_measured_geometry(turns, curvature, cubic):
     analytic, dense = cell_inputs(turns, curvature, cubic)
-    got = analytic_rfi_vis(*analytic, cubic_terms=0)
+    got = analytic_rfi_vis(*analytic, segments=4, terms=16, cubic_terms=0)
     expected = coarse_rfi_vis(*dense)
     error = float(jnp.max(jnp.abs(got-expected)))
     # Quote error against instantaneous amplitude, not the fringe-suppressed
     # visibility. The noise is roughly 1/54 of that amplitude on this dataset.
     amplitude = float(jnp.max(jnp.abs(analytic[0][:, 0]*analytic[0][:, 1].conj())))
     assert error/amplitude < (1/54)/50, (turns, curvature, cubic, error/amplitude)
-    corrected = analytic_rfi_vis(*analytic)
+    corrected = analytic_rfi_vis(*analytic, segments=4, terms=16)
     assert float(jnp.max(jnp.abs(corrected-expected))) < error/20
 
 
@@ -149,7 +155,8 @@ def test_polynomial_stencil_is_near_exact_against_an_independent_integral():
                     phase = .43 + 2*np.pi*dnu*.12 + (centre_freq+dnu)/1400*(np.pi*37.21*x + 2*np.pi*.2*x*x)
                     return product*np.exp(1j*phase)/2
                 expected[0, f, cell] += (quad(lambda x: integrand(x).real, -1, 1, epsabs=1e-13)[0] + 1j*quad(lambda x: integrand(x).imag, -1, 1, epsabs=1e-13)[0])/3
-    np.testing.assert_allclose(analytic_rfi_vis(*analytic), expected, atol=2e-6 if not _double() else 5e-13, rtol=0)
+    # Near-roundoff accuracy deliberately uses the larger expansion.
+    np.testing.assert_allclose(analytic_rfi_vis(*analytic, segments=4, terms=16), expected, atol=2e-6 if not _double() else 5e-13, rtol=0)
 
 
 @pytest.mark.parametrize("half_width", [0, 1, 2])
@@ -186,8 +193,8 @@ def test_multiple_sources_and_reversed_baselines_keep_their_axes():
 def test_cubic_correction_is_needed_when_a_fast_baseline_has_a_slow_cell(turns, curvature):
     analytic, dense = cell_inputs(turns, curvature, cubic=.027)
     expected = coarse_rfi_vis(*dense)
-    quadratic = analytic_rfi_vis(*analytic, cubic_terms=0)
-    corrected = analytic_rfi_vis(*analytic)
+    quadratic = analytic_rfi_vis(*analytic, segments=4, terms=16, cubic_terms=0)
+    corrected = analytic_rfi_vis(*analytic, segments=4, terms=16)
     amplitude = float(jnp.max(jnp.abs(analytic[0][:, 0]*analytic[0][:, 1].conj())))
     # Membership uses the baseline's maximum requirement across cells and
     # sources. A cell in that fast group can still be near stationary, where

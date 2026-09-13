@@ -13,7 +13,7 @@ from functools import partial
 
 from tabascal.coarse_rfi_vis import analytic_rfi_vis, coarse_rfi_vis
 from tabascal.poly_interp import (
-    analytic_sampling_cut, fine_offsets, interp_tables, make_poly_time_group,
+    fine_offsets, interp_tables, make_poly_time_group,
     monomial_tables, poly_sample_counts, poly_time_groups,
 )
 from ri_kernels.jax_api import RFIVisOp
@@ -22,6 +22,11 @@ try:
     from ri_kernels.jax_api import RFIInterpVisOp
 except ImportError:  # an ri_kernels release without the data-grid operator
     RFIInterpVisOp = None
+
+try:
+    from ri_kernels.jax_api import RFIAnalyticVisOp
+except ImportError:  # an ri_kernels release without the analytic operator
+    RFIAnalyticVisOp = None
 
 
 class RiemannVis(Component):
@@ -492,8 +497,8 @@ class PolyInterpVisHybrid(PolyInterpVisVariable):
     """Slow baselines use quadrature; fast baselines use an analytic cell integral.
 
     ``rfi.poly_analytic.quadrature_limit`` is the crossover in samples per cell.
-    A null limit derives a conservative operation count from the stencil and
-    moment expansion. Both groups reuse the compact antenna maps and scatter
+    A null limit uses the measured VJP crossover for the working precision.
+    Both groups reuse the compact antenna maps and scatter
     their results into MS order, so shared antennas accumulate both cotangents.
     The fast group's time table holds monomial coefficients and its dt slot
     holds the cell duration; it never constructs a fine time grid.
@@ -508,17 +513,20 @@ class PolyInterpVisHybrid(PolyInterpVisVariable):
         options = config.args["rfi"].get("poly_analytic", {})
         if not isinstance(options, dict) or options.keys() - {"quadrature_limit", "segments", "terms", "cubic_terms"}:
             raise ValueError("rfi.poly_analytic accepts quadrature_limit, segments, terms and cubic_terms")
-        self.segments, self.terms = options.get("segments", 4), options.get("terms", 16)
+        self.segments, self.terms = options.get("segments", 2), options.get("terms", 6)
         self.cubic_terms = options.get("cubic_terms", 3)
         for name, value in (("segments", self.segments), ("terms", self.terms)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"rfi.poly_analytic.{name} must be a positive whole number")
         if isinstance(self.cubic_terms, bool) or not isinstance(self.cubic_terms, int) or self.cubic_terms < 0:
             raise ValueError("rfi.poly_analytic.cubic_terms must be a non-negative whole number")
-        effective_h = min(half_width, (self.n_time - 1) // 2)
         limit = options.get("quadrature_limit")
         if limit is None:
-            limit = analytic_sampling_cut(effective_h, self.segments, self.terms, self.cubic_terms)
+            # Measured VJP crossovers on a GH200: the optimiser runs the
+            # transpose every iteration. Re-measure on very different hardware;
+            # operation counts miss quadrature's memory-traffic cost. Match the
+            # active precision used to cast the tables in build_constants.
+            limit = 166 if jnp.asarray(0.).dtype == jnp.float32 else 56
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
             raise ValueError("rfi.poly_analytic.quadrature_limit must be null or a non-negative whole count")
         self.quadrature_limit = limit
@@ -571,10 +579,13 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
             for group in self.groups
         ]
 
+    def _group_eval(self, i):
+        return self._ops[i].eval
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        ops = self._ops
+        group_evals = tuple(self._group_eval(i) for i in range(len(self._ops)))
         identity_antennas = tuple(self.identity_antennas)
         n_bl, n_freq, n_time = self.n_bl, self.n_freq, self.n_time
 
@@ -585,13 +596,13 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
 
             def local_vis(rfi_A, rfi_phase, rfi_delay):
                 vis = jnp.zeros((n_bl, n_freq, n_time), dtype=rfi_A.dtype)
-                for i, op in enumerate(ops):
+                for i, evaluate in enumerate(group_evals):
                     inputs = (rfi_A, rfi_phase, rfi_delay)
                     if not identity_antennas[i]:
                         inputs = tuple(jnp.take(x, c(f"antennas_{i}"), axis=1) for x in inputs)
                     amp, phase, delay = (jnp.swapaxes(x, 0, 1) for x in inputs)
                     vis = vis.at[c(f"idx_{i}")].set(
-                        op.eval(
+                        evaluate(
                             amp, phase, delay, w_freq, start_freq,
                             c(f"w_time_{i}"), c(f"start_time_{i}"), dnu_mhz, c(f"dt_{i}"), freqs_mhz,
                         )
@@ -606,6 +617,40 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
             return state
 
         return forward
+
+
+class PolyInterpVisHybridFFI(PolyInterpVisHybrid):
+    """:class:`PolyInterpVisHybrid` through compiled quadrature and analytic ops.
+
+    Each nonempty group has an operator on its compact antenna axis. Analytic
+    calls receive monomial coefficients and a scalar cell duration in the
+    quadrature time-table and offset slots. The shared FFI forward handles
+    gathers, antenna-first layout, baseline scatter and the source-shard sum.
+    The analytic operator differentiates amplitude only; phase and delay are
+    fixed trajectory inputs. Requires ri_kernels from the interp-analytic branch.
+    """
+
+    def setup(self, config):
+        super().setup(config)
+        self._ops = []
+        for group, analytic in zip(self.groups, self.analytic_groups):
+            op_cls = RFIAnalyticVisOp if analytic else RFIInterpVisOp
+            if op_cls is None:
+                name = "RFIAnalyticVisOp" if analytic else "RFIInterpVisOp"
+                raise RuntimeError(
+                    f"{self.__class__.__name__} setup failed: the installed "
+                    f"ri_kernels has no {name}. Build ri_kernels from the "
+                    "interp-analytic branch, or use rfi_vis:PolyInterpVisHybrid."
+                )
+            self._ops.append(op_cls(len(group.antennas), group.a1, group.a2))
+
+    def _group_eval(self, i):
+        evaluate = self._ops[i].eval
+        if self.analytic_groups[i]:
+            return partial(evaluate, segments=self.segments, terms=self.terms, cubic_terms=self.cubic_terms)
+        return evaluate
+
+    build_forward = PolyInterpVisVariableFFI.build_forward
 
 
 class RiemannVisVariable(Component):

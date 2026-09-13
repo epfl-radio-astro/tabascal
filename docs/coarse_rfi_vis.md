@@ -253,7 +253,8 @@ asks for more memory than the card has.
 
 ## Analytic integration for fast baselines
 
-Use `rfi_vis:PolyInterpVisHybrid` with the same coarse signal and trajectory
+Use `rfi_vis:PolyInterpVisHybridFFI` (compiled) or
+`rfi_vis:PolyInterpVisHybrid` (pure JAX) with the same coarse signal and trajectory
 components to put slow baselines through quadrature and fast baselines through
 `analytic_rfi_vis`. Quadrature has a sample count proportional to fringe
 winding; rebuilding its tables independently does not remove that floor. The
@@ -267,8 +268,8 @@ an amplitude polynomial per antenna. Convolving the two antenna polynomials
 produces the baseline amplitude, of degree `P = 4h`; holding the amplitude
 constant fails even as the fringe winds faster.
 
-On each of four equal pieces, translation of both polynomials is exact. The
-phase has a constant term, a linear coefficient and a quadratic coefficient.
+On each of two equal pieces by default, translation of both polynomials is
+exact. The phase has a constant term, a linear coefficient and a quadratic coefficient.
 Outside the stationary region, expand the curvature exponential and contract
 against linear-phase moments. Their integration-by-parts recurrence runs
 upwards only through degrees below the winding; above that it runs downwards
@@ -278,22 +279,22 @@ At small curvature, where division by curvature is ill-conditioned even near
 a stationary point, use the convergent series instead. No time samples or
 large-winding Fresnel subtraction enter the analytic result.
 
-The cut is exposed as `rfi.poly_analytic.quadrature_limit`. Its default is an
-arithmetic estimate, not a calibrated runtime prediction. With `S` pieces,
-`K` curvature terms, `J` cubic terms, product degree `P=4h`, required moment
-degree `D=P+3(J-1)` and `M = D + 2(K-1)`, it is
-`S * (2M + 64 + K(D+1) + J(P+1) + (2h+1)^2)`: upward and downward recurrence
-stages, curvature and cubic contractions, and amplitude products, each
-charged as one quadrature sample. This conservative starting comparison
-gives **1376** with `h=1`, `S=4`, `K=16`, `J=3`; odd counts at 1377 and above
-go to the analytic group.
-A measured crossover should replace it through the explicit setting. The
-existing group records, compact antenna maps, identity bypass and output
+The cut is exposed as `rfi.poly_analytic.quadrature_limit`. Its default is the
+measured GH200 VJP crossover at 256 antennas: **166 samples in single precision,
+56 in double**. The optimiser runs the transpose every iteration. The forward
+crossovers were about 385 and 110 respectively. These numbers should be
+re-measured on very different hardware. Operation counts overestimate the cut
+because quadrature is dominated by memory traffic. An explicit non-negative
+limit overrides it; `0` sends everything analytic, and a limit above the largest
+requirement sends everything through quadrature.
+The existing group records, compact antenna maps, identity bypass and output
 scatter are shared with the quadrature pair. Neither an overlap score nor
 an empty-group fallback can send an expensive baseline back to quadrature.
 
-The default expansion is tested through 3 curvature turns at the cell edge
-and 1000 noninteger winding turns, in single and double precision. Increase
+The defaults are `segments: 2`, `terms: 6`, `cubic_terms: 3`. The measured
+accuracy was 1.21e-5 at a fifth of the cost of 4/16. The broader stress tests
+through 3 curvature turns at the cell edge and 1000 noninteger winding turns
+use an explicit 4/16 expansion, in single and double precision. Increase
 `segments` for larger curvature: the local quadratic coefficient falls as
 `1/S^2`. Dense-reference tests dropping cubic phase using the supplied
 256A, 384A, 512A median and 512A p99 coefficients give errors of approximately
@@ -308,14 +309,36 @@ the cubic's constant, linear and quadratic parts is exact; only its residual
 coefficient, reduced by `1/S^3`, needs expansion. `cubic_terms: 0` deliberately
 drops it for comparison. Derivatives above cubic are still omitted.
 
-The polynomial-amplitude test also agrees with an independent integral to
-near roundoff in double precision. This validates the supplied coefficient
+The polynomial-amplitude test with 4/16 also agrees with an independent integral
+to near roundoff in double precision. This validates the supplied coefficient
 range, not all orbits or arbitrary higher derivatives.
 
-This is a pure-JAX implementation. Hardware measurements still need to check
-compiled execution through JAX, shared-antenna gradients under source sharding,
-peak memory and the actual crossover; there is no FFI implementation of the
-analytic operator yet.
+`PolyInterpVisHybridFFI` uses `RFIInterpVisOp` for quadrature and
+`RFIAnalyticVisOp` for analytic integration, from the `interp-analytic` branch of
+`ri_kernels`. It reuses compact antenna maps, per-group tables, source-shard
+sums and the baseline scatter. Only nonempty groups construct operators.
+The analytic time-table slot carries monomial coefficients, and its offset
+slot carries the scalar cell duration. Amplitude JVPs and VJPs propagate
+through both groups, adding contributions at shared antennas; the analytic
+operator treats phase and delay as fixed trajectory inputs.
+
+At 512 antennas, 6571 samples per cell and float64 on a GH200, compiled analytic
+forward took 16.9 ms against 944.3 ms for compiled quadrature (56x); VJP took
+19.6 ms against 4734.9 ms (241x). Below about 100 samples quadrature remains
+several times cheaper. The median requirement at 512 stations was 445, placing
+most baselines on the analytic side with these defaults. Source-sharded GPU
+execution and peak memory still need validation on the GPU hosts.
+
+Run the component comparisons on a host with that kernel build:
+
+```sh
+python -m pytest tests/components/test_poly_interp_vis_hybrid_ffi.py --no-cov
+```
+
+The file explicitly exercises both float32 and float64, including the
+all-quadrature identity against `PolyInterpVisFFI`. Compiled cases skip when
+the required backend libraries are absent; CPU reference-operator cases test
+the wrapper wiring separately.
 
 ## Quadrature-only variable sampling
 

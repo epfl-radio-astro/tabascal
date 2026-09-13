@@ -450,7 +450,7 @@ class TestTheGainsSectionHasNoCorrelationLengths:
 class TestPolynomialTimeSampling:
     @pytest.mark.parametrize("component", [
         "PolyInterpVis", "PolyInterpVisFFI", "PolyInterpVisVariable", "PolyInterpVisVariableFFI",
-        "PolyInterpVisHybrid",
+        "PolyInterpVisHybrid", "PolyInterpVisHybridFFI",
     ])
     def test_polynomial_routes_bypass_legacy_binning(self, component, tmp_path, monkeypatch):
         config = base_args(tmp_path)
@@ -458,6 +458,9 @@ class TestPolynomialTimeSampling:
         config["rfi"]["min_time_bins"] = 10
         config["rfi"]["max_time_bins"] = 30
         assert config["rfi"]["poly_time_sampling"] == {"max_groups": 2, "split_at": None}
+        assert config["rfi"]["poly_analytic"] == {
+            "quadrature_limit": None, "segments": 2, "terms": 6, "cubic_terms": 3,
+        }
         tab_config, sizes = build_stubbed_tab_config(config, monkeypatch)
         assert tab_config.n_int_time == 1
         np.testing.assert_array_equal(tab_config.rfi_time_requirements, np.ones(sizes.n_bl))
