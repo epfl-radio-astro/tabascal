@@ -189,3 +189,75 @@ class TestSplittingAGroupOverDevices:
         only, = split_group_over_devices(group, 1)
         assert np.array_equal(only.baseline_indices, group.baseline_indices)
         assert np.array_equal(only.a1, group.a1)
+
+
+class TestGhostPaddedDeviceGroups:
+    """Padding an uneven group with dark baselines that never reach the output."""
+
+    @staticmethod
+    def a_group(n_ant=12):
+        from tabascal.poly_interp import make_poly_time_group
+        a1, a2 = np.triu_indices(n_ant, k=1)
+        req = np.full(len(a1), 9.0)
+        return make_poly_time_group(req, a1, a2, np.arange(len(a1)))
+
+    def test_every_device_gets_the_same_shape(self):
+        from tabascal.poly_interp import device_groups
+        group = self.a_group()                       # 66 baselines, does not divide by 4
+        shards = device_groups(group, 4)
+        assert len({len(s.a1) for s in shards}) == 1
+        assert len({len(s.a2) for s in shards}) == 1
+        # 66 over 4 is 17 apiece once padded.
+        assert len(shards[0].a1) == 17
+
+    def test_the_real_baselines_are_a_partition(self):
+        from tabascal.poly_interp import device_groups
+        group = self.a_group()
+        shards = device_groups(group, 4)
+        assert sum(s.n_real for s in shards) == len(group.baseline_indices)
+        rebuilt = np.concatenate([s.a1[: s.n_real] for s in shards])
+        assert np.array_equal(rebuilt, group.a1)
+
+    def test_ghosts_pair_with_an_antenna_the_group_does_not_have(self):
+        """A ghost pair cannot collide with a real one, which the operator forbids."""
+        from tabascal.poly_interp import device_groups
+        group = self.a_group()
+        ghost = len(group.antennas)
+        for shard in device_groups(group, 4):
+            ghosts_1, ghosts_2 = shard.a1[shard.n_real:], shard.a2[shard.n_real:]
+            assert np.all(ghosts_2 == ghost)
+            assert np.all(ghosts_1 < ghost)
+            # The operator rejects a repeated (a1, a2); ghosts must be distinct too.
+            pairs = np.stack([shard.a1, shard.a2], axis=1)
+            assert len(np.unique(pairs, axis=0)) == len(pairs)
+
+    def test_positions_address_the_devices_own_block(self):
+        from tabascal.poly_interp import device_groups
+        group = self.a_group()
+        for shard in device_groups(group, 4, offset=5):
+            assert np.array_equal(shard.positions, np.arange(5, 5 + shard.n_real))
+            # Only the real rows are placed; the ghosts have nowhere to go.
+            assert len(shard.positions) == shard.n_real
+
+    def test_an_even_group_needs_no_ghosts(self):
+        from tabascal.poly_interp import device_groups
+        from tabascal.poly_interp import make_poly_time_group
+        a1, a2 = np.triu_indices(8, k=1)             # 28 baselines, divides by 4
+        group = make_poly_time_group(np.full(28, 9.0), a1, a2, np.arange(28))
+        for shard in device_groups(group, 4):
+            assert shard.n_real == len(shard.a1) == 7
+
+    def test_too_few_antennas_to_pad_is_refused(self):
+        from tabascal.poly_interp import device_groups, make_poly_time_group
+        # Three antennas give three baselines and only three possible ghosts.
+        a1, a2 = np.triu_indices(3, k=1)
+        group = make_poly_time_group(np.full(3, 9.0), a1, a2, np.arange(3))
+        with pytest.raises(ValueError, match="cannot all be distinct pairs"):
+            device_groups(group, 7)
+
+    def test_one_device_leaves_the_group_untouched(self):
+        from tabascal.poly_interp import device_groups
+        group = self.a_group()
+        only, = device_groups(group, 1)
+        assert only.n_real == len(group.baseline_indices)
+        assert np.array_equal(only.a1, group.a1)

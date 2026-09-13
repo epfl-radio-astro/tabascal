@@ -112,6 +112,67 @@ def split_group_over_devices(group: PolyTimeGroup, n_dev: int) -> tuple[PolyTime
     )
 
 
+@dataclass(frozen=True)
+class DeviceGroup:
+    """One device's share of a group, shaped identically on every device.
+
+    ``a1``/``a2`` index the group's antenna axis extended by one: the last
+    index is a ghost antenna carrying no signal. ``n_real`` rows of the
+    operator's output are real baselines and the rest are ghosts, which are
+    sliced off before anything is written, so they never reach the visibility
+    array. ``positions`` says where the real rows belong in the device's own
+    block of it.
+    """
+
+    positions: NDArray
+    a1: NDArray
+    a2: NDArray
+    n_real: int
+
+
+def device_groups(group: PolyTimeGroup, n_dev: int, offset: int = 0) -> tuple[DeviceGroup, ...]:
+    """Split a group across devices, padding with dark ghost baselines.
+
+    ``shard_map`` runs one program, so every device's operator call must have
+    the same baseline count. A group rarely divides evenly, and the operator
+    refuses a repeated ``(a1, a2)``, so there is no real pair to pad with --
+    at 512 stations all 130816 pairs are already in the list. A ghost antenna
+    supplies ``n_ant`` fresh ones instead, exactly as
+    :func:`~tabascal.distributed.padded_rfi_count` pads the source axis with
+    dark satellites: no signal, hence no contribution and no gradient.
+
+    Each device needs at most ``n_dev - 1`` of them, so one ghost antenna is
+    ample. ``offset`` is where this group's share starts within the device's
+    block, since several groups write into one block.
+    """
+    if isinstance(n_dev, bool) or not isinstance(n_dev, (int, np.integer)) or n_dev < 1:
+        raise ValueError("n_dev must be a positive whole number")
+    n_bl = len(group.baseline_indices)
+    per = -(-n_bl // n_dev)          # ceiling: the shape every device will carry
+    ghost = len(group.antennas)      # one past the group's own antennas
+    if per * n_dev - n_bl > len(group.antennas):
+        raise ValueError(
+            f"a group of {n_bl} baselines over {n_dev} devices needs "
+            f"{per * n_dev - n_bl} ghost baselines but its antenna axis is only "
+            f"{len(group.antennas)} wide, so they cannot all be distinct pairs"
+        )
+
+    shards, taken = [], 0
+    for d in range(n_dev):
+        real = min(per, max(0, n_bl - taken))
+        sl = slice(taken, taken + real)
+        pad = per - real
+        # Distinct partners keep the ghost pairs distinct from one another; the
+        # ghost index keeps them distinct from every real baseline.
+        a1 = np.concatenate((group.a1[sl], np.arange(pad, dtype=group.a1.dtype)))
+        a2 = np.concatenate((group.a2[sl], np.full(pad, ghost, dtype=group.a2.dtype)))
+        shards.append(DeviceGroup(
+            np.arange(offset, offset + real, dtype=np.int32), a1, a2, real,
+        ))
+        taken += real
+    return tuple(shards)
+
+
 def poly_time_groups(
     requirements: NDArray, a1: NDArray, a2: NDArray,
     *, max_groups: int = 2, split_at: int | None = None,
