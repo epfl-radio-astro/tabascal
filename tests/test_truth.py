@@ -226,3 +226,60 @@ def test_effective_sample_size_matches_the_explicit_gram():
             y.size,
         )
         assert np.isclose(_effective_sample_size(y), expected, rtol=1e-9, atol=0)
+
+
+def test_autocorr_matches_explicit_lags():
+    """FFT lags preserve the overlap normalisation and first-negative window."""
+    rng = np.random.default_rng(42)
+    for shape in ((7, 3, 11), (2, 5, 150), (4, 1, 3)):
+        for complex_data in (False, True):
+            arr = rng.normal(size=shape)
+            if complex_data:
+                arr = arr + 1j * rng.normal(size=shape)
+            for data in (arr, np.cumsum(arr, axis=-1), np.ones(shape), np.zeros(shape)):
+                for axis in range(3):
+                    n = shape[axis]
+                    m = np.moveaxis(data, axis, -1).reshape(-1, n)
+                    g0 = np.mean(np.sum(np.abs(m) ** 2, axis=1))
+                    expected = 1.0
+                    if n >= 4 and g0 > 0:
+                        for k in range(1, n):
+                            rho = np.mean(np.sum(m[:, :n-k] * np.conj(m[:, k:]), axis=1).real) / g0
+                            if rho <= 0:
+                                break
+                            expected += 2 * (1 - k / n) * rho
+                    np.testing.assert_allclose(_integrated_autocorr_time(data, axis), expected, rtol=1e-12)
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_autocorr_matches_long_correlated_window(dtype):
+    """Correlated residuals exercise many lags before the Sokal window closes.
+
+    White noise can stop at lag one, hiding the cost this FFT replaces. A smooth
+    complex oscillation has zero time mean and stays positively correlated for
+    roughly a quarter of the 150-sample series, in either production precision.
+    """
+    n = 150
+    rng = np.random.default_rng(17)
+    amplitude = rng.normal(size=(4, 3, 1)) + 1j * rng.normal(size=(4, 3, 1))
+    residual = (amplitude * np.exp(2j * np.pi * np.arange(n) / n)).astype(dtype)
+    residual -= residual.mean()
+    m = residual.reshape(-1, n)
+    g0 = np.mean(np.sum(np.abs(m) ** 2, axis=1))
+    expected = 1.0
+    positive_lags = 0
+    for k in range(1, n):
+        rho = np.mean(np.sum(m[:, :n-k] * np.conj(m[:, k:]), axis=1).real) / g0
+        if rho <= 0:
+            break
+        positive_lags += 1
+        expected += 2 * (1 - k / n) * rho
+
+    # Pin the long window as well as the result, so this cannot silently become
+    # another early-exit white-noise test when the residual fixture changes.
+    assert n // 5 < positive_lags < n // 3
+    assert expected > 20
+    tolerance = 1e-6 if dtype == np.complex64 else 1e-12
+    np.testing.assert_allclose(
+        _integrated_autocorr_time(residual, axis=2), expected, rtol=tolerance,
+    )

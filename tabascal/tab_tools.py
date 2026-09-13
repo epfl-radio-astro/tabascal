@@ -180,9 +180,17 @@ def _integrated_autocorr_time(arr: np.ndarray, axis: int) -> float:
     g0 = np.mean(np.sum(np.abs(m) ** 2, axis=1))
     if g0 <= 0:
         return 1.0
+    # Zero padding gives linear rather than circular autocovariance. Only its
+    # real part is used, so sum the powers of separate real/imaginary rFFTs.
+    # Average in frequency space before inversion to keep just one lag vector.
+    n_fft = 1 << (2 * n - 1).bit_length()
+    power = np.mean(np.abs(np.fft.rfft(m.real, n=n_fft)) ** 2, axis=0)
+    if np.iscomplexobj(m):
+        power += np.mean(np.abs(np.fft.rfft(m.imag, n=n_fft)) ** 2, axis=0)
+    covariance = np.fft.irfft(power, n=n_fft)[:n]
     tau = 1.0
     for k in range(1, n):
-        rho = np.mean(np.sum(m[:, : n - k] * np.conj(m[:, k:]), axis=1).real) / g0
+        rho = covariance[k] / g0
         if rho <= 0:
             break
         tau += 2.0 * (1.0 - k / n) * rho
