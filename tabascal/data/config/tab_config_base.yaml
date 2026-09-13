@@ -6,6 +6,7 @@ data:
   truth_zarr: null        # Optional - tab-sim simulation truth, read by ast.init 'truth', rfi.init 'truth' and plots.truth, and required when any of them is set. Defaults to <MS directory>/<MS name>.zarr, where sim-vis writes it beside the MS
   ms_path: null           # Optional - Can be provided when running tabascal 
   freq: null              # Optional - A single frequency in Hz to run on, resolved to the nearest channel and refused if it falls outside the band. null, the default, reads every channel
+  row_chunk: null        # Optional - Positive row chunk for MS reads and writes. null preserves dask-ms defaults; tune throughput and memory on the target machine
   data_col: DATA          # Optional - Defaults to 'DATA'
   corr: xx                # Optional - Correlation to model, matched against the MS's POLARIZATION::CORR_TYPE
   noise: null             # Optional - Defaults to reading from the MS file. NOTE it is in the frame of data_col, i.e. BEFORE gain_table is applied - with a gain table, leave it null and let SIGMA carry it rather than pre-scaling it by hand
