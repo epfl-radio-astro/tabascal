@@ -116,6 +116,27 @@ def nlog_post(prob_model, params, obs_data, state=None, constants=None):
     return nlog_p
 
 
+@measure_runtime
+def nlog_like_and_post(prob_model, params, obs_data, state=None, constants=None):
+    """Return the existing likelihood and posterior diagnostics from one forward pass."""
+    log_joint, model_trace = log_density(
+        prob_model,
+        model_args=(obs_data,),
+        model_kwargs={"state": state, "constants": constants},
+        params=params,
+    )
+    # Exactly what log_likelihood reduces: it takes the site's own
+    # `fn.log_prob(value)`, and numpyro's mask handler records its mask on the
+    # message rather than wrapping the distribution, so neither this nor the
+    # function it replaces applies the flags here. The joint below does apply
+    # them, through log_density's scale_and_mask -- which is the same asymmetry
+    # the two separate helpers had, preserved deliberately so the printed
+    # log_l and log_p are unchanged.
+    obs = model_trace["obs"]
+    nlog_l = -obs["fn"].log_prob(obs["value"]).mean()
+    return nlog_l, -log_joint / obs_data.size / 2
+
+
 def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
 
     complex_types = [
