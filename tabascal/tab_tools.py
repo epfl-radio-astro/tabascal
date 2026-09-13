@@ -711,7 +711,19 @@ def run_opt(
         print_truth_metrics(vi_pred, truth, tab_config, "opt")
 
     print()
-    print(f"Copying tabascal results to MS file from {map_path}")
+    write_ms_if_enabled(tab_config, ms_path, map_path)
+
+    return vi_pred, vi_results.losses, vi_params, rchi2
+
+
+def write_ms_if_enabled(tab_config, ms_path, results_path):
+    """Apply the run's MS export policy to either initial or fitted results."""
+    # Both run routes already wrote the zarr. Keep its location visible when
+    # the optional MS copy (including its calibration-table export) is skipped.
+    if tab_config.args["data"].get("skip_ms_write", False):
+        print(f"Skipping MS write; tabascal results are in {results_path}")
+        return
+    print(f"Copying tabascal results to MS file from {results_path}")
     # No corr= here: write_results_xds recorded the fitted correlation on the
     # zarr, so the results carry it themselves. The gain tables are not on the
     # zarr, though, and the MS's data column is still raw, so they are handed
@@ -719,9 +731,8 @@ def run_opt(
     # that was divided out of the visibilities at read time.
     write_results_ms(
         ms_path,
-        map_path,
+        results_path,
         tab_config.args["data"]["data_col"],
         gain_table=getattr(tab_config, "gain_table", None),
+        row_chunk=tab_config.args["data"].get("row_chunk"),
     )
-
-    return vi_pred, vi_results.losses, vi_params, rchi2

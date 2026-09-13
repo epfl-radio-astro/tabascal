@@ -23,7 +23,7 @@ import jax
 from jax import random
 
 from tabascal.timing import measure_runtime, print_timings, enable_timings
-from tabascal.tab_tools import init_predict, run_opt, nlog_like_and_post
+from tabascal.tab_tools import init_predict, run_opt, nlog_like_and_post, write_ms_if_enabled
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.distributed import (
     barrier,
@@ -482,16 +482,7 @@ def tabascal_subtraction(
             print(f"log_l : {nlog_l:.3e}")
             print(f"log_p : {nlog_p:.3e}")
         else:
-            from tabascal.write import write_results_ms
-            print(f"Copying tabascal initial values to MS file from {paths.init_pred_path}")
-            # The correlation comes off the zarr the line above just wrote; the
-            # gain tables do not, and the MS's data column is still raw.
-            write_results_ms(
-                ms_path,
-                paths.init_pred_path,
-                tab_config.args["data"]["data_col"],
-                gain_table=getattr(tab_config, "gain_table", None),
-            )
+            write_ms_if_enabled(tab_config, ms_path, paths.init_pred_path)
 
     if is_process_0():
         with open(os.path.join(paths.plot_dir, f"tab_config_{paths.run_id}.yaml"), "w") as fp:
@@ -536,6 +527,8 @@ def run(args):
         enable_timings()
 
     config = load_config(args.config)
+    if getattr(args, "skip_ms_write", False):
+        config["data"]["skip_ms_write"] = True
 
     set_precision(config)
 
