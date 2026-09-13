@@ -633,17 +633,23 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
         self._device_groups = [
             device_groups(group, n_dev, self.n_bl) for group in self.groups
         ]
-        self._device_ops = [
-            tuple(
-                self._device_op_class(i)(len(group.antennas) + 1, shard.a1, shard.a2)
-                for shard in shards
-            )
-            for i, (group, shards) in enumerate(zip(self.groups, self._device_groups))
-        ]
-        # A ghost row is only needed where a group actually had to be padded.
+        # A ghost row is only needed where a group actually had to be padded,
+        # and the operator's antenna axis has to match the signal it is given:
+        # widening it unconditionally leaves the index arrays one longer than
+        # the inputs, which the operator rejects.
         self.group_has_ghost = [
             any(shard.n_real != shard.n_padded for shard in shards)
             for shards in self._device_groups
+        ]
+        self._device_ops = [
+            tuple(
+                self._device_op_class(i)(
+                    len(group.antennas) + int(self.group_has_ghost[i]),
+                    shard.a1, shard.a2,
+                )
+                for shard in shards
+            )
+            for i, (group, shards) in enumerate(zip(self.groups, self._device_groups))
         ]
 
     def _group_eval(self, i):

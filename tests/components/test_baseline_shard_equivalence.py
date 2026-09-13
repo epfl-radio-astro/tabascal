@@ -157,3 +157,23 @@ def test_an_even_split_needs_no_ghosts_and_still_agrees(monkeypatch, cls):
     ]
     assert sum(padded) == 0, f"unexpected ghosts: {padded}"
     np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.parametrize("cls", ROUTES, ids=ROUTE_IDS)
+def test_the_operator_axis_matches_the_signal_it_is_given(monkeypatch, cls):
+    """The ghost antenna must exist in the indices exactly when it exists in
+    the signal.
+
+    Widening the operator's antenna axis unconditionally leaves its index
+    arrays one longer than the inputs, which the operator rejects outright --
+    and only on a configuration that happens to need no padding, so a case
+    that does need it would never reveal it.
+    """
+    _needs_analytic(cls)
+    cfg, state = _case(requirements=np.full(8, 30), cls=cls)   # divides evenly
+    _, comp = _baseline_sharded(monkeypatch, cfg, state, cls)
+    for i, shards in enumerate(comp._device_groups):
+        widened = comp._device_ops[i][0].pair_index.shape[0]
+        expected = len(comp.groups[i].antennas) + int(comp.group_has_ghost[i])
+        assert widened == expected
+        assert not comp.group_has_ghost[i], "this case was meant to need no ghosts"
