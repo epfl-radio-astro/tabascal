@@ -130,47 +130,64 @@ class DeviceGroup:
     n_real: int
 
 
-def device_groups(group: PolyTimeGroup, n_dev: int, offset: int = 0) -> tuple[DeviceGroup, ...]:
-    """Split a group across devices, padding with dark ghost baselines.
+def device_groups(
+    group: PolyTimeGroup, n_dev: int, n_bl_total: int, offset: int = 0,
+) -> tuple[DeviceGroup, ...]:
+    """Split a group by which device owns each baseline, padding to one shape.
 
-    ``shard_map`` runs one program, so every device's operator call must have
-    the same baseline count. A group rarely divides evenly, and the operator
-    refuses a repeated ``(a1, a2)``, so there is no real pair to pad with --
-    at 512 stations all 130816 pairs are already in the list. A ghost antenna
-    supplies ``n_ant`` fresh ones instead, exactly as
-    :func:`~tabascal.distributed.padded_rfi_count` pads the source axis with
-    dark satellites: no signal, hence no contribution and no gradient.
+    Device ``d`` owns the contiguous range ``[d*block, (d+1)*block)`` of the
+    visibility array in the order the data already has, so nothing is
+    reordered: the observed visibilities, the flags and the noise are simply
+    sharded along the axis they already have, and every array downstream keeps
+    that split all the way to the likelihood. A device therefore never needs
+    anyone else's baselines and nothing is gathered back together -- only the
+    scalar likelihood is reduced across devices.
 
-    Each device needs at most ``n_dev - 1`` of them, so one ghost antenna is
-    ample. ``offset`` is where this group's share starts within the device's
-    block, since several groups write into one block.
+    Which of a group's baselines land on a device is then whatever the data
+    ordering puts there, so the counts differ between devices. ``shard_map``
+    runs one program, so they are padded up to a common count with dark ghost
+    baselines: pairs ``(j, ghost)`` against an antenna carrying no signal,
+    which collide with no real baseline, stay distinct from each other, and
+    contribute neither visibility nor gradient -- the same device
+    :func:`~tabascal.distributed.padded_rfi_count` uses on the source axis.
+
+    ``positions`` are local to the owning device's block, so a group writes
+    into the device's own rows. ``offset`` is where this group's share starts
+    within that block, since several groups share it.
     """
     if isinstance(n_dev, bool) or not isinstance(n_dev, (int, np.integer)) or n_dev < 1:
         raise ValueError("n_dev must be a positive whole number")
-    n_bl = len(group.baseline_indices)
-    per = -(-n_bl // n_dev)          # ceiling: the shape every device will carry
-    ghost = len(group.antennas)      # one past the group's own antennas
-    if per * n_dev - n_bl > len(group.antennas):
+    if n_bl_total % n_dev:
         raise ValueError(
-            f"a group of {n_bl} baselines over {n_dev} devices needs "
-            f"{per * n_dev - n_bl} ghost baselines but its antenna axis is only "
-            f"{len(group.antennas)} wide, so they cannot all be distinct pairs"
+            f"cannot split {n_bl_total} baselines evenly over {n_dev} devices "
+            f"({n_bl_total % n_dev} left over); shard_map needs one block size"
+        )
+    block = n_bl_total // n_dev
+    idx = np.asarray(group.baseline_indices)
+    owner = idx // block
+    shares = [idx[owner == d] for d in range(n_dev)]
+    local = [np.asarray(group.a1)[owner == d] for d in range(n_dev)]
+    local2 = [np.asarray(group.a2)[owner == d] for d in range(n_dev)]
+
+    per = max((len(s) for s in shares), default=0)
+    ghost = len(group.antennas)
+    if per - min((len(s) for s in shares), default=0) > len(group.antennas):
+        raise ValueError(
+            f"a device needs up to {per - min(len(s) for s in shares)} ghost "
+            f"baselines but the group's antenna axis is only {len(group.antennas)} "
+            "wide, so they cannot all be distinct pairs"
         )
 
-    shards, taken = [], 0
+    out = []
     for d in range(n_dev):
-        real = min(per, max(0, n_bl - taken))
-        sl = slice(taken, taken + real)
+        real = len(shares[d])
         pad = per - real
-        # Distinct partners keep the ghost pairs distinct from one another; the
-        # ghost index keeps them distinct from every real baseline.
-        a1 = np.concatenate((group.a1[sl], np.arange(pad, dtype=group.a1.dtype)))
-        a2 = np.concatenate((group.a2[sl], np.full(pad, ghost, dtype=group.a2.dtype)))
-        shards.append(DeviceGroup(
-            np.arange(offset, offset + real, dtype=np.int32), a1, a2, real,
+        a1 = np.concatenate((local[d], np.arange(pad, dtype=np.asarray(group.a1).dtype)))
+        a2 = np.concatenate((local2[d], np.full(pad, ghost, dtype=np.asarray(group.a2).dtype)))
+        out.append(DeviceGroup(
+            (shares[d] - d * block).astype(np.int32) + offset, a1, a2, real,
         ))
-        taken += real
-    return tuple(shards)
+    return tuple(out)
 
 
 def poly_time_groups(
