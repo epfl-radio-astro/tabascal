@@ -327,7 +327,9 @@ forward took 16.9 ms against 944.3 ms for compiled quadrature (56x); VJP took
 19.6 ms against 4734.9 ms (241x). Below about 100 samples quadrature remains
 several times cheaper. The median requirement at 512 stations was 445, placing
 most baselines on the analytic side with these defaults. Source-sharded GPU
-execution and peak memory still need validation on the GPU hosts.
+execution and peak memory have since been validated on four GH200s -- see
+`benchmarks/baseline_sharding/measurements.md`, which also carries the
+baseline-axis comparison.
 
 Run the component comparisons on a host with that kernel build:
 
