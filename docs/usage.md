@@ -202,6 +202,51 @@ smallest footprint a run really needs and to find out where an out-of-memory
 error comes from. It frees only what is no longer live, so it will not make two
 overlapping peaks fit.
 
+### Sharding across several GPUs
+
+Sharding turns itself on when more than one device is visible — there is no
+config key for it — and `TABASCAL_SHARD_AXIS` chooses which axis of the problem
+gets split:
+
+```bash
+TABASCAL_SHARD_AXIS=baseline tabascal run -c config.yaml -ms file.ms
+```
+
+`source`, the default, splits the satellite axis: each device carries a share of
+the satellites and the RFI visibilities are summed back across devices on every
+iteration. The arrays that dominate a large fit are visibility-shaped,
+`(n_bl, n_freq, n_time)`, and carry no source axis at all, so they stay
+replicated — the *work* divides but the *memory* does not.
+
+`baseline` splits the visibility axis instead. Each device owns a contiguous
+range of baselines, in the order the data already has, computes only its own
+rows, and nothing is gathered back: only the scalar likelihood is reduced.
+
+On four GH200s at 512 antennas, 8 channels, the optimiser took 132.82 s on the
+source axis against 140.97 s on the baseline axis, while peak memory on the
+limiting device fell from 33.911 GB to 13.703 GB. The reduced chi-squared is
+identical to sixteen digits on both, so the devices are not trading accuracy for
+room. The baseline axis is the slower of the two by about 6% and the one that
+fits: at 32 and 64 channels the same observation completes only on that axis.
+
+`source` stays the default because it is faster wherever both fit. A
+single-device run is unaffected by either setting.
+
+**Baseline sharding needs the baseline count to divide by the device count.**
+That holds for a complete array — 256, 384 and 512 antennas give 32640, 73536
+and 130816 baselines, each a multiple of four — but not necessarily for a
+flagged or selected subset. Where it does not divide, the arrays fall back to
+replicated placement at component boundaries: the run is still correct, it
+simply saves no memory over a source-sharded one. Inside the kernel call the
+work is padded up to the largest group any device holds, with dark ghost
+antennas making up the missing pairs; ghost rows carry no signal and are
+discarded before the result is scattered.
+
+Peaks quoted here are allocator `peak_bytes_in_use` within the per-GPU pool, not
+the reserved figure `nvidia-smi` reports, and the two can differ by a lot. They
+are comparable with each other rather than a statement of absolute headroom.
+
+
 ## Extracting RFI light curves
 
 `tabascal light-curve` measures each satellite's apparent flux over time and

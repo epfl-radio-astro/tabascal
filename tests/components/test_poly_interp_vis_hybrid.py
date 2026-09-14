@@ -18,7 +18,7 @@ def _case(limit=10):
 
 
 @pytest.mark.parametrize("x64,limit", [(False, 166), (True, 56)])
-@pytest.mark.parametrize("options", [{}, {"quadrature_limit": None}, {"segments": 4, "terms": 16}])
+@pytest.mark.parametrize("options", [{"quadrature_limit": None}, {"quadrature_limit": None, "segments": 4, "terms": 16}])
 def test_default_cut_uses_measured_vjp_crossover(x64, limit, options):
     previous = jax.config.x64_enabled
     jax.config.update("jax_enable_x64", x64)
@@ -89,3 +89,11 @@ def test_invalid_settings_are_refused(options):
     cfg.args['rfi']['poly_analytic'] = options
     with pytest.raises(RuntimeError, match='rfi.poly_analytic'):
         _component_call(PolyInterpVisHybrid, cfg, state)
+
+
+def test_default_is_analytic_only():
+    cfg, state = _case()
+    cfg.args["rfi"]["poly_analytic"] = {}
+    _, comp = _component_call(PolyInterpVisHybrid, cfg, state)
+    assert comp.quadrature_limit == 0
+    assert comp.analytic_groups == [True]

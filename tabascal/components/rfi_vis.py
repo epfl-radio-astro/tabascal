@@ -3,7 +3,10 @@ from math import isfinite
 import jax.numpy as jnp
 import numpy as np
 
-from tabascal.distributed import psum_over_rfi, sharding_enabled
+import jax
+from tabascal.distributed import (
+    map_over_baselines, psum_over_rfi, sharding_baselines, sharding_enabled,
+)
 from tabascal.interferometry import (
     calculate_rfi_vis_blocked,
     calculate_rfi_vis_variable,
@@ -13,15 +16,27 @@ from functools import partial
 
 from tabascal.coarse_rfi_vis import analytic_rfi_vis, coarse_rfi_vis
 from tabascal.poly_interp import (
+    device_groups,
     fine_offsets, interp_tables, make_poly_time_group,
     monomial_tables, poly_sample_counts, poly_time_groups,
 )
+from jax.sharding import PartitionSpec as P
 from ri_kernels.jax_api import RFIVisOp
 
 try:
     from ri_kernels.jax_api import RFIInterpVisOp
 except ImportError:  # an ri_kernels release without the data-grid operator
     RFIInterpVisOp = None
+
+try:
+    from ri_kernels.jax_api import eval_with_indices
+except ImportError:
+    eval_with_indices = None
+
+try:
+    from ri_kernels.jax_api import analytic_eval_with_indices
+except ImportError:
+    analytic_eval_with_indices = None
 
 try:
     from ri_kernels.jax_api import RFIAnalyticVisOp
@@ -450,10 +465,15 @@ class PolyInterpVisVariable(PolyInterpVis):
                 f"start_time_{i}": jnp.asarray(start),
                 f"dt_{i}": jnp.asarray(dt),
             })
+        constants.update(self._extra_constants())
         return constants
 
     def _group_function(self, i):
         return coarse_rfi_vis
+
+    def _extra_constants(self):
+        """Hook for a route that needs more than the time tables."""
+        return {}
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
@@ -520,7 +540,7 @@ class PolyInterpVisHybrid(PolyInterpVisVariable):
                 raise ValueError(f"rfi.poly_analytic.{name} must be a positive whole number")
         if isinstance(self.cubic_terms, bool) or not isinstance(self.cubic_terms, int) or self.cubic_terms < 0:
             raise ValueError("rfi.poly_analytic.cubic_terms must be a non-negative whole number")
-        limit = options.get("quadrature_limit")
+        limit = options.get("quadrature_limit", 0)
         if limit is None:
             # Measured VJP crossovers on a GH200: the optimiser runs the
             # transpose every iteration. Re-measure on very different hardware;
@@ -574,18 +594,113 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
                 "interp-vis branch, or use rfi_vis:PolyInterpVisVariable."
             )
         super().setup(config)
-        self._ops = [
-            RFIInterpVisOp(len(group.antennas), group.a1, group.a2)
-            for group in self.groups
+        if sharding_baselines():
+            self._setup_device_ops()
+        else:
+            self._ops = [
+                RFIInterpVisOp(len(group.antennas), group.a1, group.a2)
+                for group in self.groups
+            ]
+
+    def _device_op_class(self, i):
+        """The operator this group's baselines go through. Quadrature here."""
+        return RFIInterpVisOp
+
+    def _group_eval_with_indices(self, i):
+        """The seam that takes a device's own index arrays for this group."""
+        return eval_with_indices
+
+    def _setup_device_ops(self):
+        """Build one operator per group *per device*, and stack their indices.
+
+        A device owns a contiguous range of the visibility array, so which of a
+        group's baselines it holds is whatever the data ordering puts there.
+        Each of those sub-lists gets its own operator, built on the group's
+        antenna axis extended by enough dark antennas for the per-device
+        counts to be padded to one shape with distinct pairs.
+
+        The index arrays then go in as data. Those that carry a baseline axis
+        are concatenated, so ``shard_map`` hands each device its own slice; the
+        rest are stacked, one row per device. The values differ per device --
+        a sorter sorts the *local* baselines and ``pair_index`` names a *local*
+        row -- so they are built per device rather than sliced from the whole,
+        which would point outside the shard and be wrong in silence.
+        """
+        for i in range(len(self.groups)):
+            if self._device_op_class(i) is None:
+                raise RuntimeError("The installed ri_kernels lacks this group's operator")
+            # Check only the seam actually used: an analytic-only calculation
+            # does not depend on the quadrature seam (or vice versa).
+            if self._group_eval_with_indices(i) is None:
+                raise RuntimeError(
+                    f"{self.__class__.__name__} cannot shard baselines: the installed "
+                    "ri_kernels lacks this group's eval_with_indices seam. "
+                    "Build ri_kernels from interp-shardable."
+                )
+        n_dev = jax.device_count()
+        self._device_groups = [
+            device_groups(group, n_dev, self.n_bl) for group in self.groups
+        ]
+        # A ghost row is only needed where a group actually had to be padded,
+        # and the operator's antenna axis has to match the signal it is given:
+        # widening it unconditionally leaves the index arrays one longer than
+        # the inputs, which the operator rejects.
+        self.group_n_ghost = [shards[0].n_ghost_antennas for shards in self._device_groups]
+        self.group_has_ghost = [n > 0 for n in self.group_n_ghost]
+        self._device_ops = [
+            tuple(
+                self._device_op_class(i)(
+                    len(group.antennas) + self.group_n_ghost[i],
+                    shard.a1, shard.a2,
+                )
+                for shard in shards
+            )
+            for i, (group, shards) in enumerate(zip(self.groups, self._device_groups))
         ]
 
     def _group_eval(self, i):
         return self._ops[i].eval
 
+    def _extra_constants(self):
+        return self._device_constants() if sharding_baselines() else {}
+
+    def _device_constants(self):
+        """The stacked per-device index arrays, as constants the map divides.
+
+        Index arrays with a baseline axis are concatenated across devices so
+        ``in_specs=P("bl")`` hands each its own slice. The others -- the per
+        antenna starts, the pair table, the tile-pair list -- have one row per
+        device instead, sharded on that leading axis, so each arrives as a
+        single row to be squeezed. They are uniform in shape because their
+        shapes follow the antenna count, which every device shares.
+        """
+        constants = {}
+        for i, (shards, ops) in enumerate(zip(self._device_groups, self._device_ops)):
+            indices = [op.indices for op in ops]
+            # (a1, a1_sorter, a1_start, a2, a2_sorter, a2_start, pair_index, tile_pairs)
+            per_baseline = (0, 1, 3, 4)
+            for j, name in enumerate(
+                ("a1", "a1_sorter", "a1_start", "a2", "a2_sorter", "a2_start",
+                 "pair_index", "tile_pairs")
+            ):
+                parts = [jnp.asarray(ix[j]) for ix in indices]
+                constants[f"dev_{name}_{i}"] = (
+                    jnp.concatenate(parts, axis=0) if j in per_baseline
+                    else jnp.stack(parts, axis=0)
+                )
+            constants[f"dev_pos_{i}"] = jnp.concatenate(
+                [jnp.asarray(shard.positions) for shard in shards], axis=0
+            )
+        return constants
+
     def build_forward(self):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
-        group_evals = tuple(self._group_eval(i) for i in range(len(self._ops)))
+        sharded = sharding_baselines()
+        sharded_vis = self._build_sharded_vis() if sharded else None
+        group_evals = () if sharded else tuple(
+            self._group_eval(i) for i in range(len(self._ops))
+        )
         identity_antennas = tuple(self.identity_antennas)
         n_bl, n_freq, n_time = self.n_bl, self.n_freq, self.n_time
 
@@ -609,14 +724,103 @@ class PolyInterpVisVariableFFI(PolyInterpVisVariable):
                     )
                 return vis
 
-            vis_rfi = psum_over_rfi(local_vis)(
-                state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"]
-            )
+            signal = (state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"])
+            if sharded:
+                vis_rfi = sharded_vis(c, signal)
+            else:
+                vis_rfi = psum_over_rfi(local_vis)(*signal)
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
             return state
 
         return forward
+
+    def _build_sharded_vis(self):
+        """The baseline-sharded route: each device computes only its own rows.
+
+        Every device holds the whole per-antenna signal and computes the
+        baselines in its own block of the visibility array, so nothing is
+        summed across devices -- the map's output *is* the visibility array,
+        one block per device. That is the difference from the source route,
+        which has every device compute every baseline for a few sources and
+        then ``psum`` the whole array back together on each iteration.
+        Reverse mode still reduces gradients of the shared per-antenna signal.
+
+        The block carries one spare row. Padded ghost baselines scatter into
+        it and it is dropped, so every device writes the same number of rows
+        and a ghost cannot land on a real baseline.
+        """
+        prefix = self.prefix
+        n_dev = jax.device_count()
+        block = (self.n_bl + n_dev - 1) // n_dev
+        n_freq, n_time = self.n_freq, self.n_time
+        groups = tuple(range(len(self.groups)))
+        identity = tuple(self.identity_antennas)
+        n_ghost = tuple(self.group_n_ghost)
+        evals = tuple(self._group_eval_with_indices(i) for i in groups)
+        names = ("a1", "a1_sorter", "a1_start", "a2", "a2_sorter", "a2_start",
+                 "pair_index", "tile_pairs")
+        per_baseline = (0, 1, 3, 4)
+
+        def sharded_vis(c, signal):
+            # Per-baseline arrays are split by the map; the per-device rows are
+            # split on their leading axis and squeezed back to one row inside.
+            args, specs = [], []
+            for i in groups:
+                for j, name in enumerate(names):
+                    args.append(c(f"dev_{name}_{i}"))
+                    specs.append(P("bl"))
+                args.append(c(f"dev_pos_{i}"))
+                specs.append(P("bl"))
+            tables = [c("w_freq"), c("start_freq"), c("dnu_mhz"), c("freqs_mhz")]
+            for i in groups:
+                tables += [c(f"w_time_{i}"), c(f"start_time_{i}"), c(f"dt_{i}")]
+                if not identity[i]:
+                    tables.append(c(f"antennas_{i}"))
+            args += tables + list(signal)
+            specs += [P()] * (len(tables) + len(signal))
+
+            def local(*flat):
+                it = iter(flat)
+                idx = {}
+                for i in groups:
+                    row = [next(it) for _ in names]
+                    idx[i] = tuple(
+                        a if j in per_baseline else a[0] for j, a in enumerate(row)
+                    )
+                    idx[f"pos_{i}"] = next(it)
+                w_freq, start_freq, dnu_mhz, freqs_mhz = (next(it) for _ in range(4))
+                tab = {}
+                for i in groups:
+                    tab[i] = (next(it), next(it), next(it))
+                    tab[f"ant_{i}"] = None if identity[i] else next(it)
+                rfi_A, rfi_phase, rfi_delay = (next(it) for _ in range(3))
+
+                vis = jnp.zeros((block + 1, n_freq, n_time), dtype=rfi_A.dtype)
+                for i in groups:
+                    inputs = (rfi_A, rfi_phase, rfi_delay)
+                    if tab[f"ant_{i}"] is not None:
+                        inputs = tuple(jnp.take(x, tab[f"ant_{i}"], axis=1) for x in inputs)
+                    amp, phase, delay = (jnp.swapaxes(x, 0, 1) for x in inputs)
+                    if n_ghost[i]:
+                        # Dark antennas carry no signal, so their baselines
+                        # are zero and take no gradient, like a dark satellite.
+                        amp, phase, delay = (
+                            jnp.concatenate([x, jnp.zeros((n_ghost[i], *x.shape[1:]), dtype=x.dtype)], axis=0)
+                            for x in (amp, phase, delay)
+                        )
+                    w_time, start_time, dt = tab[i]
+                    vis = vis.at[idx[f"pos_{i}"]].set(
+                        evals[i](
+                            idx[i], amp, phase, delay, w_freq, start_freq,
+                            w_time, start_time, dnu_mhz, dt, freqs_mhz,
+                        )
+                    )
+                return vis[:block]
+
+            return map_over_baselines(local, in_specs=tuple(specs))(*args)[:self.n_bl]
+
+        return sharded_vis
 
 
 class PolyInterpVisHybridFFI(PolyInterpVisHybrid):
@@ -630,8 +834,26 @@ class PolyInterpVisHybridFFI(PolyInterpVisHybrid):
     fixed trajectory inputs. Requires ri_kernels from the interp-analytic branch.
     """
 
+    def _device_op_class(self, i):
+        return RFIAnalyticVisOp if self.analytic_groups[i] else RFIInterpVisOp
+
+    def _group_eval_with_indices(self, i):
+        if self.analytic_groups[i]:
+            if analytic_eval_with_indices is None:
+                return None
+            return partial(
+                analytic_eval_with_indices, segments=self.segments,
+                terms=self.terms, cubic_terms=self.cubic_terms,
+            )
+        return eval_with_indices
+
     def setup(self, config):
         super().setup(config)
+        if sharding_baselines():
+            # The same per-device operators the quadrature route builds, but
+            # each group takes whichever of the two kernels its cut chose.
+            self._setup_device_ops()
+            return
         self._ops = []
         for group, analytic in zip(self.groups, self.analytic_groups):
             op_cls = RFIAnalyticVisOp if analytic else RFIInterpVisOp
@@ -651,6 +873,10 @@ class PolyInterpVisHybridFFI(PolyInterpVisHybrid):
         return evaluate
 
     build_forward = PolyInterpVisVariableFFI.build_forward
+    _setup_device_ops = PolyInterpVisVariableFFI._setup_device_ops
+    _device_constants = PolyInterpVisVariableFFI._device_constants
+    _extra_constants = PolyInterpVisVariableFFI._extra_constants
+    _build_sharded_vis = PolyInterpVisVariableFFI._build_sharded_vis
 
 
 class RiemannVisVariable(Component):

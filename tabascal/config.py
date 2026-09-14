@@ -2,9 +2,14 @@ from tabascal.imports import import_components
 from tabascal.components import validate_component_order
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
+    baseline_sharding,
+    baselines_divide,
+    constrain_baseline_state,
     constrain_rfi_state,
     make_global,
     replicated_sharding,
+    shard_pytree,
+    sharding_baselines,
     sharding_enabled,
 )
 from tabascal.gain_table import gains_from_tables, normalise_gain_tables
@@ -235,8 +240,18 @@ class TabConfig:
             # eagerly against globally-sharded arrays; process-local device arrays
             # cannot mix with global ones in multi-process, so globalize them here,
             # before any component sees them.
-            self.vis_obs = make_global(self.vis_obs, replicated_sharding())
-            self.flags = make_global(self.flags, replicated_sharding())
+            # Baselines are the axis these carry, so under that route they
+            # divide: a device holds the rows it is going to fit and no more,
+            # and every array derived from them downstream keeps the split all
+            # the way to the likelihood. The source route has no baseline axis
+            # to divide and leaves them whole on every device.
+            vis_sharding = (
+                baseline_sharding()
+                if sharding_baselines() and baselines_divide(self.n_bl)
+                else replicated_sharding()
+            )
+            self.vis_obs = make_global(self.vis_obs, vis_sharding)
+            self.flags = make_global(self.flags, vis_sharding)
             self.ms_flags = make_global(self.ms_flags, replicated_sharding())
             self.estimator_flags = make_global(
                 self.estimator_flags, replicated_sharding()
@@ -249,14 +264,17 @@ class TabConfig:
                     self.gain_flags, replicated_sharding()
                 )
             # Was float(self.noise), which a resolved noise array cannot survive.
-            # Replicated rather than sharded: it is one array indexed by baseline
-            # (and channel, and timestep where the MS resolves the noise that
-            # far), and every process needs all of it -- at most the size of
-            # vis_obs, which is replicated beside it. A scalar override goes
-            # through unchanged, as a 0-d global array.
+            # It is one array indexed by baseline (and channel, and timestep
+            # where the MS resolves the noise that far), so it follows vis_obs:
+            # divided under the baseline route, whole under the source one. A
+            # scalar override has no baseline axis to divide and stays a 0-d
+            # global array either way.
             if self.noise is not None:
+                noise = jnp.asarray(self.noise)
                 self.noise = make_global(
-                    jnp.asarray(self.noise), replicated_sharding()
+                    noise,
+                    vis_sharding if noise.ndim and noise.shape[0] == self.n_bl
+                    else replicated_sharding(),
                 )
 
     def set_elevation_mask(
@@ -784,6 +802,14 @@ class Model:
 
         for comp in components:
             comp.setup(tab_config)
+            if sharding_baselines():
+                # Components retain their output placeholders after assembly.
+                # Placing only Model.state later leaves those full visibility
+                # cubes alive on device 0. Place the retained originals too,
+                # before the model and forward closures take references.
+                comp.state_outputs = shard_pytree(
+                    comp.state_outputs, self.n_rfi, tab_config.n_bl
+                )
 
         init_params = [comp.init_params_base for comp in components]
         self.init_params = {k: v for d in init_params for k, v in d.items()}
@@ -809,11 +835,18 @@ class Model:
     def build_forward(self):
         forwards = [comp.build_forward() for comp in self.components]
         n_rfi = self.n_rfi
+        # The baseline count the visibilities carry, taken from the array
+        # itself rather than a config the model does not keep.
+        n_bl = self.state["vis_obs"].shape[0]
 
         def forward(params, state, constants):
 
             for sub_forward in forwards:
                 state = sub_forward(params, state, constants)
+                # Under the baseline route the visibilities stay divided from
+                # one component to the next, so the sky model is computed on
+                # each device's own rows rather than whole and then resharded.
+                state = constrain_baseline_state(state, n_bl)
                 # Keep the per-RFI fine grids (rfi_A/rfi_phase -- the memory hogs)
                 # pinned to the RFI sharding between components, so XLA never
                 # materializes a replicated copy. No-op on a single device.

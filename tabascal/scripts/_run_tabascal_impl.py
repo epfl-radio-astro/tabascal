@@ -416,14 +416,14 @@ def tabascal_subtraction(
                 )
 
         if sharding_enabled():
-            # Split every leading-RFI-axis array across the device mesh and replicate
-            # the rest. _map_step takes all of these as traced jit arguments, so GSPMD
+            # Place parameters, state and constants on the selected source or
+            # baseline layout. _map_step takes these as traced jit arguments, so GSPMD
             # propagates the shardings through the whole optimization (gradients and
             # optimizer state included) from here on. (vis_obs/flags/noise were already
             # globalized in TabConfig, before Model captured them in closures.)
-            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
-            model.state = shard_pytree(model.state, tab_config.n_rfi)
-            model.constants = shard_pytree(model.constants, tab_config.n_rfi)
+            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi, tab_config.n_bl)
+            model.state = shard_pytree(model.state, tab_config.n_rfi, tab_config.n_bl)
+            model.constants = shard_pytree(model.constants, tab_config.n_rfi, tab_config.n_bl)
 
         _print_model_summary(tab_config, model, start_time)
 
@@ -451,6 +451,10 @@ def tabascal_subtraction(
         if config["plots"]["init"] and is_process_0():
             from tabascal.plot import plot_init
             plot_init(tab_config, init_pred, truth, paths.model_name, paths.plot_dir)
+
+        # These visibility cubes have been saved and plotted; retaining them
+        # through optimization needlessly keeps another prediction on every GPU.
+        del init_pred
 
         key, subkey = random.split(key)
         if config["plots"]["prior"]:

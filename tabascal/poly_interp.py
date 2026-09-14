@@ -66,6 +66,145 @@ def make_poly_time_group(requirements, a1, a2, indices) -> PolyTimeGroup:
     )
 
 
+def split_group_over_devices(group: PolyTimeGroup, n_dev: int) -> tuple[PolyTimeGroup, ...]:
+    """Divide one group's baselines evenly over devices, keeping its antennas.
+
+    Each device computes a share of the group's baselines and none of anyone
+    else's, so nothing has to be summed across devices -- unlike sharding the
+    source axis, where every device computes every baseline for a few sources
+    and the partial visibilities must be added back together.
+
+    The antenna set is deliberately *not* recompacted per device, which is what
+    separates this from :func:`make_poly_time_group`. Every device keeps the
+    whole group's antennas, so the per-antenna signal is identical on all of
+    them and enters the map replicated; recompacting would give each device a
+    different antenna count, and ``shard_map`` runs one program with one set of
+    shapes. The signal is small -- 0.24 GB at 512 stations against 1.256 GB for
+    a single visibility array -- so replicating it costs far less than the
+    visibilities it lets us divide.
+
+    ``a1`` and ``a2`` stay indices into the group's compact antenna axis, and
+    ``baseline_indices`` stay indices into the *global* visibility array, so a
+    device knows where its own results belong.
+
+    Raises when the count does not divide: ``shard_map`` needs one shape for
+    every device, and a silent remainder would drop baselines.
+    """
+    if isinstance(n_dev, bool) or not isinstance(n_dev, (int, np.integer)) or n_dev < 1:
+        raise ValueError("n_dev must be a positive whole number")
+    n_bl = len(group.baseline_indices)
+    if n_bl % n_dev:
+        raise ValueError(
+            f"cannot split {n_bl} baselines evenly over {n_dev} devices "
+            f"({n_bl % n_dev} left over). Every device must take the same "
+            "number for shard_map to run one program over them."
+        )
+    per = n_bl // n_dev
+    return tuple(
+        PolyTimeGroup(
+            group.baseline_indices[d * per:(d + 1) * per],
+            group.n_g,
+            group.antennas,
+            group.a1[d * per:(d + 1) * per],
+            group.a2[d * per:(d + 1) * per],
+        )
+        for d in range(n_dev)
+    )
+
+
+@dataclass(frozen=True)
+class DeviceGroup:
+    """One device's share of a group, shaped identically on every device.
+
+    ``a1``/``a2`` index the group's antenna axis extended by
+    ``n_ghost_antennas`` dark antennas, the same count on every device.
+    ``n_real`` output rows are real baselines; ghosts scatter to a spare row
+    that is discarded before returning the visibility array. ``positions`` says where the real rows belong in the device's own
+    block of it.
+    """
+
+    positions: NDArray
+    a1: NDArray
+    a2: NDArray
+    n_real: int
+    n_ghost_antennas: int = 0
+
+    @property
+    def n_padded(self) -> int:
+        """Rows the operator is asked for, real and ghost, the same on every device."""
+        return len(self.a1)
+
+
+def device_groups(
+    group: PolyTimeGroup, n_dev: int, n_bl_total: int, offset: int = 0,
+) -> tuple[DeviceGroup, ...]:
+    """Split a group by which device owns each baseline, padding to one shape.
+
+    With ``block = ceil(n_bl_total / n_dev)``, device ``d`` owns the
+    contiguous range ``[d*block, (d+1)*block)`` of the
+    visibility array in the order the data already has, so nothing is
+    reordered: the observed visibilities, the flags and the noise are simply
+    sharded along the axis they already have, and every array downstream keeps
+    that split all the way to the likelihood. A device therefore never needs
+    anyone else's visibility rows. Likelihood scalars and reverse-mode
+    gradients of shared per-antenna inputs still need reductions. For
+    indivisible totals the last block extends past the real array; the caller
+    trims those rows and uses replicated placement at component boundaries.
+
+    Which of a group's baselines land on a device is then whatever the data
+    ordering puts there, so the counts differ between devices. ``shard_map``
+    runs one program, so they are padded up to a common count with dark ghost
+    baselines: distinct pairs against extra antennas carrying no signal,
+    which collide with no real baseline, stay distinct from each other, and
+    contribute neither visibility nor gradient -- the same device
+    :func:`~tabascal.distributed.padded_rfi_count` uses on the source axis.
+
+    ``positions`` are local to the owning device's block, so a group writes
+    into the device's own rows, and are padded to the same length as ``a1``
+    with ``block`` -- one past the block's last row. The caller gives its local
+    visibility array that one extra row, lets the ghosts land in it and drops
+    it, so the scatter has a fixed shape and a ghost can never overwrite a real
+    baseline. ``offset`` is where this group's share starts within that block,
+    since several groups share it.
+    """
+    if isinstance(n_dev, bool) or not isinstance(n_dev, (int, np.integer)) or n_dev < 1:
+        raise ValueError("n_dev must be a positive whole number")
+    if n_bl_total < 1:
+        raise ValueError("n_bl_total must be positive")
+    block = (n_bl_total + n_dev - 1) // n_dev
+    idx = np.asarray(group.baseline_indices)
+    owner = idx // block
+    shares = [idx[owner == d] for d in range(n_dev)]
+    mine_a1 = [np.asarray(group.a1)[owner == d] for d in range(n_dev)]
+    mine_a2 = [np.asarray(group.a2)[owner == d] for d in range(n_dev)]
+
+    per = max((len(s) for s in shares), default=0)
+    ghost = len(group.antennas)
+    max_pad = per - min((len(s) for s in shares), default=0)
+    # Each extra dark antenna supplies `ghost` distinct real/dark pairs.
+    # Size this from ownership imbalance, which can be much larger than n_ant.
+    n_ghost = (max_pad + ghost - 1) // ghost if max_pad else 0
+
+    out = []
+    for d in range(n_dev):
+        real = len(shares[d])
+        pad = per - real
+        ghost_rows = np.arange(pad)
+        a1 = np.concatenate((
+            mine_a1[d], (ghost_rows % ghost).astype(np.asarray(group.a1).dtype),
+        ))
+        a2 = np.concatenate((
+            mine_a2[d], (ghost + ghost_rows // ghost).astype(np.asarray(group.a2).dtype),
+        ))
+        # Ghost rows are scattered to `block`, the spare row the caller adds
+        # and discards, so every device scatters the same number of rows.
+        rows = (shares[d] - d * block).astype(np.int32) + offset
+        out.append(DeviceGroup(
+            np.concatenate((rows, np.full(pad, block, dtype=np.int32))), a1, a2, real, n_ghost,
+        ))
+    return tuple(out)
+
+
 def poly_time_groups(
     requirements: NDArray, a1: NDArray, a2: NDArray,
     *, max_groups: int = 2, split_at: int | None = None,

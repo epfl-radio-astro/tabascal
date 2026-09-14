@@ -35,7 +35,7 @@ from datetime import datetime
 from time import perf_counter
 
 from typing import Callable, Optional
-from functools import reduce, partial
+from functools import partial
 
 
 from numpyro.infer import log_likelihood
@@ -137,31 +137,30 @@ def nlog_like_and_post(prob_model, params, obs_data, state=None, constants=None)
     return nlog_l, -log_joint / obs_data.size / 2
 
 
+@jax.jit
 def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
-
-    complex_types = [
-        complex,
-        np.complex64,
-        np.complex128,
-        jnp.complex64,
-        jnp.complex128,
-    ]
-    dtype = [true.dtype == c_type for c_type in complex_types]
-    is_complex = reduce(jnp.logical_or, dtype)
-    if is_complex:
-        norm = 2 * true[~flags].size
-    else:
-        norm = true[~flags].size
-
-    # Broadcast the noise onto the data BEFORE masking. `x[~flags]` flattens, so
-    # a resolved noise applied afterwards -- per baseline, per channel or per
-    # timestep -- would no longer line up with the samples it belongs to; it
-    # would be silently recycled across whichever axes it resolves.
+    # Reducing in place avoids the observation-sized index vectors and gathers
+    # made by boolean indexing. Mask before division so excluded NaNs or zero
+    # noise cannot contaminate the result. Resolved noise keeps its data axes.
     noise = jnp.broadcast_to(broadcast_to_vis(noise, true.shape), true.shape)
+    diff = jnp.where(flags, 0, pred - true)
+    noise = jnp.where(flags, 1, noise)
+    # Cast before the complex factor: 512 antennas at 64 channels already
+    # exceed int32 when the number of samples is doubled.
+    count_dtype = jnp.result_type(true.real.dtype, jnp.float32)
+    norm = jnp.sum(~flags).astype(count_dtype) * (2 if jnp.issubdtype(true.dtype, jnp.complexfloating) else 1)
+    return jnp.sum((jnp.abs(diff) / noise) ** 2) / norm
 
-    rchi2 = jnp.sum((jnp.abs(pred[~flags] - true[~flags]) / noise[~flags]) ** 2) / norm
 
-    return rchi2
+@jax.jit
+def _truth_reductions(pred, true, flags):
+    """Scalar error moments without compacting the visibility cubes."""
+    diff = jnp.where(flags, 0, pred - true)
+    signal = jnp.where(flags, 0, true)
+    count = jnp.sum(jnp.broadcast_to(~flags, true.shape))
+    return (jnp.sqrt(jnp.sum(jnp.abs(diff) ** 2) / count),
+            jnp.abs(jnp.sum(diff) / count),
+            jnp.sqrt(jnp.sum(jnp.abs(signal) ** 2) / count))
 
 
 def rmse(pred: Array, true: Array, flags: Optional[Array] = None) -> Array:
@@ -308,14 +307,9 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
 
         diff_full = p - true
         mask = flags if (use_flags and flags is not None and flags.shape == true.shape) else None
-        if mask is not None:
-            diff, masked_true = diff_full[~mask], true[~mask]
-        else:
-            diff, masked_true = diff_full, true
-
-        r = float(jnp.sqrt(jnp.mean(jnp.abs(diff) ** 2)))   # RMSE: bias + scatter
-        me = float(jnp.abs(jnp.mean(diff)))                 # |mean error|: coherent bias
-        signal = float(jnp.sqrt(jnp.mean(jnp.abs(masked_true) ** 2)))
+        r, me, signal = map(float, _truth_reductions(
+            p, true, mask if mask is not None else jnp.asarray(False)
+        ))
         n_eff = _effective_sample_size(np.asarray(diff_full))
         sigma = np.sqrt(2.0 * n_eff) * me / r if r > 0 else 0.0
 
@@ -420,9 +414,9 @@ def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
     # to align the resolved array with. Same choice as print_truth_metrics.
     noise_scalar = tab_config.noise_scalar
 
-    # reduced_chi2/rmse select with ``x[~flags]``, whose output shape depends on
-    # the mask -- fine eagerly, not traceable. Weight by the mask instead and
-    # divide by a statically known count, which is numerically the same thing.
+    # Boolean compaction makes the output shape depend on the mask. Reduce
+    # masked values in place, as reduced_chi2 does, and compute this trace's
+    # fixed sample count once when constructing the callback.
     keep = ~flags if flags is not None and flags.shape == vis_obs.shape else None
     n_keep = float(keep.sum()) if keep is not None else float(vis_obs.size)
 

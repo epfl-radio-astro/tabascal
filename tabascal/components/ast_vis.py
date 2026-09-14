@@ -1,7 +1,10 @@
 from math import isfinite, sqrt
 
-from jax import checkpoint, lax, vmap, random
+from jax import checkpoint, jit, lax, vmap, random
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
+
+from tabascal.distributed import baselines_divide, map_over_baselines, sharding_baselines
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
@@ -268,13 +271,11 @@ class GPVisAst(Component):
         The affine transform runs inside the body, on the block, so that neither
         it nor the padded grid is ever formed for every baseline at once.
 
-        Splitting the baseline axis across devices was measured alongside this
-        and is deliberately not here: on the astronomical benchmark the scan
-        takes the value-and-gradient peak from 1008 MB to 163.5 MB on its own,
-        and adding the split takes it back up to 174.5 MB, because the gather
-        the visibilities need on the way out makes the backward pass scatter a
-        cotangent the forward has just collected. See issue #209 for the change
-        that would remove the padded grid altogether.
+        With baseline sharding, the scan runs inside each device's shard. A
+        global scan reshapes the baseline axis into (block, row); XLA can then
+        gather the entire latent arrays and the visibility cotangent even if
+        the component's input and output layouts both divide baselines. Local
+        padding and reshaping keep that work on the owning device.
         """
         prefix = self.prefix
         forward_transform = self.forward_transform
@@ -323,6 +324,12 @@ class GPVisAst(Component):
 
             return jnp.reshape(vis_ast, (-1,) + vis_ast.shape[2:])[:n_bl]
 
+        transform_vis = blocked_vis
+        if sharding_baselines() and baselines_divide(self.n_bl):
+            # Keep the existing block budget, but apply it to local rows. This
+            # also makes an uneven last scan block local to its owning device.
+            transform_vis = map_over_baselines(blocked_vis, in_specs=(P("bl"),) * 3)
+
         def forward(params, state, constants):
             # Pure JAX operations only
             sigma_ast_k = constants[f"{prefix}/sigma_ast_k"]
@@ -330,7 +337,7 @@ class GPVisAst(Component):
 
             ast_k_base = params["ast_k_r_base"] + 1.0j * params["ast_k_i_base"]
 
-            vis_ast = blocked_vis(ast_k_base, sigma_ast_k, mu_ast_k)
+            vis_ast = transform_vis(ast_k_base, sigma_ast_k, mu_ast_k)
 
             state = {**state, "vis_ast": state["vis_ast"] + vis_ast}
 
@@ -407,14 +414,24 @@ class GPVisAst(Component):
             self.pk_cutoff,
         )
 
-        self.signal_to_latent = lambda vis_ast: vmap(signal_to_latent, (0, None, None), 0)(vis_ast, self.pad_factors, self.latent_idxs)
-
         print("\nAST specs")
         print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
         print(f"(n_freq, n_time): ({self.n_freq}, {self.n_time})")
         print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
 
         self.n_k_freq_ast, self.n_k_time_ast = self.pk.shape
+
+        # Truth/data initialization also pads and transforms the sky. A vmap
+        # over the entire observation creates a four-visibility temporary at
+        # the production padding, before the forward's blocking can help.
+        # Bound this FFT even when the forward uses the direct transform.
+        encode_block = max(1, self._BLOCK_BUDGET_BYTES // max(
+            1, GPVisAst._transform_bytes_per_baseline(self)
+        ))
+        self.signal_to_latent = jit(lambda vis_ast: lax.map(
+            lambda vis: signal_to_latent(vis, self.pad_factors, self.latent_idxs),
+            vis_ast, batch_size=min(int(encode_block), self.n_bl),
+        ))
 
         def sigma(k0, std):
             """Mode standard deviations that make ``std`` the width of vis_ast.
