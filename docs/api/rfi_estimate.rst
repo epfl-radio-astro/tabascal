@@ -131,26 +131,12 @@ arrays, walking the grid with ``lax.map`` so one compilation covers the whole
 scan, and is left undecorated so the drivers own the ``jit`` and the batched
 identification search can ``vmap`` it over candidates.
 
-That core holds the whole offset grid's baseline paths and a full fringe model
-per offset, which on a compact array whose every baseline is coherent runs to
-tens of gigabytes. It is kept as the reference, and the drivers run the same
-statistic in bounded memory. :func:`~tabascal.rfi_estimate.near_field_antenna_paths`
-holds one path per antenna, less the mean path of the antennas the coherent
-baselines use (``reference_antennas``), so that single precision still carries
-it however far an antenna the cut dropped sits; the mean cancels from every
-baseline difference. :func:`~tabascal.rfi_estimate.tau_scan_antennas`
-differences them on the device a chunk of baselines at a time
-(:func:`~tabascal.rfi_estimate.baseline_chunks`), adding each chunk's
-:math:`z, n_1, n_2` to a running total carried through ``lax.scan``, so no
-chunk's result is kept. The chunk is every baseline whenever ``max_mem_gb``
-allows. The budget counts, per candidate, its path grid and its outputs
-(:math:`r` and :math:`z^2`) and the chunk's working set, and once for the null
-its stored product, padded out to whole chunks. :func:`~tabascal.rfi_estimate.decohered_null_antennas`
-uses the fact that a per-antenna jitter only turns the model by a phase:
-:math:`|M|`, :math:`n_1` and :math:`n_2` are the same for every draw, so the
-model is built once and each draw applies a per-baseline phase to
-:math:`w V M^{*}`. On a 256-antenna station the paths are 127 times smaller, and a
-fit that exhausted a 96 GB GPU peaks under 5 GB.
+The drivers use :func:`~tabascal.rfi_estimate.near_field_antenna_paths`,
+:func:`~tabascal.rfi_estimate.tau_scan_antennas` and
+:func:`~tabascal.rfi_estimate.decohered_null_antennas`. These store paths per
+antenna, accumulate scores over baseline chunks and build the null model once.
+See the function docstrings for reference centering, precision and padding
+semantics.
 :func:`~tabascal.rfi_estimate.shift_orbit_record_epoch` closes the loop: an orbit
 record whose epoch is moved by :math:`-\tau` reproduces the measured trajectory
 through ``--extra-orbit-dir`` with no further code.
@@ -202,20 +188,16 @@ the same :math:`z^2`, so the search and
 :func:`~tabascal.rfi_estimate.fit_time_offset` report the same detection for the
 same pass.
 
-**One compilation.** The chunked scan, ``vmap``\ ped over a candidate axis, is
-jitted at module level and the candidates are fed to it in batches, a ragged
-last batch padded by repeating its last candidate so every call of the sweep has
-one shape and compiles once. Per candidate the memory is its per-antenna path
-grid, its outputs and the fringe model of the baselines scanned at once, and the
-null's stored product is held once, after the sweep. ``max_mem_gb`` is a budget
-for those: the batch actually run is the smaller of ``batch_size`` and what the
-budget affords with every baseline in one chunk (reported back as
-``batch_size``), and when not even one candidate fits whole its baselines are
-chunked instead (reported as ``bl_chunk``). Both are read against the same
-terms, so a batch that fits is never also chunked. At MWA scale it is the budget that
-decides: the union reaches 7704 of the array's 9180 baselines once candidates
-come near the horizon, and a batch of eight scanned whole would ask for tens of
-gigabytes.
+**Batching and memory.** A module-level jitted kernel scans candidate batches.
+The final batch repeats its last candidate to preserve the input shape;
+padded results are discarded. Compilations depend on input shapes, dtypes
+and weak types.
+
+``max_mem_gb`` limits the requested ``batch_size`` using the scan's memory
+estimate. Baselines are chunked only when one candidate does not fit whole.
+The actual sizes are returned as ``batch_size`` and ``bl_chunk``.
+The budget is a sizing heuristic, not a cap; see
+:func:`~tabascal.rfi_estimate.search_candidates` for the counted arrays.
 
 The null is drawn for the top ``n_null_candidates`` only: two hundred extra scans
 per satellite over a whole constellation is the search twice over, spent on

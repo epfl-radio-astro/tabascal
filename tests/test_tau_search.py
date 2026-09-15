@@ -993,18 +993,12 @@ class TestDecoheredNull:
 # The same statistic in bounded memory
 # ---------------------------------------------------------------------------
 
-#: A slice of the default grid either side of the injected offset: enough
-#: offsets to exercise the offset axis, few enough to keep the reference cheap.
+#: Five default-grid offsets centred on the injected offset.
 NEAR_BEST = slice(BEST_INDEX - 2, BEST_INDEX + 3)
 
 
 def _scan_rtol(precision):
-    """How closely two layouts of the same sums agree.
-
-    Chunking changes only the order the per-baseline terms are added in, and the
-    per-antenna paths reach the same differences through a subtraction of their
-    own; both are rounding, set by the working precision.
-    """
+    """Tolerance for precision-dependent rounding in path subtraction and sums."""
     return 1e-9 if precision == "double" else 2e-4
 
 
@@ -1021,8 +1015,6 @@ class TestNearFieldAntennaPaths:
 
     def test_their_differences_are_the_baseline_paths(self, obs,
                                                      near_best_antenna_paths):
-        """Against the independent transcription, not the module's own function:
-        the per-antenna form is only useful if it is the same geometry."""
         want = ref_paths(obs.record, obs.ants_itrf, obs.times_jd, obs.phase_centre,
                          obs.a1, obs.a2, N_FINE, obs.int_time,
                          DEFAULT_TAU_GRID[NEAR_BEST])
@@ -1030,18 +1022,15 @@ class TestNearFieldAntennaPaths:
 
         assert ant.shape == (5, N_ANT, obs.n_time, N_FINE)
         assert ant.dtype == np.float64
-        # A micrometre: a millionth of a wavelength, and far above f64 rounding
-        # on the ~400 km absolute paths the reference is subtracted from.
+        # Allow float64 rounding from subtracting the reference path.
         np.testing.assert_allclose(ant[:, obs.a1] - ant[:, obs.a2], want, atol=1e-6)
 
     def test_they_are_bounded_by_the_array_not_by_the_range(self, obs,
                                                            near_best_antenna_paths):
-        """What makes them safe to carry in float32 on the device.
+        """Centred paths are bounded by twice the longest baseline.
 
-        The absolute paths are hundreds of kilometres; less the array mean, each
-        is an average of differences, and a difference is at most twice the
-        longest baseline (the geometric part and the w term are each bounded by
-        it).
+        The geometric and phase-tracking differences are each bounded by
+        the baseline length.
         """
         longest = float(obs.bl_len.max())
 
@@ -1051,12 +1040,10 @@ class TestNearFieldAntennaPaths:
         )
 
     def test_a_reference_set_keeps_its_own_antennas_near_zero(self, obs):
-        """What the drivers pass: the antennas their coherent baselines use.
+        """Reference paths are bounded by twice the reference set's longest baseline.
 
-        Centred on the core rather than on the whole array, the core stays within
-        twice its own longest baseline however far the 8 km outlier the cut
-        drops sits, and every difference -- to the outlier included -- is
-        unchanged.
+        Outliers do not affect this bound. Baseline differences, including
+        those to outliers, are preserved.
         """
         core = np.flatnonzero(np.arange(N_ANT) != FAR_ANT)
         taus = DEFAULT_TAU_GRID[NEAR_BEST]
@@ -1116,9 +1103,10 @@ class TestTauScanAntennas:
     def test_full_weights_flags_and_a_frame_mask_survive_the_chunking(
         self, obs, grid_paths, near_best_antenna_paths, precision
     ):
-        """Weights that vary per cell, zeros where samples are flagged, and frames
-        left out of the score: each has to be read per chunk, and a padding row
-        must add nothing to any of them."""
+        """Chunking preserves per-cell weights, flags and frame masks.
+
+        Padding rows contribute zero.
+        """
         rng = np.random.default_rng(11)
         weights = np.broadcast_to(obs.weights, obs.vis.shape) * rng.uniform(
             0.5, 1.5, obs.vis.shape
@@ -1139,8 +1127,7 @@ class TestTauScanAntennas:
 
     def test_no_baselines_is_the_references_empty_answer(self, obs,
                                                          near_best_antenna_paths):
-        """A padding row reads row 0, and with no baselines there is no row 0:
-        the empty axis is answered, as the reference's empty sums answer it."""
+        """An empty baseline axis returns zero scores without gathering row 0."""
         empty = np.zeros((0, N_FREQ, obs.n_time), dtype=complex)
         none = np.zeros(0, dtype=int)
 
@@ -1161,20 +1148,16 @@ class TestTauScanAntennas:
     def test_the_running_total_is_the_references_sum(
         self, obs, near_best_antenna_paths, inputs, precision
     ):
-        """A running total is only the reference's sum if it takes the dtype that
-        sum takes. With every model input an integer, the exponential still
-        makes n2 floating (double under x64, from the weak Python constants
-        inside the model); real visibilities still give a complex z; and integer
-        visibilities keep an exact integer n1. A carry of any other dtype
-        truncates the fractional |M|^2 of each chunk, drops z's imaginary part,
-        narrows a double sum or rounds a large integer power. One baseline per
-        chunk, so every term lands in the total on its own."""
+        """Running totals preserve the sum dtypes.
+
+        Integer model inputs produce floating n2, double under x64.
+        Real visibilities produce complex z. Integer visibilities and
+        weights produce integer n1.
+        """
         vis, weights, ant, freqs = (obs.vis, obs.weights, near_best_antenna_paths,
                                     obs.freqs)
         if inputs == "integer weights paths and frequencies":
-            # Whole metres: a 250 m core baseline still moves a couple of metres
-            # inside a dump, so |M|^2 is fractional; and the frequencies are
-            # whole hertz, well inside int32.
+            # Integer paths can still produce fractional |M|^2.
             ant = np.round(ant).astype(np.int64)
             weights = (obs.weights > 0).astype(np.int64)
             freqs = obs.freqs.astype(np.int64)
@@ -1219,9 +1202,7 @@ class TestTauScanAntennas:
     def test_weak_scalar_weights_promote_as_the_reference_does(
         self, obs, near_best_antenna_paths, precision
     ):
-        """A Python float weight is weakly typed and defers to the arrays it
-        meets; a padding zero of a concrete dtype would lift explicit float32
-        inputs to double under x64. Same dtypes as the reference, same values."""
+        """Padding preserves weak scalar weights without promoting float32 inputs."""
         vis = obs.vis.astype(np.complex64)
         ant = near_best_antenna_paths.astype(np.float32)
         freqs = obs.freqs.astype(np.float32)
@@ -1242,9 +1223,7 @@ class TestTauScanAntennas:
                                    rtol=2e-3)
 
     def test_the_sums_are_carried_not_stacked(self, obs):
-        """The running total is the memory claim: a map followed by a sum would
-        keep every chunk's result, a stack that grows as the chunk shrinks. Every
-        scan in the chunked sum returns its carry and nothing else."""
+        """Chunk scans return only their carry, without stacking chunk results."""
         rows = baseline_chunks(obs.n_bl, 1)
         jaxpr = jax.make_jaxpr(
             lambda v, w, r: _chunked_power(jnp.asarray(v), jnp.asarray(w), r)
@@ -1279,8 +1258,7 @@ class TestDecoheredNullAntennas:
     @pytest.mark.parametrize("bl_chunk", [1, 7, None])
     def test_it_is_the_reference_null(self, obs, grid_paths,
                                       near_best_antenna_paths, bl_chunk, precision):
-        """Same seed, same draws, same scores: the model built once and turned by
-        each draw's phase is the model rebuilt from the jittered paths."""
+        """Phase-factorized null scores match direct path jitter for the same seed."""
         want = np.asarray(decohered_null(obs.vis, obs.weights, grid_paths[BEST_INDEX],
                                          obs.freqs, obs.a1, obs.a2, n_draws=24,
                                          seed=5))
@@ -1325,7 +1303,7 @@ class TestDecoheredNullAntennas:
 
 
 class TestScanMemoryBudget:
-    """The budget decides the layout of the scan, never its answer."""
+    """Memory budgeting preserves scan results up to rounding."""
 
     def test_the_chunk_is_what_the_budget_affords(self):
         """Fixed arrays per candidate, a working set per baseline, and the null's
@@ -1386,8 +1364,6 @@ class TestScanMemoryBudget:
         assert tight["significance"] == pytest.approx(free["significance"], rel=1e-3)
 
     def test_the_fit_is_the_reference_scan_and_null(self, obs, grid_paths, precision):
-        """End to end: what fit_time_offset reports is what the reference
-        kernels compute on the same baselines, weights and offsets."""
         fit = fit_time_offset(
             obs.vis, obs.record, obs.ants_itrf, obs.times_jd, obs.phase_centre,
             obs.freqs, obs.a1, obs.a2, obs.int_time, noise=SIGMA, n_null=16,

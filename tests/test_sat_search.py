@@ -581,15 +581,11 @@ def single_fit(observation, record, taus_s=SEARCH_GRID, **kwargs):
 
 
 def bytes_per_candidate(n_bl_used, n_tau):
-    """What one candidate of a batch costs scanned whole, written out as the
-    search sizes it.
+    """Estimated bytes per candidate with all baselines in one chunk.
 
-    Per baseline, the fine-grid phase, the complex exponent and its exponential,
-    ``(n_freq, n_time, n_fine)`` each, beside the baseline's fine-grid path and
-    the per-cell visibility, weight and product the sums reduce -- all in
-    whatever precision the scan is running in. Plus what the candidate holds for
-    its whole scan: the per-antenna path grid for the whole offset grid, float64
-    on the host and again on the device, and the ``r`` and ``z2`` outputs.
+    Includes the per-baseline working set, host and device path grids,
+    and scan outputs. Host paths use float64; device arrays use session
+    precision.
     """
     c = jnp.zeros(1, dtype=complex).dtype.itemsize
     f = jnp.zeros(1, dtype=float).dtype.itemsize
@@ -1558,8 +1554,7 @@ class TestBatchMemoryBudget:
 
         assert uncapped["batch_size"] == min(8, n_cand)
         assert capped["batch_size"] == 1
-        # And a batch of one that still does not fit is chunked over its
-        # baselines rather than refused; with room, nothing is chunked.
+        # Chunk baselines only when one candidate does not fit whole.
         assert uncapped["bl_chunk"] == uncapped["n_bl_used"]
         assert capped["bl_chunk"] == 1
         # One report per batch, and either way the sweep ends on the last
