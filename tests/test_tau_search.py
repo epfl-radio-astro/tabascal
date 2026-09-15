@@ -1230,9 +1230,11 @@ class TestTauScanAntennas:
         )(obs.vis, np.broadcast_to(obs.weights, obs.weights.shape), rows)
         scans = [e for e in jaxpr.jaxpr.eqns if e.primitive.name == "scan"]
 
+        # Read from the output shapes rather than the scan's params, whose names
+        # are JAX internals: a stacked result would carry a leading chunk axis.
         assert scans, "the chunked sum is expected to be a scan"
         for eqn in scans:
-            assert len(eqn.outvars) == eqn.params["num_carry"]
+            assert all(v.aval.shape == obs.vis.shape[1:] for v in eqn.outvars)
 
     def test_it_vmaps_over_a_candidate_axis(self, obs, near_best_antenna_paths,
                                             exact_rtol):
