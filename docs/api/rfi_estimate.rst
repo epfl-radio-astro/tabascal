@@ -130,6 +130,22 @@ The core (:func:`~tabascal.rfi_estimate.near_field_fringe_model`,
 arrays, walking the grid with ``lax.map`` so one compilation covers the whole
 scan, and is left undecorated so the drivers own the ``jit`` and the batched
 identification search can ``vmap`` it over candidates.
+
+That core holds the whole offset grid's baseline paths and a full fringe model
+per offset, which on a compact array whose every baseline is coherent runs to
+tens of gigabytes. It is kept as the reference, and the drivers run the same
+statistic in bounded memory. :func:`~tabascal.rfi_estimate.near_field_antenna_paths`
+holds one path per antenna, less the array mean so that single precision still
+carries it, and :func:`~tabascal.rfi_estimate.tau_scan_antennas` differences
+them on the device a chunk of baselines at a time
+(:func:`~tabascal.rfi_estimate.baseline_chunks`), adding each chunk's
+:math:`z, n_1, n_2` to a running total. The chunk is every baseline whenever
+``max_mem_gb`` allows. :func:`~tabascal.rfi_estimate.decohered_null_antennas`
+uses the fact that a per-antenna jitter only turns the model by a phase:
+:math:`|M|`, :math:`n_1` and :math:`n_2` are the same for every draw, so the
+model is built once and each draw applies a per-baseline phase to
+:math:`w V M^{*}`. On a 256-antenna station the paths are 127 times smaller, and a
+fit that exhausted a 96 GB GPU peaks under 5 GB.
 :func:`~tabascal.rfi_estimate.shift_orbit_record_epoch` closes the loop: an orbit
 record whose epoch is moved by :math:`-\tau` reproduces the measured trajectory
 through ``--extra-orbit-dir`` with no further code.
@@ -181,17 +197,18 @@ the same :math:`z^2`, so the search and
 :func:`~tabascal.rfi_estimate.fit_time_offset` report the same detection for the
 same pass.
 
-**One compilation.** ``jax.jit(jax.vmap(tau_scan))`` is held at module level and
-the candidates are fed to it in batches, a ragged last batch padded by repeating
-its last candidate so every call has one shape. Two arrays per candidate dominate
-the memory -- the fringe model ``(n_bl, n_freq, n_time, n_fine)`` complex, one
-offset at a time, and the paths ``(n_tau, n_bl, n_time, n_fine)`` float64 -- and
-``max_mem_gb`` is a budget for their sum, so the batch actually run is the
-smaller of ``batch_size`` and what that budget affords (reported back as
-``batch_size``). At MWA scale it is the budget that decides: the union reaches
-7704 of the array's 9180 baselines once candidates come near the horizon, one
-candidate over 24 channels is then some 2.1 GB, and a batch of eight would ask
-for 17 GB.
+**One compilation.** The chunked scan, ``vmap``\ ped over a candidate axis, is
+jitted once at module level and the candidates are fed to it in batches, a
+ragged last batch padded by repeating its last candidate so every call has one
+shape. Per candidate the memory is its per-antenna path grid and the fringe
+model of the baselines scanned at once, and ``max_mem_gb`` is a budget for
+those: the batch actually run is the smaller of ``batch_size`` and what the
+budget affords with every baseline in one chunk (reported back as
+``batch_size``), and when not even one candidate fits whole its baselines are
+chunked instead (reported as ``bl_chunk``). At MWA scale it is the budget that
+decides: the union reaches 7704 of the array's 9180 baselines once candidates
+come near the horizon, and a batch of eight scanned whole would ask for tens of
+gigabytes.
 
 The null is drawn for the top ``n_null_candidates`` only: two hundred extra scans
 per satellite over a whole constellation is the search twice over, spent on

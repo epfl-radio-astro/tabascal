@@ -581,21 +581,24 @@ def single_fit(observation, record, taus_s=SEARCH_GRID, **kwargs):
 
 
 def bytes_per_candidate(n_bl_used, n_tau):
-    """What one candidate of a batch costs, written out as the search sizes it.
+    """What one candidate of a batch costs scanned whole, written out as the
+    search sizes it.
 
-    The per-offset fringe model -- ``(n_bl, n_freq, n_time, n_fine)`` complex, in
-    whatever precision the scan is running in -- plus the host-side float64 path
-    differences for the whole offset grid. On the MWA case the shared set runs
-    out to 7704 of 9180 baselines (a candidate 2800 km away carries a 2.9 km
-    coherence length), and eight of these at once is 17 GB: the machine swaps
-    long before the GPU is asked for anything.
+    Per baseline, the fine-grid phase, the complex exponent and its exponential,
+    ``(n_freq, n_time, n_fine)`` each, beside the baseline's fine-grid path and
+    the per-cell visibility, weight and product the sums reduce -- all in
+    whatever precision the scan is running in. Plus the per-antenna path grid for
+    the whole offset grid, float64 on the host and again on the device.
     """
-    complex_bytes = jnp.zeros(1, dtype=complex).dtype.itemsize
-
-    return (
-        n_bl_used * N_FREQ * N_TIME * N_FINE * complex_bytes
-        + n_tau * n_bl_used * N_TIME * N_FINE * 8
+    c = jnp.zeros(1, dtype=complex).dtype.itemsize
+    f = jnp.zeros(1, dtype=float).dtype.itemsize
+    per_baseline = (
+        N_FREQ * N_TIME * N_FINE * (f + 2 * c)
+        + N_TIME * N_FINE * f
+        + N_FREQ * N_TIME * (2 * c + f)
     )
+
+    return n_bl_used * per_baseline + n_tau * N_ANT * N_TIME * N_FINE * (8 + f)
 
 
 def fake_search(entries, tau_grid=SEARCH_GRID):
@@ -1552,6 +1555,10 @@ class TestBatchMemoryBudget:
 
         assert uncapped["batch_size"] == min(8, n_cand)
         assert capped["batch_size"] == 1
+        # And a batch of one that still does not fit is chunked over its
+        # baselines rather than refused; with room, nothing is chunked.
+        assert uncapped["bl_chunk"] == uncapped["n_bl_used"]
+        assert capped["bl_chunk"] == 1
         # One report per batch, and either way the sweep ends on the last
         # candidate: progress is what a minutes-long search says while it runs.
         assert len(free_calls) == 1 and free_calls[-1] == (n_cand, n_cand)

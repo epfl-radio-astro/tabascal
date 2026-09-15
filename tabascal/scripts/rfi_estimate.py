@@ -144,7 +144,10 @@ def build_parser(parser=None):
     )
     parser.add_argument(
         "--max-mem-gb", dest="max_mem_gb", type=float, default=1.0,
-        help="Memory budget for the matched-filter time-chunk loop (default: 1.0).",
+        help="Memory budget for the matched-filter time-chunk loop and, with "
+        "--fit-offset, for the scan's working set, which is then run over chunks "
+        "of baselines when it would not fit whole (default: 1.0). It changes how "
+        "the work is laid out, never the result.",
     )
 
     add_offset_fit_arguments(parser)
