@@ -581,21 +581,23 @@ def single_fit(observation, record, taus_s=SEARCH_GRID, **kwargs):
 
 
 def bytes_per_candidate(n_bl_used, n_tau):
-    """What one candidate of a batch costs, written out as the search sizes it.
+    """Estimated bytes per candidate with all baselines in one chunk.
 
-    The per-offset fringe model -- ``(n_bl, n_freq, n_time, n_fine)`` complex, in
-    whatever precision the scan is running in -- plus the host-side float64 path
-    differences for the whole offset grid. On the MWA case the shared set runs
-    out to 7704 of 9180 baselines (a candidate 2800 km away carries a 2.9 km
-    coherence length), and eight of these at once is 17 GB: the machine swaps
-    long before the GPU is asked for anything.
+    Includes the per-baseline working set, host and device path grids,
+    and scan outputs. Host paths use float64; device arrays use session
+    precision.
     """
-    complex_bytes = jnp.zeros(1, dtype=complex).dtype.itemsize
-
-    return (
-        n_bl_used * N_FREQ * N_TIME * N_FINE * complex_bytes
-        + n_tau * n_bl_used * N_TIME * N_FINE * 8
+    c = jnp.zeros(1, dtype=complex).dtype.itemsize
+    f = jnp.zeros(1, dtype=float).dtype.itemsize
+    per_baseline = (
+        N_FREQ * N_TIME * N_FINE * (f + 2 * c)
+        + N_TIME * N_FINE * f
+        + N_FREQ * N_TIME * (2 * c + f)
     )
+
+    fixed = n_tau * N_ANT * N_TIME * N_FINE * (8 + f) + n_tau * N_FREQ * (N_TIME + 1) * f
+
+    return n_bl_used * per_baseline + fixed
 
 
 def fake_search(entries, tau_grid=SEARCH_GRID):
@@ -942,7 +944,7 @@ class TestSearchResult:
                 "tau_grid", "z2_tau", "tau_best", "z2_best", "best_chan",
                 "best_freq", "r_best", "frames", "elevation", "null",
                 "null_mean", "null_std", "significance", "n_bl_used", "range_m",
-                "v_perp_m_s", "b_coh", "n_fine", "sigma_transverse_m",
+                "v_perp_m_s", "b_coh", "n_fine", "sigma_transverse_m", "bl_chunk",
             }
             assert fit["tau_best"] == row["tau_best"]
             assert fit["best_chan"] == row["best_chan"]
@@ -1552,6 +1554,9 @@ class TestBatchMemoryBudget:
 
         assert uncapped["batch_size"] == min(8, n_cand)
         assert capped["batch_size"] == 1
+        # Chunk baselines only when one candidate does not fit whole.
+        assert uncapped["bl_chunk"] == uncapped["n_bl_used"]
+        assert capped["bl_chunk"] == 1
         # One report per batch, and either way the sweep ends on the last
         # candidate: progress is what a minutes-long search says while it runs.
         assert len(free_calls) == 1 and free_calls[-1] == (n_cand, n_cand)

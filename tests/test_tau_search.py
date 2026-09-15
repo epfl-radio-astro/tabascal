@@ -70,16 +70,25 @@ from tabascal.interferometry import C, itrf_to_uvw_numpy
 from tabascal.orbit import _select_from_extra_dir
 from tabascal.rfi_estimate import (
     DEFAULT_TAU_GRID,
+    _batch_for_memory,
+    _baseline_chunk,
+    _chunked_power,
     _lc_result,
+    _null_row_bytes,
+    _scan_bytes_per_baseline,
+    _scan_fixed_bytes,
     attach_offset_fits,
+    baseline_chunks,
     baseline_lengths,
     coherence_scores,
     coherent_baseline_mask,
     decohered_null,
+    decohered_null_antennas,
     fine_time_offsets,
     fit_time_offset,
     is_detection,
     matched_filter_sums,
+    near_field_antenna_paths,
     near_field_baseline_paths,
     near_field_fringe_model,
     plot_offset_diagnostics,
@@ -90,6 +99,7 @@ from tabascal.rfi_estimate import (
     select_sources,
     shift_orbit_record_epoch,
     tau_scan,
+    tau_scan_antennas,
     write_shifted_orbits,
 )
 from tabascal.time import gast_deg, jd_to_mjd, skyfield_time, timescale
@@ -977,6 +987,401 @@ class TestDecoheredNull:
 
         np.testing.assert_array_equal(first, again)
         assert not np.allclose(first, other)
+
+
+# ---------------------------------------------------------------------------
+# The same statistic in bounded memory
+# ---------------------------------------------------------------------------
+
+#: Five default-grid offsets centred on the injected offset.
+NEAR_BEST = slice(BEST_INDEX - 2, BEST_INDEX + 3)
+
+
+def _scan_rtol(precision):
+    """Tolerance for precision-dependent rounding in path subtraction and sums."""
+    return 1e-9 if precision == "double" else 2e-4
+
+
+@pytest.fixture(scope="module")
+def near_best_antenna_paths(obs):
+    return near_field_antenna_paths(
+        obs.record, obs.ants_itrf, obs.times_jd, obs.phase_centre, N_FINE,
+        obs.int_time, DEFAULT_TAU_GRID[NEAR_BEST],
+    )
+
+
+class TestNearFieldAntennaPaths:
+    """One path per antenna, from which every baseline's is a difference."""
+
+    def test_their_differences_are_the_baseline_paths(self, obs,
+                                                     near_best_antenna_paths):
+        want = ref_paths(obs.record, obs.ants_itrf, obs.times_jd, obs.phase_centre,
+                         obs.a1, obs.a2, N_FINE, obs.int_time,
+                         DEFAULT_TAU_GRID[NEAR_BEST])
+        ant = near_best_antenna_paths
+
+        assert ant.shape == (5, N_ANT, obs.n_time, N_FINE)
+        assert ant.dtype == np.float64
+        # Allow float64 rounding from subtracting the reference path.
+        np.testing.assert_allclose(ant[:, obs.a1] - ant[:, obs.a2], want, atol=1e-6)
+
+    def test_they_are_bounded_by_the_array_not_by_the_range(self, obs,
+                                                           near_best_antenna_paths):
+        """Centred paths are bounded by twice the longest baseline.
+
+        The geometric and phase-tracking differences are each bounded by
+        the baseline length.
+        """
+        longest = float(obs.bl_len.max())
+
+        assert np.abs(near_best_antenna_paths).max() <= 2.0 * longest
+        np.testing.assert_allclose(
+            near_best_antenna_paths.mean(axis=1), 0.0, atol=1e-6
+        )
+
+    def test_a_reference_set_keeps_its_own_antennas_near_zero(self, obs):
+        """Reference paths are bounded by twice the reference set's longest baseline.
+
+        Outliers do not affect this bound. Baseline differences, including
+        those to outliers, are preserved.
+        """
+        core = np.flatnonzero(np.arange(N_ANT) != FAR_ANT)
+        taus = DEFAULT_TAU_GRID[NEAR_BEST]
+        whole = near_field_antenna_paths(obs.record, obs.ants_itrf, obs.times_jd,
+                                         obs.phase_centre, N_FINE, obs.int_time, taus)
+        centred = near_field_antenna_paths(obs.record, obs.ants_itrf, obs.times_jd,
+                                           obs.phase_centre, N_FINE, obs.int_time,
+                                           taus, reference_antennas=core)
+        core_bl = (obs.a1 != FAR_ANT) & (obs.a2 != FAR_ANT)
+        longest_core = float(obs.bl_len[core_bl].max())
+
+        np.testing.assert_allclose(centred[:, core].mean(axis=1), 0.0, atol=1e-6)
+        assert np.abs(centred[:, core]).max() <= 2.0 * longest_core
+        np.testing.assert_allclose(
+            centred[:, obs.a1] - centred[:, obs.a2], whole[:, obs.a1] - whole[:, obs.a2],
+            atol=1e-6,
+        )
+
+
+class TestBaselineChunks:
+    """The static layout the chunked kernels walk."""
+
+    def test_every_baseline_appears_once_and_the_padding_is_past_the_end(self):
+        rows = baseline_chunks(45, 7)
+
+        assert rows.shape == (7, 7)
+        assert rows.dtype == np.int32
+        np.testing.assert_array_equal(rows.ravel()[:45], np.arange(45))
+        assert np.all(rows.ravel()[45:] >= 45)
+
+    @pytest.mark.parametrize("bl_chunk", [None, 45, 1000])
+    def test_no_chunk_is_one_chunk_of_everything(self, bl_chunk):
+        np.testing.assert_array_equal(baseline_chunks(45, bl_chunk), np.arange(45)[None])
+
+    def test_a_chunk_is_never_empty(self):
+        assert baseline_chunks(45, 0).shape == (45, 1)
+
+
+class TestTauScanAntennas:
+    """The drivers' scan is the reference scan, however it is chunked."""
+
+    @pytest.mark.parametrize("bl_chunk", [1, 7, 45, None])
+    def test_it_is_the_reference_scan(self, obs, grid_paths, near_best_antenna_paths,
+                                      bl_chunk, precision):
+        want = tau_scan(obs.vis, obs.weights, grid_paths[NEAR_BEST], obs.freqs)
+        got = tau_scan_antennas(obs.vis, obs.weights, near_best_antenna_paths,
+                                obs.freqs, obs.a1, obs.a2, bl_chunk=bl_chunk)
+        rtol = _scan_rtol(precision)
+
+        assert np.asarray(got["z2"]).shape == (5, N_FREQ)
+        assert np.asarray(got["r"]).shape == (5, N_FREQ, obs.n_time)
+        np.testing.assert_allclose(np.asarray(got["z2"]), np.asarray(want["z2"]),
+                                   rtol=rtol, atol=rtol)
+        np.testing.assert_allclose(np.asarray(got["r"]), np.asarray(want["r"]),
+                                   rtol=rtol, atol=rtol)
+
+    def test_full_weights_flags_and_a_frame_mask_survive_the_chunking(
+        self, obs, grid_paths, near_best_antenna_paths, precision
+    ):
+        """Chunking preserves per-cell weights, flags and frame masks.
+
+        Padding rows contribute zero.
+        """
+        rng = np.random.default_rng(11)
+        weights = np.broadcast_to(obs.weights, obs.vis.shape) * rng.uniform(
+            0.5, 1.5, obs.vis.shape
+        )
+        weights = np.where(rng.uniform(size=obs.vis.shape) < 0.1, 0.0, weights)
+        vis = np.where(weights > 0.0, obs.vis, 0.0)
+        mask = np.arange(obs.n_time) % 3 != 0
+        rtol = _scan_rtol(precision)
+
+        want = tau_scan(vis, weights, grid_paths[NEAR_BEST], obs.freqs,
+                        frame_mask=mask)
+        for bl_chunk in (4, None):
+            got = tau_scan_antennas(vis, weights, near_best_antenna_paths, obs.freqs,
+                                    obs.a1, obs.a2, frame_mask=mask,
+                                    bl_chunk=bl_chunk)
+            np.testing.assert_allclose(np.asarray(got["z2"]),
+                                       np.asarray(want["z2"]), rtol=rtol, atol=rtol)
+
+    def test_no_baselines_is_the_references_empty_answer(self, obs,
+                                                         near_best_antenna_paths):
+        """An empty baseline axis returns zero scores without gathering row 0."""
+        empty = np.zeros((0, N_FREQ, obs.n_time), dtype=complex)
+        none = np.zeros(0, dtype=int)
+
+        want = tau_scan(empty, np.ones((0, 1, 1)),
+                        np.zeros((5, 0, obs.n_time, N_FINE)), obs.freqs)
+        got = tau_scan_antennas(empty, np.ones((0, 1, 1)), near_best_antenna_paths,
+                                obs.freqs, none, none, bl_chunk=4)
+
+        assert np.asarray(got["z2"]).shape == (5, N_FREQ)
+        assert np.asarray(got["r"]).shape == (5, N_FREQ, obs.n_time)
+        np.testing.assert_array_equal(np.asarray(got["z2"]), np.asarray(want["z2"]))
+        np.testing.assert_array_equal(np.asarray(got["r"]), np.asarray(want["r"]))
+
+    @pytest.mark.parametrize(
+        "inputs", ["integer weights paths and frequencies", "real visibilities",
+                   "integer visibilities"]
+    )
+    def test_the_running_total_is_the_references_sum(
+        self, obs, near_best_antenna_paths, inputs, precision
+    ):
+        """Running totals preserve the sum dtypes.
+
+        Integer model inputs produce floating n2, double under x64.
+        Real visibilities produce complex z. Integer visibilities and
+        weights produce integer n1.
+        """
+        vis, weights, ant, freqs = (obs.vis, obs.weights, near_best_antenna_paths,
+                                    obs.freqs)
+        if inputs == "integer weights paths and frequencies":
+            # Integer paths can still produce fractional |M|^2.
+            ant = np.round(ant).astype(np.int64)
+            weights = (obs.weights > 0).astype(np.int64)
+            freqs = obs.freqs.astype(np.int64)
+            smear = np.abs(ref_model(ant[2, obs.a1] - ant[2, obs.a2], obs.freqs)) ** 2
+            assert np.any((smear[obs.keep] > 0.01) & (smear[obs.keep] < 0.99))
+        elif inputs == "real visibilities":
+            vis = obs.vis.real
+        else:
+            vis = np.round(obs.vis.real * 100).astype(np.int64)
+            weights = (obs.weights > 0).astype(np.int64)
+
+        want = tau_scan(vis, weights, ant[:, obs.a1] - ant[:, obs.a2], freqs)
+        got = tau_scan_antennas(vis, weights, ant, freqs, obs.a1, obs.a2, bl_chunk=1)
+        null_want = np.asarray(decohered_null(vis, weights, ant[2, obs.a1] - ant[2, obs.a2],
+                                              freqs, obs.a1, obs.a2, n_draws=8))
+        null_got = np.asarray(decohered_null_antennas(vis, weights, ant[2], freqs,
+                                                      obs.a1, obs.a2, n_draws=8,
+                                                      bl_chunk=1))
+        rtol = _scan_rtol(precision)
+
+        assert float(np.asarray(want["z2"]).max()) > 0.0
+        assert np.asarray(got["z2"]).dtype == np.asarray(want["z2"]).dtype
+        np.testing.assert_allclose(np.asarray(got["z2"]), np.asarray(want["z2"]),
+                                   rtol=rtol, atol=rtol)
+        np.testing.assert_allclose(null_got, null_want,
+                                   rtol=1e-9 if precision == "double" else 2e-3)
+
+    def test_an_integer_power_is_summed_exactly(self):
+        """n1 of integer visibilities and weights is an integer sum in the
+        reference, and must stay one: 4096^2 + 1 is the first power a float32
+        total rounds (to 16 777 216)."""
+        v = np.array([4096, 1, 3], dtype=np.int64)[:, None, None]
+        w = np.ones((3, 1, 1), dtype=np.int64)
+
+        n1 = np.asarray(_chunked_power(jnp.asarray(v), jnp.asarray(w),
+                                       baseline_chunks(3, 1)))
+
+        assert n1.dtype.kind == "i"
+        np.testing.assert_array_equal(n1, np.sum(w * np.abs(v) ** 2, axis=0))
+        assert int(n1.ravel()[0]) == 16_777_226
+
+    def test_weak_scalar_weights_promote_as_the_reference_does(
+        self, obs, near_best_antenna_paths, precision
+    ):
+        """Padding preserves weak scalar weights without promoting float32 inputs."""
+        vis = obs.vis.astype(np.complex64)
+        ant = near_best_antenna_paths.astype(np.float32)
+        freqs = obs.freqs.astype(np.float32)
+        vis = np.where(obs.keep[:, None, None], vis, 0).astype(np.complex64)
+
+        want = tau_scan(vis, 1.0, ant[:, obs.a1] - ant[:, obs.a2], freqs)
+        got = tau_scan_antennas(vis, 1.0, ant, freqs, obs.a1, obs.a2, bl_chunk=4)
+        null_want = decohered_null(vis, 1.0, ant[2, obs.a1] - ant[2, obs.a2], freqs,
+                                   obs.a1, obs.a2, n_draws=4)
+        null_got = decohered_null_antennas(vis, 1.0, ant[2], freqs, obs.a1, obs.a2,
+                                           n_draws=4, bl_chunk=4)
+
+        assert np.asarray(got["z2"]).dtype == np.asarray(want["z2"]).dtype
+        assert np.asarray(null_got).dtype == np.asarray(null_want).dtype
+        np.testing.assert_allclose(np.asarray(got["z2"]), np.asarray(want["z2"]),
+                                   rtol=2e-4, atol=2e-4)
+        np.testing.assert_allclose(np.asarray(null_got), np.asarray(null_want),
+                                   rtol=2e-3)
+
+    def test_the_sums_are_carried_not_stacked(self, obs):
+        """Chunk scans return only their carry, without stacking chunk results."""
+        rows = baseline_chunks(obs.n_bl, 1)
+        jaxpr = jax.make_jaxpr(
+            lambda v, w, r: _chunked_power(jnp.asarray(v), jnp.asarray(w), r)
+        )(obs.vis, np.broadcast_to(obs.weights, obs.weights.shape), rows)
+        scans = [e for e in jaxpr.jaxpr.eqns if e.primitive.name == "scan"]
+
+        # Read from the output shapes rather than the scan's params, whose names
+        # are JAX internals: a stacked result would carry a leading chunk axis.
+        assert scans, "the chunked sum is expected to be a scan"
+        for eqn in scans:
+            assert all(v.aval.shape == obs.vis.shape[1:] for v in eqn.outvars)
+
+    def test_it_vmaps_over_a_candidate_axis(self, obs, near_best_antenna_paths,
+                                            exact_rtol):
+        stacked = np.stack([near_best_antenna_paths[:2], near_best_antenna_paths[3:]])
+
+        batched = jax.vmap(
+            lambda paths: tau_scan_antennas(obs.vis, obs.weights, paths, obs.freqs,
+                                            obs.a1, obs.a2, bl_chunk=10)
+        )(stacked)
+
+        assert np.asarray(batched["z2"]).shape == (2, 2, N_FREQ)
+        for i, sub in enumerate((near_best_antenna_paths[:2],
+                                 near_best_antenna_paths[3:])):
+            one = tau_scan_antennas(obs.vis, obs.weights, sub, obs.freqs, obs.a1,
+                                    obs.a2, bl_chunk=10)
+            np.testing.assert_allclose(np.asarray(batched["z2"])[i],
+                                       np.asarray(one["z2"]), rtol=exact_rtol)
+
+
+class TestDecoheredNullAntennas:
+    """The drivers' null draws the reference's offsets and scores them the same."""
+
+    @pytest.mark.parametrize("bl_chunk", [1, 7, None])
+    def test_it_is_the_reference_null(self, obs, grid_paths,
+                                      near_best_antenna_paths, bl_chunk, precision):
+        """Phase-factorized null scores match direct path jitter for the same seed."""
+        want = np.asarray(decohered_null(obs.vis, obs.weights, grid_paths[BEST_INDEX],
+                                         obs.freqs, obs.a1, obs.a2, n_draws=24,
+                                         seed=5))
+        got = np.asarray(decohered_null_antennas(
+            obs.vis, obs.weights, near_best_antenna_paths[2], obs.freqs, obs.a1,
+            obs.a2, n_draws=24, seed=5, bl_chunk=bl_chunk,
+        ))
+        # The reference adds up to 50 m of jitter to the paths before the float32
+        # exponential; the factorised form applies it as a separate phase.
+        rtol = 1e-9 if precision == "double" else 2e-3
+
+        assert got.shape == (24,)
+        np.testing.assert_allclose(got, want, rtol=rtol)
+
+    def test_a_frame_mask_is_honoured(self, obs, grid_paths,
+                                      near_best_antenna_paths, precision):
+        mask = np.arange(obs.n_time) < obs.n_time // 2
+        want = np.asarray(decohered_null(obs.vis, obs.weights, grid_paths[BEST_INDEX],
+                                         obs.freqs, obs.a1, obs.a2, frame_mask=mask,
+                                         n_draws=8, seed=2))
+        got = np.asarray(decohered_null_antennas(
+            obs.vis, obs.weights, near_best_antenna_paths[2], obs.freqs, obs.a1,
+            obs.a2, frame_mask=mask, n_draws=8, seed=2, bl_chunk=5,
+        ))
+
+        np.testing.assert_allclose(got, want, rtol=1e-9 if precision == "double" else 2e-3)
+
+    def test_no_baselines_scores_every_draw_zero(self, obs, near_best_antenna_paths):
+        empty = np.zeros((0, N_FREQ, obs.n_time), dtype=complex)
+        none = np.zeros(0, dtype=int)
+
+        want = np.asarray(decohered_null(empty, np.ones((0, 1, 1)),
+                                         np.zeros((0, obs.n_time, N_FINE)), obs.freqs,
+                                         none, none, n_draws=6))
+        got = np.asarray(decohered_null_antennas(
+            empty, np.ones((0, 1, 1)), near_best_antenna_paths[2], obs.freqs, none,
+            none, n_draws=6, bl_chunk=3,
+        ))
+
+        assert got.shape == (6,)
+        np.testing.assert_array_equal(got, want)
+
+
+class TestScanMemoryBudget:
+    """Memory budgeting preserves scan results up to rounding."""
+
+    def test_the_chunk_is_what_the_budget_affords(self):
+        """Fixed arrays per candidate, a working set per baseline, and the null's
+        product per row, padded out to whole chunks: solved for the chunk."""
+        n_bl, n_tau, n_ant = 100, 3, N_ANT
+        per = _scan_bytes_per_baseline(N_FREQ, N_TIME, N_FINE)
+        fixed = _scan_fixed_bytes(n_tau, n_ant, N_FREQ, N_TIME, N_FINE)
+        row = _null_row_bytes(N_FREQ, N_TIME)
+        shape = (n_bl, N_FREQ, N_TIME, N_FINE, n_tau, n_ant)
+
+        def budget(n_batch, chunk):
+            """GB that holds exactly this layout, at the padding bound."""
+            return (n_batch * fixed + (n_bl + chunk) * row
+                    + n_batch * chunk * per) / 1e9
+
+        assert _baseline_chunk(*shape, None) == n_bl
+        assert _baseline_chunk(*shape, 1e3) == n_bl
+        assert _baseline_chunk(*shape, 1.001 * budget(1, 10)) == 10
+        assert _baseline_chunk(*shape, 0.999 * budget(1, 10)) == 9
+        assert _baseline_chunk(*shape, 1.001 * budget(2, 5), n_batch=2) == 5
+        # Never zero: a budget below one baseline still scans one at a time.
+        assert _baseline_chunk(*shape, 1e-12) == 1
+
+    @pytest.mark.parametrize("fits", [1, 2, 3])
+    def test_a_batch_that_fits_is_never_chunked(self, fits):
+        """The batch and the chunk read the same terms, so chunking starts only
+        where a batch of one does not fit whole."""
+        n_bl, n_tau, n_ant = 100, 3, N_ANT
+        per_candidate = (n_bl * _scan_bytes_per_baseline(N_FREQ, N_TIME, N_FINE)
+                         + _scan_fixed_bytes(n_tau, n_ant, N_FREQ, N_TIME, N_FINE))
+        gb = (fits * per_candidate + 2 * n_bl * _null_row_bytes(N_FREQ, N_TIME)) / 1e9
+
+        n_batch = _batch_for_memory(8, n_bl, N_FREQ, N_TIME, N_FINE, n_tau, n_ant,
+                                    8, gb * 1.0001)
+
+        assert n_batch == fits
+        assert _baseline_chunk(n_bl, N_FREQ, N_TIME, N_FINE, n_tau, n_ant,
+                               gb * 1.0001, n_batch=n_batch) == n_bl
+
+    def test_a_tight_budget_changes_nothing_but_the_chunking(self, obs, precision):
+        settings = dict(noise=SIGMA, taus_s=SHORT_GRID, n_null=32)
+        free = fit_time_offset(
+            obs.vis, obs.record, obs.ants_itrf, obs.times_jd, obs.phase_centre,
+            obs.freqs, obs.a1, obs.a2, obs.int_time, max_mem_gb=None, **settings,
+        )
+        tight = fit_time_offset(
+            obs.vis, obs.record, obs.ants_itrf, obs.times_jd, obs.phase_centre,
+            obs.freqs, obs.a1, obs.a2, obs.int_time, max_mem_gb=1e-9, **settings,
+        )
+        rtol = _scan_rtol(precision)
+
+        assert free["bl_chunk"] == free["n_bl_used"] == N_COHERENT_BL
+        assert tight["bl_chunk"] == 1
+        assert tight["tau_best"] == free["tau_best"]
+        assert tight["best_chan"] == free["best_chan"]
+        np.testing.assert_allclose(tight["z2_tau"], free["z2_tau"], rtol=rtol, atol=rtol)
+        np.testing.assert_allclose(tight["null"], free["null"], rtol=rtol)
+        assert tight["significance"] == pytest.approx(free["significance"], rel=1e-3)
+
+    def test_the_fit_is_the_reference_scan_and_null(self, obs, grid_paths, precision):
+        fit = fit_time_offset(
+            obs.vis, obs.record, obs.ants_itrf, obs.times_jd, obs.phase_centre,
+            obs.freqs, obs.a1, obs.a2, obs.int_time, noise=SIGMA, n_null=16,
+            max_mem_gb=1e-9,
+        )
+        keep = obs.keep
+        weights = obs.weights[keep]
+        want = tau_scan(obs.vis[keep], weights, grid_paths[:, keep], obs.freqs)
+        null = decohered_null(obs.vis[keep], weights,
+                              grid_paths[int(np.argmax(np.asarray(want["z2"]).max(1)))][keep],
+                              obs.freqs, obs.a1[keep], obs.a2[keep], n_draws=16)
+
+        np.testing.assert_allclose(fit["z2_tau"], np.asarray(want["z2"]),
+                                   rtol=_scan_rtol(precision), atol=_scan_rtol(precision))
+        np.testing.assert_allclose(fit["null"], np.asarray(null),
+                                   rtol=1e-9 if precision == "double" else 2e-3)
 
 
 # ---------------------------------------------------------------------------
