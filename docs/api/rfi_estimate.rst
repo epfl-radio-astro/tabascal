@@ -135,12 +135,17 @@ That core holds the whole offset grid's baseline paths and a full fringe model
 per offset, which on a compact array whose every baseline is coherent runs to
 tens of gigabytes. It is kept as the reference, and the drivers run the same
 statistic in bounded memory. :func:`~tabascal.rfi_estimate.near_field_antenna_paths`
-holds one path per antenna, less the array mean so that single precision still
-carries it, and :func:`~tabascal.rfi_estimate.tau_scan_antennas` differences
-them on the device a chunk of baselines at a time
+holds one path per antenna, less the mean path of the antennas the coherent
+baselines use (``reference_antennas``), so that single precision still carries
+it however far an antenna the cut dropped sits; the mean cancels from every
+baseline difference. :func:`~tabascal.rfi_estimate.tau_scan_antennas`
+differences them on the device a chunk of baselines at a time
 (:func:`~tabascal.rfi_estimate.baseline_chunks`), adding each chunk's
-:math:`z, n_1, n_2` to a running total. The chunk is every baseline whenever
-``max_mem_gb`` allows. :func:`~tabascal.rfi_estimate.decohered_null_antennas`
+:math:`z, n_1, n_2` to a running total carried through ``lax.scan``, so no
+chunk's result is kept. The chunk is every baseline whenever ``max_mem_gb``
+allows. The budget counts, per candidate, its path grid and its outputs
+(:math:`r` and :math:`z^2`) and the chunk's working set, and once for the null
+its stored product, padded out to whole chunks. :func:`~tabascal.rfi_estimate.decohered_null_antennas`
 uses the fact that a per-antenna jitter only turns the model by a phase:
 :math:`|M|`, :math:`n_1` and :math:`n_2` are the same for every draw, so the
 model is built once and each draw applies a per-baseline phase to
@@ -198,14 +203,16 @@ the same :math:`z^2`, so the search and
 same pass.
 
 **One compilation.** The chunked scan, ``vmap``\ ped over a candidate axis, is
-jitted once at module level and the candidates are fed to it in batches, a
-ragged last batch padded by repeating its last candidate so every call has one
-shape. Per candidate the memory is its per-antenna path grid and the fringe
-model of the baselines scanned at once, and ``max_mem_gb`` is a budget for
-those: the batch actually run is the smaller of ``batch_size`` and what the
+jitted at module level and the candidates are fed to it in batches, a ragged
+last batch padded by repeating its last candidate so every call of the sweep has
+one shape and compiles once. Per candidate the memory is its per-antenna path
+grid, its outputs and the fringe model of the baselines scanned at once, and the
+null's stored product is held once, after the sweep. ``max_mem_gb`` is a budget
+for those: the batch actually run is the smaller of ``batch_size`` and what the
 budget affords with every baseline in one chunk (reported back as
 ``batch_size``), and when not even one candidate fits whole its baselines are
-chunked instead (reported as ``bl_chunk``). At MWA scale it is the budget that
+chunked instead (reported as ``bl_chunk``). Both are read against the same
+terms, so a batch that fits is never also chunked. At MWA scale it is the budget that
 decides: the union reaches 7704 of the array's 9180 baselines once candidates
 come near the horizon, and a batch of eight scanned whole would ask for tens of
 gigabytes.

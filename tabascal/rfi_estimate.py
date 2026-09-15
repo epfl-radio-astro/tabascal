@@ -1152,12 +1152,15 @@ def baseline_chunks(n_bl: int, bl_chunk: Optional[int] = None) -> NDArray:
     ``(n_chunk, size)`` int32, chunk ``k`` holding rows ``k * size`` onward. The
     last chunk is padded with rows ``>= n_bl``, which the kernels read as absent
     -- zero weight, and nothing gathered from past the end -- so every chunk has
-    one shape. The kernels compile once per (baseline count, chunk size): once
-    for a whole search, whose baseline set is shared by every candidate, and
-    again only when a later call brings a different count or chunk. ``None``, or
-    a chunk at least ``n_bl`` long, is a single chunk: the unchunked sums in one
-    step. No baselines at all is one chunk of one padding row, which the kernels
-    answer with the empty sums rather than read.
+    one shape, and a baseline count need not be a multiple of the chunk. Like
+    any jitted function the kernels compile once per combination of their
+    inputs' shapes, dtypes and weak types -- the baselines, channels, frames and
+    offsets, the chunk, and the batch -- so a search, which pads its last batch
+    and shares one baseline set across every candidate, compiles once for the
+    whole sweep. ``None``, or a chunk at least ``n_bl`` long, is a single chunk:
+    the unchunked sums in one step. No baselines at all is one chunk of one
+    padding row, which the kernels never read: they hand an empty baseline axis
+    to the reference functions instead.
 
     Parameters
     ----------
@@ -1190,45 +1193,52 @@ def _chunk_view(vis, weights, rows):
 
     Returns the rows clamped into range as well, for gathering anything else
     indexed by baseline: a padding row reads row 0, and its zero weight is what
-    keeps that out of every sum. Only called with at least one baseline; the
-    kernels answer an empty baseline axis before they get here, since there is
-    no row 0 to read.
+    keeps that out of every sum. The zero is the weights' own type -- their dtype,
+    and weak if they are a weak Python scalar -- so a chunk computes in exactly
+    the dtypes the reference does. Only called with at least
+    one baseline; the kernels hand an empty baseline axis to the reference
+    before they get here, since there is no row 0 to read.
     """
     valid = rows < vis.shape[0]
     safe = jnp.where(valid, rows, 0)
     w = weights[safe] if weights.shape[0] > 1 else weights
-    w = jnp.where(valid[:, None, None], w, 0.0)
+    w = jnp.where(valid[:, None, None], w, jnp.zeros_like(w, shape=()))
 
     return vis[safe], w, safe
 
 
-def _chunk_sum(term, rows, zeros):
-    """``zeros + sum_k term(rows[k])``, as a running total.
+def _zeros_of(term, row):
+    """Zeros shaped and typed as ``term(row)`` returns, without computing it.
+
+    ``jax.eval_shape`` traces ``term`` abstractly, so the dtype is the one the
+    reference arithmetic gives -- integer inputs, weak Python scalars inside the
+    model and x64 all promote exactly as they do there -- with no promotion rule
+    written down to get wrong. Only the small ``(n_freq, n_time)``-sized zeros are
+    made; the term itself is traced, never evaluated.
+    """
+    return jax.tree_util.tree_map(
+        lambda a: jnp.zeros(a.shape, a.dtype), jax.eval_shape(term, row)
+    )
+
+
+def _chunk_sum(term, rows):
+    """``sum_k term(rows[k])``, as a running total.
 
     Carried through ``lax.scan`` with nothing stacked, so one chunk's working
     arrays and one total are all that is alive: a ``lax.map`` followed by a sum
     would also keep every chunk's result, ``(n_chunk, ...)``, which grows as the
     budget shrinks the chunk -- 2 GB of sums alone at one baseline per chunk on
-    a 32 640-baseline array. Each term is cast to the total's dtype, which the
-    caller sets to what the reference sums come out in.
+    a 32 640-baseline array. The total starts from :func:`_zeros_of` the term,
+    so it has exactly the dtype the reference's sum has and every chunk is
+    computed inside the one loop.
     """
 
     def body(total, r):
-        step = jax.tree_util.tree_map(
-            lambda t, d: t + d.astype(t.dtype), total, term(r)
-        )
+        return jax.tree_util.tree_map(jnp.add, total, term(r)), None
 
-        return step, None
-
-    total, _ = jax.lax.scan(body, zeros, rows)
+    total, _ = jax.lax.scan(body, _zeros_of(term, rows[0]), rows)
 
     return total
-
-
-def _real_dtype(*arrays):
-    """The real dtype a mixed real/complex product reduces to."""
-    return jnp.result_type(*[jnp.real(a).dtype if jnp.iscomplexobj(a) else a.dtype
-                             for a in arrays])
 
 
 def _chunked_power(vis, weights, rows):
@@ -1239,9 +1249,7 @@ def _chunked_power(vis, weights, rows):
 
         return jnp.sum(w * jnp.abs(v) ** 2, axis=0)
 
-    zeros = jnp.zeros(vis.shape[1:], dtype=_real_dtype(vis, weights))
-
-    return _chunk_sum(term, rows, zeros)
+    return _chunk_sum(term, rows)
 
 
 def _tau_scan_rows(vis, weights, ant_paths, freqs, a1, a2, frame_mask, rows):
@@ -1258,26 +1266,17 @@ def _tau_scan_rows(vis, weights, ant_paths, freqs, a1, a2, frame_mask, rows):
     a1 = jnp.asarray(a1)
     a2 = jnp.asarray(a2)
     rows = jnp.asarray(rows)
-    n_tau = ant_paths.shape[0]
-    n_freq, n_time = vis.shape[1], vis.shape[2]
-    real = _real_dtype(vis, weights, ant_paths, freqs)
 
     if vis.shape[0] == 0:
-        # Every sum over no baseline is zero, and coherence_scores reads a cell
-        # nothing was measured in as r = 0 contributing z2 = 0 -- which is what
-        # the reference returns. Answered here because there is nothing to
-        # gather: row 0 does not exist.
-        return {
-            "z2": jnp.zeros((n_tau, n_freq), dtype=real),
-            "r": jnp.zeros((n_tau, n_freq, n_time), dtype=real),
-        }
+        # No baselines: nothing to gather, not even row 0. The reference itself
+        # answers, its baseline paths as empty as the visibilities, so the
+        # zeros come back in its own dtypes.
+        return tau_scan(
+            vis, weights, ant_paths[:, a1] - ant_paths[:, a2], freqs, frame_mask
+        )
 
     # n1 does not depend on the offset, so it is summed once for the grid.
     n1 = _chunked_power(vis, weights, rows)
-    sums = (
-        jnp.zeros((n_freq, n_time), dtype=jnp.result_type(vis, weights, ant_paths, freqs)),
-        jnp.zeros((n_freq, n_time), dtype=_real_dtype(weights, ant_paths, freqs)),
-    )
 
     def one_offset(path):
         def term(r):
@@ -1289,7 +1288,7 @@ def _tau_scan_rows(vis, weights, ant_paths, freqs, a1, a2, frame_mask, rows):
                 jnp.sum(w * jnp.abs(model) ** 2, axis=0),
             )
 
-        z, n2 = _chunk_sum(term, rows, sums)
+        z, n2 = _chunk_sum(term, rows)
         r, z2 = coherence_scores(z, n1, n2, frame_mask)
 
         return {"z2": z2, "r": r}
@@ -1321,8 +1320,10 @@ def tau_scan_antennas(
     ``n_bl``, and on a 256-antenna station the paths shrink 127 times.
 
     The offset axis is still one ``lax.map`` in one program, and the function is
-    still pure over fixed-shape arrays, so it jits once per shape and ``vmap``\\ s
-    over candidates exactly as :func:`tau_scan` does. That function is kept, and
+    still pure over fixed-shape arrays, so it compiles once per combination of
+    input shapes, dtypes and weak types -- the chunk size among them, through
+    :func:`baseline_chunks` -- and ``vmap``\\ s over candidates exactly as
+    :func:`tau_scan` does. That function is kept, and
     unchanged, as the reference this one is tested against. No baselines gives
     the reference's answer for none: every ``z2`` and ``r`` zero.
 
@@ -1380,12 +1381,12 @@ def _null_rows(vis, weights, path_best, freqs, a1, a2, frame_mask, rows, offsets
     rows = jnp.asarray(rows)
     offsets = jnp.asarray(offsets)
     lam = C / freqs
-    n_freq, n_time = vis.shape[1], vis.shape[2]
 
     if vis.shape[0] == 0:
-        # The reference scores every draw of an empty sum as z2 = 0.
-        return jnp.zeros(
-            offsets.shape[0], dtype=_real_dtype(vis, weights, path_best, freqs, offsets)
+        # No baselines: the reference draws the same offsets over an empty sum.
+        return _null_draw_scores(
+            vis, weights, path_best[a1] - path_best[a2], freqs, offsets, a1, a2,
+            frame_mask,
         )
 
     n1 = _chunked_power(vis, weights, rows)
@@ -1394,20 +1395,23 @@ def _null_rows(vis, weights, path_best, freqs, a1, a2, frame_mask, rows, offsets
     # data per baseline, kept, and n2, carried. A jitter moves a baseline's path
     # by the same amount at every sub-step, so it turns M by a phase and leaves
     # |M| alone.
-    def at_best(n2, r):
+    def at_best(r):
         v, w, safe = _chunk_view(vis, weights, r)
         model = near_field_fringe_model(
             path_best[a1[safe]] - path_best[a2[safe]], freqs
         )
-        step = jnp.sum(w * jnp.abs(model) ** 2, axis=0).astype(n2.dtype)
 
-        return n2 + step, w * v * jnp.conjugate(model)
+        return jnp.sum(w * jnp.abs(model) ** 2, axis=0), w * v * jnp.conjugate(model)
 
-    n2_zeros = jnp.zeros((n_freq, n_time), dtype=_real_dtype(weights, path_best, freqs))
-    n2, product = jax.lax.scan(at_best, n2_zeros, rows)  # product (n_chunk, size, F, T)
+    def at_best_step(n2, r):
+        step, product_chunk = at_best(r)
+
+        return n2 + step, product_chunk
+
+    n2_zeros = _zeros_of(lambda r: at_best(r)[0], rows[0])
+    n2, product = jax.lax.scan(at_best_step, n2_zeros, rows)  # (n_chunk, size, F, T)
     safe = jnp.where(rows < vis.shape[0], rows, 0)
     p, q = a1[safe], a2[safe]
-    z_zeros = jnp.zeros((n_freq, n_time), dtype=jnp.result_type(product, offsets, freqs))
 
     def one_draw(offset):
         def term(k):
@@ -1416,7 +1420,7 @@ def _null_rows(vis, weights, path_best, freqs, a1, a2, frame_mask, rows, offsets
 
             return jnp.sum(product[k] * turn[:, :, None], axis=0)
 
-        z = _chunk_sum(term, jnp.arange(rows.shape[0]), z_zeros)
+        z = _chunk_sum(term, jnp.arange(rows.shape[0]))
         _, z2 = coherence_scores(z, n1, n2, frame_mask)
 
         return jnp.max(z2)
@@ -1424,8 +1428,9 @@ def _null_rows(vis, weights, path_best, freqs, a1, a2, frame_mask, rows, offsets
     return jax.lax.map(one_draw, offsets)
 
 
-#: The bounded-memory kernels, compiled once per shape: the fit calls them
-#: directly, and the search vmaps the scan over its candidate axis.
+#: The bounded-memory kernels, compiled once per combination of input shapes,
+#: dtypes and weak types and cached at module level: the fit calls them directly,
+#: and the search vmaps the scan over its candidate axis.
 _tau_scan_rows_jit = jax.jit(_tau_scan_rows)
 _null_rows_jit = jax.jit(_null_rows)
 
@@ -2402,8 +2407,9 @@ def candidates_from_norad_ids(norad_ids, times_jd: NDArray, extra_orbit_dir=None
 #: The batched core: one program over a leading candidate axis of the weights,
 #: the antenna paths and the frame mask, with the visibilities, the frequencies,
 #: the baseline indices and the chunk layout shared across the batch. Held at
-#: module level and jitted once, so a sweep over a constellation compiles a
-#: single time and then runs device-resident -- which is the whole design. It is
+#: module level, so its compilations are cached across calls; within a search
+#: every batch has one shape, so a sweep over a constellation compiles a single
+#: time and then runs device-resident -- which is the whole design. It is
 #: the kernel :func:`fit_time_offset` runs: the search does not own a statistic of
 #: its own to disagree with the single-satellite fit about.
 _batched_tau_scan = jax.jit(

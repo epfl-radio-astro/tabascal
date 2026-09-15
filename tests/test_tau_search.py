@@ -1154,6 +1154,93 @@ class TestTauScanAntennas:
         np.testing.assert_array_equal(np.asarray(got["z2"]), np.asarray(want["z2"]))
         np.testing.assert_array_equal(np.asarray(got["r"]), np.asarray(want["r"]))
 
+    @pytest.mark.parametrize(
+        "inputs", ["integer weights paths and frequencies", "real visibilities",
+                   "integer visibilities"]
+    )
+    def test_the_running_total_is_the_references_sum(
+        self, obs, near_best_antenna_paths, inputs, precision
+    ):
+        """A running total is only the reference's sum if it takes the dtype that
+        sum takes. With every model input an integer, the exponential still
+        makes n2 floating (double under x64, from the weak Python constants
+        inside the model); real visibilities still give a complex z; and integer
+        visibilities keep an exact integer n1. A carry of any other dtype
+        truncates the fractional |M|^2 of each chunk, drops z's imaginary part,
+        narrows a double sum or rounds a large integer power. One baseline per
+        chunk, so every term lands in the total on its own."""
+        vis, weights, ant, freqs = (obs.vis, obs.weights, near_best_antenna_paths,
+                                    obs.freqs)
+        if inputs == "integer weights paths and frequencies":
+            # Whole metres: a 250 m core baseline still moves a couple of metres
+            # inside a dump, so |M|^2 is fractional; and the frequencies are
+            # whole hertz, well inside int32.
+            ant = np.round(ant).astype(np.int64)
+            weights = (obs.weights > 0).astype(np.int64)
+            freqs = obs.freqs.astype(np.int64)
+            smear = np.abs(ref_model(ant[2, obs.a1] - ant[2, obs.a2], obs.freqs)) ** 2
+            assert np.any((smear[obs.keep] > 0.01) & (smear[obs.keep] < 0.99))
+        elif inputs == "real visibilities":
+            vis = obs.vis.real
+        else:
+            vis = np.round(obs.vis.real * 100).astype(np.int64)
+            weights = (obs.weights > 0).astype(np.int64)
+
+        want = tau_scan(vis, weights, ant[:, obs.a1] - ant[:, obs.a2], freqs)
+        got = tau_scan_antennas(vis, weights, ant, freqs, obs.a1, obs.a2, bl_chunk=1)
+        null_want = np.asarray(decohered_null(vis, weights, ant[2, obs.a1] - ant[2, obs.a2],
+                                              freqs, obs.a1, obs.a2, n_draws=8))
+        null_got = np.asarray(decohered_null_antennas(vis, weights, ant[2], freqs,
+                                                      obs.a1, obs.a2, n_draws=8,
+                                                      bl_chunk=1))
+        rtol = _scan_rtol(precision)
+
+        assert float(np.asarray(want["z2"]).max()) > 0.0
+        assert np.asarray(got["z2"]).dtype == np.asarray(want["z2"]).dtype
+        np.testing.assert_allclose(np.asarray(got["z2"]), np.asarray(want["z2"]),
+                                   rtol=rtol, atol=rtol)
+        np.testing.assert_allclose(null_got, null_want,
+                                   rtol=1e-9 if precision == "double" else 2e-3)
+
+    def test_an_integer_power_is_summed_exactly(self):
+        """n1 of integer visibilities and weights is an integer sum in the
+        reference, and must stay one: 4096^2 + 1 is the first power a float32
+        total rounds (to 16 777 216)."""
+        v = np.array([4096, 1, 3], dtype=np.int64)[:, None, None]
+        w = np.ones((3, 1, 1), dtype=np.int64)
+
+        n1 = np.asarray(_chunked_power(jnp.asarray(v), jnp.asarray(w),
+                                       baseline_chunks(3, 1)))
+
+        assert n1.dtype.kind == "i"
+        np.testing.assert_array_equal(n1, np.sum(w * np.abs(v) ** 2, axis=0))
+        assert int(n1.ravel()[0]) == 16_777_226
+
+    def test_weak_scalar_weights_promote_as_the_reference_does(
+        self, obs, near_best_antenna_paths, precision
+    ):
+        """A Python float weight is weakly typed and defers to the arrays it
+        meets; a padding zero of a concrete dtype would lift explicit float32
+        inputs to double under x64. Same dtypes as the reference, same values."""
+        vis = obs.vis.astype(np.complex64)
+        ant = near_best_antenna_paths.astype(np.float32)
+        freqs = obs.freqs.astype(np.float32)
+        vis = np.where(obs.keep[:, None, None], vis, 0).astype(np.complex64)
+
+        want = tau_scan(vis, 1.0, ant[:, obs.a1] - ant[:, obs.a2], freqs)
+        got = tau_scan_antennas(vis, 1.0, ant, freqs, obs.a1, obs.a2, bl_chunk=4)
+        null_want = decohered_null(vis, 1.0, ant[2, obs.a1] - ant[2, obs.a2], freqs,
+                                   obs.a1, obs.a2, n_draws=4)
+        null_got = decohered_null_antennas(vis, 1.0, ant[2], freqs, obs.a1, obs.a2,
+                                           n_draws=4, bl_chunk=4)
+
+        assert np.asarray(got["z2"]).dtype == np.asarray(want["z2"]).dtype
+        assert np.asarray(null_got).dtype == np.asarray(null_want).dtype
+        np.testing.assert_allclose(np.asarray(got["z2"]), np.asarray(want["z2"]),
+                                   rtol=2e-4, atol=2e-4)
+        np.testing.assert_allclose(np.asarray(null_got), np.asarray(null_want),
+                                   rtol=2e-3)
+
     def test_the_sums_are_carried_not_stacked(self, obs):
         """The running total is the memory claim: a map followed by a sum would
         keep every chunk's result, a stack that grows as the chunk shrinks. Every
