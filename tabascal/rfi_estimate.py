@@ -682,6 +682,7 @@ def near_field_antenna_paths(
     n_fine: int,
     delta_t: float,
     taus_s=0.0,
+    reference_antennas=None,
 ) -> NDArray:
     """Per-antenna near-field paths on the fine grid, relative to the array.
 
@@ -696,20 +697,27 @@ def near_field_antenna_paths(
     **Why the reference is subtracted.** An absolute path is hundreds of
     kilometres, which float32 resolves to tens of metres, and the scan runs in
     single precision by default. Each (offset, time, sub-step) has the mean over
-    the antennas taken off here, in float64 on the host. It is common to every
-    antenna, so it cancels from every baseline difference, and what is left is
-    bounded by twice the longest baseline -- the same size as the baseline
-    differences float32 already carries today.
+    the ``reference_antennas`` taken off here, in float64 on the host. It is
+    common to every antenna, so it cancels from every baseline difference, and
+    for an antenna among them what is left is bounded by twice the longest
+    baseline between them -- the same size as the baseline differences float32
+    already carries today. The drivers pass the antennas their coherent
+    baselines use, so that an outlying antenna the cut dropped does not push
+    the ones that remain away from zero; an antenna outside the reference set
+    keeps its difference exact in float64, and only its own float32 rounding
+    grows.
 
     Parameters
     ----------
     record, ants_itrf, times_jd, phase_centre, n_fine, delta_t, taus_s
         As :func:`near_field_baseline_paths`.
+    reference_antennas : Array of int, optional
+        Antennas whose mean path is subtracted. ``None`` uses them all.
 
     Returns
     -------
     Array (n_tau, n_ant, n_time, n_fine) float64
-        Path of each antenna less the array mean, in metres.
+        Path of each antenna less the reference mean, in metres.
     """
     n_time = len(np.atleast_1d(times_jd))
     n_fine = int(n_fine)
@@ -718,10 +726,17 @@ def near_field_antenna_paths(
         record, ants_itrf, times_jd, phase_centre, n_fine, delta_t, taus_s
     )
 
+    reference = (
+        slice(None)
+        if reference_antennas is None
+        else np.unique(np.asarray(reference_antennas, dtype=int))
+    )
+
     n_tau = len(np.atleast_1d(taus_s))
     out = np.empty((n_tau, n_ant, n_time, n_fine), dtype=np.float64)
     for i, path in enumerate(paths):
-        out[i] = (path - path.mean(axis=0, keepdims=True)).reshape(n_ant, n_time, n_fine)
+        centred = path - path[reference].mean(axis=0, keepdims=True)
+        out[i] = centred.reshape(n_ant, n_time, n_fine)
 
     return out
 
@@ -1137,9 +1152,12 @@ def baseline_chunks(n_bl: int, bl_chunk: Optional[int] = None) -> NDArray:
     ``(n_chunk, size)`` int32, chunk ``k`` holding rows ``k * size`` onward. The
     last chunk is padded with rows ``>= n_bl``, which the kernels read as absent
     -- zero weight, and nothing gathered from past the end -- so every chunk has
-    one shape and the scan compiles once for any baseline count. ``None``, or a
-    chunk at least ``n_bl`` long, is a single chunk: the unchunked sums in one
-    step.
+    one shape. The kernels compile once per (baseline count, chunk size): once
+    for a whole search, whose baseline set is shared by every candidate, and
+    again only when a later call brings a different count or chunk. ``None``, or
+    a chunk at least ``n_bl`` long, is a single chunk: the unchunked sums in one
+    step. No baselines at all is one chunk of one padding row, which the kernels
+    answer with the empty sums rather than read.
 
     Parameters
     ----------
@@ -1172,7 +1190,9 @@ def _chunk_view(vis, weights, rows):
 
     Returns the rows clamped into range as well, for gathering anything else
     indexed by baseline: a padding row reads row 0, and its zero weight is what
-    keeps that out of every sum.
+    keeps that out of every sum. Only called with at least one baseline; the
+    kernels answer an empty baseline axis before they get here, since there is
+    no row 0 to read.
     """
     valid = rows < vis.shape[0]
     safe = jnp.where(valid, rows, 0)
@@ -1182,16 +1202,33 @@ def _chunk_view(vis, weights, rows):
     return vis[safe], w, safe
 
 
-def _chunk_sum(term, rows):
-    """``sum_k term(rows[k])``, one chunk's working arrays alive at a time.
+def _chunk_sum(term, rows, zeros):
+    """``zeros + sum_k term(rows[k])``, as a running total.
 
-    ``lax.map`` stacks only what ``term`` returns -- per-cell sums of shape
-    ``(n_freq, n_time)``, a few megabytes for a whole observation -- never the
-    per-baseline arrays each call builds on the way to them.
+    Carried through ``lax.scan`` with nothing stacked, so one chunk's working
+    arrays and one total are all that is alive: a ``lax.map`` followed by a sum
+    would also keep every chunk's result, ``(n_chunk, ...)``, which grows as the
+    budget shrinks the chunk -- 2 GB of sums alone at one baseline per chunk on
+    a 32 640-baseline array. Each term is cast to the total's dtype, which the
+    caller sets to what the reference sums come out in.
     """
-    return jax.tree_util.tree_map(
-        lambda stacked: jnp.sum(stacked, axis=0), jax.lax.map(term, rows)
-    )
+
+    def body(total, r):
+        step = jax.tree_util.tree_map(
+            lambda t, d: t + d.astype(t.dtype), total, term(r)
+        )
+
+        return step, None
+
+    total, _ = jax.lax.scan(body, zeros, rows)
+
+    return total
+
+
+def _real_dtype(*arrays):
+    """The real dtype a mixed real/complex product reduces to."""
+    return jnp.result_type(*[jnp.real(a).dtype if jnp.iscomplexobj(a) else a.dtype
+                             for a in arrays])
 
 
 def _chunked_power(vis, weights, rows):
@@ -1202,7 +1239,9 @@ def _chunked_power(vis, weights, rows):
 
         return jnp.sum(w * jnp.abs(v) ** 2, axis=0)
 
-    return _chunk_sum(term, rows)
+    zeros = jnp.zeros(vis.shape[1:], dtype=_real_dtype(vis, weights))
+
+    return _chunk_sum(term, rows, zeros)
 
 
 def _tau_scan_rows(vis, weights, ant_paths, freqs, a1, a2, frame_mask, rows):
@@ -1214,13 +1253,31 @@ def _tau_scan_rows(vis, weights, ant_paths, freqs, a1, a2, frame_mask, rows):
     """
     vis = jnp.asarray(vis)
     weights = _as_three_axes(weights)
+    ant_paths = jnp.asarray(ant_paths)
     freqs = jnp.asarray(freqs)
     a1 = jnp.asarray(a1)
     a2 = jnp.asarray(a2)
     rows = jnp.asarray(rows)
+    n_tau = ant_paths.shape[0]
+    n_freq, n_time = vis.shape[1], vis.shape[2]
+    real = _real_dtype(vis, weights, ant_paths, freqs)
+
+    if vis.shape[0] == 0:
+        # Every sum over no baseline is zero, and coherence_scores reads a cell
+        # nothing was measured in as r = 0 contributing z2 = 0 -- which is what
+        # the reference returns. Answered here because there is nothing to
+        # gather: row 0 does not exist.
+        return {
+            "z2": jnp.zeros((n_tau, n_freq), dtype=real),
+            "r": jnp.zeros((n_tau, n_freq, n_time), dtype=real),
+        }
 
     # n1 does not depend on the offset, so it is summed once for the grid.
     n1 = _chunked_power(vis, weights, rows)
+    sums = (
+        jnp.zeros((n_freq, n_time), dtype=jnp.result_type(vis, weights, ant_paths, freqs)),
+        jnp.zeros((n_freq, n_time), dtype=_real_dtype(weights, ant_paths, freqs)),
+    )
 
     def one_offset(path):
         def term(r):
@@ -1232,12 +1289,12 @@ def _tau_scan_rows(vis, weights, ant_paths, freqs, a1, a2, frame_mask, rows):
                 jnp.sum(w * jnp.abs(model) ** 2, axis=0),
             )
 
-        z, n2 = _chunk_sum(term, rows)
+        z, n2 = _chunk_sum(term, rows, sums)
         r, z2 = coherence_scores(z, n1, n2, frame_mask)
 
         return {"z2": z2, "r": r}
 
-    return jax.lax.map(one_offset, jnp.asarray(ant_paths))
+    return jax.lax.map(one_offset, ant_paths)
 
 
 def tau_scan_antennas(
@@ -1259,14 +1316,15 @@ def tau_scan_antennas(
     antenna (:func:`near_field_antenna_paths`), and every sum the statistic is
     built from -- ``z``, ``n1`` and ``n2`` of :func:`matched_filter_sums` -- is
     additive over baselines. So each offset differences and models
-    ``bl_chunk`` baselines, adds their sums to a running total inside
+    ``bl_chunk`` baselines, adds their sums to a running total carried through
     ``lax.scan``, and moves on. Peak memory is set by ``bl_chunk`` rather than by
     ``n_bl``, and on a 256-antenna station the paths shrink 127 times.
 
     The offset axis is still one ``lax.map`` in one program, and the function is
     still pure over fixed-shape arrays, so it jits once per shape and ``vmap``\\ s
     over candidates exactly as :func:`tau_scan` does. That function is kept, and
-    unchanged, as the reference this one is tested against.
+    unchanged, as the reference this one is tested against. No baselines gives
+    the reference's answer for none: every ``z2`` and ``r`` zero.
 
     Parameters
     ----------
@@ -1320,25 +1378,36 @@ def _null_rows(vis, weights, path_best, freqs, a1, a2, frame_mask, rows, offsets
     a1 = jnp.asarray(a1)
     a2 = jnp.asarray(a2)
     rows = jnp.asarray(rows)
+    offsets = jnp.asarray(offsets)
     lam = C / freqs
+    n_freq, n_time = vis.shape[1], vis.shape[2]
+
+    if vis.shape[0] == 0:
+        # The reference scores every draw of an empty sum as z2 = 0.
+        return jnp.zeros(
+            offsets.shape[0], dtype=_real_dtype(vis, weights, path_best, freqs, offsets)
+        )
 
     n1 = _chunked_power(vis, weights, rows)
 
     # The model at the best offset, built once: its weighted product with the
-    # data per baseline, and n2. A jitter moves a baseline's path by the same
-    # amount at every sub-step, so it turns M by a phase and leaves |M| alone.
-    def at_best(r):
+    # data per baseline, kept, and n2, carried. A jitter moves a baseline's path
+    # by the same amount at every sub-step, so it turns M by a phase and leaves
+    # |M| alone.
+    def at_best(n2, r):
         v, w, safe = _chunk_view(vis, weights, r)
         model = near_field_fringe_model(
             path_best[a1[safe]] - path_best[a2[safe]], freqs
         )
+        step = jnp.sum(w * jnp.abs(model) ** 2, axis=0).astype(n2.dtype)
 
-        return w * v * jnp.conjugate(model), jnp.sum(w * jnp.abs(model) ** 2, axis=0)
+        return n2 + step, w * v * jnp.conjugate(model)
 
-    product, n2 = jax.lax.map(at_best, rows)  # (n_chunk, size, n_freq, n_time)
-    n2 = jnp.sum(n2, axis=0)
+    n2_zeros = jnp.zeros((n_freq, n_time), dtype=_real_dtype(weights, path_best, freqs))
+    n2, product = jax.lax.scan(at_best, n2_zeros, rows)  # product (n_chunk, size, F, T)
     safe = jnp.where(rows < vis.shape[0], rows, 0)
     p, q = a1[safe], a2[safe]
+    z_zeros = jnp.zeros((n_freq, n_time), dtype=jnp.result_type(product, offsets, freqs))
 
     def one_draw(offset):
         def term(k):
@@ -1347,7 +1416,7 @@ def _null_rows(vis, weights, path_best, freqs, a1, a2, frame_mask, rows, offsets
 
             return jnp.sum(product[k] * turn[:, :, None], axis=0)
 
-        z = _chunk_sum(term, jnp.arange(rows.shape[0]))
+        z = _chunk_sum(term, jnp.arange(rows.shape[0]), z_zeros)
         _, z2 = coherence_scores(z, n1, n2, frame_mask)
 
         return jnp.max(z2)
@@ -1387,8 +1456,9 @@ def decohered_null_antennas(
     the paths. :func:`decohered_null` rebuilds the full model per draw and is
     kept, unchanged, as the reference.
 
-    The product is one visibility-sized array held for the whole null; each
-    draw's working set is one chunk of it.
+    The product is one visibility-sized array, padded out to whole chunks, held
+    for the whole null; each draw's working set is one chunk of it. No baselines
+    gives the reference's answer for none: every draw scores zero.
 
     Parameters
     ----------
@@ -1413,6 +1483,14 @@ def decohered_null_antennas(
     )
 
 
+def _session_itemsizes():
+    """Complex and real widths in the session's precision, as the scan runs."""
+    c = np.dtype(jax.dtypes.canonicalize_dtype(np.complex128)).itemsize
+    f = np.dtype(jax.dtypes.canonicalize_dtype(np.float64)).itemsize
+
+    return c, f
+
+
 def _scan_bytes_per_baseline(n_freq: int, n_time: int, n_fine: int) -> int:
     """Working bytes one baseline of a chunk costs inside one offset of the scan.
 
@@ -1420,10 +1498,8 @@ def _scan_bytes_per_baseline(n_freq: int, n_time: int, n_fine: int) -> int:
     as a real argument, the complex exponent and its exponential. Beside them
     are the baseline's path difference on the fine grid and the per-cell arrays
     the sums reduce: the gathered visibility and weight, and ``w V conj(M)``.
-    The widths are the session's, as the scan's are.
     """
-    c = np.dtype(jax.dtypes.canonicalize_dtype(np.complex128)).itemsize
-    f = np.dtype(jax.dtypes.canonicalize_dtype(np.float64)).itemsize
+    c, f = _session_itemsizes()
     fine = int(n_freq) * int(n_time) * int(n_fine)
 
     return fine * (f + 2 * c) + int(n_time) * int(n_fine) * f + int(n_freq) * int(
@@ -1431,11 +1507,26 @@ def _scan_bytes_per_baseline(n_freq: int, n_time: int, n_fine: int) -> int:
     ) * (2 * c + f)
 
 
-def _antenna_path_bytes(n_tau: int, n_ant: int, n_time: int, n_fine: int) -> int:
-    """The per-antenna path grid: float64 on the host and its device copy."""
-    f = np.dtype(jax.dtypes.canonicalize_dtype(np.float64)).itemsize
+def _scan_fixed_bytes(n_tau: int, n_ant: int, n_freq: int, n_time: int,
+                      n_fine: int) -> int:
+    """What one candidate holds for its whole scan, whatever the chunk.
 
-    return int(n_tau) * int(n_ant) * int(n_time) * int(n_fine) * (8 + f)
+    Its per-antenna path grid, ``(n_tau, n_ant, n_time, n_fine)`` float64 on the
+    host and again on the device, and the scan's outputs, ``r``
+    ``(n_tau, n_freq, n_time)`` and ``z2`` ``(n_tau, n_freq)``. The running
+    totals, ``(n_freq, n_time)``, are too small to count.
+    """
+    _, f = _session_itemsizes()
+    paths = int(n_tau) * int(n_ant) * int(n_time) * int(n_fine) * (8 + f)
+
+    return paths + int(n_tau) * int(n_freq) * (int(n_time) + 1) * f
+
+
+def _null_row_bytes(n_freq: int, n_time: int) -> int:
+    """Bytes per baseline row of the null's stored product, ``w V conj(M)``."""
+    c, _ = _session_itemsizes()
+
+    return int(n_freq) * int(n_time) * c
 
 
 def _baseline_chunk(
@@ -1443,26 +1534,38 @@ def _baseline_chunk(
     n_freq: int,
     n_time: int,
     n_fine: int,
+    n_tau: int,
+    n_ant: int,
     max_mem_gb,
     n_batch: int = 1,
-    reserved_bytes: int = 0,
 ) -> int:
     """Baselines per chunk: all of them when the budget allows, never zero.
 
-    What is left of ``max_mem_gb`` once ``reserved_bytes`` -- the arrays held for
-    the whole scan -- are set aside, divided among ``n_batch`` concurrent
-    candidates at :func:`_scan_bytes_per_baseline` each. ``None`` is no budget
-    and one chunk. A budget too small for a single baseline still scans one at a
-    time, for the reason :func:`_batch_for_memory` gives.
+    The budget has to hold, at once: ``n_batch`` candidates' fixed arrays
+    (:func:`_scan_fixed_bytes`); ``n_batch`` chunks' working sets
+    (:func:`_scan_bytes_per_baseline` per baseline); and the null's product,
+    one row per baseline *padded out to whole chunks*, which is at most
+    ``n_bl + chunk`` rows. Solving that for the chunk gives
+
+        chunk = (budget - n_batch * fixed - n_bl * row) / (n_batch * per + row)
+
+    with the padding counted at its bound. :func:`_batch_for_memory` sizes the
+    batch against the same terms at ``chunk = n_bl``, so a batch it admits is
+    never chunked -- chunking starts only where a batch of one does not fit
+    whole. ``None`` is no budget and one chunk. A budget too small for a single
+    baseline still scans one at a time, for the reason :func:`_batch_for_memory`
+    gives.
     """
     n_bl = max(int(n_bl), 1)
     if max_mem_gb is None:
         return n_bl
 
-    per = max(int(n_batch) * _scan_bytes_per_baseline(n_freq, n_time, n_fine), 1)
-    free = float(max_mem_gb) * 1e9 - float(reserved_bytes)
+    per = _scan_bytes_per_baseline(n_freq, n_time, n_fine)
+    fixed = _scan_fixed_bytes(n_tau, n_ant, n_freq, n_time, n_fine)
+    row = _null_row_bytes(n_freq, n_time)
+    free = float(max_mem_gb) * 1e9 - int(n_batch) * fixed - n_bl * row
 
-    return int(max(1, min(n_bl, free // per)))
+    return int(max(1, min(n_bl, free // max(int(n_batch) * per + row, 1))))
 
 
 # ---------------------------------------------------------------------------
@@ -1926,19 +2029,16 @@ def fit_time_offset(
                 frame_index[None, None, :]]
     vis_w[np.broadcast_to(weights, vis_w.shape) <= 0.0] = 0.0
 
-    # Per antenna, differenced a chunk of baselines at a time on the device.
-    # The chunk is sized from what the budget leaves after the arrays held for
-    # the whole scan: the path grid, and the null's per-baseline product.
+    # Per antenna, centred on the antennas the coherent baselines use, and
+    # differenced a chunk of baselines at a time on the device. The chunk is
+    # sized from what the budget leaves after the arrays held for the whole
+    # scan: the path grid, the outputs, and the null's per-baseline product.
     ant_paths = near_field_antenna_paths(
         record, ants_itrf, times_w, phase_centre, n_fine, int_time, taus_s=taus,
+        reference_antennas=np.union1d(a1_used, a2_used),
     )
-    complex_bytes = np.dtype(jax.dtypes.canonicalize_dtype(np.complex128)).itemsize
     bl_chunk = _baseline_chunk(
-        n_bl_used, n_freq, n_time_w, n_fine, max_mem_gb,
-        reserved_bytes=(
-            _antenna_path_bytes(len(taus), len(ants_itrf), n_time_w, n_fine)
-            + n_bl_used * n_freq * n_time_w * complex_bytes
-        ),
+        n_bl_used, n_freq, n_time_w, n_fine, len(taus), len(ants_itrf), max_mem_gb,
     )
     rows = baseline_chunks(n_bl_used, bl_chunk)
     scan = _tau_scan_rows_jit(
@@ -2392,10 +2492,10 @@ def _bytes_per_candidate(n_bl: int, n_freq: int, n_time: int, n_fine: int,
     """What one candidate of a batch costs while it is scanned whole, in bytes.
 
     The scan's working set with every baseline in one chunk --
-    :func:`_scan_bytes_per_baseline` for each of ``n_bl`` -- plus the candidate's
-    per-antenna path grid, ``(n_tau, n_ant, n_time, n_fine)``, on the host and on
-    the device. This is what decides the batch; a batch of one that still does
-    not fit is then chunked over its baselines instead (:func:`_baseline_chunk`).
+    :func:`_scan_bytes_per_baseline` for each of ``n_bl`` -- plus what the
+    candidate holds for its whole scan, its per-antenna path grid and its outputs
+    (:func:`_scan_fixed_bytes`). The null's product, held for one candidate at a
+    time, is a separate term of the budget (:func:`_batch_for_memory`).
 
     Not counted: the weights (per baseline for a scalar sigma, the full
     ``(n_bl, n_freq, n_time)`` once anything is flagged) and the visibilities.
@@ -2403,7 +2503,7 @@ def _bytes_per_candidate(n_bl: int, n_freq: int, n_time: int, n_fine: int,
     """
     return int(n_bl) * _scan_bytes_per_baseline(
         n_freq, n_time, n_fine
-    ) + _antenna_path_bytes(n_tau, n_ant, n_time, n_fine)
+    ) + _scan_fixed_bytes(n_tau, n_ant, n_freq, n_time, n_fine)
 
 
 def _batch_for_memory(
@@ -2430,6 +2530,11 @@ def _batch_for_memory(
     their own. At least one candidate is always scored: a budget below a single
     candidate has no smaller batch to fall back to, and refusing to run would
     leave the search unusable at exactly the scale it exists for.
+
+    The null's product is set aside first, at the bound :func:`_baseline_chunk`
+    uses for it with every baseline in one chunk, ``2 n_bl`` rows. The two
+    functions read the same terms, so a batch this admits is never then
+    chunked: chunking starts only where a batch of one does not fit whole.
     """
     n_batch = min(int(batch_size), int(n_cand))
     if max_mem_gb is None:
@@ -2438,7 +2543,8 @@ def _batch_for_memory(
     per_candidate = max(
         _bytes_per_candidate(n_bl, n_freq, n_time, n_fine, n_tau, n_ant), 1
     )
-    affordable = int(float(max_mem_gb) * 1e9) // per_candidate
+    free = float(max_mem_gb) * 1e9 - 2 * int(n_bl) * _null_row_bytes(n_freq, n_time)
+    affordable = int(free // per_candidate)
 
     return max(1, min(n_batch, affordable))
 
@@ -2511,7 +2617,9 @@ def search_candidates(
     -- reported back as ``batch_size``, since it is what the sweep did rather
     than what it was asked for -- and when not even one candidate fits that way,
     the batch of one is chunked over its baselines instead, reported as
-    ``bl_chunk``. Neither changes an answer. On the MWA case the coherent union
+    ``bl_chunk``. Both are read against the same terms, the null's stored
+    product included, so a batch that fits is never also chunked. Neither
+    changes an answer. On the MWA case the coherent union
     reaches 7704 of the array's 9180 baselines once candidates come near the
     horizon (``b_coh_max`` 2880 m), and a batch of eight scanned whole would ask
     for tens of gigabytes. Not counted are the per-candidate weights, at
@@ -2702,16 +2810,14 @@ def search_candidates(
         max_mem_gb,
     )
     # Every baseline in one chunk whenever the batch fits that way; chunked only
-    # when a single candidate does not. The null's per-baseline product is held
-    # for one candidate at a time, after the sweep, and is set aside too.
-    complex_bytes = np.dtype(jax.dtypes.canonicalize_dtype(np.complex128)).itemsize
+    # when a single candidate does not. Both are sized from the same terms, the
+    # null's product (held for one candidate, after the sweep) included.
     bl_chunk = _baseline_chunk(
-        n_bl_used, n_freq, n_time, n_fine, max_mem_gb, n_batch=n_batch,
-        reserved_bytes=(
-            n_batch * _antenna_path_bytes(len(taus), n_ant, n_time, n_fine)
-            + n_bl_used * n_freq * n_time * complex_bytes
-        ),
+        n_bl_used, n_freq, n_time, n_fine, len(taus), n_ant, max_mem_gb,
+        n_batch=n_batch,
     )
+    # Centred on the antennas the shared baseline set uses.
+    reference_antennas = np.union1d(a1_used, a2_used)
     rows = baseline_chunks(n_bl_used, bl_chunk)
     z2_tau = np.empty((n_cand, len(taus), n_freq))
     r_best = np.full((n_cand, n_freq, n_time), np.nan)
@@ -2726,7 +2832,7 @@ def search_candidates(
         for k, i in enumerate(index):
             paths[k] = near_field_antenna_paths(
                 candidates[i]["record"], ants_itrf, times_jd, phase_centre,
-                n_fine, int_time, taus_s=taus,
+                n_fine, int_time, taus_s=taus, reference_antennas=reference_antennas,
             )
         # A ragged last batch repeats its last candidate rather than shrinking:
         # a shorter batch is another shape and so another compilation, and the
@@ -2772,7 +2878,7 @@ def search_candidates(
     for i in order[: max(0, int(n_null_candidates))]:
         paths_best = near_field_antenna_paths(
             candidates[i]["record"], ants_itrf, times_jd, phase_centre, n_fine,
-            int_time, taus_s=tau_best[i],
+            int_time, taus_s=tau_best[i], reference_antennas=reference_antennas,
         )[0]
         draws = np.asarray(
             decohered_null_antennas(
@@ -2840,6 +2946,7 @@ def search_candidates(
                 b_coh=float(b_coh[i]),
                 n_fine=int(n_fine),
                 sigma_transverse_m=float(sigma_transverse_m),
+                bl_chunk=int(bl_chunk),
             )
         )
 

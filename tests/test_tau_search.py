@@ -70,9 +70,13 @@ from tabascal.interferometry import C, itrf_to_uvw_numpy
 from tabascal.orbit import _select_from_extra_dir
 from tabascal.rfi_estimate import (
     DEFAULT_TAU_GRID,
+    _batch_for_memory,
     _baseline_chunk,
+    _chunked_power,
     _lc_result,
+    _null_row_bytes,
     _scan_bytes_per_baseline,
+    _scan_fixed_bytes,
     attach_offset_fits,
     baseline_chunks,
     baseline_lengths,
@@ -1046,6 +1050,31 @@ class TestNearFieldAntennaPaths:
             near_best_antenna_paths.mean(axis=1), 0.0, atol=1e-6
         )
 
+    def test_a_reference_set_keeps_its_own_antennas_near_zero(self, obs):
+        """What the drivers pass: the antennas their coherent baselines use.
+
+        Centred on the core rather than on the whole array, the core stays within
+        twice its own longest baseline however far the 8 km outlier the cut
+        drops sits, and every difference -- to the outlier included -- is
+        unchanged.
+        """
+        core = np.flatnonzero(np.arange(N_ANT) != FAR_ANT)
+        taus = DEFAULT_TAU_GRID[NEAR_BEST]
+        whole = near_field_antenna_paths(obs.record, obs.ants_itrf, obs.times_jd,
+                                         obs.phase_centre, N_FINE, obs.int_time, taus)
+        centred = near_field_antenna_paths(obs.record, obs.ants_itrf, obs.times_jd,
+                                           obs.phase_centre, N_FINE, obs.int_time,
+                                           taus, reference_antennas=core)
+        core_bl = (obs.a1 != FAR_ANT) & (obs.a2 != FAR_ANT)
+        longest_core = float(obs.bl_len[core_bl].max())
+
+        np.testing.assert_allclose(centred[:, core].mean(axis=1), 0.0, atol=1e-6)
+        assert np.abs(centred[:, core]).max() <= 2.0 * longest_core
+        np.testing.assert_allclose(
+            centred[:, obs.a1] - centred[:, obs.a2], whole[:, obs.a1] - whole[:, obs.a2],
+            atol=1e-6,
+        )
+
 
 class TestBaselineChunks:
     """The static layout the chunked kernels walk."""
@@ -1108,6 +1137,37 @@ class TestTauScanAntennas:
             np.testing.assert_allclose(np.asarray(got["z2"]),
                                        np.asarray(want["z2"]), rtol=rtol, atol=rtol)
 
+    def test_no_baselines_is_the_references_empty_answer(self, obs,
+                                                         near_best_antenna_paths):
+        """A padding row reads row 0, and with no baselines there is no row 0:
+        the empty axis is answered, as the reference's empty sums answer it."""
+        empty = np.zeros((0, N_FREQ, obs.n_time), dtype=complex)
+        none = np.zeros(0, dtype=int)
+
+        want = tau_scan(empty, np.ones((0, 1, 1)),
+                        np.zeros((5, 0, obs.n_time, N_FINE)), obs.freqs)
+        got = tau_scan_antennas(empty, np.ones((0, 1, 1)), near_best_antenna_paths,
+                                obs.freqs, none, none, bl_chunk=4)
+
+        assert np.asarray(got["z2"]).shape == (5, N_FREQ)
+        assert np.asarray(got["r"]).shape == (5, N_FREQ, obs.n_time)
+        np.testing.assert_array_equal(np.asarray(got["z2"]), np.asarray(want["z2"]))
+        np.testing.assert_array_equal(np.asarray(got["r"]), np.asarray(want["r"]))
+
+    def test_the_sums_are_carried_not_stacked(self, obs):
+        """The running total is the memory claim: a map followed by a sum would
+        keep every chunk's result, a stack that grows as the chunk shrinks. Every
+        scan in the chunked sum returns its carry and nothing else."""
+        rows = baseline_chunks(obs.n_bl, 1)
+        jaxpr = jax.make_jaxpr(
+            lambda v, w, r: _chunked_power(jnp.asarray(v), jnp.asarray(w), r)
+        )(obs.vis, np.broadcast_to(obs.weights, obs.weights.shape), rows)
+        scans = [e for e in jaxpr.jaxpr.eqns if e.primitive.name == "scan"]
+
+        assert scans, "the chunked sum is expected to be a scan"
+        for eqn in scans:
+            assert len(eqn.outvars) == eqn.params["num_carry"]
+
     def test_it_vmaps_over_a_candidate_axis(self, obs, near_best_antenna_paths,
                                             exact_rtol):
         stacked = np.stack([near_best_antenna_paths[:2], near_best_antenna_paths[3:]])
@@ -1161,22 +1221,62 @@ class TestDecoheredNullAntennas:
 
         np.testing.assert_allclose(got, want, rtol=1e-9 if precision == "double" else 2e-3)
 
+    def test_no_baselines_scores_every_draw_zero(self, obs, near_best_antenna_paths):
+        empty = np.zeros((0, N_FREQ, obs.n_time), dtype=complex)
+        none = np.zeros(0, dtype=int)
+
+        want = np.asarray(decohered_null(empty, np.ones((0, 1, 1)),
+                                         np.zeros((0, obs.n_time, N_FINE)), obs.freqs,
+                                         none, none, n_draws=6))
+        got = np.asarray(decohered_null_antennas(
+            empty, np.ones((0, 1, 1)), near_best_antenna_paths[2], obs.freqs, none,
+            none, n_draws=6, bl_chunk=3,
+        ))
+
+        assert got.shape == (6,)
+        np.testing.assert_array_equal(got, want)
+
 
 class TestScanMemoryBudget:
     """The budget decides the layout of the scan, never its answer."""
 
     def test_the_chunk_is_what_the_budget_affords(self):
+        """Fixed arrays per candidate, a working set per baseline, and the null's
+        product per row, padded out to whole chunks: solved for the chunk."""
+        n_bl, n_tau, n_ant = 100, 3, N_ANT
         per = _scan_bytes_per_baseline(N_FREQ, N_TIME, N_FINE)
+        fixed = _scan_fixed_bytes(n_tau, n_ant, N_FREQ, N_TIME, N_FINE)
+        row = _null_row_bytes(N_FREQ, N_TIME)
+        shape = (n_bl, N_FREQ, N_TIME, N_FINE, n_tau, n_ant)
 
-        assert _baseline_chunk(100, N_FREQ, N_TIME, N_FINE, None) == 100
-        assert _baseline_chunk(100, N_FREQ, N_TIME, N_FINE, 1e3) == 100
-        assert _baseline_chunk(100, N_FREQ, N_TIME, N_FINE, 10.5 * per / 1e9) == 10
-        assert _baseline_chunk(100, N_FREQ, N_TIME, N_FINE, 10.5 * per / 1e9,
-                               n_batch=2) == 5
-        assert _baseline_chunk(100, N_FREQ, N_TIME, N_FINE, 10.5 * per / 1e9,
-                               reserved_bytes=6 * per) == 4
+        def budget(n_batch, chunk):
+            """GB that holds exactly this layout, at the padding bound."""
+            return (n_batch * fixed + (n_bl + chunk) * row
+                    + n_batch * chunk * per) / 1e9
+
+        assert _baseline_chunk(*shape, None) == n_bl
+        assert _baseline_chunk(*shape, 1e3) == n_bl
+        assert _baseline_chunk(*shape, 1.001 * budget(1, 10)) == 10
+        assert _baseline_chunk(*shape, 0.999 * budget(1, 10)) == 9
+        assert _baseline_chunk(*shape, 1.001 * budget(2, 5), n_batch=2) == 5
         # Never zero: a budget below one baseline still scans one at a time.
-        assert _baseline_chunk(100, N_FREQ, N_TIME, N_FINE, 1e-12) == 1
+        assert _baseline_chunk(*shape, 1e-12) == 1
+
+    @pytest.mark.parametrize("fits", [1, 2, 3])
+    def test_a_batch_that_fits_is_never_chunked(self, fits):
+        """The batch and the chunk read the same terms, so chunking starts only
+        where a batch of one does not fit whole."""
+        n_bl, n_tau, n_ant = 100, 3, N_ANT
+        per_candidate = (n_bl * _scan_bytes_per_baseline(N_FREQ, N_TIME, N_FINE)
+                         + _scan_fixed_bytes(n_tau, n_ant, N_FREQ, N_TIME, N_FINE))
+        gb = (fits * per_candidate + 2 * n_bl * _null_row_bytes(N_FREQ, N_TIME)) / 1e9
+
+        n_batch = _batch_for_memory(8, n_bl, N_FREQ, N_TIME, N_FINE, n_tau, n_ant,
+                                    8, gb * 1.0001)
+
+        assert n_batch == fits
+        assert _baseline_chunk(n_bl, N_FREQ, N_TIME, N_FINE, n_tau, n_ant,
+                               gb * 1.0001, n_batch=n_batch) == n_bl
 
     def test_a_tight_budget_changes_nothing_but_the_chunking(self, obs, precision):
         settings = dict(noise=SIGMA, taus_s=SHORT_GRID, n_null=32)

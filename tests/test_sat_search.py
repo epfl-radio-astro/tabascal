@@ -587,8 +587,9 @@ def bytes_per_candidate(n_bl_used, n_tau):
     Per baseline, the fine-grid phase, the complex exponent and its exponential,
     ``(n_freq, n_time, n_fine)`` each, beside the baseline's fine-grid path and
     the per-cell visibility, weight and product the sums reduce -- all in
-    whatever precision the scan is running in. Plus the per-antenna path grid for
-    the whole offset grid, float64 on the host and again on the device.
+    whatever precision the scan is running in. Plus what the candidate holds for
+    its whole scan: the per-antenna path grid for the whole offset grid, float64
+    on the host and again on the device, and the ``r`` and ``z2`` outputs.
     """
     c = jnp.zeros(1, dtype=complex).dtype.itemsize
     f = jnp.zeros(1, dtype=float).dtype.itemsize
@@ -598,7 +599,9 @@ def bytes_per_candidate(n_bl_used, n_tau):
         + N_FREQ * N_TIME * (2 * c + f)
     )
 
-    return n_bl_used * per_baseline + n_tau * N_ANT * N_TIME * N_FINE * (8 + f)
+    fixed = n_tau * N_ANT * N_TIME * N_FINE * (8 + f) + n_tau * N_FREQ * (N_TIME + 1) * f
+
+    return n_bl_used * per_baseline + fixed
 
 
 def fake_search(entries, tau_grid=SEARCH_GRID):
@@ -945,7 +948,7 @@ class TestSearchResult:
                 "tau_grid", "z2_tau", "tau_best", "z2_best", "best_chan",
                 "best_freq", "r_best", "frames", "elevation", "null",
                 "null_mean", "null_std", "significance", "n_bl_used", "range_m",
-                "v_perp_m_s", "b_coh", "n_fine", "sigma_transverse_m",
+                "v_perp_m_s", "b_coh", "n_fine", "sigma_transverse_m", "bl_chunk",
             }
             assert fit["tau_best"] == row["tau_best"]
             assert fit["best_chan"] == row["best_chan"]
