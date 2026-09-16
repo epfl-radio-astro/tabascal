@@ -213,12 +213,10 @@ def _add_scan_arguments(parser):
     group.add_argument(
         "--max-mem-gb", dest="max_mem_gb", type=float, default=4.0, metavar="GB",
         help="Memory budget for the batch, in gigabytes (default: 4.0). It "
-        "counts the two arrays that dominate -- one candidate's fringe model "
-        "(n_bl x n_freq x n_time x n_fine complex, one offset at a time) and its "
-        "path differences over the whole grid -- which run to gigabytes apiece "
-        "on a real array, so this and not --batch-size is usually what decides "
-        "how many candidates are scored at once. The weights beside them are not "
-        "counted, so it is a sizing heuristic rather than a cap.",
+        "counts per-candidate paths, outputs and chunk working sets, plus the "
+        "null's stored product. Reduces --batch-size to fit; if one candidate "
+        "does not fit whole, uses baseline chunks. Visibilities and weights "
+        "are excluded, so this is a sizing heuristic rather than a cap.",
     )
     group.add_argument(
         "--precision", dest="precision", default=None, choices=("single", "double"),

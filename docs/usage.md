@@ -336,6 +336,11 @@ difference of a few kilometres needs no more, and with `-ms` there is no config
 to ask — which `--precision {single,double}` overrides; with `-c` the config's
 `model.precision` decides unless the flag is given.
 
+`--max-mem-gb` (default 1 GB) budgets the offset scan and curve extraction.
+The scan uses all coherent baselines at once when they fit, otherwise smaller
+baseline chunks. The budget is a sizing heuristic, not a memory cap. Raise it
+for speed on a larger device; chunking preserves the statistic up to rounding.
+
 The curves are then extracted at the offset that was measured, not at `tau = 0`,
 and the fit travels with them into the `.npz`: `tau_best`, `tau_grid`, `z2_tau`,
 `z2_best`, `best_chan`, `significance`, `null_mean`, `null_std`, `detected` and
