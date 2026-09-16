@@ -130,6 +130,13 @@ The core (:func:`~tabascal.rfi_estimate.near_field_fringe_model`,
 arrays, walking the grid with ``lax.map`` so one compilation covers the whole
 scan, and is left undecorated so the drivers own the ``jit`` and the batched
 identification search can ``vmap`` it over candidates.
+
+The drivers use :func:`~tabascal.rfi_estimate.near_field_antenna_paths`,
+:func:`~tabascal.rfi_estimate.tau_scan_antennas` and
+:func:`~tabascal.rfi_estimate.decohered_null_antennas`. These store paths per
+antenna, accumulate scores over baseline chunks and build the null model once.
+See the function docstrings for reference centering, precision and padding
+semantics.
 :func:`~tabascal.rfi_estimate.shift_orbit_record_epoch` closes the loop: an orbit
 record whose epoch is moved by :math:`-\tau` reproduces the measured trajectory
 through ``--extra-orbit-dir`` with no further code.
@@ -181,17 +188,16 @@ the same :math:`z^2`, so the search and
 :func:`~tabascal.rfi_estimate.fit_time_offset` report the same detection for the
 same pass.
 
-**One compilation.** ``jax.jit(jax.vmap(tau_scan))`` is held at module level and
-the candidates are fed to it in batches, a ragged last batch padded by repeating
-its last candidate so every call has one shape. Two arrays per candidate dominate
-the memory -- the fringe model ``(n_bl, n_freq, n_time, n_fine)`` complex, one
-offset at a time, and the paths ``(n_tau, n_bl, n_time, n_fine)`` float64 -- and
-``max_mem_gb`` is a budget for their sum, so the batch actually run is the
-smaller of ``batch_size`` and what that budget affords (reported back as
-``batch_size``). At MWA scale it is the budget that decides: the union reaches
-7704 of the array's 9180 baselines once candidates come near the horizon, one
-candidate over 24 channels is then some 2.1 GB, and a batch of eight would ask
-for 17 GB.
+**Batching and memory.** A module-level jitted kernel scans candidate batches.
+The final batch repeats its last candidate to preserve the input shape;
+padded results are discarded. Compilations depend on input shapes, dtypes
+and weak types.
+
+``max_mem_gb`` limits the requested ``batch_size`` using the scan's memory
+estimate. Baselines are chunked only when one candidate does not fit whole.
+The actual sizes are returned as ``batch_size`` and ``bl_chunk``.
+The budget is a sizing heuristic, not a cap; see
+:func:`~tabascal.rfi_estimate.search_candidates` for the counted arrays.
 
 The null is drawn for the top ``n_null_candidates`` only: two hundred extra scans
 per satellite over a whole constellation is the search twice over, spent on
