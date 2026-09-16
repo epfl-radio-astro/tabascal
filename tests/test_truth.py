@@ -283,3 +283,18 @@ def test_autocorr_matches_long_correlated_window(dtype):
     np.testing.assert_allclose(
         _integrated_autocorr_time(residual, axis=2), expected, rtol=tolerance,
     )
+
+
+def test_autocorr_single_precision_does_not_drift_with_row_count():
+    """The lag power is averaged over every row, and float32 drifts with the count.
+
+    Production averages over ~1e6 baseline-channel rows, where a float32 running
+    sum moves tau by ~1e-4 and with it the printed N_eff. Accumulating in float64
+    keeps complex64 input within float32 rounding of the same series in complex128.
+    """
+    rng = np.random.default_rng(11)
+    shape = (200_000, 1, 8)
+    series = np.cumsum(rng.standard_normal(shape) + 1j * rng.standard_normal(shape), axis=-1)
+    reference = _integrated_autocorr_time(series, axis=2)
+    single = _integrated_autocorr_time(series.astype(np.complex64), axis=2)
+    np.testing.assert_allclose(single, reference, rtol=1e-6)
