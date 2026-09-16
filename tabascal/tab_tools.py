@@ -261,8 +261,9 @@ def _effective_sample_size(resid: np.ndarray) -> float:
     good = nrm > 0
     if good.sum() >= 2:
         yg = yr[good] / nrm[good][:, None]
-        # Real by construction: a sum of squared magnitudes. Guard the degenerate
-        # case where the normalised rows cancel, which no correlation can undo.
+        # Real by construction: a sum of squared magnitudes. Rows that cancel
+        # exactly (r and -r) make it zero; count the good rows as independent
+        # rather than divide by it.
         total = float(np.sum(np.abs(yg.sum(axis=0)) ** 2))
         neff_row = good.sum() ** 2 / total if total > 0 else float(good.sum())
     else:

@@ -228,6 +228,32 @@ def test_effective_sample_size_matches_the_explicit_gram():
         assert np.isclose(_effective_sample_size(y), expected, rtol=1e-9, atol=0)
 
 
+def test_effective_sample_size_rows_that_cancel_count_as_independent():
+    """Rows that cancel exactly leave nothing to divide the row count by.
+
+    With rows ``r`` and ``-r`` the column sums of the normalised rows are zero, so
+    ``n_row^2 / total`` has no finite value. The guard counts the good rows as
+    independent instead, so the time and frequency deflation still applies rather
+    than the result jumping to the ``N`` cap.
+    """
+    rng = np.random.default_rng(5)
+    # Integer-valued with zero mean, so every centring step is exact and the two
+    # normalised rows are exact negatives: the total is zero, not merely small.
+    # A walk rather than white steps, so the time axis carries correlation and the
+    # result sits below the N cap -- where dividing by zero would have landed it.
+    walk = np.cumsum(rng.integers(-2, 3, size=(2, 20)).astype(float), axis=1)
+    parts = np.concatenate([walk, -walk[:, ::-1]], axis=1)
+    series = (parts[0] + 1j * parts[1])[None, None, :]
+    y = np.concatenate([series, -series])
+
+    tau_time = _integrated_autocorr_time(y, 2)
+    assert tau_time > 1
+    expected = (y.shape[2] / tau_time) * 1.0 * 2
+    neff = _effective_sample_size(y)
+    assert neff < y.size
+    assert np.isclose(neff, expected, rtol=1e-12, atol=0)
+
+
 def test_autocorr_matches_explicit_lags():
     """FFT lags preserve the overlap normalisation and first-negative window."""
     rng = np.random.default_rng(42)
