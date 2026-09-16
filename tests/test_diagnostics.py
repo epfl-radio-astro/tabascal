@@ -15,8 +15,9 @@ def test_paired_diagnostics(masked, scale):
         calls.append(1)
         loc = numpyro.sample("loc", dist.Normal(0, 1))
         mask = jnp.array([True, False, True]) if masked else True
-        with numpyro.handlers.scale(scale=scale):
-            numpyro.sample("obs", dist.Normal(loc + state, constants).mask(mask), obs=obs_data)
+        # Flags go through the mask handler, as components/likelihood.py applies them.
+        with numpyro.handlers.scale(scale=scale), numpyro.handlers.mask(mask=mask):
+            numpyro.sample("obs", dist.Normal(loc + state, constants), obs=obs_data)
     params = {"loc": jnp.array(0.4)}
     data = jnp.array([1., 2., 3.])
     kwargs = dict(state=0.2, constants=1.3)

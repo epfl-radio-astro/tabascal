@@ -125,12 +125,11 @@ def nlog_like_and_post(prob_model, params, obs_data, state=None, constants=None)
         model_kwargs={"state": state, "constants": constants},
         params=params,
     )
-    # Exactly what log_likelihood reduces: it takes the site's own
-    # `fn.log_prob(value)`, and numpyro's mask handler records its mask on the
-    # message rather than wrapping the distribution, so neither this nor the
-    # function it replaces applies the flags here. The joint below does apply
-    # them, through log_density's scale_and_mask -- which is the same asymmetry
-    # the two separate helpers had, preserved deliberately so the printed
+    # Exactly what log_likelihood reduces: the site's own `fn.log_prob(value)`.
+    # numpyro's mask handler replaces that fn with `fn.mask(flags)`, so both
+    # reductions honour the flags (flagged entries add zero but still count in
+    # the mean). Only the joint applies the site's scale, as log_density always
+    # did and log_likelihood never has -- that asymmetry is kept so the printed
     # log_l and log_p are unchanged.
     obs = model_trace["obs"]
     nlog_l = -obs["fn"].log_prob(obs["value"]).mean()
