@@ -95,6 +95,10 @@ def build_parser():
     run_parser.add_argument(
         "-sx", "--suffix", default="", type=_label, help="Image name suffix."
     )
+    run_parser.add_argument(
+        "--skip-ms-write", action="store_true",
+        help="Keep results in zarr and skip the MS copy; tab2MS can copy them later.",
+    )
     run_parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
     run_parser.add_argument(
         "-nl", "--no-log",
