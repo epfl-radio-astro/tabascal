@@ -29,6 +29,7 @@ from tabascal.interferometry import calculate_rfi_vis_fine
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
     ComplexRFIConstAnt,
+    _corr_scales_from_matched_filter,
     _std_from_matched_filter,
     read_light_curves,
     rfi_signal_config_validation,
@@ -810,6 +811,207 @@ class TestPerSatelliteWidth:
 
         assert _wants_rfi_axis("rfi_signal/sigma_rfi_k", per_source, N_RFI)
         assert not _wants_rfi_axis("rfi_signal/sigma_rfi_k", shared, N_RFI)
+
+
+# ---------------------------------------------------------------------------
+# Correlation scales per satellite, from the matched filter
+# ---------------------------------------------------------------------------
+
+class TestPerSatelliteCorrelationScales:
+    """``rfi.gp_cov.corr_time`` / ``corr_freq: matched-filter``: each light curve's own scales.
+
+    The estimator is tested on curves with a known correlation, the component on
+    scales handed to it -- what is measured and what is done with it are separate
+    questions, and the mock observation (8 integrations) is too short to ask the first.
+    """
+
+    D_TIME, D_FREQ, N_T, N_F = 2.0, 30e3, 400, 6
+
+    @classmethod
+    def _ar1(cls, tau, seed, n=None):
+        """A unit-variance AR(1) series whose autocorrelation is exp(-lag / tau)."""
+        n = cls.N_T if n is None else n
+        rng = np.random.RandomState(seed)
+        phi = np.exp(-cls.D_TIME / tau)
+        x = np.zeros(n)
+        for t in range(1, n):
+            x[t] = phi * x[t - 1] + np.sqrt(1 - phi ** 2) * rng.randn()
+        return x
+
+    @classmethod
+    def _result(cls, series, error=0.05, in_view=None):
+        """``series``: (n_src, n_freq, n_time) real light curves; white noise is added."""
+        series = np.asarray(series, dtype=float)
+        rng = np.random.RandomState(99)
+        return {
+            "light_curves": series + error * rng.randn(*series.shape) + 0j,
+            "error": np.full(series.shape, error),
+            "freqs": 150e6 + cls.D_FREQ * np.arange(series.shape[1]),
+            "times_sec": cls.D_TIME * np.arange(series.shape[2]),
+            "in_view": in_view,
+        }
+
+    def _broadband(self, taus):
+        return np.stack([np.tile(10.0 + self._ar1(tau, seed=i), (self.N_F, 1)) for i, tau in enumerate(taus)])
+
+    @pytest.mark.parametrize("key", ["corr_freq", "corr_time"])
+    @pytest.mark.parametrize("word", ["matched-filter", "mf"])
+    def test_both_scales_take_the_word_and_its_alias(self, key, word):
+        gp_cov = {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0, key: word}
+        freqs, times = jnp.linspace(1.4e9, 1.41e9, 4), jnp.linspace(0.0, 120.0, 8)
+
+        out = rfi_signal_config_validation(
+            {"r_seed": 1, "gp_cov": gp_cov}, jnp.ones((3, 4, 8), dtype=complex), freqs, 1e6, times, 8.0
+        )["gp_cov"]
+
+        assert out[key] == FROM_MATCHED_FILTER
+
+    def test_the_scales_take_no_other_word(self):
+        """Not even ``data``: the visibilities as a whole have no coherence scale to read."""
+        with pytest.raises(ValueError, match="rfi.gp_cov.corr_time"):
+            validate_gp_cov({"corr_time": "data"}, "rfi", {"corr_time": "rfi_scale"}, optional=("corr_time",))
+
+    def test_the_time_scale_is_the_e_folding_of_each_curve(self):
+        """Over realisations, not one: a single AR(1) pass scatters by tens of per cent.
+
+        That scatter is the estimator's honest precision on one pass and not a defect
+        of it, so the assertion is on the median of eight satellites at each scale.
+        """
+        taus = [10.0] * 8 + [30.0] * 8
+        series = np.stack([
+            np.tile(10.0 + self._ar1(tau, seed=i, n=1200), (self.N_F, 1)) for i, tau in enumerate(taus)
+        ])
+
+        _, corr_time = _corr_scales_from_matched_filter(self._result(series), len(taus), (1.0, 1.0))
+
+        assert np.median(corr_time[:8]) == pytest.approx(10.0, rel=0.2)
+        assert np.median(corr_time[8:]) == pytest.approx(30.0, rel=0.2)
+
+    def test_emission_coherent_across_the_band_takes_the_whole_band(self):
+        """It never decorrelates inside the lags there are, so the band is a lower bound."""
+        corr_freq, _ = _corr_scales_from_matched_filter(self._result(self._broadband((20.0,))), 1, (1.0, 1.0))
+
+        assert corr_freq[0] == pytest.approx(self.N_F * self.D_FREQ)
+
+    def test_channels_that_vary_independently_take_one_channel(self):
+        series = np.stack([[10.0 + self._ar1(20.0, seed=10 + f) for f in range(self.N_F)]])
+
+        corr_freq, _ = _corr_scales_from_matched_filter(self._result(series), 1, (1.0, 1.0))
+
+        assert corr_freq[0] == pytest.approx(self.D_FREQ)
+
+    def test_a_slow_trend_under_the_track_does_not_lengthen_it(self):
+        """The sky under a track is slow power the satellite does not have."""
+        flat = self._broadband((10.0,))
+        ramp = flat + np.linspace(0.0, 20.0, self.N_T)[None, None, :]
+
+        _, plain = _corr_scales_from_matched_filter(self._result(flat), 1, (1.0, 1.0))
+        _, sloped = _corr_scales_from_matched_filter(self._result(ramp), 1, (1.0, 1.0))
+
+        assert sloped[0] == pytest.approx(plain[0], rel=0.05)
+
+    def test_only_the_pass_is_measured(self):
+        """Samples out of view are masked zeros, and a step to zero is not variability."""
+        in_view = np.zeros((1, self.N_T), dtype=bool)
+        in_view[0, 50:350] = True
+        masked = self._result(self._broadband((10.0,)), in_view=in_view)
+        # The same noisy samples, cut to the pass, as an observation that was only the pass.
+        whole = {k: (v[..., 50:350] if k in ("light_curves", "error") else v) for k, v in masked.items()}
+        whole.update(times_sec=masked["times_sec"][50:350], in_view=None)
+        masked["light_curves"] = np.where(in_view[:, None, :], masked["light_curves"], 0.0)
+
+        _, inside = _corr_scales_from_matched_filter(masked, 1, (1.0, 1.0))
+        _, alone = _corr_scales_from_matched_filter(whole, 1, (1.0, 1.0))
+
+        assert inside[0] == pytest.approx(alone[0], rel=1e-9)
+
+    def test_an_undetected_satellite_and_the_padding_take_the_median(self):
+        series = self._broadband((10.0, 40.0, 20.0))
+        series[2] = 0.0                                   # noise only
+
+        corr_freq, corr_time = _corr_scales_from_matched_filter(self._result(series), 5, (1.0, 1.0))
+
+        assert corr_time[2] == pytest.approx(np.median(corr_time[:2]))
+        np.testing.assert_allclose(corr_time[3:], np.median(corr_time[:3]))
+        assert np.all(np.isfinite(corr_freq)) and np.all(corr_freq > 0)
+
+    def test_an_axis_nothing_can_measure_takes_what_null_means(self):
+        one_channel = self._result(self._broadband((20.0,))[:, :1])
+        too_short = self._result(self._broadband((20.0,))[:, :, :6])
+
+        corr_freq, corr_time = _corr_scales_from_matched_filter(one_channel, 1, (123.0, 456.0))
+        assert corr_freq[0] == 123.0 and corr_time[0] != 456.0
+
+        corr_freq, corr_time = _corr_scales_from_matched_filter(too_short, 1, (123.0, 456.0))
+        assert (corr_freq[0], corr_time[0]) == (123.0, 456.0)
+
+    # -- what the component does with them --------------------------------------------
+
+    #: Per source, padding included: a fast, a middling and a slow satellite.
+    TIMES = np.array([10.0, 30.0, 90.0, 30.0])
+    FREQS = np.array([2e6, 8e6, 8e6, 8e6])
+
+    @pytest.fixture
+    def measured(self, monkeypatch):
+        import tabascal.components.rfi_signal as mod
+        import tabascal.rfi_estimate as est
+
+        calls = []
+        monkeypatch.setattr(est, "light_curves_from_config", lambda config, **kw: (calls.append(1), {})[1])
+        monkeypatch.setattr(
+            mod, "_corr_scales_from_matched_filter", lambda result, n_rfi, fallback: (self.FREQS, self.TIMES)
+        )
+        return calls
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_each_source_gets_its_own_spectrum_at_the_same_width(self, cls, measured):
+        comp = setup_component(cls, std=3.0, corr_time="matched-filter", corr_freq="mf")
+        sigma = np.asarray(comp.sigma_rfi_k)
+
+        assert sigma.shape == (N_RFI, 1, comp.n_k_freq_rfi, comp.n_k_time_rfi)
+        np.testing.assert_allclose(2.0 * (sigma ** 2).sum(axis=(1, 2, 3)), 3.0, rtol=1e-5)
+
+        # The faster satellite keeps more of its power away from the zero mode, which sits
+        # wherever |k| is smallest on the cut grid rather than at index 0.
+        zero = tuple(int(np.argmin(np.abs(np.asarray(k)))) for k in comp.ks)
+        away = lambda i: 1.0 - sigma[i, 0][zero] ** 2 / (sigma[i] ** 2).sum()
+        assert away(0) > away(1) > away(2)
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_the_grid_is_cut_for_the_fastest_real_source(self, cls, measured):
+        per_source = setup_component(cls, corr_time="matched-filter", corr_freq="matched-filter")
+        fastest = setup_component(cls, corr_time=float(self.TIMES[:N_RFI_REAL].min()),
+                                  corr_freq=float(self.FREQS[:N_RFI_REAL].min()))
+
+        assert (per_source.n_k_freq_rfi, per_source.n_k_time_rfi) == (fastest.n_k_freq_rfi, fastest.n_k_time_rfi)
+        # and the fastest source's own spectrum is the one that grid was cut from
+        np.testing.assert_allclose(
+            np.asarray(per_source.sigma_rfi_k)[0, 0], np.asarray(fastest.sigma_rfi_k)[0, 0], rtol=1e-5
+        )
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_no_retained_mode_is_held_below_the_cutoff(self, cls, measured):
+        comp = setup_component(cls, corr_time="matched-filter", corr_freq="matched-filter")
+        power = np.asarray(comp.sigma_rfi_k)[:, 0] ** 2
+        _, cutoff = comp.gp_cov_params()
+
+        # Axis by axis, as pk_cut judges it: against the largest mode in its row and column.
+        for axis in (1, 2):
+            assert np.all(power >= 0.99 * cutoff * power.max(axis=axis, keepdims=True))
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_the_transform_round_trips_and_the_padding_stays_dark(self, cls, measured):
+        comp = setup_component(cls, corr_time="matched-filter", init="sample")
+
+        assert_transform_roundtrip(comp, comp.init_rfi_k_base, comp.sigma_rfi_k, comp.mu_rfi_k, atol=tol())
+        rfi_A = run_forward(comp, random_params(comp))
+        assert float(jnp.max(jnp.abs(rfi_A[N_RFI_REAL:]))) == 0.0
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_numbers_on_both_axes_leave_the_shared_spectrum(self, cls):
+        comp = setup_component(cls, corr_time=60.0, corr_freq=5e6)
+
+        assert comp.sigma_rfi_k.shape == (1, 1, comp.n_k_freq_rfi, comp.n_k_time_rfi)
 
 
 # ---------------------------------------------------------------------------

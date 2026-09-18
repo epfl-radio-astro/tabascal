@@ -192,6 +192,26 @@ def _gp_cov_rfi_amplitude(value, where: str):
     return _gp_cov_amplitude(value, where)
 
 
+def _gp_cov_rfi_scale(value, where: str):
+    """A positive number, or ``"matched-filter"`` (``"mf"``).
+
+    A correlation scale of the RFI prior: set, or measured per satellite from the
+    matched-filter light curve's own autocorrelation. There is no ``"data"`` here --
+    the visibilities as a whole have no single coherence scale to read off, while a
+    light curve filtered along one trajectory does.
+    """
+
+    if isinstance(value, str):
+        if value in _MATCHED_FILTER_WORDS:
+            return FROM_MATCHED_FILTER
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is not a number and not "
+            f"{FROM_MATCHED_FILTER!r}, which is the only word it takes."
+        )
+
+    return _gp_cov_number(value, where)
+
+
 def _gp_cov_pair(value, where: str) -> List[float]:
     """An ordered pair of positive numbers, one per axis.
 
@@ -267,6 +287,7 @@ GP_COV_KINDS = {
     "number": _gp_cov_number,
     "amplitude": _gp_cov_amplitude,
     "rfi_amplitude": _gp_cov_rfi_amplitude,
+    "rfi_scale": _gp_cov_rfi_scale,
     "pair": _gp_cov_pair,
 }
 

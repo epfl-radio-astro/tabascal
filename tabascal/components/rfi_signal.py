@@ -9,7 +9,7 @@ from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
-from tabascal.fft_gp import FROM_DATA, FROM_MATCHED_FILTER, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov
+from tabascal.fft_gp import FROM_DATA, FROM_MATCHED_FILTER, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -421,8 +421,8 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
 #: See ``BaseGPRFI.default_gammas``.
 _GP_COV_RULES = {
     "std": "rfi_amplitude",
-    "corr_freq": "number",
-    "corr_time": "number",
+    "corr_freq": "rfi_scale",
+    "corr_time": "rfi_scale",
     "gammas": "pair",
 }
 
@@ -629,6 +629,119 @@ def _std_from_matched_filter(result: Dict, n_rfi: int) -> NDArray:
     return padded
 
 
+def _axis_extent(x, dx) -> float:
+    """The span of an axis, or one sample of it where it has a single point."""
+    ext = float(jnp.max(x) - jnp.min(x))
+    return float(dx) if ext == 0.0 else ext
+
+
+def _e_folding_lag(rho: NDArray) -> Optional[float]:
+    """First lag, in samples, at which ``rho`` falls below 1/e; ``None`` if it never does."""
+    level = np.exp(-1.0)
+    for k in range(1, rho.size):
+        if rho[k] < level:
+            return (k - 1) + (rho[k - 1] - level) / max(rho[k - 1] - rho[k], 1e-12)
+    return None
+
+
+def _longest_run(mask: NDArray) -> slice:
+    """The longest contiguous stretch of ``mask``: one pass, not the gaps between two."""
+    best, start = slice(0, 0), None
+    for i, m in enumerate(list(mask) + [False]):
+        if m and start is None:
+            start = i
+        elif not m and start is not None:
+            if i - start > best.stop - best.start:
+                best = slice(start, i)
+            start = None
+    return best
+
+
+def _corr_scales_from_matched_filter(result: Dict, n_rfi: int, fallback: Tuple[float, float]) -> Tuple[NDArray, NDArray]:
+    """One ``(corr_freq, corr_time)`` per satellite, in Hz and s, from its light curve.
+
+    The de-rotated RFI is real, so ``Re(S_hat)`` is the light curve plus white
+    noise of known variance ``error^2``. Its autocorrelation, with that variance
+    taken off the zero lag, is the correlation function the prior describes, and
+    the lag at which it falls to 1/e is the scale:
+
+    * **time** -- of the inverse-variance channel average over the longest stretch
+      the satellite is in view, after removing a straight line. The sky under a
+      track is slow power the satellite does not have, and leaving it in reads
+      5-30 s long on the EDA2 passes this was written against -- the unsafe side,
+      since too long a scale is what under-subtracts.
+    * **frequency** -- of the channel time series against channel separation, each
+      with its own time mean removed.
+
+    What cannot be measured is said rather than guessed. A correlation that never
+    falls to 1/e inside the lags available is a lower bound, and takes the axis'
+    whole extent: broadband emission across a narrow band is the usual case, and
+    the scale is then at least the band. One that falls inside a single sample
+    takes that sample. A satellite below the noise takes the median of those
+    measured, and an axis nothing measures -- one channel, a handful of
+    integrations -- takes ``fallback``, which is the ``null`` default of that key.
+
+    One pass is one realisation: an AR(1) series of 400 samples with a 5-sample
+    scale reads 7-18 s for a true 10 s, and wider the longer the scale is against
+    the pass. That is the precision of a knee, which is all this sets.
+
+    It measures the *apparent* light curve, beam crossing included, which is what
+    the prior is on. One thing a single scale does not carry: a bright satellite
+    has significant structure well inside its e-folding time, and the roll-off past
+    the knee (``gammas``) decides whether the prior leaves room for it.
+    """
+    curves = np.asarray(result["light_curves"]).real      # (n_src, n_freq, n_time)
+    error = np.asarray(result["error"], dtype=float)
+    freqs = np.asarray(result["freqs"], dtype=float)
+    times = np.asarray(result["times_sec"], dtype=float)
+    in_view = result.get("in_view")
+    n_src, n_freq, n_time = curves.shape
+    in_view = np.ones((n_src, n_time), bool) if in_view is None else np.asarray(in_view, dtype=bool)
+
+    d_freq = float(np.median(np.diff(freqs))) if n_freq > 1 else 0.0
+    d_time = float(np.median(np.diff(times))) if n_time > 1 else 0.0
+    corr_freq = np.full(n_src, np.nan)
+    corr_time = np.full(n_src, np.nan)
+
+    for i in range(n_src):
+        ok_t = in_view[i] & np.isfinite(curves[i]).all(axis=0) & np.isfinite(error[i]).all(axis=0)
+        run = _longest_run(ok_t)
+        n = run.stop - run.start
+        if n < 8:
+            continue
+        y = curves[i][:, run]                                  # (n_freq, n)
+        w = 1.0 / error[i][:, run] ** 2
+
+        # --- time: channel average, straight line removed
+        x = (y * w).sum(axis=0) / w.sum(axis=0)
+        noise = float(np.mean(1.0 / w.sum(axis=0)))
+        tt = np.arange(n)
+        x = x - np.polyval(np.polyfit(tt, x, 1), tt)
+        c0 = float(np.mean(x * x)) - noise
+        if c0 > 0 and d_time > 0:
+            rho = np.array([1.0] + [float(np.mean(x[:-k] * x[k:])) / c0 for k in range(1, max(n // 3, 3))])
+            lag = _e_folding_lag(rho)
+            corr_time[i] = n * d_time if lag is None else max(lag, 1.0) * d_time
+
+        # --- frequency: channel time series against separation
+        if n_freq >= 3:
+            z = y - y.mean(axis=1, keepdims=True)
+            c0 = float(np.mean(z * z)) - float(np.mean(error[i][:, run] ** 2))
+            if c0 > 0:
+                rho = np.array([1.0] + [float(np.mean(z[:-q] * z[q:])) / c0 for q in range(1, n_freq - 1)])
+                lag = _e_folding_lag(rho)
+                corr_freq[i] = n_freq * d_freq if lag is None else max(lag, 1.0) * d_freq
+
+    def fill(scale, default):
+        measured = np.isfinite(scale)
+        scale = np.where(measured, scale, np.median(scale[measured]) if measured.any() else default)
+        padded = np.full(n_rfi, np.median(scale), dtype=float)
+        padded[:n_src] = scale
+        return padded
+
+    return fill(corr_freq, fallback[0]), fill(corr_time, fallback[1])
+
+
 def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float, gain_flags: Array = None) -> Dict:
     """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
 
@@ -648,12 +761,7 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
         Raised when an invalid input is provided for one fo the configuration parameters.
     """
 
-    def extent(x, dx):
-        ext = float(jnp.max(x) - jnp.min(x))
-        if ext == 0.0:
-            return float(dx)
-        else:
-            return ext
+    extent = _axis_extent
 
     # The covariance keys go through the validator both Fourier-domain priors
     # share, so a width of zero, of -5, or of True is refused here by name
@@ -701,8 +809,11 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
         print("Using RFI gp_cov.std : per satellite, from the matched filter")
     else:
         print(f"Using RFI gp_cov.std : {gp_cov['std']:.1e} Jy (rms|V|)")
-    print(f"Using RFI gp_cov.corr_freq : {gp_cov['corr_freq']/1e3:.1f} kHz")
-    print(f"Using RFI gp_cov.corr_time : {gp_cov['corr_time']:.1f} s")
+    for key, unit, scale in (("corr_freq", "kHz", 1e3), ("corr_time", "s", 1.0)):
+        if gp_cov[key] == FROM_MATCHED_FILTER:
+            print(f"Using RFI gp_cov.{key} : per satellite, from the matched filter")
+        else:
+            print(f"Using RFI gp_cov.{key} : {gp_cov[key] / scale:.1f} {unit}")
 
     return rfi_config
 
@@ -860,6 +971,28 @@ class BaseGPRFI(Component):
             print(f"RFI gp_cov.std from the matched filter, Jy (rms|V|): {widths}")
         self.gp_var = self.rfi_std / _LATENT_POWER
 
+        # And one correlation scale per satellite on either axis, from the same
+        # filtered curves. Arrays of n_rfi where asked for, floats otherwise.
+        if FROM_MATCHED_FILTER in (self.corr_freq, self.corr_time):
+            # What null means on each axis, for one the light curves cannot measure.
+            null_scales = (
+                _axis_extent(self.freqs, self.chan_width) / 2,
+                _axis_extent(self.times, self.int_time) / 2,
+            )
+            mf_freq, mf_time = _corr_scales_from_matched_filter(
+                self._matched_filter_curves(tab_config), self.n_rfi, null_scales
+            )
+            for key, measured, unit, scale in (
+                ("corr_freq", mf_freq, "kHz", 1e3), ("corr_time", mf_time, "s", 1.0)
+            ):
+                if getattr(self, key) == FROM_MATCHED_FILTER:
+                    setattr(self, key, measured)
+                    listed = ", ".join(
+                        f"{n}: {v / scale:.3g}"
+                        for n, v in zip(self.norad_ids[: self.n_rfi_real], measured)
+                    )
+                    print(f"RFI gp_cov.{key} from the matched filter, {unit}: {listed}")
+
     def build_mask_constants(self) -> dict:
         """Constants the signal mask needs, or ``{}`` when nothing is masked.
 
@@ -998,19 +1131,63 @@ class BaseGPRFI(Component):
         parameters it multiplies (``RFI_AXIS_NAMES``). ``pk`` stays 2-D, at the
         mean width, for the shape bookkeeping that reads it.
         """
-        if np.ndim(self.gp_var) == 0:
+        if not self._per_source_prior:
             pk = (self.gp_var / jnp.sum(pk)) * pk
             return pk, jnp.sqrt(pk)[None, None, :, :]
 
-        unit = pk / jnp.sum(pk)
-        gp_var = jnp.asarray(self.gp_var, dtype=unit.dtype)
-        sigma = jnp.sqrt(gp_var[:, None, None, None] * unit[None, None, :, :])
+        gp_var = jnp.broadcast_to(jnp.asarray(self.gp_var, dtype=pk.dtype), (self.n_rfi,))
+        unit = self._unit_spectra(pk)                     # (n_rfi or 1, n_k_freq, n_k_time)
+        sigma = jnp.sqrt(gp_var[:, None, None, None] * unit[:, None, :, :])
 
-        return jnp.mean(gp_var) * unit, sigma
+        return jnp.mean(gp_var) * pk / jnp.sum(pk), sigma
+
+    @property
+    def _per_source_prior(self) -> bool:
+        """True when any of the width and the two scales is one per satellite."""
+        return any(np.ndim(v) for v in (self.gp_var, self.corr_freq, self.corr_time))
+
+    def _grid_corr_scales(self) -> List[float]:
+        """The ``(corr_freq, corr_time)`` the latent grid is cut for.
+
+        The grid is shared, so with a scale per satellite it is the shortest one
+        present: the slowest roll-off keeps the most modes, and every other
+        satellite's spectrum fits inside it. Read off the real sources only --
+        the padded rows are copies and must not decide anything.
+        """
+        return [
+            float(np.min(np.asarray(v)[: self.n_rfi_real])) if np.ndim(v) else v
+            for v in (self.corr_freq, self.corr_time)
+        ]
+
+    def _unit_spectra(self, pk: Array) -> Array:
+        """Each source's spectrum on the shared grid, normalised to unit sum.
+
+        With scales per satellite the shape differs by source: the separable
+        :func:`pow_spec` at that source's own knees, on the ``ks`` the grid kept.
+        A mode the grid keeps for a faster satellite is held at the cutoff's level
+        for a slower one rather than below it, axis by axis -- the rule
+        :func:`~tabascal.fft_gp.pk_cut` cut the grid by, so no retained mode is
+        given less room than a retained mode ever has, and the source the grid was
+        cut for keeps exactly the spectrum it would have had alone.
+        """
+        if not (np.ndim(self.corr_freq) or np.ndim(self.corr_time)):
+            return (pk / jnp.sum(pk))[None, :, :]
+
+        gammas, cutoff = self.gp_cov_params()
+        scales = [np.broadcast_to(np.asarray(v, dtype=float), (self.n_rfi,)) for v in (self.corr_freq, self.corr_time)]
+        spectra = []
+        for i in range(self.n_rfi):
+            k0s = knee_from_corr_scale([scales[0][i], scales[1][i]])
+            axes = [pow_spec(k, 1.0, k0, gamma) for k, k0, gamma in zip(self.ks, k0s, gammas)]
+            axes = [jnp.maximum(a, cutoff * jnp.max(a)) for a in axes]
+            pk_i = axes[0][:, None] * axes[1][None, :]
+            spectra.append(pk_i / jnp.sum(pk_i))
+
+        return jnp.stack(spectra).astype(pk.dtype)
 
     def _assert_sigma_shape(self):
         """``sigma_rfi_k`` is shared, or one per source; nothing in between."""
-        lead = 1 if np.ndim(self.gp_var) == 0 else self.n_rfi
+        lead = self.n_rfi if self._per_source_prior else 1
         assert_attr_shape(
             self, "sigma_rfi_k", (lead, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
         )
@@ -1204,7 +1381,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
-        k0s = knee_from_corr_scale([self.corr_freq, self.corr_time])
+        k0s = knee_from_corr_scale(self._grid_corr_scales())
         # The spectrum is renormalised below, so p0 only has to be a positive scalar.
         p0 = float(np.mean(self.gp_var)) if np.ndim(self.gp_var) else self.gp_var
         gammas, pk_cutoff = self.gp_cov_params()
@@ -1484,7 +1661,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
-        k0s = knee_from_corr_scale([self.corr_freq, self.corr_time])
+        k0s = knee_from_corr_scale(self._grid_corr_scales())
         # The spectrum is renormalised below, so p0 only has to be a positive scalar.
         p0 = float(np.mean(self.gp_var)) if np.ndim(self.gp_var) else self.gp_var
         gammas, pk_cutoff = self.gp_cov_params()
