@@ -9,7 +9,7 @@ from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov
+from tabascal.fft_gp import FROM_DATA, FROM_MATCHED_FILTER, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -420,7 +420,7 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
 #: component's own, since the two Fourier components do not agree on theirs.
 #: See ``BaseGPRFI.default_gammas``.
 _GP_COV_RULES = {
-    "std": "amplitude",
+    "std": "rfi_amplitude",
     "corr_freq": "number",
     "corr_time": "number",
     "gammas": "pair",
@@ -568,6 +568,67 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     return std
 
 
+def _std_from_matched_filter(result: Dict, n_rfi: int) -> NDArray:
+    """One ``rms|V|`` per satellite, in Jy, from its matched-filter light curve.
+
+    ``rfi.gp_cov.std`` is one source's width, and both of its other measurements
+    hand every source the same number taken from *all* the visibilities: ``data``
+    their rms, ``null`` twice their maximum. On an array with short baselines
+    that number is the diffuse sky's -- 7.7e5 Jy on an EDA2 observation whose
+    satellites are 1e2-1e4 Jy -- so a satellite sits at a few hundredths of its
+    prior width in the whitened parameters. The fit is quadratic in the amplitude,
+    ``vis_rfi ~ rfi_A[a1] conj(rfi_A[a2])``, which makes zero a stationary point,
+    and a fixed-step optimiser taking steps larger than the signal can walk a
+    faint satellite into it and leave it there: reduced chi^2 unchanged, the
+    satellite unsubtracted. The matched filter has already measured each
+    satellite on its own track, so the width can be the satellite's.
+
+    The estimate is the debiased mean power of the light curve over the samples
+    the satellite is in view and measured. ``error`` is the standard deviation of
+    ``Re(S_hat)``, so the complex estimate carries ``2 error^2`` of noise power,
+    which is subtracted; what is left is floored at ``error^2``, the filter's own
+    one-sigma floor, so a satellite it did not detect gets the width of what it
+    could have hidden rather than none:
+
+        std_i^2 = max( <|S_hat_i|^2> - 2 <error_i^2>,  <error_i^2> )
+
+    The sky under a track is in ``S_hat`` as well as the satellite, so this tends
+    wide, which is the safe side for a prior width.
+
+    Rows ``[n_real:]`` are the sharding duplicates, dark by construction
+    (:meth:`BaseGPRFI._mask_dummy_rfi`); they take the median of the real widths
+    so the whitening transform stays finite for them.
+    """
+    curves = np.asarray(result["light_curves"])
+    error = np.asarray(result["error"], dtype=float)
+    in_view = result.get("in_view")
+
+    keep = np.isfinite(curves) & np.isfinite(error)
+    if in_view is not None:
+        keep &= np.asarray(in_view, dtype=bool)[:, None, :]
+
+    n_keep = keep.sum(axis=(1, 2))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        power = np.where(keep, np.abs(curves) ** 2, 0.0).sum(axis=(1, 2)) / n_keep
+        floor = np.where(keep, error ** 2, 0.0).sum(axis=(1, 2)) / n_keep
+    std = np.sqrt(np.maximum(power - 2.0 * floor, floor))
+
+    measured = np.isfinite(std) & (std > 0)
+    if not measured.any():
+        raise ValueError(
+            "rfi.gp_cov.std: matched-filter has nothing to measure -- no satellite "
+            "has a finite light-curve sample while in view. Set a number, or "
+            f"{FROM_DATA!r}."
+        )
+    # A satellite never in view is dark for the whole run; any finite width does.
+    std = np.where(measured, std, np.median(std[measured]))
+
+    padded = np.full(n_rfi, np.median(std), dtype=float)
+    padded[: std.size] = std
+
+    return padded
+
+
 def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float, gain_flags: Array = None) -> Dict:
     """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
 
@@ -608,7 +669,11 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     else:
         raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
 
-    if gp_cov["std"] == FROM_DATA:
+    if gp_cov["std"] == FROM_MATCHED_FILTER:
+        # Resolved in BaseGPRFI.setup: it needs the trajectories, which this
+        # function is not given, and it is one width per satellite.
+        pass
+    elif gp_cov["std"] == FROM_DATA:
         gp_cov["std"] = _std_from_data(vis_obs, gain_flags)
     elif gp_cov["std"] is None:
         # _LATENT_POWER times the largest visibility. It is a maximum where the
@@ -632,7 +697,10 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     rfi_config["gp_cov"] = gp_cov
 
     print()
-    print(f"Using RFI gp_cov.std : {gp_cov['std']:.1e} Jy (rms|V|)")
+    if gp_cov["std"] == FROM_MATCHED_FILTER:
+        print("Using RFI gp_cov.std : per satellite, from the matched filter")
+    else:
+        print(f"Using RFI gp_cov.std : {gp_cov['std']:.1e} Jy (rms|V|)")
     print(f"Using RFI gp_cov.corr_freq : {gp_cov['corr_freq']/1e3:.1f} kHz")
     print(f"Using RFI gp_cov.corr_time : {gp_cov['corr_time']:.1f} s")
 
@@ -753,7 +821,6 @@ class BaseGPRFI(Component):
         # See _LATENT_POWER for why the two differ by exactly that factor.
         gp_cov = rfi_config["gp_cov"]
         self.rfi_std = gp_cov["std"]
-        self.gp_var = self.rfi_std / _LATENT_POWER
         self.corr_freq = gp_cov["corr_freq"]
         self.corr_time = gp_cov["corr_time"]
 
@@ -777,6 +844,21 @@ class BaseGPRFI(Component):
         # Ordered as the n_rfi axis. The tail entries are sharding duplicates, so
         # consumers matching against a file slice to [:n_rfi_real] first.
         self.norad_ids = tab_config.norad_ids
+
+        # One width per satellite, measured by the same matched filter that
+        # rfi.init and rfi.mean can seed from (and memoised with them, so a config
+        # asking for all three filters the visibilities once). An array of n_rfi
+        # here; a float for every other rfi.gp_cov.std.
+        if self.rfi_std == FROM_MATCHED_FILTER:
+            self.rfi_std = _std_from_matched_filter(
+                self._matched_filter_curves(tab_config), self.n_rfi
+            )
+            widths = ", ".join(
+                f"{n}: {w:.3g}"
+                for n, w in zip(self.norad_ids[: self.n_rfi_real], self.rfi_std)
+            )
+            print(f"RFI gp_cov.std from the matched filter, Jy (rms|V|): {widths}")
+        self.gp_var = self.rfi_std / _LATENT_POWER
 
     def build_mask_constants(self) -> dict:
         """Constants the signal mask needs, or ``{}`` when nothing is masked.
@@ -885,13 +967,53 @@ class BaseGPRFI(Component):
         for it as both the prior mean and the init filters the visibilities once.
         """
         if getattr(self, "_mf_rfi_k", None) is None:
-            from tabascal.rfi_estimate import light_curves_from_config
-
-            print("Estimating RFI light curves by matched filter (no imaging required)")
-            curves = light_curves_from_config(tab_config)["light_curves"]
+            curves = self._matched_filter_curves(tab_config)["light_curves"]
             self._mf_rfi_k = self._rfi_k_from_light_curves(curves)
 
         return self._mf_rfi_k
+
+    def _matched_filter_curves(self, tab_config) -> Dict:
+        """The matched-filter result, filtered once however many keys ask for it.
+
+        ``rfi.gp_cov.std``, ``rfi.mean`` and ``rfi.init`` can each be
+        ``matched-filter``, and the width is wanted before the latent grid exists
+        while the seeds are wanted after, so the raw result is what is memoised.
+        """
+        if getattr(self, "_mf_result", None) is None:
+            from tabascal.rfi_estimate import light_curves_from_config
+
+            print("Estimating RFI light curves by matched filter (no imaging required)")
+            self._mf_result = light_curves_from_config(tab_config)
+
+        return self._mf_result
+
+    def _scale_spectrum(self, pk: Array) -> Tuple[Array, Array]:
+        """Normalise the cut spectrum to the width: ``(pk, sigma_rfi_k)``.
+
+        ``sum(sigma_rfi_k**2) = rfi.gp_cov.std / 2`` per source, see
+        :data:`_LATENT_POWER`. A scalar width gives the ``(1, 1, n_k_freq,
+        n_k_time)`` every source shares, by the arithmetic this has always been.
+        One width per satellite gives ``(n_rfi, 1, n_k_freq, n_k_time)``: the same
+        spectral shape scaled per source, sharded along the source axis with the
+        parameters it multiplies (``RFI_AXIS_NAMES``). ``pk`` stays 2-D, at the
+        mean width, for the shape bookkeeping that reads it.
+        """
+        if np.ndim(self.gp_var) == 0:
+            pk = (self.gp_var / jnp.sum(pk)) * pk
+            return pk, jnp.sqrt(pk)[None, None, :, :]
+
+        unit = pk / jnp.sum(pk)
+        gp_var = jnp.asarray(self.gp_var, dtype=unit.dtype)
+        sigma = jnp.sqrt(gp_var[:, None, None, None] * unit[None, None, :, :])
+
+        return jnp.mean(gp_var) * unit, sigma
+
+    def _assert_sigma_shape(self):
+        """``sigma_rfi_k`` is shared, or one per source; nothing in between."""
+        lead = 1 if np.ndim(self.gp_var) == 0 else self.n_rfi
+        assert_attr_shape(
+            self, "sigma_rfi_k", (lead, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
+        )
 
     def _mask_dummy_rfi(self, arr: Array) -> Array:
         """Zero the padded (dark dummy) rows of an (n_rfi, ...) array; no-op unpadded."""
@@ -1083,7 +1205,8 @@ class ComplexRFIVarAnt(BaseGPRFI):
         dxs = [self.chan_width, self.int_time]
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
         k0s = knee_from_corr_scale([self.corr_freq, self.corr_time])
-        p0 = self.gp_var #* self.n_time * self.n_freq
+        # The spectrum is renormalised below, so p0 only has to be a positive scalar.
+        p0 = float(np.mean(self.gp_var)) if np.ndim(self.gp_var) else self.gp_var
         gammas, pk_cutoff = self.gp_cov_params()
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
@@ -1128,11 +1251,9 @@ class ComplexRFIVarAnt(BaseGPRFI):
         # printed beside it rather than with the other rfi keys.
         print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
 
-        scale_norm = self.gp_var / jnp.sum(self.pk)
-        self.pk = scale_norm * self.pk
+        self.pk, self.sigma_rfi_k = self._scale_spectrum(self.pk)
 
         self.n_k_freq_rfi, self.n_k_time_rfi = self.pk.shape
-        self.sigma_rfi_k = jnp.sqrt(self.pk)[None, None, :, :]
 
     def _compute_data_est(self, vis_obs):
 
@@ -1234,9 +1355,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
         rfi_shape = (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi)
 
         assert_attr_shape(self, "mu_rfi_k", rfi_shape)
-        assert_attr_shape(
-            self, "sigma_rfi_k", (1, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
-        )
+        self._assert_sigma_shape()
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
@@ -1366,7 +1485,8 @@ class ComplexRFIConstAnt(BaseGPRFI):
         dxs = [self.chan_width, self.int_time]
         pad_factors = [self.freq_pad_factor, self.time_pad_factor]
         k0s = knee_from_corr_scale([self.corr_freq, self.corr_time])
-        p0 = self.gp_var
+        # The spectrum is renormalised below, so p0 only has to be a positive scalar.
+        p0 = float(np.mean(self.gp_var)) if np.ndim(self.gp_var) else self.gp_var
         gammas, pk_cutoff = self.gp_cov_params()
 
         self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
@@ -1411,11 +1531,9 @@ class ComplexRFIConstAnt(BaseGPRFI):
         # printed beside it rather than with the other rfi keys.
         print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
 
-        scale_norm = self.gp_var / jnp.sum(self.pk)
-        self.pk = scale_norm * self.pk
+        self.pk, self.sigma_rfi_k = self._scale_spectrum(self.pk)
 
         self.n_k_freq_rfi, self.n_k_time_rfi = self.pk.shape
-        self.sigma_rfi_k = jnp.sqrt(self.pk)[None, None, :, :]
 
     def _compute_data_est(self, vis_obs: Array) -> Array:
 
@@ -1530,9 +1648,7 @@ class ComplexRFIConstAnt(BaseGPRFI):
         rfi_shape = (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
 
         assert_attr_shape(self, "mu_rfi_k", rfi_shape)
-        assert_attr_shape(
-            self, "sigma_rfi_k", (1, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
-        )
+        self._assert_sigma_shape()
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
