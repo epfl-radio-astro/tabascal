@@ -32,6 +32,8 @@ from tabascal.rfi_estimate import (
     rfi_phase_from_positions,
     rfi_phase_from_records,
     save_light_curves_npz,
+    subtract_time_median,
+    validate_mf_sky,
 )
 from tabascal.components.rfi_signal import read_light_curves
 from tabascal.time import jd_to_mjd, mjd_to_jd, to_utc_mjd
@@ -1026,6 +1028,91 @@ def make_tab_config(n_rfi=3, n_rfi_real=2, n_ant=N_ANT, n_freq=N_FREQ,
     )
 
 
+class TestSubtractTimeMedian:
+    """``rfi.mf_sky: median``: each baseline's time median is the sky, not the satellite.
+
+    A static sky is a constant per baseline and channel; a satellite turns the
+    fringe. The known answers below are exact: a phasor sampled over a whole
+    number of turns has a median of zero in both parts, and a median does not
+    move for a minority of samples however bright.
+    """
+
+    N_BL, N_FREQ, N_TIME = 6, 3, 64
+
+    def _sky(self):
+        rng = np.random.default_rng(3)
+        shape = (self.N_BL, self.N_FREQ, 1)
+        return 1e4 * (rng.normal(size=shape) + 1j * rng.normal(size=shape))
+
+    def _satellite(self, turns=(1, 2, 3, 5, 8, 13)):
+        t = np.arange(self.N_TIME) / self.N_TIME
+        # Half a sample of phase so that no sample sits on a zero of cos or sin:
+        # the sorted values then pair off as +x, -x and the median is exactly 0.
+        phase = 2 * np.pi * np.asarray(turns)[:, None, None] * (t + 0.5 / self.N_TIME)[None, None, :]
+        return 300.0 * np.exp(1j * phase) * np.ones((1, self.N_FREQ, 1))
+
+    def test_a_static_sky_goes_and_a_turning_fringe_stays(self):
+        sat = self._satellite()
+
+        out = subtract_time_median(self._sky() + sat)
+
+        np.testing.assert_allclose(out, sat, atol=1e-9)
+
+    def test_a_bright_minority_does_not_move_it(self):
+        """A satellite up for a fifth of the pass, not turning at all: still the sky's median."""
+        sky = self._sky() * np.ones((1, 1, self.N_TIME))
+        burst = np.zeros(sky.shape, dtype=complex)
+        burst[..., : self.N_TIME // 5] = 5e5 + 5e5j
+
+        out = subtract_time_median(sky + burst)
+
+        np.testing.assert_allclose(out, burst, atol=1e-6)
+
+    def test_flagged_samples_are_left_out_of_the_median(self):
+        sat = self._satellite()
+        vis = self._sky() + sat
+        flags = np.zeros(vis.shape, dtype=bool)
+        flags[..., ::2] = True
+        spoiled = np.where(flags, 1e9 + 1e9j, vis)
+        kept = self._sky() + sat[..., 1::2]
+
+        out = subtract_time_median(spoiled, flags)
+
+        # The unflagged half decides the median; the flagged samples only have it subtracted.
+        np.testing.assert_allclose(out[..., 1::2], subtract_time_median(kept), atol=1e-9)
+
+    def test_nothing_unflagged_is_returned_as_it_came(self):
+        vis = self._sky() + self._satellite()
+        flags = np.zeros(vis.shape, dtype=bool)
+        flags[0] = True
+
+        out = subtract_time_median(vis, flags)
+
+        np.testing.assert_array_equal(out[0], vis[0])
+
+    @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+    def test_the_precision_is_kept(self, dtype):
+        vis = (self._sky() + self._satellite()).astype(dtype)
+
+        assert subtract_time_median(vis).dtype == dtype
+
+    def test_two_samples_have_no_median_to_take(self):
+        vis = (self._sky() + self._satellite())[..., :2]
+
+        np.testing.assert_array_equal(subtract_time_median(vis), vis)
+
+    @pytest.mark.parametrize("value, expected", [
+        (None, None), ("none", None), (False, None), ("median", "median"), ("Median", "median"),
+    ])
+    def test_the_config_value_is_one_of_two(self, value, expected):
+        assert validate_mf_sky(value) == expected
+
+    @pytest.mark.parametrize("value", ["mean", 1, True, "model"])
+    def test_anything_else_is_refused_by_name(self, value):
+        with pytest.raises(ValueError, match="mf_sky"):
+            validate_mf_sky(value)
+
+
 class TestLightCurvesFromConfig:
     """The in-process path: no second MS read, and already in norad_ids order."""
 
@@ -1074,6 +1161,33 @@ class TestLightCurvesFromConfig:
         np.testing.assert_allclose(
             scaled["light_curves"], 3.0 * plain["light_curves"], rtol=exact_rtol
         )
+
+    def test_the_median_sky_is_taken_off_before_filtering(self):
+        """The fixture's visibilities are static, so with the median off nothing is left."""
+        config = make_tab_config()
+
+        plain = light_curves_from_config(config)
+        result = light_curves_from_config(config, sky="median")
+
+        assert plain["sky"] is None and result["sky"] == "median"
+        assert np.nanmax(np.abs(plain["light_curves"])) > 0
+        assert np.nanmax(np.abs(result["light_curves"])) == 0
+        # The floor is the weights', which the sky does not enter.
+        np.testing.assert_array_equal(result["error"], plain["error"])
+
+    @pytest.mark.parametrize("sky, stamped", [(None, "none"), ("median", "median")])
+    def test_the_file_stamps_what_was_taken_off(self, sky, stamped, tmp_path):
+        """A file the sky was removed from is not the same measurement as one it was left in."""
+        result = light_curves_from_config(make_tab_config(), sky=sky)
+        path = str(tmp_path / "lc.npz")
+
+        save_light_curves_npz(path, result)
+
+        assert str(np.load(path, allow_pickle=True)["sky"]) == stamped
+
+    def test_an_unknown_sky_is_refused(self):
+        with pytest.raises(ValueError, match="mf_sky"):
+            light_curves_from_config(make_tab_config(), sky="mean")
 
     def test_the_noise_on_the_config_sets_the_weights(self, exact_rtol):
         """Not uniform weights: the run's own resolved noise, per baseline."""

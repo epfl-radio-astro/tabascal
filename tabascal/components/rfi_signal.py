@@ -910,6 +910,16 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
     rfi_config["gp_cov"] = gp_cov
 
+    # What the matched filter takes off the visibilities first. Checked here so a
+    # misspelt value stops the run at the config rather than at the first use, and
+    # imported only when set: the estimator's imports are not free.
+    mf_sky = rfi_config.get("mf_sky")
+    if mf_sky is not None:
+        from tabascal.rfi_estimate import validate_mf_sky
+
+        mf_sky = validate_mf_sky(mf_sky)
+    rfi_config["mf_sky"] = mf_sky
+
     print()
     if gp_cov["std"] == FROM_MATCHED_FILTER:
         print("Using RFI gp_cov.std : per satellite, from the matched filter")
@@ -1221,8 +1231,12 @@ class BaseGPRFI(Component):
         if getattr(self, "_mf_result", None) is None:
             from tabascal.rfi_estimate import light_curves_from_config
 
-            print("Estimating RFI light curves by matched filter (no imaging required)")
-            self._mf_result = light_curves_from_config(tab_config)
+            sky = self.rfi_config.get("mf_sky")
+            print(
+                "Estimating RFI light curves by matched filter (no imaging required)"
+                + (f", each baseline's time {sky} taken off first" if sky else "")
+            )
+            self._mf_result = light_curves_from_config(tab_config, sky=sky)
 
         return self._mf_result
 

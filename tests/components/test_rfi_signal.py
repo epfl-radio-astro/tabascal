@@ -707,6 +707,38 @@ class TestPerSatelliteWidth:
 
         assert gp_cov["std"] == FROM_MATCHED_FILTER
 
+    @pytest.mark.parametrize("value, expected", [(None, None), ("median", "median"), ("Median", "median")])
+    def test_the_filters_sky_option_is_validated_with_the_block(self, value, expected):
+        cfg = {"r_seed": 1, "mf_sky": value, "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
+        freqs, times = jnp.linspace(1.4e9, 1.41e9, 4), jnp.linspace(0.0, 120.0, 8)
+
+        out = rfi_signal_config_validation(cfg, jnp.ones((3, 4, 8), dtype=complex), freqs, 1e6, times, 8.0)
+
+        assert out["mf_sky"] == expected
+
+    def test_an_unknown_sky_option_stops_at_the_config(self):
+        cfg = {"r_seed": 1, "mf_sky": "mean", "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
+        freqs, times = jnp.linspace(1.4e9, 1.41e9, 4), jnp.linspace(0.0, 120.0, 8)
+
+        with pytest.raises(ValueError, match="mf_sky"):
+            rfi_signal_config_validation(cfg, jnp.ones((3, 4, 8), dtype=complex), freqs, 1e6, times, 8.0)
+
+    @pytest.mark.parametrize("value", [None, "median"])
+    def test_the_component_hands_the_option_to_the_filter(self, value, monkeypatch):
+        import tabascal.rfi_estimate as mod
+
+        seen = []
+        result = self._result()
+        monkeypatch.setattr(
+            mod, "light_curves_from_config", lambda config, **kwargs: (seen.append(kwargs), result)[1]
+        )
+        config = make_rfi_config(std="matched-filter")
+        config.args["rfi"]["mf_sky"] = value
+
+        ComplexRFIVarAnt().setup(config)
+
+        assert seen == [{"sky": value}]
+
     def test_the_astronomical_block_does_not(self):
         """The sky has no trajectory to filter along, so its key keeps one word."""
         with pytest.raises(ValueError, match="ast.gp_cov.std"):

@@ -61,6 +61,7 @@ rfi:
   est: null             # Optional - Path to a measured light-curve file (.npz or .zarr) used by init/mean 'est'. Not needed for 'matched-filter'
   init: sample          # Optional - The initialization method for the RFI signal parameters. Options are 'prior', 'est', 'matched-filter' (alias 'mf'), 'truth', 'zeros', 'ones', 'sample'. 'matched-filter' estimates the light curves from the visibilities already in memory - no imaging step and no est file
   mean: 0               # Optional - Mean of the prior distribution for the RFI signal parameters. Options are 0/'zeros', 'data', 'est', 'matched-filter' (alias 'mf')
+  mf_sky: null          # Optional - What the matched filter takes off the visibilities first, for init/mean/gp_cov 'matched-filter' and 'tabascal light-curve -c'. null filters them as given; 'median' subtracts each baseline's time median (per channel, real and imaginary parts), a model-free estimate of the sky under the tracks
   min_elevation: 0      # Optional - Elevation in degrees below which the RFI signal of a satellite is masked to zero. 0 masks a satellite only while it is below the geometric horizon. Set to null to disable masking entirely
   time_pad_factor: 2
   freq_pad_factor: 2
