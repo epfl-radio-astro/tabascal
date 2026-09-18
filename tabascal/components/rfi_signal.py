@@ -657,40 +657,127 @@ def _longest_run(mask: NDArray) -> slice:
     return best
 
 
-def _corr_scales_from_matched_filter(result: Dict, n_rfi: int, fallback: Tuple[float, float]) -> Tuple[NDArray, NDArray]:
+#: How far past an axis' extent a scale that never decorrelates on it may be put. Far
+#: enough that a coherent axis keeps one latent mode rather than a band's worth.
+_UNRESOLVED_EXTENTS = 64.0
+
+
+def _decay_scale(rho: NDArray, step: float, extent: float) -> float:
+    """The 1/e scale of a correlation function sampled every ``step``.
+
+    Where it falls to 1/e inside the lags there are, that lag, and never less than
+    one sample. Where it does not, the decay it *did* show is extrapolated as an
+    exponential from the last lag: emission at rho = 0.95 across a 0.75 MHz band has
+    a 15 MHz scale, not a 0.75 MHz one, and calling it the band would hand the prior
+    seventeen frequency modes to describe a signal that has one. Capped at
+    :data:`_UNRESOLVED_EXTENTS` extents, which is also what rho >= 1 gets.
+    """
+    lag = _e_folding_lag(rho)
+    if lag is not None:
+        return max(lag, 1.0) * step
+
+    cap = _UNRESOLVED_EXTENTS * extent
+    last = float(rho[-1])
+    if not 0.0 < last < 1.0:
+        return cap
+    return min(-(rho.size - 1) * step / np.log(last), cap)
+
+
+def _envelope_scale(a: NDArray, null: NDArray, step: float, extent: float, gamma: float) -> Optional[float]:
+    """The longest scale whose prior spectrum covers every mode ``a`` detectably has.
+
+    An e-folding time is the scale of the *dominant* variation. What the prior must
+    not do is give a mode less variance than the signal demonstrably has there, and
+    for a bright source that includes fast structure carrying almost none of the
+    variance: SOLRAD 7B's carrier e-folds in 28 s and is fitted at chi^2 = 36 with
+    that, where 5 s fits it at 0.95.
+
+    ``a`` and ``null`` are ``(n_rep, n)`` series along the axis, averaged in power
+    over ``n_rep``: the amplitude, and a signal-free series with the same noise
+    *and confusion* -- ``Im(S_hat)``, the matched null. Its spectrum is the floor,
+    bin by bin. The filter's analytic error is not: it assumes independent
+    baselines and sits 3-15x below ``Im(S_hat)`` on EDA2, which reads the sky and
+    the other satellites as fast structure in every source.
+
+    Both are Hann-tapered -- a pass is not periodic, and the leakage of a bright slow
+    envelope is exactly a spurious fast tail -- and compared in log-spaced bins past
+    the taper's main lobe. A bin is detected where it clears the null by three of
+    the null's own standard errors. Returns ``None`` where there is no signal power
+    at all, and ``_UNRESOLVED_EXTENTS`` extents where nothing beyond the slow modes
+    is detected: the axis then asks nothing of the knee.
+    """
+    from tabascal.fft_gp import pow_spec
+
+    n_rep, n = a.shape
+    if n < 8:
+        return None
+    taper = np.hanning(n)
+    taper /= np.sqrt(np.mean(taper ** 2))
+    spectrum = lambda z: (np.abs(np.fft.rfft(z * taper[None, :], axis=1)) ** 2 / n).mean(axis=0)
+    power, floor = spectrum(a), spectrum(null)
+    k = np.fft.rfftfreq(n, step)
+
+    signal = np.clip(power - floor, 0.0, None)
+    total = signal[0] + 2.0 * signal[1:].sum()
+    if total <= 0:
+        return None
+
+    edges = np.unique(np.round(np.geomspace(3, k.size, 12)).astype(int))
+    detected = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        excess = power[lo:hi].mean() - floor[lo:hi].mean()
+        if excess > 3.0 * floor[lo:hi].mean() / np.sqrt((hi - lo) * n_rep):
+            detected.append((k[lo:hi].mean(), excess))
+    longest = _UNRESOLVED_EXTENTS * extent
+    if not detected:
+        return longest
+
+    two_sided = np.where(np.arange(k.size) == 0, 1.0, 2.0)
+    for scale in np.geomspace(longest, step, 96):
+        # np.array, not asarray: a jax array comes back as a read-only view
+        prior = np.array(pow_spec(k, 1.0, 1.0 / (2 * np.pi * scale), gamma), dtype=float)
+        prior *= total / (two_sided * prior).sum()
+        if all(np.interp(kb, k, prior) >= sb for kb, sb in detected):
+            return float(scale)
+
+    return float(step)
+
+
+def _corr_scales_from_matched_filter(
+    result: Dict, n_rfi: int, fallback: Tuple[float, float], gammas=(3, 3)
+) -> Tuple[NDArray, NDArray]:
     """One ``(corr_freq, corr_time)`` per satellite, in Hz and s, from its light curve.
 
-    The de-rotated RFI is real, so ``Re(S_hat)`` is the light curve plus white
-    noise of known variance ``error^2``. Its autocorrelation, with that variance
-    taken off the zero lag, is the correlation function the prior describes, and
-    the lag at which it falls to 1/e is the scale:
+    The de-rotated RFI is real, so ``Re(S_hat)`` is the light curve and ``Im(S_hat)``
+    a matched null: the same noise and confusion, no signal. Antenna phase errors do
+    not move the signal out of the real part -- ``sum_pq exp(i(phi_p - phi_q))`` is
+    real -- they only shrink it. Two scales are read off each axis, and the shorter
+    is the answer:
 
-    * **time** -- of the inverse-variance channel average over the longest stretch
-      the satellite is in view, after removing a straight line. The sky under a
-      track is slow power the satellite does not have, and leaving it in reads
-      5-30 s long on the EDA2 passes this was written against -- the unsafe side,
-      since too long a scale is what under-subtracts.
-    * **frequency** -- of the channel time series against channel separation, each
-      with its own time mean removed.
+    * the **1/e lag** of the autocorrelation of ``Re(S_hat)``, its white-noise
+      variance taken off the zero lag (:func:`_decay_scale`). In time, of the
+      inverse-variance channel average over the longest stretch the satellite is in
+      view, after removing a straight line: the sky under a track is slow power the
+      satellite does not have, and reads 5-30 s long on the EDA2 passes this was
+      written against. In frequency, of the channel series against separation, each
+      with its own time mean removed. This is the scale of the pass itself, and on
+      faint satellites it is all there is to measure -- usefully, because the
+      per-antenna amplitudes the prior is on drift on the same geometric timescale
+      even where the array-averaged curve shows nothing faster.
+    * the **envelope scale** of the amplitude ``sqrt(Re S_hat)`` against the null
+      (:func:`_envelope_scale`): what a bright source's detectable fast structure
+      demands, which its e-folding time does not know about.
 
-    What cannot be measured is said rather than guessed. A correlation that never
-    falls to 1/e inside the lags available is a lower bound, and takes the axis'
-    whole extent: broadband emission across a narrow band is the usual case, and
-    the scale is then at least the band. One that falls inside a single sample
-    takes that sample. A satellite below the noise takes the median of those
-    measured, and an axis nothing measures -- one channel, a handful of
-    integrations -- takes ``fallback``, which is the ``null`` default of that key.
+    A satellite the filter did not detect -- its mean flux over the pass within five
+    standard errors of the null's scatter -- takes the median of those measured, and an axis
+    nothing measures -- one channel, a handful of integrations -- takes ``fallback``,
+    which is what ``null`` means for that key.
 
     One pass is one realisation: an AR(1) series of 400 samples with a 5-sample
     scale reads 7-18 s for a true 10 s, and wider the longer the scale is against
     the pass. That is the precision of a knee, which is all this sets.
-
-    It measures the *apparent* light curve, beam crossing included, which is what
-    the prior is on. One thing a single scale does not carry: a bright satellite
-    has significant structure well inside its e-folding time, and the roll-off past
-    the knee (``gammas``) decides whether the prior leaves room for it.
     """
-    curves = np.asarray(result["light_curves"]).real      # (n_src, n_freq, n_time)
+    curves = np.asarray(result["light_curves"])          # (n_src, n_freq, n_time) complex
     error = np.asarray(result["error"], dtype=float)
     freqs = np.asarray(result["freqs"], dtype=float)
     times = np.asarray(result["times_sec"], dtype=float)
@@ -703,34 +790,53 @@ def _corr_scales_from_matched_filter(result: Dict, n_rfi: int, fallback: Tuple[f
     corr_freq = np.full(n_src, np.nan)
     corr_time = np.full(n_src, np.nan)
 
+    def amplitude_and_null(z):
+        """sqrt(Re z), and Im z carried through the same linearisation."""
+        amp = np.sqrt(np.clip(z.real, 0.0, None))
+        return amp, z.imag / (2.0 * np.maximum(amp, 0.1 * np.median(amp) + 1e-30))
+
+    def shorter(*scales):
+        scales = [v for v in scales if v is not None and np.isfinite(v)]
+        return min(scales) if scales else np.nan
+
     for i in range(n_src):
         ok_t = in_view[i] & np.isfinite(curves[i]).all(axis=0) & np.isfinite(error[i]).all(axis=0)
         run = _longest_run(ok_t)
         n = run.stop - run.start
         if n < 8:
             continue
-        y = curves[i][:, run]                                  # (n_freq, n)
+        y = curves[i][:, run]                                  # (n_freq, n) complex
         w = 1.0 / error[i][:, run] ** 2
 
-        # --- time: channel average, straight line removed
+        # --- time: the channel average
         x = (y * w).sum(axis=0) / w.sum(axis=0)
         noise = float(np.mean(1.0 / w.sum(axis=0)))
+        # Undetected: the pass' mean flux does not clear five standard errors of the
+        # matched null's scatter. It has no scales to give, and takes the others'.
+        if np.mean(x.real) <= 5.0 * np.std(x.imag) / np.sqrt(n):
+            continue
         tt = np.arange(n)
-        x = x - np.polyval(np.polyfit(tt, x, 1), tt)
-        c0 = float(np.mean(x * x)) - noise
+        xr = x.real - np.polyval(np.polyfit(tt, x.real, 1), tt)
+        decay = None
+        c0 = float(np.mean(xr * xr)) - noise
         if c0 > 0 and d_time > 0:
-            rho = np.array([1.0] + [float(np.mean(x[:-k] * x[k:])) / c0 for k in range(1, max(n // 3, 3))])
-            lag = _e_folding_lag(rho)
-            corr_time[i] = n * d_time if lag is None else max(lag, 1.0) * d_time
+            rho = np.array([1.0] + [float(np.mean(xr[:-k] * xr[k:])) / c0 for k in range(1, max(n // 3, 3))])
+            decay = _decay_scale(rho, d_time, n * d_time)
+        amp, null = amplitude_and_null(x)
+        envelope = _envelope_scale(amp[None, :], null[None, :], d_time, n * d_time, gammas[1]) if d_time > 0 else None
+        corr_time[i] = shorter(decay, envelope)
 
-        # --- frequency: channel time series against separation
+        # --- frequency: the channel series against separation
         if n_freq >= 3:
-            z = y - y.mean(axis=1, keepdims=True)
+            z = y.real - y.real.mean(axis=1, keepdims=True)
+            decay = None
             c0 = float(np.mean(z * z)) - float(np.mean(error[i][:, run] ** 2))
             if c0 > 0:
                 rho = np.array([1.0] + [float(np.mean(z[:-q] * z[q:])) / c0 for q in range(1, n_freq - 1)])
-                lag = _e_folding_lag(rho)
-                corr_freq[i] = n_freq * d_freq if lag is None else max(lag, 1.0) * d_freq
+                decay = _decay_scale(rho, d_freq, n_freq * d_freq)
+            amp, null = amplitude_and_null(y.T)                 # (n, n_freq): one spectrum per integration
+            envelope = _envelope_scale(amp, null, d_freq, n_freq * d_freq, gammas[0])
+            corr_freq[i] = shorter(decay, envelope)
 
     def fill(scale, default):
         measured = np.isfinite(scale)
@@ -980,7 +1086,7 @@ class BaseGPRFI(Component):
                 _axis_extent(self.times, self.int_time) / 2,
             )
             mf_freq, mf_time = _corr_scales_from_matched_filter(
-                self._matched_filter_curves(tab_config), self.n_rfi, null_scales
+                self._matched_filter_curves(tab_config), self.n_rfi, null_scales, self._gammas
             )
             for key, measured, unit, scale in (
                 ("corr_freq", mf_freq, "kHz", 1e3), ("corr_time", mf_time, "s", 1.0)

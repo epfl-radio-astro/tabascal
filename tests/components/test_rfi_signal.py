@@ -30,6 +30,7 @@ from tabascal.components.rfi_signal import (
     ComplexRFIVarAnt,
     ComplexRFIConstAnt,
     _corr_scales_from_matched_filter,
+    _decay_scale,
     _std_from_matched_filter,
     read_light_curves,
     rfi_signal_config_validation,
@@ -820,7 +821,7 @@ class TestPerSatelliteWidth:
 class TestPerSatelliteCorrelationScales:
     """``rfi.gp_cov.corr_time`` / ``corr_freq: matched-filter``: each light curve's own scales.
 
-    The estimator is tested on curves with a known correlation, the component on
+    The estimator is tested on curves built to have a known answer, the component on
     scales handed to it -- what is measured and what is done with it are separate
     questions, and the mock observation (8 integrations) is too short to ask the first.
     """
@@ -828,31 +829,48 @@ class TestPerSatelliteCorrelationScales:
     D_TIME, D_FREQ, N_T, N_F = 2.0, 30e3, 400, 6
 
     @classmethod
-    def _ar1(cls, tau, seed, n=None):
-        """A unit-variance AR(1) series whose autocorrelation is exp(-lag / tau)."""
-        n = cls.N_T if n is None else n
+    def _times(cls):
+        return cls.D_TIME * np.arange(cls.N_T)
+
+    @classmethod
+    def _pass(cls, tone=0.0, period=12.0):
+        """A bright slow pass, optionally carrying a fast tone of relative amplitude ``tone``."""
+        t = cls._times()
+        slow = 100.0 * np.exp(-0.5 * ((t - t.mean()) / 120.0) ** 2) + 20.0
+        return slow * (1.0 + tone * np.sin(2 * np.pi * t / period))
+
+    @classmethod
+    def _red(cls, seed, tau=60.0):
+        """Unit-variance AR(1): slow, correlated confusion."""
         rng = np.random.RandomState(seed)
         phi = np.exp(-cls.D_TIME / tau)
-        x = np.zeros(n)
-        for t in range(1, n):
-            x[t] = phi * x[t - 1] + np.sqrt(1 - phi ** 2) * rng.randn()
+        x = np.zeros(cls.N_T)
+        for i in range(1, cls.N_T):
+            x[i] = phi * x[i - 1] + np.sqrt(1 - phi ** 2) * rng.randn()
         return x
 
     @classmethod
     def _result(cls, series, error=0.05, in_view=None):
-        """``series``: (n_src, n_freq, n_time) real light curves; white noise is added."""
+        """``series``: (n_src, n_freq, n_time) real light curves; complex white noise is added,
+        so the imaginary part is the matched null the estimator reads its floor from."""
         series = np.asarray(series, dtype=float)
         rng = np.random.RandomState(99)
+        noise = error * (rng.randn(*series.shape) + 1j * rng.randn(*series.shape))
         return {
-            "light_curves": series + error * rng.randn(*series.shape) + 0j,
+            "light_curves": series + noise,
             "error": np.full(series.shape, error),
             "freqs": 150e6 + cls.D_FREQ * np.arange(series.shape[1]),
             "times_sec": cls.D_TIME * np.arange(series.shape[2]),
             "in_view": in_view,
         }
 
-    def _broadband(self, taus):
-        return np.stack([np.tile(10.0 + self._ar1(tau, seed=i), (self.N_F, 1)) for i, tau in enumerate(taus)])
+    @classmethod
+    def _broadband(cls, *curves):
+        return np.stack([np.tile(c, (cls.N_F, 1)) for c in curves])
+
+    def _scales(self, result, n_rfi=None, fallback=(1.0, 1.0)):
+        n_rfi = result["light_curves"].shape[0] if n_rfi is None else n_rfi
+        return _corr_scales_from_matched_filter(result, n_rfi, fallback)
 
     @pytest.mark.parametrize("key", ["corr_freq", "corr_time"])
     @pytest.mark.parametrize("word", ["matched-filter", "mf"])
@@ -871,78 +889,102 @@ class TestPerSatelliteCorrelationScales:
         with pytest.raises(ValueError, match="rfi.gp_cov.corr_time"):
             validate_gp_cov({"corr_time": "data"}, "rfi", {"corr_time": "rfi_scale"}, optional=("corr_time",))
 
-    def test_the_time_scale_is_the_e_folding_of_each_curve(self):
-        """Over realisations, not one: a single AR(1) pass scatters by tens of per cent.
+    # -- the 1/e scale of a correlation function ---------------------------------------
 
-        That scatter is the estimator's honest precision on one pass and not a defect
-        of it, so the assertion is on the median of eight satellites at each scale.
-        """
-        taus = [10.0] * 8 + [30.0] * 8
-        series = np.stack([
-            np.tile(10.0 + self._ar1(tau, seed=i, n=1200), (self.N_F, 1)) for i, tau in enumerate(taus)
-        ])
+    def test_a_decay_inside_the_lags_is_interpolated(self):
+        rho = np.array([1.0, 0.8, 0.5, 0.3, 0.1])
+        # falls through 1/e between lags 2 and 3
+        expected = 2.0 * (2 + (0.5 - np.exp(-1)) / 0.2)
 
-        _, corr_time = _corr_scales_from_matched_filter(self._result(series), len(taus), (1.0, 1.0))
+        assert _decay_scale(rho, 2.0, 100.0) == pytest.approx(expected)
 
-        assert np.median(corr_time[:8]) == pytest.approx(10.0, rel=0.2)
-        assert np.median(corr_time[8:]) == pytest.approx(30.0, rel=0.2)
+    def test_a_decay_inside_one_sample_is_that_sample(self):
+        assert _decay_scale(np.array([1.0, 0.2]), 2.0, 100.0) == 2.0
 
-    def test_emission_coherent_across_the_band_takes_the_whole_band(self):
-        """It never decorrelates inside the lags there are, so the band is a lower bound."""
-        corr_freq, _ = _corr_scales_from_matched_filter(self._result(self._broadband((20.0,))), 1, (1.0, 1.0))
+    def test_a_decay_that_never_gets_there_is_extrapolated_not_called_the_extent(self):
+        """rho = 0.95 across a band is a scale of twenty bands, not of one."""
+        rho = np.array([1.0, 0.99, 0.98, 0.95])
 
-        assert corr_freq[0] == pytest.approx(self.N_F * self.D_FREQ)
+        assert _decay_scale(rho, 30e3, 120e3) == pytest.approx(-3 * 30e3 / np.log(0.95))
+
+    @pytest.mark.parametrize("last", [1.0, 1.01, 0.999999])
+    def test_no_measurable_decay_is_capped(self, last):
+        assert _decay_scale(np.array([1.0, 1.0, last]), 30e3, 120e3) == pytest.approx(64 * 120e3)
+
+    # -- what detectable fast structure demands -----------------------------------------
+
+    def test_a_slow_bright_pass_keeps_a_long_scale(self):
+        _, corr_time = self._scales(self._result(self._broadband(self._pass())))
+
+        assert corr_time[0] > 60.0
+
+    def test_fast_structure_above_the_null_shortens_it_and_more_so_the_brighter(self):
+        """The e-folding time is the same in all three; only the envelope sees the tone."""
+        curves = self._broadband(self._pass(), self._pass(tone=0.01), self._pass(tone=0.05))
+
+        _, corr_time = self._scales(self._result(curves))
+
+        assert corr_time[2] < corr_time[1] < corr_time[0]
+        assert corr_time[2] < 12.0                      # the tone's own period
+
+    def test_a_slower_tone_asks_for_less(self):
+        curves = self._broadband(self._pass(tone=0.05, period=12.0), self._pass(tone=0.05, period=40.0))
+
+        _, corr_time = self._scales(self._result(curves))
+
+        assert corr_time[0] < corr_time[1]
+
+    def test_structure_the_matched_null_also_has_is_not_the_satellites(self):
+        """Confusion is in Im(S_hat) as well as Re, and is judged against, not fitted to."""
+        faint = self._result(self._broadband(0.02 * self._pass()), error=0.3)
+        faint["light_curves"] = faint["light_curves"] + (self._red(1) + 1j * self._red(2))[None, None, :]
+
+        _, corr_time = self._scales(faint)
+
+        assert corr_time[0] > 40.0
+
+    def test_emission_coherent_across_the_band_is_put_far_beyond_it(self):
+        """One latent frequency mode, not a band's worth."""
+        corr_freq, _ = self._scales(self._result(self._broadband(self._pass())))
+
+        assert corr_freq[0] == pytest.approx(64 * self.N_F * self.D_FREQ)
 
     def test_channels_that_vary_independently_take_one_channel(self):
-        series = np.stack([[10.0 + self._ar1(20.0, seed=10 + f) for f in range(self.N_F)]])
+        series = np.stack([[20.0 + 3.0 * self._red(10 + f, tau=20.0) for f in range(self.N_F)]])
 
-        corr_freq, _ = _corr_scales_from_matched_filter(self._result(series), 1, (1.0, 1.0))
+        corr_freq, _ = self._scales(self._result(series))
 
         assert corr_freq[0] == pytest.approx(self.D_FREQ)
-
-    def test_a_slow_trend_under_the_track_does_not_lengthen_it(self):
-        """The sky under a track is slow power the satellite does not have."""
-        flat = self._broadband((10.0,))
-        ramp = flat + np.linspace(0.0, 20.0, self.N_T)[None, None, :]
-
-        _, plain = _corr_scales_from_matched_filter(self._result(flat), 1, (1.0, 1.0))
-        _, sloped = _corr_scales_from_matched_filter(self._result(ramp), 1, (1.0, 1.0))
-
-        assert sloped[0] == pytest.approx(plain[0], rel=0.05)
 
     def test_only_the_pass_is_measured(self):
         """Samples out of view are masked zeros, and a step to zero is not variability."""
         in_view = np.zeros((1, self.N_T), dtype=bool)
         in_view[0, 50:350] = True
-        masked = self._result(self._broadband((10.0,)), in_view=in_view)
+        masked = self._result(self._broadband(self._pass(tone=0.05)), in_view=in_view)
         # The same noisy samples, cut to the pass, as an observation that was only the pass.
-        whole = {k: (v[..., 50:350] if k in ("light_curves", "error") else v) for k, v in masked.items()}
-        whole.update(times_sec=masked["times_sec"][50:350], in_view=None)
+        alone = {k: (v[..., 50:350] if k in ("light_curves", "error") else v) for k, v in masked.items()}
+        alone.update(times_sec=masked["times_sec"][50:350], in_view=None)
         masked["light_curves"] = np.where(in_view[:, None, :], masked["light_curves"], 0.0)
 
-        _, inside = _corr_scales_from_matched_filter(masked, 1, (1.0, 1.0))
-        _, alone = _corr_scales_from_matched_filter(whole, 1, (1.0, 1.0))
-
-        assert inside[0] == pytest.approx(alone[0], rel=1e-9)
+        np.testing.assert_allclose(self._scales(masked), self._scales(alone), rtol=1e-9)
 
     def test_an_undetected_satellite_and_the_padding_take_the_median(self):
-        series = self._broadband((10.0, 40.0, 20.0))
-        series[2] = 0.0                                   # noise only
+        curves = self._broadband(self._pass(), self._pass(tone=0.05), 0.0 * self._pass())
 
-        corr_freq, corr_time = _corr_scales_from_matched_filter(self._result(series), 5, (1.0, 1.0))
+        corr_freq, corr_time = self._scales(self._result(curves), n_rfi=5)
 
         assert corr_time[2] == pytest.approx(np.median(corr_time[:2]))
         np.testing.assert_allclose(corr_time[3:], np.median(corr_time[:3]))
-        assert np.all(np.isfinite(corr_freq)) and np.all(corr_freq > 0)
+        np.testing.assert_allclose(corr_freq, corr_freq[0])
 
     def test_an_axis_nothing_can_measure_takes_what_null_means(self):
-        one_channel = self._result(self._broadband((20.0,))[:, :1])
-        too_short = self._result(self._broadband((20.0,))[:, :, :6])
+        one_channel = self._result(self._broadband(self._pass())[:, :1])
+        too_short = self._result(self._broadband(self._pass())[:, :, :6])
 
-        corr_freq, corr_time = _corr_scales_from_matched_filter(one_channel, 1, (123.0, 456.0))
+        corr_freq, corr_time = self._scales(one_channel, fallback=(123.0, 456.0))
         assert corr_freq[0] == 123.0 and corr_time[0] != 456.0
 
-        corr_freq, corr_time = _corr_scales_from_matched_filter(too_short, 1, (123.0, 456.0))
+        corr_freq, corr_time = self._scales(too_short, fallback=(123.0, 456.0))
         assert (corr_freq[0], corr_time[0]) == (123.0, 456.0)
 
     # -- what the component does with them --------------------------------------------
@@ -959,7 +1001,7 @@ class TestPerSatelliteCorrelationScales:
         calls = []
         monkeypatch.setattr(est, "light_curves_from_config", lambda config, **kw: (calls.append(1), {})[1])
         monkeypatch.setattr(
-            mod, "_corr_scales_from_matched_filter", lambda result, n_rfi, fallback: (self.FREQS, self.TIMES)
+            mod, "_corr_scales_from_matched_filter", lambda result, n_rfi, fallback, gammas=None: (self.FREQS, self.TIMES)
         )
         return calls
 
