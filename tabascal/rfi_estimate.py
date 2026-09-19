@@ -118,6 +118,7 @@ can be added by constructing ``rfi_xyz`` from those and feeding
 
 import calendar
 import os
+import warnings
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -3198,12 +3199,86 @@ def _resolve_records(norad_ids, times_jd, extra_orbit_dir):
     return [int(n) for n in ids[:n_real]], list(records[:n_real])
 
 
+#: ``rfi.mf_sky`` values: what is taken off the visibilities before they are filtered.
+MF_SKY_OPTIONS = (None, "median")
+
+
+def validate_mf_sky(value):
+    """``rfi.mf_sky`` as one of :data:`MF_SKY_OPTIONS`, or a ``ValueError`` naming it."""
+    if value in (None, False, "none", "null"):
+        return None
+    if isinstance(value, str) and value.lower() == "median":
+        return "median"
+    raise ValueError(
+        f"Config parameter (rfi:\n\tmf_sky: {value!r}) is not valid. Choose from (null, 'median')."
+    )
+
+
+def subtract_time_median(vis: NDArray, flags: Optional[NDArray] = None) -> NDArray:
+    """The visibilities minus each baseline's time median: a sky estimate with no model.
+
+    The matched filter beam-forms whatever is in the visibilities toward the
+    track, and on an array with short baselines that is mostly the sky: on a
+    151 MHz pass of one such array the filter reads a track S/N of 200 for three
+    satellites whose own signal is 20-35. The sky's share is slow in amplitude and of either sign -- no autos
+    and few short spacings put negative bowls around bright diffuse emission --
+    so the light curve goes negative for a third of a pass, the seed
+    ``sqrt(max(Re S_hat, 0))`` is zero there, and the prior width and correlation
+    scales read off the curve are the sky's.
+
+    Over a pass the sky is nearly static on a baseline: a drift-scan sky moves
+    15 arcsec a second, which turns a fringe by a fraction of a radian on the
+    short baselines the diffuse emission lives on. A satellite in low orbit crosses
+    the sky in that time and turns the fringe of even the shortest baseline at
+    least once, so its median over the pass is near zero. The median of the real
+    and of the imaginary part over time, per baseline and channel, is therefore
+    the sky and not the satellite, and robust to the bright samples the satellite
+    does contribute. On the pass above the filtered curves then agree with those
+    of the data minus the *fitted* sky to a few per cent (widths 85-215 Jy against
+    95-218 Jy; 335-495 Jy with the sky left in).
+
+    What it costs: a source whose fringe does not complete a turn on a baseline
+    within the pass -- a slow or distant emitter, a very short baseline, a pass of
+    a few integrations -- loses part of its flux on that baseline to the median.
+    The estimate seeds and scales a fit, which forgives a few per cent; it is not
+    a measurement to quote. Off by default.
+
+    Parameters
+    ----------
+    vis : Array (n_bl, n_freq, n_time) complex
+    flags : Array (n_bl, n_freq, n_time) bool, optional
+        ``True`` marks samples left out of the median. A baseline and channel with
+        nothing unflagged has no median and is returned unchanged.
+
+    Returns
+    -------
+    Array (n_bl, n_freq, n_time) complex
+        ``vis - median_t(vis)``, in the precision it came in.
+    """
+    vis = np.asarray(vis)
+    if vis.shape[-1] < 3:
+        # Two samples have no median apart from their mean, which is the signal.
+        return vis
+    keep = np.ones(vis.shape, dtype=bool) if flags is None else ~np.asarray(flags, dtype=bool)
+    keep &= np.isfinite(vis)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)   # all-flagged rows: nan, handled below
+        med = (
+            np.nanmedian(np.where(keep, vis.real, np.nan), axis=-1, keepdims=True)
+            + 1j * np.nanmedian(np.where(keep, vis.imag, np.nan), axis=-1, keepdims=True)
+        )
+    med = np.where(np.isfinite(med), med, 0.0)
+
+    return (vis - med).astype(vis.dtype, copy=False)
+
+
 def light_curves_from_config(
     tab_config,
     vis: Optional[NDArray] = None,
     exclude_autos: bool = True,
     max_mem_gb: float = 1.0,
     offset_fit: Optional[dict] = None,
+    sky: Optional[str] = None,
 ) -> dict:
     """Matched-filter light curves from an already-loaded :class:`TabConfig`.
 
@@ -3234,14 +3309,24 @@ def light_curves_from_config(
         Settings for the along-track offset search; see
         :func:`attach_offset_fits`. With it, each satellite's ``tau`` is measured
         first and the curves are extracted at the offset it found.
+    sky : {None, "median"}, optional
+        What to take off the visibilities before filtering them -- the offset
+        search included, which meets the same sky. ``"median"`` is each baseline's
+        time median (:func:`subtract_time_median`); ``None`` filters them as given.
+        This is ``rfi.mf_sky``.
 
     Returns
     -------
     dict
-        See :func:`_lc_result`.
+        See :func:`_lc_result`, with ``sky`` recording what was taken off.
     """
     if vis is None:
         vis = tab_config.vis_obs
+
+    sky = validate_mf_sky(sky)
+    if sky == "median":
+        flags_ = getattr(tab_config, "flags", None)
+        vis = subtract_time_median(vis, None if flags_ is None else np.asarray(flags_))
 
     n_real = getattr(tab_config, "n_rfi_real", len(tab_config.norad_ids))
     norad_ids = [int(n) for n in tab_config.norad_ids[:n_real]]
@@ -3310,6 +3395,7 @@ def light_curves_from_config(
         tab_config.args["data"]["corr"],
         in_view=in_view,
     )
+    result["sky"] = sky
 
     if fits is None:
         return result
@@ -3826,6 +3912,11 @@ def save_light_curves_npz(path: str, result: dict) -> None:
     -- and so an untagged file, which pre-dates the stamp and may have been
     written on a declared scale, can be told apart and warned about.
 
+    ``sky`` records what was subtracted from the visibilities before they were
+    filtered (``rfi.mf_sky``): ``"none"``, or ``"median"`` for each baseline's
+    time median. Stamped for the same reason ``time_scale`` is -- the curves do
+    not say so themselves.
+
     ``light_curves`` is the *magnitude* ``|S_hat|``, an apparent flux in Jy: the
     reader casts to float64, which would silently discard the imaginary part of a
     complex array. The native complex estimate is kept alongside it under
@@ -3864,6 +3955,11 @@ def save_light_curves_npz(path: str, result: dict) -> None:
         z=z,
         data_col=str(result["data_col"]),
         corr=str(result["corr"]),
+        # Stamped like time_scale, and for the same reason: a file the sky was
+        # taken out of is not the same measurement as one it was left in, and a
+        # reader reseeding from it cannot tell by looking. "none" where nothing
+        # was, so the key is a string on every file that carries it.
+        sky=str(result.get("sky") or "none"),
     )
     if result.get("in_view") is not None:
         arrays["in_view"] = np.asarray(result["in_view"], dtype=bool)

@@ -687,6 +687,9 @@ def _from_config(args, offset_fit=None):
         exclude_autos=args.exclude_autos,
         max_mem_gb=args.max_mem_gb,
         offset_fit=offset_fit,
+        # The run's own rfi.mf_sky, so what is written out is what the run seeds
+        # from. Not applied to a -z residual: the model has the sky off already.
+        sky=None if args.zarr else config["rfi"].get("mf_sky"),
     )
     if args.zarr:
         result["data_col"] = (
