@@ -574,8 +574,8 @@ def _std_from_matched_filter(result: Dict, n_rfi: int) -> NDArray:
     ``rfi.gp_cov.std`` is one source's width, and both of its other measurements
     hand every source the same number taken from *all* the visibilities: ``data``
     their rms, ``null`` twice their maximum. On an array with short baselines
-    that number is the diffuse sky's -- 7.7e5 Jy on an EDA2 observation whose
-    satellites are 1e2-1e4 Jy -- so a satellite sits at a few hundredths of its
+    that number is the diffuse sky's -- 7.7e5 Jy on one low-frequency observation
+    whose satellites are 1e2-1e4 Jy -- so a satellite sits at a few hundredths of its
     prior width in the whitened parameters. The fit is quadratic in the amplitude,
     ``vis_rfi ~ rfi_A[a1] conj(rfi_A[a2])``, which makes zero a stationary point,
     and a fixed-step optimiser taking steps larger than the signal can walk a
@@ -696,7 +696,7 @@ def _envelope_scale(a: NDArray, null: NDArray, step: float, extent: float, gamma
     over ``n_rep``: the amplitude, and a signal-free series with the same noise
     *and confusion* -- ``Im(S_hat)``, the matched null. Its spectrum is the floor,
     bin by bin. The filter's analytic error is not: it assumes independent
-    baselines and sits 3-15x below ``Im(S_hat)`` on EDA2, which reads the sky and
+    baselines and sat 3-15x below ``Im(S_hat)`` where this was measured, which reads the sky and
     the other satellites as fast structure in every source.
 
     Both are Hann-tapered -- a pass is not periodic, and the leakage of a bright slow
@@ -758,8 +758,8 @@ def _corr_scales_from_matched_filter(
       variance taken off the zero lag (:func:`_decay_scale`). In time, of the
       inverse-variance channel average over the longest stretch the satellite is in
       view, after removing a straight line: the sky under a track is slow power the
-      satellite does not have, and reads 5-30 s long on the EDA2 passes this was
-      written against. In frequency, of the channel series against separation, each
+      satellite does not have, and reads 5-30 s long on the low-frequency passes
+      this was written against. In frequency, of the channel series against separation, each
       with its own time mean removed. This is the scale of the pass itself, and on
       faint satellites it is all there is to measure -- usefully, because the
       per-antenna amplitudes the prior is on drift on the same geometric timescale

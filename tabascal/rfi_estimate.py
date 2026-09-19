@@ -3218,9 +3218,9 @@ def subtract_time_median(vis: NDArray, flags: Optional[NDArray] = None) -> NDArr
     """The visibilities minus each baseline's time median: a sky estimate with no model.
 
     The matched filter beam-forms whatever is in the visibilities toward the
-    track, and on an array with short baselines that is mostly the sky: an EDA2
-    pass at 151 MHz reads a track S/N of 200 on three Starlinks whose own signal
-    is 20-35. The sky's share is slow in amplitude and of either sign -- no autos
+    track, and on an array with short baselines that is mostly the sky: on a
+    151 MHz pass of one such array the filter reads a track S/N of 200 for three
+    satellites whose own signal is 20-35. The sky's share is slow in amplitude and of either sign -- no autos
     and few short spacings put negative bowls around bright diffuse emission --
     so the light curve goes negative for a third of a pass, the seed
     ``sqrt(max(Re S_hat, 0))`` is zero there, and the prior width and correlation
