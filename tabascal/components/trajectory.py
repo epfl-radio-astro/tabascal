@@ -1,3 +1,6 @@
+from collections.abc import Mapping
+from math import isfinite
+
 from tabascal.orbit import TLEError, get_tles_by_id
 from satchecker_client.records import KIND_TLE, record_elements, record_kind
 from tabascal.distributed import (
@@ -11,6 +14,11 @@ from tabascal.dist import standard_normal
 from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
 from tabascal.components import Component, assert_attr_shape
+from tabascal.fft_gp import (
+    knee_from_corr_scale,
+    latent_to_signal,
+    latent_to_signal_init,
+)
 from tabascal.timing import measure_runtime
 from tabascal.time import gast_deg, skyfield_time, timescale
 
@@ -267,6 +275,79 @@ def ric_prior_envelope(component, times_jd=None, n_draw=256, seed=0):
     return ric.std(axis=0), speed
 
 
+#: Default ``satellites.orbit_deviation``, the prior on
+#: :class:`RICDeviationGP`'s displacement. ``std`` is metres (a scalar, or one
+#: per RIC axis) and ``corr_time`` seconds, with null meaning half the
+#: observation -- the same thing null means for ``rfi.gp_cov.corr_time``.
+DEFAULT_ORBIT_DEVIATION = {
+    "std": 100.0,
+    "corr_time": None,
+    "gamma": 3.0,
+    "cutoff": 1e-6,
+    "time_pad_factor": 2.0,
+}
+
+
+def validate_orbit_deviation(value):
+    """``satellites.orbit_deviation`` as a complete dict, or a ``ValueError``.
+
+    ``std`` comes back as three metres, one per RIC axis, whether it was given
+    as one number or three. ``corr_time`` may still be ``None``, which only the
+    component can resolve -- half the observation is not known here.
+    """
+    given = dict(DEFAULT_ORBIT_DEVIATION) if value is None else None
+
+    if given is None:
+        if not isinstance(value, Mapping):
+            raise ValueError(
+                f"Config parameter (satellites:\n\torbit_deviation: {value!r}) is "
+                "not valid. Give a mapping of "
+                f"{sorted(DEFAULT_ORBIT_DEVIATION)}, or null for the defaults."
+            )
+        unknown = sorted(set(value) - set(DEFAULT_ORBIT_DEVIATION))
+        if unknown:
+            raise ValueError(
+                f"Config parameter (satellites:\n\torbit_deviation) has unknown "
+                f"key(s) {unknown}. Valid keys are {sorted(DEFAULT_ORBIT_DEVIATION)}."
+            )
+        given = {**DEFAULT_ORBIT_DEVIATION, **value}
+
+    def _positive(key, allow_none=False):
+        v = given[key]
+        if allow_none and v is None:
+            return None
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            v = float("nan")
+        if not isfinite(v) or v <= 0:
+            raise ValueError(
+                f"Config parameter (satellites:\n\torbit_deviation:\n\t\t{key}: "
+                f"{given[key]!r}) is not valid. Give a positive, finite number"
+                f"{' or null' if allow_none else ''}."
+            )
+        return v
+
+    std = np.asarray(given["std"], dtype=float).reshape(-1)
+    if std.size == 1:
+        std = np.repeat(std, 3)
+    if std.size != 3 or not np.all(np.isfinite(std)) or not np.all(std > 0):
+        raise ValueError(
+            f"Config parameter (satellites:\n\torbit_deviation:\n\t\tstd: "
+            f"{given['std']!r}) is not valid. Give one positive number in metres, "
+            "or three -- radial, in-track, cross-track."
+        )
+
+    return {
+        "std": std,
+        "corr_time": _positive("corr_time", allow_none=True),
+        "gamma": _positive("gamma"),
+        "cutoff": _positive("cutoff"),
+        "time_pad_factor": _positive("time_pad_factor"),
+    }
+
+
+
 class PhaseCalculationRFI(Component):
 
     requires_double = True
@@ -483,6 +564,264 @@ class FixedOrbit(Component):
             (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine),
         )
 
+
+
+class RICDeviationGP(Component):
+    """A time-varying positional offset from a fixed orbit, fitted in the RIC frame.
+
+    ``FixedOrbit`` propagates the orbital record and that is the satellite's
+    position, exactly. ``NoDragOrbit`` and ``Orbit`` relax that by fitting the
+    elements, but they still fit *an SGP4 orbit*: whatever they find, the
+    satellite moves along a trajectory the model can express, and the six or
+    seven numbers apply to the whole pass. This component relaxes it differently.
+    It adds a smooth offset that varies over the pass -- radial, in-track and
+    cross-track, each a Gaussian process in time -- to the positions the
+    component before it produced, and fits that.
+
+    The two are worth having separately because they fail differently. An
+    element error is a statement about the orbit and is rigid over a pass by
+    construction; if the residual wanted a satellite to be 200 m further along
+    at the start of a pass and 200 m behind at the end, no element set can say
+    so. Everything outside the model -- an unmodelled manoeuvre, a drag or
+    solar-radiation-pressure excursion the record's epoch predates, the fact
+    that the phase centre of the emission is not the centre of mass and does
+    not have to sit still relative to it -- has that shape, and a fitted orbit
+    absorbs it only by distorting the whole pass.
+
+    Deliberately paired with ``FixedOrbit``: the nominal trajectory then stays
+    the record's, and everything fitted here is a departure from it, which is
+    the quantity worth reading. It can follow a fitted-orbit component instead,
+    but then the two priors overlap on the rigid part of the deviation and
+    neither term means much on its own.
+
+    The RIC basis is built once at setup from the orbital records, which is the
+    nominal trajectory, so the forward pass is a linear map from the parameters
+    to a displacement: no re-propagation, no re-derivation of the frame, and a
+    Jacobian the optimiser sees exactly. Emit ``rfi_xyz`` before
+    ``PhaseCalculationRFI``, which recomputes the phase from whatever positions
+    reach it::
+
+        - trajectory:FixedOrbit
+        - trajectory:RICDeviationGP
+        - trajectory:PhaseCalculationRFI
+
+    ``FixedOrbit`` writes an ``rfi_phase`` of its own and this component does
+    not touch it, so that ordering is not optional: without the recomputation
+    the deviation would move ``rfi_xyz`` and change no visibility.
+
+    Read ``satellites.orbit_deviation``. The width is a real displacement in
+    metres, unlike ``satellites.orbit_ric_std``, which is a width on the state
+    at the record epoch -- here there is no propagation between where the prior
+    is set and where it is felt, because the deviation is defined at the times
+    observed.
+    """
+
+    # The phase is what a position moves, and the phase component it feeds is
+    # double-only; a metre of an 800 km range is 1e-6 of it, which single
+    # precision cannot carry through a difference of that size either.
+    requires_double = True
+
+    required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
+    output_shapes = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
+
+    parameter_shapes = {
+        "rfi_dev_r_base": ("n_rfi", 3, "n_k_time_dev"),
+        "rfi_dev_i_base": ("n_rfi", 3, "n_k_time_dev"),
+    }
+
+    #: RIC axis order, for messages and for the per-axis width.
+    AXES = ("radial", "in-track", "cross-track")
+
+    def setup(self, config):
+        """All validation and error-prone operations here"""
+        self.require_double(config)
+        try:
+            self.n_rfi = config.n_rfi
+            self.n_time = config.n_time
+            self.n_time_fine = config.n_time_fine
+            self.n_int_time = config.n_int_time
+            self.int_time = config.int_time
+            self.times_jd_fine = config.times_jd_fine
+            self.orbit_records = config.orbit_records
+
+            if self.n_time_fine < 2:
+                raise ValueError(
+                    "a deviation that varies over time needs more than one time "
+                    f"sample; this observation has n_time_fine = {self.n_time_fine}"
+                )
+
+            self.dev_config = validate_orbit_deviation(
+                (getattr(config, "args", None) or {})
+                .get("satellites", {})
+                .get("orbit_deviation")
+            )
+            if self.dev_config["corr_time"] is None:
+                # Half the observation, which is what null means on the RFI
+                # signal's time axis too. Resolved here rather than in the
+                # validator because only the component knows how long the
+                # observation is.
+                self.dev_config["corr_time"] = 0.5 * self.n_time * self.int_time
+
+            self._compute_ric_basis()
+            self._compute_gp_params()
+            self._compute_init_params()
+            self._set_outputs()
+
+            self._validate_dimensions()
+
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def build_set_params(self):
+        n_rfi = self.n_rfi
+        n_k = self.n_k_time_dev
+
+        def set_params(params):
+            params["rfi_dev_r_base"] = standard_normal("rfi_dev_r_base", (n_rfi, 3, n_k))
+            params["rfi_dev_i_base"] = standard_normal("rfi_dev_i_base", (n_rfi, 3, n_k))
+
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        return {
+            "sigma_dev_k": self.sigma_dev_k,
+            "ric_basis": self.ric_basis,
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        pads = self.pads
+        ss_idxs = self.ss_idxs
+
+        def forward(params, state, constants):
+            # Pure JAX operations only
+            sigma_dev_k = constants[f"{prefix}/sigma_dev_k"]
+            ric_basis = constants[f"{prefix}/ric_basis"]
+
+            dev_k = sigma_dev_k * (
+                params["rfi_dev_r_base"] + 1.0j * params["rfi_dev_i_base"]
+            )
+            # (n_rfi, 3) independent 1-D transforms, one per RIC axis per satellite
+            dev = vmap(vmap(latent_to_signal, (0, None, None), 0), (0, None, None), 0)(
+                dev_k, pads, ss_idxs
+            )
+            # Real part, not the modulus: the deviation is a signed displacement,
+            # and the prior below is normalised for exactly this projection.
+            dev = jnp.real(dev)
+
+            # (n_rfi, 3 axes, n_time_fine) against (n_rfi, n_time_fine, 3 axes, 3 xyz)
+            rfi_xyz = state["rfi_xyz"] + jnp.einsum("sct,stcx->stx", dev, ric_basis)
+
+            return {**state, "rfi_xyz": rfi_xyz}
+
+        return forward
+
+    def validate_and_test(self):
+        """Call this before using in JIT context"""
+        pass
+
+    @measure_runtime
+    def _compute_ric_basis(self):
+        """The RIC unit vectors of the nominal trajectory, per satellite per time.
+
+        Built from the orbital records rather than from the incoming state, so
+        the frame is the record's orbit whatever the component before this one
+        did with the positions, and so it is a constant the forward pass can
+        take as given.
+
+        The velocity direction comes from a finite difference of the positions
+        over the fine grid rather than from a second propagation: the frame only
+        needs a direction, and the fine grid is sampled far more finely than the
+        orbit turns.
+        """
+        xyz = np.asarray(
+            get_satellite_positions(self.orbit_records, list(self.times_jd_fine))
+        )                                                    # (n_rfi, n_time_fine, 3), m
+
+        # Times in seconds for the gradient; the spacing is uniform, so any
+        # positive scale gives the same unit vector, but keep it physical.
+        t_s = (np.asarray(self.times_jd_fine) - np.asarray(self.times_jd_fine)[0]) * 86400.0
+        vel = np.gradient(xyz, t_s, axis=1)
+
+        def unit(v):
+            n = np.linalg.norm(v, axis=-1, keepdims=True)
+            # A padded dummy satellite can sit at the origin; leave its frame as
+            # zeros rather than NaN. It carries no signal, so it moves nothing.
+            return np.divide(v, n, out=np.zeros_like(v), where=n > 0)
+
+        r_hat = unit(xyz)
+        c_hat = unit(np.cross(xyz, vel))
+        i_hat = np.cross(c_hat, r_hat)
+
+        # (n_rfi, n_time_fine, 3 axes, 3 xyz), rows in AXES order
+        self.ric_basis = jnp.asarray(np.stack([r_hat, i_hat, c_hat], axis=2))
+
+    def _compute_gp_params(self):
+        """The power spectrum of the deviation, normalised to the configured width.
+
+        One 1-D grid over time, supersampled to the fine grid the positions live
+        on, exactly as the RFI signal's time axis is. The spectrum is normalised
+        so that ``sum(sigma_dev_k**2)`` is the configured variance, which -- for
+        the real part of a transform of complex coefficients with independent
+        unit-normal real and imaginary parts -- is the variance of the
+        displacement itself, at every time. So ``std`` is the rms of the metres
+        this component adds, and it stays so when the correlation time, the
+        roll-off or the cutoff change: those move where the power sits, not how
+        much of it there is.
+        """
+        std = self.dev_config["std"]                         # (3,) metres
+        k0 = knee_from_corr_scale([self.dev_config["corr_time"]])
+
+        pk, ks, self.pads, self.ss_idxs = latent_to_signal_init(
+            [self.n_time],
+            [self.int_time],
+            [self.dev_config["time_pad_factor"]],
+            [self.n_int_time],
+            1.0,                       # renormalised below, so any positive scalar
+            k0,
+            [self.dev_config["gamma"]],
+            self.dev_config["cutoff"],
+        )
+        self.pk = pk
+        self.n_k_time_dev = int(pk.shape[0])
+
+        unit_pk = pk / jnp.sum(pk)                           # (n_k,), sums to 1
+        var = jnp.asarray(std, dtype=unit_pk.dtype) ** 2     # (3,)
+        # (1 broadcast over satellites, 3 axes, n_k)
+        self.sigma_dev_k = jnp.sqrt(var[None, :, None] * unit_pk[None, None, :])
+
+        print("\nOrbit deviation specs")
+        print(f"(std_R, std_I, std_C): ({std[0]:.4g}, {std[1]:.4g}, {std[2]:.4g}) m")
+        print(f"(corr_time, n_k_time): ({self.dev_config['corr_time']:.4g} s, {self.n_k_time_dev})")
+        print(f"(gamma, cutoff)      : ({self.dev_config['gamma']}, {self.dev_config['cutoff']:.1e})")
+
+    def _compute_init_params(self):
+        """Start on the nominal orbit.
+
+        Zero base parameters are zero deviation, so a run begins at exactly the
+        trajectory the component before this one produced and every metre it
+        ends up with was asked for by the data.
+        """
+        zeros = jnp.zeros((self.n_rfi, 3, self.n_k_time_dev))
+        self.init_params = {"rfi_dev": zeros}
+        self.init_params_base = {
+            "rfi_dev_r_base": zeros,
+            "rfi_dev_i_base": zeros,
+        }
+
+    def _set_outputs(self):
+        self.state_outputs = {
+            "rfi_xyz": jnp.zeros((self.n_rfi, self.n_time_fine, 3)),
+        }
+
+    def _validate_dimensions(self):
+        """Ensure all setup operations completed successfully"""
+
+        assert_attr_shape(self, "ric_basis", (self.n_rfi, self.n_time_fine, 3, 3))
+        assert_attr_shape(self, "sigma_dev_k", (1, 3, self.n_k_time_dev))
 
 class NoDragOrbit(Component):
 

@@ -4,6 +4,7 @@ model:
     - trajectory:FixedOrbit
     # - trajectory:NoDragOrbit
     # - trajectory:Orbit
+    # - trajectory:RICDeviationGP   # with FixedOrbit: a smooth offset from it, fitted over the pass
     # - trajectory:PhaseCalculationRFI
   # RFI signal model
     - rfi_signal:ComplexRFIVarAnt

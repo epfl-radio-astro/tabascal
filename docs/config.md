@@ -52,6 +52,7 @@ error under `single`, so set `model.precision: double` to use them:
 * `trajectory:PhaseCalculationRFI`
 * `trajectory:NoDragOrbit`
 * `trajectory:Orbit`
+* `trajectory:RICDeviationGP`
 
 Both `rfi_vis` kernels (`RiemannVis` and the FFI `RiemannVisFFI`, see [RFI-visibility
 kernels](kernels.md)) run in either precision, as do the astronomical Gaussian
@@ -540,6 +541,7 @@ satellites:
   remote_max_age_days: 3
   cache_reuse_max_age_days: 1
   orbit_ric_std: null
+  orbit_deviation: null
 ```
 
 * `norad_ids`: List of the NORAD IDs of the satellites to include. TABASCAL requests the record whose epoch is closest to the observation from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service (via the [satchecker-client](https://satchecker-client.readthedocs.io/) package) — its `get-nearest-omm` endpoint for observations from 2026-07-12 onwards and `get-nearest-tle` before that, falling back to the other archive if the first has nothing acceptable. Cache misses run concurrently with a bounded five-worker pool; no account or credentials are required. **Every ID listed here must resolve to an acceptable record**: otherwise preflight stops before reading the visibilities and names each failure. TABASCAL never silently drops a configured satellite from the RFI model.
@@ -561,6 +563,13 @@ satellites:
   Set this against what the width is worth where the satellite is observed, not against the quoted accuracy of a TLE. `tabascal.components.trajectory.ric_prior_envelope(component)` draws from the prior a set-up component actually built, propagates the draws and returns the 1σ displacement in metres at each time, with the orbital speed beside it so the in-track column can be read as an along-track time offset — the form `tabascal light-curve --fit-offset` reports a trajectory timing error in.
 
   A prior too narrow to reach the displacement being looked for makes a fit that does not move indistinguishable from an orbit that was already right. Widening it is not free in the other direction either: the satellites are bright, compact and well sampled, so extra trajectory freedom is freedom to absorb signal that belongs elsewhere in the model.
+* `orbit_deviation`: Prior on `trajectory:RICDeviationGP`, which fits a **smooth offset from the nominal orbit that varies over the pass**, in the radial/in-track/cross-track frame, and adds it to whatever positions the component before it produced. A mapping of `std` (metres — one number, or three, one per RIC axis), `corr_time` (seconds; `null` is half the observation, as it is for `rfi.gp_cov.corr_time`), `gamma`, `cutoff` and `time_pad_factor`. `null` is `{std: 100.0, corr_time: null, gamma: 3.0, cutoff: 1e-6, time_pad_factor: 2.0}`. No shipped config includes the component, so the key is inert until one does.
+
+  This is a different relaxation from `orbit_ric_std`, and they answer different questions. Fitting elements asks *which SGP4 orbit* the satellite is on: whatever comes out, the trajectory is one the propagator can express and the six numbers apply to the whole pass. The deviation asks how far the satellite is from the orbit at each moment, with no requirement that the answer be an orbit at all. An excursion that is ahead of the record early in a pass and behind it later has no element set to describe it, and a fitted orbit can only absorb it by distorting the whole pass; an unmodelled manoeuvre, drag or solar-radiation-pressure departure after the record's epoch, or an emission phase centre that moves relative to the centre of mass, all have that shape.
+
+  The width means what it says here: it is a displacement in metres at the times actually observed, with no epoch to propagate it from, so unlike `orbit_ric_std` the number set is the number felt. `std` is the rms of the metres the component adds, and stays so when `corr_time`, `gamma` or `cutoff` change — those move where the power sits on the time axis, not how much of it there is.
+
+  The component needs `trajectory:PhaseCalculationRFI` after it, because `trajectory:FixedOrbit` writes an `rfi_phase` of its own that this component does not touch; without the recomputation the deviation would move `rfi_xyz` and change no visibility. It starts at zero, so a run begins on the nominal trajectory and every metre it ends with was asked for by the data.
 
 ## Gains
 

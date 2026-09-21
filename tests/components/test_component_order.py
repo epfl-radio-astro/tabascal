@@ -113,6 +113,30 @@ class TestMissingProducer:
         assert "rfi_xyz" in message
         assert "trajectory:FixedOrbit" in message
 
+    def test_the_deviation_needs_positions_to_deviate_from(self):
+        """``RICDeviationGP`` adds to ``rfi_xyz``, so nothing can make it first.
+
+        It is the unusual case of a component whose required input is also its
+        output: listed before any trajectory component it has nothing to add to.
+        Caught at assembly, where there is a component to name, rather than as a
+        traced KeyError inside the forward pass.
+        """
+        with pytest.raises(ComponentOrderError) as excinfo:
+            check(
+                [
+                    "trajectory:RICDeviationGP",
+                    "trajectory:PhaseCalculationRFI",
+                    "rfi_signal:ComplexRFIConstAnt",
+                    "rfi_vis:RiemannVis",
+                    "ast_vis:GPVisAst",
+                    "gains:UnitaryGains",
+                ]
+            )
+
+        message = str(excinfo.value)
+        assert "RICDeviationGP" in message
+        assert "rfi_xyz" in message
+
 
 class TestWrongOrder:
     """The right components, listed in the wrong order."""
@@ -200,6 +224,19 @@ class TestValidLists:
                     "gains:UnitaryGains",
                 ],
                 id="gp-plus-fixed-sky",
+            ),
+            pytest.param(
+                [
+                    "trajectory:FixedOrbit",
+                    "trajectory:RICDeviationGP",
+                    "trajectory:PhaseCalculationRFI",
+                    "rfi_signal:ComplexRFIConstAnt",
+                    "rfi_vis:RiemannVisFFI",
+                    "ast_signal:FixedDiscreteSky",
+                    "ast_vis:DiscreteSkyVis",
+                    "gains:ConstGains",
+                ],
+                id="fixed-orbit-plus-deviation",
             ),
         ],
     )

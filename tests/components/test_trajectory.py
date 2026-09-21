@@ -82,6 +82,7 @@ def make_trajectory_config(
     n_time=4,
     n_int_time=2,
     n_int_freq=1,
+    int_time=8.0,
     orbit_records=None,
     epoch_jd=None,
     precision=None,
@@ -110,6 +111,7 @@ def make_trajectory_config(
         n_time_fine=n_time_fine,
         n_int_time=n_int_time,
         n_int_freq=n_int_freq,
+        int_time=int_time,
         orbit_records=orbit_records,
         elements=jnp.zeros((n_rfi, 6)),  # placeholder — not used by FixedOrbit forward
         epoch_jd=jnp.full((n_rfi,), ep),
@@ -976,3 +978,148 @@ class TestSatelliteElevations:
             "elevations are identical under both latitude conventions; the "
             "geodetic site is not being used"
         )
+
+
+# ---------------------------------------------------------------------------
+# RICDeviationGP — the smooth departure from a nominal orbit
+# ---------------------------------------------------------------------------
+
+@pytest.mark.requires_double
+class TestRICDeviationGP:
+    """The component fits metres off the nominal track, so the tests are about
+    metres: that zero parameters move nothing, that the configured width is the
+    rms of the displacement it actually produces, and that each width acts along
+    the axis it names."""
+
+    def _setup(self, deviation=None, **kw):
+        from tabascal.components.trajectory import RICDeviationGP
+
+        cfg = make_trajectory_config(n_rfi=2, n_time=16, n_int_time=2, **kw)
+        cfg.args = {"rfi": {}, "satellites": {"orbit_deviation": deviation}}
+        comp = RICDeviationGP()
+        comp.setup(cfg)
+        return comp, cfg
+
+    def _run(self, comp, cfg, params, nominal=None):
+        """Forward the component over a nominal trajectory, returning the offset."""
+        if nominal is None:
+            nominal = jnp.zeros((cfg.n_rfi, cfg.n_time_fine, 3))
+        state = comp.build_forward()(params, {"rfi_xyz": nominal}, make_constants(comp))
+        return np.asarray(state["rfi_xyz"] - nominal)
+
+    def test_zero_parameters_leave_the_orbit_alone(self):
+        """The init is zero, so a run starts on exactly the nominal trajectory."""
+        comp, cfg = self._setup()
+        offset = self._run(comp, cfg, comp.init_params_base)
+        assert np.all(offset == 0.0)
+
+    def test_std_is_the_rms_of_the_metres_it_adds(self):
+        """``std`` is a displacement, not a knob that happens to scale one.
+
+        Drawn from the prior, the rms of the deviation must be the configured
+        width. This is the claim the normalisation exists to make, and the one
+        that quietly breaks if the power spectrum is renormalised anywhere else
+        or if the real part is taken without accounting for it.
+        """
+        std = 250.0
+        comp, cfg = self._setup({"std": std, "corr_time": 30.0})
+
+        rng = np.random.default_rng(0)
+        shape = (cfg.n_rfi, 3, comp.n_k_time_dev)
+        draws = [
+            self._run(
+                comp,
+                cfg,
+                {
+                    "rfi_dev_r_base": jnp.asarray(rng.standard_normal(shape)),
+                    "rfi_dev_i_base": jnp.asarray(rng.standard_normal(shape)),
+                },
+            )
+            for _ in range(200)
+        ]
+        rms = float(np.sqrt(np.mean(np.square(draws))))
+        # 200 draws x n_rfi x n_time_fine x 3 samples of a correlated process;
+        # 8 % is loose enough for the correlation and tight enough to catch a
+        # factor of sqrt(2) or 2, which is what a normalisation slip looks like.
+        assert rms == pytest.approx(std, rel=0.08)
+
+    def test_each_width_acts_along_its_own_axis(self):
+        """A width on one RIC axis displaces along that axis and no other.
+
+        Built with the axes set far apart rather than one at a time, so this
+        also catches a basis whose rows are transposed: the in-track column
+        would then carry the radial width.
+        """
+        comp, cfg = self._setup({"std": [1.0, 1000.0, 1.0], "corr_time": 30.0})
+
+        rng = np.random.default_rng(1)
+        shape = (cfg.n_rfi, 3, comp.n_k_time_dev)
+        offset = self._run(
+            comp,
+            cfg,
+            {
+                "rfi_dev_r_base": jnp.asarray(rng.standard_normal(shape)),
+                "rfi_dev_i_base": jnp.asarray(rng.standard_normal(shape)),
+            },
+        )
+
+        basis = np.asarray(comp.ric_basis)                 # (n_rfi, n_time, 3 axes, 3 xyz)
+        along = np.einsum("stx,stcx->stc", offset, basis)  # metres per RIC axis
+        rms = np.sqrt(np.mean(np.square(along), axis=(0, 1)))
+        assert rms[1] > 100 * rms[0] and rms[1] > 100 * rms[2]
+
+    def test_basis_is_orthonormal_and_radial_is_outward(self):
+        """The frame the widths are quoted in has to be the frame they act in."""
+        comp, _ = self._setup()
+        basis = np.asarray(comp.ric_basis)
+
+        gram = np.einsum("stcx,stdx->stcd", basis, basis)
+        assert np.allclose(gram, np.eye(3), atol=1e-8)
+
+        from tabascal.components.trajectory import get_satellite_positions
+
+        xyz = np.asarray(
+            get_satellite_positions(comp.orbit_records, list(comp.times_jd_fine))
+        )
+        r_hat = xyz / np.linalg.norm(xyz, axis=-1, keepdims=True)
+        assert np.allclose(basis[..., 0, :], r_hat, atol=1e-8)
+
+    def test_corr_time_null_is_half_the_observation(self):
+        """The same thing null means on the RFI signal's time axis."""
+        comp, cfg = self._setup({"std": 100.0, "corr_time": None})
+        assert comp.dev_config["corr_time"] == pytest.approx(
+            0.5 * cfg.n_time * cfg.int_time
+        )
+
+    def test_a_longer_correlation_time_keeps_fewer_modes(self):
+        """corr_time moves where the power sits, and with it the parameter count."""
+        slow, _ = self._setup({"std": 100.0, "corr_time": 120.0})
+        fast, _ = self._setup({"std": 100.0, "corr_time": 4.0})
+        assert slow.n_k_time_dev < fast.n_k_time_dev
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"std": -1.0},
+            {"std": [1.0, 2.0]},
+            {"corr_time": 0.0},
+            {"gamma": "wide"},
+            {"cutoff": float("inf")},
+            {"unknown_key": 1.0},
+            [100.0, 30.0],
+        ],
+    )
+    def test_bad_deviation_config_names_the_key(self, bad):
+        from tabascal.components.trajectory import validate_orbit_deviation
+
+        with pytest.raises(ValueError, match="orbit_deviation"):
+            validate_orbit_deviation(bad)
+
+    def test_single_time_sample_is_refused(self):
+        """A deviation that varies over time needs a time axis to vary over."""
+        from tabascal.components.trajectory import RICDeviationGP
+
+        cfg = make_trajectory_config(n_rfi=1, n_time=1, n_int_time=1)
+        cfg.args = {"rfi": {}, "satellites": {"orbit_deviation": None}}
+        with pytest.raises(RuntimeError, match="more than one time sample"):
+            RICDeviationGP().setup(cfg)
