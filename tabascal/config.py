@@ -58,7 +58,9 @@ def deep_update(d: Dict, u: Dict) -> Dict:
     A ``None`` anywhere else is a value like any other. It overrides a scalar,
     which is what ``data.noise: null`` and ``rfi.min_elevation: null`` are for,
     and under a key the base does not have — where there is no default to keep
-    — it is stored, as an unknown key of any other value would be.
+    — it is stored, as an unknown key of any other value would be. A mapping
+    given where the default is null, or anything else that is not a mapping,
+    replaces it: there are no defaults under it to merge with.
 
     Parameters
     ----------
@@ -74,7 +76,17 @@ def deep_update(d: Dict, u: Dict) -> Dict:
     """
     for k, v in u.items():
         if isinstance(v, collections.abc.Mapping):
-            d[k] = deep_update(d.get(k, {}), v)
+            # The default under this key is not always a mapping to merge into.
+            # A block whose default is null -- a section that is off until it is
+            # configured -- used to reach dict assignment on None and raise
+            # TypeError, which surfaced as "configuration file could not be
+            # loaded" with nothing to say which key. Anything that is not a
+            # mapping has no defaults to keep, so the given block stands on its
+            # own.
+            base = d.get(k)
+            if not isinstance(base, collections.abc.Mapping):
+                base = {}
+            d[k] = deep_update(base, v)
         elif v is None and isinstance(d.get(k), collections.abc.Mapping):
             continue
         else:

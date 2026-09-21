@@ -169,3 +169,17 @@ class TestDeepUpdate:
         assert deep_update({"a": {"b": 1, "c": 2}}, {"a": {"c": 3}}) == {
             "a": {"b": 1, "c": 3}
         }
+
+    def test_a_mapping_over_a_null_default_is_taken(self):
+        """A section whose default is null can still be configured.
+
+        ``d.get(k, {})`` returns None for a key that exists and is null, so this
+        used to reach dict assignment on None and raise TypeError -- surfacing
+        as "configuration file could not be loaded" with nothing to say which
+        key was at fault.
+        """
+        assert deep_update({"a": None}, {"a": {"b": 1}}) == {"a": {"b": 1}}
+
+    def test_a_mapping_over_a_scalar_default_is_taken(self):
+        """The same rule, for the same reason: a scalar has no keys to merge."""
+        assert deep_update({"a": 1}, {"a": {"b": 2}}) == {"a": {"b": 2}}
