@@ -615,10 +615,12 @@ class TestSGP4Orbits:
         comp.setup(cfg)
 
         historical = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1]) ** 2) / 1e4
-        assert jnp.allclose(comp.ric_cov, historical, rtol=0, atol=0)
+        # Not bit-exact: the key is metres, so the same number is now reached as
+        # (7.3 / 1e3) ** 2 rather than 0.73 ** 2 / 1e4, and those differ by an ulp.
+        assert jnp.allclose(comp.ric_cov, historical, rtol=1e-12, atol=0)
         # and the same through the helper, with the key explicitly null
         cfg.args["satellites"] = {"orbit_ric_std": None}
-        assert jnp.allclose(orbit_ric_cov(cfg), historical, rtol=0, atol=0)
+        assert jnp.allclose(orbit_ric_cov(cfg), historical, rtol=1e-12, atol=0)
 
     def test_ric_std_widens_the_prior(self, orbit_cls, n_params):
         """A wider ``orbit_ric_std`` widens the element-space prior it is pushed through.
@@ -627,6 +629,11 @@ class TestSGP4Orbits:
         deviation by k scales the element covariance by k^2 and its Cholesky
         factor by k. Testing the factor rather than one entry keeps this about
         the wiring and not about the Jacobian.
+
+        Orbit prepends a fixed bstar variance that this key does not set and
+        must not scale, so only the element block is compared -- and the bstar
+        entry is checked to have stayed put, which is the other half of the
+        claim.
         """
         cls = self._get_cls(orbit_cls)
         k = 100.0
@@ -643,7 +650,14 @@ class TestSGP4Orbits:
         }
         wide.setup(cfg_w)
 
-        assert jnp.allclose(wide.L_rfi_orbit, k * narrow.L_rfi_orbit, rtol=1e-6)
+        n_el = 6  # the six Keplerian elements, last in Orbit's 7-vector
+        assert jnp.allclose(
+            wide.L_rfi_orbit[:, -n_el:, -n_el:],
+            k * narrow.L_rfi_orbit[:, -n_el:, -n_el:],
+            rtol=1e-6,
+        )
+        if n_params == 7:
+            assert jnp.allclose(wide.L_rfi_orbit[:, 0, 0], narrow.L_rfi_orbit[:, 0, 0])
 
     def test_ric_prior_envelope_grows_with_the_velocity_width(self, orbit_cls, n_params):
         """Widening only the velocity entries buys along-track displacement.
@@ -668,7 +682,27 @@ class TestSGP4Orbits:
             assert speed.shape == (cfg.n_rfi, cfg.n_time_fine)
             return float(np.median(sigma[..., 1]))
 
-        assert envelope(100.0) > 10 * envelope(1.0)
+        wide, narrow = envelope(1.0), envelope(0.1)
+        assert np.isfinite(wide) and np.isfinite(narrow)
+        assert wide > 5 * narrow
+
+    def test_ric_prior_envelope_refuses_a_width_it_cannot_propagate(self, orbit_cls, n_params):
+        """A width wide enough to diverge is reported, not averaged away.
+
+        100 m/s of velocity is most of a transfer burn; part of that prior is
+        not an orbit SGP4 converges on, and an envelope quietly computed over
+        the draws that did survive would describe a prior nobody configured.
+        """
+        from tabascal.components.trajectory import ric_prior_envelope
+
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        cfg.args["satellites"] = {"orbit_ric_std": [7.3, 13.1, 5.4, 100.0, 100.0, 100.0]}
+        comp = cls()
+        comp.setup(cfg)
+
+        with pytest.raises(ValueError, match="did not propagate"):
+            ric_prior_envelope(comp, n_draw=8, seed=0)
 
 
 # ---------------------------------------------------------------------------

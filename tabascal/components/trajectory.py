@@ -272,6 +272,20 @@ def ric_prior_envelope(component, times_jd=None, n_draw=256, seed=0):
         ric[d, ..., 1] = np.sum(dxyz * i_hat, axis=-1)
         ric[d, ..., 2] = np.sum(dxyz * c_hat, axis=-1)
 
+    # A width wide enough to put part of the prior on orbits SGP4 cannot
+    # propagate is a fact about that width, not a numerical detail to average
+    # away: a silently-dropped tail would report an envelope for a prior that is
+    # not the one configured.
+    bad = ~np.isfinite(ric)
+    if bad.any():
+        raise ValueError(
+            f"{100 * bad.any(axis=(1, 2, 3)).mean():.0f} % of the prior draws did "
+            "not propagate: satellites.orbit_ric_std is wide enough to put part of "
+            "the prior on states SGP4 does not converge on. Narrow it -- most of "
+            "the along-track reach comes from the velocity entries, which are the "
+            "ones that diverge."
+        )
+
     return ric.std(axis=0), speed
 
 
