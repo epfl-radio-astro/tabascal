@@ -597,6 +597,77 @@ class TestSGP4Orbits:
             diag = jnp.diag(comp.L_rfi_orbit[i])
             assert jnp.all(diag > 0), f"Cholesky diagonal not positive for satellite {i}"
 
+    def test_default_ric_std_is_the_historical_prior(self, orbit_cls, n_params):
+        """An unset ``satellites.orbit_ric_std`` reproduces the hard-coded prior exactly.
+
+        The key was added with the values the components already carried, so
+        every existing config must fit against the identical covariance. The
+        literal here is the one that was in the source, kept as a literal on
+        purpose: reading it from the constant it replaced would test nothing.
+        """
+        from tabascal.components.trajectory import orbit_ric_cov
+
+        cls = self._get_cls(orbit_cls)
+        cfg = _make_sgp4_config(n_params)
+        comp = cls()
+        comp.setup(cfg)
+
+        historical = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1]) ** 2) / 1e4
+        assert jnp.allclose(comp.ric_cov, historical, rtol=0, atol=0)
+        # and the same through the helper, with the key explicitly null
+        cfg.args["satellites"] = {"orbit_ric_std": None}
+        assert jnp.allclose(orbit_ric_cov(cfg), historical, rtol=0, atol=0)
+
+    def test_ric_std_widens_the_prior(self, orbit_cls, n_params):
+        """A wider ``orbit_ric_std`` widens the element-space prior it is pushed through.
+
+        The map from RIC to elements is linear, so scaling every RIC standard
+        deviation by k scales the element covariance by k^2 and its Cholesky
+        factor by k. Testing the factor rather than one entry keeps this about
+        the wiring and not about the Jacobian.
+        """
+        cls = self._get_cls(orbit_cls)
+        k = 100.0
+
+        narrow = cls()
+        cfg = _make_sgp4_config(n_params)
+        cfg.args["satellites"] = {"orbit_ric_std": [7.3, 13.1, 5.4, 1.0, 1.0, 1.0]}
+        narrow.setup(cfg)
+
+        wide = cls()
+        cfg_w = _make_sgp4_config(n_params)
+        cfg_w.args["satellites"] = {
+            "orbit_ric_std": [k * 7.3, k * 13.1, k * 5.4, k * 1.0, k * 1.0, k * 1.0]
+        }
+        wide.setup(cfg_w)
+
+        assert jnp.allclose(wide.L_rfi_orbit, k * narrow.L_rfi_orbit, rtol=1e-6)
+
+    def test_ric_prior_envelope_grows_with_the_velocity_width(self, orbit_cls, n_params):
+        """Widening only the velocity entries buys along-track displacement.
+
+        This is the property the key exists for: the prior is set at the record
+        epoch and felt at the observation, so the velocity entries are what a
+        run widens to move a satellite along its track by the time it is seen.
+        The position entries are left alone here, so a growing in-track envelope
+        can only have come from the velocity ones.
+        """
+        from tabascal.components.trajectory import ric_prior_envelope
+
+        cls = self._get_cls(orbit_cls)
+
+        def envelope(vel_std):
+            cfg = _make_sgp4_config(n_params)
+            cfg.args["satellites"] = {"orbit_ric_std": [7.3, 13.1, 5.4] + [vel_std] * 3}
+            comp = cls()
+            comp.setup(cfg)
+            sigma, speed = ric_prior_envelope(comp, n_draw=8, seed=0)
+            assert sigma.shape == (cfg.n_rfi, cfg.n_time_fine, 3)
+            assert speed.shape == (cfg.n_rfi, cfg.n_time_fine)
+            return float(np.median(sigma[..., 1]))
+
+        assert envelope(100.0) > 10 * envelope(1.0)
+
 
 # ---------------------------------------------------------------------------
 # Component.require_double — the shared double-precision gate

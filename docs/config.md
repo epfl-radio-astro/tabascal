@@ -539,6 +539,7 @@ satellites:
   extra_orbit_max_age_days: null
   remote_max_age_days: 3
   cache_reuse_max_age_days: 1
+  orbit_ric_std: null
 ```
 
 * `norad_ids`: List of the NORAD IDs of the satellites to include. TABASCAL requests the record whose epoch is closest to the observation from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service (via the [satchecker-client](https://satchecker-client.readthedocs.io/) package) — its `get-nearest-omm` endpoint for observations from 2026-07-12 onwards and `get-nearest-tle` before that, falling back to the other archive if the first has nothing acceptable. Cache misses run concurrently with a bounded five-worker pool; no account or credentials are required. **Every ID listed here must resolve to an acceptable record**: otherwise preflight stops before reading the visibilities and names each failure. TABASCAL never silently drops a configured satellite from the RFI model.
@@ -553,6 +554,13 @@ satellites:
 
   **The default of `3` is provisional.** It is a hard backstop against obviously unsuitable remote records — for one observation, SatChecker's per-satellite fallback silently returned records ~31 days old, worth ~9,663 km of ISS position error — and *not* a claim that a three-day-old element set gives adequate positional accuracy. The calibrated, observation-specific suitability policy that should replace it is tracked in [issue #101](https://github.com/epfl-radio-astro/tabascal/issues/101); it may end up rejecting records younger than three days for some orbits and baselines, or accepting older ones where independently justified.
 * `cache_reuse_max_age_days`: Request-avoidance threshold for the per-NORAD cache (default `1`). A cached record this close to the observation avoids a request. An older cached record triggers an exact-epoch nearest lookup — including against the fallback archive, since holding a stale record is not the same as the archive having answered — but remains an offline fallback if it is within `remote_max_age_days`. A response replaces it only when strictly closer to the observation. `null` always reuses the nearest acceptable cached record. When both limits are set, this value must not exceed the hard ceiling.
+* `orbit_ric_std`: Width of the prior the **fitted-orbit** components put on each satellite's state, as six positive numbers — radial, in-track and cross-track position in metres, then the same three velocity components in m/s. Read by `trajectory:NoDragOrbit` and `trajectory:Orbit`; `trajectory:FixedOrbit` fits no orbit and ignores it. `null` is `[7.3, 13.1, 5.4, 1.0, 1.0, 1.0]`, the values those components carried hard-coded before this key existed, so leaving it unset changes no fit.
+
+  The width is quoted **at the record epoch**, which is not where it is felt. SGP4 propagates the state from that epoch to the observation, so the two are separated by however old the record is, and the entries do not keep their meaning across that gap: a velocity component turns into along-track position on the way, at roughly the elapsed time times the velocity error, while a position component stays about the size it was set to. A run that needs kilometres of along-track freedom at the observation therefore has to widen the **velocity** entries — widening the in-track position entry to kilometres asks instead for a satellite that was already kilometres from where its elements were fitted, which is a different and much less likely claim.
+
+  Set this against what the width is worth where the satellite is observed, not against the quoted accuracy of a TLE. `tabascal.components.trajectory.ric_prior_envelope(component)` draws from the prior a set-up component actually built, propagates the draws and returns the 1σ displacement in metres at each time, with the orbital speed beside it so the in-track column can be read as an along-track time offset — the form `tabascal light-curve --fit-offset` reports a trajectory timing error in.
+
+  A prior too narrow to reach the displacement being looked for makes a fit that does not move indistinguishable from an orbit that was already right. Widening it is not free in the other direction either: the satellites are bright, compact and well sampled, so extra trajectory freedom is freedom to absorb signal that belongs elsewhere in the model.
 
 ## Gains
 

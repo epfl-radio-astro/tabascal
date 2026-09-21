@@ -144,6 +144,129 @@ def get_satellite_elevations(orbit_records: list, times_jd, ants_itrf) -> NDArra
     return elevation
 
 
+#: Default ``satellites.orbit_ric_std``: the 1-sigma width of the prior the SGP4
+#: trajectory components put on a satellite's state at its record epoch, as
+#: (radial, in-track, cross-track) position in metres followed by the same three
+#: velocity components in metres per second. These are the values the components
+#: carried hard-coded before the key existed, so the default changes no fit.
+DEFAULT_ORBIT_RIC_STD = (7.3, 13.1, 5.4, 1.0, 1.0, 1.0)
+
+
+def validate_orbit_ric_std(value):
+    """``satellites.orbit_ric_std`` as six positive numbers, or a ``ValueError``.
+
+    Returned in metres and metres per second, the units the key is written in.
+    """
+    if value is None:
+        return np.asarray(DEFAULT_ORBIT_RIC_STD, dtype=float)
+
+    try:
+        arr = np.asarray(value, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        arr = np.asarray([], dtype=float)
+
+    if arr.size != 6 or not np.all(np.isfinite(arr)) or not np.all(arr > 0):
+        raise ValueError(
+            f"Config parameter (satellites:\n\torbit_ric_std: {value!r}) is not "
+            "valid. Give six positive, finite numbers -- radial, in-track and "
+            "cross-track position in metres, then the same three velocity "
+            f"components in m/s -- or null for the default {list(DEFAULT_ORBIT_RIC_STD)}."
+        )
+
+    return arr
+
+
+def orbit_ric_cov(config):
+    """The RIC-frame prior covariance the SGP4 orbit components fit under.
+
+    A diagonal 6x6 in the units sgp4jax works in, km and km/s, built from
+    ``satellites.orbit_ric_std`` (metres, m/s) so that the config states the
+    width in the units an orbit error is quoted in and the conversion happens
+    once, here.
+
+    The width is set at the *record epoch*, which is not where it is felt. SGP4
+    propagates from there to the observation, so a velocity component grows into
+    along-track position on the way: the position entries bound where the
+    satellite was when its elements were fitted, and the velocity entries are
+    what lets it be somewhere else by the time it crosses the field. A prior
+    quoted for the epoch is therefore narrower at the epoch than the
+    displacement it admits at the observation, and a run that needs kilometres
+    of along-track freedom buys them through the velocity terms rather than the
+    position ones. ``tabascal.components.trajectory.ric_prior_envelope`` reports
+    what a given width is worth at given times, which is the number to set this
+    key against.
+    """
+    std_m = validate_orbit_ric_std(
+        (getattr(config, "args", None) or {}).get("satellites", {}).get("orbit_ric_std")
+    )
+
+    return jnp.diag(jnp.asarray(std_m / 1e3) ** 2)
+
+
+
+def ric_prior_envelope(component, times_jd=None, n_draw=256, seed=0):
+    """What a satellite's orbit prior is worth, in metres, where it is felt.
+
+    ``satellites.orbit_ric_std`` is a width on the state at the *record epoch*.
+    What a fit can actually do with it is the displacement that width reaches at
+    the observation, after SGP4 has propagated it, and the two differ by however
+    far the epoch is from the observation: a metre per second of along-track
+    velocity is metres at the epoch and kilometres an hour later. This draws from
+    the prior, propagates each draw, and reports the 1-sigma displacement about
+    the nominal orbit in the RIC frame of the nominal state -- the number to read
+    before concluding that a fit did not move because it did not want to.
+
+    Parameters
+    ----------
+    component : NoDragOrbit or Orbit
+        A component whose ``setup`` has run, so its prior and elements exist.
+    times_jd : array-like, optional
+        UTC Julian dates to evaluate at. Defaults to the component's own fine grid.
+    n_draw : int
+        Prior draws. The standard deviation converges as 1/sqrt(n_draw).
+    seed : int
+        Seed for the draws.
+
+    Returns
+    -------
+    (Array, Array)
+        ``(sigma_ric, speed)``: the 1-sigma (radial, in-track, cross-track)
+        displacement in metres, shaped (n_rfi, n_time, 3), and the nominal
+        orbital speed in m/s, shaped (n_rfi, n_time). Dividing the in-track
+        column by the speed turns it into an along-track time offset in seconds,
+        which is the form a trajectory timing error is usually quoted in.
+    """
+    times_jd = component.times_jd_fine if times_jd is None else jnp.asarray(times_jd)
+    mu = np.asarray(component.mu_rfi_orbit)
+    L = np.asarray(component.L_rfi_orbit)
+
+    def propagate(elements):
+        sats = component.sats_init(jnp.asarray(elements))
+        xyz, vel = sgp4jax.gcrf_positions_multi_leo(sats, times_jd)
+        return np.asarray(xyz) * 1e3, np.asarray(vel) * 1e3
+
+    xyz0, vel0 = propagate(mu)
+    speed = np.linalg.norm(vel0, axis=-1)
+
+    # RIC basis of the nominal state, per satellite per time
+    r_hat = xyz0 / np.linalg.norm(xyz0, axis=-1, keepdims=True)
+    h = np.cross(xyz0, vel0)
+    c_hat = h / np.linalg.norm(h, axis=-1, keepdims=True)
+    i_hat = np.cross(c_hat, r_hat)
+
+    rng = np.random.default_rng(seed)
+    ric = np.empty((n_draw, *xyz0.shape))
+    for d in range(n_draw):
+        z = rng.standard_normal(mu.shape)
+        xyz, _ = propagate(mu + np.einsum("sij,sj->si", L, z))
+        dxyz = xyz - xyz0
+        ric[d, ..., 0] = np.sum(dxyz * r_hat, axis=-1)
+        ric[d, ..., 1] = np.sum(dxyz * i_hat, axis=-1)
+        ric[d, ..., 2] = np.sum(dxyz * c_hat, axis=-1)
+
+    return ric.std(axis=0), speed
+
+
 class PhaseCalculationRFI(Component):
 
     requires_double = True
@@ -383,7 +506,7 @@ class NoDragOrbit(Component):
             self.n_time_fine = config.n_time_fine
 
             self.n_rfi = config.n_rfi
-            self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
+            self.ric_cov = orbit_ric_cov(config)
 
             # Reuse the resolution the preflight check already made and enforced
             # coverage on: re-resolving here could reach a different satellite set
@@ -561,7 +684,7 @@ class Orbit(Component):
             self.n_time_fine = config.n_time_fine
 
             self.n_rfi = config.n_rfi
-            self.ric_cov = jnp.diag(jnp.array([0.73, 1.31, 0.54, 0.1, 0.1, 0.1])**2)/1e4
+            self.ric_cov = orbit_ric_cov(config)
 
             # Reuse the resolution the preflight check already made and enforced
             # coverage on: re-resolving here could reach a different satellite set
