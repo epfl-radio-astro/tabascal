@@ -60,10 +60,10 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     #
     # The references below were re-measured on Daint after #103 swapped the
     # RFI-signal component in `_components_map` from the real-space
-    # `ComplexRFI` to the scanned Fourier `ComplexRFIVarAnt`. That is a
-    # deliberate accuracy-for-runtime trade, not a bug: see issue #107. Do not
-    # "restore" the older, faster numbers -- they belong to a component that no
-    # longer exists.
+    # `ComplexRFI` to the scanned Fourier `ComplexRFIVarAnt` (now
+    # `ComplexRFIVarAntFine`). That is a deliberate accuracy-for-runtime trade,
+    # not a bug: see issue #107. Do not "restore" the older, faster numbers --
+    # they belong to a component that no longer exists.
     _expected_gpus = 1
     _expected_device_kind = "GH200"
 
@@ -73,16 +73,16 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
 
     _components_map = {
         "Riemann": [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFIVarAnt",
-            "rfi_vis:RiemannVis",
+            "trajectory:FixedOrbitFine",
+            "rfi_signal:ComplexRFIVarAntFine",
+            "rfi_vis:RiemannVisFine",
             "ast_vis:GPVisAst",
             "gains:UnitaryGains",
         ],
         "RiemannFFI": [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFIVarAnt",
-            "rfi_vis:RiemannVisFFI",
+            "trajectory:FixedOrbitFine",
+            "rfi_signal:ComplexRFIVarAntFine",
+            "rfi_vis:RiemannVisFFIFine",
             "ast_vis:GPVisAst",
             "gains:UnitaryGains",
         ],
@@ -214,8 +214,9 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
     #
     # Re-measured on Daint nid005989 (commit 46b6153, JAX 0.6.0) after #103
     # replaced the real-space `rfi_signal:ComplexRFI` with the scanned Fourier
-    # `ComplexRFIVarAnt`. The previous values described the deleted component,
-    # so they are superseded rather than adjusted. Tolerances are unchanged.
+    # `ComplexRFIVarAnt` (now `ComplexRFIVarAntFine`). The previous values
+    # described the deleted component, so they are superseded rather than
+    # adjusted. Tolerances are unchanged.
     #
     # The optimiser got slower where the RFI-signal component is a large share
     # of the step (RiemannFFI: +58% single, +26% double) and slightly faster

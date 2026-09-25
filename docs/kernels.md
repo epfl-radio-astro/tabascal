@@ -1,9 +1,9 @@
 # RFI-visibility kernels
 
-The {class}`~tabascal.components.rfi_vis.RiemannVisFFI` and
-{class}`~tabascal.components.rfi_vis.RiemannVisVariableFFI` components call
+The {class}`~tabascal.components.rfi_vis.RiemannVisFFIFine` and
+{class}`~tabascal.components.rfi_vis.RiemannVisVariableFFIFine` components call
 compiled kernels instead of the pure-JAX implementation used by
-{class}`~tabascal.components.rfi_vis.RiemannVis`.
+{class}`~tabascal.components.rfi_vis.RiemannVisFine`.
 
 Those kernels ship in the separate
 [`ri-kernels`](https://github.com/epfl-radio-astro/ri-kernels) package, a plain
@@ -35,7 +35,7 @@ file](config.md):
 ```yaml
 model:
   components:
-    - rfi_vis:RiemannVisFFI
+    - rfi_vis:RiemannVisFFIFine
 ```
 
 ## Memory
@@ -47,7 +47,7 @@ multiply, sum over sources and the average back onto the data grid happen in one
 pass, and their transpose rule recomputes the same terms from the per-antenna
 inputs, so nothing of that size is kept for the backward pass either.
 
-{class}`~tabascal.components.rfi_vis.RiemannVis` reaches the same bound by
+{class}`~tabascal.components.rfi_vis.RiemannVisFine` reaches the same bound by
 scanning the baseline axis under `jax.checkpoint`: each step forms the fine grid
 for `rfi.baseline_block_size` baselines at a time, or for the whole axis where
 it is shorter than that, averages it onto the data grid, and
