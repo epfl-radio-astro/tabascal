@@ -27,6 +27,14 @@ model:
 
 The components should be given in order of dependency. For example, `trajectory:OrbitFine` is specified before `trajectory:PhaseCalculationRFIFine` because the later depends on the output of the former. Each component is a class which defines the parameters (if any), their initialisation, their prior distribution, and its own forward model for the component. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the module name and then the class name. For example the component `trajectory:OrbitFine` is a class named {class}`~tabascal.components.trajectory.OrbitFine` that resides in the module file [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)
 
+Every RFI component that works on the fine time-frequency grid carries a `Fine`
+suffix: `trajectory:` `FixedOrbitFine`, `PhaseCalculationRFIFine`,
+`NoDragOrbitFine`, `OrbitFine`; `rfi_signal:` `ComplexRFIVarAntFine`,
+`ComplexRFIConstAntFine`; `rfi_vis:` `RiemannVisFine`, `RiemannVisFFIFine`,
+`RiemannVisVariableFine`, `RiemannVisVariableFFIFine`. The names without the
+suffix are no longer accepted, so a config or import written before the rename,
+including a saved run's YAML, needs the suffix added.
+
 That order is checked when the model is assembled, before anything is computed. Each component declares the state keys it reads and the keys it writes, and a list that leaves out a component — or holds the right ones in the wrong order — is rejected by name, saying which key is missing, what produces it, and whether that producer is absent or merely listed too late.
 
 ### Precision

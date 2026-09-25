@@ -133,7 +133,7 @@ def make_trajectory_config(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.requires_double
-class TestPhaseCalculationRFI:
+class TestPhaseCalculationRFIFine:
 
     def test_setup_validates_dimensions(self):
         """If the config is self-consistent, _validate_dimensions must not raise."""
@@ -242,7 +242,7 @@ class TestPhaseCalculationRFI:
 # FixedOrbitFine
 # ---------------------------------------------------------------------------
 
-class TestFixedOrbit:
+class TestFixedOrbitFine:
 
     def test_rfi_xyz_shape(self):
         """Pre-computed satellite positions stored at setup have shape (n_rfi, n_time_fine, 3)."""

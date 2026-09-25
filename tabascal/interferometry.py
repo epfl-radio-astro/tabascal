@@ -19,7 +19,7 @@ def get_rfi_phase_numpy(
     numpy twin of the jax :func:`get_rfi_phase` — same formula, kept in numpy/f64
     for the host-side one-shot setup in ``FixedOrbitFine`` (large magnitudes need f64).
     The two must stay in sync; their equivalence is checked by
-    ``tests/components/test_trajectory.py::TestFixedOrbit::test_compute_rfi_phase_consistent_with_get_rfi_phase``.
+    ``tests/components/test_trajectory.py::TestFixedOrbitFine::test_compute_rfi_phase_consistent_with_get_rfi_phase``.
 
     Parameters
     ----------
