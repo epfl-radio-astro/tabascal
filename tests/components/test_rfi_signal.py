@@ -27,8 +27,8 @@ import numpyro
 
 from tabascal.interferometry import calculate_rfi_vis_fine
 from tabascal.components.rfi_signal import (
-    ComplexRFIVarAnt,
-    ComplexRFIConstAnt,
+    ComplexRFIVarAntFine,
+    ComplexRFIConstAntFine,
     read_light_curves,
     rfi_signal_config_validation,
 )
@@ -52,8 +52,8 @@ N_RFI, N_RFI_REAL, N_ANT, N_FREQ, N_TIME = 4, 3, 3, 4, 8
 _TEST_EPOCH_JD = 2460000.5
 _TEST_EPOCH_MJD = _TEST_EPOCH_JD - 2400000.5
 
-ALL_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
-FOURIER_CLASSES = [ComplexRFIVarAnt, ComplexRFIConstAnt]
+ALL_CLASSES = [ComplexRFIVarAntFine, ComplexRFIConstAntFine]
+FOURIER_CLASSES = [ComplexRFIVarAntFine, ComplexRFIConstAntFine]
 
 # Init modes every class accepts. "truth" is excluded throughout: it goes through
 # read_true_rfi_A, which needs a real simulation .zarr store.
@@ -375,7 +375,7 @@ class TestPaddingHelpers:
     """The device-sharding helpers on BaseGPRFI, driven through a concrete subclass."""
 
     def test_mask_dummy_rfi_zeroes_only_padded_rows(self):
-        comp = setup_component(ComplexRFIVarAnt)
+        comp = setup_component(ComplexRFIVarAntFine)
         arr = jnp.arange(N_RFI * 2 * 3, dtype=float).reshape(N_RFI, 2, 3) + 1.0
 
         masked = comp._mask_dummy_rfi(arr)
@@ -384,7 +384,7 @@ class TestPaddingHelpers:
         assert jnp.all(masked[N_RFI_REAL:] == 0)
 
     def test_mask_dummy_rfi_is_noop_when_unpadded(self):
-        comp = setup_component(ComplexRFIVarAnt, n_rfi=N_RFI, n_rfi_real=N_RFI)
+        comp = setup_component(ComplexRFIVarAntFine, n_rfi=N_RFI, n_rfi_real=N_RFI)
         arr = jnp.ones((N_RFI, 2, 3))
 
         assert jnp.array_equal(comp._mask_dummy_rfi(arr), arr)
@@ -392,7 +392,7 @@ class TestPaddingHelpers:
     @pytest.mark.parametrize("dtype", [float, complex])
     def test_zero_pad_rfi_grows_and_zeroes(self, dtype):
         """A truth/estimate array with only the real sources is padded with exact zeros."""
-        comp = setup_component(ComplexRFIVarAnt)
+        comp = setup_component(ComplexRFIVarAntFine)
         arr = jnp.ones((N_RFI_REAL, 2, 3), dtype=dtype)
 
         padded = comp._zero_pad_rfi(arr)
@@ -403,14 +403,14 @@ class TestPaddingHelpers:
         assert jnp.all(padded[N_RFI_REAL:] == 0)
 
     def test_zero_pad_rfi_is_identity_when_already_full(self):
-        comp = setup_component(ComplexRFIVarAnt)
+        comp = setup_component(ComplexRFIVarAntFine)
         arr = jnp.ones((N_RFI, 2, 3))
 
         assert comp._zero_pad_rfi(arr) is arr
 
     def test_n_rfi_real_defaults_to_n_rfi_when_config_lacks_it(self):
         """An unpadded TabConfig has no n_rfi_real; the mask must then be a no-op."""
-        comp = setup_component(ComplexRFIVarAnt, with_n_rfi_real=False)
+        comp = setup_component(ComplexRFIVarAntFine, with_n_rfi_real=False)
 
         assert comp.n_rfi_real == comp.n_rfi
         arr = jnp.ones((N_RFI, 2, 3))
@@ -459,8 +459,8 @@ class TestComponentContract:
     @pytest.mark.parametrize(
         "cls,expected",
         [
-            (ComplexRFIVarAnt, {"sigma_rfi_k", "mu_rfi_k"}),
-            (ComplexRFIConstAnt, {"sigma_rfi_k", "mu_rfi_k"}),
+            (ComplexRFIVarAntFine, {"sigma_rfi_k", "mu_rfi_k"}),
+            (ComplexRFIConstAntFine, {"sigma_rfi_k", "mu_rfi_k"}),
         ],
     )
     def test_build_constants_keys(self, cls, expected):
@@ -501,8 +501,8 @@ class TestComponentContract:
         [
             # All surviving components model a complex amplitude. Note the
             # narrows the dtype when it overwrites it.
-            (ComplexRFIVarAnt, True),
-            (ComplexRFIConstAnt, True),
+            (ComplexRFIVarAntFine, True),
+            (ComplexRFIConstAntFine, True),
         ],
     )
     def test_forward_output_dtype(self, cls, complex_valued):
@@ -639,9 +639,9 @@ class TestDummySourcesStayDark:
 
     def test_data_estimate_splits_over_real_sources_only(self):
         """The data-derived prior mean divides by n_rfi_real, not the padded n_rfi."""
-        padded = setup_component(ComplexRFIVarAnt, n_rfi=N_RFI, n_rfi_real=N_RFI_REAL, mean="data")
+        padded = setup_component(ComplexRFIVarAntFine, n_rfi=N_RFI, n_rfi_real=N_RFI_REAL, mean="data")
         unpadded = setup_component(
-            ComplexRFIVarAnt, n_rfi=N_RFI_REAL, n_rfi_real=N_RFI_REAL, mean="data"
+            ComplexRFIVarAntFine, n_rfi=N_RFI_REAL, n_rfi_real=N_RFI_REAL, mean="data"
         )
 
         # Same per-source share regardless of how many dummies were appended.
@@ -759,13 +759,13 @@ class TestMatchedFilterSeeding:
 
     def test_the_antenna_axis_follows_the_model(self, estimate):
         """VarAnt carries one amplitude per antenna; ConstAnt shares one."""
-        assert setup_component(ComplexRFIVarAnt, init="mf").init_rfi_k.shape[1] == N_ANT
-        assert setup_component(ComplexRFIConstAnt, init="mf").init_rfi_k.shape[1] == 1
+        assert setup_component(ComplexRFIVarAntFine, init="mf").init_rfi_k.shape[1] == N_ANT
+        assert setup_component(ComplexRFIConstAntFine, init="mf").init_rfi_k.shape[1] == 1
 
     def test_the_run_config_is_what_gets_filtered(self, estimate):
         """The estimate is made from this run's own visibilities, not a file."""
         config = make_rfi_config(init="matched-filter")
-        comp = ComplexRFIVarAnt()
+        comp = ComplexRFIVarAntFine()
         comp.setup(config)
 
         assert estimate.calls and estimate.calls[0] is config
@@ -896,7 +896,7 @@ class TestTransforms:
 # ---------------------------------------------------------------------------
 
 class TestFourierScanTransform:
-    """ComplexRFIVarAnt scans the antenna axis instead of vmapping it.
+    """ComplexRFIVarAntFine scans the antenna axis instead of vmapping it.
 
     That is a pure implementation change made to bound the cuFFT plan work area (a
     batched transform over n_rfi * n_ant asked for 12.6 GiB at 32 channels and
@@ -917,7 +917,7 @@ class TestFourierScanTransform:
         )(rfi_k_A, comp.pads, comp.ss_idxs)
 
     def test_matches_vmap_reference(self):
-        comp = setup_component(ComplexRFIVarAnt)
+        comp = setup_component(ComplexRFIVarAntFine)
         params = random_params(comp)
 
         got = run_forward(comp, params)
@@ -927,7 +927,7 @@ class TestFourierScanTransform:
         assert jnp.allclose(got, expected, atol=tol(), rtol=tol())
 
     def test_gradients_match_vmap_reference(self):
-        comp = setup_component(ComplexRFIVarAnt)
+        comp = setup_component(ComplexRFIVarAntFine)
         params = random_params(comp)
         constants = make_constants(comp)
 
@@ -948,7 +948,7 @@ class TestFourierScanTransform:
 
     def test_const_ant_broadcast_matches_full_grid(self):
         """The shared-antenna signal is identical across antennas after broadcast."""
-        comp = setup_component(ComplexRFIConstAnt)
+        comp = setup_component(ComplexRFIConstAntFine)
         rfi_A = run_forward(comp, random_params(comp))
 
         assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
@@ -970,8 +970,8 @@ class TestClassSpecifics:
         assert set(comp.init_params) == {"rfi_k_r", "rfi_k_i"}
 
     def test_const_ant_has_singleton_antenna_axis(self):
-        """ComplexRFIConstAnt shares one latent across antennas."""
-        comp = setup_component(ComplexRFIConstAnt, init="sample")
+        """ComplexRFIConstAntFine shares one latent across antennas."""
+        comp = setup_component(ComplexRFIConstAntFine, init="sample")
 
         assert comp.mu_rfi_k.shape == (N_RFI, 1, comp.n_k_freq_rfi, comp.n_k_time_rfi)
         for value in comp.init_params_base.values():
@@ -980,15 +980,15 @@ class TestClassSpecifics:
     @pytest.mark.parametrize("init", COMMON_INITS)
     def test_const_ant_forward_is_identical_across_antennas(self, init):
         """The defining property: every antenna sees the same RFI amplitude."""
-        comp = setup_component(ComplexRFIConstAnt, init=init)
+        comp = setup_component(ComplexRFIConstAntFine, init=init)
         rfi_A = run_forward(comp, random_params(comp))
 
         assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
         assert jnp.allclose(rfi_A, rfi_A[:, :1], atol=tol())
 
     def test_variable_ant_forward_differs_across_antennas(self):
-        """ComplexRFIVarAnt, by contrast, gives each antenna its own amplitude."""
-        comp = setup_component(ComplexRFIVarAnt, init="sample")
+        """ComplexRFIVarAntFine, by contrast, gives each antenna its own amplitude."""
+        comp = setup_component(ComplexRFIVarAntFine, init="sample")
         rfi_A = run_forward(comp, random_params(comp))
 
         assert not jnp.allclose(rfi_A[:N_RFI_REAL], rfi_A[:N_RFI_REAL, :1])
@@ -1004,7 +1004,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     import jax.numpy as jnp
     from types import SimpleNamespace
 
-    from tabascal.components.rfi_signal import ComplexRFIVarAnt
+    from tabascal.components.rfi_signal import ComplexRFIVarAntFine
 
     assert jax.device_count() == 2, jax.device_count()
 
@@ -1032,7 +1032,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
         },
     )
 
-    comp = ComplexRFIVarAnt()
+    comp = ComplexRFIVarAntFine()
     comp.setup(config)
 
     # The placeholder is allocated per-shard, never as a full single-device array.
@@ -1754,7 +1754,7 @@ class TestTheEstimateIsSampledOnUtc:
         config.times_jd = np.asarray(data["times_jd"])
         config.time_scale = data["time_scale"]
 
-        comp = ComplexRFIVarAnt()
+        comp = ComplexRFIVarAntFine()
         comp.setup(config)
 
         return comp, config
@@ -1946,7 +1946,7 @@ class TestGpCovIsRead:
     @pytest.mark.parametrize("absent", [_ABSENT, None])
     @pytest.mark.parametrize(
         "cls, gammas, cutoff",
-        [(ComplexRFIVarAnt, [3.0, 3.0], 1e-9), (ComplexRFIConstAnt, [100.0, 100.0], 1e-6)],
+        [(ComplexRFIVarAntFine, [3.0, 3.0], 1e-9), (ComplexRFIConstAntFine, [100.0, 100.0], 1e-6)],
     )
     def test_the_defaults_are_these_numbers(self, cls, gammas, cutoff, absent):
         """The values themselves, not merely that the component's own are used.
@@ -1963,9 +1963,9 @@ class TestGpCovIsRead:
 
     def test_the_two_components_keep_their_own_defaults(self):
         """Preserved rather than unified: making them agree is a model change."""
-        assert ComplexRFIVarAnt.default_gammas != ComplexRFIConstAnt.default_gammas
+        assert ComplexRFIVarAntFine.default_gammas != ComplexRFIConstAntFine.default_gammas
         assert (
-            ComplexRFIVarAnt.default_pk_cutoff != ComplexRFIConstAnt.default_pk_cutoff
+            ComplexRFIVarAntFine.default_pk_cutoff != ComplexRFIConstAntFine.default_pk_cutoff
         )
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
@@ -1996,7 +1996,7 @@ class TestGpCovIsRead:
         """Asserted against the offending-key list, not the whole message: every
         message ends "It takes ['gammas', 'cutoff']", so a bare `"gamma" in
         message` passes for a validator that names nothing."""
-        message = gp_cov_error(ComplexRFIVarAnt, {"gamma": 3})
+        message = gp_cov_error(ComplexRFIVarAntFine, {"gamma": 3})
 
         assert "no key(s) ['gamma']" in message
 
@@ -2004,30 +2004,30 @@ class TestGpCovIsRead:
         "gammas", [3, "3", [3], [3, 3, 3], [0, 3], [-1, 3], [True, 3], [float("inf"), 3], [float("nan"), 3]]
     )
     def test_gammas_that_are_not_a_pair_of_positive_numbers_are_refused(self, gammas):
-        assert "gammas" in gp_cov_error(ComplexRFIVarAnt, {"gammas": gammas})
+        assert "gammas" in gp_cov_error(ComplexRFIVarAntFine, {"gammas": gammas})
 
     @pytest.mark.parametrize(
         "cutoff", [0, -1e-6, "1e-6", True, float("inf"), float("nan"), [1e-6]]
     )
     def test_a_cutoff_that_is_not_a_positive_number_is_refused(self, cutoff):
-        assert "cutoff" in gp_cov_error(ComplexRFIVarAnt, {"cutoff": cutoff})
+        assert "cutoff" in gp_cov_error(ComplexRFIVarAntFine, {"cutoff": cutoff})
 
     def test_a_gp_cov_that_is_not_a_mapping_is_refused(self):
-        assert "gp_cov" in gp_cov_error(ComplexRFIVarAnt, [3, 3])
+        assert "gp_cov" in gp_cov_error(ComplexRFIVarAntFine, [3, 3])
 
     @pytest.mark.parametrize("cutoff", [1.0, 2.0])
     def test_a_cutoff_that_cuts_everything_is_refused(self, cutoff):
         """It is relative to the largest mode and the comparison is strict, so 1
         keeps nothing. Left to fft_gp it surfaces as "zero-size array to reduction
         operation min", which names neither the key nor the reason."""
-        assert "cutoff" in gp_cov_error(ComplexRFIVarAnt, {"cutoff": cutoff})
+        assert "cutoff" in gp_cov_error(ComplexRFIVarAntFine, {"cutoff": cutoff})
 
     def test_a_cutoff_just_below_one_is_still_accepted(self):
         """The bound is at 1, not near it. Asserted as "fewer modes than the
         default, and at least one", rather than an exact shape, which is a
         property of this fixture's grid and not of the bound."""
-        comp = setup_with_gp_cov(ComplexRFIVarAnt, {"cutoff": 0.999999})
-        default = setup_with_gp_cov(ComplexRFIVarAnt, _ABSENT)
+        comp = setup_with_gp_cov(ComplexRFIVarAntFine, {"cutoff": 0.999999})
+        default = setup_with_gp_cov(ComplexRFIVarAntFine, _ABSENT)
 
         assert 1 <= comp.n_k_freq_rfi < default.n_k_freq_rfi
         assert 1 <= comp.n_k_time_rfi < default.n_k_time_rfi
@@ -2071,7 +2071,7 @@ class TestGpCovIsRead:
     def test_an_ordered_pair_is_accepted_however_it_is_spelled(self, gammas):
         """A config assembled in Python carries numpy; only *unordered* pairs are
         the problem, and those are refused by name."""
-        comp = setup_with_gp_cov(ComplexRFIVarAnt, {"gammas": gammas})
+        comp = setup_with_gp_cov(ComplexRFIVarAntFine, {"gammas": gammas})
 
         assert comp.gp_cov_params()[0] == [3.0, 3.0]
 
@@ -2106,26 +2106,26 @@ class TestGpCovIsRead:
         keyed = KeyedPair(time=3.0, freq=4.0)
         assert len(keyed) == 2 and keyed[0] == 3.0
 
-        assert "gammas" in gp_cov_error(ComplexRFIVarAnt, {"gammas": keyed})
+        assert "gammas" in gp_cov_error(ComplexRFIVarAntFine, {"gammas": keyed})
 
     def test_a_pandas_series_is_refused(self):
         """The real instance of the case above, when pandas is installed."""
         pd = pytest.importorskip("pandas")
         series = pd.Series({"time": 3.0, "freq": 4.0})
 
-        assert "gammas" in gp_cov_error(ComplexRFIVarAnt, {"gammas": series})
+        assert "gammas" in gp_cov_error(ComplexRFIVarAntFine, {"gammas": series})
 
     @pytest.mark.parametrize("gammas", [{3: None, 4: None}, {3, 4}])
     def test_gammas_given_as_an_unordered_pair_are_refused(self, gammas):
         """A mapping or a set of length two passes len() and iterates to its keys,
         in an order that means nothing -- but the two entries name the frequency
         and time axes, in that order."""
-        assert "gammas" in gp_cov_error(ComplexRFIVarAnt, {"gammas": gammas})
+        assert "gammas" in gp_cov_error(ComplexRFIVarAntFine, {"gammas": gammas})
 
     def test_unknown_keys_that_are_not_all_strings_still_name_themselves(self):
         """YAML keys need not be strings, and sorting a mixed set raises from
         inside the validator instead of saying which key is wrong."""
-        message = gp_cov_error(ComplexRFIVarAnt, {1: 2, "gamma": 3})
+        message = gp_cov_error(ComplexRFIVarAntFine, {1: 2, "gamma": 3})
 
         assert "'gamma'" in message and "1" in message
         assert "not supported between instances" not in message
@@ -2157,8 +2157,8 @@ class TestTheStdIsTheWidthItClaims:
     the key and the visibility a run actually realises, and both are asserted
     here rather than described:
 
-    * ``ComplexRFIConstAnt`` broadcasts one amplitude to every antenna, so its
-      visibility is ``|A|^2`` where ``ComplexRFIVarAnt``'s is
+    * ``ComplexRFIConstAntFine`` broadcasts one amplitude to every antenna, so its
+      visibility is ``|A|^2`` where ``ComplexRFIVarAntFine``'s is
       ``A_p conj(A_q)`` with independent draws. ``E|A|^4 = 2 (E|A|^2)^2``, so
       it realises ``sqrt(2)`` times the width.
     * The width applies to each satellite and their visibilities sum, so N
@@ -2230,7 +2230,7 @@ class TestTheStdIsTheWidthItClaims:
         normalisation, and it tightens with draws rather than converging on
         something else -- at 800 it is inside 4 %.
         """
-        comp = setup_component(ComplexRFIVarAnt, std=std, n_rfi=1, n_rfi_real=1)
+        comp = setup_component(ComplexRFIVarAntFine, std=std, n_rfi=1, n_rfi_real=1)
 
         assert self._rms_vis(comp) == pytest.approx(std, rel=0.25)
 
@@ -2247,8 +2247,8 @@ class TestTheStdIsTheWidthItClaims:
         and 2 (the factor applied twice), which is what this has to catch.
         """
         kwargs = dict(std=3.0, n_rfi=1, n_rfi_real=1)
-        var_ant = self._rms_vis(setup_component(ComplexRFIVarAnt, **kwargs))
-        const_ant = self._rms_vis(setup_component(ComplexRFIConstAnt, **kwargs))
+        var_ant = self._rms_vis(setup_component(ComplexRFIVarAntFine, **kwargs))
+        const_ant = self._rms_vis(setup_component(ComplexRFIConstAntFine, **kwargs))
 
         assert 1.2 < const_ant / var_ant < 1.75
 
@@ -2265,11 +2265,11 @@ class TestTheStdIsTheWidthItClaims:
         much the geometric phases happen to align.
         """
         one = self._rms_vis(
-            setup_component(ComplexRFIVarAnt, std=3.0, n_rfi=1, n_rfi_real=1)
+            setup_component(ComplexRFIVarAntFine, std=3.0, n_rfi=1, n_rfi_real=1)
         )
         many = self._rms_vis(
             setup_component(
-                ComplexRFIVarAnt, std=3.0, n_rfi=n_sources, n_rfi_real=n_sources
+                ComplexRFIVarAntFine, std=3.0, n_rfi=n_sources, n_rfi_real=n_sources
             ),
             n_rfi_real=n_sources,
         )

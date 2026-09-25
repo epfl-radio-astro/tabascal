@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from tabascal.components.ast_vis import GPVisAst
-from tabascal.components.rfi_vis import RiemannVis
+from tabascal.components.rfi_vis import RiemannVisFine
 from tabascal.config import (
     TabConfig,
     load_config,
@@ -293,7 +293,7 @@ class TestBaseConfigIntegrationSampleCounts:
 
     ``rfi.freq_int_samples`` and ``rfi.n_int_freq`` named the same knob: the base
     config shipped the second, the Riemann visibility components and
-    ``trajectory:FixedOrbit`` read the first, and everything else
+    ``trajectory:FixedOrbitFine`` read the first, and everything else
     (``rfi_signal``, ``gains``, the fine grid ``TabConfig`` itself builds) read
     the second. A config omitting the first died in setup; a config setting both
     to different values built two disagreeing fine grids.
@@ -353,7 +353,7 @@ class TestBaseConfigIntegrationSampleCounts:
 
         # The component that used to raise. Its fine grid must be the one
         # TabConfig just built, or the reshape in forward cannot line up.
-        comp = RiemannVis()
+        comp = RiemannVisFine()
         comp.setup(tab_config)
 
         assert comp.n_int_freq == tab_config.n_int_freq

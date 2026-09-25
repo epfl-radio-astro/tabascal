@@ -367,19 +367,19 @@ def test_truth_metric_capture_roundtrips_printed_output(capsys):
         _assert_truth_metrics(stdout, "opt", {"rfi": {"RMSE": 1.0}})
 
 # ---------------------------------------------------------------------------
-# Trajectory components — downstream fixed to RiemannVis + UnitaryGains
+# Trajectory components — downstream fixed to RiemannVisFine + UnitaryGains
 # ---------------------------------------------------------------------------
 
 trajectory_configs = [
-    # FixedOrbit without PhaseCalculationRFI covered by RiemannVis
+    # FixedOrbitFine without PhaseCalculationRFIFine covered by RiemannVisFine
     pytest.param(
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:FixedOrbit",
-                "trajectory:PhaseCalculationRFI",
-                "rfi_signal:ComplexRFIVarAnt",
-                "rfi_vis:RiemannVis",
+                "trajectory:FixedOrbitFine",
+                "trajectory:PhaseCalculationRFIFine",
+                "rfi_signal:ComplexRFIVarAntFine",
+                "rfi_vis:RiemannVisFine",
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
@@ -409,16 +409,16 @@ trajectory_configs = [
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
-        id="FixedOrbit+PhaseCalculationRFI",
+        id="FixedOrbitFine+PhaseCalculationRFIFine",
     ),
     pytest.param(
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:NoDragOrbit",
-                "trajectory:PhaseCalculationRFI",
-                "rfi_signal:ComplexRFIVarAnt",
-                "rfi_vis:RiemannVis",
+                "trajectory:NoDragOrbitFine",
+                "trajectory:PhaseCalculationRFIFine",
+                "rfi_signal:ComplexRFIVarAntFine",
+                "rfi_vis:RiemannVisFine",
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
@@ -426,7 +426,7 @@ trajectory_configs = [
             # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
             # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
             # Measured opt-point values, double precision (gains identity -> RMSE 0); see the
-            # note on the FixedOrbit case for what ARM/x86/GPU are:
+            # note on the FixedOrbitFine case for what ARM/x86/GPU are:
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   ARM  | 0.8767109952752573 |     0.2401       1.1      |     0.4806       1.0
             #   x86  | 0.8767113498565474 |     0.2401       1.1      |     0.4806       1.0
@@ -445,16 +445,16 @@ trajectory_configs = [
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
-        id="NoDragOrbit+PhaseCalculationRFI",
+        id="NoDragOrbitFine+PhaseCalculationRFIFine",
     ),
     pytest.param(
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:Orbit",
-                "trajectory:PhaseCalculationRFI",
-                "rfi_signal:ComplexRFIVarAnt",
-                "rfi_vis:RiemannVis",
+                "trajectory:OrbitFine",
+                "trajectory:PhaseCalculationRFIFine",
+                "rfi_signal:ComplexRFIVarAntFine",
+                "rfi_vis:RiemannVisFine",
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
@@ -462,7 +462,7 @@ trajectory_configs = [
             # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
             # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
             # Measured opt-point values, double precision (gains identity -> RMSE 0; matches
-            # NoDragOrbit -- same orbit to fp precision):
+            # NoDragOrbitFine -- same orbit to fp precision):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   ARM  | 0.8767098298475181 |     0.2401       1.1      |     0.4806       1.0
             #   x86  | 0.8767101993544267 |     0.2401       1.1      |     0.4806       1.0
@@ -482,20 +482,20 @@ trajectory_configs = [
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
-        id="Orbit+PhaseCalculationRFI",
+        id="OrbitFine+PhaseCalculationRFIFine",
     ),
 ]
 
 
 # ---------------------------------------------------------------------------
-# RFI signal components — upstream fixed to FixedOrbit
+# RFI signal components — upstream fixed to FixedOrbitFine
 # ---------------------------------------------------------------------------
 
 rfi_signal_configs = []
 
 
 # ---------------------------------------------------------------------------
-# RFI visibility components — upstream fixed to FixedOrbit
+# RFI visibility components — upstream fixed to FixedOrbitFine
 # ---------------------------------------------------------------------------
 
 rfi_vis_configs = [
@@ -503,9 +503,9 @@ rfi_vis_configs = [
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:FixedOrbit",
-                "rfi_signal:ComplexRFIVarAnt",
-                "rfi_vis:RiemannVis",
+                "trajectory:FixedOrbitFine",
+                "rfi_signal:ComplexRFIVarAntFine",
+                "rfi_vis:RiemannVisFine",
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
@@ -544,20 +544,20 @@ rfi_vis_configs = [
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
-        id="RiemannVis",
+        id="RiemannVisFine",
     ),
     pytest.param(
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:FixedOrbit",
-                "rfi_signal:ComplexRFIVarAnt",
-                "rfi_vis:RiemannVisFFI",
+                "trajectory:FixedOrbitFine",
+                "rfi_signal:ComplexRFIVarAntFine",
+                "rfi_vis:RiemannVisFFIFine",
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
             # Only chi2 is asserted -- the FFI kernel is the unit under test; truth metrics
-            # match the non-FFI RiemannVis case above. Measured opt-point
+            # match the non-FFI RiemannVisFine case above. Measured opt-point
             # values (gains identity -> RMSE 0):
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   double  ARM    | 0.8965724354 |     0.1787       1.2      |     0.4176       0.3
@@ -573,26 +573,26 @@ rfi_vis_configs = [
             # Grace-Hopper node.
             chi2_ref=0.8965724353762747,
         ),
-        id="RiemannVisFFI",
+        id="RiemannVisFFIFine",
     ),
 ]
 
 
 # ---------------------------------------------------------------------------
-# Astronomical sky signal components — upstream fixed to FixedOrbit
+# Astronomical sky signal components — upstream fixed to FixedOrbitFine
 # ---------------------------------------------------------------------------
 
 ast_signal_configs = []
 
 # ---------------------------------------------------------------------------
-# Astronomical visibility components — upstream fixed to FixedOrbit
+# Astronomical visibility components — upstream fixed to FixedOrbitFine
 # ---------------------------------------------------------------------------
 
 ast_vis_configs = []
 
 
 # ---------------------------------------------------------------------------
-# Gains components — upstream fixed to FixedOrbit
+# Gains components — upstream fixed to FixedOrbitFine
 # ---------------------------------------------------------------------------
 
 # UnitaryGains is exercised by every case above -- it is the gains component they
@@ -728,9 +728,9 @@ def test_pipeline_log_is_written_in_the_plot_directory(
         {
             "model": {
                 "components": [
-                    "trajectory:FixedOrbit",
-                    "rfi_signal:ComplexRFIVarAnt",
-                    "rfi_vis:RiemannVis",
+                    "trajectory:FixedOrbitFine",
+                    "rfi_signal:ComplexRFIVarAntFine",
+                    "rfi_vis:RiemannVisFine",
                     "ast_vis:GPVisAst",
                     "gains:UnitaryGains",
                 ],
@@ -781,16 +781,16 @@ def test_pipeline_log_is_written_in_the_plot_directory(
 
 def _sharded_components(rfi_vis: str) -> list[str]:
     return [
-        "trajectory:FixedOrbit",
-        "trajectory:PhaseCalculationRFI",
-        "rfi_signal:ComplexRFIVarAnt",
+        "trajectory:FixedOrbitFine",
+        "trajectory:PhaseCalculationRFIFine",
+        "rfi_signal:ComplexRFIVarAntFine",
         f"rfi_vis:{rfi_vis}",
         "ast_vis:GPVisAst",
         "gains:UnitaryGains",
     ]
 
 
-# Same case as FixedOrbit+PhaseCalculationRFI above (double precision), so it shares that
+# Same case as FixedOrbitFine+PhaseCalculationRFIFine above (double precision), so it shares that
 # case's re-recorded reference and has to move with it -- the 1% tolerance is wide enough to
 # hide a missed update here, so it is worth checking the two match when either changes.
 # Verified on ARM CPU, x86 CPU and an NVIDIA GPU (the sharded child is pinned to CPU by
@@ -801,7 +801,7 @@ _SHARDED_CHI2_REF = 0.8967103833231144
 def _prepare_sharded_run(
     provide_test_data: Path,
     work_dir: Path,
-    rfi_vis: str = "RiemannVis",
+    rfi_vis: str = "RiemannVisFine",
     save_rfi_per_sat: bool = False,
 ) -> tuple[list[str], Path]:
     """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command."""
@@ -870,8 +870,8 @@ def _cpu_env(n_devices: int) -> dict:
         # The plain variant runs entirely through GSPMD+shard_map on pure JAX ops;
         # the FFI variant additionally exercises the custom C kernel inside
         # shard_map (the reason for check_vma=False in psum_over_rfi).
-        "RiemannVis",
-        "RiemannVisFFI",
+        "RiemannVisFine",
+        "RiemannVisFFIFine",
     ],
 )
 def test_pipeline_sharded_equivalence(

@@ -44,7 +44,7 @@ class TestConfigNormalisation:
         assert tle_config.normalise_tle_config(_config(norad_ids=None)).norad_ids == []
 
     @pytest.mark.parametrize(
-        "component", ["trajectory:FixedOrbit", "trajectory.FixedOrbit"]
+        "component", ["trajectory:FixedOrbitFine", "trajectory.FixedOrbitFine"]
     )
     def test_null_norad_ids_with_a_tle_model_is_a_clean_error(self, component):
         # import_components accepts both separators, so the guard has to see
