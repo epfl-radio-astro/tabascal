@@ -209,6 +209,45 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     out = jax.jit(f)({"rfi_A": A_s})
     assert out["rfi_A"].sharding.spec == P("rfi")
 
+    # AnalyticVis: its three per-source inputs sharded, the value and the
+    # signal-only gradient match the unsharded run
+    from types import SimpleNamespace
+    from tabascal.components.rfi_vis import AnalyticVis
+
+    cfg = SimpleNamespace(
+        n_ant=3, n_bl=3, n_freq=2, n_time=4, n_int_freq=1, int_time=2.0, chan_width=1e6,
+        freqs=1.4e9 + 1e6 * np.arange(2.0), a1=np.array([0, 0, 1]), a2=np.array([1, 2, 2]),
+        args={"rfi": {"analytic": {"stencil": 1, "segments": 2, "terms": 6,
+                                   "cubic_terms": 3, "scratch_mb": 256}}, "data": {}},
+    )
+    comp = AnalyticVis()
+    comp.setup(cfg)
+    forward = comp.build_forward()
+    shape = (n_rfi, 3, 2, 4)
+    tree = {
+        "rfi_A": rng.normal(size=shape) + 1j * rng.normal(size=shape),
+        "rfi_phase": rng.uniform(0, 6, shape),
+        "rfi_delay_poly_us": rng.normal(size=(n_rfi, 3, 4, 4)) * [1, 1e-4, 1e-6, 1e-8],
+        **{f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()},
+    }
+
+    def loss(amp, tree):
+        state = {**tree, "rfi_A": amp, "vis_rfi": jnp.zeros((3, 2, 4), complex)}
+        vis = forward({}, state, tree)["vis_rfi"]
+        return jnp.sum(vis.real * np.arange(24.0).reshape(3, 2, 4) + vis.imag)
+
+    sharded = dist.shard_pytree(tree, n_rfi)
+    for key in ("rfi_A", "rfi_phase", "rfi_delay_poly_us"):
+        assert sharded[key].sharding.spec == P("rfi"), key
+    grad = jax.jit(jax.value_and_grad(loss))
+    jaxpr = str(jax.make_jaxpr(jax.grad(loss))(sharded["rfi_A"], sharded))
+    assert "rfi_analytic_transpose_op" in jaxpr and "rfi_analytic_full_transpose_op" not in jaxpr
+    got = grad(sharded["rfi_A"], sharded)
+    dist.sharding_enabled = lambda: False
+    expect = jax.value_and_grad(loss)(tree["rfi_A"], tree)
+    np.testing.assert_allclose(got[0], expect[0], rtol=1e-10)
+    np.testing.assert_allclose(np.asarray(got[1]), expect[1], rtol=1e-10, atol=1e-12)
+
     print("MULTI_DEVICE_OK")
     """
 )
