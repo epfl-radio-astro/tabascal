@@ -587,11 +587,10 @@ rfi_vis_configs = [
             ],
             # The data-grid route: the RiemannVisFine model with the signal and
             # phase on the data grid and each cell integrated in closed form.
-            # TO BE RE-RECORDED on ARM/x86/GPU, double and single: chi2 and the
-            # metric ranges below are #238's data-grid PolyInterpVis reference
-            # (0.8965709350 double / 0.8965295553 single on ARM), a stand-in until
-            # this case has been measured.
-            chi2_ref=0.896570934972912,
+            # chi2 measured on ARM (Apple M-series, CPU): 0.8942335916 double /
+            # 0.8941589594 single. TO BE RE-RECORDED on x86 and GPU; the metric
+            # ranges hold both ARM measurements.
+            chi2_ref=0.8942335916260074,
             metrics_ref={
                 "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
                 "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
