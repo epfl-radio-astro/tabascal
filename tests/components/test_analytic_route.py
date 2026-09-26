@@ -383,3 +383,5 @@ class TestComponentOrder:
         message = str(excinfo.value)
         assert "'trajectory:FixedOrbit'" in message
         assert "FixedOrbitFine" not in message and "PhaseCalculationRFIFine" not in message
+        with pytest.raises(ComponentOrderError, match="'rfi_signal:ComplexRFIVarAnt'.*-- add one"):
+            check(["trajectory:FixedOrbit", "rfi_vis:AnalyticVis", "rfi_signal:ComplexRFIVarAntFine"])

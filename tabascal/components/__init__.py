@@ -212,10 +212,19 @@ def _describe_missing(
     only has to be moved. Say which.
     """
     name = component_ref(components[index])
+    # Only producers that write it on the grid it is read on, when any do:
+    # offering a fine-grid producer to a data-grid reader trades one error for
+    # another.
+    wanted = tuple(getattr(components[index], "required_inputs", {}).get(exc.key, ()))
+
+    def on_grid(producer) -> bool:
+        shape = getattr(producer, "output_shapes", {}).get(exc.key)
+        return not wanted or shape is None or tuple(shape) == wanted
+
     later = [
         (i, component_ref(comp))
         for i, comp in enumerate(components[index + 1 :], start=index + 1)
-        if exc.key in component_outputs(comp)
+        if exc.key in component_outputs(comp) and on_grid(comp)
     ]
     where = f"model.components[{index}]"
 
@@ -228,14 +237,7 @@ def _describe_missing(
         )
 
     producers = state_key_producers().get(exc.key, [])
-    # Only those that write it on the grid it is read on, when any do: offering
-    # a fine-grid producer to a data-grid reader trades one error for another.
-    wanted = tuple(getattr(components[index], "required_inputs", {}).get(exc.key, ()))
-    on_grid = [
-        ref for ref in producers
-        if tuple(in_tree_components()[ref].output_shapes[exc.key]) == wanted
-    ]
-    producers = on_grid or producers
+    producers = [ref for ref in producers if on_grid(in_tree_components()[ref])] or producers
     if producers:
         listed = ", ".join(f"'{ref}'" for ref in producers)
         absent = (
