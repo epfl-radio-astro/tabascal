@@ -1,16 +1,20 @@
 model:
   components:
-  # RFI Phase from trajectory
-    - trajectory:FixedOrbitFine
+  # RFI phase, signal and visibilities on the data grid, each cell
+  # integrated in closed form (docs/analytic_rfi_vis.md)
+    - trajectory:FixedOrbit
+    - rfi_signal:ComplexRFIVarAnt
+    # - rfi_signal:ComplexRFIConstAnt
+    - rfi_vis:AnalyticVis
+  # Or the fine-grid route, which the three above replace as a set:
+    # - trajectory:FixedOrbitFine
     # - trajectory:NoDragOrbitFine
     # - trajectory:OrbitFine
     # - trajectory:PhaseCalculationRFIFine
-  # RFI signal model
-    - rfi_signal:ComplexRFIVarAntFine
+    # - rfi_signal:ComplexRFIVarAntFine
     # - rfi_signal:ComplexRFIConstAntFine
-  # RFI visibility calculation
     # - rfi_vis:RiemannVisFine
-    - rfi_vis:RiemannVisVariableFFIFine
+    # - rfi_vis:RiemannVisVariableFFIFine
   # Astronomical signal model
     - ast_vis:GPVisAst
   # Antenna Gain model 
