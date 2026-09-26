@@ -297,16 +297,20 @@ class TestAnalyticVis:
         for got, expected in zip(pullback(cot), dense_pullback(cot)):
             assert rel_err(got, expected) < tol
 
-    @pytest.mark.parametrize("signals, n_int_freq", [
-        pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 1, id="VarAnt-1"),
-        pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 3, id="VarAnt-3"),
-        pytest.param((ComplexRFIConstAntFine, ComplexRFIConstAnt), 3, id="ConstAnt-3"),
+    @pytest.mark.parametrize("signals, n_int_freq, gp", [
+        pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 1, None, id="VarAnt-1"),
+        pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 3, None, id="VarAnt-3"),
+        # ConstAnt's own prior keeps only the DC mode here: a constant signal, which
+        # every stencil interpolates exactly. VarAnt's gammas and cutoff let it vary.
+        pytest.param((ComplexRFIConstAntFine, ComplexRFIConstAnt), 3, ([3, 3], 1e-9), id="ConstAnt-3"),
     ])
-    def test_approximates_the_fine_grid_route(self, signals, n_int_freq):
+    def test_approximates_the_fine_grid_route(self, signals, n_int_freq, gp):
         """The same latent parameters through both routes, and closer than holding each
         cell's value (stencil 0). Cells wind ~4 turns: 101 samples keep the fine route's
         own Riemann error (6e-3 at 31) below the signal interpolation's (9e-4)."""
         cfg = make_config(n_ant=5, n_int_time=101, n_int_freq=n_int_freq, corr_time=80.0)
+        if gp is not None:
+            cfg.args["rfi"]["gp_cov"]["gammas"], cfg.args["rfi"]["cutoff"] = gp
         fine, params = run_route([FixedOrbitFine, signals[0], RiemannVisFine], cfg)
         expected = fine(params)["vis_rfi"]
         err = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
