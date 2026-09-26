@@ -228,6 +228,14 @@ def _describe_missing(
         )
 
     producers = state_key_producers().get(exc.key, [])
+    # Only those that write it on the grid it is read on, when any do: offering
+    # a fine-grid producer to a data-grid reader trades one error for another.
+    wanted = tuple(getattr(components[index], "required_inputs", {}).get(exc.key, ()))
+    on_grid = [
+        ref for ref in producers
+        if tuple(in_tree_components()[ref].output_shapes[exc.key]) == wanted
+    ]
+    producers = on_grid or producers
     if producers:
         listed = ", ".join(f"'{ref}'" for ref in producers)
         absent = (
@@ -247,6 +255,56 @@ def _describe_missing(
     )
 
 
+#: The dimensions of the fine grid the Fine RFI components pass between them.
+_FINE_DIMS = ("n_freq_fine", "n_time_fine")
+
+
+def _grid_name(shape) -> str:
+    return "fine grid" if any(d in _FINE_DIMS for d in shape) else "data grid"
+
+
+def rfi_grid(classes: Iterable[type]):
+    """The grid a model's RFI components exchange state on.
+
+    ``"fine"`` when any of them reads or writes a fine-grid array, ``"data"``
+    when none does and one reads the data-grid route's ``rfi_delay_poly_us``,
+    and ``None`` when there is no RFI chain to speak of.
+    """
+    classes = list(classes)
+    shapes = [
+        shape for cls in classes
+        for shape in (*cls.required_inputs.values(), *cls.output_shapes.values())
+    ]
+    if any(d in _FINE_DIMS for shape in shapes for d in shape):
+        return "fine"
+    if any("rfi_delay_poly_us" in cls.required_inputs for cls in classes):
+        return "data"
+    return None
+
+
+def _check_grid(components, producer: int, consumer: int, key: str, shape) -> None:
+    """Raise if ``key`` is read with a different shape from the one it was written with.
+
+    The order check alone compares key names, and the fine-grid and data-grid
+    RFI components share theirs, so a mixed chain would assemble and then fail
+    inside the traced forward pass.
+    """
+    written = getattr(components[producer], "output_shapes", {}).get(key)
+    if written is None or tuple(written) == tuple(shape):
+        return
+    name = component_ref(components[consumer])
+    raise ComponentOrderError(
+        f"model.components[{consumer}] '{name}' reads the model state key '{key}' "
+        f"on the {_grid_name(shape)} {tuple(shape)}, but "
+        f"'{component_ref(components[producer])}' (model.components[{producer}]) "
+        f"writes it on the {_grid_name(written)} {tuple(written)}. The RFI "
+        "components must share a grid: the Fine trajectory and signal (e.g. "
+        "trajectory:FixedOrbitFine, rfi_signal:ComplexRFIVarAntFine) with an "
+        "rfi_vis:RiemannVis*Fine, or trajectory:FixedOrbit with "
+        "rfi_signal:ComplexRFIVarAnt or ComplexRFIConstAnt and rfi_vis:AnalyticVis."
+    )
+
+
 def validate_component_order(
     components: Sequence[Any], initial_state_keys: Iterable[str] = ()
 ) -> None:
@@ -261,6 +319,9 @@ def validate_component_order(
     as a ``KeyError`` on a state key from inside the JIT-ed forward pass.
     """
     state = dict.fromkeys(initial_state_keys)
+    initial = set(state)
+    # The component that last wrote each key, beyond those the model supplies.
+    written: Dict[str, int] = {}
     for index, comp in enumerate(components):
         try:
             comp.validate_state(state)
@@ -268,4 +329,10 @@ def validate_component_order(
             raise ComponentOrderError(
                 _describe_missing(exc, components, index)
             ) from None
+        for key, shape in getattr(comp, "required_inputs", {}).items():
+            if key in written:
+                _check_grid(components, written[key], index, key, shape)
         state.update(dict.fromkeys(component_outputs(comp)))
+        written.update(
+            (key, index) for key in component_outputs(comp) if key not in initial
+        )

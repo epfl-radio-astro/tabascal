@@ -353,7 +353,10 @@ def _print_model_summary(tab_config, model, start_time):
     n_params = sum(x.size for x in model.init_params.values())
     n_data = 2 * tab_config.vis_obs.size
 
-    print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
+    if tab_config.rfi_grid == "data":
+        print("RFI visibilities integrated analytically per cell (no fine time grid).")
+    else:
+        print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
     print()
     print(f"Number of Antennas   : {tab_config.n_ant: 4}")
     print(f"Number of Time Steps : {tab_config.n_time: 4}")
