@@ -658,6 +658,23 @@ class BaseGPRFI(Component):
     #: change here changes the number of fitted parameters.
     default_pk_cutoff = 1e-9
 
+    #: Whether the inverse transform supersamples onto the fine grid. The
+    #: data-grid signals turn it off: the same latent, prior and parameters,
+    #: with the signal at each cell's own sample only.
+    supersample = True
+
+    @property
+    def ss_factors(self) -> list:
+        """Samples per cell on the frequency and time axes of the signal."""
+        return [self.n_int_freq, self.n_int_time] if self.supersample else [1, 1]
+
+    @property
+    def signal_shape(self) -> tuple:
+        """``(n_freq, n_time)`` axes of the signal: the fine grid's or the data grid's."""
+        if self.supersample:
+            return (self.n_freq_fine, self.n_time_fine)
+        return (self.n_freq, self.n_time)
+
     def gp_cov_params(self):
         """``(gammas, cutoff)`` for this component: the config's, else its own.
 
@@ -768,8 +785,13 @@ class BaseGPRFI(Component):
         # padded dummy rows too -- they duplicate the last real satellite, so they
         # inherit its mask and are zeroed independently by masked_forward_transform.
         # Stored as a boolean, which is what jnp.where in the forward wants and is
-        # the smallest thing to shard.
-        rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None)
+        # the smallest thing to shard. A data-grid signal takes the data-grid
+        # mask under the same name: that is the name distributed.py shards along
+        # the source axis, and neither it nor build_masked_signal minds the
+        # length of the time axis.
+        rfi_mask_fine = getattr(
+            tab_config, "rfi_mask_fine" if self.supersample else "rfi_mask", None
+        )
         self.rfi_mask_fine = (
             None if rfi_mask_fine is None else jnp.asarray(rfi_mask_fine, dtype=bool)
         )
@@ -914,9 +936,7 @@ class BaseGPRFI(Component):
         # This placeholder is a fine-grid memory hog; under sharding each device only
         # ever allocates its own RFI shard (never the full array).
         self.state_outputs = {
-            "rfi_A": sharded_rfi_zeros(
-                (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine), complex
-            ),
+            "rfi_A": sharded_rfi_zeros((self.n_rfi, self.n_ant, *self.signal_shape), complex),
         }
 
     def _compute_gp_params(self):
@@ -1090,7 +1110,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             ns,
             dxs,
             pad_factors,
-            [self.n_int_freq, self.n_int_time],
+            self.ss_factors,
             p0,
             k0s,
             gammas,
@@ -1241,6 +1261,22 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
 
+class ComplexRFIVarAnt(ComplexRFIVarAntFine):
+    """:class:`ComplexRFIVarAntFine` on the data grid ``(n_rfi, n_ant, n_freq, n_time)``.
+
+    The same latent, prior, parameters and initialisation; the inverse transform
+    lands on each cell's own sample instead of supersampling, so where the two
+    grids meet the two components agree exactly. For
+    :class:`~tabascal.components.rfi_vis.AnalyticVis`, which interpolates the
+    signal across each cell itself.
+    """
+
+    supersample = False
+    output_shapes = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+    }
+
+
 class ComplexRFIConstAntFine(BaseGPRFI):
 
     # Its own historical values, unchanged by the wiring: see BaseGPRFI.
@@ -1325,8 +1361,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         ss_idxs = self.ss_idxs
         n_rfi = self.n_rfi
         n_ant = self.n_ant
-        n_freq_fine = self.n_freq_fine
-        n_time_fine = self.n_time_fine
+        signal_shape = self.signal_shape
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -1346,7 +1381,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             rfi_A = masked_signal(rfi_A, constants)
             # Avoids allocating a full grid of ones and a multiply.
             rfi_A = jnp.broadcast_to(
-                rfi_A[:, None], (n_rfi, n_ant, n_freq_fine, n_time_fine)
+                rfi_A[:, None], (n_rfi, n_ant, *signal_shape)
             )
 
             state = {**state, "rfi_A": rfi_A}
@@ -1373,7 +1408,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             ns,
             dxs,
             pad_factors,
-            [self.n_int_freq, self.n_int_time],
+            self.ss_factors,
             p0,
             k0s,
             gammas,
@@ -1536,3 +1571,19 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
+
+
+class ComplexRFIConstAnt(ComplexRFIConstAntFine):
+    """:class:`ComplexRFIConstAntFine` on the data grid ``(n_rfi, n_ant, n_freq, n_time)``.
+
+    The same latent, prior, parameters and initialisation; the inverse transform
+    lands on each cell's own sample instead of supersampling, so where the two
+    grids meet the two components agree exactly. For
+    :class:`~tabascal.components.rfi_vis.AnalyticVis`, which interpolates the
+    signal across each cell itself.
+    """
+
+    supersample = False
+    output_shapes = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+    }
