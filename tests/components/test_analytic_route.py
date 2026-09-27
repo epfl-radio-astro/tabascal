@@ -297,6 +297,25 @@ class TestAnalyticVis:
         for got, expected in zip(pullback(cot), dense_pullback(cot)):
             assert rel_err(got, expected) < tol
 
+    def test_each_unmasked_window_is_integrated_alone(self):
+        """Source 0 in view in two windows narrower than the stencil, so each holds its
+        cells' values (stencil 0); source 1 throughout. Masked cells get nothing from 0."""
+        cfg, state = op_case(n_int_freq=1)  # one sample per channel: its stencil is moot
+        state = {**state, "vis_rfi": jnp.zeros_like(state["vis_rfi"])}
+        amp, phase = state["rfi_A"], state["rfi_phase"]
+        held = analytic_call(op_case(n_int_freq=1, stencil=0)[0], state)(amp.at[1].set(0), phase)
+        expected = analytic_call(cfg, state)(amp.at[0].set(0), phase)
+        cfg.rfi_mask = np.array([[True, True, False, True, False], [True] * 5])
+        expected += jnp.where(cfg.rfi_mask[0], held, 0)
+        call = analytic_call(cfg, state)
+        vis, pullback = jax.vjp(call, amp, phase)
+        tol = 1e-12 if jax.config.x64_enabled else 1e-5
+        np.testing.assert_allclose(vis, expected, rtol=tol, atol=tol * float(jnp.abs(vis).max()))
+        for grad in pullback(jnp.where(cfg.rfi_mask[0], 0, jnp.ones_like(vis))):
+            assert bool(jnp.all(grad[0] == 0)) and bool(jnp.any(grad[1] != 0))
+        jaxpr = str(jax.make_jaxpr(jax.grad(lambda a: jnp.abs(call(a, phase)).sum()))(amp))
+        assert "rfi_analytic_transpose_op" in jaxpr and "rfi_analytic_full_transpose_op" not in jaxpr
+
     @pytest.mark.parametrize("signals, n_int_freq, gp", [
         pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 1, None, id="VarAnt-1"),
         pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 3, None, id="VarAnt-3"),
