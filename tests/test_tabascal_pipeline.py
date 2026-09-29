@@ -166,11 +166,7 @@ def _run_pipeline(
     t_config: PipelineTestConfig,
     precision: str,
 ) -> tuple[int, str, str]:
-    local_dir = Path(provide_test_data)
     data_dir = Path(__file__).parent / "data"
-    input_hash = compute_sha256(data_dir / t_config.sim_file_name)
-
-    input_dir = local_dir / input_hash
     config_template = data_dir / "tab_target.yaml"
     config_path = tmp_path / "tab_target.yaml"
 
@@ -180,8 +176,8 @@ def _run_pipeline(
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
-    input_src_dir = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
-    assert input_src_dir, f"No pnt_src* directory found in {input_dir}"
+    # A copy, not the cache: the run writes its results into the MS.
+    input_src_dir = _copy_sim(provide_test_data, tmp_path / "sim", t_config.sim_file_name)
 
     tabascal_script = (
         Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
@@ -707,23 +703,27 @@ def test_pipeline(
 # ---------------------------------------------------------------------------
 
 
-def _copy_sim(provide_test_data: Path, work_dir: Path) -> Path:
-    """Copy the 8A/3-satellite sim into ``work_dir`` and return the copy.
+def _copy_sim(
+    provide_test_data: Path, work_dir: Path, sim_file_name: str = "sim_target_8A.yaml"
+) -> Path:
+    """Copy a sim into ``work_dir`` and return the copy.
 
     The copy keeps the sim directory basename (the zarr/MS paths inside the run are
     derived from it) and keeps the run's outputs -- plots, logs, results -- out of
     the shared HuggingFace cache, so a test can assert on what its own run wrote.
+    Files are copied without their mode bits: huggingface_hub stores cache blobs
+    read-only, and a copy that kept 0444 is an MS casacore cannot open to write.
     """
     import shutil
 
     work_dir.mkdir(parents=True, exist_ok=True)
     data_dir = Path(__file__).parent / "data"
-    input_hash = compute_sha256(data_dir / "sim_target_8A.yaml")
+    input_hash = compute_sha256(data_dir / sim_file_name)
     input_dir = Path(provide_test_data) / input_hash
     src = next((d for d in input_dir.glob("pnt_src*") if d.is_dir()), None)
     assert src, f"No pnt_src* directory found in {input_dir}"
     out_dir = work_dir / src.name
-    shutil.copytree(src, out_dir)
+    shutil.copytree(src, out_dir, copy_function=shutil.copyfile)
     return out_dir
 
 
@@ -741,9 +741,9 @@ def test_pipeline_log_is_written_in_the_plot_directory(
     One iteration: what is under test is where the run writes, not what it fits.
     """
     out_dir = _copy_sim(provide_test_data, tmp_path)
-    # The cached sim the copy comes from collects a log from every run the tests
-    # above make against it in place, so what *this* run wrote is the difference
-    # rather than everything that is there.
+    # A cache written to in place by older test code can carry logs into the
+    # copy, so what *this* run wrote is the difference rather than everything
+    # that is there.
     before = set(tmp_path.rglob("log_tab*"))
 
     data_dir = Path(__file__).parent / "data"

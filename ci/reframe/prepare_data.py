@@ -142,8 +142,15 @@ def main():
     if sim_dir is None:
         raise RuntimeError(f"No pnt_src* directory found in {input_dir}")
 
-    # Still the tab-sim simulation directory, which is what -od is given:
-    # without an ms_path it is read as one, the layout the perf job relies on.
+    # The run writes its results into the MS, so give it a copy under workdir
+    # rather than the HuggingFace cache, whose blobs are read-only. copyfile
+    # drops the 0444 mode bits; the basename is kept because the run derives
+    # its MS/zarr paths from it. -od still receives a tab-sim simulation
+    # directory: without an ms_path it is read as one, as the perf job expects.
+    staged = workdir / "sim" / sim_dir.name
+    if not staged.is_dir():
+        shutil.copytree(sim_dir, staged, copy_function=shutil.copyfile)
+    sim_dir = staged
     (workdir / "sim_dir.txt").write_text(str(sim_dir))
 
     # Step 3: Create modified config with requested components
