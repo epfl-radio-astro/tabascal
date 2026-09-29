@@ -73,6 +73,12 @@ def _gp_cov_number(value, where: str) -> float:
 #: "measure it from the observed visibilities rather than making me guess".
 FROM_DATA = "data"
 
+#: ``rfi.gp_cov.std``'s other word: one width per satellite, read off the
+#: matched-filter light curves. Only the RFI prior takes it -- the matched
+#: filter measures sources with a trajectory, and the sky has none.
+FROM_MATCHED_FILTER = "matched-filter"
+_MATCHED_FILTER_WORDS = (FROM_MATCHED_FILTER, "mf")
+
 
 def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
     """``rms|V|`` over the samples ``keep`` selects, in Jy.
@@ -165,6 +171,47 @@ def _gp_cov_amplitude(value, where: str):
     return _gp_cov_number(value, where)
 
 
+def _gp_cov_rfi_amplitude(value, where: str):
+    """A positive number, ``"data"``, or ``"matched-filter"`` (``"mf"``).
+
+    The RFI width can be measured two ways where the astronomical one has only
+    the first: from every visibility, or per satellite from the matched filter
+    the run can already seed from. Spelled like ``rfi.init`` and ``rfi.mean``
+    spell it, alias included, and normalised to the long form.
+    """
+
+    if isinstance(value, str) and value in _MATCHED_FILTER_WORDS:
+        return FROM_MATCHED_FILTER
+    if isinstance(value, str) and value != FROM_DATA:
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is not a number, not "
+            f"{FROM_DATA!r} and not {FROM_MATCHED_FILTER!r}, which are the only "
+            "words it takes."
+        )
+
+    return _gp_cov_amplitude(value, where)
+
+
+def _gp_cov_rfi_scale(value, where: str):
+    """A positive number, or ``"matched-filter"`` (``"mf"``).
+
+    A correlation scale of the RFI prior: set, or measured per satellite from the
+    matched-filter light curve's own autocorrelation. There is no ``"data"`` here --
+    the visibilities as a whole have no single coherence scale to read off, while a
+    light curve filtered along one trajectory does.
+    """
+
+    if isinstance(value, str):
+        if value in _MATCHED_FILTER_WORDS:
+            return FROM_MATCHED_FILTER
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is not a number and not "
+            f"{FROM_MATCHED_FILTER!r}, which is the only word it takes."
+        )
+
+    return _gp_cov_number(value, where)
+
+
 def _gp_cov_pair(value, where: str) -> List[float]:
     """An ordered pair of positive numbers, one per axis.
 
@@ -239,6 +286,8 @@ def _gp_cov_cutoff(value, where: str) -> float:
 GP_COV_KINDS = {
     "number": _gp_cov_number,
     "amplitude": _gp_cov_amplitude,
+    "rfi_amplitude": _gp_cov_rfi_amplitude,
+    "rfi_scale": _gp_cov_rfi_scale,
     "pair": _gp_cov_pair,
 }
 
