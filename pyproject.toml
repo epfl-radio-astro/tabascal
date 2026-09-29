@@ -27,7 +27,9 @@ requires-python = ">=3.10"
 dependencies = [
     "dask",
     "dask-ms",
-    "jax>=0.6.0",
+    # 0.11.2 segfaults compiling tabascal's multi-device CPU programs (shard_map
+    # over forced host devices); 0.11.1 is fine. Drop once a fixed release is out.
+    "jax>=0.6.0,!=0.11.2",
     "matplotlib",
     "numpy",
     "numpyro",
