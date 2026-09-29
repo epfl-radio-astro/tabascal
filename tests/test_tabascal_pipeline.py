@@ -717,9 +717,9 @@ def test_pipeline_log_is_written_in_the_plot_directory(
     One iteration: what is under test is where the run writes, not what it fits.
     """
     out_dir = _copy_sim(provide_test_data, tmp_path)
-    # The cached sim the copy comes from collects a log from every run the tests
-    # above make against it in place, so what *this* run wrote is the difference
-    # rather than everything that is there.
+    # A cache written to in place by older test code can carry logs into the
+    # copy, so what *this* run wrote is the difference rather than everything
+    # that is there.
     before = set(tmp_path.rglob("log_tab*"))
 
     data_dir = Path(__file__).parent / "data"
