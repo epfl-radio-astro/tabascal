@@ -106,8 +106,8 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVis())
-    ffi_result = compute_vis_rfi(RiemannVisFFI())
+    ref_result = compute_vis_rfi(RiemannVisFine())
+    ffi_result = compute_vis_rfi(RiemannVisFFIFine())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -131,8 +131,8 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         )
         return tangents["vis_rfi"]
 
-    ref_result = compue_jvp(RiemannVis())
-    ffi_result = compue_jvp(RiemannVisFFI())
+    ref_result = compue_jvp(RiemannVisFine())
+    ffi_result = compue_jvp(RiemannVisFFIFine())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -160,8 +160,8 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
 
 
-    ref_state = compue_vjp(RiemannVis())
-    ffi_state = compue_vjp(RiemannVisFFI())
+    ref_state = compue_vjp(RiemannVisFine())
+    ffi_state = compue_vjp(RiemannVisFFIFine())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_state["rfi_A"].dtype == ref_state["rfi_A"].dtype
@@ -199,7 +199,7 @@ def test_mixed_precision_rejected():
 # ---------------------------------------------------------------------------
 # Blocked baseline scan
 #
-# RiemannVis walks the baseline axis in blocks of rfi.baseline_block_size under
+# RiemannVisFine walks the baseline axis in blocks of rfi.baseline_block_size under
 # jax.checkpoint, so the (n_bl, n_rfi, n_freq_fine, n_time_fine) fine grid the
 # Riemann sum is built from is formed a block at a time rather than for the whole
 # axis, and is recomputed in the backward pass rather than kept. Baselines are independent, so
@@ -212,7 +212,7 @@ def test_mixed_precision_rejected():
 def dense_vis_rfi(state, config):
     """The unblocked reduction: the whole fine grid, then the fine->coarse mean.
 
-    What ``RiemannVis`` computed before the scan, written out here so the blocked
+    What ``RiemannVisFine`` computed before the scan, written out here so the blocked
     kernel is held to the formula rather than only to itself.
     """
     vis_fine = calculate_rfi_vis_fine(
@@ -303,7 +303,7 @@ def test_the_block_size_changes_neither_the_value_nor_the_gradient(block_size):
     state = create_state(config, False, 42, real_dtype=real_dtype)
     cotangent = create_state(config, True, 50, real_dtype=real_dtype)["vis_rfi"]
 
-    impl = RiemannVis()
+    impl = RiemannVisFine()
     impl.setup(config)
     constants = make_constants(impl)
     forward = impl.build_forward()
@@ -338,7 +338,7 @@ def test_the_fine_grid_is_not_kept_for_the_reverse_pass():
     real_dtype = _session_dtype()
     state = create_state(config, False, 42, real_dtype=real_dtype)
 
-    impl = RiemannVis()
+    impl = RiemannVisFine()
     impl.setup(config)
     constants = make_constants(impl)
     forward = impl.build_forward()
@@ -417,7 +417,7 @@ def test_the_default_block_size_is_used_when_the_config_does_not_set_one():
     config = create_config(4, 2, 3, 5, 4, 3)
     assert config.args["rfi"] == {}
 
-    impl = RiemannVis()
+    impl = RiemannVisFine()
     impl.setup(config)
 
     assert impl.baseline_block_size == 128
@@ -436,7 +436,7 @@ def test_a_null_block_size_is_one_block_over_every_baseline():
     config = create_config(*sizes, rfi_args={"baseline_block_size": None})
     state = create_state(config, False, 42, real_dtype=real_dtype)
 
-    impl = RiemannVis()
+    impl = RiemannVisFine()
     impl.setup(config)
     assert impl.baseline_block_size is None
 
@@ -471,7 +471,7 @@ def test_a_null_block_size_keeps_the_tape_bounded():
     def residual_bytes(block):
         config = create_config(*sizes, rfi_args={"baseline_block_size": block})
         state = create_state(config, False, 42, real_dtype=real_dtype)
-        impl = RiemannVis()
+        impl = RiemannVisFine()
         impl.setup(config)
         constants = make_constants(impl)
         forward = impl.build_forward()
@@ -502,7 +502,7 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"baseline_block_size": block_size})
 
     with pytest.raises(RuntimeError, match="baseline_block_size"):
-        RiemannVis().setup(config)
+        RiemannVisFine().setup(config)
 
 
 _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
@@ -520,7 +520,7 @@ _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
     x64 = os.environ["TAB_TEST_X64"] == "1"
     jax.config.update("jax_enable_x64", x64)
 
-    from tabascal.components.rfi_vis import RiemannVis
+    from tabascal.components.rfi_vis import RiemannVisFine
     from tabascal.distributed import sharding_enabled
 
     assert jax.device_count() == 2, jax.device_count()
@@ -558,7 +558,7 @@ _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
             n_int_time=n_int_time, n_int_freq=n_int_freq, n_bl=n_bl, a1=a1, a2=a2,
             precision="double", args={"rfi": {"baseline_block_size": block_size}},
         )
-        comp = RiemannVis()
+        comp = RiemannVisFine()
         comp.setup(config)
         constants = {
             f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()
@@ -620,7 +620,7 @@ def test_every_block_size_agrees_with_the_rfi_axis_split_across_devices():
 # ---------------------------------------------------------------------------
 # Variable (per-baseline) time sampling
 #
-# RiemannVisVariable and RiemannVisVariableFFI split the baselines into groups,
+# RiemannVisVariableFine and RiemannVisVariableFFIFine split the baselines into groups,
 # each integrated over a coarser time stride. The config
 # carries this grouping as ``time_sample_idxs`` (the baseline indices in each
 # group) and ``time_strides`` (the matching integration-time stride per group).
@@ -658,7 +658,7 @@ def make_variable_config(
 
 
 @pytest.mark.parametrize(
-    "Impl", [RiemannVis, RiemannVisFFI, RiemannVisVariable, RiemannVisVariableFFI]
+    "Impl", [RiemannVisFine, RiemannVisFFIFine, RiemannVisVariableFine, RiemannVisVariableFFIFine]
 )
 def test_integration_sample_counts_come_from_the_bound_config(Impl):
     """``n_int_freq`` and ``n_int_time`` are read off the TabConfig, symmetrically.
@@ -687,7 +687,7 @@ def test_variable_single_group_matches_reference(
     """One group spanning all baselines at stride 1 == full-resolution reference.
 
     With a single stride-1 group every integration sample is kept and averaged,
-    so the variable kernel must reproduce the dense RiemannVis exactly
+    so the variable kernel must reproduce the dense RiemannVisFine exactly
     (up to floating-point rounding).
     """
     config = make_variable_config(
@@ -700,8 +700,8 @@ def test_variable_single_group_matches_reference(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVis())
-    var_result = compute_vis_rfi(RiemannVisVariable())
+    ref_result = compute_vis_rfi(RiemannVisFine())
+    var_result = compute_vis_rfi(RiemannVisVariableFine())
 
     atol, rtol = _tols(real_dtype)
     assert var_result.shape == ref_result.shape
@@ -724,8 +724,8 @@ def test_variable_ffi_single_group_matches_reference(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisFFI())
-    var_result = compute_vis_rfi(RiemannVisVariableFFI())
+    ref_result = compute_vis_rfi(RiemannVisFFIFine())
+    var_result = compute_vis_rfi(RiemannVisVariableFFIFine())
 
     atol, rtol = _tols(real_dtype)
     assert var_result.shape == ref_result.shape
@@ -754,8 +754,8 @@ def test_variable_ffi_matches_variable(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisVariable())
-    ffi_result = compute_vis_rfi(RiemannVisVariableFFI())
+    ref_result = compute_vis_rfi(RiemannVisVariableFine())
+    ffi_result = compute_vis_rfi(RiemannVisVariableFFIFine())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.shape == (config.n_bl, config.n_freq, config.n_time)
@@ -785,8 +785,8 @@ def test_variable_ffi_matches_variable_jvp(
         )
         return tangents["vis_rfi"]
 
-    ref_result = compute_jvp(RiemannVisVariable())
-    ffi_result = compute_jvp(RiemannVisVariableFFI())
+    ref_result = compute_jvp(RiemannVisVariableFine())
+    ffi_result = compute_jvp(RiemannVisVariableFFIFine())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -815,8 +815,8 @@ def test_variable_ffi_matches_variable_vjp(
         (output_state,) = vjp_func(vjp_state)
         return output_state
 
-    ref_state = compute_vjp(RiemannVisVariable())
-    ffi_state = compute_vjp(RiemannVisVariableFFI())
+    ref_state = compute_vjp(RiemannVisVariableFine())
+    ffi_state = compute_vjp(RiemannVisVariableFFIFine())
 
     atol, rtol = _tols(real_dtype)
     assert ffi_state["rfi_A"].dtype == ref_state["rfi_A"].dtype
@@ -826,7 +826,7 @@ def test_variable_ffi_matches_variable_vjp(
 
 
 @pytest.mark.parametrize(
-    "Impl", [RiemannVisVariable, RiemannVisVariableFFI]
+    "Impl", [RiemannVisVariableFine, RiemannVisVariableFFIFine]
 )
 def test_variable_accumulates_into_state(Impl):
     """forward adds vis_rfi onto the incoming state rather than overwriting it."""

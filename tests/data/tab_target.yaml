@@ -1,10 +1,10 @@
 model:
   components:
   # RFI Phase from trajectory
-    - trajectory:FixedOrbit
+    - trajectory:FixedOrbitFine
   # RFI signal model
-    - rfi_signal:ComplexRFIVarAnt
-    - rfi_vis:RiemannVis
+    - rfi_signal:ComplexRFIVarAntFine
+    - rfi_vis:RiemannVisFine
   # Astronomical signal model
     - ast_vis:GPVisAst
   # Antenna Gain model 

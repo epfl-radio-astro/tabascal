@@ -1,5 +1,5 @@
-"""Tests for tabascal.components.trajectory — FixedOrbit, PhaseCalculationRFI,
-NoDragOrbit, and Orbit.
+"""Tests for tabascal.components.trajectory — FixedOrbitFine, PhaseCalculationRFIFine,
+NoDragOrbitFine, and OrbitFine.
 
 TLEs are sourced from IAU CPS SatChecker (no credentials). The SGP4 orbit tests
 run fully offline against the bundled TLE cache under tabascal/data/tles/.
@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 
-from tabascal.components.trajectory import FixedOrbit, PhaseCalculationRFI
+from tabascal.components.trajectory import FixedOrbitFine, PhaseCalculationRFIFine
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy
 
 from .conftest import active_precision, make_constants, assert_transform_roundtrip
@@ -111,7 +111,7 @@ def make_trajectory_config(
         n_int_time=n_int_time,
         n_int_freq=n_int_freq,
         orbit_records=orbit_records,
-        elements=jnp.zeros((n_rfi, 6)),  # placeholder — not used by FixedOrbit forward
+        elements=jnp.zeros((n_rfi, 6)),  # placeholder — not used by FixedOrbitFine forward
         epoch_jd=jnp.full((n_rfi,), ep),
         times_jd=jnp.linspace(ep, ep + n_time * 8.0 / 86400, n_time),
         times_jd_fine=times_jd_fine,
@@ -129,16 +129,16 @@ def make_trajectory_config(
 
 
 # ---------------------------------------------------------------------------
-# PhaseCalculationRFI
+# PhaseCalculationRFIFine
 # ---------------------------------------------------------------------------
 
 @pytest.mark.requires_double
-class TestPhaseCalculationRFI:
+class TestPhaseCalculationRFIFine:
 
     def test_setup_validates_dimensions(self):
         """If the config is self-consistent, _validate_dimensions must not raise."""
         cfg = make_trajectory_config(n_ant=4, n_rfi=2, n_freq=3, n_time=6, n_int_time=2)
-        comp = PhaseCalculationRFI()
+        comp = PhaseCalculationRFIFine()
         comp.setup(cfg)
         assert comp.ants_uvw.shape == (cfg.n_ant, cfg.n_time_fine, 3)
         assert comp.ants_xyz.shape == (cfg.n_ant, cfg.n_time_fine, 3)
@@ -146,7 +146,7 @@ class TestPhaseCalculationRFI:
     def test_set_params_is_identity(self):
         """build_set_params returns a no-op pass-through."""
         cfg = make_trajectory_config()
-        comp = PhaseCalculationRFI()
+        comp = PhaseCalculationRFIFine()
         comp.setup(cfg)
         sentinel = {"foo": jnp.array(1.0)}
         out = comp.build_set_params()(sentinel)
@@ -159,7 +159,7 @@ class TestPhaseCalculationRFI:
             n_ant=n_ant, n_rfi=n_rfi, n_freq=n_freq,
             n_time=n_time, n_int_time=n_int_time,
         )
-        comp = PhaseCalculationRFI()
+        comp = PhaseCalculationRFIFine()
         comp.setup(cfg)
 
         n_time_fine = n_time * n_int_time
@@ -176,7 +176,7 @@ class TestPhaseCalculationRFI:
         """Different antennas should see different phase delays."""
         n_ant, n_rfi = 4, 1
         cfg = make_trajectory_config(n_ant=n_ant, n_rfi=n_rfi)
-        comp = PhaseCalculationRFI()
+        comp = PhaseCalculationRFIFine()
         comp.setup(cfg)
 
         rfi_xyz = jnp.broadcast_to(
@@ -190,7 +190,7 @@ class TestPhaseCalculationRFI:
     def test_forward_preserves_rfi_xyz_in_state(self):
         """Forward pass copies rfi_xyz through to the output state unchanged."""
         cfg = make_trajectory_config()
-        comp = PhaseCalculationRFI()
+        comp = PhaseCalculationRFIFine()
         comp.setup(cfg)
 
         rfi_xyz = jnp.zeros((cfg.n_rfi, cfg.n_time_fine, 3)) + 6.8e6
@@ -211,7 +211,7 @@ class TestPhaseCalculationRFI:
             n_ant=n_ant, n_rfi=n_rfi, n_freq=n_freq,
             n_time=n_time, n_int_time=n_int_time,
         )
-        comp = PhaseCalculationRFI()
+        comp = PhaseCalculationRFIFine()
         comp.setup(cfg)
 
         n_time_fine = n_time * n_int_time
@@ -224,7 +224,7 @@ class TestPhaseCalculationRFI:
     def test_compute_ant_pos_xyz_earth_radius(self):
         """ants_xyz (GCRF) should be at Earth's surface radius (~6.37e6 m)."""
         cfg = make_trajectory_config(n_ant=4)
-        comp = PhaseCalculationRFI()
+        comp = PhaseCalculationRFIFine()
         comp.setup(cfg)
         radii = jnp.linalg.norm(comp.ants_xyz, axis=-1)
         assert jnp.all(radii > 6.35e6), "Antenna radius below Earth surface"
@@ -233,22 +233,22 @@ class TestPhaseCalculationRFI:
     def test_compute_ant_pos_distinct_across_antennas(self):
         """Different antennas must have distinct GCRF positions."""
         cfg = make_trajectory_config(n_ant=4)
-        comp = PhaseCalculationRFI()
+        comp = PhaseCalculationRFIFine()
         comp.setup(cfg)
         assert not jnp.allclose(comp.ants_xyz[0, 0], comp.ants_xyz[1, 0])
 
 
 # ---------------------------------------------------------------------------
-# FixedOrbit
+# FixedOrbitFine
 # ---------------------------------------------------------------------------
 
-class TestFixedOrbit:
+class TestFixedOrbitFine:
 
     def test_rfi_xyz_shape(self):
         """Pre-computed satellite positions stored at setup have shape (n_rfi, n_time_fine, 3)."""
         n_rfi, n_time, n_int_time = 1, 4, 2
         cfg = make_trajectory_config(n_rfi=n_rfi, n_time=n_time, n_int_time=n_int_time)
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         n_time_fine = n_time * n_int_time
         assert comp.rfi_xyz.shape == (n_rfi, n_time_fine, 3)
@@ -260,7 +260,7 @@ class TestFixedOrbit:
             n_rfi=n_rfi, n_ant=n_ant, n_freq=n_freq,
             n_time=n_time, n_int_time=n_int_time,
         )
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         n_time_fine = n_time * n_int_time
         assert comp.rfi_phase.shape == (n_rfi, n_ant, n_freq, n_time_fine)
@@ -268,7 +268,7 @@ class TestFixedOrbit:
     def test_rfi_xyz_altitude_reasonable(self):
         """ISS is at ~400 km altitude — distance from Earth's centre ≈ 6.8e6 m."""
         cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         radii = jnp.linalg.norm(comp.rfi_xyz[0], axis=-1)
         assert jnp.all(radii > 6.0e6)
@@ -277,14 +277,14 @@ class TestFixedOrbit:
     def test_rfi_phase_finite(self):
         """All pre-computed phase values are finite."""
         cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         assert jnp.all(jnp.isfinite(comp.rfi_phase))
 
     def test_forward_adds_rfi_xyz_and_phase_to_state(self):
         """Forward pass inserts rfi_xyz and rfi_phase into the state dict."""
         cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         out = comp.build_forward()({}, {}, make_constants(comp))
         assert "rfi_xyz" in out
@@ -293,7 +293,7 @@ class TestFixedOrbit:
     def test_forward_output_matches_precomputed(self):
         """Forward pass must return the same pre-computed arrays stored at setup time."""
         cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         out = comp.build_forward()({}, {}, make_constants(comp))
         assert jnp.array_equal(out["rfi_xyz"], comp.rfi_xyz)
@@ -312,7 +312,7 @@ class TestFixedOrbit:
             n_time=n_time, n_int_time=n_int_time,
             orbit_records=records,
         )
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         n_time_fine = n_time * n_int_time
         assert comp.rfi_xyz.shape == (n_rfi, n_time_fine, 3)
@@ -325,14 +325,14 @@ class TestFixedOrbit:
             _tle_record(27386, _ENVISAT_TLE1, _ENVISAT_TLE2),
         ]
         cfg = make_trajectory_config(n_rfi=2, orbit_records=records)
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         assert not jnp.allclose(comp.rfi_xyz[0], comp.rfi_xyz[1])
 
     def test_build_set_params_is_identity(self):
-        """FixedOrbit.build_set_params returns a pass-through with no side effects."""
+        """FixedOrbitFine.build_set_params returns a pass-through with no side effects."""
         cfg = make_trajectory_config(n_rfi=1)
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         sentinel = {"foo": jnp.array(1.0)}
         assert comp.build_set_params()(sentinel) is sentinel
@@ -340,7 +340,7 @@ class TestFixedOrbit:
     def test_compute_rfi_phase_consistent_with_get_rfi_phase(self):
         """Phase stored at setup must equal get_rfi_phase called with the same arrays."""
         cfg = make_trajectory_config(n_rfi=1, n_ant=4, n_freq=2, n_time=4, n_int_time=2)
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         expected = get_rfi_phase(comp.rfi_xyz, comp.ants_uvw, comp.ants_xyz, comp.freqs_fine)
         assert jnp.allclose(comp.rfi_phase, expected)
@@ -350,7 +350,7 @@ class TestFixedOrbit:
         cfg = make_trajectory_config(
             n_rfi=1, n_ant=4, n_freq=2, n_time=4, n_int_time=2, precision="single"
         )
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         assert comp.rfi_phase.shape == (cfg.n_rfi, cfg.n_ant, cfg.n_freq_fine, cfg.n_time_fine)
         assert jnp.all(jnp.isfinite(comp.rfi_phase))
@@ -555,15 +555,15 @@ class TestFetchOrbitalElementsPartial:
 
 
 # ---------------------------------------------------------------------------
-# NoDragOrbit and Orbit — merged parametrized class
-# NoDragOrbit: n_params=6 (bstar excluded from learnable params)
-# Orbit:       n_params=7 (bstar included)
+# NoDragOrbitFine and OrbitFine — merged parametrized class
+# NoDragOrbitFine: n_params=6 (bstar excluded from learnable params)
+# OrbitFine:       n_params=7 (bstar included)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.requires_double
 @pytest.mark.parametrize("orbit_cls,n_params", [
-    pytest.param("NoDragOrbit", 6, id="NoDragOrbit"),
-    pytest.param("Orbit", 7, id="Orbit"),
+    pytest.param("NoDragOrbitFine", 6, id="NoDragOrbitFine"),
+    pytest.param("OrbitFine", 7, id="OrbitFine"),
 ])
 class TestSGP4Orbits:
 
@@ -699,7 +699,7 @@ def test_require_double_gate():
 class TestOmmPropagation:
     """An OMM record must propagate to the same orbit its TLE form would.
 
-    FixedOrbit propagates through Skyfield, which reads TLE *lines*. An OMM has
+    FixedOrbitFine propagates through Skyfield, which reads TLE *lines*. An OMM has
     none — that is the whole point of the format — so its elements go straight
     into an sgp4 Satrec via sgp4init. Nothing in that path is checked by a
     checksum or a parser, so a wrong unit (degrees for radians, rev/day for
@@ -759,7 +759,7 @@ class TestOmmPropagation:
         cfg = make_trajectory_config(
             n_rfi=1, epoch_jd=epoch, orbit_records=[make_omm(25544, epoch)]
         )
-        comp = FixedOrbit()
+        comp = FixedOrbitFine()
         comp.setup(cfg)
         assert comp.rfi_xyz.shape == (1, cfg.n_time_fine, 3)
         assert jnp.all(jnp.isfinite(comp.rfi_xyz))
@@ -776,7 +776,7 @@ class TestOmmPropagation:
             cfg = make_trajectory_config(
                 n_rfi=1, epoch_jd=epoch, orbit_records=[record]
             )
-            comp = FixedOrbit()
+            comp = FixedOrbitFine()
             comp.setup(cfg)
             by_kind[kind] = np.asarray(comp.rfi_xyz)
         assert np.max(np.abs(by_kind["tle"] - by_kind["omm"])) < 1e-3

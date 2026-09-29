@@ -51,9 +51,9 @@ def check(refs):
 
 
 FULL_RFI = [
-    "trajectory:FixedOrbit",
-    "rfi_signal:ComplexRFIVarAnt",
-    "rfi_vis:RiemannVis",
+    "trajectory:FixedOrbitFine",
+    "rfi_signal:ComplexRFIVarAntFine",
+    "rfi_vis:RiemannVisFine",
 ]
 
 
@@ -82,36 +82,36 @@ class TestMissingProducer:
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:FixedOrbit",
-                    "rfi_vis:RiemannVis",
+                    "trajectory:FixedOrbitFine",
+                    "rfi_vis:RiemannVisFine",
                     "ast_vis:GPVisAst",
                     "gains:UnitaryGains",
                 ]
             )
 
         message = str(excinfo.value)
-        assert "RiemannVis" in message
+        assert "RiemannVisFine" in message
         assert "rfi_A" in message
         # Every in-tree producer of the key is offered, not just one.
-        assert "rfi_signal:ComplexRFIVarAnt" in message
-        assert "rfi_signal:ComplexRFIConstAnt" in message
+        assert "rfi_signal:ComplexRFIVarAntFine" in message
+        assert "rfi_signal:ComplexRFIConstAntFine" in message
 
     def test_phase_calculation_without_a_trajectory(self):
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:PhaseCalculationRFI",
-                    "rfi_signal:ComplexRFIVarAnt",
-                    "rfi_vis:RiemannVis",
+                    "trajectory:PhaseCalculationRFIFine",
+                    "rfi_signal:ComplexRFIVarAntFine",
+                    "rfi_vis:RiemannVisFine",
                     "ast_vis:GPVisAst",
                     "gains:UnitaryGains",
                 ]
             )
 
         message = str(excinfo.value)
-        assert "PhaseCalculationRFI" in message
+        assert "PhaseCalculationRFIFine" in message
         assert "rfi_xyz" in message
-        assert "trajectory:FixedOrbit" in message
+        assert "trajectory:FixedOrbitFine" in message
 
 
 class TestWrongOrder:
@@ -141,17 +141,17 @@ class TestWrongOrder:
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:PhaseCalculationRFI",
-                    "trajectory:FixedOrbit",
-                    "rfi_signal:ComplexRFIVarAnt",
-                    "rfi_vis:RiemannVis",
+                    "trajectory:PhaseCalculationRFIFine",
+                    "trajectory:FixedOrbitFine",
+                    "rfi_signal:ComplexRFIVarAntFine",
+                    "rfi_vis:RiemannVisFine",
                     "ast_vis:GPVisAst",
                     "gains:UnitaryGains",
                 ]
             )
 
         message = str(excinfo.value)
-        assert "PhaseCalculationRFI" in message
+        assert "PhaseCalculationRFIFine" in message
         assert "rfi_xyz" in message
         assert "listed after" in message
 
@@ -167,10 +167,10 @@ class TestValidLists:
             ),
             pytest.param(
                 [
-                    "trajectory:FixedOrbit",
-                    "trajectory:PhaseCalculationRFI",
-                    "rfi_signal:ComplexRFIVarAnt",
-                    "rfi_vis:RiemannVisFFI",
+                    "trajectory:FixedOrbitFine",
+                    "trajectory:PhaseCalculationRFIFine",
+                    "rfi_signal:ComplexRFIVarAntFine",
+                    "rfi_vis:RiemannVisFFIFine",
                     "ast_vis:GPVisAst",
                     "gains:UnitaryGains",
                 ],
@@ -178,10 +178,10 @@ class TestValidLists:
             ),
             pytest.param(
                 [
-                    "trajectory:Orbit",
-                    "trajectory:PhaseCalculationRFI",
-                    "rfi_signal:ComplexRFIConstAnt",
-                    "rfi_vis:RiemannVisVariable",
+                    "trajectory:OrbitFine",
+                    "trajectory:PhaseCalculationRFIFine",
+                    "rfi_signal:ComplexRFIConstAntFine",
+                    "rfi_vis:RiemannVisVariableFine",
                     "ast_signal:FixedDiscreteSky",
                     "ast_vis:DiscreteSkyVis",
                     "gains:ConstGains",
@@ -190,10 +190,10 @@ class TestValidLists:
             ),
             pytest.param(
                 [
-                    "trajectory:NoDragOrbit",
-                    "trajectory:PhaseCalculationRFI",
-                    "rfi_signal:ComplexRFIVarAnt",
-                    "rfi_vis:RiemannVisVariableFFI",
+                    "trajectory:NoDragOrbitFine",
+                    "trajectory:PhaseCalculationRFIFine",
+                    "rfi_signal:ComplexRFIVarAntFine",
+                    "rfi_vis:RiemannVisVariableFFIFine",
                     "ast_signal:FixedDiscreteSky",
                     "ast_vis:GPVisAst",
                     "ast_vis:DiscreteSkyVis",

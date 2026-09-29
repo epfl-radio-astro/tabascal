@@ -467,7 +467,7 @@ class TestPhaseFromRecords:
         np.testing.assert_allclose(from_records, from_positions, rtol=exact_rtol)
 
     def test_the_phase_is_the_same_as_the_forward_model_builds(self, exact_rtol):
-        """Same formula as FixedOrbit._compute_rfi_phase, or the seed is mismatched."""
+        """Same formula as FixedOrbitFine._compute_rfi_phase, or the seed is mismatched."""
         from tabascal.components.trajectory import (
             get_satellite_positions,
             itrs_to_gcrs_sf,

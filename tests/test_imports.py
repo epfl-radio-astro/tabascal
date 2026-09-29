@@ -14,8 +14,8 @@ import sys
 import pytest
 
 from tabascal.components import in_tree_components
-from tabascal.components.rfi_signal import ComplexRFIConstAnt, ComplexRFIVarAnt
-from tabascal.components.rfi_vis import RiemannVis
+from tabascal.components.rfi_signal import ComplexRFIConstAntFine, ComplexRFIVarAntFine
+from tabascal.components.rfi_vis import RiemannVisFine
 from tabascal.imports import (
     import_components,
 )
@@ -32,22 +32,22 @@ class TestTheHappyPath:
     """Current names keep resolving, in every spelling the importer accepts."""
 
     def test_a_current_reference_resolves(self):
-        assert import_components(["rfi_signal:ComplexRFIVarAnt"]) == [ComplexRFIVarAnt]
+        assert import_components(["rfi_signal:ComplexRFIVarAntFine"]) == [ComplexRFIVarAntFine]
 
     def test_the_dotted_spelling_resolves_the_same(self):
-        assert import_components(["rfi_signal.ComplexRFIVarAnt"]) == [ComplexRFIVarAnt]
+        assert import_components(["rfi_signal.ComplexRFIVarAntFine"]) == [ComplexRFIVarAntFine]
 
     def test_a_fully_qualified_reference_resolves(self):
         """The base package is a convenience, not a requirement."""
-        assert import_components(["tabascal.components.rfi_vis:RiemannVis"]) == [
-            RiemannVis
+        assert import_components(["tabascal.components.rfi_vis:RiemannVisFine"]) == [
+            RiemannVisFine
         ]
 
     def test_a_whole_current_model_resolves(self):
         refs = [
-            "trajectory:FixedOrbit",
-            "rfi_signal:ComplexRFIVarAnt",
-            "rfi_vis:RiemannVis",
+            "trajectory:FixedOrbitFine",
+            "rfi_signal:ComplexRFIVarAntFine",
+            "rfi_vis:RiemannVisFine",
             "ast_vis:GPVisAst",
             "gains:UnitaryGains",
         ]
@@ -58,6 +58,34 @@ class TestTheHappyPath:
     @pytest.mark.parametrize("ref", sorted(in_tree_components()))
     def test_every_in_tree_component_resolves_by_its_reference(self, ref):
         assert import_components([ref]) == [in_tree_components()[ref]]
+
+
+#: The components that pass RFI on the fine grid: each carries the suffix.
+FINE_GRID = [
+    "trajectory:FixedOrbitFine",
+    "trajectory:PhaseCalculationRFIFine",
+    "trajectory:NoDragOrbitFine",
+    "trajectory:OrbitFine",
+    "rfi_signal:ComplexRFIVarAntFine",
+    "rfi_signal:ComplexRFIConstAntFine",
+    "rfi_vis:RiemannVisFine",
+    "rfi_vis:RiemannVisFFIFine",
+    "rfi_vis:RiemannVisVariableFine",
+    "rfi_vis:RiemannVisVariableFFIFine",
+]
+
+#: Their names before the suffix, which are not kept as aliases.
+REMOVED = [ref.removesuffix("Fine") for ref in FINE_GRID]
+
+
+class TestTheFineGridSuffix:
+
+    def test_every_fine_grid_component_carries_it(self):
+        assert set(FINE_GRID) <= set(in_tree_components())
+
+    @pytest.mark.parametrize("ref", REMOVED)
+    def test_the_name_without_it_is_gone(self, ref):
+        assert f"has no class '{ref.split(':')[1]}'" in message(ref)
 
 
 class TestAnUnknownClassInAKnownModule:
@@ -75,7 +103,7 @@ class TestAnUnknownClassInAKnownModule:
         text = message(self.ref)
         offered = [
             name
-            for name in (ComplexRFIVarAnt.__name__, ComplexRFIConstAnt.__name__)
+            for name in (ComplexRFIVarAntFine.__name__, ComplexRFIConstAntFine.__name__)
             if name in text
         ]
         assert len(offered) >= 2
@@ -109,7 +137,7 @@ class TestTheMessageReadsAsProse:
 class TestAnUnknownModule:
     """A module that is not there gets the same treatment as a missing class."""
 
-    ref = "rfi_signals:ComplexRFIVarAnt"
+    ref = "rfi_signals:ComplexRFIVarAntFine"
 
     def test_the_module_is_named(self):
         text = message(self.ref)
@@ -197,15 +225,15 @@ class TestTheReportItself:
 
     def test_every_bad_reference_is_reported_not_just_the_first(self):
         text = message("rfi_signal:FourierGPRFI", "ast_vis:FourierTimeFreqGPAst")
-        assert "ComplexRFIVarAnt" in text
+        assert "ComplexRFIVarAntFine" in text
         assert "GPVisAst" in text
 
     def test_a_good_reference_beside_a_bad_one_does_not_rescue_the_call(self):
         with pytest.raises(ImportError):
-            import_components(["rfi_signal:ComplexRFIVarAnt", "rfi_signal:Nope"])
+            import_components(["rfi_signal:ComplexRFIVarAntFine", "rfi_signal:Nope"])
 
     def test_a_reference_with_no_module_part_is_rejected(self):
-        assert "not a valid" in message("ComplexRFIVarAnt")
+        assert "not a valid" in message("ComplexRFIVarAntFine")
 
     def test_resolving_to_something_that_is_not_a_class_is_rejected(self):
         text = message("rfi_signal:jnp")
