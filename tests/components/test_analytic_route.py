@@ -20,7 +20,8 @@ from tabascal.components.rfi_signal import (
 from tabascal.components.rfi_vis import AnalyticVis, RiemannVisFine
 from tabascal.components.trajectory import FixedOrbit, FixedOrbitFine
 from tabascal.interferometry import calculate_rfi_vis_blocked
-from tabascal.poly_interp import fine_offsets, interp_tables
+from tabascal.poly_interp import fine_offsets, interp_tables, monomial_tables
+from ri_kernels.jax_api import RFIAnalyticVisOp
 
 from .conftest import active_precision, make_constants
 from .test_component_order import check
@@ -172,6 +173,23 @@ def analytic_call(cfg, state):
     return lambda amp, phase: forward({}, {**state, "rfi_A": amp, "rfi_phase": phase}, constants)["vis_rfi"]
 
 
+def op_vis(cfg, state, s):
+    """Source ``s`` alone and unmasked through the op, with the full-axis tables."""
+    options = dict(cfg.args["rfi"]["analytic"])
+    h, dtype = options.pop("stencil"), state["rfi_phase"].dtype
+    dnu = fine_offsets(cfg.n_int_freq, cfg.chan_width)
+    w_freq, start_freq = interp_tables(cfg.n_freq, h, dnu / cfg.chan_width)
+    g_time, start_time = monomial_tables(cfg.n_time, h)
+    one = lambda key: jnp.swapaxes(state[key][s : s + 1], 0, 1)
+    real = lambda x: jnp.asarray(x, dtype)
+    return RFIAnalyticVisOp(cfg.n_ant, cfg.a1, cfg.a2).eval(
+        one("rfi_A"), one("rfi_phase"), real(one("rfi_delay_poly_us")),
+        real(w_freq), jnp.asarray(start_freq, jnp.int32), real(g_time),
+        jnp.asarray(start_time, jnp.int32), real(dnu / 1e6), real(cfg.int_time),
+        real(cfg.freqs / 1e6), **options,
+    )
+
+
 def rel_err(got, expected):
     return float(jnp.abs(got - expected).max()) / float(jnp.abs(expected).max())
 
@@ -253,13 +271,15 @@ class TestDataGridSignal:
         np.testing.assert_allclose(A, A_fine[:, :, 1::3, 2::5], rtol=tol, atol=tol)
 
     @pytest.mark.parametrize("data_cls", [ComplexRFIVarAnt, ComplexRFIConstAnt])
-    def test_the_elevation_mask_is_on_the_data_grid(self, data_cls):
-        mask = np.ones((1, 6), dtype=bool)
-        mask[:, 4:] = False
-        comp = data_cls()
-        comp.setup(make_config(rfi_mask=mask))
-        A = comp.build_forward()(comp.init_params_base, {}, make_constants(comp))["rfi_A"]
-        assert bool(jnp.all(A[..., 4:] == 0)) and bool(jnp.all(A[..., :4] != 0))
+    def test_the_elevation_mask_leaves_the_signal_whole(self, data_cls):
+        """AnalyticVis masks each source's visibility, so rfi_A is the unmasked signal."""
+        comps = [data_cls() for _ in range(2)]
+        for comp, mask in zip(comps, (None, np.arange(6) < 4)):
+            comp.setup(make_config(rfi_mask=None if mask is None else mask[None]))
+        params = comps[0].init_params_base
+        A, A_masked = (c.build_forward()(params, {}, make_constants(c))["rfi_A"] for c in comps)
+        assert bool(jnp.all(A != 0))
+        np.testing.assert_array_equal(A_masked, A)
 
 
 class TestAnalyticVis:
@@ -297,22 +317,25 @@ class TestAnalyticVis:
         for got, expected in zip(pullback(cot), dense_pullback(cot)):
             assert rel_err(got, expected) < tol
 
-    def test_each_unmasked_window_is_integrated_alone(self):
-        """Source 0 in view in two windows narrower than the stencil, so each holds its
-        cells' values (stencil 0); source 1 throughout. Masked cells get nothing from 0."""
-        cfg, state = op_case(n_int_freq=1)  # one sample per channel: its stencil is moot
+    def test_each_source_is_masked_after_interpolation(self):
+        """Source 0 in view in two windows, one a single cell; source 1 throughout. A
+        visible edge cell's centred stencil reads its masked neighbour's signal."""
+        cfg, state = op_case(n_int_freq=1)
+        cfg.rfi_mask = np.array([[True, True, False, True, False], [True] * 5])
         state = {**state, "vis_rfi": jnp.zeros_like(state["vis_rfi"])}
         amp, phase = state["rfi_A"], state["rfi_phase"]
-        held = analytic_call(op_case(n_int_freq=1, stencil=0)[0], state)(amp.at[1].set(0), phase)
-        expected = analytic_call(cfg, state)(amp.at[0].set(0), phase)
-        cfg.rfi_mask = np.array([[True, True, False, True, False], [True] * 5])
-        expected += jnp.where(cfg.rfi_mask[0], held, 0)
         call = analytic_call(cfg, state)
         vis, pullback = jax.vjp(call, amp, phase)
+        expected = sum(op_vis(cfg, state, s) * cfg.rfi_mask[s] for s in range(2))
         tol = 1e-12 if jax.config.x64_enabled else 1e-5
         np.testing.assert_allclose(vis, expected, rtol=tol, atol=tol * float(jnp.abs(vis).max()))
-        for grad in pullback(jnp.where(cfg.rfi_mask[0], 0, jnp.ones_like(vis))):
+        hidden = ~cfg.rfi_mask[0]
+        for grad in pullback(jnp.where(hidden, jnp.ones_like(vis), 0)):
             assert bool(jnp.all(grad[0] == 0)) and bool(jnp.any(grad[1] != 0))
+        alone = amp.at[1].set(0)
+        vis0, bumped = (call(a, phase) for a in (alone, alone.at[0, ..., 2].add(1)))
+        assert bool(jnp.all(vis0[..., hidden] == 0)) and bool(jnp.all(bumped[..., hidden] == 0))
+        assert bool(jnp.all(bumped[..., [1, 3]] != vis0[..., [1, 3]]))
         jaxpr = str(jax.make_jaxpr(jax.grad(lambda a: jnp.abs(call(a, phase)).sum()))(amp))
         assert "rfi_analytic_transpose_op" in jaxpr and "rfi_analytic_full_transpose_op" not in jaxpr
 

@@ -209,7 +209,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     out = jax.jit(f)({"rfi_A": A_s})
     assert out["rfi_A"].sharding.spec == P("rfi")
 
-    # AnalyticVis under an elevation mask: its per-source inputs and windows sharded,
+    # AnalyticVis under an elevation mask: its per-source inputs and mask sharded,
     # the value and the signal-only gradient match the unsharded run
     from types import SimpleNamespace
     from tabascal.components.rfi_vis import AnalyticVis
@@ -238,7 +238,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
         return jnp.sum(vis.real * np.arange(24.0).reshape(3, 2, 4) + vis.imag)
 
     sharded = dist.shard_pytree(tree, n_rfi)
-    for key in ("rfi_A", "rfi_phase", "rfi_delay_poly_us", f"{comp.prefix}/rfi_windows"):
+    for key in ("rfi_A", "rfi_phase", "rfi_delay_poly_us", f"{comp.prefix}/rfi_mask"):
         assert sharded[key].sharding.spec == P("rfi"), key
     grad = jax.jit(jax.value_and_grad(loss))
     jaxpr = str(jax.make_jaxpr(jax.grad(loss))(sharded["rfi_A"], sharded))
