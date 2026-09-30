@@ -51,11 +51,11 @@ phase, and what is left is small enough for float32 to carry across a cell.
 Delays are in microseconds and frequencies in MHz, so their product is cycles.
 The kernel keeps derivatives up to the third, so `path_order` is at most 3.
 
-**Signal.** The data-grid signal is the fine-grid signal at each cell's own
-sample: the same latent, prior and parameters as its `Fine` twin. Inside a cell
+**Signal.** Before masking, the data-grid signal is the fine-grid signal at each
+cell's own sample: the same latent, prior and parameters as its `Fine` twin. Inside a cell
 it is the polynomial through the `2 * rfi.analytic.stencil + 1` nearest cells on
 each axis (Lagrange weights; shifted inwards at the observation's edges). The
-elevation mask is not applied to it, so the saved `rfi_A` is unmasked. Instead
+elevation mask is not applied to it, so the prediction-state `rfi_A` is unmasked. Instead
 each source's visibility is masked per cell after interpolation, and a visible
 cell's stencil reads its hidden neighbours' signal, which is continuous across
 the horizon. A satellite that sets mid-cell is still all or nothing per cell.

@@ -332,6 +332,7 @@ class TestAnalyticVis:
         hidden = ~cfg.rfi_mask[0]
         for grad in pullback(jnp.where(hidden, jnp.ones_like(vis), 0)):
             assert bool(jnp.all(grad[0] == 0)) and bool(jnp.any(grad[1] != 0))
+        assert bool(jnp.any(pullback(jnp.where(hidden, 0, jnp.ones_like(vis)))[0][0, ..., 2] != 0))
         alone = amp.at[1].set(0)
         vis0, bumped = (call(a, phase) for a in (alone, alone.at[0, ..., 2].add(1)))
         assert bool(jnp.all(vis0[..., hidden] == 0)) and bool(jnp.all(bumped[..., hidden] == 0))
