@@ -1,5 +1,5 @@
 from tabascal.imports import import_components
-from tabascal.components import validate_component_order
+from tabascal.components import rfi_grid, validate_component_order
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
     constrain_rfi_state,
@@ -215,12 +215,22 @@ class TabConfig:
             "Variable" in comp for comp in config["model"]["components"]
         )
 
-        self.estimate_rfi_sampling(
-            config["rfi"]["time_int_factor"],
-            config["rfi"].get("min_time_bins", 1),
-            config["rfi"].get("max_time_bins", 30),
-            min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
-        )
+        # The data-grid route integrates each cell in closed form and never
+        # forms a fine time grid, so there is no sampling to estimate: one
+        # sample per cell, and none of the fringe-rate work that sizes it.
+        self.rfi_grid = rfi_grid(import_components(config["model"]["components"]))
+        if self.rfi_grid == "data":
+            self.max_rfi_vis = np.max(np.abs(self.vis_obs))
+            self.n_int_time = 1
+            self.time_sample_idxs = [np.arange(self.n_bl)]
+            self.time_strides = [1]
+        else:
+            self.estimate_rfi_sampling(
+                config["rfi"]["time_int_factor"],
+                config["rfi"].get("min_time_bins", 1),
+                config["rfi"].get("max_time_bins", 30),
+                min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
+            )
 
         self._set_freqs_times()
 

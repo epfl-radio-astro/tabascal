@@ -45,9 +45,9 @@ class TestTheHappyPath:
 
     def test_a_whole_current_model_resolves(self):
         refs = [
-            "trajectory:FixedOrbitFine",
-            "rfi_signal:ComplexRFIVarAntFine",
-            "rfi_vis:RiemannVisFine",
+            "trajectory:FixedOrbit",
+            "rfi_signal:ComplexRFIVarAnt",
+            "rfi_vis:AnalyticVis",
             "ast_vis:GPVisAst",
             "gains:UnitaryGains",
         ]
@@ -74,8 +74,13 @@ FINE_GRID = [
     "rfi_vis:RiemannVisVariableFFIFine",
 ]
 
-#: Their names before the suffix, which are not kept as aliases.
-REMOVED = [ref.removesuffix("Fine") for ref in FINE_GRID]
+#: Their names before the suffix, which are not kept as aliases -- bar the three
+#: that now name the data-grid route -- and the draft data-grid names.
+REMOVED = [
+    ref.removesuffix("Fine")
+    for ref in FINE_GRID
+    if ref.split(":")[1] not in ("FixedOrbitFine", "ComplexRFIVarAntFine", "ComplexRFIConstAntFine")
+] + ["trajectory:FixedOrbitCoarse", "rfi_signal:ComplexRFIVarAntCoarse", "rfi_vis:PolyInterpVis"]
 
 
 class TestTheFineGridSuffix:
