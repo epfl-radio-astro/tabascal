@@ -10,6 +10,7 @@ import warnings
 import zlib
 from typing import Dict
 
+import jax
 from jax import random
 
 #: The seed a null or absent ``inference.seed`` means.
@@ -89,5 +90,9 @@ def describe_random_draws(config: Dict) -> str:
     else:
         line = "Random draws : no random draws in the fit, every init is deterministic"
     if (config.get("plots") or {}).get("prior"):
-        line += f"; prior plots draw from inference.seed {seed}"
+        # The runner's own test: prior plots are skipped in a multi-process run.
+        if jax.process_count() > 1:
+            line += "; prior plots skipped (multi-process run)"
+        else:
+            line += f"; prior plots draw from inference.seed {seed}"
     return line

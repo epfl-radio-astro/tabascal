@@ -27,7 +27,7 @@ plots:
 #######################
 inference:
   opt: true               # Optional - Whether to run the optimization to find optimal (MAP) parameters
-  seed: null              # Optional - The one random seed of the run. Each component that draws (ast/rfi init: sample) folds its own fixed tag into it, so adding a component never shifts another's draw. null means 1; 0 is a seed like any other. Replaces rfi.r_seed and gains.r_seed
+  seed: null              # Optional - The one random seed of the run. Each component that draws (ast/rfi init: sample) folds its own fixed tag into it, so adding a component never shifts another's draw. null means 1; 0 is a seed like any other
 ##########################
 # Optimization parameters
 ##########################

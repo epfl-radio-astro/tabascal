@@ -55,7 +55,6 @@ def make_gains_config(
         a2=a2.astype("int32"),
         args={
             "gains": {
-                "r_seed": 123,
                 "amp_mean": amp_mean,
                 "amp_std": amp_std,
                 "phase_mean": phase_mean,
