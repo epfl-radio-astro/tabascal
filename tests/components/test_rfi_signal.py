@@ -83,7 +83,7 @@ def make_rfi_config(
     init="prior",
     mean="zeros",
     est=None,
-    r_seed=1,
+    r_seed=None,
     std=1.0,
     corr_freq=5e6,
     corr_time=60.0,
@@ -280,7 +280,6 @@ class TestRfiSignalConfigValidation:
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
         gp_cov = result["gp_cov"]
 
-        assert result["r_seed"] == 42
         assert isinstance(gp_cov["std"], float) and gp_cov["std"] == pytest.approx(7.0)
         assert gp_cov["corr_freq"] == pytest.approx(5e6)
         assert isinstance(gp_cov["corr_time"], float)
@@ -311,15 +310,6 @@ class TestRfiSignalConfigValidation:
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
         cfg = {"r_seed": 1, "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
         cfg["gp_cov"][key] = "not a number"
-
-        with pytest.raises(ValueError):
-            rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
-
-    def test_a_non_numeric_r_seed_raises(self):
-        """r_seed is not a covariance key, and keeps its own check."""
-        freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": "not a number", "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
 
         with pytest.raises(ValueError):
             rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)

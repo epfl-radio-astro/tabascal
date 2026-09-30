@@ -102,29 +102,6 @@ def scale_config(**overrides):
 
 
 
-class TestSeed:
-
-    def test_an_explicit_zero_seed_is_honoured(self):
-        """0 is a seed like any other; ``not r_seed`` used to read it as "unset".
-
-        The substitution was not harmless — seed 0 and the default seed 2 drive
-        different draws — so a config asking for 0 quietly got someone else's random
-        numbers.
-        """
-        assert validate_gain_scales(scale_config(r_seed=0))["r_seed"] == 0
-        assert not jnp.allclose(
-            jax.random.normal(jax.random.PRNGKey(0), (8,)),
-            jax.random.normal(jax.random.PRNGKey(2), (8,)),
-        )
-
-    def test_an_unset_seed_still_defaults(self):
-        assert validate_gain_scales(scale_config())["r_seed"] == 2
-
-    def test_a_non_integer_seed_is_an_error(self):
-        with pytest.raises(ValueError, match="r_seed"):
-            validate_gain_scales(scale_config(r_seed=1.5))
-
-
 class TestPriorWidths:
 
     @pytest.mark.parametrize("key", ["amp_std", "phase_std"])

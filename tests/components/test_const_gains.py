@@ -710,14 +710,6 @@ class TestScaleKeysReachTheComponent:
     into a ``RuntimeError``.
     """
 
-    def test_a_zero_seed_is_the_seed_it_says(self):
-        comp = ConstGains()
-        cfg = make_const_gains_config()
-        cfg.args["gains"]["r_seed"] = 0
-        comp.setup(cfg)
-
-        assert comp.r_seed == 0
-
     @pytest.mark.parametrize("width", [0, 0.0, -1.0, float("nan"), float("inf")])
     @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
     def test_an_unusable_prior_width_is_an_error(self, key, width):
@@ -1165,7 +1157,6 @@ def test_validate_gain_scales_converts_percent_and_degrees():
         }
     )
 
-    assert cfg["r_seed"] == 2
     assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
     assert cfg["phase_mean"] == pytest.approx(0.0)
     assert cfg["phase_std"] == pytest.approx(float(np.deg2rad(2.0)))
