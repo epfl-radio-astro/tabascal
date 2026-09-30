@@ -26,6 +26,7 @@ parent_directory/
 |       └── init_pred_Custom.B                  # The calibration the initial values imply
 |       └── map_pred_Custom.zarr                # Optimised parameter prediction values
 |       └── map_pred_Custom.B                   # The calibration it implies, as a CASA table
+|       └── used_orbits_Custom.json             # Orbit records used, when present, to replay the trajectory priors
 ```
 
 The log holds the run's console output up to — but not including — the memory-usage and timings summaries, which are printed after the log has been closed and so reach the console only. It is written into `plots/` as the run goes, so it is there to watch while the run is still going and it survives a run that dies. Naming a run with `-sx <suffix>` puts its plots in `plots/<suffix>/` and the suffix in the log's name, `log_tab_<suffix>_<timestamp>.txt`, which is what tells two runs over the same dataset apart — the timestamp alone has one-second resolution. `-nl` turns the log off.
