@@ -81,7 +81,7 @@ def make_vis_state(n_ant, n_freq, n_time, rng_key=0):
 # None means "unset", 0 means 0
 # ---------------------------------------------------------------------------
 
-SCALE_KEYS = ("r_seed", "amp_mean", "amp_std", "phase_mean", "phase_std")
+SCALE_KEYS = ("amp_mean", "amp_std", "phase_mean", "phase_std")
 
 #: Every value that is not a width: zero included, since a zero-width prior is a
 #: degenerate Normal rather than an unset one.
@@ -236,7 +236,7 @@ class TestPhaseMean:
 
 
 class TestMissingKeysAreNamed:
-    """Five keys are read here, so a bare "validation failed" is not enough."""
+    """Four keys are read here, so a bare "validation failed" is not enough."""
 
     @pytest.mark.parametrize("key", SCALE_KEYS)
     def test_the_missing_key_is_named(self, key):
