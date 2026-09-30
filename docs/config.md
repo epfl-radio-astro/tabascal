@@ -637,3 +637,22 @@ gains:
 * A **calibration table**, read with {func}`~tabascal.ms.read_caltable` — one tabascal wrote with `tab2MS`, or one from CASA. A caltable is resolved over frequency and time and `ConstGains` is not, so it is reduced to the median $|g|$ and the mean phase direction over each antenna's valid samples, with a warning naming the largest deviation when the solutions actually do vary. Flagged solutions are dropped rather than counted as zero, and an antenna the table has no solution for at all falls back to unit gain, with a warning.
 
 Either way the gain is **projected into the gauge** rather than taken as given: the mean log amplitude is subtracted (unless `fix_flux_scale: false`) and the phases are referenced to `ref_ant`. Projecting an already-projected gain changes nothing, so the same file can be handed back to a second run. A zero or non-finite gain is an error — the fit is in log amplitude, which such a value has no value at.
+
+## tab-sim compatibility
+
+The `tabsim` section adapts TABASCAL to data simulated by [tab-sim](https://tab-sim.readthedocs.io/) where tab-sim differs from a real correlator. Leave it at its defaults for real data.
+
+```yaml
+tabsim:
+  phase_tracking: apparent
+```
+
+* `phase_tracking`: How the data were phase-tracked to the Measurement Set's phase centre. Every RFI trajectory component (`FixedOrbitFine`, `PhaseCalculationRFIFine`), the RFI sampling estimate, `rfi.init: matched-filter` and `tabascal light-curve -c` read it. The centre itself is read from `FIELD::PHASE_DIR` for the field being read, in the frame its `MEASINFO` `Ref` declares (`J2000`, `ICRS`, `B1950`, `GALACTIC` or `APP`), and converted to J2000 once, when the MS is read. Any other frame, or a time-variable centre (`NUM_POLY > 0`), is refused; a missing `Ref` is read as J2000 with a warning.
+  * `apparent` (default): the apparent place of date, i.e. with annual aberration, precession and nutation applied, paired with GAST. This is what a correlator tracks ([issue #252](https://github.com/epfl-radio-astro/tabascal/issues/252)).
+  * `j2000`: the J2000 RA/Dec, as converted to ICRS from the declared frame, paired with GAST directly. tab-sim always writes J2000, so for its data the conversion only removes the ~20 mas FK5 frame bias. This is what current tab-sim simulations do ([chrisfinlay/tab-sim#73](https://github.com/chrisfinlay/tab-sim/issues/73)), so set it for tab-sim data. Otherwise the modelled RFI is displaced from the simulated RFI by the precession since J2000, about 0.25° for 2019. The option stays until tab-sim is fixed, tracked in [issue #253](https://github.com/epfl-radio-astro/tabascal/issues/253).
+
+  `j2000` reproduces the phase-tracking term of TABASCAL before #252 given the same coordinates, and nothing else: those coordinates now come from `FIELD::PHASE_DIR` converted to ICRS, so for a J2000 MS the term differs from the old one by the ~20 mas frame bias (the old code read `SOURCE::DIRECTION` as is). The other Earth-orientation corrections made with it stay in place whichever value is set: `PhaseCalculationRFIFine` places the antennas with skyfield's ITRS-to-GCRS rotation, where it used to read the UTC date as UT1, and the fringe-rate estimate turns the satellite Earth-fixed with the full rotation rather than the sidereal angle alone. A run with `j2000` therefore need not match an older run exactly.
+
+  `tabascal light-curve` and `tabascal search` take the same choice as `--phase-tracking`, which overrides the config for `light-curve -c`. The config fragment `tabascal search` writes always carries a `tabsim` section naming the convention it searched with, so a fit merged from it uses the same one.
+
+A section left out or set to `null` takes the defaults. Anything else is checked as given: a section that is not a mapping, an unknown key, or a value other than the two above (`null` and `false` included) is an error rather than being read as the default.

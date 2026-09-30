@@ -287,8 +287,11 @@ def _in_memory_ms(times, n_ant=3, n_freq=2, int_time=8.0):
                 "CHAN_WIDTH": column(np.full((1, n_freq), 1.0e6), ["row", "chan"]),
             }
         ),
-        "SOURCE": xr.Dataset(
-            data_vars={"DIRECTION": column([[0.35, -0.5]], ["row", "radec"])}
+        "FIELD": xr.Dataset(
+            data_vars={
+                "PHASE_DIR": column([[[0.35, -0.5]]], ["row", "poly", "radec"]),
+                "NUM_POLY": column([0], ["row"]),
+            }
         ),
         "DATA_DESCRIPTION": xr.Dataset(
             data_vars={
@@ -302,6 +305,10 @@ def _in_memory_ms(times, n_ant=3, n_freq=2, int_time=8.0):
     }
 
     return partition, subtables
+
+
+#: What ``read_phase_centre`` reads beside the in-memory ``FIELD`` subtables.
+FIELD_KEYWORDS = {"PHASE_DIR": {"MEASINFO": {"type": "direction", "Ref": "J2000"}}}
 
 
 @pytest.fixture
@@ -322,10 +329,11 @@ def run_reader(monkeypatch):
             "tabascal.ms.xds_from_ms",
             lambda path, column_keywords=False: ([partition], keywords),
         )
-        monkeypatch.setattr(
-            "tabascal.ms.xds_from_table",
-            lambda path, group_cols=None: [subtables[path.split("::")[-1]]],
-        )
+        def fake_from_table(path, group_cols=None, column_keywords=False):
+            found = [subtables[path.split("::")[-1]]]
+            return (found, FIELD_KEYWORDS) if column_keywords else found
+
+        monkeypatch.setattr("tabascal.ms.xds_from_table", fake_from_table)
 
         return read_ms("in-memory.ms")
 
@@ -795,7 +803,7 @@ class TestDeclaredTimeScale:
 
     The declaration is honoured by normalising to UTC once, here at the
     boundary, rather than by threading a scale through the trajectory maths.
-    Everything past ``read_ms`` -- skyfield, ``sgp4jax.itrf_to_gcrf`` (which has
+    Everything past ``read_ms`` -- skyfield, ``sgp4jax``'s GCRF propagation (which has
     no scale concept at all) and the TLE epoch checks -- reads UTC Julian Dates,
     so one conversion covers all of them.
     """
@@ -1879,7 +1887,12 @@ def _channel_ms(n_ant=N_ANT_C, n_time=N_TIME_C, n_freq=N_FREQ_C, n_corr=N_CORR_C
         }
     )
     src = xr.Dataset(
-        {"DIRECTION": (("row", "radec"), da.from_array(np.deg2rad([[30.0, -30.0]])))}
+        {
+            "PHASE_DIR": (
+                ("row", "poly", "radec"), da.from_array(np.deg2rad([[[30.0, -30.0]]]))
+            ),
+            "NUM_POLY": (("row",), da.from_array(np.array([0]))),
+        }
     )
 
     return xds, ant, spec, src, freqs, widths
@@ -1893,12 +1906,12 @@ def channel_ms(monkeypatch):
         xds, ant, spec, src, freqs, widths = _channel_ms(**kwargs)
         import tabascal.ms as ms_mod
 
-        tables = {"::ANTENNA": [ant], "::SPECTRAL_WINDOW": [spec], "::SOURCE": [src]}
+        tables = {"::ANTENNA": [ant], "::SPECTRAL_WINDOW": [spec], "::FIELD": [src]}
 
-        def fake_from_table(path, group_cols=None):
+        def fake_from_table(path, group_cols=None, column_keywords=False):
             for suffix, value in tables.items():
                 if path.endswith(suffix):
-                    return value
+                    return (value, FIELD_KEYWORDS) if column_keywords else value
             raise AssertionError(f"unexpected subtable {path}")
 
         monkeypatch.setattr(
