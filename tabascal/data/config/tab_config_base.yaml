@@ -102,7 +102,7 @@ gains:
 # Compatibility with data simulated by tab-sim
 ###############################################
 tabsim:
-  phase_tracking: apparent # Optional - How the data were phase-tracked to the J2000 phase centre the MS records, for every RFI trajectory component and for the light-curve and search estimators. 'apparent', the default, is its apparent place of date (aberration, precession and nutation applied, paired with GAST), which is what a correlator tracks (GitHub #252). 'j2000' pairs the J2000 RA/Dec with GAST directly, which is what tab-sim simulations do until chrisfinlay/tab-sim#73 is fixed: set it for tab-sim data, or the modelled RFI is displaced by the precession since J2000. It restores the old tracking term only: the antenna Earth orientation and the fringe-rate rotation stay corrected either way. Tracked in GitHub #253
+  phase_tracking: apparent # Optional - How the data were phase-tracked to the J2000 phase centre the MS records, for every RFI trajectory component and for the light-curve and search estimators. 'apparent', the default, is its apparent place of date (aberration, precession and nutation applied, paired with GAST), which is what a correlator tracks (GitHub #252). 'j2000' pairs the J2000 RA/Dec (as read from FIELD::PHASE_DIR and converted to ICRS, which for a J2000 MS removes the ~20 mas frame bias) with GAST directly, which is what tab-sim simulations do until chrisfinlay/tab-sim#73 is fixed: set it for tab-sim data, or the modelled RFI is displaced by the precession since J2000. It restores the old tracking term only: the antenna Earth orientation and the fringe-rate rotation stay corrected either way. Tracked in GitHub #253
 # ###################
 # # Model parameters
 # ###################

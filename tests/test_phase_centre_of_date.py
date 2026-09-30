@@ -129,7 +129,7 @@ def test_phase_centre_argument_stays_j2000(site, monkeypatch):
 
 
 def test_tabsim_phase_tracking_selects_the_j2000_convention():
-    """``tabsim.phase_tracking: j2000`` is the old GAST - RA_J2000 term exactly (#253)."""
+    """``tabsim.phase_tracking: j2000`` is the old GAST - RA term exactly, given the same RA/Dec (#253)."""
     from tabascal.config import normalise_tabsim_config
     from tabascal.interferometry import itrf_to_uvw_numpy
     from tabascal.time import gast_deg

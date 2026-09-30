@@ -741,12 +741,15 @@ def tracked_radec(phase_centre: dict, times_jd: NDArray):
     """RA/Dec of date, in degrees per time, that the visibilities are tracked to.
 
     The direction to pair with :func:`tabascal.time.gast_deg`. ``phase_centre``
-    holds the J2000 ``ra`` and ``dec`` as a Measurement Set records them, and
-    optionally ``tracking``, one of :data:`PHASE_TRACKING`: ``apparent``, the
-    default, is :func:`tabascal.time.apparent_radec_of_date`; ``j2000`` returns
-    the J2000 values unchanged, for data simulated by tab-sim (#253). That
-    reproduces the pre-#252 tracking term bit for bit, and only that: the antenna
-    Earth orientation and the fringe-rate rotation stay corrected either way.
+    holds the J2000 (ICRS) ``ra`` and ``dec`` that :func:`tabascal.ms.read_ms`
+    converts the Measurement Set's phase centre to, and optionally ``tracking``,
+    one of :data:`PHASE_TRACKING`: ``apparent``, the default, is
+    :func:`tabascal.time.apparent_radec_of_date`; ``j2000`` returns those values
+    unchanged, for data simulated by tab-sim (#253). Given the same ``ra`` and
+    ``dec`` that is the pre-#252 tracking term exactly, but ``read_ms`` now removes
+    the ~20 mas frame bias from a declared FK5 J2000 centre, so on a J2000 MS the
+    term differs from the old one by that much. The antenna Earth orientation and
+    the fringe-rate rotation stay corrected either way.
 
     Returns
     -------

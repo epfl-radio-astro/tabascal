@@ -193,6 +193,7 @@ def rfi_phase_from_positions(
         Observation times in Julian date.
     phase_centre : dict
         ``{"ra": <deg>, "dec": <deg>}`` J2000 phase centre of the visibilities,
+        as :func:`tabascal.ms.read_ms` converts it from the MS's declared frame,
         with an optional ``"tracking"`` convention; see
         :func:`tabascal.components.trajectory.tracked_radec`.
     freqs : Array (n_freq,)
@@ -3430,7 +3431,8 @@ def extract_light_curves_from_ms(
 def ms_phase_centre(ms: dict, phase_tracking: str = "apparent") -> dict:
     """The phase centre dict of a :func:`tabascal.ms.read_ms` result.
 
-    The MS's J2000 ``ra`` and ``dec``, and ``tracking``: how the data were
+    The MS's ``ra`` and ``dec``, which ``read_ms`` has already converted to
+    J2000 from the frame ``FIELD::PHASE_DIR`` declares, and ``tracking``: how the data were
     tracked to it, checked against
     :data:`tabascal.components.trajectory.PHASE_TRACKING`.
     """

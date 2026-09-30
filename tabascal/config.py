@@ -593,7 +593,8 @@ class TabConfig:
 
         ms_params = read_ms(self.ms_path, freq, None, corr, data_col)
 
-        # The J2000 centre the MS records, and how the data were tracked to it
+        # The MS's phase centre, as read_ms converts it to J2000 from the frame
+        # FIELD::PHASE_DIR declares, and how the data were tracked to it
         # (tabsim.phase_tracking), for every RFI component and estimator.
         self.phase_centre = {
             "ra": ms_params["ra"],
