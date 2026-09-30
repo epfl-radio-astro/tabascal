@@ -261,7 +261,7 @@ def test_the_runner_takes_its_run_key_from_inference_seed(monkeypatch):
         raise Stop
 
     monkeypatch.setattr(impl, "run_key", spy)
-    monkeypatch.setattr(impl, "_resolve_paths", lambda *a, **k: SimpleNamespace(ms_path=None))
+    monkeypatch.setattr(impl, "_resolve_paths", lambda *a, **k: SimpleNamespace(ms_path=None, log_path=None))
 
     with pytest.raises(Stop):
         impl.tabascal_subtraction({"inference": {"seed": 7}}, out_dir=None, log=False)
