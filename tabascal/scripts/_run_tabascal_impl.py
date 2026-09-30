@@ -35,6 +35,7 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
+from tabascal.seeds import config_seed, describe_random_draws, run_key
 from tabascal.write import write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
@@ -378,9 +379,11 @@ def tabascal_subtraction(
 
     with _stdout_logger(paths.log_path, log):
         start_time = datetime.now()
-        key, _ = random.split(random.PRNGKey(1))
+        key, _ = random.split(run_key(config_seed(config)))
 
         _print_run_header(paths.model_name, paths.f_name, paths.ms_path, start_time)
+        print(describe_random_draws(config))
+        print()
 
         if sharding_enabled():
             print(f"Sharding RFI sources over {jax.device_count()} devices:")

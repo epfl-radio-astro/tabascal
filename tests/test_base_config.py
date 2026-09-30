@@ -443,5 +443,4 @@ class TestTheGainsSectionHasNoCorrelationLengths:
             "phase_mean",
             "amp_std",
             "phase_std",
-            "r_seed",
         }

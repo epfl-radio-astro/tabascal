@@ -27,6 +27,7 @@ plots:
 #######################
 inference:
   opt: true               # Optional - Whether to run the optimization to find optimal (MAP) parameters
+  seed: null              # Optional - The one random seed of the run. Each component that draws (ast/rfi init: sample) folds its own fixed tag into it, so adding a component never shifts another's draw. null means 1; 0 is a seed like any other
 ##########################
 # Optimization parameters
 ##########################
@@ -69,7 +70,6 @@ rfi:
   max_time_bins: 30     # Optional - Maximum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariableFine / RiemannVisVariableFFIFine)
   n_int_freq: 1         # Optional - Number of integration samples per frequency channel of the RFI fine grid. Given directly - there is no estimate on this axis, which is why it takes a count where the time axis takes a factor
   baseline_block_size: 128 # Optional - Number of baselines handled per scan step in rfi_vis:RiemannVisFine, or null for a single block over every baseline. Trades recomputation for peak memory: the fine grid it integrates carries min(baseline_block_size, n_bl) on its baseline axis rather than n_bl. null keeps the checkpoint, so the reverse pass still recomputes that grid rather than storing it, but forms it whole - it bounds the tape and not the peak. Read by no other component - the FFI kernels bound the same term themselves
-  r_seed: 123           # Optional - Random seed to use for sampling
   cutoff: null          # Optional - Relative power below which a k-mode is dropped from the latent grid, so it sets the number of fitted RFI parameters and nothing about what the prior believes - the spectrum is normalised after the cut. Out here with the other knobs on the size of the problem for that reason. null uses the component's own default, 1e-9 for rfi_signal:ComplexRFIVarAntFine and 1e-6 for rfi_signal:ComplexRFIConstAntFine
   gp_cov:               # Optional - Prior covariance of the RFI signal: a width, the correlation scales that set the knee, and the roll-off past it. The same keys ast.gp_cov takes, read at the same level; the two differ only in that the time scale is a correlation time here rather than a field of view, and in what corr_freq: null means
     std: null           # Optional - Width of the prior on ONE RFI source, in Jy: the rms|V| that source realises in expectation, the same quantity as ast.gp_cov.std. Exact for a zero-mean unmasked source before integration; a non-zero mean, min_elevation and fringe averaging each move what a run actually sees. N VarAnt satellites realise sqrt(N) times it and ComplexRFIConstAntFine another sqrt(2) - see _LATENT_POWER in rfi_signal. 'data' measures the total rms|V| of the observed visibilities, which carries the sky and the noise as well as the RFI, and does not correct for the sqrt(N); see GitHub #220. A number sets it outright. null is twice the largest observed visibility, a maximum where this key says typical - see GitHub #227
@@ -97,7 +97,6 @@ gains:
   phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radiands. Options are 'truth' or a value like 0.0
   amp_std: null         # Optional - Standard deviation of the prior distribution over the gain amplitudes as a percentage of amp_mean. null defaults to 20, i.e. a 20 % spread
   phase_std: null       # Optional - Standard deviation of the prior distribution over the gain phases in degrees. null defaults to 180, half a turn, which is effectively uniform over the circle - the wrapped prior is flat to 1.4 %
-  r_seed: 123           # Optional - Random seed for the gain draws. Only null takes the default; 0 is a seed like any other
 # ###################
 # # Model parameters
 # ###################

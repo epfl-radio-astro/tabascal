@@ -172,9 +172,11 @@ The `inference` section defines the type of inference that will be done. An exam
 ```yaml
 inference:
   opt: True
+  seed: null
 ```
 
 * `opt`: Optimisation will be done to find the maximum a posteriori (MAP) point. It is the only inference this section offers.
+* `seed`: The one random seed of the run. **`null` means "unset"; `0` means zero**: `null` or absent takes the default, 1, and any integer, 0 included, is the seed it says. Anything else — `true`, `1.5`, `"7"` — is an error naming `inference.seed`. The run key is `PRNGKey(seed)`, and each component that draws folds its own fixed tag into it: `ast.init: sample` draws under `ast` and `rfi.init: sample` under `rfi`, so adding or removing a component never shifts another's draw. With neither init set to `sample` the fit makes no random draw and the seed changes nothing; prior plots (`plots.prior`) still draw from it, but they never touch the fit. The run header says which of these apply.
 
 ## Optimisation
 
@@ -565,9 +567,8 @@ gains:
 * `phase_mean`: The mean of the prior over the gain phase, in **radians**.
 * `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**. `null` defaults to **180** — half a turn, which is effectively uniform over the circle. See below.
 * `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
-* `r_seed`: The random seed the gain component draws with.
 
-**`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. A zero seed is the seed it says. A zero width is an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason.
+**`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. A zero width is an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason.
 
 
 ### The default prior widths
