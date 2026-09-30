@@ -132,9 +132,9 @@ RFI_AXIS_NAMES = frozenset({
     # forwards. Sharded rather than replicated so that multiply stays elementwise
     # within each shard -- replicated, it would pull rfi_A back to a full copy.
     "rfi_mask_fine",
-    # (n_rfi, n_win, ...) unmasked windows and their time tables, which
-    # rfi_vis:AnalyticVis gathers from each shard's own sources
-    "rfi_windows", "rfi_window_g_time",
+    # (n_rfi, n_time) elevation mask of rfi_vis:AnalyticVis, which scans each
+    # shard's own sources
+    "rfi_mask",
 })
 
 

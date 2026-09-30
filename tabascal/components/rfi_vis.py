@@ -461,39 +461,6 @@ _ANALYTIC_OPTIONS = {
 }
 
 
-def window_tables(mask, h):
-    """Each source's unmasked windows of ``mask`` ``(n_rfi, n_time)``, with their time tables.
-
-    Returns ``index`` ``(n_rfi, n_win, 2 + L)`` int32 -- each window's first
-    cell, its length and its cells' stencil starts, relative to the first cell
-    -- and ``g_time`` ``(n_rfi, n_win, L, 2h + 1, 2h + 1)``, the
-    :func:`monomial_tables` of the window alone. A window narrower than the
-    stencil takes ``min(h, (n - 1) // 2)``, zero-padded to the common width;
-    cells past a window's end, and the empty windows that pad a source's count
-    to ``n_win``, have zero coefficients. ``L`` is long enough for every
-    padded stencil to lie within it, as the kernel requires.
-    """
-    runs = []
-    for row in mask:
-        edges = np.flatnonzero(np.diff(np.r_[0, row.astype(np.int8), 0]))
-        runs.append(list(zip(edges[::2], edges[1::2] - edges[::2])))
-    width = 2 * h + 1
-    L = max([width] + [n + 2 * (h - min(h, (n - 1) // 2)) for r in runs for _, n in r])
-    n_win = max(len(r) for r in runs)
-    index = np.zeros((len(runs), n_win, 2 + L), np.int32)
-    g_time = np.zeros((len(runs), n_win, L, width, width))
-    for s, r in enumerate(runs):
-        for w in range(n_win):
-            t0, n = r[w] if w < len(r) else (0, 0)
-            starts = np.clip(np.arange(L) - h, 0, L - width)
-            if n:
-                h_w = min(h, (n - 1) // 2)
-                g, starts[:n] = monomial_tables(n, h_w)
-                g_time[s, w, :n, : 2 * h_w + 1, : 2 * h_w + 1] = g
-            index[s, w] = [t0, n, *starts]
-    return index, g_time
-
-
 class AnalyticVis(Component):
     """RFI visibilities from the data grid, each cell integrated in closed form.
 
@@ -510,7 +477,9 @@ class AnalyticVis(Component):
 
     The kernel differentiates the signal and the phase; the delay, the interval
     and the tables are constants. With ``FixedOrbit`` the phase is a constant
-    too, and the signal-only kernels run. See ``docs/analytic_rfi_vis.md``.
+    too, and the signal-only kernels run. Under an elevation mask each source
+    is integrated alone, over the whole axis, and its visibility masked per
+    cell. See ``docs/analytic_rfi_vis.md``.
     """
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
@@ -563,13 +532,11 @@ class AnalyticVis(Component):
             self.dnu_mhz = dnu / 1e6
             self.freq_mhz = np.asarray(config.freqs, dtype=np.float64) / 1e6
             self.int_time = float(config.int_time)
-            # Under an elevation mask the stencil would carry a neighbour's
-            # signal into a masked cell, so each unmasked window is integrated
-            # on its own, with tables that never read outside it.
+            # The elevation mask multiplies each source's visibility after its
+            # cells are interpolated, so a visible cell's stencil reads its
+            # hidden neighbours' signal.
             mask = getattr(config, "rfi_mask", None)
-            self.windows = (
-                None if mask is None or np.all(mask) else window_tables(np.asarray(mask, bool), h)
-            )
+            self.rfi_mask = None if mask is None or np.all(mask) else np.asarray(mask, bool)
 
             self._set_outputs()
 
@@ -608,11 +575,9 @@ class AnalyticVis(Component):
         return set_params
 
     def build_constants(self):
-        windows = {} if self.windows is None else dict(
-            zip(("rfi_windows", "rfi_window_g_time"), map(jnp.asarray, self.windows))
-        )
+        mask = {} if self.rfi_mask is None else {"rfi_mask": jnp.asarray(self.rfi_mask)}
         return {
-            **windows,
+            **mask,
             "w_freq": jnp.asarray(self.w_freq),
             "start_freq": jnp.asarray(self.start_freq),
             "g_time": jnp.asarray(self.g_time),
@@ -626,7 +591,7 @@ class AnalyticVis(Component):
         """Return pure, JIT-compatible function"""
         prefix = self.prefix
         op, options, n_bl = self._op, self.options, self.n_bl
-        windowed = self.windows is not None
+        masked = self.rfi_mask is not None
 
         def forward(params, state, constants):
             real = [
@@ -639,52 +604,30 @@ class AnalyticVis(Component):
             # Per-RFI-shard body, psum-ed across devices under sharding as the
             # fine-grid components do. The kernel wants the antenna axis first
             # and every real input in the phase's dtype.
-            def local_vis(rfi_A, rfi_phase, rfi_delay, *windows):
+            def local_vis(rfi_A, rfi_phase, rfi_delay, *mask):
                 dtype = rfi_phase.dtype
                 w_freq, g_time, dnu_mhz, int_time, freq_mhz = (x.astype(dtype) for x in real)
-                if not windows:
-                    return op.eval(
-                        jnp.swapaxes(rfi_A, 0, 1),
-                        jnp.swapaxes(rfi_phase, 0, 1),
-                        jnp.swapaxes(rfi_delay, 0, 1).astype(dtype),
-                        w_freq, start_freq, g_time, start_time, dnu_mhz, int_time, freq_mhz,
-                        **options,
-                    )
-                index, g_win = windows
-                n_src, n_win, n_cell = index.shape[0], index.shape[1], index.shape[2] - 2
-                n_time = rfi_A.shape[-1]
-
-                # One window per step, gathered from the full grid and added at
-                # its first cell into a carry long enough for the padded tail.
-                def step(vis, window):
-                    s, idx, g = window
-                    t0, n = idx[0], idx[1]
-                    cells = jnp.minimum(t0 + jnp.arange(n_cell), n_time - 1)
-                    take = lambda x, axis: jnp.swapaxes(
-                        jnp.take(lax.dynamic_index_in_dim(x, s, 0), cells, axis=axis), 0, 1
-                    )
-                    v = op.eval(
-                        take(rfi_A, -1), take(rfi_phase, -1), take(rfi_delay, 2).astype(dtype),
-                        w_freq, start_freq, g.astype(dtype), idx[2:], dnu_mhz, int_time, freq_mhz,
-                        **options,
-                    )
-                    v = jnp.where(jnp.arange(n_cell) < n, v, 0)
-                    old = lax.dynamic_slice_in_dim(vis, t0, n_cell, axis=2)
-                    return lax.dynamic_update_slice_in_dim(vis, old + v, t0, axis=2), None
-
-                xs = (
-                    jnp.repeat(jnp.arange(n_src), n_win),
-                    index.reshape(n_src * n_win, n_cell + 2),
-                    g_win.reshape(n_src * n_win, *g_win.shape[2:]),
+                vis = lambda A, phase, delay: op.eval(
+                    jnp.swapaxes(A, 0, 1),
+                    jnp.swapaxes(phase, 0, 1),
+                    jnp.swapaxes(delay, 0, 1).astype(dtype),
+                    w_freq, start_freq, g_time, start_time, dnu_mhz, int_time, freq_mhz,
+                    **options,
                 )
-                vis = jnp.zeros((n_bl, w_freq.shape[0], n_time + n_cell), rfi_A.dtype)
-                return lax.scan(step, vis, xs)[0][..., :n_time]
+                if not mask:
+                    return vis(rfi_A, rfi_phase, rfi_delay)
 
-            windows = [] if not windowed else [
-                constants[f"{prefix}/{name}"] for name in ("rfi_windows", "rfi_window_g_time")
-            ]
+                # One source per step, its mask applied to its visibility.
+                def step(total, source):
+                    *inputs, m = source
+                    return total + jnp.where(m, vis(*(x[None] for x in inputs)), 0), None
+
+                total = jnp.zeros((n_bl, w_freq.shape[0], rfi_A.shape[-1]), rfi_A.dtype)
+                return lax.scan(step, total, (rfi_A, rfi_phase, rfi_delay, *mask))[0]
+
+            mask = [constants[f"{prefix}/rfi_mask"]] if masked else []
             vis_rfi = psum_over_rfi(local_vis)(
-                state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"], *windows
+                state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"], *mask
             )
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 

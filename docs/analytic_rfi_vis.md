@@ -54,12 +54,14 @@ The kernel keeps derivatives up to the third, so `path_order` is at most 3.
 **Signal.** The data-grid signal is the fine-grid signal at each cell's own
 sample: the same latent, prior and parameters as its `Fine` twin. Inside a cell
 it is the polynomial through the `2 * rfi.analytic.stencil + 1` nearest cells on
-each axis (Lagrange weights; shifted inwards at the edges). In time the stencil
-stays inside each source's contiguous unmasked window, so a masked cell is never
-read and contributes nothing; a window shorter than the stencil uses a narrower
-one. On CPU each window is its own kernel call, and ri-kernels 0.2.2 runs a
-single source's transpose on one thread, so a masked gradient is several times
-slower there than an unmasked one.
+each axis (Lagrange weights; shifted inwards at the observation's edges). The
+elevation mask is not applied to it, so the saved `rfi_A` is unmasked. Instead
+each source's visibility is masked per cell after interpolation, and a visible
+cell's stencil reads its hidden neighbours' signal, which is continuous across
+the horizon. A satellite that sets mid-cell is still all or nothing per cell.
+Under a mask each source is its own kernel call, and ri-kernels 0.2.2 runs a
+single source's CPU transpose on one thread, so a masked gradient is several
+times slower there than an unmasked one.
 
 **Integral.** The time integral of the product is closed form; the frequency
 average is the same `n_int_freq`-point rule as the fine grid. The signal and the

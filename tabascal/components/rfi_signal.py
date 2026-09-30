@@ -785,13 +785,10 @@ class BaseGPRFI(Component):
         # padded dummy rows too -- they duplicate the last real satellite, so they
         # inherit its mask and are zeroed independently by masked_forward_transform.
         # Stored as a boolean, which is what jnp.where in the forward wants and is
-        # the smallest thing to shard. A data-grid signal takes the data-grid
-        # mask under the same name: that is the name distributed.py shards along
-        # the source axis, and neither it nor build_masked_signal minds the
-        # length of the time axis.
-        rfi_mask_fine = getattr(
-            tab_config, "rfi_mask_fine" if self.supersample else "rfi_mask", None
-        )
+        # the smallest thing to shard. A data-grid signal is left unmasked:
+        # rfi_vis:AnalyticVis interpolates it across the horizon and masks each
+        # source's visibility instead.
+        rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None) if self.supersample else None
         self.rfi_mask_fine = (
             None if rfi_mask_fine is None else jnp.asarray(rfi_mask_fine, dtype=bool)
         )
@@ -1268,7 +1265,9 @@ class ComplexRFIVarAnt(ComplexRFIVarAntFine):
     lands on each cell's own sample instead of supersampling, so where the two
     grids meet the two components agree exactly. For
     :class:`~tabascal.components.rfi_vis.AnalyticVis`, which interpolates the
-    signal across each cell itself.
+    signal across each cell itself. The elevation mask is not applied: ``rfi_A``
+    is the continuous signal, saved results included, and AnalyticVis masks
+    each source's visibility instead.
     """
 
     supersample = False
@@ -1580,7 +1579,9 @@ class ComplexRFIConstAnt(ComplexRFIConstAntFine):
     lands on each cell's own sample instead of supersampling, so where the two
     grids meet the two components agree exactly. For
     :class:`~tabascal.components.rfi_vis.AnalyticVis`, which interpolates the
-    signal across each cell itself.
+    signal across each cell itself. The elevation mask is not applied: ``rfi_A``
+    is the continuous signal, saved results included, and AnalyticVis masks
+    each source's visibility instead.
     """
 
     supersample = False
