@@ -22,6 +22,7 @@ from tabascal.components.trajectory import (
 )
 from tabascal.orbit import check_epoch_agreement, preflight_tle_check
 from tabascal.orbit_config import normalise_tle_config
+from tabascal.seeds import validate_seed, warn_deprecated_seeds
 from tabascal.interferometry import (
     baseline_gains,
     calculate_fringe_frequency_numpy,
@@ -133,9 +134,14 @@ def load_config(path: str) -> Dict:
     base_config = yaml_load(tab_base_config_path)
 
     try:
-        return deep_update(base_config, yaml_load(path))
+        config = deep_update(base_config, yaml_load(path))
     except Exception as e:
         raise IOError(f"Configuration file could not be loaded from {path}") from e
+
+    # Outside the try: a bad seed is a config to edit, not a file that failed to load.
+    validate_seed(config)
+    warn_deprecated_seeds(config)
+    return config
 
     
 class TabConfig:

@@ -6,6 +6,7 @@ import jax.numpy as jnp
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
+from tabascal.seeds import component_key, config_seed
 from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
@@ -64,6 +65,9 @@ _LATENT_WIDTH = sqrt(2.0)
 
 class GPVisAst(Component):
 
+    #: The tag ``ast.init: sample`` folds into ``inference.seed`` (tabascal.seeds).
+    seed_tag = "ast"
+
     # Accumulates into vis_ast, which Model zeroes before the components run.
     required_inputs = {
         "vis_ast": ("n_bl", "n_freq", "n_time"),
@@ -92,6 +96,7 @@ class GPVisAst(Component):
             self.dec = config.phase_centre["dec"]
             self.freqs = config.freqs
             self.times = config.times
+            self.seed = config_seed(config.args)
 
             # Checked rather than indexed: these went straight to the Fourier
             # machinery, so a negative gamma, a string, or a cutoff of 1 -- which
@@ -596,7 +601,7 @@ class GPVisAst(Component):
         elif init_type == "sample":
             print("Using prior sample for AST init")
             prior_sample = random.normal(
-                random.PRNGKey(1),
+                component_key(self.seed, self.seed_tag),
                 (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast),
                 dtype=complex,
             )
