@@ -134,21 +134,23 @@ from tabascal.components.trajectory import (
     fetch_orbital_elements,
     get_satellite_elevations,
     get_satellite_positions,
+    check_phase_tracking,
     itrs_to_gcrs_sf,
+    tracking_uvw,
 )
 from tabascal.interferometry import (
     C,
     Omega_e,
     get_rfi_phase_numpy,
-    itrf_to_uvw_numpy,
 )
 from tabascal.noise import broadcast_to_vis
 from tabascal.time import (
     datetime_to_jd,
-    gast_deg,
     jd_to_datetime,
+    skyfield_time,
     to_utc_mjd,
 )
+from skyfield.framelib import itrs
 
 
 #: Bytes of working array per (baseline, channel, timestep) inside the
@@ -190,7 +192,9 @@ def rfi_phase_from_positions(
     times_jd : Array (n_time,)
         Observation times in Julian date.
     phase_centre : dict
-        ``{"ra": <deg>, "dec": <deg>}`` phase centre of the visibilities.
+        ``{"ra": <deg>, "dec": <deg>}`` J2000 phase centre of the visibilities,
+        with an optional ``"tracking"`` convention; see
+        :func:`tabascal.components.trajectory.tracked_radec`.
     freqs : Array (n_freq,)
         Channel frequencies in Hz.
 
@@ -202,12 +206,7 @@ def rfi_phase_from_positions(
     times_jd = np.asarray(times_jd)
     freqs = np.asarray(freqs)
 
-    gsa = gast_deg(times_jd)  # GAST in degrees (UTC convention)
-    gh0 = (gsa - phase_centre["ra"]) % 360
-
-    ants_uvw = np.transpose(
-        itrf_to_uvw_numpy(ants_itrf, gh0, phase_centre["dec"]), axes=(1, 0, 2)
-    )  # (n_ant, n_time, 3)
+    ants_uvw = tracking_uvw(ants_itrf, times_jd, phase_centre)  # (n_ant, n_time, 3)
     ants_xyz = itrs_to_gcrs_sf(ants_itrf, times_jd)  # (n_ant, n_time, 3)
 
     return get_rfi_phase_numpy(np.asarray(rfi_xyz), ants_uvw, ants_xyz, freqs)
@@ -742,10 +741,7 @@ def _antenna_path_grid(record, ants_itrf, times_jd, phase_centre, n_fine, delta_
     t_fine = (times_jd[:, None] + offsets[None, :] / 86400.0).ravel()
 
     # The array, once. It does not move with tau.
-    gh0 = (gast_deg(t_fine) - phase_centre["ra"]) % 360
-    w = np.transpose(
-        itrf_to_uvw_numpy(ants_itrf, gh0, phase_centre["dec"]), axes=(1, 0, 2)
-    )[..., -1]  # (n_ant, n_time * n_fine)
+    w = tracking_uvw(ants_itrf, t_fine, phase_centre)[..., -1]  # (n_ant, n_time * n_fine)
     ants_xyz = itrs_to_gcrs_sf(ants_itrf, t_fine)  # (n_ant, n_time * n_fine, 3)
 
     # The orbit, once for the whole grid: propagation dominates the cost, and a
@@ -780,11 +776,13 @@ def satellite_range_and_speed(record, ants_itrf: NDArray, times_jd: NDArray):
     adds is bounded by ``Omega_e * range_m`` and :func:`fit_time_offset` adds it
     where the fringe-rate ceiling is sized.
 
-    The Earth-fixed direction is recovered by turning the inertial separation
-    back by the sidereal angle. That leaves the precession-nutation rotation in
-    it, which is constant to a part in ``1e12`` over the second differenced here
-    and so cannot affect a *rate*; against the full frame transform the speed
-    agrees to a part in ``1e4``.
+    The Earth-fixed separation is the inertial one turned by skyfield's full
+    GCRS-to-ITRS rotation. The sidereal angle alone is not enough, even for a
+    rate: precession-nutation does not commute with the Earth's rotation, so
+    leaving it out tilts the spin axis the separation turns about and gives an
+    Earth-fixed source at geostationary radius a spurious ~4 m/s. It is Earth
+    orientation, not the phase-tracking convention, so ``tabsim.phase_tracking``
+    does not enter here.
 
     It is not the orbital speed. Near the horizon most of a LEO satellite's
     motion is along the line of sight and does not fringe, and its range is
@@ -819,12 +817,8 @@ def satellite_range_and_speed(record, ants_itrf: NDArray, times_jd: NDArray):
         - itrs_to_gcrs_sf(centre[None], t3)[0]
     )  # (3, 3), inertial
 
-    theta = np.deg2rad(gast_deg(t3))
-    cos, sin = np.cos(theta), np.sin(theta)
-    sep = np.stack(
-        [cos * sep[:, 0] + sin * sep[:, 1], -sin * sep[:, 0] + cos * sep[:, 1], sep[:, 2]],
-        axis=-1,
-    )
+    rot = np.reshape(itrs.rotation_at(skyfield_time(t3)), (3, 3, -1))
+    sep = np.einsum("ijt,tj->ti", rot, sep)
 
     ranges = np.linalg.norm(sep, axis=-1)
     look = sep / ranges[:, None]
@@ -3017,7 +3011,9 @@ def write_search_results(
     return path
 
 
-def write_config_fragment(path: str, selection: dict, shifted_orbit_dir=None) -> str:
+def write_config_fragment(
+    path: str, selection: dict, shifted_orbit_dir=None, phase_tracking: str = "apparent"
+) -> str:
     """Write the detections as a tabascal ``satellites`` section.
 
     The deliverable the issue asks for: the ``norad_ids`` list a run needs,
@@ -3037,12 +3033,19 @@ def write_config_fragment(path: str, selection: dict, shifted_orbit_dir=None) ->
     whole point of writing them: a later run reproduces the trajectories the
     search measured, whatever SatChecker serves by then.
 
+    A ``tabsim`` section always follows, naming the ``phase_tracking`` the search
+    ran with. The offsets and detections were measured under it, so the fit must
+    use it too. It is written even at the default so that merging the fragment
+    overrides whatever the target config says, rather than inheriting it.
+
     Returns
     -------
     str
         ``path``.
     """
     import yaml
+
+    phase_tracking = check_phase_tracking(phase_tracking, "phase_tracking")
 
     detected = selection["detected"]
     lines = [
@@ -3079,7 +3082,9 @@ def write_config_fragment(path: str, selection: dict, shifted_orbit_dir=None) ->
         # own configs write it, while the section itself stays in block style.
         fh.write(
             yaml.safe_dump(
-                {"satellites": satellites}, sort_keys=False, default_flow_style=None
+                {"satellites": satellites, "tabsim": {"phase_tracking": phase_tracking}},
+                sort_keys=False,
+                default_flow_style=None,
             )
         )
 
@@ -3335,7 +3340,7 @@ def _times_jd(ms: dict) -> NDArray:
     UTC. :func:`tabascal.ms.read_ms` normalises whatever it finds onto UTC and
     reports that as ``times_jd``, leaving ``times_mjd`` on the declared scale so
     it stays comparable with the column itself. Rebuilding a Julian Date from
-    ``times_mjd`` here would undo that: skyfield, ``sgp4jax.itrf_to_gcrf`` and
+    ``times_mjd`` here would undo that: skyfield, ``sgp4jax``'s GCRF propagation and
     the elevation calls all read UTC, so on a TAI-declared MS the propagation,
     the fringe and the elevation cut would every one of them be 37 s out -- some
     285 km along a LEO satellite's ground track, and nothing raises.
@@ -3354,6 +3359,7 @@ def extract_light_curves_from_ms(
     min_elevation: Optional[float] = 0.0,
     max_mem_gb: float = 1.0,
     offset_fit: Optional[dict] = None,
+    phase_tracking: str = "apparent",
 ) -> dict:
     """Extract matched-filter RFI light curves from any column of an MS.
 
@@ -3389,6 +3395,10 @@ def extract_light_curves_from_ms(
         Settings for the along-track offset search; see
         :func:`attach_offset_fits`. With it, each satellite's ``tau`` is measured
         first and the curves are extracted at the offset it found.
+    phase_tracking : str, default "apparent"
+        How the data were phase-tracked to the MS's J2000 centre; one of
+        :data:`tabascal.components.trajectory.PHASE_TRACKING`. ``"j2000"`` is for
+        data simulated by tab-sim (#253).
 
     Returns
     -------
@@ -3413,15 +3423,31 @@ def extract_light_curves_from_ms(
         min_elevation,
         max_mem_gb,
         offset_fit=offset_fit,
+        phase_tracking=phase_tracking,
     )
+
+
+def ms_phase_centre(ms: dict, phase_tracking: str = "apparent") -> dict:
+    """The phase centre dict of a :func:`tabascal.ms.read_ms` result.
+
+    The MS's J2000 ``ra`` and ``dec``, and ``tracking``: how the data were
+    tracked to it, checked against
+    :data:`tabascal.components.trajectory.PHASE_TRACKING`.
+    """
+    return {
+        "ra": float(ms["ra"]),
+        "dec": float(ms["dec"]),
+        "tracking": check_phase_tracking(phase_tracking, "phase_tracking"),
+    }
 
 
 def _filter_visibilities(
     vis, ms, records, norad_ids, times_jd, data_col, corr,
     exclude_autos, min_elevation, max_mem_gb, offset_fit=None,
+    phase_tracking="apparent",
 ):
     """Shared tail of the two MS-backed drivers."""
-    phase_centre = {"ra": float(ms["ra"]), "dec": float(ms["dec"])}
+    phase_centre = ms_phase_centre(ms, phase_tracking)
     ants_itrf = np.asarray(ms["ants_itrf"])
     flags = None if ms.get("flags") is None else np.asarray(ms["flags"])
 
@@ -3635,6 +3661,7 @@ def extract_light_curves_from_zarr(
     min_elevation: Optional[float] = 0.0,
     max_mem_gb: float = 1.0,
     offset_fit: Optional[dict] = None,
+    phase_tracking: str = "apparent",
 ) -> dict:
     """Matched-filter the residual of a tabascal run, taken from its results zarr.
 
@@ -3686,6 +3713,7 @@ def extract_light_curves_from_zarr(
         min_elevation,
         max_mem_gb,
         offset_fit=offset_fit,
+        phase_tracking=phase_tracking,
     )
 
 

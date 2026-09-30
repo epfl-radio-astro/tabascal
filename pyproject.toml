@@ -36,6 +36,9 @@ dependencies = [
     "numpyro",
     "optax",
     "platformdirs",
+    # Analytic Earth velocity (epv00) for the annual aberration of the tracked
+    # phase centre, with no ephemeris to download; see tabascal/time.py.
+    "pyerfa",
     "PyYAML",
     # CPU RFI-visibility FFI kernels + the RFIVisOp JAX bindings. The GPU
     # kernels ship as add-on wheels pulled in by the cuda12/cuda13 extras.

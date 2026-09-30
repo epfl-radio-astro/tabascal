@@ -825,7 +825,7 @@ def read_ms(
     # The declared scale is honoured by normalising to UTC once, here, rather
     # than by threading a scale through the trajectory maths: everything past
     # this point reads UTC Julian Dates -- skyfield through skyfield_time's
-    # default, sgp4jax.itrf_to_gcrf, which has no scale concept to be told
+    # default, sgp4jax's GCRF propagation, which has no scale concept to be told
     # otherwise, and the TLE epoch checks -- so one conversion covers all of
     # them. times_mjd stays as declared beside it: it is the MS's own column in
     # days, and orbit_config.ms_integration_times_mjd reports the same column

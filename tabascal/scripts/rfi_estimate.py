@@ -149,9 +149,29 @@ def build_parser(parser=None):
         "it does not fit whole. This is a sizing heuristic, not a memory cap.",
     )
 
+    add_phase_tracking_argument(parser, "the config's tabsim.phase_tracking with -c")
     add_offset_fit_arguments(parser)
 
     return parser
+
+
+def add_phase_tracking_argument(parser, default_from=None):
+    """``--phase-tracking``, the command-line twin of ``tabsim.phase_tracking``.
+
+    The choices are written out rather than read from
+    :data:`tabascal.components.trajectory.PHASE_TRACKING`, whose import would
+    pull the JAX stack into ``tabascal -h``; the value is checked against that
+    tuple again where it is used.
+    """
+    default = "apparent" if default_from is None else f"{default_from}, else apparent"
+    parser.add_argument(
+        "--phase-tracking", dest="phase_tracking", default=None,
+        choices=("apparent", "j2000"),
+        help="How the data were phase-tracked to the MS's J2000 phase centre: "
+        "'apparent' (its apparent place of date, as a correlator tracks it) or "
+        "'j2000' (J2000 RA/Dec with GAST, as current tab-sim simulations do; "
+        f"see tabascal #253). Default: {default}.",
+    )
 
 
 #: The offset-fit options and the values they take when nobody asks for them.
@@ -365,6 +385,31 @@ def resolve_corr(args, config):
         )
 
     return corr
+
+
+def resolve_phase_tracking(args, config):
+    """The tracking convention: the flag, else the config's, else ``apparent``.
+
+    With a config, the flag is written into its ``tabsim`` section and the
+    section is then checked by the same
+    :func:`tabascal.config.normalise_tabsim_config` a run uses, so a configured
+    value is validated as given -- ``null`` or ``false`` is refused rather than
+    read as the default. Without one, argparse has already checked the flag.
+    """
+    if config is None:
+        return "apparent" if args.phase_tracking is None else args.phase_tracking
+
+    from collections.abc import Mapping
+
+    from tabascal.config import normalise_tabsim_config
+
+    if args.phase_tracking is not None:
+        if config.get("tabsim") is None:
+            config["tabsim"] = {}
+        if isinstance(config["tabsim"], Mapping):
+            config["tabsim"]["phase_tracking"] = args.phase_tracking
+
+    return normalise_tabsim_config(config)["phase_tracking"]
 
 
 def resolve_min_elevation(args, config):
@@ -638,6 +683,7 @@ def _from_config(args, offset_fit=None):
     # The satellites are the config's own: -n/-np are refused alongside -c, since
     # both name them and there is no rule for which would win.
     config["rfi"]["min_elevation"] = resolve_min_elevation(args, config)
+    resolve_phase_tracking(args, config)  # writes the flag in, and checks the section
 
     # An MS with no usable noise column is not fatal here: the curves are still
     # measured, and come back unweighted and unscaled with nan errors, which is
@@ -752,6 +798,7 @@ def _extract_from_ms(args, offset_fit):
         min_elevation=resolve_min_elevation(args, None),
         max_mem_gb=args.max_mem_gb,
         offset_fit=offset_fit,
+        phase_tracking=resolve_phase_tracking(args, None),
     )
     if args.zarr:
         return (

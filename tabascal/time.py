@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from functools import lru_cache
 
+import erfa
 import numpy as np
 from skyfield.api import load
 
@@ -223,7 +224,7 @@ def to_utc_jd(times_jd, scale: str = "utc"):
 
     tabascal reads times on whatever scale their source declares and works in
     UTC everywhere after that: :func:`skyfield_time` defaults to it, the epoch
-    checks compare against it, and ``sgp4jax.itrf_to_gcrf`` has no scale concept
+    checks compare against it, and ``sgp4jax``'s GCRF propagation has no scale concept
     to be told anything else. Converting once, where the times are read, puts all
     of them on the instant the source actually named without a ``scale``
     argument threaded through any of them.
@@ -340,3 +341,60 @@ def gast_deg(times_jd, scale: str = "utc"):
     gast = skyfield_time(times_jd, scale).gast
 
     return np.asarray(gast) * 15.0  # GAST hours → degrees
+
+
+def apparent_radec_of_date(ra_deg, dec_deg, times_jd, scale: str = "utc"):
+    """A J2000 (ICRS) direction as the apparent geocentric RA/Dec of date.
+
+    This is the direction a correlator tracks for a J2000 phase centre, on the
+    true equator and equinox of date, and so the one to pair with
+    :func:`gast_deg`: ``GAST - ra`` is then its Greenwich hour angle. It applies
+    annual aberration (up to 20.5 arcsec) and then frame bias, precession and
+    nutation (about 0.25 deg by 2019).
+
+    Diurnal aberration (at most 0.32 arcsec, and common to the whole array) and
+    gravitational light deflection (a few milliarcseconds away from the Sun) are
+    not applied. The phase centre is a direction at infinity, so there is no
+    parallax either.
+
+    The Earth's barycentric velocity is the analytic ``erfa.epv00`` series,
+    good to a few mm/s, or micro-arcseconds of aberration, with no ephemeris
+    file to download. The bias-precession-nutation matrix is skyfield's, the
+    same one :func:`gast_deg` and skyfield's ITRS-to-GCRS rotation use, so the
+    tracked direction and the antenna positions share one frame.
+
+    Parameters
+    ----------
+    ra_deg, dec_deg : float
+        The J2000 direction in degrees, as a Measurement Set records it.
+    times_jd : array_like
+        Observation times as Julian Dates on ``scale``.
+    scale : str, optional
+        Time scale the Julian Dates are on; see :func:`skyfield_time`.
+
+    Returns
+    -------
+    (np.ndarray, np.ndarray)
+        Apparent RA in ``[0, 360)`` and Dec, in degrees, one per input time.
+    """
+
+    t = skyfield_time(np.atleast_1d(np.asarray(times_jd, dtype=float)), scale)
+
+    ra, dec = np.deg2rad(float(ra_deg)), np.deg2rad(float(dec_deg))
+    s = np.array([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
+
+    pvh, pvb = erfa.epv00(t.whole, t.tdb_fraction)
+    v = pvb["v"] / erfa.DC  # barycentric velocity in units of c
+    s_app = erfa.ab(
+        s,
+        v,
+        np.linalg.norm(pvh["p"], axis=-1),
+        np.sqrt(1.0 - np.sum(v * v, axis=-1)),
+    )
+
+    s_date = np.einsum("ijt,tj->ti", np.reshape(t.M, (3, 3, -1)), s_app)
+
+    ra_date = np.rad2deg(np.arctan2(s_date[:, 1], s_date[:, 0])) % 360.0
+    dec_date = np.rad2deg(np.arcsin(np.clip(s_date[:, 2], -1.0, 1.0)))
+
+    return ra_date, dec_date

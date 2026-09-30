@@ -795,7 +795,7 @@ class TestDeclaredTimeScale:
 
     The declaration is honoured by normalising to UTC once, here at the
     boundary, rather than by threading a scale through the trajectory maths.
-    Everything past ``read_ms`` -- skyfield, ``sgp4jax.itrf_to_gcrf`` (which has
+    Everything past ``read_ms`` -- skyfield, ``sgp4jax``'s GCRF propagation (which has
     no scale concept at all) and the TLE epoch checks -- reads UTC Julian Dates,
     so one conversion covers all of them.
     """

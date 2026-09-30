@@ -12,7 +12,7 @@ from tabascal.transform import affine_transform_full
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy, itrf_to_uvw_numpy
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
-from tabascal.time import gast_deg, skyfield_time, timescale
+from tabascal.time import apparent_radec_of_date, gast_deg, skyfield_time, timescale
 
 import sgp4jax
 from sgp4jax import WGS72 as gravity
@@ -176,16 +176,11 @@ class PhaseCalculationRFIFine(Component):
 
     def _compute_ant_pos(self):
 
-        gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
-        gh0 = (gsa - self.phase_centre["ra"]) % 360
-
-        self.ants_xyz = vmap(vmap(sgp4jax.itrf_to_gcrf, (0, None, None), 0), (None, 0, 0), 1)(
-            self.ants_itrf, 
-            jnp.floor(self.times_jd_fine), 
-            self.times_jd_fine - jnp.floor(self.times_jd_fine)
-        )
-        self.ants_uvw = jnp.transpose(
-            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
+        # Skyfield's ITRS-to-GCRS rotation, as FixedOrbitFine uses: sgp4jax.itrf_to_gcrf
+        # takes the UTC date as UT1, which moves the array by up to DUT1 of rotation.
+        self.ants_xyz = jnp.asarray(itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine))
+        self.ants_uvw = jnp.asarray(
+            tracking_uvw(self.ants_itrf, self.times_jd_fine, self.phase_centre)
         )
 
     def _validate_dimensions(self):
@@ -325,12 +320,7 @@ class FixedOrbitFine(Component):
         # rfi_phase is one-shot setup producing a forward constant, so compute it in
         # numpy/skyfield (f64) in both precisions — faster than the jax path (no JIT
         # compile) and accurate. jnp.array casts to the active precision (f64/f32).
-        gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
-        gh0 = (gsa - self.phase_centre["ra"]) % 360
-
-        self.ants_uvw = np.transpose(
-            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
-        )
+        self.ants_uvw = tracking_uvw(self.ants_itrf, self.times_jd_fine, self.phase_centre)
         # Fine-grid constant and the biggest array of this component: under sharding
         # it is created directly with the RFI-axis sharding so the full array only
         # ever exists in host numpy, never on a single device.
@@ -725,6 +715,75 @@ class OrbitFine(Component):
         assert_attr_shape(self, "L_rfi_orbit", (self.n_rfi, 7, 7))
         assert_attr_shape(self, "init_rfi_orbit", orbit_shape)
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
+
+
+#: Conventions for the direction a J2000 phase centre is tracked in, as
+#: ``phase_centre["tracking"]`` or the config's ``tabsim.phase_tracking``.
+#: ``apparent`` is the apparent place of date, which is what a correlator tracks.
+#: ``j2000`` pairs the J2000 RA/Dec with GAST directly, as tab-sim simulations do
+#: until chrisfinlay/tab-sim#73 is fixed; see tabascal #252 and #253.
+PHASE_TRACKING = ("apparent", "j2000")
+
+
+def check_phase_tracking(value, where: str = "tabsim.phase_tracking") -> str:
+    """``value`` as one of :data:`PHASE_TRACKING`, case-insensitively, or a ValueError."""
+
+    key = value.strip().lower() if isinstance(value, str) else None
+    if key not in PHASE_TRACKING:
+        raise ValueError(
+            f"{where} must be one of {list(PHASE_TRACKING)}, not {value!r}."
+        )
+
+    return key
+
+
+def tracked_radec(phase_centre: dict, times_jd: NDArray):
+    """RA/Dec of date, in degrees per time, that the visibilities are tracked to.
+
+    The direction to pair with :func:`tabascal.time.gast_deg`. ``phase_centre``
+    holds the J2000 ``ra`` and ``dec`` as a Measurement Set records them, and
+    optionally ``tracking``, one of :data:`PHASE_TRACKING`: ``apparent``, the
+    default, is :func:`tabascal.time.apparent_radec_of_date`; ``j2000`` returns
+    the J2000 values unchanged, for data simulated by tab-sim (#253). That
+    reproduces the pre-#252 tracking term bit for bit, and only that: the antenna
+    Earth orientation and the fringe-rate rotation stay corrected either way.
+
+    Returns
+    -------
+    (np.ndarray, np.ndarray)
+        RA and Dec in degrees, one per input time.
+    """
+
+    times_jd = np.atleast_1d(np.asarray(times_jd, dtype=float))
+    tracking = check_phase_tracking(
+        phase_centre.get("tracking", "apparent"), 'phase_centre["tracking"]'
+    )
+    if tracking == "j2000":
+        return (
+            np.full(times_jd.shape, float(phase_centre["ra"])),
+            np.full(times_jd.shape, float(phase_centre["dec"])),
+        )
+
+    return apparent_radec_of_date(phase_centre["ra"], phase_centre["dec"], times_jd)
+
+
+def tracking_uvw(ants_itrf: NDArray, times_jd: NDArray, phase_centre: dict) -> NDArray:
+    """Antenna uvw toward the phase centre as :func:`tracked_radec` places it.
+
+    ``w`` is the phase-tracking term: this is the one place it is built, for the
+    forward model and the :mod:`tabascal.rfi_estimate` paths alike.
+
+    Returns
+    -------
+    Array (n_ant, n_time, 3)
+        uvw relative to the first antenna, in metres.
+    """
+
+    times_jd = np.asarray(times_jd)
+    ra, dec = tracked_radec(phase_centre, times_jd)
+    gh0 = (gast_deg(times_jd) - ra) % 360
+
+    return np.transpose(itrf_to_uvw_numpy(ants_itrf, gh0, dec), axes=(1, 0, 2))
 
 
 def itrs_to_gcrs_sf(pos_itrs: NDArray, times_jd: NDArray) -> NDArray:
