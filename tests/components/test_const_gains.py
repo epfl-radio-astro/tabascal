@@ -77,7 +77,6 @@ def make_const_gains_config(
         flags=jnp.asarray(np.asarray(flags)),
         args={
             "gains": {
-                "r_seed": 123,
                 "amp_mean": amp_mean,
                 "amp_std": amp_std,
                 "phase_mean": phase_mean,
@@ -1149,7 +1148,6 @@ def test_validate_gain_scales_converts_percent_and_degrees():
     """The scales reach the component in the units the model works in."""
     cfg = validate_gain_scales(
         {
-            "r_seed": None,
             "amp_mean": 2.0,
             "amp_std": 5.0,
             "phase_mean": None,

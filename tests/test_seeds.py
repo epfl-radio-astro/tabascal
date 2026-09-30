@@ -54,7 +54,9 @@ def ast_start(tmp_path, seed, init="sample"):
 
 def rfi_start(cls, seed, init="sample", r_seed=None):
     """An RFI signal component with no dummy sources, set up on the mock config."""
-    config = make_rfi_config(n_rfi=3, n_rfi_real=3, init=init, r_seed=r_seed)
+    config = make_rfi_config(n_rfi=3, n_rfi_real=3, init=init)
+    if r_seed is not None:
+        config.args["rfi"]["r_seed"] = r_seed
     _set_seed(config.args, seed)
     comp = cls()
     comp.setup(config)
@@ -190,16 +192,16 @@ def test_a_set_r_seed_warns_that_inference_seed_replaces_it(tmp_path, section):
     ), messages
 
 
-def test_a_null_r_seed_does_not_warn(tmp_path):
-    path = write_config(tmp_path, rfi={"r_seed": None}, gains={"r_seed": None})
+@pytest.mark.parametrize(
+    "sections",
+    [{"rfi": {"r_seed": None}, "gains": {"r_seed": None}}, {}],
+    ids=["null", "absent"],
+)
+def test_a_null_or_absent_r_seed_does_not_warn(tmp_path, sections):
+    """The absent case also fails if the base config ever ships an r_seed again."""
     with warnings.catch_warnings():
         warnings.simplefilter("error", FutureWarning)
-        load_config(str(path))
-
-
-@pytest.mark.parametrize("section", ["rfi", "gains"])
-def test_the_base_config_no_longer_ships_r_seed(tmp_path, section):
-    assert "r_seed" not in base_args(tmp_path)[section]
+        load_config(str(write_config(tmp_path, **sections)))
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +231,41 @@ def test_the_line_names_each_sampled_section_and_the_seed(tmp_path, ast_init, rf
     assert "no random draws" not in line
     assert "4242" in line
     assert all(section in line for section in sampled), line
+
+
+@pytest.mark.parametrize("n_proc, says", [(1, "prior plots draw"), (2, "prior plots skipped")])
+def test_the_line_says_whether_prior_plots_draw(tmp_path, monkeypatch, n_proc, says):
+    """The runner skips prior plots in a multi-process run, and the line follows it."""
+    from tabascal.seeds import describe_random_draws
+
+    config = loaded(tmp_path, seed=4242)
+    config["plots"]["prior"] = True
+    monkeypatch.setattr(jax, "process_count", lambda: n_proc)
+
+    assert says in describe_random_draws(config)
+
+
+def test_the_runner_takes_its_run_key_from_inference_seed(monkeypatch):
+    """Stops the run at the key; a hard-coded key never reaches the spy and fails."""
+    from types import SimpleNamespace
+
+    from tabascal.scripts import _run_tabascal_impl as impl
+
+    class Stop(Exception):
+        pass
+
+    seen = []
+
+    def spy(seed):
+        seen.append(seed)
+        raise Stop
+
+    monkeypatch.setattr(impl, "run_key", spy)
+    monkeypatch.setattr(impl, "_resolve_paths", lambda *a, **k: SimpleNamespace(ms_path=None))
+
+    with pytest.raises(Stop):
+        impl.tabascal_subtraction({"inference": {"seed": 7}}, out_dir=None, log=False)
+    assert seen == [7]
 
 
 # ---------------------------------------------------------------------------

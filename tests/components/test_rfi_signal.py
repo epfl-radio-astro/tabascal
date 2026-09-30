@@ -83,7 +83,6 @@ def make_rfi_config(
     init="prior",
     mean="zeros",
     est=None,
-    r_seed=None,
     std=1.0,
     corr_freq=5e6,
     corr_time=60.0,
@@ -135,7 +134,6 @@ def make_rfi_config(
         vis_obs=jnp.ones((n_bl, n_freq, n_time), dtype=complex),
         args={
             "rfi": {
-                "r_seed": r_seed,
                 "gp_cov": {
                     "std": std,
                     "corr_freq": corr_freq,
@@ -245,7 +243,7 @@ class TestRfiSignalConfigValidation:
         """All-None config picks up defaults derived from the data and the observation grid."""
         freqs, times = self._grid()
         vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": None, "gp_cov": {"std": None, "corr_freq": None, "corr_time": None}}
+        cfg = {"gp_cov": {"std": None, "corr_freq": None, "corr_time": None}}
 
         gp_cov = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)["gp_cov"]
 
@@ -261,7 +259,7 @@ class TestRfiSignalConfigValidation:
         """
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "gp_cov": {"std": 1.0, "corr_freq": None, "corr_time": None}}
+        cfg = {"gp_cov": {"std": 1.0, "corr_freq": None, "corr_time": None}}
 
         gp_cov = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)["gp_cov"]
 
@@ -275,7 +273,7 @@ class TestRfiSignalConfigValidation:
         """Explicit numeric values survive validation and are coerced to float."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 42, "gp_cov": {"std": 7, "corr_freq": 5e6, "corr_time": 60}}
+        cfg = {"gp_cov": {"std": 7, "corr_freq": 5e6, "corr_time": 60}}
 
         result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
         gp_cov = result["gp_cov"]
@@ -294,8 +292,8 @@ class TestRfiSignalConfigValidation:
         """
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        omitted = {"r_seed": 1, "gp_cov": {"std": 1.0, "corr_freq": 5e6}}  # no corr_time
-        explicit = {"r_seed": 1, "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": None}}
+        omitted = {"gp_cov": {"std": 1.0, "corr_freq": 5e6}}  # no corr_time
+        explicit = {"gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": None}}
 
         left = rfi_signal_config_validation(omitted, vis_obs, freqs, 1e6, times, 8.0)
         right = rfi_signal_config_validation(explicit, vis_obs, freqs, 1e6, times, 8.0)
@@ -308,7 +306,7 @@ class TestRfiSignalConfigValidation:
         """A non-numeric value for any tunable raises ValueError."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
+        cfg = {"gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
         cfg["gp_cov"][key] = "not a number"
 
         with pytest.raises(ValueError):
@@ -339,7 +337,7 @@ class TestRfiSignalConfigValidation:
         """
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"r_seed": 1, "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
+        cfg = {"gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
         cfg["gp_cov"][key] = value
 
         with pytest.raises(ValueError, match=f"rfi.gp_cov.{key}"):
@@ -349,7 +347,7 @@ class TestRfiSignalConfigValidation:
         """With a zero-extent grid the defaults fall back to the step sizes, not zero."""
         freqs, times = jnp.array([1.4e9]), jnp.array([0.0])
         vis_obs = jnp.ones((6, 1, 1), dtype=complex)
-        cfg = {"r_seed": None, "gp_cov": {"std": None, "corr_freq": None, "corr_time": None}}
+        cfg = {"gp_cov": {"std": None, "corr_freq": None, "corr_time": None}}
 
         gp_cov = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)["gp_cov"]
 
@@ -1013,8 +1011,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     time_scale="utc",
         vis_obs=jnp.ones((3, n_freq, n_time), dtype=complex),
         args={
-            "rfi": {"r_seed": 1,
-                    "gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0},
+            "rfi": {"gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0},
                     "init": "sample", "mean": "zeros", "est": None,
                     "time_pad_factor": 2, "freq_pad_factor": 2},
             "plots": {"truth": False},
@@ -2307,7 +2304,6 @@ class TestTheStdCanBeMeasuredFromTheData:
 
     def _validate(self, vis, gain_flags=None, **kwargs):
         cfg = {
-            "r_seed": 1,
             "gp_cov": {"std": "data", "corr_freq": 5e6, "corr_time": 60.0},
         }
         cfg["gp_cov"].update(kwargs)
