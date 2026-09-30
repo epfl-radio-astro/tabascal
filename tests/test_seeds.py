@@ -201,7 +201,9 @@ def test_a_null_or_absent_r_seed_does_not_warn(tmp_path, sections):
     """The absent case also fails if the base config ever ships an r_seed again."""
     with warnings.catch_warnings():
         warnings.simplefilter("error", FutureWarning)
-        load_config(str(write_config(tmp_path, **sections)))
+        config = load_config(str(write_config(tmp_path, **sections)))
+    if not sections:
+        assert not any("r_seed" in config[s] for s in ("rfi", "gains"))
 
 
 # ---------------------------------------------------------------------------
