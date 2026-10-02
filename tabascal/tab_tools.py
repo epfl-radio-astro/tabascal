@@ -26,7 +26,8 @@ from jax.tree_util import tree_map
 from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
 from tabascal.timing import measure_runtime
-from tabascal.write import write_results_ms, write_results_xds
+from tabascal.ms import remove_caltable
+from tabascal.write import caltable_path, write_results_ms, write_results_xds
 
 import numpy as np
 
@@ -210,9 +211,19 @@ def _integrated_autocorr_time(arr: np.ndarray, axis: int) -> float:
     if np.iscomplexobj(m):
         power += np.mean(np.abs(np.fft.rfft(m.imag, n=n_fft)) ** 2, axis=0, dtype=np.float64)
     covariance = np.fft.irfft(power, n=n_fft)[:n]
-    tau = 1.0
+    # The window closes on the first lag that is not positive, so a lag within
+    # the transform's rounding of zero decides it on noise: an exactly
+    # uncorrelated lag can come back as +7e-8 and keep the sum running. Settle
+    # those few from the direct lag product, in float64.
+    tol = 16 * np.log2(n_fft) * np.finfo(m.real.dtype).eps * g0
+    tau, wide = 1.0, None
     for k in range(1, n):
-        rho = covariance[k] / g0
+        c = covariance[k]
+        if abs(c) <= tol:
+            if wide is None:
+                wide = m.astype(np.result_type(m.dtype, np.float64))
+            c = np.mean(np.sum(wide[:, : n - k] * np.conj(wide[:, k:]), axis=1).real)
+        rho = c / g0
         if rho <= 0:
             break
         tau += 2.0 * (1.0 - k / n) * rho
@@ -264,7 +275,10 @@ def _effective_sample_size(resid: np.ndarray) -> float:
         # Real by construction: a sum of squared magnitudes. Rows that cancel
         # exactly (r and -r) make it zero; count the good rows as independent
         # rather than divide by it.
-        total = float(np.sum(np.abs(yg.sum(axis=0)) ** 2))
+        # The column sums run over every baseline -- 130816 at 512 stations --
+        # and a float32 running sum drifts with that count, so widen it.
+        colsum = yg.sum(axis=0, dtype=np.result_type(yg.dtype, np.float64))
+        total = float(np.sum(np.abs(colsum) ** 2))
         neff_row = good.sum() ** 2 / total if total > 0 else float(good.sum())
     else:
         neff_row = float(n_row)
@@ -724,6 +738,12 @@ def write_ms_if_enabled(tab_config, ms_path, results_path):
     # the optional MS copy (including its calibration-table export) is skipped.
     if tab_config.args["data"].get("skip_ms_write", False):
         print(f"Skipping MS write; tabascal results are in {results_path}")
+        # The export is what replaces the table beside the results, so a rerun
+        # that skips it would leave the previous fit's gains there under the
+        # current name. Remove it; tab2MS writes the new one.
+        stale = caltable_path(results_path)
+        if remove_caltable(stale, ms_path):
+            print(f"Removed the superseded calibration table {stale}")
         return
     print(f"Copying tabascal results to MS file from {results_path}")
     # No corr= here: write_results_xds recorded the fitted correlation on the

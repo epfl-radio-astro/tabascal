@@ -324,3 +324,27 @@ def test_autocorr_single_precision_does_not_drift_with_row_count():
     reference = _integrated_autocorr_time(series, axis=2)
     single = _integrated_autocorr_time(series.astype(np.complex64), axis=2)
     np.testing.assert_allclose(single, reference, rtol=1e-6)
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_autocorr_an_exactly_uncorrelated_lag_closes_the_window(dtype):
+    """A lag of exactly zero stops the sum, though the transform rounds it positive.
+
+    Lag one of this zero-mean series is exactly zero, so the window closes there
+    and tau is 1. In complex64 the transform returns it as ~7e-8, which once kept
+    the sum running into the positive lags after it and moved N_eff from 7 to 4.6.
+    """
+    series = np.array([-2, -1, 0, -1, 2, 0, 2], dtype=dtype)[None, None, :]
+    assert _integrated_autocorr_time(series, axis=2) == 1.0
+
+
+def test_effective_sample_size_single_precision_does_not_drift_with_baseline_count():
+    """The row axis sums a column over every baseline, 130816 of them at 512 stations.
+
+    A float32 running sum over that many rows moved N_eff by 4e-4 for this series;
+    widened, complex64 input agrees with complex128 to float32 rounding.
+    """
+    rows = np.tile(np.exp(2j * np.pi * np.arange(16) / 16), (130_816, 1))[:, None, :]
+    reference = _effective_sample_size(rows)
+    single = _effective_sample_size(rows.astype(np.complex64))
+    np.testing.assert_allclose(single, reference, rtol=1e-6)

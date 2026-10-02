@@ -10,8 +10,9 @@ from tabascal.scripts.run_tabascal import build_parser
 @pytest.mark.parametrize("skip", [None, False, True])
 @pytest.mark.parametrize("path", ["initial.zarr", "optimized.zarr"])
 def test_export_policy(monkeypatch, capsys, skip, path):
-    writer = Mock()
+    writer, remover = Mock(), Mock(return_value=True)
     monkeypatch.setattr(tab_tools, "write_results_ms", writer)
+    monkeypatch.setattr(tab_tools, "remove_caltable", remover)
     data = {"data_col": "DATA", "row_chunk": 100000}
     if skip is not None:
         data["skip_ms_write"] = skip
@@ -20,8 +21,12 @@ def test_export_policy(monkeypatch, capsys, skip, path):
     assert path in capsys.readouterr().out
     if skip:
         writer.assert_not_called()
+        # The export would have replaced the previous run's table; skipping it
+        # must not leave those gains beside the new results.
+        remover.assert_called_once_with(path.replace(".zarr", ".B"), "input.ms")
     else:
         writer.assert_called_once_with("input.ms", path, "DATA", gain_table=["external.B"], row_chunk=100000)
+        remover.assert_not_called()
 
 
 @pytest.mark.parametrize("cli, configured, expected", [(False, False, False), (False, True, True), (True, False, True)])
