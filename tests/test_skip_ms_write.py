@@ -63,3 +63,20 @@ def test_optimized_run_keeps_zarr(monkeypatch, skip):
     zarr_writer.assert_called_once_with(pred, config, "optimized.zarr")
     assert ms_writer.call_count == (0 if skip else 1)
     assert result[0] is pred
+
+
+@pytest.mark.parametrize("rank0", [True, False])
+@pytest.mark.parametrize("fails", [False, True])
+def test_skip_removes_the_stale_table_on_process_0_and_leaves_together(monkeypatch, rank0, fails):
+    error = OSError("busy")
+    remover = Mock(side_effect=error if fails else None, return_value=True)
+    together = Mock()
+    monkeypatch.setattr(tab_tools, "remove_caltable", remover)
+    monkeypatch.setattr(tab_tools, "is_process_0", lambda: rank0)
+    monkeypatch.setattr(tab_tools, "fail_together", together)
+    config = SimpleNamespace(args={"data": {"data_col": "DATA", "skip_ms_write": True}})
+    tab_tools.write_ms_if_enabled(config, "input.ms", "optimized.zarr")
+    assert remover.call_count == rank0
+    # Every process reaches the collective, carrying process 0's failure.
+    together.assert_called_once()
+    assert together.call_args.args[0] is (error if rank0 and fails else None)

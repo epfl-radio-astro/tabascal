@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from jax import random, Array
 from jax.tree_util import tree_map
 
-from tabascal.distributed import is_process_0
+from tabascal.distributed import fail_together, is_process_0
 from tabascal.noise import broadcast_to_vis
 from tabascal.timing import measure_runtime
 from tabascal.ms import remove_caltable
@@ -740,10 +740,18 @@ def write_ms_if_enabled(tab_config, ms_path, results_path):
         print(f"Skipping MS write; tabascal results are in {results_path}")
         # The export is what replaces the table beside the results, so a rerun
         # that skips it would leave the previous fit's gains there under the
-        # current name. Remove it; tab2MS writes the new one.
-        stale = caltable_path(results_path)
-        if remove_caltable(stale, ms_path):
-            print(f"Removed the superseded calibration table {stale}")
+        # current name. Remove it; tab2MS writes the new one. Process 0 only,
+        # as for the export, and every process leaves through fail_together:
+        # this is reached on all of them, and a failure on process 0 alone
+        # would otherwise strand the rest in the next collective.
+        stale, failure = caltable_path(results_path), None
+        if is_process_0():
+            try:
+                if remove_caltable(stale, ms_path):
+                    print(f"Removed the superseded calibration table {stale}")
+            except Exception as err:
+                failure = err
+        fail_together(failure, f"remove the superseded calibration table {stale}")
         return
     print(f"Copying tabascal results to MS file from {results_path}")
     # No corr= here: write_results_xds recorded the fitted correlation on the
