@@ -91,7 +91,7 @@ before/after values.
 
 The comments in `tabascal_perf_check.py` are part of that record. For example
 the current values note that #103 replaced the real-space
-`rfi_signal:ComplexRFI` with the scanned Fourier `ComplexRFIVarAnt`, a
+`rfi_signal:ComplexRFI` with the scanned Fourier `ComplexRFIVarAnt` (now `ComplexRFIVarAntFine`), a
 deliberate accuracy-for-runtime trade (see issue #107) that made the optimiser
 slower where the RFI-signal component dominates the step and slightly faster
 where RFI-vis does. Those older, faster numbers describe a component that no

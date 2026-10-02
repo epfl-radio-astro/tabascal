@@ -448,8 +448,8 @@ _GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
 #: the coefficients, inverts with ``norm="forward"`` and crops, so every
 #: retained coefficient reaches every output point with unit magnitude:
 #: ``E|A|^2 = 2 sum(sigma^2) = rfi.gp_cov.std``, and for the independent antennas of
-#: ``ComplexRFIVarAnt``, ``E|V_pq|^2 = rfi.gp_cov.std^2``. Padding and cropping change
-#: which modes exist and how they correlate, not the amplitude.
+#: ``ComplexRFIVarAntFine``, ``E|V_pq|^2 = rfi.gp_cov.std^2``. Padding and cropping
+#: change which modes exist and how they correlate, not the amplitude.
 #:
 #: It is an expectation, so a measured realisation scatters around it, by more
 #: where the correlation structure leaves fewer independent samples in the
@@ -473,7 +473,7 @@ _GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
 #:
 #: **Per source, and for this antenna structure.** ``rfi.gp_cov.std`` is one source's
 #: width, and two known factors sit between it and the visibility a run
-#: realises. ``ComplexRFIConstAnt`` broadcasts one amplitude to every antenna,
+#: realises. ``ComplexRFIConstAntFine`` broadcasts one amplitude to every antenna,
 #: so its visibility is ``|A|^2`` rather than ``A_p conj(A_q)`` and
 #: ``E|A|^4 = 2 (E|A|^2)^2`` makes it ``sqrt(2)`` wider. And the width applies
 #: to each satellite while their visibilities sum, so N *VarAnt* sources
@@ -939,7 +939,7 @@ class BaseGPRFI(Component):
     # helper function to set dummy rfi values to 0 for padding. Required for multi-device.
     def masked_forward_transform(self, base_params, L, mu):
         return self._mask_dummy_rfi(self.forward_transform(base_params, L, mu))
-class ComplexRFIVarAnt(BaseGPRFI):
+class ComplexRFIVarAntFine(BaseGPRFI):
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -1241,7 +1241,7 @@ class ComplexRFIVarAnt(BaseGPRFI):
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
 
-class ComplexRFIConstAnt(BaseGPRFI):
+class ComplexRFIConstAntFine(BaseGPRFI):
 
     # Its own historical values, unchanged by the wiring: see BaseGPRFI.
     default_gammas = [1e2, 1e2]

@@ -6,4 +6,4 @@ The RFI signal component models the complex-valued signal of each RFI source, at
 
 <!-- The combined signal should be  -->
 
-## Fourier-domian - {class}`~tabascal.components.rfi_signal.ComplexRFIVarAnt`, {class}`~tabascal.components.rfi_signal.ComplexRFIConstAnt`
+## Fourier-domian - {class}`~tabascal.components.rfi_signal.ComplexRFIVarAntFine`, {class}`~tabascal.components.rfi_signal.ComplexRFIConstAntFine`

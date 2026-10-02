@@ -68,10 +68,10 @@ NORAD_IDS = [58126, 27868, 44713]
 #: differ in how they reduce over the source axis, which is exactly what the
 #: sum-back is a statement about.
 RFI_VIS_COMPONENTS = [
-    "rfi_vis:RiemannVis",
-    "rfi_vis:RiemannVisFFI",
-    "rfi_vis:RiemannVisVariable",
-    "rfi_vis:RiemannVisVariableFFI",
+    "rfi_vis:RiemannVisFine",
+    "rfi_vis:RiemannVisFFIFine",
+    "rfi_vis:RiemannVisVariableFine",
+    "rfi_vis:RiemannVisVariableFFIFine",
 ]
 
 
@@ -86,7 +86,7 @@ def _complex_dtype():
 
 
 def make_config(
-    component="rfi_vis:RiemannVisFFI",
+    component="rfi_vis:RiemannVisFFIFine",
     n_rfi=None,
     n_rfi_real=None,
     norad_ids=None,
@@ -127,7 +127,7 @@ def make_config(
         time_strides=[1],
         args={
             "rfi": {},
-            "model": {"components": ["trajectory:FixedOrbit", component]},
+            "model": {"components": ["trajectory:FixedOrbitFine", component]},
             "data": {"corr": corr, "save_rfi_per_sat": save_rfi_per_sat},
         },
     )
@@ -383,7 +383,7 @@ class TestPaddedSatellites:
     """Sharding pads the source list with dark dummies; they are not satellites."""
 
     @staticmethod
-    def _padded_config(component="rfi_vis:RiemannVisFFI"):
+    def _padded_config(component="rfi_vis:RiemannVisFFIFine"):
         return make_config(
             component=component,
             # The padding duplicates the last satellite.
@@ -436,7 +436,7 @@ class TestPaddedSatellites:
 class TestFineGridCancellation:
     """The case with no bound: why the kernel-level claim stays qualitative.
 
-    The op reduces over source *and* integration sample together. ``RiemannVis``
+    The op reduces over source *and* integration sample together. ``RiemannVisFine``
     does it in that order literally -- ``calculate_rfi_vis_blocked`` sums the
     sources at each fine sample, and the mean over fine samples comes after --
     so a source whose fine samples are ``[A, -A]`` beside one whose are
@@ -467,7 +467,7 @@ class TestFineGridCancellation:
             time_sample_idxs=[np.zeros(1, dtype="int32")], time_strides=[1],
             args={
                 "rfi": {},
-                "model": {"components": ["rfi_vis:RiemannVis"]},
+                "model": {"components": ["rfi_vis:RiemannVisFine"]},
                 "data": {"corr": "xx", "save_rfi_per_sat": True},
             },
         )
@@ -644,7 +644,7 @@ class TestTheComponentMustBeResolvable:
     def test_two_rfi_vis_components_are_an_error(self):
         """Which one produced ``vis_rfi`` is then a guess, and a wrong one is silent."""
         config = make_config()
-        config.args["model"]["components"] += ["rfi_vis:RiemannVis"]
+        config.args["model"]["components"] += ["rfi_vis:RiemannVisFine"]
 
         with pytest.raises(ValueError, match="rfi_vis"):
             rfi_vis_per_sat(make_pred(make_config()), config)

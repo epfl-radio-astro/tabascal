@@ -114,7 +114,7 @@ def test_wants_rfi_axis_matching():
     # plain param key
     assert dist._wants_rfi_axis("rfi_k_r_base", np.zeros((3, 4)), n_rfi)
     # prefixed constant key matches on the segment after the last "/"
-    assert dist._wants_rfi_axis("_c/ComplexRFIVarAnt/mu_rfi_k", np.zeros((3, 4)), n_rfi)
+    assert dist._wants_rfi_axis("_c/ComplexRFIVarAntFine/mu_rfi_k", np.zeros((3, 4)), n_rfi)
     # right name, wrong leading dim -> replicated
     assert not dist._wants_rfi_axis("rfi_A", np.zeros((5, 4)), n_rfi)
     # A component constant that is not in the name list stays replicated, even when
@@ -155,7 +155,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     rng = np.random.default_rng(0)
     tree = {
         "rfi_k_r_base": rng.normal(size=(n_rfi, 2, 3)),
-        "_c/ComplexRFIVarAnt/mu_rfi_k": rng.normal(size=(n_rfi, 2, 3)),
+        "_c/ComplexRFIVarAntFine/mu_rfi_k": rng.normal(size=(n_rfi, 2, 3)),
         "_c/ConstGains/amp_basis": rng.normal(size=(4, 3)),  # name-excluded
         "ast_k_r_base": rng.normal(size=(6, 3)),
     }
@@ -163,7 +163,7 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     for key, val in tree.items():
         np.testing.assert_array_equal(np.asarray(sharded[key]), val)
     assert sharded["rfi_k_r_base"].sharding.spec == P("rfi")
-    assert sharded["_c/ComplexRFIVarAnt/mu_rfi_k"].sharding.spec == P("rfi")
+    assert sharded["_c/ComplexRFIVarAntFine/mu_rfi_k"].sharding.spec == P("rfi")
     assert sharded["_c/ConstGains/amp_basis"].sharding.spec == P()
     assert sharded["ast_k_r_base"].sharding.spec == P()
 

@@ -11,10 +11,10 @@ from tabascal.components import Component
 from ri_kernels.jax_api import RFIVisOp
 
 
-class RiemannVis(Component):
+class RiemannVisFine(Component):
     """Riemann-sum RFI visibilities in pure JAX, scanned over the baseline axis.
 
-    The reference implementation of the same integral as :class:`RiemannVisFFI`,
+    The reference implementation of the same integral as :class:`RiemannVisFFIFine`,
     and the one that kernel is validated against in value, forward mode and
     reverse mode. The baseline axis is walked in blocks of
     ``rfi.baseline_block_size`` under ``checkpoint`` (see
@@ -131,7 +131,7 @@ class RiemannVis(Component):
             "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
         }
 
-class RiemannVisFFI(Component):
+class RiemannVisFFIFine(Component):
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
@@ -209,7 +209,7 @@ class RiemannVisFFI(Component):
         }
 
 
-class RiemannVisVariable(Component):
+class RiemannVisVariableFine(Component):
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
@@ -322,7 +322,7 @@ class RiemannVisVariable(Component):
         }
 
 
-class RiemannVisVariableFFI(Component):
+class RiemannVisVariableFFIFine(Component):
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
@@ -383,9 +383,9 @@ class RiemannVisVariableFFI(Component):
 
         if sharding_enabled():
             print(
-                "\n!!! WARNING !!!  RiemannVisVariableFFI scales poorly "
+                "\n!!! WARNING !!!  RiemannVisVariableFFIFine scales poorly "
                 "across multiple devices. Consider using "
-                "RiemannVisFFI instead for multi-device runs.\n"
+                "RiemannVisFFIFine instead for multi-device runs.\n"
             )
 
 

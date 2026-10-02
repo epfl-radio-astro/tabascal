@@ -443,8 +443,8 @@ class ConstGains(Component):
     **What has to be true for it to be identifiable** (issue #124). A gain is only
     constrained by a model term the gain cannot deform:
 
-    * Pair it with ``rfi_signal:ComplexRFIConstAnt``. With the per-antenna RFI model
-      ``ComplexRFIVarAnt`` the gain is an exact no-op on the RFI term —
+    * Pair it with ``rfi_signal:ComplexRFIConstAntFine``. With the per-antenna RFI
+      model ``ComplexRFIVarAntFine`` the gain is an exact no-op on the RFI term —
       ``g_p A_p conj(g_q A_q)`` is a reparametrisation of an already-free ``A_p`` —
       so setup warns when the two are combined.
     * The astronomical GP (``ast_vis:GPVisAst``) has per-baseline freedom and absorbs
@@ -665,15 +665,15 @@ class ConstGains(Component):
     def _warn_on_rfi_degeneracy(self, components: List[str]) -> None:
         """Warn, but do not refuse, when the RFI model already has the same freedom."""
 
-        if "ComplexRFIVarAnt" in components:
+        if "ComplexRFIVarAntFine" in components:
             warnings.warn(
-                "ConstGains is combined with rfi_signal:ComplexRFIVarAnt, whose RFI "
-                "amplitude A_p is already free per antenna. The RFI visibility "
+                "ConstGains is combined with rfi_signal:ComplexRFIVarAntFine, whose "
+                "RFI amplitude A_p is already free per antenna. The RFI visibility "
                 "g_p A_p conj(g_q A_q) is then unchanged by g_p -> c_p g_p together "
                 "with A_p -> A_p / c_p, so the gain is a flat direction of the RFI "
                 "term and only the astronomical model constrains it. Pair ConstGains "
-                "with rfi_signal:ComplexRFIConstAnt, whose RFI amplitude carries no "
-                "per-antenna freedom of its own. See issue #124.",
+                "with rfi_signal:ComplexRFIConstAntFine, whose RFI amplitude carries "
+                "no per-antenna freedom of its own. See issue #124.",
                 UserWarning,
                 stacklevel=2,
             )

@@ -484,7 +484,7 @@ class TestNearFieldBaselinePaths:
 
         ``exp(-2 pi i path / lam)`` at one sub-step and zero offset has to be
         the ``exp(i(phi_p - phi_q))`` that
-        :func:`rfi_phase_from_records` -- and so ``FixedOrbit`` -- already
+        :func:`rfi_phase_from_records` -- and so ``FixedOrbitFine`` -- already
         builds. Both sides are host f64, so the agreement is exact to rounding
         in either session precision.
         """

@@ -27,7 +27,10 @@ requires-python = ">=3.10"
 dependencies = [
     "dask",
     "dask-ms",
-    "jax>=0.6.0",
+    # 0.11.2 segfaults compiling tabascal's multi-device CPU programs (shard_map
+    # over forced host devices; reproduced on Python 3.13), where 0.11.1 does not.
+    # Keep the exclusion until the minimum version is above it.
+    "jax>=0.6.0,!=0.11.2",
     "matplotlib",
     "numpy",
     "numpyro",
@@ -42,7 +45,9 @@ dependencies = [
     "sgp4jax>=0.1.6,<0.2",  # enables jax x64 at import; orbit API is pre-1.0
     "skyfield>=1.49,<2",  # uses skyfield's _utc_jd(whole, fraction); see tabascal/time.py
     "tqdm",
-    "xarray",
+    # 2026.9.0 passes zarr_format= to zarr's open_group, which zarr<3 (below)
+    # does not accept. Lift together with the zarr bound (#120).
+    "xarray<2026.9.0",
     # Explicit: no other runtime dependency pulls zarr in. See #120 for the bound.
     "zarr>=2.12.0,<3.0.0",
 ]
@@ -133,7 +138,8 @@ sgp4jax         = ">=0.1.6,<0.2"
 # _utc_jd(whole, fraction); pin a known-good range and guard it with a smoke test.
 skyfield        = ">=1.49,<2"
 tqdm            = "*"
-xarray          = "*"
+# Bounded with zarr: 2026.9.0 passes zarr_format= to zarr<3's open_group (#120).
+xarray          = "<2026.9.0"
 zarr            = "<3.0.0"
 
 # ── CPU feature ────────────────────────────────────────────────────────────────

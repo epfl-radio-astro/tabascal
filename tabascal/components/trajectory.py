@@ -144,7 +144,7 @@ def get_satellite_elevations(orbit_records: list, times_jd, ants_itrf) -> NDArra
     return elevation
 
 
-class PhaseCalculationRFI(Component):
+class PhaseCalculationRFIFine(Component):
 
     requires_double = True
     required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
@@ -239,7 +239,7 @@ class PhaseCalculationRFI(Component):
         }
 
 
-class FixedOrbit(Component):
+class FixedOrbitFine(Component):
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -361,7 +361,7 @@ class FixedOrbit(Component):
         )
 
 
-class NoDragOrbit(Component):
+class NoDragOrbitFine(Component):
 
     requires_double = True
     required_inputs = {}  # No inputs needed
@@ -539,7 +539,7 @@ class NoDragOrbit(Component):
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
 
 
-class Orbit(Component):
+class OrbitFine(Component):
 
     requires_double = True
     required_inputs = {}  # No inputs needed

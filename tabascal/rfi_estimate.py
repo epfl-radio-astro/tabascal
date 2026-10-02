@@ -178,7 +178,7 @@ def rfi_phase_from_positions(
     """Per-antenna geometric phase for RFI sources at known ECI positions.
 
     Numpy/f64 host-side computation mirroring
-    :meth:`tabascal.components.trajectory.FixedOrbit._compute_rfi_phase`, so the
+    :meth:`tabascal.components.trajectory.FixedOrbitFine._compute_rfi_phase`, so the
     estimate is matched to the phase the forward model itself builds.
 
     Parameters

@@ -56,7 +56,7 @@ does not move with `NRMSE(noise)`. Note that `RMSE` is in the *denominator* and
 `N_eff` is inside the square root, so the significance can rise while the fit
 strictly improves.
 
-This happened when the astronomical fringe rate was corrected (`RiemannVis` case,
+This happened when the astronomical fringe rate was corrected (`RiemannVisFine` case,
 double precision):
 
 | | before | after | |
@@ -98,7 +98,7 @@ pixi run -e dev pytest tests/test_tabascal_pipeline.py --record-refs -s --x64 fa
 For one case:
 
 ```bash
-pixi run -e dev pytest "tests/test_tabascal_pipeline.py::test_pipeline[RiemannVis]" \
+pixi run -e dev pytest "tests/test_tabascal_pipeline.py::test_pipeline[RiemannVisFine]" \
     --record-refs -s
 ```
 
@@ -106,7 +106,7 @@ Output per case, shaped to be read straight across into the config literal and
 its arch table:
 
 ```
---- measured: RiemannVis [double] ---
+--- measured: RiemannVisFine [double] ---
     chi2_ref=0.8874370375849675,
     ast: {'NRMSE(noise)': 0.2617, 'NRMSE(signal)': 0.09797, 'RMSE': 0.17, 'bias_significance': 1.1}
     rfi: {'NRMSE(noise)': 0.4277, 'NRMSE(signal)': 0.02529, 'RMSE': 0.2779, 'bias_significance': 0.2}

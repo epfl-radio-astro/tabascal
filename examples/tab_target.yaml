@@ -1,16 +1,16 @@
 model:
   components:
   # RFI Phase from trajectory
-    - trajectory:FixedOrbit
-    # - trajectory:NoDragOrbit
-    # - trajectory:Orbit
-    # - trajectory:PhaseCalculationRFI
+    - trajectory:FixedOrbitFine
+    # - trajectory:NoDragOrbitFine
+    # - trajectory:OrbitFine
+    # - trajectory:PhaseCalculationRFIFine
   # RFI signal model
-    - rfi_signal:ComplexRFIVarAnt
-    # - rfi_signal:ComplexRFIConstAnt
+    - rfi_signal:ComplexRFIVarAntFine
+    # - rfi_signal:ComplexRFIConstAntFine
   # RFI visibility calculation
-    # - rfi_vis:RiemannVis
-    - rfi_vis:RiemannVisVariableFFI
+    # - rfi_vis:RiemannVisFine
+    - rfi_vis:RiemannVisVariableFFIFine
   # Astronomical signal model
     - ast_vis:GPVisAst
   # Antenna Gain model 
