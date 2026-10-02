@@ -14,6 +14,7 @@ from tabascal.ms import (
     grid_to_rows,
     into_corr,
     ms_layout,
+    ms_row_chunks,
     partition_noise,
     partition_polarization,
     partition_setup,
@@ -386,8 +387,12 @@ def write_results_ms(
     corr: str | None = None,
     gain_table=None,
     caltable_path: str | None = None,
+    row_chunk: int | None = None,
 ):
     """Copy a results zarr into the Measurement Set it was fitted from.
+
+    ``row_chunk`` overrides the dask-ms row chunk for data-dependent I/O tuning;
+    None preserves its default. Larger chunks are not always faster.
 
     Every column written here -- ``CORRECTED_DATA``, ``TAB_AST_DATA``,
     ``TAB_RFI_DATA``, ``TAB_AST_RES``, ``TAB_RFI_RES`` and ``TAB_RES_DATA`` --
@@ -434,7 +439,7 @@ def write_results_ms(
 
     # column_keywords for the TIME unit the gain tables are matched on, read the
     # same way read_ms reads it so the two cannot disagree about the grid.
-    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True)
+    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True, **ms_row_chunks(row_chunk))
     xds_ms = xds_list[0]
     xds_tab = xr.open_zarr(results_zarr_path)
 

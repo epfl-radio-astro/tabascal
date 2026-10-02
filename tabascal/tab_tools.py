@@ -23,10 +23,11 @@ import jax.numpy as jnp
 from jax import random, Array
 from jax.tree_util import tree_map
 
-from tabascal.distributed import is_process_0
+from tabascal.distributed import fail_together, is_process_0
 from tabascal.noise import broadcast_to_vis
 from tabascal.timing import measure_runtime
-from tabascal.write import write_results_ms, write_results_xds
+from tabascal.ms import remove_caltable
+from tabascal.write import caltable_path, write_results_ms, write_results_xds
 
 import numpy as np
 
@@ -116,6 +117,26 @@ def nlog_post(prob_model, params, obs_data, state=None, constants=None):
     return nlog_p
 
 
+@measure_runtime
+def nlog_like_and_post(prob_model, params, obs_data, state=None, constants=None):
+    """Return the existing likelihood and posterior diagnostics from one forward pass."""
+    log_joint, model_trace = log_density(
+        prob_model,
+        model_args=(obs_data,),
+        model_kwargs={"state": state, "constants": constants},
+        params=params,
+    )
+    # Exactly what log_likelihood reduces: the site's own `fn.log_prob(value)`.
+    # numpyro's mask handler replaces that fn with `fn.mask(flags)`, so both
+    # reductions honour the flags (flagged entries add zero but still count in
+    # the mean). Only the joint applies the site's scale, as log_density always
+    # did and log_likelihood never has -- that asymmetry is kept so the printed
+    # log_l and log_p are unchanged.
+    obs = model_trace["obs"]
+    nlog_l = -obs["fn"].log_prob(obs["value"]).mean()
+    return nlog_l, -log_joint / obs_data.size / 2
+
+
 def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
 
     complex_types = [
@@ -180,9 +201,29 @@ def _integrated_autocorr_time(arr: np.ndarray, axis: int) -> float:
     g0 = np.mean(np.sum(np.abs(m) ** 2, axis=1))
     if g0 <= 0:
         return 1.0
-    tau = 1.0
+    # Zero padding gives linear rather than circular autocovariance. Only its
+    # real part is used, so sum the powers of separate real/imaginary rFFTs.
+    # Average in frequency space before inversion to keep just one lag vector.
+    # Accumulate that average in float64: across ~1e6 rows a float32 sum drifts
+    # by ~1e-4, which would show in the printed N_eff.
+    n_fft = 1 << (2 * n - 1).bit_length()
+    power = np.mean(np.abs(np.fft.rfft(m.real, n=n_fft)) ** 2, axis=0, dtype=np.float64)
+    if np.iscomplexobj(m):
+        power += np.mean(np.abs(np.fft.rfft(m.imag, n=n_fft)) ** 2, axis=0, dtype=np.float64)
+    covariance = np.fft.irfft(power, n=n_fft)[:n]
+    # The window closes on the first lag that is not positive, so a lag within
+    # the transform's rounding of zero decides it on noise: an exactly
+    # uncorrelated lag can come back as +7e-8 and keep the sum running. Settle
+    # those few from the direct lag product, in float64.
+    tol = 16 * np.log2(n_fft) * np.finfo(m.real.dtype).eps * g0
+    tau, wide = 1.0, None
     for k in range(1, n):
-        rho = np.mean(np.sum(m[:, : n - k] * np.conj(m[:, k:]), axis=1).real) / g0
+        c = covariance[k]
+        if abs(c) <= tol:
+            if wide is None:
+                wide = m.astype(np.result_type(m.dtype, np.float64))
+            c = np.mean(np.sum(wide[:, : n - k] * np.conj(wide[:, k:]), axis=1).real)
+        rho = c / g0
         if rho <= 0:
             break
         tau += 2.0 * (1.0 - k / n) * rho
@@ -217,13 +258,28 @@ def _effective_sample_size(resid: np.ndarray) -> float:
 
     # Row axis is unordered (baseline/antenna index is not a sequence), so use the full
     # correlation matrix rather than an autocorrelation: N_eff_row = n_row^2 / sum(rho_ij).
+    # Only the *total* of that matrix is wanted, and it factors:
+    #
+    #     sum_ij (Y Y^H)_ij = sum_ij sum_k Y_ik conj(Y_jk) = sum_k |sum_i Y_ik|^2
+    #
+    # so the column sums give it without forming the matrix. That matters at scale:
+    # the row axis is baselines, so the Gram is n_bl x n_bl -- 73536^2 (43 GB) at 384
+    # stations and 130816^2 (137 GB) at 512, on the host, twice per fit. Summing the
+    # columns instead is linear in the rows and keeps nothing but one feature vector.
     yr = y.reshape(n_row, -1)
     yr = yr - yr.mean(axis=1, keepdims=True)
     nrm = np.sqrt(np.sum(np.abs(yr) ** 2, axis=1))
     good = nrm > 0
     if good.sum() >= 2:
         yg = yr[good] / nrm[good][:, None]
-        neff_row = good.sum() ** 2 / (yg @ yg.conj().T).real.sum()
+        # Real by construction: a sum of squared magnitudes. Rows that cancel
+        # exactly (r and -r) make it zero; count the good rows as independent
+        # rather than divide by it.
+        # The column sums run over every baseline -- 130816 at 512 stations --
+        # and a float32 running sum drifts with that count, so widen it.
+        colsum = yg.sum(axis=0, dtype=np.result_type(yg.dtype, np.float64))
+        total = float(np.sum(np.abs(colsum) ** 2))
+        neff_row = good.sum() ** 2 / total if total > 0 else float(good.sum())
     else:
         neff_row = float(n_row)
 
@@ -671,7 +727,33 @@ def run_opt(
         print_truth_metrics(vi_pred, truth, tab_config, "opt")
 
     print()
-    print(f"Copying tabascal results to MS file from {map_path}")
+    write_ms_if_enabled(tab_config, ms_path, map_path)
+
+    return vi_pred, vi_results.losses, vi_params, rchi2
+
+
+def write_ms_if_enabled(tab_config, ms_path, results_path):
+    """Apply the run's MS export policy to either initial or fitted results."""
+    # Both run routes already wrote the zarr. Keep its location visible when
+    # the optional MS copy (including its calibration-table export) is skipped.
+    if tab_config.args["data"].get("skip_ms_write", False):
+        print(f"Skipping MS write; tabascal results are in {results_path}")
+        # The export is what replaces the table beside the results, so a rerun
+        # that skips it would leave the previous fit's gains there under the
+        # current name. Remove it; tab2MS writes the new one. Process 0 only,
+        # as for the export, and every process leaves through fail_together:
+        # this is reached on all of them, and a failure on process 0 alone
+        # would otherwise strand the rest in the next collective.
+        stale, failure = caltable_path(results_path), None
+        if is_process_0():
+            try:
+                if remove_caltable(stale, ms_path):
+                    print(f"Removed the superseded calibration table {stale}")
+            except Exception as err:
+                failure = err
+        fail_together(failure, f"remove the superseded calibration table {stale}")
+        return
+    print(f"Copying tabascal results to MS file from {results_path}")
     # No corr= here: write_results_xds recorded the fitted correlation on the
     # zarr, so the results carry it themselves. The gain tables are not on the
     # zarr, though, and the MS's data column is still raw, so they are handed
@@ -679,9 +761,8 @@ def run_opt(
     # that was divided out of the visibilities at read time.
     write_results_ms(
         ms_path,
-        map_path,
+        results_path,
         tab_config.args["data"]["data_col"],
         gain_table=getattr(tab_config, "gain_table", None),
+        row_chunk=tab_config.args["data"].get("row_chunk"),
     )
-
-    return vi_pred, vi_results.losses, vi_params, rchi2

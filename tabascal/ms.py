@@ -772,6 +772,15 @@ def grid_to_rows(arr, n_freq: int, n_corr: int = 1):
     return arr.transpose(2, 0, 1).reshape(-1, n_freq, n_corr)
 
 
+def ms_row_chunks(row_chunk=None):
+    """Leave dask-ms defaults intact unless a positive row chunk is requested."""
+    if row_chunk is None:
+        return {}
+    if isinstance(row_chunk, bool) or not isinstance(row_chunk, int) or row_chunk <= 0:
+        raise ValueError("data.row_chunk must be a positive integer or null")
+    return {"chunks": {"row": row_chunk}}
+
+
 @measure_runtime
 def read_ms(
     ms_path,
@@ -779,9 +788,10 @@ def read_ms(
     chans: Optional[jax.Array] = None,
     corr: str = "xx",
     data_col: str = "DATA",
+    row_chunk: Optional[int] = None,
 ):
 
-    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True)
+    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True, **ms_row_chunks(row_chunk))
     xds = xds_list[0]
 
     # Which spectral window and polarization setup this partition actually uses.

@@ -23,7 +23,7 @@ import jax
 from jax import random
 
 from tabascal.timing import measure_runtime, print_timings, enable_timings
-from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
+from tabascal.tab_tools import init_predict, run_opt, nlog_like_and_post, write_ms_if_enabled
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.distributed import (
     barrier,
@@ -151,8 +151,7 @@ def build_model(config, ms_path):
 def evaluate_init(tab_config, model, key, truth=None):
     key, subkey = random.split(key)
     init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants, truth=truth)
-    nlog_l = nlog_like(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-    nlog_p = nlog_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+    nlog_l, nlog_p = nlog_like_and_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
     return key, init_pred, nlog_l, nlog_p
 
 
@@ -478,22 +477,12 @@ def tabascal_subtraction(
 
             opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
 
-            nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-            nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+            nlog_l, nlog_p = nlog_like_and_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
 
             print(f"log_l : {nlog_l:.3e}")
             print(f"log_p : {nlog_p:.3e}")
         else:
-            from tabascal.write import write_results_ms
-            print(f"Copying tabascal initial values to MS file from {paths.init_pred_path}")
-            # The correlation comes off the zarr the line above just wrote; the
-            # gain tables do not, and the MS's data column is still raw.
-            write_results_ms(
-                ms_path,
-                paths.init_pred_path,
-                tab_config.args["data"]["data_col"],
-                gain_table=getattr(tab_config, "gain_table", None),
-            )
+            write_ms_if_enabled(tab_config, ms_path, paths.init_pred_path)
 
     if is_process_0():
         with open(os.path.join(paths.plot_dir, f"tab_config_{paths.run_id}.yaml"), "w") as fp:
@@ -538,6 +527,8 @@ def run(args):
         enable_timings()
 
     config = load_config(args.config)
+    if getattr(args, "skip_ms_write", False):
+        config["data"]["skip_ms_write"] = True
 
     set_precision(config)
 
