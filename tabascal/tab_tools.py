@@ -745,7 +745,12 @@ def write_ms_if_enabled(tab_config, ms_path, results_path):
         # this is reached on all of them, and a failure on process 0 alone
         # would otherwise strand the rest in the next collective.
         stale, failure = caltable_path(results_path), None
-        if is_process_0():
+        # A rerun may calibrate with the table its previous fit left here. That
+        # is an input now, which tab2MS will need to export this fit, so it stays.
+        inputs = {os.path.realpath(p) for p in getattr(tab_config, "gain_table", None) or []}
+        if os.path.realpath(stale) in inputs:
+            print(f"Keeping {stale}: this run calibrates with it (data.gain_table)")
+        elif is_process_0():
             try:
                 if remove_caltable(stale, ms_path):
                     print(f"Removed the superseded calibration table {stale}")

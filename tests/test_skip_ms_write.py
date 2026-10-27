@@ -80,3 +80,24 @@ def test_skip_removes_the_stale_table_on_process_0_and_leaves_together(monkeypat
     # Every process reaches the collective, carrying process 0's failure.
     together.assert_called_once()
     assert together.call_args.args[0] is (error if rank0 and fails else None)
+
+
+@pytest.mark.parametrize("rank0", [True, False])
+def test_skip_keeps_a_previous_table_this_run_calibrates_with(monkeypatch, tmp_path, rank0):
+    """A rerun with data.gain_table = the last fit's table must not delete its own input."""
+    remover, together = Mock(return_value=True), Mock()
+    monkeypatch.setattr(tab_tools, "remove_caltable", remover)
+    monkeypatch.setattr(tab_tools, "is_process_0", lambda: rank0)
+    monkeypatch.setattr(tab_tools, "fail_together", together)
+    results = tmp_path / "optimized.zarr"
+    previous = tmp_path / "optimized.B"
+    config = SimpleNamespace(
+        args={"data": {"data_col": "DATA", "skip_ms_write": True}},
+        gain_table=[str(tmp_path / "other.B"), str(tmp_path / "." / "optimized.B")],
+    )
+    tab_tools.write_ms_if_enabled(config, "input.ms", str(results))
+    remover.assert_not_called()
+    # Still a point every process reaches together.
+    together.assert_called_once()
+    assert together.call_args.args[0] is None
+    assert previous.name in str(together.call_args.args[1])
