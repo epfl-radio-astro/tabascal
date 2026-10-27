@@ -161,6 +161,8 @@ class TabConfig:
     ):
 
         self.args = config
+        # load_config has already done this for a config read from a file.
+        warn_deprecated_seeds(config)
         self.precision = config.get("model", {}).get("precision", "single")
         self.ms_path = ms_path
         # One normalisation of the satellites section, shared by preflight and the

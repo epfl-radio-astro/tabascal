@@ -192,6 +192,46 @@ def test_a_set_r_seed_warns_that_inference_seed_replaces_it(tmp_path, section):
     ), messages
 
 
+@pytest.mark.parametrize("seed", [True, 1.5, "7"])
+def test_a_seed_that_is_not_an_integer_is_refused_without_load_config(tmp_path, seed):
+    """A config built in code skips load_config; even a deterministic start refuses it.
+
+    Component setup wraps its errors in a RuntimeError that keeps the message.
+    """
+    with pytest.raises(RuntimeError, match=r"inference\.seed"):
+        ast_start(tmp_path, seed, init="prior")
+
+
+def test_a_loaded_r_seed_warns_once_although_tabconfig_checks_again(tmp_path):
+    from tabascal.seeds import warn_deprecated_seeds
+
+    with pytest.warns(FutureWarning):
+        config = load_config(str(write_config(tmp_path, rfi={"r_seed": 5})))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        warn_deprecated_seeds(config)
+
+
+def test_tabconfig_warns_about_an_r_seed_in_a_config_built_in_code(monkeypatch):
+    """Stops TabConfig at the check; a config that skips load_config is still warned."""
+    import tabascal.config as config_module
+
+    class Stop(Exception):
+        pass
+
+    seen = []
+
+    def spy(config):
+        seen.append(config)
+        raise Stop
+
+    monkeypatch.setattr(config_module, "warn_deprecated_seeds", spy)
+    args = {"rfi": {"r_seed": 5}}
+    with pytest.raises(Stop):
+        config_module.TabConfig(args, ms_path=None)
+    assert seen == [args]
+
+
 @pytest.mark.parametrize(
     "sections",
     [{"rfi": {"r_seed": None}, "gains": {"r_seed": None}}, {}],

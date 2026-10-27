@@ -21,26 +21,21 @@ DEPRECATED_SEED_KEYS = ("rfi", "gains")
 
 
 def validate_seed(config: Dict) -> None:
-    """Default ``inference.seed`` in place, and refuse anything but an integer.
-
-    Only null or absent takes the default; 0 is a seed like any other. A bool
-    is refused although Python counts it an integer, as is a float, even a
-    whole one, since a seed written as 1.5 or "7" was not meant as either.
-    """
+    """Default ``inference.seed`` in place, and refuse anything but an integer."""
     inference = config["inference"] = config.get("inference") or {}
-    seed = inference.get("seed")
-    if seed is None:
-        inference["seed"] = DEFAULT_SEED
-    elif isinstance(seed, bool) or not isinstance(seed, int):
-        raise ValueError(
-            f"inference.seed must be an integer or null, not {seed!r}."
-        )
+    inference["seed"] = config_seed(config)
 
 
 def warn_deprecated_seeds(config: Dict) -> None:
-    """A FutureWarning for each section-level ``r_seed`` still set; null is silent."""
+    """A FutureWarning for each section-level ``r_seed`` still set; null is silent.
+
+    Called by both load_config and TabConfig, so a config built in code is
+    warned too. The key is dropped once warned about -- it does nothing -- so
+    a loaded config does not warn a second time when TabConfig reads it.
+    """
     for section in DEPRECATED_SEED_KEYS:
-        if (config.get(section) or {}).get("r_seed") is not None:
+        section_config = config.get(section) or {}
+        if section_config.pop("r_seed", None) is not None:
             warnings.warn(
                 f"{section}.r_seed is deprecated and has no effect: every random "
                 "draw now derives from inference.seed. Remove it from the config.",
@@ -50,9 +45,18 @@ def warn_deprecated_seeds(config: Dict) -> None:
 
 
 def config_seed(args: Dict) -> int:
-    """The seed a config asks for, defaulted for configs that skip load_config."""
+    """The seed a config asks for, defaulted and checked for configs that skip load_config.
+
+    Only null or absent takes the default; 0 is a seed like any other. A bool
+    is refused although Python counts it an integer, as is a float, even a
+    whole one, since a seed written as 1.5 or "7" was not meant as either.
+    """
     seed = (args.get("inference") or {}).get("seed")
-    return DEFAULT_SEED if seed is None else seed
+    if seed is None:
+        return DEFAULT_SEED
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError(f"inference.seed must be an integer or null, not {seed!r}.")
+    return seed
 
 
 def run_key(seed: int):
