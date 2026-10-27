@@ -22,6 +22,8 @@ import jax
 import numpy as np
 import optax
 
+from tabascal.distributed import fail_together
+
 #: The schedules ``opt.schedule.kind`` names.
 SCHEDULE_KINDS = ("constant", "step", "exponential", "cosine")
 
@@ -228,26 +230,37 @@ def checkpoint_path(directory: str, stem: str, step: int) -> str:
     return os.path.join(directory, f"{stem}_step{step}.npz")
 
 
-def save_checkpoint(path: str, params: Dict, step: int, loss: float, write: bool) -> None:
-    """Write the parameters after ``step`` steps, with that step's loss.
+def save_checkpoint(path: str, params: Dict, step: int, trace_loss: float, write: bool) -> None:
+    """Write the parameters after ``step`` steps.
+
+    ``trace_loss`` is the loss the trace records for that step, which the step
+    evaluated before its own update -- the loss at the parameters after step
+    ``step - 1``, not at these. It is there to line a checkpoint up with the
+    trace; score a checkpoint from its parameters.
 
     Every rank gathers, since that can be a collective; only ``write`` (rank 0)
-    writes. Parameter names never start with an underscore, so the two
+    writes, and every rank then meets in :func:`fail_together`, so a failed
+    write ends the run on every process rather than stranding the others in
+    the next step. Parameter names never start with an underscore, so the
     ``_``-keys cannot collide with them.
     """
     arrays = {name: _to_host(value) for name, value in params.items()}
-    if not write:
-        return
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    np.savez(path, _step=step, _loss=loss, **arrays)
+    failure = None
+    if write:
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            np.savez(path, _step=step, _trace_loss=trace_loss, **arrays)
+        except Exception as err:
+            failure = err
+    fail_together(failure, f"write the checkpoint {path}")
 
 
 def load_checkpoint(path: str):
-    """``(params, step, loss)`` from a file :func:`save_checkpoint` wrote.
+    """``(params, step, trace_loss)`` from a file :func:`save_checkpoint` wrote.
 
     ``params`` are keyed as the model names them, without ``_auto_loc``, which
     is what ``Predictive`` and ``init_predict`` take.
     """
     with np.load(path) as f:
         params = {k: f[k] for k in f.files if not k.startswith("_")}
-        return params, int(f["_step"]), float(f["_loss"])
+        return params, int(f["_step"]), float(f["_trace_loss"])

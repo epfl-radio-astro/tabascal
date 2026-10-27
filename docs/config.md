@@ -221,7 +221,7 @@ A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: i
 
 `stop: {window: W, rtol: r, min_steps: M}` ends the fit after step n once n is at least M and 2W, and the mean loss over steps n-W+1..n differs from the mean over the W steps before by at most r times the latter's magnitude. The loss is the negative log posterior per data point, so with a large constant offset in it a relative change is smaller than the change in fit; choose `rtol` with a trace of the loss to hand. It needs `schedule`: with `dual_run` it would not be clear whether a stop ends the first phase or the fit.
 
-`checkpoints: [1000, 2000, 4000]` writes the parameters after each of those steps to `results/checkpoints/<map_pred name>_step<N>.npz`, so one long run can be scored at several step counts. With `dual_run` the steps count across both phases. `tabascal.opt_schedule.load_checkpoint(path)` returns `(params, step, loss)`, the parameters keyed as the model names them, which `Predictive` takes. A step the fit does not reach because `stop` ended it first is not written.
+`checkpoints: [1000, 2000, 4000]` writes the parameters after each of those steps to `results/checkpoints/<map_pred name>_step<N>.npz`, so one long run can be scored at several step counts. With `dual_run` the steps count across both phases. `tabascal.opt_schedule.load_checkpoint(path)` returns `(params, step, trace_loss)`, the parameters keyed as the model names them, which `Predictive` takes. `trace_loss` is the trace's loss for that step, which the step evaluated before its own update, so it lines a checkpoint up with the trace but is not the loss at the saved parameters. A step the fit does not reach because `stop` ended it first is not written.
 
 ### Optimiser trace
 

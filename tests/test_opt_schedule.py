@@ -199,11 +199,37 @@ def test_checkpoints_are_written_at_their_steps_and_reload(tmp_path, dual_run):
         f"map_pred_Custom_step{s}.npz" for s in steps
     ]
     for step in steps:
-        params, saved_step, loss = load_checkpoint(checkpoint_path(str(tmp_path), "map_pred_Custom", step))
+        params, saved_step, trace_loss = load_checkpoint(checkpoint_path(str(tmp_path), "map_pred_Custom", step))
         assert saved_step == step
-        assert loss == ref_losses[step - 1]
+        assert trace_loss == ref_losses[step - 1]  # the trace's entry, evaluated before the update
         _same(params, history[step - 1], suffix="")
     _same(results.params, load_checkpoint(checkpoint_path(str(tmp_path), "map_pred_Custom", 6))[0])
+
+
+def test_a_failed_checkpoint_write_is_raised_on_every_rank(tmp_path, monkeypatch):
+    """Rank 0 hands its error to fail_together; a rank that does not write still meets it."""
+    import tabascal.opt_schedule as opt_schedule
+    from tabascal.opt_schedule import save_checkpoint
+
+    seen = []
+    monkeypatch.setattr(opt_schedule, "fail_together", lambda failure, what: seen.append(failure))
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("")
+    params = {"a": np.zeros(3)}
+
+    save_checkpoint(str(blocker / "x_step1.npz"), params, 1, 0.0, write=True)
+    save_checkpoint(str(blocker / "x_step1.npz"), params, 1, 0.0, write=False)
+
+    assert isinstance(seen[0], OSError) and seen[1] is None
+
+
+def test_a_failed_checkpoint_write_raises_in_a_single_process_run(tmp_path):
+    from tabascal.opt_schedule import save_checkpoint
+
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("")
+    with pytest.raises(OSError):
+        save_checkpoint(str(blocker / "x_step1.npz"), {"a": np.zeros(3)}, 1, 0.0, write=True)
 
 
 def test_no_checkpoint_is_written_by_default(tmp_path):
