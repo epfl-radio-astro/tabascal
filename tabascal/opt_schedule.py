@@ -214,6 +214,9 @@ def converged(losses: Sequence[float], stop: Dict) -> bool:
         return False
     before = sum(losses[n - 2 * w:n - w]) / w
     after = sum(losses[n - w:]) / w
+    # inf <= rtol * inf is True: a window that overflowed is no baseline to converge on.
+    if not (math.isfinite(before) and math.isfinite(after)):
+        return False
     return abs(after - before) <= stop["rtol"] * abs(before)
 
 

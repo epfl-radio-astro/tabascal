@@ -253,6 +253,10 @@ def test_no_checkpoint_is_written_by_default(tmp_path):
         ([2, 2, 2], {"window": 2, "rtol": 0.1, "min_steps": 0}, False),  # two windows not yet full
         ([2, 2, 2, 2], {"window": 2, "rtol": 0.1, "min_steps": 5}, False),
         ([-2, -2, -2.1, -2.1], {"window": 2, "rtol": 0.1, "min_steps": 0}, True),  # magnitude
+        ([float("inf"), 1.0], {"window": 1, "rtol": 1e-4, "min_steps": 0}, False),
+        ([float("-inf"), 1.0], {"window": 1, "rtol": 1e-4, "min_steps": 0}, False),
+        ([1.0, float("nan")], {"window": 1, "rtol": 1e-4, "min_steps": 0}, False),
+        ([1e308, 1e308, 1.0, 1.0], {"window": 2, "rtol": 1e-4, "min_steps": 0}, False),  # sum overflows
     ],
 )
 def test_converged_compares_the_means_of_the_last_two_windows(losses, stop, expected):
