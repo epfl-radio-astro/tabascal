@@ -231,3 +231,58 @@ def test_one_pair_of_matrices_serves_every_baseline(tmp_path):
     bigger, _ = _route(GPVisAstDFT, ast_config(tmp_path))
     for small, large in zip(comp.dft_mats, bigger.dft_mats):
         assert small.shape == large.shape
+
+
+# --- wide time padding --------------------------------------------------------
+
+
+def _random_latent(comp, seed=3):
+    """A latent away from the init, so a zero start cannot make two routes agree."""
+    rng = np.random.default_rng(seed)
+    return {
+        k: jnp.asarray(rng.normal(size=v.shape), dtype=v.dtype)
+        for k, v in comp.init_params_base.items()
+    }
+
+
+@pytest.mark.parametrize("time_pad_factor", [2.0, 8.0, 16.0])
+def test_the_component_matches_the_fft_component_at_wide_time_padding(tmp_path, time_pad_factor):
+    """A time_pad_factor of 8 removes a start/end-of-pass excess in long passes
+    and quadruples the padded grid, which is the case this component is for. The modes it keeps
+    grow with the padding, so 2 alone does not cover the matrices it builds there."""
+    ref_comp, ref_vis = _route(GPVisAst, ast_config(tmp_path, time_pad_factor=time_pad_factor))
+    dft_comp, dft_vis = _route(GPVisAstDFT, ast_config(tmp_path, time_pad_factor=time_pad_factor))
+
+    assert dft_comp.pk.shape == ref_comp.pk.shape
+    if time_pad_factor > 2:
+        narrow, _ = _route(GPVisAst, ast_config(tmp_path, time_pad_factor=2.0))
+        assert ref_comp.n_k_time_ast > narrow.n_k_time_ast
+
+    params = _random_latent(ref_comp)
+    expected = np.asarray(ref_vis(params))
+    got = np.asarray(dft_vis(params))
+
+    rtol, atol = _tols()
+    np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol * max(np.abs(expected).max(), 1.0))
+
+
+@pytest.mark.parametrize("time_pad_factor", [2.0, 8.0, 16.0])
+def test_the_gradients_match_the_fft_component_at_wide_time_padding(tmp_path, time_pad_factor):
+    ref_comp, ref_vis = _route(GPVisAst, ast_config(tmp_path, time_pad_factor=time_pad_factor))
+    _, dft_vis = _route(GPVisAstDFT, ast_config(tmp_path, time_pad_factor=time_pad_factor))
+    params = _random_latent(ref_comp)
+    # A loss with data in it, so the gradient is not a multiple of the value.
+    target = np.asarray(ref_vis(_random_latent(ref_comp, seed=4)))
+
+    def grad(vis):
+        return jax.grad(lambda p: jnp.sum(jnp.abs(vis(p) - target) ** 2))(params)
+
+    ref, got = grad(ref_vis), grad(dft_vis)
+
+    rtol, atol = _tols()
+    for key in ref:
+        scale = max(float(np.abs(np.asarray(ref[key])).max()), 1.0)
+        np.testing.assert_allclose(
+            np.asarray(got[key]), np.asarray(ref[key]), rtol=rtol, atol=atol * scale,
+            err_msg=key,
+        )
