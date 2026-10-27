@@ -36,6 +36,7 @@ opt:
   max_iter: 500           # Optional - Maximum number of iterations to run the optimization for
   guide: map              # Optional - The type of optimization to run. Currently only 'map' is possible
   dual_run: true          # Optional - Whether to continue optimzation for a second run using a step size 10x smaller
+  init_jitter: null       # Optional - Seeded perturbation of the start, drawn from inference.seed, so configs that otherwise draw nothing can be run as an ensemble. null is off and leaves the run bit-identical. A number is an absolute scale, in prior widths, added to every fitted parameter; a mapping takes it per block, e.g. {rfi: {relative: 0.01}, ast: 0.05}, where relative is a fraction of the rms of that block's start and a block is a parameter name or its prefix up to an underscore
   trace_path: null        # Optional - Path to write an .npz trace of the per-iteration loss, wall-clock time and reduced chi^2 to. null disables it. Overridden by the TAB_LOSS_TRACE environment variable
 ###################################################
 # Astronomical prior and initialization parameters
