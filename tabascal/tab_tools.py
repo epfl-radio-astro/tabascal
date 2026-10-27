@@ -25,6 +25,14 @@ from jax.tree_util import tree_map
 
 from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
+from tabascal.opt_schedule import (
+    checkpoint_path as _checkpoint_path,
+    converged,
+    describe_schedule,
+    save_checkpoint,
+    step_size,
+    validate_opt,
+)
 from tabascal.timing import measure_runtime
 from tabascal.write import write_results_ms, write_results_xds
 
@@ -477,6 +485,10 @@ def run_custom_svi(
     constants: dict = None,
     trace_path: Optional[str] = None,
     metrics: Optional[tuple] = None,
+    schedule: Optional[dict] = None,
+    stop: Optional[dict] = None,
+    checkpoints: tuple = (),
+    checkpoint_path: Optional[Callable[[int], str]] = None,
 ) -> SVIRunResult:
     """MAP optimization that avoids capturing large state arrays as JAX constants.
 
@@ -502,7 +514,17 @@ def run_custom_svi(
     model evaluation contains collectives, so the ranks disagreeing about that
     would deadlock the optimisation. Every rank traces; only the write at the
     end is rank 0's, gated inside :func:`_write_loss_trace`.
+
+    ``schedule`` (normalised by :func:`tabascal.opt_schedule.validate_schedule`)
+    replaces the two phases with one ``adabelief`` whose step size follows it,
+    for ``max_iter`` steps in all; ``dual_run`` is then not read. One optimiser
+    means one compiled step and moments that carry through every step (#82).
+    ``stop`` ends that run early once :func:`tabascal.opt_schedule.converged`.
+    ``checkpoints`` are steps, counted across both phases with ``dual_run``,
+    after which the parameters are written to ``checkpoint_path(step)``.
     """
+    if stop is not None and schedule is None:
+        raise ValueError("run_custom_svi takes a stop only with a schedule.")
     # The path is the switch. Metrics without one would compile and run the
     # traced step for a production run and then discard every number it cost;
     # a path without metrics would write a file missing the keys the schema
@@ -533,9 +555,10 @@ def run_custom_svi(
     trace_t0 = None
     traced_metrics: dict = {}
 
-    def _run_phase(params, epsilon, max_iter):
+    checkpoints = set(checkpoints)
+
+    def _run_phase(params, optimizer, max_iter, offset=0):
         nonlocal trace_t0
-        optimizer = optax.adabelief(epsilon)
         opt_state = optimizer.init(params)
         losses = []
         window = max(max_iter // 10, 1)
@@ -569,14 +592,31 @@ def run_custom_svi(
                 f"init loss: {init_loss:.4f}, avg. loss [{n1}-{n2}]: {avg_loss:.4f}",
                 refresh=False,
             )
+            if offset + i + 1 in checkpoints:
+                save_checkpoint(
+                    checkpoint_path(offset + i + 1), params, offset + i + 1, loss_val,
+                    write=is_process_0(),
+                )
+            # Every rank holds the same losses, so every rank stops at the same step.
+            if stop is not None and converged(losses, stop):
+                pbar.close()
+                print(f"Converged after {i + 1} steps: the mean loss moved by less "
+                      f"than {stop['rtol']:g} between the last two windows of {stop['window']}.")
+                break
         return params, losses
 
     params = init_params
-    params, losses = _run_phase(params, epsilon, max_iter)
+    if schedule is not None:
+        optimizer = optax.adabelief(step_size(schedule, epsilon, max_iter))
+        params, losses = _run_phase(params, optimizer, max_iter)
+    else:
+        params, losses = _run_phase(params, optax.adabelief(epsilon), max_iter)
 
-    if dual_run:
-        params, losses2 = _run_phase(params, epsilon / 10, max_iter)
-        losses = losses + losses2
+        if dual_run:
+            params, losses2 = _run_phase(
+                params, optax.adabelief(epsilon / 10), max_iter, offset=max_iter
+            )
+            losses = losses + losses2
 
     _write_loss_trace(trace_path, losses, step_times, traced_metrics)
 
@@ -626,20 +666,31 @@ def run_opt(
 ):
 
     start = datetime.now()
+    opt_config = tab_config.args["opt"]
+    checked = validate_opt(opt_config)
     print()
     print("Running Optimization ...")
-    trace_path = loss_trace_path(tab_config.args["opt"].get("trace_path"))
+    print(f"Optimiser : {describe_schedule(opt_config)}")
+    trace_path = loss_trace_path(opt_config.get("trace_path"))
+    # Beside the MAP prediction, named after it, so two runs into one results
+    # directory with different suffixes keep their checkpoints apart.
+    stem = os.path.basename(os.path.normpath(map_path)).removesuffix(".zarr")
+    checkpoint_dir = os.path.join(os.path.dirname(os.path.normpath(map_path)), "checkpoints")
     vi_results = run_custom_svi(
         prob_model=prob_model,
         obs_data=tab_config.vis_obs,
-        max_iter=tab_config.args["opt"]["max_iter"],
+        max_iter=opt_config["max_iter"],
         init_params=init_params,
-        epsilon=tab_config.args["opt"]["epsilon"],
-        dual_run=tab_config.args["opt"]["dual_run"],
+        epsilon=opt_config["epsilon"],
+        dual_run=opt_config["dual_run"],
         state=state,
         constants=constants,
         trace_path=trace_path,
         metrics=build_trace_metrics(tab_config, truth) if trace_path else None,
+        schedule=checked["schedule"],
+        stop=checked["stop"],
+        checkpoints=tuple(checked["checkpoints"]),
+        checkpoint_path=lambda step: _checkpoint_path(checkpoint_dir, stem, step),
     )
     vi_params = vi_results.params
     # Strip _auto_loc suffix to get raw param names for Predictive

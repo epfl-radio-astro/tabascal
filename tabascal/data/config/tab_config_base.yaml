@@ -35,6 +35,9 @@ opt:
   max_iter: 500           # Optional - Maximum number of iterations to run the optimization for
   guide: map              # Optional - The type of optimization to run. Currently only 'map' is possible
   dual_run: true          # Optional - Whether to continue optimzation for a second run using a step size 10x smaller
+  schedule: null          # Optional - One optimiser whose step size follows a schedule, for max_iter steps in all, instead of dual_run's two: one compiled step and no reset of the optimiser's moments (GitHub #82). null keeps dual_run. {kind: step, boundaries: [N], factor: 0.1} drops the step size 10x after step N, as dual_run does; {kind: exponential, final_factor: 0.01} and {kind: cosine, final_factor: 0.0} decay smoothly to final_factor * epsilon at max_iter; {kind: constant} holds epsilon. dual_run is not read when this is set
+  stop: null              # Optional - End the fit once the loss has stopped moving: {window: W, rtol: r, min_steps: M} stops when the mean loss of the last W steps is within r (relative) of the W before, after at least M steps. Needs schedule. null runs every step
+  checkpoints: null       # Optional - Steps after which to write the parameters to results/checkpoints/<map_pred name>_step<N>.npz, e.g. [1000, 2000, 4000], so one long run can be scored at several step counts. Counted across both phases with dual_run. null writes none
   trace_path: null        # Optional - Path to write an .npz trace of the per-iteration loss, wall-clock time and reduced chi^2 to. null disables it. Overridden by the TAB_LOSS_TRACE environment variable
 ###################################################
 # Astronomical prior and initialization parameters
