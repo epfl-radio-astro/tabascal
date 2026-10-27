@@ -63,23 +63,25 @@ def test_off_is_described_as_nothing():
 # ---------------------------------------------------------------------------
 
 
-def test_a_number_is_an_absolute_scale_on_every_block():
+def test_a_number_is_an_absolute_scale_on_every_block(exact_rtol):
     params = start()
     out = jitter_init(params, 0.05, seed=7)
     for name, x in params.items():
-        np.testing.assert_allclose(
-            np.asarray(out[name]) - np.asarray(x), 0.05 * draw(7, name, x), rtol=1e-6, atol=1e-12
-        )
+        # Against the sum rather than the difference, which in single precision
+        # keeps the start's round-off and none of the jitter's digits.
+        expected = np.asarray(x) + 0.05 * draw(7, name, x)
+        np.testing.assert_allclose(np.asarray(out[name]), expected, rtol=exact_rtol, atol=exact_rtol)
 
 
-def test_a_relative_scale_is_a_fraction_of_the_rms_of_the_start():
+def test_a_relative_scale_is_a_fraction_of_the_rms_of_the_start(exact_rtol):
     params = start()
     out = jitter_init(params, {"rfi": {"relative": 0.1}}, seed=7)
     for name in ("rfi_k_r_base", "rfi_k_i_base"):
         x = np.asarray(params[name])
         sigma = 0.1 * np.sqrt(np.mean(x**2))
         np.testing.assert_allclose(
-            np.asarray(out[name]) - x, sigma * draw(7, name, params[name]), rtol=1e-6, atol=1e-12
+            np.asarray(out[name]), x + sigma * draw(7, name, params[name]),
+            rtol=exact_rtol, atol=exact_rtol,
         )
     for name in ("ast_k_r_base", "ast_k_i_base", "gains_amp_base"):
         assert out[name] is params[name]
