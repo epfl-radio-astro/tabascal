@@ -187,13 +187,29 @@ opt:
   epsilon: 1e-1
   max_iter: 10000
   dual_run: True
+  init_jitter: null
   trace_path: null
 ```
 
 * `epsilon`: This is the optimiser step size
 * `max_iter`: This is the number of iterations to run the optimiser for in each optimisation run.
 * `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller.
+* `init_jitter`: A seeded perturbation added to the start before the fit, or `null` (the default) for none. See [Start jitter](#start-jitter).
 * `trace_path`: Path of an `.npz` file to record the optimiser's convergence to, or `null` (the default) to record nothing. See [Optimiser trace](#optimiser-trace).
+
+### Start jitter
+
+A config whose inits are all deterministic (`rfi.init: matched-filter`, `ast.init: prior`, `gains.init: prior`) makes no random draw: reruns are bit-identical, whatever `inference.seed` says, so they cannot show how far apart two fits of the same data land. `init_jitter` adds a draw to the start, so an ensemble over `inference.seed` can.
+
+```yaml
+opt:
+  init_jitter: 0.05                              # every block, absolute
+  init_jitter: {rfi: {relative: 0.01}, ast: 0.05} # per block
+```
+
+Every fitted parameter is a standard-normal latent, so an **absolute** scale is in units of the prior width: `0.05` moves each latent by 5 % of its prior standard deviation. A **relative** scale is a fraction of the rms of that block's own start, for starts such as the matched filter's that sit far from the prior mean; it is an error on a block that starts at zero, where it would add nothing. A number applies to every block, and a mapping names blocks, each either a parameter name (`rfi_k_r_base`) or its prefix up to an underscore (`rfi`), the longest match winning. Blocks a mapping leaves out are not jittered, and a block that names no parameter is an error.
+
+Each parameter draws from `inference.seed` under the tag `init_jitter` folded with its own name, so its jitter does not depend on the other parameters, and is independent of a sampled start (`init: sample`). The jitter is applied before the init prediction, so `init_pred` is the start the fit actually took, and the run header names it. With `init_jitter` null nothing is drawn and the run is bit-identical to one without the key.
 
 ### Optimiser trace
 

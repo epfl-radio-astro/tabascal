@@ -22,6 +22,7 @@ from tabascal.components.trajectory import (
 )
 from tabascal.orbit import check_epoch_agreement, preflight_tle_check
 from tabascal.orbit_config import normalise_tle_config
+from tabascal.jitter import validate_init_jitter
 from tabascal.seeds import validate_seed, warn_deprecated_seeds
 from tabascal.interferometry import (
     baseline_gains,
@@ -75,7 +76,9 @@ def deep_update(d: Dict, u: Dict) -> Dict:
     """
     for k, v in u.items():
         if isinstance(v, collections.abc.Mapping):
-            d[k] = deep_update(d.get(k, {}), v)
+            # A mapping over a null or scalar default replaces it.
+            base = d.get(k)
+            d[k] = deep_update(base if isinstance(base, collections.abc.Mapping) else {}, v)
         elif v is None and isinstance(d.get(k), collections.abc.Mapping):
             continue
         else:
@@ -141,6 +144,7 @@ def load_config(path: str) -> Dict:
     # Outside the try: a bad seed is a config to edit, not a file that failed to load.
     validate_seed(config)
     warn_deprecated_seeds(config)
+    validate_init_jitter((config.get("opt") or {}).get("init_jitter"))
     return config
 
     
