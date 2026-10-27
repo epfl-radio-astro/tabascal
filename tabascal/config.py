@@ -75,7 +75,9 @@ def deep_update(d: Dict, u: Dict) -> Dict:
     """
     for k, v in u.items():
         if isinstance(v, collections.abc.Mapping):
-            d[k] = deep_update(d.get(k, {}), v)
+            # A mapping over a null or scalar default replaces it.
+            base = d.get(k)
+            d[k] = deep_update(base if isinstance(base, collections.abc.Mapping) else {}, v)
         elif v is None and isinstance(d.get(k), collections.abc.Mapping):
             continue
         else:

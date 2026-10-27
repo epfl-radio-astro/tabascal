@@ -165,6 +165,11 @@ class TestDeepUpdate:
     def test_none_over_a_missing_key_is_stored(self):
         assert deep_update({}, {"a": None}) == {"a": None}
 
+    @pytest.mark.parametrize("base", [None, 0.1])
+    def test_a_mapping_over_a_null_or_scalar_replaces_it(self, base):
+        """opt.init_jitter defaults to null and takes a mapping."""
+        assert deep_update({"a": base}, {"a": {"b": 1}}) == {"a": {"b": 1}}
+
     def test_a_mapping_merges_key_by_key(self):
         assert deep_update({"a": {"b": 1, "c": 2}}, {"a": {"c": 3}}) == {
             "a": {"b": 1, "c": 3}
