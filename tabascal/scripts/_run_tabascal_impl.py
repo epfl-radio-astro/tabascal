@@ -34,6 +34,7 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
+from tabascal.jitter import jitter_init
 from tabascal.opt_schedule import validate_opt
 from tabascal.seeds import config_seed, describe_random_draws, run_key
 from tabascal.write import check_input_column, write_results_xds
@@ -498,6 +499,11 @@ def _subtract(config, paths):
                 "  (reuse via --extra-orbit-dir to reproduce this run's "
                 "trajectory priors)"
             )
+
+    # Before sharding, so every rank perturbs the same local arrays the same way.
+    model.init_params = jitter_init(
+        model.init_params, config["opt"].get("init_jitter"), config_seed(config)
+    )
 
     if sharding_enabled():
         # Split every leading-RFI-axis array across the device mesh and replicate

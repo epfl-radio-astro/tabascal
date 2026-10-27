@@ -199,6 +199,7 @@ opt:
   schedule: null
   stop: null
   checkpoints: null
+  init_jitter: null
   trace_path: null
 ```
 
@@ -209,6 +210,7 @@ opt:
 * `schedule`: One optimiser with a step-size schedule in place of `dual_run`'s two, or `null` (the default) to keep `dual_run`. See [Step-size schedule](#step-size-schedule).
 * `stop`: End the fit once the loss stops moving, or `null` (the default) to run every step. Needs `schedule`.
 * `checkpoints`: Steps after which to write the parameters to a file, or `null` (the default) for none.
+* `init_jitter`: A seeded perturbation added to the start before the fit, or `null` (the default) for none. See [Start jitter](#start-jitter).
 * `trace_path`: Path of an `.npz` file to record the optimiser's per-iteration metrics to, with its loss and time, or `null` (the default) for the loss and time alone in `results/trace.npz`. A relative path is taken inside the run's directory, so each run keeps its own trace; an absolute one is used as given. See [Optimiser trace](#optimiser-trace).
 
 ### Optimiser
@@ -254,6 +256,20 @@ A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: i
 `stop: {window: W, rtol: r, min_steps: M}` ends the fit after step n once n is at least M and 2W, and the mean loss over steps n-W+1..n differs from the mean over the W steps before by at most r times the latter's magnitude. The loss is the negative log posterior per data point, so with a large constant offset in it a relative change is smaller than the change in fit; choose `rtol` with a trace of the loss to hand. It needs `schedule`: with `dual_run` it would not be clear whether a stop ends the first phase or the fit.
 
 `checkpoints: [1000, 2000, 4000]` writes the parameters after each of those steps to `checkpoints/<map_pred name>_step<N>.npz` in the run's `results` directory, so one long run can be scored at several step counts. With `dual_run` the steps count across both phases. `tabascal.opt_schedule.load_checkpoint(path)` returns `(params, step, trace_loss)`, the parameters keyed as the model names them, which `Predictive` takes. `trace_loss` is the trace's loss for that step, which the step evaluated before its own update, so it lines a checkpoint up with the trace but is not the loss at the saved parameters. A step the fit does not reach because `stop` ended it first is not written.
+
+### Start jitter
+
+A config whose inits are all deterministic (`rfi.init: matched-filter`, `ast.init: prior`, `gains.init: prior`) makes no random draw: reruns are bit-identical, whatever `inference.seed` says, so they cannot show how far apart two fits of the same data land. `init_jitter` adds a draw to the start, so an ensemble over `inference.seed` can.
+
+```yaml
+opt:
+  init_jitter: 0.05                              # every block, absolute
+  init_jitter: {rfi: {relative: 0.01}, ast: 0.05} # per block
+```
+
+Every fitted parameter is a standard-normal latent, so an **absolute** scale is in units of the prior width: `0.05` moves each latent by 5 % of its prior standard deviation. A **relative** scale is a fraction of the rms of that block's own start, for starts such as the matched filter's that sit far from the prior mean; it is an error on a block that starts at zero, where it would add nothing. A number applies to every block, and a mapping names blocks, each either a parameter name (`rfi_k_r_base`) or its prefix up to an underscore (`rfi`), the longest match winning. Blocks a mapping leaves out are not jittered, and a block that names no parameter is an error.
+
+Each parameter draws from `inference.seed` under the tag `init_jitter` folded with its own name, so its jitter does not depend on the other parameters, and is independent of a sampled start (`init: sample`). The jitter is applied before the init prediction, so `init_pred` is the start the fit actually took, and the run header names it. With `init_jitter` null nothing is drawn and the run is bit-identical to one without the key.
 
 ### Optimiser trace
 
