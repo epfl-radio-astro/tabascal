@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 from jax import random
 
+from tabascal.distributed import _wants_rfi_axis
 from tabascal.seeds import component_key
 
 #: The tag the jitter folds into ``inference.seed`` (tabascal.seeds).
@@ -103,12 +104,21 @@ def _perturb(x, key, sigma):
     return x + sigma * random.normal(key, x.shape, x.dtype)
 
 
-def jitter_init(params: Dict, spec, seed: int) -> Dict:
+def jitter_init(
+    params: Dict, spec, seed: int, n_rfi: Optional[int] = None,
+    n_rfi_real: Optional[int] = None,
+) -> Dict:
     """``params`` with the seeded jitter added, or ``params`` itself when it is off.
 
     Each parameter draws from ``fold_in(component_key(seed, "init_jitter"),
     crc32(name))``, so its draw depends on the seed and its own name alone, as
     a component's ``init: sample`` does.
+
+    Under sharding ``n_rfi`` is padded up to a multiple of the device count with
+    dark dummy sources whose latents must stay zero. On an RFI-axis parameter
+    only the first ``n_rfi_real`` rows are drawn and measured, so the dummies
+    stay dark and the jitter on the real sources does not depend on the number
+    of devices.
     """
     resolved = resolve_init_jitter(spec, params)
     if not resolved:
@@ -118,16 +128,22 @@ def jitter_init(params: Dict, spec, seed: int) -> Dict:
     out = dict(params)
     for name, (kind, scale) in resolved.items():
         x = params[name]
+        padded = (
+            n_rfi is not None and n_rfi_real is not None and n_rfi_real < n_rfi
+            and _wants_rfi_axis(name, x, n_rfi)
+        )
+        real = x[:n_rfi_real] if padded else x
         sigma = scale
         if kind == "relative":
-            rms = float(jnp.sqrt(jnp.mean(jnp.abs(x) ** 2)))
+            rms = float(jnp.sqrt(jnp.mean(jnp.abs(real) ** 2)))
             if rms == 0:
                 raise ValueError(
                     f"opt.init_jitter: {name} starts at zero, so a relative "
                     "jitter on it is zero. Give it an absolute scale, in prior widths."
                 )
             sigma = scale * rms
-        out[name] = _perturb(x, random.fold_in(base, zlib.crc32(name.encode())), sigma)
+        moved = _perturb(real, random.fold_in(base, zlib.crc32(name.encode())), sigma)
+        out[name] = jnp.concatenate([moved, x[n_rfi_real:]]) if padded else moved
     return out
 
 

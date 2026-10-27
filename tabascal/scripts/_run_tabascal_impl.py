@@ -502,7 +502,8 @@ def _subtract(config, paths):
 
     # Before sharding, so every rank perturbs the same local arrays the same way.
     model.init_params = jitter_init(
-        model.init_params, config["opt"].get("init_jitter"), config_seed(config)
+        model.init_params, config["opt"].get("init_jitter"), config_seed(config),
+        n_rfi=tab_config.n_rfi, n_rfi_real=getattr(tab_config, "n_rfi_real", tab_config.n_rfi),
     )
 
     if sharding_enabled():

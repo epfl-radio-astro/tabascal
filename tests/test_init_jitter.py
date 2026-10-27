@@ -123,6 +123,21 @@ def test_the_draw_is_not_the_one_ast_init_sample_takes():
     assert not np.array_equal(draw(7, "ast_k_r_base", x), ast_key_draw)
 
 
+@pytest.mark.parametrize("kind", ["absolute", "relative"])
+def test_padded_dummy_sources_stay_dark_and_do_not_change_the_real_draw(kind):
+    """Padding 2 real sources to 4 for the devices moves neither the real rows nor the dummies."""
+    params = start()
+    rfi = params["rfi_k_r_base"]
+    padded = dict(params, rfi_k_r_base=jax.numpy.concatenate([rfi, jax.numpy.zeros_like(rfi)]))
+    spec = {"rfi_k_r_base": {kind: 0.1}}
+
+    unpadded_out = jitter_init(params, spec, seed=7, n_rfi=2, n_rfi_real=2)
+    padded_out = jitter_init(padded, spec, seed=7, n_rfi=4, n_rfi_real=2)
+
+    np.testing.assert_array_equal(padded_out["rfi_k_r_base"][:2], unpadded_out["rfi_k_r_base"])
+    np.testing.assert_array_equal(padded_out["rfi_k_r_base"][2:], 0)
+
+
 # ---------------------------------------------------------------------------
 # What is refused
 # ---------------------------------------------------------------------------
