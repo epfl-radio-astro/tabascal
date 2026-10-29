@@ -650,7 +650,27 @@ def caltable_path(results_zarr_path: str) -> str:
     return os.path.splitext(os.path.normpath(results_zarr_path))[0] + CALTABLE_EXT
 
 
-def _clear_failed_export(out_path: str, ms_path: str) -> str:
+def _is_input_table(out_path: str, gain_table) -> bool:
+    """Whether ``out_path`` is one of the ``data.gain_table`` the run calibrated with.
+
+    A rerun can calibrate with the table its previous fit left beside the
+    results, so the export's destination can be one of its own inputs. Writing
+    there would destroy the input and leave a product of the table with itself;
+    removing it would leave nothing to export this fit against. Compared by real
+    path, so a symlink or a ``./`` does not hide it.
+    """
+
+    # Not normalise_gain_tables: that also checks the tables still exist, which
+    # is the read's business, and a no-op export that never looked at them must
+    # not start failing over one that has since gone.
+    if gain_table is None:
+        return False
+    paths = [gain_table] if isinstance(gain_table, (str, os.PathLike)) else list(gain_table)
+    target = os.path.realpath(out_path)
+    return any(os.path.realpath(p) == target for p in paths)
+
+
+def _clear_failed_export(out_path: str, ms_path: str, gain_table=None) -> str:
     """Remove a table a failed export could not replace. Returns what happened.
 
     A failure *before* the write -- a multi-window MS, results that do not
@@ -666,6 +686,13 @@ def _clear_failed_export(out_path: str, ms_path: str) -> str:
     """
 
     try:
+        # Not superseded: it is what this run calibrated with.
+        if _is_input_table(out_path, gain_table):
+            return (
+                f" {out_path} is one of this run's data.gain_table inputs, so it "
+                "has been left alone."
+            )
+
         if remove_caltable(out_path, ms_path):
             return f" The superseded table at {out_path} has been removed."
 
@@ -701,11 +728,14 @@ def _emit_gain_caltable(
     * something at the output path that is not a calibration table;
     * results whose gains do not describe the MS's antennas or timesteps;
     * a ``TIME`` column declaring a scale tabascal cannot interpret;
+    * a destination that is one of the run's own ``gain_table`` inputs;
     * anything the filesystem refuses.
 
     All of those fail *before* the table is written, which leaves an earlier
     run's table standing at the destination -- so it is cleared here too, by
     :func:`_clear_failed_export`, and what happened to it is part of the warning.
+    A table that is one of the run's inputs is not an earlier run's table, and is
+    left in place.
 
     The destination is resolved here, once, and handed to both: the export and
     the clean-up after it have to be talking about the same path, or a run given
@@ -736,7 +766,7 @@ def _emit_gain_caltable(
         )
         # An earlier run's table is still standing at the destination this one
         # could not write, so it goes the same way it would on a no-op export.
-        cleared = _clear_failed_export(out_path, ms_path)
+        cleared = _clear_failed_export(out_path, ms_path, gain_table)
 
         warnings.warn(
             # The destination rather than the results it describes: with an
@@ -845,6 +875,12 @@ def write_gain_caltable(
     is in the same position, and :func:`_clear_failed_export` does the same there.
     Only a calibration table is ever removed, and never one overlapping the MS.
 
+    Nor is a table the run calibrated with ever removed or overwritten: an
+    ``out_path`` that is one of the ``gain_table`` inputs -- a rerun calibrated
+    with the table its previous fit left here -- is refused before anything is
+    read (:func:`_is_input_table`), which :func:`_emit_gain_caltable` reports as
+    a warning, and the input is left as it was.
+
     Note that ``applycal`` operates on ``DATA``. An MS whose visibilities live in
     a non-standard column cannot consume this table, whatever the table says.
     """
@@ -853,6 +889,16 @@ def write_gain_caltable(
     # rerun that fits nothing has to remove the table the last run left here.
     if out_path is None:
         out_path = caltable_path(results_zarr_path)
+
+    # Before every path below that removes or writes out_path, the no-op ones
+    # included: none of them may touch a table this run calibrated with.
+    if _is_input_table(out_path, gain_table):
+        raise ValueError(
+            f"{out_path} is one of this run's data.gain_table inputs, so the "
+            "calibration table cannot be written there without destroying it. "
+            "Move that table elsewhere and point data.gain_table at the new "
+            "path, or give the export an out_path of its own."
+        )
 
     # Closed on the way out: this runs at the end of a long job, and a store left
     # open holds file handles for the rest of it.

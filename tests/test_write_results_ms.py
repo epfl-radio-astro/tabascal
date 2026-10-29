@@ -2774,3 +2774,114 @@ class TestWriteResultsXdsRecordsTheCorrelation:
         _, captured = run_writer(_fake_ms(data), path, corr_idx=2)
 
         assert captured["resolved"] == "yx"
+
+
+def _snapshot(path):
+    """Every file under a table directory and its bytes, to tell it was not touched."""
+    out = {}
+    for root, _, files in os.walk(path):
+        for name in files:
+            full = os.path.join(root, name)
+            with open(full, "rb") as f:
+                out[os.path.relpath(full, path)] = f.read()
+    return out
+
+
+class TestATableTheRunCalibratedWithIsLeftAlone:
+    """A rerun can calibrate with the table its previous fit left beside the results.
+
+    That table is then an input, and the export's own destination: writing there
+    would destroy it, and removing it as superseded would leave nothing to export
+    this fit against later.
+    """
+
+    @pytest.fixture
+    def previous(self, tmp_path, run_writer, ms_skeleton):
+        """A first fit, exported: its ``<results>.B`` and the data it describes."""
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        table = _caltable_path(zarr_path)
+        assert os.path.exists(table)
+        return zarr_path, table, gains, ast, rfi, data
+
+    @pytest.mark.parametrize("spelling", ["same", "dotted", "symlink"])
+    def test_a_refit_calibrated_with_it_neither_overwrites_nor_removes_it(
+        self, tmp_path, run_writer, ms_skeleton, previous, spelling
+    ):
+        zarr_path, table, gains, ast, rfi, data = previous
+        before = _snapshot(table)
+        if spelling == "dotted":
+            given = os.path.join(os.path.dirname(table), ".", os.path.basename(table))
+        elif spelling == "symlink":
+            given = str(tmp_path / "link.B")
+            os.symlink(table, given)
+        else:
+            given = table
+
+        again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
+        with pytest.warns(RuntimeWarning, match="data.gain_table inputs") as record:
+            values, _ = run_writer(
+                _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
+                ext_gains=_ext_gains(), gain_table=[given],
+            )
+
+        assert _snapshot(table) == before
+        # The columns are the run's result and are written regardless.
+        assert set(COLS).issubset(values)
+        message = str(record.pop(RuntimeWarning).message)
+        assert "left alone" in message and "superseded" not in message
+
+    def test_a_refit_that_fits_nothing_does_not_remove_it(
+        self, tmp_path, run_writer, ms_skeleton, previous
+    ):
+        """The no-op export removes a stale table; an input is not stale."""
+        _, table, _, ast, rfi, _ = previous
+        before = _snapshot(table)
+
+        unity = _uniform_gains(1)
+        again = _write_zarr(tmp_path, unity, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(unity) * (ast + rfi)).mean(axis=0)))
+        with pytest.warns(RuntimeWarning, match="data.gain_table inputs"):
+            run_writer(
+                _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
+                ext_gains=_ext_gains(), gain_table=[table],
+            )
+
+        assert _snapshot(table) == before
+
+    def test_another_input_does_not_stop_the_export(
+        self, tmp_path, run_writer, ms_skeleton, previous
+    ):
+        """Only the destination itself is protected; an input elsewhere is the usual case."""
+        zarr_path, table, gains, ast, rfi, data = previous
+        elsewhere = tmp_path / "flux.B0"
+        elsewhere.mkdir()
+        before = _snapshot(table)
+
+        again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=".*gain_table inputs.*")
+            run_writer(
+                _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
+                ext_gains=_ext_gains(), gain_table=[str(elsewhere)],
+            )
+
+        assert os.path.exists(table) and _snapshot(table) != before
+
+    def test_the_failed_export_clean_up_leaves_an_input_in_place(self, tmp_path, ms_skeleton, previous):
+        _, table, *_ = previous
+        before = _snapshot(table)
+
+        said = write_mod._clear_failed_export(table, ms_skeleton, [table])
+
+        assert "left alone" in said
+        assert _snapshot(table) == before
+
+    def test_the_check_does_not_require_the_inputs_to_exist(self, tmp_path):
+        """A no-op export never read them, and must not start failing over one gone since."""
+        assert not write_mod._is_input_table(str(tmp_path / "r.B"), [str(tmp_path / "gone.B")])
+        assert not write_mod._is_input_table(str(tmp_path / "r.B"), None)
+        assert write_mod._is_input_table(str(tmp_path / "r.B"), str(tmp_path / "r.B"))
