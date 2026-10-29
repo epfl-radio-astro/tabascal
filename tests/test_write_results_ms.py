@@ -2807,7 +2807,7 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
         assert os.path.exists(table)
         return zarr_path, table, gains, ast, rfi, data
 
-    @pytest.mark.parametrize("spelling", ["same", "dotted", "symlink"])
+    @pytest.mark.parametrize("spelling", ["same", "dotted", "symlink", "case"])
     def test_a_refit_calibrated_with_it_neither_overwrites_nor_removes_it(
         self, tmp_path, run_writer, ms_skeleton, previous, spelling
     ):
@@ -2818,6 +2818,11 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
         elif spelling == "symlink":
             given = str(tmp_path / "link.B")
             os.symlink(table, given)
+        elif spelling == "case":
+            # APFS and NTFS by default: another spelling of the same directory.
+            given = os.path.join(os.path.dirname(table), os.path.basename(table).upper())
+            if not os.path.exists(given):
+                pytest.skip("case-sensitive filesystem")
         else:
             given = table
 
@@ -2879,6 +2884,11 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
 
         assert "left alone" in said
         assert _snapshot(table) == before
+
+        upper = os.path.join(os.path.dirname(table), os.path.basename(table).upper())
+        if os.path.exists(upper):  # a case-insensitive filesystem
+            assert "left alone" in write_mod._clear_failed_export(table, ms_skeleton, [upper])
+            assert _snapshot(table) == before
 
     def test_the_check_does_not_require_the_inputs_to_exist(self, tmp_path):
         """A no-op export never read them, and must not start failing over one gone since."""

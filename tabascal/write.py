@@ -10,6 +10,7 @@ from tabascal.gain_table import gains_from_tables, normalise_gain_tables
 from tabascal.imports import import_components
 from tabascal.interferometry import baseline_gains
 from tabascal.ms import (
+    _same_directory,
     fitted_correlation,
     grid_to_rows,
     into_corr,
@@ -657,7 +658,9 @@ def _is_input_table(out_path: str, gain_table) -> bool:
     results, so the export's destination can be one of its own inputs. Writing
     there would destroy the input and leave a product of the table with itself;
     removing it would leave nothing to export this fit against. Compared by real
-    path, so a symlink or a ``./`` does not hide it.
+    path and then by filesystem identity (:func:`~tabascal.ms._same_directory`),
+    so neither a symlink, a ``./`` nor a different case on a case-insensitive
+    filesystem hides it.
     """
 
     # Not normalise_gain_tables: that also checks the tables still exist, which
@@ -667,7 +670,7 @@ def _is_input_table(out_path: str, gain_table) -> bool:
         return False
     paths = [gain_table] if isinstance(gain_table, (str, os.PathLike)) else list(gain_table)
     target = os.path.realpath(out_path)
-    return any(os.path.realpath(p) == target for p in paths)
+    return any(_same_directory(os.path.realpath(p), target) for p in paths)
 
 
 def _clear_failed_export(out_path: str, ms_path: str, gain_table=None) -> str:
