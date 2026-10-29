@@ -91,6 +91,7 @@ def make_rfi_config(
     with_n_rfi_real=True,
     rfi_mask_fine=None,
     time_scale="utc",
+    signal_type=None,
 ):
     """Build a minimal mock TabConfig for the RFI-signal components.
 
@@ -151,6 +152,11 @@ def make_rfi_config(
             "data": {"zarr_path": None, "data_col": "DATA"},
         },
     )
+    # Left out unless asked for, so the default every other test runs on is
+    # the one a config that never mentions the key gets.
+    if signal_type is not None:
+        config.args["rfi"]["signal_type"] = signal_type
+
     # Omitted entirely (rather than set to None) so the getattr fallback in
     # BaseGPRFI.setup is exercised as it would be on an unpadded TabConfig.
     if with_n_rfi_real:
@@ -2386,3 +2392,168 @@ class TestTheStdCanBeMeasuredFromTheData:
         vis = jnp.ones((4, 3, 5), dtype=complex)
         with pytest.raises(ValueError, match="rfi"):
             self._validate(vis, std="widish")
+
+
+# ---------------------------------------------------------------------------
+# rfi.signal_type: real
+# ---------------------------------------------------------------------------
+
+class TestRealSignalType:
+    """``rfi.signal_type: real`` fits a real amplitude through its Hartley
+    coefficients: one real parameter per retained mode, on the grid the complex
+    latent uses.
+
+    The complex space is the default and every other test in this file runs on
+    it unchanged; these pin down what the real one changes and what it must not.
+    """
+
+    def test_the_default_is_complex(self):
+        comp = setup_component(ComplexRFIVarAntFine)
+
+        assert comp.signal_type == "complex"
+        assert set(comp.parameter_shapes) == {"rfi_k_r_base", "rfi_k_i_base"}
+
+    def test_an_unknown_signal_type_is_refused_by_name(self):
+        with pytest.raises(RuntimeError, match=r"rfi\.signal_type"):
+            setup_component(ComplexRFIVarAntFine, signal_type="hermitian")
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_only_the_real_part_is_a_parameter(self, cls):
+        comp = setup_component(cls, signal_type="real")
+
+        assert set(comp.parameter_shapes) == {"rfi_k_r_base"}
+        assert set(comp.init_params_base) == {"rfi_k_r_base"}
+        assert set(comp.init_params) == {"rfi_k_r"}
+        # The class's own declaration is untouched: the override is per instance.
+        assert "rfi_k_i_base" in cls.parameter_shapes
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_set_params_samples_what_is_declared(self, cls):
+        comp = setup_component(cls, signal_type="real")
+        with numpyro.handlers.seed(rng_seed=0):
+            params = comp.build_set_params()({})
+
+        assert set(params) == set(comp.parameter_shapes)
+        for name, value in params.items():
+            assert value.shape == comp.init_params_base[name].shape
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    @pytest.mark.parametrize("init", COMMON_INITS)
+    def test_every_init_is_real(self, cls, init):
+        comp = setup_component(cls, signal_type="real", init=init)
+
+        assert not jnp.iscomplexobj(comp.init_rfi_k)
+        assert not jnp.iscomplexobj(comp.mu_rfi_k)
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    @pytest.mark.parametrize("mean", ["zeros", "data"])
+    def test_every_prior_mean_is_real(self, cls, mean):
+        comp = setup_component(cls, signal_type="real", mean=mean)
+
+        assert not jnp.iscomplexobj(comp.mu_rfi_k)
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_the_forward_is_complex_typed_with_no_imaginary_part(self, cls):
+        """Complex because the visibility kernels take one; real in value."""
+        comp = setup_component(cls, signal_type="real")
+        rfi_A = run_forward(comp, random_params(comp))
+
+        assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
+        assert jnp.issubdtype(rfi_A.dtype, jnp.complexfloating)
+        assert jnp.all(rfi_A.imag == 0)
+        assert jnp.max(jnp.abs(rfi_A[:N_RFI_REAL])) > 0
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_the_dummy_sources_stay_dark(self, cls):
+        comp = setup_component(cls, signal_type="real")
+        rfi_A = run_forward(comp, random_params(comp))
+
+        assert jnp.all(rfi_A[N_RFI_REAL:] == 0)
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_the_gradient_reaches_the_real_sources_only(self, cls):
+        comp = setup_component(cls, signal_type="real")
+        forward = comp.build_forward()
+        constants = make_constants(comp)
+
+        grad = jax.grad(
+            lambda p: jnp.sum(jnp.abs(forward(p, {}, constants)["rfi_A"]) ** 2)
+        )(random_params(comp))["rfi_k_r_base"]
+
+        assert jnp.max(jnp.abs(grad[:N_RFI_REAL])) > 0
+        assert jnp.all(grad[N_RFI_REAL:] == 0)
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_the_forward_is_jit_compatible(self, cls):
+        comp = setup_component(cls, signal_type="real")
+        params = random_params(comp)
+        forward = comp.build_forward()
+        constants = make_constants(comp)
+
+        eager = forward(params, {}, constants)["rfi_A"]
+        jitted = jax.jit(forward)(params, {}, constants)["rfi_A"]
+
+        assert jnp.allclose(eager, jitted, atol=tol(), rtol=tol())
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_a_real_signal_is_filtered_as_the_complex_space_filters_it(self, cls):
+        """Through the latent and back, a real signal comes out as the real
+        part of what the complex space makes of it.
+
+        At the observed samples, which is where the two must agree: between
+        them an even padded axis leaves one unpaired mode the two interpolate
+        differently -- see fft_gp's "Real or complex signal space".
+        """
+        real = setup_component(cls, signal_type="real")
+        cplx = setup_component(cls)
+        y = jax.random.normal(jax.random.PRNGKey(3), (N_FREQ, N_TIME))
+
+        got = real.latent_to_signal(real.signal_to_latent(y))
+        expected = cplx.latent_to_signal(cplx.signal_to_latent(y)).real
+
+        assert not jnp.iscomplexobj(got)
+        assert jnp.allclose(got, expected, atol=10 * tol())
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_the_spectrum_normalises_to_the_whole_std(self, cls):
+        """``sum(sigma^2) = std``: a real latent carries ``E z^2 = 1``, not 2."""
+        comp = setup_component(cls, std=6.0, signal_type="real")
+
+        assert float(
+            jnp.sum(jnp.asarray(comp.sigma_rfi_k)[0, 0] ** 2)
+        ) == pytest.approx(6.0)
+
+    @pytest.mark.parametrize("std", [0.5, 40.0])
+    def test_a_var_ant_source_realises_the_configured_std(self, std):
+        """The key means the same width in either space. Sampled, as for the
+        complex space; see :class:`TestTheStdIsTheWidthItClaims`."""
+        comp = setup_component(
+            ComplexRFIVarAntFine, std=std, n_rfi=1, n_rfi_real=1, signal_type="real"
+        )
+
+        assert TestTheStdIsTheWidthItClaims._rms_vis(comp) == pytest.approx(
+            std, rel=0.25
+        )
+
+    def test_a_const_ant_source_is_wider_by_about_sqrt_three(self):
+        """``E A^4 = 3 (E A^2)^2`` for a real Gaussian, where it is 2 for a
+        circular complex one. Bounded for the reason the complex test gives,
+        separating ``sqrt(3)`` from 1 and from 3."""
+        kwargs = dict(std=3.0, n_rfi=1, n_rfi_real=1, signal_type="real")
+        rms = TestTheStdIsTheWidthItClaims._rms_vis
+        var_ant = rms(setup_component(ComplexRFIVarAntFine, **kwargs))
+        const_ant = rms(setup_component(ComplexRFIConstAntFine, **kwargs))
+
+        assert 1.3 < const_ant / var_ant < 2.3
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_a_complex_truth_keeps_its_real_part_and_says_what_it_drops(
+        self, cls, capsys
+    ):
+        comp = setup_component(cls, signal_type="real")
+        rfi_A = jnp.full((1, 1, N_FREQ, N_TIME), 3.0 + 4.0j)
+
+        kept = comp._true_signal(rfi_A)
+
+        assert jnp.array_equal(kept, rfi_A.real)
+        assert "0.8" in capsys.readouterr().out

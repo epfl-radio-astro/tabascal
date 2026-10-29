@@ -1,3 +1,4 @@
+import functools
 import warnings
 from abc import abstractmethod
 
@@ -9,7 +10,7 @@ from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov, validate_signal_type
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -486,7 +487,47 @@ _GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
 #:
 #: Measured, not derived: ``tests/components/test_rfi_signal.py`` samples each
 #: component through its own antenna structure and checks all three.
+#:
+#: Everything above is the complex signal space, the default. ``rfi.signal_type:
+#: real`` has its own entry in :data:`_LATENT_POWER_BY_TYPE`; this constant also
+#: sets the ``std: null`` default, which is left meaning the same in both.
 _LATENT_POWER = 2.0
+
+#: :data:`_LATENT_POWER` per ``rfi.signal_type``.
+#:
+#: A real amplitude is fitted through one real Hartley coefficient per mode
+#: (see :mod:`tabascal.fft_gp`), drawn as a single standard normal, so it
+#: carries ``E z^2 = 1`` and ``E A^2 = sum(sigma_rfi_k**2)``. The visibility of
+#: independent antennas is still quadratic in it, so ``sum(sigma**2) =
+#: rfi.gp_cov.std`` keeps ``E|V_pq|^2 = rfi.gp_cov.std^2``: the key means the
+#: same width in either space. What does differ is ConstAnt's factor: a real
+#: Gaussian has ``E A^4 = 3 (E A^2)^2``, so ``|A|^2`` there is ``sqrt(3)`` wider
+#: rather than ``sqrt(2)``.
+_LATENT_POWER_BY_TYPE = {"complex": _LATENT_POWER, "real": 1.0}
+
+
+def _latent_base(params: Dict, signal_type: str) -> Array:
+    """The latent base coefficients from the fitted parameters.
+
+    Complex: a real and an imaginary part, each a standard normal. Real: the
+    Hartley coefficients, one standard normal per mode, carried in
+    ``rfi_k_r_base`` alone.
+    """
+    if signal_type == "real":
+        return params["rfi_k_r_base"]
+    return params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
+
+
+def _latent_params(latent: Array, signal_type: str, suffix: str = "") -> Dict:
+    """``latent`` as the named parameters it is fitted through.
+
+    Only ``rfi_k_r`` in the real signal space, which has no imaginary part to
+    fit; both halves in the complex one.
+    """
+    out = {f"rfi_k_r{suffix}": latent.real}
+    if signal_type == "complex":
+        out[f"rfi_k_i{suffix}"] = latent.imag
+    return out
 
 def _validate_gp_cov(gp_cov) -> Dict:
     """Normalise ``rfi.gp_cov`` to the keys the RFI components read."""
@@ -631,10 +672,17 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
     rfi_config["gp_cov"] = gp_cov
 
+    # Real or complex RFI amplitude. Complex is the model; real is there to
+    # compare against and to verify with, and is fitted through the same FFTs.
+    rfi_config["signal_type"] = validate_signal_type(
+        rfi_config.get("signal_type"), "rfi.signal_type"
+    )
+
     print()
     print(f"Using RFI gp_cov.std : {gp_cov['std']:.1e} Jy (rms|V|)")
     print(f"Using RFI gp_cov.corr_freq : {gp_cov['corr_freq']/1e3:.1f} kHz")
     print(f"Using RFI gp_cov.corr_time : {gp_cov['corr_time']:.1f} s")
+    print(f"Using RFI signal_type : {rfi_config['signal_type']}")
 
     return rfi_config
 
@@ -716,6 +764,17 @@ class BaseGPRFI(Component):
         self.rfi_config = rfi_config
         self._gammas, self._pk_cutoff = self._resolve_gp_cov_params()
 
+        # Real or complex amplitude. A real one is fitted through its Hartley
+        # coefficients alone, so the imaginary base parameter is not declared
+        # -- per instance, as gains.ConstGains does with its own.
+        self.signal_type = rfi_config["signal_type"]
+        self._latent_dtype = complex if self.signal_type == "complex" else float
+        self.parameter_shapes = {
+            name: shape
+            for name, shape in type(self).parameter_shapes.items()
+            if self.signal_type == "complex" or name != "rfi_k_i_base"
+        }
+
         # Random seed used for random sampling such as initial parameters drawn from the prior
         self.r_seed = rfi_config["r_seed"]
 
@@ -750,10 +809,11 @@ class BaseGPRFI(Component):
         self.int_time = tab_config.int_time
 
         # The spectrum normalises to this; rfi.gp_cov.std is what it produces.
-        # See _LATENT_POWER for why the two differ by exactly that factor.
+        # See _LATENT_POWER for why the two differ by exactly that factor, and
+        # _LATENT_POWER_BY_TYPE for the real signal space's.
         gp_cov = rfi_config["gp_cov"]
         self.rfi_std = gp_cov["std"]
-        self.gp_var = self.rfi_std / _LATENT_POWER
+        self.gp_var = self.rfi_std / _LATENT_POWER_BY_TYPE[self.signal_type]
         self.corr_freq = gp_cov["corr_freq"]
         self.corr_time = gp_cov["corr_time"]
 
@@ -909,6 +969,25 @@ class BaseGPRFI(Component):
         pad = jnp.zeros((n_pad,) + arr.shape[1:], dtype=arr.dtype)
         return jnp.concatenate([arr, pad], axis=0)
 
+    def _true_signal(self, rfi_A: Array) -> Array:
+        """A simulated amplitude in this component's signal space.
+
+        The simulation's amplitude is complex. The real space keeps its real
+        part, and says how much it is leaving behind, since a truth that the
+        model cannot represent is not a truth to compare against silently.
+        """
+        if self.signal_type == "complex":
+            return rfi_A
+
+        rms = lambda x: float(jnp.sqrt(jnp.mean(jnp.abs(x) ** 2)))
+        total = rms(rfi_A)
+        lost = rms(rfi_A.imag) / total if total else 0.0
+        print(
+            "Warning: rfi.signal_type is real, so the true RFI amplitude is "
+            f"taken as its real part; rms Im / rms |A| = {lost:.3g} is discarded."
+        )
+        return rfi_A.real
+
     def _set_outputs(self):
 
         # This placeholder is a fine-grid memory hog; under sharding each device only
@@ -997,9 +1076,10 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             params["rfi_k_r_base"] = standard_normal(
                 "rfi_k_r_base", shape
             )
-            params["rfi_k_i_base"] = standard_normal(
-                "rfi_k_i_base", shape
-            )
+            if self.signal_type == "complex":
+                params["rfi_k_i_base"] = standard_normal(
+                    "rfi_k_i_base", shape
+                )
 
             return params
 
@@ -1037,12 +1117,14 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         masked_signal = self.build_masked_signal()
         pads = self.pads
         ss_idxs = self.ss_idxs
+        signal_type = self.signal_type
+        to_signal = functools.partial(latent_to_signal, signal_type=signal_type)
 
         # One antenna's sources at a time, so the cuFFT batch is n_rfi rather than
         # n_rfi * n_ant.
         @checkpoint
         def antenna_block(rfi_k_A_ant):
-            return vmap(latent_to_signal, (0, None, None), 0)(
+            return vmap(to_signal, (0, None, None), 0)(
                 rfi_k_A_ant, pads, ss_idxs
             )
 
@@ -1051,7 +1133,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             sigma_rfi_k = constants[f"{prefix}/sigma_rfi_k"]
             mu_rfi_k = constants[f"{prefix}/mu_rfi_k"]
 
-            rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
+            rfi_k_A_base = _latent_base(params, signal_type)
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
 
@@ -1065,6 +1147,9 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             )
             rfi_A = jnp.swapaxes(rfi_A_ant_major, 0, 1)
             rfi_A = masked_signal(rfi_A, constants)
+            # The visibility kernels take a complex amplitude whichever space it
+            # was fitted in. A no-op in the complex one.
+            rfi_A = rfi_A.astype(jnp.result_type(rfi_A, jnp.complex64))
 
             state = {**state, "rfi_A": rfi_A}
 
@@ -1100,7 +1185,8 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
             _rfi_k_A, 
             self.pads, 
-            self.ss_idxs
+            self.ss_idxs,
+            signal_type=self.signal_type,
         )
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
@@ -1118,6 +1204,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             _rfi_A,
             pad_factors,
             self.latent_idxs,
+            signal_type=self.signal_type,
         )
         
         print("\nRFI specs")
@@ -1127,6 +1214,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         # The latent dimension printed above is what these two set, so they are
         # printed beside it rather than with the other rfi keys.
         print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
+        print(f"signal type     : {self.signal_type}")
 
         scale_norm = self.gp_var / jnp.sum(self.pk)
         self.pk = scale_norm * self.pk
@@ -1156,7 +1244,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
-                (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
+                (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=self._latent_dtype
             )
         else:
             raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, est, matched-filter, zeros).")
@@ -1176,7 +1264,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
     def _compute_true_params(self, sim_zarr_path: str, data_col: str):
 
         # The zarr only knows the real satellites; zero-pad to the sharded count.
-        rfi_A = read_true_rfi_A(sim_zarr_path, data_col, self.times)
+        rfi_A = self._true_signal(read_true_rfi_A(sim_zarr_path, data_col, self.times))
         self.true_rfi_k_A = self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(rfi_A))
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
@@ -1197,13 +1285,13 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         elif init_type in ["zeros", 0]:
             print("Using zeros for rfi_A init")
             # zeros_k is shape (1, 1, n_k_freq_rfi, n_k_time_rfi)
-            zeros_k = self.signal_to_latent(jnp.zeros((self.n_freq, self.n_time), dtype=complex))[None,None,:,:]
+            zeros_k = self.signal_to_latent(jnp.zeros((self.n_freq, self.n_time), dtype=self._latent_dtype))[None,None,:,:]
             # init_rfi_k is shape (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
             self.init_rfi_k = zeros_k * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type in ["ones", 1]:
             print("Using ones for rfi_A init")
             # ones_k is shape (1, 1, n_k_freq_rfi, n_k_time_rfi)
-            ones_k = self.signal_to_latent(jnp.ones((self.n_freq, self.n_time), dtype=complex))[None,None,:,:]
+            ones_k = self.signal_to_latent(jnp.ones((self.n_freq, self.n_time), dtype=self._latent_dtype))[None,None,:,:]
             # init_rfi_k is shape (n_rfi, n_ant, n_k_freq_rfi, n_k_time_rfi)
             self.init_rfi_k = ones_k * jnp.ones((self.n_rfi, self.n_ant, 1, 1))
         elif init_type == "sample":
@@ -1211,7 +1299,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             base_sample = random.normal(
                 random.PRNGKey(self.r_seed),
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
-                dtype=complex,
+                dtype=self._latent_dtype,
             )
             self.init_rfi_k = self.masked_forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
         else:
@@ -1219,14 +1307,10 @@ class ComplexRFIVarAntFine(BaseGPRFI):
 
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
 
-        self.init_params = {
-            "rfi_k_r": self.init_rfi_k.real,
-            "rfi_k_i": self.init_rfi_k.imag,
-        }
-        self.init_params_base = {
-            "rfi_k_r_base": self.init_rfi_k_base.real,
-            "rfi_k_i_base": self.init_rfi_k_base.imag,
-        }
+        self.init_params = _latent_params(self.init_rfi_k, self.signal_type)
+        self.init_params_base = _latent_params(
+            self.init_rfi_k_base, self.signal_type, suffix="_base"
+        )
 
     def _validate_dimensions(self):
         """Ensure all setup operations completed successfully"""
@@ -1301,9 +1385,10 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             params["rfi_k_r_base"] = standard_normal(
                 "rfi_k_r_base", (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
             )
-            params["rfi_k_i_base"] = standard_normal(
-                "rfi_k_i_base", (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
-            )
+            if self.signal_type == "complex":
+                params["rfi_k_i_base"] = standard_normal(
+                    "rfi_k_i_base", (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
+                )
 
             return params
 
@@ -1327,23 +1412,28 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         n_ant = self.n_ant
         n_freq_fine = self.n_freq_fine
         n_time_fine = self.n_time_fine
+        signal_type = self.signal_type
+        to_signal = functools.partial(latent_to_signal, signal_type=signal_type)
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
             sigma_rfi_k = constants[f"{prefix}/sigma_rfi_k"]
             mu_rfi_k = constants[f"{prefix}/mu_rfi_k"]
 
-            rfi_k_A_base = params["rfi_k_r_base"] + 1.0j * params["rfi_k_i_base"]
+            rfi_k_A_base = _latent_base(params, signal_type)
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
             # The antenna axis is a singleton, so map over n_rfi only.
-            rfi_A = vmap(latent_to_signal, (0, None, None), 0)(
+            rfi_A = vmap(to_signal, (0, None, None), 0)(
                 rfi_k_A[:, 0], pads, ss_idxs
             )
             # Masked before the broadcast: the mask does not vary over antennas, so
             # applying it here scales (n_rfi, n_freq_fine, n_time_fine) rather than
             # forcing the broadcast view below to materialise n_ant copies.
             rfi_A = masked_signal(rfi_A, constants)
+            # The visibility kernels take a complex amplitude whichever space it
+            # was fitted in. Cast before the broadcast, on the smaller array.
+            rfi_A = rfi_A.astype(jnp.result_type(rfi_A, jnp.complex64))
             # Avoids allocating a full grid of ones and a multiply.
             rfi_A = jnp.broadcast_to(
                 rfi_A[:, None], (n_rfi, n_ant, n_freq_fine, n_time_fine)
@@ -1383,7 +1473,8 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
             _rfi_k_A, 
             self.pads, 
-            self.ss_idxs
+            self.ss_idxs,
+            signal_type=self.signal_type,
         )
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
@@ -1401,6 +1492,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             rfi_A,
             pad_factors,
             self.latent_idxs,
+            signal_type=self.signal_type,
         )
         
         print("\nRFI specs")
@@ -1410,6 +1502,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         # The latent dimension printed above is what these two set, so they are
         # printed beside it rather than with the other rfi keys.
         print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
+        print(f"signal type     : {self.signal_type}")
 
         scale_norm = self.gp_var / jnp.sum(self.pk)
         self.pk = scale_norm * self.pk
@@ -1444,7 +1537,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         elif prior_type in ["zeros", 0]:
             print("Using zeros for RFI prior mean")
             self.mu_rfi_k = jnp.zeros(
-                (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=complex
+                (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi), dtype=self._latent_dtype
             )
         else:
             raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, est, matched-filter, zeros).")
@@ -1464,7 +1557,9 @@ class ComplexRFIConstAntFine(BaseGPRFI):
     def _compute_true_params(self, sim_zarr_path: str, data_col: str):
 
         # true_rfi_A shape goes from (n_rfi, n_ant, n_freq, n_time) -> (n_rfi, 1, n_freq, n_time)
-        true_rfi_A = jnp.mean(read_true_rfi_A(sim_zarr_path, data_col, self.times), axis=1, keepdims=True)
+        true_rfi_A = self._true_signal(
+            jnp.mean(read_true_rfi_A(sim_zarr_path, data_col, self.times), axis=1, keepdims=True)
+        )
 
         # true_rfi_k_A is shape (n_rfi, 1, n_k_freq_rfi, n_k_time_rfi)
         # Latent prediction is mapped over axes (0, 1)
@@ -1494,11 +1589,11 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             self.init_rfi_k = self.true_rfi_k_A
         elif init_type in ["zeros", 0]:
             print("Using zeros for rfi_A init")
-            zeros = jnp.zeros((self.n_freq, self.n_time), dtype=complex)
+            zeros = jnp.zeros((self.n_freq, self.n_time), dtype=self._latent_dtype)
             self.init_rfi_k = self.signal_to_latent(zeros)[None,None,:,:] * jnp.ones((self.n_rfi, 1, 1, 1))
         elif init_type in ["ones", 1]:
             print("Using ones for rfi_A init")
-            ones = jnp.ones((self.n_freq, self.n_time), dtype=complex)
+            ones = jnp.ones((self.n_freq, self.n_time), dtype=self._latent_dtype)
             self.init_rfi_k = self.signal_to_latent(ones)[None,None,:,:] * jnp.ones((self.n_rfi, 1, 1, 1))
         elif init_type == "sample":
             print("Drawing sample from prior for rfi_A init")
@@ -1507,7 +1602,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             base_sample = random.normal(
                 random.PRNGKey(self.r_seed),
                 (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi),
-                dtype=complex,
+                dtype=self._latent_dtype,
             )
             self.init_rfi_k = self.masked_forward_transform(base_sample, self.sigma_rfi_k, self.mu_rfi_k)
         else:
@@ -1515,14 +1610,10 @@ class ComplexRFIConstAntFine(BaseGPRFI):
 
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
 
-        self.init_params = {
-            "rfi_k_r": self.init_rfi_k.real,
-            "rfi_k_i": self.init_rfi_k.imag,
-        }
-        self.init_params_base = {
-            "rfi_k_r_base": self.init_rfi_k_base.real,
-            "rfi_k_i_base": self.init_rfi_k_base.imag,
-        }
+        self.init_params = _latent_params(self.init_rfi_k, self.signal_type)
+        self.init_params_base = _latent_params(
+            self.init_rfi_k_base, self.signal_type, suffix="_base"
+        )
 
     def _validate_dimensions(self):
         """Ensure all setup operations completed successfully"""

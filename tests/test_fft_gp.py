@@ -26,6 +26,7 @@ from tabascal.fft_gp import (
     supersample_domain_k,
     supersample_domain_specs,
     supersample_fourier,
+    validate_signal_type,
 )
 from tabascal.timing import clear_timings, disable_timings
 
@@ -678,3 +679,122 @@ class TestPkCutRefusesAnEmptySelection:
             advice[name] = str(excinfo.value).rsplit("strict. ", 1)[-1]
 
         assert len(set(advice.values())) == 4, advice
+
+
+class TestRealSignalType:
+    """``signal_type="real"``: a real signal through its Hartley coefficients.
+
+    One real coefficient per retained mode, on the grid the complex latent
+    uses. The complex path is the default and is what every test above runs.
+    """
+
+    @staticmethod
+    def _gp(ns, pad_factors, ss_factors, cutoff=1e-9):
+        dxs = [1.0] * len(ns)
+        k0s, gammas = [0.2] * len(ns), [3] * len(ns)
+        idxs, _ = signal_to_latent_init(ns, dxs, pad_factors, 1.0, k0s, gammas, cutoff)
+        latent_pk, _, pads, ss_idxs = latent_to_signal_init(
+            ns, dxs, pad_factors, ss_factors, 1.0, k0s, gammas, cutoff
+        )
+        return idxs, latent_pk, pads, ss_idxs
+
+    def test_the_round_trip_is_exact_without_padding_or_a_cut(self):
+        ns = [6, 9]
+        y = jnp.asarray(np.random.default_rng(0).normal(size=ns))
+        idxs, _, pads, ss_idxs = self._gp(ns, [1, 1], [1, 1], cutoff=1e-30)
+
+        h = signal_to_latent(y, [1, 1], idxs, signal_type="real")
+        back = latent_to_signal(h, pads, ss_idxs, signal_type="real")
+
+        assert not jnp.iscomplexobj(h)
+        assert h.shape == tuple(ns)
+        assert not jnp.iscomplexobj(back)
+        np.testing.assert_allclose(back, y, atol=1e-5)
+
+    @pytest.mark.parametrize("ns", [[5, 7], [6, 9]])
+    def test_it_is_the_real_part_of_the_complex_path(self, ns):
+        """Everywhere on an odd padded grid; at the original samples on an
+        even one, where the unpaired -N/2 mode is interpolated differently
+        between them -- which the complex path's own imaginary part shows."""
+        pad_factors, ss = [2.0, 2.0], [3, 3]
+        y = jnp.asarray(np.random.default_rng(1).normal(size=ns))
+        idxs, _, pads, ss_idxs = self._gp(ns, pad_factors, ss)
+
+        real = latent_to_signal(
+            signal_to_latent(y, pad_factors, idxs, signal_type="real"),
+            pads, ss_idxs, signal_type="real",
+        )
+        cplx = latent_to_signal(signal_to_latent(y + 0j, pad_factors, idxs), pads, ss_idxs)
+
+        on_samples = (slice(ss[0] // 2, None, ss[0]), slice(ss[1] // 2, None, ss[1]))
+        np.testing.assert_allclose(real[on_samples], cplx.real[on_samples], atol=1e-5)
+        # [5, 7] pads to [9, 13]: odd on both axes, so every mode is paired.
+        if ns == [5, 7]:
+            np.testing.assert_allclose(real, cplx.real, atol=1e-5)
+
+    def test_independent_coefficients_give_the_spectrums_variance(self):
+        """``E y^2 = sum P``: one standard normal per mode, not two."""
+        idxs, latent_pk, pads, ss_idxs = self._gp([5, 7], [2.0, 2.0], [2, 2])
+        P = latent_pk / jnp.sum(latent_pk)
+
+        keys = jax.random.split(jax.random.PRNGKey(0), 2000)
+        draws = jax.vmap(
+            lambda key: latent_to_signal(
+                jnp.sqrt(P) * jax.random.normal(key, P.shape),
+                pads, ss_idxs, signal_type="real",
+            )
+        )(keys)
+
+        assert float(jnp.mean(draws**2)) == pytest.approx(1.0, rel=0.05)
+
+    def test_it_is_jit_compatible(self):
+        ns, pad_factors = [5, 7], [2.0, 2.0]
+        idxs, _, pads, ss_idxs = self._gp(ns, pad_factors, [2, 2])
+        y = jnp.asarray(np.random.default_rng(2).normal(size=ns))
+
+        def through(y):
+            h = signal_to_latent(y, pad_factors, idxs, signal_type="real")
+            return latent_to_signal(h, pads, ss_idxs, signal_type="real")
+
+        np.testing.assert_allclose(jax.jit(through)(y), through(y), atol=1e-5)
+
+    def test_a_complex_input_is_refused(self):
+        idxs, *_ = self._gp([5, 7], [2.0, 2.0], [1, 1])
+
+        with pytest.raises(TypeError, match="real signal"):
+            signal_to_latent(jnp.ones((5, 7), dtype=complex), [2.0, 2.0], idxs, signal_type="real")
+
+    def test_an_unknown_signal_type_is_refused(self):
+        _, latent_pk, pads, ss_idxs = self._gp([5, 7], [2.0, 2.0], [1, 1])
+
+        with pytest.raises(ValueError, match="signal_type"):
+            latent_to_signal(jnp.zeros(latent_pk.shape), pads, ss_idxs, signal_type="imag")
+
+    def test_the_cut_and_supersampling_helpers_agree_with_the_latent_path(self):
+        """fourier_cut / supersample_fourier take the same keyword and the same
+        Hartley convention."""
+        y = jnp.asarray(np.random.default_rng(3).normal(size=(5, 7)))
+        pk = pow_spec_nd(domain_k([5, 7], [1.0, 1.0]), 1.0, [1e9, 1e9], [1, 1])
+
+        h = fourier_cut(pk, 1e-30, y, signal_type="real")
+        back = supersample_fourier(h, [1, 1], signal_type="real")
+
+        assert not jnp.iscomplexobj(h)
+        np.testing.assert_allclose(back, y, atol=1e-5)
+
+    def test_supersample_returns_a_real_signal(self):
+        y = jnp.asarray(np.random.default_rng(4).normal(size=(5, 7)))
+
+        y_ss = supersample(y, [3, 3], signal_type="real")
+
+        assert not jnp.iscomplexobj(y_ss)
+        np.testing.assert_allclose(y_ss[::3, ::3], y, atol=1e-5)
+
+    @pytest.mark.parametrize("value", [None, "complex", "real"])
+    def test_the_config_value_validates(self, value):
+        assert validate_signal_type(value, "rfi.signal_type") == (value or "complex")
+
+    @pytest.mark.parametrize("value", ["Real", 1, True, ["real"]])
+    def test_a_bad_config_value_is_refused_by_name(self, value):
+        with pytest.raises(ValueError, match=r"rfi\.signal_type"):
+            validate_signal_type(value, "rfi.signal_type")
