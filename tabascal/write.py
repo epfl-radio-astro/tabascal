@@ -10,7 +10,7 @@ from tabascal.gain_table import gains_from_tables, normalise_gain_tables
 from tabascal.imports import import_components
 from tabascal.interferometry import baseline_gains
 from tabascal.ms import (
-    _same_directory,
+    _is_inside,
     fitted_correlation,
     grid_to_rows,
     into_corr,
@@ -652,13 +652,15 @@ def caltable_path(results_zarr_path: str) -> str:
 
 
 def _is_input_table(out_path: str, gain_table) -> bool:
-    """Whether ``out_path`` is one of the ``data.gain_table`` the run calibrated with.
+    """Whether ``out_path`` is, or contains, a ``data.gain_table`` the run calibrated with.
 
     A rerun can calibrate with the table its previous fit left beside the
     results, so the export's destination can be one of its own inputs. Writing
     there would destroy the input and leave a product of the table with itself;
-    removing it would leave nothing to export this fit against. Compared by real
-    path and then by filesystem identity (:func:`~tabascal.ms._same_directory`),
+    removing it would leave nothing to export this fit against. Both remove
+    ``out_path`` recursively, so an input stored beneath it counts too.
+
+    Compared by real path and filesystem identity (:func:`~tabascal.ms._is_inside`),
     so neither a symlink, a ``./`` nor a different case on a case-insensitive
     filesystem hides it.
     """
@@ -670,7 +672,7 @@ def _is_input_table(out_path: str, gain_table) -> bool:
         return False
     paths = [gain_table] if isinstance(gain_table, (str, os.PathLike)) else list(gain_table)
     target = os.path.realpath(out_path)
-    return any(_same_directory(os.path.realpath(p), target) for p in paths)
+    return any(_is_inside(os.path.realpath(p), target) for p in paths)
 
 
 def _clear_failed_export(out_path: str, ms_path: str, gain_table=None) -> str:
