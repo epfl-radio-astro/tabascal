@@ -1,4 +1,5 @@
 """The optional MS export leaves the results zarr as the recorded output."""
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
@@ -80,6 +81,27 @@ def test_skip_removes_the_stale_table_on_process_0_and_leaves_together(monkeypat
     # Every process reaches the collective, carrying process 0's failure.
     together.assert_called_once()
     assert together.call_args.args[0] is (error if rank0 and fails else None)
+
+
+@pytest.mark.parametrize("spelling", ["dotted", "nested", "case"])
+def test_skip_keeps_an_input_however_it_is_spelled(monkeypatch, tmp_path, spelling):
+    """The removal is recursive, and APFS/NTFS fold case: neither may hide an input."""
+    remover = Mock(return_value=True)
+    monkeypatch.setattr(tab_tools, "remove_caltable", remover)
+    monkeypatch.setattr(tab_tools, "fail_together", Mock())
+    (tmp_path / "optimized.B" / "archive" / "input.B").mkdir(parents=True)
+    given = {
+        "dotted": str(tmp_path / "." / "optimized.B"),
+        "nested": str(tmp_path / "optimized.B" / "archive" / "input.B"),
+        "case": str(tmp_path / "OPTIMIZED.B"),
+    }[spelling]
+    if spelling == "case" and not os.path.exists(given):
+        pytest.skip("case-sensitive filesystem")
+    config = SimpleNamespace(
+        args={"data": {"data_col": "DATA", "skip_ms_write": True}}, gain_table=[given],
+    )
+    tab_tools.write_ms_if_enabled(config, "input.ms", str(tmp_path / "optimized.zarr"))
+    remover.assert_not_called()
 
 
 @pytest.mark.parametrize("rank0", [True, False])
