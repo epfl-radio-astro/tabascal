@@ -241,8 +241,9 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     for key in ("rfi_A", "rfi_phase", "rfi_delay_poly_us", f"{comp.prefix}/rfi_mask"):
         assert sharded[key].sharding.spec == P("rfi"), key
     grad = jax.jit(jax.value_and_grad(loss))
-    jaxpr = str(jax.make_jaxpr(jax.grad(loss))(sharded["rfi_A"], sharded))
-    assert "rfi_analytic_transpose_op" in jaxpr and "rfi_analytic_full_transpose_op" not in jaxpr
+    jvp = lambda a, t, tree: jax.jvp(lambda a: loss(a, tree), (a,), (t,))
+    jaxpr = str(jax.make_jaxpr(jvp)(sharded["rfi_A"], sharded["rfi_A"], sharded))
+    assert "rfi_analytic_jvp_op" in jaxpr and "rfi_analytic_full_jvp_op" not in jaxpr
     got = grad(sharded["rfi_A"], sharded)
     dist.sharding_enabled = lambda: False
     expect = jax.value_and_grad(loss)(tree["rfi_A"], tree)

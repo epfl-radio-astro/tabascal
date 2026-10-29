@@ -337,8 +337,8 @@ class TestAnalyticVis:
         vis0, bumped = (call(a, phase) for a in (alone, alone.at[0, ..., 2].add(1)))
         assert bool(jnp.all(vis0[..., hidden] == 0)) and bool(jnp.all(bumped[..., hidden] == 0))
         assert bool(jnp.all(bumped[..., [1, 3]] != vis0[..., [1, 3]]))
-        jaxpr = str(jax.make_jaxpr(jax.grad(lambda a: jnp.abs(call(a, phase)).sum()))(amp))
-        assert "rfi_analytic_transpose_op" in jaxpr and "rfi_analytic_full_transpose_op" not in jaxpr
+        jaxpr = str(jax.make_jaxpr(lambda a, t: jax.jvp(lambda a: call(a, phase), (a,), (t,)))(amp, amp))
+        assert "rfi_analytic_jvp_op" in jaxpr and "rfi_analytic_full_jvp_op" not in jaxpr
 
     @pytest.mark.parametrize("signals, n_int_freq, gp", [
         pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 1, None, id="VarAnt-1"),
@@ -376,9 +376,10 @@ class TestAnalyticVis:
         grads = jax.grad(loss)(params)
         assert set(grads) == {"rfi_k_r_base", "rfi_k_i_base"}
         assert all(bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0 for g in grads.values())
-        jaxpr = str(jax.make_jaxpr(jax.grad(loss))(params))
-        assert "rfi_analytic_transpose_op" in jaxpr
-        assert "rfi_analytic_full_transpose_op" not in jaxpr
+        # Both JVPs share one transpose, so the kernel shows in the JVP.
+        jaxpr = str(jax.make_jaxpr(lambda p: jax.jvp(loss, (p,), (p,)))(params))
+        assert "rfi_analytic_jvp_op" in jaxpr
+        assert "rfi_analytic_full_jvp_op" not in jaxpr
 
     @pytest.mark.parametrize("key, value", [
         ("stencil", -1), ("stencil", 5), ("stencil", 1.5), ("segments", 0), ("terms", 33),
