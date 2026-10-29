@@ -174,7 +174,7 @@ jaxlib          = { version = "*", build = "*cuda12*" }
 # which would collide with the conda jaxlib cuda build above.
 [tool.pixi.feature.cuda12.pypi-dependencies]
 tabascal          = { path = ".", editable = true }
-ri_kernels_cuda12 = ">=0.2.2,<0.3"
+ri_kernels_cuda12 = ">=0.2.4,<0.3"
 
 # ── Dev feature ────────────────────────────────────────────────────────────────
 # Adds docs and test tooling. Also carries the full PyPI package set so that
