@@ -651,18 +651,54 @@ def caltable_path(results_zarr_path: str) -> str:
     return os.path.splitext(os.path.normpath(results_zarr_path))[0] + CALTABLE_EXT
 
 
+def _resolution_steps(path) -> list:
+    """Every location ``path`` passes through on the way to its target, symlinks included.
+
+    The path is normalised lexically first, as ``normalise_gain_tables`` does for
+    the read: ``jump/../r.B`` has to mean the table the run actually read.
+    """
+
+    pending = os.path.abspath(path).split(os.sep)
+    current, steps, links = os.sep, [], 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", os.curdir):
+            continue
+        if part == os.pardir:
+            current = os.path.dirname(current)
+            continue
+
+        step = os.path.join(current, part)
+        steps.append(step)
+        if not os.path.islink(step):
+            current = step
+            continue
+
+        links += 1
+        if links > 40:  # a symlink loop, which no read could get through either
+            break
+        target = os.readlink(step)
+        current = os.sep if os.path.isabs(target) else current
+        pending = target.split(os.sep) + pending
+
+    return steps
+
+
 def _is_input_table(out_path: str, gain_table) -> bool:
     """Whether ``out_path`` is, or contains, a ``data.gain_table`` the run calibrated with.
 
     A rerun can calibrate with the table its previous fit left beside the
     results, so the export's destination can be one of its own inputs. Writing
-    there would destroy the input and leave a product of the table with itself;
-    removing it would leave nothing to export this fit against. Both remove
-    ``out_path`` recursively, so an input stored beneath it counts too.
+    there would replace the input with its product with this fit, losing the
+    calibration the fit is relative to; removing it would leave nothing to export
+    this fit against. Both remove ``out_path`` recursively, so an input stored
+    beneath it counts too.
 
-    Compared by real path and filesystem identity (:func:`~tabascal.ms._is_inside`),
-    so neither a symlink, a ``./`` nor a different case on a case-insensitive
-    filesystem hides it.
+    Compared by filesystem identity (:func:`~tabascal.ms._is_inside`) at every
+    step of the input's path (:func:`_resolution_steps`), so neither a symlink, a
+    ``./`` nor a different case on a case-insensitive filesystem hides it, and a
+    symlink beneath ``out_path`` that points out of it counts: removing it breaks
+    the configured path just as removing the table would.
     """
 
     # Not normalise_gain_tables: that also checks the tables still exist, which
@@ -672,7 +708,7 @@ def _is_input_table(out_path: str, gain_table) -> bool:
         return False
     paths = [gain_table] if isinstance(gain_table, (str, os.PathLike)) else list(gain_table)
     target = os.path.realpath(out_path)
-    return any(_is_inside(os.path.realpath(p), target) for p in paths)
+    return any(_is_inside(step, target) for p in paths for step in _resolution_steps(p))
 
 
 def _clear_failed_export(out_path: str, ms_path: str, gain_table=None) -> str:

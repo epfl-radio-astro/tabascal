@@ -2912,6 +2912,33 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
             assert "left alone" in write_mod._clear_failed_export(table, ms_skeleton, [upper])
             assert _snapshot(table) == before
 
+    @pytest.mark.parametrize("given", ["inside", "through_directory", "chain"])
+    def test_a_symlink_in_the_destination_counts_wherever_it_points(self, tmp_path, given):
+        """Removing the destination removes the link, which breaks the configured path."""
+        table, cal = tmp_path / "r.B", tmp_path / "cal"
+        table.mkdir()
+        (cal / "external.B").mkdir(parents=True)
+        (table / "input.B").symlink_to(cal / "external.B")
+        (table / "sub").symlink_to(cal)
+        (tmp_path / "chain.B").symlink_to(table / "input.B")
+        path = {
+            "inside": table / "input.B",
+            "through_directory": table / "sub" / "external.B",
+            "chain": tmp_path / "chain.B",
+        }[given]
+
+        assert write_mod._is_input_table(str(table), [str(path)])
+        assert not write_mod._is_input_table(str(table), [str(cal / "external.B")])
+
+    def test_dot_dot_after_a_symlink_means_what_the_read_takes_it_to_mean(self, tmp_path):
+        """``normalise_gain_tables`` collapses it lexically, so the guard has to as well."""
+        (tmp_path / "else" / "dir").mkdir(parents=True)
+        (tmp_path / "jump").symlink_to(tmp_path / "else" / "dir")
+        table, jump = str(tmp_path / "r.B"), tmp_path / "jump"
+
+        assert write_mod._is_input_table(table, [str(jump / ".." / "r.B")])
+        assert not write_mod._is_input_table(table, [str(tmp_path / "r.B" / ".." / "external.B")])
+
     def test_the_check_does_not_require_the_inputs_to_exist(self, tmp_path):
         """A no-op export never read them, and must not start failing over one gone since."""
         assert not write_mod._is_input_table(str(tmp_path / "r.B"), [str(tmp_path / "gone.B")])
