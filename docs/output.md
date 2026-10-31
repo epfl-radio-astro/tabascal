@@ -269,7 +269,7 @@ A rerun can calibrate with the table its previous fit left: `data.gain_table: re
 To keep both tables, give the run its own name, or the export its own path:
 
 ```bash
-tabascal run -c config.yaml -sx round2            # writes map_pred_Custom_round2.B
+tabascal run -c config.yaml -ms file.ms -sx round2  # writes map_pred_Custom_round2.B
 tab2MS -m file.ms -z results.zarr -gt old.B -o new.B
 ```
 
