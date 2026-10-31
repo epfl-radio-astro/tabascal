@@ -332,6 +332,22 @@ def _exported_results(config, paths):
     return paths.init_pred_path
 
 
+def _tables_read(config):
+    """The calibration tables this run reads, which its own table must not replace."""
+    gain_table = config["data"].get("gain_table") or []
+    tables = [gain_table] if isinstance(gain_table, (str, os.PathLike)) else list(gain_table)
+
+    # Read once into the starting point, so the export does not need it afterwards,
+    # but the run cannot be reproduced from its config without it. Whichever
+    # components are selected: which of them read it cannot be told from their
+    # names, and a needless stop costs a clear error where a miss costs the table.
+    init = (config.get("gains") or {}).get("init")
+    if isinstance(init, str) and init != "prior":
+        tables.append(init)
+
+    return tables
+
+
 def _print_run_header(model_name, f_name, ms_path, start_time):
     """The run's identity, including which visibilities it is about to read.
 
@@ -384,7 +400,7 @@ def tabascal_subtraction(
     with _stdout_logger(paths.log_path, log):
         # First, because the fit is what a refusal at the end would throw away.
         check_export_destination(
-            _exported_results(config, paths), config["data"].get("gain_table")
+            _exported_results(config, paths), _tables_read(config)
         )
 
         start_time = datetime.now()

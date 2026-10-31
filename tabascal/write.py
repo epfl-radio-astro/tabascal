@@ -732,11 +732,11 @@ def check_export_destination(
 
     if _is_input_table(out_path, gain_table):
         raise ValueError(
-            f"{out_path} is, or contains, one of the data.gain_table inputs, and "
-            "this run would write its own calibration table there, destroying "
-            "that input. Name this run with -sx (or give tab2MS a different -o) "
-            "so that it writes elsewhere, or move the table and point "
-            "data.gain_table at the new path."
+            f"{out_path} is, or contains, a table this run reads (data.gain_table "
+            "or gains.init), and this run would write its own calibration table "
+            "there, destroying that input. Name this run with -sx (or give tab2MS "
+            "a different -o) so that it writes elsewhere, or move the table and "
+            "point the config at the new path."
         )
 
 

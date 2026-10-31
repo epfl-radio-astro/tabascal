@@ -1329,15 +1329,17 @@ def test_every_results_file_the_run_names_is_documented(impl, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "opt, table, stops",
+    "opt, table, stops, section, key",
     [
-        (True, "map_pred_Custom.B", True),
-        (False, "init_pred_Custom.B", True),
-        (True, "init_pred_Custom.B", False),  # a fit exports only the map table
+        (True, "map_pred_Custom.B", True, "data", "gain_table"),
+        (False, "init_pred_Custom.B", True, "data", "gain_table"),
+        (True, "init_pred_Custom.B", False, "data", "gain_table"),  # a fit exports only the map table
+        (True, "map_pred_Custom.B", True, "gains", "init"),
+        (True, "init_pred_Custom.B", False, "gains", "init"),
     ],
 )
 def test_a_run_that_would_overwrite_its_input_stops_before_any_work(
-    impl, tmp_path, monkeypatch, opt, table, stops
+    impl, tmp_path, monkeypatch, opt, table, stops, section, key
 ):
     built = RuntimeError("got as far as building the model")
 
@@ -1346,11 +1348,13 @@ def test_a_run_that_would_overwrite_its_input_stops_before_any_work(
 
     monkeypatch.setattr(impl, "build_model", _build)
     config = {
-        "data": {"out_dir": str(tmp_path / "obs"), "gain_table": str(tmp_path / "obs" / "results" / table)},
+        "data": {"out_dir": str(tmp_path / "obs")},
+        "gains": {},
         "model": {},
         "inference": {"opt": opt},
         "opt": {"max_iter": 10},
     }
+    config[section][key] = str(tmp_path / "obs" / "results" / table)
 
     with pytest.raises(ValueError if stops else RuntimeError) as err:
         impl.tabascal_subtraction(config, None, log=False)

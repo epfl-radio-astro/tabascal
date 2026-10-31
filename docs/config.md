@@ -129,7 +129,7 @@ data:
 
   The division happens in memory, so `data_col` on disk is untouched and still raw. The results writer therefore removes the same layer again when it writes the `TAB_*` columns and the weights; the run hands it this list automatically, and `tab2MS` takes it as `-gt` — see [Output](output.md).
 
-  A run may not write its own table over one of these, and stops at startup if it would; see [the output docs](output.md#when-the-table-would-replace-one-of-the-runs-inputs).
+  A run may not write its own table over one of these, or over a `gains.init` table, and stops at startup if it would; see [the output docs](output.md#when-the-table-would-replace-one-of-the-runs-inputs).
 
   A table is solved on whatever `(frequency, time)` grid the calibrator chose, so it is placed on the observation's grid first. Matching is **by value**, not by index — a time within 1 ms and a channel within 1e-6 of the band centre frequency count as the same sample — which is what lets a table solved on a master MS apply to a subset carved out of it, in whatever channel order the subset was written. The times matched are the MS's own `TIME` column on the scale it declares (`times_mjd`), not the UTC-normalised `times_jd`, because a caltable's `TIME` is a copy of the MS's: declared frame to declared frame is exact, where the UTC coordinate of a TAI-declared MS is 37 s away.
 

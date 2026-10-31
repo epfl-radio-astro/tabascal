@@ -264,7 +264,7 @@ The table carries the mean of the per-antenna gains over the `sample` axis. Wher
 
 ### When the table would replace one of the run's inputs
 
-A rerun can calibrate with the table its previous fit left: `data.gain_table: results/map_pred_Custom.B`. That is also where a run of the same name writes its own table, which would destroy the calibration the fit is relative to. So **the run stops with an error at startup**, before any fitting, so no results, calibration table or MS columns are written. `tab2MS` does the same before it writes any column.
+A rerun can read the table its previous fit left, as `data.gain_table: results/map_pred_Custom.B` or `gains.init: results/map_pred_Custom.B`. That is also where a run of the same name writes its own table, which would destroy the input. So **the run stops with an error at startup**, before any fitting, so no results, calibration table or MS columns are written. A `gains.init` path counts whichever gain component the run uses, so remove the line if it is left over from another configuration. `tab2MS` does the same for its `-gt` tables before it writes any column. It is not told about `gains.init`, so `tab2MS` over the same results can still replace a table used only for that.
 
 To keep both tables, give the run its own name, or the export its own path:
 

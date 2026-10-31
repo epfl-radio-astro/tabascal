@@ -2828,7 +2828,7 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
             given = table
 
         again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
-        with pytest.raises(ValueError, match="data.gain_table inputs"):
+        with pytest.raises(ValueError, match="a table this run reads"):
             run_writer(
                 _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
                 ext_gains=_ext_gains(), gain_table=[given],
@@ -2844,9 +2844,9 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
         os.mkdir(out)
         monkeypatch.setattr(write_mod, "xds_from_ms", pytest.fail)
 
-        with pytest.raises(ValueError, match="data.gain_table inputs"):
+        with pytest.raises(ValueError, match="a table this run reads"):
             write_results_ms("unused.ms", zarr_path, gain_table=[table])
-        with pytest.raises(ValueError, match="data.gain_table inputs"):
+        with pytest.raises(ValueError, match="a table this run reads"):
             write_results_ms("unused.ms", zarr_path, gain_table=[out], caltable_path=out)
 
     def test_an_input_kept_inside_the_destination_survives_every_export_path(
@@ -2859,7 +2859,7 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
         before = _snapshot(nested)
 
         again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
-        with pytest.raises(ValueError, match="data.gain_table inputs"):
+        with pytest.raises(ValueError, match="a table this run reads"):
             run_writer(
                 _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
                 ext_gains=_ext_gains(), gain_table=[nested],
@@ -2877,7 +2877,7 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
         before = _snapshot(table)
 
         again = _write_zarr(tmp_path, _uniform_gains(1), ast, rfi)
-        with pytest.raises(ValueError, match="data.gain_table inputs"):
+        with pytest.raises(ValueError, match="a table this run reads"):
             write_mod.write_gain_caltable(ms_skeleton, again, gain_table=[table])
 
         assert _snapshot(table) == before
@@ -2893,7 +2893,7 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
 
         again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
         with warnings.catch_warnings():
-            warnings.filterwarnings("error", message=".*gain_table inputs.*")
+            warnings.filterwarnings("error", message=".*a table this run reads.*")
             run_writer(
                 _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
                 ext_gains=_ext_gains(), gain_table=[str(elsewhere)],
