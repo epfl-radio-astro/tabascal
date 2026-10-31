@@ -55,7 +55,6 @@ def make_gains_config(
         a2=a2.astype("int32"),
         args={
             "gains": {
-                "r_seed": 123,
                 "amp_mean": amp_mean,
                 "amp_std": amp_std,
                 "phase_mean": phase_mean,
@@ -81,7 +80,7 @@ def make_vis_state(n_ant, n_freq, n_time, rng_key=0):
 # None means "unset", 0 means 0
 # ---------------------------------------------------------------------------
 
-SCALE_KEYS = ("r_seed", "amp_mean", "amp_std", "phase_mean", "phase_std")
+SCALE_KEYS = ("amp_mean", "amp_std", "phase_mean", "phase_std")
 
 #: Every value that is not a width: zero included, since a zero-width prior is a
 #: degenerate Normal rather than an unset one.
@@ -100,29 +99,6 @@ def scale_config(**overrides):
 
     return {**{key: None for key in SCALE_KEYS}, **overrides}
 
-
-
-class TestSeed:
-
-    def test_an_explicit_zero_seed_is_honoured(self):
-        """0 is a seed like any other; ``not r_seed`` used to read it as "unset".
-
-        The substitution was not harmless — seed 0 and the default seed 2 drive
-        different draws — so a config asking for 0 quietly got someone else's random
-        numbers.
-        """
-        assert validate_gain_scales(scale_config(r_seed=0))["r_seed"] == 0
-        assert not jnp.allclose(
-            jax.random.normal(jax.random.PRNGKey(0), (8,)),
-            jax.random.normal(jax.random.PRNGKey(2), (8,)),
-        )
-
-    def test_an_unset_seed_still_defaults(self):
-        assert validate_gain_scales(scale_config())["r_seed"] == 2
-
-    def test_a_non_integer_seed_is_an_error(self):
-        with pytest.raises(ValueError, match="r_seed"):
-            validate_gain_scales(scale_config(r_seed=1.5))
 
 
 class TestPriorWidths:
@@ -259,7 +235,7 @@ class TestPhaseMean:
 
 
 class TestMissingKeysAreNamed:
-    """Five keys are read here, so a bare "validation failed" is not enough."""
+    """Four keys are read here, so a bare "validation failed" is not enough."""
 
     @pytest.mark.parametrize("key", SCALE_KEYS)
     def test_the_missing_key_is_named(self, key):

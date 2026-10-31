@@ -9,6 +9,7 @@ from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
+from tabascal.seeds import component_key, config_seed
 from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
@@ -600,14 +601,6 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     # null, and the fallbacks below are what null means.
     gp_cov = _validate_gp_cov(rfi_config.get("gp_cov"))
 
-    r_seed = rfi_config.get("r_seed")
-    if not r_seed: # Set Default
-        rfi_config["r_seed"] = 1
-    elif isinstance(r_seed, int):
-        pass
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
-
     if gp_cov["std"] == FROM_DATA:
         gp_cov["std"] = _std_from_data(vis_obs, gain_flags)
     elif gp_cov["std"] is None:
@@ -640,6 +633,9 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
 
 class BaseGPRFI(Component):
+
+    #: The tag ``rfi.init: sample`` folds into ``inference.seed`` (tabascal.seeds).
+    seed_tag = "rfi"
 
     #: Roll-off exponent of the RFI prior power spectrum on the frequency and time
     #: axes, used when ``rfi.gp_cov.gammas`` is not set. Declared per component
@@ -716,8 +712,8 @@ class BaseGPRFI(Component):
         self.rfi_config = rfi_config
         self._gammas, self._pk_cutoff = self._resolve_gp_cov_params()
 
-        # Random seed used for random sampling such as initial parameters drawn from the prior
-        self.r_seed = rfi_config["r_seed"]
+        # Seed for `init: sample`, drawn from under this component's own tag
+        self.seed = config_seed(tab_config.args)
 
         # Basic shape parameters 
         self.n_rfi = tab_config.n_rfi
@@ -1209,7 +1205,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         elif init_type == "sample":
             print("Drawing sample from prior for rfi_A init")
             base_sample = random.normal(
-                random.PRNGKey(self.r_seed),
+                component_key(self.seed, self.seed_tag),
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
@@ -1505,7 +1501,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             # This variant carries a singleton antenna axis: the latent is shared by
             # every antenna and only broadcast to n_ant inside the forward.
             base_sample = random.normal(
-                random.PRNGKey(self.r_seed),
+                component_key(self.seed, self.seed_tag),
                 (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
