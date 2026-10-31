@@ -176,7 +176,6 @@ class _RunPaths:
     ms_path: str
     plot_dir: str
     map_path: str
-    params_path: str
     init_pred_path: str
     used_orbits_path: str
 
@@ -321,7 +320,6 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
         ms_path=ms_path,
         plot_dir=plot_dir,
         map_path=os.path.join(results_dir, f"map_pred_{results_name}.zarr"),
-        params_path=os.path.join(results_dir, f"map_params_{results_name}.zarr"),
         init_pred_path=os.path.join(results_dir, f"init_pred_{results_name}.zarr"),
         used_orbits_path=os.path.join(results_dir, f"used_orbits_{results_name}.json"),
     )
@@ -464,7 +462,7 @@ def tabascal_subtraction(
         key, *subkeys = random.split(key, 3)
         if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
             vi_pred, losses, vi_params, _ = run_opt(
-                tab_config, prob_model, subkeys, model.init_params, ms_path, paths.map_path, paths.params_path,
+                tab_config, prob_model, subkeys, model.init_params, ms_path, paths.map_path,
                 state=model.state, constants=model.constants, truth=truth,
             )
 
