@@ -571,6 +571,30 @@ rfi_vis_configs = [
         ),
         id="RiemannVisFFIFine",
     ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFIVarAnt",
+                "rfi_vis:AnalyticVis",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The data-grid route: the RiemannVisFine model with the signal and
+            # phase on the data grid and each cell integrated in closed form.
+            # chi2 measured on ARM (Apple M-series, CPU): 0.8942335916 double /
+            # 0.8941589594 single. TO BE RE-RECORDED on x86 and GPU; the metric
+            # ranges hold both ARM measurements.
+            chi2_ref=0.8942335916260074,
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
+        ),
+        id="AnalyticVis",
+    ),
 ]
 
 

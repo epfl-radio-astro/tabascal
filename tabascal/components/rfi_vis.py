@@ -1,6 +1,8 @@
 from math import isfinite
 
 import jax.numpy as jnp
+from jax import lax
+import numpy as np
 
 from tabascal.distributed import psum_over_rfi, sharding_enabled
 from tabascal.interferometry import (
@@ -8,7 +10,8 @@ from tabascal.interferometry import (
     calculate_rfi_vis_variable,
 )
 from tabascal.components import Component
-from ri_kernels.jax_api import RFIVisOp
+from tabascal.poly_interp import fine_offsets, interp_tables, monomial_tables
+from ri_kernels.jax_api import RFIAnalyticVisOp, RFIVisOp
 
 
 class RiemannVisFine(Component):
@@ -435,6 +438,197 @@ class RiemannVisVariableFFIFine(Component):
             vis_rfi = psum_over_rfi(local_vis)(state["rfi_A"], state["rfi_phase"])
 
             # vis_rfi is shape (n_bl, n_freq, n_time)
+            state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
+
+            return state
+
+        return forward
+
+    def _set_outputs(self):
+
+        self.state_outputs = {
+            "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
+        }
+
+
+#: The ``rfi.analytic`` options and their ranges; ``None`` is unbounded.
+_ANALYTIC_OPTIONS = {
+    "stencil": (0, 4),
+    "segments": (1, 1024),
+    "terms": (1, 32),
+    "cubic_terms": (0, 8),
+    "scratch_mb": (1, None),
+}
+
+
+class AnalyticVis(Component):
+    """RFI visibilities from the data grid, each cell integrated in closed form.
+
+    Reads the signal and phase of
+    :class:`~tabascal.components.rfi_signal.ComplexRFIVarAnt` (or
+    ``ComplexRFIConstAnt``) and :class:`~tabascal.components.trajectory.FixedOrbit`
+    on the data grid, with the delay polynomial beside them, and hands them to
+    ``ri_kernels.jax_api.RFIAnalyticVisOp``. Inside each cell the signal is the
+    polynomial through the ``2 * rfi.analytic.stencil + 1`` nearest cells on each
+    axis and the phase is linear in frequency and a Taylor series in time; the
+    time integral is closed form and the frequency one the ``n_int_freq``-point
+    rule of the fine grid. No fine time grid is formed, so ``n_int_time`` is
+    never read.
+
+    The kernel differentiates the signal and the phase; the delay, the interval
+    and the tables are constants. With ``FixedOrbit`` the phase is a constant
+    too, and the signal-only kernels run. Under an elevation mask each source
+    is integrated alone, over the whole axis, and its visibility masked per
+    cell. See ``docs/analytic_rfi_vis.md``.
+    """
+
+    # Accumulates into vis_rfi, which Model zeroes before the components run.
+    required_inputs = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+        "rfi_phase": ("n_rfi", "n_ant", "n_freq", "n_time"),
+        "rfi_delay_poly_us": ("n_rfi", "n_ant", "n_time", "n_path"),
+        "vis_rfi": ("n_bl", "n_freq", "n_time"),
+    }
+    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+
+    parameters = {}
+
+    def setup(self, config):
+        """All validation and error-prone operations here"""
+        try:
+            self.n_ant = config.n_ant
+            self.n_bl = config.n_bl
+            self.n_freq = config.n_freq
+            self.n_time = config.n_time
+            self.options = self._read_options(config.args["rfi"]["analytic"])
+
+            if config.args.get("data", {}).get("save_rfi_per_sat"):
+                raise ValueError(
+                    "data.save_rfi_per_sat re-evaluates the visibility op on the "
+                    "fine-grid state, which this component does not carry: use a "
+                    "Fine chain with rfi_vis:RiemannVisFine to save it."
+                )
+
+            # The kernel writes each antenna pair once, so a repeated pair would
+            # be left unwritten. A reversed pair or an autocorrelation is fine.
+            pairs, counts = np.unique(
+                np.stack([np.asarray(config.a1), np.asarray(config.a2)], axis=1),
+                axis=0, return_counts=True,
+            )
+            if np.any(counts > 1):
+                repeated = ", ".join(str(tuple(int(a) for a in p)) for p in pairs[counts > 1])
+                raise ValueError(
+                    f"each (a1, a2) baseline must appear at most once; repeated: {repeated}."
+                )
+            self._op = RFIAnalyticVisOp(self.n_ant, config.a1, config.a2)
+
+            # Host-side float64 tables, once. MHz against delays in
+            # microseconds: their product is cycles.
+            h = self.options.pop("stencil")
+            chan_width = float(config.chan_width)
+            dnu = fine_offsets(config.n_int_freq, chan_width)
+            self.w_freq, self.start_freq = interp_tables(self.n_freq, h, dnu / chan_width)
+            self.g_time, self.start_time = monomial_tables(self.n_time, h)
+            self.dnu_mhz = dnu / 1e6
+            self.freq_mhz = np.asarray(config.freqs, dtype=np.float64) / 1e6
+            self.int_time = float(config.int_time)
+            # The elevation mask multiplies each source's visibility after its
+            # cells are interpolated, so a visible cell's stencil reads its
+            # hidden neighbours' signal.
+            mask = getattr(config, "rfi_mask", None)
+            self.rfi_mask = None if mask is None or np.all(mask) else np.asarray(mask, bool)
+
+            self._set_outputs()
+
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    @staticmethod
+    def _read_options(analytic):
+        unknown = sorted(set(analytic) - set(_ANALYTIC_OPTIONS))
+        if unknown:
+            raise ValueError(
+                f"rfi.analytic.{unknown[0]} is not an option; the options are "
+                f"{', '.join(_ANALYTIC_OPTIONS)}."
+            )
+        options = {}
+        for key, (lo, hi) in _ANALYTIC_OPTIONS.items():
+            value = analytic[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < lo
+                or (hi is not None and value > hi)
+            ):
+                bounds = f"from {lo} to {hi}" if hi is not None else f"of at least {lo}"
+                raise ValueError(
+                    f"rfi.analytic.{key} must be a whole number {bounds}, got {value!r}."
+                )
+            options[key] = value
+        return options
+
+    def build_set_params(self):
+
+        def set_params(params):
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        mask = {} if self.rfi_mask is None else {"rfi_mask": jnp.asarray(self.rfi_mask)}
+        return {
+            **mask,
+            "w_freq": jnp.asarray(self.w_freq),
+            "start_freq": jnp.asarray(self.start_freq),
+            "g_time": jnp.asarray(self.g_time),
+            "start_time": jnp.asarray(self.start_time),
+            "dnu_mhz": jnp.asarray(self.dnu_mhz),
+            "freq_mhz": jnp.asarray(self.freq_mhz),
+            "int_time": jnp.asarray(self.int_time),
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        op, options, n_bl = self._op, self.options, self.n_bl
+        masked = self.rfi_mask is not None
+
+        def forward(params, state, constants):
+            real = [
+                constants[f"{prefix}/{name}"]
+                for name in ("w_freq", "g_time", "dnu_mhz", "int_time", "freq_mhz")
+            ]
+            start_freq = constants[f"{prefix}/start_freq"].astype(jnp.int32)
+            start_time = constants[f"{prefix}/start_time"].astype(jnp.int32)
+
+            # Per-RFI-shard body, psum-ed across devices under sharding as the
+            # fine-grid components do. The kernel wants the antenna axis first
+            # and every real input in the phase's dtype.
+            def local_vis(rfi_A, rfi_phase, rfi_delay, *mask):
+                dtype = rfi_phase.dtype
+                w_freq, g_time, dnu_mhz, int_time, freq_mhz = (x.astype(dtype) for x in real)
+                vis = lambda A, phase, delay: op.eval(
+                    jnp.swapaxes(A, 0, 1),
+                    jnp.swapaxes(phase, 0, 1),
+                    jnp.swapaxes(delay, 0, 1).astype(dtype),
+                    w_freq, start_freq, g_time, start_time, dnu_mhz, int_time, freq_mhz,
+                    **options,
+                )
+                if not mask:
+                    return vis(rfi_A, rfi_phase, rfi_delay)
+
+                # One source per step, its mask applied to its visibility.
+                def step(total, source):
+                    *inputs, m = source
+                    return total + jnp.where(m, vis(*(x[None] for x in inputs)), 0), None
+
+                total = jnp.zeros((n_bl, w_freq.shape[0], rfi_A.shape[-1]), rfi_A.dtype)
+                return lax.scan(step, total, (rfi_A, rfi_phase, rfi_delay, *mask))[0]
+
+            mask = [constants[f"{prefix}/rfi_mask"]] if masked else []
+            vis_rfi = psum_over_rfi(local_vis)(
+                state["rfi_A"], state["rfi_phase"], state["rfi_delay_poly_us"], *mask
+            )
             state = {**state, "vis_rfi": state["vis_rfi"] + vis_rfi}
 
             return state
