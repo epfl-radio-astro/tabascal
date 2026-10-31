@@ -262,6 +262,19 @@ So an antenna the fit killed is *missing* from the table and *uncalibrated* in t
 
 The table carries the mean of the per-antenna gains over the `sample` axis. Where the columns are divided by the mean of `g_p g_q*`, a per-antenna table can only hold the mean of `g_p`, and the two differ by the covariance between the two antennas' gains. For a MAP run — one sample — they are identical.
 
+### When the table would replace one of the run's inputs
+
+A rerun can calibrate with the table its previous fit left: `data.gain_table: results/map_pred_Custom.B`. That is also where a run of the same name writes its own table, which would destroy the calibration the fit is relative to. So **the run stops with an error at startup**, before any fitting, so no results, calibration table or MS columns are written. `tab2MS` does the same before it writes any column.
+
+To keep both tables, give the run its own name, or the export its own path:
+
+```bash
+tabascal run -c config.yaml -ms file.ms -sx round2  # writes map_pred_Custom_round2.B
+tab2MS -m file.ms -z results.zarr -gt old.B -o new.B
+```
+
+A destination counts as an input if it contains one, since writing there replaces the whole directory. Symlinks are followed, so another spelling of the same table counts too.
+
 ### When no table is written
 
 Nothing is written when there is no calibration to export: results with no `gains`, gains that are not the four-dimensional `(sample, antenna, channel, time)` grid a caltable can hold, or gains that are exactly 1 **on every sample**. A `UnitaryGains` run stores ones and fits nothing, and a run that used external tables while fitting nothing is in the same position — the total calibration is then the tables the caller already has.

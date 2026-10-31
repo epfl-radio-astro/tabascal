@@ -10,6 +10,7 @@ from tabascal.gain_table import gains_from_tables, normalise_gain_tables
 from tabascal.imports import import_components
 from tabascal.interferometry import baseline_gains
 from tabascal.ms import (
+    _is_inside,
     fitted_correlation,
     grid_to_rows,
     into_corr,
@@ -417,6 +418,9 @@ def write_results_ms(
     path. It is required whenever the run used one: without it every column is
     written a whole calibration layer away from the frame it should be in.
 
+    A destination that is one of the ``gain_table`` inputs is refused first
+    (:func:`check_export_destination`), before any column is written.
+
     Once the columns are written, the calibration they were divided by is
     exported beside the results as a CASA table -- see
     :func:`write_gain_caltable`, which is where the two outputs deliberately
@@ -426,6 +430,8 @@ def write_results_ms(
     is removed from all follow it, so a failed rerun cannot tidy up the default
     it displaced while leaving its own stale table standing.
     """
+
+    check_export_destination(results_zarr_path, gain_table, caltable_path)
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
     # so no other rank needs to participate.
@@ -650,7 +656,91 @@ def caltable_path(results_zarr_path: str) -> str:
     return os.path.splitext(os.path.normpath(results_zarr_path))[0] + CALTABLE_EXT
 
 
-def _clear_failed_export(out_path: str, ms_path: str) -> str:
+def _resolution_steps(path) -> list:
+    """Every location ``path`` passes through on the way to its target, symlinks included.
+
+    The path is normalised lexically first, as ``normalise_gain_tables`` does for
+    the read: ``jump/../r.B`` has to mean the table the run actually read.
+    """
+
+    pending = os.path.abspath(path).split(os.sep)
+    current, steps, links = os.sep, [], 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", os.curdir):
+            continue
+        if part == os.pardir:
+            current = os.path.dirname(current)
+            continue
+
+        step = os.path.join(current, part)
+        steps.append(step)
+        if not os.path.islink(step):
+            current = step
+            continue
+
+        links += 1
+        if links > 40:  # a symlink loop, which no read could get through either
+            break
+        target = os.readlink(step)
+        current = os.sep if os.path.isabs(target) else current
+        pending = target.split(os.sep) + pending
+
+    return steps
+
+
+def _is_input_table(out_path: str, gain_table) -> bool:
+    """Whether ``out_path`` is, or contains, a ``data.gain_table`` the run calibrated with.
+
+    A rerun can calibrate with the table its previous fit left beside the
+    results, so the export's destination can be one of its own inputs. Writing
+    there would replace the input with its product with this fit, losing the
+    calibration the fit is relative to; removing it would leave nothing to export
+    this fit against. Both remove ``out_path`` recursively, so an input stored
+    beneath it counts too.
+
+    Compared by filesystem identity (:func:`~tabascal.ms._is_inside`) at every
+    step of the input's path (:func:`_resolution_steps`), so neither a symlink, a
+    ``./`` nor a different case on a case-insensitive filesystem hides it, and a
+    symlink beneath ``out_path`` that points out of it counts: removing it breaks
+    the configured path just as removing the table would.
+    """
+
+    # Not normalise_gain_tables: that also checks the tables still exist, which
+    # is the read's business, and a no-op export that never looked at them must
+    # not start failing over one that has since gone.
+    if gain_table is None:
+        return False
+    paths = [gain_table] if isinstance(gain_table, (str, os.PathLike)) else list(gain_table)
+    target = os.path.realpath(out_path)
+    return any(_is_inside(step, target) for p in paths for step in _resolution_steps(p))
+
+
+def check_export_destination(
+    results_zarr_path: str, gain_table, out_path: str | None = None
+) -> None:
+    """Refuse an export that would destroy a table the run calibrated with.
+
+    A check on paths alone, so it can run before any of the work the table would
+    record: a run calls it first, not after the fit, and a refusal then costs
+    nothing. Stopping is the only answer that keeps both the input and the new
+    solution without inventing a name nobody asked for.
+    """
+
+    if out_path is None:
+        out_path = caltable_path(results_zarr_path)
+
+    if _is_input_table(out_path, gain_table):
+        raise ValueError(
+            f"{out_path} is, or contains, one of the data.gain_table inputs, and "
+            "this run would write its own calibration table there, destroying "
+            "that input. Name this run with -sx (or give tab2MS a different -o) "
+            "so that it writes elsewhere, or move the table and point "
+            "data.gain_table at the new path."
+        )
+
+
+def _clear_failed_export(out_path: str, ms_path: str, gain_table=None) -> str:
     """Remove a table a failed export could not replace. Returns what happened.
 
     A failure *before* the write -- a multi-window MS, results that do not
@@ -666,6 +756,13 @@ def _clear_failed_export(out_path: str, ms_path: str) -> str:
     """
 
     try:
+        # Not superseded: it is what this run calibrated with.
+        if _is_input_table(out_path, gain_table):
+            return (
+                f" {out_path} is one of this run's data.gain_table inputs, so it "
+                "has been left alone."
+            )
+
         if remove_caltable(out_path, ms_path):
             return f" The superseded table at {out_path} has been removed."
 
@@ -701,11 +798,14 @@ def _emit_gain_caltable(
     * something at the output path that is not a calibration table;
     * results whose gains do not describe the MS's antennas or timesteps;
     * a ``TIME`` column declaring a scale tabascal cannot interpret;
+    * a destination that is one of the run's own ``gain_table`` inputs;
     * anything the filesystem refuses.
 
     All of those fail *before* the table is written, which leaves an earlier
     run's table standing at the destination -- so it is cleared here too, by
     :func:`_clear_failed_export`, and what happened to it is part of the warning.
+    A table that is one of the run's inputs is not an earlier run's table, and is
+    left in place.
 
     The destination is resolved here, once, and handed to both: the export and
     the clean-up after it have to be talking about the same path, or a run given
@@ -736,7 +836,7 @@ def _emit_gain_caltable(
         )
         # An earlier run's table is still standing at the destination this one
         # could not write, so it goes the same way it would on a no-op export.
-        cleared = _clear_failed_export(out_path, ms_path)
+        cleared = _clear_failed_export(out_path, ms_path, gain_table)
 
         warnings.warn(
             # The destination rather than the results it describes: with an
@@ -845,6 +945,12 @@ def write_gain_caltable(
     is in the same position, and :func:`_clear_failed_export` does the same there.
     Only a calibration table is ever removed, and never one overlapping the MS.
 
+    Nor is a table the run calibrated with ever removed or overwritten: an
+    ``out_path`` that is one of the ``gain_table`` inputs -- a rerun calibrated
+    with the table its previous fit left here -- raises before anything is read
+    (:func:`check_export_destination`). A run makes the same check at startup, so
+    reaching it here means the export was called directly.
+
     Note that ``applycal`` operates on ``DATA``. An MS whose visibilities live in
     a non-standard column cannot consume this table, whatever the table says.
     """
@@ -853,6 +959,10 @@ def write_gain_caltable(
     # rerun that fits nothing has to remove the table the last run left here.
     if out_path is None:
         out_path = caltable_path(results_zarr_path)
+
+    # Before every path below that removes or writes out_path, the no-op ones
+    # included: none of them may touch a table this run calibrated with.
+    check_export_destination(results_zarr_path, gain_table, out_path)
 
     # Closed on the way out: this runs at the end of a long job, and a store left
     # open holds file handles for the rest of it.

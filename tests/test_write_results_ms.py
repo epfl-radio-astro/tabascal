@@ -32,6 +32,7 @@ not from the ``exact_rtol`` fixture, whose fp64 bound the writer could not meet.
 """
 
 import os
+import shutil
 import warnings
 
 import numpy as np
@@ -2774,3 +2775,177 @@ class TestWriteResultsXdsRecordsTheCorrelation:
         _, captured = run_writer(_fake_ms(data), path, corr_idx=2)
 
         assert captured["resolved"] == "yx"
+
+
+def _snapshot(path):
+    """Every file under a table directory and its bytes, to tell it was not touched."""
+    out = {}
+    for root, _, files in os.walk(path):
+        for name in files:
+            full = os.path.join(root, name)
+            with open(full, "rb") as f:
+                out[os.path.relpath(full, path)] = f.read()
+    return out
+
+
+class TestATableTheRunCalibratedWithIsLeftAlone:
+    """A rerun can calibrate with the table its previous fit left beside the results.
+
+    That table is then an input, and the export's own destination: writing there
+    would destroy it, and removing it as superseded would leave nothing to export
+    this fit against later.
+    """
+
+    @pytest.fixture
+    def previous(self, tmp_path, run_writer, ms_skeleton):
+        """A first fit, exported: its ``<results>.B`` and the data it describes."""
+        gains, ast, rfi = _model(1)
+        zarr_path = _write_zarr(tmp_path, gains, ast, rfi)
+        data = _observed(_to_ms((_baseline_gains(gains) * (ast + rfi)).mean(axis=0)))
+        run_writer(_fake_ms(data), zarr_path, ms_path=ms_skeleton, emit=True)
+
+        table = _caltable_path(zarr_path)
+        assert os.path.exists(table)
+        return zarr_path, table, gains, ast, rfi, data
+
+    @pytest.mark.parametrize("spelling", ["same", "dotted", "symlink", "case"])
+    def test_a_refit_calibrated_with_it_neither_overwrites_nor_removes_it(
+        self, tmp_path, run_writer, ms_skeleton, previous, spelling
+    ):
+        zarr_path, table, gains, ast, rfi, data = previous
+        before = _snapshot(table)
+        if spelling == "dotted":
+            given = os.path.join(os.path.dirname(table), ".", os.path.basename(table))
+        elif spelling == "symlink":
+            given = str(tmp_path / "link.B")
+            os.symlink(table, given)
+        elif spelling == "case":
+            # APFS and NTFS by default: another spelling of the same directory.
+            given = os.path.join(os.path.dirname(table), os.path.basename(table).upper())
+            if not os.path.exists(given):
+                pytest.skip("case-sensitive filesystem")
+        else:
+            given = table
+
+        again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            run_writer(
+                _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
+                ext_gains=_ext_gains(), gain_table=[given],
+            )
+
+        assert _snapshot(table) == before
+
+    def test_a_refusal_comes_before_any_column_is_written(
+        self, monkeypatch, tmp_path, previous
+    ):
+        zarr_path, table, *_ = previous
+        out = str(tmp_path / "own.B")
+        os.mkdir(out)
+        monkeypatch.setattr(write_mod, "xds_from_ms", pytest.fail)
+
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            write_results_ms("unused.ms", zarr_path, gain_table=[table])
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            write_results_ms("unused.ms", zarr_path, gain_table=[out], caltable_path=out)
+
+    def test_an_input_kept_inside_the_destination_survives_every_export_path(
+        self, tmp_path, run_writer, ms_skeleton, previous
+    ):
+        """The export removes its destination recursively, so what is beneath it goes too."""
+        zarr_path, table, gains, ast, rfi, data = previous
+        nested = os.path.join(table, "archive", "input.B")
+        shutil.copytree(table, nested)  # a valid caltable, kept inside the old one
+        before = _snapshot(nested)
+
+        again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            run_writer(
+                _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
+                ext_gains=_ext_gains(), gain_table=[nested],
+            )
+        assert _snapshot(nested) == before
+
+        assert "left alone" in write_mod._clear_failed_export(table, ms_skeleton, [nested])
+        assert _snapshot(nested) == before
+
+    def test_a_direct_export_that_fits_nothing_does_not_remove_it(
+        self, tmp_path, ms_skeleton, previous
+    ):
+        """The no-op export removes a stale table; an input is not stale."""
+        _, table, _, ast, rfi, _ = previous
+        before = _snapshot(table)
+
+        again = _write_zarr(tmp_path, _uniform_gains(1), ast, rfi)
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            write_mod.write_gain_caltable(ms_skeleton, again, gain_table=[table])
+
+        assert _snapshot(table) == before
+
+    def test_another_input_does_not_stop_the_export(
+        self, tmp_path, run_writer, ms_skeleton, previous
+    ):
+        """Only the destination itself is protected; an input elsewhere is the usual case."""
+        zarr_path, table, gains, ast, rfi, data = previous
+        elsewhere = tmp_path / "flux.B0"
+        elsewhere.mkdir()
+        before = _snapshot(table)
+
+        again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=".*gain_table inputs.*")
+            run_writer(
+                _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
+                ext_gains=_ext_gains(), gain_table=[str(elsewhere)],
+            )
+
+        assert os.path.exists(table) and _snapshot(table) != before
+
+    def test_the_failed_export_clean_up_leaves_an_input_in_place(self, tmp_path, ms_skeleton, previous):
+        _, table, *_ = previous
+        before = _snapshot(table)
+
+        said = write_mod._clear_failed_export(table, ms_skeleton, [table])
+
+        assert "left alone" in said
+        assert _snapshot(table) == before
+
+        upper = os.path.join(os.path.dirname(table), os.path.basename(table).upper())
+        if os.path.exists(upper):  # a case-insensitive filesystem
+            assert "left alone" in write_mod._clear_failed_export(table, ms_skeleton, [upper])
+            assert _snapshot(table) == before
+
+    @pytest.mark.parametrize("given", ["inside", "through_directory", "chain"])
+    def test_a_symlink_in_the_destination_counts_wherever_it_points(self, tmp_path, given):
+        """Removing the destination removes the link, which breaks the configured path."""
+        table, cal = tmp_path / "r.B", tmp_path / "cal"
+        table.mkdir()
+        (cal / "external.B").mkdir(parents=True)
+        (table / "input.B").symlink_to(cal / "external.B")
+        (table / "sub").symlink_to(cal)
+        (tmp_path / "chain.B").symlink_to(table / "input.B")
+        path = {
+            "inside": table / "input.B",
+            "through_directory": table / "sub" / "external.B",
+            "chain": tmp_path / "chain.B",
+        }[given]
+
+        assert write_mod._is_input_table(str(table), [str(path)])
+        assert not write_mod._is_input_table(str(table), [str(cal / "external.B")])
+
+    def test_dot_dot_after_a_symlink_means_what_the_read_takes_it_to_mean(self, tmp_path):
+        """``normalise_gain_tables`` collapses it lexically, so the guard has to as well."""
+        (tmp_path / "else" / "dir").mkdir(parents=True)
+        (tmp_path / "jump").symlink_to(tmp_path / "else" / "dir")
+        table, jump = str(tmp_path / "r.B"), tmp_path / "jump"
+
+        assert write_mod._is_input_table(table, [str(jump / ".." / "r.B")])
+        assert not write_mod._is_input_table(table, [str(tmp_path / "r.B" / ".." / "external.B")])
+
+    def test_the_check_does_not_require_the_inputs_to_exist(self, tmp_path):
+        """A no-op export never read them, and must not start failing over one gone since."""
+        assert not write_mod._is_input_table(str(tmp_path / "r.B"), [str(tmp_path / "gone.B")])
+        assert not write_mod._is_input_table(str(tmp_path / "r.B"), None)
+        # A sibling sharing a prefix is not inside: an ancestor walk, not a string test.
+        assert not write_mod._is_input_table(str(tmp_path / "r.B"), [str(tmp_path / "r.B2")])
+        assert write_mod._is_input_table(str(tmp_path / "r.B"), str(tmp_path / "r.B"))

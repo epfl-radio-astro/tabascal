@@ -1328,6 +1328,36 @@ def test_every_results_file_the_run_names_is_documented(impl, tmp_path):
     assert named <= documented
 
 
+@pytest.mark.parametrize(
+    "opt, table, stops",
+    [
+        (True, "map_pred_Custom.B", True),
+        (False, "init_pred_Custom.B", True),
+        (True, "init_pred_Custom.B", False),  # a fit exports only the map table
+    ],
+)
+def test_a_run_that_would_overwrite_its_input_stops_before_any_work(
+    impl, tmp_path, monkeypatch, opt, table, stops
+):
+    built = RuntimeError("got as far as building the model")
+
+    def _build(*args):
+        raise built
+
+    monkeypatch.setattr(impl, "build_model", _build)
+    config = {
+        "data": {"out_dir": str(tmp_path / "obs"), "gain_table": str(tmp_path / "obs" / "results" / table)},
+        "model": {},
+        "inference": {"opt": opt},
+        "opt": {"max_iter": 10},
+    }
+
+    with pytest.raises(ValueError if stops else RuntimeError) as err:
+        impl.tabascal_subtraction(config, None, log=False)
+
+    assert (err.value is not built) == stops
+
+
 class TestRunHeaderNamesTheMS:
     """The log has to say which visibilities the run read.
 
