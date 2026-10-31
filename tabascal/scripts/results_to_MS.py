@@ -62,7 +62,7 @@ def build_parser():
             "results path with a '.B' extension, beside the zarr. The path "
             "given is the only one the export uses: it writes there, and a "
             "table an earlier run left there is what a run with nothing to "
-            "export removes."
+            "export removes. It may not be, or contain, one of the -gt tables."
         ),
     )
 

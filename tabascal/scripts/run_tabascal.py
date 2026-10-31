@@ -93,7 +93,7 @@ def build_parser():
     # into plots/<suffix>, both of which are created rather than resolved, so a
     # path here silently places the run's whole output somewhere else.
     run_parser.add_argument(
-        "-sx", "--suffix", default="", type=_label, help="Image name suffix."
+        "-sx", "--suffix", default="", type=_label, help="Suffix naming this run's plots and results, including its calibration table."
     )
     run_parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
     run_parser.add_argument(

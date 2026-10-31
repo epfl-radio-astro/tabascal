@@ -32,6 +32,7 @@ not from the ``exact_rtol`` fixture, whose fp64 bound the writer could not meet.
 """
 
 import os
+import shutil
 import warnings
 
 import numpy as np
@@ -2827,31 +2828,38 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
             given = table
 
         again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
-        with pytest.warns(RuntimeWarning, match="data.gain_table inputs") as record:
-            values, _ = run_writer(
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            run_writer(
                 _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
                 ext_gains=_ext_gains(), gain_table=[given],
             )
 
         assert _snapshot(table) == before
-        # The columns are the run's result and are written regardless.
-        assert set(COLS).issubset(values)
-        message = str(record.pop(RuntimeWarning).message)
-        assert "left alone" in message and "superseded" not in message
+
+    def test_a_refusal_comes_before_any_column_is_written(
+        self, monkeypatch, tmp_path, previous
+    ):
+        zarr_path, table, *_ = previous
+        out = str(tmp_path / "own.B")
+        os.mkdir(out)
+        monkeypatch.setattr(write_mod, "xds_from_ms", pytest.fail)
+
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            write_results_ms("unused.ms", zarr_path, gain_table=[table])
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            write_results_ms("unused.ms", zarr_path, gain_table=[out], caltable_path=out)
 
     def test_an_input_kept_inside_the_destination_survives_every_export_path(
         self, tmp_path, run_writer, ms_skeleton, previous
     ):
         """The export removes its destination recursively, so what is beneath it goes too."""
-        import shutil
-
         zarr_path, table, gains, ast, rfi, data = previous
         nested = os.path.join(table, "archive", "input.B")
         shutil.copytree(table, nested)  # a valid caltable, kept inside the old one
         before = _snapshot(nested)
 
         again = _write_zarr(tmp_path, 2 * gains, ast, rfi)
-        with pytest.warns(RuntimeWarning, match="data.gain_table inputs"):
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
             run_writer(
                 _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
                 ext_gains=_ext_gains(), gain_table=[nested],
@@ -2861,21 +2869,16 @@ class TestATableTheRunCalibratedWithIsLeftAlone:
         assert "left alone" in write_mod._clear_failed_export(table, ms_skeleton, [nested])
         assert _snapshot(nested) == before
 
-    def test_a_refit_that_fits_nothing_does_not_remove_it(
-        self, tmp_path, run_writer, ms_skeleton, previous
+    def test_a_direct_export_that_fits_nothing_does_not_remove_it(
+        self, tmp_path, ms_skeleton, previous
     ):
         """The no-op export removes a stale table; an input is not stale."""
         _, table, _, ast, rfi, _ = previous
         before = _snapshot(table)
 
-        unity = _uniform_gains(1)
-        again = _write_zarr(tmp_path, unity, ast, rfi)
-        data = _observed(_to_ms((_baseline_gains(unity) * (ast + rfi)).mean(axis=0)))
-        with pytest.warns(RuntimeWarning, match="data.gain_table inputs"):
-            run_writer(
-                _fake_ms(data), again, ms_path=ms_skeleton, emit=True,
-                ext_gains=_ext_gains(), gain_table=[table],
-            )
+        again = _write_zarr(tmp_path, _uniform_gains(1), ast, rfi)
+        with pytest.raises(ValueError, match="data.gain_table inputs"):
+            write_mod.write_gain_caltable(ms_skeleton, again, gain_table=[table])
 
         assert _snapshot(table) == before
 

@@ -418,6 +418,9 @@ def write_results_ms(
     path. It is required whenever the run used one: without it every column is
     written a whole calibration layer away from the frame it should be in.
 
+    A destination that is one of the ``gain_table`` inputs is refused first
+    (:func:`check_export_destination`), before any column is written.
+
     Once the columns are written, the calibration they were divided by is
     exported beside the results as a CASA table -- see
     :func:`write_gain_caltable`, which is where the two outputs deliberately
@@ -427,6 +430,8 @@ def write_results_ms(
     is removed from all follow it, so a failed rerun cannot tidy up the default
     it displaced while leaving its own stale table standing.
     """
+
+    check_export_destination(results_zarr_path, gain_table, caltable_path)
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
     # so no other rank needs to participate.
@@ -711,6 +716,30 @@ def _is_input_table(out_path: str, gain_table) -> bool:
     return any(_is_inside(step, target) for p in paths for step in _resolution_steps(p))
 
 
+def check_export_destination(
+    results_zarr_path: str, gain_table, out_path: str | None = None
+) -> None:
+    """Refuse an export that would destroy a table the run calibrated with.
+
+    A check on paths alone, so it can run before any of the work the table would
+    record: a run calls it first, not after the fit, and a refusal then costs
+    nothing. Stopping is the only answer that keeps both the input and the new
+    solution without inventing a name nobody asked for.
+    """
+
+    if out_path is None:
+        out_path = caltable_path(results_zarr_path)
+
+    if _is_input_table(out_path, gain_table):
+        raise ValueError(
+            f"{out_path} is, or contains, one of the data.gain_table inputs, and "
+            "this run would write its own calibration table there, destroying "
+            "that input. Name this run with -sx (or give tab2MS a different -o) "
+            "so that it writes elsewhere, or move the table and point "
+            "data.gain_table at the new path."
+        )
+
+
 def _clear_failed_export(out_path: str, ms_path: str, gain_table=None) -> str:
     """Remove a table a failed export could not replace. Returns what happened.
 
@@ -918,9 +947,9 @@ def write_gain_caltable(
 
     Nor is a table the run calibrated with ever removed or overwritten: an
     ``out_path`` that is one of the ``gain_table`` inputs -- a rerun calibrated
-    with the table its previous fit left here -- is refused before anything is
-    read (:func:`_is_input_table`), which :func:`_emit_gain_caltable` reports as
-    a warning, and the input is left as it was.
+    with the table its previous fit left here -- raises before anything is read
+    (:func:`check_export_destination`). A run makes the same check at startup, so
+    reaching it here means the export was called directly.
 
     Note that ``applycal`` operates on ``DATA``. An MS whose visibilities live in
     a non-standard column cannot consume this table, whatever the table says.
@@ -933,13 +962,7 @@ def write_gain_caltable(
 
     # Before every path below that removes or writes out_path, the no-op ones
     # included: none of them may touch a table this run calibrated with.
-    if _is_input_table(out_path, gain_table):
-        raise ValueError(
-            f"{out_path} is one of this run's data.gain_table inputs, so the "
-            "calibration table cannot be written there without destroying it. "
-            "Move that table elsewhere and point data.gain_table at the new "
-            "path, or give the export an out_path of its own."
-        )
+    check_export_destination(results_zarr_path, gain_table, out_path)
 
     # Closed on the way out: this runs at the end of a long job, and a store left
     # open holds file handles for the rest of it.

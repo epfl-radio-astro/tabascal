@@ -262,6 +262,19 @@ So an antenna the fit killed is *missing* from the table and *uncalibrated* in t
 
 The table carries the mean of the per-antenna gains over the `sample` axis. Where the columns are divided by the mean of `g_p g_q*`, a per-antenna table can only hold the mean of `g_p`, and the two differ by the covariance between the two antennas' gains. For a MAP run — one sample — they are identical.
 
+### When the table would replace one of the run's inputs
+
+A rerun can calibrate with the table its previous fit left: `data.gain_table: results/map_pred_Custom.B`. That is also where a run of the same name writes its own table, which would destroy the calibration the fit is relative to. So **the run stops with an error at startup**, before any fitting, so no results, calibration table or MS columns are written. `tab2MS` does the same before it writes any column.
+
+To keep both tables, give the run its own name, or the export its own path:
+
+```bash
+tabascal run -c config.yaml -sx round2            # writes map_pred_Custom_round2.B
+tab2MS -m file.ms -z results.zarr -gt old.B -o new.B
+```
+
+A destination counts as an input if it contains one, since writing there replaces the whole directory. Symlinks are followed, so another spelling of the same table counts too.
+
 ### When no table is written
 
 Nothing is written when there is no calibration to export: results with no `gains`, gains that are not the four-dimensional `(sample, antenna, channel, time)` grid a caltable can hold, or gains that are exactly 1 **on every sample**. A `UnitaryGains` run stores ones and fits nothing, and a run that used external tables while fitting nothing is in the same position — the total calibration is then the tables the caller already has.
@@ -269,8 +282,6 @@ Nothing is written when there is no calibration to export: results with no `gain
 Every-sample rather than on the mean: samples either side of 1 average to exactly 1 while the divisor the columns use — the mean of the baseline *product* — is a real calibration, so testing the mean alone would throw one away.
 
 **A table from a previous run of the same results is removed** in that case, with a `RuntimeWarning` saying so. A stale calibration sitting under the current name beside the current results reads as the current solution, which is a bad thing to be wrong about.
-
-**A table the run calibrated with is never removed or overwritten.** If the destination is one of the `data.gain_table` inputs, or contains one, it is left as it is and a `RuntimeWarning` says so, on every path here and under [If the export fails](#if-the-export-fails). The columns are still written. A rerun calibrating with its own previous `<results>.B` needs that table moved and `data.gain_table` repointed, or `tab2MS -o` naming a separate destination.
 
 Only a calibration table is ever removed: the path has to be a casacore table — casacore's own structural check, not just the marker files — whose INFO record declares `Type = Calibration`, and it may not be, contain, or sit inside the MS. A directory of your own that happens to be named `<results>.B` — or named by `-o` — is left exactly as it is, and so is a table too damaged for casacore to open. The same rule applies to *writing*: the export replaces a previous calibration table at that path and refuses anything else, rather than deleting it.
 
@@ -281,12 +292,11 @@ The export is the last thing the writer does and is additive to it. Everything i
 * an MS with more than one spectral window, which the writer serves one partition of while a caltable can only file rows under one window's id;
 * an output path overlapping the MS — results written *inside* the MS put the table there too, and `-o` can name a path inside it outright;
 * something at the output path that is not a calibration table;
-* an output path that is, or contains, one of the run's `data.gain_table` inputs;
 * results whose gains do not describe the MS's antennas or timesteps;
 * a `TIME` column declaring a time scale tabascal cannot interpret;
 * anything the filesystem refuses.
 
-**A table from an earlier run is removed here too**, and the warning says so. A run whose export fails is in the same position as one that has nothing to export: the table it could not replace would otherwise stand beside the new results as if it were this run's answer. It is removed under exactly the rules above — so a directory of your own in the way, or a table the run calibrated with, is reported and left alone.
+**A table from an earlier run is removed here too**, and the warning says so. A run whose export fails is in the same position as one that has nothing to export: the table it could not replace would otherwise stand beside the new results as if it were this run's answer. It is removed under exactly the rules above — so a directory of your own in the way is reported and left alone.
 
 A `MemoryError` is not demoted — that is a statement about the process, not about the data — and `Ctrl-C` stops the run as it always would.
 

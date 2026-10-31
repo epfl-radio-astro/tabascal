@@ -35,7 +35,7 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
-from tabascal.write import write_results_xds
+from tabascal.write import caltable_path, check_export_destination, write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 from tabascal.scripts._config_paths import config_is_unset, config_path
@@ -325,6 +325,13 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
     )
 
 
+def _exported_results(config, paths):
+    """The results zarr this run exports a calibration table from."""
+    if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
+        return paths.map_path
+    return paths.init_pred_path
+
+
 def _print_run_header(model_name, f_name, ms_path, start_time):
     """The run's identity, including which visibilities it is about to read.
 
@@ -375,6 +382,11 @@ def tabascal_subtraction(
     ms_path = paths.ms_path
 
     with _stdout_logger(paths.log_path, log):
+        # First, because the fit is what a refusal at the end would throw away.
+        check_export_destination(
+            _exported_results(config, paths), config["data"].get("gain_table")
+        )
+
         start_time = datetime.now()
         key, _ = random.split(random.PRNGKey(1))
 
