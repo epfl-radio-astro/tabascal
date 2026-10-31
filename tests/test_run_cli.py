@@ -1309,6 +1309,25 @@ class TestResolvePathsRefusesWhatItCannotUse:
         assert paths.ms_path == str(tmp_path / "real.ms")
 
 
+def test_every_results_file_the_run_names_is_documented(impl, tmp_path):
+    """A resolved results path nothing wrote (``map_params_*.zarr``) had no entry here."""
+    paths = impl._resolve_paths(
+        {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}, None, None, "", None
+    )
+    results_dir = str(tmp_path / "obs" / "results")
+    named = {
+        os.path.basename(path)
+        for path in vars(paths).values()
+        if os.path.dirname(path) == results_dir
+    }
+    documented = set(re.findall(r"└── (\S+)", (_DOCS / "output.md").read_text()))
+
+    assert named == {
+        "init_pred_Custom.zarr", "map_pred_Custom.zarr", "used_orbits_Custom.json"
+    }
+    assert named <= documented
+
+
 class TestRunHeaderNamesTheMS:
     """The log has to say which visibilities the run read.
 
