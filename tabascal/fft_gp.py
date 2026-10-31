@@ -1109,3 +1109,101 @@ def latent_to_signal(
 
     # Crop to requested domain
     return y_padded_ss[tuple(ss_idxs)]
+
+
+@measure_runtime
+def latent_to_signal_dft_init(
+    ns: List[int],
+    dxs: List[float],
+    pad_factors: List[float],
+    ss_factors: List[int],
+    p0: float,
+    k0s: List[float],
+    gammas: List[float],
+    cutoff: float,
+) -> Tuple[Array, List[Array], List[Array], int]:
+    """
+    The same transform as :func:`latent_to_signal_init`, as one matrix per axis.
+
+    :func:`latent_to_signal` pads the surviving Fourier modes back up to the
+    padded (and supersampled) grid, inverse-transforms the whole of it and
+    throws away everything outside the original domain. The padded grid is
+    never wanted for itself: at the default padding it is about four times the
+    elements of the signal in two dimensions, it is formed once per baseline,
+    and reverse mode carries it too.
+
+    The chain is linear and separable, so the cropped output is a
+    discrete Fourier transform of the surviving modes evaluated at the
+    positions that survive the crop, one small matrix per axis:
+
+        y[j0, j1] = sum_{q0, q1} Y[q0, q1] E0[q0, j0] E1[q1, j1]
+
+    with ``E[q, j] = exp(2 pi i m_q j / N)``, ``m_q`` the integer frequency of
+    the mode and ``N`` the padded, supersampled length of that axis. Nothing of
+    the padded grid is formed: the intermediate is the size of the signal in
+    one axis and of the modes in the other.
+
+    The integers are kept exact -- the phase is ``(m_q j) mod N`` over ``N``,
+    not a float product that would carry ``N/2`` cycles into the rounding --
+    so the matrices are the same in single precision as in double.
+
+    Returns
+    -------
+    tuple[Array, list[Array], list[Array], int]
+        (latent_pk, latent_ks, mats, first_axis):
+        - latent_pk, latent_ks: as :func:`latent_to_signal_init`.
+        - mats: one ``(n_k, n_out)`` complex matrix per axis.
+        - first_axis: which axis to contract first, the order that makes the
+          intermediate smaller.
+    """
+    latent_pk, latent_ks, pads, ss_idxs = latent_to_signal_init(
+        ns, dxs, pad_factors, ss_factors, p0, k0s, gammas, cutoff
+    )
+
+    n_pads = pad_domain_specs(ns, pad_factors)
+    mats = []
+    for axis, (n, n_pad, ss, pad, sl) in enumerate(
+        zip(ns, n_pads, ss_factors, pads, ss_idxs)
+    ):
+        # The padded, supersampled length this axis's modes live on.
+        length = int((n + 2 * int(n_pad)) * ss)
+        # The integer frequency of every mode of the centred grid, and the
+        # block of them this axis kept.
+        m_all = np.fft.fftshift(np.fft.fftfreq(length) * length).round().astype(np.int64)
+        m = m_all[int(pad[0]) : int(pad[0]) + latent_pk.shape[axis]]
+        j = np.arange(int(sl.start), int(sl.stop), dtype=np.int64)
+        phase = (m[:, None] * j[None, :]) % length / length
+        mats.append(jnp.asarray(np.exp(2j * np.pi * phase)))
+
+    # Contracting the axis that shrinks most first keeps the intermediate
+    # smallest: (n_out0, n_k1) against (n_k0, n_out1).
+    n_k0, n_k1 = latent_pk.shape
+    n_out0, n_out1 = mats[0].shape[1], mats[1].shape[1]
+    first_axis = 0 if n_out0 * n_k1 <= n_k0 * n_out1 else 1
+
+    return latent_pk, latent_ks, mats, first_axis
+
+
+def latent_to_signal_dft(
+    Y_latent: Array, mats: List[Array], first_axis: int = 0
+) -> Array:
+    """
+    Transform latent Fourier modes to the signal over the original domain.
+
+    The matrix form of :func:`latent_to_signal`, to the same values: see
+    :func:`latent_to_signal_dft_init`. Two dimensions, as the callers have.
+
+    Parameters
+    ----------
+    Y_latent : Array
+        Fourier modes, ``(n_k0, n_k1)`` in -k_max to k_max ordering.
+    mats : list[Array]
+        One ``(n_k, n_out)`` matrix per axis.
+    first_axis : int
+        Which axis to contract first.
+    """
+    if first_axis == 0:
+        # (n_k0, n_k1) -> (n_out0, n_k1) -> (n_out0, n_out1)
+        return jnp.matmul(jnp.matmul(mats[0].T, Y_latent), mats[1])
+    # (n_k0, n_k1) -> (n_k0, n_out1) -> (n_out0, n_out1)
+    return jnp.matmul(mats[0].T, jnp.matmul(Y_latent, mats[1]))
