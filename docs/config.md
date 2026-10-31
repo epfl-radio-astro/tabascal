@@ -185,13 +185,43 @@ opt:
   epsilon: 1e-1
   max_iter: 10000
   dual_run: True
+  schedule: null
+  stop: null
+  checkpoints: null
   trace_path: null
 ```
 
 * `epsilon`: This is the optimiser step size
 * `max_iter`: This is the number of iterations to run the optimiser for in each optimisation run.
 * `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller.
+* `schedule`: One optimiser with a step-size schedule in place of `dual_run`'s two, or `null` (the default) to keep `dual_run`. See [Step-size schedule](#step-size-schedule).
+* `stop`: End the fit once the loss stops moving, or `null` (the default) to run every step. Needs `schedule`.
+* `checkpoints`: Steps after which to write the parameters to a file, or `null` (the default) for none.
 * `trace_path`: Path of an `.npz` file to record the optimiser's convergence to, or `null` (the default) to record nothing. See [Optimiser trace](#optimiser-trace).
+
+### Step-size schedule
+
+With `dual_run` the fit runs in two phases, each with a new `adabelief`: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments and compiles its step again, which shows as a small bump in the loss at the switch (GitHub #82). `schedule` builds one `adabelief` for the whole fit instead, whose step size follows a schedule: one compiled step, and moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read.
+
+```yaml
+opt:
+  epsilon: 0.2
+  max_iter: 2000
+  schedule: {kind: step, boundaries: [1000], factor: 0.1}  # dual_run's drop, without the reset
+  # schedule: {kind: exponential, final_factor: 0.01}      # 0.2 -> 0.002, smoothly, by step 2000
+  # schedule: {kind: cosine, final_factor: 0.0}            # half a cosine from 0.2 to 0
+  # schedule: {kind: constant}
+```
+
+* `step`: multiplies the step size by `factor` (default 0.1) after each step in `boundaries`, so the first N steps of `boundaries: [N]` run at `epsilon`, as `dual_run`'s first phase does. The boundaries must increase and stay below `max_iter`.
+* `exponential`: `epsilon * final_factor ** (step / max_iter)`, with `0 < final_factor <= 1`.
+* `cosine`: half a cosine from `epsilon` down to `final_factor * epsilon` (default 0) at `max_iter`.
+
+A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: it keeps the moments across the drop, which is the point.
+
+`stop: {window: W, rtol: r, min_steps: M}` ends the fit after step n once n is at least M and 2W, and the mean loss over steps n-W+1..n differs from the mean over the W steps before by at most r times the latter's magnitude. The loss is the negative log posterior per data point, so with a large constant offset in it a relative change is smaller than the change in fit; choose `rtol` with a trace of the loss to hand. It needs `schedule`: with `dual_run` it would not be clear whether a stop ends the first phase or the fit.
+
+`checkpoints: [1000, 2000, 4000]` writes the parameters after each of those steps to `results/checkpoints/<map_pred name>_step<N>.npz`, so one long run can be scored at several step counts. With `dual_run` the steps count across both phases. `tabascal.opt_schedule.load_checkpoint(path)` returns `(params, step, trace_loss)`, the parameters keyed as the model names them, which `Predictive` takes. `trace_loss` is the trace's loss for that step, which the step evaluated before its own update, so it lines a checkpoint up with the trace but is not the loss at the saved parameters. A step the fit does not reach because `stop` ended it first is not written.
 
 ### Optimiser trace
 
@@ -201,7 +231,7 @@ Setting `trace_path` records, once per optimiser iteration, the quantities that 
 
 Set the `TAB_LOSS_TRACE` environment variable to override `trace_path` for a single run, for tracing a config that should not be edited. Under multiple processes every process traces — they all evaluate the same model and must run the same program — and one file is written, by the first process.
 
-The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or `2 * max_iter` with `dual_run`) with one entry per iteration:
+The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or `2 * max_iter` with `dual_run`, or fewer when `stop` ends the fit) with one entry per iteration:
 
 | Key | Present | Meaning |
 |---|---|---|
