@@ -86,3 +86,9 @@ gains:
   # phase_mean: truth
   amp_std: 1.0      # %
   phase_std: 1.0    # degrees
+
+# The 96A simulation comes from tab-sim, which tracks the J2000 phase centre with
+# GAST (chrisfinlay/tab-sim#73). Remove once that is fixed and the data are
+# regenerated: https://github.com/epfl-radio-astro/tabascal/issues/253
+tabsim:
+  phase_tracking: j2000

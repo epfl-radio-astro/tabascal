@@ -456,6 +456,11 @@ runs once per candidate — halve it once the field is narrowed. There is no
 `--fit-offset` here: the scan *is* the search, and at `tau = 0` the MWA case
 scored 0.045 against a candidate median of 0.0446, which is no detection at all.
 
+Both commands take `--phase-tracking j2000` for data simulated by tab-sim,
+which tracks the J2000 phase centre rather than its apparent place of date; see
+[tab-sim compatibility](config.md#tab-sim-compatibility) and
+[issue #253](https://github.com/epfl-radio-astro/tabascal/issues/253).
+
 The `tabascal` script also has a help context which can be accessed with
 
 ```bash

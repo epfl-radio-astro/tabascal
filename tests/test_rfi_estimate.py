@@ -473,7 +473,7 @@ class TestPhaseFromRecords:
             itrs_to_gcrs_sf,
         )
         from tabascal.interferometry import get_rfi_phase_numpy, itrf_to_uvw_numpy
-        from tabascal.time import gast_deg
+        from tabascal.time import apparent_radec_of_date, gast_deg
 
         records = [make_tle_record(25544, JD0)]
         times_jd = self._times()
@@ -482,10 +482,9 @@ class TestPhaseFromRecords:
         got = rfi_phase_from_records(records, ANTS, times_jd, CENTRE, freqs)
 
         rfi_xyz = np.asarray(get_satellite_positions(records, list(times_jd)))
-        gh0 = (gast_deg(times_jd) - CENTRE["ra"]) % 360
-        ants_uvw = np.transpose(
-            itrf_to_uvw_numpy(ANTS, gh0, CENTRE["dec"]), axes=(1, 0, 2)
-        )
+        ra, dec = apparent_radec_of_date(CENTRE["ra"], CENTRE["dec"], times_jd)
+        gh0 = (gast_deg(times_jd) - ra) % 360
+        ants_uvw = np.transpose(itrf_to_uvw_numpy(ANTS, gh0, dec), axes=(1, 0, 2))
         ants_xyz = itrs_to_gcrs_sf(ANTS, times_jd)
         expected = get_rfi_phase_numpy(rfi_xyz, ants_uvw, ants_xyz, freqs)
 

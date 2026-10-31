@@ -1,9 +1,9 @@
 """Tests for tabascal.interferometry.calculate_fringe_frequency_numpy.
 
 These cover the host-side (numpy) fringe-frequency calculation used during
-config setup.  The numpy path works in the GAST-only ECI frame: a source's
-ECI position is rotated by the Greenwich apparent sidereal angle to ECEF
-internally, so synthetic sources here are constructed in that same frame.
+config setup.  A source's GCRS position is turned Earth-fixed internally by
+skyfield's full ITRS rotation, so synthetic sources here are constructed in
+that same frame.
 """
 
 import jax.numpy as jnp
@@ -16,7 +16,6 @@ from tabascal.interferometry import (
     apply_gains,
     baseline_gains,
     Omega_e,
-    Rotz_numpy,
     calculate_fringe_frequency_numpy,
     fov_to_eff_diameter,
     max_ast_fringe_rate,
@@ -24,6 +23,7 @@ from tabascal.interferometry import (
     get_strides_and_idxs,
     itrf_to_uvw_numpy,
 )
+from tabascal.components.trajectory import itrs_to_gcrs_sf
 from tabascal.time import mjd_to_jd, gast_deg
 
 
@@ -64,13 +64,12 @@ def rfi_eci_line(times_mjd):
 def rfi_eci_geostationary(times_mjd):
     """Source stationary in ECEF, expressed in the ECI frame.
 
-    A fixed ECEF point rotated into ECI by the GAST at each time.  After the
-    function rotates it back to ECEF its position is constant, so s_hat_ecef
-    is constant, fringe_move = 0 and fringe_freq = -fringe_stat exactly.
+    A fixed ECEF point rotated into GCRS at each time.  After the function
+    rotates it back to ECEF its position is constant, so s_hat_ecef is
+    constant, fringe_move = 0 and fringe_freq = -fringe_stat exactly.
     """
     r_ecef = np.array([42164e3, 0.0, 0.0])   # GEO radius at 0 deg longitude, metres
-    gsa = gast_deg(mjd_to_jd(times_mjd))
-    return np.array([Rotz_numpy(g) @ r_ecef for g in gsa])  # (n_time, 3)
+    return itrs_to_gcrs_sf(r_ecef[None], mjd_to_jd(times_mjd))[0]  # (n_time, 3)
 
 
 # ---------------------------------------------------------------------------

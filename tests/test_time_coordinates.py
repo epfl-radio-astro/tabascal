@@ -311,7 +311,7 @@ class TestToUtcJd:
     """Moving a declared scale onto UTC, once, where the times are read.
 
     Everything downstream reads a Julian Date as UTC -- skyfield through
-    ``skyfield_time``'s default, ``sgp4jax.itrf_to_gcrf``, which has no scale
+    ``skyfield_time``'s default, ``sgp4jax``'s GCRF propagation, which has no scale
     concept to be told otherwise, and the TLE epoch checks. Normalising at the
     boundary puts all of them on the instant the MS actually names, without a
     ``scale`` argument threaded through any of them.

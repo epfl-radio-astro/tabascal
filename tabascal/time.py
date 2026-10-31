@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from functools import lru_cache
 
+import erfa
 import numpy as np
 from skyfield.api import load
 
@@ -223,7 +224,7 @@ def to_utc_jd(times_jd, scale: str = "utc"):
 
     tabascal reads times on whatever scale their source declares and works in
     UTC everywhere after that: :func:`skyfield_time` defaults to it, the epoch
-    checks compare against it, and ``sgp4jax.itrf_to_gcrf`` has no scale concept
+    checks compare against it, and ``sgp4jax``'s GCRF propagation has no scale concept
     to be told anything else. Converting once, where the times are read, puts all
     of them on the instant the source actually named without a ``scale``
     argument threaded through any of them.
@@ -340,3 +341,157 @@ def gast_deg(times_jd, scale: str = "utc"):
     gast = skyfield_time(times_jd, scale).gast
 
     return np.asarray(gast) * 15.0  # GAST hours → degrees
+
+
+def apparent_radec_of_date(ra_deg, dec_deg, times_jd, scale: str = "utc"):
+    """A J2000 (ICRS) direction as the apparent geocentric RA/Dec of date.
+
+    This is the direction a correlator tracks for a J2000 phase centre, on the
+    true equator and equinox of date, and so the one to pair with
+    :func:`gast_deg`: ``GAST - ra`` is then its Greenwich hour angle. It applies
+    annual aberration (up to 20.5 arcsec) and then frame bias, precession and
+    nutation (about 0.25 deg by 2019).
+
+    Diurnal aberration (at most 0.32 arcsec, and common to the whole array) and
+    gravitational light deflection (a few milliarcseconds away from the Sun) are
+    not applied. The phase centre is a direction at infinity, so there is no
+    parallax either.
+
+    The Earth's barycentric velocity is the analytic ``erfa.epv00`` series,
+    good to a few mm/s, or micro-arcseconds of aberration, with no ephemeris
+    file to download. The bias-precession-nutation matrix is skyfield's, the
+    same one :func:`gast_deg` and skyfield's ITRS-to-GCRS rotation use, so the
+    tracked direction and the antenna positions share one frame.
+
+    Parameters
+    ----------
+    ra_deg, dec_deg : float
+        The J2000 direction in degrees, as a Measurement Set records it.
+    times_jd : array_like
+        Observation times as Julian Dates on ``scale``.
+    scale : str, optional
+        Time scale the Julian Dates are on; see :func:`skyfield_time`.
+
+    Returns
+    -------
+    (np.ndarray, np.ndarray)
+        Apparent RA in ``[0, 360)`` and Dec, in degrees, one per input time.
+    """
+
+    t = skyfield_time(np.atleast_1d(np.asarray(times_jd, dtype=float)), scale)
+
+    s_app = erfa.ab(_unit_vector(ra_deg, dec_deg), *_annual_aberration(t))
+    s_date = np.einsum("ijt,tj->ti", np.reshape(t.M, (3, 3, -1)), s_app)
+
+    return _radec_deg(s_date)
+
+
+def icrs_from_apparent(ra_deg, dec_deg, time_jd, scale: str = "utc"):
+    """The ICRS direction whose apparent place of date is ``(ra_deg, dec_deg)``.
+
+    The inverse of :func:`apparent_radec_of_date` at one time, ``time_jd``: the
+    bias-precession-nutation rotation is undone exactly, and the aberration by
+    fixed-point iteration, which converges to machine precision in a few steps
+    since the aberration is only ~1e-4 rad. A round trip agrees to well below a
+    micro-arcsecond.
+
+    Returns
+    -------
+    (float, float)
+        ICRS RA in ``[0, 360)`` and Dec, in degrees.
+    """
+
+    t = skyfield_time(np.atleast_1d(float(time_jd)), scale)
+
+    s_date = _unit_vector(ra_deg, dec_deg)
+    s_app = np.reshape(t.M, (3, 3, -1))[:, :, 0].T @ s_date
+    v, em, bm1 = (np.asarray(x)[0] for x in _annual_aberration(t))
+
+    s = s_app
+    for _ in range(5):
+        s = s + (s_app - erfa.ab(s, v, em, bm1))
+        s = s / np.linalg.norm(s)
+
+    ra, dec = _radec_deg(s[None])
+
+    return float(ra[0]), float(dec[0])
+
+
+#: Direction frames a Measurement Set may declare for its phase centre that
+#: :func:`icrs_from_frame` can turn into a fixed ICRS direction.
+PHASE_CENTRE_FRAMES = ("J2000", "ICRS", "B1950", "GALACTIC", "APP")
+
+
+def icrs_from_frame(ra_deg, dec_deg, frame: str, time_jd, scale: str = "utc"):
+    """A direction declared in ``frame`` as ICRS, which tabascal calls J2000.
+
+    ``frame`` is one of :data:`PHASE_CENTRE_FRAMES`, as a Measurement Set's
+    ``MEASINFO`` ``Ref`` spells it:
+
+    - ``ICRS`` is returned as it is.
+    - ``J2000``, the FK5 mean equator and equinox of J2000, has the ~20 mas frame
+      bias removed (``erfa.bp06``).
+    - ``B1950`` is FK4 at epoch B1950.0 with no proper motion, moved to FK5 J2000
+      by ``erfa.fk45z`` and then as ``J2000``.
+    - ``GALACTIC`` goes through ``erfa.g2icrs``.
+    - ``APP``, an apparent geocentric place of date, is inverted by
+      :func:`icrs_from_apparent` at ``time_jd``, the observation's mid time.
+
+    Returns
+    -------
+    (float, float)
+        ICRS RA in ``[0, 360)`` and Dec, in degrees.
+
+    Raises
+    ------
+    ValueError
+        If ``frame`` is not one of :data:`PHASE_CENTRE_FRAMES`.
+    """
+
+    key = str(frame).strip().upper()
+    if key not in PHASE_CENTRE_FRAMES:
+        raise ValueError(
+            f"Direction frame {frame!r} is not one tabascal can turn into a fixed "
+            f"J2000 direction. Supported: {list(PHASE_CENTRE_FRAMES)}."
+        )
+
+    if key == "ICRS":
+        return float(ra_deg) % 360.0, float(dec_deg)
+    if key == "APP":
+        return icrs_from_apparent(ra_deg, dec_deg, time_jd, scale)
+    if key == "GALACTIC":
+        ra, dec = erfa.g2icrs(np.deg2rad(float(ra_deg)), np.deg2rad(float(dec_deg)))
+        return float(np.rad2deg(ra)) % 360.0, float(np.rad2deg(dec))
+
+    if key == "B1950":
+        ra, dec = erfa.fk45z(np.deg2rad(float(ra_deg)), np.deg2rad(float(dec_deg)), 1950.0)
+        ra_deg, dec_deg = np.rad2deg(ra), np.rad2deg(dec)
+
+    rb = erfa.bp06(2451545.0, 0.0)[0]  # ICRS -> FK5 J2000 frame bias
+    ra, dec = _radec_deg((rb.T @ _unit_vector(ra_deg, dec_deg))[None])
+
+    return float(ra[0]), float(dec[0])
+
+
+def _unit_vector(ra_deg, dec_deg):
+    ra, dec = np.deg2rad(float(ra_deg)), np.deg2rad(float(dec_deg))
+
+    return np.array([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
+
+
+def _radec_deg(s):
+    """Unit vectors ``(n, 3)`` to RA in ``[0, 360)`` and Dec, in degrees."""
+
+    ra = np.rad2deg(np.arctan2(s[:, 1], s[:, 0])) % 360.0
+    dec = np.rad2deg(np.arcsin(np.clip(s[:, 2], -1.0, 1.0)))
+
+    return ra, dec
+
+
+def _annual_aberration(t):
+    """``erfa.ab``'s velocity, Sun distance and Lorentz factor for skyfield times."""
+
+    pvh, pvb = erfa.epv00(t.whole, t.tdb_fraction)
+    v = pvb["v"] / erfa.DC  # barycentric velocity in units of c
+
+    return v, np.linalg.norm(pvh["p"], axis=-1), np.sqrt(1.0 - np.sum(v * v, axis=-1))

@@ -779,6 +779,27 @@ class TestLightCurveInputs:
 
         assert self._mod().resolve_ms_path(args, config).endswith("sim_run/sim_run.ms")
 
+    @pytest.mark.parametrize("argv, config, want", [
+        (["-ms", "o.ms", "-n", "1"], None, "apparent"),
+        (["-ms", "o.ms", "-n", "1", "--phase-tracking", "j2000"], None, "j2000"),
+        (["-c", "c.yaml"], {}, "apparent"),
+        (["-c", "c.yaml"], {"tabsim": {"phase_tracking": "j2000"}}, "j2000"),
+        (["-c", "c.yaml", "--phase-tracking", "apparent"],
+         {"tabsim": {"phase_tracking": "j2000"}}, "apparent"),
+        (["-c", "c.yaml", "--phase-tracking", "j2000"], {"tabsim": None}, "j2000"),
+        *[(["-c", "c.yaml"], {"tabsim": {"phase_tracking": v}}, ValueError)
+          for v in (None, False, 0, "", [])],
+        (["-c", "c.yaml", "--phase-tracking", "j2000"], {"tabsim": False}, ValueError),
+    ])
+    def test_phase_tracking_precedence_and_validation(self, argv, config, want):
+        """The flag, else the config as given -- never a falsy value read as the default."""
+        args = _parse("light-curve", *argv)
+        if want is ValueError:
+            with pytest.raises(ValueError, match="tabsim"):
+                self._mod().resolve_phase_tracking(args, config)
+        else:
+            assert self._mod().resolve_phase_tracking(args, config) == want
+
     def test_the_flag_beats_the_config_for_the_elevation_cut(self):
         args = _parse("light-curve", "-c", "c.yaml", "--min-elevation", "20")
         assert self._mod().resolve_min_elevation(args, {"rfi": {"min_elevation": 0}}) == 20.0

@@ -1,4 +1,6 @@
-from tabascal.time import mjd_to_jd, gast_deg
+from tabascal.time import mjd_to_jd, skyfield_time
+
+from skyfield.framelib import itrs
 
 from jax import checkpoint, jit, lax, Array
 import jax.numpy as jnp
@@ -65,8 +67,11 @@ def itrf_to_uvw_numpy(itrf: NDArray, h0: NDArray, dec: float) -> NDArray:
         Antenna positions in the ITRF frame in units of metres.
     h0: Array (n_time,)
         The hour angle of the target in decimal degrees.
-    dec: float
-        The declination of the target in decimal degrees.
+    dec: float or Array (n_time,)
+        The declination of the target in decimal degrees. It must be on the
+        same equator as ``h0``: with a Greenwich hour angle from GAST, that is
+        the true equator of date (see
+        :func:`tabascal.time.apparent_radec_of_date`), not J2000.
 
     Returns
     -------
@@ -103,51 +108,6 @@ def itrf_to_uvw_numpy(itrf: NDArray, h0: NDArray, dec: float) -> NDArray:
     return uvw
 
 
-def Rotz_numpy(theta: float) -> NDArray:
-    """
-    Define a rotation matrix about the 'z-axis' by an angle theta, in degrees.
-
-    Parameters
-    ----------
-    theta: float
-        Rotation angle in degrees.
-
-    Returns
-    -------
-    R: ndarray (3, 3)
-        Rotation matrix.
-    """
-    theta = np.asarray(theta).flatten()[0]
-    c = np.cos(np.deg2rad(theta))
-    s = np.sin(np.deg2rad(theta))
-    Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
-
-    return Rz
-
-
-def xyz_to_itrf_numpy(xyz: NDArray, gsa: NDArray) -> NDArray:
-    """Transform coordinates from the ECI frame to the ITRF (ECEF) frame that is fixed with the Earth.
-
-    Parameters
-    ----------
-    xyz : Array (n_time, 3)
-        ECI coordinates in metres.
-    gsa : Array (n_time,)
-        Greenwich sidereal time in degrees.
-
-    Returns
-    -------
-    Array (n_time, 3)
-        ITRF (ECEF) coordinates in metres.
-    """
-
-    xyz = np.atleast_2d(xyz)
-    gsa = np.atleast_1d(gsa)
-    itrf = np.array([Rotz_numpy(-g) @ x for x, g in zip(xyz, gsa)])
-
-    return itrf
-
-
 def calculate_fringe_frequency_numpy(
     times_mjd: NDArray,
     freq: float,
@@ -165,13 +125,14 @@ def calculate_fringe_frequency_numpy(
     freq : float
         Observational frequency in Hz.
     rfi_xyz : NDArray (n_time, 3)
-        Position of the RFI source in the ECI frame in metres.
+        Position of the RFI source in the GCRS frame in metres. It is turned
+        Earth-fixed by skyfield's full GCRS-to-ITRS rotation.
     ants_itrf : NDArray (n_ant, 3)
         Antenna positions in the ITRF (ECEF) frame in metres.
     ants_u : NDArray (n_time, n_ant)
         U component of the antennas in UVW frame in metres.
-    dec : float
-        Phase centre declination in degrees.
+    dec : float or NDArray (n_time,)
+        Phase centre declination of date in degrees, as ``ants_u`` was built with.
 
     Returns
     -------
@@ -180,10 +141,10 @@ def calculate_fringe_frequency_numpy(
     """
 
     lam = C / freq
-    gsa = gast_deg(mjd_to_jd(times_mjd))  # GAST in degrees (UTC convention)
+    rot = np.reshape(itrs.rotation_at(skyfield_time(mjd_to_jd(times_mjd))), (3, 3, -1))
     times = (times_mjd - times_mjd[0]) * 24 * 3600
 
-    r_ecef = xyz_to_itrf_numpy(rfi_xyz, gsa)  # type: ignore
+    r_ecef = np.einsum("ijt,tj->ti", rot, np.atleast_2d(rfi_xyz))
     s_ecef = r_ecef - np.mean(ants_itrf, axis=0)
     s_hat_ecef = s_ecef / np.linalg.norm(s_ecef, axis=-1, keepdims=True)
     s_hat_dot = np.gradient(s_hat_ecef, np.diff(times[:2])[0], axis=0)
@@ -193,7 +154,7 @@ def calculate_fringe_frequency_numpy(
     bl_u = ants_u[:, a1] - ants_u[:, a2]
 
     fringe_move = np.einsum("bi,ti->tb", bl_ecef, s_hat_dot) / lam
-    fringe_stat = -bl_u * Omega_e * np.cos(np.deg2rad(dec)) / lam
+    fringe_stat = -bl_u * Omega_e * np.cos(np.deg2rad(np.atleast_1d(dec)))[:, None] / lam
     fringe_freq = fringe_move - fringe_stat
 
     return fringe_freq
