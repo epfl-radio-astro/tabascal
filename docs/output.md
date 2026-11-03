@@ -36,13 +36,13 @@ out_dir/
 * `config.yaml` is the configuration the run used, with the base defaults merged in, the command-line flags applied and every input path — the MS, gain tables, truth zarr, `rfi.est`, `gains.init`, `data.noise`, `ast.point_sources`, the orbit directory and NORAD ID file — made absolute. `data.out_dir` stays the parent, so `tabascal run -c <run>/config.yaml -n again` repeats the run into a new sibling directory.
 * `run.json` holds the command line, working directory, host, the versions of tabascal and the libraries that decide what it computes, the PRNG seed, a fingerprint of each input, and a `status`: `running` from the start, then `finished` or `failed` (with the error).
 
-The fingerprints are what let a later command say whether the inputs are still the ones the run read. A file is recorded by size and modification time, plus a SHA-256 below 64 MiB; a directory — a gain table, a zarr, an orbit directory — by the sizes and modification times of every file in it. The MS is the exception: `tab2MS` writes columns into it, so its files change with every export. What is recorded instead is what the run read from it — the number of rows, the `TIME` column, the channel frequencies, the antennas and the correlations. `tab2MS` and `tabascal rfi-per-sat` recompute them and warn, naming the input, when one has changed.
+The fingerprints are what let a later command say whether the inputs are still the ones the run read. A file below 64 MiB is recorded by its size and SHA-256, so a copy with the same contents still matches; a larger one by size and modification time. A directory — a gain table, a zarr — is recorded by the sizes and modification times of every file in it, and an orbit directory by its `*.json` files alone, which is all the orbit resolver reads from it. The MS is the exception: `tab2MS` writes columns into it, so its files change with every export. What is recorded instead is what the run read from it — the number of rows, the `TIME` column, the channel frequencies, the antennas and the correlations. `tab2MS` and `tabascal rfi-per-sat` recompute them and warn, naming the input, when one has changed.
 
 The log is written as the run goes, so it is there to watch while the run is still going and it survives a run that dies. It holds the console output up to — but not including — the memory-usage and timings summaries, which are printed after the log has been closed and so reach the console only. `-nl` turns it off.
 
 `runs/latest` is a relative symbolic link to the most recently *started* run, replaced atomically as each run starts, so `tab2MS runs/latest` exports the run just made. With several runs going at once it names whichever started last, not whichever finished.
 
-### Cleaning up
+## Cleaning up
 
 Delete whole run directories, never files inside one: a run directory is a record, and one with its `results/` removed but its `run.json` saying `finished` is a record of something that is not there.
 
