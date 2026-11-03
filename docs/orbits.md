@@ -193,12 +193,16 @@ accuracy. The observation-specific replacement is tracked in
 ## Exact replay
 
 Every run saves the exact records it used to
-`<out_dir>/results/used_orbits_<name>.json`. To reproduce those trajectory
-priors, copy or retain that file and pass its directory to a later run:
+`<run>/results/used_orbits.json`, inside its own run directory. To reproduce
+those trajectory priors, pass that `results/` directory to a later run — it
+only reads the earlier run, so the two stay separate:
 
 ```bash
-tabascal run -c path/to/config.yaml -ms path/to/data.ms --extra-orbit-dir /path/to/saved-run
+tabascal run -c path/to/config.yaml -n replay -ms path/to/data.ms --extra-orbit-dir path/to/runs/first_20261103T091500_3fa2c1/results
 ```
+
+The run's `config.yaml` and `--extra-orbit-dir <run>/results` together repeat
+it: `tabascal run -c <run>/config.yaml -n replay --extra-orbit-dir <run>/results`.
 
 The default `extra_orbit_max_age_days: null` deliberately exempts explicit
 replay files from the remote age ceiling.
@@ -272,7 +276,7 @@ of format. Invalid rows do not poison unrelated satellites; the unresolved ID
 falls through to the managed cache and SatChecker.
 
 The column-oriented JSON written by `pandas.DataFrame.to_json()` is also
-accepted. In particular, TABASCAL's `used_orbits_<name>.json` replay files can
+accepted. In particular, TABASCAL's `used_orbits.json` replay files can
 be placed directly in this directory. Other files and subdirectories are
 ignored; only `*.json` files immediately inside `extra_orbit_dir` are read.
 
@@ -293,7 +297,7 @@ A run consumes the directory like any other: point `satellites.extra_orbit_dir`
 at it (or pass `--extra-orbit-dir`), and each shifted record wins outright for
 its own NORAD id, ahead of the managed cache and SatChecker, under the default
 unlimited `extra_orbit_max_age_days`. The run log's per-satellite provenance line
-says `from extra_orbit_dir`, and `used_orbits_<name>.json` records the lines
+says `from extra_orbit_dir`, and the run's `used_orbits.json` records the lines
 actually propagated, so what was modelled can be read back afterwards.
 
 `tabascal search` writes the same records for every satellite it detects, into

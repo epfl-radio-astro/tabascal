@@ -190,7 +190,7 @@ def plot_predictions(
     pred,
     truth,
     type: str = "",
-    model_name: str = "",
+    run_name: str = "",
     max_plots: int = 10,
     save_dir: str = "plots/",
 ):
@@ -211,7 +211,7 @@ def plot_predictions(
         true=truth["vis_ast"][:, 0],
         rmse=rmse_ast,
         name="Ast. Vis.",
-        save_name=f"{model_name}_{type}_ast_vis",
+        save_name=f"{run_name}_{type}_ast_vis",
         max_plots=max_plots,
         save_dir=save_dir,
     )
@@ -222,7 +222,7 @@ def plot_predictions(
         true=truth["vis_rfi"][:, 0],
         rmse=rmse_rfi,
         name="RFI Vis.",
-        save_name=f"{model_name}_{type}_rfi_vis",
+        save_name=f"{run_name}_{type}_rfi_vis",
         diff=False,  # True,
         max_plots=max_plots,
         save_dir=save_dir,
@@ -234,7 +234,7 @@ def plot_predictions(
         true=truth["gains"][:, 0],
         rmse=rmse_gains,
         name="Gains",
-        save_name=f"{model_name}_{type}_gains",
+        save_name=f"{run_name}_{type}_gains",
         diff=False,
         max_plots=max_plots,
         save_dir=save_dir,
@@ -242,7 +242,7 @@ def plot_predictions(
 
 
 @measure_runtime
-def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_dir: str):
+def plot_init(tab_config, init_pred: dict, truth: dict, run_name: str, plot_dir: str):
 
     start = datetime.now()
     print()
@@ -252,7 +252,7 @@ def plot_init(tab_config, init_pred: dict, truth: dict, model_name: str, plot_di
         pred=init_pred,
         truth=truth,
         type="init",
-        model_name=model_name,
+        run_name=run_name,
         max_plots=10,
         save_dir=plot_dir,
     )
@@ -266,7 +266,7 @@ def plot_prior(
     tab_config,
     prob_model: Callable,
     truth: dict,
-    model_name: str,
+    run_name: str,
     subkey: jax.Array,
     plot_dir: str,
     state=None,
@@ -285,7 +285,7 @@ def plot_prior(
         pred=prior_pred,
         truth=truth,
         type="prior",
-        model_name=model_name,
+        run_name=run_name,
         max_plots=10,
         save_dir=plot_dir,
     )
@@ -295,7 +295,7 @@ def plot_prior(
 
 
 @measure_runtime
-def plot_opt(tab_config, vi_pred, truth, model_name, plot_dir):
+def plot_opt(tab_config, vi_pred, truth, run_name, plot_dir):
 
     start = datetime.now()
 
@@ -304,7 +304,7 @@ def plot_opt(tab_config, vi_pred, truth, model_name, plot_dir):
         pred=vi_pred,
         truth=truth,
         type=tab_config.args["opt"]["guide"],
-        model_name=model_name,
+        run_name=run_name,
         max_plots=10,
         save_dir=plot_dir,
     )
@@ -315,7 +315,7 @@ def plot_opt(tab_config, vi_pred, truth, model_name, plot_dir):
 
 
 @measure_runtime
-def plot_losses(losses, model_name, plot_dir):
+def plot_losses(losses, run_name, plot_dir):
 
     start = datetime.now()
 
@@ -329,7 +329,7 @@ def plot_losses(losses, model_name, plot_dir):
     else:
         ax.set_yscale("log")
     plt.savefig(
-        os.path.join(plot_dir, f"{model_name}_opt_loss.pdf"),
+        os.path.join(plot_dir, f"{run_name}_opt_loss.pdf"),
         format="pdf",
         bbox_inches="tight",
     )

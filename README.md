@@ -60,11 +60,14 @@ TABASCAL runs are defined by a YAML configuration file. To run it on a
 Measurement Set:
 
 ```bash
-tabascal run -c path/to/config.yaml -ms path/to/file.ms
+tabascal run -c path/to/config.yaml -n first -ms path/to/file.ms
 ```
 
-Products go to `plots/` and `results/` beside the Measurement Set. Pass
-`-od path/to/output_dir`, or set `data.out_dir`, to write them elsewhere.
+Each run gets its own directory, `runs/<name>_<YYYYmmddTHHMMSS>_<token>/`
+beside the Measurement Set, holding its resolved config, a `run.json` record,
+the log, `plots/` and `results/`. Pass `-od path/to/output_dir`, or set
+`data.out_dir`, to put `runs/` elsewhere. `tab2MS path/to/runs/latest` exports
+a run's results into the Measurement Set again.
 
 The results are written to a `.zarr` file and then transferred into the
 Measurement Set as the `TAB_AST_DATA`, `TAB_RFI_DATA`, `TAB_AST_RES`,

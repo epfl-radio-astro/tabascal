@@ -22,9 +22,8 @@ columns. Those cases need a real MS on disk to copy subtables out of
 (``ms_skeleton``) and are skipped where casacore is not installed.
 
 ``write_results_xds`` is covered here too, for the one thing the writer reads
-back out of it: which correlation the run fitted. So is the writer's own command
-line, ``tab2MS``, for the arguments that have to reach the writer to mean
-anything.
+back out of it: which correlation the run fitted. ``tab2MS``, which reads its
+arguments from a run directory, is covered in ``test_run_dir.py``.
 
 No jax runs here: the writer works in ``complex64`` in either session
 precision, so the tolerances come from float32 round-off (``_tolerances``) and
@@ -41,7 +40,6 @@ import dask.array as da
 import xarray as xr
 
 import tabascal.ms as ms_mod
-import tabascal.scripts.results_to_MS as tab2ms_mod
 import tabascal.write as write_mod
 from tabascal.ms import read_caltable
 from tabascal.write import write_results_ms, write_results_xds
@@ -2503,7 +2501,7 @@ class TestNothingIsExportedWithoutAFit:
 
 
 class TestACustomCaltablePath:
-    """``tab2MS -o``: one path, authoritative everywhere.
+    """``caltable_path``: one path, authoritative everywhere.
 
     The default ``<results>.B`` is derived from the results zarr, and the
     clean-up that removes a superseded table used to derive it a second time.
@@ -2688,37 +2686,6 @@ class TestACustomCaltablePath:
         tables = pytest.importorskip("casacore.tables")
         with tables.table(os.path.join(ms_skeleton, "ANTENNA"), ack=False) as ant:
             assert ant.nrows() == N_ANT
-
-
-class TestTheTab2MSArguments:
-    """``tab2MS``'s own surface: what the flags parse to and what they call."""
-
-    def _args(self, *argv):
-        return tab2ms_mod.build_parser().parse_args(
-            ["-m", "a.ms", "-z", "r.zarr", *argv]
-        )
-
-    def test_the_caltable_path_is_optional(self):
-        """No flag, no override: the export keeps deriving ``<results>.B``."""
-
-        assert self._args().caltable_path is None
-
-    @pytest.mark.parametrize("flag", ["-o", "--caltable-path"])
-    def test_both_spellings_set_it(self, flag):
-        assert self._args(flag, "/cal/solution.B").caltable_path == "/cal/solution.B"
-
-    def test_it_is_handed_to_the_writer(self, monkeypatch):
-        """Parsed and passed on, rather than parsed and dropped."""
-
-        captured = {}
-        monkeypatch.setattr(
-            write_mod, "write_results_ms", lambda **kw: captured.update(kw)
-        )
-
-        tab2ms_mod.run(self._args("-o", "/cal/solution.B"))
-
-        assert captured["caltable_path"] == "/cal/solution.B"
-        assert captured["results_zarr_path"] == "r.zarr"
 
 
 # ---------------------------------------------------------------------------
