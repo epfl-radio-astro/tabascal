@@ -34,7 +34,7 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
-from tabascal.write import write_results_xds
+from tabascal.write import check_input_column, write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 from tabascal.scripts._config_paths import config_is_unset, config_path
@@ -385,6 +385,12 @@ SEED = 1
 def tabascal_subtraction(
     config, out_dir, ms_path=None, name=None, extra_orbit_dir=None, norad_path=None, log=True
 ):
+    # Before the run directory exists: a config whose exports would replace
+    # its own input is not a run that failed, it is one that cannot start.
+    check_input_column(
+        config["data"].get("data_col", "DATA"),
+        config["data"].get("save_rfi_per_sat", False),
+    )
     paths = _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path)
 
     try:
