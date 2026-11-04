@@ -864,11 +864,12 @@ class TestTheDefaultPhasePriorCoversTheCircle:
 
 class TestDegeneracyWarning:
 
-    def test_warns_with_a_per_antenna_rfi_amplitude(self):
-        with pytest.warns(UserWarning, match="ComplexRFIVarAntFine"):
+    @pytest.mark.parametrize("signal", ["ComplexRFIVarAnt", "ComplexRFIVarAntFine"])
+    def test_warns_with_a_per_antenna_rfi_amplitude(self, signal):
+        with pytest.warns(UserWarning, match=rf"\b{signal}\b"):
             ConstGains().setup(
                 make_const_gains_config(
-                    components=("rfi_signal:ComplexRFIVarAntFine", "gains:ConstGains")
+                    components=(f"rfi_signal:{signal}", "gains:ConstGains")
                 )
             )
 
@@ -881,15 +882,16 @@ class TestDegeneracyWarning:
             )
 
         message = str(record[0].message)
-        assert "ComplexRFIConstAntFine" in message
+        assert "ComplexRFIConstAnt" in message
         assert "#124" in message
 
-    def test_does_not_warn_with_a_constant_antenna_rfi_amplitude(self):
+    @pytest.mark.parametrize("signal", ["ComplexRFIConstAnt", "ComplexRFIConstAntFine"])
+    def test_does_not_warn_with_a_constant_antenna_rfi_amplitude(self, signal):
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
             ConstGains().setup(
                 make_const_gains_config(
-                    components=("rfi_signal:ComplexRFIConstAntFine", "gains:ConstGains")
+                    components=(f"rfi_signal:{signal}", "gains:ConstGains")
                 )
             )
 

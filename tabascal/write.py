@@ -1258,8 +1258,10 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
 
     The RFI visibility op reduces over the satellite (``n_rfi``) axis, so each
     source's contribution is recovered by evaluating the **same** op with every
-    other source's amplitude held at zero -- on the already-fitted fine-grid
-    ``rfi_A`` and ``rfi_phase`` carried in ``vi_pred``. No re-fit, no GP
+    other source's amplitude held at zero -- on the already-fitted ``rfi_A`` and
+    ``rfi_phase`` carried in ``vi_pred``, on the fine grid or, for
+    ``rfi_vis:AnalyticVis``, on the data grid with ``rfi_delay_poly_us`` beside
+    them. No re-fit, no GP
     re-evaluation, and no second model: the component is the run's own, rebuilt
     from ``model.components`` (see :func:`_rfi_vis_reference`).
 
@@ -1322,6 +1324,8 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     forward = comp.build_forward()
 
     rfi_A, rfi_phase = vi_pred["rfi_A"], vi_pred["rfi_phase"]
+    # Only the data-grid route carries it; an empty dict leaves the state alone.
+    extra = {k: vi_pred[k] for k in ("rfi_delay_poly_us",) if k in vi_pred}
     vis_rfi = vi_pred["vis_rfi"]
     n_sample, n_rfi = rfi_A.shape[:2]
     shape, dtype, norad_ids = per_sat_layout(vi_pred, tab_config)
@@ -1332,7 +1336,7 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     # reshape the op makes of rfi_A anyway, instead of leaving a second
     # full-size copy of the fine grid resident beside it.
     @jax.jit
-    def one_source(mask, rfi_A, rfi_phase, vis_zero):
+    def one_source(mask, rfi_A, rfi_phase, vis_zero, extra):
         # where, not a multiply by 0/1: a masked source is then exactly zero even
         # where the fitted grid is not finite, since 0 * inf and 0 * nan are nan
         # and one bad source would poison every other source's column -- the same
@@ -1344,6 +1348,7 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
             "rfi_A": jnp.where(mask, rfi_A, 0),
             "rfi_phase": jnp.where(mask, rfi_phase, 0),
             "vis_rfi": vis_zero,
+            **{k: jnp.where(mask, v, 0) for k, v in extra.items()},
         }
 
         return forward({}, constrain_rfi_state(state, n_rfi), constants)["vis_rfi"]
@@ -1366,7 +1371,8 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
         vis_zero = jnp.zeros_like(vis_rfi[s])
         for r in range(n_real):
             vis = one_source(
-                _source_mask(r, n_rfi), rfi_A[s], rfi_phase[s], vis_zero
+                _source_mask(r, n_rfi), rfi_A[s], rfi_phase[s], vis_zero,
+                {k: v[s] for k, v in extra.items()},
             )
 
             # The evaluation is unconditional; only what happens to the block is

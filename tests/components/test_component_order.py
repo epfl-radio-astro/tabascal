@@ -260,6 +260,7 @@ EXPECTED_LOCATIONS = {
     "ci/reframe/data/tab_target.yaml": 1,
     "examples/tab_target.yaml": 1,
     "tests/data/tab_target.yaml": 1,
+    "docs/analytic_rfi_vis.md": 1,
     "docs/config.md": 3,
     "docs/kernels.md": 1,
 }
