@@ -39,7 +39,7 @@ def build_parser(parser=None):
         "'rfi_vis_src', which a run writes when data.save_rfi_per_sat is true.",
     )
     parser.add_argument(
-        "-m", "--ms_path", default=None,
+        "-ms", "--ms_path", default=None,
         help="Use this Measurement Set rather than the one the run recorded, "
         "e.g. after moving it. Warns when it differs.",
     )

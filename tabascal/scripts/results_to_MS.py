@@ -30,7 +30,7 @@ def build_parser():
         "names the most recently started one.",
     )
     parser.add_argument(
-        "-m", "--ms_path", default=None,
+        "-ms", "--ms_path", default=None,
         help="Use this Measurement Set rather than the one the run recorded, "
         "e.g. after moving it. Warns when it differs.",
     )

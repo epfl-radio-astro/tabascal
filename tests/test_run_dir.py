@@ -178,7 +178,7 @@ def test_tab2ms_exports_what_the_run_did(tmp_path, monkeypatch, opt, max_iter, e
     assert captured.get("caltable_path") is None
 
 
-@pytest.mark.parametrize("flag, field", [("-m", "ms_path"), ("-gt", "gain_table")])
+@pytest.mark.parametrize("flag, field", [("-ms", "ms_path"), ("-gt", "gain_table")])
 def test_tab2ms_warns_when_an_override_differs(tmp_path, monkeypatch, recwarn, flag, field):
     """And fingerprints the override: a moved gain table identical to the recorded one is fine."""
     recorded = tmp_path / "flux.B"
@@ -195,7 +195,7 @@ def test_tab2ms_warns_when_an_override_differs(tmp_path, monkeypatch, recwarn, f
     messages = [str(w.message) for w in recwarn]
     assert any(m.startswith(f"data.{field}: using") and str(moved) in m for m in messages)
     assert captured[field] in (str(moved), [str(moved)])
-    # Only the -m run still compares the recorded table, which is gone.
+    # Only the -ms run still compares the recorded table, which is gone.
     changed = [m for m in messages if "is not what the run read" in m]
     assert len(changed) == (0 if flag == "-gt" else 1)
     assert all("data.gain_table[0]" in m for m in changed)
@@ -208,6 +208,6 @@ def test_tab2ms_warns_when_an_override_differs(tmp_path, monkeypatch, recwarn, f
 )
 def test_tab2ms_old_flags_name_the_new_command(capsys, old):
     with pytest.raises(SystemExit):
-        results_to_MS.build_parser().parse_args(["-m", "a.ms", *old])
+        results_to_MS.build_parser().parse_args(["-ms", "a.ms", *old])
 
     assert "tab2MS <out_dir>/runs/<run>" in capsys.readouterr().err

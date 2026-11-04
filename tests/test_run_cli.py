@@ -431,12 +431,12 @@ class TestRfiPerSatSubcommand:
         assert (args.prefix, args.corr) == ("TAB_RFI_", None)
 
     def test_the_overrides_can_be_given(self):
-        args = _parse("rfi-per-sat", "r", "-m", "o.ms", "-p", "RFI_SRC_", "-c", "yy")
+        args = _parse("rfi-per-sat", "r", "-ms", "o.ms", "-p", "RFI_SRC_", "-c", "yy")
         assert (args.ms_path, args.prefix, args.corr) == ("o.ms", "RFI_SRC_", "yy")
 
     def test_the_old_zarr_flag_says_what_replaced_it(self, capsys):
         with pytest.raises(SystemExit):
-            _parse("rfi-per-sat", "-m", "o.ms", "-z", "map_pred.zarr")
+            _parse("rfi-per-sat", "-ms", "o.ms", "-z", "map_pred.zarr")
 
         assert "rfi-per-sat <out_dir>/runs/<run>" in capsys.readouterr().err
 

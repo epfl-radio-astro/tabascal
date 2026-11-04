@@ -165,7 +165,7 @@ tab2MS out_dir/runs/sweep_20261103T091500_3fa2c1
 tab2MS out_dir/runs/latest
 ```
 
-Everything else comes from the run's `config.yaml`: the MS, the data column, the gain tables, and which results — `map_pred` if the run optimised, `init_pred` if it did not, as the run itself did. The calibration table goes into the run's `results/`. Two overrides remain, for inputs that have moved since: `-m` names the MS and `-gt` the gain tables, each warning when it differs from what the run recorded. The fingerprints are checked either way.
+Everything else comes from the run's `config.yaml`: the MS, the data column, the gain tables, and which results — `map_pred` if the run optimised, `init_pred` if it did not, as the run itself did. The calibration table goes into the run's `results/`. Two overrides remain, for inputs that have moved since: `-ms` names the MS and `-gt` the gain tables, each warning when it differs from what the run recorded. The fingerprints are checked either way.
 
 ### Writing results for a run that used a gain table
 
@@ -192,7 +192,7 @@ The predictions above are averaged over the `sample` axis of the results `.zarr`
 tabascal rfi-per-sat out_dir/runs/latest
 ```
 
-`tab2MS-persat` is the same tool under the name that matches `tab2MS`, and `-p` changes the `TAB_RFI_` prefix. It takes the run directory as `tab2MS` does, the same results zarr, the same `-m` override and the same fingerprint check. It reads `rfi_vis_src` back out of the zarr and needs nothing else: no re-fit and no gain tables — so the export can be made long after the run, and re-made. A run that did not store the decomposition is an error saying which option produces one.
+`tab2MS-persat` is the same tool under the name that matches `tab2MS`, and `-p` changes the `TAB_RFI_` prefix. It takes the run directory as `tab2MS` does, the same results zarr, the same `-ms` override and the same fingerprint check. It reads `rfi_vis_src` back out of the zarr and needs nothing else: no re-fit and no gain tables — so the export can be made long after the run, and re-made. A run that did not store the decomposition is an error saying which option produces one.
 
 **What they are for.** Image one column at a time. A real satellite is a clean streak in exactly one per-source image; a feature that shows up in several is astronomical flux the RFI model has split across satellites. Reduced chi² cannot see that — a fixed total split differently between sources costs it nothing — so the per-source images are the diagnostic for it.
 
