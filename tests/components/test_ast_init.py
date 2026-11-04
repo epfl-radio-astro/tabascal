@@ -261,7 +261,7 @@ def test_ast_mean_zero_and_zeros_are_the_same_prior(tmp_path):
 # ---------------------------------------------------------------------------
 # The baseline block scan
 #
-# latent_to_signal pads the latent grid up to the padded k-grid, transforms and
+# Under ast.transform: fft, latent_to_signal pads the latent grid up to the padded k-grid, transforms and
 # crops back, so vmapping it over every baseline holds (n_bl, n_freq_pad,
 # n_time_pad) several times over -- padding the crop then throws away. The
 # component walks the baseline axis in blocks of ast.baseline_block_size
@@ -321,6 +321,8 @@ def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path)
 
     args = base_args(tmp_path)
     del args["ast"]["baseline_block_size"]
+    # The transform whose grid auto sizes from; under the dft it is one step.
+    args["ast"]["transform"] = "fft"
 
     config = make_ast_config(args)
     comp = GPVisAst()
@@ -333,7 +335,7 @@ def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path)
 def test_auto_blocks_a_padded_grid_that_does_not_fit_the_budget(tmp_path):
     """And binds where the grid is large, which is the case it exists for."""
 
-    comp = setup_ast(ast_config(tmp_path, baseline_block_size="auto"))
+    comp = setup_ast(ast_config(tmp_path, baseline_block_size="auto", transform="fft"))
     padded = 1
     for dim, (lo, hi) in zip((comp.n_k_freq_ast, comp.n_k_time_ast), comp.pads):
         padded *= dim + lo + hi

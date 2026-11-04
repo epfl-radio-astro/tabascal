@@ -1,11 +1,10 @@
-"""``GPVisAstDFT`` -- the astronomical GP with the padded grid never formed.
+"""``ast.transform: dft`` -- the astronomical GP with the padded grid never formed.
 
-The component is :class:`GPVisAst` with one step replaced: the surviving
-Fourier modes reach the visibilities through a matrix per axis rather than
-through a zero-pad, a full inverse FFT of the padded grid and a crop. It is
-therefore held to the FFT component in value and in gradient, not to a
-tolerance of its own, and the transform itself is held to the chain it stands
-for.
+The surviving Fourier modes reach the visibilities through a matrix per axis
+rather than through a zero-pad, a full inverse FFT of the padded grid and a
+crop (``ast.transform: fft``). The DFT is therefore held to the FFT in value
+and in gradient, not to a tolerance of its own, and the transform itself is
+held to the chain it stands for.
 """
 
 import jax
@@ -13,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tabascal.components.ast_vis import GPVisAst, GPVisAstDFT, time_pad_for_fringe_rate
+from tabascal.components.ast_vis import GPVisAst, time_pad_for_fringe_rate
 from tabascal.fft_gp import (
     latent_to_signal,
     latent_to_signal_dft,
@@ -111,8 +110,9 @@ def test_the_matrices_do_not_depend_on_the_working_precision():
 # --- the component ---------------------------------------------------------
 
 
-def _route(cls, config):
-    comp = cls()
+def _route(transform, config):
+    config.args["ast"]["transform"] = transform
+    comp = GPVisAst()
     comp.setup(config)
     forward = comp.build_forward()
     constants = make_constants(comp)
@@ -125,10 +125,10 @@ def _route(cls, config):
 
 
 @pytest.mark.parametrize("block_size", [None, 2])
-def test_the_component_matches_the_fft_component(tmp_path, block_size):
+def test_the_dft_matches_the_fft(tmp_path, block_size):
     config = ast_config(tmp_path, baseline_block_size=block_size)
-    ref_comp, ref_vis = _route(GPVisAst, config)
-    dft_comp, dft_vis = _route(GPVisAstDFT, ast_config(tmp_path, baseline_block_size=block_size))
+    ref_comp, ref_vis = _route("fft", config)
+    dft_comp, dft_vis = _route("dft", ast_config(tmp_path, baseline_block_size=block_size))
 
     # The same prior and the same modes: only the transform differs.
     assert dft_comp.pk.shape == ref_comp.pk.shape
@@ -144,21 +144,21 @@ def test_the_component_matches_the_fft_component(tmp_path, block_size):
     np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol * max(np.abs(expected).max(), 1.0))
 
 
-def test_the_gradients_match_the_fft_component(tmp_path):
+def test_the_dft_gradients_match_the_fft(tmp_path):
     """Reverse mode too: the transpose of a matrix product is not the transpose
     of a pad, a shift and an inverse transform, even where the values agree."""
     config = ast_config(tmp_path)
 
-    def value_and_grad(cls):
-        comp, vis = _route(cls, ast_config(tmp_path))
+    def value_and_grad(transform):
+        comp, vis = _route(transform, ast_config(tmp_path))
 
         def loss(params):
             return jnp.sum(jnp.abs(vis(params)) ** 2)
 
         return jax.grad(loss)(comp.init_params_base)
 
-    ref = value_and_grad(GPVisAst)
-    got = value_and_grad(GPVisAstDFT)
+    ref = value_and_grad("fft")
+    got = value_and_grad("dft")
 
     rtol, atol = _tols()
     for key in ref:
@@ -169,15 +169,15 @@ def test_the_gradients_match_the_fft_component(tmp_path):
         )
 
 
-def test_the_dft_component_has_no_transform_in_its_compiled_program(tmp_path):
-    """The point of the component: no inverse FFT, so no padded grid to hold.
+def test_the_dft_has_no_fft_in_its_compiled_program(tmp_path):
+    """The point of the transform: no inverse FFT, so no padded grid to hold.
 
-    Read off the compiled program rather than timed. The FFT component is
-    compiled beside it, so the check is that the two differ in this, not that
+    Read off the compiled program rather than timed. The FFT is compiled
+    beside it, so the check is that the two differ in this, not that
     some name happens to be absent.
     """
-    fft_comp, fft_vis = _route(GPVisAst, ast_config(tmp_path))
-    dft_comp, dft_vis = _route(GPVisAstDFT, ast_config(tmp_path))
+    fft_comp, fft_vis = _route("fft", ast_config(tmp_path))
+    dft_comp, dft_vis = _route("dft", ast_config(tmp_path))
 
     fft_text = jax.jit(fft_vis).lower(fft_comp.init_params_base).compile().as_text()
     dft_text = jax.jit(dft_vis).lower(dft_comp.init_params_base).compile().as_text()
@@ -188,21 +188,21 @@ def test_the_dft_component_has_no_transform_in_its_compiled_program(tmp_path):
     assert "fft_type" not in dft_text
 
 
-def test_auto_blocking_is_a_single_step(tmp_path):
+def test_auto_blocking_is_a_single_step_under_the_dft(tmp_path):
     """``auto`` exists to bound the padded grid. This transform builds none,
     and the scan's own stack of outputs costs memory, so blocking it is worse
     on both counts and ``auto`` should not do it."""
-    comp, _ = _route(GPVisAstDFT, ast_config(tmp_path, baseline_block_size="auto"))
+    comp, _ = _route("dft", ast_config(tmp_path, baseline_block_size="auto"))
 
     assert comp.baseline_block_size == comp.n_bl
 
 
 def test_an_explicit_block_is_still_honoured(tmp_path):
     """The way to trade the room back if another part of a model wants it."""
-    comp, vis = _route(GPVisAstDFT, ast_config(tmp_path, baseline_block_size=2))
+    comp, vis = _route("dft", ast_config(tmp_path, baseline_block_size=2))
     assert comp.baseline_block_size == 2
 
-    single, single_vis = _route(GPVisAstDFT, ast_config(tmp_path, baseline_block_size=None))
+    single, single_vis = _route("dft", ast_config(tmp_path, baseline_block_size=None))
     rtol, atol = _tols()
     np.testing.assert_allclose(
         np.asarray(vis(comp.init_params_base)),
@@ -220,7 +220,7 @@ def test_one_pair_of_matrices_serves_every_baseline(tmp_path):
     that gave the matrices a baseline axis would cost ``n_bl`` times their
     size and would not be visible in any value this file checks.
     """
-    comp, _ = _route(GPVisAstDFT, ast_config(tmp_path))
+    comp, _ = _route("dft", ast_config(tmp_path))
 
     n_out = [comp.n_freq, comp.n_time]
     n_k = [comp.n_k_freq_ast, comp.n_k_time_ast]
@@ -229,7 +229,7 @@ def test_one_pair_of_matrices_serves_every_baseline(tmp_path):
         assert mat.shape == (n_k[axis], n_out[axis])
 
     # And the transform broadcasts them rather than mapping over them.
-    bigger, _ = _route(GPVisAstDFT, ast_config(tmp_path))
+    bigger, _ = _route("dft", ast_config(tmp_path))
     for small, large in zip(comp.dft_mats, bigger.dft_mats):
         assert small.shape == large.shape
 
@@ -247,16 +247,16 @@ def _random_latent(comp, seed=3):
 
 
 @pytest.mark.parametrize("time_pad_factor", [2.0, 8.0, 16.0])
-def test_the_component_matches_the_fft_component_at_wide_time_padding(tmp_path, time_pad_factor):
+def test_the_dft_matches_the_fft_at_wide_time_padding(tmp_path, time_pad_factor):
     """A time_pad_factor of 8 removes a start/end-of-pass excess in long passes
     and quadruples the padded grid, which is the case this component is for. The modes it keeps
     grow with the padding, so 2 alone does not cover the matrices it builds there."""
-    ref_comp, ref_vis = _route(GPVisAst, ast_config(tmp_path, time_pad_factor=time_pad_factor))
-    dft_comp, dft_vis = _route(GPVisAstDFT, ast_config(tmp_path, time_pad_factor=time_pad_factor))
+    ref_comp, ref_vis = _route("fft", ast_config(tmp_path, time_pad_factor=time_pad_factor))
+    dft_comp, dft_vis = _route("dft", ast_config(tmp_path, time_pad_factor=time_pad_factor))
 
     assert dft_comp.pk.shape == ref_comp.pk.shape
     if time_pad_factor > 2:
-        narrow, _ = _route(GPVisAst, ast_config(tmp_path, time_pad_factor=2.0))
+        narrow, _ = _route("fft", ast_config(tmp_path, time_pad_factor=2.0))
         assert ref_comp.n_k_time_ast > narrow.n_k_time_ast
 
     params = _random_latent(ref_comp)
@@ -268,9 +268,9 @@ def test_the_component_matches_the_fft_component_at_wide_time_padding(tmp_path, 
 
 
 @pytest.mark.parametrize("time_pad_factor", [2.0, 8.0, 16.0])
-def test_the_gradients_match_the_fft_component_at_wide_time_padding(tmp_path, time_pad_factor):
-    ref_comp, ref_vis = _route(GPVisAst, ast_config(tmp_path, time_pad_factor=time_pad_factor))
-    _, dft_vis = _route(GPVisAstDFT, ast_config(tmp_path, time_pad_factor=time_pad_factor))
+def test_the_dft_gradients_match_the_fft_at_wide_time_padding(tmp_path, time_pad_factor):
+    ref_comp, ref_vis = _route("fft", ast_config(tmp_path, time_pad_factor=time_pad_factor))
+    _, dft_vis = _route("dft", ast_config(tmp_path, time_pad_factor=time_pad_factor))
     params = _random_latent(ref_comp)
     # A loss with data in it, so the gradient is not a multiple of the value.
     target = np.asarray(ref_vis(_random_latent(ref_comp, seed=4)))
@@ -331,3 +331,12 @@ def test_auto_reaches_the_slowest_baseline_and_no_less_than_the_floor(tmp_path, 
 def test_a_time_pad_factor_that_is_neither_a_factor_nor_auto_is_refused(tmp_path, bad):
     with pytest.raises(RuntimeError, match="time_pad_factor"):
         GPVisAst().setup(ast_config(tmp_path, time_pad_factor=bad))
+
+
+def test_the_transform_defaults_to_the_dft_and_refuses_anything_else(tmp_path):
+    comp = GPVisAst()
+    comp.setup(ast_config(tmp_path))
+    assert comp.transform == "dft"
+
+    with pytest.raises(RuntimeError, match="ast.transform"):
+        GPVisAst().setup(ast_config(tmp_path, transform="nufft"))

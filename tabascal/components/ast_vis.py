@@ -42,6 +42,12 @@ _DEFAULT_PK_CUTOFF = 1e-6
 #: less than an unconfigured run does.
 _AUTO_TIME_PAD_FLOOR = 2.0
 
+#: The ``ast.transform`` options. ``dft`` is the default: it holds less than the
+#: padded grid at every size but the smallest, and the sky is not where a run's
+#: time goes -- the RFI visibilities are -- so its quadratic cost in channels is
+#: the lesser concern. ``fft`` is the lever back where that cost does matter.
+_TRANSFORMS = ("dft", "fft")
+
 
 def time_pad_for_fringe_rate(n_time, int_time, fringe_rate):
     """The smallest ``time_pad_factor`` whose first non-zero mode is at most ``fringe_rate``.
@@ -200,6 +206,17 @@ class GPVisAst(Component):
                 )
             self.baseline_block_size_setting = block_size
 
+            # How the surviving modes become visibilities: see
+            # build_block_signal. Both give the same values to round-off.
+            transform = config.args["ast"].get("transform", "dft")
+            if transform not in _TRANSFORMS:
+                raise ValueError(
+                    "ast.transform is how the latent modes become visibilities: "
+                    "'dft', a matrix per axis with no padded grid, or 'fft', "
+                    f"the padded grid's inverse FFT and a crop, got {transform!r}."
+                )
+            self.transform = transform
+
             self.xs = [self.freqs, self.times]
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
             self.ss_factors = [1, 1]
@@ -242,8 +259,7 @@ class GPVisAst(Component):
         """What one baseline costs the transform at its peak, in bytes.
 
         The padded Fourier grid: the pad, the shift and the inverse transform
-        are each of that size. Split out because a transform that does not
-        build it has a different budget -- see :class:`GPVisAstDFT`.
+        are each of that size. Only ``ast.transform: fft`` builds it.
         """
         padded = 1
         for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
@@ -252,11 +268,35 @@ class GPVisAst(Component):
         return padded * jnp.zeros((), dtype=complex).dtype.itemsize
 
     def _resolve_baseline_block_size(self):
-        """Turn the ``baseline_block_size`` setting into a block, or ``None``."""
+        """Turn the ``baseline_block_size`` setting into a block, or ``None``.
+
+        Under ``ast.transform: dft``, ``auto`` is a single step over every
+        baseline. The block exists to bound the padded Fourier grid, and that
+        transform builds none: its only transient is the intermediate of the
+        two matrix products, which is the modes in one axis and the
+        visibilities in the other. What the scan does still cost is the stack
+        of its steps' outputs, so there blocking is worse on both counts.
+        Measured on one GH200, 2016 baselines at 150 integrations, value and
+        gradient together:
+
+        =========  =================  ==================  =================
+        channels   FFT, best block    FFT, single step    DFT, single step
+        =========  =================  ==================  =================
+        8          273.9 MB, 1.0 ms   441.2 MB, 1.0 ms    218.6 MB, 0.2 ms
+        32         828.6 MB, 4.0 ms   1711.2 MB, 3.3 ms   683.8 MB, 0.4 ms
+        128        2386.4 MB, 14.7 ms 5926.7 MB, 12.7 ms  1799.1 MB, 1.1 ms
+        =========  =================  ==================  =================
+
+        An explicit ``baseline_block_size`` is honoured under either transform.
+        """
 
         setting = self.baseline_block_size_setting
         if setting != "auto":
             self.baseline_block_size = None if setting is None else int(setting)
+            return
+
+        if self.transform == "dft":
+            self.baseline_block_size = self.n_bl
             return
 
         per_baseline = self._transform_bytes_per_baseline()
@@ -294,7 +334,7 @@ class GPVisAst(Component):
         """Return pure, JIT-compatible function
 
         The baseline axis is walked in blocks of ``ast.baseline_block_size``
-        rather than vmapped whole. ``latent_to_signal`` pads the latent block up
+        rather than vmapped whole. Under ``ast.transform: fft``, ``latent_to_signal`` pads the latent block up
         to the padded k-grid, shifts, inverse-transforms and crops back, so a
         vmap over every baseline holds ``(n_bl, n_freq_pad, n_time_pad)`` three
         times over -- at the default padding each axis is about twice the data
@@ -319,8 +359,8 @@ class GPVisAst(Component):
         takes the value-and-gradient peak from 1008 MB to 163.5 MB on its own,
         and adding the split takes it back up to 174.5 MB, because the gather
         the visibilities need on the way out makes the backward pass scatter a
-        cotangent the forward has just collected. See issue #209 for the change
-        that would remove the padded grid altogether.
+        cotangent the forward has just collected. ``ast.transform: dft`` removes
+        the padded grid altogether: see :meth:`build_block_signal`.
         """
         prefix = self.prefix
         forward_transform = self.forward_transform
@@ -387,15 +427,74 @@ class GPVisAst(Component):
     def build_block_signal(self):
         """The latent-to-signal transform of one block of baselines.
 
-        Split out so a subclass can replace the transform and nothing else:
-        the priors, the initialisation and the blocking above are the same
-        whichever way the modes are turned into a signal.
+        :func:`~tabascal.fft_gp.latent_to_signal` (``ast.transform: fft``) pads
+        the modes back up to the padded grid, inverse-transforms the whole of it
+        and crops -- at the default padding, about four times the elements of
+        the visibilities formed and thrown away, per block, in the forward pass
+        and again in reverse. The chain is linear and separable, so the same
+        values come out of one small matrix per axis
+        (:func:`~tabascal.fft_gp.latent_to_signal_dft`, ``ast.transform:
+        dft``), and the largest thing formed is the size of the visibilities.
+        The matrices are fixed at setup and shared by every baseline.
+
+        What the matrices cost is quadratic in each axis's length where the FFT
+        is n log n, and with ``corr_freq: null`` every frequency mode survives
+        the cut, so on a wide band the DFT is the slower of the two. On a GTX
+        1060, 66 baselines at 150 integrations, single precision, value and
+        gradient together, each case in its own process:
+
+        =========  ===================  ===================
+        channels   FFT                  DFT
+        =========  ===================  ===================
+        16         3.4 ms, 54 MB        2.7 ms, 119 MB
+        128        36 ms, 452 MB        26 ms, 312 MB
+        512        119 ms, 1280 MB      244 ms, 1036 MB
+        1024       207 ms, 2254 MB      882 ms, 1999 MB
+        2048       out of memory        3343 ms, 3781 MB
+        =========  ===================  ===================
         """
+        if self.transform == "dft":
+            mats = self.dft_mats
+            first_axis = self.dft_first_axis
+            dft = vmap(latent_to_signal_dft, (0, None, None), 0)
+
+            return lambda Y_block: dft(Y_block, mats, first_axis)
+
         pads = self.pads
         ss_idxs = self.ss_idxs
         transform = vmap(latent_to_signal, (0, None, None), 0)
 
         return lambda Y_block: transform(Y_block, pads, ss_idxs)
+
+    def _compute_dft_mats(self, ns, dxs):
+        """The matrices of ``ast.transform: dft``.
+
+        The same modes and the same spectrum as the padded grid's -- checked
+        here against its own pads and crop -- with the transform as matrices.
+        """
+        pk, _, self.dft_mats, self.dft_first_axis = latent_to_signal_dft_init(
+            ns,
+            dxs,
+            self.pad_factors,
+            self.ss_factors,
+            _SHAPE_ONLY,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
+        )
+        if pk.shape != self.pk.shape:
+            raise RuntimeError(
+                "The DFT transform kept a different set of Fourier modes than "
+                f"the FFT one: {pk.shape} against {self.pk.shape}. They are "
+                "built from the same power spectrum and cutoff, so this is a "
+                "bug rather than a configuration error."
+            )
+        n_out = [m.shape[1] for m in self.dft_mats]
+        if n_out != [self.n_freq, self.n_time]:
+            raise RuntimeError(
+                f"The DFT transform outputs {n_out} samples where the "
+                f"visibilities are ({self.n_freq}, {self.n_time})."
+            )
 
     def validate_and_test(self):
         """Call this before using in JIT context"""
@@ -428,7 +527,7 @@ class GPVisAst(Component):
             print(
                 "  The slowest baselines' sky is held all but constant in time at this "
                 f"padding: set ast.time_pad_factor to {recommended:.4g} or "
-                "'auto' to resolve it (cheap with ast_vis:GPVisAstDFT)."
+                "'auto' to resolve it (cheap with ast.transform: dft)."
             )
 
     def _compute_gp_params(self):
@@ -492,6 +591,9 @@ class GPVisAst(Component):
         print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
 
         self.n_k_freq_ast, self.n_k_time_ast = self.pk.shape
+
+        if self.transform == "dft":
+            self._compute_dft_mats(ns, dxs)
 
         def sigma(k0, std):
             """Mode standard deviations that make ``std`` the width of vis_ast.
@@ -774,95 +876,6 @@ def radec_to_lmn(ra, dec, ra0, dec0):
     )
 
     return l, m, n, -2.0 * hav
-
-
-class GPVisAstDFT(GPVisAst):
-    """:class:`GPVisAst` with the padded grid never formed.
-
-    The prior, the initialisation and the blocking over baselines are the
-    parent's; only the step from the surviving Fourier modes to the
-    visibilities differs. :func:`~tabascal.fft_gp.latent_to_signal` pads those
-    modes back up to the padded grid, inverse-transforms the whole of it and
-    crops -- at the default padding, about four times the elements of the
-    visibilities formed and thrown away, per block, in the forward pass and
-    again in reverse. The chain is linear and separable, so the same values
-    come out of one small matrix per axis
-    (:func:`~tabascal.fft_gp.latent_to_signal_dft`), and the largest thing
-    formed is the size of the visibilities.
-
-    The modes of this component are set by the array's geometry rather than by
-    a choice, so the matrices are fixed at setup and shared by every baseline.
-
-    Select it where the parent would go::
-
-        model:
-          components:
-            - ast_vis:GPVisAstDFT
-    """
-
-    def _compute_gp_params(self):
-        super()._compute_gp_params()
-        # The same modes and the same spectrum as the parent -- checked below
-        # against its own pads and crop -- with the transform as matrices.
-        pk, ks, self.dft_mats, self.dft_first_axis = latent_to_signal_dft_init(
-            [self.n_freq, self.n_time],
-            [self.chan_width, self.int_time],
-            self.pad_factors,
-            self.ss_factors,
-            _SHAPE_ONLY,
-            self.k0s,
-            self.gammas,
-            self.pk_cutoff,
-        )
-        if pk.shape != self.pk.shape:
-            raise RuntimeError(
-                "The DFT transform kept a different set of Fourier modes than "
-                f"the FFT one: {pk.shape} against {self.pk.shape}. They are "
-                "built from the same power spectrum and cutoff, so this is a "
-                "bug rather than a configuration error."
-            )
-        n_out = [m.shape[1] for m in self.dft_mats]
-        if n_out != [self.n_freq, self.n_time]:
-            raise RuntimeError(
-                f"The DFT transform outputs {n_out} samples where the "
-                f"visibilities are ({self.n_freq}, {self.n_time})."
-            )
-
-    def _resolve_baseline_block_size(self):
-        """``auto`` is a single step over every baseline.
-
-        The block exists to bound the padded Fourier grid, and this component
-        builds none: its only transient is the intermediate of the two matrix
-        products, which is the modes in one axis and the visibilities in the
-        other. What the scan does still cost is the stack of its steps'
-        outputs, so on this transform blocking is worse on both counts.
-        Measured on one GH200, 2016 baselines at 150 integrations, value and
-        gradient together:
-
-        =========  =================  ==================  =================
-        channels   FFT, best block    FFT, single step    DFT, single step
-        =========  =================  ==================  =================
-        8          273.9 MB, 1.0 ms   441.2 MB, 1.0 ms    218.6 MB, 0.2 ms
-        32         828.6 MB, 4.0 ms   1711.2 MB, 3.3 ms   683.8 MB, 0.4 ms
-        128        2386.4 MB, 14.7 ms 5926.7 MB, 12.7 ms  1799.1 MB, 1.1 ms
-        =========  =================  ==================  =================
-
-        An explicit ``baseline_block_size`` is still honoured: it is the way
-        to trade this back if some other part of a model wants the room.
-        """
-        setting = self.baseline_block_size_setting
-        if setting != "auto":
-            self.baseline_block_size = None if setting is None else int(setting)
-            return
-
-        self.baseline_block_size = self.n_bl
-
-    def build_block_signal(self):
-        mats = self.dft_mats
-        first_axis = self.dft_first_axis
-        transform = vmap(latent_to_signal_dft, (0, None, None), 0)
-
-        return lambda Y_block: transform(Y_block, mats, first_axis)
 
 
 class DiscreteSkyVis(Component):
