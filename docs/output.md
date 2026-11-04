@@ -180,7 +180,7 @@ Every column written records, in a `TABASCAL` column keyword, which run wrote ea
 | `corr` | the correlation's name, e.g. `xx` (empty for results that predate recording it) |
 | `run` | the run directory the results came from (empty when they are not in one) |
 | `results` | the absolute path of the results `.zarr` |
-| `data_col` | the column the run read (not on the per-satellite columns, which do not depend on it) |
+| `data_col` | the column the run read (absent when a direct `write_per_sat_rfi_ms` call is not told it) |
 | `written` | when, in UTC |
 
 An export replaces its own correlation's entry and keeps the others, so the keyword describes the column as it now stands:
@@ -226,7 +226,7 @@ tabascal rfi-per-sat out_dir/runs/latest
 
 **What they are for.** Image one column at a time. A real satellite is a clean streak in exactly one per-source image; a feature that shows up in several is astronomical flux the RFI model has split across satellites. Reduced chi² cannot see that — a fixed total split differently between sources costs it nothing — so the per-source images are the diagnostic for it.
 
-The columns are in the same **calibrated frame** as every other column above, and they get there the same way `TAB_RFI_DATA` does: they are model visibilities, fitted to data whose gain layers were already divided out, so nothing is applied to them. As for the other columns, only the fitted correlation is written: the others keep what the MS holds, and start at `0` in a new column, matching the model columns. The correlation comes off the zarr, and `-c` overrides it for a zarr written before that was recorded, exactly as for `tab2MS`. Each column records its [provenance](#provenance), and the run's data column may not be one of them.
+The columns are in the same **calibrated frame** as every other column above, and they get there the same way `TAB_RFI_DATA` does: they are model visibilities, fitted to data whose gain layers were already divided out, so nothing is applied to them. As for the other columns, only the fitted correlation is written: the others keep what the MS holds, and start at `0` in a new column, matching the model columns. The correlation comes off the zarr, and `-c` overrides it for a zarr written before that was recorded, exactly as for `tab2MS`. Each column records its [provenance](#provenance). The run's data column may not be any `<prefix><digits>` column, since those are what this export writes, zeroes and removes; with `data.save_rfi_per_sat: true` a run reading a `TAB_RFI_<digits>` column is refused before it starts.
 
 **Columns from earlier exports.** A later export may fit fewer satellites, or different ones. A `<prefix><NORAD>` column an earlier export wrote on *this* correlation, for a satellite these results do not hold, is stale: that correlation is set to `0` and its provenance entry removed, and a column left describing no correlation at all is removed from the MS. Its other correlations, written by runs on other correlations, stay. A `<prefix><digits>` column without provenance — from a tabascal version that did not record it, or from somewhere else — is not touched: a `RuntimeWarning` names it, to be removed by hand if it is stale.
 

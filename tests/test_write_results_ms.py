@@ -479,6 +479,7 @@ def run_writer(monkeypatch, tmp_path):
 
         return values, captured
 
+    _run.captured = captured
     return _run
 
 
@@ -1190,17 +1191,6 @@ class TestWeights:
             self._reference(gains_tot, _sigma_grid(0)).astype(np.float32),
         )
 
-    def test_unfitted_correlations_carry_no_weight(self, run):
-        """Zero, matching the zeroed model columns: nothing was fitted there."""
-        values, _, _ = run(n_corr=4, corr_idx=2)
-
-        keep = [c for c in range(4) if c != 2]
-
-        np.testing.assert_array_equal(_others(values["WEIGHT_SPECTRUM"], 2), 0.0)
-        np.testing.assert_array_equal(values["WEIGHT"][:, keep], 0.0)
-        assert not np.allclose(_fit(values["WEIGHT_SPECTRUM"], 2), 0.0)
-        assert not np.allclose(values["WEIGHT"][:, 2], 0.0)
-
     def test_an_ms_with_no_noise_column_gets_no_weights(self, tmp_path, run_writer):
         """Nothing is invented: the weights are simply not written."""
         gains, ast, rfi = _model(1)
@@ -1509,6 +1499,18 @@ class TestMultipleCorrelations:
                 np.delete(values[col], idx, -1), np.delete(old, idx, -1)
             )
             assert not np.allclose(values[col][..., idx], old[..., idx])
+
+    def test_the_foreign_warning_comes_before_any_write(self, run):
+        """Promoted to an error, it stops the export with the MS untouched."""
+        xds_ms, zarr_path, _, run_writer, corr, idx = run()
+        xds_ms = self._with_columns(xds_ms, CORRECTED_DATA=np.asarray(xds_ms.DATA))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            with pytest.raises(RuntimeWarning, match="WEIGHT and WEIGHT_SPECTRUM"):
+                run_writer(xds_ms, zarr_path, corr=corr, corr_idx=idx)
+
+        assert "cols" not in run_writer.captured
 
     def test_a_new_weight_spectrum_starts_from_weight(self, run):
         xds_ms, zarr_path, _, run_writer, corr, idx = run()

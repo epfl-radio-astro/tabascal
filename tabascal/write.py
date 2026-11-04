@@ -98,10 +98,14 @@ def check_input_column(data_col: str, save_rfi_per_sat: bool = False) -> None:
 
     refuse_input_column(data_col, RESULT_COLUMNS, "write_results_ms")
 
-    if save_rfi_per_sat and re.fullmatch(
-        re.escape(RFI_PER_SAT_PREFIX) + r"\d+", data_col
-    ):
+    if save_rfi_per_sat and _per_sat_column(RFI_PER_SAT_PREFIX).fullmatch(data_col):
         refuse_input_column(data_col, [data_col], "tabascal rfi-per-sat")
+
+
+def _per_sat_column(prefix: str):
+    """The names of the per-satellite columns under ``prefix``: ``<prefix><digits>``."""
+
+    return re.compile(re.escape(prefix) + r"\d+")
 
 
 def _provenance(results_zarr_path, corr_idx, corr_name, data_col=None):
@@ -1533,9 +1537,13 @@ def write_per_sat_rfi_ms(
     removed. ``<prefix><digits>`` columns without tabascal's provenance keyword
     are not touched, only named in a warning.
 
-    ``data_col`` is the column the run read; it may not be one of the columns
-    written.
+    ``data_col`` is the column the run read. It may not be any
+    ``<prefix><digits>`` column, since every column this export writes, zeroes
+    or removes is one; that is refused on every process before anything is read.
     """
+
+    if data_col is not None and _per_sat_column(prefix).fullmatch(data_col):
+        refuse_input_column(data_col, [data_col], "tabascal rfi-per-sat")
 
     # In multi-process runs only process 0 writes; nothing here is sharded.
     if not is_process_0():
@@ -1597,16 +1605,14 @@ def write_per_sat_rfi_ms(
             "the earlier. Fit each satellite once."
         )
 
-    if data_col is not None:
-        refuse_input_column(data_col, cols, "tabascal rfi-per-sat")
-
     corr_key, corr_record = _provenance(
         results_zarr_path,
         corr_idx,
         corr if corr is not None else xds_tab.attrs.get("corr"),
+        data_col,
     )
 
-    pattern = re.compile(re.escape(prefix) + r"\d+")
+    pattern = _per_sat_column(prefix)
     earlier = [
         c for c in xds_ms.data_vars if pattern.fullmatch(c) and c not in cols
     ]

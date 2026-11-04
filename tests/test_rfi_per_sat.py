@@ -1397,11 +1397,21 @@ class TestEarlierExports:
         for col in ["TAB_RFI_2", names[0]]:
             np.testing.assert_array_equal(values[col][..., 1], old[..., 1])
 
-    def test_the_input_column_is_refused(self, tmp_path, run_per_sat_writer):
-        zarr_path = _per_sat_zarr(tmp_path, _sources(), NORAD_IDS)
+    @pytest.mark.parametrize("data_col", [f"TAB_RFI_{NORAD_IDS[1]}", "TAB_RFI_1"])
+    def test_the_input_column_is_refused_on_every_process(self, data_col, monkeypatch):
+        """Written or merely stale, it is refused before a worker returns."""
+        monkeypatch.setattr(write_mod, "is_process_0", lambda: False)
 
         with pytest.raises(ValueError, match="replace the data the run read"):
-            run_per_sat_writer(_fake_ms(), zarr_path, data_col=f"TAB_RFI_{NORAD_IDS[1]}")
+            write_per_sat_rfi_ms("unused.ms", "unused.zarr", data_col=data_col)
+
+    def test_provenance_names_the_data_column(self, tmp_path, run_per_sat_writer):
+        zarr_path = _per_sat_zarr(tmp_path, _sources(), NORAD_IDS)
+
+        _, captured = run_per_sat_writer(_fake_ms(), zarr_path, data_col="DATA")
+
+        for keywords in captured["keywords"].values():
+            assert keywords["TABASCAL"]["CORR_0"]["data_col"] == "DATA"
 
 
 class TestTheWrittenColumns:
