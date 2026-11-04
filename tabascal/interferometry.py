@@ -42,14 +42,46 @@ def get_rfi_phase_numpy(
     c = 299792458.0
     lamda = c / freqs[None, None, :, None]
 
-    distances = np.linalg.norm(
-        ants_xyz[None, :, None, :, :] - rfi_xyz[:, None, None, :, :], axis=-1
-    )
-    fringe_dist = ((distances + ants_uvw[None, :, None, :, -1]) / lamda) % 1
+    fringe_dist = (get_rfi_path_numpy(rfi_xyz, ants_uvw, ants_xyz)[:, :, None, :] / lamda) % 1
 
     phases = -2.0 * np.pi * fringe_dist
 
     return phases
+
+
+def get_rfi_path_numpy(rfi_xyz: NDArray, ants_uvw: NDArray, ants_xyz: NDArray) -> NDArray:
+    """The path the phase is ``-2 pi freq path / c`` of, unreduced, in metres.
+
+    The range from each source to each antenna plus the antenna's ``w`` towards
+    the phase centre: what :func:`get_rfi_phase_numpy` divides by the wavelength
+    and reduces to a turn. ``trajectory:FixedOrbit`` fits a polynomial in
+    time through it instead, so it needs the path itself.
+
+    Parameters
+    ----------
+    rfi_xyz: Array (n_src, n_time, 3)
+        Positions of the RFI sources over time in the ECI frame in metres.
+    ants_uvw: Array (n_ant, n_time, 3)
+        UVW coordinates of the antennas in metres.
+    ants_xyz: Array (n_ant, n_time, 3)
+        Positions of the antennas over time in the ECI frame in metres.
+
+    Returns
+    -------
+    path: Array (n_src, n_ant, n_time)
+    """
+    # One source at a time: broadcasting every source against every antenna
+    # at once builds (n_src, n_ant, n_time, 3) temporaries -- the difference
+    # and norm's squared copy -- several times the size of the result.
+    rfi_xyz, ants_xyz = np.asarray(rfi_xyz), np.asarray(ants_xyz)
+    w = np.asarray(ants_uvw)[:, :, -1]
+    dtype = np.result_type(rfi_xyz, ants_xyz, w, np.float32)
+    path = np.empty((rfi_xyz.shape[0],) + ants_xyz.shape[:2], dtype=dtype)
+    for s, src_xyz in enumerate(rfi_xyz):
+        path[s] = np.linalg.norm(ants_xyz - src_xyz[None, :, :], axis=-1)
+        path[s] += w
+
+    return path
 
 
 def itrf_to_uvw_numpy(itrf: NDArray, h0: NDArray, dec: float) -> NDArray:

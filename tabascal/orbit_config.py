@@ -18,7 +18,7 @@ Three age settings exist and are deliberately kept distinct:
 
 ``extra_orbit_max_age_days``
     Acceptance of explicit user/replay files (``extra_orbit_dir``). ``null`` by
-    default so exact ``used_orbits_*.json`` replay is always possible; remote
+    default so exact ``used_orbits.json`` replay is always possible; remote
     service policy must never constrain it.
 ``remote_max_age_days``
     Emergency acceptance ceiling for SatChecker records and its managed cache.
@@ -67,7 +67,7 @@ DEFAULT_CACHE_REUSE_MAX_AGE_DAYS = 1.0
 #: Trajectory components that consume resolved TLEs, so an empty NORAD ID list is
 #: a configuration error rather than a satellite-free model.
 _TLE_TRAJECTORY_COMPONENTS = frozenset(
-    {"FixedOrbitFine", "OrbitFine", "NoDragOrbitFine"}
+    {"FixedOrbit", "FixedOrbitFine", "OrbitFine", "NoDragOrbitFine"}
 )
 
 

@@ -61,7 +61,8 @@ def build_parser():
     """
     import argparse
 
-    from tabascal.scripts._labels import label as _label
+    from tabascal.scripts._labels import removed as _removed
+    from tabascal.scripts._labels import run_name as _run_name
 
     parser = argparse.ArgumentParser(description="tabascal CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -72,8 +73,8 @@ def build_parser():
     run_parser.add_argument(
         "-od",
         "--out_dir",
-        help="Directory the run writes its plots/ and results/ to. Defaults to "
-        "the Measurement Set's own directory. Given without -ms, it is read as "
+        help="Directory the run creates its run directory in, under runs/. "
+        "Defaults to the Measurement Set's own directory. Given without -ms, it is read as "
         "a tab-sim simulation directory and the MS and truth zarr are looked "
         "for inside it. Does not move the MS when data.ms_path names one.",
     )
@@ -89,11 +90,23 @@ def build_parser():
             "satellites.norad_ids in the config file."
         ),
     )
-    # A label, not a path: it is interpolated into the results filenames and
-    # into plots/<suffix>, both of which are created rather than resolved, so a
-    # path here silently places the run's whole output somewhere else.
+    # A label, not a path: it starts the name of the directory the run creates
+    # under <out_dir>/runs/, so a path here would place the run elsewhere.
     run_parser.add_argument(
-        "-sx", "--suffix", default="", type=_label, help="Image name suffix."
+        "-n", "--name",
+        required=True,
+        type=_run_name,
+        help="Name of the run. Its outputs go to "
+        "<out_dir>/runs/<name>_<YYYYmmddTHHMMSS>_<token>/, and its plot files "
+        "are prefixed with it.",
+    )
+    run_parser.add_argument(
+        "-sx", "--suffix",
+        action=_removed(
+            "every run now gets its own directory, named with -n/--name: "
+            "tabascal run -c <config> -n <name>"
+        ),
+        help=argparse.SUPPRESS,
     )
     run_parser.add_argument("-t", "--timings", action="store_true", help="Enable timing measurements.")
     run_parser.add_argument(
