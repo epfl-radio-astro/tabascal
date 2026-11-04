@@ -1609,6 +1609,21 @@ def _what_is_at(path: str) -> str:
     return "a directory"
 
 
+def remove_columns(ms_path: str, columns) -> None:
+    """Remove ``columns`` from the MS's main table."""
+
+    from casacore.tables import table
+
+    with table(ms_path, readonly=False, ack=False) as main:
+        # dask-ms keeps the MS open in this process with user locking, which the
+        # table opened here shares, so the lock has to be taken by hand.
+        main.lock(write=True)
+        try:
+            main.removecols(list(columns))
+        finally:
+            main.unlock()
+
+
 def remove_caltable(path: str, ms_path: str) -> bool:
     """Delete the calibration table at *path*, if that is what is there.
 

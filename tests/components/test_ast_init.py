@@ -464,7 +464,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         )
 
         assert float(jnp.sqrt(jnp.mean(jnp.abs(vis) ** 2))) == pytest.approx(30.0, rel=0.02)
-        assert float(jnp.std(vis.real)) == pytest.approx(30.0 / jnp.sqrt(2.0), rel=0.02)
+        assert float(jnp.std(vis.real)) == pytest.approx(30.0 / 2.0**0.5, rel=0.02)
 
     @pytest.mark.parametrize(
         "overrides",

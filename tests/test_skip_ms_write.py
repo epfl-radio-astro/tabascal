@@ -32,7 +32,7 @@ def test_export_policy(monkeypatch, capsys, skip, path):
 
 @pytest.mark.parametrize("cli, configured, expected", [(False, False, False), (False, True, True), (True, False, True)])
 def test_cli_and_config_policy(monkeypatch, cli, configured, expected):
-    argv = ["run", "-c", "config.yaml"] + (["--skip-ms-write"] if cli else [])
+    argv = ["run", "-c", "config.yaml", "-n", "test"] + (["--skip-ms-write"] if cli else [])
     args = build_parser().parse_args(argv)
     config = {"data": {"skip_ms_write": configured}}
     monkeypatch.setattr(runner, "load_config", lambda _: config)
@@ -60,7 +60,7 @@ def test_optimized_run_keeps_zarr(monkeypatch, skip):
     zarr_writer, ms_writer = Mock(), Mock()
     monkeypatch.setattr(tab_tools, "write_results_xds", zarr_writer)
     monkeypatch.setattr(tab_tools, "write_results_ms", ms_writer)
-    result = tab_tools.run_opt(config, None, [None, None], {}, "input.ms", "optimized.zarr", "params")
+    result = tab_tools.run_opt(config, None, [None, None], {}, "input.ms", "optimized.zarr")
     zarr_writer.assert_called_once_with(pred, config, "optimized.zarr")
     assert ms_writer.call_count == (0 if skip else 1)
     assert result[0] is pred

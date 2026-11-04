@@ -44,7 +44,9 @@ class TestConfigNormalisation:
         assert tle_config.normalise_tle_config(_config(norad_ids=None)).norad_ids == []
 
     @pytest.mark.parametrize("sep", [":", "."])
-    @pytest.mark.parametrize("name", ["FixedOrbitFine", "OrbitFine", "NoDragOrbitFine"])
+    @pytest.mark.parametrize(
+        "name", ["FixedOrbit", "FixedOrbitFine", "OrbitFine", "NoDragOrbitFine"]
+    )
     def test_null_norad_ids_with_a_tle_model_is_a_clean_error(self, name, sep):
         # import_components accepts both separators, so the guard has to see
         # both. A dotted reference that slipped past it would leave the run

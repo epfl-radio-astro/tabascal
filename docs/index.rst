@@ -11,6 +11,7 @@ Welcome to tabascal documentation
    sim-vis_output
    config
    kernels
+   analytic_rfi_vis
    components
    concepts
    orbits

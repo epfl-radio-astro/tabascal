@@ -1,6 +1,7 @@
 """Test full Tabascal pipeline runs."""
 
 import hashlib
+import json
 import logging
 import re
 import subprocess
@@ -192,6 +193,8 @@ def _run_pipeline(
             "run",
             "-c",
             str(config_path),
+            "-n",
+            "pipe",
             "-od",
             str(input_src_dir),
             "--extra-orbit-dir",
@@ -571,6 +574,30 @@ rfi_vis_configs = [
         ),
         id="RiemannVisFFIFine",
     ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFIVarAnt",
+                "rfi_vis:AnalyticVis",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The data-grid route: the RiemannVisFine model with the signal and
+            # phase on the data grid and each cell integrated in closed form.
+            # chi2 measured on ARM (Apple M-series, CPU): 0.8942335916 double /
+            # 0.8941589594 single. TO BE RE-RECORDED on x86 and GPU; the metric
+            # ranges hold both ARM measurements.
+            chi2_ref=0.8942335916260074,
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
+        ),
+        id="AnalyticVis",
+    ),
 ]
 
 
@@ -703,24 +730,14 @@ def _copy_sim(
     return out_dir
 
 
-def test_pipeline_log_is_written_in_the_plot_directory(
+def test_pipeline_writes_into_its_own_run_directory(
     provide_test_data: Path, tmp_path: Path, precision: str
 ) -> None:
-    """A run leaves one log, in the plot directory it fills anyway, named for it.
-
-    The log used to be opened in the process's working directory and copied into
-    the plot directory once the run had finished, so a run left a file there for
-    its whole duration and two runs launched in the same second from one
-    directory could not both survive it. Nothing in the working directory, then,
-    and the suffix in the name so the log says which run it belongs to.
+    """A run writes only into the directory it created, and tab2MS reads it back.
 
     One iteration: what is under test is where the run writes, not what it fits.
     """
     out_dir = _copy_sim(provide_test_data, tmp_path)
-    # A cache written to in place by older test code can carry logs into the
-    # copy, so what *this* run wrote is the difference rather than everything
-    # that is there.
-    before = set(tmp_path.rglob("log_tab*"))
 
     data_dir = Path(__file__).parent / "data"
     config_path = tmp_path / "tab_target.yaml"
@@ -747,9 +764,9 @@ def test_pipeline_log_is_written_in_the_plot_directory(
         [
             sys.executable, str(script), "run",
             "-c", str(config_path),
+            "-n", "runA",
             "-od", str(out_dir),
             "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
-            "-sx", "runA",
         ],
         capture_output=True,
         text=True,
@@ -758,15 +775,24 @@ def test_pipeline_log_is_written_in_the_plot_directory(
     )
     assert result.returncode == 0, f"Tabascal failed: {result.stderr}"
 
-    # One log, and nowhere but the plot directory: not in the directory the run
-    # was launched from, and not anywhere else under the sim it wrote into.
-    written = set(tmp_path.rglob("log_tab*")) - before
-    assert len(written) == 1, f"expected one new log, found {written}"
+    (run_dir,) = (out_dir / "runs").glob("runA_*")
+    assert (out_dir / "runs" / "latest").resolve() == run_dir.resolve()
+    assert "Start Time :" in (run_dir / "log.txt").read_text()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "finished"
+    assert (run_dir / "results" / "map_pred.zarr").is_dir()
+    assert not list(tmp_path.glob("log*")), "the working directory was written to"
 
-    log = written.pop()
-    assert log.parent == out_dir / "plots" / "runA"
-    assert log.name.startswith("log_tab_runA_")
-    assert "Start Time :" in log.read_text()
+    # The run already wrote the MS; exporting again must not see it as changed.
+    export = Path(__file__).parent.parent / "tabascal" / "scripts" / "results_to_MS.py"
+    result = subprocess.run(
+        [sys.executable, str(export), str(out_dir / "runs" / "latest")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert result.returncode == 0, f"tab2MS failed: {result.stderr}"
+    assert "is not what the run read" not in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +856,7 @@ def _prepare_sharded_run(
     cmd = [
         sys.executable, str(script), "run",
         "-c", str(config_path),
+        "-n", "pipe",
         "-od", str(out_dir),
         "--extra-orbit-dir", tle_dir,
         "-nl",
@@ -933,7 +960,7 @@ def _assert_per_sat_results(out_dir: Path) -> None:
     import numpy as np
     import xarray as xr
 
-    with xr.open_zarr(str(out_dir / "results" / "map_pred_Custom.zarr")) as xds:
+    with xr.open_zarr(str(out_dir / "runs" / "latest" / "results" / "map_pred.zarr")) as xds:
         assert xds.rfi_vis_src.dims == ("sample", "src", "bl", "freq", "time")
         assert xds.sizes["src"] == 3
         assert len({int(nid) for nid in xds.norad_id.values}) == 3
@@ -1062,7 +1089,10 @@ def test_pipeline_multiprocess(
         if not line.startswith("[Gloo]")
     )
     assert worker_out == "", f"rank 1 was not silent:\n{worker_out}"
-    assert (out_dir / "results" / "map_pred_Custom.zarr").is_dir()
+    # One run directory, created by rank 0 and shared, and finished on it.
+    (run_dir,) = (out_dir / "runs").glob("pipe_*")
+    assert (run_dir / "results" / "map_pred.zarr").is_dir()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "finished"
 
 
 def test_pipeline_multiprocess_per_sat(

@@ -20,7 +20,7 @@ Source precedence is resolved **independently per NORAD ID**:
      only if within ``extra_orbit_max_age_days`` (``None`` = unlimited). An
      accepted record wins outright — later sources are not consulted for that ID.
      This is *your* data: the remote service's age policy never applies to it, so
-     exact replay of a previous run's ``used_orbits_*.json`` is always possible.
+     exact replay of a previous run's ``used_orbits.json`` is always possible.
   2. Per-satellite cache — the cached record whose epoch is closest to the
      observation. If it is within ``cache_reuse_max_age_days``, it avoids a
      network request. An older record within the hard ceiling remains an offline

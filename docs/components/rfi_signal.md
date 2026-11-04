@@ -7,3 +7,5 @@ The RFI signal component models the complex-valued signal of each RFI source, at
 <!-- The combined signal should be  -->
 
 ## Fourier-domian - {class}`~tabascal.components.rfi_signal.ComplexRFIVarAntFine`, {class}`~tabascal.components.rfi_signal.ComplexRFIConstAntFine`
+
+{class}`~tabascal.components.rfi_signal.ComplexRFIVarAnt` and {class}`~tabascal.components.rfi_signal.ComplexRFIConstAnt` are the same models on the data grid: the same latent, prior and parameters, with the signal at each cell's own sample rather than supersampled onto the fine grid, for {class}`~tabascal.components.rfi_vis.AnalyticVis`.
