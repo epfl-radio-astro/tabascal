@@ -1,4 +1,4 @@
-from math import isfinite, sqrt
+from math import ceil, isfinite, sqrt
 
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
@@ -34,6 +34,37 @@ _GP_COV_OPTIONAL = ("fov_deg", "corr_freq")
 #: ``ast.cutoff`` when it is left null. What every shipped configuration sets,
 #: kept as the default now that the key may be omitted.
 _DEFAULT_PK_CUTOFF = 1e-6
+
+#: The least ``ast.time_pad_factor: auto`` resolves to. The fringe rate only
+#: ever asks for more padding; this is what keeps the ends of the observation
+#: clear of the wrap-around of a periodic model when every baseline is fast
+#: enough to need none, and it is the default factor, so ``auto`` never pads
+#: less than an unconfigured run does.
+_AUTO_TIME_PAD_FLOOR = 2.0
+
+
+def time_pad_for_fringe_rate(n_time, int_time, fringe_rate):
+    """The smallest ``time_pad_factor`` whose first non-zero mode is at most ``fringe_rate``.
+
+    The padded time axis has ``n_pad = n + 2 * floor(n * (f - 1) / 2)`` samples,
+    so its modes are spaced ``1 / (n_pad * int_time)``. A baseline whose knee is
+    below that spacing has every mode but the zero one cut down by its prior,
+    and its sky is fitted as all but constant in time however it actually drifts. This
+    is the factor that brings the first mode down to ``fringe_rate``, and 1 when
+    the observation is already long enough.
+    """
+    fringe_rate = float(fringe_rate)
+    if not isfinite(fringe_rate) or fringe_rate <= 0:
+        raise ValueError(
+            f"A baseline's maximum fringe rate is {fringe_rate!r}, so no padding "
+            "resolves it. A zero-length baseline in the data would give this."
+        )
+    n_needed = ceil(1.0 / (fringe_rate * float(int_time)))
+    pad = max(0, ceil((n_needed - n_time) / 2))
+    # Half a sample over the exact factor, so that floor(n * (f - 1) / 2) gives
+    # back `pad` rather than one less in floating point.
+    return 1.0 + (2 * pad + 1) / n_time if pad else 1.0
+
 
 #: The power spectrum is used for its shape alone -- which modes survive
 #: ``cutoff``, and their relative weight -- and the amplitude is applied by
@@ -134,6 +165,19 @@ class GPVisAst(Component):
 
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]
+            # 'auto' is resolved from the fringe rates in _compute_gp_params.
+            tpf = self.time_pad_factor
+            if tpf != "auto" and (
+                isinstance(tpf, bool)
+                or not isinstance(tpf, (int, float))
+                or not isfinite(tpf)
+                or tpf < 1
+            ):
+                raise ValueError(
+                    "ast.time_pad_factor is a number of at least 1, or 'auto' "
+                    "to size it from the slowest baseline's fringe rate, got "
+                    f"{tpf!r}."
+                )
 
             # null is a setting, not a missing value: every baseline in one
             # step, which is the padded transform at full width. int() alone
@@ -162,6 +206,8 @@ class GPVisAst(Component):
 
             # Do expensive setup operations once
             self._compute_gp_params()
+            # The number 'auto' came to, so the run's saved config says it.
+            config.args["ast"]["time_pad_factor"] = self.time_pad_factor
             self._resolve_baseline_block_size()
             self._compute_prior_params(config.args["ast"]["mean"], config.vis_obs)
 
@@ -355,6 +401,36 @@ class GPVisAst(Component):
         """Call this before using in JIT context"""
         pass
 
+    def _resolve_time_pad_factor(self):
+        """Size the time padding from the slowest baseline, under ``auto``.
+
+        The shortest baselines fringe slowest: where a baseline's knee is below
+        the padded axis's first mode, its sky can only be fitted as all but
+        constant in time. ``auto`` pads until the first mode reaches the lowest knee, and no
+        less than :data:`_AUTO_TIME_PAD_FLOOR`; a number is used as given, with
+        the factor ``auto`` would have chosen printed beside it.
+        """
+        fr_min = float(jnp.min(self.ast_fr))
+        fr_max = float(jnp.max(self.ast_fr))
+        needed = time_pad_for_fringe_rate(self.n_time, self.int_time, fr_min)
+        recommended = max(_AUTO_TIME_PAD_FLOOR, needed)
+
+        if self.time_pad_factor == "auto":
+            self.time_pad_factor = recommended
+            self.pad_factors[1] = recommended
+
+        print(
+            f"\nAST fringe rates (min, max): ({fr_min:.3e}, {fr_max:.3e}) Hz; "
+            f"time_pad_factor {self.time_pad_factor:.4g}, "
+            f"{needed:.4g} needed to resolve the slowest baseline"
+        )
+        if self.time_pad_factor < needed:
+            print(
+                "  The slowest baselines' sky is held all but constant in time at this "
+                f"padding: set ast.time_pad_factor to {recommended:.4g} or "
+                "'auto' to resolve it (cheap with ast_vis:GPVisAstDFT)."
+            )
+
     def _compute_gp_params(self):
 
         if self.fov_deg:
@@ -373,6 +449,7 @@ class GPVisAst(Component):
 
         self.k0_time = self.ast_fr
         self.k0s = [self.k0_freq, self.k0_time.max()]
+        self._resolve_time_pad_factor()
 
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]

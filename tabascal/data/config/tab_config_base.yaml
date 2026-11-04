@@ -53,7 +53,7 @@ ast:
     fov_deg: null       # Optional - Full field of view (angular diameter, in degrees) setting the knee along the time axis, through the maximum astronomical fringe rate of a source at fov_deg / 2 from the phase centre. null uses the primary beam of the telescope, 2 * 1.22 * lambda / D, from the dish diameter in the MS file
     gammas: [5, 5]      # Optional - Rate of drop off of the power law section of the power spectrum along the (frequency, time) axes. As gamma -> infinity the power spectrum tends to a Gaussian
   freq_pad_factor: 2.0  # Optional - Zero padding factor of the frequency axis of the Fourier domain signal model. 1.0 is the observed band itself, which makes the solution periodic over it
-  time_pad_factor: 2.0  # Optional - Zero padding factor of the time axis. The time axis equivalent of freq_pad_factor
+  time_pad_factor: 2.0  # Optional - Zero padding factor of the time axis. The time axis equivalent of freq_pad_factor. 'auto' pads until the first time mode reaches the slowest baseline's fringe rate, at least 2.0; below that, a short baseline's sky is fitted as all but constant in time
 ##########################################
 # RFI prior and initialization parameters
 ##########################################

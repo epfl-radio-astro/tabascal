@@ -13,12 +13,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tabascal.components.ast_vis import GPVisAst, GPVisAstDFT
+from tabascal.components.ast_vis import GPVisAst, GPVisAstDFT, time_pad_for_fringe_rate
 from tabascal.fft_gp import (
     latent_to_signal,
     latent_to_signal_dft,
     latent_to_signal_dft_init,
     latent_to_signal_init,
+    pad_domain_k,
 )
 
 from .conftest import active_precision, make_constants
@@ -286,3 +287,47 @@ def test_the_gradients_match_the_fft_component_at_wide_time_padding(tmp_path, ti
             np.asarray(got[key]), np.asarray(ref[key]), rtol=rtol, atol=atol * scale,
             err_msg=key,
         )
+
+
+# --- time padding from the fringe rate ----------------------------------------
+
+
+def _first_time_mode(n_time, int_time, time_pad_factor):
+    ks = np.asarray(pad_domain_k([n_time], [int_time], [time_pad_factor])[0])
+    return np.abs(ks[ks != 0]).min()
+
+
+@pytest.mark.parametrize("n_time, int_time, rate", [(8, 17.1, 1e-3), (77, 8.0, 3e-5), (150, 2.0, 1e-2)])
+def test_the_padding_is_the_least_that_resolves_the_fringe_rate(n_time, int_time, rate):
+    f = time_pad_for_fringe_rate(n_time, int_time, rate)
+    assert _first_time_mode(n_time, int_time, f) <= rate
+    if f > 1:
+        # One cell a side fewer and the first mode is above the rate again.
+        assert _first_time_mode(n_time, int_time, f - 2 / n_time) > rate
+
+
+def _auto(tmp_path, fov_deg):
+    config = ast_config(tmp_path, time_pad_factor="auto")
+    config.args["ast"]["gp_cov"]["fov_deg"] = fov_deg
+    comp = GPVisAst()
+    comp.setup(config)
+    return comp, config
+
+
+@pytest.mark.parametrize("fov_deg", [None, 0.05])
+def test_auto_reaches_the_slowest_baseline_and_no_less_than_the_floor(tmp_path, fov_deg):
+    comp, config = _auto(tmp_path, fov_deg)
+    needed = time_pad_for_fringe_rate(comp.n_time, comp.int_time, comp.ast_fr.min())
+
+    assert comp.time_pad_factor == max(2.0, needed)
+    assert config.args["ast"]["time_pad_factor"] == comp.time_pad_factor
+    assert _first_time_mode(comp.n_time, comp.int_time, comp.time_pad_factor) <= comp.ast_fr.min()
+    if fov_deg is not None:
+        # Narrow enough that the floor is not what decided it.
+        assert needed > 2.0
+
+
+@pytest.mark.parametrize("bad", ["fast", 0.5, True, float("nan")])
+def test_a_time_pad_factor_that_is_neither_a_factor_nor_auto_is_refused(tmp_path, bad):
+    with pytest.raises(RuntimeError, match="time_pad_factor"):
+        GPVisAst().setup(ast_config(tmp_path, time_pad_factor=bad))
