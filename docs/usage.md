@@ -85,8 +85,8 @@ incomplete RFI model. The remedies are to supply the missing records via
 or to remove the satellite from `satellites.norad_ids`.
 
 Every run also saves the records it actually used to
-`<out_dir>/results/used_orbits_<name>.json`; passing that file's directory back
-via `--extra-orbit-dir` reproduces the run's trajectory priors exactly. For the
+`<run>/results/used_orbits.json`; passing that directory back via
+`--extra-orbit-dir <run>/results` reproduces the run's trajectory priors exactly. For the
 two archives and the handover between them, the full caching behaviour, the age
 policies, what validation each format does and does not give you, and how to
 supply records manually (e.g. from Space-Track) when SatChecker cannot provide
@@ -146,29 +146,36 @@ sim-vis -h
 RFI subtraction (TABASCAL) runs are also defined by YAML configuration files and can be run in much the same way. Given the simulation dataset created in the previous step, we can run TABASCAL on it using
 
 ```bash
-tabascal run -c tab_target.yaml -od data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
+tabascal run -c tab_target.yaml -n target -od data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI
 ```
+
+`-n` names the run, and is required: every run writes into a directory of its
+own, `<out_dir>/runs/<name>_<YYYYmmddTHHMMSS>_<token>/`, so runs never
+overwrite each other's outputs. See [Output from TABASCAL](output.md) for what
+it holds.
 
 The output of a successful run with TABASCAL will show lines like
 
 ```text
-Copying tabascal results to MS file from data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI/results/map_pred_Custom.zarr
+Copying tabascal results to MS file from data/pnt_src_obs_08A_120T-0000-0238_1025I_001F-1.227e+09-1.227e+09_050PAST_000GAST_000EAST_3SAT_0GRD_1.0e+00RFI/runs/target_20261103T091500_3fa2c1/results/map_pred.zarr
 Writing tabascal results to ['CORRECTED_DATA', 'TAB_AST_DATA', 'TAB_RFI_DATA', 'TAB_AST_RES', 'TAB_RFI_RES', 'TAB_RES_DATA', 'WEIGHT_SPECTRUM', 'WEIGHT'] columns in MS file.
 Data type: 24, SORT_COLUMNSnot handled
 Data type: 24, SORT_ORDERnot handled
 ```
 
-The results of the TABASCAL run are saved in a `.zarr` file and then transferred into the Measurement Set.
+The results of the TABASCAL run are saved in a `.zarr` file and then transferred into the Measurement Set. `tab2MS <run directory>` transfers a run's results again later — after another run has overwritten the columns, say.
 
 If you have a Measurement Set from another source you can run TABASCAL on that directly with
 
 ```bash
-tabascal run -c path/to/config.yaml -ms path/to/ms/file.ms
+tabascal run -c path/to/config.yaml -n mwa -ms path/to/ms/file.ms
 ```
 
-The run writes its `plots/` and `results/` beside the Measurement Set. Pass
-`-od path/to/output_dir`, or set `data.out_dir`, to send them somewhere else —
-a read-only or shared data directory being the usual reason.
+The run creates its directory under `runs/` beside the Measurement Set. Pass
+`-od path/to/output_dir`, or set `data.out_dir`, to put `runs/` somewhere else —
+a read-only or shared data directory being the usual reason. The run directory
+records the resolved configuration, so the run can be repeated with
+`tabascal run -c <run>/config.yaml -n <name>`.
 
 ### GPU memory
 
@@ -183,7 +190,7 @@ of it. If that is the program you have, turn preallocation back on with JAX's
 own switch:
 
 ```bash
-XLA_PYTHON_CLIENT_PREALLOCATE=true tabascal run -c config.yaml -ms file.ms
+XLA_PYTHON_CLIENT_PREALLOCATE=true tabascal run -c config.yaml -n big -ms file.ms
 ```
 
 TABASCAL supplies the default only when the variable is unset, so whatever you
@@ -250,13 +257,18 @@ and the in-view mask; readers of the format ignore the extras. `-p` also writes
 a per-source spectrogram of `z`.
 
 To score a run, filter its *residual* rather than a data column. Point `-z` at
-the run's results zarr and `-dc` at the reference column the residual is formed
-against: the residual is then `data_col - zarr.vis_obs`, which cannot be
-invalidated by a later run overwriting the MS's `TAB_*` columns.
+the run's directory and `-dc` at the reference column the residual is formed
+against: the residual is then `data_col - zarr.vis_obs`, taken from the results
+the run exported, which cannot be invalidated by a later run overwriting the
+MS's `TAB_*` columns. The run's own `config.yaml` stands in for `-c`, and the
+curves go to `<run>/light_curves/` rather than beside the MS.
 
 ```bash
-tabascal light-curve -c tab_target.yaml -z path/to/results/map_pred_Custom.zarr -dc DATA
+tabascal light-curve -z path/to/out_dir/runs/latest -dc DATA
 ```
+
+`-z` also takes a results zarr directly, with `-c` or `-ms` and `-n` to say
+what to filter for.
 
 The store is checked against the visibilities before anything is subtracted —
 its baseline and timestep counts, the cadence of its time axis, and the

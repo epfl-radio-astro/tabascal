@@ -619,7 +619,6 @@ def run_opt(
     init_params: dict,
     ms_path,
     map_path,
-    params_path,
     state=None,
     constants=None,
     truth=None,
