@@ -68,11 +68,18 @@ def get_rfi_path_numpy(rfi_xyz: NDArray, ants_uvw: NDArray, ants_xyz: NDArray) -
     -------
     path: Array (n_src, n_ant, n_time)
     """
-    distances = np.linalg.norm(
-        ants_xyz[None, :, :, :] - rfi_xyz[:, None, :, :], axis=-1
-    )
+    # One source at a time: broadcasting every source against every antenna
+    # at once builds (n_src, n_ant, n_time, 3) temporaries -- the difference
+    # and norm's squared copy -- several times the size of the result.
+    rfi_xyz, ants_xyz = np.asarray(rfi_xyz), np.asarray(ants_xyz)
+    w = np.asarray(ants_uvw)[:, :, -1]
+    dtype = np.result_type(rfi_xyz, ants_xyz, w, np.float32)
+    path = np.empty((rfi_xyz.shape[0],) + ants_xyz.shape[:2], dtype=dtype)
+    for s, src_xyz in enumerate(rfi_xyz):
+        path[s] = np.linalg.norm(ants_xyz - src_xyz[None, :, :], axis=-1)
+        path[s] += w
 
-    return distances + ants_uvw[None, :, :, -1]
+    return path
 
 
 def itrf_to_uvw_numpy(itrf: NDArray, h0: NDArray, dec: float) -> NDArray:
