@@ -475,9 +475,9 @@ class AnalyticVis(Component):
     rule of the fine grid. No fine time grid is formed, so ``n_int_time`` is
     never read.
 
-    The kernel differentiates the signal and the phase; the delay, the interval
-    and the tables are constants. With ``FixedOrbit`` the phase is a constant
-    too, and the signal-only kernels run. Under an elevation mask each source
+    The kernel differentiates the signal, the phase and the delay; the interval
+    and the tables are constants. With ``FixedOrbit`` the phase and the delay
+    are constants too, and the signal-only kernels run. Under an elevation mask each source
     is integrated alone, over the whole axis, and its visibility masked per
     cell. See ``docs/analytic_rfi_vis.md``.
     """
@@ -490,6 +490,7 @@ class AnalyticVis(Component):
         "vis_rfi": ("n_bl", "n_freq", "n_time"),
     }
     output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
+    integrates_cells = True
 
     parameters = {}
 
@@ -501,13 +502,6 @@ class AnalyticVis(Component):
             self.n_freq = config.n_freq
             self.n_time = config.n_time
             self.options = self._read_options(config.args["rfi"]["analytic"])
-
-            if config.args.get("data", {}).get("save_rfi_per_sat"):
-                raise ValueError(
-                    "data.save_rfi_per_sat re-evaluates the visibility op on the "
-                    "fine-grid state, which this component does not carry: use a "
-                    "Fine chain with rfi_vis:RiemannVisFine to save it."
-                )
 
             # The kernel writes each antenna pair once, so a repeated pair would
             # be left unwritten. A reversed pair or an autocorrelation is fine.

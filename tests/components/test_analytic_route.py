@@ -21,6 +21,7 @@ from tabascal.components.rfi_vis import AnalyticVis, RiemannVisFine
 from tabascal.components.trajectory import FixedOrbit, FixedOrbitFine
 from tabascal.interferometry import calculate_rfi_vis_blocked
 from tabascal.poly_interp import fine_offsets, interp_tables, monomial_tables
+from tabascal.write import rfi_vis_per_sat
 from ri_kernels.jax_api import RFIAnalyticVisOp
 
 from .conftest import active_precision, make_constants
@@ -245,7 +246,7 @@ class TestFixedOrbit:
 
     @pytest.mark.parametrize("args, key", [
         *[({"path_order": v}, "path_order") for v in (-1, 1.5, True, 4)],
-        *[({"path_nodes": v}, "path_nodes") for v in (3, 0, 2.5, True)],
+        *[({"path_nodes": v}, "path_nodes") for v in (3, 0, 2.5, True, 6)],
     ])
     def test_a_bad_path_setting_is_refused(self, args, key):
         with pytest.raises(RuntimeError, match=rf"rfi\.{key}"):
@@ -390,16 +391,30 @@ class TestAnalyticVis:
         with pytest.raises(RuntimeError, match=rf"rfi\.analytic\.{key}"):
             AnalyticVis().setup(cfg)
 
-    @pytest.mark.parametrize("attrs, data, match", [
-        ({}, {"save_rfi_per_sat": True}, "save_rfi_per_sat"),
-        ({"a1": np.array([0, 0], np.int32), "a2": np.array([1, 1], np.int32), "n_bl": 2}, {}, r"\(0, 1\)"),
-    ])
-    def test_the_per_satellite_split_and_a_repeated_baseline_are_refused(self, attrs, data, match):
+    def test_a_repeated_baseline_is_refused(self):
         cfg, _ = op_case()
-        vars(cfg).update(attrs)
-        cfg.args["data"].update(data)
-        with pytest.raises(RuntimeError, match=match):
+        vars(cfg).update({"a1": np.array([0, 0], np.int32), "a2": np.array([1, 1], np.int32), "n_bl": 2})
+        with pytest.raises(RuntimeError, match=r"\(0, 1\)"):
             AnalyticVis().setup(cfg)
+
+    def test_the_per_satellite_split_is_each_source_alone(self):
+        cfg, state = op_case()
+        cfg.args["data"]["save_rfi_per_sat"] = True
+        cfg.args["model"] = {"components": ["rfi_vis:AnalyticVis"]}
+        cfg.n_rfi = cfg.n_rfi_real = 2
+        cfg.norad_ids = [101, 102]
+        total = analytic_call(cfg, {**state, "vis_rfi": jnp.zeros_like(state["vis_rfi"])})(
+            state["rfi_A"], state["rfi_phase"]
+        )
+        pred = {k: v[None] for k, v in {**state, "vis_rfi": total}.items()}
+
+        vis_src, norad_ids = rfi_vis_per_sat(pred, cfg)
+
+        assert norad_ids == [101, 102]
+        tol = 1e-10 if active_precision() == "double" else 1e-4
+        for s in range(2):
+            np.testing.assert_allclose(vis_src[0, s], op_vis(cfg, state, s), rtol=tol, atol=tol)
+        np.testing.assert_allclose(vis_src[0].sum(0), total, rtol=tol, atol=tol)
 
 
 class TestComponentOrder:
@@ -427,5 +442,11 @@ class TestComponentOrder:
         message = str(excinfo.value)
         assert "'trajectory:FixedOrbit'" in message
         assert "FixedOrbitFine" not in message and "PhaseCalculationRFIFine" not in message
-        with pytest.raises(ComponentOrderError, match="'rfi_signal:ComplexRFIVarAnt'.*-- add one"):
+        with pytest.raises(ComponentOrderError) as excinfo:
             check(["trajectory:FixedOrbit", "rfi_vis:AnalyticVis", "rfi_signal:ComplexRFIVarAntFine"])
+        message = str(excinfo.value)
+        # The producer that is there is named, with the grid it is on, not
+        # offered as missing or as merely out of order.
+        assert "'rfi_signal:ComplexRFIVarAntFine' (model.components[2]) writes it, but on the fine grid" in message
+        assert "'rfi_signal:ComplexRFIVarAnt'" in message
+        assert "add one" not in message and "wrong order" not in message

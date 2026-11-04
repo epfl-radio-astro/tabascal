@@ -440,14 +440,22 @@ class FixedOrbit(Component):
             # Nodes per cell for that fit. The default oversamples the degree
             # several times over, which keeps the fit close to the least-squares
             # one over the whole cell rather than an interpolation through the
-            # fewest points that fix a polynomial.
+            # fewest points that fix a polynomial. The count must be odd: the
+            # nodes are laid out as fine_offsets lays out a cell, with the centre
+            # at index n // 2, so an even count leaves one more node before the
+            # centre than after it, and the fit runs out before the cell's end.
             nodes = config.args["rfi"].get("path_nodes", None)
             if nodes is None:  # the base config carries the key as null
                 nodes = 4 * order + 1
-            if isinstance(nodes, bool) or not isinstance(nodes, int) or nodes < order + 1:
+            if (
+                isinstance(nodes, bool)
+                or not isinstance(nodes, int)
+                or nodes < order + 1
+                or nodes % 2 == 0
+            ):
                 raise ValueError(
                     "rfi.path_nodes is how many samples per cell the path polynomial is "
-                    f"fitted through: a whole number of at least rfi.path_order + 1 = "
+                    f"fitted through: an odd whole number of at least rfi.path_order + 1 = "
                     f"{order + 1}, got {nodes!r}."
                 )
             self.n_path_nodes = nodes

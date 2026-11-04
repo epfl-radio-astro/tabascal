@@ -463,7 +463,7 @@ The estimate is per baseline, since $\nu_F$ is, and `TabConfig.estimate_rfi_samp
 The data-grid route, `trajectory:FixedOrbit` with `rfi_vis:AnalyticVis` (see [Analytic RFI visibilities](analytic_rfi_vis.md)), reads its own keys instead:
 
 * `path_order`: the degree, 0 to 3, of the polynomial in time through each cell's geometric delay that `FixedOrbit` writes. The kernel keeps the delay's derivatives up to the third, so a higher degree is refused rather than dropped.
-* `path_nodes`: how many samples per cell that polynomial is fitted through, at least `path_order + 1`. `null` is `4 * path_order + 1`, close to the least-squares fit over the whole cell.
+* `path_nodes`: how many samples per cell that polynomial is fitted through, an odd number of at least `path_order + 1`, spaced symmetrically about the cell centre. `null` is `4 * path_order + 1`, close to the least-squares fit over the whole cell.
 * `analytic`: the options of `AnalyticVis`, each a whole number. `stencil` (0 to 4) is the half-width $h$ of the signal interpolant, the polynomial through the $2h + 1$ nearest cells on each axis; `0` holds each cell's value. `segments` (1 to 1024), `terms` (1 to 32) and `cubic_terms` (0 to 8; `0` drops the cubic phase) set the expansion of the closed-form time integral: the defaults are the measured speed/accuracy trade, and `segments: 4, terms: 16` is the conservative setting. `scratch_mb` (at least 1) bounds the GPU coefficient scratch in MiB. Other keys are refused.
 
 ### RFI light curve estimates

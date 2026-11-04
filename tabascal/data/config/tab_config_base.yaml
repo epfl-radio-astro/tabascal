@@ -70,7 +70,7 @@ rfi:
   n_int_freq: 1         # Optional - Number of integration samples per frequency channel of the RFI fine grid. Given directly - there is no estimate on this axis, which is why it takes a count where the time axis takes a factor
   baseline_block_size: 128 # Optional - Number of baselines handled per scan step in rfi_vis:RiemannVisFine, or null for a single block over every baseline. Trades recomputation for peak memory: the fine grid it integrates carries min(baseline_block_size, n_bl) on its baseline axis rather than n_bl. null keeps the checkpoint, so the reverse pass still recomputes that grid rather than storing it, but forms it whole - it bounds the tape and not the peak. Read by no other component - the FFI kernels bound the same term themselves
   path_order: 3         # Optional - Degree of the polynomial in time through each cell's geometric delay in trajectory:FixedOrbit, from 0 to 3: the analytic kernel keeps the delay's derivatives up to the third
-  path_nodes: null      # Optional - Samples per cell that polynomial is fitted through in trajectory:FixedOrbit, at least path_order + 1. null is 4 * path_order + 1
+  path_nodes: null      # Optional - Samples per cell that polynomial is fitted through in trajectory:FixedOrbit, odd and at least path_order + 1. null is 4 * path_order + 1
   analytic:             # Optional - Options of rfi_vis:AnalyticVis. See docs/analytic_rfi_vis.md
     stencil: 1          # Half-width h of the signal interpolant: the polynomial through the 2h + 1 nearest cells on each axis, 0 to 4. 0 holds each cell's value
     segments: 2         # Equal pieces [-1, 1] is split into for the time integral, 1 to 1024

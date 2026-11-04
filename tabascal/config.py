@@ -215,22 +215,14 @@ class TabConfig:
             "Variable" in comp for comp in config["model"]["components"]
         )
 
-        # The data-grid route integrates each cell in closed form and never
-        # forms a fine time grid, so there is no sampling to estimate: one
-        # sample per cell, and none of the fringe-rate work that sizes it.
         self.rfi_grid = rfi_grid(import_components(config["model"]["components"]))
-        if self.rfi_grid == "data":
-            self.max_rfi_vis = np.max(np.abs(self.vis_obs))
-            self.n_int_time = 1
-            self.time_sample_idxs = [np.arange(self.n_bl)]
-            self.time_strides = [1]
-        else:
-            self.estimate_rfi_sampling(
-                config["rfi"]["time_int_factor"],
-                config["rfi"].get("min_time_bins", 1),
-                config["rfi"].get("max_time_bins", 30),
-                min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
-            )
+        self.estimate_rfi_sampling(
+            config["rfi"]["time_int_factor"],
+            config["rfi"].get("min_time_bins", 1),
+            config["rfi"].get("max_time_bins", 30),
+            min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
+            grid=self.rfi_grid,
+        )
 
         self._set_freqs_times()
 
@@ -626,7 +618,20 @@ class TabConfig:
         min_time_bins: int,
         max_time_bins: int,
         min_divisors: int = 8,
+        grid: Optional[str] = None,
     ):
+        self.max_rfi_vis = np.max(np.abs(self.vis_obs))
+
+        # The data-grid route (grid == "data", see components.rfi_grid)
+        # integrates each cell in closed form and never forms a fine time grid,
+        # so there is no sampling to estimate: one sample per cell, and none of
+        # the fringe-rate work that sizes it.
+        if grid == "data":
+            self.time_sample_idxs, self.time_strides, self.n_int_time = (
+                [np.arange(self.n_bl)], [1], 1
+            )
+            return
+
         # A satellite-free model has no RFI trajectory, so there is nothing to
         # derive a sub-integration sampling rate from: the fringe frequency whose
         # rate of change sets it is a property of the satellites. Skip the
@@ -635,7 +640,6 @@ class TabConfig:
         # reductions below fail with an opaque AxisError far from the cause.
         # One sample per integration is the floor, which is what no RFI needs.
         if self.n_rfi == 0:
-            self.max_rfi_vis = np.max(np.abs(self.vis_obs))
             self.time_sample_idxs, self.time_strides, self.n_int_time = (
                 get_strides_and_idxs(
                     np.ones(self.n_bl, dtype=int),
@@ -673,7 +677,6 @@ class TabConfig:
         # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
         fringe_freq = np.array([get_fringe_freq(rfi_pos) for rfi_pos in rfi_xyz])
 
-        self.max_rfi_vis = np.max(np.abs(self.vis_obs))
         sample_freq_bl = (
             np.pi
             * np.max(np.abs(fringe_freq), axis=(0, 1))
@@ -841,6 +844,10 @@ class Model:
 
             numpyro.deterministic("rfi_phase", state["rfi_phase"])
             numpyro.deterministic("rfi_A", state["rfi_A"])
+            # The data-grid route's third RFI input, which write.rfi_vis_per_sat
+            # needs to re-evaluate AnalyticVis one source at a time.
+            if "rfi_delay_poly_us" in state:
+                numpyro.deterministic("rfi_delay_poly_us", state["rfi_delay_poly_us"])
 
             numpyro.deterministic("vis_rfi", state["vis_rfi"])
             numpyro.deterministic("vis_ast", state["vis_ast"])

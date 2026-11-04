@@ -44,6 +44,10 @@ class Component(ABC):
     # run-time preflight in scripts._run_tabascal_impl and by require_double).
     requires_double: bool = False
 
+    # Set True on RFI visibility components that integrate each data-grid cell
+    # in closed form, so no fine time grid is sized for them (read by rfi_grid).
+    integrates_cells: bool = False
+
     @abstractmethod
     def setup(self, tab_config: Any) -> None:
         """Initialize component with configuration"""
@@ -222,14 +226,17 @@ def _describe_missing(
         return not wanted or shape is None or tuple(shape) == wanted
 
     later = [
-        (i, component_ref(comp))
+        (i, comp)
         for i, comp in enumerate(components[index + 1 :], start=index + 1)
-        if exc.key in component_outputs(comp) and on_grid(comp)
+        if exc.key in component_outputs(comp)
     ]
     where = f"model.components[{index}]"
 
-    if later:
-        listed = ", ".join(f"'{ref}' (model.components[{i}])" for i, ref in later)
+    if any(on_grid(comp) for _, comp in later):
+        listed = ", ".join(
+            f"'{component_ref(comp)}' (model.components[{i}])"
+            for i, comp in later if on_grid(comp)
+        )
         return (
             f"{where} '{name}' reads the model state key '{exc.key}', which is "
             f"produced by {listed}, listed after it. The components are in the "
@@ -237,7 +244,22 @@ def _describe_missing(
         )
 
     producers = state_key_producers().get(exc.key, [])
-    producers = [ref for ref in producers if on_grid(in_tree_components()[ref])] or producers
+    on_grid_producers = [ref for ref in producers if on_grid(in_tree_components()[ref])]
+    if later:
+        # Only producers on the other grid are listed, so moving one would
+        # trade this error for _check_grid's: name the grid, not the order.
+        i, comp = later[0]
+        written = tuple(comp.output_shapes[exc.key])
+        listed = ", ".join(f"'{ref}'" for ref in on_grid_producers)
+        instead = f" Use one that does, such as {listed}, before '{name}'." if listed else ""
+        return (
+            f"{where} '{name}' reads the model state key '{exc.key}' on the "
+            f"{_grid_name(wanted)} {wanted}, which nothing before it produces. "
+            f"'{component_ref(comp)}' (model.components[{i}]) writes it, but on "
+            f"the {_grid_name(written)} {written}.{instead}"
+        )
+
+    producers = on_grid_producers or producers
     if producers:
         listed = ", ".join(f"'{ref}'" for ref in producers)
         absent = (
@@ -269,8 +291,8 @@ def rfi_grid(classes: Iterable[type]):
     """The grid a model's RFI components exchange state on.
 
     ``"fine"`` when any of them reads or writes a fine-grid array, ``"data"``
-    when none does and one reads the data-grid route's ``rfi_delay_poly_us``,
-    and ``None`` when there is no RFI chain to speak of.
+    when none does and one declares ``integrates_cells``, and ``None`` when
+    there is no RFI chain to speak of.
     """
     classes = list(classes)
     shapes = [
@@ -279,7 +301,7 @@ def rfi_grid(classes: Iterable[type]):
     ]
     if any(d in _FINE_DIMS for shape in shapes for d in shape):
         return "fine"
-    if any("rfi_delay_poly_us" in cls.required_inputs for cls in classes):
+    if any(getattr(cls, "integrates_cells", False) for cls in classes):
         return "data"
     return None
 

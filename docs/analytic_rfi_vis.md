@@ -64,9 +64,10 @@ single source's CPU transpose on one thread, so a masked gradient is several
 times slower there than an unmasked one.
 
 **Integral.** The time integral of the product is closed form; the frequency
-average is the same `n_int_freq`-point rule as the fine grid. The signal and the
-phase are differentiated; the delay and the tables are constants. With
-`FixedOrbit` the phase is constant too, and only the signal-only kernels run.
+average is the same `n_int_freq`-point rule as the fine grid. The signal, the
+phase and the delay are differentiated; the interval and the tables are
+constants. With `FixedOrbit` the phase and the delay are constant too, and only
+the signal-only kernels run.
 
 ## Options
 
@@ -79,9 +80,9 @@ integral to ~1e-5.
 ## Limits
 
 - No fitted orbit on this grid: `NoDragOrbit`, `Orbit` and
-  `PhaseCalculationRFI` exist only as `*Fine`, since the kernel stops the
-  gradient on the delay.
-- `data.save_rfi_per_sat` is refused; it re-evaluates fine-grid state.
+  `PhaseCalculationRFI` exist only as `*Fine`. The kernel carries the delay's
+  gradient, but no data-grid trajectory yet forms the delay polynomial from
+  fitted orbital parameters.
 - Each `(a1, a2)` baseline may appear once (reversed pairs and autocorrelations
   are fine).
 
