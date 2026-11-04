@@ -10,7 +10,6 @@ tests import that module lazily and stub the run itself out.
 import os
 import re
 import shlex
-from datetime import datetime
 from pathlib import Path
 
 import argparse
@@ -277,28 +276,36 @@ def _raise(error):
 class TestRunSubcommand:
 
     def test_config_and_out_dir(self):
-        args = _parse("run", "-c", "tab_target.yaml", "-od", "out_dir")
+        args = _parse("run", "-c", "tab_target.yaml", "-n", "t", "-od", "out_dir")
         assert args.command == "run"
         assert args.config == "tab_target.yaml"
         assert args.out_dir == "out_dir"
 
     def test_config_and_ms_path(self):
-        args = _parse("run", "-c", "config.yaml", "-ms", "file.ms")
+        args = _parse("run", "-c", "config.yaml", "-n", "t", "-ms", "file.ms")
         assert args.ms_path == "file.ms"
 
     def test_extra_orbit_dir(self):
-        assert _parse("run", "-c", "c.yaml", "--extra-orbit-dir", "d").extra_orbit_dir == "d"
+        assert _parse("run", "-c", "c.yaml", "-n", "t", "--extra-orbit-dir", "d").extra_orbit_dir == "d"
 
     @pytest.mark.parametrize("flag", ["-np", "--norad-path"])
     def test_norad_path(self, flag):
-        assert _parse("run", "-c", "c.yaml", flag, "ids.txt").norad_path == "ids.txt"
+        assert _parse("run", "-c", "c.yaml", "-n", "t", flag, "ids.txt").norad_path == "ids.txt"
 
     def test_norad_path_defaults_to_none(self):
-        assert _parse("run", "-c", "c.yaml").norad_path is None
+        assert _parse("run", "-c", "c.yaml", "-n", "t").norad_path is None
 
-    def test_config_is_required(self):
+    @pytest.mark.parametrize("argv", [("-n", "t"), ("-c", "c.yaml"), ("-c", "c.yaml", "-n", "")])
+    def test_config_and_name_are_required(self, argv):
         with pytest.raises(SystemExit):
-            _parse("run")
+            _parse("run", *argv)
+
+    def test_the_old_suffix_says_what_replaced_it(self, capsys):
+        """Before argparse gets to the missing ``-n``: the old command line is the error."""
+        with pytest.raises(SystemExit):
+            _parse("run", "-c", "c.yaml", "-sx", "runA")
+
+        assert "-n/--name" in capsys.readouterr().err
 
     def test_subcommand_is_required(self):
         # The bare `tabascal -c ...` form the docs used to show is not valid.
@@ -416,37 +423,22 @@ class TestLightCurveSubcommand:
 
 
 class TestRfiPerSatSubcommand:
-    """``tabascal rfi-per-sat``: the per-satellite RFI columns, post hoc.
+    """``tabascal rfi-per-sat``: the per-satellite RFI columns, post hoc, from a run."""
 
-    Both inputs are required -- there is nothing to derive an MS from here, and
-    a results zarr the run did not write per-satellite visibilities into has
-    nothing to export.
-    """
+    def test_the_run_directory_and_defaults(self):
+        args = _parse("rfi-per-sat", "runs/latest")
+        assert (args.command, args.run_dir, args.ms_path) == ("rfi-per-sat", "runs/latest", None)
+        assert (args.prefix, args.corr) == ("TAB_RFI_", None)
 
-    def test_the_ms_and_the_results_zarr(self):
-        args = _parse("rfi-per-sat", "-m", "obs.ms", "-z", "map_pred.zarr")
-        assert args.command == "rfi-per-sat"
-        assert args.ms_path == "obs.ms"
-        assert args.results_zarr_path == "map_pred.zarr"
+    def test_the_overrides_can_be_given(self):
+        args = _parse("rfi-per-sat", "r", "-ms", "o.ms", "-p", "RFI_SRC_", "-c", "yy")
+        assert (args.ms_path, args.prefix, args.corr) == ("o.ms", "RFI_SRC_", "yy")
 
-    def test_both_are_required(self):
+    def test_the_old_zarr_flag_says_what_replaced_it(self, capsys):
         with pytest.raises(SystemExit):
-            _parse("rfi-per-sat", "-m", "obs.ms")
-        with pytest.raises(SystemExit):
-            _parse("rfi-per-sat", "-z", "map_pred.zarr")
+            _parse("rfi-per-sat", "-ms", "o.ms", "-z", "map_pred.zarr")
 
-    def test_the_defaults(self):
-        args = _parse("rfi-per-sat", "-m", "o.ms", "-z", "r.zarr")
-        # The columns the docs name, and the correlation off the zarr.
-        assert args.prefix == "TAB_RFI_"
-        assert args.corr is None
-
-    def test_the_prefix_and_correlation_can_be_given(self):
-        args = _parse(
-            "rfi-per-sat", "-m", "o.ms", "-z", "r.zarr", "-p", "RFI_SRC_", "-c", "yy"
-        )
-        assert args.prefix == "RFI_SRC_"
-        assert args.corr == "yy"
+        assert "rfi-per-sat <out_dir>/runs/<run>" in capsys.readouterr().err
 
     def test_the_writer_is_imported_only_when_it_runs(self):
         """The top-level parser builds this one, and `tabascal -h` stays cheap.
@@ -476,7 +468,7 @@ class TestRfiPerSatSubcommand:
                 "-c",
                 "import sys\n"
                 "from tabascal.scripts.run_tabascal import build_parser\n"
-                "build_parser().parse_args(['rfi-per-sat', '-m', 'o.ms', '-z', 'r.zarr'])\n"
+                "build_parser().parse_args(['rfi-per-sat', 'r'])\n"
                 "print(sorted(m for m in ('jax', 'numpyro', 'tabascal.write')"
                 " if m in sys.modules))\n",
             ],
@@ -528,10 +520,10 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
     @pytest.mark.parametrize(
         "argv",
         [
-            ("run", "-c", "c.yaml"),
+            ("run", "-c", "c.yaml", "-n", "t"),
             ("light-curve", "-ms", "o.ms", "-n", "12345"),
             ("search", "-ms", "o.ms", "--tle-dir", "d"),
-            ("rfi-per-sat", "-m", "o.ms", "-z", "r.zarr"),
+            ("rfi-per-sat", "r"),
         ],
         ids=["run", "light-curve", "search", "rfi-per-sat"],
     )
@@ -551,13 +543,13 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
         """Including ``false``: it is still the user's word, not our default."""
         monkeypatch.setenv(self._ENV, asked)
 
-        assert self._main_with(monkeypatch, ("run", "-c", "c.yaml")) == asked
+        assert self._main_with(monkeypatch, ("run", "-c", "c.yaml", "-n", "t")) == asked
 
     @pytest.mark.parametrize(
         "module_name, argv",
         [
-            ("results_to_MS", ["tab2MS", "-m", "o.ms", "-z", "r.zarr"]),
-            ("rfi_per_sat_to_MS", ["tab2MS-persat", "-m", "o.ms", "-z", "r.zarr"]),
+            ("results_to_MS", ["tab2MS", "r"]),
+            ("rfi_per_sat_to_MS", ["tab2MS-persat", "r"]),
             ("rfi_estimate", ["light-curve", "-ms", "o.ms", "-n", "12345"]),
             ("sat_search", ["search", "-ms", "o.ms", "--tle-dir", "d"]),
         ],
@@ -627,7 +619,7 @@ class TestDeviceMemoryIsOnDemandUnlessAsked:
                 "print('after import:', env())\n"
                 "_run_tabascal_impl.run = lambda args: print('at the fit:', env())\n"
                 "run_tabascal._run_cmd(\n"
-                "    run_tabascal.build_parser().parse_args(['run', '-c', 'c.yaml'])\n"
+                "    run_tabascal.build_parser().parse_args(['run', '-c', 'c.yaml', '-n', 't'])\n"
                 ")\n",
             ],
             capture_output=True,
@@ -913,88 +905,6 @@ class TestLightCurveInputs:
         assert self._mod().resolve_corr(args, config) == "xy"
 
 
-class _FrozenClock:
-    """``datetime`` with a stopped clock, for the same-second collision test."""
-
-    @staticmethod
-    def now():
-        return datetime(2026, 1, 2, 3, 4, 5)
-
-
-class TestRunLogPath:
-    """Where a run's log is written: in the plot directory it fills anyway.
-
-    It used to be opened in the process's working directory and copied into the
-    plot directory once the run had finished. Two runs started in the same
-    second from one directory then shared that filename, and the first to finish
-    removed it -- killing the second inside the copy with all of its compute
-    already done.
-    """
-
-    @staticmethod
-    def _resolve(impl, tmp_path, suffix=""):
-        config = {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}
-        return impl._resolve_paths(config, None, None, suffix, None)
-
-    @staticmethod
-    def _assert_log_is_in_the_plot_dir(paths):
-        # Normalised: a run with no suffix leaves plot_dir with a trailing
-        # separator, which dirname() of the log path does not have.
-        assert os.path.normpath(os.path.dirname(paths.log_path)) == os.path.normpath(
-            paths.plot_dir
-        )
-
-    def test_the_log_is_written_in_the_plot_directory(self, impl, tmp_path):
-        paths = self._resolve(impl, tmp_path)
-
-        assert os.path.isabs(paths.log_path)  # never relative to the CWD
-        self._assert_log_is_in_the_plot_dir(paths)
-        assert os.path.basename(paths.log_path) == f"log_tab_{paths.run_id}.txt"
-
-    def test_the_suffix_names_the_log(self, impl, tmp_path):
-        """Which run a log belongs to, without opening it."""
-        paths = self._resolve(impl, tmp_path, suffix="runA")
-
-        self._assert_log_is_in_the_plot_dir(paths)
-        assert paths.plot_dir.endswith(os.path.join("plots", "runA"))
-        assert os.path.basename(paths.log_path) == f"log_tab_runA_{paths.run_id}.txt"
-
-    def test_the_directory_is_there_before_the_log_is_opened(
-        self, impl, tmp_path, monkeypatch
-    ):
-        """``_stdout_logger`` opens the path for writing; nothing creates it later.
-
-        And the directory the run was launched from is left alone.
-        """
-        monkeypatch.chdir(tmp_path)
-        paths = self._resolve(impl, tmp_path)
-
-        with impl._stdout_logger(paths.log_path, True):
-            print("logged")
-
-        assert Path(paths.log_path).read_text().strip() == "logged"
-        assert list(Path.cwd().glob("log_tab*")) == []
-
-    def test_runs_in_the_same_second_are_told_apart_by_their_suffix(
-        self, impl, tmp_path, monkeypatch
-    ):
-        """The suffix separates concurrent runs; the timestamp alone cannot.
-
-        ``run_id`` has 1-second resolution, so two runs launched together with
-        the *same* suffix still resolve to one path -- asserted here so what is
-        left of the collision is on the record rather than assumed gone.
-        """
-        monkeypatch.setattr(impl, "datetime", _FrozenClock)
-
-        run_a = self._resolve(impl, tmp_path, "runA")
-        run_b = self._resolve(impl, tmp_path, "runB")
-        run_a_again = self._resolve(impl, tmp_path, "runA")
-
-        assert run_a.run_id == run_b.run_id == run_a_again.run_id
-        assert run_a.log_path != run_b.log_path
-        assert run_a.log_path == run_a_again.log_path
-
-
 class TestResolveMSPath:
     """Which Measurement Set a run reads: the flag, the config, the sim layout.
 
@@ -1011,10 +921,10 @@ class TestResolveMSPath:
             "data": {"out_dir": str(tmp_path / "obs"), "ms_path": config_ms_path},
             "model": {},
         }
-        paths = impl._resolve_paths(config, None, ms_path, "", None)
-        # The run reads the bundle; the config is written back so the archived
-        # tab_config_<run_id>.yaml records the MS the run actually used. They
-        # have to be the one path or that record is a fiction.
+        paths = impl._resolve_paths(config, None, ms_path, "t", None)
+        # The run reads the bundle; the config is written back so the run's
+        # config.yaml records the MS the run actually used. They have to be the
+        # one path or that record is a fiction.
         assert config["data"]["ms_path"] == paths.ms_path
         return paths.ms_path
 
@@ -1048,12 +958,12 @@ class TestResolveMSPath:
         """A hand-written config need not carry every key of the base one."""
         config = {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}
 
-        paths = impl._resolve_paths(config, None, None, "", None)
+        paths = impl._resolve_paths(config, None, None, "t", None)
 
         assert paths.ms_path == str(tmp_path / "obs" / "obs.ms")
-        # Recorded even when derived, so the archived tab_config_<run_id>.yaml
-        # is a record of the run and not of the intent -- which is why
-        # re-running one after moving the data needs -ms and not -s.
+        # Recorded even when derived, so the run's config.yaml is a record of
+        # the run and not of the intent -- which is why re-running one after
+        # moving the data needs -ms.
         assert config["data"]["ms_path"] == paths.ms_path
 
     def test_a_relative_config_path_is_made_absolute(self, impl, tmp_path, monkeypatch):
@@ -1080,7 +990,7 @@ class TestResolveMSPath:
             "model": {},
         }
 
-        paths = impl._resolve_paths(config, str(tmp_path / "other"), None, "", None)
+        paths = impl._resolve_paths(config, str(tmp_path / "other"), None, "t", None)
 
         assert paths.ms_path == named_ms
         assert config["data"]["out_dir"] == str(tmp_path / "other")
@@ -1090,7 +1000,7 @@ class TestResolveMSPath:
         """It still wins for everything out_dir does name."""
         config = {"data": {"out_dir": str(tmp_path / "from_config")}, "model": {}}
 
-        paths = impl._resolve_paths(config, str(tmp_path / "from_flag"), None, "", None)
+        paths = impl._resolve_paths(config, str(tmp_path / "from_flag"), None, "t", None)
 
         assert paths.ms_path == str(tmp_path / "from_flag" / "from_flag.ms")
         assert config["data"]["zarr_path"] == str(
@@ -1107,7 +1017,7 @@ class TestResolveMSPath:
         """
         config = {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}
 
-        impl._resolve_paths(config, None, None, "", None)
+        impl._resolve_paths(config, None, None, "t", None)
 
         assert config["data"]["truth_zarr"] == str(tmp_path / "obs" / "obs.zarr")
         assert config["data"]["zarr_path"] == config["data"]["truth_zarr"]
@@ -1127,7 +1037,7 @@ class TestResolveMSPath:
             "model": {},
         }
 
-        impl._resolve_paths(config, None, None, "", None)
+        impl._resolve_paths(config, None, None, "t", None)
 
         assert config["data"]["truth_zarr"] == str(
             tmp_path / "sim" / "pnt_src_obs.zarr"
@@ -1136,7 +1046,7 @@ class TestResolveMSPath:
     def test_an_unwritable_output_directory_is_reported_as_one(self, impl, tmp_path):
         """It defaults to the MS's own directory, and an archive is often read-only.
 
-        A raw PermissionError out of makedirs names a plots/ path the user
+        A raw PermissionError out of makedirs names a runs/ path the user
         never chose, and nothing about the flag that would move it.
         """
         archive = tmp_path / "archive"
@@ -1149,7 +1059,7 @@ class TestResolveMSPath:
                     {"data": {"ms_path": str(archive / "obs.ms")}, "model": {}},
                     None,
                     None,
-                    "",
+                    "t",
                     None,
                 )
         finally:
@@ -1172,7 +1082,7 @@ class TestResolveMSPath:
             "model": {},
         }
 
-        impl._resolve_paths(config, None, None, "", None)
+        impl._resolve_paths(config, None, None, "t", None)
 
         assert config["data"]["zarr_path"] == truth
 
@@ -1190,7 +1100,7 @@ class TestResolveMSPath:
             "model": {},
         }
 
-        impl._resolve_paths(config, None, None, "", None)
+        impl._resolve_paths(config, None, None, "t", None)
 
         assert config["data"]["zarr_path"] == str(
             tmp_path / "mwa" / "mwa_large_ch28.zarr"
@@ -1209,7 +1119,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
 
     @staticmethod
     def _resolve(impl, data):
-        return impl._resolve_paths({"data": data, "model": {}}, None, None, "", None)
+        return impl._resolve_paths({"data": data, "model": {}}, None, None, "t", None)
 
     @pytest.mark.parametrize("data", [{}, {"out_dir": None}, {"out_dir": ""}])
     def test_naming_neither_the_ms_nor_the_directory_is_reported(self, impl, data):
@@ -1229,7 +1139,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
 
         message = str(excinfo.value)
         assert "-ms/--ms_path" in message and "-od/--out_dir" in message
-        assert "plots" in message and "results" in message
+        assert "runs/" in message
 
     def test_an_ms_alone_writes_beside_itself(self, impl, tmp_path):
         """The case #207 was reported for: real data, no simulation directory.
@@ -1241,7 +1151,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
         ms = tmp_path / "mwa" / "mwa_large_ch28.ms"
 
         paths = impl._resolve_paths(
-            {"data": {"ms_path": str(ms)}, "model": {}}, None, None, "", None
+            {"data": {"ms_path": str(ms)}, "model": {}}, None, None, "t", None
         )
 
         assert paths.ms_path == str(ms)
@@ -1254,7 +1164,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
             {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}},
             None,
             None,
-            "",
+            "t",
             None,
         )
 
@@ -1312,9 +1222,9 @@ class TestResolvePathsRefusesWhatItCannotUse:
 def test_every_results_file_the_run_names_is_documented(impl, tmp_path):
     """A resolved results path nothing wrote (``map_params_*.zarr``) had no entry here."""
     paths = impl._resolve_paths(
-        {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}, None, None, "", None
+        {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}, None, None, "t", None
     )
-    results_dir = str(tmp_path / "obs" / "results")
+    results_dir = os.path.join(paths.run_dir, "results")
     named = {
         os.path.basename(path)
         for path in vars(paths).values()
@@ -1322,9 +1232,7 @@ def test_every_results_file_the_run_names_is_documented(impl, tmp_path):
     }
     documented = set(re.findall(r"└── (\S+)", (_DOCS / "output.md").read_text()))
 
-    assert named == {
-        "init_pred_Custom.zarr", "map_pred_Custom.zarr", "used_orbits_Custom.json"
-    }
+    assert named == {"init_pred.zarr", "map_pred.zarr", "used_orbits.json"}
     assert named <= documented
 
 
@@ -1345,7 +1253,7 @@ class TestRunHeaderNamesTheMS:
 
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            impl._print_run_header("Custom", "obs", ms_path, "2026-01-02T03:04:05")
+            impl._print_run_header("/out/runs/r_1", "obs", ms_path, "2026-01-02T03:04:05")
 
         return buffer.getvalue()
 
@@ -1357,7 +1265,7 @@ class TestRunHeaderNamesTheMS:
         header = self._header(impl, "/data/mwa/real.ms")
 
         assert "obs" in header
-        assert "Custom" in header
+        assert "/out/runs/r_1" in header
 
 
 class TestRunReporting:
@@ -1391,7 +1299,7 @@ class TestRunReporting:
         self._stub_run(impl, monkeypatch, calls, raises=error)
 
         with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
-            impl.run(_parse("run", "-c", "c.yaml", "-t"))
+            impl.run(_parse("run", "-c", "c.yaml", "-n", "t", "-t"))
 
         # Timings are deliberately left out: a timing table for a dead run misleads.
         assert calls == ["run", "memory"]
@@ -1405,7 +1313,7 @@ class TestRunReporting:
         self._stub_run(impl, monkeypatch, calls, raises=TLEError("no orbit for 99999"))
 
         with pytest.raises(SystemExit) as exc:
-            impl.run(_parse("run", "-c", "c.yaml"))
+            impl.run(_parse("run", "-c", "c.yaml", "-n", "t"))
 
         assert exc.value.code == 1
         assert calls == ["run", "memory"]
@@ -1413,8 +1321,8 @@ class TestRunReporting:
     @pytest.mark.parametrize(
         "argv, expected",
         [
-            (("run", "-c", "c.yaml"), ["run", "memory"]),
-            (("run", "-c", "c.yaml", "-t"), ["run", "memory", "timings"]),
+            (("run", "-c", "c.yaml", "-n", "t"), ["run", "memory"]),
+            (("run", "-c", "c.yaml", "-n", "t", "-t"), ["run", "memory", "timings"]),
         ],
     )
     def test_success_path_is_unchanged(self, impl, monkeypatch, calls, argv, expected):
@@ -1441,7 +1349,7 @@ class TestRunReporting:
         )
 
         with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
-            impl.run(_parse("run", "-c", "c.yaml"))
+            impl.run(_parse("run", "-c", "c.yaml", "-n", "t"))
 
         assert "backend is gone" in capsys.readouterr().err
 
@@ -1457,7 +1365,7 @@ class TestRunReporting:
         )
 
         with pytest.raises(SystemExit) as exc:
-            impl.run(_parse("run", "-c", "c.yaml"))
+            impl.run(_parse("run", "-c", "c.yaml", "-n", "t"))
 
         assert exc.value.code == 1
         assert "backend is gone" in capsys.readouterr().err
@@ -1467,7 +1375,7 @@ class TestRunReporting:
         monkeypatch.setattr(impl, "is_process_0", lambda: False)
         self._stub_run(impl, monkeypatch, calls)
 
-        impl.run(_parse("run", "-c", "c.yaml", "-t"))
+        impl.run(_parse("run", "-c", "c.yaml", "-n", "t", "-t"))
 
         assert calls == ["run"]
 
@@ -1477,7 +1385,7 @@ class TestRunReporting:
         self._stub_run(impl, monkeypatch, calls, raises=RuntimeError("RESOURCE_EXHAUSTED"))
 
         with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
-            impl.run(_parse("run", "-c", "c.yaml", "-t"))
+            impl.run(_parse("run", "-c", "c.yaml", "-n", "t", "-t"))
 
         assert calls == ["run"]
 
@@ -1756,7 +1664,7 @@ class TestDocumentedCommands:
     )
     def test_the_check_reads_the_options_not_the_tokens(self, tail, flagged):
         """The spellings a token matcher got wrong, pinned rather than tried."""
-        argv = shlex.split(f"tabascal run -c c.yaml {tail}")
+        argv = shlex.split(f"tabascal run -c c.yaml -n x {tail}")
         options = self._run_options(argv)
 
         assert bool(not (options.ms_path or options.out_dir)) is flagged
@@ -1773,20 +1681,15 @@ class TestDocumentedCommands:
 
 
 class TestALabelIsNotAPath:
-    """``-sx`` names an output file; it does not place one.
+    """``run -n`` and ``light-curve -sx`` name an output; they do not place one.
 
-    Both subcommands interpolate it into paths the run then *creates* --
-    ``light_curves/<tag>.npz``, ``results/<name>_<suffix>.zarr`` and
-    ``plots/<suffix>`` -- so a path here is obeyed rather than rejected:
-    ``os.path.join`` drops everything before an absolute component, and
-    ``os.makedirs`` and zarr happily create whatever a relative one names.
-    ``../..`` walks out of the output directory entirely.
-
-    Reachable by accident rather than only by misuse: argparse matches a short
-    option by prefix, so a bare ``-s`` on either subcommand lands here.
+    Both are interpolated into paths the command then *creates* --
+    ``runs/<name>_<time>_<token>/`` and ``light_curves/<tag>.npz`` -- so a path
+    here would be obeyed rather than rejected: ``os.path.join`` drops everything
+    before an absolute component, and ``..`` walks out of the output directory.
     """
 
-    @pytest.mark.parametrize("subcommand", ["run", "light-curve"])
+    @pytest.mark.parametrize("flag", [("run", "-n"), ("light-curve", "-sx")])
     @pytest.mark.parametrize(
         "value",
         [
@@ -1809,25 +1712,21 @@ class TestALabelIsNotAPath:
             ),
         ],
     )
-    def test_it_is_refused_at_the_command_line(self, subcommand, value):
+    def test_it_is_refused_at_the_command_line(self, flag, value):
         """At parse time, so the run stops before the work it would misplace."""
+        subcommand, option = flag
         with pytest.raises(SystemExit) as excinfo:
-            _parse(subcommand, "-c", "c.yaml", "-sx", value)
+            _parse(subcommand, "-c", "c.yaml", option, value)
 
         assert excinfo.value.code == 2
 
-    @pytest.mark.parametrize("subcommand", ["run", "light-curve"])
-    def test_a_bare_s_is_the_way_in(self, subcommand):
-        """``-s`` prefix-matches ``-sx`` on both, which is what makes it a trap."""
+    def test_a_bare_s_is_the_way_in(self):
+        """``-s`` prefix-matches ``-sx`` on light-curve, which is what makes it a trap."""
         with pytest.raises(SystemExit):
-            _parse(subcommand, "-c", "c.yaml", "-s", "/data/pnt_src_sim")
+            _parse("light-curve", "-c", "c.yaml", "-s", "/data/pnt_src_sim")
 
     @pytest.mark.parametrize(
         "value", ["runA", "v1.2.3", "a b", "TAB_RES", "sim-2026"]
     )
     def test_an_ordinary_label_still_goes_through(self, value):
-        assert _parse("run", "-c", "c.yaml", "-sx", value).suffix == value
-
-    def test_the_default_is_no_label_and_not_a_path(self):
-        """argparse runs type() over a string default too, and it is ``""``."""
-        assert _parse("run", "-c", "c.yaml").suffix == ""
+        assert _parse("run", "-c", "c.yaml", "-n", value).name == value
