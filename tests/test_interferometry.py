@@ -21,6 +21,7 @@ from tabascal.interferometry import (
     fov_to_eff_diameter,
     max_ast_fringe_rate,
     get_divisors,
+    get_rfi_path_numpy,
     get_strides_and_idxs,
     itrf_to_uvw_numpy,
 )
@@ -782,3 +783,21 @@ class TestApplyGains:
         np.testing.assert_allclose(
             np.asarray(out), np.asarray(baseline_gains(g, a1, a2)), rtol=exact_rtol
         )
+
+
+class TestGetRfiPathNumpy:
+
+    def test_matches_the_all_sources_broadcast(self):
+        """The per-source loop is the one-shot broadcast it replaced, bit for bit."""
+        rng = np.random.default_rng(3)
+        rfi = rng.normal(size=(3, 7, 3)) * 7e6
+        ants = rng.normal(size=(5, 7, 3)) * 6.4e6
+        uvw = rng.normal(size=(5, 7, 3)) * 1e3
+        expected = np.linalg.norm(ants[None] - rfi[:, None], axis=-1) + uvw[None, :, :, -1]
+        got = get_rfi_path_numpy(rfi, uvw, ants)
+        assert got.shape == (3, 5, 7) and got.dtype == np.float64
+        np.testing.assert_array_equal(got, expected)
+
+    def test_no_sources(self):
+        got = get_rfi_path_numpy(np.zeros((0, 4, 3)), np.zeros((2, 4, 3)), np.ones((2, 4, 3)))
+        assert got.shape == (0, 2, 4)
