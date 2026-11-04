@@ -42,7 +42,13 @@ import xarray as xr
 import tabascal.ms as ms_mod
 import tabascal.write as write_mod
 from tabascal.ms import read_caltable
-from tabascal.write import write_results_ms, write_results_xds
+from tabascal.write import (
+    PROVENANCE_KEYWORD,
+    RESULT_COLUMNS,
+    check_input_column,
+    write_results_ms,
+    write_results_xds,
+)
 
 
 N_ANT = 4
@@ -355,6 +361,7 @@ def run_writer(monkeypatch, tmp_path):
         ms_path="unused.ms",
         emit=False,
         time_scale=None,
+        column_keywords=None,
     ):
         # What the MS's TIME column declares. The scale is left off unless a case
         # is about it, which is what an MS that declares only a unit looks like.
@@ -362,6 +369,8 @@ def run_writer(monkeypatch, tmp_path):
 
         if time_scale is not None:
             keywords["TIME"]["MEASINFO"] = {"type": "epoch", "Ref": time_scale}
+
+        keywords.update(column_keywords or {})
 
         def _from_ms(path, column_keywords=False):
             return ([xds_ms], keywords) if column_keywords else [xds_ms]
@@ -707,7 +716,9 @@ class TestWrittenColumns:
 
         # Jy on the visibility columns only; WEIGHT and WEIGHT_SPECTRUM are
         # standard columns and are left with the units the MS gives them.
-        assert captured["keywords"] == {col: {"UNIT": "Jy"} for col in COLS}
+        assert {c: k.get("UNIT") for c, k in captured["keywords"].items()} == {
+            **{col: "Jy" for col in COLS}, **{col: None for col in WEIGHT_COLS}
+        }
 
     def test_the_total_residual_closes_on_a_perfect_model(self, tmp_path, run_writer):
         """With DATA equal to the stored forward model, nothing is left over."""
@@ -1469,6 +1480,83 @@ class TestMultipleCorrelations:
 
         assert "resolved" not in captured        # never had to resolve a name
         assert values["CORRECTED_DATA"].shape[2] == 1
+
+
+    def _with_columns(self, xds_ms, **cols):
+        """``xds_ms`` with the MS columns an earlier export left, all on every corr."""
+
+        def var(v):
+            dims = ["row", "chan", "corr"][: v.ndim - 1] + ["corr"]
+            return dims, da.from_array(v, chunks=(N_BL,) + v.shape[1:])
+
+        return xds_ms.assign(**{name: var(v) for name, v in cols.items()})
+
+    def test_existing_columns_keep_their_other_correlations(self, run):
+        """An xx fit after a yx one must not erase the yx results, nor the weights."""
+        xds_ms, zarr_path, _, run_writer, corr, idx = run()
+        shape = (xds_ms.sizes["row"], N_FREQ, self.N_CORR)
+        before = {col: np.full(shape, 5 + 1j, np.complex64) for col in COLS}
+        before["WEIGHT_SPECTRUM"] = np.full(shape, 3, np.float32)
+        before["WEIGHT"] = np.full(shape[::2], 2, np.float32)
+
+        with pytest.warns(RuntimeWarning, match="tabascal did not write"):
+            values, _ = run_writer(
+                self._with_columns(xds_ms, **before), zarr_path, corr=corr, corr_idx=idx
+            )
+
+        for col, old in before.items():
+            np.testing.assert_array_equal(
+                np.delete(values[col], idx, -1), np.delete(old, idx, -1)
+            )
+            assert not np.allclose(values[col][..., idx], old[..., idx])
+
+    def test_a_new_weight_spectrum_starts_from_weight(self, run):
+        xds_ms, zarr_path, _, run_writer, corr, idx = run()
+        weight = np.arange(xds_ms.sizes["row"] * self.N_CORR, dtype=np.float32)
+        weight = weight.reshape(-1, self.N_CORR)
+
+        values, _ = run_writer(
+            self._with_columns(xds_ms, WEIGHT=weight), zarr_path, corr=corr, corr_idx=idx
+        )
+
+        np.testing.assert_array_equal(
+            _others(values["WEIGHT_SPECTRUM"], idx),
+            _others(np.repeat(weight[:, None], N_FREQ, 1), idx),
+        )
+
+    def test_provenance_is_kept_per_correlation(self, tmp_path, run):
+        """Each correlation names its own run; the earlier entry survives."""
+        xds_ms, _, _, run_writer, corr, idx = run()
+        gains, ast, rfi = _model(1)
+        run_dir = tmp_path / "runs" / "a"
+        (run_dir / "results").mkdir(parents=True)
+        (run_dir / "run.json").write_text("{}")
+        zarr_path = _write_zarr(run_dir / "results", gains, ast, rfi, corr="yx")
+        earlier = {"CORR_0": {"corr": "xx", "results": "/elsewhere/map_pred.zarr"}}
+        owned = {f"CORR_{idx}": {"corr": "yx"}, **earlier}
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # CORRECTED_DATA here is tabascal's own
+            _, captured = run_writer(
+                self._with_columns(xds_ms, CORRECTED_DATA=np.asarray(xds_ms.DATA)),
+                zarr_path,
+                corr_idx=idx,
+                column_keywords={"CORRECTED_DATA": {PROVENANCE_KEYWORD: owned}},
+            )
+
+        record = captured["keywords"]["CORRECTED_DATA"][PROVENANCE_KEYWORD]
+        written = record[f"CORR_{idx}"]
+        assert record["CORR_0"] == earlier["CORR_0"]
+        assert written.pop("written")
+        assert written == {
+            "corr": "yx",
+            "run": str(run_dir),
+            "results": str(zarr_path),
+            "data_col": "DATA",
+        }
+        assert set(captured["keywords"]["TAB_AST_DATA"][PROVENANCE_KEYWORD]) == {
+            f"CORR_{idx}"
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -2741,3 +2829,30 @@ class TestWriteResultsXdsRecordsTheCorrelation:
         _, captured = run_writer(_fake_ms(data), path, corr_idx=2)
 
         assert captured["resolved"] == "yx"
+
+
+class TestTheInputColumnIsNeverWritten:
+
+    @pytest.mark.parametrize("col", RESULT_COLUMNS)
+    def test_the_writer_refuses_before_reading_anything(self, col, monkeypatch):
+        monkeypatch.setattr(write_mod, "xds_from_ms", lambda *a, **k: pytest.fail("read"))
+
+        with pytest.raises(ValueError, match="replace the data the run read"):
+            write_results_ms("unused.ms", "unused.zarr", data_col=col)
+
+    @pytest.mark.parametrize(
+        "data_col, per_sat, refused",
+        [
+            ("CORRECTED_DATA", False, True),
+            ("TAB_RES_DATA", False, True),
+            ("TAB_RFI_58126", True, True),
+            ("TAB_RFI_58126", False, False),
+            ("DATA", True, False),
+        ],
+    )
+    def test_the_run_checks_before_fitting(self, data_col, per_sat, refused):
+        if refused:
+            with pytest.raises(ValueError, match="replace the data the run read"):
+                check_input_column(data_col, per_sat)
+        else:
+            check_input_column(data_col, per_sat)
