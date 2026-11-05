@@ -43,9 +43,9 @@ _DEFAULT_PK_CUTOFF = 1e-6
 _AUTO_TIME_PAD_FLOOR = 2.0
 
 #: The ``ast.transform`` options. ``dft`` is the default: it holds less than the
-#: padded grid at every size but the smallest, and the sky is not where a run's
-#: time goes -- the RFI visibilities are -- so its quadratic cost in channels is
-#: the lesser concern. ``fft`` is the lever back where that cost does matter.
+#: padded grid at every size but the smallest, and with ``corr_freq`` set it is
+#: faster too. ``fft`` is the lever back for ``corr_freq: null`` on a wide band,
+#: where every delay mode survives and the matrices grow with the channels squared.
 _TRANSFORMS = ("dft", "fft")
 
 
@@ -437,21 +437,29 @@ class GPVisAst(Component):
         dft``), and the largest thing formed is the size of the visibilities.
         The matrices are fixed at setup and shared by every baseline.
 
-        What the matrices cost is quadratic in each axis's length where the FFT
-        is n log n, and with ``corr_freq: null`` every frequency mode survives
-        the cut, so on a wide band the DFT is the slower of the two. On a GTX
-        1060, 66 baselines at 150 integrations, single precision, value and
-        gradient together, each case in its own process:
+        What the matrices cost is the surviving modes times the data length on
+        each axis, where the FFT pays for the whole padded grid. The sky is
+        smooth in frequency, so with ``corr_freq`` set to a bandwidth near the
+        observed one only a few delay modes survive and the DFT is the faster
+        of the two at every band width. On a GTX 1060, 66 baselines at 150
+        integrations, single precision, value and gradient together, each case
+        in its own process, (frequency, time) modes (3, 63) at ``corr_freq``
+        one band and (33, 63) at a tenth of one:
 
-        =========  ===================  ===================
-        channels   FFT                  DFT
-        =========  ===================  ===================
-        16         3.4 ms, 54 MB        2.7 ms, 119 MB
-        128        36 ms, 452 MB        26 ms, 312 MB
-        512        119 ms, 1280 MB      244 ms, 1036 MB
-        1024       207 ms, 2254 MB      882 ms, 1999 MB
-        2048       out of memory        3343 ms, 3781 MB
-        =========  ===================  ===================
+        =========  ===================  ===================  ===================  ===================
+        channels   FFT, 1 band          DFT, 1 band          FFT, 0.1 band        DFT, 0.1 band
+        =========  ===================  ===================  ===================  ===================
+        16         3.2 ms, 28 MB        1.3 ms, 81 MB        3.1 ms, 42 MB        2.3 ms, 94 MB
+        128        31 ms, 235 MB        6.3 ms, 151 MB       31 ms, 256 MB        14 ms, 171 MB
+        512        110 ms, 477 MB       19 ms, 403 MB        111 ms, 492 MB       39 ms, 423 MB
+        1024       194 ms, 784 MB       37 ms, 727 MB        194 ms, 855 MB       75 ms, 742 MB
+        2048       395 ms, 1509 MB      71 ms, 1452 MB       395 ms, 1527 MB      146 ms, 1468 MB
+        4096       830 ms, 2940 MB      142 ms, 2903 MB      829 ms, 2958 MB      294 ms, 2920 MB
+        =========  ===================  ===================  ===================  ===================
+
+        ``corr_freq: null`` is the exception: no roll-off keeps every delay
+        mode, the frequency matrix becomes square in the channel count, and the
+        FFT is the faster from about 512 channels (1024: 207 ms against 882 ms).
         """
         if self.transform == "dft":
             mats = self.dft_mats

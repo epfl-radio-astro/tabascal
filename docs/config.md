@@ -241,15 +241,18 @@ ast:
 * `mean`: The mean of the prior distribution: `0` (equivalently `zeros`), the default, or `data`, the observed visibilities.
 * `freq_pad_factor`: This defines the size of the padding used when modelling the signal in the Fourier domain. The signal is modelled in the Fourier domain where periodicity is assumed on some interval. If `freq_pad_factor: 1.0` is given then the interval is the interval of the data itself and will lead to periodic solutions.
 * `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`. It also sets how slow a variation the sky model can follow: the padded axis's modes are spaced `1 / (n_time_pad * int_time)`, and a baseline whose maximum fringe rate is below the first of them has every mode but the zero one suppressed by its prior, so its sky is fitted as all but constant in time. The shortest baselines fringe slowest, so they set what is needed. `auto` pads until the first mode reaches the slowest baseline's fringe rate, and no less than `2.0`, which keeps the ends of the observation clear of the periodic wrap-around when every baseline is fast enough to need nothing; the factor it came to is written back to the run's config. With a number, the run prints the slowest and fastest fringe rates and the factor `auto` would choose. The time modes that survive `cutoff` grow in proportion to the padding, and under `transform: fft` so does the padded grid; the default `transform: dft` never forms the grid, so a large factor costs it only the extra modes.
-* `transform`: How the latent modes become visibilities. `dft`, the default, applies one small matrix per axis, sized by the modes that survive `cutoff`: the pad, the inverse transform and the crop are one linear, separable map, so the padded Fourier grid is never formed and the largest array is the visibilities themselves. `fft` pads the modes up to the padded grid, inverse-transforms it and crops the padding away. The two agree to round-off in value and in gradient. They differ in cost: the matrices are quadratic in each axis's length where the FFT is n log n, and with `gp_cov.corr_freq: null` every frequency mode survives the cut, so on a wide band `dft` is the slower. It is the default because it holds less memory at all but the smallest sizes, and the RFI visibilities, not the sky, are where a run's time goes. On a GTX 1060, 66 baselines at 150 integrations, single precision, value and gradient together, each case in its own process:
+* `transform`: How the latent modes become visibilities. `dft`, the default, applies one small matrix per axis, sized by the modes that survive `cutoff`: the pad, the inverse transform and the crop are one linear, separable map, so the padded Fourier grid is never formed and the largest array is the visibilities themselves. `fft` pads the modes up to the padded grid, inverse-transforms it and crops the padding away. The two agree to round-off in value and in gradient. They differ in cost: the matrices cost the surviving modes times the data length on each axis, where the FFT pays for the whole padded grid. The sky is smooth in frequency, so with `gp_cov.corr_freq` set to a bandwidth near the observed one only a few delay modes survive and `dft` is the faster at every band width, as well as the lighter. On a GTX 1060, 66 baselines at 150 integrations, single precision, value and gradient together, each case in its own process, (frequency, time) modes (3, 63) at `corr_freq` one band and (33, 63) at a tenth of one:
 
-    | channels | `fft` | `dft` |
-    |---|---|---|
-    | 16 | 3.4 ms, 54 MB | 2.7 ms, 119 MB |
-    | 128 | 36 ms, 452 MB | 26 ms, 312 MB |
-    | 512 | 119 ms, 1280 MB | 244 ms, 1036 MB |
-    | 1024 | 207 ms, 2254 MB | 882 ms, 1999 MB |
-    | 2048 | out of memory | 3343 ms, 3781 MB |
+    | channels | `fft`, 1 band | `dft`, 1 band | `fft`, 0.1 band | `dft`, 0.1 band |
+    |---|---|---|---|---|
+    | 16 | 3.2 ms, 28 MB | 1.3 ms, 81 MB | 3.1 ms, 42 MB | 2.3 ms, 94 MB |
+    | 128 | 31 ms, 235 MB | 6.3 ms, 151 MB | 31 ms, 256 MB | 14 ms, 171 MB |
+    | 512 | 110 ms, 477 MB | 19 ms, 403 MB | 111 ms, 492 MB | 39 ms, 423 MB |
+    | 1024 | 194 ms, 784 MB | 37 ms, 727 MB | 194 ms, 855 MB | 75 ms, 742 MB |
+    | 2048 | 395 ms, 1509 MB | 71 ms, 1452 MB | 395 ms, 1527 MB | 146 ms, 1468 MB |
+    | 4096 | 830 ms, 2940 MB | 142 ms, 2903 MB | 829 ms, 2958 MB | 294 ms, 2920 MB |
+
+    `corr_freq: null` is the exception. No roll-off keeps every delay mode, the frequency matrix becomes square in the channel count, and `fft` is the faster from about 512 channels (207 ms against 882 ms at 1024). Set `corr_freq` on any wide band, which [its entry](#astronomical-signal) asks for anyway.
 
 * `baseline_block_size`: The number of baselines `GPVisAst` transforms per step of its scan over the baseline axis: `auto`, the default, picks it from the transform; a whole number sets it outright, under either transform; `null` puts every baseline in a single step. It is purely a memory strategy: baselines are independent, so the result does not depend on it, and unlike the RFI scans there is no checkpoint on the body — the transform is affine in the parameters, so its derivative is a linear map with no primal intermediates to store.
 
