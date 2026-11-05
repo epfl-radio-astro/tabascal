@@ -442,7 +442,7 @@ class GPVisAst(Component):
         smooth in frequency, so with ``corr_freq`` set to a bandwidth near the
         observed one only a few delay modes survive and the DFT is the faster
         of the two at every band width. On a GTX 1060, 66 baselines at 150
-        integrations, single precision, value and gradient together, each case
+        integrations, double precision, value and gradient together, each case
         in its own process, (frequency, time) modes (3, 63) at ``corr_freq``
         one band and (33, 63) at a tenth of one:
 
