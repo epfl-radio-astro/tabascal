@@ -52,14 +52,14 @@ def create_config(
     )
 
 
-def ffi(cls):
-    """``cls()``, set up with ``rfi.backend: ffi`` whatever config it is given."""
+def backend(cls, name):
+    """``cls()``, set up with ``rfi.backend: name`` whatever config it is given."""
     impl = cls()
     setup = impl.setup
-    def setup_ffi(config):
-        rfi = {**config.args["rfi"], "backend": "ffi"}
+    def setup_with(config):
+        rfi = {**config.args["rfi"], "backend": name}
         setup(SimpleNamespace(**{**vars(config), "args": {**config.args, "rfi": rfi}}))
-    impl.setup = setup_ffi
+    impl.setup = setup_with
     return impl
 
 
@@ -118,8 +118,8 @@ def test_ffi(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisFine())
-    ffi_result = compute_vis_rfi(ffi(RiemannVisFine))
+    ref_result = compute_vis_rfi(backend(RiemannVisFine, "jax"))
+    ffi_result = compute_vis_rfi(backend(RiemannVisFine, "ffi"))
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -143,8 +143,8 @@ def test_ffi_jvp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
         )
         return tangents["vis_rfi"]
 
-    ref_result = compue_jvp(RiemannVisFine())
-    ffi_result = compue_jvp(ffi(RiemannVisFine))
+    ref_result = compue_jvp(backend(RiemannVisFine, "jax"))
+    ffi_result = compue_jvp(backend(RiemannVisFine, "ffi"))
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -172,8 +172,8 @@ def test_ffi_vjp(n_ant, n_rfi, n_time, n_freq, n_int_time, n_int_freq):
 
 
 
-    ref_state = compue_vjp(RiemannVisFine())
-    ffi_state = compue_vjp(ffi(RiemannVisFine))
+    ref_state = compue_vjp(backend(RiemannVisFine, "jax"))
+    ffi_state = compue_vjp(backend(RiemannVisFine, "ffi"))
 
     atol, rtol = _tols(real_dtype)
     assert ffi_state["rfi_A"].dtype == ref_state["rfi_A"].dtype
@@ -315,7 +315,7 @@ def test_the_block_size_changes_neither_the_value_nor_the_gradient(block_size):
     state = create_state(config, False, 42, real_dtype=real_dtype)
     cotangent = create_state(config, True, 50, real_dtype=real_dtype)["vis_rfi"]
 
-    impl = RiemannVisFine()
+    impl = backend(RiemannVisFine, "jax")
     impl.setup(config)
     constants = make_constants(impl)
     forward = impl.build_forward()
@@ -350,7 +350,7 @@ def test_the_fine_grid_is_not_kept_for_the_reverse_pass():
     real_dtype = _session_dtype()
     state = create_state(config, False, 42, real_dtype=real_dtype)
 
-    impl = RiemannVisFine()
+    impl = backend(RiemannVisFine, "jax")
     impl.setup(config)
     constants = make_constants(impl)
     forward = impl.build_forward()
@@ -429,7 +429,7 @@ def test_the_default_block_size_is_used_when_the_config_does_not_set_one():
     config = create_config(4, 2, 3, 5, 4, 3)
     assert config.args["rfi"] == {}
 
-    impl = RiemannVisFine()
+    impl = backend(RiemannVisFine, "jax")
     impl.setup(config)
 
     assert impl.baseline_block_size == 128
@@ -448,7 +448,7 @@ def test_a_null_block_size_is_one_block_over_every_baseline():
     config = create_config(*sizes, rfi_args={"baseline_block_size": None})
     state = create_state(config, False, 42, real_dtype=real_dtype)
 
-    impl = RiemannVisFine()
+    impl = backend(RiemannVisFine, "jax")
     impl.setup(config)
     assert impl.baseline_block_size is None
 
@@ -483,7 +483,7 @@ def test_a_null_block_size_keeps_the_tape_bounded():
     def residual_bytes(block):
         config = create_config(*sizes, rfi_args={"baseline_block_size": block})
         state = create_state(config, False, 42, real_dtype=real_dtype)
-        impl = RiemannVisFine()
+        impl = backend(RiemannVisFine, "jax")
         impl.setup(config)
         constants = make_constants(impl)
         forward = impl.build_forward()
@@ -514,15 +514,15 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"baseline_block_size": block_size})
 
     with pytest.raises(RuntimeError, match="baseline_block_size"):
-        RiemannVisFine().setup(config)
+        backend(RiemannVisFine, "jax").setup(config)
 
 
 @pytest.mark.parametrize("Impl", [RiemannVisFine, RiemannVisVariableFine])
-@pytest.mark.parametrize("backend, expected", [(None, "jax"), ("jax", "jax"), ("ffi", "ffi")])
-def test_rfi_backend_picks_the_implementation(Impl, backend, expected):
-    """null is the default, ``jax``; the FFI route is the one that has no constants."""
+@pytest.mark.parametrize("name, expected", [(None, "ffi"), ("ffi", "ffi"), ("jax", "jax")])
+def test_rfi_backend_picks_the_implementation(Impl, name, expected):
+    """null is the default, ``ffi``; the FFI route is the one that has no constants."""
     config = make_variable_config(4, 2, 3, 5, 4, 3, strides=[1, 2])
-    config.args["rfi"]["backend"] = backend
+    config.args["rfi"]["backend"] = name
     impl = Impl()
     impl.setup(config)
 
@@ -530,11 +530,11 @@ def test_rfi_backend_picks_the_implementation(Impl, backend, expected):
     assert (impl.build_constants() == {}) == (expected == "ffi")
 
 
-@pytest.mark.parametrize("backend", ["FFI", "xla", 1])
-def test_an_unknown_rfi_backend_is_refused(backend):
-    config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"backend": backend})
+@pytest.mark.parametrize("name", ["FFI", "xla", 1])
+def test_an_unknown_rfi_backend_is_refused(name):
+    config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"backend": name})
 
-    with pytest.raises(RuntimeError, match="rfi.backend must be one of 'jax', 'ffi'"):
+    with pytest.raises(RuntimeError, match="rfi.backend must be one of 'ffi', 'jax'"):
         RiemannVisFine().setup(config)
 
 
@@ -589,7 +589,8 @@ _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
         config = SimpleNamespace(
             n_ant=n_ant, n_rfi=n_rfi, n_time=n_time, n_freq=n_freq,
             n_int_time=n_int_time, n_int_freq=n_int_freq, n_bl=n_bl, a1=a1, a2=a2,
-            precision="double", args={"rfi": {"baseline_block_size": block_size}},
+            precision="double",
+            args={"rfi": {"baseline_block_size": block_size, "backend": "jax"}},
         )
         comp = RiemannVisFine()
         comp.setup(config)
@@ -692,7 +693,10 @@ def make_variable_config(
 
 @pytest.mark.parametrize(
     "Impl",
-    [RiemannVisFine, partial(ffi, RiemannVisFine), RiemannVisVariableFine, partial(ffi, RiemannVisVariableFine)],
+    [
+        partial(backend, RiemannVisFine, "jax"), partial(backend, RiemannVisFine, "ffi"),
+        partial(backend, RiemannVisVariableFine, "jax"), partial(backend, RiemannVisVariableFine, "ffi"),
+    ],
     ids=["RiemannVisFine-jax", "RiemannVisFine-ffi", "RiemannVisVariableFine-jax", "RiemannVisVariableFine-ffi"],
 )
 def test_integration_sample_counts_come_from_the_bound_config(Impl):
@@ -735,8 +739,8 @@ def test_variable_single_group_matches_reference(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisFine())
-    var_result = compute_vis_rfi(RiemannVisVariableFine())
+    ref_result = compute_vis_rfi(backend(RiemannVisFine, "jax"))
+    var_result = compute_vis_rfi(backend(RiemannVisVariableFine, "jax"))
 
     atol, rtol = _tols(real_dtype)
     assert var_result.shape == ref_result.shape
@@ -759,8 +763,8 @@ def test_variable_ffi_single_group_matches_reference(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(ffi(RiemannVisFine))
-    var_result = compute_vis_rfi(ffi(RiemannVisVariableFine))
+    ref_result = compute_vis_rfi(backend(RiemannVisFine, "ffi"))
+    var_result = compute_vis_rfi(backend(RiemannVisVariableFine, "ffi"))
 
     atol, rtol = _tols(real_dtype)
     assert var_result.shape == ref_result.shape
@@ -789,8 +793,8 @@ def test_variable_ffi_matches_variable(
         impl.setup(config)
         return impl.build_forward()({}, state, make_constants(impl))["vis_rfi"]
 
-    ref_result = compute_vis_rfi(RiemannVisVariableFine())
-    ffi_result = compute_vis_rfi(ffi(RiemannVisVariableFine))
+    ref_result = compute_vis_rfi(backend(RiemannVisVariableFine, "jax"))
+    ffi_result = compute_vis_rfi(backend(RiemannVisVariableFine, "ffi"))
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.shape == (config.n_bl, config.n_freq, config.n_time)
@@ -820,8 +824,8 @@ def test_variable_ffi_matches_variable_jvp(
         )
         return tangents["vis_rfi"]
 
-    ref_result = compute_jvp(RiemannVisVariableFine())
-    ffi_result = compute_jvp(ffi(RiemannVisVariableFine))
+    ref_result = compute_jvp(backend(RiemannVisVariableFine, "jax"))
+    ffi_result = compute_jvp(backend(RiemannVisVariableFine, "ffi"))
 
     atol, rtol = _tols(real_dtype)
     assert ffi_result.dtype == ref_result.dtype
@@ -850,8 +854,8 @@ def test_variable_ffi_matches_variable_vjp(
         (output_state,) = vjp_func(vjp_state)
         return output_state
 
-    ref_state = compute_vjp(RiemannVisVariableFine())
-    ffi_state = compute_vjp(ffi(RiemannVisVariableFine))
+    ref_state = compute_vjp(backend(RiemannVisVariableFine, "jax"))
+    ffi_state = compute_vjp(backend(RiemannVisVariableFine, "ffi"))
 
     atol, rtol = _tols(real_dtype)
     assert ffi_state["rfi_A"].dtype == ref_state["rfi_A"].dtype
@@ -861,7 +865,9 @@ def test_variable_ffi_matches_variable_vjp(
 
 
 @pytest.mark.parametrize(
-    "Impl", [RiemannVisVariableFine, partial(ffi, RiemannVisVariableFine)], ids=["jax", "ffi"]
+    "Impl",
+    [partial(backend, RiemannVisVariableFine, "jax"), partial(backend, RiemannVisVariableFine, "ffi")],
+    ids=["jax", "ffi"],
 )
 def test_variable_accumulates_into_state(Impl):
     """forward adds vis_rfi onto the incoming state rather than overwriting it."""

@@ -517,6 +517,7 @@ rfi_vis_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
+            rfi_backend="jax",
             # Re-recorded for ast.gp_cov.std: the prior on the astronomical
             # visibilities is normalised to a width in Jy now, so it is a different
             # prior. All three architectures re-measured on the branch -- ARM on an
@@ -552,7 +553,7 @@ rfi_vis_configs = [
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
-        id="RiemannVisFine",
+        id="RiemannVisFine-jax",
     ),
     pytest.param(
         PipelineTestConfig(
@@ -564,9 +565,8 @@ rfi_vis_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            rfi_backend="ffi",
-            # Only chi2 is asserted -- the FFI kernel is the unit under test; truth metrics
-            # match the jax-backend RiemannVisFine case above. Measured opt-point
+            # The default rfi.backend, ffi. Only chi2 is asserted -- the FFI kernel is the
+            # unit under test; truth metrics match the jax-backend case above. Measured opt-point
             # values (gains identity -> RMSE 0):
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   double  ARM    | 0.8965724354 |     0.1787       1.2      |     0.4176       0.3
@@ -582,7 +582,7 @@ rfi_vis_configs = [
             # Grace-Hopper node.
             chi2_ref=0.8965724353762747,
         ),
-        id="RiemannVisFine-ffi",
+        id="RiemannVisFine",
     ),
     pytest.param(
         PipelineTestConfig(

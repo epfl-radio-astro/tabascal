@@ -35,8 +35,12 @@ def _read_backend(config, backends):
 class RiemannVisFine(Component):
     """Riemann-sum RFI visibilities on the fine grid, through ``rfi.backend``.
 
-    ``jax`` (the default) is the reference implementation, the one ``ffi`` is
-    validated against in value, forward mode and reverse mode. It walks the
+    ``ffi``, the default, is ``ri_kernels``' compiled ``RFIVisOp``, which bounds
+    the fine grid inside the kernel and reads no block size. See
+    ``docs/kernels.md``.
+
+    ``jax`` is the reference implementation, the one ``ffi`` is validated
+    against in value, forward mode and reverse mode. It walks the
     baseline axis in blocks of ``rfi.baseline_block_size`` under ``checkpoint``
     (see :func:`tabascal.interferometry.calculate_rfi_vis_blocked`) so that the
     fine grid it integrates is bounded by the block rather than by the whole
@@ -52,9 +56,6 @@ class RiemannVisFine(Component):
     whole. Measured on one GH200 that peaks where the unscanned kernel did, and
     across four it is well under it, the tape being per-device memory that the
     collective does not divide.
-
-    ``ffi`` is ``ri_kernels``' compiled ``RFIVisOp``, which bounds the same term
-    itself and reads no block size. See ``docs/kernels.md``.
     """
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
@@ -78,7 +79,7 @@ class RiemannVisFine(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
             self.n_ant = config.n_ant
-            self.backend = _read_backend(config, ("jax", "ffi"))
+            self.backend = _read_backend(config, ("ffi", "jax"))
 
             # null is a setting, not a missing value: one block over every
             # baseline, which keeps the checkpoint and leaves the scan a single
@@ -199,8 +200,8 @@ class RiemannVisVariableFine(Component):
     """:class:`RiemannVisFine` with each baseline group sampled at its own stride.
 
     The baselines are split into the groups of ``time_sample_idxs``, each read at
-    every ``time_stride``-th fine time sample. ``rfi.backend`` picks ``jax`` (the
-    default) or ``ffi``, one ``RFIVisOp`` per group; ``ffi`` scales poorly
+    every ``time_stride``-th fine time sample. ``rfi.backend`` picks ``ffi`` (the
+    default), one ``RFIVisOp`` per group, or ``jax``; ``ffi`` scales poorly
     across devices.
     """
 
@@ -226,7 +227,7 @@ class RiemannVisVariableFine(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
-            self.backend = _read_backend(config, ("jax", "ffi"))
+            self.backend = _read_backend(config, ("ffi", "jax"))
 
             self.time_sample_idxs = config.time_sample_idxs
             self.time_strides = config.time_strides

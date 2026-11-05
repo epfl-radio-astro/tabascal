@@ -467,7 +467,7 @@ class TestFineGridCancellation:
             times=np.zeros(1), freqs=np.full(1, 1.0e9),
             time_sample_idxs=[np.zeros(1, dtype="int32")], time_strides=[1],
             args={
-                "rfi": {},
+                "rfi": {"backend": "jax"},
                 "model": {"components": ["rfi_vis:RiemannVisFine"]},
                 "data": {"corr": "xx", "save_rfi_per_sat": True},
             },

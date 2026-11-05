@@ -73,7 +73,7 @@ rfi:
     corr_time: 24 # seconds
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
-  # backend: ffi      # rfi_vis implementation, jax or ffi; null is the component's default
+  # backend: jax      # rfi_vis implementation, ffi (the default) or jax
   n_int_freq: 1
   time_int_factor: 5
 

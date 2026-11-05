@@ -1,10 +1,10 @@
 # RFI-visibility kernels
 
-With `rfi.backend: ffi`, the
+By default (`rfi.backend: ffi`), the
 {class}`~tabascal.components.rfi_vis.RiemannVisFine` and
 {class}`~tabascal.components.rfi_vis.RiemannVisVariableFine` components call
-compiled kernels instead of their pure-JAX implementation, `rfi.backend: jax`,
-which is their default.
+compiled kernels; `rfi.backend: jax` selects their pure-JAX implementation
+instead.
 
 Those kernels ship in the separate
 [`ri-kernels`](https://github.com/epfl-radio-astro/ri-kernels) package, a plain
@@ -28,17 +28,17 @@ pip install "ri_kernels[cuda12]"
 AMD GPUs using ROCm are supported, but may require the `ri-kernels` package to
 be compiled from source.
 
-## Enabling them
+## Choosing the backend
 
-Set the backend in the `rfi` section of the [configuration file](config.md)
-beside the component in `model`:
+The kernels need no configuration. To run the pure-JAX implementation instead,
+set the backend in the `rfi` section of the [configuration file](config.md):
 
 ```yaml
 model:
   components:
     - rfi_vis:RiemannVisFine
 rfi:
-  backend: ffi
+  backend: jax
 ```
 
 ## Memory
