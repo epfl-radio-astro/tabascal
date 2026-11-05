@@ -261,7 +261,7 @@ def test_ast_mean_zero_and_zeros_are_the_same_prior(tmp_path):
 # ---------------------------------------------------------------------------
 # The baseline block scan
 #
-# latent_to_signal pads the latent grid up to the padded k-grid, transforms and
+# Under ast.transform: fft, latent_to_signal pads the latent grid up to the padded k-grid, transforms and
 # crops back, so vmapping it over every baseline holds (n_bl, n_freq_pad,
 # n_time_pad) several times over -- padding the crop then throws away. The
 # component walks the baseline axis in blocks of ast.baseline_block_size
@@ -276,7 +276,7 @@ BLOCK_SIZES = [1, 4, 6, 128, None]
 
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 def test_the_baseline_block_size_changes_neither_value_nor_gradient(
-    tmp_path, block_size
+    tmp_path, block_size, exact_rtol
 ):
     """The scanned transform reproduces the unblocked one, block for block.
 
@@ -304,11 +304,16 @@ def test_the_baseline_block_size_changes_neither_value_nor_gradient(
     ref_vis, ref_grads = value_and_grad(None)
     vis, grads = value_and_grad(block_size)
 
-    np.testing.assert_allclose(vis, ref_vis, rtol=1e-12, atol=1e-12)
+    # The block is the batch the transform's matrix products run over, and a GPU
+    # may sum a different batch in a different order: round-off on the scale of
+    # the output.
+    def close(got, expected):
+        scale = float(np.abs(expected).max())
+        np.testing.assert_allclose(got, expected, rtol=exact_rtol, atol=exact_rtol * scale)
+
+    close(vis, ref_vis)
     for key in ref_grads:
-        np.testing.assert_allclose(
-            np.asarray(grads[key]), np.asarray(ref_grads[key]), rtol=1e-12, atol=1e-12
-        )
+        close(np.asarray(grads[key]), np.asarray(ref_grads[key]))
 
 
 def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path):
@@ -321,6 +326,8 @@ def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path)
 
     args = base_args(tmp_path)
     del args["ast"]["baseline_block_size"]
+    # The transform whose grid auto sizes from; under the dft it is one step.
+    args["ast"]["transform"] = "fft"
 
     config = make_ast_config(args)
     comp = GPVisAst()
@@ -333,7 +340,7 @@ def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path)
 def test_auto_blocks_a_padded_grid_that_does_not_fit_the_budget(tmp_path):
     """And binds where the grid is large, which is the case it exists for."""
 
-    comp = setup_ast(ast_config(tmp_path, baseline_block_size="auto"))
+    comp = setup_ast(ast_config(tmp_path, baseline_block_size="auto", transform="fft"))
     padded = 1
     for dim, (lo, hi) in zip((comp.n_k_freq_ast, comp.n_k_time_ast), comp.pads):
         padded *= dim + lo + hi
