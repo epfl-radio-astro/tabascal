@@ -276,17 +276,6 @@ class GPVisAst(Component):
         two matrix products, which is the modes in one axis and the
         visibilities in the other. What the scan does still cost is the stack
         of its steps' outputs, so there blocking is worse on both counts.
-        Measured on one GH200, 2016 baselines at 150 integrations, value and
-        gradient together:
-
-        =========  =================  ==================  =================
-        channels   FFT, best block    FFT, single step    DFT, single step
-        =========  =================  ==================  =================
-        8          273.9 MB, 1.0 ms   441.2 MB, 1.0 ms    218.6 MB, 0.2 ms
-        32         828.6 MB, 4.0 ms   1711.2 MB, 3.3 ms   683.8 MB, 0.4 ms
-        128        2386.4 MB, 14.7 ms 5926.7 MB, 12.7 ms  1799.1 MB, 1.1 ms
-        =========  =================  ==================  =================
-
         An explicit ``baseline_block_size`` is honoured under either transform.
         """
 
@@ -355,9 +344,8 @@ class GPVisAst(Component):
         it nor the padded grid is ever formed for every baseline at once.
 
         Splitting the baseline axis across devices was measured alongside this
-        and is deliberately not here: on the astronomical benchmark the scan
-        takes the value-and-gradient peak from 1008 MB to 163.5 MB on its own,
-        and adding the split takes it back up to 174.5 MB, because the gather
+        and is deliberately not here: the scan lowers the value-and-gradient
+        peak on its own, and adding the split raises it again, because the gather
         the visibilities need on the way out makes the backward pass scatter a
         cotangent the forward has just collected. ``ast.transform: dft`` removes
         the padded grid altogether: see :meth:`build_block_signal`.
@@ -441,25 +429,11 @@ class GPVisAst(Component):
         each axis, where the FFT pays for the whole padded grid. The sky is
         smooth in frequency, so with ``corr_freq`` set to a bandwidth near the
         observed one only a few delay modes survive and the DFT is the faster
-        of the two at every band width. On a GTX 1060, 66 baselines at 150
-        integrations, double precision, value and gradient together, each case
-        in its own process, (frequency, time) modes (3, 63) at ``corr_freq``
-        one band and (33, 63) at a tenth of one:
-
-        =========  ===================  ===================  ===================  ===================
-        channels   FFT, 1 band          DFT, 1 band          FFT, 0.1 band        DFT, 0.1 band
-        =========  ===================  ===================  ===================  ===================
-        16         3.2 ms, 28 MB        1.3 ms, 81 MB        3.1 ms, 42 MB        2.3 ms, 94 MB
-        128        31 ms, 235 MB        6.3 ms, 151 MB       31 ms, 256 MB        14 ms, 171 MB
-        512        110 ms, 477 MB       19 ms, 403 MB        111 ms, 492 MB       39 ms, 423 MB
-        1024       194 ms, 784 MB       37 ms, 727 MB        194 ms, 855 MB       75 ms, 742 MB
-        2048       395 ms, 1509 MB      71 ms, 1452 MB       395 ms, 1527 MB      146 ms, 1468 MB
-        4096       830 ms, 2940 MB      142 ms, 2903 MB      829 ms, 2958 MB      294 ms, 2920 MB
-        =========  ===================  ===================  ===================  ===================
+        of the two at every band width.
 
         ``corr_freq: null`` is the exception: no roll-off keeps every delay
-        mode, the frequency matrix becomes square in the channel count, and the
-        FFT is the faster from about 512 channels (1024: 207 ms against 882 ms).
+        mode, the frequency matrix becomes square in the channel count, and on
+        a wide band the FFT is the faster.
         """
         if self.transform == "dft":
             mats = self.dft_mats
