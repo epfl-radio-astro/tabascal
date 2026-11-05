@@ -34,7 +34,7 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
-from tabascal.write import write_results_xds
+from tabascal.write import check_input_column, write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 from tabascal.scripts._config_paths import config_is_unset, config_path
@@ -358,7 +358,10 @@ def _print_model_summary(tab_config, model, start_time):
     n_params = sum(x.size for x in model.init_params.values())
     n_data = 2 * tab_config.vis_obs.size
 
-    print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
+    if tab_config.rfi_grid == "data":
+        print("RFI visibilities integrated analytically per cell (no fine time grid).")
+    else:
+        print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
     print()
     print(f"Number of Antennas   : {tab_config.n_ant: 4}")
     print(f"Number of Time Steps : {tab_config.n_time: 4}")
@@ -382,6 +385,12 @@ SEED = 1
 def tabascal_subtraction(
     config, out_dir, ms_path=None, name=None, extra_orbit_dir=None, norad_path=None, log=True
 ):
+    # Before the run directory exists: a config whose exports would replace
+    # its own input is not a run that failed, it is one that cannot start.
+    check_input_column(
+        config["data"].get("data_col", "DATA"),
+        config["data"].get("save_rfi_per_sat", False),
+    )
     paths = _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path)
 
     try:

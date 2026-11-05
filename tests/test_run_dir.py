@@ -95,6 +95,15 @@ def test_a_failed_record_stops_the_run_before_it_starts(impl, tmp_path, monkeypa
         )
 
 
+def test_a_run_that_would_write_over_its_input_never_starts(impl, tmp_path):
+    config = {"data": {"ms_path": str(tmp_path / "o.ms"), "data_col": "CORRECTED_DATA"}}
+
+    with pytest.raises(ValueError, match="replace the data the run read"):
+        impl.tabascal_subtraction(config, str(tmp_path), name="t", log=False)
+
+    assert not (tmp_path / "runs").exists()
+
+
 def test_inputs_through_latest_are_resolved_once_and_shared(tmp_path, monkeypatch):
     """Rank 0 resolves latest to the earlier run; a worker arriving after it moved gets the same."""
     import tabascal.distributed as dist
