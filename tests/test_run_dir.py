@@ -82,6 +82,14 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
     assert set(record["inputs"]) == {"data.ms_path", "data.gain_table[0]", "rfi.est", "data.truth_zarr"}
 
 
+@pytest.mark.parametrize("saved, resolved, expected", [("auto", 40.625, 40.625), (8.0, 8.0, 8.0)])
+def test_auto_time_padding_is_saved_as_the_factor_it_came_to(impl, tmp_path, saved, resolved, expected):
+    run_dir_mod.write_config(str(tmp_path), {"ast": {"time_pad_factor": saved}, "rfi": {}})
+    impl._record_resolved_settings(str(tmp_path), {"ast": {"time_pad_factor": resolved}})
+
+    assert run_dir_mod.read_config(str(tmp_path)) == {"ast": {"time_pad_factor": expected}, "rfi": {}}
+
+
 def test_a_failed_record_stops_the_run_before_it_starts(impl, tmp_path, monkeypatch):
     def broken(*args):
         raise OSError("disk full")
