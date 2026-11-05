@@ -89,6 +89,7 @@ def run(args):
         data_col=data["data_col"],
         corr=args.corr,
         gain_table=gain_table,
+        row_chunk=data.get("row_chunk"),
     )
 
 
