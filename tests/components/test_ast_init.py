@@ -276,7 +276,7 @@ BLOCK_SIZES = [1, 4, 6, 128, None]
 
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 def test_the_baseline_block_size_changes_neither_value_nor_gradient(
-    tmp_path, block_size
+    tmp_path, block_size, exact_rtol
 ):
     """The scanned transform reproduces the unblocked one, block for block.
 
@@ -304,11 +304,16 @@ def test_the_baseline_block_size_changes_neither_value_nor_gradient(
     ref_vis, ref_grads = value_and_grad(None)
     vis, grads = value_and_grad(block_size)
 
-    np.testing.assert_allclose(vis, ref_vis, rtol=1e-12, atol=1e-12)
+    # The block is the batch the transform's matrix products run over, and a GPU
+    # may sum a different batch in a different order: round-off on the scale of
+    # the output.
+    def close(got, expected):
+        scale = float(np.abs(expected).max())
+        np.testing.assert_allclose(got, expected, rtol=exact_rtol, atol=exact_rtol * scale)
+
+    close(vis, ref_vis)
     for key in ref_grads:
-        np.testing.assert_allclose(
-            np.asarray(grads[key]), np.asarray(ref_grads[key]), rtol=1e-12, atol=1e-12
-        )
+        close(np.asarray(grads[key]), np.asarray(ref_grads[key]))
 
 
 def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path):
