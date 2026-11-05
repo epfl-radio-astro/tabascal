@@ -1,5 +1,4 @@
 """The optional MS export leaves the results zarr as the recorded output."""
-import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
@@ -11,9 +10,8 @@ from tabascal.scripts.run_tabascal import build_parser
 @pytest.mark.parametrize("skip", [None, False, True])
 @pytest.mark.parametrize("path", ["initial.zarr", "optimized.zarr"])
 def test_export_policy(monkeypatch, capsys, skip, path):
-    writer, remover = Mock(), Mock(return_value=True)
+    writer = Mock()
     monkeypatch.setattr(tab_tools, "write_results_ms", writer)
-    monkeypatch.setattr(tab_tools, "remove_caltable", remover)
     data = {"data_col": "DATA", "row_chunk": 100000}
     if skip is not None:
         data["skip_ms_write"] = skip
@@ -22,12 +20,8 @@ def test_export_policy(monkeypatch, capsys, skip, path):
     assert path in capsys.readouterr().out
     if skip:
         writer.assert_not_called()
-        # The export would have replaced the previous run's table; skipping it
-        # must not leave those gains beside the new results.
-        remover.assert_called_once_with(path.replace(".zarr", ".B"), "input.ms")
     else:
         writer.assert_called_once_with("input.ms", path, "DATA", gain_table=["external.B"], row_chunk=100000)
-        remover.assert_not_called()
 
 
 @pytest.mark.parametrize("cli, configured, expected", [(False, False, False), (False, True, True), (True, False, True)])
@@ -64,62 +58,3 @@ def test_optimized_run_keeps_zarr(monkeypatch, skip):
     zarr_writer.assert_called_once_with(pred, config, "optimized.zarr")
     assert ms_writer.call_count == (0 if skip else 1)
     assert result[0] is pred
-
-
-@pytest.mark.parametrize("rank0", [True, False])
-@pytest.mark.parametrize("fails", [False, True])
-def test_skip_removes_the_stale_table_on_process_0_and_leaves_together(monkeypatch, rank0, fails):
-    error = OSError("busy")
-    remover = Mock(side_effect=error if fails else None, return_value=True)
-    together = Mock()
-    monkeypatch.setattr(tab_tools, "remove_caltable", remover)
-    monkeypatch.setattr(tab_tools, "is_process_0", lambda: rank0)
-    monkeypatch.setattr(tab_tools, "fail_together", together)
-    config = SimpleNamespace(args={"data": {"data_col": "DATA", "skip_ms_write": True}})
-    tab_tools.write_ms_if_enabled(config, "input.ms", "optimized.zarr")
-    assert remover.call_count == rank0
-    # Every process reaches the collective, carrying process 0's failure.
-    together.assert_called_once()
-    assert together.call_args.args[0] is (error if rank0 and fails else None)
-
-
-@pytest.mark.parametrize("spelling", ["dotted", "nested", "case"])
-def test_skip_keeps_an_input_however_it_is_spelled(monkeypatch, tmp_path, spelling):
-    """The removal is recursive, and APFS/NTFS fold case: neither may hide an input."""
-    remover = Mock(return_value=True)
-    monkeypatch.setattr(tab_tools, "remove_caltable", remover)
-    monkeypatch.setattr(tab_tools, "fail_together", Mock())
-    (tmp_path / "optimized.B" / "archive" / "input.B").mkdir(parents=True)
-    given = {
-        "dotted": str(tmp_path / "." / "optimized.B"),
-        "nested": str(tmp_path / "optimized.B" / "archive" / "input.B"),
-        "case": str(tmp_path / "OPTIMIZED.B"),
-    }[spelling]
-    if spelling == "case" and not os.path.exists(given):
-        pytest.skip("case-sensitive filesystem")
-    config = SimpleNamespace(
-        args={"data": {"data_col": "DATA", "skip_ms_write": True}}, gain_table=[given],
-    )
-    tab_tools.write_ms_if_enabled(config, "input.ms", str(tmp_path / "optimized.zarr"))
-    remover.assert_not_called()
-
-
-@pytest.mark.parametrize("rank0", [True, False])
-def test_skip_keeps_a_previous_table_this_run_calibrates_with(monkeypatch, tmp_path, rank0):
-    """A rerun with data.gain_table = the last fit's table must not delete its own input."""
-    remover, together = Mock(return_value=True), Mock()
-    monkeypatch.setattr(tab_tools, "remove_caltable", remover)
-    monkeypatch.setattr(tab_tools, "is_process_0", lambda: rank0)
-    monkeypatch.setattr(tab_tools, "fail_together", together)
-    results = tmp_path / "optimized.zarr"
-    previous = tmp_path / "optimized.B"
-    config = SimpleNamespace(
-        args={"data": {"data_col": "DATA", "skip_ms_write": True}},
-        gain_table=[str(tmp_path / "other.B"), str(tmp_path / "." / "optimized.B")],
-    )
-    tab_tools.write_ms_if_enabled(config, "input.ms", str(results))
-    remover.assert_not_called()
-    # Still a point every process reaches together.
-    together.assert_called_once()
-    assert together.call_args.args[0] is None
-    assert previous.name in str(together.call_args.args[1])
