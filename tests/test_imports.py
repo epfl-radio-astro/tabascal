@@ -69,9 +69,7 @@ FINE_GRID = [
     "rfi_signal:ComplexRFIVarAntFine",
     "rfi_signal:ComplexRFIConstAntFine",
     "rfi_vis:RiemannVisFine",
-    "rfi_vis:RiemannVisFFIFine",
     "rfi_vis:RiemannVisVariableFine",
-    "rfi_vis:RiemannVisVariableFFIFine",
 ]
 
 #: Their names before the suffix, which are not kept as aliases -- bar the three
@@ -80,7 +78,10 @@ REMOVED = [
     ref.removesuffix("Fine")
     for ref in FINE_GRID
     if ref.split(":")[1] not in ("FixedOrbitFine", "ComplexRFIVarAntFine", "ComplexRFIConstAntFine")
-] + ["trajectory:FixedOrbitCoarse", "rfi_signal:ComplexRFIVarAntCoarse", "rfi_vis:PolyInterpVis"]
+] + [
+    "trajectory:FixedOrbitCoarse", "rfi_signal:ComplexRFIVarAntCoarse", "rfi_vis:PolyInterpVis",
+    "rfi_vis:RiemannVisFFI", "rfi_vis:RiemannVisVariableFFI",
+]
 
 
 class TestTheFineGridSuffix:
@@ -91,6 +92,14 @@ class TestTheFineGridSuffix:
     @pytest.mark.parametrize("ref", REMOVED)
     def test_the_name_without_it_is_gone(self, ref):
         assert f"has no class '{ref.split(':')[1]}'" in message(ref)
+
+    @pytest.mark.parametrize(
+        "ref, now",
+        [("rfi_vis:RiemannVisFFIFine", "RiemannVisFine"),
+         ("rfi_vis:RiemannVisVariableFFIFine", "RiemannVisVariableFine")],
+    )
+    def test_an_ffi_component_names_its_backend(self, ref, now):
+        assert f"It is now {now} with rfi.backend: ffi." in message(ref)
 
 
 class TestAnUnknownClassInAKnownModule:

@@ -68,10 +68,9 @@ NORAD_IDS = [58126, 27868, 44713]
 #: differ in how they reduce over the source axis, which is exactly what the
 #: sum-back is a statement about.
 RFI_VIS_COMPONENTS = [
-    "rfi_vis:RiemannVisFine",
-    "rfi_vis:RiemannVisFFIFine",
-    "rfi_vis:RiemannVisVariableFine",
-    "rfi_vis:RiemannVisVariableFFIFine",
+    (component, backend)
+    for component in ("rfi_vis:RiemannVisFine", "rfi_vis:RiemannVisVariableFine")
+    for backend in ("jax", "ffi")
 ]
 
 
@@ -86,7 +85,8 @@ def _complex_dtype():
 
 
 def make_config(
-    component="rfi_vis:RiemannVisFFIFine",
+    component="rfi_vis:RiemannVisFine",
+    backend="ffi",
     n_rfi=None,
     n_rfi_real=None,
     norad_ids=None,
@@ -126,7 +126,7 @@ def make_config(
         time_sample_idxs=[np.arange(N_BL, dtype="int32")],
         time_strides=[1],
         args={
-            "rfi": {},
+            "rfi": {"backend": backend},
             "model": {"components": ["trajectory:FixedOrbitFine", component]},
             "data": {"corr": corr, "save_rfi_per_sat": save_rfi_per_sat},
         },
@@ -300,9 +300,9 @@ class TestTheDecompositionSumsBack:
     than assumed away by constructing the total as the sum.
     """
 
-    @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
-    def test_the_sources_sum_back_to_the_fitted_rfi_visibility(self, component):
-        config = make_config(component=component)
+    @pytest.mark.parametrize("component,backend", RFI_VIS_COMPONENTS)
+    def test_the_sources_sum_back_to_the_fitted_rfi_visibility(self, component, backend):
+        config = make_config(component=component, backend=backend)
         pred = make_pred(config)
 
         vis_src, norad_ids = rfi_vis_per_sat(pred, config)
@@ -383,9 +383,10 @@ class TestPaddedSatellites:
     """Sharding pads the source list with dark dummies; they are not satellites."""
 
     @staticmethod
-    def _padded_config(component="rfi_vis:RiemannVisFFIFine"):
+    def _padded_config(component="rfi_vis:RiemannVisFine", backend="ffi"):
         return make_config(
             component=component,
+            backend=backend,
             # The padding duplicates the last satellite.
             norad_ids=NORAD_IDS + [NORAD_IDS[-1]],
             n_rfi_real=len(NORAD_IDS),
@@ -408,15 +409,15 @@ class TestPaddedSatellites:
             dtype=np.dtype(_real_dtype()),
         )
 
-    @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
-    def test_the_padded_row_carried_nothing(self, component):
+    @pytest.mark.parametrize("component,backend", RFI_VIS_COMPONENTS)
+    def test_the_padded_row_carried_nothing(self, component, backend):
         """The premise of dropping it: a dummy source contributes exactly zero.
 
         Per component, because each reduces over the source axis differently and
         it is that reduction which has to leave a dark row at precisely zero --
         not merely small.
         """
-        config = self._padded_config(component)
+        config = self._padded_config(component, backend)
         pred = make_pred(config, dark=1)
         forward, constants = _forward(config)
 
@@ -566,10 +567,10 @@ class TestNonFiniteSources:
     """
 
     @pytest.mark.parametrize("field", ["rfi_A", "rfi_phase"])
-    @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
+    @pytest.mark.parametrize("component,backend", RFI_VIS_COMPONENTS)
     @pytest.mark.parametrize("value", [np.nan, np.inf])
-    def test_the_other_columns_stay_finite(self, field, component, value):
-        config = make_config(component=component)
+    def test_the_other_columns_stay_finite(self, field, component, backend, value):
+        config = make_config(component=component, backend=backend)
         pred = make_pred(config)
         bad = pred[field].at[:, 1].set(value)
 

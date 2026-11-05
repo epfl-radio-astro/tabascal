@@ -14,17 +14,34 @@ from tabascal.poly_interp import fine_offsets, interp_tables, monomial_tables
 from ri_kernels.jax_api import RFIAnalyticVisOp, RFIVisOp
 
 
-class RiemannVisFine(Component):
-    """Riemann-sum RFI visibilities in pure JAX, scanned over the baseline axis.
+def _read_backend(config, backends):
+    """The ``rfi.backend`` a component runs, from the ones it has, default first.
 
-    The reference implementation of the same integral as :class:`RiemannVisFFIFine`,
-    and the one that kernel is validated against in value, forward mode and
-    reverse mode. The baseline axis is walked in blocks of
-    ``rfi.baseline_block_size`` under ``checkpoint`` (see
-    :func:`tabascal.interferometry.calculate_rfi_vis_blocked`) so that the fine
-    grid it integrates is bounded by the block rather than by the whole array:
-    what the forward pass leaves behind for reverse mode is the result and a
-    transposed copy of its per-antenna inputs, not the ``(n_bl, n_rfi,
+    ``jax`` is the visibility written in JAX and differentiated by it; ``ffi``
+    is the compiled ``ri_kernels`` op, with its own JVP and transpose. A null
+    or absent key is the component's default.
+    """
+    backend = config.args["rfi"].get("backend")
+    if backend is None:
+        return backends[0]
+    if backend not in backends:
+        raise ValueError(
+            f"rfi.backend must be one of {', '.join(map(repr, backends))} or null "
+            f"for this component, got {backend!r}."
+        )
+    return backend
+
+
+class RiemannVisFine(Component):
+    """Riemann-sum RFI visibilities on the fine grid, through ``rfi.backend``.
+
+    ``jax`` (the default) is the reference implementation, the one ``ffi`` is
+    validated against in value, forward mode and reverse mode. It walks the
+    baseline axis in blocks of ``rfi.baseline_block_size`` under ``checkpoint``
+    (see :func:`tabascal.interferometry.calculate_rfi_vis_blocked`) so that the
+    fine grid it integrates is bounded by the block rather than by the whole
+    array: what the forward pass leaves behind for reverse mode is the result
+    and a transposed copy of its per-antenna inputs, not the ``(n_bl, n_rfi,
     n_freq_fine, n_time_fine)`` intermediate the reduction is built from.
 
     It trades recomputation for memory rather than aiming at speed. The block
@@ -35,6 +52,9 @@ class RiemannVisFine(Component):
     whole. Measured on one GH200 that peaks where the unscanned kernel did, and
     across four it is well under it, the tape being per-device memory that the
     collective does not divide.
+
+    ``ffi`` is ``ri_kernels``' compiled ``RFIVisOp``, which bounds the same term
+    itself and reads no block size. See ``docs/kernels.md``.
     """
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
@@ -57,6 +77,8 @@ class RiemannVisFine(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
+            self.n_ant = config.n_ant
+            self.backend = _read_backend(config, ("jax", "ffi"))
 
             # null is a setting, not a missing value: one block over every
             # baseline, which keeps the checkpoint and leaves the scan a single
@@ -96,10 +118,15 @@ class RiemannVisFine(Component):
         return set_params
 
     def build_constants(self):
+        if self.backend == "ffi":
+            return {}
         return {"a1": self.a1, "a2": self.a2}
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
+        if self.backend == "ffi":
+            return self._build_forward_ffi()
+
         prefix = self.prefix
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
@@ -128,51 +155,7 @@ class RiemannVisFine(Component):
 
         return forward
 
-    def _set_outputs(self):
-
-        self.state_outputs = {
-            "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
-        }
-
-class RiemannVisFFIFine(Component):
-
-    # Accumulates into vis_rfi, which Model zeroes before the components run.
-    required_inputs = {
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-        "vis_rfi": ("n_bl", "n_freq", "n_time"),
-    }
-    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
-
-    parameters = {}
-
-    def setup(self, config):
-        """All validation and error-prone operations here"""
-        try:
-            self.a1 = config.a1
-            self.a2 = config.a2
-            self.n_int_time = config.n_int_time
-            self.n_int_freq = config.n_int_freq
-            self.n_time = config.n_time
-            self.n_bl = config.n_bl
-            self.n_freq = config.n_freq
-            self.n_ant = config.n_ant
-            self.n_rfi = config.n_rfi
-
-            self._set_outputs()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def build_set_params(self):
-
-        def set_params(params):
-            return params
-
-        return set_params
-
-    def build_forward(self):
-        """Return pure, JIT-compatible function"""
+    def _build_forward_ffi(self):
         # Pre-compute everything possible
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
@@ -213,6 +196,13 @@ class RiemannVisFFIFine(Component):
 
 
 class RiemannVisVariableFine(Component):
+    """:class:`RiemannVisFine` with each baseline group sampled at its own stride.
+
+    The baselines are split into the groups of ``time_sample_idxs``, each read at
+    every ``time_stride``-th fine time sample. ``rfi.backend`` picks ``jax`` (the
+    default) or ``ffi``, one ``RFIVisOp`` per group; ``ffi`` scales poorly
+    across devices.
+    """
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
@@ -236,6 +226,7 @@ class RiemannVisVariableFine(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
+            self.backend = _read_backend(config, ("jax", "ffi"))
 
             self.time_sample_idxs = config.time_sample_idxs
             self.time_strides = config.time_strides
@@ -253,6 +244,8 @@ class RiemannVisVariableFine(Component):
         return set_params
 
     def build_constants(self):
+        if self.backend == "ffi":
+            return {}
         constants = {"a1": self.a1, "a2": self.a2}
         for i, idx in enumerate(self.time_sample_idxs):
             constants[f"time_sample_idxs_{i}"] = idx
@@ -260,6 +253,9 @@ class RiemannVisVariableFine(Component):
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
+        if self.backend == "ffi":
+            return self._build_forward_ffi()
+
         prefix = self.prefix
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
@@ -318,55 +314,7 @@ class RiemannVisVariableFine(Component):
 
         return forward
 
-    def _set_outputs(self):
-
-        self.state_outputs = {
-            "vis_rfi": jnp.zeros((self.n_bl, self.n_freq, self.n_time), dtype=complex),
-        }
-
-
-class RiemannVisVariableFFIFine(Component):
-
-    # Accumulates into vis_rfi, which Model zeroes before the components run.
-    required_inputs = {
-        "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-        "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
-        "vis_rfi": ("n_bl", "n_freq", "n_time"),
-    }
-    output_shapes = {"vis_rfi": ("n_bl", "n_freq", "n_time")}
-
-    parameters = {}
-
-    def setup(self, config):
-        """All validation and error-prone operations here"""
-        try:
-            self.a1 = config.a1
-            self.a2 = config.a2
-            self.n_int_time = config.n_int_time
-            self.n_int_freq = config.n_int_freq
-            self.n_rfi = config.n_rfi
-            self.n_ant = config.n_ant
-            self.n_time = config.n_time
-            self.n_bl = config.n_bl
-            self.n_freq = config.n_freq
-
-            self.time_sample_idxs = config.time_sample_idxs
-            self.time_strides = config.time_strides
-
-            self._set_outputs()
-
-        except Exception as e:
-            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    def build_set_params(self):
-
-        def set_params(params):
-            return params
-
-        return set_params
-
-    def build_forward(self):
-        """Return pure, JIT-compatible function"""
+    def _build_forward_ffi(self):
         # Pre-compute everything possible
         n_int_time = self.n_int_time
         n_int_freq = self.n_int_freq
@@ -386,9 +334,10 @@ class RiemannVisVariableFFIFine(Component):
 
         if sharding_enabled():
             print(
-                "\n!!! WARNING !!!  RiemannVisVariableFFIFine scales poorly "
-                "across multiple devices. Consider using "
-                "RiemannVisFFIFine instead for multi-device runs.\n"
+                "\n!!! WARNING !!!  RiemannVisVariableFine with rfi.backend: ffi "
+                "scales poorly across multiple devices. Consider using "
+                "RiemannVisFine with rfi.backend: ffi instead for multi-device "
+                "runs.\n"
             )
 
 
@@ -501,6 +450,9 @@ class AnalyticVis(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
             self.n_time = config.n_time
+            # Only the compiled op for now: the JAX reference lands with it in
+            # ri_kernels and becomes the second backend then.
+            self.backend = _read_backend(config, ("ffi",))
             self.options = self._read_options(config.args["rfi"]["analytic"])
 
             # The kernel writes each antenna pair once, so a repeated pair would

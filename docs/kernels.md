@@ -1,9 +1,10 @@
 # RFI-visibility kernels
 
-The {class}`~tabascal.components.rfi_vis.RiemannVisFFIFine` and
-{class}`~tabascal.components.rfi_vis.RiemannVisVariableFFIFine` components call
-compiled kernels instead of the pure-JAX implementation used by
-{class}`~tabascal.components.rfi_vis.RiemannVisFine`.
+With `rfi.backend: ffi`, the
+{class}`~tabascal.components.rfi_vis.RiemannVisFine` and
+{class}`~tabascal.components.rfi_vis.RiemannVisVariableFine` components call
+compiled kernels instead of their pure-JAX implementation, `rfi.backend: jax`,
+which is their default.
 
 Those kernels ship in the separate
 [`ri-kernels`](https://github.com/epfl-radio-astro/ri-kernels) package, a plain
@@ -29,13 +30,15 @@ be compiled from source.
 
 ## Enabling them
 
-Select the component in the `model` section of the [configuration
-file](config.md):
+Set the backend in the `rfi` section of the [configuration file](config.md)
+beside the component in `model`:
 
 ```yaml
 model:
   components:
-    - rfi_vis:RiemannVisFFIFine
+    - rfi_vis:RiemannVisFine
+rfi:
+  backend: ffi
 ```
 
 ## Memory
@@ -47,14 +50,14 @@ multiply, sum over sources and the average back onto the data grid happen in one
 pass, and their transpose rule recomputes the same terms from the per-antenna
 inputs, so nothing of that size is kept for the backward pass either.
 
-{class}`~tabascal.components.rfi_vis.RiemannVisFine` reaches the same bound by
+The `jax` backend of {class}`~tabascal.components.rfi_vis.RiemannVisFine` reaches the same bound by
 scanning the baseline axis under `jax.checkpoint`: each step forms the fine grid
 for `rfi.baseline_block_size` baselines at a time, or for the whole axis where
 it is shorter than that, averages it onto the data grid, and
 lets the backward pass recompute it. The block size is the memory/recomputation
 trade and does not change the result — see
 [`baseline_block_size`](config.md#rfi-signal). It remains the slower of the two
-components, and what it holds still grows with the number of baselines, since the
+backends, and what it holds still grows with the number of baselines, since the
 visibilities do; what the scan removes is the fine grid's baseline axis, which is
 the term that carried `n_rfi * n_int_freq * n_int_time` with it.
 
@@ -77,7 +80,8 @@ whichever the config selects, so they impose no constraint of their own — see
 ## Analytic route
 
 `ri_kernels` 0.2.2 also carries `RFIAnalyticVisOp`, the kernel behind
-{class}`~tabascal.components.rfi_vis.AnalyticVis`. It reads the signal, phase
+{class}`~tabascal.components.rfi_vis.AnalyticVis`, whose only backend
+it is for now: `rfi.backend` there is `ffi` or `null`. It reads the signal, phase
 and delay polynomial on the data grid and integrates each cell in closed form,
 so there is no fine grid for `baseline_block_size` or the memory figures above
 to bound; `rfi.analytic.scratch_mb` bounds its GPU scratch instead. It is used

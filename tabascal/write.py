@@ -1275,11 +1275,11 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     values they average to -- and where the fine grid cancels, the two can be
     nothing like each other. A source whose fine samples are ``[A, -A]`` beside
     one whose are ``[1, 0]``: a kernel that sums the sources at each fine sample
-    (``RiemannVisFine`` does, in ``calculate_rfi_vis_blocked``) rounds ``A + 1`` back to
+    (``RiemannVisFine``'s ``jax`` backend does, in ``calculate_rfi_vis_blocked``) rounds ``A + 1`` back to
     ``A`` and averages to 0, while the per-source evaluation keeps the 1 and
     gives 0.5. The difference is then the whole of the coarse visibility. Which
-    kernels it happens in is a property of their accumulation order: the FFI and
-    variable kernels accumulate source-major on that input and lose nothing.
+    kernels it happens in is a property of their accumulation order: the ``ffi``
+    backends and the variable kernels accumulate source-major on that input and lose nothing.
 
     In practice it is round-off: on fitted grids it measures ~2e-16 relative in
     fp64 and ~6e-8 in fp32, orders of magnitude below anything a wrong

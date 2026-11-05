@@ -139,6 +139,8 @@ class PipelineTestConfig:
             re-measured for the ast.gp_cov.std change.
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
+        rfi_backend: ``rfi.backend`` of the ``rfi_vis`` component, merged into the
+            template's ``rfi`` section; None leaves the component's default.
         config_overrides: Dictionary of overrides to the tabascal config file
         metrics_ref: Optional truth-based error references, keyed by quantity
             (``ast``/``rfi``/``gains``) then by metric name. Like ``chi2_ref`` these are
@@ -155,6 +157,7 @@ class PipelineTestConfig:
     components: list[str]
     chi2_ref: float | tuple[float, float]
     requires_double: bool = False
+    rfi_backend: str | None = None
     config_overrides: dict = field(default_factory=dict)
     metrics_ref: dict[str, dict[str, float | tuple[float, float]]] = field(
         default_factory=dict
@@ -174,6 +177,12 @@ def _run_pipeline(
     config_mod: dict = {
         "model": {"components": t_config.components, "precision": precision}
     }
+    if t_config.rfi_backend is not None:
+        from tabascal.config import yaml_load
+
+        # The whole section: read_and_modify_yaml replaces top-level sections.
+        rfi = dict(yaml_load(config_template)["rfi"])
+        config_mod["rfi"] = {**rfi, "backend": t_config.rfi_backend}
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
@@ -551,12 +560,13 @@ rfi_vis_configs = [
             [
                 "trajectory:FixedOrbitFine",
                 "rfi_signal:ComplexRFIVarAntFine",
-                "rfi_vis:RiemannVisFFIFine",
+                "rfi_vis:RiemannVisFine",
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
+            rfi_backend="ffi",
             # Only chi2 is asserted -- the FFI kernel is the unit under test; truth metrics
-            # match the non-FFI RiemannVisFine case above. Measured opt-point
+            # match the jax-backend RiemannVisFine case above. Measured opt-point
             # values (gains identity -> RMSE 0):
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   double  ARM    | 0.8965724354 |     0.1787       1.2      |     0.4176       0.3
@@ -572,7 +582,7 @@ rfi_vis_configs = [
             # Grace-Hopper node.
             chi2_ref=0.8965724353762747,
         ),
-        id="RiemannVisFFIFine",
+        id="RiemannVisFine-ffi",
     ),
     pytest.param(
         PipelineTestConfig(
@@ -827,8 +837,8 @@ _SHARDED_CHI2_REF = 0.8967103833231144
 def _prepare_sharded_run(
     provide_test_data: Path,
     work_dir: Path,
-    rfi_vis: str = "RiemannVisFine",
     save_rfi_per_sat: bool = False,
+    rfi_backend: str | None = None,
 ) -> tuple[list[str], Path]:
     """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command."""
     out_dir = _copy_sim(provide_test_data, work_dir)
@@ -836,11 +846,16 @@ def _prepare_sharded_run(
 
     config_path = work_dir / "tab_target.yaml"
     updates: dict = {
-        "model": {"components": _sharded_components(rfi_vis), "precision": "double"}
+        "model": {"components": _sharded_components("RiemannVisFine"), "precision": "double"}
     }
 
+    from tabascal.config import yaml_load
+
+    if rfi_backend is not None:
+        rfi = dict(yaml_load(data_dir / "tab_target.yaml")["rfi"])
+        updates["rfi"] = {**rfi, "backend": rfi_backend}
+
     if save_rfi_per_sat:
-        from tabascal.config import yaml_load
 
         # The whole section, not just the new key: read_and_modify_yaml replaces
         # a top-level section rather than merging into it, and dropping
@@ -892,17 +907,17 @@ def _cpu_env(n_devices: int) -> dict:
 
 
 @pytest.mark.parametrize(
-    "rfi_vis",
+    "rfi_backend",
     [
-        # The plain variant runs entirely through GSPMD+shard_map on pure JAX ops;
-        # the FFI variant additionally exercises the custom C kernel inside
+        # The jax backend runs entirely through GSPMD+shard_map on pure JAX ops;
+        # the ffi backend additionally exercises the custom C kernel inside
         # shard_map (the reason for check_vma=False in psum_over_rfi).
-        "RiemannVisFine",
-        "RiemannVisFFIFine",
+        "jax",
+        "ffi",
     ],
 )
 def test_pipeline_sharded_equivalence(
-    provide_test_data: Path, tmp_path: Path, precision: str, rfi_vis: str
+    provide_test_data: Path, tmp_path: Path, precision: str, rfi_backend: str
 ) -> None:
     """Sharded run (2 fake CPU devices, padding 3 sats -> 4) == single-device run.
 
@@ -923,13 +938,17 @@ def test_pipeline_sharded_equivalence(
     if precision != "double":
         pytest.skip("equivalence is asserted exactly; components require double")
 
-    ref_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "ref", rfi_vis)
+    ref_cmd, _ = _prepare_sharded_run(
+        provide_test_data, tmp_path / "ref", rfi_backend=rfi_backend
+    )
     ref = subprocess.run(
         ref_cmd, capture_output=True, text=True, cwd=tmp_path / "ref", env=_cpu_env(1)
     )
     assert ref.returncode == 0, f"single-device run failed: {ref.stderr}"
 
-    shard_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "shard", rfi_vis)
+    shard_cmd, _ = _prepare_sharded_run(
+        provide_test_data, tmp_path / "shard", rfi_backend=rfi_backend
+    )
     shard = subprocess.run(
         shard_cmd, capture_output=True, text=True, cwd=tmp_path / "shard", env=_cpu_env(2)
     )

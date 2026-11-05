@@ -205,8 +205,8 @@ class TabConfig:
         self.n_int_freq = config["rfi"]["n_int_freq"]
 
         # The divisor-rich fine grid (min_divisors > 1) is only needed by the
-        # RiemannVisVariableFine / RiemannVisVariableFFIFine components, which
-        # split baselines into multiple stride groups. For every other rfi_vis
+        # RiemannVisVariableFine component (either backend), which
+        # splits baselines into multiple stride groups. For every other rfi_vis
         # component it just
         # inflates n_int_time (the fine-grid time dimension) and slows the run,
         # so only request it when a Variable component is actually selected.
