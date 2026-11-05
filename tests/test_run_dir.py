@@ -157,7 +157,8 @@ def test_a_changed_input_is_named(tmp_path, section, key, changed, warns):
 def _fake_run(tmp_path, opt, max_iter, gain_table=None):
     run = run_dir_mod.create_run_dir(str(tmp_path), "r")
     config = {
-        "data": {"ms_path": str(tmp_path / "obs.ms"), "data_col": "DATA", "gain_table": gain_table},
+        "data": {"ms_path": str(tmp_path / "obs.ms"), "data_col": "DATA", "gain_table": gain_table,
+                 "row_chunk": 1000},
         "inference": {"opt": opt},
         "opt": {"max_iter": max_iter},
     }
@@ -184,6 +185,7 @@ def test_tab2ms_exports_what_the_run_did(tmp_path, monkeypatch, opt, max_iter, e
     assert captured["results_zarr_path"] == os.path.join(run, "results", exported)
     assert captured["ms_path"] == str(tmp_path / "obs.ms")
     assert captured["data_col"] == "DATA"
+    assert captured["row_chunk"] == 1000
     assert captured.get("caltable_path") is None
 
 
