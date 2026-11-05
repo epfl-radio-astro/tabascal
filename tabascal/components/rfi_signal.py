@@ -9,7 +9,7 @@ from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, latent_to_signal_dft_init, latent_to_signal_dft, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -429,6 +429,14 @@ _GP_COV_RULES = {
 #: All of them: each has a default, and none has to be written down.
 _GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
 
+#: The ``rfi.transform`` options, the same two ``ast.transform`` takes: ``fft``,
+#: the padded grid's inverse FFT and a crop, or ``dft``, one matrix per axis with
+#: no padded grid. The first is the default. Unlike the sky's, the VarAnt
+#: priors keep every delay mode at their defaults, so the frequency matrix is
+#: square in the channel count, and the DFT pays off only where the FFT's padded
+#: grid is supersampled, on the fine grid.
+_TRANSFORMS = ("fft", "dft")
+
 #: What the spectrum is normalised to, per unit of ``rfi.gp_cov.std``.
 #:
 #: ``rfi.gp_cov.std`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
@@ -608,6 +616,17 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     else:
         raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
 
+    transform = rfi_config.get("transform")
+    if transform is None:
+        transform = _TRANSFORMS[0]
+    if transform not in _TRANSFORMS:
+        raise ValueError(
+            "rfi.transform is how the latent modes become the RFI signal: "
+            "'fft', the padded grid's inverse FFT and a crop, or 'dft', a matrix "
+            f"per axis with no padded grid, got {transform!r}."
+        )
+    rfi_config["transform"] = transform
+
     if gp_cov["std"] == FROM_DATA:
         gp_cov["std"] = _std_from_data(vis_obs, gain_flags)
     elif gp_cov["std"] is None:
@@ -732,6 +751,7 @@ class BaseGPRFI(Component):
         # this component's own defaults.
         self.rfi_config = rfi_config
         self._gammas, self._pk_cutoff = self._resolve_gp_cov_params()
+        self.transform = rfi_config["transform"]
 
         # Random seed used for random sampling such as initial parameters drawn from the prior
         self.r_seed = rfi_config["r_seed"]
@@ -953,6 +973,41 @@ class BaseGPRFI(Component):
     def inv_transform(self, params, L, mu):
         pass
 
+    def _compute_transform(self, ns, dxs, pad_factors, p0, k0s, gammas, cutoff):
+        """The latent modes and how they reach the signal, under ``rfi.transform``.
+
+        Sets the spectrum the modes are cut from, the pads and crop of the FFT
+        and, under ``dft``, the matrices that stand in for them -- the same modes,
+        checked here, so the parameters do not depend on the transform.
+        """
+        args = (ns, dxs, pad_factors, self.ss_factors, p0, k0s, gammas, cutoff)
+        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(*args)
+
+        if self.transform == "dft":
+            pk, _, self.dft_mats, self.dft_first_axis = latent_to_signal_dft_init(*args)
+            if pk.shape != self.pk.shape:
+                raise RuntimeError(
+                    "The DFT transform kept a different set of Fourier modes than "
+                    f"the FFT one: {pk.shape} against {self.pk.shape}. They are "
+                    "built from the same power spectrum and cutoff, so this is a "
+                    "bug rather than a configuration error."
+                )
+
+    def build_latent_to_signal(self) -> Callable:
+        """One source's modes ``(n_k_freq, n_k_time)`` to its signal on ``signal_shape``.
+
+        Under ``rfi.transform: fft`` the modes are padded to the padded (and
+        supersampled) grid, inverse-transformed and cropped. Under ``dft`` the
+        same values come from one matrix per axis, fixed at setup, so the padded
+        grid is never formed.
+        """
+        if self.transform == "dft":
+            mats, first_axis = self.dft_mats, self.dft_first_axis
+            return lambda Y: latent_to_signal_dft(Y, mats, first_axis)
+
+        pads, ss_idxs = self.pads, self.ss_idxs
+        return lambda Y: latent_to_signal(Y, pads, ss_idxs)
+
     # helper function to set dummy rfi values to 0 for padding. Required for multi-device.
     def masked_forward_transform(self, base_params, L, mu):
         return self._mask_dummy_rfi(self.forward_transform(base_params, L, mu))
@@ -1045,23 +1100,19 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         AD, which would rebuild much of what the vmap was holding, so without it the
         scan fixes the cuFFT plan and not the autodiff tape.
 
-        Measured on a 64-antenna / 32-channel / 4-satellite problem, single
-        precision: peak device memory 35.80 -> 14.62 GB (2.45x) for a 4% runtime
-        cost, with the optimised chi^2 unchanged to ~6 significant figures.
+        Under ``rfi.transform: dft`` there is no cuFFT plan, and the scan stays
+        for the tape alone.
         """
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
         masked_signal = self.build_masked_signal()
-        pads = self.pads
-        ss_idxs = self.ss_idxs
+        to_signal = vmap(self.build_latent_to_signal())
 
         # One antenna's sources at a time, so the cuFFT batch is n_rfi rather than
         # n_rfi * n_ant.
         @checkpoint
         def antenna_block(rfi_k_A_ant):
-            return vmap(latent_to_signal, (0, None, None), 0)(
-                rfi_k_A_ant, pads, ss_idxs
-            )
+            return to_signal(rfi_k_A_ant)
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -1074,7 +1125,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
 
             # lax.scan stacks along axis 0, so the antenna axis is moved there and
             # back. The leading swap is on the small latent grid; the trailing one is
-            # full size and is part of the 4% measured above.
+            # full size.
             _, rfi_A_ant_major = lax.scan(
                 lambda carry, k_ant: (carry, antenna_block(k_ant)),
                 None,
@@ -1103,22 +1154,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         p0 = self.gp_var #* self.n_time * self.n_freq
         gammas, pk_cutoff = self.gp_cov_params()
 
-        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
-            ns,
-            dxs,
-            pad_factors,
-            self.ss_factors,
-            p0,
-            k0s,
-            gammas,
-            pk_cutoff,
-        )
-
-        self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
-            _rfi_k_A, 
-            self.pads, 
-            self.ss_idxs
-        )
+        self._compute_transform(ns, dxs, pad_factors, p0, k0s, gammas, pk_cutoff)
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
         self.latent_idxs, _ = signal_to_latent_init(
@@ -1356,8 +1392,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         prefix = self.prefix
         forward_transform = self.masked_forward_transform
         masked_signal = self.build_masked_signal()
-        pads = self.pads
-        ss_idxs = self.ss_idxs
+        to_signal = vmap(self.build_latent_to_signal())
         n_rfi = self.n_rfi
         n_ant = self.n_ant
         signal_shape = self.signal_shape
@@ -1371,9 +1406,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
 
             rfi_k_A = forward_transform(rfi_k_A_base, sigma_rfi_k, mu_rfi_k)
             # The antenna axis is a singleton, so map over n_rfi only.
-            rfi_A = vmap(latent_to_signal, (0, None, None), 0)(
-                rfi_k_A[:, 0], pads, ss_idxs
-            )
+            rfi_A = to_signal(rfi_k_A[:, 0])
             # Masked before the broadcast: the mask does not vary over antennas, so
             # applying it here scales (n_rfi, n_freq_fine, n_time_fine) rather than
             # forcing the broadcast view below to materialise n_ant copies.
@@ -1403,22 +1436,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         p0 = self.gp_var
         gammas, pk_cutoff = self.gp_cov_params()
 
-        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
-            ns,
-            dxs,
-            pad_factors,
-            self.ss_factors,
-            p0,
-            k0s,
-            gammas,
-            pk_cutoff,
-        )
-
-        self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
-            _rfi_k_A, 
-            self.pads, 
-            self.ss_idxs
-        )
+        self._compute_transform(ns, dxs, pad_factors, p0, k0s, gammas, pk_cutoff)
 
         # Pre-compute slicing indices for JIT-compatible latent extraction
         self.latent_idxs, _ = signal_to_latent_init(
