@@ -48,6 +48,7 @@ from tabascal.run_dir import (
     create_run_dir,
     finish_record,
     place_outputs,
+    read_config,
     start_record,
     write_config,
 )
@@ -434,6 +435,22 @@ def _on_process_0(what, work):
     fail_together(failure, what)
 
 
+def _record_resolved_settings(run_dir, config):
+    """Write what model setup resolved into the run's saved ``config.yaml``.
+
+    The file is written before setup, so a run that dies there still says what
+    it was, and ``ast.time_pad_factor: auto`` only becomes a number inside it.
+    Only that key is rewritten: setup fills in other values on the same dict,
+    not all of them plain YAML.
+    """
+    resolved = (config.get("ast") or {}).get("time_pad_factor")
+    saved = read_config(run_dir)
+    if (saved.get("ast") or {}).get("time_pad_factor") != "auto" or resolved == "auto":
+        return
+    saved["ast"]["time_pad_factor"] = float(resolved)
+    write_config(run_dir, saved)
+
+
 def _subtract(config, paths):
     """The run itself, inside its directory: model, initial prediction, fit."""
     ms_path = paths.ms_path
@@ -452,6 +469,10 @@ def _subtract(config, paths):
 
     tab_config, model = build_model(config, ms_path)
     prob_model = model.prob_model
+    _on_process_0(
+        "record the resolved settings in config.yaml",
+        lambda: _record_resolved_settings(paths.run_dir, config),
+    )
 
     # Persist the real TLEs this run resolved so it can be reproduced later.
     # Only process 0 writes the shared result path in distributed runs.

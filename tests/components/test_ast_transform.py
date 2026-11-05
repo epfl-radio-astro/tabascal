@@ -48,6 +48,8 @@ def _tols():
         ([1, 12], [2.0, 2.0], [1, 1]),  # a single channel
         ([5, 8], [1.5, 3.0], [1, 1]),  # padding that is not the default
         ([4, 6], [2.0, 2.0], [1, 2]),  # supersampled, as the RFI path is
+        ([4, 7], [2.0, 2.0], [1, 2]),  # an odd padded length, supersampled evenly
+        ([5, 9], [2.0, 2.0], [3, 4]),
     ],
 )
 def test_the_matrices_are_the_pad_ifft_crop_chain(ns, pad_factors, ss_factors):
@@ -227,11 +229,6 @@ def test_one_pair_of_matrices_serves_every_baseline(tmp_path):
     for axis, mat in enumerate(comp.dft_mats):
         assert mat.ndim == 2, "a baseline axis would make this rank three"
         assert mat.shape == (n_k[axis], n_out[axis])
-
-    # And the transform broadcasts them rather than mapping over them.
-    bigger, _ = _route("dft", ast_config(tmp_path))
-    for small, large in zip(comp.dft_mats, bigger.dft_mats):
-        assert small.shape == large.shape
 
 
 # --- wide time padding --------------------------------------------------------

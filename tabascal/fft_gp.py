@@ -1160,18 +1160,18 @@ def latent_to_signal_dft_init(
         ns, dxs, pad_factors, ss_factors, p0, k0s, gammas, cutoff
     )
 
-    n_pads = pad_domain_specs(ns, pad_factors)
     mats = []
-    for axis, (n, n_pad, ss, pad, sl) in enumerate(
-        zip(ns, n_pads, ss_factors, pads, ss_idxs)
-    ):
-        # The padded, supersampled length this axis's modes live on.
-        length = int((n + 2 * int(n_pad)) * ss)
+    for axis, (pad, sl) in enumerate(zip(pads, ss_idxs)):
+        # The length the FFT route's grid actually has: the kept modes and the
+        # pads around them. Not the padded length times the supersampling
+        # factor, which it is one short of when that product's excess is odd.
+        length = int(latent_pk.shape[axis] + pad[0] + pad[1])
         # The integer frequency of every mode of the centred grid, and the
         # block of them this axis kept.
         m_all = np.fft.fftshift(np.fft.fftfreq(length) * length).round().astype(np.int64)
         m = m_all[int(pad[0]) : int(pad[0]) + latent_pk.shape[axis]]
-        j = np.arange(int(sl.start), int(sl.stop), dtype=np.int64)
+        # The samples the crop keeps, as the slice keeps them from that grid.
+        j = np.arange(length, dtype=np.int64)[sl]
         phase = (m[:, None] * j[None, :]) % length / length
         mats.append(jnp.asarray(np.exp(2j * np.pi * phase)))
 
