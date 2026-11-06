@@ -138,8 +138,9 @@ def test_through_build_model_another_component_never_shifts_a_draw(
     config = loaded(tmp_path, ast_init="sample", seed=7, components=components)
     config["ast"]["gp_cov"]["std"], config["ast"]["time_pad_factor"] = 1.0, 2
     build_stubbed_tab_config(config, monkeypatch)  # for its observation stubs
-    (comp,) = [c for c in build_model(config, "never/read.ms")[1].components if isinstance(c, GPVisAst)]
-    start = base_latent(comp)
+    _, model = build_model(config, "never/read.ms")
+    start = (np.asarray(model.init_params["ast_k_r_base"])
+             + 1j * np.asarray(model.init_params["ast_k_i_base"]))
 
     np.testing.assert_allclose(start, sample_draw(7, "ast", start.shape),
                                rtol=exact_rtol, atol=exact_rtol)
@@ -201,6 +202,7 @@ def test_a_set_r_seed_warns_once_into_a_tabconfig(tmp_path, monkeypatch, section
     with pytest.warns(FutureWarning) as record:
         if route == "loaded":
             config = load_config(str(write_config(tmp_path, [], **{section: {"r_seed": 0}})))
+            assert len([w for w in record if "r_seed" in str(w.message)]) == 1
         else:
             config = base_args(tmp_path)
             config[section]["r_seed"] = 0
@@ -318,13 +320,14 @@ def test_the_seed_reaches_every_key_consumer_the_header_and_run_json(tmp_path, m
 
     seeds = (ABSENT, 1, 0, 7)
     runs = [run_stubbed(tmp_path, monkeypatch, capsys, s, n) for n, s in enumerate(seeds)]
-    unset, one, _, seven = (calls for calls, *_ in runs)
+    unset, one, zero, seven = (calls for calls, *_ in runs)
 
     assert [calls["seed"] for calls, *_ in runs] == [[1], [1], [0], [7]]
     for consumer in ("init", "prior", "opt"):
         assert np.array_equal(unset[consumer], one[consumer]), consumer
         # Key by key: one fixed key among changing ones still fails.
-        assert not np.all(np.asarray(one[consumer]) == np.asarray(seven[consumer]), axis=-1).any(), consumer
+        for changed in (zero, seven):
+            assert not np.all(np.asarray(one[consumer]) == np.asarray(changed[consumer]), axis=-1).any(), consumer
     assert [read_record(run_dir)["seed"] for *_, run_dir in runs] == [1, 1, 0, 7]
     assert all(describe_random_draws(config) in out for _, out, config, _ in runs)
 
