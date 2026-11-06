@@ -25,6 +25,7 @@ from jax.tree_util import tree_map
 
 from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
+from tabascal.run_dir import LOSS_TRACE
 from tabascal.opt_schedule import (
     build_optimizer,
     checkpoint_path as _checkpoint_path,
@@ -378,9 +379,11 @@ def fix_padding(config: dict, n_freq):
 
 
 def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
-    """Path to dump the optimiser trace to, or None when tracing is off.
+    """Path to dump the traced optimiser metrics to, or None when they are off.
 
-    ``opt.trace_path`` is the supported way to ask for a trace, so a run that is
+    Every run writes its loss and step times; this decides only whether the
+    per-iteration metrics are computed too, and where that fuller trace goes.
+    ``opt.trace_path`` is the supported way to ask for them, so a run that is
     meant to be compared against another records itself without anyone having to
     remember an environment variable. ``TAB_LOSS_TRACE`` still overrides it, for
     tracing a one-off run of a config that must not be edited -- a shared
@@ -497,7 +500,8 @@ def _write_loss_trace(
     The losses are written exactly as the optimiser produced them -- already
     normalised by ``obs_data.size`` in the step itself -- so the trace and the
     loss curve the run returns are the same numbers. ``metrics`` holds the
-    per-iteration model-independent quantities from :func:`build_trace_metrics`.
+    per-iteration model-independent quantities from :func:`build_trace_metrics`,
+    when the run computed them.
 
     This is the *only* place the process rank is allowed to matter: every rank
     ran the same traced program and so holds the same numbers, and all of them
@@ -559,18 +563,19 @@ def run_custom_svi(
 
     ``trace_path`` dumps the per-iteration loss and the wall-clock time it was
     reached to an ``.npz``, for loss-versus-time comparisons between models
-    (issue #107), together with the ``metrics`` from
-    :func:`build_trace_metrics` -- a ``(function, data)`` pair, which the path
-    requires because the documented schema always carries a reduced chi^2.
-    ``trace_path`` alone decides: without one, nothing is timed, no metrics are
-    computed and the optimiser takes the original :func:`_map_step`, so the
-    trace is genuinely free when it is off.
+    (issue #107). That much is free: the loop reads every loss back to the host
+    anyway, so timing a step adds one clock read. ``metrics`` -- the
+    ``(function, data)`` pair from :func:`build_trace_metrics` -- adds the
+    per-iteration metrics to the file, through :func:`_map_step_metrics`;
+    without them the optimiser takes the original :func:`_map_step`, and its
+    output is what it always was. Metrics without a path would be computed and
+    thrown away, so they are ignored.
 
-    The path must be the same on every process. It selects which of
-    :func:`_map_step` and :func:`_map_step_metrics` runs, and under sharding the
-    model evaluation contains collectives, so the ranks disagreeing about that
-    would deadlock the optimisation. Every rank traces; only the write at the
-    end is rank 0's, gated inside :func:`_write_loss_trace`.
+    Whether metrics are given must be the same on every process. It selects
+    which of :func:`_map_step` and :func:`_map_step_metrics` runs, and under
+    sharding the model evaluation contains collectives, so the ranks disagreeing
+    about that would deadlock the optimisation. Only the write at the end is
+    rank 0's, gated inside :func:`_write_loss_trace`.
 
     ``optimizer`` (normalised by :func:`tabascal.opt_schedule.validate_optimizer`)
     is the optax optimiser each phase builds, ``adabelief`` when it is None.
@@ -584,20 +589,10 @@ def run_custom_svi(
     """
     if stop is not None and schedule is None:
         raise ValueError("run_custom_svi takes a stop only with a schedule.")
-    # The path is the switch. Metrics without one would compile and run the
-    # traced step for a production run and then discard every number it cost;
-    # a path without metrics would write a file missing the keys the schema
-    # promises. Refused here rather than at the writer, which only runs once
-    # the whole optimisation is already done.
+    # Metrics without a path would compile and run the traced step for a
+    # production run and then discard every number it cost.
     if trace_path is None:
         metrics = None
-    elif metrics is None:
-        raise ValueError(
-            "run_custom_svi was given trace_path but no metrics, so the trace "
-            "would carry no reduced chi^2 and not be the documented file. Pass "
-            "metrics=build_trace_metrics(tab_config, truth), or leave "
-            "trace_path unset."
-        )
 
     metrics_fn, metrics_data = metrics if metrics is not None else (None, None)
 
@@ -606,10 +601,8 @@ def run_custom_svi(
     # any difference in cost per iteration, so a model that converges in fewer
     # but more expensive steps looks better than it is; the honest axis is time.
     # `float(loss)` below already forces a device sync, so the timestamp taken
-    # after it bounds completed work rather than dispatched work. Every read of
-    # the clock is guarded on the trace being on, so an untraced run does not
-    # pay for a measurement nobody asked for.
-    tracing = trace_path is not None
+    # after it bounds completed work rather than dispatched work, and costs
+    # nothing beyond the clock read.
     step_times = []
     trace_t0 = None
     traced_metrics: dict = {}
@@ -624,7 +617,7 @@ def run_custom_svi(
         init_loss = None
         pbar = trange(max_iter, disable=not is_process_0())
         for i in pbar:
-            if tracing and trace_t0 is None:
+            if trace_t0 is None:
                 trace_t0 = perf_counter()
             if metrics_fn is None:
                 params, opt_state, loss = _map_step(
@@ -638,8 +631,7 @@ def run_custom_svi(
                 for name, value in step_metrics.items():
                     traced_metrics.setdefault(name, []).append(float(value))
             loss_val = float(loss)
-            if tracing:
-                step_times.append(perf_counter() - trace_t0)
+            step_times.append(perf_counter() - trace_t0)
             losses.append(loss_val)
             if init_loss is None:
                 init_loss = loss_val
@@ -729,11 +721,15 @@ def run_opt(
     print()
     print("Running Optimization ...")
     print(f"Optimiser : {describe_schedule(opt_config)}")
-    trace_path = loss_trace_path(opt_config.get("trace_path"))
+    traced_path = loss_trace_path(opt_config.get("trace_path"))
+    results_dir = os.path.dirname(os.path.normpath(map_path))
+    # Every run keeps its loss and step times beside its results; asking for a
+    # trace adds the metrics and puts the file where it was asked for instead.
+    trace_path = traced_path or os.path.join(results_dir, LOSS_TRACE)
     # Beside the MAP prediction, named after it, so two runs into one results
     # directory with different suffixes keep their checkpoints apart.
     stem = os.path.basename(os.path.normpath(map_path)).removesuffix(".zarr")
-    checkpoint_dir = os.path.join(os.path.dirname(os.path.normpath(map_path)), "checkpoints")
+    checkpoint_dir = os.path.join(results_dir, "checkpoints")
     vi_results = run_custom_svi(
         prob_model=prob_model,
         obs_data=tab_config.vis_obs,
@@ -744,7 +740,7 @@ def run_opt(
         state=state,
         constants=constants,
         trace_path=trace_path,
-        metrics=build_trace_metrics(tab_config, truth) if trace_path else None,
+        metrics=build_trace_metrics(tab_config, truth) if traced_path else None,
         optimizer=checked["optimizer"],
         schedule=checked["schedule"],
         stop=checked["stop"],

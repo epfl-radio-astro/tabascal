@@ -207,7 +207,7 @@ opt:
 * `schedule`: One optimiser with a step-size schedule in place of `dual_run`'s two, or `null` (the default) to keep `dual_run`. See [Step-size schedule](#step-size-schedule).
 * `stop`: End the fit once the loss stops moving, or `null` (the default) to run every step. Needs `schedule`.
 * `checkpoints`: Steps after which to write the parameters to a file, or `null` (the default) for none.
-* `trace_path`: Path of an `.npz` file to record the optimiser's convergence to, or `null` (the default) to record nothing. A relative path is taken inside the run's directory, so each run keeps its own trace; an absolute one is used as given. See [Optimiser trace](#optimiser-trace).
+* `trace_path`: Path of an `.npz` file to record the optimiser's per-iteration metrics to, with its loss and time, or `null` (the default) for the loss and time alone in `results/trace.npz`. A relative path is taken inside the run's directory, so each run keeps its own trace; an absolute one is used as given. See [Optimiser trace](#optimiser-trace).
 
 ### Optimiser
 
@@ -257,9 +257,11 @@ A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: i
 
 Two models cannot be compared on their loss curves. The loss is a negative log *joint*, so its prior term scales with the latent dimension of whichever parameterisation is running — `gains:UnitaryGains`, which fits no gain at all, and `gains:ConstGains`, which fits $2 n_\text{ant} - 2$ parameters, do not put their losses on a common scale. And loss *per iteration* hides the cost of an iteration, so a model that converges in fewer but more expensive steps looks better than it is.
 
-Setting `trace_path` records, once per optimiser iteration, the quantities that can be compared: the wall-clock time the iteration finished, and the metrics fixed by the data rather than by the parameterisation. The metrics are read out of the same forward pass as the loss, so they cost a few elementwise reductions rather than a second evaluation of the model, and the run is otherwise unchanged. With `trace_path` left `null` nothing is recorded and the optimiser takes the same compiled path it always did.
+Every run records, once per optimiser iteration, its loss and the wall-clock time the iteration finished, in `trace.npz` in the run's `results` directory. That costs nothing measurable: the optimiser reads every loss back from the device anyway, and the time is one clock read after it.
 
-Set the `TAB_LOSS_TRACE` environment variable to override `trace_path` for a single run, for tracing a config that should not be edited. Under multiple processes every process traces — they all evaluate the same model and must run the same program — and one file is written, by the first process.
+Setting `trace_path` adds the metrics fixed by the data rather than by the parameterisation, and writes the trace to that path instead. The metrics are read out of the same forward pass as the loss, so they cost a few elementwise reductions per iteration rather than a second evaluation of the model; on an SKA-Low run of 128 stations and 8 channels on a GH200 that was about 2 ms a step, or 1.4% of the optimiser's time. They do take a separately compiled step, so with `trace_path` left `null` the optimiser runs the same compiled step as it always did and its result is unchanged.
+
+Set the `TAB_LOSS_TRACE` environment variable to override `trace_path` for a single run, for tracing a config that should not be edited. Under multiple processes every process computes the metrics or none does — they all evaluate the same model and must run the same program — and one file is written, by the first process.
 
 The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or `2 * max_iter` with `dual_run`, or fewer when `stop` ends the fit) with one entry per iteration:
 
@@ -267,9 +269,9 @@ The file is written once, at the end of the run, and holds one array per key, ea
 |---|---|---|
 | `loss` | always | The optimiser's own loss, the negative log joint divided by `vis_obs.size` |
 | `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched. The first iteration includes the step's compilation, and with `dual_run` so does the first iteration of the second phase; with `schedule` there is no second compilation. A checkpoint write or a `stop` check after a step is not in that step's time but in the next one's, if another step runs; neither after the last step, nor writing the trace file, is in any |
-| `chi2` | always | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
-| `vis_ast_nrmse` | with truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |
-| `vis_rfi_nrmse` | with truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |
+| `chi2` | with `trace_path` | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
+| `vis_ast_nrmse` | with `trace_path` and truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |
+| `vis_rfi_nrmse` | with `trace_path` and truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |
 
 The `nrmse` keys need a truth to score against, so they appear only on a dataset simulated with `sim-vis`. Every entry is recorded at the parameters that produced that iteration's gradient, i.e. *before* its update — so the first entry is the value at the initialisation, and the last is one update behind the reported optimum.
 
