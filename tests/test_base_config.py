@@ -15,6 +15,7 @@ supplies that the component never reads is caught by the recorded-read
 comparison.
 """
 
+from importlib.resources import files
 from types import SimpleNamespace
 
 import jax.numpy as jnp
@@ -26,6 +27,7 @@ from tabascal.components.rfi_vis import RiemannVisFine
 from tabascal.config import (
     TabConfig,
     load_config,
+    yaml_load,
 )
 from tabascal.interferometry import get_strides_and_idxs, max_ast_fringe_rate
 
@@ -452,10 +454,11 @@ class TestTheGainsSectionHasNoCorrelationLengths:
     frequency, so there is no correlation length to configure.
     """
 
-    def test_the_keys_the_gains_section_still_ships(self, tmp_path):
+    def test_the_keys_the_gains_section_still_ships(self):
         """What is left is the prior over a constant gain, and nothing else."""
 
-        assert set(base_args(tmp_path)["gains"]) == {
+        shipped = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))
+        assert set(shipped["gains"]) == {
             "init",
             "ref_ant",
             "fix_flux_scale",

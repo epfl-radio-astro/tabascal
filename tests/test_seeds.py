@@ -3,8 +3,10 @@
 import subprocess
 import sys
 import warnings
+import zlib
 from importlib.resources import files as _res_files
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import numpy as np
@@ -16,7 +18,7 @@ from tabascal.components.rfi_signal import ComplexRFIConstAntFine, ComplexRFIVar
 from tabascal.config import load_config, yaml_load
 
 from tests.components.test_rfi_signal import make_rfi_config
-from tests.test_base_config import base_args, make_ast_config
+from tests.test_base_config import base_args, build_stubbed_tab_config, make_ast_config
 
 #: Stands for a config with no ``inference.seed`` key at all.
 ABSENT = object()
@@ -42,21 +44,23 @@ def _set_seed(args, seed):
         inference["seed"] = seed
 
 
-def ast_start(tmp_path, seed, init="sample"):
+def ast_start(tmp_path, seed, init="sample", components=COMPONENTS):
     """``GPVisAst`` set up with ``ast.init`` and ``inference.seed``."""
     args = base_args(tmp_path)
     args["ast"]["init"] = init
+    args["model"]["components"] = list(components)
     _set_seed(args, seed)
     comp = GPVisAst()
     comp.setup(make_ast_config(args))
     return comp
 
 
-def rfi_start(cls, seed, init="sample", r_seed=None):
+def rfi_start(cls, seed, init="sample", r_seed=None, components=COMPONENTS):
     """An RFI signal component with no dummy sources, set up on the mock config."""
     config = make_rfi_config(n_rfi=3, n_rfi_real=3, init=init)
     if r_seed is not None:
         config.args["rfi"]["r_seed"] = r_seed
+    config.args["model"] = {"components": list(components)}
     _set_seed(config.args, seed)
     comp = cls()
     comp.setup(config)
@@ -76,22 +80,21 @@ def base_latent(comp):
     return np.asarray(params[f"{part}_r_base"]) + 1j * np.asarray(params[f"{part}_i_base"])
 
 
-def write_config(tmp_path, **sections):
+def write_config(tmp_path, components=COMPONENTS, **sections):
     path = tmp_path / "user.yaml"
-    path.write_text(yaml.dump({"model": {"components": COMPONENTS}, **sections}))
+    path.write_text(yaml.dump({"model": {"components": components}, **sections}))
     return path
 
 
-def loaded(tmp_path, ast_init="prior", rfi_init="prior", seed=None):
-    return load_config(
-        str(write_config(
-            tmp_path, ast={"init": ast_init}, rfi={"init": rfi_init}, inference={"seed": seed}
-        ))
-    )
+def loaded(tmp_path, ast_init="prior", rfi_init="prior", seed=None, components=COMPONENTS):
+    inference = {} if seed is ABSENT else {"inference": {"seed": seed}}
+    return load_config(str(write_config(
+        tmp_path, components, ast={"init": ast_init}, rfi={"init": rfi_init}, **inference
+    )))
 
 
 # ---------------------------------------------------------------------------
-# The helpers
+# The `init: sample` draws
 # ---------------------------------------------------------------------------
 
 
@@ -101,21 +104,6 @@ def test_the_run_key_is_the_prng_key_of_the_seed():
     assert np.array_equal(run_key(5), jax.random.PRNGKey(5))
 
 
-@pytest.mark.parametrize("tag", ["ast", "rfi"])
-def test_a_component_key_is_the_seed_folded_with_the_crc_of_its_tag(tag):
-    import zlib
-
-    from tabascal.seeds import component_key
-
-    expected = jax.random.fold_in(jax.random.PRNGKey(5), zlib.crc32(tag.encode()))
-    assert np.array_equal(component_key(5, tag), expected)
-
-
-# ---------------------------------------------------------------------------
-# The `init: sample` draws
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("seed", [ABSENT, None, 0, 7], ids=["absent", "null", "0", "7"])
 @pytest.mark.parametrize(
     "tag, make",
@@ -123,33 +111,29 @@ def test_a_component_key_is_the_seed_folded_with_the_crc_of_its_tag(tag):
     + [("rfi", lambda tmp_path, seed, c=c: rfi_start(c, seed)) for c in RFI_CLASSES],
     ids=["ast"] + [f"rfi-{c.__name__}" for c in RFI_CLASSES],
 )
-def test_a_sample_start_is_the_draw_from_its_own_component_key(
+def test_a_sample_start_is_the_draw_from_the_seed_folded_with_the_crc_of_its_tag(
     tmp_path, tag, make, seed, exact_rtol
 ):
-    """The draw depends on (seed, tag) alone, so no other component can shift it."""
-    from tabascal.seeds import component_key
-
-    comp = make(tmp_path, seed)
-    start = base_latent(comp)
+    start = base_latent(make(tmp_path, seed))
     expected_seed = DEFAULT_SEED if seed in (ABSENT, None) else seed
-    draw = jax.random.normal(component_key(expected_seed, tag), start.shape, dtype=complex)
+    key = jax.random.fold_in(jax.random.PRNGKey(expected_seed), zlib.crc32(tag.encode()))
+    draw = jax.random.normal(key, start.shape, dtype=complex)
 
     np.testing.assert_allclose(start, np.asarray(draw), rtol=exact_rtol, atol=exact_rtol)
 
 
-@pytest.mark.parametrize("seeds", [(7, 7), (7, 8)], ids=["same", "different"])
 @pytest.mark.parametrize("tag", ["ast", "rfi"])
-def test_the_sample_start_is_identical_exactly_when_the_seed_is(tmp_path, tag, seeds):
-    first, second = (base_latent(START[tag](tmp_path, s)) for s in seeds)
+def test_adding_removing_or_moving_another_component_never_shifts_a_draw(tmp_path, tag):
+    lists = [COMPONENTS, ["gains:ConstGains", *COMPONENTS], COMPONENTS[1:], COMPONENTS[::-1]]
+    first, *others = (base_latent(START[tag](tmp_path, 7, components=c)) for c in lists)
 
-    assert np.array_equal(first, second) == (seeds[0] == seeds[1])
+    assert all(np.array_equal(first, other) for other in others)
 
 
-def test_rfi_r_seed_has_no_effect_on_the_draw(tmp_path):
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", FutureWarning)
-        set_ = rfi_start(ComplexRFIVarAntFine, 7, r_seed=99)
-    unset = rfi_start(ComplexRFIVarAntFine, 7, r_seed=None)
+@pytest.mark.parametrize("r_seed", [99, "not a seed"])
+@pytest.mark.parametrize("cls", RFI_CLASSES)
+def test_an_old_rfi_r_seed_has_no_effect_on_the_draw(cls, r_seed):
+    set_, unset = (rfi_start(cls, 7, r_seed=r) for r in (r_seed, None))
 
     assert np.array_equal(base_latent(set_), base_latent(unset))
 
@@ -170,66 +154,45 @@ def test_a_deterministic_start_does_not_depend_on_the_seed(tmp_path, tag, init):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("seed", [None, 0, 7])
-def test_a_null_or_integer_seed_loads(tmp_path, seed):
-    loaded(tmp_path, seed=seed)
+@pytest.mark.parametrize(
+    "seed, expected", [(ABSENT, 1), (None, 1), (0, 0), (7, 7)], ids=["absent", "null", "0", "7"]
+)
+def test_load_config_normalises_the_seed(tmp_path, seed, expected):
+    assert loaded(tmp_path, seed=seed)["inference"]["seed"] == expected
 
 
-@pytest.mark.parametrize("seed", [True, 1.5, "7"])
+NOT_INTEGERS = [True, 1.0, 1.5, "7"]
+
+
+@pytest.mark.parametrize("seed", NOT_INTEGERS)
 def test_a_seed_that_is_not_an_integer_is_refused_by_name(tmp_path, seed):
     with pytest.raises(ValueError, match=r"inference\.seed"):
         loaded(tmp_path, seed=seed)
 
 
-@pytest.mark.parametrize("section", ["rfi", "gains"])
-def test_a_set_r_seed_warns_that_inference_seed_replaces_it(tmp_path, section):
-    with pytest.warns(FutureWarning) as record:
-        load_config(str(write_config(tmp_path, **{section: {"r_seed": 5}})))
-
-    messages = [str(w.message) for w in record if issubclass(w.category, FutureWarning)]
-    assert any(
-        section in m and "r_seed" in m and "inference.seed" in m for m in messages
-    ), messages
-
-
-@pytest.mark.parametrize("seed", [True, 1.5, "7"])
-def test_a_seed_that_is_not_an_integer_is_refused_without_load_config(tmp_path, seed):
-    """A config built in code skips load_config; even a deterministic start refuses it.
-
-    Component setup wraps its errors in a RuntimeError that keeps the message.
-    """
+@pytest.mark.parametrize("seed", NOT_INTEGERS)
+@pytest.mark.parametrize("tag", ["ast", "rfi"])
+def test_a_seed_that_is_not_an_integer_is_refused_without_load_config(tmp_path, tag, seed):
+    """A config built in code skips load_config; even a deterministic start refuses it."""
     with pytest.raises(RuntimeError, match=r"inference\.seed"):
-        ast_start(tmp_path, seed, init="prior")
+        START[tag](tmp_path, seed, init="prior")
 
 
-def test_a_loaded_r_seed_warns_once_although_tabconfig_checks_again(tmp_path):
-    from tabascal.seeds import warn_deprecated_seeds
+@pytest.mark.parametrize("route", ["loaded", "built in code"])
+@pytest.mark.parametrize("section", ["rfi", "gains"])
+def test_a_set_r_seed_warns_once_into_a_tabconfig(tmp_path, monkeypatch, section, route):
+    """Loaded (load_config warns, TabConfig must not again) or built in code (TabConfig warns)."""
+    with pytest.warns(FutureWarning) as record:
+        if route == "loaded":
+            config = load_config(str(write_config(tmp_path, [], **{section: {"r_seed": 5}})))
+        else:
+            config = base_args(tmp_path)
+            config[section]["r_seed"] = 5
+        build_stubbed_tab_config(config, monkeypatch)
 
-    with pytest.warns(FutureWarning):
-        config = load_config(str(write_config(tmp_path, rfi={"r_seed": 5})))
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", FutureWarning)
-        warn_deprecated_seeds(config)
-
-
-def test_tabconfig_warns_about_an_r_seed_in_a_config_built_in_code(monkeypatch):
-    """Stops TabConfig at the check; a config that skips load_config is still warned."""
-    import tabascal.config as config_module
-
-    class Stop(Exception):
-        pass
-
-    seen = []
-
-    def spy(config):
-        seen.append(config)
-        raise Stop
-
-    monkeypatch.setattr(config_module, "warn_deprecated_seeds", spy)
-    args = {"rfi": {"r_seed": 5}}
-    with pytest.raises(Stop):
-        config_module.TabConfig(args, ms_path=None)
-    assert seen == [args]
+    (warned,) = [w for w in record if "r_seed" in str(w.message)]
+    assert issubclass(warned.category, FutureWarning)
+    assert f"{section}.r_seed" in str(warned.message) and "inference.seed" in str(warned.message)
 
 
 @pytest.mark.parametrize(
@@ -238,12 +201,9 @@ def test_tabconfig_warns_about_an_r_seed_in_a_config_built_in_code(monkeypatch):
     ids=["null", "absent"],
 )
 def test_a_null_or_absent_r_seed_does_not_warn(tmp_path, sections):
-    """The absent case also fails if the base config ever ships an r_seed again."""
     with warnings.catch_warnings():
         warnings.simplefilter("error", FutureWarning)
-        config = load_config(str(write_config(tmp_path, **sections)))
-    if not sections:
-        assert not any("r_seed" in config[s] for s in ("rfi", "gains"))
+        load_config(str(write_config(tmp_path, **sections)))
 
 
 # ---------------------------------------------------------------------------
@@ -251,31 +211,34 @@ def test_a_null_or_absent_r_seed_does_not_warn(tmp_path, sections):
 # ---------------------------------------------------------------------------
 
 
-def test_with_no_sampled_init_the_line_says_there_are_no_random_draws(tmp_path):
+@pytest.mark.parametrize(
+    "ast_init, rfi_init, drop, sampled",
+    [
+        ("prior", "prior", None, []),
+        ("sample", "prior", None, ["ast"]),
+        ("prior", "sample", None, ["rfi"]),
+        ("sample", "sample", None, ["ast", "rfi"]),
+        ("sample", "sample", "ast_vis", ["rfi"]),
+        ("sample", "sample", "rfi_signal", ["ast"]),
+    ],
+)
+def test_the_line_names_exactly_the_sections_that_draw(
+    tmp_path, ast_init, rfi_init, drop, sampled
+):
+    """A section draws when it asks for ``init: sample`` and the model has its component."""
     from tabascal.seeds import describe_random_draws
 
-    assert "no random draws" in describe_random_draws(loaded(tmp_path, seed=4242))
+    components = [c for c in COMPONENTS if drop is None or not c.startswith(drop)]
+    line = describe_random_draws(loaded(tmp_path, ast_init, rfi_init, 4242, components))
+
+    assert ("no random draws" in line) != bool(sampled), line
+    assert ("4242" in line) == bool(sampled), line
+    assert [t for t in ("ast", "rfi") if f"{t} init" in line] == sampled, line
 
 
 @pytest.mark.parametrize(
-    "ast_init, rfi_init, sampled",
-    [
-        ("sample", "prior", ["ast"]),
-        ("prior", "sample", ["rfi"]),
-        ("sample", "sample", ["ast", "rfi"]),
-    ],
+    "n_proc, says", [(1, "prior plots draw from inference.seed 4242"), (3, "prior plots skipped")]
 )
-def test_the_line_names_each_sampled_section_and_the_seed(tmp_path, ast_init, rfi_init, sampled):
-    from tabascal.seeds import describe_random_draws
-
-    line = describe_random_draws(loaded(tmp_path, ast_init, rfi_init, seed=4242))
-
-    assert "no random draws" not in line
-    assert "4242" in line
-    assert all(section in line for section in sampled), line
-
-
-@pytest.mark.parametrize("n_proc, says", [(1, "prior plots draw"), (2, "prior plots skipped")])
 def test_the_line_says_whether_prior_plots_draw(tmp_path, monkeypatch, n_proc, says):
     """The runner skips prior plots in a multi-process run, and the line follows it."""
     from tabascal.seeds import describe_random_draws
@@ -287,30 +250,59 @@ def test_the_line_says_whether_prior_plots_draw(tmp_path, monkeypatch, n_proc, s
     assert says in describe_random_draws(config)
 
 
-def test_the_runner_takes_its_run_key_from_inference_seed(monkeypatch):
-    """Stops the run at the key; a hard-coded key never reaches the spy and fails."""
-    from types import SimpleNamespace
+# ---------------------------------------------------------------------------
+# The runner, with the model and its outputs stubbed
+# ---------------------------------------------------------------------------
 
+
+def run_stubbed(tmp_path, monkeypatch, capsys, seed, n):
+    """The runner on a loaded config with prior plots on; the keys each consumer got."""
     from tabascal.scripts import _run_tabascal_impl as impl
 
-    class Stop(Exception):
-        pass
+    config = loaded(tmp_path, seed=seed)
+    config["plots"]["prior"] = True
+    run_dir = tmp_path / f"run{n}"
+    run_dir.mkdir()
+    paths = SimpleNamespace(
+        **dict.fromkeys(["name", "f_name", "ms_path", "log_path", "plot_dir", "map_path",
+                         "init_pred_path", "used_orbits_path"]),
+        run_dir=str(run_dir),
+    )
+    model = SimpleNamespace(prob_model=None, init_params={}, state={}, constants={})
+    keys = {}
+    stubs = {
+        **dict.fromkeys(["_print_run_header", "_record_resolved_settings", "save_orbits_for_reuse",
+                         "_print_model_summary", "write_results_xds"], lambda *a, **k: None),
+        "_resolve_paths": lambda *a, **k: paths,
+        "build_model": lambda *a: (SimpleNamespace(vis_obs=None), model),
+        "load_truth": lambda *a: {},
+        "init_predict": lambda _c, _m, key, *a, **k: keys.setdefault("init", key),
+        "nlog_like_and_post": lambda *a, **k: (0.0, 0.0),
+        "run_opt": lambda _c, _m, subkeys, *a, **k: (keys.setdefault("opt", subkeys), None, {}, None),
+    }
+    for name, stub in stubs.items():
+        monkeypatch.setattr(impl, name, stub)
+    monkeypatch.setattr(
+        "tabascal.plot.plot_prior", lambda _c, _m, _t, _n, key, *a, **k: keys.setdefault("prior", key)
+    )
 
-    seen = []
+    impl.tabascal_subtraction(config, out_dir=None, log=False)
+    return keys, capsys.readouterr().out, config, run_dir
 
-    def spy(seed):
-        seen.append(seed)
-        raise Stop
 
-    monkeypatch.setattr(impl, "run_key", spy)
-    paths = SimpleNamespace(run_dir=None, f_name=None, ms_path=None, log_path=None)
-    monkeypatch.setattr(impl, "_resolve_paths", lambda *a, **k: paths)
-    for name in ("write_config", "start_record", "finish_record"):
-        monkeypatch.setattr(impl, name, lambda *a, **k: None)
+def test_the_seed_reaches_every_key_consumer_the_header_and_run_json(tmp_path, monkeypatch, capsys):
+    """Unset and 1 hand the init prediction, prior plots and optimiser the same keys; 7 others."""
+    from tabascal.run_dir import read_record
+    from tabascal.seeds import describe_random_draws
 
-    with pytest.raises(Stop):
-        impl.tabascal_subtraction({"data": {}, "inference": {"seed": 7}}, out_dir=None, log=False)
-    assert seen == [7]
+    runs = [run_stubbed(tmp_path, monkeypatch, capsys, s, n) for n, s in enumerate((ABSENT, 1, 7))]
+    (unset, *_), (one, *_), (seven, *_) = runs
+
+    for consumer in ("init", "prior", "opt"):
+        assert np.array_equal(unset[consumer], one[consumer]), consumer
+        assert not np.array_equal(one[consumer], seven[consumer]), consumer
+    assert [read_record(run_dir)["seed"] for *_, run_dir in runs] == [1, 1, 7]
+    assert all(describe_random_draws(config) in out for _, out, config, _ in runs)
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +316,7 @@ FIT_SEEDS = (1, 7)
 def deterministic_fits(tmp_path_factory):
     """Three MAP iterations on the 8A sim at each of two seeds; ~35 s per run.
 
-    Returns ``{seed: (stdout, run_dir, config_path)}``.
+    Returns ``{seed: run_dir}``.
     """
     import tabsim
     from huggingface_hub import snapshot_download
@@ -373,7 +365,7 @@ def deterministic_fits(tmp_path_factory):
             capture_output=True, text=True, cwd=work, check=False,
         )
         assert result.returncode == 0, f"seed {seed} run failed: {result.stderr}"
-        fits[seed] = (result.stdout, out_dir / "runs" / "latest", config_path)
+        fits[seed] = out_dir / "runs" / "latest"
 
     return fits
 
@@ -384,26 +376,10 @@ def test_with_no_stochastic_path_the_seed_changes_no_output(deterministic_fits, 
     import xarray as xr
 
     first, second = (
-        xr.open_zarr(str(deterministic_fits[s][1] / "results" / f"{product}.zarr"))
+        xr.open_zarr(str(deterministic_fits[s] / "results" / f"{product}.zarr"))
         for s in FIT_SEEDS
     )
 
     assert set(first.data_vars) == set(second.data_vars)
     for name in first.data_vars:
         assert np.array_equal(first[name].values, second[name].values), name
-
-
-@pytest.mark.parametrize("seed", FIT_SEEDS)
-def test_the_run_header_carries_the_random_draws_line(deterministic_fits, seed):
-    from tabascal.seeds import describe_random_draws
-
-    stdout, _, config_path = deterministic_fits[seed]
-
-    assert describe_random_draws(load_config(str(config_path))) in stdout
-
-
-@pytest.mark.parametrize("seed", FIT_SEEDS)
-def test_run_json_records_inference_seed(deterministic_fits, seed):
-    from tabascal.run_dir import read_record
-
-    assert read_record(deterministic_fits[seed][1])["seed"] == seed

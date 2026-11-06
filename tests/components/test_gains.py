@@ -100,6 +100,9 @@ def scale_config(**overrides):
     return {**{key: None for key in SCALE_KEYS}, **overrides}
 
 
+def test_an_old_r_seed_is_not_read_so_not_even_a_string_is_refused():
+    validate_gain_scales(scale_config(r_seed="x"))
+
 
 class TestPriorWidths:
 
