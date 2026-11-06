@@ -34,6 +34,7 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
+from tabascal.opt_schedule import validate_opt
 from tabascal.seeds import config_seed, describe_random_draws, run_key
 from tabascal.write import check_input_column, write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
@@ -456,6 +457,9 @@ def _subtract(config, paths):
     _print_run_header(paths.run_dir, paths.f_name, paths.ms_path, start_time)
     print(describe_random_draws(config))
     print()
+    # Here rather than in run_opt, so a bad opt key fails before the setup does.
+    if config["inference"]["opt"]:
+        validate_opt(config["opt"])
 
     if sharding_enabled():
         print(f"Sharding RFI sources over {jax.device_count()} devices:")

@@ -193,13 +193,65 @@ opt:
   epsilon: 1e-1
   max_iter: 10000
   dual_run: True
+  optimizer: null
+  schedule: null
+  stop: null
+  checkpoints: null
   trace_path: null
 ```
 
 * `epsilon`: This is the optimiser step size
 * `max_iter`: This is the number of iterations to run the optimiser for in each optimisation run.
 * `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller.
+* `optimizer`: Which optax optimiser to run and with which settings, or `null` (the default) for `adabelief` with optax's defaults. See [Optimiser](#optimiser).
+* `schedule`: One optimiser with a step-size schedule in place of `dual_run`'s two, or `null` (the default) to keep `dual_run`. See [Step-size schedule](#step-size-schedule).
+* `stop`: End the fit once the loss stops moving, or `null` (the default) to run every step. Needs `schedule`.
+* `checkpoints`: Steps after which to write the parameters to a file, or `null` (the default) for none.
 * `trace_path`: Path of an `.npz` file to record the optimiser's convergence to, or `null` (the default) to record nothing. A relative path is taken inside the run's directory, so each run keeps its own trace; an absolute one is used as given. See [Optimiser trace](#optimiser-trace).
+
+### Optimiser
+
+`optimizer` names the optax optimiser, with or without a schedule. A name alone takes optax's defaults; a mapping adds that optimiser's scalar arguments under their optax names, and `clip_norm`, which clips the gradient's global norm before the optimiser sees it. The step size is always `epsilon` (or the schedule), never an argument here.
+
+```yaml
+opt:
+  optimizer: adam
+  # optimizer: {name: adabelief, b1: 0.95, eps: 1e-12}
+  # optimizer: {name: adamw, weight_decay: 1e-4, clip_norm: 1.0}
+  # optimizer: {name: sgd, momentum: 0.9, nesterov: true}
+```
+
+The names are `adabelief`, `adam`, `adamw`, `amsgrad`, `nadam`, `radam`, `adamax`, `yogi`, `lion`, `lamb`, `novograd`, `rmsprop`, `sgd` and `adagrad`. An argument the optimiser does not take is refused by name at run start, with the list it does take. So is a number outside the range the optimiser's update is defined on: the decay rates (`b1`, `b2`, `b3`, `decay`) and `momentum` must lie in `[0, 1)`, `eps` must be above 0, `eps_root`, `weight_decay` and the initial accumulators `>= 0`, and `radam`'s `threshold` above 4, each as the run's precision holds it. `rmsprop` does not take `centered` and `bias_correction` together. A mapping without `name` is `adabelief`. With `dual_run` both phases build this optimiser, the second at `epsilon / 10`.
+
+### Step-size schedule
+
+With `dual_run` the fit runs in two phases, each with a new optimiser: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments and compiles its step again. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: one compiled step, and moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read.
+
+```yaml
+opt:
+  epsilon: 0.2
+  max_iter: 2000
+  schedule: {kind: step, boundaries: [1000], factor: 0.1}  # dual_run's drop, without the reset
+  # schedule: {kind: exponential, final_factor: 0.01}      # 0.2 -> 0.002, smoothly, by step 2000
+  # schedule: {kind: cosine, final_factor: 0.0}            # half a cosine from 0.2 to 0
+  # schedule: {kind: linear, final_factor: 0.1}            # a straight line from 0.2 to 0.02
+  # schedule: {kind: step, boundaries: [500, 1500], factor: [0.3, 0.1]}  # 0.2, 0.06, 0.006
+  # schedule: {kind: cosine, warmup_steps: 100}            # up from 0 over 100 steps, then the cosine
+  # schedule: {kind: constant}
+```
+
+* `step`: multiplies the step size by `factor` (default 0.1) after each step in `boundaries`, so the first N steps of `boundaries: [N]` run at `epsilon`, as `dual_run`'s first phase does. `factor` is one number for every boundary or a list with one per boundary. The boundaries must increase and stay below `max_iter`.
+* `exponential`: `epsilon * final_factor ** (step / max_iter)`, with `0 < final_factor <= 1`.
+* `cosine`: half a cosine from `epsilon` down to `final_factor * epsilon` (default 0) at `max_iter`.
+* `linear`: a straight line from `epsilon` down to `final_factor * epsilon` (default 0) at `max_iter`.
+
+Every kind also takes `warmup_steps` (default 0) and `warmup_factor` (default 0): the first `warmup_steps` steps rise linearly from `warmup_factor * epsilon` to `epsilon`, and the schedule starts from there. The decays still end at `max_iter`, so they run over the `max_iter - warmup_steps` steps left, and `step` boundaries still count from the start of the fit, so they must come after the warmup.
+
+A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: it keeps the moments across the drop, which is the point.
+
+`stop: {window: W, rtol: r, min_steps: M}` ends the fit after step n once n is at least M and 2W, and the mean loss over steps n-W+1..n differs from the mean over the W steps before by at most r times the latter's magnitude. The loss is the negative log posterior per data point, so with a large constant offset in it a relative change is smaller than the change in fit; choose `rtol` with a trace of the loss to hand. It needs `schedule`: with `dual_run` it would not be clear whether a stop ends the first phase or the fit.
+
+`checkpoints: [1000, 2000, 4000]` writes the parameters after each of those steps to `checkpoints/<map_pred name>_step<N>.npz` in the run's `results` directory, so one long run can be scored at several step counts. With `dual_run` the steps count across both phases. `tabascal.opt_schedule.load_checkpoint(path)` returns `(params, step, trace_loss)`, the parameters keyed as the model names them, which `Predictive` takes. `trace_loss` is the trace's loss for that step, which the step evaluated before its own update, so it lines a checkpoint up with the trace but is not the loss at the saved parameters. A step the fit does not reach because `stop` ended it first is not written.
 
 ### Optimiser trace
 
@@ -209,12 +261,12 @@ Setting `trace_path` records, once per optimiser iteration, the quantities that 
 
 Set the `TAB_LOSS_TRACE` environment variable to override `trace_path` for a single run, for tracing a config that should not be edited. Under multiple processes every process traces — they all evaluate the same model and must run the same program — and one file is written, by the first process.
 
-The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or `2 * max_iter` with `dual_run`) with one entry per iteration:
+The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or `2 * max_iter` with `dual_run`, or fewer when `stop` ends the fit) with one entry per iteration:
 
 | Key | Present | Meaning |
 |---|---|---|
 | `loss` | always | The optimiser's own loss, the negative log joint divided by `vis_obs.size` |
-| `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched |
+| `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched. The first iteration includes the step's compilation, and with `dual_run` so does the first iteration of the second phase; with `schedule` there is no second compilation. A checkpoint write or a `stop` check after a step is not in that step's time but in the next one's, if another step runs; neither after the last step, nor writing the trace file, is in any |
 | `chi2` | always | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
 | `vis_ast_nrmse` | with truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |
 | `vis_rfi_nrmse` | with truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |
