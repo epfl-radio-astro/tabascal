@@ -82,11 +82,14 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
         "RiemannFFI": [
             "trajectory:FixedOrbitFine",
             "rfi_signal:ComplexRFIVarAntFine",
-            "rfi_vis:RiemannVisFFIFine",
+            "rfi_vis:RiemannVisFine",
             "ast_vis:GPVisAst",
             "gains:UnitaryGains",
         ],
     }
+
+    #: rfi.backend of each variant's rfi_vis component.
+    _backend_map = {"Riemann": "jax", "RiemannFFI": "ffi"}
 
     def gpu_setup_cmds(self):
         """Commands selecting the GPUs the run may use, prepended to prerun_cmds."""
@@ -147,6 +150,7 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
         self.prerun_cmds.append(
             f"python {_src_root}/ci/reframe/prepare_data.py"
             f" --components '{components_str}'"
+            f" --rfi-backend {self._backend_map[self.variant]}"
             f" --workdir {workdir}"
             f" --src-root {_src_root}"
             f" --precision {self.precision}"
@@ -158,6 +162,8 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
             "run",
             "-c",
             f"{workdir}/tab_target.yaml",
+            "-n",
+            "perf",
             "-od",
             f"$(cat {workdir}/sim_dir.txt)",
             "--extra-orbit-dir",

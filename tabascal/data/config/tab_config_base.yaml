@@ -2,10 +2,12 @@
 # Data parameters
 ##################
 data:
-  out_dir: null           # Optional - Where the run writes its plots/ and results/ directories. Defaults to the directory ms_path names. Given without ms_path, a tab-sim simulation directory: the MS and truth zarr are looked for inside it. Can be given instead with -od
+  out_dir: null           # Optional - Where the run creates its own directory, runs/<name>_<YYYYmmddTHHMMSS>_<token>/, holding config.yaml, run.json, log.txt, plots/ and results/. Defaults to the directory ms_path names. Given without ms_path, a tab-sim simulation directory: the MS and truth zarr are looked for inside it. Can be given instead with -od
   truth_zarr: null        # Optional - tab-sim simulation truth, read by ast.init 'truth', rfi.init 'truth' and plots.truth, and required when any of them is set. Defaults to <MS directory>/<MS name>.zarr, where sim-vis writes it beside the MS
   ms_path: null           # Optional - Can be provided when running tabascal 
   freq: null              # Optional - A single frequency in Hz to run on, resolved to the nearest channel and refused if it falls outside the band. null, the default, reads every channel
+  skip_ms_write: false   # Optional - Keep results in zarr without copying to the MS. tab2MS can copy them afterwards; --skip-ms-write enables this from the CLI
+  row_chunk: null        # Optional - Positive row chunk for MS reads and writes. null preserves dask-ms defaults; tune throughput and memory on the target machine
   data_col: DATA          # Optional - Defaults to 'DATA'
   corr: xx                # Optional - Correlation to model, matched against the MS's POLARIZATION::CORR_TYPE
   noise: null             # Optional - Defaults to reading from the MS file. NOTE it is in the frame of data_col, i.e. BEFORE gain_table is applied - with a gain table, leave it null and let SIGMA carry it rather than pre-scaling it by hand
@@ -27,6 +29,7 @@ plots:
 #######################
 inference:
   opt: true               # Optional - Whether to run the optimization to find optimal (MAP) parameters
+  seed: null              # Optional - The one random seed of the run. Each component that draws (ast/rfi init: sample) folds its own fixed tag into it, so adding a component never shifts another's draw. null means 1; 0 is a seed like any other
 ##########################
 # Optimization parameters
 ##########################
@@ -38,13 +41,14 @@ opt:
   schedule: null          # Optional - One optimiser whose step size follows a schedule, for max_iter steps in all, instead of dual_run's two: one compiled step and no reset of the optimiser's moments (GitHub #82). null keeps dual_run. {kind: step, boundaries: [N], factor: 0.1} drops the step size 10x after step N, as dual_run does; {kind: exponential, final_factor: 0.01} and {kind: cosine, final_factor: 0.0} decay smoothly to final_factor * epsilon at max_iter; {kind: constant} holds epsilon. dual_run is not read when this is set
   stop: null              # Optional - End the fit once the loss has stopped moving: {window: W, rtol: r, min_steps: M} stops when the mean loss of the last W steps is within r (relative) of the W before, after at least M steps. Needs schedule. null runs every step
   checkpoints: null       # Optional - Steps after which to write the parameters to results/checkpoints/<map_pred name>_step<N>.npz, e.g. [1000, 2000, 4000], so one long run can be scored at several step counts. Counted across both phases with dual_run. null writes none
-  trace_path: null        # Optional - Path to write an .npz trace of the per-iteration loss, wall-clock time and reduced chi^2 to. null disables it. Overridden by the TAB_LOSS_TRACE environment variable
+  trace_path: null        # Optional - Path to write an .npz trace of the per-iteration loss, wall-clock time and reduced chi^2 to. A relative path is taken inside the run directory. null disables it. Overridden by the TAB_LOSS_TRACE environment variable
 ###################################################
 # Astronomical prior and initialization parameters
 ####################################################
 ast:
   point_sources: null   # Optional - Fixed (non-fitted) sources for ast_signal:FixedDiscreteSky + ast_vis:DiscreteSkyVis. Either a path to an OSKAR 12-column sky model file or an inline list, e.g. [{name: Fornax A, ra: 50.6738, dec: -37.2083, I: 750.0, ref_freq_mhz: 154.0, alpha: -0.77}] (ra/dec in degrees, I in Jy at ref_freq_mhz). A rigid sky the gain cannot deform, so it anchors a per-antenna gain that a flexible sky model would otherwise absorb
-  baseline_block_size: auto # Optional - Number of baselines transformed per scan step in ast_vis:GPVisAst: 'auto' sizes the block so one step's padded Fourier grid stays inside a fixed budget, a whole number sets it, and null puts every baseline in a single step. Trades scan steps for peak memory, and 'auto' is there because a block that does not bind costs steps for nothing: on a single-channel observation, whose padded grid is (1, 180), a fixed block of 128 split 4560 baselines into 36 steps and cost 13 % of the optimiser's time with no memory to show for it. Unlike the RFI scans there is no checkpoint on it - the transform is affine in the parameters, so its derivative is a linear map and reverse mode has no primal intermediates to store
+  transform: dft        # Optional - How ast_vis:GPVisAst turns its latent modes into visibilities: 'dft', a small matrix per axis with no padded Fourier grid, or 'fft', the padded grid's inverse FFT and a crop. The same values to round-off; dft holds less memory at all but the smallest sizes and is faster once gp_cov.corr_freq is set. With corr_freq: null every delay mode survives and fft is faster on wide bands
+  baseline_block_size: auto # Optional - Number of baselines transformed per scan step in ast_vis:GPVisAst: 'auto' picks it from ast.transform (one step over every baseline under dft; under fft, sized so one step's padded Fourier grid stays inside a fixed budget), a whole number sets it, and null puts every baseline in a single step. Purely a memory strategy: the result does not depend on it. Unlike the RFI scans there is no checkpoint on it - the transform is affine in the parameters, so its derivative is a linear map and reverse mode has no primal intermediates to store
   source_block_size: 128 # Optional - Number of discrete sources handled per scan step in ast_vis:DiscreteSkyVis. Trades recomputation for peak memory: the delay array is (n_bl, n_time, source_block_size) rather than (n_bl, n_time, n_src)
   uvw_sign: [-1, -1, -1] # Optional - Sign applied to each of the u, v and w axes of the MS UVW column by ast_vis:DiscreteSkyVis, each exactly +1 or -1. It turns that column into the ANTENNA2 - ANTENNA1 baseline the visibility equation is written for, so the right value is a property of whatever wrote the data. The default matches tab-sim, which writes ants_uvw[a1] - ants_uvw[a2]; the opposite convention needs [1, 1, 1] and getting it wrong mirrors the fixed sky through the phase centre
   init: sample          # Optional - Where the astronomical visibility parameters start. Options are 'sample' (a draw with the shape of the prior, but narrower than it by a factor of sqrt(2) - see GitHub #217), 'prior' (the prior mean, i.e. whatever mean is set to), 'data' (the observed visibilities, RFI and all, attributed to the sky), 'zeros' (an identically zero sky) and 'truth' (the simulated sky, read from the tab-sim zarr beside the MS)
@@ -56,7 +60,7 @@ ast:
     fov_deg: null       # Optional - Full field of view (angular diameter, in degrees) setting the knee along the time axis, through the maximum astronomical fringe rate of a source at fov_deg / 2 from the phase centre. null uses the primary beam of the telescope, 2 * 1.22 * lambda / D, from the dish diameter in the MS file
     gammas: [5, 5]      # Optional - Rate of drop off of the power law section of the power spectrum along the (frequency, time) axes. As gamma -> infinity the power spectrum tends to a Gaussian
   freq_pad_factor: 2.0  # Optional - Zero padding factor of the frequency axis of the Fourier domain signal model. 1.0 is the observed band itself, which makes the solution periodic over it
-  time_pad_factor: 2.0  # Optional - Zero padding factor of the time axis. The time axis equivalent of freq_pad_factor
+  time_pad_factor: 2.0  # Optional - Zero padding factor of the time axis. The time axis equivalent of freq_pad_factor. 'auto' pads until the first time mode reaches the slowest baseline's fringe rate, at least 2.0; below that, a short baseline's sky is fitted as all but constant in time
 ##########################################
 # RFI prior and initialization parameters
 ##########################################
@@ -67,18 +71,26 @@ rfi:
   min_elevation: 0      # Optional - Elevation in degrees below which the RFI signal of a satellite is masked to zero. 0 masks a satellite only while it is below the geometric horizon. Set to null to disable masking entirely
   time_pad_factor: 2
   freq_pad_factor: 2
-  time_int_factor: 1    # Optional - Factor to increase the number of integration samples per time step of the RFI fine grid over the estimate. The count itself is always estimated from the observation and its RFI sampling requirements (see TabConfig.estimate_rfi_sampling) and cannot be given directly - this factor is the knob on that axis
-  min_time_bins: 1      # Optional - Minimum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariableFine / RiemannVisVariableFFIFine)
-  max_time_bins: 30     # Optional - Maximum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariableFine / RiemannVisVariableFFIFine)
+  time_int_factor: 1    # Optional - Factor to increase the number of integration samples per time step of the RFI fine grid over the estimate. The count itself is always estimated from the observation and its RFI sampling requirements (see TabConfig.estimate_rfi_sampling) and cannot be given directly - this factor is the knob on that axis. Fine-grid route only: rfi_vis:AnalyticVis forms no fine time grid and ignores it
+  min_time_bins: 1      # Optional - Minimum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariableFine). Fine-grid route only
+  max_time_bins: 30     # Optional - Maximum number of stride groups when binning per-baseline RFI sampling rates (RiemannVisVariableFine). Fine-grid route only
   n_int_freq: 1         # Optional - Number of integration samples per frequency channel of the RFI fine grid. Given directly - there is no estimate on this axis, which is why it takes a count where the time axis takes a factor
-  baseline_block_size: 128 # Optional - Number of baselines handled per scan step in rfi_vis:RiemannVisFine, or null for a single block over every baseline. Trades recomputation for peak memory: the fine grid it integrates carries min(baseline_block_size, n_bl) on its baseline axis rather than n_bl. null keeps the checkpoint, so the reverse pass still recomputes that grid rather than storing it, but forms it whole - it bounds the tape and not the peak. Read by no other component - the FFI kernels bound the same term themselves
-  r_seed: 123           # Optional - Random seed to use for sampling
-  cutoff: null          # Optional - Relative power below which a k-mode is dropped from the latent grid, so it sets the number of fitted RFI parameters and nothing about what the prior believes - the spectrum is normalised after the cut. Out here with the other knobs on the size of the problem for that reason. null uses the component's own default, 1e-9 for rfi_signal:ComplexRFIVarAntFine and 1e-6 for rfi_signal:ComplexRFIConstAntFine
+  backend: null         # Optional - Implementation of the rfi_vis component: 'jax', the visibility written in JAX and differentiated by it, or 'ffi', ri_kernels' compiled op with its own JVP and transpose. null is 'ffi', the default of every rfi_vis component; rfi_vis:AnalyticVis has no other backend yet. See docs/kernels.md
+  baseline_block_size: 128 # Optional - Number of baselines handled per scan step in rfi_vis:RiemannVisFine with backend 'jax', or null for a single block over every baseline. Trades recomputation for peak memory: the fine grid it integrates carries min(baseline_block_size, n_bl) on its baseline axis rather than n_bl. null keeps the checkpoint, so the reverse pass still recomputes that grid rather than storing it, but forms it whole - it bounds the tape and not the peak. Read by no other component or backend - the FFI kernels bound the same term themselves
+  path_order: 3         # Optional - Degree of the polynomial in time through each cell's geometric delay in trajectory:FixedOrbit, from 0 to 3: the analytic kernel keeps the delay's derivatives up to the third
+  path_nodes: null      # Optional - Samples per cell that polynomial is fitted through in trajectory:FixedOrbit, odd and at least path_order + 1. null is 4 * path_order + 1
+  analytic:             # Optional - Options of rfi_vis:AnalyticVis. See docs/analytic_rfi_vis.md
+    stencil: 1          # Half-width h of the signal interpolant: the polynomial through the 2h + 1 nearest cells on each axis, 0 to 4. 0 holds each cell's value
+    segments: 2         # Equal pieces [-1, 1] is split into for the time integral, 1 to 1024
+    terms: 6            # Terms of the curvature series, 1 to 32
+    cubic_terms: 3      # Terms of the residual cubic series, 0 to 8; 0 drops the cubic phase
+    scratch_mb: 256     # Bound on the GPU coefficient scratch in MiB, at least 1; the CPU ignores it
+  cutoff: null          # Optional - Relative power below which a k-mode is dropped from the latent grid, so it sets the number of fitted RFI parameters and nothing about what the prior believes - the spectrum is normalised after the cut. Out here with the other knobs on the size of the problem for that reason. null uses the component's own default, 1e-9 for rfi_signal:ComplexRFIVarAnt and ComplexRFIVarAntFine and 1e-6 for rfi_signal:ComplexRFIConstAnt and ComplexRFIConstAntFine
   gp_cov:               # Optional - Prior covariance of the RFI signal: a width, the correlation scales that set the knee, and the roll-off past it. The same keys ast.gp_cov takes, read at the same level; the two differ only in that the time scale is a correlation time here rather than a field of view, and in what corr_freq: null means
     std: null           # Optional - Width of the prior on ONE RFI source, in Jy: the rms|V| that source realises in expectation, the same quantity as ast.gp_cov.std. Exact for a zero-mean unmasked source before integration; a non-zero mean, min_elevation and fringe averaging each move what a run actually sees. N VarAnt satellites realise sqrt(N) times it and ComplexRFIConstAntFine another sqrt(2) - see _LATENT_POWER in rfi_signal. 'data' measures the total rms|V| of the observed visibilities, which carries the sky and the noise as well as the RFI, and does not correct for the sqrt(N); see GitHub #220. A number sets it outright. null is twice the largest observed visibility, a maximum where this key says typical - see GitHub #227
     corr_freq: 1e6      # Optional - Bandwidth, in Hz, over which the RFI signal stays correlated, setting the knee of the power spectrum along the frequency axis. null is half the observed band - NOT what ast.gp_cov.corr_freq: null means, which is no roll-off at all. The difference is which default declines to commit. A flat delay spectrum is not a smooth signal - equal power at every delay leaves the channels uncorrelated - so the astronomical null states no frequency structure at all, which costs nothing on the single-channel observations the shipped configs run. An emitter is coherent over some band by construction, so half the observation is the least-committal guess that is still a coherence scale
     corr_time: 24       # Optional - Time, in seconds, over which the RFI signal stays correlated, setting the knee along the time axis. null is half the observation. Given as a time rather than as an angle because an emitter's coherence time is a property of the emitter, where a sky source's is its fringe rate - which is why the astronomical block asks for fov_deg on this axis instead
-    gammas: null        # Optional - Roll-off exponent of the power spectrum on the frequency and time axes, in that order. null uses the component's own default, which is [3, 3] for rfi_signal:ComplexRFIVarAntFine and [100, 100] for rfi_signal:ComplexRFIConstAntFine
+    gammas: null        # Optional - Roll-off exponent of the power spectrum on the frequency and time axes, in that order. null uses the component's own default, which is [3, 3] for rfi_signal:ComplexRFIVarAnt and ComplexRFIVarAntFine and [100, 100] for rfi_signal:ComplexRFIConstAnt and ComplexRFIConstAntFine
 ############################
 # Satellite path parameters
 ############################
@@ -100,7 +112,6 @@ gains:
   phase_mean: 0.0       # Optional - Mean of the prior distribution over the gain phases, in radiands. Options are 'truth' or a value like 0.0
   amp_std: null         # Optional - Standard deviation of the prior distribution over the gain amplitudes as a percentage of amp_mean. null defaults to 20, i.e. a 20 % spread
   phase_std: null       # Optional - Standard deviation of the prior distribution over the gain phases in degrees. null defaults to 180, half a turn, which is effectively uniform over the circle - the wrapped prior is flat to 1.4 %
-  r_seed: 123           # Optional - Random seed for the gain draws. Only null takes the default; 0 is a seed like any other
 # ###################
 # # Model parameters
 # ###################

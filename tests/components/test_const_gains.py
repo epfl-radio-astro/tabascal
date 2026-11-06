@@ -77,7 +77,6 @@ def make_const_gains_config(
         flags=jnp.asarray(np.asarray(flags)),
         args={
             "gains": {
-                "r_seed": 123,
                 "amp_mean": amp_mean,
                 "amp_std": amp_std,
                 "phase_mean": phase_mean,
@@ -710,14 +709,6 @@ class TestScaleKeysReachTheComponent:
     into a ``RuntimeError``.
     """
 
-    def test_a_zero_seed_is_the_seed_it_says(self):
-        comp = ConstGains()
-        cfg = make_const_gains_config()
-        cfg.args["gains"]["r_seed"] = 0
-        comp.setup(cfg)
-
-        assert comp.r_seed == 0
-
     @pytest.mark.parametrize("width", [0, 0.0, -1.0, float("nan"), float("inf")])
     @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
     def test_an_unusable_prior_width_is_an_error(self, key, width):
@@ -864,11 +855,12 @@ class TestTheDefaultPhasePriorCoversTheCircle:
 
 class TestDegeneracyWarning:
 
-    def test_warns_with_a_per_antenna_rfi_amplitude(self):
-        with pytest.warns(UserWarning, match="ComplexRFIVarAntFine"):
+    @pytest.mark.parametrize("signal", ["ComplexRFIVarAnt", "ComplexRFIVarAntFine"])
+    def test_warns_with_a_per_antenna_rfi_amplitude(self, signal):
+        with pytest.warns(UserWarning, match=rf"\b{signal}\b"):
             ConstGains().setup(
                 make_const_gains_config(
-                    components=("rfi_signal:ComplexRFIVarAntFine", "gains:ConstGains")
+                    components=(f"rfi_signal:{signal}", "gains:ConstGains")
                 )
             )
 
@@ -881,15 +873,16 @@ class TestDegeneracyWarning:
             )
 
         message = str(record[0].message)
-        assert "ComplexRFIConstAntFine" in message
+        assert "ComplexRFIConstAnt" in message
         assert "#124" in message
 
-    def test_does_not_warn_with_a_constant_antenna_rfi_amplitude(self):
+    @pytest.mark.parametrize("signal", ["ComplexRFIConstAnt", "ComplexRFIConstAntFine"])
+    def test_does_not_warn_with_a_constant_antenna_rfi_amplitude(self, signal):
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
             ConstGains().setup(
                 make_const_gains_config(
-                    components=("rfi_signal:ComplexRFIConstAntFine", "gains:ConstGains")
+                    components=(f"rfi_signal:{signal}", "gains:ConstGains")
                 )
             )
 
@@ -1157,7 +1150,6 @@ def test_validate_gain_scales_converts_percent_and_degrees():
     """The scales reach the component in the units the model works in."""
     cfg = validate_gain_scales(
         {
-            "r_seed": None,
             "amp_mean": 2.0,
             "amp_std": 5.0,
             "phase_mean": None,
@@ -1165,7 +1157,6 @@ def test_validate_gain_scales_converts_percent_and_degrees():
         }
     )
 
-    assert cfg["r_seed"] == 2
     assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
     assert cfg["phase_mean"] == pytest.approx(0.0)
     assert cfg["phase_std"] == pytest.approx(float(np.deg2rad(2.0)))

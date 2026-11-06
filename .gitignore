@@ -1,7 +1,7 @@
 pixi.lock
 .coverage
 htmlcov/
-**/log_tab_*.txt
+**/runs/
 **/log_sim_*.txt
 ci/reframe/data/data
 tabascal.egg-info/*

@@ -1,5 +1,5 @@
 from tabascal.imports import import_components
-from tabascal.components import validate_component_order
+from tabascal.components import rfi_grid, validate_component_order
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
     constrain_rfi_state,
@@ -22,6 +22,7 @@ from tabascal.components.trajectory import (
 )
 from tabascal.orbit import check_epoch_agreement, preflight_tle_check
 from tabascal.orbit_config import normalise_tle_config
+from tabascal.seeds import validate_seed, warn_deprecated_seeds
 from tabascal.interferometry import (
     baseline_gains,
     calculate_fringe_frequency_numpy,
@@ -135,9 +136,14 @@ def load_config(path: str) -> Dict:
     base_config = yaml_load(tab_base_config_path)
 
     try:
-        return deep_update(base_config, yaml_load(path))
+        config = deep_update(base_config, yaml_load(path))
     except Exception as e:
         raise IOError(f"Configuration file could not be loaded from {path}") from e
+
+    # Outside the try: a bad seed is a config to edit, not a file that failed to load.
+    validate_seed(config)
+    warn_deprecated_seeds(config)
+    return config
 
     
 class TabConfig:
@@ -157,6 +163,8 @@ class TabConfig:
     ):
 
         self.args = config
+        # load_config has already done this for a config read from a file.
+        warn_deprecated_seeds(config)
         self.precision = config.get("model", {}).get("precision", "single")
         self.ms_path = ms_path
         # One normalisation of the satellites section, shared by preflight and the
@@ -207,8 +215,8 @@ class TabConfig:
         self.n_int_freq = config["rfi"]["n_int_freq"]
 
         # The divisor-rich fine grid (min_divisors > 1) is only needed by the
-        # RiemannVisVariableFine / RiemannVisVariableFFIFine components, which
-        # split baselines into multiple stride groups. For every other rfi_vis
+        # RiemannVisVariableFine component (either backend), which
+        # splits baselines into multiple stride groups. For every other rfi_vis
         # component it just
         # inflates n_int_time (the fine-grid time dimension) and slows the run,
         # so only request it when a Variable component is actually selected.
@@ -217,11 +225,13 @@ class TabConfig:
             "Variable" in comp for comp in config["model"]["components"]
         )
 
+        self.rfi_grid = rfi_grid(import_components(config["model"]["components"]))
         self.estimate_rfi_sampling(
             config["rfi"]["time_int_factor"],
             config["rfi"].get("min_time_bins", 1),
             config["rfi"].get("max_time_bins", 30),
             min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
+            grid=self.rfi_grid,
         )
 
         self._set_freqs_times()
@@ -556,7 +566,15 @@ class TabConfig:
 
     def read_ms_params(self, freq: float, corr: str, data_col: str):
 
-        ms_params = read_ms(self.ms_path, freq, None, corr, data_col)
+        # Read off the config if there is one. This method is deliberately
+        # callable unbound, on an object carrying nothing but an ms_path --
+        # tests/test_noise.py does exactly that -- so the chunk is an optional
+        # tuning knob here rather than a required attribute.
+        data_args = getattr(self, "args", {}).get("data", {})
+        ms_params = read_ms(
+            self.ms_path, freq, None, corr, data_col,
+            row_chunk=data_args.get("row_chunk"),
+        )
 
         self.phase_centre = {"ra": ms_params["ra"], "dec": ms_params["dec"]}
         self.dish_d = ms_params["dish_d"]
@@ -618,7 +636,20 @@ class TabConfig:
         min_time_bins: int,
         max_time_bins: int,
         min_divisors: int = 8,
+        grid: Optional[str] = None,
     ):
+        self.max_rfi_vis = np.max(np.abs(self.vis_obs))
+
+        # The data-grid route (grid == "data", see components.rfi_grid)
+        # integrates each cell in closed form and never forms a fine time grid,
+        # so there is no sampling to estimate: one sample per cell, and none of
+        # the fringe-rate work that sizes it.
+        if grid == "data":
+            self.time_sample_idxs, self.time_strides, self.n_int_time = (
+                [np.arange(self.n_bl)], [1], 1
+            )
+            return
+
         # A satellite-free model has no RFI trajectory, so there is nothing to
         # derive a sub-integration sampling rate from: the fringe frequency whose
         # rate of change sets it is a property of the satellites. Skip the
@@ -627,7 +658,6 @@ class TabConfig:
         # reductions below fail with an opaque AxisError far from the cause.
         # One sample per integration is the floor, which is what no RFI needs.
         if self.n_rfi == 0:
-            self.max_rfi_vis = np.max(np.abs(self.vis_obs))
             self.time_sample_idxs, self.time_strides, self.n_int_time = (
                 get_strides_and_idxs(
                     np.ones(self.n_bl, dtype=int),
@@ -665,7 +695,6 @@ class TabConfig:
         # fringe_freq is shape (n_rfi, n_time_coarse, n_bl)
         fringe_freq = np.array([get_fringe_freq(rfi_pos) for rfi_pos in rfi_xyz])
 
-        self.max_rfi_vis = np.max(np.abs(self.vis_obs))
         sample_freq_bl = (
             np.pi
             * np.max(np.abs(fringe_freq), axis=(0, 1))
@@ -833,6 +862,10 @@ class Model:
 
             numpyro.deterministic("rfi_phase", state["rfi_phase"])
             numpyro.deterministic("rfi_A", state["rfi_A"])
+            # The data-grid route's third RFI input, which write.rfi_vis_per_sat
+            # needs to re-evaluate AnalyticVis one source at a time.
+            if "rfi_delay_poly_us" in state:
+                numpyro.deterministic("rfi_delay_poly_us", state["rfi_delay_poly_us"])
 
             numpyro.deterministic("vis_rfi", state["vis_rfi"])
             numpyro.deterministic("vis_ast", state["vis_ast"])

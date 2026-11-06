@@ -15,6 +15,7 @@ supplies that the component never reads is caught by the recorded-read
 comparison.
 """
 
+from importlib.resources import files
 from types import SimpleNamespace
 
 import jax.numpy as jnp
@@ -26,6 +27,7 @@ from tabascal.components.rfi_vis import RiemannVisFine
 from tabascal.config import (
     TabConfig,
     load_config,
+    yaml_load,
 )
 from tabascal.interferometry import get_strides_and_idxs, max_ast_fringe_rate
 
@@ -65,7 +67,7 @@ def base_args(tmp_path):
     return load_config(str(path))
 
 
-def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5):
+def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5, n_rfi=0):
     """Build a real ``TabConfig`` from ``config`` on a tiny synthetic observation.
 
     Only the steps that need a measurement set, a satellite catalogue or the
@@ -96,13 +98,19 @@ def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5):
             "flags": np.zeros((n_bl, n_freq, n_time), dtype=bool),
             "noise": 1.0,
             "noise_scalar": 1.0,
+            # Enough for GPVisAst to set up under a real Model.
+            "dish_d": 13.5,
+            "uvw": np.full((n_time, n_bl, 3), 1e3),
+            "phase_centre": {"ra": 30.0, "dec": -30.0},
         },
         "set_noise": {},
         "apply_gain_table": {},
         "set_flags": {},
-        # No satellites: estimate_rfi_sampling then takes its own n_rfi == 0
-        # branch, which is real code and needs no trajectory.
-        "get_orbital_elements": {"n_rfi": 0, "orbit_records": [], "norad_ids": []},
+        # No satellites by default: estimate_rfi_sampling then takes its own
+        # n_rfi == 0 branch, which is real code and needs no trajectory.
+        "get_orbital_elements": {
+            "n_rfi": n_rfi, "orbit_records": [None] * n_rfi, "norad_ids": list(range(n_rfi)),
+        },
     }
 
     def stub(leaves):
@@ -422,6 +430,24 @@ class TestTheTimeCountIsNotAConfigKey:
         assert tab_config.n_int_time == expected
         assert tab_config.n_time_fine == sizes.n_time * expected
 
+    def test_the_analytic_route_has_no_fine_time_grid_to_size(self, tmp_path, monkeypatch):
+        """With a satellite, and the fringe-rate scan wired to fail: it must not run."""
+        path = tmp_path / "user.yaml"
+        path.write_text(
+            "model:\n  components: [trajectory:FixedOrbit, rfi_signal:ComplexRFIVarAnt, rfi_vis:AnalyticVis]\n"
+            "rfi:\n  min_elevation: null\nsatellites:\n  norad_ids: [25544]\n"
+        )
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the fringe-rate estimate ran")
+
+        monkeypatch.setattr("tabascal.config.get_satellite_positions", refuse)
+        monkeypatch.setattr("tabascal.config.calculate_fringe_frequency_numpy", refuse)
+        tab_config, sizes = build_stubbed_tab_config(load_config(str(path)), monkeypatch, n_rfi=1)
+
+        assert tab_config.n_int_time == 1
+        assert tab_config.n_time_fine == sizes.n_time
+
 
 
 class TestTheGainsSectionHasNoCorrelationLengths:
@@ -432,10 +458,11 @@ class TestTheGainsSectionHasNoCorrelationLengths:
     frequency, so there is no correlation length to configure.
     """
 
-    def test_the_keys_the_gains_section_still_ships(self, tmp_path):
+    def test_the_keys_the_gains_section_still_ships(self):
         """What is left is the prior over a constant gain, and nothing else."""
 
-        assert set(base_args(tmp_path)["gains"]) == {
+        shipped = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))
+        assert set(shipped["gains"]) == {
             "init",
             "ref_ant",
             "fix_flux_scale",
@@ -443,5 +470,4 @@ class TestTheGainsSectionHasNoCorrelationLengths:
             "phase_mean",
             "amp_std",
             "phase_std",
-            "r_seed",
         }

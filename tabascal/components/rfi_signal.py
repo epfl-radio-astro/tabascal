@@ -9,6 +9,7 @@ from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
+from tabascal.seeds import component_key, config_seed
 from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
@@ -600,14 +601,6 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     # null, and the fallbacks below are what null means.
     gp_cov = _validate_gp_cov(rfi_config.get("gp_cov"))
 
-    r_seed = rfi_config.get("r_seed")
-    if not r_seed: # Set Default
-        rfi_config["r_seed"] = 1
-    elif isinstance(r_seed, int):
-        pass
-    else:
-        raise ValueError(f"Config parameter (rfi:\n\tr_seed: {r_seed}) is not of type int.")
-
     if gp_cov["std"] == FROM_DATA:
         gp_cov["std"] = _std_from_data(vis_obs, gain_flags)
     elif gp_cov["std"] is None:
@@ -641,6 +634,9 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
 
 class BaseGPRFI(Component):
 
+    #: The tag ``rfi.init: sample`` folds into ``inference.seed`` (tabascal.seeds).
+    seed_tag = "rfi"
+
     #: Roll-off exponent of the RFI prior power spectrum on the frequency and time
     #: axes, used when ``rfi.gp_cov.gammas`` is not set. Declared per component
     #: because the two Fourier components have never agreed on it: the difference
@@ -657,6 +653,23 @@ class BaseGPRFI(Component):
     #: when ``rfi.cutoff`` is not set. Sets the latent dimension, so a
     #: change here changes the number of fitted parameters.
     default_pk_cutoff = 1e-9
+
+    #: Whether the inverse transform supersamples onto the fine grid. The
+    #: data-grid signals turn it off: the same latent, prior and parameters,
+    #: with the signal at each cell's own sample only.
+    supersample = True
+
+    @property
+    def ss_factors(self) -> list:
+        """Samples per cell on the frequency and time axes of the signal."""
+        return [self.n_int_freq, self.n_int_time] if self.supersample else [1, 1]
+
+    @property
+    def signal_shape(self) -> tuple:
+        """``(n_freq, n_time)`` axes of the signal: the fine grid's or the data grid's."""
+        if self.supersample:
+            return (self.n_freq_fine, self.n_time_fine)
+        return (self.n_freq, self.n_time)
 
     def gp_cov_params(self):
         """``(gammas, cutoff)`` for this component: the config's, else its own.
@@ -716,8 +729,8 @@ class BaseGPRFI(Component):
         self.rfi_config = rfi_config
         self._gammas, self._pk_cutoff = self._resolve_gp_cov_params()
 
-        # Random seed used for random sampling such as initial parameters drawn from the prior
-        self.r_seed = rfi_config["r_seed"]
+        # Seed for `init: sample`, drawn from under this component's own tag
+        self.seed = config_seed(tab_config.args)
 
         # Basic shape parameters 
         self.n_rfi = tab_config.n_rfi
@@ -768,8 +781,10 @@ class BaseGPRFI(Component):
         # padded dummy rows too -- they duplicate the last real satellite, so they
         # inherit its mask and are zeroed independently by masked_forward_transform.
         # Stored as a boolean, which is what jnp.where in the forward wants and is
-        # the smallest thing to shard.
-        rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None)
+        # the smallest thing to shard. A data-grid signal is left unmasked:
+        # rfi_vis:AnalyticVis interpolates it across the horizon and masks each
+        # source's visibility instead.
+        rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None) if self.supersample else None
         self.rfi_mask_fine = (
             None if rfi_mask_fine is None else jnp.asarray(rfi_mask_fine, dtype=bool)
         )
@@ -914,9 +929,7 @@ class BaseGPRFI(Component):
         # This placeholder is a fine-grid memory hog; under sharding each device only
         # ever allocates its own RFI shard (never the full array).
         self.state_outputs = {
-            "rfi_A": sharded_rfi_zeros(
-                (self.n_rfi, self.n_ant, self.n_freq_fine, self.n_time_fine), complex
-            ),
+            "rfi_A": sharded_rfi_zeros((self.n_rfi, self.n_ant, *self.signal_shape), complex),
         }
 
     def _compute_gp_params(self):
@@ -1090,7 +1103,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             ns,
             dxs,
             pad_factors,
-            [self.n_int_freq, self.n_int_time],
+            self.ss_factors,
             p0,
             k0s,
             gammas,
@@ -1209,7 +1222,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         elif init_type == "sample":
             print("Drawing sample from prior for rfi_A init")
             base_sample = random.normal(
-                random.PRNGKey(self.r_seed),
+                component_key(self.seed, self.seed_tag),
                 (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
@@ -1239,6 +1252,24 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         )
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
+
+
+class ComplexRFIVarAnt(ComplexRFIVarAntFine):
+    """:class:`ComplexRFIVarAntFine` on the data grid ``(n_rfi, n_ant, n_freq, n_time)``.
+
+    The same latent, prior, parameters and initialisation; the inverse transform
+    lands on each cell's own sample instead of supersampling, so where the two
+    grids meet the two components agree exactly. For
+    :class:`~tabascal.components.rfi_vis.AnalyticVis`, which interpolates the
+    signal across each cell itself. The elevation mask is not applied: ``rfi_A``
+    is the continuous signal, saved results included, and AnalyticVis masks
+    each source's visibility instead.
+    """
+
+    supersample = False
+    output_shapes = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+    }
 
 
 class ComplexRFIConstAntFine(BaseGPRFI):
@@ -1325,8 +1356,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         ss_idxs = self.ss_idxs
         n_rfi = self.n_rfi
         n_ant = self.n_ant
-        n_freq_fine = self.n_freq_fine
-        n_time_fine = self.n_time_fine
+        signal_shape = self.signal_shape
 
         def forward(params: dict, state: dict, constants: dict):
             # Pure JAX operations only
@@ -1346,7 +1376,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             rfi_A = masked_signal(rfi_A, constants)
             # Avoids allocating a full grid of ones and a multiply.
             rfi_A = jnp.broadcast_to(
-                rfi_A[:, None], (n_rfi, n_ant, n_freq_fine, n_time_fine)
+                rfi_A[:, None], (n_rfi, n_ant, *signal_shape)
             )
 
             state = {**state, "rfi_A": rfi_A}
@@ -1373,7 +1403,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             ns,
             dxs,
             pad_factors,
-            [self.n_int_freq, self.n_int_time],
+            self.ss_factors,
             p0,
             k0s,
             gammas,
@@ -1505,7 +1535,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             # This variant carries a singleton antenna axis: the latent is shared by
             # every antenna and only broadcast to n_ant inside the forward.
             base_sample = random.normal(
-                random.PRNGKey(self.r_seed),
+                component_key(self.seed, self.seed_tag),
                 (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi),
                 dtype=complex,
             )
@@ -1536,3 +1566,21 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
 
+
+
+class ComplexRFIConstAnt(ComplexRFIConstAntFine):
+    """:class:`ComplexRFIConstAntFine` on the data grid ``(n_rfi, n_ant, n_freq, n_time)``.
+
+    The same latent, prior, parameters and initialisation; the inverse transform
+    lands on each cell's own sample instead of supersampling, so where the two
+    grids meet the two components agree exactly. For
+    :class:`~tabascal.components.rfi_vis.AnalyticVis`, which interpolates the
+    signal across each cell itself. The elevation mask is not applied: ``rfi_A``
+    is the continuous signal, saved results included, and AnalyticVis masks
+    each source's visibility instead.
+    """
+
+    supersample = False
+    output_shapes = {
+        "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
+    }
