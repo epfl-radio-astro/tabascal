@@ -55,6 +55,11 @@ def main():
         help="Comma-separated component specs for model.components",
     )
     parser.add_argument(
+        "--rfi-backend",
+        default=None,
+        help="rfi.backend of the rfi_vis component: jax or ffi (default: the component's)",
+    )
+    parser.add_argument(
         "--workdir", required=True, help="Working directory for output files"
     )
     parser.add_argument(
@@ -161,6 +166,8 @@ def main():
     config = yaml_load(tab_template)
     config["model"] = {"components": components, "precision": args.precision}
     config.setdefault("opt", {})["max_iter"] = args.max_iter
+    if args.rfi_backend is not None:
+        config.setdefault("rfi", {})["backend"] = args.rfi_backend
     config_out = workdir / "tab_target.yaml"
     with open(config_out, "w") as f:
         yaml.dump(config, f)

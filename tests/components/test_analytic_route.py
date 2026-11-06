@@ -391,6 +391,16 @@ class TestAnalyticVis:
         with pytest.raises(RuntimeError, match=rf"rfi\.analytic\.{key}"):
             AnalyticVis().setup(cfg)
 
+    @pytest.mark.parametrize("backend, ok", [(None, True), ("ffi", True), ("jax", False)])
+    def test_ffi_is_the_only_backend(self, backend, ok):
+        cfg, _ = op_case()
+        cfg.args["rfi"]["backend"] = backend
+        if ok:
+            AnalyticVis().setup(cfg)
+        else:
+            with pytest.raises(RuntimeError, match="rfi.backend must be one of 'ffi'"):
+                AnalyticVis().setup(cfg)
+
     def test_a_repeated_baseline_is_refused(self):
         cfg, _ = op_case()
         vars(cfg).update({"a1": np.array([0, 0], np.int32), "a2": np.array([1, 1], np.int32), "n_bl": 2})
