@@ -135,13 +135,15 @@ def jitter_init(
         real = x[:n_rfi_real] if padded else x
         sigma = scale
         if kind == "relative":
-            rms = float(jnp.sqrt(jnp.mean(jnp.abs(real) ** 2)))
-            if rms == 0:
+            # Scaled by the largest entry, so that squaring a start near the
+            # dtype's range neither underflows to zero nor overflows to inf.
+            peak = jnp.max(jnp.abs(real), initial=0.0)
+            if float(peak) == 0:
                 raise ValueError(
                     f"opt.init_jitter: {name} starts at zero, so a relative "
                     "jitter on it is zero. Give it an absolute scale, in prior widths."
                 )
-            sigma = scale * rms
+            sigma = scale * float(peak) * float(jnp.sqrt(jnp.mean((jnp.abs(real) / peak) ** 2)))
         moved = _perturb(real, random.fold_in(base, zlib.crc32(name.encode())), sigma)
         out[name] = jnp.concatenate([moved, x[n_rfi_real:]]) if padded else moved
     return out
@@ -149,11 +151,13 @@ def jitter_init(
 
 def describe_init_jitter(spec) -> Optional[str]:
     """The jitter as the run header names it, or None when it is off."""
-    blocks = validate_init_jitter(spec)
-    if not blocks:
-        return None
+    blocks = validate_init_jitter(spec) or {}
+    # A zero scale draws nothing (resolve_init_jitter drops it), so it is not named.
     parts = [
         f"{block or 'every block'} {kind} {scale:g}"
         for block, (kind, scale) in blocks.items()
+        if scale > 0
     ]
+    if not parts:
+        return None
     return "start jittered (" + ", ".join(parts) + ")"

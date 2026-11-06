@@ -54,8 +54,10 @@ def test_off_returns_the_very_start_it_was_given(spec):
     assert all(out[k] is params[k] for k in params)
 
 
-def test_off_is_described_as_nothing():
-    assert describe_init_jitter(None) is None
+@pytest.mark.parametrize("spec", [None, 0, {"rfi": 0}], ids=["null", "0", "zero-block"])
+def test_off_is_described_as_nothing(tmp_path, spec):
+    assert describe_init_jitter(spec) is None
+    assert "no random draws" in describe_random_draws(loaded(tmp_path, spec))
 
 
 # ---------------------------------------------------------------------------
@@ -73,14 +75,20 @@ def test_a_number_is_an_absolute_scale_on_every_block(exact_rtol):
         np.testing.assert_allclose(np.asarray(out[name]), expected, rtol=exact_rtol, atol=exact_rtol)
 
 
-def test_a_relative_scale_is_a_fraction_of_the_rms_of_the_start(exact_rtol):
+@pytest.mark.parametrize("magnitude", ["unit", "tiny", "huge"])
+def test_a_relative_scale_is_a_fraction_of_the_rms_of_the_start(exact_rtol, magnitude):
+    """Also for starts whose squares underflow or overflow the dtype."""
     params = start()
+    info = np.finfo(params["rfi_k_r_base"].dtype)
+    c = {"unit": 1.0, "tiny": np.sqrt(info.tiny) * 1e-3, "huge": np.sqrt(info.max) * 1e3}[magnitude]
+    unit = {name: np.asarray(params[name]) for name in ("rfi_k_r_base", "rfi_k_i_base")}
+    params.update({name: params[name] * c for name in unit})
     out = jitter_init(params, {"rfi": {"relative": 0.1}}, seed=7)
-    for name in ("rfi_k_r_base", "rfi_k_i_base"):
-        x = np.asarray(params[name])
-        sigma = 0.1 * np.sqrt(np.mean(x**2))
+    for name, y in unit.items():
+        # In units of c, where the reference's own squares stay in range.
+        sigma = 0.1 * np.sqrt(np.mean(y**2))
         np.testing.assert_allclose(
-            np.asarray(out[name]), x + sigma * draw(7, name, params[name]),
+            np.asarray(out[name]) / c, y + sigma * draw(7, name, params[name]),
             rtol=exact_rtol, atol=exact_rtol,
         )
     for name in ("ast_k_r_base", "ast_k_i_base", "gains_amp_base"):
