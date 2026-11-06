@@ -384,6 +384,7 @@ def test_the_defaults_fill_in():
         ({"optimizer": {"name": "adam", "eps_root": -1}}, "eps_root"),
         ({"optimizer": {"name": "sgd", "momentum": 1.0}}, "momentum"),
         ({"optimizer": {"name": "adamw", "weight_decay": -1e-4}}, "weight_decay"),
+        ({"optimizer": {"name": "radam", "threshold": 4}}, "threshold"),
         ({"optimizer": {"clip_norm": 0}}, "clip_norm"),
         ({"stop": {"window": 10, "rtol": 1e-4}}, "needs opt.schedule"),
         ({"schedule": {"kind": "constant"}, "stop": {"window": 0, "rtol": 1e-4}}, "window"),

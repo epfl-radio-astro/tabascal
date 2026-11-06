@@ -37,15 +37,18 @@ OPTIMIZERS = (
 #: Arguments of those optimisers that are not scalars a YAML file can give.
 _NOT_FROM_CONFIG = ("learning_rate", "mask", "mu_dtype", "accumulator_dtype")
 
-#: The range each of their numeric arguments must lie in, as ``(low, high)``
-#: with ``high`` excluded: a decay rate of 1 never forgets its start, and the
-#: first update divides by zero. Every numeric argument of OPTIMIZERS is here.
+#: The range each of their numeric arguments must lie in, as ``(low, high,
+#: low_open)`` with ``high`` excluded: a decay rate of 1 never forgets its
+#: start, and the first update divides by zero. radam's rectification takes the
+#: square root of ``rho_t - 4`` once ``rho_t`` passes ``threshold``, so that
+#: must be above 4. Every numeric argument of OPTIMIZERS is here.
 _ARG_RANGES = {
-    **dict.fromkeys(("b1", "b2", "b3", "decay", "momentum"), (0.0, 1.0)),
+    **dict.fromkeys(("b1", "b2", "b3", "decay", "momentum"), (0.0, 1.0, False)),
     **dict.fromkeys(
-        ("eps", "eps_root", "weight_decay", "initial_scale", "initial_accumulator_value", "threshold"),
-        (0.0, math.inf),
+        ("eps", "eps_root", "weight_decay", "initial_scale", "initial_accumulator_value"),
+        (0.0, math.inf, False),
     ),
+    "threshold": (4.0, math.inf, True),
 }
 
 #: The schedules ``opt.schedule.kind`` names.
@@ -137,8 +140,10 @@ def validate_optimizer(optimizer) -> Optional[Dict]:
             if not isinstance(value, bool):
                 raise ValueError(f"opt.optimizer.{key} must be true or false, not {value!r}.")
         elif not (value is None and default is None):
-            low, high = _ARG_RANGES[key]
-            args[key] = _number(value, f"optimizer.{key}", low, high, high_open=high < math.inf)
+            low, high, low_open = _ARG_RANGES[key]
+            args[key] = _number(
+                value, f"optimizer.{key}", low, high, low_open=low_open, high_open=high < math.inf
+            )
     return {"name": name, "clip_norm": clip_norm, "args": args}
 
 

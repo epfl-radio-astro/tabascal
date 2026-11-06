@@ -221,7 +221,7 @@ opt:
   # optimizer: {name: sgd, momentum: 0.9, nesterov: true}
 ```
 
-The names are `adabelief`, `adam`, `adamw`, `amsgrad`, `nadam`, `radam`, `adamax`, `yogi`, `lion`, `lamb`, `novograd`, `rmsprop`, `sgd` and `adagrad`. An argument the optimiser does not take is refused by name at run start, with the list it does take. A mapping without `name` is `adabelief`. With `dual_run` both phases build this optimiser, the second at `epsilon / 10`.
+The names are `adabelief`, `adam`, `adamw`, `amsgrad`, `nadam`, `radam`, `adamax`, `yogi`, `lion`, `lamb`, `novograd`, `rmsprop`, `sgd` and `adagrad`. An argument the optimiser does not take is refused by name at run start, with the list it does take. So is a number outside the range the optimiser's update is defined on: the decay rates (`b1`, `b2`, `b3`, `decay`) and `momentum` must lie in `[0, 1)`, the epsilons, `weight_decay` and the initial accumulators must be `>= 0`, and `radam`'s `threshold` must be above 4. A mapping without `name` is `adabelief`. With `dual_run` both phases build this optimiser, the second at `epsilon / 10`.
 
 ### Step-size schedule
 
