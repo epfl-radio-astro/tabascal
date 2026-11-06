@@ -35,6 +35,7 @@ COMPONENTS = [
     "ast_vis:GPVisAst",
     "gains:UnitaryGains",
 ]
+AST, GAINS = COMPONENTS[3:]
 
 
 def _set_seed(args, seed):
@@ -44,23 +45,22 @@ def _set_seed(args, seed):
         inference["seed"] = seed
 
 
-def ast_start(tmp_path, seed, init="sample", components=COMPONENTS):
+def ast_start(tmp_path, seed, init="sample"):
     """``GPVisAst`` set up with ``ast.init`` and ``inference.seed``."""
     args = base_args(tmp_path)
     args["ast"]["init"] = init
-    args["model"]["components"] = list(components)
     _set_seed(args, seed)
     comp = GPVisAst()
     comp.setup(make_ast_config(args))
     return comp
 
 
-def rfi_start(cls, seed, init="sample", r_seed=None, components=COMPONENTS):
+def rfi_start(cls, seed, init="sample", r_seed=None):
     """An RFI signal component with no dummy sources, set up on the mock config."""
     config = make_rfi_config(n_rfi=3, n_rfi_real=3, init=init)
     if r_seed is not None:
         config.args["rfi"]["r_seed"] = r_seed
-    config.args["model"] = {"components": list(components)}
+    config.args["model"] = {"components": COMPONENTS}  # a real list, whose order no draw may read
     _set_seed(config.args, seed)
     comp = cls()
     comp.setup(config)
@@ -71,6 +71,12 @@ START = {
     "ast": lambda tmp_path, seed, **kw: ast_start(tmp_path, seed, **kw),
     "rfi": lambda tmp_path, seed, **kw: rfi_start(ComplexRFIVarAntFine, seed, **kw),
 }
+
+
+def sample_draw(seed, tag, shape):
+    """What ``init: sample`` must draw, written out rather than via tabascal.seeds."""
+    key = jax.random.fold_in(jax.random.PRNGKey(seed), zlib.crc32(tag.encode()))
+    return np.asarray(jax.random.normal(key, shape, dtype=complex))
 
 
 def base_latent(comp):
@@ -116,18 +122,27 @@ def test_a_sample_start_is_the_draw_from_the_seed_folded_with_the_crc_of_its_tag
 ):
     start = base_latent(make(tmp_path, seed))
     expected_seed = DEFAULT_SEED if seed in (ABSENT, None) else seed
-    key = jax.random.fold_in(jax.random.PRNGKey(expected_seed), zlib.crc32(tag.encode()))
-    draw = jax.random.normal(key, start.shape, dtype=complex)
-
-    np.testing.assert_allclose(start, np.asarray(draw), rtol=exact_rtol, atol=exact_rtol)
+    np.testing.assert_allclose(start, sample_draw(expected_seed, tag, start.shape),
+                               rtol=exact_rtol, atol=exact_rtol)
 
 
-@pytest.mark.parametrize("tag", ["ast", "rfi"])
-def test_adding_removing_or_moving_another_component_never_shifts_a_draw(tmp_path, tag):
-    lists = [COMPONENTS, ["gains:ConstGains", *COMPONENTS], COMPONENTS[1:], COMPONENTS[::-1]]
-    first, *others = (base_latent(START[tag](tmp_path, 7, components=c)) for c in lists)
+@pytest.mark.parametrize(
+    "components", [[AST, GAINS], [GAINS, AST, GAINS], [AST, GAINS, GAINS]],
+    ids=["base", "moved", "added"],
+)
+def test_through_build_model_another_component_never_shifts_a_draw(
+    tmp_path, monkeypatch, components, exact_rtol
+):
+    from tabascal.scripts._run_tabascal_impl import build_model
 
-    assert all(np.array_equal(first, other) for other in others)
+    config = loaded(tmp_path, ast_init="sample", seed=7, components=components)
+    config["ast"]["gp_cov"]["std"], config["ast"]["time_pad_factor"] = 1.0, 2
+    build_stubbed_tab_config(config, monkeypatch)  # for its observation stubs
+    (comp,) = [c for c in build_model(config, "never/read.ms")[1].components if isinstance(c, GPVisAst)]
+    start = base_latent(comp)
+
+    np.testing.assert_allclose(start, sample_draw(7, "ast", start.shape),
+                               rtol=exact_rtol, atol=exact_rtol)
 
 
 @pytest.mark.parametrize("r_seed", [99, "not a seed"])
@@ -158,7 +173,8 @@ def test_a_deterministic_start_does_not_depend_on_the_seed(tmp_path, tag, init):
     "seed, expected", [(ABSENT, 1), (None, 1), (0, 0), (7, 7)], ids=["absent", "null", "0", "7"]
 )
 def test_load_config_normalises_the_seed(tmp_path, seed, expected):
-    assert loaded(tmp_path, seed=seed)["inference"]["seed"] == expected
+    seed = loaded(tmp_path, seed=seed)["inference"]["seed"]
+    assert seed == expected and type(seed) is int
 
 
 NOT_INTEGERS = [True, 1.0, 1.5, "7"]
@@ -184,10 +200,10 @@ def test_a_set_r_seed_warns_once_into_a_tabconfig(tmp_path, monkeypatch, section
     """Loaded (load_config warns, TabConfig must not again) or built in code (TabConfig warns)."""
     with pytest.warns(FutureWarning) as record:
         if route == "loaded":
-            config = load_config(str(write_config(tmp_path, [], **{section: {"r_seed": 5}})))
+            config = load_config(str(write_config(tmp_path, [], **{section: {"r_seed": 0}})))
         else:
             config = base_args(tmp_path)
-            config[section]["r_seed"] = 5
+            config[section]["r_seed"] = 0
         build_stubbed_tab_config(config, monkeypatch)
 
     (warned,) = [w for w in record if "r_seed" in str(w.message)]
@@ -237,7 +253,8 @@ def test_the_line_names_exactly_the_sections_that_draw(
 
 
 @pytest.mark.parametrize(
-    "n_proc, says", [(1, "prior plots draw from inference.seed 4242"), (3, "prior plots skipped")]
+    "n_proc, says",
+    [(1, "prior plots draw from inference.seed 4242")] + [(n, "prior plots skipped") for n in (2, 3)],
 )
 def test_the_line_says_whether_prior_plots_draw(tmp_path, monkeypatch, n_proc, says):
     """The runner skips prior plots in a multi-process run, and the line follows it."""
@@ -256,8 +273,9 @@ def test_the_line_says_whether_prior_plots_draw(tmp_path, monkeypatch, n_proc, s
 
 
 def run_stubbed(tmp_path, monkeypatch, capsys, seed, n):
-    """The runner on a loaded config with prior plots on; the keys each consumer got."""
+    """The runner on a loaded config with prior plots on; every seed and key its consumers got."""
     from tabascal.scripts import _run_tabascal_impl as impl
+    from tabascal.seeds import run_key
 
     config = loaded(tmp_path, seed=seed)
     config["plots"]["prior"] = True
@@ -269,39 +287,45 @@ def run_stubbed(tmp_path, monkeypatch, capsys, seed, n):
         run_dir=str(run_dir),
     )
     model = SimpleNamespace(prob_model=None, init_params={}, state={}, constants={})
-    keys = {}
+    calls = {}
+
+    def spy(name, at, returns=None):
+        return lambda *a, **k: (calls.setdefault(name, []).append(a[at]), returns)[1]
+
     stubs = {
         **dict.fromkeys(["_print_run_header", "_record_resolved_settings", "save_orbits_for_reuse",
                          "_print_model_summary", "write_results_xds"], lambda *a, **k: None),
         "_resolve_paths": lambda *a, **k: paths,
         "build_model": lambda *a: (SimpleNamespace(vis_obs=None), model),
         "load_truth": lambda *a: {},
-        "init_predict": lambda _c, _m, key, *a, **k: keys.setdefault("init", key),
+        "run_key": lambda s: (spy("seed", 0)(s), run_key(s))[1],
+        "init_predict": spy("init", 2),
         "nlog_like_and_post": lambda *a, **k: (0.0, 0.0),
-        "run_opt": lambda _c, _m, subkeys, *a, **k: (keys.setdefault("opt", subkeys), None, {}, None),
+        "run_opt": spy("opt", 2, (None, None, {}, None)),
     }
     for name, stub in stubs.items():
         monkeypatch.setattr(impl, name, stub)
-    monkeypatch.setattr(
-        "tabascal.plot.plot_prior", lambda _c, _m, _t, _n, key, *a, **k: keys.setdefault("prior", key)
-    )
+    monkeypatch.setattr("tabascal.plot.plot_prior", spy("prior", 4))
 
     impl.tabascal_subtraction(config, out_dir=None, log=False)
-    return keys, capsys.readouterr().out, config, run_dir
+    return calls, capsys.readouterr().out, config, run_dir
 
 
 def test_the_seed_reaches_every_key_consumer_the_header_and_run_json(tmp_path, monkeypatch, capsys):
-    """Unset and 1 hand the init prediction, prior plots and optimiser the same keys; 7 others."""
+    """run_key gets the loaded seed; the init prediction, prior plots and optimiser keys follow it."""
     from tabascal.run_dir import read_record
     from tabascal.seeds import describe_random_draws
 
-    runs = [run_stubbed(tmp_path, monkeypatch, capsys, s, n) for n, s in enumerate((ABSENT, 1, 7))]
-    (unset, *_), (one, *_), (seven, *_) = runs
+    seeds = (ABSENT, 1, 0, 7)
+    runs = [run_stubbed(tmp_path, monkeypatch, capsys, s, n) for n, s in enumerate(seeds)]
+    unset, one, _, seven = (calls for calls, *_ in runs)
 
+    assert [calls["seed"] for calls, *_ in runs] == [[1], [1], [0], [7]]
     for consumer in ("init", "prior", "opt"):
         assert np.array_equal(unset[consumer], one[consumer]), consumer
-        assert not np.array_equal(one[consumer], seven[consumer]), consumer
-    assert [read_record(run_dir)["seed"] for *_, run_dir in runs] == [1, 1, 7]
+        # Key by key: one fixed key among changing ones still fails.
+        assert not np.all(np.asarray(one[consumer]) == np.asarray(seven[consumer]), axis=-1).any(), consumer
+    assert [read_record(run_dir)["seed"] for *_, run_dir in runs] == [1, 1, 0, 7]
     assert all(describe_random_draws(config) in out for _, out, config, _ in runs)
 
 

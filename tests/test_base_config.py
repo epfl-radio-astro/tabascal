@@ -98,6 +98,10 @@ def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5, n
             "flags": np.zeros((n_bl, n_freq, n_time), dtype=bool),
             "noise": 1.0,
             "noise_scalar": 1.0,
+            # Enough for GPVisAst to set up under a real Model.
+            "dish_d": 13.5,
+            "uvw": np.full((n_time, n_bl, 3), 1e3),
+            "phase_centre": {"ra": 30.0, "dec": -30.0},
         },
         "set_noise": {},
         "apply_gain_table": {},
