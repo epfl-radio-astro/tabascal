@@ -1,9 +1,9 @@
 """One optimiser for the whole fit: its kind, a step-size schedule, a stop and checkpoints.
 
-``opt.dual_run`` fits in two phases, each with its own ``adabelief``. The
+``opt.dual_run`` fits in two phases, each with its own optimiser. The
 optimiser is a static argument of the compiled step, so the second phase
-compiles again and starts from fresh moments, which shows as a bump in the
-loss at the switch (GitHub #82). ``opt.schedule`` builds one optimiser whose
+compiles again and starts from fresh moments, which GitHub #82 reports as a
+bump in the loss at the switch. ``opt.schedule`` builds one optimiser whose
 step size follows a schedule instead: one compiled step, and moments that run
 through every step.
 

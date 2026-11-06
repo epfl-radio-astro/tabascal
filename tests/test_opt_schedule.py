@@ -1,7 +1,7 @@
 """``opt.optimizer``, ``opt.schedule``, ``opt.stop`` and ``opt.checkpoints`` (GitHub #82).
 
-- **The old path is unchanged.** With no schedule, ``dual_run`` still runs two
-  ``adabelief`` phases, bit for bit.
+- **The old path is unchanged.** With ``optimizer`` and ``schedule`` both null,
+  ``dual_run`` still runs two ``adabelief`` phases, bit for bit.
 - **One compilation.** A schedule builds one optimiser, so the step is traced
   once where ``dual_run`` traces it twice.
 - **The step sizes are the ones asked for**, and the optimiser asked for takes them.
