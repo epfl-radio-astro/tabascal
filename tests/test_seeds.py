@@ -303,10 +303,13 @@ def test_the_runner_takes_its_run_key_from_inference_seed(monkeypatch):
         raise Stop
 
     monkeypatch.setattr(impl, "run_key", spy)
-    monkeypatch.setattr(impl, "_resolve_paths", lambda *a, **k: SimpleNamespace(ms_path=None, log_path=None))
+    paths = SimpleNamespace(run_dir=None, f_name=None, ms_path=None, log_path=None)
+    monkeypatch.setattr(impl, "_resolve_paths", lambda *a, **k: paths)
+    for name in ("write_config", "start_record", "finish_record"):
+        monkeypatch.setattr(impl, name, lambda *a, **k: None)
 
     with pytest.raises(Stop):
-        impl.tabascal_subtraction({"inference": {"seed": 7}}, out_dir=None, log=False)
+        impl.tabascal_subtraction({"data": {}, "inference": {"seed": 7}}, out_dir=None, log=False)
     assert seen == [7]
 
 
@@ -321,7 +324,7 @@ FIT_SEEDS = (1, 7)
 def deterministic_fits(tmp_path_factory):
     """Three MAP iterations on the 8A sim at each of two seeds; ~35 s per run.
 
-    Returns ``{seed: (stdout, out_dir, config_path)}``.
+    Returns ``{seed: (stdout, run_dir, config_path)}``.
     """
     import tabsim
     from huggingface_hub import snapshot_download
@@ -363,13 +366,14 @@ def deterministic_fits(tmp_path_factory):
                 sys.executable, str(script), "run",
                 "-c", str(config_path),
                 "-od", str(out_dir),
+                "-n", "seed",
                 "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
                 "-nl",
             ],
             capture_output=True, text=True, cwd=work, check=False,
         )
         assert result.returncode == 0, f"seed {seed} run failed: {result.stderr}"
-        fits[seed] = (result.stdout, out_dir, config_path)
+        fits[seed] = (result.stdout, out_dir / "runs" / "latest", config_path)
 
     return fits
 
@@ -380,7 +384,7 @@ def test_with_no_stochastic_path_the_seed_changes_no_output(deterministic_fits, 
     import xarray as xr
 
     first, second = (
-        xr.open_zarr(str(deterministic_fits[s][1] / "results" / f"{product}_Custom.zarr"))
+        xr.open_zarr(str(deterministic_fits[s][1] / "results" / f"{product}.zarr"))
         for s in FIT_SEEDS
     )
 
@@ -396,3 +400,10 @@ def test_the_run_header_carries_the_random_draws_line(deterministic_fits, seed):
     stdout, _, config_path = deterministic_fits[seed]
 
     assert describe_random_draws(load_config(str(config_path))) in stdout
+
+
+@pytest.mark.parametrize("seed", FIT_SEEDS)
+def test_run_json_records_inference_seed(deterministic_fits, seed):
+    from tabascal.run_dir import read_record
+
+    assert read_record(deterministic_fits[seed][1])["seed"] == seed
