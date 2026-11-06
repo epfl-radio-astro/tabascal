@@ -68,10 +68,9 @@ NORAD_IDS = [58126, 27868, 44713]
 #: differ in how they reduce over the source axis, which is exactly what the
 #: sum-back is a statement about.
 RFI_VIS_COMPONENTS = [
-    "rfi_vis:RiemannVisFine",
-    "rfi_vis:RiemannVisFFIFine",
-    "rfi_vis:RiemannVisVariableFine",
-    "rfi_vis:RiemannVisVariableFFIFine",
+    (component, backend)
+    for component in ("rfi_vis:RiemannVisFine", "rfi_vis:RiemannVisVariableFine")
+    for backend in ("jax", "ffi")
 ]
 
 
@@ -86,7 +85,8 @@ def _complex_dtype():
 
 
 def make_config(
-    component="rfi_vis:RiemannVisFFIFine",
+    component="rfi_vis:RiemannVisFine",
+    backend="ffi",
     n_rfi=None,
     n_rfi_real=None,
     norad_ids=None,
@@ -126,7 +126,7 @@ def make_config(
         time_sample_idxs=[np.arange(N_BL, dtype="int32")],
         time_strides=[1],
         args={
-            "rfi": {},
+            "rfi": {"backend": backend},
             "model": {"components": ["trajectory:FixedOrbitFine", component]},
             "data": {"corr": corr, "save_rfi_per_sat": save_rfi_per_sat},
         },
@@ -300,9 +300,9 @@ class TestTheDecompositionSumsBack:
     than assumed away by constructing the total as the sum.
     """
 
-    @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
-    def test_the_sources_sum_back_to_the_fitted_rfi_visibility(self, component):
-        config = make_config(component=component)
+    @pytest.mark.parametrize("component,backend", RFI_VIS_COMPONENTS)
+    def test_the_sources_sum_back_to_the_fitted_rfi_visibility(self, component, backend):
+        config = make_config(component=component, backend=backend)
         pred = make_pred(config)
 
         vis_src, norad_ids = rfi_vis_per_sat(pred, config)
@@ -383,9 +383,10 @@ class TestPaddedSatellites:
     """Sharding pads the source list with dark dummies; they are not satellites."""
 
     @staticmethod
-    def _padded_config(component="rfi_vis:RiemannVisFFIFine"):
+    def _padded_config(component="rfi_vis:RiemannVisFine", backend="ffi"):
         return make_config(
             component=component,
+            backend=backend,
             # The padding duplicates the last satellite.
             norad_ids=NORAD_IDS + [NORAD_IDS[-1]],
             n_rfi_real=len(NORAD_IDS),
@@ -408,15 +409,15 @@ class TestPaddedSatellites:
             dtype=np.dtype(_real_dtype()),
         )
 
-    @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
-    def test_the_padded_row_carried_nothing(self, component):
+    @pytest.mark.parametrize("component,backend", RFI_VIS_COMPONENTS)
+    def test_the_padded_row_carried_nothing(self, component, backend):
         """The premise of dropping it: a dummy source contributes exactly zero.
 
         Per component, because each reduces over the source axis differently and
         it is that reduction which has to leave a dark row at precisely zero --
         not merely small.
         """
-        config = self._padded_config(component)
+        config = self._padded_config(component, backend)
         pred = make_pred(config, dark=1)
         forward, constants = _forward(config)
 
@@ -466,7 +467,7 @@ class TestFineGridCancellation:
             times=np.zeros(1), freqs=np.full(1, 1.0e9),
             time_sample_idxs=[np.zeros(1, dtype="int32")], time_strides=[1],
             args={
-                "rfi": {},
+                "rfi": {"backend": "jax"},
                 "model": {"components": ["rfi_vis:RiemannVisFine"]},
                 "data": {"corr": "xx", "save_rfi_per_sat": True},
             },
@@ -566,10 +567,10 @@ class TestNonFiniteSources:
     """
 
     @pytest.mark.parametrize("field", ["rfi_A", "rfi_phase"])
-    @pytest.mark.parametrize("component", RFI_VIS_COMPONENTS)
+    @pytest.mark.parametrize("component,backend", RFI_VIS_COMPONENTS)
     @pytest.mark.parametrize("value", [np.nan, np.inf])
-    def test_the_other_columns_stay_finite(self, field, component, value):
-        config = make_config(component=component)
+    def test_the_other_columns_stay_finite(self, field, component, backend, value):
+        config = make_config(component=component, backend=backend)
         pred = make_pred(config)
         bad = pred[field].at[:, 1].set(value)
 
@@ -1331,9 +1332,9 @@ def run_per_sat_writer(monkeypatch):
 
     captured = {}
 
-    def _run(xds_ms, zarr_path, *, corr=None, corr_idx=0, pol_id=0, **kwargs):
+    def _run(xds_ms, zarr_path, *, corr=None, corr_idx=0, pol_id=0, keywords=None, **kwargs):
         def _from_ms(path, column_keywords=False):
-            return ([xds_ms], {}) if column_keywords else [xds_ms]
+            return ([xds_ms], keywords or {}) if column_keywords else [xds_ms]
 
         def _describe(ms_path, data_desc_id=0):
             return 0, pol_id
@@ -1355,6 +1356,9 @@ def run_per_sat_writer(monkeypatch):
         monkeypatch.setattr(ms_mod, "resolve_data_description", _describe)
         monkeypatch.setattr(ms_mod, "resolve_correlation", _resolve)
         monkeypatch.setattr(write_mod, "xds_to_table", _capture)
+        monkeypatch.setattr(
+            write_mod, "remove_columns", lambda ms, cols: captured.update(removed=cols)
+        )
 
         write_per_sat_rfi_ms("unused.ms", zarr_path, corr=corr, **kwargs)
 
@@ -1365,6 +1369,50 @@ def run_per_sat_writer(monkeypatch):
         return values, captured
 
     return _run
+
+
+class TestEarlierExports:
+    """Columns of earlier exports: other correlations kept, stale ones cleared."""
+
+    def test_stale_columns_lose_this_correlation_only(self, tmp_path, run_per_sat_writer):
+        zarr_path = _per_sat_zarr(tmp_path, _sources(), NORAD_IDS)
+        xds_ms = _fake_ms(n_corr=2)
+        old = np.full(xds_ms.DATA.shape, 4, np.complex64)
+        names = [f"TAB_RFI_{NORAD_IDS[0]}", "TAB_RFI_1", "TAB_RFI_2", "TAB_RFI_3"]
+        xds_ms = xds_ms.assign(
+            **{n: (["row", "chan", "corr"], da.from_array(old, chunks=xds_ms.DATA.data.chunks)) for n in names}
+        )
+        rec = {"corr": "yy"}
+        keywords = {
+            "TAB_RFI_1": {"TABASCAL": {"CORR_0": rec}},              # only this corr: removed
+            "TAB_RFI_2": {"TABASCAL": {"CORR_0": rec, "CORR_1": rec}},  # zeroed here, kept on 1
+        }                                                            # TAB_RFI_3 untracked
+
+        with pytest.warns(RuntimeWarning, match="TAB_RFI_3"):
+            values, captured = run_per_sat_writer(xds_ms, zarr_path, keywords=keywords)
+
+        assert captured["removed"] == ["TAB_RFI_1"]
+        assert captured["cols"] == [f"TAB_RFI_{nid}" for nid in NORAD_IDS] + ["TAB_RFI_2"]
+        assert captured["keywords"]["TAB_RFI_2"] == {"TABASCAL": {"CORR_1": rec}}
+        np.testing.assert_array_equal(values["TAB_RFI_2"][..., 0], 0)
+        for col in ["TAB_RFI_2", names[0]]:
+            np.testing.assert_array_equal(values[col][..., 1], old[..., 1])
+
+    @pytest.mark.parametrize("data_col", [f"TAB_RFI_{NORAD_IDS[1]}", "TAB_RFI_1"])
+    def test_the_input_column_is_refused_on_every_process(self, data_col, monkeypatch):
+        """Written or merely stale, it is refused before a worker returns."""
+        monkeypatch.setattr(write_mod, "is_process_0", lambda: False)
+
+        with pytest.raises(ValueError, match="replace the data the run read"):
+            write_per_sat_rfi_ms("unused.ms", "unused.zarr", data_col=data_col)
+
+    def test_provenance_names_the_data_column(self, tmp_path, run_per_sat_writer):
+        zarr_path = _per_sat_zarr(tmp_path, _sources(), NORAD_IDS)
+
+        _, captured = run_per_sat_writer(_fake_ms(), zarr_path, data_col="DATA")
+
+        for keywords in captured["keywords"].values():
+            assert keywords["TABASCAL"]["CORR_0"]["data_col"] == "DATA"
 
 
 class TestTheWrittenColumns:
@@ -1378,8 +1426,8 @@ class TestTheWrittenColumns:
         values, captured = run_per_sat_writer(_fake_ms(), zarr_path)
 
         assert captured["cols"] == [f"TAB_RFI_{nid}" for nid in NORAD_IDS]
-        assert captured["keywords"] == {
-            f"TAB_RFI_{nid}": {"UNIT": "Jy"} for nid in NORAD_IDS
+        assert {c: k["UNIT"] for c, k in captured["keywords"].items()} == {
+            f"TAB_RFI_{nid}": "Jy" for nid in NORAD_IDS
         }
         for i, nid in enumerate(NORAD_IDS):
             np.testing.assert_array_equal(

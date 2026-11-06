@@ -1,15 +1,16 @@
 """Validation for the CLI options that name an output rather than locate one.
 
-``-sx/--tag`` and ``-sx/--suffix`` are labels: they are interpolated into a
-filename that the run then places itself. A label carrying a path takes that
+``tabascal run -n/--name`` and ``tabascal light-curve -sx/--tag`` are labels:
+they are interpolated into a directory or file name that the command then
+places itself. A label carrying a path takes that
 placement away, silently and in whichever direction the path points --
 ``os.path.join`` discards everything before an absolute component, ``os.makedirs``
 and zarr create whatever directories a relative one names, and ``..`` walks out
 of the output directory altogether.
 
-Both are reachable by accident rather than only by misuse: argparse matches a
-short option by prefix, so a bare ``-s`` on either subcommand arrives here as
-the label.
+A path is reachable by accident rather than only by misuse: argparse matches a
+short option by prefix, so a bare ``-s`` on ``light-curve`` arrives here as the
+label.
 
 Windows names -- a colon's alternate data stream, a reserved device like ``NUL``
 -- are not policed: tabascal ships for macOS and Linux only (its casacore
@@ -61,3 +62,35 @@ def label(value: str) -> str:
         )
 
     return value
+
+
+def run_name(value: str) -> str:
+    """A :func:`label` that must be given: it names the run's directory."""
+
+    if not value:
+        import argparse
+
+        raise argparse.ArgumentTypeError(
+            "a run needs a name: it starts the name of the run's directory."
+        )
+
+    return label(value)
+
+
+def removed(replacement: str):
+    """An argparse action for an option that is gone, saying what replaced it.
+
+    It fires as the option is read, before argparse checks for missing required
+    arguments, so an old command line gets this message rather than that one.
+    """
+    import argparse
+
+    class _Removed(argparse.Action):
+        def __init__(self, option_strings, dest, **kwargs):
+            kwargs["nargs"] = "?"
+            super().__init__(option_strings, dest, **kwargs)
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            parser.error(f"{option_string} was removed: {replacement}")
+
+    return _Removed

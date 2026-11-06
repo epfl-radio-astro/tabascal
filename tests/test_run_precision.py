@@ -59,10 +59,10 @@ def test_single_disables_x64_after_sgp4jax_enabled_it():
 
 # The differentiable orbit/phase trajectory components are the genuinely
 # double-only ones (two, so the "every offender" test can prove it lists all).
-# The FFI RFI-vis kernel is built for both precisions, so it is the single-ok
-# representative here — which also guards against it regressing to double-only.
+# RiemannVisFine runs both of its backends in either precision, so it is the
+# single-ok representative here — which also guards against it regressing to double-only.
 _DOUBLE_ONLY = ["trajectory:OrbitFine", "trajectory:PhaseCalculationRFIFine"]
-_SINGLE_OK = ["rfi_vis:RiemannVisFFIFine"]
+_SINGLE_OK = ["rfi_vis:RiemannVisFine"]
 
 
 def test_preflight_single_rejects_double_only_component():

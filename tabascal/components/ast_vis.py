@@ -1,4 +1,4 @@
-from math import isfinite, sqrt
+from math import ceil, isfinite, sqrt
 
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
@@ -7,7 +7,7 @@ from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
 from tabascal.seeds import component_key, config_seed
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_cutoff, validate_gp_cov
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, latent_to_signal_dft_init, latent_to_signal_dft, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_cutoff, validate_gp_cov
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
@@ -35,6 +35,43 @@ _GP_COV_OPTIONAL = ("fov_deg", "corr_freq")
 #: ``ast.cutoff`` when it is left null. What every shipped configuration sets,
 #: kept as the default now that the key may be omitted.
 _DEFAULT_PK_CUTOFF = 1e-6
+
+#: The least ``ast.time_pad_factor: auto`` resolves to. The fringe rate only
+#: ever asks for more padding; this is what keeps the ends of the observation
+#: clear of the wrap-around of a periodic model when every baseline is fast
+#: enough to need none, and it is the default factor, so ``auto`` never pads
+#: less than an unconfigured run does.
+_AUTO_TIME_PAD_FLOOR = 2.0
+
+#: The ``ast.transform`` options. ``dft`` is the default: it holds less than the
+#: padded grid at every size but the smallest, and with ``corr_freq`` set it is
+#: faster too. ``fft`` is the lever back for ``corr_freq: null`` on a wide band,
+#: where every delay mode survives and the matrices grow with the channels squared.
+_TRANSFORMS = ("dft", "fft")
+
+
+def time_pad_for_fringe_rate(n_time, int_time, fringe_rate):
+    """The smallest ``time_pad_factor`` whose first non-zero mode is at most ``fringe_rate``.
+
+    The padded time axis has ``n_pad = n + 2 * floor(n * (f - 1) / 2)`` samples,
+    so its modes are spaced ``1 / (n_pad * int_time)``. A baseline whose knee is
+    below that spacing has every mode but the zero one cut down by its prior,
+    and its sky is fitted as all but constant in time however it actually drifts. This
+    is the factor that brings the first mode down to ``fringe_rate``, and 1 when
+    the observation is already long enough.
+    """
+    fringe_rate = float(fringe_rate)
+    if not isfinite(fringe_rate) or fringe_rate <= 0:
+        raise ValueError(
+            f"A baseline's maximum fringe rate is {fringe_rate!r}, so no padding "
+            "resolves it. A zero-length baseline in the data would give this."
+        )
+    n_needed = ceil(1.0 / (fringe_rate * float(int_time)))
+    pad = max(0, ceil((n_needed - n_time) / 2))
+    # Half a sample over the exact factor, so that floor(n * (f - 1) / 2) gives
+    # back `pad` rather than one less in floating point.
+    return 1.0 + (2 * pad + 1) / n_time if pad else 1.0
+
 
 #: The power spectrum is used for its shape alone -- which modes survive
 #: ``cutoff``, and their relative weight -- and the amplitude is applied by
@@ -139,6 +176,19 @@ class GPVisAst(Component):
 
             self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
             self.time_pad_factor = config.args["ast"]["time_pad_factor"]
+            # 'auto' is resolved from the fringe rates in _compute_gp_params.
+            tpf = self.time_pad_factor
+            if tpf != "auto" and (
+                isinstance(tpf, bool)
+                or not isinstance(tpf, (int, float))
+                or not isfinite(tpf)
+                or tpf < 1
+            ):
+                raise ValueError(
+                    "ast.time_pad_factor is a number of at least 1, or 'auto' "
+                    "to size it from the slowest baseline's fringe rate, got "
+                    f"{tpf!r}."
+                )
 
             # null is a setting, not a missing value: every baseline in one
             # step, which is the padded transform at full width. int() alone
@@ -161,12 +211,25 @@ class GPVisAst(Component):
                 )
             self.baseline_block_size_setting = block_size
 
+            # How the surviving modes become visibilities: see
+            # build_block_signal. Both give the same values to round-off.
+            transform = config.args["ast"].get("transform", "dft")
+            if transform not in _TRANSFORMS:
+                raise ValueError(
+                    "ast.transform is how the latent modes become visibilities: "
+                    "'dft', a matrix per axis with no padded grid, or 'fft', "
+                    f"the padded grid's inverse FFT and a crop, got {transform!r}."
+                )
+            self.transform = transform
+
             self.xs = [self.freqs, self.times]
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
             self.ss_factors = [1, 1]
 
             # Do expensive setup operations once
             self._compute_gp_params()
+            # The number 'auto' came to, so the run's saved config says it.
+            config.args["ast"]["time_pad_factor"] = self.time_pad_factor
             self._resolve_baseline_block_size()
             self._compute_prior_params(config.args["ast"]["mean"], config.vis_obs)
 
@@ -197,19 +260,40 @@ class GPVisAst(Component):
     #: band -- where the grid is the largest array in the model -- still blocks.
     _BLOCK_BUDGET_BYTES = 64 * 1024**2
 
+    def _transform_bytes_per_baseline(self):
+        """What one baseline costs the transform at its peak, in bytes.
+
+        The padded Fourier grid: the pad, the shift and the inverse transform
+        are each of that size. Only ``ast.transform: fft`` builds it.
+        """
+        padded = 1
+        for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
+            padded *= dim + lo + hi
+
+        return padded * jnp.zeros((), dtype=complex).dtype.itemsize
+
     def _resolve_baseline_block_size(self):
-        """Turn the ``baseline_block_size`` setting into a block, or ``None``."""
+        """Turn the ``baseline_block_size`` setting into a block, or ``None``.
+
+        Under ``ast.transform: dft``, ``auto`` is a single step over every
+        baseline. The block exists to bound the padded Fourier grid, and that
+        transform builds none: its only transient is the intermediate of the
+        two matrix products, which is the modes in one axis and the
+        visibilities in the other. What the scan does still cost is the stack
+        of its steps' outputs, so there blocking is worse on both counts.
+        An explicit ``baseline_block_size`` is honoured under either transform.
+        """
 
         setting = self.baseline_block_size_setting
         if setting != "auto":
             self.baseline_block_size = None if setting is None else int(setting)
             return
 
-        # One baseline's padded grid, in the precision the run is in.
-        padded = 1
-        for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
-            padded *= dim + lo + hi
-        per_baseline = padded * jnp.zeros((), dtype=complex).dtype.itemsize
+        if self.transform == "dft":
+            self.baseline_block_size = self.n_bl
+            return
+
+        per_baseline = self._transform_bytes_per_baseline()
 
         block = max(1, self._BLOCK_BUDGET_BYTES // max(1, per_baseline))
         # A block at or above the axis is one step over all of it, which is what
@@ -244,7 +328,7 @@ class GPVisAst(Component):
         """Return pure, JIT-compatible function
 
         The baseline axis is walked in blocks of ``ast.baseline_block_size``
-        rather than vmapped whole. ``latent_to_signal`` pads the latent block up
+        rather than vmapped whole. Under ``ast.transform: fft``, ``latent_to_signal`` pads the latent block up
         to the padded k-grid, shifts, inverse-transforms and crops back, so a
         vmap over every baseline holds ``(n_bl, n_freq_pad, n_time_pad)`` three
         times over -- at the default padding each axis is about twice the data
@@ -265,20 +349,17 @@ class GPVisAst(Component):
         it nor the padded grid is ever formed for every baseline at once.
 
         Splitting the baseline axis across devices was measured alongside this
-        and is deliberately not here: on the astronomical benchmark the scan
-        takes the value-and-gradient peak from 1008 MB to 163.5 MB on its own,
-        and adding the split takes it back up to 174.5 MB, because the gather
+        and is deliberately not here: the scan lowers the value-and-gradient
+        peak on its own, and adding the split raises it again, because the gather
         the visibilities need on the way out makes the backward pass scatter a
-        cotangent the forward has just collected. See issue #209 for the change
-        that would remove the padded grid altogether.
+        cotangent the forward has just collected. ``ast.transform: dft`` removes
+        the padded grid altogether: see :meth:`build_block_signal`.
         """
         prefix = self.prefix
-        pads = self.pads
-        ss_idxs = self.ss_idxs
         forward_transform = self.forward_transform
         block_size = self.baseline_block_size
 
-        block_signal = vmap(latent_to_signal, (0, None, None), 0)
+        block_signal = self.build_block_signal()
 
         def blocked_vis(ast_k_base, sigma_ast_k, mu_ast_k):
             # The size comes off the array rather than off the config, so the
@@ -293,16 +374,14 @@ class GPVisAst(Component):
                 # grid that fits the budget takes, and it is the transform as it
                 # was before the scan existed.
                 return block_signal(
-                    forward_transform(ast_k_base, sigma_ast_k, mu_ast_k),
-                    pads,
-                    ss_idxs,
+                    forward_transform(ast_k_base, sigma_ast_k, mu_ast_k)
                 )
 
             def block_vis(carry, block):
                 k_base, sigma, mu = block
 
                 return carry, block_signal(
-                    forward_transform(k_base, sigma, mu), pads, ss_idxs
+                    forward_transform(k_base, sigma, mu)
                 )
 
             # The padding baselines of the last block carry a zero latent, a zero
@@ -338,9 +417,105 @@ class GPVisAst(Component):
 
         return forward
 
+    def build_block_signal(self):
+        """The latent-to-signal transform of one block of baselines.
+
+        :func:`~tabascal.fft_gp.latent_to_signal` (``ast.transform: fft``) pads
+        the modes back up to the padded grid, inverse-transforms the whole of it
+        and crops -- at the default padding, about four times the elements of
+        the visibilities formed and thrown away, per block, in the forward pass
+        and again in reverse. The chain is linear and separable, so the same
+        values come out of one small matrix per axis
+        (:func:`~tabascal.fft_gp.latent_to_signal_dft`, ``ast.transform:
+        dft``), and the largest thing formed is the size of the visibilities.
+        The matrices are fixed at setup and shared by every baseline.
+
+        What the matrices cost is the surviving modes times the data length on
+        each axis, where the FFT pays for the whole padded grid. The sky is
+        smooth in frequency, so with ``corr_freq`` set to a bandwidth near the
+        observed one only a few delay modes survive and the DFT is the faster
+        of the two at every band width.
+
+        ``corr_freq: null`` is the exception: no roll-off keeps every delay
+        mode, the frequency matrix becomes square in the channel count, and on
+        a wide band the FFT is the faster.
+        """
+        if self.transform == "dft":
+            mats = self.dft_mats
+            first_axis = self.dft_first_axis
+            dft = vmap(latent_to_signal_dft, (0, None, None), 0)
+
+            return lambda Y_block: dft(Y_block, mats, first_axis)
+
+        pads = self.pads
+        ss_idxs = self.ss_idxs
+        transform = vmap(latent_to_signal, (0, None, None), 0)
+
+        return lambda Y_block: transform(Y_block, pads, ss_idxs)
+
+    def _compute_dft_mats(self, ns, dxs):
+        """The matrices of ``ast.transform: dft``.
+
+        The same modes and the same spectrum as the padded grid's -- checked
+        here against its own pads and crop -- with the transform as matrices.
+        """
+        pk, _, self.dft_mats, self.dft_first_axis = latent_to_signal_dft_init(
+            ns,
+            dxs,
+            self.pad_factors,
+            self.ss_factors,
+            _SHAPE_ONLY,
+            self.k0s,
+            self.gammas,
+            self.pk_cutoff,
+        )
+        if pk.shape != self.pk.shape:
+            raise RuntimeError(
+                "The DFT transform kept a different set of Fourier modes than "
+                f"the FFT one: {pk.shape} against {self.pk.shape}. They are "
+                "built from the same power spectrum and cutoff, so this is a "
+                "bug rather than a configuration error."
+            )
+        n_out = [m.shape[1] for m in self.dft_mats]
+        if n_out != [self.n_freq, self.n_time]:
+            raise RuntimeError(
+                f"The DFT transform outputs {n_out} samples where the "
+                f"visibilities are ({self.n_freq}, {self.n_time})."
+            )
+
     def validate_and_test(self):
         """Call this before using in JIT context"""
         pass
+
+    def _resolve_time_pad_factor(self):
+        """Size the time padding from the slowest baseline, under ``auto``.
+
+        The shortest baselines fringe slowest: where a baseline's knee is below
+        the padded axis's first mode, its sky can only be fitted as all but
+        constant in time. ``auto`` pads until the first mode reaches the lowest knee, and no
+        less than :data:`_AUTO_TIME_PAD_FLOOR`; a number is used as given, with
+        the factor ``auto`` would have chosen printed beside it.
+        """
+        fr_min = float(jnp.min(self.ast_fr))
+        fr_max = float(jnp.max(self.ast_fr))
+        needed = time_pad_for_fringe_rate(self.n_time, self.int_time, fr_min)
+        recommended = max(_AUTO_TIME_PAD_FLOOR, needed)
+
+        if self.time_pad_factor == "auto":
+            self.time_pad_factor = recommended
+            self.pad_factors[1] = recommended
+
+        print(
+            f"\nAST fringe rates (min, max): ({fr_min:.3e}, {fr_max:.3e}) Hz; "
+            f"time_pad_factor {self.time_pad_factor:.4g}, "
+            f"{needed:.4g} needed to resolve the slowest baseline"
+        )
+        if self.time_pad_factor < needed:
+            print(
+                "  The slowest baselines' sky is held all but constant in time at this "
+                f"padding: set ast.time_pad_factor to {recommended:.4g} or "
+                "'auto' to resolve it (cheap with ast.transform: dft)."
+            )
 
     def _compute_gp_params(self):
 
@@ -360,6 +535,7 @@ class GPVisAst(Component):
 
         self.k0_time = self.ast_fr
         self.k0s = [self.k0_freq, self.k0_time.max()]
+        self._resolve_time_pad_factor()
 
         ns = [self.n_freq, self.n_time]
         dxs = [self.chan_width, self.int_time]
@@ -402,6 +578,9 @@ class GPVisAst(Component):
         print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
 
         self.n_k_freq_ast, self.n_k_time_ast = self.pk.shape
+
+        if self.transform == "dft":
+            self._compute_dft_mats(ns, dxs)
 
         def sigma(k0, std):
             """Mode standard deviations that make ``std`` the width of vis_ast.

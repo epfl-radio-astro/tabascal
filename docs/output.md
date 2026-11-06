@@ -1,38 +1,63 @@
 # Output from TABASCAL
 
-When you run TABASCAL on a dataset, a few directories are created in the same location as the Measurement Set (MS). These directories are populated with memory profiling files, diagnostic plots, and the estimates for the different components. An example of the directory structure with descriptions is shown below
+Every `tabascal run` writes into a directory of its own, created for it under `<out_dir>/runs/` and never reused. `<out_dir>` is `-od`, else `data.out_dir`, else the directory the Measurement Set (MS) is in. The directory is named for the run — `-n/--name`, which is required — followed by the time it started and a random token, so two runs never share one, however close together or however named. An example with descriptions:
 
 ```text
-parent_directory/
+out_dir/
 |   └── dataset.ms                              # Original MS file with new columns added
-|   ├── memory_profiles/
-|       └── memory_1.prof                       # Memory profile for model initialisation
-|       └── memory_2.prof                       # Memory profile for prediction of initial parameters
-|       └── memory_3.prof                       # Memory profile for prediction of prior distribution
-|   ├── plots/
-|       └── log_tab_01-02-2026T03:04:05.txt     # The run's console output, bar the final summaries
-|       └── Custom_init_ast_vis_imag.pdf        # Astronomical visibility prediction of initial parameters
-|       └── Custom_init_gains_amp_phase.pdf     # Gain prediction of initial parameters
-|       └── Custom_init_rfi_vis_imag.pdf        # RFI visibility prediction of initial parameters
-|       └── Custom_map_ast_vis_imag.pdf         # Astronomical visibility prediction of optimised parameters
-|       └── Custom_map_gains_amp_phase.pdf      # Gain prediction of optimised parameters
-|       └── Custom_map_rfi_vis_imag.pdf         # RFI visibility prediction of optimised parameters
-|       └── Custom_opt_loss.pdf                 # Optimiser loss over the optimisation period
-|       └── Custom_prior_ast_vis_imag.pdf       # Astronomical visibility prediction of prior distribution
-|       └── Custom_prior_gains_amp_phase.pdf    # Gain prediction of prior distribution
-|       └── Custom_prior_rfi_vis_imag.pdf       # RFI visibility prediction of prior distribution
-|   ├── results/
-|       └── init_pred_Custom.zarr               # Initial parameter prediction values
-|       └── init_pred_Custom.B                  # The calibration the initial values imply
-|       └── map_pred_Custom.zarr                # Optimised parameter prediction values
-|       └── map_pred_Custom.B                   # The calibration it implies, as a CASA table
+|   ├── runs/
+|       └── latest -> sweep_20261103T091500_3fa2c1      # Link to the most recently started run
+|       ├── sweep_20261103T091500_3fa2c1/
+|           └── config.yaml                     # The resolved config, every input path absolute
+|           └── run.json                        # How it was run, what it read, and its status
+|           └── log.txt                         # The run's console output, bar the final summaries
+|           ├── plots/
+|               └── sweep_init_ast_vis_imag.pdf         # Astronomical visibility prediction of initial parameters
+|               └── sweep_init_gains_amp_phase.pdf      # Gain prediction of initial parameters
+|               └── sweep_init_rfi_vis_imag.pdf         # RFI visibility prediction of initial parameters
+|               └── sweep_map_ast_vis_imag.pdf          # Astronomical visibility prediction of optimised parameters
+|               └── sweep_map_gains_amp_phase.pdf       # Gain prediction of optimised parameters
+|               └── sweep_map_rfi_vis_imag.pdf          # RFI visibility prediction of optimised parameters
+|               └── sweep_opt_loss.pdf                  # Optimiser loss over the optimisation period
+|               └── sweep_prior_ast_vis_imag.pdf        # Astronomical visibility prediction of prior distribution
+|               └── sweep_prior_gains_amp_phase.pdf     # Gain prediction of prior distribution
+|               └── sweep_prior_rfi_vis_imag.pdf        # RFI visibility prediction of prior distribution
+|           ├── results/
+|               └── init_pred.zarr              # Initial parameter prediction values
+|               └── init_pred.B                 # The calibration the initial values imply
+|               └── map_pred.zarr               # Optimised parameter prediction values
+|               └── map_pred.B                  # The calibration it implies, as a CASA table
+|               └── used_orbits.json            # Orbit records used, when present, to replay the trajectory priors
+|           ├── light_curves/                   # Written later, by tabascal light-curve -z <this run>
 ```
 
-The log holds the run's console output up to — but not including — the memory-usage and timings summaries, which are printed after the log has been closed and so reach the console only. It is written into `plots/` as the run goes, so it is there to watch while the run is still going and it survives a run that dies. Naming a run with `-sx <suffix>` puts its plots in `plots/<suffix>/` and the suffix in the log's name, `log_tab_<suffix>_<timestamp>.txt`, which is what tells two runs over the same dataset apart — the timestamp alone has one-second resolution. `-nl` turns the log off.
+`config.yaml` and `run.json` are written before the run reads anything, so a run that dies still says what it was:
+
+* `config.yaml` is the configuration the run used, with the base defaults merged in, the command-line flags applied and every input path — the MS, gain tables, truth zarr, `rfi.est`, `gains.init`, `data.noise`, `ast.point_sources`, the orbit directory and NORAD ID file — made absolute. `data.out_dir` stays the parent, so `tabascal run -c <run>/config.yaml -n again` repeats the run into a new sibling directory.
+* `run.json` holds the command line, working directory, host, the versions of tabascal and the libraries that decide what it computes, the PRNG seed, a fingerprint of each input, and a `status`: `running` from the start, then `finished` or `failed` (with the error).
+
+The fingerprints are what let a later command say whether the inputs are still the ones the run read. A file below 64 MiB is recorded by its size and SHA-256, so a copy with the same contents still matches; a larger one by size and modification time. A directory — a gain table, a zarr — is recorded by the sizes and modification times of every file in it, and an orbit directory by its `*.json` files alone, which is all the orbit resolver reads from it. The MS is the exception: `tab2MS` writes columns into it, so its files change with every export. What is recorded instead is what the run read from it — the number of rows, the `TIME` column, the channel frequencies, the antennas and the correlations. `tab2MS` and `tabascal rfi-per-sat` recompute them and warn, naming the input, when one has changed.
+
+The log is written as the run goes, so it is there to watch while the run is still going and it survives a run that dies. It holds the console output up to — but not including — the memory-usage and timings summaries, which are printed after the log has been closed and so reach the console only. `-nl` turns it off.
+
+`runs/latest` is a relative symbolic link to the most recently *started* run, replaced atomically as each run starts, so `tab2MS runs/latest` exports the run just made. With several runs going at once it names whichever started last, not whichever finished.
+
+## Cleaning up
+
+Delete whole run directories, never files inside one: a run directory is a record, and one with its `results/` removed but its `run.json` saying `finished` is a record of something that is not there.
+
+```bash
+du -sh out_dir/runs/*                                   # what each run costs
+grep -l '"status": "failed"' out_dir/runs/*/run.json    # runs that died
+grep -l '"status": "running"' out_dir/runs/*/run.json   # still going, or killed outright
+rm -r out_dir/runs/sweep_20261103T091500_3fa2c1
+```
+
+A run killed outright — `SIGKILL`, an out-of-memory kill, a node lost — never gets to write its final status and is left `running`. `runs/latest` dangles once the run it points at is deleted, and the next run replaces it.
 
 ## Results `.zarr` files
 
-The results of the run are saved into a `.zarr` file inside the `results` directory as shown above. The contents of this file can be accessed using [Xarray](https://xarray.com/) as follows
+The results of the run are saved into a `.zarr` file inside the run's `results/` directory as shown above. The contents of this file can be accessed using [Xarray](https://xarray.com/) as follows
 
 ```python
 import xarray as xr
@@ -68,7 +93,7 @@ The results from tabascal shown above are also copied into the MS file used. Six
 
 **Every column is written in one frame: the data with all the gains divided out.** There are two gain layers and both come off:
 
-* the **external** calibration named by [`data.gain_table`](config.md), which is divided out of the visibilities when the MS is read. The MS's own data column is still raw, so the writer has to remove it again — pass the same tables to `tab2MS -gt` (see below), or the columns land a whole calibration layer away from the frame the models are in;
+* the **external** calibration named by [`data.gain_table`](config.md), which is divided out of the visibilities when the MS is read. The MS's own data column is still raw, so the writer has to remove it again — the run and `tab2MS` both do, with the tables the run recorded, or the columns would land a whole calibration layer away from the frame the models are in;
 * the **DIE gains the model fitted**, stored in the results `.zarr`.
 
 Below, `g_p` and `g_q` are the fitted gain predictions for the two antennas of a baseline, `g_ext` the per-baseline product of the external tables' gains, and
@@ -77,7 +102,7 @@ Below, `g_p` and `g_q` are the fitted gain predictions for the two antennas of a
 g_total = g_ext × g_p g_q*
 ```
 
-`DATA` stands for whichever column the run was given (usually `DATA`).
+`DATA` stands for whichever column the run was given (usually `DATA`). That column may not be one of the six written here: a run with `data.data_col` set to `CORRECTED_DATA` or a `TAB_*` column is refused before it starts, and so is a direct `write_results_ms` call, before anything is read. An export would otherwise replace the very data the run read, and a second export of the same results would divide the gains out a second time. To refine a calibration, read `DATA` and name the tables that produced the existing `CORRECTED_DATA` in [`data.gain_table`](config.md).
 
 | Column | Contents | Frame |
 | --- | --- | --- |
@@ -115,7 +140,7 @@ Dividing by the gain makes the noise heteroscedastic: a low-gain baseline is noi
 
 `WEIGHT_SPECTRUM` rather than `WEIGHT` alone because a frequency-dependent gain gives a frequency-dependent weight, which a single per-row number cannot carry — and which CASA's `applycal(calwt=True)` does not produce either: it was measured to apply one per-row factor, constant across channels, even when `WEIGHT_SPECTRUM` exists.
 
-Both columns are **overwritten**, and whatever they held before is gone — if the MS carried weights from some other source (a re-weighting task, a hand-tuned scheme), copy them elsewhere first. Dividing the new `WEIGHT_SPECTRUM` by `|g_total|²` recovers `1 / SIGMA²`, the uncalibrated inverse-variance weighting implied by the MS's own noise column, and nothing else. Where a gain was substituted with 1 (see below) the weight is simply `1 / SIGMA²`, which is correct: those visibilities were written uncalibrated.
+On the fitted correlation both columns are **overwritten**, and whatever they held there before is gone — if the MS carried weights from some other source (a re-weighting task, a hand-tuned scheme), copy them elsewhere first. This follows the MS convention CASA's `applycal` also follows: `SIGMA` describes `DATA`, while `WEIGHT` describes `CORRECTED_DATA` and is rewritten with it. Replacing a `CORRECTED_DATA` that tabascal did not write warns, naming the weights with it — see [Another pipeline's `CORRECTED_DATA`](#another-pipelines-corrected_data). Dividing the new `WEIGHT_SPECTRUM` by `|g_total|²` recovers `1 / SIGMA²`, the uncalibrated inverse-variance weighting implied by the MS's own noise column, and nothing else. Where a gain was substituted with 1 (see below) the weight is simply `1 / SIGMA²`, which is correct: those visibilities were written uncalibrated.
 
 If the MS carries no usable noise column at all, nothing is invented: a warning is printed and the two weight columns are left exactly as they were, while the visibility columns are still written.
 
@@ -123,28 +148,65 @@ If the MS carries no usable noise column at all, nothing is invented: a warning 
 
 TABASCAL fits a single correlation, named by `data.corr` in the configuration (default `xx`) and recorded in the results `.zarr`. The results are written into that correlation of the MS only, resolved by identity against `POLARIZATION::CORR_TYPE` rather than by position — on the `POLARIZATION` row that the data partition's `DATA_DESC_ID` points to, exactly as the run resolved it when reading — a single-polarisation MS holds one correlation whatever it is, so `yy` is index 0 there.
 
-On the other correlations of a multi-correlation MS:
+Only the fitted correlation is written. **The other correlations of every column keep what the MS already holds** — the weights included — so exporting an `xx` fit and then a `yy` fit leaves both results in place, each correlation describing the run that wrote it.
 
-* `TAB_AST_DATA` and `TAB_RFI_DATA` — the model columns — are **0**;
-* `WEIGHT_SPECTRUM` and `WEIGHT` are **0** too, matching them: nothing there was calibrated, so nothing there has this frame's weight;
-* `CORRECTED_DATA`, `TAB_AST_RES`, `TAB_RFI_RES` and `TAB_RES_DATA` carry the **data column passed through unchanged**: no gain applied and nothing subtracted, which is the honest value for a correlation that was never modelled. The closure identity still holds there, trivially.
+A column that does not exist yet starts on the other correlations the way CASA starts one:
 
-A results `.zarr` written before the correlation was recorded does not say where it belongs. On a single-correlation MS there is only one answer; on a wider one, writing raises a `ValueError` rather than guessing. Pass the correlation explicitly in that case:
+* `TAB_AST_DATA` and `TAB_RFI_DATA` — the model columns — start at **0**;
+* `CORRECTED_DATA`, `TAB_AST_RES`, `TAB_RFI_RES` and `TAB_RES_DATA` start as the **data column passed through unchanged**, as CASA starts `CORRECTED_DATA` as a copy of `DATA`: no gain applied and nothing subtracted, which is the honest value for a correlation that was never modelled. The closure identity holds there, trivially;
+* `WEIGHT_SPECTRUM` starts as `WEIGHT` spread over the channels, as CASA initialises it. `WEIGHT` is a required column and always exists.
+
+The closure identity is a statement about the correlations tabascal wrote. On one it did not write, `CORRECTED_DATA` may hold another pipeline's values beside `TAB_*` columns that started from the data.
+
+A results `.zarr` written before the correlation was recorded does not say where it belongs. On a single-correlation MS there is only one answer; on a wider one, writing raises a `ValueError` rather than guessing. `tab2MS -c xx` names the correlation explicitly.
+
+### Exporting a run
+
+A run writes its results into the MS as it finishes. Every run writes the same columns, so each correlation holds whichever run wrote it last — the columns' provenance says which (see [Provenance](#provenance)); `tab2MS` writes a run's results back in, given its directory:
 
 ```bash
-tab2MS -m path/to/file.ms -z path/to/results.zarr -c xx
+tab2MS out_dir/runs/sweep_20261103T091500_3fa2c1
+tab2MS out_dir/runs/latest
 ```
+
+Everything else comes from the run's `config.yaml`: the MS, the data column, the gain tables, and which results — `map_pred` if the run optimised, `init_pred` if it did not, as the run itself did. The calibration table goes into the run's `results/`. Two overrides remain, for inputs that have moved since: `-ms` names the MS and `-gt` the gain tables, each warning when it differs from what the run recorded. The fingerprints are checked either way.
+
+### Provenance
+
+Every column written records, in a `TABASCAL` column keyword, which run wrote each correlation: a record per correlation, keyed `CORR_<index>` on the MS's correlation axis, holding
+
+| Field | Contents |
+| --- | --- |
+| `corr` | the correlation's name, e.g. `xx` (empty for results that predate recording it) |
+| `run` | the run directory the results came from (empty when they are not in one) |
+| `results` | the absolute path of the results `.zarr` |
+| `data_col` | the column the run read (absent when a direct `write_per_sat_rfi_ms` call is not told it) |
+| `written` | when, in UTC |
+
+An export replaces its own correlation's entry and keeps the others, so the keyword describes the column as it now stands:
+
+```python
+from casacore.tables import table
+with table("dataset.ms", ack=False) as ms:
+    print(ms.getcolkeyword("CORRECTED_DATA", "TABASCAL"))
+```
+
+### Another pipeline's `CORRECTED_DATA`
+
+`CORRECTED_DATA` and the weights belong together: other calibration tools write them too, and CASA's `applycal` replaces both without a word. tabascal replaces them as well, since that is where downstream tools look for calibrated data — but when the fitted correlation of an existing `CORRECTED_DATA` carries no tabascal provenance, it raises a `RuntimeWarning` first, naming `CORRECTED_DATA`, `WEIGHT` and `WEIGHT_SPECTRUM`.
+
+**What was there on that correlation is gone once the export runs.** It is a derived product, rebuilt from the raw data and the gain tables that made it, which is why it is replaced rather than refused. If those tables are not kept, copy the columns elsewhere first. The other correlations are not touched, and once tabascal has written a correlation, later exports to it do not warn. A process that promotes `RuntimeWarning` to an error stops here, before any column is written.
 
 ### Writing results for a run that used a gain table
 
-The external calibration is applied when the MS is read, so the MS's data column on disk is still raw and the writer has to remove that layer itself. `tabascal` does this automatically — the run hands its own `data.gain_table` list to the writer. Running `tab2MS` by hand, name the same tables, in the same order:
+The external calibration is applied when the MS is read, so the MS's data column on disk is still raw and the writer has to remove that layer itself. `tabascal` and `tab2MS` both do this automatically, with the `data.gain_table` list the run recorded. Tables that have moved since are named with `-gt`, in the same order:
 
 ```bash
-tab2MS -m path/to/file.ms -z path/to/results.zarr -gt path/to/flux.B0 -gt path/to/phase.G0
-tab2MS -m path/to/file.ms -z path/to/results.zarr -gt path/to/flux.B0,path/to/phase.G0
+tab2MS out_dir/runs/latest -gt path/to/flux.B0 -gt path/to/phase.G0
+tab2MS out_dir/runs/latest -gt path/to/flux.B0,path/to/phase.G0
 ```
 
-Repeat `-gt` or give a comma-separated list; the two forms are equivalent and both mirror `data.gain_table`'s ordered list, since the tables compose in order. The gains are placed on this observation's grid exactly as the reader placed them — the MS's own `TIME` column in the unit and on the scale it declares, and the channel frequencies of the partition's spectral window — so the columns land in the frame the models were fitted in. Omitting the flag for a run that used a table writes every column, and the weights, one calibration layer out.
+Repeat `-gt` or give a comma-separated list; the two forms are equivalent and both mirror `data.gain_table`'s ordered list, since the tables compose in order. The gains are placed on this observation's grid exactly as the reader placed them — the MS's own `TIME` column in the unit and on the scale it declares, and the channel frequencies of the partition's spectral window — so the columns land in the frame the models were fitted in. Calling `write_results_ms` directly without them, for a run that used a table, writes every column, and the weights, one calibration layer out.
 
 A visibility no table could supply a gain for is written *uncalibrated on that layer* rather than blanked, the same convention as a dead fitted gain.
 
@@ -157,14 +219,16 @@ The predictions above are averaged over the `sample` axis of the results `.zarr`
 `TAB_RFI_DATA` is the RFI model summed over every satellite the run fitted. A run with [`data.save_rfi_per_sat: true`](config.md) also stores that sum's parts, and they can be written into the MS as one column per satellite — `TAB_RFI_<NORAD id>`, e.g. `TAB_RFI_58126`:
 
 ```bash
-tabascal rfi-per-sat -m path/to/file.ms -z path/to/results/map_pred_Custom.zarr
+tabascal rfi-per-sat out_dir/runs/latest
 ```
 
-`tab2MS-persat` is the same tool under the name that matches `tab2MS`, and `-p` changes the `TAB_RFI_` prefix. It reads `rfi_vis_src` back out of the zarr and needs nothing else: no re-fit, no configuration, and no gain tables — so the export can be made long after the run, and re-made. A zarr from a run that did not store the decomposition is an error saying which option produces one.
+`tab2MS-persat` is the same tool under the name that matches `tab2MS`, and `-p` changes the `TAB_RFI_` prefix. It takes the run directory as `tab2MS` does, the same results zarr, the same `-ms` override and the same fingerprint check. It reads `rfi_vis_src` back out of the zarr and needs nothing else: no re-fit and no gain tables — so the export can be made long after the run, and re-made. A run that did not store the decomposition is an error saying which option produces one.
 
 **What they are for.** Image one column at a time. A real satellite is a clean streak in exactly one per-source image; a feature that shows up in several is astronomical flux the RFI model has split across satellites. Reduced chi² cannot see that — a fixed total split differently between sources costs it nothing — so the per-source images are the diagnostic for it.
 
-The columns are in the same **calibrated frame** as every other column above, and they get there the same way `TAB_RFI_DATA` does: they are model visibilities, fitted to data whose gain layers were already divided out, so nothing is applied to them. Correlations that were not fitted are `0`, matching the model columns. The correlation comes off the zarr, and `-c` overrides it for a zarr written before that was recorded, exactly as for `tab2MS`.
+The columns are in the same **calibrated frame** as every other column above, and they get there the same way `TAB_RFI_DATA` does: they are model visibilities, fitted to data whose gain layers were already divided out, so nothing is applied to them. As for the other columns, only the fitted correlation is written: the others keep what the MS holds, and start at `0` in a new column, matching the model columns. The correlation comes off the zarr, and `-c` overrides it for a zarr written before that was recorded, exactly as for `tab2MS`. Each column records its [provenance](#provenance). The run's data column may not be any `<prefix><digits>` column, since those are what this export writes, zeroes and removes; with `data.save_rfi_per_sat: true` a run reading a `TAB_RFI_<digits>` column is refused before it starts.
+
+**Columns from earlier exports.** A later export may fit fewer satellites, or different ones. A `<prefix><NORAD>` column an earlier export wrote on *this* correlation, for a satellite these results do not hold, is stale: that correlation is set to `0` and its provenance entry removed, and a column left describing no correlation at all is removed from the MS. Its other correlations, written by runs on other correlations, stay. A `<prefix><digits>` column without provenance — from a tabascal version that did not record it, or from somewhere else — is not touched: a `RuntimeWarning` names it, to be removed by hand if it is stale.
 
 They decompose `TAB_RFI_DATA`:
 
@@ -185,7 +249,7 @@ per component — the real and imaginary parts separately, since a `complex64` c
 
 **The scale is the per-sample, per-source values, taken before the sample mean**, because that is where the rounding happens. Referencing it to the columns instead would not be a bound at all: two samples of `+A` and `−A` average to a column of exactly zero while the total was rounded from `A`, so the columns can be zero and the difference nowhere near it. For a MAP run — one sample — the two readings coincide, but the guarantee is the one above.
 
-**The decomposition's own re-association**, which is the hypothesis above and has *no* bound in these coarse values. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that single reduction into per-source partial sums. The difference is bounded by the **fine-grid** terms behind each visibility, not by the coarse values they average to, and where the fine grid cancels the two are nothing like each other: a source whose fine samples are `[A, −A]` beside one whose are `[1, 0]` gives a joint evaluation of exactly `0` and per-source values summing to exactly `0.5` — a difference equal to the whole coarse visibility. Whether it happens at all depends on the kernel's accumulation order (`RiemannVisFine` sums the sources at each fine sample and loses the `1`; the FFI and variable kernels accumulate source-major on that input and lose nothing).
+**The decomposition's own re-association**, which is the hypothesis above and has *no* bound in these coarse values. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that single reduction into per-source partial sums. The difference is bounded by the **fine-grid** terms behind each visibility, not by the coarse values they average to, and where the fine grid cancels the two are nothing like each other: a source whose fine samples are `[A, −A]` beside one whose are `[1, 0]` gives a joint evaluation of exactly `0` and per-source values summing to exactly `0.5` — a difference equal to the whole coarse visibility. Whether it happens at all depends on the kernel's accumulation order (`RiemannVisFine` with `rfi.backend: jax` sums the sources at each fine sample and loses the `1`; the `ffi` backends and the variable kernels accumulate source-major on that input and lose nothing).
 
 On fitted grids it is round-off: measured at ~2e-16 relative in double precision and ~6e-8 in single. Treat the sum-back as an exact identity that floating point perturbs, rather than as a guarantee with a number on it, and read a large discrepancy as what it usually is — a dropped source or a column in the wrong frame, which are orders of magnitude larger again — before suspecting cancellation.
 
@@ -211,21 +275,13 @@ Sorting the MS by `TIME`, `ANTENNA1`, `ANTENNA2` resolves the last three.
 
 ## Calibration table
 
-Every run that fits gains also writes the calibration it implies as a CASA calibration table, beside the results `.zarr` and named after it — `map_pred_Custom.zarr` gives `map_pred_Custom.B`. It is a `B Jones` table, one row per (time, antenna) with `CPARAM` of shape (channel, polarisation), exactly the layout `casatasks.gaincal` produces, so a tabascal solution can be consumed by standard tooling like any other calibration rather than only as the columns above.
+Every run that fits gains also writes the calibration it implies as a CASA calibration table, beside the results `.zarr` in the run's `results/` and named after it — `map_pred.zarr` gives `map_pred.B`. The run writes it with the MS columns, and `tab2MS` rewrites it when it rewrites them. It is a `B Jones` table, one row per (time, antenna) with `CPARAM` of shape (channel, polarisation), exactly the layout `casatasks.gaincal` produces, so a tabascal solution can be consumed by standard tooling like any other calibration rather than only as the columns above.
 
-Every results `.zarr` the run writes gets its own table, named after it. A configuration that writes the initial prediction as well as the optimised one therefore leaves an `init_pred_Custom.B` beside `init_pred_Custom.zarr`: the calibration those initial values imply, which is a real if uninteresting calibration and is never confused with the fitted one.
+Every results `.zarr` the run writes gets its own table, named after it. A run whose initial prediction was exported therefore leaves an `init_pred.B` beside `init_pred.zarr`: the calibration those initial values imply, which is a real if uninteresting calibration and is never confused with the fitted one.
 
 ### Writing the table somewhere else
 
-`tab2MS -o` (`--caltable-path`) names the output, for a pipeline that wants the calibration under a name of its own rather than the results':
-
-```bash
-tab2MS -m path/to/file.ms -z path/to/results.zarr -o path/to/cal/tabascal.B
-```
-
-The path given is the **only** one the export uses: it writes there, every rule below is applied to it, and a table an earlier run left *there* is what a rerun with nothing to export removes. The default `<results>.B` is not written, read or removed.
-
-There is no configuration key for it, so the automatic export at the end of a run always names its table after the results `.zarr` it describes. That pairing is what the stale-table rules below are stated in terms of — a table left by an earlier run of *these* results — and a path fixed in a configuration, which is reused across runs, would break it: every run would write over one table, and a rerun that fitted no gains would remove one belonging to another run's results. Re-export with `tab2MS -o` when the table has to live elsewhere.
+`write_results_ms(..., caltable_path=...)` names the output, for a pipeline that wants the calibration under a name of its own rather than the results'. The path given is the **only** one the export uses: it writes there, every rule below is applied to it, and a table an earlier export left *there* is what a rerun with nothing to export removes. The default `<results>.B` is not written, read or removed. Neither the run nor `tab2MS` takes one: their table belongs in the run's own `results/`, named after the results it describes, which is what the stale-table rules below are stated in terms of.
 
 The table's `TIME` column is a copy of the MS's, and its `MEASINFO` record declares the scale **the MS declares** rather than assuming UTC. Declared to declared, the same convention the external gain tables are matched on: relabelling a TAI-declared observation as UTC would move every timestamp by the accumulated leap seconds — 37 s since 2017 — for anything that reads the declaration.
 
@@ -239,7 +295,7 @@ so one application of this one table takes `DATA` to `CORRECTED_DATA`:
 
 ```python
 from casatasks import applycal
-applycal(vis="dataset.ms", gaintable=["results/map_pred_Custom.B"])
+applycal(vis="dataset.ms", gaintable=["runs/latest/results/map_pred.B"])
 ```
 
 That works because the two forms of the calibration agree: the columns are divided by a per-*baseline* gain and the table carries a per-*antenna* one, and `(g_ext_p g_p) conj(g_ext_q g_q)` is `(g_ext_p conj(g_ext_q)) (g_p conj(g_q))` — the very `g_total` the columns were divided by.
@@ -269,14 +325,14 @@ Every-sample rather than on the mean: samples either side of 1 average to exactl
 
 **A table from a previous run of the same results is removed** in that case, with a `RuntimeWarning` saying so. A stale calibration sitting under the current name beside the current results reads as the current solution, which is a bad thing to be wrong about.
 
-Only a calibration table is ever removed: the path has to be a casacore table — casacore's own structural check, not just the marker files — whose INFO record declares `Type = Calibration`, and it may not be, contain, or sit inside the MS. A directory of your own that happens to be named `<results>.B` — or named by `-o` — is left exactly as it is, and so is a table too damaged for casacore to open. The same rule applies to *writing*: the export replaces a previous calibration table at that path and refuses anything else, rather than deleting it.
+Only a calibration table is ever removed: the path has to be a casacore table — casacore's own structural check, not just the marker files — whose INFO record declares `Type = Calibration`, and it may not be, contain, or sit inside the MS. A directory of your own that happens to be named `<results>.B` — or named by `caltable_path` — is left exactly as it is, and so is a table too damaged for casacore to open. The same rule applies to *writing*: the export replaces a previous calibration table at that path and refuses anything else, rather than deleting it.
 
 ### If the export fails
 
 The export is the last thing the writer does and is additive to it. Everything it can say about *this* MS or *these* results is reported as a `RuntimeWarning` — carrying the exception type, its message and the tail of its traceback — while the columns, which were already written, stand:
 
 * an MS with more than one spectral window, which the writer serves one partition of while a caltable can only file rows under one window's id;
-* an output path overlapping the MS — results written *inside* the MS put the table there too, and `-o` can name a path inside it outright;
+* an output path overlapping the MS — results written *inside* the MS put the table there too, and `caltable_path` can name a path inside it outright;
 * something at the output path that is not a calibration table;
 * results whose gains do not describe the MS's antennas or timesteps;
 * a `TIME` column declaring a time scale tabascal cannot interpret;
@@ -290,13 +346,16 @@ The export also runs when the gain warnings above are promoted to errors (`pytho
 
 ## Light curves and the satellite search
 
-The two matched-filter commands write outside the run's directories, beside the
-Measurement Set rather than under `results/`. Neither needs a run to have
-happened first.
+The two matched-filter commands write beside the Measurement Set rather than
+into a run directory: what they produce is an *input* to runs, and neither needs
+a run to have happened first. A run that reads one fingerprints it like any
+other input.
 
 `tabascal light-curve` writes one `.npz` to
 `<ms_dir>/light_curves/<tag or column>.npz` in the `rfi.est` interchange format,
-so it can seed a later run unchanged. With `--fit-offset` the along-track offset
+so it can seed a later run unchanged. Scoring a run's residual with `-z <run
+directory>` is the exception: those curves describe the run, and go to
+`<run>/light_curves/`. With `--fit-offset` the along-track offset
 fit travels in the same file beside the curves — `tau_best` above all, without
 which the trajectory the curves were measured on cannot be reproduced.
 
