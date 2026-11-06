@@ -385,6 +385,9 @@ def test_the_defaults_fill_in():
         ({"optimizer": {"name": "sgd", "momentum": 1.0}}, "momentum"),
         ({"optimizer": {"name": "adamw", "weight_decay": -1e-4}}, "weight_decay"),
         ({"optimizer": {"name": "radam", "threshold": 4}}, "threshold"),
+        ({"optimizer": {"name": "adam", "eps": 0}}, "eps"),
+        ({"optimizer": {"name": "adam", "eps": 1e-400}}, "eps"),  # 0 once parsed
+        ({"optimizer": {"name": "rmsprop", "centered": True, "bias_correction": True}}, "centered"),
         ({"optimizer": {"clip_norm": 0}}, "clip_norm"),
         ({"stop": {"window": 10, "rtol": 1e-4}}, "needs opt.schedule"),
         ({"schedule": {"kind": "constant"}, "stop": {"window": 0, "rtol": 1e-4}}, "window"),
@@ -411,6 +414,25 @@ def test_every_numeric_optimiser_argument_has_a_range():
         params = inspect.signature(getattr(optax, name)).parameters
         numeric = {k for k, p in params.items() if k not in o._NOT_FROM_CONFIG and not isinstance(p.default, bool)}
         assert numeric <= set(o._ARG_RANGES), (name, numeric - set(o._ARG_RANGES))
+
+
+@pytest.mark.parametrize(
+    "optimizer",
+    [
+        {"name": "adam", "b1": 0.99999999},  # 1
+        {"name": "adam", "eps": 1e-40},  # subnormal
+        {"name": "sgd", "clip_norm": 1e-50},  # 0
+        {"name": "adamw", "weight_decay": 1e40},  # inf
+    ],
+)
+def test_single_precision_checks_the_value_it_will_hold(optimizer, monkeypatch):
+    import jax
+
+    monkeypatch.setattr(jax.config, "read", lambda name: True)
+    validate_optimizer(optimizer)  # fine in double precision
+    monkeypatch.setattr(jax.config, "read", lambda name: False)
+    with pytest.raises(ValueError, match="opt.optimizer"):
+        validate_optimizer(optimizer)
 
 
 def test_dual_run_checkpoints_may_reach_into_the_second_phase():

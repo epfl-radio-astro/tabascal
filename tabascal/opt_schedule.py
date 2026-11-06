@@ -39,13 +39,16 @@ _NOT_FROM_CONFIG = ("learning_rate", "mask", "mu_dtype", "accumulator_dtype")
 
 #: The range each of their numeric arguments must lie in, as ``(low, high,
 #: low_open)`` with ``high`` excluded: a decay rate of 1 never forgets its
-#: start, and the first update divides by zero. radam's rectification takes the
+#: start, and the first update divides by zero, as it does without a positive
+#: eps. radam's rectification takes the
 #: square root of ``rho_t - 4`` once ``rho_t`` passes ``threshold``, so that
 #: must be above 4. Every numeric argument of OPTIMIZERS is here.
 _ARG_RANGES = {
     **dict.fromkeys(("b1", "b2", "b3", "decay", "momentum"), (0.0, 1.0, False)),
+    # eps keeps the update's denominator off zero; eps_root only shifts it.
+    "eps": (0.0, math.inf, True),
     **dict.fromkeys(
-        ("eps", "eps_root", "weight_decay", "initial_scale", "initial_accumulator_value"),
+        ("eps_root", "weight_decay", "initial_scale", "initial_accumulator_value"),
         (0.0, math.inf, False),
     ),
     "threshold": (4.0, math.inf, True),
@@ -72,11 +75,19 @@ _STOP_KEYS = {"window": None, "rtol": None, "min_steps": 0}
 
 def _number(value, key: str, low: float, high: float = math.inf, low_open=False, high_open=False) -> float:
     # A bool is a Real to Python, and `factor: true` was not meant as 1.
-    ok = (
-        not isinstance(value, bool) and isinstance(value, Real) and math.isfinite(value)
-        and (value > low if low_open else value >= low)
-        and (value < high if high_open else value <= high)
-    )
+    ok = not isinstance(value, bool) and isinstance(value, Real)
+    if ok:
+        # Checked as the run will hold it: in single precision b1: 0.99999999
+        # is 1, 1e40 is inf, and a positive 1e-40 is a subnormal that flushes to 0.
+        dtype = np.float64 if jax.config.read("jax_enable_x64") else np.float32
+        with np.errstate(over="ignore"):
+            held = float(np.asarray(value, dtype=dtype))
+        ok = (
+            math.isfinite(held)
+            and (held > low if low_open else held >= low)
+            and (held < high if high_open else held <= high)
+            and not (low_open and low == 0 and held < np.finfo(dtype).tiny)
+        )
     if not ok:
         bound = f"{'>' if low_open else '>='} {low:g}" + (
             f" and {'<' if high_open else '<='} {high:g}" if high < math.inf else ""
@@ -144,6 +155,10 @@ def validate_optimizer(optimizer) -> Optional[Dict]:
             args[key] = _number(
                 value, f"optimizer.{key}", low, high, low_open=low_open, high_open=high < math.inf
             )
+    if name == "rmsprop" and args.get("centered") and args.get("bias_correction"):
+        # Bias-correcting the mean and the square separately can leave their
+        # difference, the variance it takes the square root of, negative.
+        raise ValueError("opt.optimizer (rmsprop) cannot take centered and bias_correction together.")
     return {"name": name, "clip_norm": clip_norm, "args": args}
 
 
