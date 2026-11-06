@@ -82,6 +82,14 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
     assert set(record["inputs"]) == {"data.ms_path", "data.gain_table[0]", "rfi.est", "data.truth_zarr"}
 
 
+@pytest.mark.parametrize("saved, resolved, expected", [("auto", 40.625, 40.625), (8.0, 8.0, 8.0)])
+def test_auto_time_padding_is_saved_as_the_factor_it_came_to(impl, tmp_path, saved, resolved, expected):
+    run_dir_mod.write_config(str(tmp_path), {"ast": {"time_pad_factor": saved}, "rfi": {}})
+    impl._record_resolved_settings(str(tmp_path), {"ast": {"time_pad_factor": resolved}})
+
+    assert run_dir_mod.read_config(str(tmp_path)) == {"ast": {"time_pad_factor": expected}, "rfi": {}}
+
+
 def test_a_failed_record_stops_the_run_before_it_starts(impl, tmp_path, monkeypatch):
     def broken(*args):
         raise OSError("disk full")
@@ -93,6 +101,15 @@ def test_a_failed_record_stops_the_run_before_it_starts(impl, tmp_path, monkeypa
         impl.tabascal_subtraction(
             {"data": {"ms_path": str(tmp_path / "o.ms")}, "model": {}}, None, name="t", log=False
         )
+
+
+def test_a_run_that_would_write_over_its_input_never_starts(impl, tmp_path):
+    config = {"data": {"ms_path": str(tmp_path / "o.ms"), "data_col": "CORRECTED_DATA"}}
+
+    with pytest.raises(ValueError, match="replace the data the run read"):
+        impl.tabascal_subtraction(config, str(tmp_path), name="t", log=False)
+
+    assert not (tmp_path / "runs").exists()
 
 
 def test_inputs_through_latest_are_resolved_once_and_shared(tmp_path, monkeypatch):
@@ -148,7 +165,8 @@ def test_a_changed_input_is_named(tmp_path, section, key, changed, warns):
 def _fake_run(tmp_path, opt, max_iter, gain_table=None):
     run = run_dir_mod.create_run_dir(str(tmp_path), "r")
     config = {
-        "data": {"ms_path": str(tmp_path / "obs.ms"), "data_col": "DATA", "gain_table": gain_table},
+        "data": {"ms_path": str(tmp_path / "obs.ms"), "data_col": "DATA", "gain_table": gain_table,
+                 "row_chunk": 1000},
         "inference": {"opt": opt},
         "opt": {"max_iter": max_iter},
     }
@@ -175,6 +193,7 @@ def test_tab2ms_exports_what_the_run_did(tmp_path, monkeypatch, opt, max_iter, e
     assert captured["results_zarr_path"] == os.path.join(run, "results", exported)
     assert captured["ms_path"] == str(tmp_path / "obs.ms")
     assert captured["data_col"] == "DATA"
+    assert captured["row_chunk"] == 1000
     assert captured.get("caltable_path") is None
 
 

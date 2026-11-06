@@ -34,7 +34,7 @@ out_dir/
 `config.yaml` and `run.json` are written before the run reads anything, so a run that dies still says what it was:
 
 * `config.yaml` is the configuration the run used, with the base defaults merged in, the command-line flags applied and every input path — the MS, gain tables, truth zarr, `rfi.est`, `gains.init`, `data.noise`, `ast.point_sources`, the orbit directory and NORAD ID file — made absolute. `data.out_dir` stays the parent, so `tabascal run -c <run>/config.yaml -n again` repeats the run into a new sibling directory.
-* `run.json` holds the command line, working directory, host, the versions of tabascal and the libraries that decide what it computes, the PRNG seed, a fingerprint of each input, and a `status`: `running` from the start, then `finished` or `failed` (with the error).
+* `run.json` holds the command line, working directory, host, the versions of tabascal and the libraries that decide what it computes, the run's seed (`inference.seed`, 1 when unset), a fingerprint of each input, and a `status`: `running` from the start, then `finished` or `failed` (with the error).
 
 The fingerprints are what let a later command say whether the inputs are still the ones the run read. A file below 64 MiB is recorded by its size and SHA-256, so a copy with the same contents still matches; a larger one by size and modification time. A directory — a gain table, a zarr — is recorded by the sizes and modification times of every file in it, and an orbit directory by its `*.json` files alone, which is all the orbit resolver reads from it. The MS is the exception: `tab2MS` writes columns into it, so its files change with every export. What is recorded instead is what the run read from it — the number of rows, the `TIME` column, the channel frequencies, the antennas and the correlations. `tab2MS` and `tabascal rfi-per-sat` recompute them and warn, naming the input, when one has changed.
 
@@ -102,7 +102,7 @@ Below, `g_p` and `g_q` are the fitted gain predictions for the two antennas of a
 g_total = g_ext × g_p g_q*
 ```
 
-`DATA` stands for whichever column the run was given (usually `DATA`).
+`DATA` stands for whichever column the run was given (usually `DATA`). That column may not be one of the six written here: a run with `data.data_col` set to `CORRECTED_DATA` or a `TAB_*` column is refused before it starts, and so is a direct `write_results_ms` call, before anything is read. An export would otherwise replace the very data the run read, and a second export of the same results would divide the gains out a second time. To refine a calibration, read `DATA` and name the tables that produced the existing `CORRECTED_DATA` in [`data.gain_table`](config.md).
 
 | Column | Contents | Frame |
 | --- | --- | --- |
@@ -140,7 +140,7 @@ Dividing by the gain makes the noise heteroscedastic: a low-gain baseline is noi
 
 `WEIGHT_SPECTRUM` rather than `WEIGHT` alone because a frequency-dependent gain gives a frequency-dependent weight, which a single per-row number cannot carry — and which CASA's `applycal(calwt=True)` does not produce either: it was measured to apply one per-row factor, constant across channels, even when `WEIGHT_SPECTRUM` exists.
 
-Both columns are **overwritten**, and whatever they held before is gone — if the MS carried weights from some other source (a re-weighting task, a hand-tuned scheme), copy them elsewhere first. Dividing the new `WEIGHT_SPECTRUM` by `|g_total|²` recovers `1 / SIGMA²`, the uncalibrated inverse-variance weighting implied by the MS's own noise column, and nothing else. Where a gain was substituted with 1 (see below) the weight is simply `1 / SIGMA²`, which is correct: those visibilities were written uncalibrated.
+On the fitted correlation both columns are **overwritten**, and whatever they held there before is gone — if the MS carried weights from some other source (a re-weighting task, a hand-tuned scheme), copy them elsewhere first. This follows the MS convention CASA's `applycal` also follows: `SIGMA` describes `DATA`, while `WEIGHT` describes `CORRECTED_DATA` and is rewritten with it. Replacing a `CORRECTED_DATA` that tabascal did not write warns, naming the weights with it — see [Another pipeline's `CORRECTED_DATA`](#another-pipelines-corrected_data). Dividing the new `WEIGHT_SPECTRUM` by `|g_total|²` recovers `1 / SIGMA²`, the uncalibrated inverse-variance weighting implied by the MS's own noise column, and nothing else. Where a gain was substituted with 1 (see below) the weight is simply `1 / SIGMA²`, which is correct: those visibilities were written uncalibrated.
 
 If the MS carries no usable noise column at all, nothing is invented: a warning is printed and the two weight columns are left exactly as they were, while the visibility columns are still written.
 
@@ -148,17 +148,21 @@ If the MS carries no usable noise column at all, nothing is invented: a warning 
 
 TABASCAL fits a single correlation, named by `data.corr` in the configuration (default `xx`) and recorded in the results `.zarr`. The results are written into that correlation of the MS only, resolved by identity against `POLARIZATION::CORR_TYPE` rather than by position — on the `POLARIZATION` row that the data partition's `DATA_DESC_ID` points to, exactly as the run resolved it when reading — a single-polarisation MS holds one correlation whatever it is, so `yy` is index 0 there.
 
-On the other correlations of a multi-correlation MS:
+Only the fitted correlation is written. **The other correlations of every column keep what the MS already holds** — the weights included — so exporting an `xx` fit and then a `yy` fit leaves both results in place, each correlation describing the run that wrote it.
 
-* `TAB_AST_DATA` and `TAB_RFI_DATA` — the model columns — are **0**;
-* `WEIGHT_SPECTRUM` and `WEIGHT` are **0** too, matching them: nothing there was calibrated, so nothing there has this frame's weight;
-* `CORRECTED_DATA`, `TAB_AST_RES`, `TAB_RFI_RES` and `TAB_RES_DATA` carry the **data column passed through unchanged**: no gain applied and nothing subtracted, which is the honest value for a correlation that was never modelled. The closure identity still holds there, trivially.
+A column that does not exist yet starts on the other correlations the way CASA starts one:
+
+* `TAB_AST_DATA` and `TAB_RFI_DATA` — the model columns — start at **0**;
+* `CORRECTED_DATA`, `TAB_AST_RES`, `TAB_RFI_RES` and `TAB_RES_DATA` start as the **data column passed through unchanged**, as CASA starts `CORRECTED_DATA` as a copy of `DATA`: no gain applied and nothing subtracted, which is the honest value for a correlation that was never modelled. The closure identity holds there, trivially;
+* `WEIGHT_SPECTRUM` starts as `WEIGHT` spread over the channels, as CASA initialises it. `WEIGHT` is a required column and always exists.
+
+The closure identity is a statement about the correlations tabascal wrote. On one it did not write, `CORRECTED_DATA` may hold another pipeline's values beside `TAB_*` columns that started from the data.
 
 A results `.zarr` written before the correlation was recorded does not say where it belongs. On a single-correlation MS there is only one answer; on a wider one, writing raises a `ValueError` rather than guessing. `tab2MS -c xx` names the correlation explicitly.
 
 ### Exporting a run
 
-A run writes its results into the MS as it finishes. Every run writes the same columns, so the MS holds whichever run wrote last; `tab2MS` writes a run's results back in, given its directory:
+A run writes its results into the MS as it finishes. Every run writes the same columns, so each correlation holds whichever run wrote it last — the columns' provenance says which (see [Provenance](#provenance)); `tab2MS` writes a run's results back in, given its directory:
 
 ```bash
 tab2MS out_dir/runs/sweep_20261103T091500_3fa2c1
@@ -166,6 +170,32 @@ tab2MS out_dir/runs/latest
 ```
 
 Everything else comes from the run's `config.yaml`: the MS, the data column, the gain tables, and which results — `map_pred` if the run optimised, `init_pred` if it did not, as the run itself did. The calibration table goes into the run's `results/`. Two overrides remain, for inputs that have moved since: `-ms` names the MS and `-gt` the gain tables, each warning when it differs from what the run recorded. The fingerprints are checked either way.
+
+### Provenance
+
+Every column written records, in a `TABASCAL` column keyword, which run wrote each correlation: a record per correlation, keyed `CORR_<index>` on the MS's correlation axis, holding
+
+| Field | Contents |
+| --- | --- |
+| `corr` | the correlation's name, e.g. `xx` (empty for results that predate recording it) |
+| `run` | the run directory the results came from (empty when they are not in one) |
+| `results` | the absolute path of the results `.zarr` |
+| `data_col` | the column the run read (absent when a direct `write_per_sat_rfi_ms` call is not told it) |
+| `written` | when, in UTC |
+
+An export replaces its own correlation's entry and keeps the others, so the keyword describes the column as it now stands:
+
+```python
+from casacore.tables import table
+with table("dataset.ms", ack=False) as ms:
+    print(ms.getcolkeyword("CORRECTED_DATA", "TABASCAL"))
+```
+
+### Another pipeline's `CORRECTED_DATA`
+
+`CORRECTED_DATA` and the weights belong together: other calibration tools write them too, and CASA's `applycal` replaces both without a word. tabascal replaces them as well, since that is where downstream tools look for calibrated data — but when the fitted correlation of an existing `CORRECTED_DATA` carries no tabascal provenance, it raises a `RuntimeWarning` first, naming `CORRECTED_DATA`, `WEIGHT` and `WEIGHT_SPECTRUM`.
+
+**What was there on that correlation is gone once the export runs.** It is a derived product, rebuilt from the raw data and the gain tables that made it, which is why it is replaced rather than refused. If those tables are not kept, copy the columns elsewhere first. The other correlations are not touched, and once tabascal has written a correlation, later exports to it do not warn. A process that promotes `RuntimeWarning` to an error stops here, before any column is written.
 
 ### Writing results for a run that used a gain table
 
@@ -196,7 +226,9 @@ tabascal rfi-per-sat out_dir/runs/latest
 
 **What they are for.** Image one column at a time. A real satellite is a clean streak in exactly one per-source image; a feature that shows up in several is astronomical flux the RFI model has split across satellites. Reduced chi² cannot see that — a fixed total split differently between sources costs it nothing — so the per-source images are the diagnostic for it.
 
-The columns are in the same **calibrated frame** as every other column above, and they get there the same way `TAB_RFI_DATA` does: they are model visibilities, fitted to data whose gain layers were already divided out, so nothing is applied to them. Correlations that were not fitted are `0`, matching the model columns. The correlation comes off the zarr, and `-c` overrides it for a zarr written before that was recorded, exactly as for `tab2MS`.
+The columns are in the same **calibrated frame** as every other column above, and they get there the same way `TAB_RFI_DATA` does: they are model visibilities, fitted to data whose gain layers were already divided out, so nothing is applied to them. As for the other columns, only the fitted correlation is written: the others keep what the MS holds, and start at `0` in a new column, matching the model columns. The correlation comes off the zarr, and `-c` overrides it for a zarr written before that was recorded, exactly as for `tab2MS`. Each column records its [provenance](#provenance). The run's data column may not be any `<prefix><digits>` column, since those are what this export writes, zeroes and removes; with `data.save_rfi_per_sat: true` a run reading a `TAB_RFI_<digits>` column is refused before it starts.
+
+**Columns from earlier exports.** A later export may fit fewer satellites, or different ones. A `<prefix><NORAD>` column an earlier export wrote on *this* correlation, for a satellite these results do not hold, is stale: that correlation is set to `0` and its provenance entry removed, and a column left describing no correlation at all is removed from the MS. Its other correlations, written by runs on other correlations, stay. A `<prefix><digits>` column without provenance — from a tabascal version that did not record it, or from somewhere else — is not touched: a `RuntimeWarning` names it, to be removed by hand if it is stale.
 
 They decompose `TAB_RFI_DATA`:
 
@@ -217,7 +249,7 @@ per component — the real and imaginary parts separately, since a `complex64` c
 
 **The scale is the per-sample, per-source values, taken before the sample mean**, because that is where the rounding happens. Referencing it to the columns instead would not be a bound at all: two samples of `+A` and `−A` average to a column of exactly zero while the total was rounded from `A`, so the columns can be zero and the difference nowhere near it. For a MAP run — one sample — the two readings coincide, but the guarantee is the one above.
 
-**The decomposition's own re-association**, which is the hypothesis above and has *no* bound in these coarse values. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that single reduction into per-source partial sums. The difference is bounded by the **fine-grid** terms behind each visibility, not by the coarse values they average to, and where the fine grid cancels the two are nothing like each other: a source whose fine samples are `[A, −A]` beside one whose are `[1, 0]` gives a joint evaluation of exactly `0` and per-source values summing to exactly `0.5` — a difference equal to the whole coarse visibility. Whether it happens at all depends on the kernel's accumulation order (`RiemannVisFine` sums the sources at each fine sample and loses the `1`; the FFI and variable kernels accumulate source-major on that input and lose nothing).
+**The decomposition's own re-association**, which is the hypothesis above and has *no* bound in these coarse values. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that single reduction into per-source partial sums. The difference is bounded by the **fine-grid** terms behind each visibility, not by the coarse values they average to, and where the fine grid cancels the two are nothing like each other: a source whose fine samples are `[A, −A]` beside one whose are `[1, 0]` gives a joint evaluation of exactly `0` and per-source values summing to exactly `0.5` — a difference equal to the whole coarse visibility. Whether it happens at all depends on the kernel's accumulation order (`RiemannVisFine` with `rfi.backend: jax` sums the sources at each fine sample and loses the `1`; the `ffi` backends and the variable kernels accumulate source-major on that input and lose nothing).
 
 On fitted grids it is round-off: measured at ~2e-16 relative in double precision and ~6e-8 in single. Treat the sum-back as an exact identity that floating point perturbs, rather than as a guarantee with a number on it, and read a large discrepancy as what it usually is — a dropped source or a column in the wrong frame, which are orders of magnitude larger again — before suspecting cancellation.
 

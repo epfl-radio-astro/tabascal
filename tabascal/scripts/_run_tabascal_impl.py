@@ -21,7 +21,7 @@ import jax
 from jax import random
 
 from tabascal.timing import measure_runtime, print_timings, enable_timings
-from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
+from tabascal.tab_tools import init_predict, run_opt, nlog_like_and_post, write_ms_if_enabled
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.distributed import (
     barrier,
@@ -34,7 +34,8 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
-from tabascal.write import write_results_xds
+from tabascal.seeds import config_seed, describe_random_draws, run_key
+from tabascal.write import check_input_column, write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 from tabascal.scripts._config_paths import config_is_unset, config_path
@@ -48,6 +49,7 @@ from tabascal.run_dir import (
     create_run_dir,
     finish_record,
     place_outputs,
+    read_config,
     start_record,
     write_config,
 )
@@ -163,8 +165,7 @@ def build_model(config, ms_path):
 def evaluate_init(tab_config, model, key, truth=None):
     key, subkey = random.split(key)
     init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants, truth=truth)
-    nlog_l = nlog_like(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-    nlog_p = nlog_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+    nlog_l, nlog_p = nlog_like_and_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
     return key, init_pred, nlog_l, nlog_p
 
 
@@ -377,21 +378,23 @@ def _print_model_summary(tab_config, model, start_time):
     print(f"{end_start}")
 
 
-#: The seed of the run's PRNG key, recorded in run.json.
-SEED = 1
-
-
 @measure_runtime
 def tabascal_subtraction(
     config, out_dir, ms_path=None, name=None, extra_orbit_dir=None, norad_path=None, log=True
 ):
+    # Before the run directory exists: a config whose exports would replace
+    # its own input is not a run that failed, it is one that cannot start.
+    check_input_column(
+        config["data"].get("data_col", "DATA"),
+        config["data"].get("save_rfi_per_sat", False),
+    )
     paths = _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path)
 
     try:
         # Before any work, so a run that dies still says what it was and what it read.
         _on_process_0(
             "write the run's config.yaml and run.json",
-            lambda: (write_config(paths.run_dir, config), start_record(paths.run_dir, config, SEED)),
+            lambda: (write_config(paths.run_dir, config), start_record(paths.run_dir, config, config_seed(config))),
         )
         with _stdout_logger(paths.log_path, log):
             _subtract(config, paths)
@@ -428,13 +431,31 @@ def _on_process_0(what, work):
     fail_together(failure, what)
 
 
+def _record_resolved_settings(run_dir, config):
+    """Write what model setup resolved into the run's saved ``config.yaml``.
+
+    The file is written before setup, so a run that dies there still says what
+    it was, and ``ast.time_pad_factor: auto`` only becomes a number inside it.
+    Only that key is rewritten: setup fills in other values on the same dict,
+    not all of them plain YAML.
+    """
+    resolved = (config.get("ast") or {}).get("time_pad_factor")
+    saved = read_config(run_dir)
+    if (saved.get("ast") or {}).get("time_pad_factor") != "auto" or resolved == "auto":
+        return
+    saved["ast"]["time_pad_factor"] = float(resolved)
+    write_config(run_dir, saved)
+
+
 def _subtract(config, paths):
     """The run itself, inside its directory: model, initial prediction, fit."""
     ms_path = paths.ms_path
     start_time = datetime.now()
-    key, _ = random.split(random.PRNGKey(SEED))
+    key, _ = random.split(run_key(config_seed(config)))
 
     _print_run_header(paths.run_dir, paths.f_name, paths.ms_path, start_time)
+    print(describe_random_draws(config))
+    print()
 
     if sharding_enabled():
         print(f"Sharding RFI sources over {jax.device_count()} devices:")
@@ -446,6 +467,10 @@ def _subtract(config, paths):
 
     tab_config, model = build_model(config, ms_path)
     prob_model = model.prob_model
+    _on_process_0(
+        "record the resolved settings in config.yaml",
+        lambda: _record_resolved_settings(paths.run_dir, config),
+    )
 
     # Persist the real TLEs this run resolved so it can be reproduced later.
     # Only process 0 writes the shared result path in distributed runs.
@@ -532,22 +557,12 @@ def _subtract(config, paths):
 
         opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
 
-        nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-        nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+        nlog_l, nlog_p = nlog_like_and_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
 
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")
     else:
-        from tabascal.write import write_results_ms
-        print(f"Copying tabascal initial values to MS file from {paths.init_pred_path}")
-        # The correlation comes off the zarr the line above just wrote; the
-        # gain tables do not, and the MS's data column is still raw.
-        write_results_ms(
-            ms_path,
-            paths.init_pred_path,
-            tab_config.args["data"]["data_col"],
-            gain_table=getattr(tab_config, "gain_table", None),
-        )
+        write_ms_if_enabled(tab_config, ms_path, paths.init_pred_path)
 
 
 def set_precision(config):
@@ -584,6 +599,8 @@ def run(args):
         enable_timings()
 
     config = load_config(args.config)
+    if getattr(args, "skip_ms_write", False):
+        config["data"]["skip_ms_write"] = True
 
     set_precision(config)
 

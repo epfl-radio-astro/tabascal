@@ -75,9 +75,18 @@ def _listing(label: str, names: List[str]) -> str:
     return _sentence(f"{label}: {', '.join(names)}." if names else "")
 
 
+#: Components folded into another one as an ``rfi.backend``, and that one.
+_BACKEND_OF = {
+    "RiemannVisFFIFine": "RiemannVisFine",
+    "RiemannVisVariableFFIFine": "RiemannVisVariableFine",
+}
+
+
 def _missing_class_message(ref: str, cls_name: str, module) -> str:
+    folded = _BACKEND_OF.get(cls_name) if module.__name__.endswith(".rfi_vis") else None
     return (
         f"'{ref}': module '{module.__name__}' has no class '{cls_name}'. "
+        + _sentence(folded and f"It is now {folded} with rfi.backend: ffi.")
         + _listing("It defines", _offered_classes(module))
     )
 

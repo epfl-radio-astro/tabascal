@@ -24,6 +24,7 @@ from tabascal.components.trajectory import (
 )
 from tabascal.orbit import check_epoch_agreement, preflight_tle_check
 from tabascal.orbit_config import normalise_tle_config
+from tabascal.seeds import validate_seed, warn_deprecated_seeds
 from tabascal.interferometry import (
     baseline_gains,
     calculate_fringe_frequency_numpy,
@@ -135,9 +136,14 @@ def load_config(path: str) -> Dict:
     base_config = yaml_load(tab_base_config_path)
 
     try:
-        return deep_update(base_config, yaml_load(path))
+        config = deep_update(base_config, yaml_load(path))
     except Exception as e:
         raise IOError(f"Configuration file could not be loaded from {path}") from e
+
+    # Outside the try: a bad seed is a config to edit, not a file that failed to load.
+    validate_seed(config)
+    warn_deprecated_seeds(config)
+    return config
 
 
 #: Keys of the ``tabsim`` section, which adapts tabascal to data simulated by
@@ -188,6 +194,8 @@ class TabConfig:
     ):
 
         self.args = config
+        # load_config has already done this for a config read from a file.
+        warn_deprecated_seeds(config)
         self.precision = config.get("model", {}).get("precision", "single")
         self.ms_path = ms_path
         # One normalisation of the satellites section, shared by preflight and the
@@ -240,8 +248,8 @@ class TabConfig:
         self.n_int_freq = config["rfi"]["n_int_freq"]
 
         # The divisor-rich fine grid (min_divisors > 1) is only needed by the
-        # RiemannVisVariableFine / RiemannVisVariableFFIFine components, which
-        # split baselines into multiple stride groups. For every other rfi_vis
+        # RiemannVisVariableFine component (either backend), which
+        # splits baselines into multiple stride groups. For every other rfi_vis
         # component it just
         # inflates n_int_time (the fine-grid time dimension) and slows the run,
         # so only request it when a Variable component is actually selected.
@@ -593,7 +601,15 @@ class TabConfig:
         self, freq: float, corr: str, data_col: str, phase_tracking: str = "apparent"
     ):
 
-        ms_params = read_ms(self.ms_path, freq, None, corr, data_col)
+        # Read off the config if there is one. This method is deliberately
+        # callable unbound, on an object carrying nothing but an ms_path --
+        # tests/test_noise.py does exactly that -- so the chunk is an optional
+        # tuning knob here rather than a required attribute.
+        data_args = getattr(self, "args", {}).get("data", {})
+        ms_params = read_ms(
+            self.ms_path, freq, None, corr, data_col,
+            row_chunk=data_args.get("row_chunk"),
+        )
 
         # The MS's phase centre, as read_ms converts it to J2000 from the frame
         # FIELD::PHASE_DIR declares, and how the data were tracked to it

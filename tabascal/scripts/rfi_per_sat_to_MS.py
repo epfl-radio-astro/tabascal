@@ -77,6 +77,7 @@ def run(args):
         results_zarr_path=exported_results(run_dir, config),
         prefix=args.prefix,
         corr=args.corr,
+        data_col=config["data"]["data_col"],
     )
 
 

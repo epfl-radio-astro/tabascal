@@ -356,6 +356,9 @@ class TestAnalyticVis:
         if gp is not None:
             cfg.args["rfi"]["gp_cov"]["gammas"], cfg.args["rfi"]["cutoff"] = gp
         fine, params = run_route([FixedOrbitFine, signals[0], RiemannVisFine], cfg)
+        # A fixed latent, not a draw: every kept mode is set, so the signal varies within a cell.
+        params = {k: jnp.cos(jnp.arange(v.size, dtype=v.dtype).reshape(v.shape) + i)
+                  for i, (k, v) in enumerate(sorted(params.items()))}
         expected = fine(params)["vis_rfi"]
         err = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
         cfg.args["rfi"]["analytic"]["stencil"] = 0
@@ -390,6 +393,16 @@ class TestAnalyticVis:
         cfg, _ = op_case(**{key: value})
         with pytest.raises(RuntimeError, match=rf"rfi\.analytic\.{key}"):
             AnalyticVis().setup(cfg)
+
+    @pytest.mark.parametrize("backend, ok", [(None, True), ("ffi", True), ("jax", False)])
+    def test_ffi_is_the_only_backend(self, backend, ok):
+        cfg, _ = op_case()
+        cfg.args["rfi"]["backend"] = backend
+        if ok:
+            AnalyticVis().setup(cfg)
+        else:
+            with pytest.raises(RuntimeError, match="rfi.backend must be one of 'ffi'"):
+                AnalyticVis().setup(cfg)
 
     def test_a_repeated_baseline_is_refused(self):
         cfg, _ = op_case()

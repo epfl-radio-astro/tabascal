@@ -38,8 +38,8 @@ For NVIDIA GPUs on Linux, use the `cuda12` extra (or `cuda13` for CUDA 13):
 pip install "tabascal[cuda12] @ git+https://github.com/epfl-radio-astro/tabascal.git"
 ```
 
-The GPU extras also pull in the compiled GPU kernel used by the FFI
-`rfi_vis` components — see [RFI-visibility kernels](kernels.md).
+The GPU extras also pull in the compiled GPU kernel used by the `ffi`
+backend of the `rfi_vis` components — see [RFI-visibility kernels](kernels.md).
 
 ### Installing from a clone
 

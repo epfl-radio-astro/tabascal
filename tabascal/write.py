@@ -14,26 +14,31 @@ from tabascal.ms import (
     grid_to_rows,
     into_corr,
     ms_layout,
+    ms_row_chunks,
     partition_noise,
     partition_polarization,
     partition_setup,
     read_time_scale,
     read_time_unit,
     remove_caltable,
+    remove_columns,
     times_to_mjd,
     write_caltable,
 )
 from tabascal.noise import broadcast_to_vis
+from tabascal.run_dir import is_run_dir
 from tabascal.time import DAY_SECS
 from tabascal.timing import measure_runtime
 
 from daskms import xds_from_ms, xds_from_table, xds_to_table
 
 import os
+import re
 import shutil
 import traceback
 import warnings
 
+from datetime import datetime, timezone
 from functools import partial
 
 import numpy as np
@@ -54,6 +59,93 @@ RFI_PER_SAT_PREFIX = "TAB_RFI_"
 
 #: Dimensions of the per-satellite RFI variable in a results zarr, in order.
 RFI_PER_SAT_DIMS = ("sample", "src", "bl", "freq", "time")
+
+#: The visibility columns :func:`write_results_ms` writes. None of them may be
+#: the column a run reads: an export would replace its own input, and a second
+#: export of the same results would divide the gains out a second time.
+RESULT_COLUMNS = (
+    "CORRECTED_DATA",
+    "TAB_AST_DATA",
+    "TAB_RFI_DATA",
+    "TAB_AST_RES",
+    "TAB_RFI_RES",
+    "TAB_RES_DATA",
+)
+
+#: The column keyword recording which run wrote each correlation of a column:
+#: ``{"CORR_<index>": {"corr", "run", "results", "data_col", "written"}}``.
+PROVENANCE_KEYWORD = "TABASCAL"
+
+
+def refuse_input_column(data_col: str, columns, writer: str) -> None:
+    """Raise if ``data_col`` is one of the ``columns`` an export writes."""
+
+    if data_col in columns:
+        raise ValueError(
+            f"data_col {data_col!r} is a column {writer} writes, so the export "
+            "would replace the data the run read, and a rerun would read its own "
+            "output. Read the raw column (DATA) instead, with the calibration "
+            "that produced this one named in data.gain_table."
+        )
+
+
+def check_input_column(data_col: str, save_rfi_per_sat: bool = False) -> None:
+    """Refuse, before any fitting, a ``data_col`` the run's exports would write.
+
+    The per-satellite columns are named only once the fit has resolved its
+    satellites, so here any ``TAB_RFI_<digits>`` is refused when the run will
+    store the decomposition; the export checks the exact names again.
+    """
+
+    refuse_input_column(data_col, RESULT_COLUMNS, "write_results_ms")
+
+    if save_rfi_per_sat and _per_sat_column(RFI_PER_SAT_PREFIX).fullmatch(data_col):
+        refuse_input_column(data_col, [data_col], "tabascal rfi-per-sat")
+
+
+def _per_sat_column(prefix: str):
+    """The names of the per-satellite columns under ``prefix``: ``<prefix><digits>``."""
+
+    return re.compile(re.escape(prefix) + r"\d+")
+
+
+def _provenance(results_zarr_path, corr_idx, corr_name, data_col=None):
+    """``(key, record)`` naming the run whose results fill correlation ``corr_idx``."""
+
+    results = os.path.abspath(results_zarr_path)
+    run_dir = os.path.dirname(os.path.dirname(results))
+    record = {
+        "corr": corr_name or "",
+        "run": run_dir if is_run_dir(run_dir) else "",
+        "results": results,
+        "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+    if data_col is not None:
+        record["data_col"] = data_col
+
+    return f"CORR_{corr_idx}", record
+
+
+def _with_provenance(column_keywords, col, key, record):
+    """``col``'s provenance keyword with ``key`` replaced by ``record``.
+
+    Merged with what the MS holds: the keyword is one record for the whole
+    column, and writing it replaces every other correlation's entry.
+    """
+
+    merged = dict(column_keywords.get(col, {}).get(PROVENANCE_KEYWORD, {}))
+
+    if record is None:
+        merged.pop(key, None)
+    else:
+        merged[key] = record
+
+    return merged
+
+
+def _is_tabascal_corr(column_keywords, col, key) -> bool:
+    return key in column_keywords.get(col, {}).get(PROVENANCE_KEYWORD, {})
 
 
 def _to_ms_column(arr, dims, chunks, n_freq, n_corr=1):
@@ -386,8 +478,12 @@ def write_results_ms(
     corr: str | None = None,
     gain_table=None,
     caltable_path: str | None = None,
+    row_chunk: int | None = None,
 ):
     """Copy a results zarr into the Measurement Set it was fitted from.
+
+    ``row_chunk`` overrides the dask-ms row chunk for data-dependent I/O tuning;
+    None preserves its default. Larger chunks are not always faster.
 
     Every column written here -- ``CORRECTED_DATA``, ``TAB_AST_DATA``,
     ``TAB_RFI_DATA``, ``TAB_AST_RES``, ``TAB_RFI_RES`` and ``TAB_RES_DATA`` --
@@ -425,7 +521,20 @@ def write_results_ms(
     export knows: what is written, what is refused, and what a superseded table
     is removed from all follow it, so a failed rerun cannot tidy up the default
     it displaced while leaving its own stale table standing.
+
+    Only the fitted correlation is written. The others keep what the MS holds,
+    so exporting an ``xx`` fit and then a ``yy`` one leaves both; a column that
+    does not exist yet starts from what CASA would start it from (see
+    ``docs/output.md``). Each column's ``TABASCAL`` keyword records, per
+    correlation, the run and results that wrote it, and replacing a
+    ``CORRECTED_DATA`` correlation that carries no such record -- another
+    pipeline's -- warns, since its weights are replaced with it.
+
+    ``data_col`` may not be one of the columns written: that is refused before
+    anything is read.
     """
+
+    refuse_input_column(data_col, RESULT_COLUMNS, "write_results_ms")
 
     # In multi-process runs only process 0 writes; the arrays involved are replicated
     # so no other rank needs to participate.
@@ -434,7 +543,7 @@ def write_results_ms(
 
     # column_keywords for the TIME unit the gain tables are matched on, read the
     # same way read_ms reads it so the two cannot disagree about the grid.
-    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True)
+    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True, **ms_row_chunks(row_chunk))
     xds_ms = xds_list[0]
     xds_tab = xr.open_zarr(results_zarr_path)
 
@@ -462,6 +571,12 @@ def write_results_ms(
         corr,
         n_corr,
         partition_polarization(ms_path, xds_ms),
+    )
+    corr_key, corr_record = _provenance(
+        results_zarr_path,
+        corr_idx,
+        corr if corr is not None else xds_tab.attrs.get("corr"),
+        data_col,
     )
 
     # Derived and validated in one place, shared with the reader. Before any
@@ -545,53 +660,80 @@ def write_results_ms(
         xds_ms, gains_tot, layout, n_freq, corr_idx, dims, fit_chunks
     )
 
-    def column(col, fill, col_dims=None):
-        """One result placed on the MS's correlation axis, ready to assign."""
+    def column(name, col, fill, col_dims=None):
+        """One result placed on the MS's correlation axis, ready to assign.
+
+        The other correlations keep the MS's values where the column exists, and
+        take ``fill`` only where it does not.
+        """
 
         col_dims = dims if col_dims is None else col_dims
+
+        if name in xds_ms:
+            fill = xds_ms[name].data
 
         return xr.DataArray(
             into_corr(col.data, corr_idx, n_corr, fill), dims=col_dims
         ).chunk({k: v for k, v in chunks.items() if k in col_dims})
 
-    # Model columns are zero on the correlations that were not fitted; the data
-    # columns pass the data through there, uncalibrated and unsubtracted.
+    # A new column starts as CASA starts one: CORRECTED_DATA (and the residuals
+    # that live in its frame) as a copy of the data, the models at zero.
     passthrough = vis_obs.data
 
-    xds_ms = xds_ms.assign(CORRECTED_DATA=column(vis_cal, passthrough))
-    xds_ms = xds_ms.assign(TAB_AST_DATA=column(vis_ast, 0))
-    xds_ms = xds_ms.assign(TAB_RFI_DATA=column(vis_rfi, 0))
-    xds_ms = xds_ms.assign(TAB_AST_RES=column(residuals["ast"], passthrough))
-    xds_ms = xds_ms.assign(TAB_RFI_RES=column(residuals["rfi"], passthrough))
-    xds_ms = xds_ms.assign(TAB_RES_DATA=column(residuals["total"], passthrough))
+    if "CORRECTED_DATA" in xds_ms and not _is_tabascal_corr(
+        column_keywords, "CORRECTED_DATA", corr_key
+    ):
+        warnings.warn(
+            f"Replacing correlation {corr_idx} of CORRECTED_DATA in {ms_path}, "
+            "which tabascal did not write, and the WEIGHT and WEIGHT_SPECTRUM "
+            "that describe it. Another pipeline's calibration of that "
+            "correlation is lost; it can be rebuilt from the raw data and its "
+            "gain tables.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
-    cols = [
-        "CORRECTED_DATA",
-        "TAB_AST_DATA",
-        "TAB_RFI_DATA",
-        "TAB_AST_RES",
-        "TAB_RFI_RES",
-        "TAB_RES_DATA",
-    ]
-    # Jy on the visibility columns. The weight columns are standard ones and are
-    # left with whatever units the MS gives them.
-    col_keywords = {col: {"UNIT": "Jy"} for col in cols}
+    results = {
+        "CORRECTED_DATA": column("CORRECTED_DATA", vis_cal, passthrough),
+        "TAB_AST_DATA": column("TAB_AST_DATA", vis_ast, 0),
+        "TAB_RFI_DATA": column("TAB_RFI_DATA", vis_rfi, 0),
+        "TAB_AST_RES": column("TAB_AST_RES", residuals["ast"], passthrough),
+        "TAB_RFI_RES": column("TAB_RFI_RES", residuals["rfi"], passthrough),
+        "TAB_RES_DATA": column("TAB_RES_DATA", residuals["total"], passthrough),
+    }
 
     if weight is not None:
-        # Zero on the correlations that were not fitted, matching the zeroed
-        # model columns: nothing there was calibrated, so nothing there has this
-        # frame's weight. Cast once, on the way into the column.
-        xds_ms = xds_ms.assign(
-            WEIGHT_SPECTRUM=column(weight.astype(np.float32), np.float32(0))
+        # A new WEIGHT_SPECTRUM starts as CASA starts one, WEIGHT spread over
+        # the channels; WEIGHT itself is a required column. Cast once, on the
+        # way into the column.
+        weight_fill = (
+            xds_ms.WEIGHT.data[:, None, :] if "WEIGHT" in xds_ms else np.float32(0)
         )
-        xds_ms = xds_ms.assign(
-            WEIGHT=column(
-                weight.mean(dim="chan").astype(np.float32),
-                np.float32(0),
-                col_dims=["row", "corr"],
+        results["WEIGHT_SPECTRUM"] = column(
+            "WEIGHT_SPECTRUM", weight.astype(np.float32), weight_fill
+        )
+        results["WEIGHT"] = column(
+            "WEIGHT",
+            weight.mean(dim="chan").astype(np.float32),
+            np.float32(0),
+            col_dims=["row", "corr"],
+        )
+
+    xds_ms = xds_ms.assign(**results)
+    cols = list(results)
+
+    # Jy on the visibility columns. The weight columns are standard ones and are
+    # left with whatever units the MS gives them.
+    col_keywords = {
+        col: {
+            PROVENANCE_KEYWORD: _with_provenance(
+                column_keywords, col, corr_key, corr_record
             )
-        )
-        cols += ["WEIGHT_SPECTRUM", "WEIGHT"]
+        }
+        for col in cols
+    }
+    for col in RESULT_COLUMNS:
+        col_keywords[col]["UNIT"] = "Jy"
 
     print(f"Writing tabascal results to {cols} columns in MS file.")
 
@@ -1138,11 +1280,11 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     values they average to -- and where the fine grid cancels, the two can be
     nothing like each other. A source whose fine samples are ``[A, -A]`` beside
     one whose are ``[1, 0]``: a kernel that sums the sources at each fine sample
-    (``RiemannVisFine`` does, in ``calculate_rfi_vis_blocked``) rounds ``A + 1`` back to
+    (``RiemannVisFine``'s ``jax`` backend does, in ``calculate_rfi_vis_blocked``) rounds ``A + 1`` back to
     ``A`` and averages to 0, while the per-source evaluation keeps the 1 and
     gives 0.5. The difference is then the whole of the coarse visibility. Which
-    kernels it happens in is a property of their accumulation order: the FFI and
-    variable kernels accumulate source-major on that input and lose nothing.
+    kernels it happens in is a property of their accumulation order: the ``ffi``
+    backends and the variable kernels accumulate source-major on that input and lose nothing.
 
     In practice it is round-off: on fitted grids it measures ~2e-16 relative in
     fp64 and ~6e-8 in fp32, orders of magnitude below anything a wrong
@@ -1337,6 +1479,7 @@ def write_per_sat_rfi_ms(
     results_zarr_path: str,
     prefix: str = RFI_PER_SAT_PREFIX,
     corr: str | None = None,
+    data_col: str | None = None,
 ):
     """Write each satellite's RFI visibility prediction to its own MS column.
 
@@ -1393,17 +1536,32 @@ def write_per_sat_rfi_ms(
     It is not a bit-for-bit identity, and cannot be: ``sum_r round(x_r)`` is not
     ``round(sum_r x_r)``.
 
-    Correlations that were not fitted are 0, matching the model columns beside
-    them; ``corr`` overrides the correlation the zarr recorded, exactly as in
-    :func:`write_results_ms`, and is needed only for a zarr written before that
-    attribute existed.
+    Only the fitted correlation is written, as in :func:`write_results_ms`: the
+    others keep what the MS holds, and are 0 in a new column, matching the model
+    columns beside them. ``corr`` overrides the correlation the zarr recorded,
+    exactly as in :func:`write_results_ms`, and is needed only for a zarr
+    written before that attribute existed.
+
+    Columns an earlier export wrote under this ``prefix`` for satellites these
+    results do not hold are stale on this correlation: it is zeroed and its
+    provenance entry removed, and a column left describing no correlation is
+    removed. ``<prefix><digits>`` columns without tabascal's provenance keyword
+    are not touched, only named in a warning.
+
+    ``data_col`` is the column the run read. It may not be any
+    ``<prefix><digits>`` column, since every column this export writes, zeroes
+    or removes is one; that is refused on every process before anything is read.
     """
+
+    if data_col is not None and _per_sat_column(prefix).fullmatch(data_col):
+        refuse_input_column(data_col, [data_col], "tabascal rfi-per-sat")
 
     # In multi-process runs only process 0 writes; nothing here is sharded.
     if not is_process_0():
         return
 
-    xds_ms = xds_from_ms(ms_path)[0]
+    xds_list, column_keywords = xds_from_ms(ms_path, column_keywords=True)
+    xds_ms = xds_list[0]
     xds_tab = xr.open_zarr(results_zarr_path)
 
     src, norad_ids = per_sat_sources(xds_tab, results_zarr_path)
@@ -1458,11 +1616,49 @@ def write_per_sat_rfi_ms(
             "the earlier. Fit each satellite once."
         )
 
+    corr_key, corr_record = _provenance(
+        results_zarr_path,
+        corr_idx,
+        corr if corr is not None else xds_tab.attrs.get("corr"),
+        data_col,
+    )
+
+    pattern = _per_sat_column(prefix)
+    earlier = [
+        c for c in xds_ms.data_vars if pattern.fullmatch(c) and c not in cols
+    ]
+    untracked = [c for c in earlier if PROVENANCE_KEYWORD not in column_keywords.get(c, {})]
+    stale = [c for c in earlier if _is_tabascal_corr(column_keywords, c, corr_key)]
+    stale_keywords = {
+        c: _with_provenance(column_keywords, c, corr_key, None) for c in stale
+    }
+    # A column with no correlation left is removed rather than zeroed.
+    emptied = [c for c in stale if not stale_keywords[c]]
+    stale = [c for c in stale if stale_keywords[c]]
+
+    if untracked:
+        warnings.warn(
+            f"{ms_path} holds {untracked}, which look like per-satellite columns "
+            "from an export that recorded no provenance. Nothing says which run "
+            "or correlation they describe, so they are left as they are; remove "
+            "them if they are stale.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     dims = ["row", "chan", "corr"]
     chunks = {k: v for k, v in xds_ms.chunks.items() if k in dims}
     # The results live on a length-1 correlation axis until into_corr places
     # them on the MS's, so they must not carry the MS's correlation chunk.
     fit_chunks = {k: v for k, v in chunks.items() if k != "corr"}
+
+    def placed(col, vis):
+        """``vis`` on the fitted correlation, the MS's values on the others."""
+
+        fill = xds_ms[col].data if col in xds_ms else 0
+        return xr.DataArray(
+            into_corr(vis.data, corr_idx, n_corr, fill), dims=dims
+        ).chunk(chunks)
 
     # Cast first and averaged afterwards, which is the order write_results_ms
     # forms TAB_RFI_DATA in. Averaging first would leave the two sides of the
@@ -1472,21 +1668,40 @@ def write_per_sat_rfi_ms(
 
     for i, col in enumerate(cols):
         vis = _to_ms_column(src[i], dims, fit_chunks, n_freq)
+        xds_ms = xds_ms.assign(**{col: placed(col, vis)})
+
+    for col in stale:
         xds_ms = xds_ms.assign(
-            **{
-                col: xr.DataArray(
-                    into_corr(vis.data, corr_idx, n_corr, 0), dims=dims
-                ).chunk(chunks)
-            }
+            **{col: placed(col, xr.zeros_like(vis, dtype=xds_ms[col].dtype))}
         )
 
-    col_keywords = {col: {"UNIT": "Jy"} for col in cols}
+    col_keywords = {
+        col: {
+            "UNIT": "Jy",
+            PROVENANCE_KEYWORD: _with_provenance(
+                column_keywords, col, corr_key, corr_record
+            ),
+        }
+        for col in cols
+    }
+    col_keywords.update(
+        {col: {PROVENANCE_KEYWORD: stale_keywords[col]} for col in stale}
+    )
 
     print(f"Writing per-satellite RFI predictions to {cols} columns in MS file.")
 
+    if stale:
+        print(f"Zeroing correlation {corr_idx} of stale columns {stale}.")
+
     # One fused compute for every column, as the results writer does: the
     # sources share the read of the zarr and the MS's row layout.
-    dask.compute(xds_to_table([xds_ms], ms_path, cols, column_keywords=col_keywords))
+    dask.compute(
+        xds_to_table([xds_ms], ms_path, cols + stale, column_keywords=col_keywords)
+    )
+
+    if emptied:
+        print(f"Removing stale columns {emptied}, which describe no correlation now.")
+        remove_columns(ms_path, emptied)
 
 
 @measure_runtime

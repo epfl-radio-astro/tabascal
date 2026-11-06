@@ -16,7 +16,7 @@ takes*.
 
 ## What is checked
 
-Two test classes, each parameterised over `variant` (`Riemann`, `RiemannFFI`)
+Two test classes, each parameterised over `variant` (`Riemann`, `RiemannFFI`: `rfi_vis:RiemannVisFine` with `rfi.backend` `jax` and `ffi`)
 and `precision` (`single`, `double`):
 
 - **`TabascalPerfCheck`** — single GPU.
