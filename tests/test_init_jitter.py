@@ -222,7 +222,7 @@ FIT_SEEDS = (1, 7)
 def jittered_fits(tmp_path_factory):
     """Three MAP iterations on the 8A sim with a jittered start, at two seeds.
 
-    Returns ``{seed: (stdout, out_dir, config_path)}``.
+    Returns ``{seed: (stdout, run_dir, config_path)}``.
     """
     import tabsim
     from huggingface_hub import snapshot_download
@@ -265,13 +265,14 @@ def jittered_fits(tmp_path_factory):
                 sys.executable, str(script), "run",
                 "-c", str(config_path),
                 "-od", str(out_dir),
+                "-n", "jitter",
                 "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
                 "-nl",
             ],
             capture_output=True, text=True, cwd=work, check=False,
         )
         assert result.returncode == 0, f"seed {seed} run failed: {result.stderr}"
-        fits[seed] = (result.stdout, out_dir, config_path)
+        fits[seed] = (result.stdout, out_dir / "runs" / "latest", config_path)
 
     return fits
 
@@ -281,7 +282,7 @@ def test_with_a_jitter_the_seed_moves_the_start(jittered_fits):
     import xarray as xr
 
     first, second = (
-        xr.open_zarr(str(jittered_fits[s][1] / "results" / "init_pred_Custom.zarr"))
+        xr.open_zarr(str(jittered_fits[s][1] / "results" / "init_pred.zarr"))
         for s in FIT_SEEDS
     )
     assert any(not np.array_equal(first[n].values, second[n].values) for n in first.data_vars)

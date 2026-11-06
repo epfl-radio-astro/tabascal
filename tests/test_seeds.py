@@ -298,7 +298,7 @@ def run_stubbed(tmp_path, monkeypatch, capsys, seed, n):
         **dict.fromkeys(["_print_run_header", "_record_resolved_settings", "save_orbits_for_reuse",
                          "_print_model_summary", "write_results_xds"], lambda *a, **k: None),
         "_resolve_paths": lambda *a, **k: paths,
-        "build_model": lambda *a: (SimpleNamespace(vis_obs=None), model),
+        "build_model": lambda *a: (SimpleNamespace(vis_obs=None, n_rfi=0), model),
         "load_truth": lambda *a: {},
         "run_key": lambda s: (spy("seed", 0)(s), run_key(s))[1],
         "init_predict": spy("init", 2),
