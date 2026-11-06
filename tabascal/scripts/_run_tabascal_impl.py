@@ -34,6 +34,7 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
+from tabascal.seeds import config_seed, describe_random_draws, run_key
 from tabascal.write import check_input_column, write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
@@ -377,10 +378,6 @@ def _print_model_summary(tab_config, model, start_time):
     print(f"{end_start}")
 
 
-#: The seed of the run's PRNG key, recorded in run.json.
-SEED = 1
-
-
 @measure_runtime
 def tabascal_subtraction(
     config, out_dir, ms_path=None, name=None, extra_orbit_dir=None, norad_path=None, log=True
@@ -397,7 +394,7 @@ def tabascal_subtraction(
         # Before any work, so a run that dies still says what it was and what it read.
         _on_process_0(
             "write the run's config.yaml and run.json",
-            lambda: (write_config(paths.run_dir, config), start_record(paths.run_dir, config, SEED)),
+            lambda: (write_config(paths.run_dir, config), start_record(paths.run_dir, config, config_seed(config))),
         )
         with _stdout_logger(paths.log_path, log):
             _subtract(config, paths)
@@ -454,9 +451,11 @@ def _subtract(config, paths):
     """The run itself, inside its directory: model, initial prediction, fit."""
     ms_path = paths.ms_path
     start_time = datetime.now()
-    key, _ = random.split(random.PRNGKey(SEED))
+    key, _ = random.split(run_key(config_seed(config)))
 
     _print_run_header(paths.run_dir, paths.f_name, paths.ms_path, start_time)
+    print(describe_random_draws(config))
+    print()
 
     if sharding_enabled():
         print(f"Sharding RFI sources over {jax.device_count()} devices:")

@@ -356,6 +356,9 @@ class TestAnalyticVis:
         if gp is not None:
             cfg.args["rfi"]["gp_cov"]["gammas"], cfg.args["rfi"]["cutoff"] = gp
         fine, params = run_route([FixedOrbitFine, signals[0], RiemannVisFine], cfg)
+        # A fixed latent, not a draw: every kept mode is set, so the signal varies within a cell.
+        params = {k: jnp.cos(jnp.arange(v.size, dtype=v.dtype).reshape(v.shape) + i)
+                  for i, (k, v) in enumerate(sorted(params.items()))}
         expected = fine(params)["vis_rfi"]
         err = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
         cfg.args["rfi"]["analytic"]["stencil"] = 0

@@ -15,6 +15,7 @@ supplies that the component never reads is caught by the recorded-read
 comparison.
 """
 
+from importlib.resources import files
 from types import SimpleNamespace
 
 import jax.numpy as jnp
@@ -26,6 +27,7 @@ from tabascal.components.rfi_vis import RiemannVisFine
 from tabascal.config import (
     TabConfig,
     load_config,
+    yaml_load,
 )
 from tabascal.interferometry import get_strides_and_idxs, max_ast_fringe_rate
 
@@ -96,6 +98,10 @@ def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5, n
             "flags": np.zeros((n_bl, n_freq, n_time), dtype=bool),
             "noise": 1.0,
             "noise_scalar": 1.0,
+            # Enough for GPVisAst to set up under a real Model.
+            "dish_d": 13.5,
+            "uvw": np.full((n_time, n_bl, 3), 1e3),
+            "phase_centre": {"ra": 30.0, "dec": -30.0},
         },
         "set_noise": {},
         "apply_gain_table": {},
@@ -452,10 +458,11 @@ class TestTheGainsSectionHasNoCorrelationLengths:
     frequency, so there is no correlation length to configure.
     """
 
-    def test_the_keys_the_gains_section_still_ships(self, tmp_path):
+    def test_the_keys_the_gains_section_still_ships(self):
         """What is left is the prior over a constant gain, and nothing else."""
 
-        assert set(base_args(tmp_path)["gains"]) == {
+        shipped = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))
+        assert set(shipped["gains"]) == {
             "init",
             "ref_ant",
             "fix_flux_scale",
@@ -463,5 +470,4 @@ class TestTheGainsSectionHasNoCorrelationLengths:
             "phase_mean",
             "amp_std",
             "phase_std",
-            "r_seed",
         }
