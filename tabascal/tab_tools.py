@@ -26,6 +26,7 @@ from jax.tree_util import tree_map
 from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
 from tabascal.opt_schedule import (
+    build_optimizer,
     checkpoint_path as _checkpoint_path,
     converged,
     describe_schedule,
@@ -540,6 +541,7 @@ def run_custom_svi(
     constants: dict = None,
     trace_path: Optional[str] = None,
     metrics: Optional[tuple] = None,
+    optimizer: Optional[dict] = None,
     schedule: Optional[dict] = None,
     stop: Optional[dict] = None,
     checkpoints: tuple = (),
@@ -570,8 +572,10 @@ def run_custom_svi(
     would deadlock the optimisation. Every rank traces; only the write at the
     end is rank 0's, gated inside :func:`_write_loss_trace`.
 
+    ``optimizer`` (normalised by :func:`tabascal.opt_schedule.validate_optimizer`)
+    is the optax optimiser each phase builds, ``adabelief`` when it is None.
     ``schedule`` (normalised by :func:`tabascal.opt_schedule.validate_schedule`)
-    replaces the two phases with one ``adabelief`` whose step size follows it,
+    replaces the two phases with one optimiser whose step size follows it,
     for ``max_iter`` steps in all; ``dual_run`` is then not read. One optimiser
     means one compiled step and moments that carry through every step (#82).
     ``stop`` ends that run early once :func:`tabascal.opt_schedule.converged`.
@@ -662,14 +666,14 @@ def run_custom_svi(
 
     params = init_params
     if schedule is not None:
-        optimizer = optax.adabelief(step_size(schedule, epsilon, max_iter))
-        params, losses = _run_phase(params, optimizer, max_iter)
+        transform = build_optimizer(optimizer, step_size(schedule, epsilon, max_iter))
+        params, losses = _run_phase(params, transform, max_iter)
     else:
-        params, losses = _run_phase(params, optax.adabelief(epsilon), max_iter)
+        params, losses = _run_phase(params, build_optimizer(optimizer, epsilon), max_iter)
 
         if dual_run:
             params, losses2 = _run_phase(
-                params, optax.adabelief(epsilon / 10), max_iter, offset=max_iter
+                params, build_optimizer(optimizer, epsilon / 10), max_iter, offset=max_iter
             )
             losses = losses + losses2
 
@@ -741,6 +745,7 @@ def run_opt(
         constants=constants,
         trace_path=trace_path,
         metrics=build_trace_metrics(tab_config, truth) if trace_path else None,
+        optimizer=checked["optimizer"],
         schedule=checked["schedule"],
         stop=checked["stop"],
         checkpoints=tuple(checked["checkpoints"]),

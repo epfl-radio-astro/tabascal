@@ -1,10 +1,10 @@
-"""``opt.schedule``, ``opt.stop`` and ``opt.checkpoints`` (GitHub #82).
+"""``opt.optimizer``, ``opt.schedule``, ``opt.stop`` and ``opt.checkpoints`` (GitHub #82).
 
 - **The old path is unchanged.** With no schedule, ``dual_run`` still runs two
   ``adabelief`` phases, bit for bit.
 - **One compilation.** A schedule builds one optimiser, so the step is traced
   once where ``dual_run`` traces it twice.
-- **The step sizes are the ones asked for**, and the optimiser takes them.
+- **The step sizes are the ones asked for**, and the optimiser asked for takes them.
 - **Checkpoints are written at their steps and reload** to the parameters the
   optimiser held then.
 - **The stop triggers** once the loss stops moving, and not before ``min_steps``.
@@ -22,6 +22,7 @@ from tabascal.opt_schedule import (
     load_checkpoint,
     step_size,
     validate_opt,
+    validate_optimizer,
     validate_schedule,
 )
 from tabascal.tab_tools import run_custom_svi
@@ -139,6 +140,46 @@ def test_a_cosine_schedule_falls_by_half_a_cosine_to_its_final_factor():
 def test_a_constant_schedule_holds_epsilon():
     schedule = step_size(validate_schedule({"kind": "constant"}, 5), EPS, 5)
     np.testing.assert_allclose([float(schedule(c)) for c in range(5)], [EPS] * 5, rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "schedule, max_iter, expected",
+    [
+        ({"kind": "linear", "final_factor": 0.2}, 4, [1, 0.8, 0.6, 0.4, 0.2]),
+        ({"kind": "step", "boundaries": [1, 3], "factor": [0.5, 0.1]}, 4, [1, 0.5, 0.5, 0.05, 0.05]),
+        # Boundaries count from the start of the fit, warmup included.
+        ({"kind": "step", "boundaries": [3], "warmup_steps": 2}, 4, [0, 0.5, 1, 0.1, 0.1]),
+        # The decay runs over the steps the warmup leaves, and still ends at max_iter.
+        ({"kind": "cosine", "warmup_steps": 2, "warmup_factor": 0.5}, 4, [0.5, 0.75, 1, 0.5, 0]),
+    ],
+    ids=["linear", "factor-per-boundary", "step-after-warmup", "cosine-after-warmup"],
+)
+def test_the_other_schedules_give_their_step_sizes(schedule, max_iter, expected):
+    sizes = step_size(validate_schedule(schedule, max_iter), EPS, max_iter)
+    np.testing.assert_allclose(
+        [float(sizes(c)) for c in range(max_iter + 1)], EPS * np.array(expected), rtol=1e-6, atol=1e-12
+    )
+
+
+@pytest.mark.parametrize("dual_run", [False, True], ids=["schedule", "dual_run"])
+def test_the_run_takes_the_optimiser_asked_for(dual_run):
+    """Its arguments and the clip included, in each phase of dual_run, bit for bit."""
+    toy = _toy_problem(0.1)
+    optimizer = validate_optimizer({"name": "adamw", "b1": 0.8, "weight_decay": 1e-3, "clip_norm": 0.5})
+
+    def adamw(lr):
+        return optax.chain(optax.clip_by_global_norm(0.5), optax.adamw(lr, b1=0.8, weight_decay=1e-3))
+
+    if dual_run:
+        ref_losses, history = _by_hand(toy, [(adamw(EPS), 3), (adamw(EPS / 10), 3)])
+        results = _svi(toy, 3, dual_run=True, optimizer=optimizer)
+    else:
+        schedule = validate_schedule({"kind": "cosine", "warmup_steps": 2}, 6)
+        ref_losses, history = _by_hand(toy, [(adamw(step_size(schedule, EPS, 6)), 6)])
+        results = _svi(toy, 6, schedule=schedule, optimizer=optimizer)
+
+    assert list(np.asarray(results.losses)) == ref_losses
+    _same(results.params, history[-1])
 
 
 def test_the_scheduled_run_takes_the_scheduled_steps():
@@ -297,7 +338,7 @@ def opt(**kwargs):
 
 
 def test_off_by_default():
-    assert validate_opt(opt()) == {"schedule": None, "stop": None, "checkpoints": []}
+    assert validate_opt(opt()) == {"optimizer": None, "schedule": None, "stop": None, "checkpoints": []}
 
 
 def test_the_defaults_fill_in():
@@ -305,15 +346,19 @@ def test_the_defaults_fill_in():
         schedule={"kind": "step", "boundaries": [500]},
         stop={"window": 50, "rtol": 1e-4},
     ))
-    assert checked["schedule"] == {"kind": "step", "boundaries": [500], "factor": 0.1}
+    assert checked["schedule"] == {
+        "kind": "step", "boundaries": [500], "factor": 0.1, "warmup_steps": 0, "warmup_factor": 0.0
+    }
     assert checked["stop"] == {"window": 50, "rtol": 1e-4, "min_steps": 0}
+    assert validate_optimizer("adam") == {"name": "adam", "clip_norm": None, "args": {}}
+    assert validate_optimizer({"b1": 0.95}) == {"name": "adabelief", "clip_norm": None, "args": {"b1": 0.95}}
 
 
 @pytest.mark.parametrize(
     "kwargs, match",
     [
         ({"schedule": "cosine"}, "opt.schedule"),
-        ({"schedule": {"kind": "linear"}}, "opt.schedule"),
+        ({"schedule": {"kind": "polynomial"}}, "opt.schedule"),
         ({"schedule": {"kind": "step"}}, "boundaries"),
         ({"schedule": {"kind": "step", "boundaries": [1000]}}, "max_iter"),
         ({"schedule": {"kind": "step", "boundaries": [500, 200]}}, "increase"),
@@ -322,6 +367,18 @@ def test_the_defaults_fill_in():
         ({"schedule": {"kind": "exponential"}}, "final_factor"),
         ({"schedule": {"kind": "exponential", "final_factor": 0}}, "final_factor"),
         ({"schedule": {"kind": "cosine", "final_factor": 1.5}}, "final_factor"),
+        ({"schedule": {"kind": "step", "boundaries": [200, 500], "factor": [0.1]}}, "one per boundary"),
+        ({"schedule": {"kind": "constant", "warmup_steps": 1000}}, "warmup_steps"),
+        ({"schedule": {"kind": "step", "boundaries": [100], "warmup_steps": 100}}, "after warmup_steps"),
+        ({"schedule": {"kind": "constant", "warmup_factor": 2}}, "warmup_factor"),
+        ({"optimizer": "adamm"}, "opt.optimizer.name"),
+        ({"optimizer": ["adam"]}, "opt.optimizer"),
+        ({"optimizer": {"name": "adam", "learning_rate": 0.1}}, "opt.epsilon"),
+        ({"optimizer": {"name": "sgd", "b1": 0.9}}, r"\['b1'\]"),
+        ({"optimizer": {"name": "sgd", "nesterov": 1}}, "true or false"),
+        ({"optimizer": {"name": "adam", "b1": True}}, "b1"),
+        ({"optimizer": {"name": "adam", "eps": None}}, "eps"),
+        ({"optimizer": {"clip_norm": 0}}, "clip_norm"),
         ({"stop": {"window": 10, "rtol": 1e-4}}, "needs opt.schedule"),
         ({"schedule": {"kind": "constant"}, "stop": {"window": 0, "rtol": 1e-4}}, "window"),
         ({"schedule": {"kind": "constant"}, "stop": {"window": 10, "rtol": True}}, "rtol"),
@@ -348,7 +405,7 @@ def test_the_base_config_ships_every_new_key_off():
     from tabascal.config import yaml_load
 
     base = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))["opt"]
-    assert base["schedule"] is None and base["stop"] is None and base["checkpoints"] is None
+    assert all(base[k] is None for k in ("optimizer", "schedule", "stop", "checkpoints"))
     assert base["dual_run"] is True
 
 
@@ -359,6 +416,11 @@ def test_the_base_config_ships_every_new_key_off():
         ({"schedule": {"kind": "step", "boundaries": [1000]}, "max_iter": 2000}, "one compiled step"),
         ({"schedule": {"kind": "constant"}, "stop": {"window": 10, "rtol": 1e-4}}, "stop when"),
         ({"checkpoints": [500]}, "saved at steps [500]"),
+        ({"optimizer": {"name": "sgd", "momentum": 0.9, "clip_norm": 1}},
+         "sgd (momentum=0.9, gradient norm clipped at 1), step size 0.2 for 1000 steps, then a new sgd"),
+        ({"schedule": {"kind": "linear", "warmup_steps": 10}},
+         "warmup from x0 over 10 steps, then linear decay to x0"),
+        ({"schedule": {"kind": "step", "boundaries": [200, 500], "factor": [0.5, 0.1]}}, "x0.5/0.1 at steps"),
     ],
 )
 def test_the_log_line_names_the_optimiser(kwargs, says):
@@ -380,7 +442,7 @@ E2E_COMPONENTS = [
 
 @pytest.fixture(scope="module")
 def scheduled_fit(tmp_path_factory):
-    """Four scheduled MAP steps on the 8A sim, with checkpoints at 2 and 4; ~35 s."""
+    """Four scheduled, clipped adam steps on the 8A sim, with checkpoints at 2 and 4; ~35 s."""
     import subprocess
     import sys
     from importlib.resources import files as _res_files
@@ -416,6 +478,7 @@ def scheduled_fit(tmp_path_factory):
             "inference": {"opt": True},
             "opt": {
                 "epsilon": 1e-3, "max_iter": 4, "dual_run": True, "guide": "map",
+                "optimizer": {"name": "adam", "clip_norm": 10.0},
                 "schedule": {"kind": "step", "boundaries": [2]},
                 "checkpoints": [2, 4],
             },
@@ -430,6 +493,7 @@ def scheduled_fit(tmp_path_factory):
             sys.executable, str(script), "run",
             "-c", str(config_path),
             "-od", str(out_dir),
+            "-n", "sched",
             "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
             "-nl",
         ],
@@ -443,14 +507,16 @@ def test_the_runner_writes_each_checkpoint_beside_the_map_prediction(scheduled_f
     import xarray as xr
 
     stdout, out_dir = scheduled_fit
-    results = out_dir / "results"
-    (map_zarr,) = results.glob("map_pred*.zarr")
-    stem = map_zarr.name.removesuffix(".zarr")
+    (run_dir,) = (out_dir / "runs").glob("sched_*")
+    results = run_dir / "results"
+    map_zarr = results / "map_pred.zarr"
+    stem = "map_pred"
 
     assert sorted(p.name for p in (results / "checkpoints").iterdir()) == [
         f"{stem}_step2.npz", f"{stem}_step4.npz"
     ]
-    assert "Optimiser : adabelief, step size 0.001, x0.1 at steps [2], 4 steps, one compiled step" in stdout
+    assert ("Optimiser : adam (gradient norm clipped at 10), step size 0.001, x0.1 at steps [2], "
+            "4 steps, one compiled step") in stdout
     # dual_run: true is not read with a schedule: four steps, not eight.
     params, step, _ = load_checkpoint(str(results / "checkpoints" / f"{stem}_step4.npz"))
     assert step == 4 and params

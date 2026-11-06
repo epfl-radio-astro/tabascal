@@ -389,9 +389,6 @@ def tabascal_subtraction(
         config["data"].get("data_col", "DATA"),
         config["data"].get("save_rfi_per_sat", False),
     )
-    # Likewise a bad opt key, rather than failing in run_opt after the setup.
-    if config["inference"]["opt"]:
-        validate_opt(config["opt"])
     paths = _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path)
 
     try:
@@ -460,6 +457,9 @@ def _subtract(config, paths):
     _print_run_header(paths.run_dir, paths.f_name, paths.ms_path, start_time)
     print(describe_random_draws(config))
     print()
+    # Here rather than in run_opt, so a bad opt key fails before the setup does.
+    if config["inference"]["opt"]:
+        validate_opt(config["opt"])
 
     if sharding_enabled():
         print(f"Sharding RFI sources over {jax.device_count()} devices:")
