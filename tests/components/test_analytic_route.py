@@ -352,15 +352,21 @@ class TestAnalyticVis:
         """The same latent parameters through both routes, and closer than holding each
         cell's value (stencil 0). Cells wind ~4 turns: 101 samples keep the fine route's
         own Riemann error (6e-3 at 31) below the signal interpolation's (9e-4)."""
-        cfg = make_config(n_ant=5, n_int_time=101, n_int_freq=n_int_freq, corr_time=80.0)
-        if gp is not None:
-            cfg.args["rfi"]["gp_cov"]["gammas"], cfg.args["rfi"]["cutoff"] = gp
-        fine, params = run_route([FixedOrbitFine, signals[0], RiemannVisFine], cfg)
-        expected = fine(params)["vis_rfi"]
-        err = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
-        cfg.args["rfi"]["analytic"]["stencil"] = 0
-        err_held = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
-        assert err < 1e-2 and err < err_held / 3, (err, err_held)
+        errs = []
+        # Pooled over draws: a single draw's held error is 1.7-17x the stencil's.
+        for seed in range(1, 5):
+            cfg = make_config(n_ant=5, n_int_time=101, n_int_freq=n_int_freq, corr_time=80.0)
+            cfg.args["inference"] = {"seed": seed}
+            if gp is not None:
+                cfg.args["rfi"]["gp_cov"]["gammas"], cfg.args["rfi"]["cutoff"] = gp
+            fine, params = run_route([FixedOrbitFine, signals[0], RiemannVisFine], cfg)
+            expected = fine(params)["vis_rfi"]
+            err = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
+            cfg.args["rfi"]["analytic"]["stencil"] = 0
+            err_held = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
+            errs.append((float(err), float(err_held)))
+        err, err_held = np.sum(errs, axis=0)
+        assert max(e for e, _ in errs) < 1e-2 and err < err_held / 3, errs
 
     def test_the_route_does_not_read_the_fine_grid(self):
         """One fine sample per cell, as TabConfig sets on this route, changes nothing:
