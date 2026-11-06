@@ -37,6 +37,17 @@ OPTIMIZERS = (
 #: Arguments of those optimisers that are not scalars a YAML file can give.
 _NOT_FROM_CONFIG = ("learning_rate", "mask", "mu_dtype", "accumulator_dtype")
 
+#: The range each of their numeric arguments must lie in, as ``(low, high)``
+#: with ``high`` excluded: a decay rate of 1 never forgets its start, and the
+#: first update divides by zero. Every numeric argument of OPTIMIZERS is here.
+_ARG_RANGES = {
+    **dict.fromkeys(("b1", "b2", "b3", "decay", "momentum"), (0.0, 1.0)),
+    **dict.fromkeys(
+        ("eps", "eps_root", "weight_decay", "initial_scale", "initial_accumulator_value", "threshold"),
+        (0.0, math.inf),
+    ),
+}
+
 #: The schedules ``opt.schedule.kind`` names.
 SCHEDULE_KINDS = ("constant", "step", "exponential", "cosine", "linear")
 
@@ -56,14 +67,17 @@ _WARMUP_KEYS = {"warmup_steps": 0, "warmup_factor": 0.0}
 _STOP_KEYS = {"window": None, "rtol": None, "min_steps": 0}
 
 
-def _number(value, key: str, low: float, high: float = math.inf, low_open=False) -> float:
+def _number(value, key: str, low: float, high: float = math.inf, low_open=False, high_open=False) -> float:
     # A bool is a Real to Python, and `factor: true` was not meant as 1.
     ok = (
         not isinstance(value, bool) and isinstance(value, Real) and math.isfinite(value)
-        and (value > low if low_open else value >= low) and value <= high
+        and (value > low if low_open else value >= low)
+        and (value < high if high_open else value <= high)
     )
     if not ok:
-        bound = f"{'>' if low_open else '>='} {low:g}" + (f" and <= {high:g}" if high < math.inf else "")
+        bound = f"{'>' if low_open else '>='} {low:g}" + (
+            f" and {'<' if high_open else '<='} {high:g}" if high < math.inf else ""
+        )
         raise ValueError(f"opt.{key} must be a finite number {bound}, not {value!r}.")
     return float(value)
 
@@ -123,8 +137,8 @@ def validate_optimizer(optimizer) -> Optional[Dict]:
             if not isinstance(value, bool):
                 raise ValueError(f"opt.optimizer.{key} must be true or false, not {value!r}.")
         elif not (value is None and default is None):
-            # A finite number; -inf is no hyperparameter, and `b1: true` was not meant as 1.
-            args[key] = _number(value, f"optimizer.{key}", -math.inf)
+            low, high = _ARG_RANGES[key]
+            args[key] = _number(value, f"optimizer.{key}", low, high, high_open=high < math.inf)
     return {"name": name, "clip_norm": clip_norm, "args": args}
 
 

@@ -273,10 +273,11 @@ def test_a_failed_checkpoint_write_raises_in_a_single_process_run(tmp_path):
         save_checkpoint(str(blocker / "x_step1.npz"), {"a": np.zeros(3)}, 1, 0.0, write=True)
 
 
-def test_no_checkpoint_is_written_by_default(tmp_path):
-    toy = _toy_problem(0.1)
-    _svi(toy, 3)
-    assert list(tmp_path.iterdir()) == []
+def test_no_checkpoint_is_written_by_default(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tab_tools, "save_checkpoint", lambda *a, **k: calls.append(a))
+    _svi(_toy_problem(0.1), 3, dual_run=True)
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +379,11 @@ def test_the_defaults_fill_in():
         ({"optimizer": {"name": "sgd", "nesterov": 1}}, "true or false"),
         ({"optimizer": {"name": "adam", "b1": True}}, "b1"),
         ({"optimizer": {"name": "adam", "eps": None}}, "eps"),
+        ({"optimizer": {"name": "adam", "b1": 1}}, "b1"),
+        ({"optimizer": {"name": "adam", "b2": -0.1}}, "b2"),
+        ({"optimizer": {"name": "adam", "eps_root": -1}}, "eps_root"),
+        ({"optimizer": {"name": "sgd", "momentum": 1.0}}, "momentum"),
+        ({"optimizer": {"name": "adamw", "weight_decay": -1e-4}}, "weight_decay"),
         ({"optimizer": {"clip_norm": 0}}, "clip_norm"),
         ({"stop": {"window": 10, "rtol": 1e-4}}, "needs opt.schedule"),
         ({"schedule": {"kind": "constant"}, "stop": {"window": 0, "rtol": 1e-4}}, "window"),
@@ -393,6 +399,17 @@ def test_the_defaults_fill_in():
 def test_a_malformed_opt_key_is_refused_by_name(kwargs, match):
     with pytest.raises(ValueError, match=match):
         validate_opt(opt(**kwargs))
+
+
+def test_every_numeric_optimiser_argument_has_a_range():
+    import inspect
+
+    from tabascal import opt_schedule as o
+
+    for name in o.OPTIMIZERS:
+        params = inspect.signature(getattr(optax, name)).parameters
+        numeric = {k for k, p in params.items() if k not in o._NOT_FROM_CONFIG and not isinstance(p.default, bool)}
+        assert numeric <= set(o._ARG_RANGES), (name, numeric - set(o._ARG_RANGES))
 
 
 def test_dual_run_checkpoints_may_reach_into_the_second_phase():
