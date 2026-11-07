@@ -66,6 +66,7 @@ FINE_GRID = [
     "trajectory:PhaseCalculationRFIFine",
     "trajectory:NoDragOrbitFine",
     "trajectory:OrbitFine",
+    "trajectory:OrbitDeviationFine",
     "rfi_signal:ComplexRFIVarAntFine",
     "rfi_signal:ComplexRFIConstAntFine",
     "rfi_vis:RiemannVisFine",
@@ -77,7 +78,8 @@ FINE_GRID = [
 REMOVED = [
     ref.removesuffix("Fine")
     for ref in FINE_GRID
-    if ref.split(":")[1] not in ("FixedOrbitFine", "ComplexRFIVarAntFine", "ComplexRFIConstAntFine")
+    if ref.split(":")[1]
+    not in ("FixedOrbitFine", "OrbitDeviationFine", "ComplexRFIVarAntFine", "ComplexRFIConstAntFine")
 ] + [
     "trajectory:FixedOrbitCoarse", "rfi_signal:ComplexRFIVarAntCoarse", "rfi_vis:PolyInterpVis",
     "rfi_vis:RiemannVisFFI", "rfi_vis:RiemannVisVariableFFI",

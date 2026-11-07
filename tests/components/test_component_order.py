@@ -156,6 +156,16 @@ class TestWrongOrder:
         assert "listed after" in message
 
 
+    def test_phase_left_stale_by_an_orbit_deviation(self):
+        """FixedOrbitFine's phase is of the undeviated orbit, so a phase calculation must follow."""
+        refs = ["trajectory:FixedOrbitFine", "trajectory:OrbitDeviationFine"] + FULL_RFI[1:]
+        with pytest.raises(ComponentOrderError, match="leaves stale") as excinfo:
+            check(refs)
+        assert "rfi_vis:RiemannVisFine" in str(excinfo.value)
+        assert "'trajectory:PhaseCalculationRFIFine' after it" in str(excinfo.value)
+        check(refs[:2] + ["trajectory:PhaseCalculationRFIFine"] + refs[2:])
+
+
 class TestValidLists:
     """Working combinations must keep working -- no false positives."""
 
@@ -200,6 +210,18 @@ class TestValidLists:
                     "gains:UnitaryGains",
                 ],
                 id="gp-plus-fixed-sky",
+            ),
+            pytest.param(
+                [
+                    "trajectory:NoDragOrbitFine",
+                    "trajectory:OrbitDeviationFine",
+                    "trajectory:PhaseCalculationRFIFine",
+                    "rfi_signal:ComplexRFIVarAntFine",
+                    "rfi_vis:RiemannVisFine",
+                    "ast_vis:GPVisAst",
+                    "gains:UnitaryGains",
+                ],
+                id="orbit-deviation",
             ),
         ],
     )
@@ -261,6 +283,7 @@ EXPECTED_LOCATIONS = {
     "examples/tab_target.yaml": 1,
     "tests/data/tab_target.yaml": 1,
     "docs/analytic_rfi_vis.md": 1,
+    "docs/components/trajectory.md": 1,
     "docs/config.md": 3,
     "docs/kernels.md": 1,
 }

@@ -28,7 +28,7 @@ The components should be given in order of dependency. For example, `trajectory:
 
 Every RFI component that works on the fine time-frequency grid carries a `Fine`
 suffix: `trajectory:` `FixedOrbitFine`, `PhaseCalculationRFIFine`,
-`NoDragOrbitFine`, `OrbitFine`; `rfi_signal:` `ComplexRFIVarAntFine`,
+`NoDragOrbitFine`, `OrbitFine`, `OrbitDeviationFine`; `rfi_signal:` `ComplexRFIVarAntFine`,
 `ComplexRFIConstAntFine`; `rfi_vis:` `RiemannVisFine`,
 `RiemannVisVariableFine`. The names without the
 suffix are no longer accepted, so a config or import written before the rename,
@@ -64,6 +64,7 @@ error under `single`, so set `model.precision: double` to use them:
 * `trajectory:PhaseCalculationRFIFine`
 * `trajectory:NoDragOrbitFine`
 * `trajectory:OrbitFine`
+* `trajectory:OrbitDeviationFine`
 
 Both `rfi.backend` implementations of `rfi_vis:RiemannVisFine` (`jax` and the
 compiled `ffi`, see [RFI-visibility kernels](kernels.md)) run in either precision, as do the
@@ -650,6 +651,25 @@ satellites:
 
   **The default of `3` is provisional.** It is a hard backstop against obviously unsuitable remote records — for one observation, SatChecker's per-satellite fallback silently returned records ~31 days old, worth ~9,663 km of ISS position error — and *not* a claim that a three-day-old element set gives adequate positional accuracy. The calibrated, observation-specific suitability policy that should replace it is tracked in [issue #101](https://github.com/epfl-radio-astro/tabascal/issues/101); it may end up rejecting records younger than three days for some orbits and baselines, or accepting older ones where independently justified.
 * `cache_reuse_max_age_days`: Request-avoidance threshold for the per-NORAD cache (default `1`). A cached record this close to the observation avoids a request. An older cached record triggers an exact-epoch nearest lookup — including against the fallback archive, since holding a stale record is not the same as the archive having answered — but remains an offline fallback if it is within `remote_max_age_days`. A response replaces it only when strictly closer to the observation. `null` always reuses the nearest acceptable cached record. When both limits are set, this value must not exceed the hard ceiling.
+
+## Orbit deviation
+
+The `orbit_deviation` section is the prior of `trajectory:OrbitDeviationFine`, which moves each satellite off the orbit listed before it by a real Gaussian process in time along its radial, in-track and cross-track (RIC) axes. No other component reads it. See [Trajectory components](components/trajectory.md) for the model.
+
+```yaml
+orbit_deviation:
+  std: [100, 1000, 300]   # metres: radial, in-track, cross-track
+  corr_time: null         # seconds; null is half the observation
+  gamma: 5
+  cutoff: null
+  time_pad_factor: 2
+```
+
+* `std`: Prior standard deviation of the offset on each RIC axis, in metres, as a list of three or one number for all of them. The spectrum is normalised to it, so this is the deviation's width at every time, whatever `corr_time`, `gamma` and `cutoff` are. The default is the scale of a LEO TLE's error near its epoch, largest along the track. Widen it to what the records can actually be wrong by: the deviation starts at zero, and a prior much narrower than the error cannot reach it.
+* `corr_time`: Time over which the offset stays correlated, in seconds, per axis or one number for all three, setting the knee of each axis's power spectrum as `rfi.gp_cov.corr_time` does. `null` is half the observation. An orbit-record error changes over a fraction of an orbit, so over a short pass it is close to an offset and a drift; a correlation time much longer than the padded observation leaves only the constant mode.
+* `gamma`: Roll-off exponent of the power spectrum past the knee, shared by the three axes. `null` is 5.
+* `cutoff`: Relative power below which a time mode is dropped. It sets the number of fitted parameters and not the prior's width, as `rfi.cutoff` does. The three axes share the modes their shortest `corr_time` keeps. `null` is `1e-6`.
+* `time_pad_factor`: Zero-padding factor of the time axis, at least 1. `1` makes the offset periodic over the observation. `null` is 2.
 
 ## Gains
 

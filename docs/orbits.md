@@ -403,6 +403,10 @@ Space-Track provides rather than repeatedly querying `gp_history`.
 This is a manual interoperability path only; TABASCAL does not store
 Space-Track credentials or query Space-Track itself.
 
+## When a record is not accurate enough
+
+A record's error grows with its age and is largest along the track. Where it is a fraction of a fringe on the longest baselines, a complex RFI amplitude absorbs the phase it costs. Beyond that the model needs the satellite moved. `tabascal light-curve --fit-offset` handles the case where the error is a pure along-track time offset (see [Records with a fitted time offset](#records-with-a-fitted-time-offset)). For a general offset, `trajectory:OrbitDeviationFine` fits each satellite's displacement from its orbit as a Gaussian process in time on the radial, in-track and cross-track axes. It goes after any orbit component and before `trajectory:PhaseCalculationRFIFine`, and its prior is set in the [`orbit_deviation`](config.md#orbit-deviation) section. The deviation is fitted as part of the run and is not written back to a record.
+
 ## Distributed runs
 
 Only process 0 resolves satellites and performs network requests. Its complete

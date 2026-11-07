@@ -8,6 +8,14 @@ from tabascal.distributed import (
     sharding_enabled,
 )
 from tabascal.dist import standard_normal
+from tabascal.fft_gp import (
+    _gp_cov_number,
+    knee_from_corr_scale,
+    latent_to_signal,
+    latent_to_signal_init,
+    pow_spec_nd,
+    validate_cutoff,
+)
 from tabascal.transform import affine_transform_full
 from tabascal.interferometry import (
     get_rfi_path_numpy,
@@ -28,6 +36,7 @@ import jax.numpy as jnp
 from jax import vmap, Array
 import numpy as np
 from numpy.typing import NDArray
+from typing import Dict, List
 
 from sgp4.api import WGS72, Satrec
 
@@ -953,6 +962,267 @@ class OrbitFine(Component):
         assert_attr_shape(self, "L_rfi_orbit", (self.n_rfi, 7, 7))
         assert_attr_shape(self, "init_rfi_orbit", orbit_shape)
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
+
+
+#: Keys of the ``orbit_deviation`` config section, which trajectory:OrbitDeviationFine reads.
+_ORBIT_DEVIATION_KEYS = ("std", "corr_time", "gamma", "cutoff", "time_pad_factor")
+
+#: The RIC axes, in the order the per-axis config entries and the deviation carry them.
+RIC_AXES = ("radial", "in-track", "cross-track")
+
+#: Default prior width of the deviation on each RIC axis, in metres: the scale of a
+#: LEO TLE's error near its epoch, largest along the track.
+_ORBIT_DEVIATION_STD = [100.0, 1000.0, 300.0]
+
+
+def _per_ric_axis(value, where: str) -> List[float]:
+    """Three positive numbers, one per RIC axis, from a list of three or one number for all."""
+    if isinstance(value, (list, tuple)):
+        if len(value) != 3:
+            raise ValueError(
+                f"{where} has {len(value)} entries; it takes 3, one per axis in the "
+                f"order {list(RIC_AXES)}, or a single number for all three."
+            )
+        return [_gp_cov_number(v, where) for v in value]
+    return [_gp_cov_number(value, where)] * 3
+
+
+def orbit_deviation_config_validation(dev_config, times: NDArray, int_time: float) -> Dict:
+    """Validate the ``orbit_deviation`` section and fill in what its nulls mean.
+
+    A null ``std``, ``gamma``, ``cutoff`` or ``time_pad_factor`` is the base
+    configuration's value; ``corr_time: null`` is half the observed extent, as
+    ``rfi.gp_cov.corr_time: null`` is.
+    """
+    dev_config = dict(dev_config or {})
+    unknown = sorted(set(dev_config) - set(_ORBIT_DEVIATION_KEYS), key=repr)
+    if unknown:
+        raise ValueError(
+            f"orbit_deviation has no key(s) {unknown}. It takes {list(_ORBIT_DEVIATION_KEYS)}."
+        )
+
+    std = dev_config.get("std")
+    std = _ORBIT_DEVIATION_STD if std is None else std
+    std = _per_ric_axis(std, "orbit_deviation.std")
+
+    corr_time = dev_config.get("corr_time")
+    if corr_time is None:
+        extent = float(np.max(times) - np.min(times))
+        corr_time = (extent if extent > 0.0 else float(int_time)) / 2
+    corr_time = _per_ric_axis(corr_time, "orbit_deviation.corr_time")
+
+    gamma = dev_config.get("gamma")
+    gamma = 5.0 if gamma is None else _gp_cov_number(gamma, "orbit_deviation.gamma")
+
+    pad = dev_config.get("time_pad_factor")
+    pad = 2.0 if pad is None else _gp_cov_number(pad, "orbit_deviation.time_pad_factor")
+    if pad < 1.0:
+        raise ValueError(
+            f"Config parameter (orbit_deviation.time_pad_factor: {pad!r}) must be at least 1."
+        )
+
+    return {
+        "std": std,
+        "corr_time": corr_time,
+        "gamma": gamma,
+        "cutoff": validate_cutoff(dev_config.get("cutoff"), "orbit_deviation.cutoff", 1e-6),
+        "time_pad_factor": pad,
+    }
+
+
+def ric_basis(rfi_xyz: Array, times: Array) -> Array:
+    """The radial, in-track and cross-track unit vectors along each satellite's path.
+
+    Parameters
+    ----------
+    rfi_xyz : Array (n_rfi, n_time, 3)
+        Positions in an inertial frame (GCRS), in metres.
+    times : Array (n_time,)
+        Their times, in seconds; at least two.
+
+    Returns
+    -------
+    Array (n_rfi, n_time, 3, 3)
+        The rotation from RIC to that frame: column ``j`` is the ``j``-th RIC axis,
+        so ``basis @ d_ric`` is the offset ``d_ric`` written in the frame.
+
+    The velocity is a central difference of the positions (one-sided at the ends),
+    since the fixed orbits output none. Radial is along ``r``, cross-track along
+    ``r x v`` and in-track ``c x r``, so only the orbital plane the difference spans
+    orients the basis, and the difference's error along the track turns no axis.
+    """
+    vel = jnp.gradient(rfi_xyz, times, axis=1)
+    r_hat = rfi_xyz / jnp.linalg.norm(rfi_xyz, axis=-1, keepdims=True)
+    h = jnp.cross(rfi_xyz, vel)
+    c_hat = h / jnp.linalg.norm(h, axis=-1, keepdims=True)
+    i_hat = jnp.cross(c_hat, r_hat)
+    return jnp.stack([r_hat, i_hat, c_hat], axis=-1)
+
+
+class OrbitDeviationFine(Component):
+    """A Gaussian-process offset of each satellite from the orbit before it, in its RIC frame.
+
+    The orbit components place each satellite on the path its orbit record
+    propagates to. Where that path is wrong by more than a fraction of a fringe,
+    the RFI phase is wrong with it, and only a complex amplitude can take up the
+    difference. This component moves each satellite off the upstream ``rfi_xyz``
+    by ``R(t) d(t)``: ``d`` is one real Gaussian process in time per satellite
+    per radial, in-track and cross-track axis, and ``R(t)`` the rotation from
+    that frame to the GCRS the positions are in (:func:`ric_basis`).
+
+    It sits between an orbit and the phase calculation, e.g.
+    ``trajectory:FixedOrbitFine`` -> ``trajectory:OrbitDeviationFine`` ->
+    ``trajectory:PhaseCalculationRFIFine``, and composes with a learnable orbit
+    (``NoDragOrbitFine``, ``OrbitFine``) the same way: the gradient reaches the
+    orbit's elements through the base positions and the basis they set.
+
+    Each axis's prior is the same Fourier GP the RFI amplitude uses
+    (:mod:`tabascal.fft_gp`), in the real signal space: the data-grid time axis
+    padded by ``orbit_deviation.time_pad_factor`` and supersampled onto the fine
+    grid, with the spectrum normalised so the deviation has standard deviation
+    ``orbit_deviation.std`` metres on that axis. The three axes share one latent
+    grid, the modes the shortest ``corr_time`` keeps, where a longer one gives
+    the extra modes almost no weight. It starts at zero
+    deviation, which reproduces the upstream orbit exactly.
+
+    The upstream ``rfi_phase`` is stale once the satellites move, so a phase
+    calculation must follow (see ``invalidates``).
+    """
+
+    requires_double = True
+    required_inputs = {"rfi_xyz": ("n_rfi", "n_time_fine", 3)}
+    output_shapes = {
+        "rfi_xyz": ("n_rfi", "n_time_fine", 3),
+        "rfi_orbit_dev": ("n_rfi", "n_time_fine", 3),
+    }
+    invalidates = ("rfi_phase",)
+
+    parameter_shapes = {"rfi_orbit_dev_base": ("n_rfi", 3, "n_k_time_dev")}
+
+    def setup(self, config):
+        """All validation and error-prone operations here"""
+        self.require_double(config)
+        try:
+            dev = orbit_deviation_config_validation(
+                config.args.get("orbit_deviation"), config.times, config.int_time
+            )
+            self.std = dev["std"]
+            self.corr_time = dev["corr_time"]
+            self.gamma = dev["gamma"]
+            self.cutoff = dev["cutoff"]
+            self.time_pad_factor = dev["time_pad_factor"]
+
+            self.n_rfi = config.n_rfi
+            self.n_time = config.n_time
+            self.n_int_time = config.n_int_time
+            self.n_time_fine = config.n_time_fine
+            self.int_time = float(config.int_time)
+            if self.n_time_fine < 2:
+                raise ValueError(
+                    "the RIC basis needs a velocity, so at least two fine time samples; "
+                    f"got {self.n_time_fine}."
+                )
+            self.times_fine = jnp.asarray(config.times_fine)
+
+            self._compute_gp_params()
+            self._compute_init_params()
+            self._set_outputs()
+            self._validate_dimensions()
+
+        except Exception as e:
+            raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
+
+    def _compute_gp_params(self):
+
+        # One latent grid for all three axes: the cut of the broadest spectrum,
+        # which with a shared gamma is the shortest correlation time's.
+        k0s = [float(knee_from_corr_scale(t)) for t in self.corr_time]
+        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
+            [self.n_time],
+            [self.int_time],
+            [self.time_pad_factor],
+            [self.n_int_time],
+            1.0,
+            [max(k0s)],
+            [self.gamma],
+            self.cutoff,
+            signal_type="real",
+        )
+        # Each axis's own spectrum on that grid, normalised so the deviation's
+        # variance, sum(P) for Hartley coefficients, is std**2.
+        pk_axes = jnp.stack(
+            [pow_spec_nd(self.ks, 1.0, [k0], [self.gamma]) for k0 in k0s]
+        )
+        pk_axes = pk_axes / jnp.sum(pk_axes, axis=1, keepdims=True)
+        pk_axes = pk_axes * jnp.asarray(self.std)[:, None] ** 2
+        self.n_k_time_dev = pk_axes.shape[1]
+        self.sigma_rfi_orbit_dev = jnp.sqrt(pk_axes)  # (3, n_k_time_dev)
+
+        print("\nOrbit deviation specs")
+        print(f"std (m)        : {self.std}  ({', '.join(RIC_AXES)})")
+        print(f"corr_time (s)  : {self.corr_time}")
+        print(f"(gamma, cutoff): ({self.gamma}, {self.cutoff:.1e})")
+        print(f"n_k_time       : {self.n_k_time_dev}")
+
+    def _compute_init_params(self):
+        zeros = jnp.zeros((self.n_rfi, 3, self.n_k_time_dev))
+        self.init_params = {"rfi_orbit_dev": zeros}
+        self.init_params_base = {"rfi_orbit_dev_base": zeros}
+
+    def build_set_params(self):
+        shape = (self.n_rfi, 3, self.n_k_time_dev)
+
+        def set_params(params):
+            params["rfi_orbit_dev_base"] = standard_normal("rfi_orbit_dev_base", shape)
+            return params
+
+        return set_params
+
+    def build_constants(self):
+        return {
+            "sigma_rfi_orbit_dev": self.sigma_rfi_orbit_dev,
+            "times_fine": self.times_fine,
+        }
+
+    def build_forward(self):
+        """Return pure, JIT-compatible function"""
+        prefix = self.prefix
+        pads = self.pads
+        ss_idxs = self.ss_idxs
+
+        def to_signal(latent):
+            return latent_to_signal(latent, pads, ss_idxs, signal_type="real")
+
+        def forward(params, state, constants):
+            sigma = constants[f"{prefix}/sigma_rfi_orbit_dev"]
+            dev_k = sigma[None] * params["rfi_orbit_dev_base"]
+            # (n_rfi, 3, n_time_fine) -> (n_rfi, n_time_fine, 3)
+            dev_ric = jnp.swapaxes(vmap(vmap(to_signal))(dev_k), 1, 2)
+
+            base = state["rfi_xyz"]
+            basis = ric_basis(base, constants[f"{prefix}/times_fine"])
+            rfi_xyz = base + jnp.einsum("stij,stj->sti", basis, dev_ric)
+
+            return {**state, "rfi_xyz": rfi_xyz, "rfi_orbit_dev": dev_ric}
+
+        return forward
+
+    def _set_outputs(self):
+        self.state_outputs = {
+            "rfi_xyz": jnp.zeros((self.n_rfi, self.n_time_fine, 3)),
+            "rfi_orbit_dev": jnp.zeros((self.n_rfi, self.n_time_fine, 3)),
+        }
+
+    def _validate_dimensions(self):
+        """Ensure all setup operations completed successfully"""
+        assert_attr_shape(self, "sigma_rfi_orbit_dev", (3, self.n_k_time_dev))
+        n_out = latent_to_signal(
+            jnp.zeros((self.n_k_time_dev,)), self.pads, self.ss_idxs, signal_type="real"
+        ).shape
+        assert n_out == (self.n_time_fine,), (
+            f"The deviation lands on {n_out[0]} time samples, not the fine grid's "
+            f"{self.n_time_fine}."
+        )
 
 
 def itrs_to_gcrs_sf(pos_itrs: NDArray, times_jd: NDArray) -> NDArray:
