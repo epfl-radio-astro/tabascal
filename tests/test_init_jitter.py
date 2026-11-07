@@ -1,5 +1,6 @@
 """``opt.init_jitter``: a seeded perturbation of the start, off by default."""
 
+import os
 import subprocess
 import sys
 import zlib
@@ -13,7 +14,6 @@ import yaml
 
 from tabascal.config import load_config, yaml_load
 from tabascal.jitter import (
-    SEED_TAG,
     describe_init_jitter,
     jitter_init,
     resolve_init_jitter,
@@ -32,12 +32,12 @@ def start():
         "ast_k_i_base": jax.numpy.zeros((4, 1, 3)),
         "rfi_k_r_base": jax.numpy.asarray(rng.normal(size=(2, 3, 1, 5))),
         "rfi_k_i_base": jax.numpy.asarray(rng.normal(size=(2, 3, 1, 5))),
-        "gains_amp_base": jax.numpy.asarray(rng.normal(size=(3, 1, 1))),
+        "gains_amp_base": jax.numpy.asarray(rng.normal(size=(3,)), dtype=jax.numpy.float32),
     }
 
 
 def draw(seed, name, like):
-    key = jax.random.fold_in(component_key(seed, SEED_TAG), zlib.crc32(name.encode()))
+    key = jax.random.fold_in(component_key(seed, "init_jitter"), zlib.crc32(name.encode()))
     return np.asarray(jax.random.normal(key, like.shape, like.dtype))
 
 
@@ -71,22 +71,31 @@ def test_a_number_is_an_absolute_scale_on_every_block(exact_rtol):
     for name, x in params.items():
         # Against the sum rather than the difference, which in single precision
         # keeps the start's round-off and none of the jitter's digits.
+        assert out[name].dtype == x.dtype
         expected = np.asarray(x) + 0.05 * draw(7, name, x)
         np.testing.assert_allclose(np.asarray(out[name]), expected, rtol=exact_rtol, atol=exact_rtol)
 
 
-@pytest.mark.parametrize("magnitude", ["unit", "tiny", "huge"])
+@pytest.mark.parametrize("magnitude", ["unit", "tiny", "huge", "edge", "product"])
 def test_a_relative_scale_is_a_fraction_of_the_rms_of_the_start(exact_rtol, magnitude):
-    """Also for starts whose squares underflow or overflow the dtype."""
+    """Also for starts whose squares, or one sparse entry near the dtype's maximum, leave its range."""
     params = start()
     info = np.finfo(params["rfi_k_r_base"].dtype)
-    c = {"unit": 1.0, "tiny": np.sqrt(info.tiny) * 1e-3, "huge": np.sqrt(info.max) * 1e3}[magnitude]
+    c = {
+        "unit": 1.0, "tiny": np.sqrt(info.tiny) * 1e-3, "huge": np.sqrt(info.max) * 1e3,
+        "edge": 0.75 * info.max, "product": info.max / 4,
+    }[magnitude]
     unit = {name: np.asarray(params[name]) for name in ("rfi_k_r_base", "rfi_k_i_base")}
-    params.update({name: params[name] * c for name in unit})
-    out = jitter_init(params, {"rfi": {"relative": 0.1}}, seed=7)
+    scale = 8.0 if magnitude == "product" else 0.1
+    if magnitude in ("edge", "product"):  # one nonzero entry, at c
+        for name in unit:
+            unit[name] = np.zeros((2, 1, 1, 50), dtype=params[name].dtype)
+            unit[name].flat[0] = 1
+    params.update({name: jax.numpy.asarray(y * c) for name, y in unit.items()})
+    out = jitter_init(params, {"rfi": {"relative": scale}}, seed=7)
     for name, y in unit.items():
         # In units of c, where the reference's own squares stay in range.
-        sigma = 0.1 * np.sqrt(np.mean(y**2))
+        sigma = scale * np.sqrt(np.mean(y**2))
         np.testing.assert_allclose(
             np.asarray(out[name]) / c, y + sigma * draw(7, name, params[name]),
             rtol=exact_rtol, atol=exact_rtol,
@@ -134,18 +143,24 @@ def test_the_draw_is_not_the_one_ast_init_sample_takes():
 
 
 @pytest.mark.parametrize("kind", ["absolute", "relative"])
-def test_padded_dummy_sources_stay_dark_and_do_not_change_the_real_draw(kind):
-    """Padding 2 real sources to 4 for the devices moves neither the real rows nor the dummies."""
+@pytest.mark.parametrize("n_real", [2, 3])
+def test_padded_dummy_sources_stay_dark_and_do_not_change_the_real_draw(kind, n_real):
+    """Padding preserves real draws and leaves non-RFI axes fully perturbed."""
     params = start()
     rfi = params["rfi_k_r_base"]
-    padded = dict(params, rfi_k_r_base=jax.numpy.concatenate([rfi, jax.numpy.zeros_like(rfi)]))
-    spec = {"rfi_k_r_base": {kind: 0.1}}
+    rfi = jax.numpy.concatenate([rfi, rfi[:1]])[:n_real]
+    params["rfi_k_r_base"] = rfi
+    padded = dict(params, rfi_k_r_base=jax.numpy.concatenate([
+        rfi, jax.numpy.zeros((4 - n_real, *rfi.shape[1:]), dtype=rfi.dtype),
+    ]))
+    spec = {"": 0.1, "rfi_k_r_base": {kind: 0.1}}
 
-    unpadded_out = jitter_init(params, spec, seed=7, n_rfi=2, n_rfi_real=2)
-    padded_out = jitter_init(padded, spec, seed=7, n_rfi=4, n_rfi_real=2)
+    unpadded_out = jitter_init(params, spec, seed=7, n_rfi=n_real, n_rfi_real=n_real)
+    padded_out = jitter_init(padded, spec, seed=7, n_rfi=4, n_rfi_real=n_real)
 
-    np.testing.assert_array_equal(padded_out["rfi_k_r_base"][:2], unpadded_out["rfi_k_r_base"])
-    np.testing.assert_array_equal(padded_out["rfi_k_r_base"][2:], 0)
+    np.testing.assert_array_equal(padded_out["rfi_k_r_base"][:n_real], unpadded_out["rfi_k_r_base"])
+    np.testing.assert_array_equal(padded_out["rfi_k_r_base"][n_real:], 0)
+    np.testing.assert_array_equal(padded_out["ast_k_r_base"], unpadded_out["ast_k_r_base"])
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +293,9 @@ def jittered_fits(tmp_path_factory):
                 "-nl",
             ],
             capture_output=True, text=True, cwd=work, check=False,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [
+                str(script.parents[2]), os.environ.get("PYTHONPATH"),
+            ]))},
         )
         assert result.returncode == 0, f"seed {seed} run failed: {result.stderr}"
         fits[seed] = (result.stdout, out_dir / "runs" / "latest", config_path)
@@ -308,3 +326,28 @@ def test_the_run_header_carries_the_jitter(jittered_fits, seed):
 
     line = describe_random_draws(load_config(str(config_path)))
     assert "jittered" in line and line in stdout
+
+
+def test_the_runner_jitters_once_before_sharding_and_shares_the_start(tmp_path, monkeypatch, capsys):
+    """One padded start reaches sharding, prediction and the optimiser in that order."""
+    from tabascal.scripts import _run_tabascal_impl as impl
+    from tests.test_seeds import run_stubbed
+
+    events = []
+    actual = impl.jitter_init
+
+    def jitter(params, spec, seed, **kwargs):
+        events.append("jitter")
+        assert kwargs == {"n_rfi": 4, "n_rfi_real": 3}
+        return actual(params, spec, seed, **kwargs)
+
+    def shard(params, n_rfi):
+        events.append("shard")
+        return params
+
+    monkeypatch.setattr(impl, "jitter_init", jitter)
+    monkeypatch.setattr(impl, "sharding_enabled", lambda: True)
+    monkeypatch.setattr(impl, "shard_pytree", shard)
+    calls, *_ = run_stubbed(tmp_path, monkeypatch, capsys, 7, 0, jitter=0.1, events=events)
+    assert events == ["jitter", "shard", "shard", "shard", "init", "opt"]
+    assert calls["init_params"][0] is calls["opt_params"][0]

@@ -274,13 +274,14 @@ def test_the_line_says_whether_prior_plots_draw(tmp_path, monkeypatch, n_proc, s
 # ---------------------------------------------------------------------------
 
 
-def run_stubbed(tmp_path, monkeypatch, capsys, seed, n):
+def run_stubbed(tmp_path, monkeypatch, capsys, seed, n, jitter=None, events=None):
     """The runner on a loaded config with prior plots on; every seed and key its consumers got."""
     from tabascal.scripts import _run_tabascal_impl as impl
     from tabascal.seeds import run_key
 
     config = loaded(tmp_path, seed=seed)
     config["plots"]["prior"] = True
+    config["opt"]["init_jitter"] = jitter
     run_dir = tmp_path / f"run{n}"
     run_dir.mkdir()
     paths = SimpleNamespace(
@@ -288,22 +289,33 @@ def run_stubbed(tmp_path, monkeypatch, capsys, seed, n):
                          "init_pred_path", "used_orbits_path"]),
         run_dir=str(run_dir),
     )
-    model = SimpleNamespace(prob_model=None, init_params={}, state={}, constants={})
+    model = SimpleNamespace(prob_model=None, init_params={
+        "rfi_k_r_base": jax.numpy.zeros((4, 1, 1, 3)),
+        "ast_k_r_base": jax.numpy.zeros((4, 1, 3)),
+    }, state={}, constants={})
     calls = {}
 
     def spy(name, at, returns=None):
         return lambda *a, **k: (calls.setdefault(name, []).append(a[at]), returns)[1]
 
+    def consumer(name, key_at, params_at, returns=None):
+        def call(*a, **k):
+            if events is not None:
+                events.append(name)
+            calls.setdefault(name + "_params", []).append(a[params_at])
+            return spy(name, key_at, returns)(*a, **k)
+        return call
+
     stubs = {
         **dict.fromkeys(["_print_run_header", "_record_resolved_settings", "save_orbits_for_reuse",
                          "_print_model_summary", "write_results_xds"], lambda *a, **k: None),
         "_resolve_paths": lambda *a, **k: paths,
-        "build_model": lambda *a: (SimpleNamespace(vis_obs=None, n_rfi=0), model),
+        "build_model": lambda *a: (SimpleNamespace(vis_obs=None, n_rfi=4, n_rfi_real=3), model),
         "load_truth": lambda *a: {},
         "run_key": lambda s: (spy("seed", 0)(s), run_key(s))[1],
-        "init_predict": spy("init", 2),
+        "init_predict": consumer("init", 2, 3),
         "nlog_like_and_post": lambda *a, **k: (0.0, 0.0),
-        "run_opt": spy("opt", 2, (None, None, {}, None)),
+        "run_opt": consumer("opt", 2, 3, (None, None, {}, None)),
     }
     for name, stub in stubs.items():
         monkeypatch.setattr(impl, name, stub)
