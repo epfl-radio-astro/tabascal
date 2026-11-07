@@ -45,12 +45,12 @@ def test_optimized_run_keeps_zarr(monkeypatch, skip):
     config = SimpleNamespace(
         args={"data": {"data_col": "DATA", "skip_ms_write": skip},
               "opt": {"max_iter": 1, "epsilon": 0.1, "dual_run": False}},
-        vis_obs=data, noise=1., flags=jnp.zeros(data.shape, dtype=bool),
+        vis_obs=data, noise=1., flags=jnp.zeros(data.shape, dtype=bool), n_rfi=0,
     )
     pred = {"vis_obs": data[None]}
     monkeypatch.setattr(tab_tools, "loss_trace_path", lambda _: None)
     monkeypatch.setattr(tab_tools, "run_custom_svi", lambda **kw: SimpleNamespace(params={}, losses=[1.]))
-    monkeypatch.setattr(tab_tools, "Predictive", lambda **kw: lambda *a, **k: pred)
+    monkeypatch.setattr(tab_tools, "_predict", lambda *a: (pred, 0.0))
     zarr_writer, ms_writer = Mock(), Mock()
     monkeypatch.setattr(tab_tools, "write_results_xds", zarr_writer)
     monkeypatch.setattr(tab_tools, "write_results_ms", ms_writer)

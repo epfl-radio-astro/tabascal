@@ -2,8 +2,8 @@
 
 - **The old path is unchanged.** With ``optimizer`` and ``schedule`` both null,
   ``dual_run`` still runs two ``adabelief`` phases, bit for bit.
-- **One compilation.** A schedule builds one optimiser, so the step is traced
-  once where ``dual_run`` traces it twice.
+- **One compilation.** A schedule builds one optimiser, and ``dual_run``'s second
+  phase only resets its step size, so either way the step is traced once.
 - **The step sizes are the ones asked for**, and the optimiser asked for takes them.
 - **Checkpoints are written at their steps and reload** to the parameters the
   optimiser held then.
@@ -97,12 +97,12 @@ def test_with_no_schedule_dual_run_is_the_two_phases_it_always_was():
     _same(results.params, history[-1])
 
 
-def test_dual_run_traces_the_step_twice():
-    """What #82 is about: the second phase's new optimiser is a new static argument."""
+def test_dual_run_traces_the_step_once():
+    """The second phase's step size is optimiser state, not a new static argument."""
     toy = _toy_problem(0.1)
     calls = _counting(toy)
     _svi(toy, 3, dual_run=True)
-    assert calls["n"] == 2
+    assert calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------
