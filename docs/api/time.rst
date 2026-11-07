@@ -63,7 +63,7 @@ time. ``utc`` returns its input unchanged — bit-identical, since no arithmetic
 is done at all.
 
 Doing this at the boundary is what lets the rest of the package stay
-scale-free, including ``sgp4jax``'s ITRF→GCRF path, which has no scale concept
+scale-free, including ``sgp4jax``'s GCRF propagation, which has no scale concept
 to thread one through. It happens in two places, both reading the same
 ``MEASINFO`` record and normalising the same way:
 :func:`~tabascal.ms.read_ms` for the times the fit runs on, and

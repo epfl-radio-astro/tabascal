@@ -102,7 +102,7 @@ from tabascal.rfi_estimate import (
     tau_scan_antennas,
     write_shifted_orbits,
 )
-from tabascal.time import gast_deg, jd_to_mjd, skyfield_time, timescale
+from tabascal.time import apparent_radec_of_date, gast_deg, jd_to_mjd, skyfield_time, timescale
 
 from .tle_helpers import block_network, jd, make_omm, make_tle_record  # noqa: F401
 
@@ -214,10 +214,9 @@ def ref_paths(record, ants_itrf, times_jd, phase_centre, a1, a2, n_fine, delta_t
     out = np.zeros((len(taus_s), len(a1), len(times_jd), n_fine))
     for i, tau in enumerate(taus_s):
         t_ant = t_fine + (tau / 86400.0 if shift_antennas else 0.0)
-        gh0 = (gast_deg(t_ant) - phase_centre["ra"]) % 360
-        w = np.transpose(
-            itrf_to_uvw_numpy(ants_itrf, gh0, phase_centre["dec"]), axes=(1, 0, 2)
-        )[..., -1]
+        ra, dec = apparent_radec_of_date(phase_centre["ra"], phase_centre["dec"], t_ant)
+        gh0 = (gast_deg(t_ant) - ra) % 360
+        w = np.transpose(itrf_to_uvw_numpy(ants_itrf, gh0, dec), axes=(1, 0, 2))[..., -1]
         ants_xyz = itrs_to_gcrs_sf(ants_itrf, t_ant)
         sat_xyz = np.asarray(
             get_satellite_positions([record], t_fine + tau / 86400.0)
@@ -616,6 +615,21 @@ class TestSatelliteRangeAndSpeed:
         assert range_m > 1500e3
         assert v_perp == pytest.approx(ref_v, rel=0.1)
         assert v_perp < 0.8 * 7.7e3
+
+    def test_an_earth_fixed_source_does_not_cross_the_line_of_sight(
+        self, record, layout, monkeypatch
+    ):
+        """The full Earth rotation: turning by GAST alone gives this ~4 m/s."""
+        import tabascal.rfi_estimate as rfi_estimate
+
+        geo = np.array([[42164e3, 0.0, 0.0]])
+        monkeypatch.setattr(
+            rfi_estimate, "get_satellite_positions",
+            lambda records, t: itrs_to_gcrs_sf(geo, np.asarray(t)),
+        )
+        _, v_perp = satellite_range_and_speed(record, layout.ants_itrf, layout.times_jd)
+
+        assert v_perp < 1e-2
 
 
 # ---------------------------------------------------------------------------

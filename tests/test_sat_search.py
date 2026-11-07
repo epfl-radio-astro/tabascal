@@ -86,7 +86,7 @@ from tabascal.rfi_estimate import (
     write_config_fragment,
     write_search_results,
 )
-from tabascal.time import gast_deg, jd_to_mjd, skyfield_time, timescale
+from tabascal.time import apparent_radec_of_date, gast_deg, jd_to_mjd, skyfield_time, timescale
 
 from .tle_helpers import (  # noqa: F401
     block_network,
@@ -212,10 +212,9 @@ def ref_paths(record, ants_itrf, times_jd, phase_centre, a1, a2, n_fine, delta_t
     times_jd = np.asarray(times_jd, dtype=np.float64)
     t_fine = (times_jd[:, None] + offsets[None, :] / 86400.0).ravel()
 
-    gh0 = (gast_deg(t_fine) - phase_centre["ra"]) % 360
-    w = np.transpose(
-        itrf_to_uvw_numpy(ants_itrf, gh0, phase_centre["dec"]), axes=(1, 0, 2)
-    )[..., -1]
+    ra, dec = apparent_radec_of_date(phase_centre["ra"], phase_centre["dec"], t_fine)
+    gh0 = (gast_deg(t_fine) - ra) % 360
+    w = np.transpose(itrf_to_uvw_numpy(ants_itrf, gh0, dec), axes=(1, 0, 2))[..., -1]
     ants_xyz = itrs_to_gcrs_sf(ants_itrf, t_fine)
 
     out = np.zeros((len(taus_s), len(a1), len(times_jd), n_fine))
@@ -1845,6 +1844,22 @@ class TestWriteConfigFragment:
                     f"{want} missing from {named[0]!r}"
                 )
 
+    @pytest.mark.parametrize("tracking", ["apparent", "j2000"])
+    def test_the_fit_it_is_merged_into_tracks_as_the_search_did(
+        self, tmp_path, search_ab, tracking
+    ):
+        """The search to fit handoff: merged over the base config, the fragment's
+        convention is the one a run resolves (#253)."""
+        from tabascal.config import load_config, normalise_tabsim_config
+
+        path = write_config_fragment(
+            str(tmp_path / "found.yaml"), select_detections(search_ab),
+            phase_tracking=tracking,
+        )
+
+        assert yaml.safe_load(open(path))["tabsim"] == {"phase_tracking": tracking}
+        assert normalise_tabsim_config(load_config(path))["phase_tracking"] == tracking
+
     def test_a_search_that_found_nothing_still_writes_an_empty_list(self, tmp_path,
                                                                      search_noise):
         """So the artifact is there to point at either way, and says why it is
@@ -2196,6 +2211,21 @@ class TestSearchCommandLine:
         assert not os.path.exists(f"{stem}_light_curves.npz")
         assert not os.path.exists(f"{stem}_shifted_tles")
         assert "No candidate cleared the threshold" in capsys.readouterr().out
+
+    def test_the_config_it_writes_names_the_tracking_it_searched_with(
+        self, tmp_path, obs_noise, snapshot_dir, stub_ms, quiet_precision
+    ):
+        """``--phase-tracking j2000`` reaches the fragment a fit is merged from."""
+        from tabascal.scripts.sat_search import run
+
+        stub_ms(obs_noise)
+        stem = str(tmp_path / "out")
+        run(_cli("-ms", str(tmp_path / "obs.ms"), "--tle-dir", snapshot_dir,
+                 *SCAN, "-o", stem, "--phase-tracking", "j2000"))
+
+        assert yaml.safe_load(open(f"{stem}_config.yaml"))["tabsim"] == {
+            "phase_tracking": "j2000"
+        }
 
     def test_save_all_keeps_every_candidates_curve(
         self, tmp_path, obs_a, snapshot_dir, stub_ms, quiet_precision
