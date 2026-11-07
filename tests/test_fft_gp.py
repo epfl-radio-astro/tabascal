@@ -680,8 +680,9 @@ class TestPkCutRefusesAnEmptySelection:
         assert len(set(advice.values())) == 4, advice
 
 
-# Padded lengths 9, 8 (pad 2) and 5, 4 (no padding), each with an even and an odd factor.
-@pytest.mark.parametrize("n, pad_factor", [(5, 2.0), (4, 2.0), (5, 1.0), (4, 1.0)])
+# Padded lengths 9, 8 (pad 2), 5, 4 (no padding) and a single channel, whose pad of
+# 2 rounds to none, each with an even and an odd factor.
+@pytest.mark.parametrize("n, pad_factor", [(5, 2.0), (4, 2.0), (5, 1.0), (4, 1.0), (1, 2.0)])
 @pytest.mark.parametrize("f", [2, 3])
 def test_latent_to_signal_is_the_dft_on_the_supersampled_domain(n, pad_factor, f):
     """Every kept mode lands on ``domain_ss`` exactly, the data grid at offset ``f // 2``."""

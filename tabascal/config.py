@@ -14,7 +14,6 @@ from tabascal.noise import (
     read_noise_file,
     representative_sigma,
 )
-from tabascal.tab_tools import fix_padding
 from tabascal.components.trajectory import (
     fetch_orbital_elements,
     get_satellite_elevations,
@@ -197,9 +196,6 @@ class TabConfig:
         # to divide by the gain.
         self.apply_gain_table(config["data"].get("gain_table"))
         self.set_flags(config["data"]["flags"])
-        config = fix_padding(
-            config, self.n_freq
-        )  # Bad solution, should be fixed in fft_gp. Issue when using a single frequency channel.
 
         # The MS read must land on the same observation epoch preflight resolved
         # against, or the model would be built from TLEs checked at another time.

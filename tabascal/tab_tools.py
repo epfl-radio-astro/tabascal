@@ -363,21 +363,6 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
         print(f"  {' ' * len(label)} | " + row("bias", me, sig))
 
 
-def fix_padding(config: dict, n_freq):
-
-    try:
-        if (
-            config["rfi"]["freq_pad_factor"] < 3
-            and n_freq == 1
-            and config["rfi"]["n_int_freq"] > 1
-        ):
-            config["rfi"]["freq_pad_factor"] = 3
-    except:
-        print("freq_pad_factor is not defined")
-
-    return config
-
-
 def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
     """Path to dump the traced optimiser metrics to, or None when they are off.
 
