@@ -255,12 +255,14 @@ class TestFixedOrbit:
 
 class TestDataGridSignal:
 
+    @pytest.mark.parametrize("signal_type", ["complex", "real"])
     @pytest.mark.parametrize("data_cls, fine_cls", SIGNALS)
-    def test_is_the_fine_signal_at_each_cells_own_sample(self, data_cls, fine_cls):
-        cfg = make_config(n_int_time=5, n_int_freq=3)
+    def test_is_the_fine_signal_at_each_cells_own_sample(self, data_cls, fine_cls, signal_type):
+        cfg = make_config(n_int_time=5, n_int_freq=3, rfi_args={"signal_type": signal_type})
         data, fine = data_cls(), fine_cls()
         data.setup(cfg)
         fine.setup(cfg)
+        assert data.signal_type == fine.signal_type == signal_type
         params = fine.init_params_base
         assert {k: v.shape for k, v in data.init_params_base.items()} == {k: v.shape for k, v in params.items()}
         for name in ("mu_rfi_k", "sigma_rfi_k"):
