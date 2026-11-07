@@ -8,8 +8,13 @@
 - **Checkpoints are written at their steps and reload** to the parameters the
   optimiser held then.
 - **The stop triggers** once the loss stops moving, and not before ``min_steps``.
+- **A plateau schedule cuts the step** when the loss stops improving, never
+  below its floor, for a negative loss as for a positive one, and with
+  ``stop.at_floor`` the fit ends only once the step is at that floor.
 """
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
@@ -19,7 +24,11 @@ from tabascal.opt_schedule import (
     checkpoint_path,
     converged,
     describe_schedule,
+    PlateauOptimizer,
+    build_scheduled_optimizer,
     load_checkpoint,
+    plateau_scale,
+    reduce_on_plateau,
     step_size,
     validate_opt,
     validate_optimizer,
@@ -330,6 +339,152 @@ def test_a_stop_without_a_schedule_is_refused():
 
 
 # ---------------------------------------------------------------------------
+# The plateau schedule
+# ---------------------------------------------------------------------------
+
+
+def _plateau(**kwargs):
+    return validate_schedule({"kind": "plateau", **kwargs}, 100_000)
+
+
+def _scales(values, **kwargs):
+    """The scale after each of ``values``, fed to :func:`reduce_on_plateau` as losses."""
+    s = _plateau(**kwargs)
+    transform = reduce_on_plateau(
+        **{k: s[k] for k in ("factor", "patience", "rtol", "atol", "cooldown",
+                             "accumulation_size", "min_factor")},
+        skip=s["warmup_steps"],
+    )
+    state, out = transform.init({"x": jnp.zeros(1)}), []
+    for v in values:
+        _, state = transform.update({"x": jnp.ones(1)}, state, value=v)
+        out.append(float(state.scale))
+    return np.array(out)
+
+
+@pytest.mark.parametrize("level", [10.0, -10.0], ids=["positive", "negative"])
+def test_a_flat_loss_cuts_the_step_after_patience_steps(level):
+    """optax's own transform never cuts on a flat negative loss; this one does."""
+    scales = _scales([level] * 7, patience=3, min_factor=1e-3, factor=0.5)
+    # Step 1 sets the best; steps 2-4 do not improve on it, and the third cuts.
+    np.testing.assert_allclose(scales, [1, 1, 1, 0.5, 0.5, 0.5, 0.25], rtol=1e-6)
+
+
+def test_a_loss_that_keeps_improving_keeps_the_step():
+    assert np.all(_scales(100.0 * 0.99 ** np.arange(50), patience=2, min_factor=1e-3) == 1)
+    assert np.all(_scales(-100.0 - np.arange(50.0), patience=2, min_factor=1e-3) == 1)
+
+
+def test_an_improvement_below_the_tolerance_is_none():
+    # Each step improves by 1e-5 (relative), under rtol = 1e-4.
+    scales = _scales(10.0 * (1 - 1e-5) ** np.arange(4), patience=3, min_factor=1e-3, rtol=1e-4)
+    assert scales[-1] == pytest.approx(0.1)
+    # atol alone: no step gets 1 below the first.
+    scales = _scales(10.0 - 0.25 * np.arange(4), patience=3, min_factor=1e-3, rtol=0, atol=1)
+    assert scales[-1] == pytest.approx(0.1)
+
+
+def test_the_step_never_falls_below_its_floor():
+    scales = _scales([1.0] * 200, patience=1, min_factor=0.003)
+    assert scales.min() == pytest.approx(0.003, rel=1e-6)
+    assert np.all(scales >= np.float32(0.003) * (1 - 1e-6))
+    assert np.all(np.diff(scales) <= 0)
+
+
+def test_cooldown_and_accumulation_space_the_cuts():
+    # Means of 2 losses: the first mean sets the best, 3 more without improvement cut.
+    scales = _scales([1.0] * 8, patience=3, accumulation_size=2, min_factor=1e-6)
+    assert list(scales < 1) == [False] * 7 + [True]
+    # A cooldown of 2 holds off the plateau count for 2 steps after a cut.
+    scales = _scales([1.0] * 10, patience=2, cooldown=2, min_factor=1e-6)
+    cuts = list(np.flatnonzero(np.diff(np.concatenate([[1.0], scales])) < 0) + 1)
+    assert cuts == [3, 7]
+
+
+def test_the_warmup_is_not_counted():
+    scales = _scales([1.0] * 12, patience=3, min_factor=1e-6, warmup_steps=8)
+    assert list(scales < 1) == [False] * 11 + [True]
+
+
+def test_the_step_decays_on_a_quadratic_and_reaches_a_lower_loss():
+    """Sign descent at a fixed step rattles around the minimum; the plateau lowers it."""
+    def loss_fn(p):
+        return jnp.sum((p["x"] - 3.05) ** 2)
+
+    sign_descent = validate_optimizer({"name": "lion", "b1": 0, "b2": 0, "weight_decay": 0})
+
+    def run(schedule):
+        transform = build_scheduled_optimizer(sign_descent, schedule, 0.1, 2000)
+        params = {"x": jnp.zeros(4)}
+        state, losses = transform.init(params), []
+        for _ in range(1000):
+            loss, grads = jax.value_and_grad(loss_fn)(params)
+            if isinstance(transform, PlateauOptimizer):
+                updates, state = transform.update(grads, state, params, value=loss)
+            else:
+                updates, state = transform.update(grads, state, params)
+            params = optax.apply_updates(params, updates)
+            losses.append(float(loss))
+        return np.array(losses), state
+
+    fixed, _ = run(validate_schedule({"kind": "constant"}, 2000))
+    plateau, state = run(validate_schedule({"kind": "plateau", "patience": 20, "min_factor": 1e-3}, 2000))
+    # Both reach the plateau at the same step: x steps by 0.1 from 0 to 3 and 3.1.
+    np.testing.assert_array_equal(plateau[:31], fixed[:31])
+    assert fixed[-100:].min() == pytest.approx(4 * 0.05 ** 2, rel=1e-3)
+    assert plateau_scale(state) == pytest.approx(1e-3, rel=1e-6)
+    assert plateau[-100:].max() < 1e-4 * fixed[-100:].min()
+
+
+def test_a_plateau_that_never_cuts_is_the_constant_schedule_bit_for_bit():
+    toy = _toy_problem(0.1)
+    constant = _svi(toy, 20, schedule=validate_schedule({"kind": "constant"}, 20))
+    plateau = _svi(toy, 20, schedule=validate_schedule(
+        {"kind": "plateau", "patience": 1000, "min_factor": 0.1}, 20
+    ))
+    assert list(np.asarray(plateau.losses)) == list(np.asarray(constant.losses))
+    for key, value in constant.params.items():
+        assert np.array_equal(np.asarray(plateau.params[key]), np.asarray(value)), key
+
+
+def test_a_plateau_traces_the_step_once():
+    toy = _toy_problem(0.1)
+    calls = _counting(toy)
+    _svi(toy, 30, schedule=_plateau(patience=2, min_factor=1e-3))
+    assert calls["n"] == 1
+
+
+@pytest.mark.parametrize("at_floor", [False, True])
+def test_the_stop_ends_a_plateau_run(tmp_path, at_floor):
+    toy = _toy_problem(0.1)
+    schedule = validate_schedule({"kind": "plateau", "patience": 20, "min_factor": 1e-3}, 20_000)
+    stop = {"window": 50, "rtol": 1e-6, "min_steps": 0, "at_floor": at_floor}
+    trace = tmp_path / "trace.npz"
+    losses = np.asarray(_svi(toy, 20_000, schedule=schedule, stop=stop, trace_path=str(trace)).losses)
+
+    assert len(losses) < 20_000
+    assert converged(list(losses), stop)
+    scale = np.load(trace)["step_scale"]
+    assert len(scale) == len(losses)
+    assert scale[0] == 1 and np.all(np.diff(scale) <= 0)
+    if at_floor:
+        assert scale[-1] == pytest.approx(1e-3, rel=1e-6)
+
+
+def test_at_floor_holds_the_stop_until_the_step_is_at_its_floor():
+    toy = _toy_problem(0.1)
+    # rtol 1 stops as soon as two windows are full; without at_floor that is step 4.
+    stop = {"window": 2, "rtol": 1.0, "min_steps": 0}
+    schedule = validate_schedule(
+        {"kind": "plateau", "patience": 5, "min_factor": 1e-2, "rtol": 0, "atol": 1e3}, 1000
+    )
+    assert len(_svi(toy, 1000, schedule=schedule, stop=stop).losses) == 4
+    # atol 1e3 makes every step after the first a plateau: cuts at steps 6 and 11
+    # reach the floor of 0.1 ** 2.
+    assert len(_svi(toy, 1000, schedule=schedule, stop={**stop, "at_floor": True}).losses) == 11
+
+
+# ---------------------------------------------------------------------------
 # What the config may say
 # ---------------------------------------------------------------------------
 
@@ -350,7 +505,12 @@ def test_the_defaults_fill_in():
     assert checked["schedule"] == {
         "kind": "step", "boundaries": [500], "factor": 0.1, "warmup_steps": 0, "warmup_factor": 0.0
     }
-    assert checked["stop"] == {"window": 50, "rtol": 1e-4, "min_steps": 0}
+    assert checked["stop"] == {"window": 50, "rtol": 1e-4, "min_steps": 0, "at_floor": False}
+    assert validate_schedule({"kind": "plateau", "patience": 50, "min_factor": 1e-3}, 1000) == {
+        "kind": "plateau", "factor": 0.1, "patience": 50, "rtol": 1e-4, "atol": 0.0,
+        "cooldown": 0, "accumulation_size": 1, "min_factor": 1e-3,
+        "warmup_steps": 0, "warmup_factor": 0.0,
+    }
     assert validate_optimizer("adam") == {"name": "adam", "clip_norm": None, "args": {}}
     assert validate_optimizer({"b1": 0.95}) == {"name": "adabelief", "clip_norm": None, "args": {"b1": 0.95}}
 
@@ -393,6 +553,23 @@ def test_the_defaults_fill_in():
         ({"schedule": {"kind": "constant"}, "stop": {"window": 0, "rtol": 1e-4}}, "window"),
         ({"schedule": {"kind": "constant"}, "stop": {"window": 10, "rtol": True}}, "rtol"),
         ({"schedule": {"kind": "constant"}, "stop": {"window": 10}}, "rtol"),
+        ({"schedule": {"kind": "plateau", "min_factor": 1e-3}}, "patience"),
+        ({"schedule": {"kind": "plateau", "patience": 10}}, "min_factor"),
+        ({"schedule": {"kind": "plateau", "patience": 0, "min_factor": 1e-3}}, "patience"),
+        ({"schedule": {"kind": "plateau", "patience": 1.5, "min_factor": 1e-3}}, "patience"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 0}}, "min_factor"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1}}, "min_factor"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3, "factor": 1}}, "factor"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3, "factor": 0}}, "factor"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3, "rtol": 2}}, "rtol"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3, "atol": -1}}, "atol"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3, "rtol": 0}}, "rtol or atol"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3, "cooldown": -1}}, "cooldown"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3, "accumulation_size": 0}}, "accumulation_size"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3, "final_factor": 0.1}}, "final_factor"),
+        ({"schedule": {"kind": "constant"}, "stop": {"window": 10, "rtol": 1e-4, "at_floor": True}},
+         "kind: plateau"),
+        ({"schedule": {"kind": "plateau", "patience": 10, "min_factor": 1e-3}, "stop": {"window": 10, "rtol": 1e-4, "at_floor": 1}}, "at_floor"),
         ({"checkpoints": [0]}, "checkpoints"),
         ({"checkpoints": [1.5]}, "checkpoints"),
         ({"checkpoints": 1000}, "checkpoints"),
@@ -461,6 +638,11 @@ def test_the_base_config_ships_every_new_key_off():
         ({"schedule": {"kind": "linear", "warmup_steps": 10}},
          "warmup from x0 over 10 steps, then linear decay to x0"),
         ({"schedule": {"kind": "step", "boundaries": [200, 500], "factor": [0.5, 0.1]}}, "x0.5/0.1 at steps"),
+        ({"schedule": {"kind": "plateau", "patience": 50, "min_factor": 1e-3, "cooldown": 10}},
+         "x0.1 after 50 steps without a 0.0001 (relative) or 0 (absolute) improvement, down to "
+         "x0.001, 10 steps' cooldown"),
+        ({"schedule": {"kind": "plateau", "patience": 50, "min_factor": 1e-3},
+          "stop": {"window": 100, "rtol": 1e-6, "at_floor": True}}, "once the step size is at its floor"),
     ],
 )
 def test_the_log_line_names_the_optimiser(kwargs, says):

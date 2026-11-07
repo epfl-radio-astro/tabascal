@@ -27,12 +27,15 @@ from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
 from tabascal.run_dir import LOSS_TRACE
 from tabascal.opt_schedule import (
+    PlateauOptimizer,
+    at_floor,
     build_optimizer,
+    build_scheduled_optimizer,
     checkpoint_path as _checkpoint_path,
     converged,
     describe_schedule,
+    plateau_scale,
     save_checkpoint,
-    step_size,
     validate_opt,
 )
 from tabascal.timing import measure_runtime
@@ -64,9 +67,22 @@ def _map_step(model, optimizer, params, opt_state, state, constants, obs_data):
         return -lp / obs_data.size
 
     loss, grads = jax.value_and_grad(neg_log_post)(params)
-    updates, new_opt_state = optimizer.update(grads, opt_state, params)
+    updates, new_opt_state = _update(optimizer, grads, opt_state, params, loss)
     new_params = optax.apply_updates(params, updates)
     return new_params, new_opt_state, loss
+
+
+def _update(optimizer, grads, opt_state, params, loss):
+    """``optimizer.update``, given the loss only if it is a ``plateau`` one.
+
+    Decided from the static optimiser's type at trace time, so every other
+    optimiser traces the call it always did, and the compiled step stays one.
+    The loss is the replicated scalar the step returns anyway, so under
+    sharding the plateau's state is replicated with it.
+    """
+    if isinstance(optimizer, PlateauOptimizer):
+        return optimizer.update(grads, opt_state, params, value=loss)
+    return optimizer.update(grads, opt_state, params)
 
 
 @partial(jax.jit, static_argnums=(0, 1, 2))
@@ -94,7 +110,7 @@ def _map_step_metrics(
         return -lp / obs_data.size, metrics_fn(model_trace, metrics_data)
 
     (loss, metrics), grads = jax.value_and_grad(neg_log_post, has_aux=True)(params)
-    updates, new_opt_state = optimizer.update(grads, opt_state, params)
+    updates, new_opt_state = _update(optimizer, grads, opt_state, params, loss)
     new_params = optax.apply_updates(params, updates)
     return new_params, new_opt_state, loss, metrics
 
@@ -596,12 +612,16 @@ def run_custom_svi(
     replaces the two phases with one optimiser whose step size follows it,
     for ``max_iter`` steps in all; ``dual_run`` is then not read. One optimiser
     means one compiled step and moments that carry through every step (#82).
-    ``stop`` ends that run early once :func:`tabascal.opt_schedule.converged`.
+    ``stop`` ends that run early once :func:`tabascal.opt_schedule.converged`,
+    and with ``at_floor`` only once a ``plateau`` schedule's step size is at its
+    floor. A ``plateau`` run's trace also records that scale, as ``step_scale``.
     ``checkpoints`` are steps, counted across both phases with ``dual_run``,
     after which the parameters are written to ``checkpoint_path(step)``.
     """
     if stop is not None and schedule is None:
         raise ValueError("run_custom_svi takes a stop only with a schedule.")
+    if stop is not None and stop.get("at_floor") and schedule["kind"] != "plateau":
+        raise ValueError("run_custom_svi takes stop.at_floor only with a plateau schedule.")
     # Metrics without a path would compile and run the traced step for a
     # production run and then discard every number it cost.
     if trace_path is None:
@@ -621,6 +641,7 @@ def run_custom_svi(
     traced_metrics: dict = {}
 
     checkpoints = set(checkpoints)
+    plateau = schedule is not None and schedule["kind"] == "plateau"
 
     def _run_phase(params, optimizer, max_iter, offset=0):
         nonlocal trace_t0
@@ -644,6 +665,14 @@ def run_custom_svi(
                 for name, value in step_metrics.items():
                     traced_metrics.setdefault(name, []).append(float(value))
             loss_val = float(loss)
+            if plateau:
+                # The scale this step's update took, decided from its own loss; a
+                # replicated scalar, read back on every rank alongside the loss.
+                scale = plateau_scale(opt_state)
+                # Relative, so the last cut's rounding onto the floor is not a cut.
+                if scale < traced_metrics.get("step_scale", [1.0])[-1] * (1 - 1e-6):
+                    print(f"\nStep size cut to x{scale:g} of epsilon at step {offset + i + 1}: the loss has plateaued.")
+                traced_metrics.setdefault("step_scale", []).append(scale)
             step_times.append(perf_counter() - trace_t0)
             losses.append(loss_val)
             if init_loss is None:
@@ -662,16 +691,21 @@ def run_custom_svi(
                     write=is_process_0(),
                 )
             # Every rank holds the same losses, so every rank stops at the same step.
-            if stop is not None and converged(losses, stop):
+            if (
+                stop is not None
+                and (not stop.get("at_floor") or at_floor(scale, schedule))
+                and converged(losses, stop)
+            ):
                 pbar.close()
                 print(f"Converged after {i + 1} steps: the mean loss moved by less "
-                      f"than {stop['rtol']:g} between the last two windows of {stop['window']}.")
+                      f"than {stop['rtol']:g} between the last two windows of {stop['window']}"
+                      + (", with the step size at its floor." if stop.get("at_floor") else "."))
                 break
         return params, losses
 
     params = init_params
     if schedule is not None:
-        transform = build_optimizer(optimizer, step_size(schedule, epsilon, max_iter))
+        transform = build_scheduled_optimizer(optimizer, schedule, epsilon, max_iter)
         params, losses = _run_phase(params, transform, max_iter)
     else:
         params, losses = _run_phase(params, build_optimizer(optimizer, epsilon), max_iter)
