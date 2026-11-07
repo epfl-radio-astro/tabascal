@@ -294,13 +294,12 @@ def test_with_a_jitter_the_seed_moves_the_start(jittered_fits):
         for s in FIT_SEEDS
     )
 
-    def moved(a, b):
-        assert np.isfinite(a).all() and np.isfinite(b).all()
-        if a.dtype.kind not in "fc":
-            return False
-        return np.abs(a - b).max() > 64 * np.finfo(a.real.dtype).eps * np.abs(a).max()
-
-    assert any(moved(first[n].values, second[n].values) for n in first.data_vars)
+    pairs = [(first[n].values, second[n].values) for n in first.data_vars]
+    assert all(np.isfinite(a).all() and np.isfinite(b).all() for a, b in pairs)
+    assert any(
+        np.abs(a - b).max() > 64 * np.finfo(a.real.dtype).eps * np.abs(a).max()
+        for a, b in pairs if a.dtype.kind in "fc"
+    )
 
 
 @pytest.mark.parametrize("seed", FIT_SEEDS)
