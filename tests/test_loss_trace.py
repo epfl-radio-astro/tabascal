@@ -1,10 +1,10 @@
-"""The optional optimiser trace: activation, schema, and what it costs when off.
+"""The optimiser trace: activation, schema, and what it costs when off.
 
-``run_custom_svi`` can dump a per-iteration record of the loss, the wall-clock
-time it was reached, and the metrics that are fixed by the data rather than by
-the parameterisation. Three things are worth locking in:
+``run_custom_svi`` dumps a per-iteration record of the loss and the wall-clock
+time it was reached, and optionally the metrics that are fixed by the data
+rather than by the parameterisation. Three things are worth locking in:
 
-- **Off is off.** With no trace path the optimiser must take the original
+- **Off is off.** Without metrics the optimiser must take the original
   ``_map_step`` path and produce bit-identical parameters, so a diagnostic can
   never be blamed for a production result.
 - **The numbers are the same numbers.** The traced ``chi2`` must equal
@@ -184,7 +184,7 @@ def _no_trace_env(monkeypatch):
 
 
 class TestTraceDisabled:
-    """With no trace path the production path must be untouched."""
+    """Without metrics the production path must be untouched."""
 
     def test_optimiser_output_is_bit_identical_to_the_plain_step(self, tmp_path):
         toy = _toy_problem(0.1)
@@ -212,12 +212,16 @@ class TestTraceDisabled:
             dual_run=False,
             state=toy.state,
             constants=toy.constants,
+            trace_path=str(tmp_path / "trace.npz"),
         )
 
         assert list(np.asarray(results.losses)) == ref_losses
         for key, ref in params.items():
             got = results.params[key + "_auto_loc"]
             assert np.array_equal(np.asarray(got), np.asarray(ref))
+        with np.load(tmp_path / "trace.npz") as npz:
+            assert set(npz.files) == {"loss", "time_s"}
+            assert list(npz["loss"]) == ref_losses
 
     def test_metrics_step_is_never_compiled(self, monkeypatch, tmp_path):
         toy = _toy_problem(0.1)
@@ -244,10 +248,10 @@ class TestTraceDisabled:
             dual_run=False,
             state=toy.state,
             constants=toy.constants,
+            trace_path=str(tmp_path / "trace.npz"),
         )
 
         assert calls == {"plain": 3, "metrics": 0}
-        assert list(tmp_path.iterdir()) == []
 
     def test_no_file_is_written_without_a_path(self, tmp_path):
         toy = _toy_problem(0.1)
@@ -284,78 +288,6 @@ class TestTraceDisabled:
 
         assert len(results.losses) == 3
         assert list(tmp_path.iterdir()) == []
-
-    def test_no_timestamps_are_taken(self, monkeypatch):
-        """"Free when unset" means no clock reads and no per-iteration list."""
-
-        toy = _toy_problem(0.1)
-
-        def forbidden():
-            raise AssertionError("the wall clock was read with the trace disabled")
-
-        monkeypatch.setattr(tab_tools, "perf_counter", forbidden)
-
-        run_custom_svi(
-            prob_model=toy.prob_model,
-            obs_data=toy.vis_obs,
-            max_iter=3,
-            init_params=toy.init_params,
-            epsilon=1e-2,
-            dual_run=False,
-            state=toy.state,
-            constants=toy.constants,
-        )
-
-
-class TestTraceContract:
-    """``trace_path`` is what turns the trace on, and it promises a schema."""
-
-    def test_a_path_without_metrics_is_refused(self, tmp_path):
-        """A trace with no chi^2 is not the documented file.
-
-        Failing at the call is the only place this can be said: by the time the
-        writer runs, the whole optimisation has already happened and refusing
-        then would throw the run away.
-        """
-        toy = _toy_problem(0.1)
-
-        with pytest.raises(ValueError, match="metrics"):
-            run_custom_svi(
-                prob_model=toy.prob_model,
-                obs_data=toy.vis_obs,
-                max_iter=3,
-                init_params=toy.init_params,
-                epsilon=1e-2,
-                dual_run=False,
-                state=toy.state,
-                constants=toy.constants,
-                trace_path=str(tmp_path / "trace.npz"),
-                metrics=None,
-            )
-
-        assert list(tmp_path.iterdir()) == []
-
-    def test_the_refusal_happens_before_any_optimisation(self, monkeypatch, tmp_path):
-        toy = _toy_problem(0.1)
-
-        def forbidden(*args, **kwargs):
-            raise AssertionError("the optimiser ran before the contract was checked")
-
-        monkeypatch.setattr(tab_tools, "_map_step", forbidden)
-        monkeypatch.setattr(tab_tools, "_map_step_metrics", forbidden)
-
-        with pytest.raises(ValueError, match="metrics"):
-            run_custom_svi(
-                prob_model=toy.prob_model,
-                obs_data=toy.vis_obs,
-                max_iter=3,
-                init_params=toy.init_params,
-                epsilon=1e-2,
-                dual_run=False,
-                state=toy.state,
-                constants=toy.constants,
-                trace_path=str(tmp_path / "trace.npz"),
-            )
 
 
 class TestWriter:
@@ -576,7 +508,7 @@ class TestNoConstantsBakedIn:
 
 
 class TestActivation:
-    """``opt.trace_path`` turns it on; ``TAB_LOSS_TRACE`` overrides it."""
+    """``opt.trace_path`` turns the metrics on; ``TAB_LOSS_TRACE`` overrides it."""
 
     def test_off_by_default(self):
         assert loss_trace_path(None) is None
@@ -613,7 +545,7 @@ class TestActivation:
 
 
 class TestRankGating:
-    """Every rank traces; only rank 0 writes.
+    """Every rank computes the metrics or none does; only rank 0 writes.
 
     The model evaluation carries collectives under sharding, so every process
     has to execute the same compiled program. Gating *activation* by rank would
@@ -685,3 +617,63 @@ class TestRankGating:
         _run(toy, tmp_path, path=str(tmp_path / "results" / "trace.npz"))
 
         assert not (tmp_path / "results").exists()
+
+
+class TestRunOpt:
+    """Every run writes ``results/trace.npz``; ``trace_path`` adds the metrics there instead."""
+
+    @pytest.mark.parametrize("configured", [None, "custom.npz", "custom"])
+    def test_where_the_trace_lands_and_what_it_holds(
+        self, monkeypatch, tmp_path, configured
+    ):
+        toy = _toy_problem(0.1)
+        toy.tab_config.args = {
+            "data": {"skip_ms_write": True},
+            "opt": {"max_iter": 3, "epsilon": 1e-2, "dual_run": False,
+                    "trace_path": configured and str(tmp_path / configured)},
+        }
+        monkeypatch.setattr(tab_tools, "write_results_xds", lambda *a: None)
+        results = tmp_path / "results"
+
+        _, losses, _, _ = tab_tools.run_opt(
+            toy.tab_config, toy.prob_model, random.split(random.PRNGKey(0)),
+            toy.init_params, "input.ms", str(results / "map_pred.zarr"),
+            state=toy.state, constants=toy.constants, truth=toy.truth,
+        )
+
+        # np.savez appends .npz to a bare path; the plot must look there too.
+        written = tmp_path / "custom.npz" if configured else results / "trace.npz"
+        assert tab_tools.run_trace_path(
+            toy.tab_config.args["opt"], str(results / "map_pred.zarr")
+        ) == str(written)
+        if configured:
+            assert not (results / "trace.npz").exists()
+        with np.load(written) as npz:
+            assert set(npz.files) == (
+                {"loss", "time_s", "chi2", "vis_ast_nrmse", "vis_rfi_nrmse"}
+                if configured else {"loss", "time_s"}
+            )
+            assert list(npz["loss"]) == list(np.asarray(losses))
+
+
+@pytest.mark.parametrize("keys", [("loss", "time_s"), ("loss", "time_s", "chi2", "vis_ast_nrmse")])
+@pytest.mark.parametrize("n_iter", [1, 4])
+def test_plot_losses_draws_a_row_per_traced_quantity(monkeypatch, tmp_path, keys, n_iter):
+    import matplotlib.pyplot as plt
+    from tabascal.plot import plot_losses
+
+    figures = []
+    monkeypatch.setattr(plt, "savefig", lambda *a, **k: figures.append(plt.gcf()))
+    # A zero NRMSE is a valid result, and must not vanish on a log axis.
+    trace = {key: np.linspace(1.0, 2.0, n_iter) for key in keys}
+    trace.update({key: np.zeros(n_iter) for key in keys if key.endswith("nrmse")})
+
+    plot_losses(trace, "run", str(tmp_path))
+
+    (fig,) = figures
+    assert len(fig.axes) == 2 * (1 + ("chi2" in keys) + ("vis_ast_nrmse" in keys))
+    for ax in fig.axes:
+        (line,) = ax.get_lines()
+        if (line.get_ydata() <= 0).any():
+            assert ax.get_yscale() != "log"
+        assert (line.get_marker() == "o") == (n_iter == 1)

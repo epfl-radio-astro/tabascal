@@ -22,7 +22,7 @@ plots:
   truth: false            # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the true parameter estimate
   prior: false            # Optional - Plot the prior distribution over the astronomical and RFI visibilities as well as the gains
   opt: false              # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the optimised parameter estimate
-  losses: false           # Optional - Plot the loss curve over the optimisation run
+  losses: false           # Optional - Plot the optimiser trace against iteration and wall-clock time: the loss, plus the reduced chi^2 and NRMSE when opt.trace_path is set
   prior_samples: 100      # Optional - Number of prior samples to use when plotting the prior
 #######################
 # Inference parameters
@@ -42,7 +42,7 @@ opt:
   schedule: null          # Optional - One optimiser whose step size follows a schedule, for max_iter steps in all, instead of dual_run's two: one compiled step and no reset of the optimiser's moments (GitHub #82). null keeps dual_run. {kind: step, boundaries: [N], factor: 0.1} drops the step size 10x after step N, as dual_run does; {kind: exponential, final_factor: 0.01} and {kind: cosine, final_factor: 0.0} decay smoothly to final_factor * epsilon at max_iter; {kind: linear, final_factor: 0.0} falls in a straight line; {kind: constant} holds epsilon. step takes one factor per boundary as a list too, and every kind takes warmup_steps and warmup_factor (both default 0), a linear rise from warmup_factor * epsilon to epsilon before the schedule. dual_run is not read when this is set
   stop: null              # Optional - End the fit once the loss has stopped moving: {window: W, rtol: r, min_steps: M} stops when the mean loss of the last W steps is within r (relative) of the W before, after at least M steps. Needs schedule. null runs every step
   checkpoints: null       # Optional - Steps after which to write the parameters to checkpoints/<map_pred name>_step<N>.npz in the run's results directory, e.g. [1000, 2000, 4000], so one long run can be scored at several step counts. Counted across both phases with dual_run. null writes none
-  trace_path: null        # Optional - Path to write an .npz trace of the per-iteration loss, wall-clock time and reduced chi^2 to. A relative path is taken inside the run directory. null disables it. Overridden by the TAB_LOSS_TRACE environment variable
+  trace_path: null        # Optional - Every run writes its per-iteration loss and wall-clock time to results/trace.npz. Setting a path adds the per-iteration reduced chi^2 (and the ast/rfi NRMSE against a simulation truth) and writes the trace there instead. A relative path is taken inside the run directory. null writes only the loss and time. Overridden by the TAB_LOSS_TRACE environment variable
 ###################################################
 # Astronomical prior and initialization parameters
 ####################################################

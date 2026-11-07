@@ -44,6 +44,7 @@ RESULTS_DIR = "results"
 INIT_PRED = "init_pred.zarr"
 MAP_PRED = "map_pred.zarr"
 USED_ORBITS = "used_orbits.json"
+LOSS_TRACE = "trace.npz"
 
 #: Plain files below this size are hashed; larger ones are fingerprinted by
 #: size and mtime alone, which is what directories get file by file.

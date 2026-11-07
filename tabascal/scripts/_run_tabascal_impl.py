@@ -21,7 +21,7 @@ import jax
 from jax import random
 
 from tabascal.timing import measure_runtime, print_timings, enable_timings
-from tabascal.tab_tools import init_predict, run_opt, nlog_like_and_post, write_ms_if_enabled
+from tabascal.tab_tools import init_predict, run_opt, run_trace_path, nlog_like_and_post, write_ms_if_enabled
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.distributed import (
     barrier,
@@ -556,8 +556,10 @@ def _subtract(config, paths):
             plot_opt(tab_config, vi_pred, truth, paths.name, paths.plot_dir)
 
         if config["plots"]["losses"] and is_process_0():
+            import numpy as np
             from tabascal.plot import plot_losses
-            plot_losses(losses, paths.name, paths.plot_dir)
+            with np.load(run_trace_path(tab_config.args["opt"], paths.map_path)) as trace:
+                plot_losses(dict(trace), paths.name, paths.plot_dir)
 
         opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
 
