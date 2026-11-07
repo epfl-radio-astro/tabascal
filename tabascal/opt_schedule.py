@@ -13,15 +13,21 @@ ends the fit once the loss has stopped moving, and ``opt.checkpoints`` writes
 the parameters at given steps, so one long run can be scored at several step
 counts. All four are off by default, and with all four off the optimiser is the
 two-phase ``adabelief`` it always was.
+
+Every schedule but one is a function of the step count, timed to ``max_iter``.
+``plateau`` is not: it lowers the step size when the loss stops improving, so
+``max_iter`` can be a ceiling set high and ``opt.stop`` decides when the fit
+ends; ``stop.at_floor`` lets it end only once the step has decayed all the way.
 """
 
 import inspect
 import math
 import os
 from numbers import Integral, Real
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, NamedTuple, Optional, Sequence
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import optax
 
@@ -55,7 +61,7 @@ _ARG_RANGES = {
 }
 
 #: The schedules ``opt.schedule.kind`` names.
-SCHEDULE_KINDS = ("constant", "step", "exponential", "cosine", "linear")
+SCHEDULE_KINDS = ("constant", "step", "exponential", "cosine", "linear", "plateau")
 
 #: The keys each schedule takes, and the default of each optional one.
 _SCHEDULE_KEYS = {
@@ -64,13 +70,19 @@ _SCHEDULE_KEYS = {
     "exponential": {"final_factor": None},
     "cosine": {"final_factor": 0.0},
     "linear": {"final_factor": 0.0},
+    # optax.contrib.reduce_on_plateau's arguments and defaults, but for patience,
+    # which is in steps and has no default that suits every fit, and the floor.
+    "plateau": {
+        "factor": 0.1, "patience": None, "rtol": 1e-4, "atol": 0.0, "cooldown": 0,
+        "accumulation_size": 1, "min_factor": None,
+    },
 }
 
 #: Keys every schedule takes: a linear warmup from warmup_factor * epsilon.
 _WARMUP_KEYS = {"warmup_steps": 0, "warmup_factor": 0.0}
 
 #: The keys ``opt.stop`` takes, and the default of each optional one.
-_STOP_KEYS = {"window": None, "rtol": None, "min_steps": 0}
+_STOP_KEYS = {"window": None, "rtol": None, "min_steps": 0, "at_floor": False}
 
 
 def _number(value, key: str, low: float, high: float = math.inf, low_open=False, high_open=False) -> float:
@@ -222,6 +234,21 @@ def validate_schedule(schedule, max_iter: int) -> Optional[Dict]:
         out["final_factor"] = _number(out["final_factor"], "schedule.final_factor", 0, 1, low_open=True)
     elif kind in ("cosine", "linear"):
         out["final_factor"] = _number(out["final_factor"], "schedule.final_factor", 0, 1)
+    elif kind == "plateau":
+        out["factor"] = _number(out["factor"], "schedule.factor", 0, 1, low_open=True, high_open=True)
+        out["min_factor"] = _number(
+            out["min_factor"], "schedule.min_factor", 0, 1, low_open=True, high_open=True
+        )
+        out["rtol"] = _number(out["rtol"], "schedule.rtol", 0, 1)
+        out["atol"] = _number(out["atol"], "schedule.atol", 0)
+        if out["rtol"] == 0 and out["atol"] == 0:
+            raise ValueError(
+                "opt.schedule (plateau) needs rtol or atol above 0: with both 0 a "
+                "loss that moves by a rounding error counts as an improvement."
+            )
+        out["patience"] = _count(out["patience"], "schedule.patience", 1)
+        out["cooldown"] = _count(out["cooldown"], "schedule.cooldown", 0)
+        out["accumulation_size"] = _count(out["accumulation_size"], "schedule.accumulation_size", 1)
     return {"kind": kind, **out}
 
 
@@ -233,6 +260,8 @@ def validate_stop(stop) -> Optional[Dict]:
     out["window"] = _count(out["window"], "stop.window", 1)
     out["rtol"] = _number(out["rtol"], "stop.rtol", 0, low_open=True)
     out["min_steps"] = _count(out["min_steps"], "stop.min_steps", 0)
+    if not isinstance(out["at_floor"], bool):
+        raise ValueError(f"opt.stop.at_floor must be true or false, not {out['at_floor']!r}.")
     return out
 
 
@@ -275,6 +304,11 @@ def validate_opt(opt_config: Dict) -> Dict:
             "not clear whether it should end the first phase or the fit. Set a "
             "schedule, e.g. {kind: step, boundaries: [N], factor: 0.1} for dual_run's drop."
         )
+    if stop is not None and stop["at_floor"] and schedule["kind"] != "plateau":
+        raise ValueError(
+            "opt.stop.at_floor needs opt.schedule.kind: plateau; no other schedule "
+            "has a floor it reaches on its own."
+        )
     checkpoints = validate_checkpoints(opt_config.get("checkpoints"), total_steps(opt_config))
     return {"optimizer": optimizer, "schedule": schedule, "stop": stop, "checkpoints": checkpoints}
 
@@ -290,10 +324,14 @@ def step_size(schedule: Dict, epsilon: float, max_iter: int):
     reaches ``epsilon`` at step W + 1. The decays then run over the remaining
     ``max_iter - W`` steps, still ending at ``max_iter``, and ``step``
     boundaries stay counted from the start of the fit.
+
+    For ``plateau`` this is the constant ``epsilon`` after its warmup; the
+    decay is :func:`reduce_on_plateau`'s, which :func:`build_scheduled_optimizer`
+    chains after the optimiser.
     """
     kind, warmup = schedule["kind"], schedule.get("warmup_steps", 0)
     n = max_iter - warmup
-    if kind == "constant":
+    if kind in ("constant", "plateau"):
         main = optax.constant_schedule(epsilon)
     elif kind == "step":
         factor = schedule["factor"]
@@ -311,6 +349,143 @@ def step_size(schedule: Dict, epsilon: float, max_iter: int):
         return main
     rise = optax.linear_schedule(schedule["warmup_factor"] * epsilon, epsilon, warmup)
     return optax.join_schedules([rise, main], [warmup])
+
+
+class PlateauState(NamedTuple):
+    """:func:`reduce_on_plateau`'s state: optax's, and the steps it has seen."""
+
+    scale: jax.Array
+    best_value: jax.Array
+    plateau_count: jax.Array
+    cooldown_count: jax.Array
+    count: jax.Array
+    avg_value: jax.Array
+    step: jax.Array
+
+
+class PlateauOptimizer(optax.GradientTransformationExtraArgs):
+    """An optimiser whose ``update`` takes the loss as ``value=``.
+
+    A type of its own so the fit step can tell, from the static optimiser
+    alone, whether to pass the loss: every other optimiser is called exactly
+    as it always was.
+    """
+
+
+def reduce_on_plateau(
+    factor: float, patience: int, rtol: float, atol: float, cooldown: int,
+    accumulation_size: int, min_factor: float, skip: int = 0,
+) -> optax.GradientTransformationExtraArgs:
+    """``optax.contrib.reduce_on_plateau``, with the tolerance on ``|best|``.
+
+    The same state machine: the mean of every ``accumulation_size`` losses is
+    compared with the best mean so far, ``patience`` such means without an
+    improvement multiply the scale by ``factor``, never below ``min_factor``,
+    and ``cooldown`` means after a cut count no plateau.
+
+    optax counts an improvement as ``mean < (1 - rtol) * best - atol``, which
+    for a negative ``best`` lies above it: a flat loss improves every time, and
+    the step never decays. The loss here is a negative log posterior per data
+    point and can well be negative, so this compares with
+    ``best - rtol * |best| - atol``, which for a positive loss is optax's.
+
+    The first ``skip`` losses (the warmup) are not counted: while the step size
+    is still rising the loss is no measure of a plateau.
+    """
+    def init_fn(params) -> PlateauState:
+        # As optax: the scale in the parameters' lowest precision, so it does not
+        # promote the updates, and the loss in their highest.
+        dtypes = [jnp.asarray(x).dtype for x in jax.tree.leaves(params)]
+        low = min(dtypes, key=lambda d: d.itemsize)
+        high = jnp.result_type(*dtypes)
+        return PlateauState(
+            scale=jnp.asarray(1.0, low),
+            best_value=jnp.asarray(jnp.inf, high),
+            plateau_count=jnp.asarray(0, jnp.int32),
+            cooldown_count=jnp.asarray(0, jnp.int32),
+            count=jnp.asarray(0, jnp.int32),
+            avg_value=jnp.asarray(0.0, high),
+            step=jnp.asarray(0, jnp.int32),
+        )
+
+    def _update_scale(state):
+        avg = state.avg_value
+        best = state.best_value
+        # Before the first mean, best is inf, and inf - rtol * inf is nan.
+        bar = jnp.where(jnp.isfinite(best), best - rtol * jnp.abs(best) - atol, best)
+        improved = avg < bar
+        best = jnp.where(improved, avg, state.best_value)
+        plateau = jnp.where(improved, 0, state.plateau_count + 1)
+        in_cooldown = state.cooldown_count > 0
+        cut = ~in_cooldown & (plateau >= patience)
+        scale = jnp.where(
+            cut, jnp.maximum(state.scale * factor, min_factor), state.scale
+        ).astype(state.scale.dtype)
+        return state._replace(
+            scale=scale,
+            best_value=best,
+            plateau_count=jnp.where(in_cooldown | cut, 0, plateau).astype(jnp.int32),
+            cooldown_count=jnp.where(
+                in_cooldown, state.cooldown_count - 1, jnp.where(cut, cooldown, 0)
+            ).astype(jnp.int32),
+            count=jnp.asarray(0, jnp.int32),
+            avg_value=jnp.zeros_like(state.avg_value),
+        )
+
+    def _accumulate(state, value):
+        count = state.count + 1
+        avg = (state.count * state.avg_value + value.astype(state.avg_value.dtype)) / count
+        state = state._replace(avg_value=avg.astype(state.avg_value.dtype), count=count)
+        return jax.lax.cond(count == accumulation_size, _update_scale, lambda s: s, state)
+
+    def update_fn(updates, state, params=None, *, value, **extra_args):
+        del params, extra_args
+        value = jnp.asarray(value)
+        state = jax.lax.cond(
+            state.step >= skip, _accumulate, lambda s, v: s, state, value
+        )
+        state = state._replace(step=state.step + 1)
+        return jax.tree.map(lambda g: state.scale * g, updates), state
+
+    return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
+def build_scheduled_optimizer(
+    optimizer: Optional[Dict], schedule: Dict, epsilon: float, max_iter: int
+) -> optax.GradientTransformation:
+    """The one optimiser ``opt.schedule`` runs: :func:`build_optimizer` at :func:`step_size`.
+
+    For ``plateau``, followed by :func:`reduce_on_plateau`, which scales the
+    optimiser's updates, so the step size is ``epsilon`` times its scale. The
+    result is then a :class:`PlateauOptimizer`, whose update takes the loss.
+    """
+    transform = build_optimizer(optimizer, step_size(schedule, epsilon, max_iter))
+    if schedule["kind"] != "plateau":
+        return transform
+    plateau = reduce_on_plateau(
+        **{k: schedule[k] for k in (
+            "factor", "patience", "rtol", "atol", "cooldown", "accumulation_size", "min_factor"
+        )},
+        skip=schedule["warmup_steps"],
+    )
+    return PlateauOptimizer(*optax.chain(transform, plateau))
+
+
+def plateau_scale(opt_state) -> Optional[float]:
+    """The scale :func:`reduce_on_plateau` holds in ``opt_state``, or None without one."""
+    for leaf in jax.tree.leaves(opt_state, is_leaf=lambda x: isinstance(x, PlateauState)):
+        if isinstance(leaf, PlateauState):
+            return float(leaf.scale)
+    return None
+
+
+def at_floor(scale: float, schedule: Dict) -> bool:
+    """True once the plateau scale has decayed to ``min_factor``.
+
+    The scale is clamped to ``min_factor`` in its own precision, so this
+    compares in that precision too, rather than to the double ``min_factor``.
+    """
+    return scale <= float(np.float32(schedule["min_factor"])) * (1 + 1e-6)
 
 
 def describe_schedule(opt_config: Dict) -> str:
@@ -342,6 +517,16 @@ def describe_schedule(opt_config: Dict) -> str:
             "exponential": f"exponential decay to x{schedule.get('final_factor', 0):g}",
             "cosine": f"cosine decay to x{schedule.get('final_factor', 0):g}",
             "linear": f"linear decay to x{schedule.get('final_factor', 0):g}",
+            "plateau": (
+                f"{factor} after {schedule.get('patience')} steps without a "
+                f"{schedule.get('rtol', 0):g} (relative) or {schedule.get('atol', 0):g} "
+                f"(absolute) improvement, down to x{schedule.get('min_factor', 0):g}"
+                + (f", {schedule['cooldown']} steps' cooldown" if schedule.get("cooldown") else "")
+                + (
+                    f", over means of {schedule['accumulation_size']} losses"
+                    if schedule.get("accumulation_size", 1) > 1 else ""
+                )
+            ),
         }[kind]
         if schedule["warmup_steps"]:
             detail = (
@@ -355,6 +540,8 @@ def describe_schedule(opt_config: Dict) -> str:
             f"; stop when the mean loss moves by < {s['rtol']:g} (relative) between "
             f"windows of {s['window']} steps, after {s['min_steps']}"
         )
+        if s["at_floor"]:
+            line += ", once the step size is at its floor"
     if checked["checkpoints"]:
         line += f"; parameters saved at steps {checked['checkpoints']}"
     return line

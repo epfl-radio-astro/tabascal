@@ -242,16 +242,48 @@ opt:
   # schedule: {kind: step, boundaries: [500, 1500], factor: [0.3, 0.1]}  # 0.2, 0.06, 0.006
   # schedule: {kind: cosine, warmup_steps: 100}            # up from 0 over 100 steps, then the cosine
   # schedule: {kind: constant}
+  # schedule: {kind: plateau, patience: 200, min_factor: 0.001}  # x0.1 each time the loss stalls, down to 0.0002
 ```
 
 * `step`: multiplies the step size by `factor` (default 0.1) after each step in `boundaries`, so the first N steps of `boundaries: [N]` run at `epsilon`, as `dual_run`'s first phase does. `factor` is one number for every boundary or a list with one per boundary. The boundaries must increase and stay below `max_iter`.
 * `exponential`: `epsilon * final_factor ** (step / max_iter)`, with `0 < final_factor <= 1`.
 * `cosine`: half a cosine from `epsilon` down to `final_factor * epsilon` (default 0) at `max_iter`.
 * `linear`: a straight line from `epsilon` down to `final_factor * epsilon` (default 0) at `max_iter`.
+* `plateau`: holds `epsilon` and multiplies it by `factor` (default 0.1) each time the loss stops improving, down to `min_factor * epsilon`. See [Plateau schedule](#plateau-schedule).
 
 Every kind also takes `warmup_steps` (default 0) and `warmup_factor` (default 0): the first `warmup_steps` steps rise linearly from `warmup_factor * epsilon` to `epsilon`, and the schedule starts from there. The decays still end at `max_iter`, so they run over the `max_iter - warmup_steps` steps left, and `step` boundaries still count from the start of the fit, so they must come after the warmup.
 
 A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: it keeps the moments across the drop, which is the point.
+
+#### Plateau schedule
+
+Every other kind is a function of the step count and is timed to `max_iter`, so `max_iter` has to be chosen before the fit, and a fit that needs more steps than that under-converges. `plateau` cuts the step size when the loss stops improving instead, so `max_iter` can be a generous ceiling and `stop` ends the fit:
+
+```yaml
+opt:
+  epsilon: 0.2
+  max_iter: 50000                     # a ceiling, not a plan
+  schedule:
+    kind: plateau
+    patience: 200                     # steps without an improvement before a cut (required)
+    min_factor: 0.001                 # the floor: the step never goes below 0.001 * epsilon (required)
+    factor: 0.1                       # each cut multiplies the step by this (default 0.1)
+    rtol: 1.0e-4                      # an improvement is a loss below best - rtol * |best| - atol
+    atol: 0.0
+    cooldown: 0                       # steps after a cut that count no plateau
+    accumulation_size: 1              # losses averaged into each comparison
+  stop: {window: 500, rtol: 1.0e-7, min_steps: 1000, at_floor: true}
+```
+
+The schedule keeps the best loss seen so far. A step whose loss is below `best - rtol * |best| - atol` is an improvement and becomes the best; after `patience` steps in a row without one, the step size is multiplied by `factor`, never below `min_factor * epsilon`, and the count starts again. `cooldown` steps after a cut count no plateau. With `accumulation_size: A` the mean of each `A` losses is compared instead, and `patience` and `cooldown` count those means, so a cut takes `A * patience` steps. `factor` and `min_factor` lie in (0, 1), and at least one of `rtol` and `atol` must be above 0. `warmup_steps` and `warmup_factor` work as for the other kinds, and the steps of the warmup are not counted.
+
+This is `optax.contrib.reduce_on_plateau`'s logic, with one change: optax counts an improvement as a loss below `(1 - rtol) * best - atol`, which for a negative best lies above the best, so a flat negative loss improves every step and the step never decays. The loss is a negative log posterior per data point and can be negative, so `best - rtol * |best| - atol` is used, which is optax's for a positive loss.
+
+The cut takes effect in the update of the step whose loss completed the plateau, and the run log notes each one. The trace records the scale each step's update took, as `step_scale` (see [Optimiser trace](#optimiser-trace)), so the step size at step n is `epsilon * step_scale[n]` (times the warmup ramp during the warmup).
+
+With `stop.at_floor: true` the stop also waits until the step size is at its floor, so a fit ends only once its smallest step has stopped moving the loss, and never at a plateau the next cut would have broken. It needs a `plateau` schedule; without it, `stop` can end a plateau fit before its last cut. A plateau that never reaches `patience` steps without an improvement runs bit for bit as `{kind: constant}` with the same warmup.
+
+#### Stopping and checkpoints
 
 `stop: {window: W, rtol: r, min_steps: M}` ends the fit after step n once n is at least M and 2W, and the mean loss over steps n-W+1..n differs from the mean over the W steps before by at most r times the latter's magnitude. The loss is the negative log posterior per data point, so with a large constant offset in it a relative change is smaller than the change in fit; choose `rtol` with a trace of the loss to hand. It needs `schedule`: with `dual_run` it would not be clear whether a stop ends the first phase or the fit.
 
@@ -289,6 +321,7 @@ The file is written once, at the end of the run, and holds one array per key, ea
 |---|---|---|
 | `loss` | always | The optimiser's own loss, the negative log joint divided by `vis_obs.size` |
 | `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched. The first iteration includes the step's compilation, and with `dual_run` so does the first iteration of the second phase; with `schedule` there is no second compilation. A checkpoint write or a `stop` check after a step is not in that step's time but in the next one's, if another step runs; neither after the last step, nor writing the trace file, is in any |
+| `step_scale` | with a `plateau` schedule | The factor on the step size this iteration's update took: 1 until the first cut, `min_factor` at the floor |
 | `chi2` | with `trace_path` | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
 | `vis_ast_nrmse` | with `trace_path` and truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |
 | `vis_rfi_nrmse` | with `trace_path` and truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |
