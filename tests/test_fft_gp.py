@@ -731,7 +731,8 @@ class TestRealSignalType:
         np.testing.assert_allclose(real, cplx.real, atol=1e-5)
         np.testing.assert_allclose(cplx.imag, 0.0, atol=1e-5)
 
-    @pytest.mark.parametrize("ns", [[5, 7], [2, 8]])
+    # Mixed parity both ways round too: [2, 7] pads to [4, 13], [5, 8] to [9, 16].
+    @pytest.mark.parametrize("ns", [[5, 7], [2, 8], [2, 7], [5, 8]])
     def test_independent_coefficients_give_the_spectrums_variance(self, ns):
         """``E y(x)^2 = sum P`` at every x, supersampled: one standard normal
         per mode, not two, and stationary on an even axis too."""
