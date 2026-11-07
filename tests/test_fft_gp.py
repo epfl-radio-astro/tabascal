@@ -780,20 +780,26 @@ class TestRealSignalType:
 
         assert not jnp.iscomplexobj(h)
         np.testing.assert_allclose(back, y, atol=1e-5)
+        # An even grid's cut drops -N/2, which uncutting must put back.
+        pk_even = pow_spec_nd(domain_k([4, 8], [1.0, 1.0]), 1.0, [1e9, 1e9], [1, 1])
+        h_even = fourier_cut(pk_even, 1e-30, jnp.ones((4, 8)), signal_type="real")
+        assert fourier_uncut(pk_even, 1e-30, h_even, signal_type="real").shape == (4, 8)
 
     def test_supersample_returns_a_real_signal(self):
-        y = jnp.asarray(np.random.default_rng(4).normal(size=(5, 7)))
+        # Even on one axis, where the padding splits the Nyquist mode and the
+        # complex result has an imaginary part that is not rounding.
+        y = jnp.asarray(np.random.default_rng(4).normal(size=(4, 7)))
 
         y_ss = supersample(y, [3, 3], signal_type="real")
 
         assert not jnp.iscomplexobj(y_ss)
-        np.testing.assert_allclose(y_ss[::3, ::3], y, atol=1e-5)
+        np.testing.assert_allclose(y_ss, supersample(y + 0j, [3, 3]).real, atol=1e-5)
 
     @pytest.mark.parametrize("value", [None, "complex", "real"])
     def test_the_config_value_validates(self, value):
         assert validate_signal_type(value, "rfi.signal_type") == (value or "complex")
 
-    @pytest.mark.parametrize("value", ["Real", 1, True, ["real"]])
+    @pytest.mark.parametrize("value", ["Real", "", 0, 1, False, True, ["real"]])
     def test_a_bad_config_value_is_refused_by_name(self, value):
         with pytest.raises(ValueError, match=r"rfi\.signal_type"):
             validate_signal_type(value, "rfi.signal_type")

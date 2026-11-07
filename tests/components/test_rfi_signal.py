@@ -2461,7 +2461,8 @@ class TestRealSignalType:
         rfi_A = run_forward(comp, random_params(comp))
 
         assert rfi_A.shape == (N_RFI, N_ANT, N_FREQ, N_TIME)
-        assert jnp.issubdtype(rfi_A.dtype, jnp.complexfloating)
+        # The working precision's complex, which the kernels pair with its float.
+        assert rfi_A.dtype == jnp.zeros(1, complex).dtype
         assert jnp.all(rfi_A.imag == 0)
         assert jnp.max(jnp.abs(rfi_A[:N_RFI_REAL])) > 0
 
@@ -2548,13 +2549,25 @@ class TestRealSignalType:
         assert 1.3 < const_ant / var_ant < 2.3
 
     @pytest.mark.parametrize("cls", ALL_CLASSES)
-    def test_a_complex_truth_keeps_its_real_part_and_says_what_it_drops(
-        self, cls, capsys
+    @pytest.mark.parametrize(
+        "amps, kept, lost", [((3, 4j, 0), (3, 0, 0), "0.8"), ((0, 0, 0), (0, 0, 0), "0")]
+    )
+    def test_a_truth_init_keeps_the_real_part_and_says_what_it_drops(
+        self, cls, amps, kept, lost, monkeypatch, capsys
     ):
+        """One constant source each; rms, not mean |A|, would report 0.571."""
+        import tabascal.components.rfi_signal as mod
+
         comp = setup_component(cls, signal_type="real")
-        rfi_A = jnp.full((1, 1, N_FREQ, N_TIME), 3.0 + 4.0j)
+        amps = jnp.asarray(amps, dtype=complex)[:, None, None, None]
+        monkeypatch.setattr(
+            mod, "read_true_rfi_A",
+            lambda *_: jnp.broadcast_to(amps, (N_RFI_REAL, N_ANT, *comp.signal_shape)),
+        )
 
-        kept = comp._true_signal(rfi_A)
+        comp._compute_true_params("sim.zarr", "DATA")
+        A = vmap(vmap(comp.latent_to_signal))(comp.true_rfi_k_A)[:N_RFI_REAL]
 
-        assert jnp.array_equal(kept, rfi_A.real)
-        assert "0.8" in capsys.readouterr().out
+        expected = np.broadcast_to(np.asarray(kept, float)[:, None, None, None], A.shape)
+        np.testing.assert_allclose(A, expected, atol=10 * tol())
+        assert f"= {lost} is discarded" in capsys.readouterr().out
