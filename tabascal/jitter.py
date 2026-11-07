@@ -1,7 +1,8 @@
 """``opt.init_jitter``: a seeded perturbation of the optimiser's start.
 
-A config whose inits are all deterministic makes no random draw, so reruns are
-bit-identical and a seed alone cannot show how far apart two fits land. The
+A config whose inits are all deterministic makes no random draw, so its start
+does not depend on the seed, and a seed alone cannot show how far apart two
+fits land. The
 jitter adds a draw to the start, so an ensemble over ``inference.seed`` can.
 
 Every fitted parameter is a standard-normal latent (``tabascal.dist``), so an

@@ -286,14 +286,21 @@ def jittered_fits(tmp_path_factory):
 
 
 def test_with_a_jitter_the_seed_moves_the_start(jittered_fits):
-    """The deterministic-init twin of this run is bitwise identical across seeds (test_seeds)."""
+    """By more than the round-off test_seeds allows its deterministic-init twin across seeds."""
     import xarray as xr
 
     first, second = (
         xr.open_zarr(str(jittered_fits[s][1] / "results" / "init_pred.zarr"))
         for s in FIT_SEEDS
     )
-    assert any(not np.array_equal(first[n].values, second[n].values) for n in first.data_vars)
+
+    def moved(a, b):
+        assert np.isfinite(a).all() and np.isfinite(b).all()
+        if a.dtype.kind not in "fc":
+            return False
+        return np.abs(a - b).max() > 64 * np.finfo(a.real.dtype).eps * np.abs(a).max()
+
+    assert any(moved(first[n].values, second[n].values) for n in first.data_vars)
 
 
 @pytest.mark.parametrize("seed", FIT_SEEDS)
