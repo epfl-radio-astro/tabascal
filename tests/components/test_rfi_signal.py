@@ -11,6 +11,7 @@ config, and the mask is device-independent. Only ``test_multi_device_padded_sour
 spends a subprocess on the real sharded placeholders.
 """
 
+import functools
 import os
 import subprocess
 import sys
@@ -32,7 +33,7 @@ from tabascal.components.rfi_signal import (
     read_light_curves,
     rfi_signal_config_validation,
 )
-from tabascal.fft_gp import latent_to_signal
+from tabascal.fft_gp import latent_to_signal, signal_to_latent
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
 
@@ -2172,7 +2173,7 @@ class TestTheStdIsTheWidthItClaims:
     SEEDS = range(24)
 
     @classmethod
-    def _rms_vis(cls, comp, n_rfi_real=1):
+    def _rms_vis(cls, comp, n_rfi_real=1, seeds=None):
         """``rms|V|`` of the visibility the component's own forward pass builds.
 
         Through ``build_forward``, not through a re-derivation of it: the
@@ -2182,7 +2183,7 @@ class TestTheStdIsTheWidthItClaims:
         """
 
         samples = []
-        for seed in cls.SEEDS:
+        for seed in cls.SEEDS if seeds is None else seeds:
             rfi_A = run_forward(comp, random_params(comp, seed=seed))
             # V_pq = sum_s A[s, p] conj(A[s, q]), over every baseline: the GP
             # is correlated along the grid, so the effective sample count is
@@ -2483,19 +2484,17 @@ class TestRealSignalType:
 
     @pytest.mark.parametrize("cls", ALL_CLASSES)
     def test_a_real_signal_is_filtered_as_the_complex_space_filters_it(self, cls):
-        """Through the latent and back, a real signal comes out as the real
-        part of what the complex space makes of it.
-
-        At the observed samples, which is where the two must agree: between
-        them an even padded axis leaves one unpaired mode the two interpolate
-        differently -- see fft_gp's "Real or complex signal space".
-        """
+        """Through the latent and back, a real signal comes out as the
+        complex transform makes it through the same, symmetric, cut."""
         real = setup_component(cls, signal_type="real")
-        cplx = setup_component(cls)
         y = jax.random.normal(jax.random.PRNGKey(3), (N_FREQ, N_TIME))
+        pad_factors = [real.freq_pad_factor, real.time_pad_factor]
 
         got = real.latent_to_signal(real.signal_to_latent(y))
-        expected = cplx.latent_to_signal(cplx.signal_to_latent(y)).real
+        expected = latent_to_signal(
+            signal_to_latent(y + 0j, pad_factors, real.latent_idxs),
+            real.pads, real.ss_idxs,
+        ).real
 
         assert not jnp.iscomplexobj(got)
         assert jnp.allclose(got, expected, atol=10 * tol())
@@ -2524,9 +2523,10 @@ class TestRealSignalType:
     def test_a_const_ant_source_is_wider_by_about_sqrt_three(self):
         """``E A^4 = 3 (E A^2)^2`` for a real Gaussian, where it is 2 for a
         circular complex one. Bounded for the reason the complex test gives,
-        separating ``sqrt(3)`` from 1 and from 3."""
+        separating ``sqrt(3)`` from 1 and from 3; the fourth moment is heavy
+        tailed, so more draws than that test needs."""
         kwargs = dict(std=3.0, n_rfi=1, n_rfi_real=1, signal_type="real")
-        rms = TestTheStdIsTheWidthItClaims._rms_vis
+        rms = functools.partial(TestTheStdIsTheWidthItClaims._rms_vis, seeds=range(200))
         var_ant = rms(setup_component(ComplexRFIVarAntFine, **kwargs))
         const_ant = rms(setup_component(ComplexRFIConstAntFine, **kwargs))
 

@@ -286,16 +286,15 @@ def validate_cutoff(value, where: str, default: float) -> float:
 # has, make y a stationary real GP with spectrum P and E y^2 = sum P -- where
 # the complex latent, drawn as two standard normals per mode, carries twice that.
 #
-# One caveat, on an axis whose padded length is even: its -N/2 mode has no +N/2
-# partner on the grid, and once supersampled it is no longer a Nyquist mode. The
-# two paths then agree at every original sample but not between them -- the
-# complex path's output is not even real there, for a real input -- and that
-# one mode's cas^2 makes the real prior's variance ripple slightly in x. It
-# carries the least power the cut keeps, and on an odd padded axis the real
-# path is exactly .real of the complex one.
-#
-# The power spectrum and the cut do not depend on which is chosen, so the
-# *_init functions take no signal type; only the transforms do.
+# The one exception is an axis whose padded length is even: its -N/2 mode has
+# no +N/2 partner on the grid, so P(-k) = P(k) cannot pair it, and once
+# supersampled it is no longer a Nyquist mode -- its cas^2 = 1 + sin(2kx)
+# makes the variance ripple in x by up to the power it carries, which no
+# scalar normalisation undoes. Where the cut keeps it, the real path drops it
+# from the latent grid instead (see :func:`pk_cut`): one mode, the least power
+# that axis keeps, and the cut grid is then symmetric about k = 0. That is the
+# only way the power spectrum and the cut depend on the signal type, which is
+# why the *_init functions take one.
 
 #: The signal spaces a Fourier-domain GP can be built in.
 SIGNAL_TYPES = ("complex", "real")
@@ -743,7 +742,9 @@ def pad(z: Array, pad_factors: List[float]) -> Array:
 
 # Used in final function
 @measure_runtime
-def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]]:
+def pk_cut(
+    pk: Array, cutoff: float, *, signal_type: str = "complex"
+) -> Tuple[List[slice], List[Tuple[int, int]]]:
     """
     Calculate the indexes and pads to cut Fourier modes according to a power spectrum cutoff.
 
@@ -753,6 +754,10 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
         The power spectrum array with dimensionality equal to the domain.
     cutoff : float
         The relative cutoff for Fourier modes.
+    signal_type : str
+        ``"complex"`` (default) or ``"real"``. A real signal also drops the
+        unpaired -N/2 mode of an even axis where the cut would keep it -- see
+        "Real or complex signal space" at the top of this module.
 
     Returns
     -------
@@ -828,12 +833,18 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
             f"axis, and the comparison is strict. {fix}"
         )
 
+    _check_signal_type(signal_type)
+
     # Calculate bounding box slices and padding to restore size
     idxs = []
     pads = []
     for i in range(pk.ndim):
         im_min = int(idx[i].min())
         im_max = int(idx[i].max())
+        # Index 0 of a shifted even axis is -N/2, which has no partner. An axis
+        # of length 2 still keeps k = 0 after it.
+        if signal_type == "real" and im_min == 0 and pk.shape[i] % 2 == 0:
+            im_min = 1
         idxs.append(slice(im_min, im_max + 1))
         pads.append((im_min, pk.shape[i] - im_max - 1))
 
@@ -867,7 +878,7 @@ def fourier_cut(pk: Array, cutoff: float, y: Array, *, signal_type: str = "compl
     if signal_type == "real":
         _require_real(y, "fourier_cut")
 
-    idxs, _ = pk_cut(pk, cutoff)
+    idxs, _ = pk_cut(pk, cutoff, signal_type=signal_type)
     Y = jnp.fft.fftshift(jnp.fft.fftn(y, norm="forward"))
     if signal_type == "real":
         Y = _to_hartley(Y)
@@ -875,7 +886,9 @@ def fourier_cut(pk: Array, cutoff: float, y: Array, *, signal_type: str = "compl
 
 
 @measure_runtime
-def fourier_uncut(pk: Array, cutoff: float, Y_cut: Array) -> Array:
+def fourier_uncut(
+    pk: Array, cutoff: float, Y_cut: Array, *, signal_type: str = "complex"
+) -> Array:
     """
     Zero-pad an array of cut Fourier modes back to the original size.
 
@@ -887,13 +900,15 @@ def fourier_uncut(pk: Array, cutoff: float, Y_cut: Array) -> Array:
         The relative cutoff.
     Y_cut : Array
         Array of cut Fourier modes.
+    signal_type : str
+        The one ``Y_cut`` was cut for, which sets the cut: see :func:`pk_cut`.
 
     Returns
     -------
     Array
         The zero-padded Fourier array (shifted frequency ordering).
     """
-    _, pads = pk_cut(pk, cutoff)
+    _, pads = pk_cut(pk, cutoff, signal_type=signal_type)
     return jnp.pad(Y_cut, pad_width=pads, mode="constant", constant_values=0.0)
 
 
@@ -1062,6 +1077,8 @@ def signal_to_latent_init(
     k0s: List[float],
     gammas: List[float],
     cutoff: float,
+    *,
+    signal_type: str = "complex",
 ) -> Tuple[List[slice], Array]:
     """
     Pre-compute slicing metadata for JIT-compatible latent extraction.
@@ -1084,17 +1101,18 @@ def signal_to_latent_init(
         Steepness factors for each dimension.
     cutoff : float
         Relative Fourier mode cutoff.
+    signal_type : str
+        ``"complex"`` (default) or ``"real"``, which sets the cut: see
+        :func:`pk_cut`. Pass the same one to :func:`latent_to_signal_init`.
 
     Returns
     -------
     tuple[list[slice], Array]
         (idxs, pk): Slicing indices and power spectrum for latent extraction.
-        Neither depends on the signal type, so this takes none: the same
-        indices serve :func:`signal_to_latent` in either.
     """
     k_pad = pad_domain_k(ns, dxs, pad_factors)
     pk = pow_spec_nd(k_pad, p0, k0s, gammas)
-    idxs, _ = pk_cut(pk, cutoff)
+    idxs, _ = pk_cut(pk, cutoff, signal_type=signal_type)
 
     return idxs, pk
 
@@ -1163,6 +1181,8 @@ def latent_to_signal_init(
     k0s: List[float],
     gammas: List[float],
     cutoff: float,
+    *,
+    signal_type: str = "complex",
 ) -> Tuple[Array, List[Array], List[Tuple[int, int]], List[slice]]:
     """
     Calculate metadata needed to transform from latent space to supersampled signal.
@@ -1183,6 +1203,9 @@ def latent_to_signal_init(
         The steepness of the low-pass filter dropoff for each dimension.
     cutoff : float
         The relative cutoff for Fourier modes.
+    signal_type : str
+        ``"complex"`` (default) or ``"real"``, which sets the cut: see
+        :func:`pk_cut`. Pass the same one to :func:`signal_to_latent_init`.
 
     Returns
     -------
@@ -1192,14 +1215,11 @@ def latent_to_signal_init(
         - latent_ks: List of k-modes for each dimension after cutting.
         - pads: Padding widths to reach the padded, supersampled Fourier grid.
         - idxs_pad_ss: Slices to extract the supersampled portion from the padded result.
-
-        None of these depends on the signal type, so this takes none: the
-        same metadata serves :func:`latent_to_signal` in either.
     """
     ks_pad = pad_domain_k(ns, dxs, pad_factors)
     pk = pow_spec_nd(ks_pad, p0, k0s, gammas)
 
-    idxs, cut_pads = pk_cut(pk, cutoff)
+    idxs, cut_pads = pk_cut(pk, cutoff, signal_type=signal_type)
     latent_pk = pk[tuple(idxs)]
     latent_ks = [k[idx] for k, idx in zip(ks_pad, idxs)]
 

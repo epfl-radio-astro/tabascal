@@ -1193,6 +1193,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             k0s,
             gammas,
             pk_cutoff,
+            signal_type=self.signal_type,
         )
 
         self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
@@ -1211,6 +1212,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
             k0s,
             gammas,
             pk_cutoff,
+            signal_type=self.signal_type,
         )
 
         self.signal_to_latent = lambda _rfi_A: signal_to_latent(
@@ -1498,6 +1500,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             k0s,
             gammas,
             pk_cutoff,
+            signal_type=self.signal_type,
         )
 
         self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
@@ -1516,6 +1519,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
             k0s,
             gammas,
             pk_cutoff,
+            signal_type=self.signal_type,
         )
 
         self.signal_to_latent = lambda rfi_A: signal_to_latent(

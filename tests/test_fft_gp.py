@@ -689,17 +689,18 @@ class TestRealSignalType:
     """
 
     @staticmethod
-    def _gp(ns, pad_factors, ss_factors, cutoff=1e-9):
+    def _gp(ns, pad_factors, ss_factors, cutoff=1e-9, signal_type="real"):
         dxs = [1.0] * len(ns)
         k0s, gammas = [0.2] * len(ns), [3] * len(ns)
-        idxs, _ = signal_to_latent_init(ns, dxs, pad_factors, 1.0, k0s, gammas, cutoff)
+        kw = dict(signal_type=signal_type)
+        idxs, _ = signal_to_latent_init(ns, dxs, pad_factors, 1.0, k0s, gammas, cutoff, **kw)
         latent_pk, _, pads, ss_idxs = latent_to_signal_init(
-            ns, dxs, pad_factors, ss_factors, 1.0, k0s, gammas, cutoff
+            ns, dxs, pad_factors, ss_factors, 1.0, k0s, gammas, cutoff, **kw
         )
         return idxs, latent_pk, pads, ss_idxs
 
     def test_the_round_trip_is_exact_without_padding_or_a_cut(self):
-        ns = [6, 9]
+        ns = [7, 9]
         y = jnp.asarray(np.random.default_rng(0).normal(size=ns))
         idxs, _, pads, ss_idxs = self._gp(ns, [1, 1], [1, 1], cutoff=1e-30)
 
@@ -711,14 +712,15 @@ class TestRealSignalType:
         assert not jnp.iscomplexobj(back)
         np.testing.assert_allclose(back, y, atol=1e-5)
 
-    @pytest.mark.parametrize("ns", [[5, 7], [6, 9]])
-    def test_it_is_the_real_part_of_the_complex_path(self, ns):
-        """Everywhere on an odd padded grid; at the original samples on an
-        even one, where the unpaired -N/2 mode is interpolated differently
-        between them -- which the complex path's own imaginary part shows."""
+    # [5, 7] pads to [9, 13], odd on both axes; [2, 8] to [4, 16], whose
+    # whole axes the cut keeps, -N/2 included.
+    @pytest.mark.parametrize("ns", [[5, 7], [2, 8]])
+    def test_it_is_the_complex_path_through_the_same_cut(self, ns):
+        """Everywhere, supersampled: the real cut pairs every mode, so the
+        complex path through it is real too."""
         pad_factors, ss = [2.0, 2.0], [3, 3]
         y = jnp.asarray(np.random.default_rng(1).normal(size=ns))
-        idxs, _, pads, ss_idxs = self._gp(ns, pad_factors, ss)
+        idxs, _, pads, ss_idxs = self._gp(ns, pad_factors, ss, cutoff=1e-30)
 
         real = latent_to_signal(
             signal_to_latent(y, pad_factors, idxs, signal_type="real"),
@@ -726,26 +728,23 @@ class TestRealSignalType:
         )
         cplx = latent_to_signal(signal_to_latent(y + 0j, pad_factors, idxs), pads, ss_idxs)
 
-        on_samples = (slice(ss[0] // 2, None, ss[0]), slice(ss[1] // 2, None, ss[1]))
-        np.testing.assert_allclose(real[on_samples], cplx.real[on_samples], atol=1e-5)
-        # [5, 7] pads to [9, 13]: odd on both axes, so every mode is paired.
-        if ns == [5, 7]:
-            np.testing.assert_allclose(real, cplx.real, atol=1e-5)
+        np.testing.assert_allclose(real, cplx.real, atol=1e-5)
+        np.testing.assert_allclose(cplx.imag, 0.0, atol=1e-5)
 
-    def test_independent_coefficients_give_the_spectrums_variance(self):
-        """``E y^2 = sum P``: one standard normal per mode, not two."""
-        idxs, latent_pk, pads, ss_idxs = self._gp([5, 7], [2.0, 2.0], [2, 2])
+    @pytest.mark.parametrize("ns", [[5, 7], [2, 8]])
+    def test_independent_coefficients_give_the_spectrums_variance(self, ns):
+        """``E y(x)^2 = sum P`` at every x, supersampled: one standard normal
+        per mode, not two, and stationary on an even axis too."""
+        _, latent_pk, pads, ss_idxs = self._gp(ns, [2.0, 2.0], [5, 3], cutoff=1e-30)
         P = latent_pk / jnp.sum(latent_pk)
 
-        keys = jax.random.split(jax.random.PRNGKey(0), 2000)
-        draws = jax.vmap(
-            lambda key: latent_to_signal(
-                jnp.sqrt(P) * jax.random.normal(key, P.shape),
-                pads, ss_idxs, signal_type="real",
-            )
-        )(keys)
+        # The exact pointwise variance, sum_k P(k) b_k(x)^2, from the basis.
+        basis = jax.vmap(
+            lambda e: latent_to_signal(e.reshape(P.shape), pads, ss_idxs, signal_type="real")
+        )(jnp.eye(P.size))
+        var = jnp.einsum("k,k...->...", P.ravel(), basis**2)
 
-        assert float(jnp.mean(draws**2)) == pytest.approx(1.0, rel=0.05)
+        np.testing.assert_allclose(var, 1.0, rtol=1e-5)
 
     def test_it_is_jit_compatible(self):
         ns, pad_factors = [5, 7], [2.0, 2.0]
