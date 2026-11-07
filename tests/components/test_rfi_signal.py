@@ -2483,7 +2483,8 @@ class TestRealSignalType:
             lambda p: jnp.sum(jnp.abs(forward(p, {}, constants)["rfi_A"]) ** 2)
         )(random_params(comp))["rfi_k_r_base"]
 
-        assert jnp.max(jnp.abs(grad[:N_RFI_REAL])) > 0
+        # Each source through its own latent, not one shared across them.
+        assert jnp.all(jnp.max(jnp.abs(grad[:N_RFI_REAL]), axis=(1, 2, 3)) > 0)
         assert jnp.all(grad[N_RFI_REAL:] == 0)
 
     @pytest.mark.parametrize("cls", ALL_CLASSES)
