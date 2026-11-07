@@ -34,6 +34,7 @@ from tabascal.components.rfi_signal import (
     rfi_signal_config_validation,
 )
 from tabascal.fft_gp import latent_to_signal, signal_to_latent
+from tabascal.seeds import component_key
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
 
@@ -2431,6 +2432,20 @@ class TestRealSignalType:
 
         assert not jnp.iscomplexobj(comp.init_rfi_k)
         assert not jnp.iscomplexobj(comp.mu_rfi_k)
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_a_ones_init_starts_the_forward_at_one(self, cls):
+        comp = setup_component(cls, signal_type="real", init="ones", mean="zeros")
+
+        np.testing.assert_allclose(run_forward(comp)[:N_RFI_REAL], 1.0, atol=10 * tol())
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES)
+    def test_a_sampled_init_is_the_seeded_real_draw(self, cls):
+        comp = setup_component(cls, signal_type="real", init="sample")
+        base = comp.init_params_base["rfi_k_r_base"]
+        draw = jax.random.normal(component_key(comp.seed, comp.seed_tag), base.shape)
+
+        np.testing.assert_allclose(base[:N_RFI_REAL], draw[:N_RFI_REAL], atol=10 * tol())
 
     @pytest.mark.parametrize("cls", ALL_CLASSES)
     @pytest.mark.parametrize("mean", ["zeros", "data"])
