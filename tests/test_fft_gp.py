@@ -678,3 +678,37 @@ class TestPkCutRefusesAnEmptySelection:
             advice[name] = str(excinfo.value).rsplit("strict. ", 1)[-1]
 
         assert len(set(advice.values())) == 4, advice
+
+
+# Padded lengths 9, 8 (pad 2) and 5, 4 (no padding), each with an even and an odd factor.
+@pytest.mark.parametrize("n, pad_factor", [(5, 2.0), (4, 2.0), (5, 1.0), (4, 1.0)])
+@pytest.mark.parametrize("f", [2, 3])
+def test_latent_to_signal_is_the_dft_on_the_supersampled_domain(n, pad_factor, f):
+    """Every kept mode lands on ``domain_ss`` exactly, the data grid at offset ``f // 2``."""
+    dx, atol = 0.7, 100 * float(jnp.finfo(jnp.zeros(()).dtype).eps)
+    pk, ks, pads, idxs = latent_to_signal_init(
+        [n], [dx], [pad_factor], [f], 1.0, [1.0], [2.0], 1e-30
+    )
+    n_pad = int(pad_domain_specs([n], [pad_factor])[0])
+    assert pk.shape == (n + 2 * n_pad,)
+
+    x = np.asarray(domain_ss([n], [dx], [0.0], [f], [pad_factor])[0])
+    np.testing.assert_allclose(x[f // 2 :: f], dx * np.arange(n), atol=atol)
+
+    got = jax.vmap(latent_to_signal, (0, None, None))(
+        jnp.eye(pk.size, dtype=complex), pads, idxs
+    )
+    expected = np.exp(2j * np.pi * np.asarray(ks[0])[:, None] * (x + n_pad * dx))
+    np.testing.assert_allclose(got, expected, atol=atol)
+
+
+@pytest.mark.parametrize("n", [8, 9])
+@pytest.mark.parametrize("f", [2, 3])
+def test_supersample_keeps_the_samples(n, f):
+    """Both supersampling routes put the input back on every ``f``-th fine sample."""
+    rng = np.random.default_rng(0)
+    y = jnp.asarray(rng.normal(size=n) + 1j * rng.normal(size=n))
+    Y = jnp.fft.fftshift(jnp.fft.fftn(y, norm="forward"))
+    for y_ss in (supersample(y, [f]), supersample_fourier(Y, [f])):
+        assert y_ss.shape == (n * f,)
+        np.testing.assert_allclose(y_ss[::f], y, atol=1e-6)

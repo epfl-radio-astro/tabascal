@@ -50,6 +50,7 @@ def _tols():
         ([4, 6], [2.0, 2.0], [1, 2]),  # supersampled, as the RFI path is
         ([4, 7], [2.0, 2.0], [1, 2]),  # an odd padded length, supersampled evenly
         ([5, 9], [2.0, 2.0], [3, 4]),
+        ([5, 4], [1.0, 1.0], [2, 3]),  # no padding: the crop wraps
     ],
 )
 def test_the_matrices_are_the_pad_ifft_crop_chain(ns, pad_factors, ss_factors):
