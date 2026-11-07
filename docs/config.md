@@ -269,6 +269,8 @@ opt:
 
 Every fitted parameter is a standard-normal latent, so an **absolute** scale is in units of the prior width: `0.05` moves each latent by 5 % of its prior standard deviation. A **relative** scale is a fraction of the rms of that block's own start, for starts such as the matched filter's that sit far from the prior mean; it is an error on a block that starts at zero, where it would add nothing. A number applies to every block, and a mapping names blocks, each either a parameter name (`rfi_k_r_base`) or its prefix up to an underscore (`rfi`), the longest match winning. Blocks a mapping leaves out are not jittered, and a block that names no parameter is an error.
 
+The rms is taken without squaring the start itself, so a block near either end of its dtype's range keeps its jitter. A block made only of subnormal values may read as zero on a backend that flushes them, and a relative jitter on it is then refused as a zero start.
+
 Each parameter draws from `inference.seed` under the tag `init_jitter` folded with its own name, so its jitter does not depend on the other parameters, and is independent of a sampled start (`init: sample`). The jitter is applied before the init prediction, so `init_pred` is the start the fit actually took, and the run header names it. With `init_jitter` null nothing is drawn and the start is the very arrays the components built, as without the key.
 
 ### Optimiser trace

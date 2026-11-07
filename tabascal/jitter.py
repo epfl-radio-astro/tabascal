@@ -138,13 +138,20 @@ def jitter_init(
         if kind == "relative":
             # Scaled by the largest entry, so that squaring a start near the
             # dtype's range neither underflows to zero nor overflows to inf.
-            peak = jnp.max(jnp.abs(real), initial=0.0)
+            # The scaling shifts exponents rather than dividing by the peak,
+            # whose reciprocal near the maximum is subnormal and can flush to
+            # zero; the rms is formed before the scale so that cannot overflow.
+            peak =jnp.max(jnp.abs(real), initial=0.0)
             if float(peak) == 0:
                 raise ValueError(
                     f"opt.init_jitter: {name} starts at zero, so a relative "
                     "jitter on it is zero. Give it an absolute scale, in prior widths."
                 )
-            sigma = scale * float(peak) * float(jnp.sqrt(jnp.mean((jnp.abs(real) / peak) ** 2)))
+            mantissa, exponent = jnp.frexp(jnp.abs(real))
+            peak_mantissa, peak_exponent = jnp.frexp(peak)
+            normalized = jnp.ldexp(mantissa, exponent - peak_exponent) / peak_mantissa
+            rms = float(peak) * float(jnp.sqrt(jnp.mean(normalized ** 2)))
+            sigma = scale * rms
         moved = _perturb(real, random.fold_in(base, zlib.crc32(name.encode())), sigma)
         out[name] = jnp.concatenate([moved, x[n_rfi_real:]]) if padded else moved
     return out
