@@ -260,6 +260,97 @@ def validate_cutoff(value, where: str, default: float) -> float:
     return _gp_cov_cutoff(value, where)
 
 
+# ---------------------------------------------------------------------------
+# Real or complex signal space
+# ---------------------------------------------------------------------------
+#
+# A GP built here is complex by default: its latent is one complex coefficient
+# per retained k-mode, and the signal is their inverse transform. A real signal
+# is the other option, kept for scientific comparison and for verification
+# rather than for speed -- it goes through the same complex FFTs.
+#
+# A real signal has a Hermitian spectrum, Y(-k) = conj(Y(k)), so half of a
+# complex latent is redundant for it. Taking .real of the complex path's output
+# would leave those directions in the fit with no effect on the likelihood, so
+# the real path parametrises the signal by its Hartley coefficients instead:
+#
+#     h(k) = Re Y(k) - Im Y(k)            y(x) = sum_k h(k) cas(k x)
+#
+# with cas = cos + sin. They are real, sit on exactly the cut, shifted grid the
+# complex coefficients do -- one real number per mode, so the degrees of
+# freedom match the signal's -- and need no k -> -k index map: with this
+# module's norm="forward" conventions the forward is the line above applied to
+# the FFT, and the inverse is Re z + Im z of the inverse FFT of the real h.
+# Every cas(k x) is real on any grid, so zero-padding for supersampling stays
+# exact. Independent h(k) with variance P(k), and P(-k) = P(k) as pow_spec_nd
+# has, make y a stationary real GP with spectrum P and E y^2 = sum P -- where
+# the complex latent, drawn as two standard normals per mode, carries twice that.
+#
+# The one exception is an axis whose padded length is even: its -N/2 mode has
+# no +N/2 partner on the grid, so P(-k) = P(k) cannot pair it, and once
+# supersampled it is no longer a Nyquist mode -- its cas^2 = 1 + sin(2kx)
+# makes the variance ripple in x by up to the power it carries, which no
+# scalar normalisation undoes. Where the cut keeps it, the real path drops it
+# from the latent grid instead (see :func:`pk_cut`): one mode, the least power
+# that axis keeps, and the cut grid is then symmetric about k = 0. That is the
+# only way the power spectrum and the cut depend on the signal type, which is
+# why the *_init functions take one.
+
+#: The signal spaces a Fourier-domain GP can be built in.
+SIGNAL_TYPES = ("complex", "real")
+
+
+def validate_signal_type(value, where: str, default: str = "complex") -> str:
+    """``<section>.signal_type``, or ``default`` where it is null."""
+    if value is None:
+        return default
+
+    if not isinstance(value, str) or value not in SIGNAL_TYPES:
+        raise ValueError(
+            f"Config parameter ({where}: {value!r}) is not a signal type. It "
+            f"takes one of {list(SIGNAL_TYPES)}."
+        )
+
+    return value
+
+
+def _check_signal_type(signal_type: str) -> None:
+    """Refuse a signal type by value, from the transforms themselves.
+
+    Static, so it costs nothing under JIT: ``signal_type`` is a Python string
+    and never a tracer.
+    """
+    if signal_type not in SIGNAL_TYPES:
+        raise ValueError(
+            f"signal_type {signal_type!r} is not one of {list(SIGNAL_TYPES)}."
+        )
+
+
+def _to_hartley(Y: Array) -> Array:
+    """Hartley coefficients of a real signal from its (forward-normalised) FFT."""
+    return Y.real - Y.imag
+
+
+def _from_hartley(z: Array) -> Array:
+    """The real signal from the inverse FFT of its Hartley coefficients."""
+    return z.real + z.imag
+
+
+def _require_real(y: Array, where: str) -> None:
+    """Refuse a complex input to a real-signal transform.
+
+    A complex array has no Hartley coefficients that mean anything: ``Re Y - Im
+    Y`` of one silently mixes its real and imaginary parts. The dtype is static,
+    so this is JIT-safe.
+    """
+    if jnp.iscomplexobj(y):
+        raise TypeError(
+            f"{where}: signal_type='real' takes a real signal, but this one is "
+            f"{jnp.asarray(y).dtype}. Pass its real part explicitly if that is "
+            "what is meant."
+        )
+
+
 def validate_gp_cov(
     gp_cov,
     section: str,
@@ -421,7 +512,7 @@ def supersample_domain_k(ns: List[int], dxs: List[float], ss_factors: List[int])
 
 
 @measure_runtime
-def supersample(y: Array, ss_factors: List[int]) -> Array:
+def supersample(y: Array, ss_factors: List[int], *, signal_type: str = "complex") -> Array:
     """
     Supersample a signal by integer factors along each axis via zero-padding in Fourier space.
 
@@ -431,12 +522,19 @@ def supersample(y: Array, ss_factors: List[int]) -> Array:
         The signal to supersample.
     ss_factors : list[int]
         The integer factors to supersample each axis.
+    signal_type : str
+        ``"complex"`` (default) or ``"real"``. A real signal must be passed as
+        a real array, and comes back real.
 
     Returns
     -------
     Array
         The supersampled signal.
     """
+    _check_signal_type(signal_type)
+    if signal_type == "real":
+        _require_real(y, "supersample")
+
     # Size of original signal
     ns = y.shape
     # Pads needed to increase size of signal to supersampled size
@@ -453,7 +551,12 @@ def supersample(y: Array, ss_factors: List[int]) -> Array:
     # Inverse FFT (default normalization scales by 1/n)
     # Scale by product of supersample factors to preserve signal amplitude
     scale = jnp.prod(jnp.array(ss_factors))
-    return jnp.fft.ifftn(Y_ss) * scale
+    y_ss = jnp.fft.ifftn(Y_ss) * scale
+
+    # The spectrum of a real input is Hermitian, so what is left in the
+    # imaginary part is rounding -- and, on an even axis, the unpaired Nyquist
+    # mode the padding splits from its partner. The real part is the signal.
+    return y_ss.real if signal_type == "real" else y_ss
 
 
 @measure_runtime
@@ -639,7 +742,9 @@ def pad(z: Array, pad_factors: List[float]) -> Array:
 
 # Used in final function
 @measure_runtime
-def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]]:
+def pk_cut(
+    pk: Array, cutoff: float, *, signal_type: str = "complex"
+) -> Tuple[List[slice], List[Tuple[int, int]]]:
     """
     Calculate the indexes and pads to cut Fourier modes according to a power spectrum cutoff.
 
@@ -649,6 +754,10 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
         The power spectrum array with dimensionality equal to the domain.
     cutoff : float
         The relative cutoff for Fourier modes.
+    signal_type : str
+        ``"complex"`` (default) or ``"real"``. A real signal also drops the
+        unpaired -N/2 mode of an even axis where the cut would keep it -- see
+        "Real or complex signal space" at the top of this module.
 
     Returns
     -------
@@ -724,12 +833,18 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
             f"axis, and the comparison is strict. {fix}"
         )
 
+    _check_signal_type(signal_type)
+
     # Calculate bounding box slices and padding to restore size
     idxs = []
     pads = []
     for i in range(pk.ndim):
         im_min = int(idx[i].min())
         im_max = int(idx[i].max())
+        # Index 0 of a shifted even axis is -N/2, which has no partner. An axis
+        # of length 2 still keeps k = 0 after it.
+        if signal_type == "real" and im_min == 0 and pk.shape[i] % 2 == 0:
+            im_min = 1
         idxs.append(slice(im_min, im_max + 1))
         pads.append((im_min, pk.shape[i] - im_max - 1))
 
@@ -737,7 +852,7 @@ def pk_cut(pk: Array, cutoff: float) -> Tuple[List[slice], List[Tuple[int, int]]
 
 
 @measure_runtime
-def fourier_cut(pk: Array, cutoff: float, y: Array) -> Array:
+def fourier_cut(pk: Array, cutoff: float, y: Array, *, signal_type: str = "complex") -> Array:
     """
     Remove Fourier modes that do not meet a relative cutoff.
 
@@ -749,19 +864,31 @@ def fourier_cut(pk: Array, cutoff: float, y: Array) -> Array:
         The relative cutoff.
     y : Array
         The signal from which to cut Fourier modes.
+    signal_type : str
+        ``"complex"`` (default) returns complex Fourier coefficients;
+        ``"real"`` takes a real ``y`` and returns its real Hartley
+        coefficients on the same grid.
 
     Returns
     -------
     Array
         The remaining Fourier modes after cutting (shifted frequency ordering).
     """
-    idxs, _ = pk_cut(pk, cutoff)
+    _check_signal_type(signal_type)
+    if signal_type == "real":
+        _require_real(y, "fourier_cut")
+
+    idxs, _ = pk_cut(pk, cutoff, signal_type=signal_type)
     Y = jnp.fft.fftshift(jnp.fft.fftn(y, norm="forward"))
+    if signal_type == "real":
+        Y = _to_hartley(Y)
     return Y[tuple(idxs)]
 
 
 @measure_runtime
-def fourier_uncut(pk: Array, cutoff: float, Y_cut: Array) -> Array:
+def fourier_uncut(
+    pk: Array, cutoff: float, Y_cut: Array, *, signal_type: str = "complex"
+) -> Array:
     """
     Zero-pad an array of cut Fourier modes back to the original size.
 
@@ -773,39 +900,47 @@ def fourier_uncut(pk: Array, cutoff: float, Y_cut: Array) -> Array:
         The relative cutoff.
     Y_cut : Array
         Array of cut Fourier modes.
+    signal_type : str
+        The one ``Y_cut`` was cut for, which sets the cut: see :func:`pk_cut`.
 
     Returns
     -------
     Array
         The zero-padded Fourier array (shifted frequency ordering).
     """
-    _, pads = pk_cut(pk, cutoff)
+    _, pads = pk_cut(pk, cutoff, signal_type=signal_type)
     return jnp.pad(Y_cut, pad_width=pads, mode="constant", constant_values=0.0)
 
 
 @measure_runtime
-def supersample_fourier(Y: Array, factors: List[int]) -> Array:
+def supersample_fourier(Y: Array, factors: List[int], *, signal_type: str = "complex") -> Array:
     """
     Supersample a signal via zero-padding of provided Fourier modes.
 
     Parameters
     ----------
     Y : Array
-        Fourier modes ordered as -k_max, ..., 0, ..., k_max.
+        Fourier modes ordered as -k_max, ..., 0, ..., k_max. Real Hartley
+        coefficients where ``signal_type`` is ``"real"``.
     factors : list[int]
         Integer factors by which to supersample each dimension.
+    signal_type : str
+        ``"complex"`` (default) or ``"real"``.
 
     Returns
     -------
     Array
         The supersampled signal.
     """
+    _check_signal_type(signal_type)
+
     ns = Y.shape
     pads = [(n * (f - 1) // 2, n * (f - 1) // 2) for n, f in zip(ns, factors)]
 
     # Pad and inverse transform
     Y_ss = jnp.fft.ifftshift(jnp.pad(Y, pads, mode="constant", constant_values=0))
-    return jnp.fft.ifftn(Y_ss, norm="forward")
+    y_ss = jnp.fft.ifftn(Y_ss, norm="forward")
+    return _from_hartley(y_ss) if signal_type == "real" else y_ss
 
 
 @measure_runtime
@@ -942,6 +1077,8 @@ def signal_to_latent_init(
     k0s: List[float],
     gammas: List[float],
     cutoff: float,
+    *,
+    signal_type: str = "complex",
 ) -> Tuple[List[slice], Array]:
     """
     Pre-compute slicing metadata for JIT-compatible latent extraction.
@@ -964,6 +1101,9 @@ def signal_to_latent_init(
         Steepness factors for each dimension.
     cutoff : float
         Relative Fourier mode cutoff.
+    signal_type : str
+        ``"complex"`` (default) or ``"real"``, which sets the cut: see
+        :func:`pk_cut`. Pass the same one to :func:`latent_to_signal_init`.
 
     Returns
     -------
@@ -972,7 +1112,7 @@ def signal_to_latent_init(
     """
     k_pad = pad_domain_k(ns, dxs, pad_factors)
     pk = pow_spec_nd(k_pad, p0, k0s, gammas)
-    idxs, _ = pk_cut(pk, cutoff)
+    idxs, _ = pk_cut(pk, cutoff, signal_type=signal_type)
 
     return idxs, pk
 
@@ -981,6 +1121,8 @@ def signal_to_latent(
     y: Array,
     pad_factors: List[float],
     idxs: List[slice],
+    *,
+    signal_type: str = "complex",
 ) -> Array:
     """
     Extract latent Fourier modes using pre-computed slicing indices.
@@ -995,6 +1137,11 @@ def signal_to_latent(
         Padding factors for each axis.
     idxs : list[slice]
         Pre-computed slicing indices from get_latent_init.
+    signal_type : str
+        ``"complex"`` (default) returns complex Fourier coefficients.
+        ``"real"`` takes a real ``y`` and returns its real Hartley
+        coefficients on the same grid -- see "Real or complex signal space"
+        at the top of this module.
 
     Returns
     -------
@@ -1013,8 +1160,14 @@ def signal_to_latent(
     >>>
     >>> latent = compute_latent(y)
     """
+    _check_signal_type(signal_type)
+    if signal_type == "real":
+        _require_real(y, "signal_to_latent")
+
     y_pad = pad(y, pad_factors)
     Y = jnp.fft.fftshift(jnp.fft.fftn(y_pad, norm="forward"))
+    if signal_type == "real":
+        Y = _to_hartley(Y)
     return Y[tuple(idxs)]
 
 
@@ -1028,6 +1181,8 @@ def latent_to_signal_init(
     k0s: List[float],
     gammas: List[float],
     cutoff: float,
+    *,
+    signal_type: str = "complex",
 ) -> Tuple[Array, List[Array], List[Tuple[int, int]], List[slice]]:
     """
     Calculate metadata needed to transform from latent space to supersampled signal.
@@ -1048,6 +1203,9 @@ def latent_to_signal_init(
         The steepness of the low-pass filter dropoff for each dimension.
     cutoff : float
         The relative cutoff for Fourier modes.
+    signal_type : str
+        ``"complex"`` (default) or ``"real"``, which sets the cut: see
+        :func:`pk_cut`. Pass the same one to :func:`signal_to_latent_init`.
 
     Returns
     -------
@@ -1061,7 +1219,7 @@ def latent_to_signal_init(
     ks_pad = pad_domain_k(ns, dxs, pad_factors)
     pk = pow_spec_nd(ks_pad, p0, k0s, gammas)
 
-    idxs, cut_pads = pk_cut(pk, cutoff)
+    idxs, cut_pads = pk_cut(pk, cutoff, signal_type=signal_type)
     latent_pk = pk[tuple(idxs)]
     latent_ks = [k[idx] for k, idx in zip(ks_pad, idxs)]
 
@@ -1086,7 +1244,11 @@ def latent_to_signal_init(
 
 
 def latent_to_signal(
-    Y_latent: Array, pads: List[Tuple[int, int]], ss_idxs: List[slice]
+    Y_latent: Array,
+    pads: List[Tuple[int, int]],
+    ss_idxs: List[slice],
+    *,
+    signal_type: str = "complex",
 ) -> Array:
     """
     Transform latent Fourier modes back to signal space over the supersampled domain.
@@ -1094,12 +1256,19 @@ def latent_to_signal(
     Parameters
     ----------
     Y_latent : Array
-        Fourier modes (-k_max to k_max ordering).
+        Fourier modes (-k_max to k_max ordering). Real Hartley coefficients
+        where ``signal_type`` is ``"real"``.
     pads : list[tuple[int, int]]
         Pads to reach the padded, supersampled size.
     ss_idxs : list[slice]
         Slices to extract the supersampled signal.
+    signal_type : str
+        ``"complex"`` (default) returns a complex signal. ``"real"`` returns
+        the real signal ``sum_k h(k) cas(k x)`` -- see "Real or complex signal
+        space" at the top of this module.
     """
+    _check_signal_type(signal_type)
+
     # Pad in shifted space
     Y_padded = jnp.pad(Y_latent, pad_width=pads, mode="constant", constant_values=0.0)
     
@@ -1108,7 +1277,8 @@ def latent_to_signal(
     y_padded_ss = jnp.fft.ifftn(Y_ss, norm="forward")
 
     # Crop to requested domain
-    return y_padded_ss[tuple(ss_idxs)]
+    y_ss = y_padded_ss[tuple(ss_idxs)]
+    return _from_hartley(y_ss) if signal_type == "real" else y_ss
 
 
 @measure_runtime
