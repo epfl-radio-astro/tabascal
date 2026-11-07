@@ -622,7 +622,7 @@ class TestRankGating:
 class TestRunOpt:
     """Every run writes ``results/trace.npz``; ``trace_path`` adds the metrics there instead."""
 
-    @pytest.mark.parametrize("configured", [None, "custom.npz"])
+    @pytest.mark.parametrize("configured", [None, "custom.npz", "custom"])
     def test_where_the_trace_lands_and_what_it_holds(
         self, monkeypatch, tmp_path, configured
     ):
@@ -641,7 +641,11 @@ class TestRunOpt:
             state=toy.state, constants=toy.constants, truth=toy.truth,
         )
 
-        written = tmp_path / configured if configured else results / "trace.npz"
+        # np.savez appends .npz to a bare path; the plot must look there too.
+        written = tmp_path / "custom.npz" if configured else results / "trace.npz"
+        assert tab_tools.run_trace_path(
+            toy.tab_config.args["opt"], str(results / "map_pred.zarr")
+        ) == str(written)
         if configured:
             assert not (results / "trace.npz").exists()
         with np.load(written) as npz:
@@ -653,15 +657,23 @@ class TestRunOpt:
 
 
 @pytest.mark.parametrize("keys", [("loss", "time_s"), ("loss", "time_s", "chi2", "vis_ast_nrmse")])
-def test_plot_losses_draws_a_row_per_traced_quantity(monkeypatch, tmp_path, keys):
+@pytest.mark.parametrize("n_iter", [1, 4])
+def test_plot_losses_draws_a_row_per_traced_quantity(monkeypatch, tmp_path, keys, n_iter):
     import matplotlib.pyplot as plt
     from tabascal.plot import plot_losses
 
     figures = []
     monkeypatch.setattr(plt, "savefig", lambda *a, **k: figures.append(plt.gcf()))
-    trace = {key: np.linspace(1.0, 2.0, 4) for key in keys}
+    # A zero NRMSE is a valid result, and must not vanish on a log axis.
+    trace = {key: np.linspace(1.0, 2.0, n_iter) for key in keys}
+    trace.update({key: np.zeros(n_iter) for key in keys if key.endswith("nrmse")})
 
     plot_losses(trace, "run", str(tmp_path))
 
     (fig,) = figures
     assert len(fig.axes) == 2 * (1 + ("chi2" in keys) + ("vis_ast_nrmse" in keys))
+    for ax in fig.axes:
+        (line,) = ax.get_lines()
+        if (line.get_ydata() <= 0).any():
+            assert ax.get_yscale() != "log"
+        assert (line.get_marker() == "o") == (n_iter == 1)

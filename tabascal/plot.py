@@ -338,10 +338,13 @@ def plot_losses(trace, run_name, plot_dir):
         for key in keys:
             values = np.asarray(trace[key])
             name = key.removesuffix("_nrmse") if len(keys) > 1 else None
-            ax_it.plot(values, label=name)
-            ax_t.plot(trace["time_s"], values, label=name)
+            # A one-step trace is a single point, which a bare line does not draw.
+            marker = "o" if values.size == 1 else None
+            ax_it.plot(values, label=name, marker=marker)
+            ax_t.plot(trace["time_s"], values, label=name, marker=marker)
         for ax in (ax_it, ax_t):
-            ax.set_yscale("symlog" if min(np.min(trace[k]) for k in keys) < 0 else "log")
+            # symlog where a value is zero or negative, which a log axis drops.
+            ax.set_yscale("symlog" if min(np.min(trace[k]) for k in keys) <= 0 else "log")
             if len(keys) > 1:
                 ax.legend()
         ax_it.set_ylabel(label)

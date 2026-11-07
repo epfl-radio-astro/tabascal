@@ -405,10 +405,15 @@ def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
 
 def run_trace_path(opt_config: dict, map_path: str) -> str:
     """Where :func:`run_opt` writes the run's trace: the traced path if any,
-    else ``trace.npz`` beside the MAP prediction."""
-    return loss_trace_path(opt_config.get("trace_path")) or os.path.join(
+    else ``trace.npz`` beside the MAP prediction.
+
+    ``.npz`` is appended when missing, as ``np.savez`` would append it, so a
+    reader given this path finds the file the writer made.
+    """
+    path = loss_trace_path(opt_config.get("trace_path")) or os.path.join(
         os.path.dirname(os.path.normpath(map_path)), LOSS_TRACE
     )
+    return path if path.endswith(".npz") else path + ".npz"
 
 
 def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
