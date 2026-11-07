@@ -9,8 +9,7 @@ model:
     - rfi_signal:ComplexRFIVarAntFine
     # - rfi_signal:ComplexRFIConstAntFine
   # RFI visibility calculation
-    #- rfi_vis:RiemannVisFine
-    - rfi_vis:RiemannVisFFIFine
+    - rfi_vis:RiemannVisFine
     # - rfi_vis:RiemannVisVariableFine
   # Astronomical signal model
     - ast_vis:GPVisAst
@@ -70,6 +69,7 @@ rfi:
     corr_time: 24 # seconds
   freq_pad_factor: 2.0
   time_pad_factor: 2.0
+  backend: ffi
   n_int_freq: 1
   time_int_factor: 5
 

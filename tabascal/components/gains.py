@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple
 def _missing_key(key: str) -> ValueError:
     """The error for a gains key the config does not carry at all.
 
-    Naming it is the whole point: five keys are read here, and a bare "validation
+    Naming it is the whole point: four keys are read here, and a bare "validation
     failed" leaves the reader to find which one is missing by bisection.
     """
 
@@ -91,27 +91,18 @@ def validate_gain_scales(gains_config: Dict) -> Dict:
     at all.
 
     A key is defaulted when, and only when, it is ``None`` or absent, so a
-    literal 0 is taken at its word: ``r_seed: 0`` is the seed it says, and a
-    zero ``amp_std`` or ``phase_std`` is an error rather than a width — a
-    zero-width prior pins every gain to its mean, which is a mistake worth
-    naming rather than a default worth guessing.
+    literal 0 is taken at its word: a zero ``amp_std`` or ``phase_std`` is an
+    error rather than a width — a zero-width prior pins every gain to its mean,
+    which is a mistake worth naming rather than a default worth guessing.
     """
 
     try:
-        r_seed = gains_config["r_seed"]
         gp_amp_mean = gains_config["amp_mean"]
         gp_amp_std = gains_config["amp_std"]
         gp_phase_mean = gains_config["phase_mean"]
         gp_phase_std = gains_config["phase_std"]
     except KeyError as e:
         raise _missing_key(e.args[0]) from e
-
-    if r_seed is None: # Set Default
-        gains_config["r_seed"] = 2
-    elif isinstance(r_seed, int):
-        pass
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tr_seed: {r_seed}) is not of type int.")
 
     # Defaulted only when it is genuinely unset. `not gp_amp_mean` also caught 0,
     # which would silently become a 1.0 nobody wrote, and let NaN and infinity
@@ -443,8 +434,8 @@ class ConstGains(Component):
     **What has to be true for it to be identifiable** (issue #124). A gain is only
     constrained by a model term the gain cannot deform:
 
-    * Pair it with ``rfi_signal:ComplexRFIConstAntFine``. With the per-antenna RFI
-      model ``ComplexRFIVarAntFine`` the gain is an exact no-op on the RFI term —
+    * Pair it with ``rfi_signal:ComplexRFIConstAnt`` (or ``ComplexRFIConstAntFine``).
+      With the per-antenna RFI model ``ComplexRFIVarAnt`` or ``ComplexRFIVarAntFine`` the gain is an exact no-op on the RFI term —
       ``g_p A_p conj(g_q A_q)`` is a reparametrisation of an already-free ``A_p`` —
       so setup warns when the two are combined.
     * The astronomical GP (``ast_vis:GPVisAst``) has per-baseline freedom and absorbs
@@ -508,7 +499,6 @@ class ConstGains(Component):
         try:
             gains_config = validate_gain_scales(tab_config.args["gains"])
 
-            self.r_seed = gains_config["r_seed"]
             self.n_ant = tab_config.n_ant
             self.n_bl = tab_config.n_bl
             self.n_freq = tab_config.n_freq
@@ -665,14 +655,17 @@ class ConstGains(Component):
     def _warn_on_rfi_degeneracy(self, components: List[str]) -> None:
         """Warn, but do not refuse, when the RFI model already has the same freedom."""
 
-        if "ComplexRFIVarAntFine" in components:
+        # Either grid: both carry a per-antenna amplitude.
+        for name in ("ComplexRFIVarAnt", "ComplexRFIVarAntFine"):
+            if name not in components:
+                continue
             warnings.warn(
-                "ConstGains is combined with rfi_signal:ComplexRFIVarAntFine, whose "
+                f"ConstGains is combined with rfi_signal:{name}, whose "
                 "RFI amplitude A_p is already free per antenna. The RFI visibility "
                 "g_p A_p conj(g_q A_q) is then unchanged by g_p -> c_p g_p together "
                 "with A_p -> A_p / c_p, so the gain is a flat direction of the RFI "
                 "term and only the astronomical model constrains it. Pair ConstGains "
-                "with rfi_signal:ComplexRFIConstAntFine, whose RFI amplitude carries "
+                f"with rfi_signal:{name.replace('VarAnt', 'ConstAnt')}, whose RFI amplitude carries "
                 "no per-antenna freedom of its own. See issue #124.",
                 UserWarning,
                 stacklevel=2,

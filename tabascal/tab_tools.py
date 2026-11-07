@@ -25,6 +25,16 @@ from jax.tree_util import tree_map
 
 from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
+from tabascal.run_dir import LOSS_TRACE
+from tabascal.opt_schedule import (
+    build_optimizer,
+    checkpoint_path as _checkpoint_path,
+    converged,
+    describe_schedule,
+    save_checkpoint,
+    step_size,
+    validate_opt,
+)
 from tabascal.timing import measure_runtime
 from tabascal.write import write_results_ms, write_results_xds
 
@@ -116,6 +126,26 @@ def nlog_post(prob_model, params, obs_data, state=None, constants=None):
     return nlog_p
 
 
+@measure_runtime
+def nlog_like_and_post(prob_model, params, obs_data, state=None, constants=None):
+    """Return the existing likelihood and posterior diagnostics from one forward pass."""
+    log_joint, model_trace = log_density(
+        prob_model,
+        model_args=(obs_data,),
+        model_kwargs={"state": state, "constants": constants},
+        params=params,
+    )
+    # Exactly what log_likelihood reduces: the site's own `fn.log_prob(value)`.
+    # numpyro's mask handler replaces that fn with `fn.mask(flags)`, so both
+    # reductions honour the flags (flagged entries add zero but still count in
+    # the mean). Only the joint applies the site's scale, as log_density always
+    # did and log_likelihood never has -- that asymmetry is kept so the printed
+    # log_l and log_p are unchanged.
+    obs = model_trace["obs"]
+    nlog_l = -obs["fn"].log_prob(obs["value"]).mean()
+    return nlog_l, -log_joint / obs_data.size / 2
+
+
 def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
 
     complex_types = [
@@ -180,9 +210,29 @@ def _integrated_autocorr_time(arr: np.ndarray, axis: int) -> float:
     g0 = np.mean(np.sum(np.abs(m) ** 2, axis=1))
     if g0 <= 0:
         return 1.0
-    tau = 1.0
+    # Zero padding gives linear rather than circular autocovariance. Only its
+    # real part is used, so sum the powers of separate real/imaginary rFFTs.
+    # Average in frequency space before inversion to keep just one lag vector.
+    # Accumulate that average in float64: across ~1e6 rows a float32 sum drifts
+    # by ~1e-4, which would show in the printed N_eff.
+    n_fft = 1 << (2 * n - 1).bit_length()
+    power = np.mean(np.abs(np.fft.rfft(m.real, n=n_fft)) ** 2, axis=0, dtype=np.float64)
+    if np.iscomplexobj(m):
+        power += np.mean(np.abs(np.fft.rfft(m.imag, n=n_fft)) ** 2, axis=0, dtype=np.float64)
+    covariance = np.fft.irfft(power, n=n_fft)[:n]
+    # The window closes on the first lag that is not positive, so a lag within
+    # the transform's rounding of zero decides it on noise: an exactly
+    # uncorrelated lag can come back as +7e-8 and keep the sum running. Settle
+    # those few from the direct lag product, in float64.
+    tol = 16 * np.log2(n_fft) * np.finfo(m.real.dtype).eps * g0
+    tau, wide = 1.0, None
     for k in range(1, n):
-        rho = np.mean(np.sum(m[:, : n - k] * np.conj(m[:, k:]), axis=1).real) / g0
+        c = covariance[k]
+        if abs(c) <= tol:
+            if wide is None:
+                wide = m.astype(np.result_type(m.dtype, np.float64))
+            c = np.mean(np.sum(wide[:, : n - k] * np.conj(wide[:, k:]), axis=1).real)
+        rho = c / g0
         if rho <= 0:
             break
         tau += 2.0 * (1.0 - k / n) * rho
@@ -217,13 +267,28 @@ def _effective_sample_size(resid: np.ndarray) -> float:
 
     # Row axis is unordered (baseline/antenna index is not a sequence), so use the full
     # correlation matrix rather than an autocorrelation: N_eff_row = n_row^2 / sum(rho_ij).
+    # Only the *total* of that matrix is wanted, and it factors:
+    #
+    #     sum_ij (Y Y^H)_ij = sum_ij sum_k Y_ik conj(Y_jk) = sum_k |sum_i Y_ik|^2
+    #
+    # so the column sums give it without forming the matrix. That matters at scale:
+    # the row axis is baselines, so the Gram is n_bl x n_bl -- 73536^2 (43 GB) at 384
+    # stations and 130816^2 (137 GB) at 512, on the host, twice per fit. Summing the
+    # columns instead is linear in the rows and keeps nothing but one feature vector.
     yr = y.reshape(n_row, -1)
     yr = yr - yr.mean(axis=1, keepdims=True)
     nrm = np.sqrt(np.sum(np.abs(yr) ** 2, axis=1))
     good = nrm > 0
     if good.sum() >= 2:
         yg = yr[good] / nrm[good][:, None]
-        neff_row = good.sum() ** 2 / (yg @ yg.conj().T).real.sum()
+        # Real by construction: a sum of squared magnitudes. Rows that cancel
+        # exactly (r and -r) make it zero; count the good rows as independent
+        # rather than divide by it.
+        # The column sums run over every baseline -- 130816 at 512 stations --
+        # and a float32 running sum drifts with that count, so widen it.
+        colsum = yg.sum(axis=0, dtype=np.result_type(yg.dtype, np.float64))
+        total = float(np.sum(np.abs(colsum) ** 2))
+        neff_row = good.sum() ** 2 / total if total > 0 else float(good.sum())
     else:
         neff_row = float(n_row)
 
@@ -314,9 +379,11 @@ def fix_padding(config: dict, n_freq):
 
 
 def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
-    """Path to dump the optimiser trace to, or None when tracing is off.
+    """Path to dump the traced optimiser metrics to, or None when they are off.
 
-    ``opt.trace_path`` is the supported way to ask for a trace, so a run that is
+    Every run writes its loss and step times; this decides only whether the
+    per-iteration metrics are computed too, and where that fuller trace goes.
+    ``opt.trace_path`` is the supported way to ask for them, so a run that is
     meant to be compared against another records itself without anyone having to
     remember an environment variable. ``TAB_LOSS_TRACE`` still overrides it, for
     tracing a one-off run of a config that must not be edited -- a shared
@@ -334,6 +401,19 @@ def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
     in :func:`_write_loss_trace` where it cannot change what is computed.
     """
     return os.environ.get("TAB_LOSS_TRACE") or config_path or None
+
+
+def run_trace_path(opt_config: dict, map_path: str) -> str:
+    """Where :func:`run_opt` writes the run's trace: the traced path if any,
+    else ``trace.npz`` beside the MAP prediction.
+
+    ``.npz`` is appended when missing, as ``np.savez`` would append it, so a
+    reader given this path finds the file the writer made.
+    """
+    path = loss_trace_path(opt_config.get("trace_path")) or os.path.join(
+        os.path.dirname(os.path.normpath(map_path)), LOSS_TRACE
+    )
+    return path if path.endswith(".npz") else path + ".npz"
 
 
 def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
@@ -433,7 +513,8 @@ def _write_loss_trace(
     The losses are written exactly as the optimiser produced them -- already
     normalised by ``obs_data.size`` in the step itself -- so the trace and the
     loss curve the run returns are the same numbers. ``metrics`` holds the
-    per-iteration model-independent quantities from :func:`build_trace_metrics`.
+    per-iteration model-independent quantities from :func:`build_trace_metrics`,
+    when the run computed them.
 
     This is the *only* place the process rank is allowed to matter: every rank
     ran the same traced program and so holds the same numbers, and all of them
@@ -477,6 +558,11 @@ def run_custom_svi(
     constants: dict = None,
     trace_path: Optional[str] = None,
     metrics: Optional[tuple] = None,
+    optimizer: Optional[dict] = None,
+    schedule: Optional[dict] = None,
+    stop: Optional[dict] = None,
+    checkpoints: tuple = (),
+    checkpoint_path: Optional[Callable[[int], str]] = None,
 ) -> SVIRunResult:
     """MAP optimization that avoids capturing large state arrays as JAX constants.
 
@@ -490,33 +576,36 @@ def run_custom_svi(
 
     ``trace_path`` dumps the per-iteration loss and the wall-clock time it was
     reached to an ``.npz``, for loss-versus-time comparisons between models
-    (issue #107), together with the ``metrics`` from
-    :func:`build_trace_metrics` -- a ``(function, data)`` pair, which the path
-    requires because the documented schema always carries a reduced chi^2.
-    ``trace_path`` alone decides: without one, nothing is timed, no metrics are
-    computed and the optimiser takes the original :func:`_map_step`, so the
-    trace is genuinely free when it is off.
+    (issue #107). That much is free: the loop reads every loss back to the host
+    anyway, so timing a step adds one clock read. ``metrics`` -- the
+    ``(function, data)`` pair from :func:`build_trace_metrics` -- adds the
+    per-iteration metrics to the file, through :func:`_map_step_metrics`;
+    without them the optimiser takes the original :func:`_map_step`, and its
+    output is what it always was. Metrics without a path would be computed and
+    thrown away, so they are ignored.
 
-    The path must be the same on every process. It selects which of
-    :func:`_map_step` and :func:`_map_step_metrics` runs, and under sharding the
-    model evaluation contains collectives, so the ranks disagreeing about that
-    would deadlock the optimisation. Every rank traces; only the write at the
-    end is rank 0's, gated inside :func:`_write_loss_trace`.
+    Whether metrics are given must be the same on every process. It selects
+    which of :func:`_map_step` and :func:`_map_step_metrics` runs, and under
+    sharding the model evaluation contains collectives, so the ranks disagreeing
+    about that would deadlock the optimisation. Only the write at the end is
+    rank 0's, gated inside :func:`_write_loss_trace`.
+
+    ``optimizer`` (normalised by :func:`tabascal.opt_schedule.validate_optimizer`)
+    is the optax optimiser each phase builds, ``adabelief`` when it is None.
+    ``schedule`` (normalised by :func:`tabascal.opt_schedule.validate_schedule`)
+    replaces the two phases with one optimiser whose step size follows it,
+    for ``max_iter`` steps in all; ``dual_run`` is then not read. One optimiser
+    means one compiled step and moments that carry through every step (#82).
+    ``stop`` ends that run early once :func:`tabascal.opt_schedule.converged`.
+    ``checkpoints`` are steps, counted across both phases with ``dual_run``,
+    after which the parameters are written to ``checkpoint_path(step)``.
     """
-    # The path is the switch. Metrics without one would compile and run the
-    # traced step for a production run and then discard every number it cost;
-    # a path without metrics would write a file missing the keys the schema
-    # promises. Refused here rather than at the writer, which only runs once
-    # the whole optimisation is already done.
+    if stop is not None and schedule is None:
+        raise ValueError("run_custom_svi takes a stop only with a schedule.")
+    # Metrics without a path would compile and run the traced step for a
+    # production run and then discard every number it cost.
     if trace_path is None:
         metrics = None
-    elif metrics is None:
-        raise ValueError(
-            "run_custom_svi was given trace_path but no metrics, so the trace "
-            "would carry no reduced chi^2 and not be the documented file. Pass "
-            "metrics=build_trace_metrics(tab_config, truth), or leave "
-            "trace_path unset."
-        )
 
     metrics_fn, metrics_data = metrics if metrics is not None else (None, None)
 
@@ -525,24 +614,23 @@ def run_custom_svi(
     # any difference in cost per iteration, so a model that converges in fewer
     # but more expensive steps looks better than it is; the honest axis is time.
     # `float(loss)` below already forces a device sync, so the timestamp taken
-    # after it bounds completed work rather than dispatched work. Every read of
-    # the clock is guarded on the trace being on, so an untraced run does not
-    # pay for a measurement nobody asked for.
-    tracing = trace_path is not None
+    # after it bounds completed work rather than dispatched work, and costs
+    # nothing beyond the clock read.
     step_times = []
     trace_t0 = None
     traced_metrics: dict = {}
 
-    def _run_phase(params, epsilon, max_iter):
+    checkpoints = set(checkpoints)
+
+    def _run_phase(params, optimizer, max_iter, offset=0):
         nonlocal trace_t0
-        optimizer = optax.adabelief(epsilon)
         opt_state = optimizer.init(params)
         losses = []
         window = max(max_iter // 10, 1)
         init_loss = None
         pbar = trange(max_iter, disable=not is_process_0())
         for i in pbar:
-            if tracing and trace_t0 is None:
+            if trace_t0 is None:
                 trace_t0 = perf_counter()
             if metrics_fn is None:
                 params, opt_state, loss = _map_step(
@@ -556,8 +644,7 @@ def run_custom_svi(
                 for name, value in step_metrics.items():
                     traced_metrics.setdefault(name, []).append(float(value))
             loss_val = float(loss)
-            if tracing:
-                step_times.append(perf_counter() - trace_t0)
+            step_times.append(perf_counter() - trace_t0)
             losses.append(loss_val)
             if init_loss is None:
                 init_loss = loss_val
@@ -569,14 +656,31 @@ def run_custom_svi(
                 f"init loss: {init_loss:.4f}, avg. loss [{n1}-{n2}]: {avg_loss:.4f}",
                 refresh=False,
             )
+            if offset + i + 1 in checkpoints:
+                save_checkpoint(
+                    checkpoint_path(offset + i + 1), params, offset + i + 1, loss_val,
+                    write=is_process_0(),
+                )
+            # Every rank holds the same losses, so every rank stops at the same step.
+            if stop is not None and converged(losses, stop):
+                pbar.close()
+                print(f"Converged after {i + 1} steps: the mean loss moved by less "
+                      f"than {stop['rtol']:g} between the last two windows of {stop['window']}.")
+                break
         return params, losses
 
     params = init_params
-    params, losses = _run_phase(params, epsilon, max_iter)
+    if schedule is not None:
+        transform = build_optimizer(optimizer, step_size(schedule, epsilon, max_iter))
+        params, losses = _run_phase(params, transform, max_iter)
+    else:
+        params, losses = _run_phase(params, build_optimizer(optimizer, epsilon), max_iter)
 
-    if dual_run:
-        params, losses2 = _run_phase(params, epsilon / 10, max_iter)
-        losses = losses + losses2
+        if dual_run:
+            params, losses2 = _run_phase(
+                params, build_optimizer(optimizer, epsilon / 10), max_iter, offset=max_iter
+            )
+            losses = losses + losses2
 
     _write_loss_trace(trace_path, losses, step_times, traced_metrics)
 
@@ -619,27 +723,42 @@ def run_opt(
     init_params: dict,
     ms_path,
     map_path,
-    params_path,
     state=None,
     constants=None,
     truth=None,
 ):
 
     start = datetime.now()
+    opt_config = tab_config.args["opt"]
+    checked = validate_opt(opt_config)
     print()
     print("Running Optimization ...")
-    trace_path = loss_trace_path(tab_config.args["opt"].get("trace_path"))
+    print(f"Optimiser : {describe_schedule(opt_config)}")
+    traced_path = loss_trace_path(opt_config.get("trace_path"))
+    results_dir = os.path.dirname(os.path.normpath(map_path))
+    # Every run keeps its loss and step times beside its results; asking for a
+    # trace adds the metrics and puts the file where it was asked for instead.
+    trace_path = run_trace_path(opt_config, map_path)
+    # Beside the MAP prediction, named after it, so two runs into one results
+    # directory with different suffixes keep their checkpoints apart.
+    stem = os.path.basename(os.path.normpath(map_path)).removesuffix(".zarr")
+    checkpoint_dir = os.path.join(results_dir, "checkpoints")
     vi_results = run_custom_svi(
         prob_model=prob_model,
         obs_data=tab_config.vis_obs,
-        max_iter=tab_config.args["opt"]["max_iter"],
+        max_iter=opt_config["max_iter"],
         init_params=init_params,
-        epsilon=tab_config.args["opt"]["epsilon"],
-        dual_run=tab_config.args["opt"]["dual_run"],
+        epsilon=opt_config["epsilon"],
+        dual_run=opt_config["dual_run"],
         state=state,
         constants=constants,
         trace_path=trace_path,
-        metrics=build_trace_metrics(tab_config, truth) if trace_path else None,
+        metrics=build_trace_metrics(tab_config, truth) if traced_path else None,
+        optimizer=checked["optimizer"],
+        schedule=checked["schedule"],
+        stop=checked["stop"],
+        checkpoints=tuple(checked["checkpoints"]),
+        checkpoint_path=lambda step: _checkpoint_path(checkpoint_dir, stem, step),
     )
     vi_params = vi_results.params
     # Strip _auto_loc suffix to get raw param names for Predictive
@@ -671,7 +790,19 @@ def run_opt(
         print_truth_metrics(vi_pred, truth, tab_config, "opt")
 
     print()
-    print(f"Copying tabascal results to MS file from {map_path}")
+    write_ms_if_enabled(tab_config, ms_path, map_path)
+
+    return vi_pred, vi_results.losses, vi_params, rchi2
+
+
+def write_ms_if_enabled(tab_config, ms_path, results_path):
+    """Apply the run's MS export policy to either initial or fitted results."""
+    # Both run routes already wrote the zarr. Keep its location visible when
+    # the optional MS copy (including its calibration-table export) is skipped.
+    if tab_config.args["data"].get("skip_ms_write", False):
+        print(f"Skipping MS write; tabascal results are in {results_path}")
+        return
+    print(f"Copying tabascal results to MS file from {results_path}")
     # No corr= here: write_results_xds recorded the fitted correlation on the
     # zarr, so the results carry it themselves. The gain tables are not on the
     # zarr, though, and the MS's data column is still raw, so they are handed
@@ -679,9 +810,8 @@ def run_opt(
     # that was divided out of the visibilities at read time.
     write_results_ms(
         ms_path,
-        map_path,
+        results_path,
         tab_config.args["data"]["data_col"],
         gain_table=getattr(tab_config, "gain_table", None),
+        row_chunk=tab_config.args["data"].get("row_chunk"),
     )
-
-    return vi_pred, vi_results.losses, vi_params, rchi2

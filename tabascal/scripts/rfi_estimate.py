@@ -71,10 +71,13 @@ def build_parser(parser=None):
     )
     parser.add_argument(
         "-z", "--zarr", default=None,
-        help="Score a run straight from its results zarr (map_pred_*.zarr): the "
-        "residual is data_col - zarr.vis_obs. Preferred over reading TAB_RES_DATA "
-        "from the MS, which every tabascal run overwrites. With -z, -dc is the "
-        "*reference* column the residual is formed against.",
+        help="Score a run straight from its results: a run directory "
+        "(<out_dir>/runs/<run>), or a results zarr. The residual is data_col - "
+        "zarr.vis_obs. Preferred over reading TAB_RES_DATA from the MS, which "
+        "every tabascal run overwrites. With -z, -dc is the *reference* column "
+        "the residual is formed against. A run directory also supplies the "
+        "config, unless -c or -n/-np is given, and the default output, "
+        "<run>/light_curves/.",
     )
     # No parser default: a default is indistinguishable from a value the user
     # typed, and with -c that would silently overwrite the config's own
@@ -101,12 +104,13 @@ def build_parser(parser=None):
     )
     parser.add_argument(
         "-sx", "--tag", default=None, type=_label,
-        help="Run tag/suffix (e.g. the tabascal -sx). Names the output so "
-        "residuals of different runs do not collide. Default: the column.",
+        help="Label naming the output, so residuals of different runs do not "
+        "collide. Default: the column.",
     )
     parser.add_argument(
         "-o", "--output", default=None,
-        help="Output .npz path (default: <ms_dir>/light_curves/<tag-or-column>.npz).",
+        help="Output .npz path (default: <ms_dir>/light_curves/<tag-or-column>.npz, "
+        "or <run>/light_curves/ when -z names a run directory).",
     )
     parser.add_argument(
         "-p", "--plot", action="store_true", default=False,
@@ -533,6 +537,9 @@ def set_precision_for_scan(precision: str):
 def resolve_output(args, ms_path, data_col):
     """Where to write, defaulting beside the MS under ``light_curves/``.
 
+    Curves scored from a run directory default into that run's own
+    ``light_curves/`` instead: they describe the run, not the MS.
+
     Named for the column actually filtered rather than for the flag, so a ``-c``
     run whose config selects ``TAB_RES_DATA`` does not write ``DATA.npz``.
 
@@ -549,8 +556,9 @@ def resolve_output(args, ms_path, data_col):
     if args.tag is not None:
         _label(args.tag)
     label = args.tag or data_col
-    ms_dir = os.path.dirname(os.path.abspath(str(ms_path).rstrip("/")))
-    path = args.output or os.path.join(ms_dir, "light_curves", f"{label}.npz")
+    run_dir = getattr(args, "run_dir", None)
+    parent = run_dir or os.path.dirname(os.path.abspath(str(ms_path).rstrip("/")))
+    path = args.output or os.path.join(parent, "light_curves", f"{label}.npz")
 
     return path if path.endswith(".npz") else path + ".npz"
 
@@ -763,7 +771,7 @@ def _extract_from_ms(args, offset_fit):
     if data_col.startswith("TAB_"):
         print(
             f"  WARNING  : reading '{data_col}' from the MS. Those columns "
-            "are overwritten by every tabascal run -- pass -z <map_pred_*.zarr> "
+            "are overwritten by every tabascal run -- pass -z <run directory> "
             "to score the run you actually mean."
         )
 
@@ -811,9 +819,32 @@ def _write_shifted_orbits(result, directory):
     print(f"  Shifted  : {path}")
 
 
+def resolve_run_dir(args):
+    """``-z <run directory>``: the run's exported results, and its config.
+
+    The results zarr is the one ``tab2MS`` exports. The run's ``config.yaml``
+    names the satellites, the MS, the column and the correlation, so it stands
+    in for ``-c`` unless the satellites were given some other way.
+    """
+    from tabascal.run_dir import exported_results, is_run_dir, load_run
+
+    args.run_dir = None
+    if not args.zarr or not is_run_dir(args.zarr):
+        return
+
+    run_dir, config, _ = load_run(args.zarr)
+    args.run_dir = run_dir
+    args.zarr = exported_results(run_dir, config)
+    if not (args.config or args.norad_ids or args.norad_path):
+        args.config = os.path.join(run_dir, "config.yaml")
+    elif not (args.config or args.ms_path or args.out_dir):
+        args.ms_path = config["data"]["ms_path"]
+
+
 def run(args):
     from tabascal.rfi_estimate import save_light_curves_npz
 
+    resolve_run_dir(args)
     offset_fit = resolve_offset_fit(args)
 
     # Printed after the resolution rather than before it: with -c the column and

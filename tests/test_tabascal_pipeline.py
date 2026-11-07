@@ -1,6 +1,7 @@
 """Test full Tabascal pipeline runs."""
 
 import hashlib
+import json
 import logging
 import re
 import subprocess
@@ -138,6 +139,8 @@ class PipelineTestConfig:
             re-measured for the ast.gp_cov.std change.
         requires_double: True if any component only runs in double precision; the
             case is skipped under single precision (``--x64 false``).
+        rfi_backend: ``rfi.backend`` of the ``rfi_vis`` component, merged into the
+            template's ``rfi`` section; None leaves the component's default.
         config_overrides: Dictionary of overrides to the tabascal config file
         metrics_ref: Optional truth-based error references, keyed by quantity
             (``ast``/``rfi``/``gains``) then by metric name. Like ``chi2_ref`` these are
@@ -154,6 +157,7 @@ class PipelineTestConfig:
     components: list[str]
     chi2_ref: float | tuple[float, float]
     requires_double: bool = False
+    rfi_backend: str | None = None
     config_overrides: dict = field(default_factory=dict)
     metrics_ref: dict[str, dict[str, float | tuple[float, float]]] = field(
         default_factory=dict
@@ -173,6 +177,12 @@ def _run_pipeline(
     config_mod: dict = {
         "model": {"components": t_config.components, "precision": precision}
     }
+    if t_config.rfi_backend is not None:
+        from tabascal.config import yaml_load
+
+        # The whole section: read_and_modify_yaml replaces top-level sections.
+        rfi = dict(yaml_load(config_template)["rfi"])
+        config_mod["rfi"] = {**rfi, "backend": t_config.rfi_backend}
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
@@ -192,6 +202,8 @@ def _run_pipeline(
             "run",
             "-c",
             str(config_path),
+            "-n",
+            "pipe",
             "-od",
             str(input_src_dir),
             "--extra-orbit-dir",
@@ -505,6 +517,7 @@ rfi_vis_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
+            rfi_backend="jax",
             # Re-recorded for ast.gp_cov.std: the prior on the astronomical
             # visibilities is normalised to a width in Jy now, so it is a different
             # prior. All three architectures re-measured on the branch -- ARM on an
@@ -540,7 +553,7 @@ rfi_vis_configs = [
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
-        id="RiemannVisFine",
+        id="RiemannVisFine-jax",
     ),
     pytest.param(
         PipelineTestConfig(
@@ -548,12 +561,12 @@ rfi_vis_configs = [
             [
                 "trajectory:FixedOrbitFine",
                 "rfi_signal:ComplexRFIVarAntFine",
-                "rfi_vis:RiemannVisFFIFine",
+                "rfi_vis:RiemannVisFine",
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # Only chi2 is asserted -- the FFI kernel is the unit under test; truth metrics
-            # match the non-FFI RiemannVisFine case above. Measured opt-point
+            # The default rfi.backend, ffi. Only chi2 is asserted -- the FFI kernel is the
+            # unit under test; truth metrics match the jax-backend case above. Measured opt-point
             # values (gains identity -> RMSE 0):
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
             #   double  ARM    | 0.8965724354 |     0.1787       1.2      |     0.4176       0.3
@@ -569,7 +582,31 @@ rfi_vis_configs = [
             # Grace-Hopper node.
             chi2_ref=0.8965724353762747,
         ),
-        id="RiemannVisFFIFine",
+        id="RiemannVisFine",
+    ),
+    pytest.param(
+        PipelineTestConfig(
+            "sim_target_8A.yaml",
+            [
+                "trajectory:FixedOrbit",
+                "rfi_signal:ComplexRFIVarAnt",
+                "rfi_vis:AnalyticVis",
+                "ast_vis:GPVisAst",
+                "gains:UnitaryGains",
+            ],
+            # The data-grid route: the RiemannVisFine model with the signal and
+            # phase on the data grid and each cell integrated in closed form.
+            # chi2 measured on ARM (Apple M-series, CPU): 0.8942335916 double /
+            # 0.8941589594 single. TO BE RE-RECORDED on x86 and GPU; the metric
+            # ranges hold both ARM measurements.
+            chi2_ref=0.8942335916260074,
+            metrics_ref={
+                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
+                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "gains": {"RMSE": (0.0, 1e-6)},
+            },
+        ),
+        id="AnalyticVis",
     ),
 ]
 
@@ -703,24 +740,14 @@ def _copy_sim(
     return out_dir
 
 
-def test_pipeline_log_is_written_in_the_plot_directory(
+def test_pipeline_writes_into_its_own_run_directory(
     provide_test_data: Path, tmp_path: Path, precision: str
 ) -> None:
-    """A run leaves one log, in the plot directory it fills anyway, named for it.
-
-    The log used to be opened in the process's working directory and copied into
-    the plot directory once the run had finished, so a run left a file there for
-    its whole duration and two runs launched in the same second from one
-    directory could not both survive it. Nothing in the working directory, then,
-    and the suffix in the name so the log says which run it belongs to.
+    """A run writes only into the directory it created, and tab2MS reads it back.
 
     One iteration: what is under test is where the run writes, not what it fits.
     """
     out_dir = _copy_sim(provide_test_data, tmp_path)
-    # A cache written to in place by older test code can carry logs into the
-    # copy, so what *this* run wrote is the difference rather than everything
-    # that is there.
-    before = set(tmp_path.rglob("log_tab*"))
 
     data_dir = Path(__file__).parent / "data"
     config_path = tmp_path / "tab_target.yaml"
@@ -737,6 +764,7 @@ def test_pipeline_log_is_written_in_the_plot_directory(
                 "precision": precision,
             },
             "opt": {"epsilon": 1e-3, "max_iter": 1, "dual_run": False, "guide": "map"},
+            "plots": {"losses": True},
         },
         data_dir / "tab_target.yaml",
         config_path,
@@ -747,9 +775,9 @@ def test_pipeline_log_is_written_in_the_plot_directory(
         [
             sys.executable, str(script), "run",
             "-c", str(config_path),
+            "-n", "runA",
             "-od", str(out_dir),
             "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
-            "-sx", "runA",
         ],
         capture_output=True,
         text=True,
@@ -758,15 +786,26 @@ def test_pipeline_log_is_written_in_the_plot_directory(
     )
     assert result.returncode == 0, f"Tabascal failed: {result.stderr}"
 
-    # One log, and nowhere but the plot directory: not in the directory the run
-    # was launched from, and not anywhere else under the sim it wrote into.
-    written = set(tmp_path.rglob("log_tab*")) - before
-    assert len(written) == 1, f"expected one new log, found {written}"
+    (run_dir,) = (out_dir / "runs").glob("runA_*")
+    assert (out_dir / "runs" / "latest").resolve() == run_dir.resolve()
+    assert "Start Time :" in (run_dir / "log.txt").read_text()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "finished"
+    assert (run_dir / "results" / "map_pred.zarr").is_dir()
+    assert (run_dir / "results" / "trace.npz").is_file()
+    assert (run_dir / "plots" / "runA_opt_loss.pdf").is_file()
+    assert not list(tmp_path.glob("log*")), "the working directory was written to"
 
-    log = written.pop()
-    assert log.parent == out_dir / "plots" / "runA"
-    assert log.name.startswith("log_tab_runA_")
-    assert "Start Time :" in log.read_text()
+    # The run already wrote the MS; exporting again must not see it as changed.
+    export = Path(__file__).parent.parent / "tabascal" / "scripts" / "results_to_MS.py"
+    result = subprocess.run(
+        [sys.executable, str(export), str(out_dir / "runs" / "latest")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert result.returncode == 0, f"tab2MS failed: {result.stderr}"
+    assert "is not what the run read" not in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -801,8 +840,8 @@ _SHARDED_CHI2_REF = 0.8967103833231144
 def _prepare_sharded_run(
     provide_test_data: Path,
     work_dir: Path,
-    rfi_vis: str = "RiemannVisFine",
     save_rfi_per_sat: bool = False,
+    rfi_backend: str | None = None,
 ) -> tuple[list[str], Path]:
     """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command."""
     out_dir = _copy_sim(provide_test_data, work_dir)
@@ -810,11 +849,16 @@ def _prepare_sharded_run(
 
     config_path = work_dir / "tab_target.yaml"
     updates: dict = {
-        "model": {"components": _sharded_components(rfi_vis), "precision": "double"}
+        "model": {"components": _sharded_components("RiemannVisFine"), "precision": "double"}
     }
 
+    from tabascal.config import yaml_load
+
+    if rfi_backend is not None:
+        rfi = dict(yaml_load(data_dir / "tab_target.yaml")["rfi"])
+        updates["rfi"] = {**rfi, "backend": rfi_backend}
+
     if save_rfi_per_sat:
-        from tabascal.config import yaml_load
 
         # The whole section, not just the new key: read_and_modify_yaml replaces
         # a top-level section rather than merging into it, and dropping
@@ -830,6 +874,7 @@ def _prepare_sharded_run(
     cmd = [
         sys.executable, str(script), "run",
         "-c", str(config_path),
+        "-n", "pipe",
         "-od", str(out_dir),
         "--extra-orbit-dir", tle_dir,
         "-nl",
@@ -865,17 +910,17 @@ def _cpu_env(n_devices: int) -> dict:
 
 
 @pytest.mark.parametrize(
-    "rfi_vis",
+    "rfi_backend",
     [
-        # The plain variant runs entirely through GSPMD+shard_map on pure JAX ops;
-        # the FFI variant additionally exercises the custom C kernel inside
+        # The jax backend runs entirely through GSPMD+shard_map on pure JAX ops;
+        # the ffi backend additionally exercises the custom C kernel inside
         # shard_map (the reason for check_vma=False in psum_over_rfi).
-        "RiemannVisFine",
-        "RiemannVisFFIFine",
+        "jax",
+        "ffi",
     ],
 )
 def test_pipeline_sharded_equivalence(
-    provide_test_data: Path, tmp_path: Path, precision: str, rfi_vis: str
+    provide_test_data: Path, tmp_path: Path, precision: str, rfi_backend: str
 ) -> None:
     """Sharded run (2 fake CPU devices, padding 3 sats -> 4) == single-device run.
 
@@ -896,13 +941,17 @@ def test_pipeline_sharded_equivalence(
     if precision != "double":
         pytest.skip("equivalence is asserted exactly; components require double")
 
-    ref_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "ref", rfi_vis)
+    ref_cmd, _ = _prepare_sharded_run(
+        provide_test_data, tmp_path / "ref", rfi_backend=rfi_backend
+    )
     ref = subprocess.run(
         ref_cmd, capture_output=True, text=True, cwd=tmp_path / "ref", env=_cpu_env(1)
     )
     assert ref.returncode == 0, f"single-device run failed: {ref.stderr}"
 
-    shard_cmd, _ = _prepare_sharded_run(provide_test_data, tmp_path / "shard", rfi_vis)
+    shard_cmd, _ = _prepare_sharded_run(
+        provide_test_data, tmp_path / "shard", rfi_backend=rfi_backend
+    )
     shard = subprocess.run(
         shard_cmd, capture_output=True, text=True, cwd=tmp_path / "shard", env=_cpu_env(2)
     )
@@ -933,7 +982,7 @@ def _assert_per_sat_results(out_dir: Path) -> None:
     import numpy as np
     import xarray as xr
 
-    with xr.open_zarr(str(out_dir / "results" / "map_pred_Custom.zarr")) as xds:
+    with xr.open_zarr(str(out_dir / "runs" / "latest" / "results" / "map_pred.zarr")) as xds:
         assert xds.rfi_vis_src.dims == ("sample", "src", "bl", "freq", "time")
         assert xds.sizes["src"] == 3
         assert len({int(nid) for nid in xds.norad_id.values}) == 3
@@ -1062,7 +1111,10 @@ def test_pipeline_multiprocess(
         if not line.startswith("[Gloo]")
     )
     assert worker_out == "", f"rank 1 was not silent:\n{worker_out}"
-    assert (out_dir / "results" / "map_pred_Custom.zarr").is_dir()
+    # One run directory, created by rank 0 and shared, and finished on it.
+    (run_dir,) = (out_dir / "runs").glob("pipe_*")
+    assert (run_dir / "results" / "map_pred.zarr").is_dir()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "finished"
 
 
 def test_pipeline_multiprocess_per_sat(

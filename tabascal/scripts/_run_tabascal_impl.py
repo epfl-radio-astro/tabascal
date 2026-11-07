@@ -17,16 +17,15 @@ from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime
 
-import yaml
-
 import jax
 from jax import random
 
 from tabascal.timing import measure_runtime, print_timings, enable_timings
-from tabascal.tab_tools import init_predict, run_opt, nlog_like, nlog_post
+from tabascal.tab_tools import init_predict, run_opt, run_trace_path, nlog_like_and_post, write_ms_if_enabled
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.distributed import (
     barrier,
+    fail_together,
     is_process_0,
     make_global,
     replicated_sharding,
@@ -35,10 +34,27 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
-from tabascal.write import write_results_xds
+from tabascal.jitter import jitter_init
+from tabascal.opt_schedule import validate_opt
+from tabascal.seeds import config_seed, describe_random_draws, run_key
+from tabascal.write import check_input_column, write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
 from tabascal.truth import require_truth, load_truth, has_truth, TruthError
 from tabascal.scripts._config_paths import config_is_unset, config_path
+from tabascal.run_dir import (
+    INIT_PRED,
+    LOG_FILE,
+    MAP_PRED,
+    PLOTS_DIR,
+    RESULTS_DIR,
+    USED_ORBITS,
+    create_run_dir,
+    finish_record,
+    place_outputs,
+    read_config,
+    start_record,
+    write_config,
+)
 
 import jax
 
@@ -151,8 +167,7 @@ def build_model(config, ms_path):
 def evaluate_init(tab_config, model, key, truth=None):
     key, subkey = random.split(key)
     init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants, truth=truth)
-    nlog_l = nlog_like(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-    nlog_p = nlog_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+    nlog_l, nlog_p = nlog_like_and_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
     return key, init_pred, nlog_l, nlog_p
 
 
@@ -169,24 +184,25 @@ def _stdout_logger(log_path, enabled):
 @dataclass
 class _RunPaths:
     """Resolved output layout for a single tabascal run."""
-    run_id: str
+    name: str
+    run_dir: str
     log_path: str
-    model_name: str
     f_name: str
     ms_path: str
     plot_dir: str
     map_path: str
-    params_path: str
     init_pred_path: str
     used_orbits_path: str
 
 
-def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path=None):
-    """Resolve the run's directory layout and write derived paths into ``config``.
+def _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path=None):
+    """Resolve the run's inputs, create its directory, and write both into ``config``.
 
-    Creates the plot and results directories and records the sim, zarr and MS
-    paths back onto ``config``. Returns a :class:`_RunPaths` bundling everything
-    the run needs so the orchestration below stays free of path arithmetic.
+    Records the MS, truth zarr and every other input path back onto ``config``,
+    absolute, and creates ``<out_dir>/runs/<name>_<time>_<token>/`` for the run
+    to write into (see :mod:`tabascal.run_dir`). Returns a :class:`_RunPaths`
+    bundling everything the run needs so the orchestration below stays free of
+    path arithmetic.
 
     The MS comes from the ``-ms`` flag, else ``data.ms_path``, else the
     simulation layout ``<out_dir>/<basename>.ms`` -- the precedence
@@ -196,7 +212,7 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
     Measurement Set appearing nowhere in the config whenever the run was
     pointed at real data rather than a simulation (issue #207).
 
-    ``out_dir`` is where the run writes: ``plots/`` and ``results/``. It was
+    ``out_dir`` is where the run's directory goes, under ``runs/``. It was
     called ``sim_dir`` and documented as the directory ``sim-vis`` creates,
     which is what it is on a simulation -- the MS and the truth zarr are looked
     for inside it -- but a real observation has no such directory, and an MS
@@ -212,19 +228,13 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
     data needs. ``-ms`` is how a run is moved onto other visibilities.
 
     One more, of the write-back rather than of the precedence. The resolved
-    ``ms_path`` is recorded on ``config`` whether it was given or derived, and
-    the run archives that config to its plot directory, so an archived config
-    names a Measurement Set and is read on it. That is what makes the archive a
-    record of the run rather than of the intent, and it is why re-running one
-    after moving the data needs ``-ms``.
+    paths are recorded on ``config`` whether given or derived, and the run
+    writes that config to its directory before it starts, so ``config.yaml``
+    names the Measurement Set it is read on. That is what makes it a record of
+    the run rather than of the intent, and it is why re-running one after
+    moving the data needs ``-ms``. ``data.out_dir`` stays the parent, so a
+    re-run lands beside the run it repeats.
     """
-    if suffix:
-        suffix = "_" + suffix
-
-    run_id = datetime.now().strftime("%m-%d-%YT%H:%M:%S")
-
-    model_name = "Custom"
-    results_name = f"{model_name}{suffix}"
 
     # The MS first, because the output directory can default to its parent but
     # nothing can default the MS except the simulation layout, which needs the
@@ -248,15 +258,14 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
         raise SystemExit(
             "Nothing to run on and nowhere to write. Provide -ms/--ms_path or "
             "data.ms_path to name the Measurement Set, and -od/--out_dir or "
-            "data.out_dir to say where this run's plots/ and results/ should "
-            "go. Either implies the other: an MS alone writes beside itself, "
+            "data.out_dir to say where this run's directory should go, under runs/. "
+            "Either implies the other: an MS alone writes beside itself, "
             "and a directory alone is read as a tab-sim simulation, whose MS "
             "and truth zarr are looked for inside it."
         )
     config["data"]["out_dir"] = out_dir
-    config["model"]["name"] = model_name
 
-    # The run's name, and the simulation layout's stem. Taken from the MS so
+    # The MS's name, and the simulation layout's stem. Taken from the MS so
     # that a real-data run is named for its visibilities rather than for
     # whichever directory it happens to write to -- and identical to the old
     # basename(sim_dir) on a simulation, where the MS is <dir>/<dir name>.ms.
@@ -287,21 +296,6 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
     config["data"]["truth_zarr"] = zarr_path
     config["data"]["zarr_path"] = zarr_path
 
-    plot_dir = os.path.join(out_dir, f"plots/{suffix[1:]}")
-    results_dir = os.path.join(out_dir, "results")
-    for directory in (plot_dir, results_dir):
-        try:
-            os.makedirs(directory, exist_ok=True)
-        except OSError as error:
-            # Reachable in a way it was not when the directory had to be given:
-            # it now defaults to the MS's own, and an archive is often read-only.
-            raise SystemExit(
-                f"Cannot create {directory}: {error.strerror or error}. That is "
-                f"under {out_dir}, which is where this run writes. Give "
-                "-od/--out_dir or data.out_dir to write somewhere else -- it "
-                "defaults to the Measurement Set's own directory."
-            ) from error
-
     if extra_orbit_dir:
         config["satellites"]["extra_orbit_dir"] = extra_orbit_dir
     if norad_path:
@@ -309,25 +303,39 @@ def _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path
         # norad_ids_path in preference to norad_ids.
         config["satellites"]["norad_ids_path"] = norad_path
 
+    if not name:
+        raise SystemExit("A run needs a name: give it with -n/--name.")
+
+    try:
+        # Resolves the inputs too, once, on process 0, for every process.
+        run_dir = create_run_dir(out_dir, name, config)
+    except OSError as error:
+        # Reachable in a way it was not when the directory had to be given:
+        # it now defaults to the MS's own, and an archive is often read-only.
+        raise SystemExit(
+            f"Cannot create a run directory under {out_dir}: "
+            f"{error.strerror or error}. That is where this run writes. Give "
+            "-od/--out_dir or data.out_dir to write somewhere else -- it "
+            "defaults to the Measurement Set's own directory."
+        ) from error
+
+    place_outputs(config, run_dir)
+
+    results_dir = os.path.join(run_dir, RESULTS_DIR)
     return _RunPaths(
-        run_id=run_id,
-        # Written straight into the plot directory, which exists by now, and named
-        # for the run: two runs launched in the same second from one working
-        # directory used to share a log file there, and whichever finished first
-        # took it away from the other.
-        log_path=os.path.join(plot_dir, f"log_tab{suffix}_{run_id}.txt"),
-        model_name=model_name,
+        name=name,
+        run_dir=run_dir,
+        log_path=os.path.join(run_dir, LOG_FILE),
         f_name=f_name,
         ms_path=ms_path,
-        plot_dir=plot_dir,
-        map_path=os.path.join(results_dir, f"map_pred_{results_name}.zarr"),
-        params_path=os.path.join(results_dir, f"map_params_{results_name}.zarr"),
-        init_pred_path=os.path.join(results_dir, f"init_pred_{results_name}.zarr"),
-        used_orbits_path=os.path.join(results_dir, f"used_orbits_{results_name}.json"),
+        plot_dir=os.path.join(run_dir, PLOTS_DIR),
+        map_path=os.path.join(results_dir, MAP_PRED),
+        init_pred_path=os.path.join(results_dir, INIT_PRED),
+        used_orbits_path=os.path.join(results_dir, USED_ORBITS),
     )
 
 
-def _print_run_header(model_name, f_name, ms_path, start_time):
+def _print_run_header(run_dir, f_name, ms_path, start_time):
     """The run's identity, including which visibilities it is about to read.
 
     ``f_name`` is the MS's name, which used to be the output directory's and to
@@ -341,7 +349,7 @@ def _print_run_header(model_name, f_name, ms_path, start_time):
 
     print()
     print(f"Start Time : {start_time}")
-    print(f"Model : {model_name}")
+    print(f"Run : {run_dir}")
     print()
     print(f_name)
     print(f"MS : {ms_path}")
@@ -353,7 +361,10 @@ def _print_model_summary(tab_config, model, start_time):
     n_params = sum(x.size for x in model.init_params.values())
     n_data = 2 * tab_config.vis_obs.size
 
-    print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
+    if tab_config.rfi_grid == "data":
+        print("RFI visibilities integrated analytically per cell (no fine time grid).")
+    else:
+        print(f"Using {tab_config.n_int_time} samples per time step for RFI prediction.")
     print()
     print(f"Number of Antennas   : {tab_config.n_ant: 4}")
     print(f"Number of Time Steps : {tab_config.n_time: 4}")
@@ -371,137 +382,200 @@ def _print_model_summary(tab_config, model, start_time):
 
 @measure_runtime
 def tabascal_subtraction(
-    config, out_dir, ms_path=None, suffix="", extra_orbit_dir=None, norad_path=None, log=True
+    config, out_dir, ms_path=None, name=None, extra_orbit_dir=None, norad_path=None, log=True
 ):
-    paths = _resolve_paths(config, out_dir, ms_path, suffix, extra_orbit_dir, norad_path)
-    ms_path = paths.ms_path
+    # Before the run directory exists: a config whose exports would replace
+    # its own input is not a run that failed, it is one that cannot start.
+    check_input_column(
+        config["data"].get("data_col", "DATA"),
+        config["data"].get("save_rfi_per_sat", False),
+    )
+    paths = _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path)
 
-    with _stdout_logger(paths.log_path, log):
-        start_time = datetime.now()
-        key, _ = random.split(random.PRNGKey(1))
-
-        _print_run_header(paths.model_name, paths.f_name, paths.ms_path, start_time)
-
-        if sharding_enabled():
-            print(f"Sharding RFI sources over {jax.device_count()} devices:")
-        else:
-            print("Running on single device:")
-
-        print_devices()
-        print()
-
-        tab_config, model = build_model(config, ms_path)
-        prob_model = model.prob_model
-
-        # Persist the real TLEs this run resolved so it can be reproduced later.
-        # Only process 0 writes the shared result path in distributed runs.
+    try:
+        # Before any work, so a run that dies still says what it was and what it read.
+        _on_process_0(
+            "write the run's config.yaml and run.json",
+            lambda: (write_config(paths.run_dir, config), start_record(paths.run_dir, config, config_seed(config))),
+        )
+        with _stdout_logger(paths.log_path, log):
+            _subtract(config, paths)
+        _on_process_0(
+            "mark the run finished", lambda: finish_record(paths.run_dir, "finished")
+        )
+    except BaseException as error:
         if is_process_0():
-            n_rfi_real = getattr(tab_config, "n_rfi_real", None)
-            used_ids = getattr(tab_config, "norad_ids", None)
-            used_records = getattr(tab_config, "orbit_records", None)
-            if n_rfi_real is not None:
-                used_ids = used_ids[:n_rfi_real] if used_ids is not None else None
-                used_records = (
-                    used_records[:n_rfi_real] if used_records is not None else None
-                )
-            saved_orbits = save_orbits_for_reuse(
-                paths.used_orbits_path,
-                used_ids,
-                used_records,
-            )
-            if saved_orbits:
-                print(f"Orbits used saved to : {saved_orbits}")
-                print(
-                    "  (reuse via --extra-orbit-dir to reproduce this run's "
-                    "trajectory priors)"
-                )
-
-        if sharding_enabled():
-            # Split every leading-RFI-axis array across the device mesh and replicate
-            # the rest. _map_step takes all of these as traced jit arguments, so GSPMD
-            # propagates the shardings through the whole optimization (gradients and
-            # optimizer state included) from here on. (vis_obs/flags/noise were already
-            # globalized in TabConfig, before Model captured them in closures.)
-            model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
-            model.state = shard_pytree(model.state, tab_config.n_rfi)
-            model.constants = shard_pytree(model.constants, tab_config.n_rfi)
-
-        _print_model_summary(tab_config, model, start_time)
-
-        # Load the tab-sim ground truth once and share it across the init/opt RMSE
-        # reporting and all plotting. Missing quantities come back as NaN so consumers
-        # can index unconditionally; reporting skips whatever is unavailable.
-        truth = load_truth(tab_config)
-        if sharding_enabled():
-            # Truth arrays are compared eagerly against globally-sharded predictions;
-            # process-local device arrays cannot mix with global ones in multi-process.
-            truth = {k: make_global(v, replicated_sharding()) for k, v in truth.items()}
-        if not has_truth(truth):
-            print("\nNo tab-sim truth available - skipping truth-based RMSE reporting.")
-
-        key, init_pred, nlog_l, nlog_p = evaluate_init(tab_config, model, key, truth=truth)
-        write_results_xds(init_pred, tab_config, paths.init_pred_path)
-
-        print(f"log_l : {nlog_l:.3e}")
-        print(f"log_p : {nlog_p:.3e}")
-
-        # Plotting from precomputed (replicated) predictions is safe on process 0
-        # alone. plot_prior is different: it draws fresh model samples, and under
-        # multi-process any model evaluation is a collective -- running it on one
-        # rank would deadlock -- so it is skipped there rather than gated.
-        if config["plots"]["init"] and is_process_0():
-            from tabascal.plot import plot_init
-            plot_init(tab_config, init_pred, truth, paths.model_name, paths.plot_dir)
-
-        key, subkey = random.split(key)
-        if config["plots"]["prior"]:
-            if jax.process_count() > 1:
-                print("Skipping prior plots: not supported in multi-process runs.")
-            else:
-                from tabascal.plot import plot_prior
-                plot_prior(tab_config, prob_model, truth, paths.model_name, subkey, paths.plot_dir, state=model.state, constants=model.constants)
-
-        key, *subkeys = random.split(key, 3)
-        if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
-            vi_pred, losses, vi_params, _ = run_opt(
-                tab_config, prob_model, subkeys, model.init_params, ms_path, paths.map_path, paths.params_path,
-                state=model.state, constants=model.constants, truth=truth,
-            )
-
-            if config["plots"]["opt"] and is_process_0():
-                from tabascal.plot import plot_opt
-                plot_opt(tab_config, vi_pred, truth, paths.model_name, paths.plot_dir)
-
-            if config["plots"]["losses"] and is_process_0():
-                from tabascal.plot import plot_losses
-                plot_losses(losses, paths.model_name, paths.plot_dir)
-
-            opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
-
-            nlog_l = nlog_like(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-            nlog_p = nlog_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-
-            print(f"log_l : {nlog_l:.3e}")
-            print(f"log_p : {nlog_p:.3e}")
-        else:
-            from tabascal.write import write_results_ms
-            print(f"Copying tabascal initial values to MS file from {paths.init_pred_path}")
-            # The correlation comes off the zarr the line above just wrote; the
-            # gain tables do not, and the MS's data column is still raw.
-            write_results_ms(
-                ms_path,
-                paths.init_pred_path,
-                tab_config.args["data"]["data_col"],
-                gain_table=getattr(tab_config, "gain_table", None),
-            )
-
-    if is_process_0():
-        with open(os.path.join(paths.plot_dir, f"tab_config_{paths.run_id}.yaml"), "w") as fp:
-            yaml.dump(config, fp)
+            # Best effort, and never in place of the failure it is recording:
+            # run.json may be what could not be written in the first place.
+            try:
+                finish_record(paths.run_dir, "failed", f"{type(error).__name__}: {error}")
+            except Exception as record_error:
+                print(f"\nCould not mark the run failed: {record_error}", file=sys.stderr)
+        raise
 
     # Workers must not tear down the distributed runtime while process 0 is still
     # writing results / running its final collectives.
     barrier("tabascal-run-end")
+
+
+def _on_process_0(what, work):
+    """``work`` on process 0 alone, its failure raised on every process.
+
+    The record is process 0's to write, and a failure there would otherwise
+    leave the workers waiting in the next collective, or the final barrier.
+    """
+    failure = None
+    if is_process_0():
+        try:
+            work()
+        except Exception as error:
+            failure = error
+    fail_together(failure, what)
+
+
+def _record_resolved_settings(run_dir, config):
+    """Write what model setup resolved into the run's saved ``config.yaml``.
+
+    The file is written before setup, so a run that dies there still says what
+    it was, and ``ast.time_pad_factor: auto`` only becomes a number inside it.
+    Only that key is rewritten: setup fills in other values on the same dict,
+    not all of them plain YAML.
+    """
+    resolved = (config.get("ast") or {}).get("time_pad_factor")
+    saved = read_config(run_dir)
+    if (saved.get("ast") or {}).get("time_pad_factor") != "auto" or resolved == "auto":
+        return
+    saved["ast"]["time_pad_factor"] = float(resolved)
+    write_config(run_dir, saved)
+
+
+def _subtract(config, paths):
+    """The run itself, inside its directory: model, initial prediction, fit."""
+    ms_path = paths.ms_path
+    start_time = datetime.now()
+    key, _ = random.split(run_key(config_seed(config)))
+
+    _print_run_header(paths.run_dir, paths.f_name, paths.ms_path, start_time)
+    print(describe_random_draws(config))
+    print()
+    # Here rather than in run_opt, so a bad opt key fails before the setup does.
+    if config["inference"]["opt"]:
+        validate_opt(config["opt"])
+
+    if sharding_enabled():
+        print(f"Sharding RFI sources over {jax.device_count()} devices:")
+    else:
+        print("Running on single device:")
+
+    print_devices()
+    print()
+
+    tab_config, model = build_model(config, ms_path)
+    prob_model = model.prob_model
+    _on_process_0(
+        "record the resolved settings in config.yaml",
+        lambda: _record_resolved_settings(paths.run_dir, config),
+    )
+
+    # Persist the real TLEs this run resolved so it can be reproduced later.
+    # Only process 0 writes the shared result path in distributed runs.
+    if is_process_0():
+        n_rfi_real = getattr(tab_config, "n_rfi_real", None)
+        used_ids = getattr(tab_config, "norad_ids", None)
+        used_records = getattr(tab_config, "orbit_records", None)
+        if n_rfi_real is not None:
+            used_ids = used_ids[:n_rfi_real] if used_ids is not None else None
+            used_records = (
+                used_records[:n_rfi_real] if used_records is not None else None
+            )
+        saved_orbits = save_orbits_for_reuse(
+            paths.used_orbits_path,
+            used_ids,
+            used_records,
+        )
+        if saved_orbits:
+            print(f"Orbits used saved to : {saved_orbits}")
+            print(
+                "  (reuse via --extra-orbit-dir to reproduce this run's "
+                "trajectory priors)"
+            )
+
+    # Before sharding, so every rank perturbs the same local arrays the same way.
+    model.init_params = jitter_init(
+        model.init_params, config["opt"].get("init_jitter"), config_seed(config),
+        n_rfi=tab_config.n_rfi, n_rfi_real=getattr(tab_config, "n_rfi_real", tab_config.n_rfi),
+    )
+
+    if sharding_enabled():
+        # Split every leading-RFI-axis array across the device mesh and replicate
+        # the rest. _map_step takes all of these as traced jit arguments, so GSPMD
+        # propagates the shardings through the whole optimization (gradients and
+        # optimizer state included) from here on. (vis_obs/flags/noise were already
+        # globalized in TabConfig, before Model captured them in closures.)
+        model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
+        model.state = shard_pytree(model.state, tab_config.n_rfi)
+        model.constants = shard_pytree(model.constants, tab_config.n_rfi)
+
+    _print_model_summary(tab_config, model, start_time)
+
+    # Load the tab-sim ground truth once and share it across the init/opt RMSE
+    # reporting and all plotting. Missing quantities come back as NaN so consumers
+    # can index unconditionally; reporting skips whatever is unavailable.
+    truth = load_truth(tab_config)
+    if sharding_enabled():
+        # Truth arrays are compared eagerly against globally-sharded predictions;
+        # process-local device arrays cannot mix with global ones in multi-process.
+        truth = {k: make_global(v, replicated_sharding()) for k, v in truth.items()}
+    if not has_truth(truth):
+        print("\nNo tab-sim truth available - skipping truth-based RMSE reporting.")
+
+    key, init_pred, nlog_l, nlog_p = evaluate_init(tab_config, model, key, truth=truth)
+    write_results_xds(init_pred, tab_config, paths.init_pred_path)
+
+    print(f"log_l : {nlog_l:.3e}")
+    print(f"log_p : {nlog_p:.3e}")
+
+    # Plotting from precomputed (replicated) predictions is safe on process 0
+    # alone. plot_prior is different: it draws fresh model samples, and under
+    # multi-process any model evaluation is a collective -- running it on one
+    # rank would deadlock -- so it is skipped there rather than gated.
+    if config["plots"]["init"] and is_process_0():
+        from tabascal.plot import plot_init
+        plot_init(tab_config, init_pred, truth, paths.name, paths.plot_dir)
+
+    key, subkey = random.split(key)
+    if config["plots"]["prior"]:
+        if jax.process_count() > 1:
+            print("Skipping prior plots: not supported in multi-process runs.")
+        else:
+            from tabascal.plot import plot_prior
+            plot_prior(tab_config, prob_model, truth, paths.name, subkey, paths.plot_dir, state=model.state, constants=model.constants)
+
+    key, *subkeys = random.split(key, 3)
+    if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
+        vi_pred, losses, vi_params, _ = run_opt(
+            tab_config, prob_model, subkeys, model.init_params, ms_path, paths.map_path,
+            state=model.state, constants=model.constants, truth=truth,
+        )
+
+        if config["plots"]["opt"] and is_process_0():
+            from tabascal.plot import plot_opt
+            plot_opt(tab_config, vi_pred, truth, paths.name, paths.plot_dir)
+
+        if config["plots"]["losses"] and is_process_0():
+            import numpy as np
+            from tabascal.plot import plot_losses
+            with np.load(run_trace_path(tab_config.args["opt"], paths.map_path)) as trace:
+                plot_losses(dict(trace), paths.name, paths.plot_dir)
+
+        opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
+
+        nlog_l, nlog_p = nlog_like_and_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+
+        print(f"log_l : {nlog_l:.3e}")
+        print(f"log_p : {nlog_p:.3e}")
+    else:
+        write_ms_if_enabled(tab_config, ms_path, paths.init_pred_path)
 
 
 def set_precision(config):
@@ -538,6 +612,8 @@ def run(args):
         enable_timings()
 
     config = load_config(args.config)
+    if getattr(args, "skip_ms_write", False):
+        config["data"]["skip_ms_write"] = True
 
     set_precision(config)
 
@@ -550,7 +626,7 @@ def run(args):
                 config,
                 args.out_dir,
                 args.ms_path,
-                args.suffix,
+                args.name,
                 extra_orbit_dir=args.extra_orbit_dir,
                 norad_path=getattr(args, "norad_path", None),
                 log=getattr(args, "log", True) and is_process_0(),
