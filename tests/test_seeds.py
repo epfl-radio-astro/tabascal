@@ -401,10 +401,9 @@ def deterministic_fits(tmp_path_factory):
 def test_with_no_stochastic_path_the_seed_changes_no_output(deterministic_fits, product):
     """Every array the run writes is the same across the two seeds.
 
-    Bitwise on CPU. On GPU two runs of one seed can differ in the last bits (XLA's
-    kernel choices vary from process to process), so there the arrays need only
-    agree to 64 machine epsilons of their peak -- a draw the seed reached would
-    differ at order one.
+    Bitwise on CPU. Single-precision runs on GH200 (CUDA 13) intermittently differ
+    in the last bits at fixed seeds, so on GPU the arrays need only agree to 64
+    machine epsilons of their peak.
     """
     import xarray as xr
 
@@ -421,4 +420,4 @@ def test_with_no_stochastic_path_the_seed_changes_no_output(deterministic_fits, 
             assert np.array_equal(a, b), name
             continue
         atol = 64 * np.finfo(a.real.dtype).eps * np.abs(a).max()
-        np.testing.assert_allclose(a, b, rtol=0, atol=atol, err_msg=name)
+        np.testing.assert_allclose(a, b, rtol=0, atol=atol, equal_nan=False, err_msg=name)
