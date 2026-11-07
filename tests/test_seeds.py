@@ -399,7 +399,12 @@ def deterministic_fits(tmp_path_factory):
 
 @pytest.mark.parametrize("product", ["init_pred", "map_pred"])
 def test_with_no_stochastic_path_the_seed_changes_no_output(deterministic_fits, product):
-    """Every array the run writes is bitwise identical across the two seeds."""
+    """Every array the run writes is the same across the two seeds.
+
+    Bitwise on CPU. Single-precision runs on GH200 (CUDA 13) intermittently differ
+    in the last bits at fixed seeds, so on GPU the arrays need only agree to 64
+    machine epsilons of their peak.
+    """
     import xarray as xr
 
     first, second = (
@@ -408,5 +413,11 @@ def test_with_no_stochastic_path_the_seed_changes_no_output(deterministic_fits, 
     )
 
     assert set(first.data_vars) == set(second.data_vars)
+    on_gpu = jax.default_backend() == "gpu"
     for name in first.data_vars:
-        assert np.array_equal(first[name].values, second[name].values), name
+        a, b = first[name].values, second[name].values
+        if not on_gpu:
+            assert np.array_equal(a, b), name
+            continue
+        atol = 64 * np.finfo(a.real.dtype).eps * np.abs(a).max()
+        np.testing.assert_allclose(a, b, rtol=0, atol=atol, equal_nan=False, err_msg=name)
