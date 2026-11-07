@@ -302,7 +302,7 @@ def run_stubbed(tmp_path, monkeypatch, capsys, seed, n, jitter=None, events=None
         def call(*a, **k):
             if events is not None:
                 events.append(name)
-            calls.setdefault(name + "_params", []).append(a[params_at])
+            calls.setdefault(name + "_params", []).append(dict(a[params_at]))
             return spy(name, key_at, returns)(*a, **k)
         return call
 

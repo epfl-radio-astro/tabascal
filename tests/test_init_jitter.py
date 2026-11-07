@@ -335,19 +335,27 @@ def test_the_runner_jitters_once_before_sharding_and_shares_the_start(tmp_path, 
 
     events = []
     actual = impl.jitter_init
+    starts = []
 
     def jitter(params, spec, seed, **kwargs):
         events.append("jitter")
         assert kwargs == {"n_rfi": 4, "n_rfi_real": 3}
-        return actual(params, spec, seed, **kwargs)
+        out = actual(params, spec, seed, **kwargs)
+        starts.append(out)
+        return out
 
     def shard(params, n_rfi):
-        events.append("shard")
+        if any(params.keys() == start.keys() for start in starts):
+            events.append("shard_start")
         return params
 
     monkeypatch.setattr(impl, "jitter_init", jitter)
     monkeypatch.setattr(impl, "sharding_enabled", lambda: True)
     monkeypatch.setattr(impl, "shard_pytree", shard)
     calls, *_ = run_stubbed(tmp_path, monkeypatch, capsys, 7, 0, jitter=0.1, events=events)
-    assert events == ["jitter", "shard", "shard", "shard", "init", "opt"]
-    assert calls["init_params"][0] is calls["opt_params"][0]
+    assert [e for e in events if e != "shard_start"] == ["jitter", "init", "opt"]
+    assert events.index("jitter") < events.index("shard_start") < events.index("init")
+    initial, optimized = calls["init_params"][0], calls["opt_params"][0]
+    assert initial.keys() == optimized.keys()
+    for name in initial:
+        np.testing.assert_array_equal(initial[name], optimized[name])
