@@ -511,6 +511,42 @@ def supersample_domain_k(ns: List[int], dxs: List[float], ss_factors: List[int])
     return ks_ss
 
 
+def supersample_pads(ns: List[int], ss_factors: List[int]) -> List[Tuple[int, int]]:
+    """
+    Pads that take a centred Fourier grid of ``n`` modes to one of ``n * f``.
+
+    Mode 0 sits at index ``n // 2`` of a centred (``fftshift``-ordered) grid, so
+    the low pad is what moves it to ``n * f // 2`` and the high pad is the rest.
+    The two differ by one when ``n * (f - 1)`` is odd, an odd length with an
+    even factor; halving the excess on both sides would give ``n * f - 1``
+    points and every sample a slightly wrong spacing.
+    """
+    pads = []
+    for n, f in zip(ns, ss_factors):
+        n, f = int(n), int(f)
+        lo = n * f // 2 - n // 2
+        pads.append((lo, n * (f - 1) - lo))
+    return pads
+
+
+def periodic_crop(y: Array, idxs: List[slice]) -> Array:
+    """
+    Crop ``y`` with slices read on its periodic extension.
+
+    The inverse transform is periodic, so a slice that starts below zero takes
+    its first samples from the end of the axis. That happens when an axis has
+    no padding: the crop starts ``f // 2`` fine samples before the first
+    data-grid sample, which is then before the start of the grid.
+    """
+    for axis, sl in enumerate(idxs):
+        start, stop = int(sl.start), int(sl.stop)
+        if start < 0:
+            y = jnp.roll(y, -start, axis=axis)
+            start, stop = 0, stop - start
+        y = jax.lax.slice_in_dim(y, start, stop, axis=axis)
+    return y
+
+
 @measure_runtime
 def supersample(y: Array, ss_factors: List[int], *, signal_type: str = "complex") -> Array:
     """
@@ -538,7 +574,7 @@ def supersample(y: Array, ss_factors: List[int], *, signal_type: str = "complex"
     # Size of original signal
     ns = y.shape
     # Pads needed to increase size of signal to supersampled size
-    pads = [(n * (f - 1) // 2, n * (f - 1) // 2) for n, f in zip(ns, ss_factors)]
+    pads = supersample_pads(ns, ss_factors)
 
     # Forward FFT (no normalization)
     Y = jnp.fft.fftn(y)
@@ -935,7 +971,7 @@ def supersample_fourier(Y: Array, factors: List[int], *, signal_type: str = "com
     _check_signal_type(signal_type)
 
     ns = Y.shape
-    pads = [(n * (f - 1) // 2, n * (f - 1) // 2) for n, f in zip(ns, factors)]
+    pads = supersample_pads(ns, factors)
 
     # Pad and inverse transform
     Y_ss = jnp.fft.ifftshift(jnp.pad(Y, pads, mode="constant", constant_values=0))
@@ -975,9 +1011,15 @@ def domain_ss(
 
     x0s_padded = [x[0] for x in pad_domain(ns, dxs, x0s, pad_factors)]
 
-    xs_pad_ss = supersample_domain(ns_padded, dxs, x0s_padded, ss_factors)
+    _, dxs_ss = supersample_domain_specs(ns_padded, dxs, ss_factors)
 
-    return [x[idx] for x, idx in zip(xs_pad_ss, idxs_pad_ss)]
+    # The padded grid's supersampled positions, counted from its first sample,
+    # so a crop that starts before it (no padding) extends the grid rather than
+    # coming back empty.
+    return [
+        x0 + dx * jnp.arange(idx.start, idx.stop)
+        for x0, dx, idx in zip(x0s_padded, dxs_ss, idxs_pad_ss)
+    ]
 
 def knee_from_corr_scale(corr_scale):
     """The power-spectrum knee conjugate to a correlation scale.
@@ -1214,7 +1256,8 @@ def latent_to_signal_init(
         - latent_pk: Power spectrum evaluated at the remaining k-modes.
         - latent_ks: List of k-modes for each dimension after cutting.
         - pads: Padding widths to reach the padded, supersampled Fourier grid.
-        - idxs_pad_ss: Slices to extract the supersampled portion from the padded result.
+        - idxs_pad_ss: Slices to extract the supersampled portion from the padded result,
+          read on its periodic extension (:func:`periodic_crop`).
     """
     ks_pad = pad_domain_k(ns, dxs, pad_factors)
     pk = pow_spec_nd(ks_pad, p0, k0s, gammas)
@@ -1225,7 +1268,7 @@ def latent_to_signal_init(
 
     # Calculate padding for supersampling
     ns_pad = [len(k) for k in ks_pad]
-    ss_pads = [(n * (f - 1) // 2, n * (f - 1) // 2) for n, f in zip(ns_pad, ss_factors)]
+    ss_pads = supersample_pads(ns_pad, ss_factors)
 
     # Combine cutoff padding and supersampling padding
     combined_pads = [
@@ -1235,8 +1278,9 @@ def latent_to_signal_init(
     # Calculate cropping slices for original domain
     n_pads = pad_domain_specs(ns, pad_factors)
     ns_padded = [n + 2 * npad for n, npad in zip(ns, n_pads)]
+    # Read on the periodic grid: see periodic_crop for a start below zero.
     idxs_pad_ss = [
-        slice(npad * f - (f // 2), n_tot * f - npad * f - (f // 2))
+        slice(int(npad * f - (f // 2)), int(n_tot * f - npad * f - (f // 2)))
         for n_tot, npad, f in zip(ns_padded, n_pads, ss_factors)
     ]
 
@@ -1277,7 +1321,7 @@ def latent_to_signal(
     y_padded_ss = jnp.fft.ifftn(Y_ss, norm="forward")
 
     # Crop to requested domain
-    y_ss = y_padded_ss[tuple(ss_idxs)]
+    y_ss = periodic_crop(y_padded_ss, ss_idxs)
     return _from_hartley(y_ss) if signal_type == "real" else y_ss
 
 
@@ -1332,16 +1376,15 @@ def latent_to_signal_dft_init(
 
     mats = []
     for axis, (pad, sl) in enumerate(zip(pads, ss_idxs)):
-        # The length the FFT route's grid actually has: the kept modes and the
-        # pads around them. Not the padded length times the supersampling
-        # factor, which it is one short of when that product's excess is odd.
+        # The padded, supersampled length: the kept modes and the pads around them.
         length = int(latent_pk.shape[axis] + pad[0] + pad[1])
         # The integer frequency of every mode of the centred grid, and the
         # block of them this axis kept.
         m_all = np.fft.fftshift(np.fft.fftfreq(length) * length).round().astype(np.int64)
         m = m_all[int(pad[0]) : int(pad[0]) + latent_pk.shape[axis]]
-        # The samples the crop keeps, as the slice keeps them from that grid.
-        j = np.arange(length, dtype=np.int64)[sl]
+        # The samples the crop keeps, read on the periodic grid as periodic_crop
+        # reads them; the phase below is reduced modulo the length anyway.
+        j = np.arange(sl.start, sl.stop, dtype=np.int64)
         phase = (m[:, None] * j[None, :]) % length / length
         mats.append(jnp.asarray(np.exp(2j * np.pi * phase)))
 
