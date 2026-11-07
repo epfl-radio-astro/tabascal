@@ -36,6 +36,7 @@ import jax.numpy as jnp
 from jax import vmap, Array
 import numpy as np
 from numpy.typing import NDArray
+from collections.abc import Mapping
 from typing import Dict, List
 
 from sgp4.api import WGS72, Satrec
@@ -994,7 +995,14 @@ def orbit_deviation_config_validation(dev_config, times: NDArray, int_time: floa
     configuration's value; ``corr_time: null`` is half the observed extent, as
     ``rfi.gp_cov.corr_time: null`` is.
     """
-    dev_config = dict(dev_config or {})
+    if dev_config is None:
+        dev_config = {}
+    if not isinstance(dev_config, Mapping):
+        raise ValueError(
+            f"Config parameter (orbit_deviation: {dev_config!r}) is not a mapping. "
+            f"It takes {list(_ORBIT_DEVIATION_KEYS)}."
+        )
+    dev_config = dict(dev_config)
     unknown = sorted(set(dev_config) - set(_ORBIT_DEVIATION_KEYS), key=repr)
     if unknown:
         raise ValueError(
@@ -1082,7 +1090,7 @@ class OrbitDeviationFine(Component):
     grid, with the spectrum normalised so the deviation has standard deviation
     ``orbit_deviation.std`` metres on that axis. The three axes share one latent
     grid, the modes the shortest ``corr_time`` keeps, where a longer one gives
-    the extra modes almost no weight. It starts at zero
+    the extra modes less power. It starts at zero
     deviation, which reproduces the upstream orbit exactly.
 
     The upstream ``rfi_phase`` is stale once the satellites move, so a phase
