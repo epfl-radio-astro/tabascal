@@ -650,3 +650,18 @@ class TestRunOpt:
                 if configured else {"loss", "time_s"}
             )
             assert list(npz["loss"]) == list(np.asarray(losses))
+
+
+@pytest.mark.parametrize("keys", [("loss", "time_s"), ("loss", "time_s", "chi2", "vis_ast_nrmse")])
+def test_plot_losses_draws_a_row_per_traced_quantity(monkeypatch, tmp_path, keys):
+    import matplotlib.pyplot as plt
+    from tabascal.plot import plot_losses
+
+    figures = []
+    monkeypatch.setattr(plt, "savefig", lambda *a, **k: figures.append(plt.gcf()))
+    trace = {key: np.linspace(1.0, 2.0, 4) for key in keys}
+
+    plot_losses(trace, "run", str(tmp_path))
+
+    (fig,) = figures
+    assert len(fig.axes) == 2 * (1 + ("chi2" in keys) + ("vis_ast_nrmse" in keys))

@@ -22,7 +22,7 @@ plots:
   truth: false            # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the true parameter estimate
   prior: false            # Optional - Plot the prior distribution over the astronomical and RFI visibilities as well as the gains
   opt: false              # Optional - Plot the estimated astronomical and RFI visibilities as well as the gains based on the optimised parameter estimate
-  losses: false           # Optional - Plot the loss curve over the optimisation run
+  losses: false           # Optional - Plot the optimiser trace against iteration and wall-clock time: the loss, plus the reduced chi^2 and NRMSE when opt.trace_path is set
   prior_samples: 100      # Optional - Number of prior samples to use when plotting the prior
 #######################
 # Inference parameters

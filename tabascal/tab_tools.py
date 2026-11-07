@@ -403,6 +403,14 @@ def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
     return os.environ.get("TAB_LOSS_TRACE") or config_path or None
 
 
+def run_trace_path(opt_config: dict, map_path: str) -> str:
+    """Where :func:`run_opt` writes the run's trace: the traced path if any,
+    else ``trace.npz`` beside the MAP prediction."""
+    return loss_trace_path(opt_config.get("trace_path")) or os.path.join(
+        os.path.dirname(os.path.normpath(map_path)), LOSS_TRACE
+    )
+
+
 def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
     """Per-iteration metrics defined by the data, not by the parameterisation.
 
@@ -725,7 +733,7 @@ def run_opt(
     results_dir = os.path.dirname(os.path.normpath(map_path))
     # Every run keeps its loss and step times beside its results; asking for a
     # trace adds the metrics and puts the file where it was asked for instead.
-    trace_path = traced_path or os.path.join(results_dir, LOSS_TRACE)
+    trace_path = run_trace_path(opt_config, map_path)
     # Beside the MAP prediction, named after it, so two runs into one results
     # directory with different suffixes keep their checkpoints apart.
     stem = os.path.basename(os.path.normpath(map_path)).removesuffix(".zarr")

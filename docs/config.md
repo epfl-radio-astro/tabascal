@@ -171,6 +171,8 @@ plots:
 
 The above configuration will plot the predictions for the initial parameters and the prior distributions. To plot the prediction from the prior, 100 samples will be drawn from the prior and then pushed through the forward model to get a predicition. The `truth` plots can only be included if TABASCAL is being run on a simulation created with `sim-vis`.
 
+`losses: True` plots the run's [optimiser trace](#optimiser-trace) to `<name>_opt_loss.pdf`, against iteration on the left and wall-clock time on the right: the loss, and with `opt.trace_path` set the reduced chi-squared and, on a simulation, the RMSEs too.
+
 ## Inference
 
 The `inference` section defines the type of inference that will be done. An example is given below.
