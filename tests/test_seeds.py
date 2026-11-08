@@ -4,7 +4,6 @@ import subprocess
 import sys
 import warnings
 import zlib
-from importlib.resources import files as _res_files
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -354,24 +353,15 @@ FIT_SEEDS = (1, 7)
 
 
 @pytest.fixture(scope="module")
-def deterministic_fits(tmp_path_factory):
+def deterministic_fits(tmp_path_factory, provide_test_data):
     """Three MAP iterations on the 8A sim at each of two seeds; ~35 s per run.
 
     Returns ``{seed: run_dir}``.
     """
-    import tabsim
-    from huggingface_hub import snapshot_download
 
     from tests.test_tabascal_pipeline import _copy_sim, read_and_modify_yaml
 
-    try:
-        data = Path(snapshot_download(
-            repo_id="epfl-radio-astro/rfi-simulations",
-            repo_type="dataset",
-            revision=f"tabsim_v{tabsim.__version__}",
-        ))
-    except Exception as e:  # pragma: no cover - offline
-        pytest.skip(f"8A simulation not available: {e}")
+    data = provide_test_data
 
     template = Path(__file__).parent / "data" / "tab_target.yaml"
     base = yaml_load(template)
@@ -400,7 +390,7 @@ def deterministic_fits(tmp_path_factory):
                 "-c", str(config_path),
                 "-od", str(out_dir),
                 "-n", "seed",
-                "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
+                "--extra-orbit-dir", str(out_dir / "input_data"),
                 "-nl",
             ],
             capture_output=True, text=True, cwd=work, check=False,

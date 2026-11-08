@@ -13,7 +13,11 @@ of erroring on the components' precision gate. (The FFI RFI-vis kernel is built
 for both complex64 and complex128, so it is exercised in either precision.)
 """
 
+import logging
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 # Test are written for single device by default.
 # Must be set before loading any other modules.
@@ -88,3 +92,49 @@ def exact_rtol(precision):
     factor or a dropped term) would produce.
     """
     return 1e-12 if precision == "double" else 1e-5
+
+
+@pytest.fixture(scope="session")
+def provide_test_data(tmp_path_factory) -> Path:
+    """The tests/data/sim_target*.yaml simulations, one directory per config hash.
+
+    Each is taken from the epfl-radio-astro/rfi-simulations HuggingFace dataset,
+    branch ``tabsim_v<installed version>``, where ci/rfi_simulations.py publishes
+    them from main. A config with no simulation there yet -- the branch is
+    unreachable, or a change edited the config -- is simulated once per session
+    with the installed tabsim instead.
+    """
+    import tabsim
+    from huggingface_hub import snapshot_download
+
+    from tests.test_tabascal_pipeline import compute_sha256
+
+    configs = sorted((Path(__file__).parent / "data").glob("sim_target*.yaml"))
+    try:
+        # Cached by HuggingFace, usually in ~/.cache/huggingface
+        snapshot = Path(snapshot_download(
+            repo_id="epfl-radio-astro/rfi-simulations",
+            repo_type="dataset",
+            revision=f"tabsim_v{tabsim.__version__}",
+        ))
+    except Exception as e:
+        logging.warning(f"Download of the tabsim {tabsim.__version__} simulations failed: {e}")
+        snapshot = None
+    hashes = {compute_sha256(c): c for c in configs}
+    if snapshot is not None and all((snapshot / h).is_dir() for h in hashes):
+        return snapshot
+
+    out = tmp_path_factory.mktemp("simulations")
+    sim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
+    for h, config in hashes.items():
+        if snapshot is not None and (snapshot / h).is_dir():
+            (out / h).symlink_to(snapshot / h)
+            continue
+        logging.warning(f"No published simulation of {config.name}; simulating it with tabsim.")
+        result = subprocess.run(
+            [sys.executable, str(sim_script), "-c", str(config), "-sp", str(out / h)],
+            capture_output=True, text=True, cwd=out, check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Simulating {config} failed: {result.stderr}")
+    return out

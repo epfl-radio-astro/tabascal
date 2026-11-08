@@ -482,28 +482,18 @@ E2E_COMPONENTS = [
 
 
 @pytest.fixture(scope="module")
-def scheduled_fit(tmp_path_factory):
+def scheduled_fit(tmp_path_factory, provide_test_data):
     """Four scheduled, clipped adam steps on the 8A sim, with checkpoints at 2 and 4; ~35 s."""
     import subprocess
     import sys
-    from importlib.resources import files as _res_files
     from pathlib import Path
 
     import jax
-    import tabsim
-    from huggingface_hub import snapshot_download
 
     from tabascal.config import yaml_load
     from tests.test_tabascal_pipeline import _copy_sim, read_and_modify_yaml
 
-    try:
-        data = Path(snapshot_download(
-            repo_id="epfl-radio-astro/rfi-simulations",
-            repo_type="dataset",
-            revision=f"tabsim_v{tabsim.__version__}",
-        ))
-    except Exception as e:  # pragma: no cover - offline
-        pytest.skip(f"8A simulation not available: {e}")
+    data = provide_test_data
 
     template = Path(__file__).parent / "data" / "tab_target.yaml"
     base = yaml_load(template)
@@ -535,7 +525,7 @@ def scheduled_fit(tmp_path_factory):
             "-c", str(config_path),
             "-od", str(out_dir),
             "-n", "sched",
-            "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
+            "--extra-orbit-dir", str(out_dir / "input_data"),
             "-nl",
         ],
         capture_output=True, text=True, cwd=work, check=False,

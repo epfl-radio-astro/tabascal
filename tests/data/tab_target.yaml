@@ -45,6 +45,7 @@ ast:
 rfi:
   init: truth
   mean: 0
+  signal_type: real  # the pipeline cases override it where they test complex
   gp_cov:
     corr_time: 24 # seconds
   freq_pad_factor: 2.0
@@ -53,7 +54,7 @@ rfi:
   time_int_factor: 5
 
 satellites:
-  norad_ids: [20452, 38833, 45854]
+  norad_ids: [48058, 48067, 49192]  # sim_target_8A.yaml's, ascending
 
 
 # True gains
