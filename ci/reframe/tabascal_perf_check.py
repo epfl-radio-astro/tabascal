@@ -364,8 +364,12 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     # All references were re-measured alongside the single-GPU ones above on the
     # tabsim 0.1.0 simulation, from the same perf job. The optimiser slowed 6-12%
     # and peak memory rose 0-5%, except RiemannFFI single: 0.205 -> 0.270 GB,
-    # against 0-2% for the same kernel on one GPU. The larger fine grid does not
-    # explain that rise, and it is uninvestigated. Tolerances are unchanged.
+    # against 0-2% for the same kernel on one GPU. That rise is the fine grid too:
+    # on Daint with JAX 0.6.0, this code on the new simulation with
+    # rfi.time_int_factor scaled back to the old 25 samples peaks at 0.205 GB
+    # again, and main on the old simulation measures 0.205 GB beside it. The
+    # step is larger than the grid's 16% because the peak does not scale
+    # linearly with it. Tolerances are unchanged.
     _reference_by_variant: dict = {
         ("Riemann", "single"): {
             "daint:gpu": {
