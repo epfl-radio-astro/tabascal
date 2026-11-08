@@ -38,9 +38,11 @@ ast_sources:
 
 rfi_sources:
   tle_satellite:
-    sat_names: [navstar, galileo]
-    max_n_sat: 32
-    spacetrack_path: spacetrack_login.yaml
+    # The satellites ci/reframe/data/tab_target.yaml models. Listed rather than
+    # searched by name, so the benchmark's model always matches the simulation
+    # whatever the catalogue returns. tabsim simulates them in ascending NORAD ID
+    # order, and rfi.init: truth reads them by position, so both lists stay sorted.
+    norad_ids: [11141,11690,20361,20959,21890,21930,22231,22275,22877,23953,25030,25933,27663,27704,28129,28190,28874,32711,34661,37753,38857,38858,39533,39741,40105,40294,40534,40544,40890,43057,43565,43567]
     power_scale: 1e-2
     max_ang_sep: 90  # degrees
     min_alt: 0       # degrees
@@ -52,6 +54,7 @@ output:
   overwrite: True
   zarr: True
   ms: True
+  save_rfi_amplitudes: True  # rfi.init: truth reads rfi_tle_sat_A
 
 diagnostics:
   uv_cov: True
