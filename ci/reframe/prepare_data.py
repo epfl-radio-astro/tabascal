@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -104,6 +105,9 @@ def main():
                 if ancillary.is_file() and ancillary.suffix != ".yaml":
                     shutil.copy2(ancillary, local_dir / ancillary.name)
             tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
+            # tabsim runs on exactly one GPU, and the multi-GPU check exposes them
+            # all, so it gets the first visible one.
+            gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")[0] or "0"
             subprocess.run(
                 [
                     sys.executable,
@@ -112,6 +116,8 @@ def main():
                     str(sim_config),
                     "-sp",
                     str(input_dir),
+                    "--gpu-id",
+                    gpu,
                 ],
                 cwd=str(local_dir),
                 check=True,
