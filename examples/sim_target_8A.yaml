@@ -54,6 +54,7 @@ output:
   overwrite: True
   zarr: True
   ms: True
+  save_rfi_amplitudes: True  # rfi.init: truth reads rfi_tle_sat_A
 
 diagnostics:
   uv_cov: True
