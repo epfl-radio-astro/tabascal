@@ -129,13 +129,6 @@ def nlog_post(prob_model, params, obs_data, state=None, constants=None):
 @measure_runtime
 def nlog_like_and_post(prob_model, params, obs_data, state=None, constants=None):
     """Return the existing likelihood and posterior diagnostics from one forward pass."""
-    return _nlog_like_and_post(prob_model, params, obs_data, state, constants)
-
-
-# One executable rather than the model's ops dispatched one at a time, which
-# costs seconds on a large model even when every op's compile is cached.
-@partial(jax.jit, static_argnums=0)
-def _nlog_like_and_post(prob_model, params, obs_data, state, constants):
     log_joint, model_trace = log_density(
         prob_model,
         model_args=(obs_data,),
