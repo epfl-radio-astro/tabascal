@@ -125,7 +125,9 @@ def main():
     # drops the 0444 mode bits; the basename is kept because the run derives
     # its MS/zarr paths from it. -od still receives a tab-sim simulation
     # directory: without an ms_path it is read as one, as the perf job expects.
-    staged = workdir / "sim" / sim_dir.name
+    # Staged under the tabsim release and the config hash too, since the basename
+    # does not change with either, so a reused workdir picks up new data.
+    staged = workdir / "sim" / branch / input_hash / sim_dir.name
     if not staged.is_dir():
         shutil.copytree(sim_dir, staged, copy_function=shutil.copyfile)
     sim_dir = staged
