@@ -34,27 +34,48 @@ SRC_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_GLOBS = ["tests/data/sim_target*.yaml", "ci/reframe/data/sim_target*.yaml"]
 
 
-def _referenced_inputs(value, base: Path):
-    """(reference, path) for every string in a config that names an existing path."""
-    if isinstance(value, dict):
-        for key, item in value.items():
-            # Where the simulation writes, not what it reads.
-            if key != "output":
-                yield from _referenced_inputs(item, base)
-    elif isinstance(value, list):
+#: The tabsim config keys that name an input file or directory.
+_INPUT_KEYS = {
+    "path", "itrf_path", "enu_path", "norad_ids_path", "norad_spec_model",
+    "extra_orbit_dir", "replay_orbit_dir", "circ_path", "spec_model", "geo_path",
+}
+#: Inputs tabsim 0.1.0 resolves against the working directory, not the config's,
+#: so a relative one names a different file depending on where the run starts.
+_CWD_RELATIVE = {
+    ("satellite", "circ_path"), ("satellite", "spec_model"),
+    ("stationary", "geo_path"), ("stationary", "spec_model"),
+}
+
+
+def _referenced_inputs(value, base: Path, parent: str = ""):
+    """(reference, path) for every input a tabsim config names that exists."""
+    if isinstance(value, list):
         for item in value:
-            yield from _referenced_inputs(item, base)
-    elif isinstance(value, str) and value:
-        path = Path(value).expanduser()
-        path = path if path.is_absolute() else base / path
-        if path.exists():
-            yield value, path
+            yield from _referenced_inputs(item, base, parent)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if key == "output":  # where the simulation writes, not what it reads
+                continue
+            if key in _INPUT_KEYS and isinstance(item, str) and item:
+                path = Path(item).expanduser()
+                if not path.is_absolute():
+                    if (parent, key) in _CWD_RELATIVE:
+                        raise ValueError(
+                            f"{parent}.{key}: {item!r} is resolved against the working "
+                            "directory, so it cannot key a published simulation; give "
+                            "it as an absolute path"
+                        )
+                    path = base / path
+                if path.exists():
+                    yield item, path
+            else:
+                yield from _referenced_inputs(item, base, key)
 
 
 def compute_sha256(file_path: Path) -> str:
     """The key a simulation is stored and looked up under.
 
-    The config's bytes, then the reference and contents of every file or
+    The config's bytes, then the reference and contents of every input file or
     directory it names that exists (an antenna layout, say), resolved against the
     config's directory as tabsim resolves them. Changing a referenced input then
     gives a new key rather than reusing a simulation of the old one.

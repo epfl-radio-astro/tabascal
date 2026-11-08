@@ -28,12 +28,20 @@ def test_simulation_key_covers_the_files_a_config_references(tmp_path, reference
     layout.parent.mkdir(parents=True, exist_ok=True)
     config_dir.mkdir(exist_ok=True)
     config = config_dir / "sim_target.yaml"
-    config.write_text(f"telescope:\n  itrf_path: {reference}\noutput:\n  path: ./data\n")
+    config.write_text(f"telescope:\n  itrf_path: {reference}\nobservation:\n  target_name: data\n"
+                      "output:\n  path: ./data\n")
     (config_dir / "tab_target.yaml").write_text("a: 1\n")
     layout.write_text("0 0 0\n")
     key = prepare_data.compute_sha256(config)
     (config_dir / "tab_target.yaml").write_text("a: 2\n")
     (config_dir / "data").mkdir()
-    assert prepare_data.compute_sha256(config) == key  # neither is an input
+    assert prepare_data.compute_sha256(config) == key  # none of these is an input
     layout.write_text("100 0 0\n")
     assert prepare_data.compute_sha256(config) != key
+
+
+def test_simulation_key_refuses_inputs_resolved_against_the_working_directory(tmp_path):
+    config = tmp_path / "sim_target.yaml"
+    config.write_text("rfi_sources:\n  stationary:\n    geo_path: locations.loc\n")
+    with pytest.raises(ValueError, match="working directory"):
+        prepare_data.compute_sha256(config)
