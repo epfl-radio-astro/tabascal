@@ -3,14 +3,12 @@ name: Simulation data
 # The pipeline tests and the ReFrame benchmark download their input simulations
 # from the epfl-radio-astro/rfi-simulations HuggingFace dataset, from the branch
 # named after the installed tabsim (tabsim_v<version>). Once a day this checks
-# whether the latest supported tabsim release has a simulation there for every
+# whether the latest tabsim release has a simulation there for every
 # sim_target*.yaml, and if not, simulates the missing ones with that release and
 # uploads them. Until then, CI regenerates the data itself on every run.
 #
 # Secrets, in the tabsim_huggingface environment:
 #   HF_TOKEN             HuggingFace token with write access to the dataset
-#   SPACETRACK_LOGIN     Space-Track login, which tabsim needs for the TLEs
-#   SPACETRACK_PASSWORD
 
 on:
   schedule:
@@ -24,14 +22,16 @@ concurrency:
 jobs:
   publish:
     name: Publish simulations
-    # Only main publishes: a manual run can be started from any branch, whose
-    # sim configs would then be uploaded under the release's branch. Forks run
-    # schedules too, without the secrets to publish anything.
+    # The nightly run publishes main's sim configs. A manual run may also be
+    # started from another branch of this repository, to publish the simulations
+    # a pending change to the configs or the tabsim pin needs before it merges:
+    # each is stored under its config's hash, so it cannot replace main's. Forks
+    # run schedules too, without the secrets to publish anything.
     if: >-
-      github.ref == 'refs/heads/main'
-      && (github.event_name != 'schedule' || github.repository == 'epfl-radio-astro/tabascal')
-    # Holds the secrets below; restrict its deployment branches to main so a
-    # workflow pushed on another branch cannot read them.
+      github.repository == 'epfl-radio-astro/tabascal'
+      && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    # Holds the secrets below. Its deployment-branch policy is what decides which
+    # branches may read them: main, plus any branch added for a manual publish.
     environment: tabsim_huggingface
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -67,7 +67,5 @@ jobs:
         if: steps.check.outputs.missing == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          SPACETRACK_LOGIN: ${{ secrets.SPACETRACK_LOGIN }}
-          SPACETRACK_PASSWORD: ${{ secrets.SPACETRACK_PASSWORD }}
         run: |
           python ci/rfi_simulations.py publish --expect-version "${{ steps.check.outputs.version }}"

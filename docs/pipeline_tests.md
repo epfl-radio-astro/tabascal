@@ -9,12 +9,9 @@ Each case runs `run_tabascal.py` in a **subprocess** against a simulation
 downloaded from the `epfl-radio-astro/rfi-simulations` HuggingFace dataset, then
 parses the run's stdout.
 
-The current tab-sim 0.0.13 reference simulations predate apparent-place tracking
-and the Earth-orientation corrections. Pipeline reference failures against those
-data are expected until the simulations are regenerated with the updated tab-sim
-([issue #253](https://github.com/epfl-radio-astro/tabascal/issues/253)). Keep the
-recorded references and tolerances unchanged until then; re-record them against
-the regenerated simulations.
+The references are recorded against simulations from tab-sim 0.1.0
+([issue #253](https://github.com/epfl-radio-astro/tabascal/issues/253)), which
+tracks the phase centre's apparent place of date.
 
 ```bash
 pixi run -e dev pytest tests/test_tabascal_pipeline.py            # double precision
@@ -166,7 +163,8 @@ inside the 1% tolerance, which is why each case carries **one** scalar rather
 than a per-precision split.
 
 Measured across ARM (Apple silicon), x86 CPU and an NVIDIA GPU, in both
-precisions:
+precisions, on the tab-sim 0.0.13 simulations, which every machine downloaded
+from the same HuggingFace snapshot:
 
 - **Double is architecture-stable** to 1.6e-6 relative in the worst case (the
   two SGP4 orbit cases, where the propagation amplifies rounding; the non-orbit
@@ -181,7 +179,11 @@ precisions:
   architectures fp32 spreads to 1.3e-7.
 
 These figures were last re-measured on all three architectures for the
-`ast.gp_cov.std` change. When a change moves the references, re-measure them
+`ast.gp_cov.std` change. The tab-sim 0.1.0 references were recorded on ARM and
+x86 only, each simulating the data itself (no snapshot existed yet). Their
+simulations differ in the last bits of the RFI and geometry arrays, so double
+agrees across the two to ~2e-7 rather than the figures above; the asserted
+values are the x86 ones. When a change moves the references, re-measure them
 rather than assuming they still hold: an architecture row left behind is not
 visible in a passing test, because the 1% tolerance is four orders wider than
 any of these spreads.

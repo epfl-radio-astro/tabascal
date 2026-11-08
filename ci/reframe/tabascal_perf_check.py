@@ -248,19 +248,27 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
     # Against main's perf job in the same container, total_runtime fell 1-6%,
     # peak memory 1-16% and optimizer_runtime moved by -1.1% to +2.5%.
     # Tolerances are unchanged.
+    #
+    # The Riemann memory references were re-measured from this pipeline's perf job
+    # on the tabsim 0.1.0 simulation (#253). Its thermal noise is sqrt(2) lower,
+    # and the RFI sampling scales with sqrt(max|V| / noise), so the fine grid went
+    # from 25 to 29 samples per time step and the jax backend's peak memory rose
+    # with it: 0.657 -> 0.719 GB single, 1.554 -> 1.794 GB double. The FFI kernel
+    # bounds that term itself and moved under 2%, and every runtime stayed inside
+    # its tolerance, so those references are unchanged.
     _reference_by_variant = {
         ("Riemann", "single"): {
             "daint:gpu": {
                 "total_runtime": (118.13, -0.25, 0.15, "s"),
                 "optimizer_runtime": (107.52, -0.20, 0.15, "s"),
-                "memory_usage": (0.657, -0.1, 0.1, "GB"),
+                "memory_usage": (0.719, -0.1, 0.1, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
                 "total_runtime": (126.24, -0.25, 0.15, "s"),
                 "optimizer_runtime": (115.36, -0.20, 0.15, "s"),
-                "memory_usage": (1.554, -0.1, 0.1, "GB"),
+                "memory_usage": (1.794, -0.1, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
