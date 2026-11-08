@@ -158,7 +158,8 @@ def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
     # Masked with `where` rather than `x[~flags]`, whose data-dependent shape
     # cannot be traced, so this runs inside the jitted predictions.
     keep = jnp.broadcast_to(~flags, true.shape)
-    n_kept = jnp.sum(keep)
+    # Counted in floating point: an int32 count overflows past 2**31 visibilities.
+    n_kept = jnp.sum(keep, dtype=jnp.real(true).dtype)
     norm = 2 * n_kept if jnp.iscomplexobj(true) else n_kept
 
     # The noise is broadcast onto the data, so a resolved noise -- per baseline,
@@ -669,7 +670,7 @@ def run_custom_svi(
         # the transform, so dual_run's second phase -- a fresh optimiser at a tenth
         # of it -- runs the executable the first phase compiled.
         transform = optax.inject_hyperparams(partial(build_optimizer, optimizer))(
-            learning_rate=epsilon
+            learning_rate=float(epsilon)
         )
         params, losses = _run_phase(params, transform, max_iter)
 
