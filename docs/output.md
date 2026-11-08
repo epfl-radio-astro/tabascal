@@ -18,7 +18,7 @@ out_dir/
 |               └── sweep_map_ast_vis_imag.pdf          # Astronomical visibility prediction of optimised parameters
 |               └── sweep_map_gains_amp_phase.pdf       # Gain prediction of optimised parameters
 |               └── sweep_map_rfi_vis_imag.pdf          # RFI visibility prediction of optimised parameters
-|               └── sweep_opt_loss.pdf                  # Optimiser loss over the optimisation period
+|               └── sweep_opt_loss.pdf                  # The optimiser trace against iteration and time
 |               └── sweep_prior_ast_vis_imag.pdf        # Astronomical visibility prediction of prior distribution
 |               └── sweep_prior_gains_amp_phase.pdf     # Gain prediction of prior distribution
 |               └── sweep_prior_rfi_vis_imag.pdf        # RFI visibility prediction of prior distribution
@@ -27,6 +27,7 @@ out_dir/
 |               └── init_pred.B                 # The calibration the initial values imply
 |               └── map_pred.zarr               # Optimised parameter prediction values
 |               └── map_pred.B                  # The calibration it implies, as a CASA table
+|               └── trace.npz                   # Optimiser loss and time per iteration, see opt.trace_path
 |               └── used_orbits.json            # Orbit records used, when present, to replay the trajectory priors
 |           ├── light_curves/                   # Written later, by tabascal light-curve -z <this run>
 ```

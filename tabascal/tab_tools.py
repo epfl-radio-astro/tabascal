@@ -25,6 +25,16 @@ from jax.tree_util import tree_map
 
 from tabascal.distributed import is_process_0
 from tabascal.noise import broadcast_to_vis
+from tabascal.run_dir import LOSS_TRACE
+from tabascal.opt_schedule import (
+    build_optimizer,
+    checkpoint_path as _checkpoint_path,
+    converged,
+    describe_schedule,
+    save_checkpoint,
+    step_size,
+    validate_opt,
+)
 from tabascal.timing import measure_runtime
 from tabascal.write import write_results_ms, write_results_xds
 
@@ -353,25 +363,12 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
         print(f"  {' ' * len(label)} | " + row("bias", me, sig))
 
 
-def fix_padding(config: dict, n_freq):
-
-    try:
-        if (
-            config["rfi"]["freq_pad_factor"] < 3
-            and n_freq == 1
-            and config["rfi"]["n_int_freq"] > 1
-        ):
-            config["rfi"]["freq_pad_factor"] = 3
-    except:
-        print("freq_pad_factor is not defined")
-
-    return config
-
-
 def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
-    """Path to dump the optimiser trace to, or None when tracing is off.
+    """Path to dump the traced optimiser metrics to, or None when they are off.
 
-    ``opt.trace_path`` is the supported way to ask for a trace, so a run that is
+    Every run writes its loss and step times; this decides only whether the
+    per-iteration metrics are computed too, and where that fuller trace goes.
+    ``opt.trace_path`` is the supported way to ask for them, so a run that is
     meant to be compared against another records itself without anyone having to
     remember an environment variable. ``TAB_LOSS_TRACE`` still overrides it, for
     tracing a one-off run of a config that must not be edited -- a shared
@@ -389,6 +386,19 @@ def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
     in :func:`_write_loss_trace` where it cannot change what is computed.
     """
     return os.environ.get("TAB_LOSS_TRACE") or config_path or None
+
+
+def run_trace_path(opt_config: dict, map_path: str) -> str:
+    """Where :func:`run_opt` writes the run's trace: the traced path if any,
+    else ``trace.npz`` beside the MAP prediction.
+
+    ``.npz`` is appended when missing, as ``np.savez`` would append it, so a
+    reader given this path finds the file the writer made.
+    """
+    path = loss_trace_path(opt_config.get("trace_path")) or os.path.join(
+        os.path.dirname(os.path.normpath(map_path)), LOSS_TRACE
+    )
+    return path if path.endswith(".npz") else path + ".npz"
 
 
 def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
@@ -488,7 +498,8 @@ def _write_loss_trace(
     The losses are written exactly as the optimiser produced them -- already
     normalised by ``obs_data.size`` in the step itself -- so the trace and the
     loss curve the run returns are the same numbers. ``metrics`` holds the
-    per-iteration model-independent quantities from :func:`build_trace_metrics`.
+    per-iteration model-independent quantities from :func:`build_trace_metrics`,
+    when the run computed them.
 
     This is the *only* place the process rank is allowed to matter: every rank
     ran the same traced program and so holds the same numbers, and all of them
@@ -532,6 +543,11 @@ def run_custom_svi(
     constants: dict = None,
     trace_path: Optional[str] = None,
     metrics: Optional[tuple] = None,
+    optimizer: Optional[dict] = None,
+    schedule: Optional[dict] = None,
+    stop: Optional[dict] = None,
+    checkpoints: tuple = (),
+    checkpoint_path: Optional[Callable[[int], str]] = None,
 ) -> SVIRunResult:
     """MAP optimization that avoids capturing large state arrays as JAX constants.
 
@@ -545,33 +561,36 @@ def run_custom_svi(
 
     ``trace_path`` dumps the per-iteration loss and the wall-clock time it was
     reached to an ``.npz``, for loss-versus-time comparisons between models
-    (issue #107), together with the ``metrics`` from
-    :func:`build_trace_metrics` -- a ``(function, data)`` pair, which the path
-    requires because the documented schema always carries a reduced chi^2.
-    ``trace_path`` alone decides: without one, nothing is timed, no metrics are
-    computed and the optimiser takes the original :func:`_map_step`, so the
-    trace is genuinely free when it is off.
+    (issue #107). That much is free: the loop reads every loss back to the host
+    anyway, so timing a step adds one clock read. ``metrics`` -- the
+    ``(function, data)`` pair from :func:`build_trace_metrics` -- adds the
+    per-iteration metrics to the file, through :func:`_map_step_metrics`;
+    without them the optimiser takes the original :func:`_map_step`, and its
+    output is what it always was. Metrics without a path would be computed and
+    thrown away, so they are ignored.
 
-    The path must be the same on every process. It selects which of
-    :func:`_map_step` and :func:`_map_step_metrics` runs, and under sharding the
-    model evaluation contains collectives, so the ranks disagreeing about that
-    would deadlock the optimisation. Every rank traces; only the write at the
-    end is rank 0's, gated inside :func:`_write_loss_trace`.
+    Whether metrics are given must be the same on every process. It selects
+    which of :func:`_map_step` and :func:`_map_step_metrics` runs, and under
+    sharding the model evaluation contains collectives, so the ranks disagreeing
+    about that would deadlock the optimisation. Only the write at the end is
+    rank 0's, gated inside :func:`_write_loss_trace`.
+
+    ``optimizer`` (normalised by :func:`tabascal.opt_schedule.validate_optimizer`)
+    is the optax optimiser each phase builds, ``adabelief`` when it is None.
+    ``schedule`` (normalised by :func:`tabascal.opt_schedule.validate_schedule`)
+    replaces the two phases with one optimiser whose step size follows it,
+    for ``max_iter`` steps in all; ``dual_run`` is then not read. One optimiser
+    means one compiled step and moments that carry through every step (#82).
+    ``stop`` ends that run early once :func:`tabascal.opt_schedule.converged`.
+    ``checkpoints`` are steps, counted across both phases with ``dual_run``,
+    after which the parameters are written to ``checkpoint_path(step)``.
     """
-    # The path is the switch. Metrics without one would compile and run the
-    # traced step for a production run and then discard every number it cost;
-    # a path without metrics would write a file missing the keys the schema
-    # promises. Refused here rather than at the writer, which only runs once
-    # the whole optimisation is already done.
+    if stop is not None and schedule is None:
+        raise ValueError("run_custom_svi takes a stop only with a schedule.")
+    # Metrics without a path would compile and run the traced step for a
+    # production run and then discard every number it cost.
     if trace_path is None:
         metrics = None
-    elif metrics is None:
-        raise ValueError(
-            "run_custom_svi was given trace_path but no metrics, so the trace "
-            "would carry no reduced chi^2 and not be the documented file. Pass "
-            "metrics=build_trace_metrics(tab_config, truth), or leave "
-            "trace_path unset."
-        )
 
     metrics_fn, metrics_data = metrics if metrics is not None else (None, None)
 
@@ -580,24 +599,23 @@ def run_custom_svi(
     # any difference in cost per iteration, so a model that converges in fewer
     # but more expensive steps looks better than it is; the honest axis is time.
     # `float(loss)` below already forces a device sync, so the timestamp taken
-    # after it bounds completed work rather than dispatched work. Every read of
-    # the clock is guarded on the trace being on, so an untraced run does not
-    # pay for a measurement nobody asked for.
-    tracing = trace_path is not None
+    # after it bounds completed work rather than dispatched work, and costs
+    # nothing beyond the clock read.
     step_times = []
     trace_t0 = None
     traced_metrics: dict = {}
 
-    def _run_phase(params, epsilon, max_iter):
+    checkpoints = set(checkpoints)
+
+    def _run_phase(params, optimizer, max_iter, offset=0):
         nonlocal trace_t0
-        optimizer = optax.adabelief(epsilon)
         opt_state = optimizer.init(params)
         losses = []
         window = max(max_iter // 10, 1)
         init_loss = None
         pbar = trange(max_iter, disable=not is_process_0())
         for i in pbar:
-            if tracing and trace_t0 is None:
+            if trace_t0 is None:
                 trace_t0 = perf_counter()
             if metrics_fn is None:
                 params, opt_state, loss = _map_step(
@@ -611,8 +629,7 @@ def run_custom_svi(
                 for name, value in step_metrics.items():
                     traced_metrics.setdefault(name, []).append(float(value))
             loss_val = float(loss)
-            if tracing:
-                step_times.append(perf_counter() - trace_t0)
+            step_times.append(perf_counter() - trace_t0)
             losses.append(loss_val)
             if init_loss is None:
                 init_loss = loss_val
@@ -624,14 +641,31 @@ def run_custom_svi(
                 f"init loss: {init_loss:.4f}, avg. loss [{n1}-{n2}]: {avg_loss:.4f}",
                 refresh=False,
             )
+            if offset + i + 1 in checkpoints:
+                save_checkpoint(
+                    checkpoint_path(offset + i + 1), params, offset + i + 1, loss_val,
+                    write=is_process_0(),
+                )
+            # Every rank holds the same losses, so every rank stops at the same step.
+            if stop is not None and converged(losses, stop):
+                pbar.close()
+                print(f"Converged after {i + 1} steps: the mean loss moved by less "
+                      f"than {stop['rtol']:g} between the last two windows of {stop['window']}.")
+                break
         return params, losses
 
     params = init_params
-    params, losses = _run_phase(params, epsilon, max_iter)
+    if schedule is not None:
+        transform = build_optimizer(optimizer, step_size(schedule, epsilon, max_iter))
+        params, losses = _run_phase(params, transform, max_iter)
+    else:
+        params, losses = _run_phase(params, build_optimizer(optimizer, epsilon), max_iter)
 
-    if dual_run:
-        params, losses2 = _run_phase(params, epsilon / 10, max_iter)
-        losses = losses + losses2
+        if dual_run:
+            params, losses2 = _run_phase(
+                params, build_optimizer(optimizer, epsilon / 10), max_iter, offset=max_iter
+            )
+            losses = losses + losses2
 
     _write_loss_trace(trace_path, losses, step_times, traced_metrics)
 
@@ -680,20 +714,36 @@ def run_opt(
 ):
 
     start = datetime.now()
+    opt_config = tab_config.args["opt"]
+    checked = validate_opt(opt_config)
     print()
     print("Running Optimization ...")
-    trace_path = loss_trace_path(tab_config.args["opt"].get("trace_path"))
+    print(f"Optimiser : {describe_schedule(opt_config)}")
+    traced_path = loss_trace_path(opt_config.get("trace_path"))
+    results_dir = os.path.dirname(os.path.normpath(map_path))
+    # Every run keeps its loss and step times beside its results; asking for a
+    # trace adds the metrics and puts the file where it was asked for instead.
+    trace_path = run_trace_path(opt_config, map_path)
+    # Beside the MAP prediction, named after it, so two runs into one results
+    # directory with different suffixes keep their checkpoints apart.
+    stem = os.path.basename(os.path.normpath(map_path)).removesuffix(".zarr")
+    checkpoint_dir = os.path.join(results_dir, "checkpoints")
     vi_results = run_custom_svi(
         prob_model=prob_model,
         obs_data=tab_config.vis_obs,
-        max_iter=tab_config.args["opt"]["max_iter"],
+        max_iter=opt_config["max_iter"],
         init_params=init_params,
-        epsilon=tab_config.args["opt"]["epsilon"],
-        dual_run=tab_config.args["opt"]["dual_run"],
+        epsilon=opt_config["epsilon"],
+        dual_run=opt_config["dual_run"],
         state=state,
         constants=constants,
         trace_path=trace_path,
-        metrics=build_trace_metrics(tab_config, truth) if trace_path else None,
+        metrics=build_trace_metrics(tab_config, truth) if traced_path else None,
+        optimizer=checked["optimizer"],
+        schedule=checked["schedule"],
+        stop=checked["stop"],
+        checkpoints=tuple(checked["checkpoints"]),
+        checkpoint_path=lambda step: _checkpoint_path(checkpoint_dir, stem, step),
     )
     vi_params = vi_results.params
     # Strip _auto_loc suffix to get raw param names for Predictive

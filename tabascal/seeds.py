@@ -73,10 +73,12 @@ def describe_random_draws(config: Dict) -> str:
     """One run-header line naming what the seed reaches in this config.
 
     A section draws when it asks for ``init: sample`` and the model has a
-    component that reads it (one with a ``seed_tag``). Prior plots draw from
+    component that reads it (one with a ``seed_tag``), and the start draws when
+    ``opt.init_jitter`` is set (tabascal.jitter). Prior plots draw from
     the run key too, but they are diagnostics and never touch the fit.
     """
     from tabascal.imports import import_components
+    from tabascal.jitter import describe_init_jitter
 
     seed = config_seed(config)
     tags = {
@@ -88,9 +90,13 @@ def describe_random_draws(config: Dict) -> str:
         if tag in tags and (config.get(tag) or {}).get("init") == "sample"
     ]
 
-    if sampled:
-        line = ", ".join(f"{tag} init" for tag in sampled)
-        line = f"Random draws : {line} sampled from inference.seed {seed}"
+    draws = [", ".join(f"{tag} init" for tag in sampled) + " sampled"] if sampled else []
+    jitter = describe_init_jitter((config.get("opt") or {}).get("init_jitter"))
+    if jitter:
+        draws.append(jitter)
+
+    if draws:
+        line = f"Random draws : {' and '.join(draws)} from inference.seed {seed}"
     else:
         line = "Random draws : no random draws in the fit, every init is deterministic"
     if (config.get("plots") or {}).get("prior"):

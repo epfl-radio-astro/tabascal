@@ -26,6 +26,7 @@ from tabascal.fft_gp import (
     supersample_domain_k,
     supersample_domain_specs,
     supersample_fourier,
+    validate_signal_type,
 )
 from tabascal.timing import clear_timings, disable_timings
 
@@ -678,3 +679,166 @@ class TestPkCutRefusesAnEmptySelection:
             advice[name] = str(excinfo.value).rsplit("strict. ", 1)[-1]
 
         assert len(set(advice.values())) == 4, advice
+
+
+class TestRealSignalType:
+    """``signal_type="real"``: a real signal through its Hartley coefficients.
+
+    One real coefficient per retained mode, on the grid the complex latent
+    uses. The complex path is the default and is what every test above runs.
+    """
+
+    @staticmethod
+    def _gp(ns, pad_factors, ss_factors, cutoff=1e-9, signal_type="real"):
+        dxs = [1.0] * len(ns)
+        k0s, gammas = [0.2] * len(ns), [3] * len(ns)
+        kw = dict(signal_type=signal_type)
+        idxs, _ = signal_to_latent_init(ns, dxs, pad_factors, 1.0, k0s, gammas, cutoff, **kw)
+        latent_pk, _, pads, ss_idxs = latent_to_signal_init(
+            ns, dxs, pad_factors, ss_factors, 1.0, k0s, gammas, cutoff, **kw
+        )
+        return idxs, latent_pk, pads, ss_idxs
+
+    def test_the_round_trip_is_exact_without_padding_or_a_cut(self):
+        ns = [7, 9]
+        y = jnp.asarray(np.random.default_rng(0).normal(size=ns))
+        idxs, _, pads, ss_idxs = self._gp(ns, [1, 1], [1, 1], cutoff=1e-30)
+
+        h = signal_to_latent(y, [1, 1], idxs, signal_type="real")
+        back = latent_to_signal(h, pads, ss_idxs, signal_type="real")
+
+        assert not jnp.iscomplexobj(h)
+        assert h.shape == tuple(ns)
+        assert not jnp.iscomplexobj(back)
+        np.testing.assert_allclose(back, y, atol=1e-5)
+
+    # [5, 7] pads to [9, 13], odd on both axes; [2, 8] to [4, 16], whose
+    # whole axes the cut keeps, -N/2 included.
+    @pytest.mark.parametrize("ns", [[5, 7], [2, 8]])
+    def test_it_is_the_complex_path_through_the_same_cut(self, ns):
+        """Everywhere, supersampled: the real cut pairs every mode, so the
+        complex path through it is real too."""
+        pad_factors, ss = [2.0, 2.0], [3, 3]
+        y = jnp.asarray(np.random.default_rng(1).normal(size=ns))
+        idxs, _, pads, ss_idxs = self._gp(ns, pad_factors, ss, cutoff=1e-30)
+
+        real = latent_to_signal(
+            signal_to_latent(y, pad_factors, idxs, signal_type="real"),
+            pads, ss_idxs, signal_type="real",
+        )
+        cplx = latent_to_signal(signal_to_latent(y + 0j, pad_factors, idxs), pads, ss_idxs)
+
+        np.testing.assert_allclose(real, cplx.real, atol=1e-5)
+        np.testing.assert_allclose(cplx.imag, 0.0, atol=1e-5)
+
+    # Mixed parity both ways round too: [2, 7] pads to [4, 13], [5, 8] to [9, 16].
+    @pytest.mark.parametrize("ns", [[5, 7], [2, 8], [2, 7], [5, 8]])
+    def test_independent_coefficients_give_the_spectrums_variance(self, ns):
+        """``E y(x)^2 = sum P`` at every x, supersampled: one standard normal
+        per mode, not two, and stationary on an even axis too."""
+        _, latent_pk, pads, ss_idxs = self._gp(ns, [2.0, 2.0], [5, 3], cutoff=1e-30)
+        P = latent_pk / jnp.sum(latent_pk)
+
+        # The exact pointwise variance, sum_k P(k) b_k(x)^2, from the basis.
+        basis = jax.vmap(
+            lambda e: latent_to_signal(e.reshape(P.shape), pads, ss_idxs, signal_type="real")
+        )(jnp.eye(P.size))
+        var = jnp.einsum("k,k...->...", P.ravel(), basis**2)
+
+        np.testing.assert_allclose(var, 1.0, rtol=1e-5)
+
+    def test_it_is_jit_compatible(self):
+        ns, pad_factors = [5, 7], [2.0, 2.0]
+        idxs, _, pads, ss_idxs = self._gp(ns, pad_factors, [2, 2])
+        y = jnp.asarray(np.random.default_rng(2).normal(size=ns))
+
+        def through(y):
+            h = signal_to_latent(y, pad_factors, idxs, signal_type="real")
+            return latent_to_signal(h, pads, ss_idxs, signal_type="real")
+
+        np.testing.assert_allclose(jax.jit(through)(y), through(y), atol=1e-5)
+
+    def test_a_complex_input_is_refused(self):
+        idxs, *_ = self._gp([5, 7], [2.0, 2.0], [1, 1])
+
+        with pytest.raises(TypeError, match="real signal"):
+            signal_to_latent(jnp.ones((5, 7), dtype=complex), [2.0, 2.0], idxs, signal_type="real")
+
+    def test_an_unknown_signal_type_is_refused(self):
+        _, latent_pk, pads, ss_idxs = self._gp([5, 7], [2.0, 2.0], [1, 1])
+
+        with pytest.raises(ValueError, match="signal_type"):
+            latent_to_signal(jnp.zeros(latent_pk.shape), pads, ss_idxs, signal_type="imag")
+
+    def test_the_cut_and_supersampling_helpers_agree_with_the_latent_path(self):
+        """fourier_cut / supersample_fourier take the same keyword and the same
+        Hartley convention."""
+        y = jnp.asarray(np.random.default_rng(3).normal(size=(5, 7)))
+        pk = pow_spec_nd(domain_k([5, 7], [1.0, 1.0]), 1.0, [1e9, 1e9], [1, 1])
+
+        h = fourier_cut(pk, 1e-30, y, signal_type="real")
+        back = supersample_fourier(h, [1, 1], signal_type="real")
+
+        assert not jnp.iscomplexobj(h)
+        np.testing.assert_allclose(back, y, atol=1e-5)
+        # An even grid's cut drops -N/2, which uncutting must put back.
+        pk_even = pow_spec_nd(domain_k([4, 8], [1.0, 1.0]), 1.0, [1e9, 1e9], [1, 1])
+        h_even = fourier_cut(pk_even, 1e-30, jnp.ones((4, 8)), signal_type="real")
+        assert fourier_uncut(pk_even, 1e-30, h_even, signal_type="real").shape == (4, 8)
+
+    def test_supersample_returns_a_real_signal(self):
+        # Even on one axis, where the padding splits the Nyquist mode and the
+        # complex result has an imaginary part that is not rounding.
+        y = jnp.asarray(np.random.default_rng(4).normal(size=(4, 7)))
+
+        y_ss = supersample(y, [3, 3], signal_type="real")
+
+        assert not jnp.iscomplexobj(y_ss)
+        np.testing.assert_allclose(y_ss, supersample(y + 0j, [3, 3]).real, atol=1e-5)
+
+    @pytest.mark.parametrize("value", [None, "complex", "real"])
+    def test_the_config_value_validates(self, value):
+        assert validate_signal_type(value, "rfi.signal_type") == (value or "complex")
+
+    @pytest.mark.parametrize("value", ["Real", "", 0, 1, False, True, ["real"]])
+    def test_a_bad_config_value_is_refused_by_name(self, value):
+        with pytest.raises(ValueError, match=r"rfi\.signal_type"):
+            validate_signal_type(value, "rfi.signal_type")
+
+
+# Padded lengths 9, 8 (pad 2), 5, 4 (no padding) and a single channel, whose pad of
+# 2 rounds to none, each with an even and an odd factor.
+@pytest.mark.parametrize("n, pad_factor", [(5, 2.0), (4, 2.0), (5, 1.0), (4, 1.0), (1, 2.0)])
+@pytest.mark.parametrize("f", [2, 3])
+@pytest.mark.parametrize("signal_type", ["complex", "real"])
+def test_latent_to_signal_is_the_dft_on_the_supersampled_domain(n, pad_factor, f, signal_type):
+    """Every kept mode lands on ``domain_ss`` exactly, the data grid at offset ``f // 2``;
+    a real signal's mode is the Hartley basis ``cos + sin`` there."""
+    dx, atol = 0.7, 100 * float(jnp.finfo(jnp.zeros(()).dtype).eps)
+    pk, ks, pads, idxs = latent_to_signal_init(
+        [n], [dx], [pad_factor], [f], 1.0, [1.0], [2.0], 1e-30, signal_type=signal_type
+    )
+    n_pad = int(pad_domain_specs([n], [pad_factor])[0])
+
+    x = np.asarray(domain_ss([n], [dx], [0.0], [f], [pad_factor])[0])
+    np.testing.assert_allclose(x[f // 2 :: f], dx * np.arange(n), atol=atol)
+
+    got = jax.vmap(lambda e: latent_to_signal(e, pads, idxs, signal_type=signal_type))(
+        jnp.eye(pk.size, dtype=complex if signal_type == "complex" else float)
+    )
+    expected = np.exp(2j * np.pi * np.asarray(ks[0])[:, None] * (x + n_pad * dx))
+    if signal_type == "real":
+        expected = expected.real + expected.imag
+    np.testing.assert_allclose(got, expected, atol=atol)
+
+
+@pytest.mark.parametrize("n", [8, 9])
+@pytest.mark.parametrize("f", [2, 3])
+def test_supersample_keeps_the_samples(n, f):
+    """Both supersampling routes put the input back on every ``f``-th fine sample."""
+    rng = np.random.default_rng(0)
+    y = jnp.asarray(rng.normal(size=n) + 1j * rng.normal(size=n))
+    Y = jnp.fft.fftshift(jnp.fft.fftn(y, norm="forward"))
+    for y_ss in (supersample(y, [f]), supersample_fourier(Y, [f])):
+        assert y_ss.shape == (n * f,)
+        np.testing.assert_allclose(y_ss[::f], y, atol=1e-6)

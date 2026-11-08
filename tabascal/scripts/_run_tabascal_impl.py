@@ -21,7 +21,7 @@ import jax
 from jax import random
 
 from tabascal.timing import measure_runtime, print_timings, enable_timings
-from tabascal.tab_tools import init_predict, run_opt, nlog_like_and_post, write_ms_if_enabled
+from tabascal.tab_tools import init_predict, run_opt, run_trace_path, nlog_like_and_post, write_ms_if_enabled
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.distributed import (
     barrier,
@@ -34,6 +34,8 @@ from tabascal.distributed import (
     suppress_worker_stdout,
 )
 from tabascal.imports import import_components
+from tabascal.jitter import jitter_init
+from tabascal.opt_schedule import validate_opt
 from tabascal.seeds import config_seed, describe_random_draws, run_key
 from tabascal.write import check_input_column, write_results_xds
 from tabascal.orbit import TLEError, save_orbits_for_reuse
@@ -456,6 +458,9 @@ def _subtract(config, paths):
     _print_run_header(paths.run_dir, paths.f_name, paths.ms_path, start_time)
     print(describe_random_draws(config))
     print()
+    # Here rather than in run_opt, so a bad opt key fails before the setup does.
+    if config["inference"]["opt"]:
+        validate_opt(config["opt"])
 
     if sharding_enabled():
         print(f"Sharding RFI sources over {jax.device_count()} devices:")
@@ -494,6 +499,12 @@ def _subtract(config, paths):
                 "  (reuse via --extra-orbit-dir to reproduce this run's "
                 "trajectory priors)"
             )
+
+    # Before sharding, so every rank perturbs the same local arrays the same way.
+    model.init_params = jitter_init(
+        model.init_params, config["opt"].get("init_jitter"), config_seed(config),
+        n_rfi=tab_config.n_rfi, n_rfi_real=getattr(tab_config, "n_rfi_real", tab_config.n_rfi),
+    )
 
     if sharding_enabled():
         # Split every leading-RFI-axis array across the device mesh and replicate
@@ -552,8 +563,10 @@ def _subtract(config, paths):
             plot_opt(tab_config, vi_pred, truth, paths.name, paths.plot_dir)
 
         if config["plots"]["losses"] and is_process_0():
+            import numpy as np
             from tabascal.plot import plot_losses
-            plot_losses(losses, paths.name, paths.plot_dir)
+            with np.load(run_trace_path(tab_config.args["opt"], paths.map_path)) as trace:
+                plot_losses(dict(trace), paths.name, paths.plot_dir)
 
         opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
 

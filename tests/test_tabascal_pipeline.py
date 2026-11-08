@@ -764,6 +764,7 @@ def test_pipeline_writes_into_its_own_run_directory(
                 "precision": precision,
             },
             "opt": {"epsilon": 1e-3, "max_iter": 1, "dual_run": False, "guide": "map"},
+            "plots": {"losses": True},
         },
         data_dir / "tab_target.yaml",
         config_path,
@@ -790,6 +791,8 @@ def test_pipeline_writes_into_its_own_run_directory(
     assert "Start Time :" in (run_dir / "log.txt").read_text()
     assert json.loads((run_dir / "run.json").read_text())["status"] == "finished"
     assert (run_dir / "results" / "map_pred.zarr").is_dir()
+    assert (run_dir / "results" / "trace.npz").is_file()
+    assert (run_dir / "plots" / "runA_opt_loss.pdf").is_file()
     assert not list(tmp_path.glob("log*")), "the working directory was written to"
 
     # The run already wrote the MS; exporting again must not see it as changed.

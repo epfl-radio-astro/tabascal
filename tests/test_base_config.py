@@ -72,8 +72,7 @@ def build_stubbed_tab_config(config, monkeypatch, n_ant=3, n_freq=4, n_time=5, n
 
     Only the steps that need a measurement set, a satellite catalogue or the
     network are stubbed. Everything that decides the fine grid --- the
-    integration-count binding, ``estimate_rfi_sampling``, ``fix_padding`` and
-    ``_set_freqs_times`` --- really runs, which is the whole point: a test that
+    integration-count binding, ``estimate_rfi_sampling`` and ``_set_freqs_times`` --- really runs, which is the whole point: a test that
     asserts on the merged config dict alone never touches the code that reads it.
 
     Returns the config and the observation sizes it was built on.
@@ -343,9 +342,9 @@ class TestBaseConfigIntegrationSampleCounts:
         was always fine; what was missing was a reader of the key it supplies.
 
         Only the steps that need an MS, a satellite catalogue or the network are
-        stubbed. The integration-count binding, ``estimate_rfi_sampling``,
-        ``fix_padding`` and ``_set_freqs_times`` — everything that decides the
-        fine grid — all really run.
+        stubbed. The integration-count binding, ``estimate_rfi_sampling`` and
+        ``_set_freqs_times`` — everything that decides the fine grid — all
+        really run.
         """
 
         path = tmp_path / "user.yaml"
@@ -366,6 +365,23 @@ class TestBaseConfigIntegrationSampleCounts:
 
         assert comp.n_int_freq == tab_config.n_int_freq
         assert comp.n_int_time == tab_config.n_int_time
+
+    def test_a_single_channel_keeps_its_pad_factor(self, tmp_path, monkeypatch):
+        """One supersampled channel is unpadded at the default pad factor, and the
+        fine grid is still its ``n_int_freq`` samples, centred as on any channel."""
+
+        path = tmp_path / "user.yaml"
+        path.write_text(_MINIMAL_CONFIG)
+        config = load_config(str(path))
+        config["rfi"]["n_int_freq"] = 2
+        pad_factor = config["rfi"]["freq_pad_factor"]
+
+        tab_config, _ = build_stubbed_tab_config(config, monkeypatch, n_freq=1)
+
+        assert tab_config.args["rfi"]["freq_pad_factor"] == pad_factor
+        np.testing.assert_allclose(
+            tab_config.freqs_fine, tab_config.freqs[0] + tab_config.chan_width * np.array([-0.5, 0.0])
+        )
 
     def test_each_count_sets_the_fine_grid_axis_it_names(self, tmp_path):
         """``n`` samples per channel and per integration, which is what the
