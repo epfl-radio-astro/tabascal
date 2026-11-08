@@ -22,6 +22,15 @@ def compute_sha256(file_path: Path) -> str:
     return sha256_hash.hexdigest()
 
 
+def simulation_gpu(environ) -> str:
+    """The one GPU tabsim may simulate on: the first visible, GPU 0 if none is named.
+
+    tabsim refuses more than one visible GPU and the multi-GPU check exposes them
+    all. An empty CUDA_VISIBLE_DEVICES hides every GPU and is passed on unchanged.
+    """
+    return environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Download/generate test data and prepare config for ReFrame check."
@@ -105,9 +114,6 @@ def main():
                 if ancillary.is_file() and ancillary.suffix != ".yaml":
                     shutil.copy2(ancillary, local_dir / ancillary.name)
             tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
-            # tabsim runs on exactly one GPU, and the multi-GPU check exposes them
-            # all, so it gets the first visible one.
-            gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")[0] or "0"
             subprocess.run(
                 [
                     sys.executable,
@@ -117,7 +123,7 @@ def main():
                     "-sp",
                     str(input_dir),
                     "--gpu-id",
-                    gpu,
+                    simulation_gpu(os.environ),
                 ],
                 cwd=str(local_dir),
                 check=True,
