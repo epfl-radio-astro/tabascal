@@ -34,10 +34,20 @@ CONFIG_GLOBS = ["tests/data/sim_target*.yaml", "ci/reframe/data/sim_target*.yaml
 
 
 def compute_sha256(file_path: Path) -> str:
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
+    """The key a simulation is stored and looked up under.
+
+    The config's bytes, then the name and bytes of every non-YAML file beside it:
+    those are the inputs it references by relative path (an antenna layout, say),
+    so changing one gives a new key rather than reusing a simulation of the old
+    file. ci/reframe/prepare_data.py and tests/test_tabascal_pipeline.py load
+    this function, so the publisher and its consumers always agree.
+    """
+    file_path = Path(file_path)
+    sha256_hash = hashlib.sha256(file_path.read_bytes())
+    for ancillary in sorted(file_path.parent.iterdir()):
+        if ancillary.is_file() and ancillary.suffix not in (".yaml", ".yml"):
+            sha256_hash.update(b"\0" + ancillary.name.encode() + b"\0")
+            sha256_hash.update(ancillary.read_bytes())
     return sha256_hash.hexdigest()
 
 

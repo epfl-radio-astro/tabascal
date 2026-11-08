@@ -19,3 +19,16 @@ _spec.loader.exec_module(prepare_data)
 )
 def test_simulation_gpu(environ, gpu):
     assert prepare_data.simulation_gpu(environ) == gpu
+
+
+def test_simulation_key_covers_the_files_a_config_references(tmp_path):
+    config = tmp_path / "sim_target.yaml"
+    config.write_text("telescope: {}\n")
+    (tmp_path / "tab_target.yaml").write_text("a: 1\n")
+    bare = prepare_data.compute_sha256(config)
+    (tmp_path / "tab_target.yaml").write_text("a: 2\n")
+    assert prepare_data.compute_sha256(config) == bare  # a sibling config is not an input
+    (tmp_path / "array.itrf.txt").write_text("0 0 0\n")
+    with_layout = prepare_data.compute_sha256(config)
+    (tmp_path / "array.itrf.txt").write_text("100 0 0\n")
+    assert len({bare, with_layout, prepare_data.compute_sha256(config)}) == 3

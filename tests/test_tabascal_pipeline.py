@@ -1,6 +1,5 @@
 """Test full Tabascal pipeline runs."""
 
-import hashlib
 import json
 import logging
 import re
@@ -17,22 +16,18 @@ import yaml
 from huggingface_hub import snapshot_download
 
 
-def compute_sha256(file_path: Path) -> str:
-    """Compute the SHA256 hash of a file.
+def _load_ci_module(path: Path):
+    """Import a CI script by path; ci/ is not a package."""
+    import importlib.util
 
-    Args:
-        file_path: Path to the file to hash
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    Returns:
-        Hexadecimal string representation of the SHA256 hash
-    """
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        # Read the file in chunks to handle large files efficiently
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
 
+#: The publisher's key, so the data looked up is the data it published.
+compute_sha256 = _load_ci_module(Path(__file__).resolve().parents[1] / "ci" / "rfi_simulations.py").compute_sha256
 
 
 @pytest.fixture
