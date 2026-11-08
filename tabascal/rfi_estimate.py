@@ -134,7 +134,6 @@ from tabascal.components.trajectory import (
     fetch_orbital_elements,
     get_satellite_elevations,
     get_satellite_positions,
-    check_phase_tracking,
     itrs_to_gcrs_sf,
     tracking_uvw,
 )
@@ -195,7 +194,7 @@ def rfi_phase_from_positions(
     phase_centre : dict
         ``{"ra": <deg>, "dec": <deg>}`` J2000 phase centre of the visibilities,
         as :func:`tabascal.ms.read_ms` converts it from the MS's declared frame,
-        with an optional ``"tracking"`` convention; see
+        tracked at its apparent place of date; see
         :func:`tabascal.components.trajectory.tracked_radec`.
     freqs : Array (n_freq,)
         Channel frequencies in Hz.
@@ -782,9 +781,7 @@ def satellite_range_and_speed(record, ants_itrf: NDArray, times_jd: NDArray):
     GCRS-to-ITRS rotation. The sidereal angle alone is not enough, even for a
     rate: precession-nutation does not commute with the Earth's rotation, so
     leaving it out tilts the spin axis the separation turns about and gives an
-    Earth-fixed source at geostationary radius a spurious ~4 m/s. It is Earth
-    orientation, not the phase-tracking convention, so ``tabsim.phase_tracking``
-    does not enter here.
+    Earth-fixed source at geostationary radius a spurious ~4 m/s.
 
     It is not the orbital speed. Near the horizon most of a LEO satellite's
     motion is along the line of sight and does not fringe, and its range is
@@ -3014,7 +3011,7 @@ def write_search_results(
 
 
 def write_config_fragment(
-    path: str, selection: dict, shifted_orbit_dir=None, phase_tracking: str = "apparent"
+    path: str, selection: dict, shifted_orbit_dir=None
 ) -> str:
     """Write the detections as a tabascal ``satellites`` section.
 
@@ -3035,19 +3032,12 @@ def write_config_fragment(
     whole point of writing them: a later run reproduces the trajectories the
     search measured, whatever SatChecker serves by then.
 
-    A ``tabsim`` section always follows, naming the ``phase_tracking`` the search
-    ran with. The offsets and detections were measured under it, so the fit must
-    use it too. It is written even at the default so that merging the fragment
-    overrides whatever the target config says, rather than inheriting it.
-
     Returns
     -------
     str
         ``path``.
     """
     import yaml
-
-    phase_tracking = check_phase_tracking(phase_tracking, "phase_tracking")
 
     detected = selection["detected"]
     lines = [
@@ -3084,7 +3074,7 @@ def write_config_fragment(
         # own configs write it, while the section itself stays in block style.
         fh.write(
             yaml.safe_dump(
-                {"satellites": satellites, "tabsim": {"phase_tracking": phase_tracking}},
+                {"satellites": satellites},
                 sort_keys=False,
                 default_flow_style=None,
             )
@@ -3361,7 +3351,6 @@ def extract_light_curves_from_ms(
     min_elevation: Optional[float] = 0.0,
     max_mem_gb: float = 1.0,
     offset_fit: Optional[dict] = None,
-    phase_tracking: str = "apparent",
 ) -> dict:
     """Extract matched-filter RFI light curves from any column of an MS.
 
@@ -3397,10 +3386,6 @@ def extract_light_curves_from_ms(
         Settings for the along-track offset search; see
         :func:`attach_offset_fits`. With it, each satellite's ``tau`` is measured
         first and the curves are extracted at the offset it found.
-    phase_tracking : str, default "apparent"
-        How the data were phase-tracked to the MS's J2000 centre; one of
-        :data:`tabascal.components.trajectory.PHASE_TRACKING`. ``"j2000"`` is for
-        data simulated by tab-sim (#253).
 
     Returns
     -------
@@ -3425,32 +3410,27 @@ def extract_light_curves_from_ms(
         min_elevation,
         max_mem_gb,
         offset_fit=offset_fit,
-        phase_tracking=phase_tracking,
     )
 
 
-def ms_phase_centre(ms: dict, phase_tracking: str = "apparent") -> dict:
+def ms_phase_centre(ms: dict) -> dict:
     """The phase centre dict of a :func:`tabascal.ms.read_ms` result.
 
     The MS's ``ra`` and ``dec``, which ``read_ms`` has already converted to
-    J2000 from the frame ``FIELD::PHASE_DIR`` declares, and ``tracking``: how the data were
-    tracked to it, checked against
-    :data:`tabascal.components.trajectory.PHASE_TRACKING`.
+    J2000 from the frame ``FIELD::PHASE_DIR`` declares.
     """
     return {
         "ra": float(ms["ra"]),
         "dec": float(ms["dec"]),
-        "tracking": check_phase_tracking(phase_tracking, "phase_tracking"),
     }
 
 
 def _filter_visibilities(
     vis, ms, records, norad_ids, times_jd, data_col, corr,
     exclude_autos, min_elevation, max_mem_gb, offset_fit=None,
-    phase_tracking="apparent",
 ):
     """Shared tail of the two MS-backed drivers."""
-    phase_centre = ms_phase_centre(ms, phase_tracking)
+    phase_centre = ms_phase_centre(ms)
     ants_itrf = np.asarray(ms["ants_itrf"])
     flags = None if ms.get("flags") is None else np.asarray(ms["flags"])
 
@@ -3664,7 +3644,6 @@ def extract_light_curves_from_zarr(
     min_elevation: Optional[float] = 0.0,
     max_mem_gb: float = 1.0,
     offset_fit: Optional[dict] = None,
-    phase_tracking: str = "apparent",
 ) -> dict:
     """Matched-filter the residual of a tabascal run, taken from its results zarr.
 
@@ -3716,7 +3695,6 @@ def extract_light_curves_from_zarr(
         min_elevation,
         max_mem_gb,
         offset_fit=offset_fit,
-        phase_tracking=phase_tracking,
     )
 
 

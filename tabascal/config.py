@@ -18,7 +18,6 @@ from tabascal.components.trajectory import (
     fetch_orbital_elements,
     get_satellite_elevations,
     get_satellite_positions,
-    check_phase_tracking,
     tracked_radec,
 )
 from tabascal.orbit import check_epoch_agreement, preflight_tle_check
@@ -149,37 +148,6 @@ def load_config(path: str) -> Dict:
     return config
 
 
-#: Keys of the ``tabsim`` section, which adapts tabascal to data simulated by
-#: tab-sim where that differs from real data.
-TABSIM_KEYS = ("phase_tracking",)
-
-
-def normalise_tabsim_config(config: Dict) -> Dict:
-    """The ``tabsim`` section, checked, with its values normalised.
-
-    An absent or null section, and an absent key, take the defaults. Anything
-    else is checked as given: a section that is not a mapping, an unknown key --
-    so a misspelt option cannot leave a run quietly on the default convention --
-    and a value outside the choices, ``null`` and ``false`` included, are refused.
-    """
-    section = config.get("tabsim")
-    if section is None:
-        section = {}
-    if not isinstance(section, collections.abc.Mapping):
-        raise ValueError(f"tabsim must be a mapping, not {section!r}.")
-    unknown = sorted(set(section) - set(TABSIM_KEYS), key=repr)
-    if unknown:
-        raise ValueError(
-            f"tabsim has no key(s) {unknown}. It takes {list(TABSIM_KEYS)}."
-        )
-
-    return {
-        "phase_tracking": check_phase_tracking(
-            section.get("phase_tracking", "apparent"), "tabsim.phase_tracking"
-        ),
-    }
-
-
 class TabConfig:
     """Configuration parameters for tabascal method"""
 
@@ -205,7 +173,6 @@ class TabConfig:
         # model build, so a malformed value is a clean error and the two can never
         # disagree about what was configured.
         self.tle_config = normalise_tle_config(config)
-        self.tabsim = normalise_tabsim_config(config)
         self.extra_orbit_dir = self.tle_config.extra_orbit_dir
         self.extra_orbit_max_age_days = self.tle_config.extra_orbit_max_age_days
 
@@ -218,7 +185,6 @@ class TabConfig:
             config["data"]["freq"],
             config["data"]["corr"],
             config["data"]["data_col"],
-            phase_tracking=self.tabsim["phase_tracking"],
         )
         self.set_noise(config["data"]["noise"], require=require_noise)
         # After set_noise, so the noise it resolved is carried into the
@@ -597,9 +563,7 @@ class TabConfig:
             )
         print()
 
-    def read_ms_params(
-        self, freq: float, corr: str, data_col: str, phase_tracking: str = "apparent"
-    ):
+    def read_ms_params(self, freq: float, corr: str, data_col: str):
 
         # Read off the config if there is one. This method is deliberately
         # callable unbound, on an object carrying nothing but an ms_path --
@@ -612,12 +576,10 @@ class TabConfig:
         )
 
         # The MS's phase centre, as read_ms converts it to J2000 from the frame
-        # FIELD::PHASE_DIR declares, and how the data were tracked to it
-        # (tabsim.phase_tracking), for every RFI component and estimator.
+        # FIELD::PHASE_DIR declares, for every RFI component and estimator.
         self.phase_centre = {
             "ra": ms_params["ra"],
             "dec": ms_params["dec"],
-            "tracking": phase_tracking,
         }
         self.dish_d = ms_params["dish_d"]
         self.ants_itrf = ms_params["ants_itrf"]

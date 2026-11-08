@@ -6,7 +6,7 @@ import pytest
 
 from tabascal import rfi_estimate
 from tabascal.components import trajectory
-from tabascal.components.trajectory import PHASE_TRACKING, FixedOrbitFine, PhaseCalculationRFIFine
+from tabascal.components.trajectory import FixedOrbitFine, PhaseCalculationRFIFine
 from tabascal.interferometry import C
 from tests.components.conftest import make_constants
 from tests.components.test_trajectory import make_trajectory_config
@@ -128,40 +128,12 @@ def test_phase_centre_argument_stays_j2000(site, monkeypatch):
     assert pc == PC
 
 
-def test_tabsim_phase_tracking_selects_the_j2000_convention():
-    """``tabsim.phase_tracking: j2000`` is the old GAST - RA term exactly, given the same RA/Dec (#253)."""
-    from tabascal.config import normalise_tabsim_config
+def test_tracking_follows_the_apparent_place_of_date():
+    """Tracking must account for the phase centre's motion since J2000."""
     from tabascal.interferometry import itrf_to_uvw_numpy
     from tabascal.time import gast_deg
 
-    old = np.transpose(
+    uncorrected = np.transpose(
         itrf_to_uvw_numpy(ANTS, (gast_deg(TIMES) - PC["ra"]) % 360, PC["dec"]), axes=(1, 0, 2)
     )
-    legacy = normalise_tabsim_config({"tabsim": {"phase_tracking": "J2000"}})
-    default = normalise_tabsim_config({"tabsim": None})
-
-    np.testing.assert_array_equal(
-        trajectory.tracking_uvw(ANTS, TIMES, {**PC, "tracking": legacy["phase_tracking"]}), old
-    )
-    assert default["phase_tracking"] == "apparent"
-    assert np.abs(trajectory.tracking_uvw(ANTS, TIMES, PC) - old).max() > 1.0
-
-
-@pytest.mark.parametrize("config, want", [
-    ({}, "apparent"),
-    ({"tabsim": None}, "apparent"),
-    ({"tabsim": {}}, "apparent"),
-    ({"tabsim": {"phase_tracking": "J2000"}}, "j2000"),
-    *[({"tabsim": v}, "mapping") for v in (False, 0, "", [])],
-    *[({"tabsim": {"phase_tracking": v}}, "must be one of") for v in (None, False, 0, "", [], "icrs")],
-    ({"tabsim": {"phase_traking": "j2000"}}, "no key"),
-])
-def test_the_tabsim_section_is_validated_as_given(config, want):
-    """Only an absent or null section or key defaults; anything else is checked."""
-    from tabascal.config import normalise_tabsim_config
-
-    if want in PHASE_TRACKING:
-        assert normalise_tabsim_config(config)["phase_tracking"] == want
-    else:
-        with pytest.raises(ValueError, match=want):
-            normalise_tabsim_config(config)
+    assert np.abs(trajectory.tracking_uvw(ANTS, TIMES, PC) - uncorrected).max() > 1.0

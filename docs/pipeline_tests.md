@@ -9,6 +9,13 @@ Each case runs `run_tabascal.py` in a **subprocess** against a simulation
 downloaded from the `epfl-radio-astro/rfi-simulations` HuggingFace dataset, then
 parses the run's stdout.
 
+The current tab-sim 0.0.13 reference simulations predate apparent-place tracking
+and the Earth-orientation corrections. Pipeline reference failures against those
+data are expected until the simulations are regenerated with the updated tab-sim
+([issue #253](https://github.com/epfl-radio-astro/tabascal/issues/253)). Keep the
+recorded references and tolerances unchanged until then; re-record them against
+the regenerated simulations.
+
 ```bash
 pixi run -e dev pytest tests/test_tabascal_pipeline.py            # double precision
 pixi run -e dev pytest tests/test_tabascal_pipeline.py --x64 false # single precision

@@ -1844,22 +1844,6 @@ class TestWriteConfigFragment:
                     f"{want} missing from {named[0]!r}"
                 )
 
-    @pytest.mark.parametrize("tracking", ["apparent", "j2000"])
-    def test_the_fit_it_is_merged_into_tracks_as_the_search_did(
-        self, tmp_path, search_ab, tracking
-    ):
-        """The search to fit handoff: merged over the base config, the fragment's
-        convention is the one a run resolves (#253)."""
-        from tabascal.config import load_config, normalise_tabsim_config
-
-        path = write_config_fragment(
-            str(tmp_path / "found.yaml"), select_detections(search_ab),
-            phase_tracking=tracking,
-        )
-
-        assert yaml.safe_load(open(path))["tabsim"] == {"phase_tracking": tracking}
-        assert normalise_tabsim_config(load_config(path))["phase_tracking"] == tracking
-
     def test_a_search_that_found_nothing_still_writes_an_empty_list(self, tmp_path,
                                                                      search_noise):
         """So the artifact is there to point at either way, and says why it is
@@ -2211,21 +2195,6 @@ class TestSearchCommandLine:
         assert not os.path.exists(f"{stem}_light_curves.npz")
         assert not os.path.exists(f"{stem}_shifted_tles")
         assert "No candidate cleared the threshold" in capsys.readouterr().out
-
-    def test_the_config_it_writes_names_the_tracking_it_searched_with(
-        self, tmp_path, obs_noise, snapshot_dir, stub_ms, quiet_precision
-    ):
-        """``--phase-tracking j2000`` reaches the fragment a fit is merged from."""
-        from tabascal.scripts.sat_search import run
-
-        stub_ms(obs_noise)
-        stem = str(tmp_path / "out")
-        run(_cli("-ms", str(tmp_path / "obs.ms"), "--tle-dir", snapshot_dir,
-                 *SCAN, "-o", stem, "--phase-tracking", "j2000"))
-
-        assert yaml.safe_load(open(f"{stem}_config.yaml"))["tabsim"] == {
-            "phase_tracking": "j2000"
-        }
 
     def test_save_all_keeps_every_candidates_curve(
         self, tmp_path, obs_a, snapshot_dir, stub_ms, quiet_precision
