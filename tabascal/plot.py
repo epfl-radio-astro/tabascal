@@ -5,6 +5,7 @@ from tabascal.timing import measure_runtime
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from numpyro.infer import Predictive
 
 from datetime import datetime
@@ -315,19 +316,40 @@ def plot_opt(tab_config, vi_pred, truth, run_name, plot_dir):
 
 
 @measure_runtime
-def plot_losses(losses, run_name, plot_dir):
+def plot_losses(trace, run_name, plot_dir):
+    """Plot a run's trace (the arrays of its ``trace.npz``) against iteration
+    and against wall-clock time: the loss, then each metric the run traced."""
 
     start = datetime.now()
 
+    rows = [(["loss"], "Loss")]
+    if "chi2" in trace:
+        rows.append((["chi2"], r"Reduced $\chi^2$"))
+    nrmse = [key for key in ("vis_ast_nrmse", "vis_rfi_nrmse") if key in trace]
+    if nrmse:
+        rows.append((nrmse, "RMSE / noise"))
+
     plt.close()
-    fig, ax = plt.subplots(1, 1, figsize=(10, 7))
-    ax.plot(losses)
-    ax.set_ylabel("Loss")
-    ax.set_xlabel("Iteration")
-    if losses.min() < 0:
-        ax.set_yscale("symlog")
-    else:
-        ax.set_yscale("log")
+    fig, axes = plt.subplots(
+        len(rows), 2, figsize=(14, 4 * len(rows)), sharex="col", sharey="row",
+        squeeze=False,
+    )
+    for (keys, label), (ax_it, ax_t) in zip(rows, axes):
+        for key in keys:
+            values = np.asarray(trace[key])
+            name = key.removesuffix("_nrmse") if len(keys) > 1 else None
+            # A one-step trace is a single point, which a bare line does not draw.
+            marker = "o" if values.size == 1 else None
+            ax_it.plot(values, label=name, marker=marker)
+            ax_t.plot(trace["time_s"], values, label=name, marker=marker)
+        for ax in (ax_it, ax_t):
+            # symlog where a value is zero or negative, which a log axis drops.
+            ax.set_yscale("symlog" if min(np.min(trace[k]) for k in keys) <= 0 else "log")
+            if len(keys) > 1:
+                ax.legend()
+        ax_it.set_ylabel(label)
+    axes[-1, 0].set_xlabel("Iteration")
+    axes[-1, 1].set_xlabel("Wall-clock time [s]")
     plt.savefig(
         os.path.join(plot_dir, f"{run_name}_opt_loss.pdf"),
         format="pdf",

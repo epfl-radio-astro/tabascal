@@ -1,0 +1,361 @@
+"""``opt.init_jitter``: a seeded perturbation of the start, off by default."""
+
+import os
+import subprocess
+import sys
+import zlib
+from importlib.resources import files as _res_files
+from pathlib import Path
+
+import jax
+import numpy as np
+import pytest
+import yaml
+
+from tabascal.config import load_config, yaml_load
+from tabascal.jitter import (
+    describe_init_jitter,
+    jitter_init,
+    resolve_init_jitter,
+    validate_init_jitter,
+)
+from tabascal.seeds import component_key, describe_random_draws
+
+from tests.test_seeds import COMPONENTS
+
+
+def start():
+    """A start shaped like a model's: two ast blocks, two rfi blocks and a gain block."""
+    rng = np.random.default_rng(0)
+    return {
+        "ast_k_r_base": jax.numpy.zeros((4, 1, 3)),
+        "ast_k_i_base": jax.numpy.zeros((4, 1, 3)),
+        "rfi_k_r_base": jax.numpy.asarray(rng.normal(size=(2, 3, 1, 5))),
+        "rfi_k_i_base": jax.numpy.asarray(rng.normal(size=(2, 3, 1, 5))),
+        "gains_amp_base": jax.numpy.asarray(rng.normal(size=(3,)), dtype=jax.numpy.float32),
+    }
+
+
+def draw(seed, name, like):
+    key = jax.random.fold_in(component_key(seed, "init_jitter"), zlib.crc32(name.encode()))
+    return np.asarray(jax.random.normal(key, like.shape, like.dtype))
+
+
+# ---------------------------------------------------------------------------
+# Off
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("spec", [None, 0, 0.0, {"rfi": 0}], ids=["null", "0", "0.0", "zero-block"])
+def test_off_returns_the_very_start_it_was_given(spec):
+    """Not a copy: the same arrays, so a run without jitter is bit-identical."""
+    params = start()
+    out = jitter_init(params, spec, seed=7)
+    assert all(out[k] is params[k] for k in params)
+
+
+@pytest.mark.parametrize("spec", [None, 0, {"rfi": 0}], ids=["null", "0", "zero-block"])
+def test_off_is_described_as_nothing(tmp_path, spec):
+    assert describe_init_jitter(spec) is None
+    assert "no random draws" in describe_random_draws(loaded(tmp_path, spec))
+
+
+# ---------------------------------------------------------------------------
+# The draw
+# ---------------------------------------------------------------------------
+
+
+def test_a_number_is_an_absolute_scale_on_every_block(exact_rtol):
+    params = start()
+    out = jitter_init(params, 0.05, seed=7)
+    for name, x in params.items():
+        # Against the sum rather than the difference, which in single precision
+        # keeps the start's round-off and none of the jitter's digits.
+        assert out[name].dtype == x.dtype
+        expected = np.asarray(x) + 0.05 * draw(7, name, x)
+        np.testing.assert_allclose(np.asarray(out[name]), expected, rtol=exact_rtol, atol=exact_rtol)
+
+
+@pytest.mark.parametrize("magnitude", ["unit", "tiny", "huge", "edge", "product"])
+def test_a_relative_scale_is_a_fraction_of_the_rms_of_the_start(exact_rtol, magnitude):
+    """Also for starts whose squares, or one sparse entry near the dtype's maximum, leave its range."""
+    params = start()
+    info = np.finfo(params["rfi_k_r_base"].dtype)
+    c = {
+        "unit": 1.0, "tiny": np.sqrt(info.tiny) * 1e-3, "huge": np.sqrt(info.max) * 1e3,
+        "edge": 0.75 * info.max, "product": info.max / 4,
+    }[magnitude]
+    unit = {name: np.asarray(params[name]) for name in ("rfi_k_r_base", "rfi_k_i_base")}
+    scale = 8.0 if magnitude == "product" else 0.1
+    if magnitude in ("edge", "product"):  # one nonzero entry, at c
+        for name in unit:
+            unit[name] = np.zeros((2, 1, 1, 50), dtype=params[name].dtype)
+            unit[name].flat[0] = 1
+    params.update({name: jax.numpy.asarray(y * c) for name, y in unit.items()})
+    out = jitter_init(params, {"rfi": {"relative": scale}}, seed=7)
+    for name, y in unit.items():
+        # In units of c, where the reference's own squares stay in range.
+        sigma = scale * np.sqrt(np.mean(y**2))
+        np.testing.assert_allclose(
+            np.asarray(out[name]) / c, y + sigma * draw(7, name, params[name]),
+            rtol=exact_rtol, atol=exact_rtol,
+        )
+    for name in ("ast_k_r_base", "ast_k_i_base", "gains_amp_base"):
+        assert out[name] is params[name]
+
+
+def test_the_longest_block_wins():
+    params = start()
+    out = jitter_init(params, {"ast": 0.1, "ast_k_r_base": 0.5}, seed=7)
+    np.testing.assert_allclose(
+        np.asarray(out["ast_k_r_base"]), 0.5 * draw(7, "ast_k_r_base", params["ast_k_r_base"]), rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(out["ast_k_i_base"]), 0.1 * draw(7, "ast_k_i_base", params["ast_k_i_base"]), rtol=1e-6
+    )
+
+
+def test_a_block_prefix_stops_at_an_underscore():
+    """``rf`` is not a prefix of ``rfi_k_r_base`` in this sense, so it names nothing."""
+    with pytest.raises(ValueError, match="rf"):
+        resolve_init_jitter({"rf": 0.1}, start())
+
+
+@pytest.mark.parametrize("seeds", [(7, 7), (7, 8)], ids=["same", "different"])
+def test_the_jitter_is_identical_exactly_when_the_seed_is(seeds):
+    a, b = (jitter_init(start(), 0.05, seed=s) for s in seeds)
+    same = all(np.array_equal(a[k], b[k]) for k in a)
+    assert same == (seeds[0] == seeds[1])
+
+
+def test_a_parameter_draw_does_not_depend_on_the_other_parameters():
+    params = start()
+    alone = jitter_init({"gains_amp_base": params["gains_amp_base"]}, 0.05, seed=7)
+    together = jitter_init(params, 0.05, seed=7)
+    assert np.array_equal(alone["gains_amp_base"], together["gains_amp_base"])
+
+
+def test_the_draw_is_not_the_one_ast_init_sample_takes():
+    """The jitter folds its own tag in, so it is independent of a sampled start."""
+    x = start()["ast_k_r_base"]
+    ast_key_draw = np.asarray(jax.random.normal(component_key(7, "ast"), x.shape, x.dtype))
+    assert not np.array_equal(draw(7, "ast_k_r_base", x), ast_key_draw)
+
+
+@pytest.mark.parametrize("kind", ["absolute", "relative"])
+@pytest.mark.parametrize("n_real", [2, 3])
+def test_padded_dummy_sources_stay_dark_and_do_not_change_the_real_draw(kind, n_real):
+    """Padding preserves real draws and leaves non-RFI axes fully perturbed."""
+    params = start()
+    rfi = params["rfi_k_r_base"]
+    rfi = jax.numpy.concatenate([rfi, rfi[:1]])[:n_real]
+    params["rfi_k_r_base"] = rfi
+    padded = dict(params, rfi_k_r_base=jax.numpy.concatenate([
+        rfi, jax.numpy.zeros((4 - n_real, *rfi.shape[1:]), dtype=rfi.dtype),
+    ]))
+    spec = {"": 0.1, "rfi_k_r_base": {kind: 0.1}}
+
+    unpadded_out = jitter_init(params, spec, seed=7, n_rfi=n_real, n_rfi_real=n_real)
+    padded_out = jitter_init(padded, spec, seed=7, n_rfi=4, n_rfi_real=n_real)
+
+    np.testing.assert_array_equal(padded_out["rfi_k_r_base"][:n_real], unpadded_out["rfi_k_r_base"])
+    np.testing.assert_array_equal(padded_out["rfi_k_r_base"][n_real:], 0)
+    np.testing.assert_array_equal(padded_out["ast_k_r_base"], unpadded_out["ast_k_r_base"])
+
+
+# ---------------------------------------------------------------------------
+# What is refused
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [True, -0.1, float("nan"), float("inf"), "0.1", {"rfi": {"relative": -1}},
+     {"rfi": {"scale": 0.1}}, {"rfi": {"relative": 0.1, "absolute": 0.1}}, {"rfi": "big"}],
+)
+def test_a_malformed_spec_is_refused_by_name(spec):
+    with pytest.raises(ValueError, match=r"opt\.init_jitter"):
+        validate_init_jitter(spec)
+
+
+def test_a_block_that_names_no_parameter_is_refused():
+    with pytest.raises(ValueError, match="gainz"):
+        jitter_init(start(), {"gainz": 0.1}, seed=7)
+
+
+def test_a_relative_jitter_on_a_block_that_starts_at_zero_is_refused():
+    """ast starts at its zero prior mean here, so a relative jitter would be no jitter."""
+    with pytest.raises(ValueError, match="ast_k_r_base"):
+        jitter_init(start(), {"ast": {"relative": 0.1}}, seed=7)
+
+
+def test_load_config_refuses_a_malformed_spec(tmp_path):
+    path = tmp_path / "user.yaml"
+    path.write_text(yaml.dump({"model": {"components": COMPONENTS}, "opt": {"init_jitter": -1}}))
+    with pytest.raises(ValueError, match=r"opt\.init_jitter"):
+        load_config(str(path))
+
+
+def test_the_base_config_ships_it_off():
+    from importlib.resources import files
+
+    base = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))
+    assert base["opt"]["init_jitter"] is None
+
+
+# ---------------------------------------------------------------------------
+# The run header
+# ---------------------------------------------------------------------------
+
+
+def loaded(tmp_path, jitter, ast_init="prior", seed=4242):
+    path = tmp_path / "user.yaml"
+    path.write_text(yaml.dump({
+        "model": {"components": COMPONENTS},
+        "ast": {"init": ast_init},
+        "rfi": {"init": "prior"},
+        "inference": {"seed": seed},
+        "opt": {"init_jitter": jitter},
+    }))
+    return load_config(str(path))
+
+
+def test_the_line_names_the_jitter_and_the_seed(tmp_path):
+    line = describe_random_draws(loaded(tmp_path, {"rfi": {"relative": 0.01}, "ast": 0.05}))
+
+    assert "no random draws" not in line
+    assert "rfi relative 0.01" in line and "ast absolute 0.05" in line
+    assert "4242" in line
+
+
+def test_the_line_names_a_sampled_start_and_the_jitter_together(tmp_path):
+    line = describe_random_draws(loaded(tmp_path, 0.05, ast_init="sample"))
+
+    assert "ast init sampled" in line and "every block absolute 0.05" in line
+
+
+# ---------------------------------------------------------------------------
+# End to end: the runner jitters the start it fits from
+# ---------------------------------------------------------------------------
+
+FIT_SEEDS = (1, 7)
+
+
+@pytest.fixture(scope="module")
+def jittered_fits(tmp_path_factory):
+    """Three MAP iterations on the 8A sim with a jittered start, at two seeds.
+
+    Returns ``{seed: (stdout, run_dir, config_path)}``.
+    """
+    import tabsim
+    from huggingface_hub import snapshot_download
+
+    from tests.test_tabascal_pipeline import _copy_sim, read_and_modify_yaml
+
+    try:
+        data = Path(snapshot_download(
+            repo_id="epfl-radio-astro/rfi-simulations",
+            repo_type="dataset",
+            revision=f"tabsim_v{tabsim.__version__}",
+        ))
+    except Exception as e:  # pragma: no cover - offline
+        pytest.skip(f"8A simulation not available: {e}")
+
+    template = Path(__file__).parent / "data" / "tab_target.yaml"
+    base = yaml_load(template)
+    script = Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
+    precision = "double" if jax.config.read("jax_enable_x64") else "single"
+
+    fits = {}
+    for seed in FIT_SEEDS:
+        work = tmp_path_factory.mktemp(f"jitter{seed}")
+        out_dir = _copy_sim(data, work)
+        config_path = work / "tab_target.yaml"
+        read_and_modify_yaml(
+            {
+                "model": {"components": COMPONENTS, "precision": precision},
+                "inference": {"opt": True, "seed": seed},
+                "opt": {"epsilon": 1e-3, "max_iter": 3, "dual_run": False, "guide": "map",
+                        "init_jitter": 0.1},
+                "ast": {**base["ast"], "init": "prior"},
+                "rfi": {**base["rfi"], "init": "prior"},
+            },
+            template,
+            config_path,
+        )
+        result = subprocess.run(
+            [
+                sys.executable, str(script), "run",
+                "-c", str(config_path),
+                "-od", str(out_dir),
+                "-n", "jitter",
+                "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
+                "-nl",
+            ],
+            capture_output=True, text=True, cwd=work, check=False,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [
+                str(script.parents[2]), os.environ.get("PYTHONPATH"),
+            ]))},
+        )
+        assert result.returncode == 0, f"seed {seed} run failed: {result.stderr}"
+        fits[seed] = (result.stdout, out_dir / "runs" / "latest", config_path)
+
+    return fits
+
+
+def test_with_a_jitter_the_seed_moves_the_start(jittered_fits):
+    """By more than the round-off test_seeds allows its deterministic-init twin across seeds."""
+    import xarray as xr
+
+    first, second = (
+        xr.open_zarr(str(jittered_fits[s][1] / "results" / "init_pred.zarr"))
+        for s in FIT_SEEDS
+    )
+
+    pairs = [(first[n].values, second[n].values) for n in first.data_vars]
+    assert all(np.isfinite(a).all() and np.isfinite(b).all() for a, b in pairs)
+    assert any(
+        np.abs(a - b).max() > 64 * np.finfo(a.real.dtype).eps * np.abs(a).max()
+        for a, b in pairs if a.dtype.kind in "fc"
+    )
+
+
+@pytest.mark.parametrize("seed", FIT_SEEDS)
+def test_the_run_header_carries_the_jitter(jittered_fits, seed):
+    stdout, _, config_path = jittered_fits[seed]
+
+    line = describe_random_draws(load_config(str(config_path)))
+    assert "jittered" in line and line in stdout
+
+
+def test_the_runner_jitters_once_before_sharding_and_shares_the_start(tmp_path, monkeypatch, capsys):
+    """One padded start reaches sharding, prediction and the optimiser in that order."""
+    from tabascal.scripts import _run_tabascal_impl as impl
+    from tests.test_seeds import run_stubbed
+
+    events = []
+    actual = impl.jitter_init
+    starts = []
+
+    def jitter(params, spec, seed, **kwargs):
+        events.append("jitter")
+        assert kwargs == {"n_rfi": 4, "n_rfi_real": 3}
+        out = actual(params, spec, seed, **kwargs)
+        starts.append(out)
+        return out
+
+    def shard(params, n_rfi):
+        if any(params.keys() == start.keys() for start in starts):
+            events.append("shard_start")
+        return params
+
+    monkeypatch.setattr(impl, "jitter_init", jitter)
+    monkeypatch.setattr(impl, "sharding_enabled", lambda: True)
+    monkeypatch.setattr(impl, "shard_pytree", shard)
+    calls, *_ = run_stubbed(tmp_path, monkeypatch, capsys, 7, 0, jitter=0.1, events=events)
+    assert [e for e in events if e != "shard_start"] == ["jitter", "init", "opt"]
+    assert events.index("jitter") < events.index("shard_start") < events.index("init")
+    initial, optimized = calls["init_params"][0], calls["opt_params"][0]
+    assert initial.keys() == optimized.keys()
+    for name in initial:
+        np.testing.assert_array_equal(initial[name], optimized[name])

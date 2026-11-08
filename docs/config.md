@@ -171,6 +171,8 @@ plots:
 
 The above configuration will plot the predictions for the initial parameters and the prior distributions. To plot the prediction from the prior, 100 samples will be drawn from the prior and then pushed through the forward model to get a predicition. The `truth` plots can only be included if TABASCAL is being run on a simulation created with `sim-vis`.
 
+`losses: True` plots the run's [optimiser trace](#optimiser-trace) to `<name>_opt_loss.pdf`, against iteration on the left and wall-clock time on the right: the loss, and with `opt.trace_path` set the reduced chi-squared and, on a simulation, the RMSEs too.
+
 ## Inference
 
 The `inference` section defines the type of inference that will be done. An example is given below.
@@ -193,31 +195,103 @@ opt:
   epsilon: 1e-1
   max_iter: 10000
   dual_run: True
+  optimizer: null
+  schedule: null
+  stop: null
+  checkpoints: null
+  init_jitter: null
   trace_path: null
 ```
 
 * `epsilon`: This is the optimiser step size
 * `max_iter`: This is the number of iterations to run the optimiser for in each optimisation run.
 * `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller.
-* `trace_path`: Path of an `.npz` file to record the optimiser's convergence to, or `null` (the default) to record nothing. A relative path is taken inside the run's directory, so each run keeps its own trace; an absolute one is used as given. See [Optimiser trace](#optimiser-trace).
+* `optimizer`: Which optax optimiser to run and with which settings, or `null` (the default) for `adabelief` with optax's defaults. See [Optimiser](#optimiser).
+* `schedule`: One optimiser with a step-size schedule in place of `dual_run`'s two, or `null` (the default) to keep `dual_run`. See [Step-size schedule](#step-size-schedule).
+* `stop`: End the fit once the loss stops moving, or `null` (the default) to run every step. Needs `schedule`.
+* `checkpoints`: Steps after which to write the parameters to a file, or `null` (the default) for none.
+* `init_jitter`: A seeded perturbation added to the start before the fit, or `null` (the default) for none. See [Start jitter](#start-jitter).
+* `trace_path`: Path of an `.npz` file to record the optimiser's per-iteration metrics to, with its loss and time, or `null` (the default) for the loss and time alone in `results/trace.npz`. A relative path is taken inside the run's directory, so each run keeps its own trace; an absolute one is used as given. See [Optimiser trace](#optimiser-trace).
+
+### Optimiser
+
+`optimizer` names the optax optimiser, with or without a schedule. A name alone takes optax's defaults; a mapping adds that optimiser's scalar arguments under their optax names, and `clip_norm`, which clips the gradient's global norm before the optimiser sees it. The step size is always `epsilon` (or the schedule), never an argument here.
+
+```yaml
+opt:
+  optimizer: adam
+  # optimizer: {name: adabelief, b1: 0.95, eps: 1e-12}
+  # optimizer: {name: adamw, weight_decay: 1e-4, clip_norm: 1.0}
+  # optimizer: {name: sgd, momentum: 0.9, nesterov: true}
+```
+
+The names are `adabelief`, `adam`, `adamw`, `amsgrad`, `nadam`, `radam`, `adamax`, `yogi`, `lion`, `lamb`, `novograd`, `rmsprop`, `sgd` and `adagrad`. An argument the optimiser does not take is refused by name at run start, with the list it does take. So is a number outside the range the optimiser's update is defined on: the decay rates (`b1`, `b2`, `b3`, `decay`) and `momentum` must lie in `[0, 1)`, `eps` must be above 0, `eps_root`, `weight_decay` and the initial accumulators `>= 0`, and `radam`'s `threshold` above 4, each as the run's precision holds it. `rmsprop` does not take `centered` and `bias_correction` together. A mapping without `name` is `adabelief`. With `dual_run` both phases build this optimiser, the second at `epsilon / 10`.
+
+### Step-size schedule
+
+With `dual_run` the fit runs in two phases, each with a new optimiser: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments and compiles its step again. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: one compiled step, and moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read.
+
+```yaml
+opt:
+  epsilon: 0.2
+  max_iter: 2000
+  schedule: {kind: step, boundaries: [1000], factor: 0.1}  # dual_run's drop, without the reset
+  # schedule: {kind: exponential, final_factor: 0.01}      # 0.2 -> 0.002, smoothly, by step 2000
+  # schedule: {kind: cosine, final_factor: 0.0}            # half a cosine from 0.2 to 0
+  # schedule: {kind: linear, final_factor: 0.1}            # a straight line from 0.2 to 0.02
+  # schedule: {kind: step, boundaries: [500, 1500], factor: [0.3, 0.1]}  # 0.2, 0.06, 0.006
+  # schedule: {kind: cosine, warmup_steps: 100}            # up from 0 over 100 steps, then the cosine
+  # schedule: {kind: constant}
+```
+
+* `step`: multiplies the step size by `factor` (default 0.1) after each step in `boundaries`, so the first N steps of `boundaries: [N]` run at `epsilon`, as `dual_run`'s first phase does. `factor` is one number for every boundary or a list with one per boundary. The boundaries must increase and stay below `max_iter`.
+* `exponential`: `epsilon * final_factor ** (step / max_iter)`, with `0 < final_factor <= 1`.
+* `cosine`: half a cosine from `epsilon` down to `final_factor * epsilon` (default 0) at `max_iter`.
+* `linear`: a straight line from `epsilon` down to `final_factor * epsilon` (default 0) at `max_iter`.
+
+Every kind also takes `warmup_steps` (default 0) and `warmup_factor` (default 0): the first `warmup_steps` steps rise linearly from `warmup_factor * epsilon` to `epsilon`, and the schedule starts from there. The decays still end at `max_iter`, so they run over the `max_iter - warmup_steps` steps left, and `step` boundaries still count from the start of the fit, so they must come after the warmup.
+
+A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: it keeps the moments across the drop, which is the point.
+
+`stop: {window: W, rtol: r, min_steps: M}` ends the fit after step n once n is at least M and 2W, and the mean loss over steps n-W+1..n differs from the mean over the W steps before by at most r times the latter's magnitude. The loss is the negative log posterior per data point, so with a large constant offset in it a relative change is smaller than the change in fit; choose `rtol` with a trace of the loss to hand. It needs `schedule`: with `dual_run` it would not be clear whether a stop ends the first phase or the fit.
+
+`checkpoints: [1000, 2000, 4000]` writes the parameters after each of those steps to `checkpoints/<map_pred name>_step<N>.npz` in the run's `results` directory, so one long run can be scored at several step counts. With `dual_run` the steps count across both phases. `tabascal.opt_schedule.load_checkpoint(path)` returns `(params, step, trace_loss)`, the parameters keyed as the model names them, which `Predictive` takes. `trace_loss` is the trace's loss for that step, which the step evaluated before its own update, so it lines a checkpoint up with the trace but is not the loss at the saved parameters. A step the fit does not reach because `stop` ended it first is not written.
+
+### Start jitter
+
+A config whose inits are all deterministic (`rfi.init: matched-filter`, `ast.init: prior`, `gains.init: prior`) makes no random draw: its start does not depend on `inference.seed` (reruns differ at most by the backend's round-off, see #273), so they cannot show how far apart two fits of the same data land. `init_jitter` adds a draw to the start, so an ensemble over `inference.seed` can.
+
+```yaml
+opt:
+  init_jitter: 0.05                                 # every block, absolute
+  # init_jitter: {rfi: {relative: 0.01}, ast: 0.05} # per block
+```
+
+Every fitted parameter is a standard-normal latent, so an **absolute** scale is in units of the prior width: `0.05` moves each latent by 5 % of its prior standard deviation. A **relative** scale is a fraction of the rms of that block's own start, for starts such as the matched filter's that sit far from the prior mean; it is an error on a block that starts at zero, where it would add nothing. A number applies to every block, and a mapping names blocks, each either a parameter name (`rfi_k_r_base`) or its prefix up to an underscore (`rfi`), the longest match winning. Blocks a mapping leaves out are not jittered, and a block that names no parameter is an error.
+
+The rms is taken without squaring the start itself, so a block near either end of its dtype's range keeps its jitter. A block made only of subnormal values may read as zero on a backend that flushes them, and a relative jitter on it is then refused as a zero start.
+
+Each parameter draws from `inference.seed` under the tag `init_jitter` folded with its own name, so its jitter does not depend on the other parameters, and is independent of a sampled start (`init: sample`). The jitter is applied before the init prediction, so `init_pred` is the start the fit actually took, and the run header names it. With `init_jitter` null nothing is drawn and the start is the very arrays the components built, as without the key.
 
 ### Optimiser trace
 
 Two models cannot be compared on their loss curves. The loss is a negative log *joint*, so its prior term scales with the latent dimension of whichever parameterisation is running — `gains:UnitaryGains`, which fits no gain at all, and `gains:ConstGains`, which fits $2 n_\text{ant} - 2$ parameters, do not put their losses on a common scale. And loss *per iteration* hides the cost of an iteration, so a model that converges in fewer but more expensive steps looks better than it is.
 
-Setting `trace_path` records, once per optimiser iteration, the quantities that can be compared: the wall-clock time the iteration finished, and the metrics fixed by the data rather than by the parameterisation. The metrics are read out of the same forward pass as the loss, so they cost a few elementwise reductions rather than a second evaluation of the model, and the run is otherwise unchanged. With `trace_path` left `null` nothing is recorded and the optimiser takes the same compiled path it always did.
+Every run records, once per optimiser iteration, its loss and the wall-clock time the iteration finished, in `trace.npz` in the run's `results` directory. That costs nothing measurable: the optimiser reads every loss back from the device anyway, and the time is one clock read after it.
 
-Set the `TAB_LOSS_TRACE` environment variable to override `trace_path` for a single run, for tracing a config that should not be edited. Under multiple processes every process traces — they all evaluate the same model and must run the same program — and one file is written, by the first process.
+Setting `trace_path` adds the metrics fixed by the data rather than by the parameterisation, and writes the trace to that path instead. The metrics are read out of the same forward pass as the loss, so they cost a few elementwise reductions per iteration rather than a second evaluation of the model; on an SKA-Low run of 128 stations and 8 channels on a GH200 that was about 2 ms a step, or 1.4% of the optimiser's time. They do take a separately compiled step, so with `trace_path` left `null` the optimiser runs the same compiled step as it always did and its result is unchanged.
 
-The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or `2 * max_iter` with `dual_run`) with one entry per iteration:
+Set the `TAB_LOSS_TRACE` environment variable to override `trace_path` for a single run, for tracing a config that should not be edited. Under multiple processes every process computes the metrics or none does — they all evaluate the same model and must run the same program — and one file is written, by the first process.
+
+The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or `2 * max_iter` with `dual_run`, or fewer when `stop` ends the fit) with one entry per iteration:
 
 | Key | Present | Meaning |
 |---|---|---|
 | `loss` | always | The optimiser's own loss, the negative log joint divided by `vis_obs.size` |
-| `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched |
-| `chi2` | always | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
-| `vis_ast_nrmse` | with truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |
-| `vis_rfi_nrmse` | with truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |
+| `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched. The first iteration includes the step's compilation, and with `dual_run` so does the first iteration of the second phase; with `schedule` there is no second compilation. A checkpoint write or a `stop` check after a step is not in that step's time but in the next one's, if another step runs; neither after the last step, nor writing the trace file, is in any |
+| `chi2` | with `trace_path` | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
+| `vis_ast_nrmse` | with `trace_path` and truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |
+| `vis_rfi_nrmse` | with `trace_path` and truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |
 
 The `nrmse` keys need a truth to score against, so they appear only on a dataset simulated with `sim-vis`. Every entry is recorded at the parameters that produced that iteration's gradient, i.e. *before* its update — so the first entry is the value at the initialisation, and the last is one update behind the reported optimum.
 
