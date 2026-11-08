@@ -55,7 +55,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test  = ["pytest", "pytest-cov", "huggingface-hub", "tabsim"]
+test  = ["pytest", "pytest-cov", "huggingface-hub", "tabsim<0.1"]  # tabsim 0.1 needs regenerated test sims (#253)
 # Read the Docs installs `.[docs]` (see .readthedocs.yaml), so this has to cover
 # everything docs/conf.py imports. The graphviz `dot` binary is not pip-installable
 # and is provided by apt there / the pixi dev environment here.
@@ -192,7 +192,7 @@ graphviz         = "*"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 reframe-hpc = "*"
-tabsim   = "*"
+tabsim   = "<0.1"
 
 # ── Environments ───────────────────────────────────────────────────────────────
 
