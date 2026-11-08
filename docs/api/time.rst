@@ -52,20 +52,23 @@ seconds for TAI, those plus 32.184 s for TT, DUT1 for UT1 — computed per sampl
 so an observation straddling a leap second is shifted by 36 s on one side of it
 and 37 s on the other.
 
-The offset lands on the day *fraction*, with the whole day carried across
-separately. This does not make the result picosecond-accurate: a returned
-Julian Date is a single f64 and near 2.5e6 days those are spaced ~40 µs apart,
-which is the floor on any JD, converted or not. What the split buys is that the
-conversion costs nothing *beyond* that floor — the offset is a difference of
-O(1) fractions and so is exact to picoseconds, and recombining rounds once.
-Rebuilding a UTC date from a skyfield accessor would spend the floor a second
-time. ``utc`` returns its input unchanged — bit-identical, since no arithmetic
-is done at all.
+The offset lands on the day *fraction*, with the whole day carried separately
+in :class:`~tabascal.time.JulianDate`. The MS reader preserves the source's
+precision in this split form through fine grids and physics. Legacy single-f64
+JD inputs and explicit ``np.asarray`` or ``float`` conversions still resolve
+only ~40 µs near 2.5e6 days; splitting an already rounded JD cannot restore its
+lost digits. ``utc`` leaves the input values unchanged. For UT1, only the
+slowly varying Delta T lookup uses a rounded JD; the instant remains split.
+
+A uniform UTC day count cannot name ``23:59:60`` or its fractional seconds.
+Converting a non-UTC instant inside an inserted leap second therefore raises
+``ValueError``; dates on either side of the insertion are supported.
 
 Doing this at the boundary is what lets the rest of the package stay
 scale-free, including ``sgp4jax``'s GCRF propagation, which has no scale concept
 to thread one through. It happens in two places, both reading the same
-``MEASINFO`` record and normalising the same way:
+``MEASINFO`` record, honouring the same scale and retaining split dates through
+the conversion, with preflight rounding only its final epoch average:
 :func:`~tabascal.ms.read_ms` for the times the fit runs on, and
 :func:`~tabascal.orbit_config.ms_observation_epoch_jd` for the preflight epoch
 the TLE age checks are measured from.
@@ -86,7 +89,7 @@ ends of that format go through it — ``tabascal light-curve`` when it writes th
 axis, and the RFI signal component when it samples an estimate onto the
 observation grid. It adds the offset at MJD magnitude rather than routing
 through a Julian Date, which keeps the sub-microsecond (~0.6 µs) an MJD near 6e4
-resolves to instead of the ~40 µs a JD does; ``utc`` again returns its input
+resolves to instead of the ~40 µs a single-f64 JD does; ``utc`` again returns its input
 bit-identically.
 
 The format states its scale in the file: ``tabascal light-curve`` stamps

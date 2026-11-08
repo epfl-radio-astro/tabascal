@@ -25,7 +25,7 @@ from tabascal.interferometry import (
     itrf_to_uvw_numpy,
 )
 from tabascal.components.trajectory import itrs_to_gcrs_sf
-from tabascal.time import mjd_to_jd, gast_deg
+from tabascal.time import JulianDate, gast_deg
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ TIMES_MJD = np.linspace(T0_MJD, T0_MJD + 100.0 / 86400.0, N_TIME)
 
 def ants_u_from_mjd(ants_itrf, times_mjd, ra, dec):
     """U component of antenna positions in the UVW frame (n_time, n_ant)."""
-    gh0 = (gast_deg(mjd_to_jd(times_mjd)) - ra) % 360
+    gh0 = (gast_deg(JulianDate.from_mjd(times_mjd)) - ra) % 360
     return itrf_to_uvw_numpy(ants_itrf, gh0, dec)[:, :, 0]
 
 
@@ -70,7 +70,7 @@ def rfi_eci_geostationary(times_mjd):
     constant, fringe_move = 0 and fringe_freq = -fringe_stat exactly.
     """
     r_ecef = np.array([42164e3, 0.0, 0.0])   # GEO radius at 0 deg longitude, metres
-    return itrs_to_gcrs_sf(r_ecef[None], mjd_to_jd(times_mjd))[0]  # (n_time, 3)
+    return itrs_to_gcrs_sf(r_ecef[None], JulianDate.from_mjd(times_mjd))[0]  # (n_time, 3)
 
 
 # ---------------------------------------------------------------------------

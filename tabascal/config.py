@@ -31,7 +31,7 @@ from tabascal.interferometry import (
     itrf_to_uvw_numpy,
 )
 from tabascal.fft_gp import domain_ss
-from tabascal.time import DAY_SECS, secs_to_days, jd_to_mjd, gast_deg
+from tabascal.time import JulianDate, DAY_SECS, secs_to_days, gast_deg
 
 import jax.numpy as jnp
 
@@ -603,15 +603,13 @@ class TabConfig:
         self.int_time = ms_params["int_time"]
         self.times = np.asarray(ms_params["times"])
         # The MS's own TIME column in days: the numbers it stores, on the scale
-        # it declares, converted in unit only. Kept as read rather than recovered
-        # from times_jd, which loses ~1e-10 days on the round trip -- enough to
-        # push an endpoint outside a range it was written on.
+        # it declares, converted in unit only. Kept as read for matching external
+        # tables on the MS's original time axis.
         self.times_mjd = np.asarray(ms_params["times_mjd"])
         # The instants those numbers name, normalised to UTC by the reader, which
-        # is the scale everything downstream works on. Equal to
-        # mjd_to_jd(times_mjd) for the usual UTC-declared MS, and offset by the
-        # leap seconds for a TAI one.
-        self.times_jd = np.asarray(ms_params["times_jd"])
+        # is the scale everything downstream works on. The split retains the
+        # original TIME precision through grids and physics.
+        self.times_jd = JulianDate(ms_params["times_jd"])
         self.time_scale = ms_params["time_scale"]
 
         self.chan_width = ms_params["chan_width"]
@@ -673,8 +671,8 @@ class TabConfig:
             return
 
         jd_minute = 1 / (24 * 60)
-        times_jd_coarse = np.arange(
-            self.times_jd[0], self.times_jd[-1] + jd_minute, jd_minute
+        times_jd_coarse = self.times_jd[0] + np.arange(
+            0.0, self.times_jd[-1] - self.times_jd[0] + jd_minute, jd_minute
         )
         # Satellite positions, GAST, antenna UVW and fringe frequencies are all
         # one-shot host-side setup, so always compute them in numpy/skyfield (f64):
@@ -689,7 +687,7 @@ class TabConfig:
         ants_u = itrf_to_uvw_numpy(self.ants_itrf, gh0, dec)[:, :, 0]
 
         get_fringe_freq = lambda rfi_pos: calculate_fringe_frequency_numpy(
-            jd_to_mjd(times_jd_coarse),
+            times_jd_coarse,
             np.max(self.freqs),
             rfi_pos,
             self.ants_itrf,
@@ -721,24 +719,24 @@ class TabConfig:
             self.args["rfi"]["freq_pad_factor"],
             self.args["rfi"]["time_pad_factor"],
         ]
-        # domain_ss is jax-based, so under jax_enable_x64=False it builds the grids
-        # in f32 internally. The real grids carry large magnitudes (freqs ~1e9 Hz,
-        # and times_jd_fine ~2.4e6 JD) that lose all usable precision in f32. Since
-        # domain_ss is affine in (x0, dx) (output = x0 + dx * normalised_grid), build
-        # the normalised grid with x0=0, dx=1 (small, f32-safe) and apply the real
-        # offset/scale in numpy f64.
-        unit_freqs, unit_times = domain_ss(
+        # Apply the frequency offset/scale in host f64: domain_ss uses the
+        # model's JAX precision, which cannot carry GHz frequencies in f32.
+        unit_freqs, _ = domain_ss(
             ns, [1.0, 1.0], [0.0, 0.0], ss_factors, pad_factors
         )
         self.freqs_fine = self.freqs[0] + self.chan_width * np.asarray(
             unit_freqs, dtype=np.float64
         )
-        self.times_fine = self.times[0] + self.int_time * np.asarray(
-            unit_times, dtype=np.float64
-        )
+        # The same cropped grid as domain_ss, evaluated entirely in host f64:
+        # even unit time offsets lose microseconds in f32 on a long observation.
+        # The padding offset cancels the crop offset, including the periodic
+        # crop at zero padding, whose first samples precede the first centre.
+        unit_times = (np.arange(self.n_time * self.n_int_time, dtype=float)
+                      - self.n_int_time // 2) / self.n_int_time
+        self.times_fine = self.times[0] + self.int_time * unit_times
         self.n_freq_fine = len(self.freqs_fine)
         self.n_time_fine = len(self.times_fine)
-        self.times_jd_fine = self.times_jd[0] + secs_to_days(self.times_fine)
+        self.times_jd_fine = JulianDate(self.times_jd)[0] + secs_to_days(self.times_fine - self.times[0])
 
     def get_orbital_elements(self):
         """Build the orbital elements from the resolution preflight already made."""

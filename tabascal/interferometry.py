@@ -1,4 +1,4 @@
-from tabascal.time import mjd_to_jd, skyfield_time
+from tabascal.time import JulianDate, skyfield_time
 
 from skyfield.framelib import itrs
 
@@ -152,8 +152,8 @@ def calculate_fringe_frequency_numpy(
 
     Parameters
     ----------
-    times_mjd : NDArray (n_time,)
-        Times are which the RFI and antenna positions are given in Modified Julian Date.
+    times_mjd : NDArray (n_time,) or JulianDate
+        Times at which the positions are given, as MJD days or split Julian Dates.
     freq : float
         Observational frequency in Hz.
     rfi_xyz : NDArray (n_time, 3)
@@ -173,8 +173,9 @@ def calculate_fringe_frequency_numpy(
     """
 
     lam = C / freq
-    rot = np.reshape(itrs.rotation_at(skyfield_time(mjd_to_jd(times_mjd))), (3, 3, -1))
-    times = (times_mjd - times_mjd[0]) * 24 * 3600
+    dates = times_mjd if isinstance(times_mjd, JulianDate) else JulianDate.from_mjd(times_mjd)
+    rot = np.reshape(itrs.rotation_at(skyfield_time(dates)), (3, 3, -1))
+    times = (dates - dates[0]) * 24 * 3600
 
     r_ecef = np.einsum("ijt,tj->ti", rot, np.atleast_2d(rfi_xyz))
     s_ecef = r_ecef - np.mean(ants_itrf, axis=0)

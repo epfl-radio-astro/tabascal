@@ -10,7 +10,7 @@ observation-epoch derivation. Preflight and execution must agree exactly on the
 epoch: it sets every TLE age comparison, so two slightly different means could
 make different acceptance decisions. The helper mirrors
 :func:`tabascal.ms.read_ms` — one time per integration, converted through the
-same :func:`tabascal.ms.times_to_mjd`, and normalised onto UTC from the same
+same :func:`tabascal.ms.times_to_jd`, and normalised onto UTC from the same
 declared time scale, so the epoch is the instant the observation happened rather
 than whatever number the ``TIME`` column happens to hold.
 
@@ -42,9 +42,10 @@ from tabascal.ms import (
     infer_time_unit,
     read_time_scale,
     read_time_unit,
+    times_to_jd,
     times_to_mjd,
 )
-from tabascal.time import mjd_to_jd, to_utc_jd
+from tabascal.time import to_utc_jd
 
 
 # ---------------------------------------------------------------------------
@@ -348,10 +349,10 @@ def _ms_times_and_scale(ms_path: str) -> tuple:
     return times, read_time_scale(keywords), read_time_unit(keywords)
 
 
-def _integration_times_mjd(
+def _integration_times(
     times: np.ndarray, ms_path: str, unit: Optional[str] = None
-) -> np.ndarray:
-    """One time per integration, in MJD days, from an already-read column.
+) -> tuple[np.ndarray, str]:
+    """Unique raw integration timestamps and their declared or inferred unit.
 
     A declared *unit* is honoured, as :func:`tabascal.ms.read_ms` honours one.
     Inferred, it is read from every row and the values from the distinct ones.
@@ -370,7 +371,15 @@ def _integration_times_mjd(
     if times.size == 0:
         raise TLEError(f"Measurement Set has an empty TIME column: {ms_path}")
 
-    return times_to_mjd(np.unique(times), unit or infer_time_unit(times))
+    return np.unique(times), unit or infer_time_unit(times)
+
+
+def _integration_times_mjd(
+    times: np.ndarray, ms_path: str, unit: Optional[str] = None
+) -> np.ndarray:
+    """One time per integration, in MJD days, from an already-read column."""
+    times, unit = _integration_times(times, ms_path, unit)
+    return times_to_mjd(times, unit)
 
 
 def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
@@ -401,22 +410,22 @@ def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
 def ms_observation_epoch_jd(ms_path: str) -> float:
     """Mean observation epoch of *ms_path* as a UTC Julian Date.
 
-    This exact value is what the canonical cache bucket and every TLE age check
-    are computed from, in both preflight and execution — and it is an *instant*,
-    so the declared scale is honoured here as it is in the reader. A TAI column
-    read as UTC would put every age comparison and nearest-record decision 37 s
-    from the instant the fit then propagates at.
+    This value sets the canonical cache bucket and preflight TLE age checks.
+    It is an *instant*, so the declared scale is honoured here as in the reader.
+    A TAI column read as UTC would put every age comparison and nearest-record
+    decision 37 s from the instant the fit then propagates at.
 
     The times are normalised per sample and averaged afterwards, through the
     same :func:`observation_epoch_jd` execution applies to what ``read_ms``
-    returned, so the two reductions are identical by construction — including
-    across a leap second, where averaging first and shifting once would differ
-    by up to half a second.
+    returned. Both retain split dates from the raw timestamps through scale
+    conversion, rounding to single f64 JDs only for this reduction. This also
+    keeps valid instants near a leap-second boundary from rounding into the
+    inserted second itself, which is not representable.
     """
     times, scale, unit = _ms_times_and_scale(ms_path)
-    times_mjd = _integration_times_mjd(times, ms_path, unit)
+    times, unit = _integration_times(times, ms_path, unit)
 
-    return observation_epoch_jd(to_utc_jd(mjd_to_jd(times_mjd), scale))
+    return observation_epoch_jd(to_utc_jd(times_to_jd(times, unit), scale))
 
 
 def observation_epoch_jd(times_jd) -> float:
@@ -424,6 +433,6 @@ def observation_epoch_jd(times_jd) -> float:
 
     Execution reaches the epoch through the times :func:`tabascal.ms.read_ms`
     returned rather than by re-reading the MS; going through this one helper keeps
-    the reduction identical to :func:`ms_observation_epoch_jd`.
+    the averaging convention shared with :func:`ms_observation_epoch_jd`.
     """
     return float(np.atleast_1d(np.asarray(times_jd, dtype=float)).mean())

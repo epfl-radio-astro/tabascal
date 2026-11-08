@@ -147,6 +147,7 @@ from tabascal.time import (
     datetime_to_jd,
     jd_to_datetime,
     skyfield_time,
+    JulianDate,
     to_utc_mjd,
 )
 from skyfield.framelib import itrs
@@ -203,7 +204,7 @@ def rfi_phase_from_positions(
     Array (n_src, n_ant, n_freq, n_time)
         Geometric phase at each antenna for each source.
     """
-    times_jd = np.asarray(times_jd)
+    times_jd = JulianDate(times_jd)
     freqs = np.asarray(freqs)
 
     ants_uvw = tracking_uvw(ants_itrf, times_jd, phase_centre)  # (n_ant, n_time, 3)
@@ -246,10 +247,10 @@ def rfi_phase_from_records(
     -------
     Array (n_src, n_ant, n_freq, n_time)
     """
-    times_jd = np.asarray(times_jd)
+    times_jd = JulianDate(times_jd)
 
     if time_offsets_s is None:
-        rfi_xyz = np.asarray(get_satellite_positions(orbit_records, list(times_jd)))
+        rfi_xyz = np.asarray(get_satellite_positions(orbit_records, times_jd))
     else:
         taus = np.atleast_1d(np.asarray(time_offsets_s, dtype=np.float64))
         if taus.size == 1:
@@ -264,7 +265,7 @@ def rfi_phase_from_records(
         rfi_xyz = np.stack(
             [
                 np.asarray(
-                    get_satellite_positions([record], list(times_jd + tau / 86400.0))
+                    get_satellite_positions([record], times_jd + tau / 86400.0)
                 )[0]
                 for record, tau in zip(orbit_records, taus)
             ]
@@ -734,7 +735,7 @@ def _antenna_path_grid(record, ants_itrf, times_jd, phase_centre, n_fine, delta_
     """
     taus = np.atleast_1d(np.asarray(taus_s, dtype=np.float64))
     ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     n_fine = int(n_fine)
 
     offsets = fine_time_offsets(n_fine, delta_t)
@@ -803,12 +804,12 @@ def satellite_range_and_speed(record, ants_itrf: NDArray, times_jd: NDArray):
     (float, float)
         Slant range in metres, and speed across the line of sight in m/s.
     """
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     centre = np.mean(np.asarray(ants_itrf, dtype=np.float64), axis=0)
 
     step = 0.5 / 86400.0
-    t_mid = float(np.mean(times_jd))
-    t3 = np.array([t_mid - step, t_mid, t_mid + step])
+    t_mid = times_jd[0] + np.mean(times_jd - times_jd[0])
+    t3 = t_mid + np.array([-step, 0.0, step])
 
     sep = (
         np.asarray(get_satellite_positions([record], t3))[0]
@@ -1721,7 +1722,7 @@ def _no_offset_fit(taus, elevation, frames, n_freq, n_time, n_fine,
         b_coh=float("nan"),
         n_fine=int(n_fine),
         sigma_transverse_m=float(sigma_transverse_m),
-        times_sec=(np.asarray(times_jd, dtype=np.float64) - times_jd[0]) * 86400.0,
+        times_sec=(JulianDate(times_jd) - JulianDate(times_jd)[0]) * 86400.0,
         bl_chunk=0,
     )
 
@@ -1857,7 +1858,7 @@ def fit_time_offset(
     """
     vis = np.asarray(vis)
     ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     freqs = np.asarray(freqs, dtype=np.float64)
     a1 = np.asarray(a1)
     a2 = np.asarray(a2)
@@ -2112,7 +2113,7 @@ def _slant_range(record, ants_itrf: NDArray, t_jd: float) -> float:
     Earth-fixed slant range as well, without a second transform to get it.
     """
     centre = np.mean(np.asarray(ants_itrf, dtype=np.float64), axis=0)
-    t = np.atleast_1d(np.float64(t_jd))
+    t = JulianDate(t_jd).atleast_1d()
     sep = (
         np.asarray(get_satellite_positions([record], t))[0]
         - itrs_to_gcrs_sf(centre[None], t)[0]
@@ -2198,7 +2199,7 @@ def enumerate_candidates(
     if not records:
         return []
 
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
     elevations = np.asarray(get_satellite_elevations(records, times_jd, ants_itrf))
 
@@ -2612,7 +2613,7 @@ def search_candidates(
     """
     vis = np.asarray(vis)
     ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     freqs = np.asarray(freqs, dtype=np.float64)
     a1 = np.asarray(a1)
     a2 = np.asarray(a2)
@@ -3184,7 +3185,7 @@ def _resolve_records(norad_ids, times_jd, extra_orbit_dir):
         )
 
     _, _, ids, records, n_real = fetch_orbital_elements(
-        times_jd=np.asarray(times_jd),
+        times_jd=JulianDate(times_jd),
         norad_ids=[int(n) for n in norad_ids],
         extra_orbit_dir=extra_orbit_dir,
     )
@@ -3243,7 +3244,7 @@ def light_curves_from_config(
     norad_ids = [int(n) for n in tab_config.norad_ids[:n_real]]
     records = list(tab_config.orbit_records[:n_real])
 
-    times_jd = np.asarray(tab_config.times_jd)
+    times_jd = JulianDate(tab_config.times_jd)
     ants_itrf = np.asarray(tab_config.ants_itrf)
 
     flags = getattr(tab_config, "flags", None)
@@ -3336,7 +3337,7 @@ def _times_jd(ms: dict) -> NDArray:
     the fringe and the elevation cut would every one of them be 37 s out -- some
     285 km along a LEO satellite's ground track, and nothing raises.
     """
-    return np.asarray(ms["times_jd"])
+    return JulianDate(ms["times_jd"])
 
 
 def extract_light_curves_from_ms(
