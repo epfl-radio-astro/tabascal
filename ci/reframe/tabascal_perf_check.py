@@ -237,17 +237,17 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
     # for the memory, and it is far more than the ~5% #108 paid for the same
     # treatment of the antenna axis: rfi.baseline_block_size is the lever if the
     # trade needs moving, a larger block being fewer scan steps and a larger fine
-    # grid. Tolerances are unchanged, and the RiemannFFI references are untouched
+    # grid. Tolerances were unchanged, and #114 left the RiemannFFI references alone
     # -- measured 0.564 and 1.316 GB against them in the same run -- since the
     # kernel bounds the same term inside itself.
     #
     # All references were re-measured on Daint nid005633 (JAX 0.6.0) from this
-    # pipeline's own perf job after #277 made the MAP step compile once per fit,
-    # jitted the init and MAP predictions and dropped the two log-posterior
-    # evaluations the loss trace already holds. Against main's perf job in the
-    # same container, total_runtime fell 1-6% and peak memory 1-16% (the eager
-    # log-posterior evaluation was the peak), and optimizer_runtime moved within
-    # noise. Tolerances are unchanged.
+    # pipeline's own perf job at 14915ad, one run per configuration, after #277
+    # made the MAP step compile once per fit, jitted the init and MAP predictions
+    # and dropped the two log-posterior evaluations the loss trace already holds.
+    # Against main's perf job in the same container, total_runtime fell 1-6%,
+    # peak memory 1-16% and optimizer_runtime moved by -1.1% to +2.5%.
+    # Tolerances are unchanged.
     _reference_by_variant = {
         ("Riemann", "single"): {
             "daint:gpu": {
@@ -347,7 +347,7 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     # recomputes.
     #
     # All references were re-measured alongside the single-GPU ones above after
-    # #277. Sharded, the fresh optimiser state used to recompile the step at the
+    # #277, from the same perf job. Sharded, the fresh optimiser state used to recompile the step at the
     # second step of each phase, so the savings are larger here: against main's
     # perf job in the same container, total_runtime fell 10-15%,
     # optimizer_runtime 7-11% and peak memory 17-39%. Tolerances are unchanged.
