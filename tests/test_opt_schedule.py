@@ -2,8 +2,8 @@
 
 - **The old path is unchanged.** With ``optimizer`` and ``schedule`` both null,
   ``dual_run`` still runs two ``adabelief`` phases, bit for bit.
-- **One compilation.** A schedule builds one optimiser, so the step is traced
-  once where ``dual_run`` traces it twice.
+- **One compilation.** A schedule builds one optimiser, and ``dual_run``'s second
+  phase only resets its step size, so either way the step is traced once.
 - **The step sizes are the ones asked for**, and the optimiser asked for takes them.
 - **Checkpoints are written at their steps and reload** to the parameters the
   optimiser held then.
@@ -52,12 +52,12 @@ def _by_hand(toy, phases):
 
 def _svi(toy, max_iter, **kwargs):
     kwargs.setdefault("dual_run", False)
+    kwargs.setdefault("epsilon", EPS)
     return run_custom_svi(
         prob_model=toy.prob_model,
         obs_data=toy.vis_obs,
         max_iter=max_iter,
         init_params=toy.init_params,
-        epsilon=EPS,
         state=toy.state,
         constants=toy.constants,
         **kwargs,
@@ -87,22 +87,23 @@ def _counting(toy):
 # ---------------------------------------------------------------------------
 
 
-def test_with_no_schedule_dual_run_is_the_two_phases_it_always_was():
+@pytest.mark.parametrize("eps", [EPS, 1])  # an integer epsilon still drops to 0.1
+def test_with_no_schedule_dual_run_is_the_two_phases_it_always_was(eps):
     toy = _toy_problem(0.1)
-    ref_losses, history = _by_hand(toy, [(optax.adabelief(EPS), 3), (optax.adabelief(EPS / 10), 3)])
+    ref_losses, history = _by_hand(toy, [(optax.adabelief(eps), 3), (optax.adabelief(eps / 10), 3)])
 
-    results = _svi(toy, 3, dual_run=True)
+    results = _svi(toy, 3, dual_run=True, epsilon=eps)
 
     assert list(np.asarray(results.losses)) == ref_losses
     _same(results.params, history[-1])
 
 
-def test_dual_run_traces_the_step_twice():
-    """What #82 is about: the second phase's new optimiser is a new static argument."""
+def test_dual_run_traces_the_step_once():
+    """The second phase's step size is optimiser state, not a new static argument."""
     toy = _toy_problem(0.1)
     calls = _counting(toy)
     _svi(toy, 3, dual_run=True)
-    assert calls["n"] == 2
+    assert calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------
