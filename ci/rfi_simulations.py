@@ -27,27 +27,49 @@ from pathlib import Path
 from huggingface_hub import HfApi
 from huggingface_hub.errors import RevisionNotFoundError
 from packaging.version import Version
+import yaml
 
 REPO_ID = "epfl-radio-astro/rfi-simulations"
 SRC_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_GLOBS = ["tests/data/sim_target*.yaml", "ci/reframe/data/sim_target*.yaml"]
 
 
+def _referenced_inputs(value, base: Path):
+    """(reference, path) for every string in a config that names an existing path."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            # Where the simulation writes, not what it reads.
+            if key != "output":
+                yield from _referenced_inputs(item, base)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _referenced_inputs(item, base)
+    elif isinstance(value, str) and value:
+        path = Path(value).expanduser()
+        path = path if path.is_absolute() else base / path
+        if path.exists():
+            yield value, path
+
+
 def compute_sha256(file_path: Path) -> str:
     """The key a simulation is stored and looked up under.
 
-    The config's bytes, then the name and bytes of every non-YAML file beside it:
-    those are the inputs it references by relative path (an antenna layout, say),
-    so changing one gives a new key rather than reusing a simulation of the old
-    file. ci/reframe/prepare_data.py and tests/test_tabascal_pipeline.py load
-    this function, so the publisher and its consumers always agree.
+    The config's bytes, then the reference and contents of every file or
+    directory it names that exists (an antenna layout, say), resolved against the
+    config's directory as tabsim resolves them. Changing a referenced input then
+    gives a new key rather than reusing a simulation of the old one.
+    ci/reframe/prepare_data.py and tests/test_tabascal_pipeline.py load this
+    function, so the publisher and its consumers always agree.
     """
     file_path = Path(file_path)
     sha256_hash = hashlib.sha256(file_path.read_bytes())
-    for ancillary in sorted(file_path.parent.iterdir()):
-        if ancillary.is_file() and ancillary.suffix not in (".yaml", ".yml"):
-            sha256_hash.update(b"\0" + ancillary.name.encode() + b"\0")
-            sha256_hash.update(ancillary.read_bytes())
+    config = yaml.safe_load(file_path.read_text()) or {}
+    for reference, path in sorted(set(_referenced_inputs(config, file_path.parent))):
+        files = [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file())
+        for f in files:
+            name = reference if f == path else f"{reference}/{f.relative_to(path).as_posix()}"
+            sha256_hash.update(b"\0" + name.encode() + b"\0")
+            sha256_hash.update(f.read_bytes())
     return sha256_hash.hexdigest()
 
 
