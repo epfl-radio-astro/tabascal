@@ -404,7 +404,7 @@ trajectory_configs = [
             # double agrees across them to ~2e-7 rather than ~1e-8; the asserted value
             # is the x86 one, the architecture CI simulates on. The coherent ast bias
             # rose to 2.0 sigma (2.7 on the MEO cases) against ~1.2 on the 0.0.13 sky,
-            # so its bound is 3.5 here; see #253's follow-up for the investigation.
+            # so its bound is 3.5 here; #280 investigates the extra bias.
             chi2_ref=0.8587299324599438,
             requires_double=True,
             metrics_ref={
