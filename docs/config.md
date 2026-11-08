@@ -229,7 +229,7 @@ The names are `adabelief`, `adam`, `adamw`, `amsgrad`, `nadam`, `radam`, `adamax
 
 ### Step-size schedule
 
-With `dual_run` the fit runs in two phases, each with a new optimiser: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments and compiles its step again. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: one compiled step, and moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read.
+With `dual_run` the fit runs in two phases, each starting the optimiser afresh: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments; only its step size changes, so it reuses the first phase's compiled step. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read.
 
 ```yaml
 opt:
@@ -288,7 +288,7 @@ The file is written once, at the end of the run, and holds one array per key, ea
 | Key | Present | Meaning |
 |---|---|---|
 | `loss` | always | The optimiser's own loss, the negative log joint divided by `vis_obs.size` |
-| `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched. The first iteration includes the step's compilation, and with `dual_run` so does the first iteration of the second phase; with `schedule` there is no second compilation. A checkpoint write or a `stop` check after a step is not in that step's time but in the next one's, if another step runs; neither after the last step, nor writing the trace file, is in any |
+| `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched. The first iteration includes the step's compilation; the step compiles once per fit, with `dual_run` or `schedule`. A checkpoint write or a `stop` check after a step is not in that step's time but in the next one's, if another step runs; neither after the last step, nor writing the trace file, is in any |
 | `chi2` | with `trace_path` | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
 | `vis_ast_nrmse` | with `trace_path` and truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |
 | `vis_rfi_nrmse` | with `trace_path` and truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |

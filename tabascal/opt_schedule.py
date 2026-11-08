@@ -1,11 +1,10 @@
 """One optimiser for the whole fit: its kind, a step-size schedule, a stop and checkpoints.
 
-``opt.dual_run`` fits in two phases, each with its own optimiser. The
-optimiser is a static argument of the compiled step, so the second phase
-compiles again and starts from fresh moments, which GitHub #82 reports as a
+``opt.dual_run`` fits in two phases. The second restarts the optimiser at a
+tenth of the step size, from fresh moments, which GitHub #82 reports as a
 bump in the loss at the switch. ``opt.schedule`` builds one optimiser whose
-step size follows a schedule instead: one compiled step, and moments that run
-through every step.
+step size follows a schedule instead, with moments that run through every
+step.
 
 ``opt.optimizer`` picks the optax optimiser and its hyperparameters, with
 or without a schedule, and can clip the gradient's global norm. ``opt.stop``

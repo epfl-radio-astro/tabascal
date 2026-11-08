@@ -167,8 +167,7 @@ def build_model(config, ms_path):
 def evaluate_init(tab_config, model, key, truth=None):
     key, subkey = random.split(key)
     init_pred = init_predict(tab_config, model.prob_model, subkey, model.init_params, state=model.state, constants=model.constants, truth=truth)
-    nlog_l, nlog_p = nlog_like_and_post(model.prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-    return key, init_pred, nlog_l, nlog_p
+    return key, init_pred
 
 
 @contextmanager
@@ -529,11 +528,16 @@ def _subtract(config, paths):
     if not has_truth(truth):
         print("\nNo tab-sim truth available - skipping truth-based RMSE reporting.")
 
-    key, init_pred, nlog_l, nlog_p = evaluate_init(tab_config, model, key, truth=truth)
+    key, init_pred = evaluate_init(tab_config, model, key, truth=truth)
     write_results_xds(init_pred, tab_config, paths.init_pred_path)
+    optimise = config["inference"]["opt"] and config["opt"]["max_iter"] > 0
 
-    print(f"log_l : {nlog_l:.3e}")
-    print(f"log_p : {nlog_p:.3e}")
+    # An optimised fit reads log_p off its loss trace instead (the loss is 2 log_p);
+    # evaluating it here as well would cost a forward pass of its own.
+    if not optimise:
+        nlog_l, nlog_p = nlog_like_and_post(prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
+        print(f"log_l : {nlog_l:.3e}")
+        print(f"log_p : {nlog_p:.3e}")
 
     # Plotting from precomputed (replicated) predictions is safe on process 0
     # alone. plot_prior is different: it draws fresh model samples, and under
@@ -552,7 +556,7 @@ def _subtract(config, paths):
             plot_prior(tab_config, prob_model, truth, paths.name, subkey, paths.plot_dir, state=model.state, constants=model.constants)
 
     key, *subkeys = random.split(key, 3)
-    if config["inference"]["opt"] and config["opt"]["max_iter"] > 0:
+    if optimise:
         vi_pred, losses, vi_params, _ = run_opt(
             tab_config, prob_model, subkeys, model.init_params, ms_path, paths.map_path,
             state=model.state, constants=model.constants, truth=truth,
@@ -568,12 +572,10 @@ def _subtract(config, paths):
             with np.load(run_trace_path(tab_config.args["opt"], paths.map_path)) as trace:
                 plot_losses(dict(trace), paths.name, paths.plot_dir)
 
-        opt_params = {key.removesuffix("_auto_loc"): value for key, value in vi_params.items()}
-
-        nlog_l, nlog_p = nlog_like_and_post(prob_model, opt_params, tab_config.vis_obs, state=model.state, constants=model.constants)
-
-        print(f"log_l : {nlog_l:.3e}")
-        print(f"log_p : {nlog_p:.3e}")
+        # The loss at each step is taken before that step's update, so the
+        # first is at the initial parameters and the last one step short of the MAP.
+        print(f"log_p @ init : {losses[0] / 2:.3e}")
+        print(f"log_p @ last step : {losses[-1] / 2:.3e}")
     else:
         write_ms_if_enabled(tab_config, ms_path, paths.init_pred_path)
 
