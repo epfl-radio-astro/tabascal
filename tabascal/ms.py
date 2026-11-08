@@ -61,10 +61,10 @@ from tabascal.noise import (
 )
 from tabascal.time import (
     DAY_SECS,
+    JulianDate,
     TIME_SCALES,
     icrs_from_frame,
     jd_to_datetime,
-    mjd_to_jd,
     to_utc_jd,
 )
 from tabascal.timing import measure_runtime
@@ -893,10 +893,9 @@ def read_ms(
         chan_widths = np.repeat(chan_widths, len(freqs))
     int_time = xds.INTERVAL.data[0].compute()
 
-    times_mjd = times_to_mjd(
-        np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()),
-        read_time_unit(column_keywords),
-    )
+    time_values = np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
+    time_unit = read_time_unit(column_keywords) or infer_time_unit(time_values)
+    times_mjd = times_to_mjd(time_values, time_unit)
 
     # The declared scale is honoured by normalising to UTC once, here, rather
     # than by threading a scale through the trajectory maths: everything past
@@ -906,14 +905,18 @@ def read_ms(
     # them. times_mjd stays as declared beside it: it is the MS's own column in
     # days, and orbit_config.ms_integration_times_mjd reports the same column
     # the same way, so the two remain comparable.
-    times_jd = to_utc_jd(mjd_to_jd(times_mjd), time_scale)
+    declared = (
+        JulianDate.from_mjd_seconds(time_values) if time_unit == "s"
+        else JulianDate.from_mjd(time_values)
+    )
+    times_jd = to_utc_jd(declared, time_scale)
 
     # The field this partition's rows belong to, in whatever frame the MS
     # declares, as J2000 -- which is what every consumer of ra/dec reads.
     ra, dec = read_phase_centre(
         ms_path,
         int(xds.attrs.get("FIELD_ID", 0)),
-        0.5 * (float(times_jd[0]) + float(times_jd[-1])),
+        times_jd[0] + 0.5 * (times_jd[-1] - times_jd[0]),
     )
 
     print(f"Observation starts at {jd_to_datetime(times_jd[0]).isoformat()} UTC")

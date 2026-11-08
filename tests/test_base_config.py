@@ -367,13 +367,19 @@ class TestBaseConfigIntegrationSampleCounts:
         assert comp.n_int_freq == tab_config.n_int_freq
         assert comp.n_int_time == tab_config.n_int_time
 
-    def test_each_count_sets_the_fine_grid_axis_it_names(self, tmp_path):
+    @pytest.mark.parametrize("n_time,n_int_time,pad,empty_crop", [
+        (8, 2, 2, False), (4, 1, 1, False),
+        (4, 2, 1, True), (4, 7, 1.1, True), (1, 7, 2, True),
+    ])
+    def test_each_count_sets_the_fine_grid_axis_it_names(
+        self, tmp_path, n_time, n_int_time, pad, empty_crop
+    ):
         """``n`` samples per channel and per integration, which is what the
         Riemann components reshape the RFI signal into. The Fourier padding is
         cropped back off, so the fine grid is exactly the supersampled data grid.
         """
 
-        n_freq, n_time, n_int_freq, n_int_time = 4, 8, 3, 2
+        n_freq, n_int_freq = 4, 3
         cfg = SimpleNamespace(
             n_freq=n_freq,
             n_time=n_time,
@@ -386,6 +392,13 @@ class TestBaseConfigIntegrationSampleCounts:
             times_jd=2460000.5 + 2.0 * np.arange(n_time) / 86400.0,
             args=base_args(tmp_path),
         )
+        cfg.args["rfi"]["time_pad_factor"] = pad
+        if empty_crop:
+            with pytest.raises(ValueError, match=(
+                f"n_time={n_time}, n_int_time={n_int_time}, time_pad_factor={pad}"
+            )):
+                TabConfig._set_freqs_times(cfg)
+            return
 
         TabConfig._set_freqs_times(cfg)
 

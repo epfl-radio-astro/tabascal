@@ -340,6 +340,59 @@ def run_reader(monkeypatch):
     return _run
 
 
+@pytest.mark.parametrize("scale", ["UTC", "TAI", "IAT", "TT", "TDT", "ET", "TDB", "UT1", "UT"])
+@pytest.mark.parametrize("unit", ["s", "d"])
+def test_ms_time_keeps_submicrosecond_precision(run_reader, scale, unit):
+    from tabascal.time import skyfield_time, timescale, TIME_SCALES
+
+    seconds = 60676 * 86400.0 + np.array([0.000007, 2.000013, 4.000019])
+    values = seconds if unit == "s" else seconds / 86400.0
+    data = run_reader(values, keywords=_keywords(scale, units=[unit]))
+    fraction = ((seconds - 60676 * 86400.0) / 86400.0 if unit == "s"
+                else values - 60676) + 0.5
+    ts = timescale()
+    if scale in ("UT", "UT1"):
+        delta_t = ts.ut1_jd(2460676.0 + fraction).delta_t
+        expected = ts.tt_jd(2460676.0, fraction + delta_t / 86400.0)
+    else:
+        expected = getattr(ts, TIME_SCALES[scale.lower()])(2460676.0, fraction)
+    actual = skyfield_time(data["times_jd"])
+    error_s = ((actual.whole - expected.whole)
+               + (actual.tt_fraction - expected.tt_fraction)) * 86400.0
+    np.testing.assert_allclose(error_s, 0.0, rtol=0, atol=1e-8)
+
+
+@pytest.mark.parametrize("double", [False, True])
+def test_ms_fine_grid_has_no_epoch_offset(run_reader, double):
+    from types import SimpleNamespace
+    import jax
+    from tabascal.config import TabConfig
+    from tabascal.time import skyfield_time, timescale
+
+    seconds = 60676 * 86400.0 + 0.000007 + 2 * np.arange(120)
+    data = run_reader(seconds, keywords=_keywords("UTC", units=["s"]))
+    config = SimpleNamespace(
+        n_time=120, n_freq=1, n_int_time=7, n_int_freq=1,
+        args={"rfi": {"freq_pad_factor": 2, "time_pad_factor": 2}},
+        freqs=np.array([1.227e9]), chan_width=1.0, int_time=2.0,
+        times=np.arange(120) * 2.0, times_jd=data["times_jd"],
+    )
+    previous = jax.config.read("jax_enable_x64")
+    try:
+        jax.config.update("jax_enable_x64", double)
+        TabConfig._set_freqs_times(config)
+    finally:
+        jax.config.update("jax_enable_x64", previous)
+    offsets = (np.arange(840) - 3) * (2.0 / 7)
+    expected = timescale()._utc_jd(
+        2460676.0, 0.5 + ((seconds[0] - 60676 * 86400.0) + offsets) / 86400.0
+    )
+    actual = skyfield_time(config.times_jd_fine)
+    error_s = ((actual.whole - expected.whole)
+               + (actual.tt_fraction - expected.tt_fraction)) * 86400.0
+    np.testing.assert_allclose(error_s, 0.0, rtol=0, atol=1e-8)
+
+
 class TestTimeUnits:
     """The one rule for reading a TIME column as MJD days.
 

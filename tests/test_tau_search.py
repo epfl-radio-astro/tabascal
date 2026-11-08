@@ -102,7 +102,7 @@ from tabascal.rfi_estimate import (
     tau_scan_antennas,
     write_shifted_orbits,
 )
-from tabascal.time import apparent_radec_of_date, gast_deg, jd_to_mjd, skyfield_time, timescale
+from tabascal.time import JulianDate, apparent_radec_of_date, gast_deg, jd_to_mjd, skyfield_time, timescale
 
 from .tle_helpers import block_network, jd, make_omm, make_tle_record  # noqa: F401
 
@@ -208,7 +208,8 @@ def ref_paths(record, ants_itrf, times_jd, phase_centre, a1, a2, n_fine, delta_t
     """
     taus_s = np.atleast_1d(np.asarray(taus_s, dtype=np.float64))
     offsets = ref_fine_offsets(n_fine, delta_t)
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    # Keep offsets below the single-JD quantum in the reference geometry too.
+    times_jd = JulianDate(times_jd)
     t_fine = (times_jd[:, None] + offsets[None, :] / 86400.0).ravel()
 
     out = np.zeros((len(taus_s), len(a1), len(times_jd), n_fine))
@@ -625,7 +626,7 @@ class TestSatelliteRangeAndSpeed:
         geo = np.array([[42164e3, 0.0, 0.0]])
         monkeypatch.setattr(
             rfi_estimate, "get_satellite_positions",
-            lambda records, t: itrs_to_gcrs_sf(geo, np.asarray(t)),
+            lambda records, t: itrs_to_gcrs_sf(geo, t),
         )
         _, v_perp = satellite_range_and_speed(record, layout.ants_itrf, layout.times_jd)
 
@@ -1646,7 +1647,7 @@ class TestPhaseAtAFittedOffset:
         rather than assumed equal.
         """
         shifted_sat = np.asarray(
-            get_satellite_positions([obs.record], obs.times_jd + TAU0 / 86400.0)
+            get_satellite_positions([obs.record], JulianDate(obs.times_jd) + TAU0 / 86400.0)
         )
         want = rfi_phase_from_positions(
             shifted_sat, obs.ants_itrf, obs.times_jd, obs.phase_centre, obs.freqs
@@ -1656,7 +1657,7 @@ class TestPhaseAtAFittedOffset:
             obs.freqs, time_offsets_s=[TAU0],
         )
         whole = rfi_phase_from_records(
-            [obs.record], obs.ants_itrf, obs.times_jd + TAU0 / 86400.0,
+            [obs.record], obs.ants_itrf, JulianDate(obs.times_jd) + TAU0 / 86400.0,
             obs.phase_centre, obs.freqs,
         )
 
@@ -1677,7 +1678,7 @@ class TestPhaseAtAFittedOffset:
         )
         second = rfi_phase_from_positions(
             np.asarray(
-                get_satellite_positions([decoy], obs.times_jd + TAU0 / 86400.0)
+                get_satellite_positions([decoy], JulianDate(obs.times_jd) + TAU0 / 86400.0)
             ),
             obs.ants_itrf, obs.times_jd, obs.phase_centre, obs.freqs,
         )

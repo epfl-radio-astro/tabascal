@@ -401,17 +401,17 @@ def ms_integration_times_mjd(ms_path: str) -> np.ndarray:
 def ms_observation_epoch_jd(ms_path: str) -> float:
     """Mean observation epoch of *ms_path* as a UTC Julian Date.
 
-    This exact value is what the canonical cache bucket and every TLE age check
-    are computed from, in both preflight and execution — and it is an *instant*,
-    so the declared scale is honoured here as it is in the reader. A TAI column
-    read as UTC would put every age comparison and nearest-record decision 37 s
-    from the instant the fit then propagates at.
+    This value sets the canonical cache bucket and preflight TLE age checks.
+    It is an *instant*, so the declared scale is honoured here as in the reader.
+    A TAI column read as UTC would put every age comparison and nearest-record
+    decision 37 s from the instant the fit then propagates at.
 
     The times are normalised per sample and averaged afterwards, through the
     same :func:`observation_epoch_jd` execution applies to what ``read_ms``
-    returned, so the two reductions are identical by construction — including
-    across a leap second, where averaging first and shifting once would differ
-    by up to half a second.
+    returned. Preflight builds single f64 JDs while execution retains split
+    dates until this reduction, so their epochs can differ by JD rounding
+    (~40 us). Both convert before averaging, including across a leap-second
+    boundary; instants inside the inserted second itself are not representable.
     """
     times, scale, unit = _ms_times_and_scale(ms_path)
     times_mjd = _integration_times_mjd(times, ms_path, unit)
@@ -424,6 +424,7 @@ def observation_epoch_jd(times_jd) -> float:
 
     Execution reaches the epoch through the times :func:`tabascal.ms.read_ms`
     returned rather than by re-reading the MS; going through this one helper keeps
-    the reduction identical to :func:`ms_observation_epoch_jd`.
+    the averaging convention shared with :func:`ms_observation_epoch_jd`,
+    though preflight rounds its inputs earlier.
     """
     return float(np.atleast_1d(np.asarray(times_jd, dtype=float)).mean())
