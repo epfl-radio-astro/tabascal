@@ -57,7 +57,7 @@ def _referenced_inputs(value, base: Path, parent: str = ""):
             if key == "output":  # where the simulation writes, not what it reads
                 continue
             if key in _INPUT_KEYS and isinstance(item, str) and item:
-                path = Path(item).expanduser()
+                path = Path(item)  # tabsim does not expand "~", so neither does the key
                 if not path.is_absolute():
                     if (parent, key) in _CWD_RELATIVE:
                         raise ValueError(
