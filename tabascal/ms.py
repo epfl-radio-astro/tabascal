@@ -392,7 +392,7 @@ def infer_time_unit(times) -> str:
     """``"s"`` or ``"d"`` for a ``TIME`` column that declares no unit.
 
     Split out from :func:`times_to_mjd` so that a caller which wants to reduce
-    one array and convert another can. ``orbit_config._integration_times_mjd``
+    one array and convert another can. ``orbit_config._integration_times``
     is the one that does: the unit has to be read from every row, because the
     reduction weighs the times by how often they occur, while the values it
     returns are the distinct ones. Converting first and deduplicating after
@@ -491,6 +491,19 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
         unit = infer_time_unit(times)
 
     return times / DAY_SECS if unit == "s" else times
+
+
+def times_to_jd(times, unit: Optional[str] = None) -> JulianDate:
+    """An MS ``TIME`` column as split Julian Dates, still on its declared scale.
+
+    Split seconds before dividing into days so the reader and preflight retain
+    the raw timestamp precision. Units follow :func:`times_to_mjd`.
+    """
+    unit = unit or infer_time_unit(times)
+    return (
+        JulianDate.from_mjd_seconds(times) if unit == "s"
+        else JulianDate.from_mjd(times)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -905,11 +918,7 @@ def read_ms(
     # them. times_mjd stays as declared beside it: it is the MS's own column in
     # days, and orbit_config.ms_integration_times_mjd reports the same column
     # the same way, so the two remain comparable.
-    declared = (
-        JulianDate.from_mjd_seconds(time_values) if time_unit == "s"
-        else JulianDate.from_mjd(time_values)
-    )
-    times_jd = to_utc_jd(declared, time_scale)
+    times_jd = to_utc_jd(times_to_jd(time_values, time_unit), time_scale)
 
     # The field this partition's rows belong to, in whatever frame the MS
     # declares, as J2000 -- which is what every consumer of ra/dec reads.

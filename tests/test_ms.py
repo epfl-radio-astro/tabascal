@@ -362,6 +362,23 @@ def test_ms_time_keeps_submicrosecond_precision(run_reader, scale, unit):
     np.testing.assert_allclose(error_s, 0.0, rtol=0, atol=1e-8)
 
 
+@pytest.mark.parametrize("unit", [None, "s", "d"])
+def test_preflight_matches_reader_just_before_a_leap_second(run_reader, monkeypatch, unit):
+    from tabascal import orbit_config
+
+    times = np.array([4989945635.99999])  # TAI, just before 23:59:60 UTC.
+    if unit == "d":
+        times = times / 86400.0
+    monkeypatch.setattr(
+        orbit_config, "_ms_times_and_scale",
+        lambda ms: (np.repeat(times, 3), "tai", unit),
+    )
+    data = run_reader(times, keywords=_keywords("TAI", units=[unit] if unit else None))
+    assert orbit_config.ms_observation_epoch_jd("in-memory.ms") == (
+        orbit_config.observation_epoch_jd(data["times_jd"])
+    )
+
+
 @pytest.mark.parametrize("double", [False, True])
 def test_ms_fine_grid_has_no_epoch_offset(run_reader, double):
     from types import SimpleNamespace
