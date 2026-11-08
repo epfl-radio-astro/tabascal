@@ -89,8 +89,9 @@ def main():
                 f"Hash directory {input_hash} not found in HF snapshot. "
                 "Generating data with tabsim."
             )
-        local_dir = workdir / "generated_data"
-        local_dir.mkdir(exist_ok=True)
+        # Per tabsim release, like the snapshot it stands in for.
+        local_dir = workdir / "generated_data" / branch
+        local_dir.mkdir(parents=True, exist_ok=True)
         input_dir = local_dir / input_hash
         if input_dir.is_dir():
             logging.info(
