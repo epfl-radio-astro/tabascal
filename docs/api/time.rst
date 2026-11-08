@@ -67,8 +67,8 @@ Converting a non-UTC instant inside an inserted leap second therefore raises
 Doing this at the boundary is what lets the rest of the package stay
 scale-free, including ``sgp4jax``'s GCRF propagation, which has no scale concept
 to thread one through. It happens in two places, both reading the same
-``MEASINFO`` record and honouring the same scale, though preflight uses rounded
-JDs rather than retaining the split:
+``MEASINFO`` record, honouring the same scale and retaining split dates through
+the conversion, with preflight rounding only its final epoch average:
 :func:`~tabascal.ms.read_ms` for the times the fit runs on, and
 :func:`~tabascal.orbit_config.ms_observation_epoch_jd` for the preflight epoch
 the TLE age checks are measured from.
