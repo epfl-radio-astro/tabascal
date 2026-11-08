@@ -8,10 +8,11 @@ config file. Without a matching snapshot they fall back to running tabsim
 themselves, which needs Space-Track credentials.
 
 ``check`` reports which configs have no snapshot on the branch of the latest
-tabsim release. ``publish`` simulates those configs with the installed tabsim
-and uploads them in a single commit. Configs are checked one by one rather than
-by branch existence, so an edited config, or a failed upload that left the
-branch behind, is filled in on the next run.
+supported tabsim release (below :data:`TABSIM_BELOW`). ``publish`` simulates
+those configs with the installed tabsim and uploads them in a single commit.
+Configs are checked one by one rather than by branch existence, so an edited
+config, or a failed upload that left the branch behind, is filled in on the
+next run.
 """
 
 import argparse
@@ -27,6 +28,7 @@ from pathlib import Path
 import yaml
 from huggingface_hub import HfApi
 from huggingface_hub.errors import RevisionNotFoundError
+from packaging.version import Version
 
 REPO_ID = "epfl-radio-astro/rfi-simulations"
 SRC_ROOT = Path(__file__).resolve().parent.parent
@@ -47,9 +49,20 @@ def sim_configs() -> dict[str, Path]:
     return {compute_sha256(p): p for p in configs}
 
 
+#: The test configs are written for tabsim releases below this one: 0.1 changes
+#: the orbit source and the phase-tracking convention (#253).
+TABSIM_BELOW = Version("0.1")
+
+
 def latest_tabsim_version() -> str:
+    """The newest final, unyanked tabsim release below :data:`TABSIM_BELOW`."""
     with urllib.request.urlopen("https://pypi.org/pypi/tabsim/json") as r:
-        return json.load(r)["info"]["version"]
+        releases = json.load(r)["releases"]
+    versions = [
+        Version(v) for v, files in releases.items()
+        if files and not all(f.get("yanked") for f in files)
+    ]
+    return str(max(v for v in versions if not v.is_prerelease and v < TABSIM_BELOW))
 
 
 def missing_configs(api: HfApi, branch: str) -> dict[str, Path]:
@@ -150,7 +163,7 @@ def main():
     sub = parser.add_subparsers(required=True)
 
     p = sub.add_parser(
-        "check", help="Report whether the latest tabsim release lacks simulations."
+        "check", help="Report whether the latest supported tabsim release lacks simulations."
     )
     p.set_defaults(func=check)
 
