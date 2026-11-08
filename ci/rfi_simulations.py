@@ -5,14 +5,13 @@ The pipeline tests (tests/test_tabascal_pipeline.py) and the ReFrame benchmark
 epfl-radio-astro/rfi-simulations dataset, from the branch ``tabsim_v<version>``
 of the installed tabsim, and look up each simulation under the SHA256 of its
 config file. Without a matching snapshot they fall back to running tabsim
-themselves, which needs Space-Track credentials.
+themselves.
 
 ``check`` reports which configs have no snapshot on the branch of the latest
-supported tabsim release (below :data:`TABSIM_BELOW`). ``publish`` simulates
-those configs with the installed tabsim and uploads them in a single commit.
-Configs are checked one by one rather than by branch existence, so an edited
-config, or a failed upload that left the branch behind, is filled in on the
-next run.
+tabsim release. ``publish`` simulates those configs with the installed tabsim
+and uploads them in a single commit. Configs are checked one by one rather than
+by branch existence, so an edited config, or a failed upload that left the
+branch behind, is filled in on the next run.
 """
 
 import argparse
@@ -25,7 +24,6 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-import yaml
 from huggingface_hub import HfApi
 from huggingface_hub.errors import RevisionNotFoundError
 from packaging.version import Version
@@ -49,20 +47,15 @@ def sim_configs() -> dict[str, Path]:
     return {compute_sha256(p): p for p in configs}
 
 
-#: The test configs are written for tabsim releases below this one: 0.1 changes
-#: the orbit source and the phase-tracking convention (#253).
-TABSIM_BELOW = Version("0.1")
-
-
 def latest_tabsim_version() -> str:
-    """The newest final, unyanked tabsim release below :data:`TABSIM_BELOW`."""
+    """The newest final, unyanked tabsim release."""
     with urllib.request.urlopen("https://pypi.org/pypi/tabsim/json") as r:
         releases = json.load(r)["releases"]
     versions = [
         Version(v) for v, files in releases.items()
         if files and not all(f.get("yanked") for f in files)
     ]
-    return str(max(v for v in versions if not v.is_prerelease and v < TABSIM_BELOW))
+    return str(max(v for v in versions if not v.is_prerelease))
 
 
 def missing_configs(api: HfApi, branch: str) -> dict[str, Path]:
@@ -74,20 +67,6 @@ def missing_configs(api: HfApi, branch: str) -> dict[str, Path]:
     except RevisionNotFoundError:
         present = set()
     return {h: p for h, p in configs.items() if h not in present}
-
-
-def write_spacetrack_credentials(target_dir: Path) -> Path:
-    """tabsim resolves the satellites' TLEs through Space-Track."""
-    username = os.environ.get("SPACETRACK_LOGIN")
-    password = os.environ.get("SPACETRACK_PASSWORD")
-    if not username or not password:
-        raise RuntimeError(
-            "Set SPACETRACK_LOGIN and SPACETRACK_PASSWORD: tabsim needs Space-Track "
-            "to simulate the satellite RFI."
-        )
-    path = target_dir / "spacetrack_login.yaml"
-    path.write_text(yaml.safe_dump({"username": username, "password": password}))
-    return path
 
 
 def check(args: argparse.Namespace) -> None:
@@ -124,13 +103,12 @@ def publish(args: argparse.Namespace) -> None:
     sim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        credentials = write_spacetrack_credentials(tmp)
         upload_dir = tmp / "upload"
 
         for h, config in missing.items():
             print(f"Simulating {config.relative_to(SRC_ROOT)} into {h}", flush=True)
             # Paths inside the config (itrf_path, ...) resolve against the
-            # config's own directory, so only the output and login move here.
+            # config's own directory, so only the output moves here.
             subprocess.run(
                 [
                     sys.executable,
@@ -139,8 +117,6 @@ def publish(args: argparse.Namespace) -> None:
                     str(config),
                     "-sp",
                     str(upload_dir / h),
-                    "-st",
-                    str(credentials),
                 ],
                 cwd=tmp,
                 check=True,
@@ -163,7 +139,7 @@ def main():
     sub = parser.add_subparsers(required=True)
 
     p = sub.add_parser(
-        "check", help="Report whether the latest supported tabsim release lacks simulations."
+        "check", help="Report whether the latest tabsim release lacks simulations."
     )
     p.set_defaults(func=check)
 

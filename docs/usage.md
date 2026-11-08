@@ -96,10 +96,6 @@ fitted along-track offset folded into their epochs, consumed the same way
 through `--extra-orbit-dir` — see
 [Records with a fitted time offset](orbits.md#records-with-a-fitted-time-offset).
 
-Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
-Space-Track and requires a `spacetrack_login.yaml`. That requirement applies only
-to the simulation step below, not to running TABASCAL.
-
 # Example Simulation and RFI Subtraction
 
 Assuming you have cloned the repository, navigate to the `tabascal/examples` directory in the root of the repository. It contains 
@@ -116,7 +112,7 @@ tabascal/
 Simulations are defined by YAML config files and can be launched using:
 
 ```bash
-sim-vis -c sim_target_8A.yaml -st spacetrack_login.yaml
+sim-vis -c sim_target_8A.yaml
 ```
 
 The output of this command will show you a number of simulation details and finally end with some lines that looks like

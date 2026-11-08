@@ -3,14 +3,12 @@ name: Simulation data
 # The pipeline tests and the ReFrame benchmark download their input simulations
 # from the epfl-radio-astro/rfi-simulations HuggingFace dataset, from the branch
 # named after the installed tabsim (tabsim_v<version>). Once a day this checks
-# whether the latest supported tabsim release has a simulation there for every
+# whether the latest tabsim release has a simulation there for every
 # sim_target*.yaml, and if not, simulates the missing ones with that release and
 # uploads them. Until then, CI regenerates the data itself on every run.
 #
 # Secrets, in the tabsim_huggingface environment:
 #   HF_TOKEN             HuggingFace token with write access to the dataset
-#   SPACETRACK_LOGIN     Space-Track login, which tabsim needs for the TLEs
-#   SPACETRACK_PASSWORD
 
 on:
   schedule:
@@ -67,7 +65,5 @@ jobs:
         if: steps.check.outputs.missing == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          SPACETRACK_LOGIN: ${{ secrets.SPACETRACK_LOGIN }}
-          SPACETRACK_PASSWORD: ${{ secrets.SPACETRACK_PASSWORD }}
         run: |
           python ci/rfi_simulations.py publish --expect-version "${{ steps.check.outputs.version }}"

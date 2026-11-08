@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import logging
-import os
 import shutil
 import subprocess
 import sys
@@ -20,29 +19,6 @@ def compute_sha256(file_path: Path) -> str:
         for byte_block in iter(lambda: f.read(4096), b""):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
-
-
-def prepare_legacy_tabsim_credentials(target_dir: Path) -> Path:
-    """Create credentials only for tabsim's legacy local-generation fallback.
-
-    Downloaded benchmark snapshots and TABASCAL itself are credential-free. The
-    installed tabsim release still queries Space-Track when it must regenerate
-    the simulation; keep that external limitation isolated to this branch until
-    tabsim exposes SatChecker or accepts pre-resolved TLEs.
-    """
-    username = os.environ.get("SPACETRACK_LOGIN")
-    password = os.environ.get("SPACETRACK_PASSWORD")
-    if not username or not password:
-        raise RuntimeError(
-            "The cached benchmark simulation is unavailable and the installed "
-            "tabsim release needs Space-Track to regenerate it. Set "
-            "SPACETRACK_LOGIN and SPACETRACK_PASSWORD, or provide the matching "
-            "epfl-radio-astro/rfi-simulations snapshot. TABASCAL's SatChecker "
-            "integration itself requires no credentials."
-        )
-    path = target_dir / "spacetrack_login.yaml"
-    path.write_text(yaml.safe_dump({"username": username, "password": password}))
-    return path
 
 
 def main():
@@ -121,9 +97,6 @@ def main():
                 f"Simulation output {input_dir} already exists. Skipping generation."
             )
         else:
-            # This is the only remaining Space-Track dependency: it belongs to
-            # tabsim's simulation generator, not TABASCAL's TLE resolution.
-            prepare_legacy_tabsim_credentials(local_dir)
             # Copy ancillary files referenced by relative paths in sim_config
             # into the working directory so sim_vis.py can find them.
             for ancillary in data_dir.glob("*"):

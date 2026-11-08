@@ -40,7 +40,6 @@ rfi_sources:
   tle_satellite:
     sat_names: [navstar, galileo]
     max_n_sat: 32
-    spacetrack_path: spacetrack_login.yaml
     power_scale: 1e-2
     max_ang_sep: 90  # degrees
     min_alt: 0       # degrees

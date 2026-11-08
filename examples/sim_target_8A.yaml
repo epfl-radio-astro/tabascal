@@ -36,7 +36,6 @@ rfi_sources:
     # norad_ids: []
     sat_names: [navstar]
     # max_n_sat: 1
-    spacetrack_path: spacetrack_login.yaml
     power_scale: 1e-2
     max_ang_sep: 30  # degrees
     min_alt: 0       # degrees
