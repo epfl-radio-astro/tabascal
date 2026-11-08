@@ -39,7 +39,6 @@ import os
 from tabascal.scripts.rfi_estimate import (
     _check_offset_fit_arguments,
     _tau_grid_steps,
-    add_phase_tracking_argument,
     resolve_corr,
     resolve_norad_ids,
     set_precision_for_scan,
@@ -73,7 +72,6 @@ def build_parser(parser=None):
         "-f", "--freq", type=float, default=None,
         help="Search only the single channel nearest this frequency (Hz).",
     )
-    add_phase_tracking_argument(parser)
 
     _add_candidate_arguments(parser)
     _add_scan_arguments(parser)
@@ -422,7 +420,7 @@ def _write_light_curves(args, ms, search, saved, stem, corr):
 
     rfi_phase = rfi_phase_from_records(
         records, ants_itrf, times_jd,
-        ms_phase_centre(ms, args.phase_tracking or "apparent"), freqs,
+        ms_phase_centre(ms), freqs,
         time_offsets_s=[row["tau_best"] for row in saved],
     )
     light_curves, error = matched_filter_light_curves(
@@ -530,7 +528,7 @@ def _search(args) -> int:
         candidates,
         ants_itrf,
         times_jd,
-        ms_phase_centre(ms, args.phase_tracking or "apparent"),
+        ms_phase_centre(ms),
         np.asarray(ms["freqs"]),
         np.asarray(ms["a1"]),
         np.asarray(ms["a2"]),
@@ -583,7 +581,6 @@ def _search(args) -> int:
 
     config = write_config_fragment(
         f"{stem}_config.yaml", selection, shifted_orbit_dir=shifted_dir,
-        phase_tracking=args.phase_tracking or "apparent",
     )
     print(f"  Config   : {config}")
 

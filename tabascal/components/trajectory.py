@@ -941,39 +941,13 @@ class OrbitFine(Component):
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
 
 
-#: Conventions for the direction a J2000 phase centre is tracked in, as
-#: ``phase_centre["tracking"]`` or the config's ``tabsim.phase_tracking``.
-#: ``apparent`` is the apparent place of date, which is what a correlator tracks.
-#: ``j2000`` pairs the J2000 RA/Dec with GAST directly, as tab-sim simulations do
-#: until chrisfinlay/tab-sim#73 is fixed; see tabascal #252 and #253.
-PHASE_TRACKING = ("apparent", "j2000")
-
-
-def check_phase_tracking(value, where: str = "tabsim.phase_tracking") -> str:
-    """``value`` as one of :data:`PHASE_TRACKING`, case-insensitively, or a ValueError."""
-
-    key = value.strip().lower() if isinstance(value, str) else None
-    if key not in PHASE_TRACKING:
-        raise ValueError(
-            f"{where} must be one of {list(PHASE_TRACKING)}, not {value!r}."
-        )
-
-    return key
-
-
 def tracked_radec(phase_centre: dict, times_jd: NDArray):
     """RA/Dec of date, in degrees per time, that the visibilities are tracked to.
 
     The direction to pair with :func:`tabascal.time.gast_deg`. ``phase_centre``
     holds the J2000 (ICRS) ``ra`` and ``dec`` that :func:`tabascal.ms.read_ms`
-    converts the Measurement Set's phase centre to, and optionally ``tracking``,
-    one of :data:`PHASE_TRACKING`: ``apparent``, the default, is
-    :func:`tabascal.time.apparent_radec_of_date`; ``j2000`` returns those values
-    unchanged, for data simulated by tab-sim (#253). Given the same ``ra`` and
-    ``dec`` that is the pre-#252 tracking term exactly, but ``read_ms`` now removes
-    the ~20 mas frame bias from a declared FK5 J2000 centre, so on a J2000 MS the
-    term differs from the old one by that much. The antenna Earth orientation and
-    the fringe-rate rotation stay corrected either way.
+    converts the Measurement Set's phase centre to. Tracking always follows its
+    apparent place of date via :func:`tabascal.time.apparent_radec_of_date`.
 
     Returns
     -------
@@ -982,15 +956,6 @@ def tracked_radec(phase_centre: dict, times_jd: NDArray):
     """
 
     times_jd = np.atleast_1d(np.asarray(times_jd, dtype=float))
-    tracking = check_phase_tracking(
-        phase_centre.get("tracking", "apparent"), 'phase_centre["tracking"]'
-    )
-    if tracking == "j2000":
-        return (
-            np.full(times_jd.shape, float(phase_centre["ra"])),
-            np.full(times_jd.shape, float(phase_centre["dec"])),
-        )
-
     return apparent_radec_of_date(phase_centre["ra"], phase_centre["dec"], times_jd)
 
 

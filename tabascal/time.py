@@ -386,43 +386,12 @@ def apparent_radec_of_date(ra_deg, dec_deg, times_jd, scale: str = "utc"):
     return _radec_deg(s_date)
 
 
-def icrs_from_apparent(ra_deg, dec_deg, time_jd, scale: str = "utc"):
-    """The ICRS direction whose apparent place of date is ``(ra_deg, dec_deg)``.
-
-    The inverse of :func:`apparent_radec_of_date` at one time, ``time_jd``: the
-    bias-precession-nutation rotation is undone exactly, and the aberration by
-    fixed-point iteration, which converges to machine precision in a few steps
-    since the aberration is only ~1e-4 rad. A round trip agrees to well below a
-    micro-arcsecond.
-
-    Returns
-    -------
-    (float, float)
-        ICRS RA in ``[0, 360)`` and Dec, in degrees.
-    """
-
-    t = skyfield_time(np.atleast_1d(float(time_jd)), scale)
-
-    s_date = _unit_vector(ra_deg, dec_deg)
-    s_app = np.reshape(t.M, (3, 3, -1))[:, :, 0].T @ s_date
-    v, em, bm1 = (np.asarray(x)[0] for x in _annual_aberration(t))
-
-    s = s_app
-    for _ in range(5):
-        s = s + (s_app - erfa.ab(s, v, em, bm1))
-        s = s / np.linalg.norm(s)
-
-    ra, dec = _radec_deg(s[None])
-
-    return float(ra[0]), float(dec[0])
-
-
 #: Direction frames a Measurement Set may declare for its phase centre that
 #: :func:`icrs_from_frame` can turn into a fixed ICRS direction.
-PHASE_CENTRE_FRAMES = ("J2000", "ICRS", "B1950", "GALACTIC", "APP")
+PHASE_CENTRE_FRAMES = ("J2000", "ICRS", "B1950", "GALACTIC")
 
 
-def icrs_from_frame(ra_deg, dec_deg, frame: str, time_jd, scale: str = "utc"):
+def icrs_from_frame(ra_deg, dec_deg, frame: str):
     """A direction declared in ``frame`` as ICRS, which tabascal calls J2000.
 
     ``frame`` is one of :data:`PHASE_CENTRE_FRAMES`, as a Measurement Set's
@@ -434,8 +403,9 @@ def icrs_from_frame(ra_deg, dec_deg, frame: str, time_jd, scale: str = "utc"):
     - ``B1950`` is FK4 at epoch B1950.0 with no proper motion, moved to FK5 J2000
       by ``erfa.fk45z`` and then as ``J2000``.
     - ``GALACTIC`` goes through ``erfa.g2icrs``.
-    - ``APP``, an apparent geocentric place of date, is inverted by
-      :func:`icrs_from_apparent` at ``time_jd``, the observation's mid time.
+
+    ``APP`` is refused: a fixed apparent direction cannot be converted once
+    to a fixed ICRS direction and preserve its tracking over the observation.
 
     Returns
     -------
@@ -457,8 +427,6 @@ def icrs_from_frame(ra_deg, dec_deg, frame: str, time_jd, scale: str = "utc"):
 
     if key == "ICRS":
         return float(ra_deg) % 360.0, float(dec_deg)
-    if key == "APP":
-        return icrs_from_apparent(ra_deg, dec_deg, time_jd, scale)
     if key == "GALACTIC":
         ra, dec = erfa.g2icrs(np.deg2rad(float(ra_deg)), np.deg2rad(float(dec_deg)))
         return float(np.rad2deg(ra)) % 360.0, float(np.rad2deg(dec))

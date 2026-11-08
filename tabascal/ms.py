@@ -258,13 +258,12 @@ def read_time_scale(column_keywords: dict, column: str = "TIME") -> str:
 DEFAULT_DIRECTION_FRAME = "J2000"
 
 
-def read_phase_centre(ms_path: str, field_id: int, time_jd: float) -> tuple:
+def read_phase_centre(ms_path: str, field_id: int) -> tuple:
     """The phase centre of field ``field_id``, as J2000 (ICRS) RA/Dec in degrees.
 
     Read from ``FIELD::PHASE_DIR`` in the frame its ``MEASINFO`` ``Ref``
-    declares, and converted by :func:`tabascal.time.icrs_from_frame`; ``time_jd``,
-    a UTC Julian Date, is the observation's mid time, which only an ``APP``
-    centre needs. Converting here, once, is what lets everything downstream take
+    declares, and converted by :func:`tabascal.time.icrs_from_frame`.
+    Converting here, once, is what lets everything downstream take
     ``ra``/``dec`` as J2000 whatever the MS was written in.
 
     A ``PHASE_DIR`` that declares no ``Ref`` is read as J2000, with a warning, as
@@ -274,7 +273,7 @@ def read_phase_centre(ms_path: str, field_id: int, time_jd: float) -> tuple:
     ------
     ValueError
         For a frame that is not a fixed sky direction tabascal can convert
-        (``AZEL``, ``HADEC``, ``JMEAN``, a planet, ...), for a per-row frame
+        (``APP``, ``AZEL``, ``HADEC``, ``JMEAN``, a planet, ...), for a per-row frame
         (``VarRefCol``), and for a centre that moves: a polynomial
         (``NUM_POLY > 0``), or an offset from an ephemeris (``EPHEMERIS_ID >= 0``;
         the column is optional, and a field without it is fixed).
@@ -315,7 +314,7 @@ def read_phase_centre(ms_path: str, field_id: int, time_jd: float) -> tuple:
 
     ra, dec = np.rad2deg(np.asarray(field.PHASE_DIR.data[0].compute())[0])
     try:
-        return icrs_from_frame(ra, dec, ref, time_jd)
+        return icrs_from_frame(ra, dec, ref)
     except ValueError as err:
         raise ValueError(f"FIELD::PHASE_DIR of {ms_path}: {err}") from err
 
@@ -913,7 +912,6 @@ def read_ms(
     ra, dec = read_phase_centre(
         ms_path,
         int(xds.attrs.get("FIELD_ID", 0)),
-        0.5 * (float(times_jd[0]) + float(times_jd[-1])),
     )
 
     print(f"Observation starts at {jd_to_datetime(times_jd[0]).isoformat()} UTC")

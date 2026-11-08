@@ -12,7 +12,6 @@ erfa = pytest.importorskip("erfa")
 
 RA, DEC = np.deg2rad(30.0), np.deg2rad(-30.0)  # the ICRS truth, which tabascal calls J2000
 UNIX = 1568538661.0 + np.array([0.0, 8.0, 16.0])  # 2019-09-15
-MID_TT = 2440587.5 + (UNIX[1] + 69.184) / 86400.0
 
 
 def _write_ms(path, dirs, ref="J2000", field_id=0, source=(RA, DEC), num_poly=0, ephemeris_id=None):
@@ -78,9 +77,6 @@ def _declared(frame):
         return erfa.fk524(*_fk5(RA, DEC), 0.0, 0.0, 0.0, 0.0)[:2]
     if frame == "GALACTIC":
         return erfa.icrs2g(RA, DEC)
-    if frame == "APP":
-        ri, di, eo = erfa.atci13(RA, DEC, 0.0, 0.0, 0.0, 0.0, MID_TT, 0.0)
-        return erfa.anp(ri - eo), di
     return RA, DEC
 
 
@@ -88,7 +84,7 @@ def _sep_arcsec(ms, ra, dec):
     return np.rad2deg(erfa.seps(np.deg2rad(float(ms["ra"])), np.deg2rad(float(ms["dec"])), ra, dec)) * 3600
 
 
-@pytest.mark.parametrize("frame, tol", [("J2000", 1e-3), ("ICRS", 1e-3), ("B1950", 0.5), ("GALACTIC", 0.5), ("APP", 0.5)])
+@pytest.mark.parametrize("frame, tol", [("J2000", 1e-3), ("ICRS", 1e-3), ("B1950", 0.5), ("GALACTIC", 0.5)])
 def test_declared_frame_is_converted_to_j2000(tmp_path, frame, tol):
     """FIELD::PHASE_DIR in any supported frame reads back as the J2000 direction it names."""
     declared = _declared(frame)
@@ -97,6 +93,7 @@ def test_declared_frame_is_converted_to_j2000(tmp_path, frame, tol):
 
 
 @pytest.mark.parametrize("ref, num_poly, ephemeris_id, match", [
+    ("APP", 0, None, "APP.*fixed J2000 direction"),
     ("AZEL", 0, None, "AZEL"), ("HADEC", 0, None, "HADEC"), ("JMEAN", 0, None, "JMEAN"), ("SUN", 0, None, "SUN"),
     ("J2000", 1, None, "NUM_POLY"), ("J2000", 0, 0, "EPHEMERIS_ID")])
 def test_unsupported_phase_centre_is_refused(tmp_path, ref, num_poly, ephemeris_id, match):
