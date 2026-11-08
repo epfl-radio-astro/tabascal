@@ -743,3 +743,18 @@ gains:
 * A **calibration table**, read with {func}`~tabascal.ms.read_caltable` — one tabascal wrote with `tab2MS`, or one from CASA. A caltable is resolved over frequency and time and `ConstGains` is not, so it is reduced to the median $|g|$ and the mean phase direction over each antenna's valid samples, with a warning naming the largest deviation when the solutions actually do vary. Flagged solutions are dropped rather than counted as zero, and an antenna the table has no solution for at all falls back to unit gain, with a warning.
 
 Either way the gain is **projected into the gauge** rather than taken as given: the mean log amplitude is subtracted (unless `fix_flux_scale: false`) and the phases are referenced to `ref_ant`. Projecting an already-projected gain changes nothing, so the same file can be handed back to a second run. A zero or non-finite gain is an error — the fit is in log amplitude, which such a value has no value at.
+
+## Phase centre
+
+Tracking always follows the phase centre's apparent place of date: annual aberration,
+precession and nutation applied, paired with GAST. Every RFI trajectory component,
+the RFI sampling estimate, matched-filter initialisation, `tabascal light-curve`
+and `tabascal search` use this direction.
+
+The centre is read from `FIELD::PHASE_DIR` for the field being read, in the frame
+its `MEASINFO` `Ref` declares (`J2000`, `ICRS`, `B1950` or `GALACTIC`), and
+converted once to ICRS. A missing `Ref` is read as J2000 with a warning. Other
+frames, per-row frames (`VarRefCol`) and moving centres (`NUM_POLY > 0` or
+`EPHEMERIS_ID >= 0`) are refused. In particular, `APP` is refused because a
+constant apparent direction cannot be converted once to a fixed ICRS direction
+without changing its tracking over the observation.

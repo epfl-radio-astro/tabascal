@@ -6,6 +6,7 @@ import pytest
 import numpy as np
 
 from tabascal.time import (
+    JulianDate,
     secs_to_days,
     days_to_secs,
     jd_to_mjd,
@@ -27,6 +28,18 @@ from tabascal.time import (
 # ---------------------------------------------------------------------------
 
 class TestTime:
+
+    def test_split_date_reflected_arithmetic(self):
+        date = JulianDate(2460676.0, 0.5 + 7e-6 / 86400.0)
+        offsets = np.array([1e-6, 3e-6]) / 86400.0
+        shifted = offsets + date
+        assert isinstance(shifted, JulianDate)
+        np.testing.assert_allclose(shifted - date, offsets, rtol=0, atol=1e-16)
+        np.testing.assert_allclose(
+            np.array([2460676.5]) - date, -7e-6 / 86400.0, rtol=0, atol=1e-16
+        )
+        with pytest.raises(TypeError):
+            np.add(date, offsets)
 
     def test_secs_to_days_roundtrip(self):
         secs = 12345.6
@@ -311,7 +324,7 @@ class TestToUtcJd:
     """Moving a declared scale onto UTC, once, where the times are read.
 
     Everything downstream reads a Julian Date as UTC -- skyfield through
-    ``skyfield_time``'s default, ``sgp4jax.itrf_to_gcrf``, which has no scale
+    ``skyfield_time``'s default, ``sgp4jax``'s GCRF propagation, which has no scale
     concept to be told otherwise, and the TLE epoch checks. Normalising at the
     boundary puts all of them on the instant the MS actually names, without a
     ``scale`` argument threaded through any of them.

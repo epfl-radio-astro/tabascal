@@ -61,9 +61,10 @@ from tabascal.noise import (
 )
 from tabascal.time import (
     DAY_SECS,
+    JulianDate,
     TIME_SCALES,
+    icrs_from_frame,
     jd_to_datetime,
-    mjd_to_jd,
     to_utc_jd,
 )
 from tabascal.timing import measure_runtime
@@ -253,6 +254,71 @@ def read_time_scale(column_keywords: dict, column: str = "TIME") -> str:
     return str(ref).strip().lower()
 
 
+#: Frame assumed for ``FIELD::PHASE_DIR`` when its ``MEASINFO`` names none.
+DEFAULT_DIRECTION_FRAME = "J2000"
+
+
+def read_phase_centre(ms_path: str, field_id: int) -> tuple:
+    """The phase centre of field ``field_id``, as J2000 (ICRS) RA/Dec in degrees.
+
+    Read from ``FIELD::PHASE_DIR`` in the frame its ``MEASINFO`` ``Ref``
+    declares, and converted by :func:`tabascal.time.icrs_from_frame`.
+    Converting here, once, is what lets everything downstream take
+    ``ra``/``dec`` as J2000 whatever the MS was written in.
+
+    A ``PHASE_DIR`` that declares no ``Ref`` is read as J2000, with a warning, as
+    :func:`read_time_scale` does for ``TIME``.
+
+    Raises
+    ------
+    ValueError
+        For a frame that is not a fixed sky direction tabascal can convert
+        (``APP``, ``AZEL``, ``HADEC``, ``JMEAN``, a planet, ...), for a per-row frame
+        (``VarRefCol``), and for a centre that moves: a polynomial
+        (``NUM_POLY > 0``), or an offset from an ephemeris (``EPHEMERIS_ID >= 0``;
+        the column is optional, and a field without it is fixed).
+    """
+
+    # One dataset per row: PHASE_DIR is (NUM_POLY + 1, 2) per row, so the rows of
+    # a FIELD table mixing polynomial orders cannot share one ungrouped dataset.
+    fields, keywords = xds_from_table(
+        ms_path + "::FIELD", group_cols="__row__", column_keywords=True
+    )
+    field = fields[field_id]
+    measinfo = (keywords or {}).get("PHASE_DIR", {}).get("MEASINFO", {})
+
+    if "VarRefCol" in measinfo:
+        raise ValueError(
+            f"FIELD::PHASE_DIR of {ms_path} declares its frame per row "
+            f"({measinfo['VarRefCol']}), which tabascal does not read. Supported: "
+            "one Ref for the column."
+        )
+    ref = measinfo.get("Ref")
+    if not ref:
+        warnings.warn(
+            f"FIELD::PHASE_DIR carries no MEASINFO Ref; assuming "
+            f"{DEFAULT_DIRECTION_FRAME}.",
+            UserWarning,
+            stacklevel=2,
+        )
+        ref = DEFAULT_DIRECTION_FRAME
+
+    for column, moving in (("NUM_POLY", lambda v: v > 0), ("EPHEMERIS_ID", lambda v: v >= 0)):
+        if column in field:
+            value = int(np.asarray(field[column].data[0].compute()))
+            if moving(value):
+                raise ValueError(
+                    f"FIELD {field_id} of {ms_path} has {column} = {value}: its "
+                    "phase centre moves with time, which tabascal does not model."
+                )
+
+    ra, dec = np.rad2deg(np.asarray(field.PHASE_DIR.data[0].compute())[0])
+    try:
+        return icrs_from_frame(ra, dec, ref)
+    except ValueError as err:
+        raise ValueError(f"FIELD::PHASE_DIR of {ms_path}: {err}") from err
+
+
 #: Units a ``TIME`` column can declare in ``QuantumUnits``, mapped to the two
 #: tabascal distinguishes. casacore writes ``'s'``; the longer spellings are
 #: accepted for the same reason the scale names are -- the point is to read
@@ -325,7 +391,7 @@ def infer_time_unit(times) -> str:
     """``"s"`` or ``"d"`` for a ``TIME`` column that declares no unit.
 
     Split out from :func:`times_to_mjd` so that a caller which wants to reduce
-    one array and convert another can. ``orbit_config._integration_times_mjd``
+    one array and convert another can. ``orbit_config._integration_times``
     is the one that does: the unit has to be read from every row, because the
     reduction weighs the times by how often they occur, while the values it
     returns are the distinct ones. Converting first and deduplicating after
@@ -424,6 +490,19 @@ def times_to_mjd(times, unit: Optional[str] = None) -> np.ndarray:
         unit = infer_time_unit(times)
 
     return times / DAY_SECS if unit == "s" else times
+
+
+def times_to_jd(times, unit: Optional[str] = None) -> JulianDate:
+    """An MS ``TIME`` column as split Julian Dates, still on its declared scale.
+
+    Split seconds before dividing into days so the reader and preflight retain
+    the raw timestamp precision. Units follow :func:`times_to_mjd`.
+    """
+    unit = unit or infer_time_unit(times)
+    return (
+        JulianDate.from_mjd_seconds(times) if unit == "s"
+        else JulianDate.from_mjd(times)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -808,7 +887,6 @@ def read_ms(
     # CHAN_WIDTH are variable-shaped, so windows with different channel counts
     # cannot share one ungrouped dataset.
     xds_spec = xds_from_table(ms_path + "::SPECTRAL_WINDOW", group_cols="__row__")
-    xds_src = xds_from_table(ms_path + "::SOURCE")[0]
 
     ants_itrf = np.array(xds_ant.POSITION.data.compute())
 
@@ -827,20 +905,26 @@ def read_ms(
         chan_widths = np.repeat(chan_widths, len(freqs))
     int_time = xds.INTERVAL.data[0].compute()
 
-    times_mjd = times_to_mjd(
-        np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute()),
-        read_time_unit(column_keywords),
-    )
+    time_values = np.array(xds.TIME.data.reshape(n_time, n_bl)[:, 0].compute())
+    time_unit = read_time_unit(column_keywords) or infer_time_unit(time_values)
+    times_mjd = times_to_mjd(time_values, time_unit)
 
     # The declared scale is honoured by normalising to UTC once, here, rather
     # than by threading a scale through the trajectory maths: everything past
     # this point reads UTC Julian Dates -- skyfield through skyfield_time's
-    # default, sgp4jax.itrf_to_gcrf, which has no scale concept to be told
+    # default, sgp4jax's GCRF propagation, which has no scale concept to be told
     # otherwise, and the TLE epoch checks -- so one conversion covers all of
     # them. times_mjd stays as declared beside it: it is the MS's own column in
     # days, and orbit_config.ms_integration_times_mjd reports the same column
     # the same way, so the two remain comparable.
-    times_jd = to_utc_jd(mjd_to_jd(times_mjd), time_scale)
+    times_jd = to_utc_jd(times_to_jd(time_values, time_unit), time_scale)
+
+    # The field this partition's rows belong to, in whatever frame the MS
+    # declares, as J2000 -- which is what every consumer of ra/dec reads.
+    ra, dec = read_phase_centre(
+        ms_path,
+        int(xds.attrs.get("FIELD_ID", 0)),
+    )
 
     print(f"Observation starts at {jd_to_datetime(times_jd[0]).isoformat()} UTC")
 
@@ -928,12 +1012,8 @@ def read_ms(
         return rows_to_grid(jnp.array(col.compute()), n_time, n_bl, n_freq)
 
     data = {
-        **{
-            key: val
-            for key, val in zip(
-                ["ra", "dec"], jnp.rad2deg(xds_src.DIRECTION.data[0].compute())
-            )
-        },
+        "ra": ra,
+        "dec": dec,
         "n_freq": n_freq,
         "n_corr": n_corr,
         "n_time": n_time,

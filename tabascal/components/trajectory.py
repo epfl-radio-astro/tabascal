@@ -18,7 +18,7 @@ from tabascal.interferometry import (
 from tabascal.poly_interp import fine_offsets, fit_path
 from tabascal.components import Component, assert_attr_shape
 from tabascal.timing import measure_runtime
-from tabascal.time import gast_deg, secs_to_days, skyfield_time, timescale
+from tabascal.time import JulianDate, apparent_radec_of_date, gast_deg, secs_to_days, skyfield_time, timescale
 
 import sgp4jax
 from sgp4jax import WGS72 as gravity
@@ -129,7 +129,7 @@ def get_satellite_elevations(orbit_records: list, times_jd, ants_itrf) -> NDArra
         Satellite elevation above the horizon, in degrees.
     """
 
-    times_jd = np.asarray(times_jd)
+    times_jd = JulianDate(times_jd)
     ts = timescale()
     sf_times = skyfield_time(times_jd)
 
@@ -182,16 +182,11 @@ class PhaseCalculationRFIFine(Component):
 
     def _compute_ant_pos(self):
 
-        gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
-        gh0 = (gsa - self.phase_centre["ra"]) % 360
-
-        self.ants_xyz = vmap(vmap(sgp4jax.itrf_to_gcrf, (0, None, None), 0), (None, 0, 0), 1)(
-            self.ants_itrf, 
-            jnp.floor(self.times_jd_fine), 
-            self.times_jd_fine - jnp.floor(self.times_jd_fine)
-        )
-        self.ants_uvw = jnp.transpose(
-            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
+        # Skyfield's ITRS-to-GCRS rotation, as FixedOrbitFine uses: sgp4jax.itrf_to_gcrf
+        # takes the UTC date as UT1, which moves the array by up to DUT1 of rotation.
+        self.ants_xyz = jnp.asarray(itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine))
+        self.ants_uvw = jnp.asarray(
+            tracking_uvw(self.ants_itrf, self.times_jd_fine, self.phase_centre)
         )
 
     def _validate_dimensions(self):
@@ -323,7 +318,7 @@ class FixedOrbitFine(Component):
     def _compute_rfi_phase(self):
 
         self.rfi_xyz = np.asarray(
-            get_satellite_positions(self.orbit_records, list(self.times_jd_fine))
+            get_satellite_positions(self.orbit_records, self.times_jd_fine)
         )
 
         self.ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, self.times_jd_fine)
@@ -331,12 +326,7 @@ class FixedOrbitFine(Component):
         # rfi_phase is one-shot setup producing a forward constant, so compute it in
         # numpy/skyfield (f64) in both precisions — faster than the jax path (no JIT
         # compile) and accurate. jnp.array casts to the active precision (f64/f32).
-        gsa = gast_deg(self.times_jd_fine)  # GAST in degrees (UTC convention)
-        gh0 = (gsa - self.phase_centre["ra"]) % 360
-
-        self.ants_uvw = np.transpose(
-            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
-        )
+        self.ants_uvw = tracking_uvw(self.ants_itrf, self.times_jd_fine, self.phase_centre)
         # Fine-grid constant and the biggest array of this component: under sharding
         # it is created directly with the RFI-axis sharding so the full array only
         # ever exists in host numpy, never on a single device.
@@ -424,7 +414,7 @@ class FixedOrbit(Component):
             self.phase_centre = config.phase_centre
             self.freqs = np.asarray(config.freqs, dtype=np.float64)
             self.int_time = float(config.int_time)
-            self.times_jd = np.asarray(config.times_jd, dtype=np.float64)
+            self.times_jd = JulianDate(config.times_jd)
 
             # The kernel keeps the delay's derivatives up to the third, so a
             # higher degree would be fitted and then silently dropped.
@@ -510,14 +500,10 @@ class FixedOrbit(Component):
         dt = fine_offsets(self.n_path_nodes, self.int_time)  # (n_nodes,), seconds
         times_jd_nodes = (self.times_jd[:, None] + secs_to_days(dt)[None, :]).ravel()
         rfi_xyz_nodes = np.asarray(
-            get_satellite_positions(self.orbit_records, list(times_jd_nodes))
+            get_satellite_positions(self.orbit_records, times_jd_nodes)
         )
         ants_xyz = itrs_to_gcrs_sf(self.ants_itrf, times_jd_nodes)
-        gsa = gast_deg(times_jd_nodes)  # GAST in degrees (UTC convention)
-        gh0 = (gsa - self.phase_centre["ra"]) % 360
-        ants_uvw = np.transpose(
-            itrf_to_uvw_numpy(self.ants_itrf, gh0, self.phase_centre["dec"]), axes=(1, 0, 2)
-        )
+        ants_uvw = tracking_uvw(self.ants_itrf, times_jd_nodes, self.phase_centre)
         # The geometric delay at the nodes, in microseconds, with the sign that
         # makes the phase 2 pi f tau -- as FixedOrbitFine's phase and the fine-grid
         # route's rfi_delay_us (PR #144) have it.
@@ -587,6 +573,17 @@ class FixedOrbit(Component):
         assert_attr_shape(
             self, "rfi_delay_poly_us", (self.n_rfi, self.n_ant, self.n_time, self.n_path)
         )
+
+
+def _gcrf_positions_split(sats, whole, fraction):
+    """The LEO batch propagator with split dates, including its frame rotation."""
+    def propagate(sat, jd, fr):
+        r, v, _ = sgp4jax.propagate_jd_leo(sat, jd, fr)
+        return sgp4jax.teme_to_gcrf(r, v, jd, fr)
+
+    return vmap(vmap(propagate, (None, 0, 0)), (0, None, None))(
+        sats, whole, fraction
+    )
 
 
 class NoDragOrbitFine(Component):
@@ -686,7 +683,8 @@ class NoDragOrbitFine(Component):
 
     def build_constants(self):
         return {
-            "times_jd_fine": self.times_jd_fine,
+            "times_jd_whole": JulianDate(self.times_jd_fine).whole,
+            "times_jd_fraction": JulianDate(self.times_jd_fine).fraction,
             "L_rfi_orbit": self.L_rfi_orbit,
             "mu_rfi_orbit": self.mu_rfi_orbit,
         }
@@ -705,7 +703,10 @@ class NoDragOrbitFine(Component):
             elements = forward_transform(params["rfi_orbit_base"], L_orbit, mu_orbit)
 
             sats = sats_init(elements)
-            rfi_xyz, _ = sgp4jax.gcrf_positions_multi_leo(sats, constants[f"{prefix}/times_jd_fine"])
+            rfi_xyz, _ = _gcrf_positions_split(
+                sats, constants[f"{prefix}/times_jd_whole"],
+                constants[f"{prefix}/times_jd_fraction"],
+            )
             rfi_xyz = rfi_xyz * 1e3
 
             state = {**state, "elements": elements, "rfi_xyz": rfi_xyz}
@@ -862,7 +863,8 @@ class OrbitFine(Component):
 
     def build_constants(self):
         return {
-            "times_jd_fine": self.times_jd_fine,
+            "times_jd_whole": JulianDate(self.times_jd_fine).whole,
+            "times_jd_fraction": JulianDate(self.times_jd_fine).fraction,
             "L_rfi_orbit": self.L_rfi_orbit,
             "mu_rfi_orbit": self.mu_rfi_orbit,
         }
@@ -881,7 +883,10 @@ class OrbitFine(Component):
             elements = forward_transform(params["rfi_orbit_base"], L_orbit, mu_orbit)
 
             sats = sats_init(elements)
-            rfi_xyz, _ = sgp4jax.gcrf_positions_multi_leo(sats, constants[f"{prefix}/times_jd_fine"])
+            rfi_xyz, _ = _gcrf_positions_split(
+                sats, constants[f"{prefix}/times_jd_whole"],
+                constants[f"{prefix}/times_jd_fraction"],
+            )
             rfi_xyz = rfi_xyz * 1e3
 
             state = {**state, "elements": elements, "rfi_xyz": rfi_xyz}
@@ -955,12 +960,49 @@ class OrbitFine(Component):
         assert_attr_shape(self, "init_rfi_orbit_base", orbit_shape)
 
 
+def tracked_radec(phase_centre: dict, times_jd: NDArray):
+    """RA/Dec of date, in degrees per time, that the visibilities are tracked to.
+
+    The direction to pair with :func:`tabascal.time.gast_deg`. ``phase_centre``
+    holds the J2000 (ICRS) ``ra`` and ``dec`` that :func:`tabascal.ms.read_ms`
+    converts the Measurement Set's phase centre to. Tracking always follows its
+    apparent place of date via :func:`tabascal.time.apparent_radec_of_date`.
+
+    Returns
+    -------
+    (np.ndarray, np.ndarray)
+        RA and Dec in degrees, one per input time.
+    """
+
+    times_jd = JulianDate(times_jd).atleast_1d()
+    return apparent_radec_of_date(phase_centre["ra"], phase_centre["dec"], times_jd)
+
+
+def tracking_uvw(ants_itrf: NDArray, times_jd: NDArray, phase_centre: dict) -> NDArray:
+    """Antenna uvw toward the phase centre as :func:`tracked_radec` places it.
+
+    ``w`` is the phase-tracking term: this is the one place it is built, for the
+    forward model and the :mod:`tabascal.rfi_estimate` paths alike.
+
+    Returns
+    -------
+    Array (n_ant, n_time, 3)
+        uvw relative to the first antenna, in metres.
+    """
+
+    times_jd = JulianDate(times_jd)
+    ra, dec = tracked_radec(phase_centre, times_jd)
+    gh0 = (gast_deg(times_jd) - ra) % 360
+
+    return np.transpose(itrf_to_uvw_numpy(ants_itrf, gh0, dec), axes=(1, 0, 2))
+
+
 def itrs_to_gcrs_sf(pos_itrs: NDArray, times_jd: NDArray) -> NDArray:
 
     # skyfield must always receive numpy (it divides by AU as a python int, which
     # overflows int32 if a jax f32 array is passed under jax_enable_x64=False).
     pos_itrs = np.asarray(pos_itrs)
-    times_jd = np.asarray(times_jd)
+    times_jd = JulianDate(times_jd)
 
     t_sf = skyfield_time(times_jd)
 

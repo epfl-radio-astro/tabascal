@@ -86,7 +86,7 @@ from tabascal.rfi_estimate import (
     write_config_fragment,
     write_search_results,
 )
-from tabascal.time import gast_deg, jd_to_mjd, skyfield_time, timescale
+from tabascal.time import apparent_radec_of_date, gast_deg, jd_to_mjd, skyfield_time, timescale
 
 from .tle_helpers import (  # noqa: F401
     block_network,
@@ -212,10 +212,9 @@ def ref_paths(record, ants_itrf, times_jd, phase_centre, a1, a2, n_fine, delta_t
     times_jd = np.asarray(times_jd, dtype=np.float64)
     t_fine = (times_jd[:, None] + offsets[None, :] / 86400.0).ravel()
 
-    gh0 = (gast_deg(t_fine) - phase_centre["ra"]) % 360
-    w = np.transpose(
-        itrf_to_uvw_numpy(ants_itrf, gh0, phase_centre["dec"]), axes=(1, 0, 2)
-    )[..., -1]
+    ra, dec = apparent_radec_of_date(phase_centre["ra"], phase_centre["dec"], t_fine)
+    gh0 = (gast_deg(t_fine) - ra) % 360
+    w = np.transpose(itrf_to_uvw_numpy(ants_itrf, gh0, dec), axes=(1, 0, 2))[..., -1]
     ants_xyz = itrs_to_gcrs_sf(ants_itrf, t_fine)
 
     out = np.zeros((len(taus_s), len(a1), len(times_jd), n_fine))

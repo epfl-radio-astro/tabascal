@@ -403,6 +403,7 @@ def _write_light_curves(args, ms, search, saved, stem, corr):
         _times_jd,
         attach_offset_fits,
         matched_filter_light_curves,
+        ms_phase_centre,
         rfi_phase_from_records,
         save_light_curves_npz,
     )
@@ -419,7 +420,7 @@ def _write_light_curves(args, ms, search, saved, stem, corr):
 
     rfi_phase = rfi_phase_from_records(
         records, ants_itrf, times_jd,
-        {"ra": float(ms["ra"]), "dec": float(ms["dec"])}, freqs,
+        ms_phase_centre(ms), freqs,
         time_offsets_s=[row["tau_best"] for row in saved],
     )
     light_curves, error = matched_filter_light_curves(
@@ -471,6 +472,7 @@ def _search(args) -> int:
         candidates_from_norad_ids,
         candidates_from_orbit_dir,
         enumerate_candidates,
+        ms_phase_centre,
         search_candidates,
         select_detections,
         write_config_fragment,
@@ -526,7 +528,7 @@ def _search(args) -> int:
         candidates,
         ants_itrf,
         times_jd,
-        {"ra": float(ms["ra"]), "dec": float(ms["dec"])},
+        ms_phase_centre(ms),
         np.asarray(ms["freqs"]),
         np.asarray(ms["a1"]),
         np.asarray(ms["a2"]),
@@ -578,7 +580,7 @@ def _search(args) -> int:
         print(f"  Shifted  : {shifted}")
 
     config = write_config_fragment(
-        f"{stem}_config.yaml", selection, shifted_orbit_dir=shifted_dir
+        f"{stem}_config.yaml", selection, shifted_orbit_dir=shifted_dir,
     )
     print(f"  Config   : {config}")
 

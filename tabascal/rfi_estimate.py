@@ -135,20 +135,22 @@ from tabascal.components.trajectory import (
     get_satellite_elevations,
     get_satellite_positions,
     itrs_to_gcrs_sf,
+    tracking_uvw,
 )
 from tabascal.interferometry import (
     C,
     Omega_e,
     get_rfi_phase_numpy,
-    itrf_to_uvw_numpy,
 )
 from tabascal.noise import broadcast_to_vis
 from tabascal.time import (
     datetime_to_jd,
-    gast_deg,
     jd_to_datetime,
+    skyfield_time,
+    JulianDate,
     to_utc_mjd,
 )
+from skyfield.framelib import itrs
 
 
 #: Bytes of working array per (baseline, channel, timestep) inside the
@@ -190,7 +192,10 @@ def rfi_phase_from_positions(
     times_jd : Array (n_time,)
         Observation times in Julian date.
     phase_centre : dict
-        ``{"ra": <deg>, "dec": <deg>}`` phase centre of the visibilities.
+        ``{"ra": <deg>, "dec": <deg>}`` J2000 phase centre of the visibilities,
+        as :func:`tabascal.ms.read_ms` converts it from the MS's declared frame,
+        tracked at its apparent place of date; see
+        :func:`tabascal.components.trajectory.tracked_radec`.
     freqs : Array (n_freq,)
         Channel frequencies in Hz.
 
@@ -199,15 +204,10 @@ def rfi_phase_from_positions(
     Array (n_src, n_ant, n_freq, n_time)
         Geometric phase at each antenna for each source.
     """
-    times_jd = np.asarray(times_jd)
+    times_jd = JulianDate(times_jd)
     freqs = np.asarray(freqs)
 
-    gsa = gast_deg(times_jd)  # GAST in degrees (UTC convention)
-    gh0 = (gsa - phase_centre["ra"]) % 360
-
-    ants_uvw = np.transpose(
-        itrf_to_uvw_numpy(ants_itrf, gh0, phase_centre["dec"]), axes=(1, 0, 2)
-    )  # (n_ant, n_time, 3)
+    ants_uvw = tracking_uvw(ants_itrf, times_jd, phase_centre)  # (n_ant, n_time, 3)
     ants_xyz = itrs_to_gcrs_sf(ants_itrf, times_jd)  # (n_ant, n_time, 3)
 
     return get_rfi_phase_numpy(np.asarray(rfi_xyz), ants_uvw, ants_xyz, freqs)
@@ -247,10 +247,10 @@ def rfi_phase_from_records(
     -------
     Array (n_src, n_ant, n_freq, n_time)
     """
-    times_jd = np.asarray(times_jd)
+    times_jd = JulianDate(times_jd)
 
     if time_offsets_s is None:
-        rfi_xyz = np.asarray(get_satellite_positions(orbit_records, list(times_jd)))
+        rfi_xyz = np.asarray(get_satellite_positions(orbit_records, times_jd))
     else:
         taus = np.atleast_1d(np.asarray(time_offsets_s, dtype=np.float64))
         if taus.size == 1:
@@ -265,7 +265,7 @@ def rfi_phase_from_records(
         rfi_xyz = np.stack(
             [
                 np.asarray(
-                    get_satellite_positions([record], list(times_jd + tau / 86400.0))
+                    get_satellite_positions([record], times_jd + tau / 86400.0)
                 )[0]
                 for record, tau in zip(orbit_records, taus)
             ]
@@ -735,17 +735,14 @@ def _antenna_path_grid(record, ants_itrf, times_jd, phase_centre, n_fine, delta_
     """
     taus = np.atleast_1d(np.asarray(taus_s, dtype=np.float64))
     ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     n_fine = int(n_fine)
 
     offsets = fine_time_offsets(n_fine, delta_t)
     t_fine = (times_jd[:, None] + offsets[None, :] / 86400.0).ravel()
 
     # The array, once. It does not move with tau.
-    gh0 = (gast_deg(t_fine) - phase_centre["ra"]) % 360
-    w = np.transpose(
-        itrf_to_uvw_numpy(ants_itrf, gh0, phase_centre["dec"]), axes=(1, 0, 2)
-    )[..., -1]  # (n_ant, n_time * n_fine)
+    w = tracking_uvw(ants_itrf, t_fine, phase_centre)[..., -1]  # (n_ant, n_time * n_fine)
     ants_xyz = itrs_to_gcrs_sf(ants_itrf, t_fine)  # (n_ant, n_time * n_fine, 3)
 
     # The orbit, once for the whole grid: propagation dominates the cost, and a
@@ -780,11 +777,11 @@ def satellite_range_and_speed(record, ants_itrf: NDArray, times_jd: NDArray):
     adds is bounded by ``Omega_e * range_m`` and :func:`fit_time_offset` adds it
     where the fringe-rate ceiling is sized.
 
-    The Earth-fixed direction is recovered by turning the inertial separation
-    back by the sidereal angle. That leaves the precession-nutation rotation in
-    it, which is constant to a part in ``1e12`` over the second differenced here
-    and so cannot affect a *rate*; against the full frame transform the speed
-    agrees to a part in ``1e4``.
+    The Earth-fixed separation is the inertial one turned by skyfield's full
+    GCRS-to-ITRS rotation. The sidereal angle alone is not enough, even for a
+    rate: precession-nutation does not commute with the Earth's rotation, so
+    leaving it out tilts the spin axis the separation turns about and gives an
+    Earth-fixed source at geostationary radius a spurious ~4 m/s.
 
     It is not the orbital speed. Near the horizon most of a LEO satellite's
     motion is along the line of sight and does not fringe, and its range is
@@ -807,24 +804,20 @@ def satellite_range_and_speed(record, ants_itrf: NDArray, times_jd: NDArray):
     (float, float)
         Slant range in metres, and speed across the line of sight in m/s.
     """
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     centre = np.mean(np.asarray(ants_itrf, dtype=np.float64), axis=0)
 
     step = 0.5 / 86400.0
-    t_mid = float(np.mean(times_jd))
-    t3 = np.array([t_mid - step, t_mid, t_mid + step])
+    t_mid = times_jd[0] + np.mean(times_jd - times_jd[0])
+    t3 = t_mid + np.array([-step, 0.0, step])
 
     sep = (
         np.asarray(get_satellite_positions([record], t3))[0]
         - itrs_to_gcrs_sf(centre[None], t3)[0]
     )  # (3, 3), inertial
 
-    theta = np.deg2rad(gast_deg(t3))
-    cos, sin = np.cos(theta), np.sin(theta)
-    sep = np.stack(
-        [cos * sep[:, 0] + sin * sep[:, 1], -sin * sep[:, 0] + cos * sep[:, 1], sep[:, 2]],
-        axis=-1,
-    )
+    rot = np.reshape(itrs.rotation_at(skyfield_time(t3)), (3, 3, -1))
+    sep = np.einsum("ijt,tj->ti", rot, sep)
 
     ranges = np.linalg.norm(sep, axis=-1)
     look = sep / ranges[:, None]
@@ -1729,7 +1722,7 @@ def _no_offset_fit(taus, elevation, frames, n_freq, n_time, n_fine,
         b_coh=float("nan"),
         n_fine=int(n_fine),
         sigma_transverse_m=float(sigma_transverse_m),
-        times_sec=(np.asarray(times_jd, dtype=np.float64) - times_jd[0]) * 86400.0,
+        times_sec=(JulianDate(times_jd) - JulianDate(times_jd)[0]) * 86400.0,
         bl_chunk=0,
     )
 
@@ -1865,7 +1858,7 @@ def fit_time_offset(
     """
     vis = np.asarray(vis)
     ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     freqs = np.asarray(freqs, dtype=np.float64)
     a1 = np.asarray(a1)
     a2 = np.asarray(a2)
@@ -2120,7 +2113,7 @@ def _slant_range(record, ants_itrf: NDArray, t_jd: float) -> float:
     Earth-fixed slant range as well, without a second transform to get it.
     """
     centre = np.mean(np.asarray(ants_itrf, dtype=np.float64), axis=0)
-    t = np.atleast_1d(np.float64(t_jd))
+    t = JulianDate(t_jd).atleast_1d()
     sep = (
         np.asarray(get_satellite_positions([record], t))[0]
         - itrs_to_gcrs_sf(centre[None], t)[0]
@@ -2206,7 +2199,7 @@ def enumerate_candidates(
     if not records:
         return []
 
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
     elevations = np.asarray(get_satellite_elevations(records, times_jd, ants_itrf))
 
@@ -2620,7 +2613,7 @@ def search_candidates(
     """
     vis = np.asarray(vis)
     ants_itrf = np.asarray(ants_itrf, dtype=np.float64)
-    times_jd = np.asarray(times_jd, dtype=np.float64)
+    times_jd = JulianDate(times_jd)
     freqs = np.asarray(freqs, dtype=np.float64)
     a1 = np.asarray(a1)
     a2 = np.asarray(a2)
@@ -3017,7 +3010,9 @@ def write_search_results(
     return path
 
 
-def write_config_fragment(path: str, selection: dict, shifted_orbit_dir=None) -> str:
+def write_config_fragment(
+    path: str, selection: dict, shifted_orbit_dir=None
+) -> str:
     """Write the detections as a tabascal ``satellites`` section.
 
     The deliverable the issue asks for: the ``norad_ids`` list a run needs,
@@ -3079,7 +3074,9 @@ def write_config_fragment(path: str, selection: dict, shifted_orbit_dir=None) ->
         # own configs write it, while the section itself stays in block style.
         fh.write(
             yaml.safe_dump(
-                {"satellites": satellites}, sort_keys=False, default_flow_style=None
+                {"satellites": satellites},
+                sort_keys=False,
+                default_flow_style=None,
             )
         )
 
@@ -3188,7 +3185,7 @@ def _resolve_records(norad_ids, times_jd, extra_orbit_dir):
         )
 
     _, _, ids, records, n_real = fetch_orbital_elements(
-        times_jd=np.asarray(times_jd),
+        times_jd=JulianDate(times_jd),
         norad_ids=[int(n) for n in norad_ids],
         extra_orbit_dir=extra_orbit_dir,
     )
@@ -3247,7 +3244,7 @@ def light_curves_from_config(
     norad_ids = [int(n) for n in tab_config.norad_ids[:n_real]]
     records = list(tab_config.orbit_records[:n_real])
 
-    times_jd = np.asarray(tab_config.times_jd)
+    times_jd = JulianDate(tab_config.times_jd)
     ants_itrf = np.asarray(tab_config.ants_itrf)
 
     flags = getattr(tab_config, "flags", None)
@@ -3335,12 +3332,12 @@ def _times_jd(ms: dict) -> NDArray:
     UTC. :func:`tabascal.ms.read_ms` normalises whatever it finds onto UTC and
     reports that as ``times_jd``, leaving ``times_mjd`` on the declared scale so
     it stays comparable with the column itself. Rebuilding a Julian Date from
-    ``times_mjd`` here would undo that: skyfield, ``sgp4jax.itrf_to_gcrf`` and
+    ``times_mjd`` here would undo that: skyfield, ``sgp4jax``'s GCRF propagation and
     the elevation calls all read UTC, so on a TAI-declared MS the propagation,
     the fringe and the elevation cut would every one of them be 37 s out -- some
     285 km along a LEO satellite's ground track, and nothing raises.
     """
-    return np.asarray(ms["times_jd"])
+    return JulianDate(ms["times_jd"])
 
 
 def extract_light_curves_from_ms(
@@ -3416,12 +3413,24 @@ def extract_light_curves_from_ms(
     )
 
 
+def ms_phase_centre(ms: dict) -> dict:
+    """The phase centre dict of a :func:`tabascal.ms.read_ms` result.
+
+    The MS's ``ra`` and ``dec``, which ``read_ms`` has already converted to
+    J2000 from the frame ``FIELD::PHASE_DIR`` declares.
+    """
+    return {
+        "ra": float(ms["ra"]),
+        "dec": float(ms["dec"]),
+    }
+
+
 def _filter_visibilities(
     vis, ms, records, norad_ids, times_jd, data_col, corr,
     exclude_autos, min_elevation, max_mem_gb, offset_fit=None,
 ):
     """Shared tail of the two MS-backed drivers."""
-    phase_centre = {"ra": float(ms["ra"]), "dec": float(ms["dec"])}
+    phase_centre = ms_phase_centre(ms)
     ants_itrf = np.asarray(ms["ants_itrf"])
     flags = None if ms.get("flags") is None else np.asarray(ms["flags"])
 
