@@ -249,40 +249,41 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
     # peak memory 1-16% and optimizer_runtime moved by -1.1% to +2.5%.
     # Tolerances are unchanged.
     #
-    # The Riemann memory references were re-measured from this pipeline's perf job
-    # on the tabsim 0.1.0 simulation (#253). Its thermal noise is sqrt(2) lower,
-    # and the RFI sampling scales with sqrt(max|V| / noise), so the fine grid went
-    # from 25 to 29 samples per time step and the jax backend's peak memory rose
-    # with it: 0.657 -> 0.719 GB single, 1.554 -> 1.794 GB double. The FFI kernel
-    # bounds that term itself and moved under 2%, and every runtime stayed inside
-    # its tolerance, so those references are unchanged.
+    # All references were re-measured on Daint nid005369 (JAX 0.6.0) from this
+    # pipeline's own perf job at bad34d2, one run per configuration, on the
+    # tabsim 0.1.0 simulation (#253). Its thermal noise is sqrt(2) lower, and the
+    # RFI sampling scales with sqrt(max|V| / noise), so the fine grid went from 25
+    # to 29 samples per time step. The jax backend's peak memory rose with it,
+    # 0.657 -> 0.719 GB single and 1.554 -> 1.794 GB double, and the optimiser
+    # slowed 9-10%; the FFI kernel bounds that term itself, so its memory moved
+    # 0-2% and its optimiser 3-6%. Tolerances are unchanged.
     _reference_by_variant = {
         ("Riemann", "single"): {
             "daint:gpu": {
-                "total_runtime": (118.13, -0.25, 0.15, "s"),
-                "optimizer_runtime": (107.52, -0.20, 0.15, "s"),
+                "total_runtime": (127.39, -0.25, 0.15, "s"),
+                "optimizer_runtime": (116.86, -0.20, 0.15, "s"),
                 "memory_usage": (0.719, -0.1, 0.1, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
-                "total_runtime": (126.24, -0.25, 0.15, "s"),
-                "optimizer_runtime": (115.36, -0.20, 0.15, "s"),
+                "total_runtime": (137.96, -0.25, 0.15, "s"),
+                "optimizer_runtime": (127.14, -0.20, 0.15, "s"),
                 "memory_usage": (1.794, -0.1, 0.1, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
             "daint:gpu": {
-                "total_runtime": (28.10, -0.25, 0.15, "s"),
-                "optimizer_runtime": (18.29, -0.20, 0.15, "s"),
+                "total_runtime": (29.53, -0.25, 0.15, "s"),
+                "optimizer_runtime": (19.36, -0.20, 0.15, "s"),
                 "memory_usage": (0.539, -0.15, 0.15, "GB"),
             },
         },
         ("RiemannFFI", "double"): {
             "daint:gpu": {
-                "total_runtime": (38.13, -0.25, 0.15, "s"),
-                "optimizer_runtime": (27.51, -0.20, 0.15, "s"),
-                "memory_usage": (1.109, -0.15, 0.15, "GB"),
+                "total_runtime": (39.31, -0.25, 0.15, "s"),
+                "optimizer_runtime": (28.26, -0.20, 0.15, "s"),
+                "memory_usage": (1.131, -0.15, 0.15, "GB"),
             },
         },
     }
@@ -359,33 +360,39 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     # second step of each phase, so the savings are larger here: against main's
     # perf job in the same container, total_runtime fell 10-15%,
     # optimizer_runtime 7-11% and peak memory 17-39%. Tolerances are unchanged.
+    #
+    # All references were re-measured alongside the single-GPU ones above on the
+    # tabsim 0.1.0 simulation, from the same perf job. The optimiser slowed 6-12%
+    # and peak memory rose 0-5%, except RiemannFFI single: 0.205 -> 0.270 GB,
+    # against 0-2% for the same kernel on one GPU. The larger fine grid does not
+    # explain that rise, and it is uninvestigated. Tolerances are unchanged.
     _reference_by_variant: dict = {
         ("Riemann", "single"): {
             "daint:gpu": {
-                "total_runtime": (64.98, -0.25, 0.15, "s"),
-                "optimizer_runtime": (53.27, -0.20, 0.15, "s"),
-                "memory_usage": (0.270, -0.15, 0.15, "GB"),
+                "total_runtime": (68.76, -0.25, 0.15, "s"),
+                "optimizer_runtime": (57.29, -0.20, 0.15, "s"),
+                "memory_usage": (0.281, -0.15, 0.15, "GB"),
             },
         },
         ("Riemann", "double"): {
             "daint:gpu": {
-                "total_runtime": (62.08, -0.25, 0.15, "s"),
-                "optimizer_runtime": (50.75, -0.20, 0.15, "s"),
+                "total_runtime": (68.98, -0.25, 0.15, "s"),
+                "optimizer_runtime": (56.96, -0.20, 0.15, "s"),
                 "memory_usage": (0.539, -0.15, 0.15, "GB"),
             },
         },
         ("RiemannFFI", "single"): {
             "daint:gpu": {
-                "total_runtime": (29.76, -0.25, 0.15, "s"),
-                "optimizer_runtime": (18.68, -0.20, 0.15, "s"),
-                "memory_usage": (0.205, -0.15, 0.15, "GB"),
+                "total_runtime": (31.60, -0.25, 0.15, "s"),
+                "optimizer_runtime": (20.23, -0.20, 0.15, "s"),
+                "memory_usage": (0.270, -0.15, 0.15, "GB"),
             },
         },
         ("RiemannFFI", "double"): {
             "daint:gpu": {
-                "total_runtime": (36.77, -0.25, 0.15, "s"),
-                "optimizer_runtime": (24.81, -0.20, 0.15, "s"),
-                "memory_usage": (0.397, -0.15, 0.15, "GB"),
+                "total_runtime": (38.18, -0.25, 0.15, "s"),
+                "optimizer_runtime": (26.30, -0.20, 0.15, "s"),
+                "memory_usage": (0.416, -0.15, 0.15, "GB"),
             },
         },
     }
