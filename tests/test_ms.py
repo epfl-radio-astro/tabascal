@@ -287,8 +287,11 @@ def _in_memory_ms(times, n_ant=3, n_freq=2, int_time=8.0):
                 "CHAN_WIDTH": column(np.full((1, n_freq), 1.0e6), ["row", "chan"]),
             }
         ),
-        "SOURCE": xr.Dataset(
-            data_vars={"DIRECTION": column([[0.35, -0.5]], ["row", "radec"])}
+        "FIELD": xr.Dataset(
+            data_vars={
+                "PHASE_DIR": column([[[0.35, -0.5]]], ["row", "poly", "radec"]),
+                "NUM_POLY": column([0], ["row"]),
+            }
         ),
         "DATA_DESCRIPTION": xr.Dataset(
             data_vars={
@@ -302,6 +305,10 @@ def _in_memory_ms(times, n_ant=3, n_freq=2, int_time=8.0):
     }
 
     return partition, subtables
+
+
+#: What ``read_phase_centre`` reads beside the in-memory ``FIELD`` subtables.
+FIELD_KEYWORDS = {"PHASE_DIR": {"MEASINFO": {"type": "direction", "Ref": "J2000"}}}
 
 
 @pytest.fixture
@@ -322,14 +329,85 @@ def run_reader(monkeypatch):
             "tabascal.ms.xds_from_ms",
             lambda path, column_keywords=False: ([partition], keywords),
         )
-        monkeypatch.setattr(
-            "tabascal.ms.xds_from_table",
-            lambda path, group_cols=None: [subtables[path.split("::")[-1]]],
-        )
+        def fake_from_table(path, group_cols=None, column_keywords=False):
+            found = [subtables[path.split("::")[-1]]]
+            return (found, FIELD_KEYWORDS) if column_keywords else found
+
+        monkeypatch.setattr("tabascal.ms.xds_from_table", fake_from_table)
 
         return read_ms("in-memory.ms")
 
     return _run
+
+
+@pytest.mark.parametrize("scale", ["UTC", "TAI", "IAT", "TT", "TDT", "ET", "TDB", "UT1", "UT"])
+@pytest.mark.parametrize("unit", ["s", "d"])
+def test_ms_time_keeps_submicrosecond_precision(run_reader, scale, unit):
+    from tabascal.time import skyfield_time, timescale, TIME_SCALES
+
+    seconds = 60676 * 86400.0 + np.array([0.000007, 2.000013, 4.000019])
+    values = seconds if unit == "s" else seconds / 86400.0
+    data = run_reader(values, keywords=_keywords(scale, units=[unit]))
+    fraction = ((seconds - 60676 * 86400.0) / 86400.0 if unit == "s"
+                else values - 60676) + 0.5
+    ts = timescale()
+    if scale in ("UT", "UT1"):
+        delta_t = ts.ut1_jd(2460676.0 + fraction).delta_t
+        expected = ts.tt_jd(2460676.0, fraction + delta_t / 86400.0)
+    else:
+        expected = getattr(ts, TIME_SCALES[scale.lower()])(2460676.0, fraction)
+    actual = skyfield_time(data["times_jd"])
+    error_s = ((actual.whole - expected.whole)
+               + (actual.tt_fraction - expected.tt_fraction)) * 86400.0
+    np.testing.assert_allclose(error_s, 0.0, rtol=0, atol=1e-8)
+
+
+@pytest.mark.parametrize("unit", [None, "s", "d"])
+def test_preflight_matches_reader_just_before_a_leap_second(run_reader, monkeypatch, unit):
+    from tabascal import orbit_config
+
+    times = np.array([4989945635.99999])  # TAI, just before 23:59:60 UTC.
+    if unit == "d":
+        times = times / 86400.0
+    monkeypatch.setattr(
+        orbit_config, "_ms_times_and_scale",
+        lambda ms: (np.repeat(times, 3), "tai", unit),
+    )
+    data = run_reader(times, keywords=_keywords("TAI", units=[unit] if unit else None))
+    assert orbit_config.ms_observation_epoch_jd("in-memory.ms") == (
+        orbit_config.observation_epoch_jd(data["times_jd"])
+    )
+
+
+@pytest.mark.parametrize("double", [False, True])
+def test_ms_fine_grid_has_no_epoch_offset(run_reader, double):
+    from types import SimpleNamespace
+    import jax
+    from tabascal.config import TabConfig
+    from tabascal.time import skyfield_time, timescale
+
+    seconds = 60676 * 86400.0 + 0.000007 + 2 * np.arange(120)
+    data = run_reader(seconds, keywords=_keywords("UTC", units=["s"]))
+    config = SimpleNamespace(
+        n_time=120, n_freq=1, n_int_time=7, n_int_freq=1,
+        args={"rfi": {"freq_pad_factor": 2, "time_pad_factor": 2}},
+        freqs=np.array([1.227e9]), chan_width=1.0, int_time=2.0,
+        times=np.arange(120) * 2.0, times_jd=data["times_jd"],
+    )
+    previous = jax.config.read("jax_enable_x64")
+    try:
+        jax.config.update("jax_enable_x64", double)
+        TabConfig._set_freqs_times(config)
+    finally:
+        jax.config.update("jax_enable_x64", previous)
+    offsets = (np.arange(840) - 3) * (2.0 / 7)
+    expected = timescale()._utc_jd(
+        2460676.0, 0.5 + ((seconds[0] - 60676 * 86400.0) + offsets) / 86400.0
+    )
+    actual = skyfield_time(config.times_jd_fine)
+    error_s = ((actual.whole - expected.whole)
+               + (actual.tt_fraction - expected.tt_fraction)) * 86400.0
+    np.testing.assert_allclose(error_s, 0.0, rtol=0, atol=1e-8)
 
 
 class TestTimeUnits:
@@ -795,7 +873,7 @@ class TestDeclaredTimeScale:
 
     The declaration is honoured by normalising to UTC once, here at the
     boundary, rather than by threading a scale through the trajectory maths.
-    Everything past ``read_ms`` -- skyfield, ``sgp4jax.itrf_to_gcrf`` (which has
+    Everything past ``read_ms`` -- skyfield, ``sgp4jax``'s GCRF propagation (which has
     no scale concept at all) and the TLE epoch checks -- reads UTC Julian Dates,
     so one conversion covers all of them.
     """
@@ -1879,7 +1957,12 @@ def _channel_ms(n_ant=N_ANT_C, n_time=N_TIME_C, n_freq=N_FREQ_C, n_corr=N_CORR_C
         }
     )
     src = xr.Dataset(
-        {"DIRECTION": (("row", "radec"), da.from_array(np.deg2rad([[30.0, -30.0]])))}
+        {
+            "PHASE_DIR": (
+                ("row", "poly", "radec"), da.from_array(np.deg2rad([[[30.0, -30.0]]]))
+            ),
+            "NUM_POLY": (("row",), da.from_array(np.array([0]))),
+        }
     )
 
     return xds, ant, spec, src, freqs, widths
@@ -1893,12 +1976,12 @@ def channel_ms(monkeypatch):
         xds, ant, spec, src, freqs, widths = _channel_ms(**kwargs)
         import tabascal.ms as ms_mod
 
-        tables = {"::ANTENNA": [ant], "::SPECTRAL_WINDOW": [spec], "::SOURCE": [src]}
+        tables = {"::ANTENNA": [ant], "::SPECTRAL_WINDOW": [spec], "::FIELD": [src]}
 
-        def fake_from_table(path, group_cols=None):
+        def fake_from_table(path, group_cols=None, column_keywords=False):
             for suffix, value in tables.items():
                 if path.endswith(suffix):
-                    return value
+                    return (value, FIELD_KEYWORDS) if column_keywords else value
             raise AssertionError(f"unexpected subtable {path}")
 
         monkeypatch.setattr(

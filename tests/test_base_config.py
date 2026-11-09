@@ -480,6 +480,7 @@ class TestTheGainsSectionHasNoCorrelationLengths:
         shipped = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))
         assert set(shipped["gains"]) == {
             "init",
+            "fit",
             "ref_ant",
             "fix_flux_scale",
             "amp_mean",

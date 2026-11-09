@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from functools import lru_cache
 
+import erfa
 import numpy as np
 from skyfield.api import load
 
@@ -8,6 +9,76 @@ DAY_SECS = 24 * 3600.0  # Seconds in a day
 
 _UNIX_EPOCH = datetime(1970, 1, 1)  # naive, UTC
 _UNIX_EPOCH_JD = 2440587.5          # Julian Date of 1970-01-01T00:00:00 UTC
+
+
+class JulianDate:
+    """Julian Dates held as whole days and f64 fractions, with array-shaped parts.
+
+    Indexing, adding day offsets and subtracting dates preserve the split.
+    ``np.asarray`` and ``float`` provide the legacy, rounded JD for display or
+    external interfaces; physics must retain this object or use its two parts.
+    Plain JD arrays remain accepted, but their lost precision is unrecoverable.
+    """
+
+    __array_ufunc__ = None  # Let ndarray + date use the precise __radd__.
+
+    def __init__(self, whole, fraction=0.0):
+        if isinstance(whole, JulianDate):
+            fraction = whole.fraction + fraction
+            whole = whole.whole
+        whole = np.asarray(whole, dtype=float)
+        integer = np.floor(whole)
+        fraction = (whole - integer) + np.asarray(fraction, dtype=float)
+        carry = np.floor(fraction)
+        self.whole, self.fraction = np.broadcast_arrays(integer + carry, fraction - carry)
+
+    @classmethod
+    def from_mjd(cls, days):
+        days = np.asarray(days, dtype=float)
+        whole = np.floor(days)
+        return cls(whole + 2400000.0, (days - whole) + 0.5)
+
+    @classmethod
+    def from_mjd_seconds(cls, seconds):
+        seconds = np.asarray(seconds, dtype=float)
+        days = np.floor(seconds / DAY_SECS)
+        return cls(days + 2400000.0, 0.5 + (seconds - days * DAY_SECS) / DAY_SECS)
+
+    @property
+    def shape(self):
+        return self.whole.shape
+
+    def __len__(self):
+        return len(self.whole)
+
+    def __getitem__(self, index):
+        return JulianDate(self.whole[index], self.fraction[index])
+
+    def __array__(self, dtype=None, copy=None):
+        return np.asarray(self.whole + self.fraction, dtype=dtype)
+
+    def __float__(self):
+        return float(self.whole + self.fraction)
+
+    def __add__(self, days):
+        return JulianDate(self.whole, self.fraction + days)
+
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        if isinstance(other, JulianDate):
+            return (self.whole - other.whole) + (self.fraction - other.fraction)
+        return self + (-np.asarray(other))
+
+    def __rsub__(self, other):
+        return JulianDate(other) - self
+
+    def ravel(self):
+        return JulianDate(self.whole.ravel(), self.fraction.ravel())
+
+    def atleast_1d(self):
+        return JulianDate(np.atleast_1d(self.whole), np.atleast_1d(self.fraction))
+
 
 def secs_to_days(seconds):
 
@@ -20,6 +91,9 @@ def days_to_secs(days):
 
 
 def jd_to_mjd(jd):
+
+    if isinstance(jd, JulianDate):
+        return (jd.whole - 2400000.5) + jd.fraction
 
     mjd = jd - 2400000.5
 
@@ -40,7 +114,7 @@ def jd_to_datetime(jd):
     handling), which is all that is needed for TLE epoch dates and timestamps.
     """
 
-    return _UNIX_EPOCH + timedelta(days=float(jd) - _UNIX_EPOCH_JD)
+    return _UNIX_EPOCH + timedelta(days=float(JulianDate(jd) - JulianDate(_UNIX_EPOCH_JD)))
 
 
 def datetime_to_jd(dt):
@@ -100,7 +174,7 @@ _UNSUPPORTED_SCALES = {
 }
 
 #: Scales whose skyfield constructor takes only a single Julian Date, so the
-#: whole/fraction split cannot be carried through to it.
+#: whole/fraction split needs a separate Delta T lookup.
 _UNSPLIT_SCALES = frozenset({"ut1", "ut"})
 
 
@@ -121,20 +195,21 @@ def skyfield_time(times_jd, scale: str = "utc"):
     default, not an assumption: an MS may declare ``TAI`` or another scale, and
     callers reading one should pass what it says rather than relying on this.
 
-    The Julian Date is split into whole and fractional parts before being handed
-    to skyfield, to preserve full f64 precision: a JD's ~2.5e6 day magnitude
-    leaves f64 only ~5e-10 days of resolution on the value as a whole. ``ut1`` is
-    the exception — skyfield's ``ut1_jd`` takes no fraction argument, so that one
-    scale is passed the recombined Julian Date and keeps only ~5e-10 days
-    (~40 us) of resolution.
+    A :class:`JulianDate` carries the whole and fraction separately from the
+    MS reader onward, so skyfield receives the original instant without the
+    ~40 us quantisation of a single f64 JD. Plain JD arrays are still accepted.
+    For UT1, ``ut1_jd`` supplies Delta T at the nearest representable JD;
+    we apply that slowly varying correction to the original split date. Only
+    the Delta T lookup is rounded, not the observation instant. Its accuracy
+    still depends on skyfield's Earth-orientation model.
 
     For ``utc`` this uses skyfield's private ``_utc_jd``, which is why
     ``pyproject.toml`` pins ``skyfield>=1.49,<2``. Keeping it to this one call
-    site means the pin protects a single line.
+    site (and the leap-second lookup below) keeps those private calls bounded.
 
     Parameters
     ----------
-    times_jd : array_like
+    times_jd : JulianDate or array_like
         Observation times as Julian Dates on ``scale``.
     scale : str, optional
         Time scale the Julian Dates are on, as named in an MS ``MEASINFO``
@@ -165,13 +240,15 @@ def skyfield_time(times_jd, scale: str = "utc"):
             f"Unsupported time scale {scale!r}. Supported: {sorted(TIME_SCALES)}."
         )
 
-    times_jd = np.asarray(times_jd, dtype=float)
-    jd_whole = np.floor(times_jd)
-    jd_frac = times_jd - jd_whole
+    dates = JulianDate(times_jd)
+    jd_whole, jd_frac = dates.whole, dates.fraction
 
     constructor = getattr(timescale(), TIME_SCALES[key])
     if key in _UNSPLIT_SCALES:
-        return constructor(times_jd)
+        delta_t = constructor(np.asarray(dates)).delta_t
+        t = timescale().tt_jd(jd_whole, jd_frac + delta_t / DAY_SECS)
+        t.ut1_fraction = jd_frac
+        return t
 
     return constructor(jd_whole, jd_frac)
 
@@ -184,17 +261,15 @@ def utc_offset_days(times_jd, scale: str = "utc"):
     of days, and it is computed **per sample**: an observation straddling a leap
     second is offset by 36 s on one side of it and 37 s on the other.
 
-    It is read out of the whole/fraction pair skyfield already holds, rather than
-    by differencing two Julian Dates or by reconstructing a UTC date from an
-    accessor. Both of those would work at the Julian Date's own ~2.5e6 magnitude,
-    where f64 resolves only ~40 us; the whole days cancel exactly and the
-    fractions are O(1), so the offset itself comes out exact to picoseconds. The
-    Julian Date it is then added to still resolves only to that ~40 us -- see
-    :func:`to_utc_jd`.
+    The offset is obtained from skyfield's split TAI date and leap seconds at
+    that instant. Whole days cancel separately, keeping the calculation at
+    fractional-day magnitude even across a change in the UTC offset.
+    Instants inside an inserted leap second are rejected: a uniform UTC day
+    count cannot represent ``23:59:60`` or its fractional seconds.
 
     Parameters
     ----------
-    times_jd : array_like
+    times_jd : JulianDate or array_like
         Julian Dates as the source declares them, on ``scale``.
     scale : str, optional
         Time scale the Julian Dates are on; see :func:`skyfield_time`.
@@ -205,17 +280,16 @@ def utc_offset_days(times_jd, scale: str = "utc"):
         The offset in days, one per input time. Exactly zero for ``utc``.
     """
 
-    times_jd = np.asarray(times_jd, dtype=float)
-
+    dates = JulianDate(times_jd)
     if str(scale).strip().lower() == "utc":
-        return np.zeros_like(times_jd)
+        return np.zeros(dates.shape)
 
-    declared = skyfield_time(times_jd, scale)
-    as_utc = skyfield_time(times_jd, "utc")
-
-    return (declared.whole - as_utc.whole) + (
-        declared.tt_fraction - as_utc.tt_fraction
-    )
+    declared = skyfield_time(dates, scale)
+    if np.any(declared.utc.second >= 60.0):
+        raise ValueError("Cannot convert an instant inside an inserted leap second "
+                         "to a uniform UTC day count (23:59:60 is not representable).")
+    utc = JulianDate(declared.whole, declared.tai_fraction - declared._leap_seconds() / DAY_SECS)
+    return utc - dates
 
 
 def to_utc_jd(times_jd, scale: str = "utc"):
@@ -223,26 +297,19 @@ def to_utc_jd(times_jd, scale: str = "utc"):
 
     tabascal reads times on whatever scale their source declares and works in
     UTC everywhere after that: :func:`skyfield_time` defaults to it, the epoch
-    checks compare against it, and ``sgp4jax.itrf_to_gcrf`` has no scale concept
+    checks compare against it, and ``sgp4jax``'s GCRF propagation has no scale concept
     to be told anything else. Converting once, where the times are read, puts all
     of them on the instant the source actually named without a ``scale``
     argument threaded through any of them.
 
-    ``utc`` returns the input unchanged -- bit-identical, not merely close, since
-    no arithmetic is done at all. The other scales have :func:`utc_offset_days`
-    added to the day fraction, with the whole day carried across separately.
-
-    That does **not** make the answer picosecond-accurate. The return value is a
-    single f64 Julian Date, and near 2.5e6 days those are spaced ~40 us apart:
-    that is the floor on any JD, before or after conversion, and no arrangement
-    of the arithmetic beats it. What the split buys is that the conversion costs
-    nothing *beyond* that floor -- the offset itself is exact to picoseconds,
-    being a difference of O(1) fractions, and recombining rounds once. Rebuilding
-    the UTC date from a skyfield accessor would spend the floor a second time.
+    ``utc`` returns the input unchanged. For :class:`JulianDate` inputs, the
+    scale offset is added to the fraction and the result remains split. Plain
+    JD arrays retain their legacy return type and its ~40 us resolution;
+    use split dates to preserve precision through the conversion.
 
     Parameters
     ----------
-    times_jd : array_like
+    times_jd : JulianDate or array_like
         Julian Dates as the source declares them, on ``scale``.
     scale : str, optional
         Time scale the Julian Dates are on; see :func:`skyfield_time`. Defaults
@@ -250,23 +317,21 @@ def to_utc_jd(times_jd, scale: str = "utc"):
 
     Returns
     -------
-    np.ndarray
-        The same instants, as UTC Julian Dates.
+    JulianDate or np.ndarray
+        The same instants, as UTC Julian Dates, retaining the input representation.
 
     Raises
     ------
     ValueError
-        If ``scale`` is not one tabascal can interpret.
+        If ``scale`` is not one tabascal can interpret, or a non-UTC input names
+        an instant inside an inserted leap second (``23:59:60``).
     """
 
-    times_jd = np.asarray(times_jd, dtype=float)
-
-    if str(scale).strip().lower() == "utc":
-        return times_jd
-
-    whole = np.floor(times_jd)
-
-    return whole + ((times_jd - whole) + utc_offset_days(times_jd, scale))
+    split = isinstance(times_jd, JulianDate)
+    dates = JulianDate(times_jd)
+    if str(scale).strip().lower() != "utc":
+        dates = dates + utc_offset_days(dates, scale)
+    return dates if split else np.asarray(dates)
 
 
 def to_utc_mjd(times_mjd, scale: str = "utc"):
@@ -287,9 +352,8 @@ def to_utc_mjd(times_mjd, scale: str = "utc"):
     :func:`to_utc_jd`: an MJD near 6e4 is spaced sub-microsecond (~0.6 us) apart
     in f64, where a Julian Date near 2.5e6 is spaced ~40 us apart, so the round
     trip out to a JD and back would round twice at the coarser magnitude -- on a
-    UTC MS, for a conversion that is not even needed. The offset *lookup* still goes through a
-    Julian Date, which costs nothing: it selects which leap-second era the time
-    falls in, and 40 us only changes that within 40 us of a leap second.
+    UTC MS, for a conversion that is not even needed. The offset lookup uses
+    a split JD and preserves the MJD's precision.
 
     Parameters
     ----------
@@ -315,7 +379,7 @@ def to_utc_mjd(times_mjd, scale: str = "utc"):
     if str(scale).strip().lower() == "utc":
         return times_mjd
 
-    return times_mjd + utc_offset_days(mjd_to_jd(times_mjd), scale)
+    return times_mjd + utc_offset_days(JulianDate.from_mjd(times_mjd), scale)
 
 
 def gast_deg(times_jd, scale: str = "utc"):
@@ -326,7 +390,7 @@ def gast_deg(times_jd, scale: str = "utc"):
 
     Parameters
     ----------
-    times_jd : array_like
+    times_jd : JulianDate or array_like
         Observation times as Julian Dates on ``scale``.
     scale : str, optional
         Time scale the Julian Dates are on; see :func:`skyfield_time`.
@@ -340,3 +404,125 @@ def gast_deg(times_jd, scale: str = "utc"):
     gast = skyfield_time(times_jd, scale).gast
 
     return np.asarray(gast) * 15.0  # GAST hours → degrees
+
+
+def apparent_radec_of_date(ra_deg, dec_deg, times_jd, scale: str = "utc"):
+    """A J2000 (ICRS) direction as the apparent geocentric RA/Dec of date.
+
+    This is the direction a correlator tracks for a J2000 phase centre, on the
+    true equator and equinox of date, and so the one to pair with
+    :func:`gast_deg`: ``GAST - ra`` is then its Greenwich hour angle. It applies
+    annual aberration (up to 20.5 arcsec) and then frame bias, precession and
+    nutation (about 0.25 deg by 2019).
+
+    Diurnal aberration (at most 0.32 arcsec, and common to the whole array) and
+    gravitational light deflection (a few milliarcseconds away from the Sun) are
+    not applied. The phase centre is a direction at infinity, so there is no
+    parallax either.
+
+    The Earth's barycentric velocity is the analytic ``erfa.epv00`` series,
+    good to a few mm/s, or micro-arcseconds of aberration, with no ephemeris
+    file to download. The bias-precession-nutation matrix is skyfield's, the
+    same one :func:`gast_deg` and skyfield's ITRS-to-GCRS rotation use, so the
+    tracked direction and the antenna positions share one frame.
+
+    Parameters
+    ----------
+    ra_deg, dec_deg : float
+        The J2000 direction in degrees, as a Measurement Set records it.
+    times_jd : JulianDate or array_like
+        Observation times as Julian Dates on ``scale``.
+    scale : str, optional
+        Time scale the Julian Dates are on; see :func:`skyfield_time`.
+
+    Returns
+    -------
+    (np.ndarray, np.ndarray)
+        Apparent RA in ``[0, 360)`` and Dec, in degrees, one per input time.
+    """
+
+    t = skyfield_time(JulianDate(times_jd).atleast_1d(), scale)
+
+    s_app = erfa.ab(_unit_vector(ra_deg, dec_deg), *_annual_aberration(t))
+    s_date = np.einsum("ijt,tj->ti", np.reshape(t.M, (3, 3, -1)), s_app)
+
+    return _radec_deg(s_date)
+
+
+#: Direction frames a Measurement Set may declare for its phase centre that
+#: :func:`icrs_from_frame` can turn into a fixed ICRS direction.
+PHASE_CENTRE_FRAMES = ("J2000", "ICRS", "B1950", "GALACTIC")
+
+
+def icrs_from_frame(ra_deg, dec_deg, frame: str):
+    """A direction declared in ``frame`` as ICRS, which tabascal calls J2000.
+
+    ``frame`` is one of :data:`PHASE_CENTRE_FRAMES`, as a Measurement Set's
+    ``MEASINFO`` ``Ref`` spells it:
+
+    - ``ICRS`` is returned as it is.
+    - ``J2000``, the FK5 mean equator and equinox of J2000, has the ~20 mas frame
+      bias removed (``erfa.bp06``).
+    - ``B1950`` is FK4 at epoch B1950.0 with no proper motion, moved to FK5 J2000
+      by ``erfa.fk45z`` and then as ``J2000``.
+    - ``GALACTIC`` goes through ``erfa.g2icrs``.
+
+    ``APP`` is refused: a fixed apparent direction cannot be converted once
+    to a fixed ICRS direction and preserve its tracking over the observation.
+
+    Returns
+    -------
+    (float, float)
+        ICRS RA in ``[0, 360)`` and Dec, in degrees.
+
+    Raises
+    ------
+    ValueError
+        If ``frame`` is not one of :data:`PHASE_CENTRE_FRAMES`.
+    """
+
+    key = str(frame).strip().upper()
+    if key not in PHASE_CENTRE_FRAMES:
+        raise ValueError(
+            f"Direction frame {frame!r} is not one tabascal can turn into a fixed "
+            f"J2000 direction. Supported: {list(PHASE_CENTRE_FRAMES)}."
+        )
+
+    if key == "ICRS":
+        return float(ra_deg) % 360.0, float(dec_deg)
+    if key == "GALACTIC":
+        ra, dec = erfa.g2icrs(np.deg2rad(float(ra_deg)), np.deg2rad(float(dec_deg)))
+        return float(np.rad2deg(ra)) % 360.0, float(np.rad2deg(dec))
+
+    if key == "B1950":
+        ra, dec = erfa.fk45z(np.deg2rad(float(ra_deg)), np.deg2rad(float(dec_deg)), 1950.0)
+        ra_deg, dec_deg = np.rad2deg(ra), np.rad2deg(dec)
+
+    rb = erfa.bp06(2451545.0, 0.0)[0]  # ICRS -> FK5 J2000 frame bias
+    ra, dec = _radec_deg((rb.T @ _unit_vector(ra_deg, dec_deg))[None])
+
+    return float(ra[0]), float(dec[0])
+
+
+def _unit_vector(ra_deg, dec_deg):
+    ra, dec = np.deg2rad(float(ra_deg)), np.deg2rad(float(dec_deg))
+
+    return np.array([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
+
+
+def _radec_deg(s):
+    """Unit vectors ``(n, 3)`` to RA in ``[0, 360)`` and Dec, in degrees."""
+
+    ra = np.rad2deg(np.arctan2(s[:, 1], s[:, 0])) % 360.0
+    dec = np.rad2deg(np.arcsin(np.clip(s[:, 2], -1.0, 1.0)))
+
+    return ra, dec
+
+
+def _annual_aberration(t):
+    """``erfa.ab``'s velocity, Sun distance and Lorentz factor for skyfield times."""
+
+    pvh, pvb = erfa.epv00(t.whole, t.tdb_fraction)
+    v = pvb["v"] / erfa.DC  # barycentric velocity in units of c
+
+    return v, np.linalg.norm(pvh["p"], axis=-1), np.sqrt(1.0 - np.sum(v * v, axis=-1))

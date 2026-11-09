@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 
 from tabascal.components.ast_signal import FixedDiscreteSky, read_oskar_sky_model
@@ -268,10 +269,18 @@ def test_matches_tabsim_astro_vis(exact_rtol):
     freqs = np.array([1.0e8])
     uvw = np.array([[[120.0, -80.0, 45.0], [-30.0, 200.0, -60.0]]])  # (n_time, n_bl, 3)
 
-    lmn = tabsim_lmn(np.array([ra]), np.array([dec]), np.array([ra0, dec0]))
-    expected = np.asarray(
-        astro_vis(jnp.array([[[flux]]]), jnp.array(uvw), lmn, jnp.array(freqs))
-    )  # (n_time, n_bl, n_freq)
+    # tabsim needs x64 for its geometry and phase, and its visibilities default to
+    # single precision; the reference is computed in double either way.
+    was_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        lmn = tabsim_lmn(np.array([ra]), np.array([dec]), np.array([ra0, dec0]))
+        expected = np.asarray(
+            astro_vis(jnp.array([[[flux]]]), jnp.array(uvw), lmn, jnp.array(freqs),
+                      visibility_precision="double")
+        )  # (n_time, n_bl, n_freq)
+    finally:
+        jax.config.update("jax_enable_x64", was_x64)
 
     cfg = make_sky_config(
         [{"ra": ra, "dec": dec, "I": flux}], uvw=uvw, freqs=freqs, ra0=ra0, dec0=dec0

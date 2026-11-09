@@ -230,7 +230,7 @@ The names are `adabelief`, `adam`, `adamw`, `amsgrad`, `nadam`, `radam`, `adamax
 
 ### Step-size schedule
 
-With `dual_run` the fit runs in two phases, each with a new optimiser: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments and compiles its step again. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: one compiled step, and moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read.
+With `dual_run` the fit runs in two phases, each starting the optimiser afresh: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments; only its step size changes, so it reuses the first phase's compiled step. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read.
 
 ```yaml
 opt:
@@ -289,7 +289,7 @@ The file is written once, at the end of the run, and holds one array per key, ea
 | Key | Present | Meaning |
 |---|---|---|
 | `loss` | always | The optimiser's own loss, the negative log joint divided by `vis_obs.size` |
-| `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched. The first iteration includes the step's compilation, and with `dual_run` so does the first iteration of the second phase; with `schedule` there is no second compilation. A checkpoint write or a `stop` check after a step is not in that step's time but in the next one's, if another step runs; neither after the last step, nor writing the trace file, is in any |
+| `time_s` | always | Seconds from the start of the first iteration to the end of this one, measured after the device sync that reads the loss — so it bounds work completed, not work dispatched. The first iteration includes the step's compilation; the step compiles once per fit, with `dual_run` or `schedule`. A checkpoint write or a `stop` check after a step is not in that step's time but in the next one's, if another step runs; neither after the last step, nor writing the trace file, is in any |
 | `chi2` | with `trace_path` | Reduced chi-squared of the observed visibilities, flag-masked and weighted by the resolved noise, exactly as the value printed at init and opt |
 | `vis_ast_nrmse` | with `trace_path` and truth | RMSE of the recovered astronomical visibilities against the simulation truth, over the representative noise |
 | `vis_rfi_nrmse` | with `trace_path` and truth | RMSE of the recovered RFI visibilities against the simulation truth, over the representative noise |
@@ -678,6 +678,7 @@ The `gains` section defines the prior over the antenna gains and how they are in
 ```yaml
 gains:
   init: prior
+  fit: complex
   amp_mean: 1.0
   amp_std: 10
   phase_mean: 0.0
@@ -691,7 +692,7 @@ gains:
 * `amp_std`: The standard deviation of the prior over the gain amplitude, **as a percentage** of `amp_mean`. `amp_std: 10` with `amp_mean: 1.0` is a 10 % spread. `null` defaults to **20**, a 20 % spread.
 * `phase_mean`: The mean of the prior over the gain phase, in **radians**.
 * `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**. `null` defaults to **180** — half a turn, which is effectively uniform over the circle. See below.
-* `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
+* `fit`, `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
 
 **`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. A zero width is an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason.
 
@@ -743,12 +744,15 @@ gains:
 
 Both directions are removed from the **parameters**, not just from the value they map to. Writing $n_\text{ant}$ amplitude parameters and subtracting their mean would give the same gains and the same prior, but would leave the all-ones direction of that latent space invisible to every visibility: flat in the likelihood however much data there is, curved only by the prior. Such a coordinate wrecks the conditioning of the optimisation and makes a likelihood-only Fisher matrix singular, so there is no such coordinate.
 
-The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the **median** of that prior — its centre in log space, and the value the fit starts at — rather than its arithmetic mean, which is the slightly larger $\texttt{amp\_mean} \cdot e^{\sigma^2/2}$ for $\sigma$ the log-space spread. And it is that **only when the flux scale is free**: under the zero-sum gauge the geometric mean of $|g|$ is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so. A value that is not positive and finite is an error rather than a default.
+The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the **median** of that prior — its centre in log space, and the value the fit starts at — rather than its arithmetic mean, which is the slightly larger $\texttt{amp\_mean} \cdot e^{\sigma^2/2}$ for $\sigma$ the log-space spread. And it is that **only when the flux scale is free**: under the zero-sum gauge the geometric mean of $|g|$ is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so when the amplitude is fitted. A value that is not positive and finite is an error rather than a default.
 
+* `fit`: Which part of the gain is fitted: `complex` (the default; `both` is the same), `amplitude` or `phase`. A partial fit has $n_\text{ant} - 1$ parameters ($n_\text{ant}$ for amplitudes with the flux scale freed).
+
+  The part left out is **held at the measured gain of `init`**, after the projection into the gauge described below. So `fit: amplitude` with `init: caltable.G` keeps the table's phases and solves for the amplitudes, and `fit: phase` the reverse. With `init: prior` (or unset) the held part is **unity** — $|g_p| = 1$, or a zero phase — whatever `amp_mean` or `phase_mean` say; those set only where a *fitted* part starts. Holding a part also lifts the rules that exist only for fitting it: an amplitude-only fit has no free phase, so it accepts an array the unflagged baselines split into groups, and a phase-only fit has no free amplitude, so `fix_flux_scale: false` needs no fixed-flux sky there; it only decides whether a measured amplitude keeps its absolute scale.
 * `ref_ant`: The antenna whose phase is pinned to 0. `null` (the default) selects the first antenna with any unflagged data. An antenna every one of whose baselines is flagged everywhere is not constrained by any visibility, so it cannot be the reference the others are measured against, and naming one explicitly is an error rather than a silently unpinned fit.
 
-  **One reference pins one connected group.** A phase is measured relative to another antenna's along a chain of baselines that carry data, so if the unflagged baselines split the array into groups that share no baseline, pinning `ref_ant` in one group leaves every other group's overall phase unconstrained. Setup computes the connected components of the unflagged baseline graph and **stops**, naming the groups, rather than fitting a model with a flat direction in it. Fit the groups separately, or flag the smaller ones out of the run. Heavy flagging is fine as long as what survives still connects the array.
-* `fix_flux_scale`: Whether to keep the zero-sum log-amplitude constraint above. `true` is the default. `false` frees the overall amplitude and is accepted **only** with `ast_signal:FixedDiscreteSky` in `model.components`, since a fixed-flux sky is the one thing in the model that can set the scale; without it the run stops at setup with the degeneracy spelled out. Nothing else changes: the phase reference is still pinned either way.
+  **One reference pins one connected group.** A phase is measured relative to another antenna's along a chain of baselines that carry data, so if the unflagged baselines split the array into groups that share no baseline, pinning `ref_ant` in one group leaves every other group's overall phase unconstrained. When the phase is fitted, setup computes the connected components of the unflagged baseline graph and **stops**, naming the groups, rather than fitting a model with a flat direction in it. Fit the groups separately, or flag the smaller ones out of the run. Heavy flagging is fine as long as what survives still connects the array.
+* `fix_flux_scale`: Whether to keep the zero-sum log-amplitude constraint above. `true` is the default. `false` frees the overall amplitude and, when the amplitude is fitted, is accepted **only** with `ast_signal:FixedDiscreteSky` in `model.components`, since a fixed-flux sky is the one thing in the model that can set the scale; without it the run stops at setup with the degeneracy spelled out. Nothing else changes: the phase reference is still pinned either way.
 
 The absolute flux scale is assumed to be set by the data — e.g. by a `REAL_DATA_FLUXCAL` column, or by the fixed sky above — and if it ever needs fitting it belongs in a separate scalar component rather than in the gain.
 
@@ -763,3 +767,18 @@ gains:
 * A **calibration table**, read with {func}`~tabascal.ms.read_caltable` — one tabascal wrote with `tab2MS`, or one from CASA. A caltable is resolved over frequency and time and `ConstGains` is not, so it is reduced to the median $|g|$ and the mean phase direction over each antenna's valid samples, with a warning naming the largest deviation when the solutions actually do vary. Flagged solutions are dropped rather than counted as zero, and an antenna the table has no solution for at all falls back to unit gain, with a warning.
 
 Either way the gain is **projected into the gauge** rather than taken as given: the mean log amplitude is subtracted (unless `fix_flux_scale: false`) and the phases are referenced to `ref_ant`. Projecting an already-projected gain changes nothing, so the same file can be handed back to a second run. A zero or non-finite gain is an error — the fit is in log amplitude, which such a value has no value at.
+
+## Phase centre
+
+Tracking always follows the phase centre's apparent place of date: annual aberration,
+precession and nutation applied, paired with GAST. Every RFI trajectory component,
+the RFI sampling estimate, matched-filter initialisation, `tabascal light-curve`
+and `tabascal search` use this direction.
+
+The centre is read from `FIELD::PHASE_DIR` for the field being read, in the frame
+its `MEASINFO` `Ref` declares (`J2000`, `ICRS`, `B1950` or `GALACTIC`), and
+converted once to ICRS. A missing `Ref` is read as J2000 with a warning. Other
+frames, per-row frames (`VarRefCol`) and moving centres (`NUM_POLY > 0` or
+`EPHEMERIS_ID >= 0`) are refused. In particular, `APP` is refused because a
+constant apparent direction cannot be converted once to a fixed ICRS direction
+without changing its tracking over the observation.

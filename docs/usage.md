@@ -96,10 +96,6 @@ fitted along-track offset folded into their epochs, consumed the same way
 through `--extra-orbit-dir` — see
 [Records with a fitted time offset](orbits.md#records-with-a-fitted-time-offset).
 
-Note: generating a simulation with `sim-vis` (part of tab-sim) still uses
-Space-Track and requires a `spacetrack_login.yaml`. That requirement applies only
-to the simulation step below, not to running TABASCAL.
-
 # Example Simulation and RFI Subtraction
 
 Assuming you have cloned the repository, navigate to the `tabascal/examples` directory in the root of the repository. It contains 
@@ -116,7 +112,7 @@ tabascal/
 Simulations are defined by YAML config files and can be launched using:
 
 ```bash
-sim-vis -c sim_target_8A.yaml -st spacetrack_login.yaml
+sim-vis -c sim_target_8A.yaml
 ```
 
 The output of this command will show you a number of simulation details and finally end with some lines that looks like
@@ -467,6 +463,8 @@ refusals, except that `--tau-step` defaults to the coarser 0.5 s because the sca
 runs once per candidate — halve it once the field is narrowed. There is no
 `--fit-offset` here: the scan *is* the search, and at `tau = 0` the MWA case
 scored 0.045 against a candidate median of 0.0446, which is no detection at all.
+
+Both commands track the [phase centre's apparent place of date](config.md#phase-centre).
 
 The `tabascal` script also has a help context which can be accessed with
 

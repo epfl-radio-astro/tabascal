@@ -58,6 +58,7 @@ def make_const_gains_config(
     init="prior",
     ref_ant=None,
     fix_flux_scale=True,
+    fit=None,
     components=("gains:ConstGains",),
     flagged_ants=(),
     flags=None,
@@ -84,6 +85,7 @@ def make_const_gains_config(
                 "init": init,
                 "ref_ant": ref_ant,
                 "fix_flux_scale": fix_flux_scale,
+                "fit": fit,
             },
             "model": {"components": list(components)},
         },
@@ -110,7 +112,7 @@ def random_params(comp, seed=0, scale=1.0):
     keys = jax.random.split(jax.random.PRNGKey(seed), 2)
     return {
         name: scale * jax.random.normal(key, comp.init_params_base[name].shape)
-        for name, key in zip(("gains_amp_base", "gains_phase_base"), keys)
+        for name, key in zip(sorted(comp.init_params_base), keys)
     }
 
 
@@ -611,6 +613,99 @@ class TestFixFluxScale:
         comp.setup(make_const_gains_config(fix_flux_scale=None))
 
         assert comp.fix_flux_scale is True
+
+
+class TestFit:
+    """gains.fit chooses the fitted blocks; the other block is held at its start."""
+
+    FREE_SKY = ("ast_signal:FixedDiscreteSky", "gains:ConstGains")
+
+    @pytest.mark.parametrize(
+        "fit, blocks",
+        [
+            (None, {"gains_amp_base", "gains_phase_base"}),
+            ("complex", {"gains_amp_base", "gains_phase_base"}),
+            ("both", {"gains_amp_base", "gains_phase_base"}),
+            ("amplitude", {"gains_amp_base"}),
+            ("phase", {"gains_phase_base"}),
+        ],
+    )
+    def test_only_the_chosen_blocks_are_parameters(self, fit, blocks):
+        comp = ConstGains()
+        comp.setup(make_const_gains_config(n_ant=6, fit=fit))
+        with numpyro.handlers.seed(rng_seed=0):
+            sampled = comp.build_set_params()({})
+
+        assert set(comp.parameter_shapes) == set(comp.init_params_base) == set(sampled) == blocks
+        assert all(v.shape == (5,) for v in sampled.values())
+
+    @pytest.mark.parametrize("fit", ["Amplitude", "amp", 1, True])
+    def test_an_unknown_mode_is_an_error(self, fit):
+        with pytest.raises(RuntimeError, match="gains:\n\tfit"):
+            ConstGains().setup(make_const_gains_config(fit=fit))
+
+    @pytest.mark.parametrize("fit, held", [("amplitude", "phase"), ("phase", "amp")])
+    @pytest.mark.parametrize("fix_flux_scale", [True, False])
+    def test_the_held_block_is_the_measured_gain(self, tmp_path, exact_rtol, fit, held, fix_flux_scale):
+        """The fitted block moves with its parameters; the held one stays at gains.init."""
+        n_ant = 6
+        rng = np.random.default_rng(3)
+        g = rng.uniform(0.4, 2.5, n_ant) * np.exp(1j * rng.uniform(-2.0, 2.0, n_ant))
+        np.savez(tmp_path / "gain.npz", gain=g)
+        comp = ConstGains()
+        comp.setup(
+            make_const_gains_config(
+                n_ant=n_ant, init=str(tmp_path / "gain.npz"), ref_ant=2, fit=fit,
+                fix_flux_scale=fix_flux_scale, components=self.FREE_SKY,
+            )
+        )
+        expected = gauge_project(g, 2, fix_flux_scale)
+
+        start = np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0])
+        moved = np.asarray(run_forward(comp, random_params(comp, seed=4))["gains"][:, 0, 0])
+
+        assert np.allclose(start, expected, rtol=exact_rtol, atol=exact_rtol)
+        part = np.abs if held == "amp" else np.angle
+        other = np.angle if held == "amp" else np.abs
+        assert np.allclose(part(moved), part(expected), rtol=exact_rtol, atol=exact_rtol)
+        assert not np.allclose(other(moved), other(expected), rtol=1e-3, atol=1e-3)
+
+    @pytest.mark.parametrize("init", ["prior", None])
+    @pytest.mark.parametrize("fit", ["amplitude", "phase"])
+    def test_without_a_measured_gain_the_held_block_is_unity(self, exact_rtol, init, fit):
+        """amp_mean and phase_mean place only the fitted block; the held one is |g| = 1 or 0 rad."""
+        comp = ConstGains()
+        comp.setup(
+            make_const_gains_config(
+                init=init, fit=fit, amp_mean=2.0, phase_mean=0.5, ref_ant=0,
+                fix_flux_scale=False, components=self.FREE_SKY,
+            )
+        )
+        g = np.asarray(run_forward(comp, random_params(comp))["gains"][:, 0, 0])
+        start = np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0])
+
+        if fit == "phase":
+            assert np.allclose(np.abs(g), 1.0, rtol=exact_rtol, atol=exact_rtol)
+            assert np.allclose(np.angle(start[1:]), 0.5, rtol=exact_rtol, atol=exact_rtol)
+        else:
+            assert np.allclose(np.angle(g), 0.0, rtol=exact_rtol, atol=exact_rtol)
+            assert np.allclose(np.abs(start), 2.0, rtol=exact_rtol, atol=exact_rtol)
+
+    def test_a_phase_only_fit_frees_the_flux_scale_without_a_fixed_sky(self):
+        """No amplitude is fitted, so no fixed sky is needed."""
+        ConstGains().setup(make_const_gains_config(fit="phase", fix_flux_scale=False))
+
+    def test_an_amplitude_only_fit_accepts_a_split_array(self):
+        """Only a fitted phase needs a chain of baselines back to the reference."""
+        flags = keep_only_baselines(6, 3, 4, [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)])
+        ConstGains().setup(make_const_gains_config(n_ant=6, flags=flags, fit="amplitude"))
+
+        with pytest.raises(RuntimeError, match="groups"):
+            ConstGains().setup(make_const_gains_config(n_ant=6, flags=flags, fit="phase"))
+
+    def test_an_amplitude_only_fit_with_a_free_scale_still_needs_a_fixed_sky(self):
+        with pytest.raises(RuntimeError, match="FixedDiscreteSky"):
+            ConstGains().setup(make_const_gains_config(fit="amplitude", fix_flux_scale=False))
 
 
 # ---------------------------------------------------------------------------

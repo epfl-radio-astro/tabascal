@@ -1,7 +1,6 @@
 """Prepare test data and config for ReFrame tabascal performance check."""
 
 import argparse
-import hashlib
 import logging
 import os
 import shutil
@@ -14,35 +13,27 @@ import yaml
 from huggingface_hub import snapshot_download
 
 
-def compute_sha256(file_path: Path) -> str:
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
+def _load_ci_module(path: Path):
+    """Import a CI script by path; ci/ is not a package."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def prepare_legacy_tabsim_credentials(target_dir: Path) -> Path:
-    """Create credentials only for tabsim's legacy local-generation fallback.
+#: The publisher's key, so the data looked up is the data it published.
+compute_sha256 = _load_ci_module(Path(__file__).resolve().parents[1] / "rfi_simulations.py").compute_sha256
 
-    Downloaded benchmark snapshots and TABASCAL itself are credential-free. The
-    installed tabsim release still queries Space-Track when it must regenerate
-    the simulation; keep that external limitation isolated to this branch until
-    tabsim exposes SatChecker or accepts pre-resolved TLEs.
+
+def simulation_gpu(environ) -> str:
+    """The one GPU tabsim may simulate on: the first visible, GPU 0 if none is named.
+
+    tabsim refuses more than one visible GPU and the multi-GPU check exposes them
+    all. An empty CUDA_VISIBLE_DEVICES hides every GPU and is passed on unchanged.
     """
-    username = os.environ.get("SPACETRACK_LOGIN")
-    password = os.environ.get("SPACETRACK_PASSWORD")
-    if not username or not password:
-        raise RuntimeError(
-            "The cached benchmark simulation is unavailable and the installed "
-            "tabsim release needs Space-Track to regenerate it. Set "
-            "SPACETRACK_LOGIN and SPACETRACK_PASSWORD, or provide the matching "
-            "epfl-radio-astro/rfi-simulations snapshot. TABASCAL's SatChecker "
-            "integration itself requires no credentials."
-        )
-    path = target_dir / "spacetrack_login.yaml"
-    path.write_text(yaml.safe_dump({"username": username, "password": password}))
-    return path
+    return environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
 
 
 def main():
@@ -113,17 +104,15 @@ def main():
                 f"Hash directory {input_hash} not found in HF snapshot. "
                 "Generating data with tabsim."
             )
-        local_dir = workdir / "generated_data"
-        local_dir.mkdir(exist_ok=True)
+        # Per tabsim release, like the snapshot it stands in for.
+        local_dir = workdir / "generated_data" / branch
+        local_dir.mkdir(parents=True, exist_ok=True)
         input_dir = local_dir / input_hash
         if input_dir.is_dir():
             logging.info(
                 f"Simulation output {input_dir} already exists. Skipping generation."
             )
         else:
-            # This is the only remaining Space-Track dependency: it belongs to
-            # tabsim's simulation generator, not TABASCAL's TLE resolution.
-            prepare_legacy_tabsim_credentials(local_dir)
             # Copy ancillary files referenced by relative paths in sim_config
             # into the working directory so sim_vis.py can find them.
             for ancillary in data_dir.glob("*"):
@@ -138,6 +127,8 @@ def main():
                     str(sim_config),
                     "-sp",
                     str(input_dir),
+                    "--gpu-id",
+                    simulation_gpu(os.environ),
                 ],
                 cwd=str(local_dir),
                 check=True,
@@ -152,7 +143,9 @@ def main():
     # drops the 0444 mode bits; the basename is kept because the run derives
     # its MS/zarr paths from it. -od still receives a tab-sim simulation
     # directory: without an ms_path it is read as one, as the perf job expects.
-    staged = workdir / "sim" / sim_dir.name
+    # Staged under the tabsim release and the config hash too, since the basename
+    # does not change with either, so a reused workdir picks up new data.
+    staged = workdir / "sim" / branch / input_hash / sim_dir.name
     if not staged.is_dir():
         shutil.copytree(sim_dir, staged, copy_function=shutil.copyfile)
     sim_dir = staged

@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from jax import random, Array
 from jax.tree_util import tree_map
 
-from tabascal.distributed import is_process_0
+from tabascal.distributed import constrain_prediction, is_process_0, replicate_off_mesh
 from tabascal.noise import broadcast_to_vis
 from tabascal.run_dir import LOSS_TRACE
 from tabascal.opt_schedule import (
@@ -45,7 +45,7 @@ from datetime import datetime
 from time import perf_counter
 
 from typing import Callable, Optional
-from functools import reduce, partial
+from functools import partial
 
 
 from numpyro.infer import log_likelihood
@@ -148,27 +148,18 @@ def nlog_like_and_post(prob_model, params, obs_data, state=None, constants=None)
 
 def reduced_chi2(pred: Array, true: Array, noise: Array, flags: Array):
 
-    complex_types = [
-        complex,
-        np.complex64,
-        np.complex128,
-        jnp.complex64,
-        jnp.complex128,
-    ]
-    dtype = [true.dtype == c_type for c_type in complex_types]
-    is_complex = reduce(jnp.logical_or, dtype)
-    if is_complex:
-        norm = 2 * true[~flags].size
-    else:
-        norm = true[~flags].size
+    # Masked with `where` rather than `x[~flags]`, whose data-dependent shape
+    # cannot be traced, so this runs inside the jitted predictions.
+    keep = jnp.broadcast_to(~flags, true.shape)
+    # Counted in floating point: an int32 count overflows past 2**31 visibilities.
+    n_kept = jnp.sum(keep, dtype=jnp.real(true).dtype)
+    norm = 2 * n_kept if jnp.iscomplexobj(true) else n_kept
 
-    # Broadcast the noise onto the data BEFORE masking. `x[~flags]` flattens, so
-    # a resolved noise applied afterwards -- per baseline, per channel or per
-    # timestep -- would no longer line up with the samples it belongs to; it
-    # would be silently recycled across whichever axes it resolves.
+    # The noise is broadcast onto the data, so a resolved noise -- per baseline,
+    # per channel or per timestep -- lines up with the samples it belongs to.
     noise = jnp.broadcast_to(broadcast_to_vis(noise, true.shape), true.shape)
 
-    rchi2 = jnp.sum((jnp.abs(pred[~flags] - true[~flags]) / noise[~flags]) ** 2) / norm
+    rchi2 = jnp.sum(jnp.where(keep, (jnp.abs(pred - true) / noise) ** 2, 0)) / norm
 
     return rchi2
 
@@ -445,9 +436,9 @@ def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
     # to align the resolved array with. Same choice as print_truth_metrics.
     noise_scalar = tab_config.noise_scalar
 
-    # reduced_chi2/rmse select with ``x[~flags]``, whose output shape depends on
-    # the mask -- fine eagerly, not traceable. Weight by the mask instead and
-    # divide by a statically known count, which is numerically the same thing.
+    # rmse selects with ``x[~flags]``, whose output shape depends on the mask --
+    # fine eagerly, not traceable. Weight by the mask instead and divide by a
+    # statically known count, which is numerically the same thing.
     keep = ~flags if flags is not None and flags.shape == vis_obs.shape else None
     n_keep = float(keep.sum()) if keep is not None else float(vis_obs.size)
 
@@ -607,9 +598,18 @@ def run_custom_svi(
 
     checkpoints = set(checkpoints)
 
-    def _run_phase(params, optimizer, max_iter, offset=0):
+    def _run_phase(params, optimizer, max_iter, offset=0, learning_rate=None):
         nonlocal trace_t0
         opt_state = optimizer.init(params)
+        if learning_rate is not None:
+            hyperparams = opt_state.hyperparams
+            opt_state = opt_state._replace(hyperparams={
+                **hyperparams,
+                "learning_rate": jnp.asarray(learning_rate, hyperparams["learning_rate"].dtype),
+            })
+        # Placed as _map_step returns it, so the second step reuses the first one's
+        # executable instead of compiling again for a differently placed state.
+        opt_state = replicate_off_mesh(opt_state)
         losses = []
         window = max(max_iter // 10, 1)
         init_loss = None
@@ -659,11 +659,17 @@ def run_custom_svi(
         transform = build_optimizer(optimizer, step_size(schedule, epsilon, max_iter))
         params, losses = _run_phase(params, transform, max_iter)
     else:
-        params, losses = _run_phase(params, build_optimizer(optimizer, epsilon), max_iter)
+        # The step size is a leaf of the optimiser state rather than a constant of
+        # the transform, so dual_run's second phase -- a fresh optimiser at a tenth
+        # of it -- runs the executable the first phase compiled.
+        transform = optax.inject_hyperparams(partial(build_optimizer, optimizer))(
+            learning_rate=float(epsilon)
+        )
+        params, losses = _run_phase(params, transform, max_iter)
 
         if dual_run:
             params, losses2 = _run_phase(
-                params, build_optimizer(optimizer, epsilon / 10), max_iter, offset=max_iter
+                params, transform, max_iter, offset=max_iter, learning_rate=epsilon / 10
             )
             losses = losses + losses2
 
@@ -674,22 +680,32 @@ def run_custom_svi(
     return SVIRunResult(params_out, jnp.array(losses))
 
 
-@measure_runtime
-def init_predict(
-    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict, state=None, constants=None, truth=None
-):
+@partial(jax.jit, static_argnums=(0, 1))
+def _predict(prob_model, n_rfi, key, params, obs_data, state, constants, vis_obs, noise, flags):
+    """One-sample ``Predictive`` at ``params`` and its reduced chi^2, as one executable.
 
+    Placed as the downstream writers expect: per-RFI sites split over the mesh,
+    everything else replicated.
+    """
     # Sharding invariant: 1 sample -> numpyro calls the model without vmap, so the
     # shard_map-wrapped RFI-vis components (incl. the FFI kernel, which has no
     # batching rule) work under device sharding. Keep this single-sample.
     pred = Predictive(
         model=prob_model,
-        posterior_samples=tree_map(lambda x: x[None, :], init_params),
+        posterior_samples=tree_map(lambda x: x[None], params),
         batch_ndims=1,
-    )
-    init_pred = pred(subkey, state=state, constants=constants)
-    rchi2 = reduced_chi2(
-        init_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise, tab_config.flags
+    )(key, obs_data=obs_data, state=state, constants=constants)
+    return constrain_prediction(pred, n_rfi), reduced_chi2(pred["vis_obs"][0], vis_obs, noise, flags)
+
+
+@measure_runtime
+def init_predict(
+    tab_config, prob_model: Callable, subkey: jax.Array, init_params: dict, state=None, constants=None, truth=None
+):
+
+    init_pred, rchi2 = _predict(
+        prob_model, getattr(tab_config, "n_rfi", 0), subkey, init_params, None, state, constants,
+        tab_config.vis_obs, tab_config.noise, tab_config.flags,
     )
     print()
     print(f"Reduced Chi^2 @ init params : {rchi2}")
@@ -747,17 +763,12 @@ def run_opt(
     )
     vi_params = vi_results.params
     # Strip _auto_loc suffix to get raw param names for Predictive
-    # Sharding invariant: with exactly 1 sample, numpyro's soft_vmap calls the model
-    # directly (no vmap), which is what lets the shard_map-wrapped RFI-vis components
-    # (incl. the FFI kernel, which has no batching rule) run under device sharding.
-    # Do not switch this to multi-sample parallel prediction while sharding is on.
     raw_params = {k.removesuffix("_auto_loc"): v for k, v in vi_params.items()}
-    vi_pred = Predictive(
-        model=prob_model,
-        posterior_samples=tree_map(lambda x: x[None], raw_params),
-        batch_ndims=1,
-    )(subkeys[1], obs_data=tab_config.vis_obs, state=state, constants=constants)
-    
+    vi_pred, rchi2 = _predict(
+        prob_model, getattr(tab_config, "n_rfi", 0), subkeys[1], raw_params, tab_config.vis_obs,
+        state, constants, tab_config.vis_obs, tab_config.noise, tab_config.flags,
+    )
+
     write_results_xds(vi_pred, tab_config, map_path)
 
     print()
@@ -765,9 +776,6 @@ def run_opt(
     print(f"{datetime.now()}")
     start = datetime.now()
 
-    rchi2 = reduced_chi2(
-        vi_pred["vis_obs"][0], tab_config.vis_obs, tab_config.noise, tab_config.flags
-    )
     print()
     print(f"Reduced Chi^2 @ opt params : {rchi2}")
 

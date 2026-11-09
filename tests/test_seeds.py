@@ -274,7 +274,7 @@ def test_the_line_says_whether_prior_plots_draw(tmp_path, monkeypatch, n_proc, s
 # ---------------------------------------------------------------------------
 
 
-def run_stubbed(tmp_path, monkeypatch, capsys, seed, n, jitter=None, events=None):
+def run_stubbed(tmp_path, monkeypatch, capsys, seed, n, jitter=None, events=None, optimise=True):
     """The runner on a loaded config with prior plots on; every seed and key its consumers got."""
     from tabascal.scripts import _run_tabascal_impl as impl
     from tabascal.seeds import run_key
@@ -282,6 +282,7 @@ def run_stubbed(tmp_path, monkeypatch, capsys, seed, n, jitter=None, events=None
     config = loaded(tmp_path, seed=seed)
     config["plots"]["prior"] = True
     config["opt"]["init_jitter"] = jitter
+    config["inference"]["opt"] = optimise
     run_dir = tmp_path / f"run{n}"
     run_dir.mkdir()
     paths = SimpleNamespace(
@@ -314,8 +315,9 @@ def run_stubbed(tmp_path, monkeypatch, capsys, seed, n, jitter=None, events=None
         "load_truth": lambda *a: {},
         "run_key": lambda s: (spy("seed", 0)(s), run_key(s))[1],
         "init_predict": consumer("init", 2, 3),
-        "nlog_like_and_post": lambda *a, **k: (0.0, 0.0),
-        "run_opt": consumer("opt", 2, 3, (None, None, {}, None)),
+        "nlog_like_and_post": lambda *a, **k: (spy("nlog", 1)(*a), (0.0, 0.0))[1],
+        "write_ms_if_enabled": lambda *a, **k: None,
+        "run_opt": consumer("opt", 2, 3, (None, [4.0, 2.0], {}, None)),
     }
     for name, stub in stubs.items():
         monkeypatch.setattr(impl, name, stub)
@@ -433,3 +435,11 @@ def test_with_no_stochastic_path_the_seed_changes_no_output(deterministic_fits, 
             continue
         atol = 64 * np.finfo(a.real.dtype).eps * np.abs(a).max()
         np.testing.assert_allclose(a, b, rtol=0, atol=atol, equal_nan=False, err_msg=name)
+
+
+@pytest.mark.parametrize("optimise", [True, False])
+def test_log_p_comes_off_the_loss_trace_when_there_is_one(tmp_path, monkeypatch, capsys, optimise):
+    """An optimised fit prints half its first and last loss; only one without a loop evaluates log_l/log_p."""
+    calls, out, *_ = run_stubbed(tmp_path, monkeypatch, capsys, 1, 1, optimise=optimise)
+    assert ("nlog" in calls) != optimise
+    assert ("log_p @ init : 2.000e+00" in out and "log_p @ last step : 1.000e+00" in out) == optimise

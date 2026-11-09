@@ -212,6 +212,47 @@ def shard_pytree(tree: dict, n_rfi: int) -> dict:
     return out
 
 
+def replicate_off_mesh(tree):
+    """Replicate every leaf of ``tree`` that is not yet placed on the mesh.
+
+    Leaves already on :func:`rfi_mesh` keep their sharding. The rest -- the
+    scalars a fresh optax state creates on one device, its step count among
+    them -- are replicated, which is how a jitted step returns them. Without
+    this the second step sees inputs placed differently from the first and
+    compiles again. Identity when sharding is off.
+    """
+    if not sharding_enabled():
+        return tree
+    mesh = rfi_mesh()
+
+    def place(leaf):
+        if isinstance(leaf, jax.Array) and getattr(leaf.sharding, "mesh", None) == mesh:
+            return leaf
+        return make_global(leaf, replicated_sharding())
+
+    return jax.tree_util.tree_map(place, tree)
+
+
+def constrain_prediction(pred: dict, n_rfi: int) -> dict:
+    """Pin one-sample ``Predictive`` output inside traced code, as the writers read it.
+
+    Per-RFI sites (leading sample axis, then the RFI axis) stay split across the
+    mesh; everything else is replicated, so process 0 can read it without a
+    gather. No-op when sharding is off.
+    """
+    if not sharding_enabled():
+        return pred
+    split = NamedSharding(rfi_mesh(), P(None, "rfi"))
+    return {
+        key: lax.with_sharding_constraint(
+            leaf,
+            split if np.ndim(leaf) >= 2 and _wants_rfi_axis(key, leaf[0], n_rfi)
+            else replicated_sharding(),
+        )
+        for key, leaf in pred.items()
+    }
+
+
 def sharded_rfi_zeros(shape: tuple, dtype) -> jax.Array:
     """Zeros with the leading (RFI) axis sharded, without a full single-device copy.
 
