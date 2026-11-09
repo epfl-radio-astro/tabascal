@@ -94,6 +94,15 @@ rfi:
     corr_freq: 1e6      # Optional - Bandwidth, in Hz, over which the RFI signal stays correlated, setting the knee of the power spectrum along the frequency axis. null is half the observed band - NOT what ast.gp_cov.corr_freq: null means, which is no roll-off at all. The difference is which default declines to commit. A flat delay spectrum is not a smooth signal - equal power at every delay leaves the channels uncorrelated - so the astronomical null states no frequency structure at all, which costs nothing on the single-channel observations the shipped configs run. An emitter is coherent over some band by construction, so half the observation is the least-committal guess that is still a coherence scale
     corr_time: 24       # Optional - Time, in seconds, over which the RFI signal stays correlated, setting the knee along the time axis. null is half the observation. Given as a time rather than as an angle because an emitter's coherence time is a property of the emitter, where a sky source's is its fringe rate - which is why the astronomical block asks for fov_deg on this axis instead
     gammas: null        # Optional - Roll-off exponent of the power spectrum on the frequency and time axes, in that order. null uses the component's own default, which is [3, 3] for rfi_signal:ComplexRFIVarAnt and ComplexRFIVarAntFine and [100, 100] for rfi_signal:ComplexRFIConstAnt and ComplexRFIConstAntFine
+#####################################################
+# Orbit deviation prior (trajectory:OrbitDeviationFine)
+#####################################################
+orbit_deviation:        # Optional - Prior of trajectory:OrbitDeviationFine, which moves each satellite off the orbit before it by a real Gaussian process in time on each of its radial, in-track and cross-track (RIC) axes. Read by no other component. It starts at zero deviation, the upstream orbit exactly. See docs/orbits.md
+  std: [100, 1000, 300] # Optional - Prior standard deviation of the offset on the (radial, in-track, cross-track) axes, in metres, or one number for all three. The default is the scale of a LEO TLE's error near its epoch, largest along the track; widen it to what the orbit records can actually be wrong by. null is the default
+  corr_time: null       # Optional - Time, in seconds, over which the offset stays correlated, per RIC axis or one number for all three; it sets the knee of each axis's power spectrum, as rfi.gp_cov.corr_time does. null is half the observation. The three axes share the latent modes the shortest of them keeps
+  gamma: 5              # Optional - Roll-off exponent of the power spectrum past the knee, shared by the three axes. null is 5
+  cutoff: null          # Optional - Relative power below which a time mode is dropped, so it sets the number of fitted parameters and not the prior's width - the spectrum is normalised after the cut. null is 1e-6
+  time_pad_factor: 2    # Optional - Zero padding factor of the time axis of the Fourier GP, at least 1. 1.0 makes the offset periodic over the observation. null is 2
 ############################
 # Satellite path parameters
 ############################
