@@ -1,19 +1,15 @@
 """Test full Tabascal pipeline runs."""
 
 import json
-import logging
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from importlib.resources import files as _res_files
 from pathlib import Path
 from typing import Any
 
 import pytest
-import tabsim
 import yaml
-from huggingface_hub import snapshot_download
 
 
 def _load_ci_module(path: Path):
@@ -28,67 +24,6 @@ def _load_ci_module(path: Path):
 
 #: The publisher's key, so the data looked up is the data it published.
 compute_sha256 = _load_ci_module(Path(__file__).resolve().parents[1] / "ci" / "rfi_simulations.py").compute_sha256
-
-
-@pytest.fixture
-def provide_test_data(tmp_path: Path) -> Path:
-    """Pytest fixture to download test data from HuggingFace.
-
-    Downloads RFI simulation data from the epfl-radio-astro/rfi-simulations dataset
-    using a branch name based on the current tabsim version. Data is cached locally
-    by HuggingFace (usually in ~/.cache/huggingface).
-    If data cannot be downloaded from HuggingFace, it is generated with tabsim.
-
-    Args:
-        tmp_path: Pytest fixture providing temporary directory for test files
-
-    Returns:
-        Path to the local directory containing the downloaded test data
-    """
-    branch = f"tabsim_v{tabsim.__version__}"
-
-    try:
-        # Data is cached by HuggingFace, usually in ~/.cache/huggingface
-        local_dir = snapshot_download(
-            repo_id="epfl-radio-astro/rfi-simulations",
-            repo_type="dataset",
-            revision=branch,
-        )
-        return Path(local_dir)
-    except Exception as e:
-        logging.warning(
-            f"Download of pre-generated RFI simulation data failed for tabsim "
-            f"version {tabsim.__version__}: {e}. Generating data with tabsim."
-        )
-
-        tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
-        data_dir = Path(__file__).parent / "data"
-
-        for config_file in data_dir.glob("sim_target*.yaml"):
-            input_hash = compute_sha256(config_file)
-            logging.warning(f"Generating data for {config_file}.")
-
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(tabsim_script),
-                    "-c",
-                    str(config_file),
-                    "-sp",
-                    str(tmp_path / input_hash),
-                ],
-                capture_output=True,
-                text=True,
-                cwd=tmp_path,
-                check=False,
-            )
-
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Data generation failed for {config_file}: {result.stderr}"
-                )
-
-        return tmp_path
 
 
 def read_and_modify_yaml(
@@ -136,6 +71,11 @@ class PipelineTestConfig:
             case is skipped under single precision (``--x64 false``).
         rfi_backend: ``rfi.backend`` of the ``rfi_vis`` component, merged into the
             template's ``rfi`` section; None leaves the component's default.
+        signal_type: ``rfi.signal_type``, merged the same way; None leaves the
+            template's (real).
+        orbit_dir: ``--extra-orbit-dir`` of the run; None gives the simulation's own
+            records (its ``input_data/used_orbits.json``), so the model's orbits are
+            the simulated ones.
         config_overrides: Dictionary of overrides to the tabascal config file
         metrics_ref: Optional truth-based error references, keyed by quantity
             (``ast``/``rfi``/``gains``) then by metric name. Like ``chi2_ref`` these are
@@ -153,6 +93,8 @@ class PipelineTestConfig:
     chi2_ref: float | tuple[float, float]
     requires_double: bool = False
     rfi_backend: str | None = None
+    signal_type: str | None = None
+    orbit_dir: Path | None = None
     config_overrides: dict = field(default_factory=dict)
     metrics_ref: dict[str, dict[str, float | tuple[float, float]]] = field(
         default_factory=dict
@@ -172,12 +114,17 @@ def _run_pipeline(
     config_mod: dict = {
         "model": {"components": t_config.components, "precision": precision}
     }
-    if t_config.rfi_backend is not None:
+    rfi_mod = {
+        k: v
+        for k, v in (("backend", t_config.rfi_backend), ("signal_type", t_config.signal_type))
+        if v is not None
+    }
+    if rfi_mod:
         from tabascal.config import yaml_load
 
         # The whole section: read_and_modify_yaml replaces top-level sections.
         rfi = dict(yaml_load(config_template)["rfi"])
-        config_mod["rfi"] = {**rfi, "backend": t_config.rfi_backend}
+        config_mod["rfi"] = {**rfi, **rfi_mod}
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
@@ -188,7 +135,7 @@ def _run_pipeline(
         Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
     )
 
-    bundled_tle_dir = str(_res_files("tabascal").joinpath("data/tles"))
+    orbit_dir = t_config.orbit_dir or input_src_dir / "input_data"
 
     result = subprocess.run(
         [
@@ -202,7 +149,7 @@ def _run_pipeline(
             "-od",
             str(input_src_dir),
             "--extra-orbit-dir",
-            bundled_tle_dir,
+            str(orbit_dir),
         ],
         capture_output=True,
         text=True,
@@ -373,6 +320,11 @@ def test_truth_metric_capture_roundtrips_printed_output(capsys):
 # Trajectory components — downstream fixed to RiemannVisFine + UnitaryGains
 # ---------------------------------------------------------------------------
 
+#: The previous day's TLEs of the simulated satellites, 0.3-1.3 km along-track from
+#: the records the simulation used, so the fitted-orbit cases start off the true
+#: orbit and have to fit their way back to it.
+_PREV_DAY_ORBITS = Path(__file__).parent / "data" / "orbits"
+
 trajectory_configs = [
     # FixedOrbitFine without PhaseCalculationRFIFine covered by RiemannVisFine
     pytest.param(
@@ -389,22 +341,20 @@ trajectory_configs = [
             # requires_double (phase trajectory needs fp64), so this runs in fp64 only.
             # Measured opt-point values, double precision (gains identity -> RMSE 0):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8587300969558382 |     0.1795       2.0      |     0.4402       1.0
-            #   x86  | 0.8587299324599438 |     0.1795       2.0      |     0.4402       1.0
-            # Re-recorded for tabsim 0.1.0 (#253). Its simulations differ from 0.0.13's
-            # in the phase-centre convention, the thermal-noise scale and the random
-            # sky, so every reference moved. ARM = Apple-silicon CPU, x86 = x86_64 CPU;
-            # GPU rows were not re-measured. Each machine simulates the data itself, and
-            # the two simulations differ in the last bits of the RFI and geometry, so
-            # double agrees across them to ~2e-7 rather than ~1e-8; the asserted value
-            # is the x86 one, the architecture CI simulates on. The coherent ast bias
-            # rose to 2.0 sigma (2.7 on the MEO cases) against ~1.2 on the 0.0.13 sky,
-            # so its bound is 3.5 here; #280 investigates the extra bias.
-            chi2_ref=0.8587299324599438,
+            #   ARM  | 0.9559194838764724 |     0.1549       2.6      |     0.3809       2.6
+            #   x86  | 0.9559194655104376 |     0.1549       2.6      |     0.3809       2.6
+            # Recorded on the LEO simulation (three OneWeb satellites, RFI SNR ~8) with
+            # the real RFI signal. ARM = Apple-silicon CPU, x86 = x86_64 CPU; GPU rows
+            # were not measured. Each machine simulates the data itself, and the two
+            # simulations differ in the last bits of the RFI and geometry, so double
+            # agrees across them to ~2e-7 rather than ~1e-8; the asserted value is the
+            # x86 one, the architecture CI simulates on. The coherent ast and rfi biases
+            # are 2.6 sigma, so both bounds are 3.5; #280 investigates the ast bias.
+            chi2_ref=0.9559194655104376,
             requires_double=True,
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 3.5)},
-                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.142, 0.167), "bias_significance": (0.0, 3.5)},
+                "rfi": {"NRMSE(noise)": (0.35, 0.41), "bias_significance": (0.0, 3.5)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -421,21 +371,23 @@ trajectory_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # requires_double, so this runs in fp64 only. max_iter 200: these MEO cases are
-            # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
-            # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
-            # Measured opt-point values, double precision (gains identity -> RMSE 0); see the
-            # note on the FixedOrbitFine case for what ARM/x86/GPU are:
+            # requires_double, so this runs in fp64 only. Starts from the previous day's
+            # TLEs (_PREV_DAY_ORBITS) and fits the orbit, max_iter 200. The fit does not
+            # recover the orbit: the orbit prior is km-wide at the observation, so it leaves
+            # even the true orbit (#282). These references record that behaviour, far from
+            # FixedOrbitFine's 0.956 on the simulated orbits and above its 1.51 on these
+            # TLEs; they should drop when #282 is fixed. Measured opt-point values, double
+            # precision (gains identity -> RMSE 0; NoDragOrbitFine and OrbitFine agree):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8416542532126120 |     0.2232       2.7      |     0.5292       1.7
-            #   x86  | 0.8416540837835149 |     0.2232       2.7      |     0.5292       1.7
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.8416540837835149,
+            #   ARM  | 3.0094970521636224 |     0.2299       4.2      |     2.092        1.2
+            #   x86  | 3.0094971569404736 |     0.2299       4.2      |     2.092        1.2
+            chi2_ref=3.0094971569404736,
             requires_double=True,
+            orbit_dir=_PREV_DAY_ORBITS,
             config_overrides={"opt": {"max_iter": 200}},
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.208, 0.240), "bias_significance": (0.0, 3.5)},
-                "rfi": {"NRMSE(noise)": (0.50, 0.56), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.215, 0.248), "bias_significance": (0.0, 5.5)},
+                "rfi": {"NRMSE(noise)": (1.95, 2.25), "bias_significance": (0.0, 2.0)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -452,21 +404,23 @@ trajectory_configs = [
                 "ast_vis:GPVisAst",
                 "gains:UnitaryGains",
             ],
-            # requires_double, so this runs in fp64 only. max_iter 200: these MEO cases are
-            # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
-            # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
-            # Measured opt-point values, double precision (gains identity -> RMSE 0; matches
-            # NoDragOrbitFine -- same orbit to fp precision):
+            # requires_double, so this runs in fp64 only. Starts from the previous day's
+            # TLEs (_PREV_DAY_ORBITS) and fits the orbit, max_iter 200. The fit does not
+            # recover the orbit: the orbit prior is km-wide at the observation, so it leaves
+            # even the true orbit (#282). These references record that behaviour, far from
+            # FixedOrbitFine's 0.956 on the simulated orbits and above its 1.51 on these
+            # TLEs; they should drop when #282 is fixed. Measured opt-point values, double
+            # precision (gains identity -> RMSE 0; NoDragOrbitFine and OrbitFine agree):
             #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8416542639577049 |     0.2232       2.7      |     0.5292       1.7
-            #   x86  | 0.8416540839414796 |     0.2232       2.7      |     0.5292       1.7
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.8416540839414796,
+            #   ARM  | 3.0093592988056543 |     0.2299       4.2      |     2.092        1.2
+            #   x86  | 3.009359403453889  |     0.2299       4.2      |     2.092        1.2
+            chi2_ref=3.009359403453889,
             requires_double=True,
+            orbit_dir=_PREV_DAY_ORBITS,
             config_overrides={"opt": {"max_iter": 200}},
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.208, 0.240), "bias_significance": (0.0, 3.5)},
-                "rfi": {"NRMSE(noise)": (0.50, 0.56), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.215, 0.248), "bias_significance": (0.0, 5.5)},
+                "rfi": {"NRMSE(noise)": (1.95, 2.25), "bias_significance": (0.0, 2.0)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -498,29 +452,31 @@ rfi_vis_configs = [
                 "gains:UnitaryGains",
             ],
             rfi_backend="jax",
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.8587299268068921,
+            # The one complex case: every other case fits the template's real signal.
+            signal_type="complex",
+            # Recorded on the LEO simulation; see the FixedOrbitFine case.
+            chi2_ref=0.9118959911161757,
             # Truth-based metrics at the opt point. ast/rfi assert NRMSE(noise) -- the residual
             # against the thermal-noise floor, the science-meaningful yardstick (< 1 means
             # sub-noise) and the most architecture-stable normalisation -- plus
             # bias_significance, the coherent mean error in units of sigma (correlation-deflated
             # by N_eff; see print_truth_metrics). The significance bound is a "no significant
-            # coherent bias" guard, not a tight value: the bias is ~2 sigma here (N_eff ~ 50),
+            # coherent bias" guard, not a tight value: the bias is ~2 sigma here,
             # so the upper bound of 3.5 only trips on gross RFI->ast leakage.
             #
             # Measured opt-point values (UnitaryGains -> identity gains, so gains RMSE ~0).
             #   precision/arch | ast NRMSE(noise)  ast sig | rfi NRMSE(noise)  rfi sig | chi2
-            #   double  ARM    |      0.1795        2.0     |      0.4402       1.0     | 0.8587300953
-            #   double  x86    |      0.1795        2.0     |      0.4402       1.0     | 0.8587299268
-            #   single  ARM    |      0.1795        2.0     |      0.4402       1.0     | 0.8587293625
-            #   single  x86    |      0.1795        2.0     |      0.4402       1.0     | 0.8587294817
-            # fp32 and fp64 agree to ~1e-6 on chi2 and to the printed precision on the
+            #   double  ARM    |      0.1580        2.2     |      0.4674       1.4     | 0.9118960319
+            #   double  x86    |      0.1580        2.2     |      0.4674       1.4     | 0.9118959911
+            #   single  ARM    |      0.1580        2.2     |      0.4674       1.4     | 0.9118959904
+            #   single  x86    |      0.1580        2.2     |      0.4674       1.4     | 0.9118960500
+            # fp32 and fp64 agree to ~1e-7 on chi2 and to the printed precision on the
             # metrics, so a single set of references covers both and there is no
             # per-precision split; that is what makes one scalar at 1% tolerance safe for
             # both.
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 3.5)},
-                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.145, 0.170), "bias_significance": (0.0, 3.5)},
+                "rfi": {"NRMSE(noise)": (0.43, 0.50), "bias_significance": (0.0, 2.0)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -537,15 +493,16 @@ rfi_vis_configs = [
                 "gains:UnitaryGains",
             ],
             # The default rfi.backend, ffi. Only chi2 is asserted -- the FFI kernel is the
-            # unit under test; truth metrics match the jax-backend case above. Measured opt-point
-            # values (gains identity -> RMSE 0):
+            # unit under test; its truth metrics match FixedOrbitFine+PhaseCalculationRFIFine,
+            # the same model with the real signal. Measured opt-point values (gains identity
+            # -> RMSE 0):
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   double  ARM    | 0.8587300953 |     0.1795       2.0      |     0.4402       1.0
-            #   double  x86    | 0.8587299268 |     0.1795       2.0      |     0.4402       1.0
-            #   single  ARM    | 0.8587294817 |     0.1795       2.0      |     0.4402       1.0
-            #   single  x86    | 0.8587294221 |     0.1795       2.0      |     0.4402       1.0
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.858729926806892,
+            #   double  ARM    | 0.9559194838 |     0.1549       2.6      |     0.3809       2.6
+            #   double  x86    | 0.9559194656 |     0.1549       2.6      |     0.3809       2.6
+            #   single  ARM    | 0.9559192657 |     0.1549       2.6      |     0.3809       2.6
+            #   single  x86    | 0.9559191465 |     0.1549       2.6      |     0.3809       2.6
+            # Recorded on the LEO simulation; see the FixedOrbitFine case.
+            chi2_ref=0.9559194656485075,
         ),
         id="RiemannVisFine",
     ),
@@ -562,15 +519,15 @@ rfi_vis_configs = [
             # The data-grid route: the RiemannVisFine model with the signal and
             # phase on the data grid and each cell integrated in closed form.
             #   precision/arch | chi2         | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   double  ARM    | 0.8563553781 |     0.1824       1.9      |     0.4473       1.1
-            #   double  x86    | 0.8563552057 |     0.1824       1.9      |     0.4473       1.1
-            #   single  ARM    | 0.8563553691 |     0.1824       1.9      |     0.4473       1.1
-            #   single  x86    | 0.8563553095 |     0.1824       1.9      |     0.4473       1.1
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.8563552057067791,
+            #   double  ARM    | 1.0025152084 |     0.1624       2.5      |     0.4664       2.8
+            #   double  x86    | 1.0025152059 |     0.1624       2.5      |     0.4664       2.8
+            #   single  ARM    | 1.0025146008 |     0.1624       2.5      |     0.4664       2.8
+            #   single  x86    | 1.0025144815 |     0.1624       2.5      |     0.4664       2.8
+            # Recorded on the LEO simulation; see the FixedOrbitFine case.
+            chi2_ref=1.0025152059406683,
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.165, 0.192), "bias_significance": (0.0, 2.0)},
-                "rfi": {"NRMSE(noise)": (0.40, 0.46), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.150, 0.176), "bias_significance": (0.0, 3.5)},
+                "rfi": {"NRMSE(noise)": (0.43, 0.50), "bias_significance": (0.0, 3.5)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -745,7 +702,7 @@ def test_pipeline_writes_into_its_own_run_directory(
             "-c", str(config_path),
             "-n", "runA",
             "-od", str(out_dir),
-            "--extra-orbit-dir", str(_res_files("tabascal").joinpath("data/tles")),
+            "--extra-orbit-dir", str(out_dir / "input_data"),
         ],
         capture_output=True,
         text=True,
@@ -800,9 +757,9 @@ def _sharded_components(rfi_vis: str) -> list[str]:
 # Same case as FixedOrbitFine+PhaseCalculationRFIFine above (double precision), so it shares that
 # case's re-recorded reference and has to move with it -- the 1% tolerance is wide enough to
 # hide a missed update here, so it is worth checking the two match when either changes.
-# Verified on ARM CPU, x86 CPU and an NVIDIA GPU (the sharded child is pinned to CPU by
-# this test either way; the reference run uses whatever is there).
-_SHARDED_CHI2_REF = 0.8587299324599438
+# Recorded on x86 CPU; ARM agrees to ~2e-8 (the sharded child is pinned to CPU by this
+# test either way; the reference run uses whatever is there).
+_SHARDED_CHI2_REF = 0.9559194655104376
 
 
 def _prepare_sharded_run(
@@ -838,13 +795,12 @@ def _prepare_sharded_run(
     read_and_modify_yaml(updates, data_dir / "tab_target.yaml", config_path)
 
     script = Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
-    tle_dir = str(_res_files("tabascal").joinpath("data/tles"))
     cmd = [
         sys.executable, str(script), "run",
         "-c", str(config_path),
         "-n", "pipe",
         "-od", str(out_dir),
-        "--extra-orbit-dir", tle_dir,
+        "--extra-orbit-dir", str(out_dir / "input_data"),
         "-nl",
     ]
     return cmd, out_dir

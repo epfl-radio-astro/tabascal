@@ -33,10 +33,14 @@ ast_sources:
 
 rfi_sources:
   tle_satellite:
-    # norad_ids: []
-    sat_names: [navstar]
-    # max_n_sat: 1
-    power_scale: 1e-2
+    # Three OneWeb satellites (LEO, ~1200 km) that pass within max_ang_sep of the
+    # target during the observation. tabsim simulates in ascending NORAD ID order
+    # and rfi.init: truth reads the amplitudes by position, so tab_target.yaml
+    # lists the same IDs in the same order.
+    norad_ids: [48058, 48067, 49192]
+    # Sets the RFI's visibility SNR, rms|vis_rfi| / complex noise std, to ~8 (aim
+    # 5-10). It is linear in power_scale: 1e-3 measured 4.1.
+    power_scale: 2e-3
     max_ang_sep: 30  # degrees
     min_alt: 0       # degrees
     vis_step: 1      # minutes
