@@ -498,7 +498,7 @@ class ConstGains(Component):
     of that prior — its centre in log space, not its arithmetic mean — and it is that
     only when the flux scale is free: under the zero-sum gauge the geometric mean is 1
     by construction and ``amp_mean`` only sets the scale the percentage is taken of,
-    so a non-unit value there warns.
+    so a non-unit value there warns when the amplitude is fitted.
 
     ``gains.fix_flux_scale: false`` lifts the amplitude constraint, and when the
     amplitude is fitted it is accepted only with a fixed-flux sky in the model, which
@@ -834,7 +834,8 @@ class ConstGains(Component):
             log_amp = np.full(self.n_ant, self.log_amp_offset if self.fit_amp else 0.0)
             phase = np.full(self.n_ant, self.gp_phase_mean if self.fit_phase else 0.0)
             phase[self.ref_ant] = 0.0
-            print("Initialising ConstGains at the prior mean")
+            held = {"amplitude": "; phase held at 0", "phase": "; |g| held at 1"}
+            print(f"Initialising ConstGains at the prior mean{held.get(self.fit, '')}")
         elif isinstance(init, str) and os.path.exists(os.path.abspath(init)):
             log_amp, phase = self._project_to_gauge(read_const_gain(init, self.n_ant))
             print(f"Initialising ConstGains at the measured antenna gain from {init}")
