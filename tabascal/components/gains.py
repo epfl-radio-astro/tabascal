@@ -477,7 +477,8 @@ class ConstGains(Component):
     * the overall PHASE is unobservable, so ``gains.ref_ant``'s phase is pinned to 0
       and the other ``n_ant - 1`` phases are free. The default reference is the first
       antenna with any unflagged data. One reference only pins one *connected* group
-      of antennas, so setup also refuses an array the unflagged baselines split in two;
+      of antennas, so when the phase is fitted setup also refuses an array the
+      unflagged baselines split in two;
     * the overall AMPLITUDE is degenerate with the RFI source amplitude and the
       astronomical amplitude, so it is REMOVED by construction: the log amplitudes are
       carried by ``n_ant - 1`` parameters on an orthonormal basis of the zero-sum
@@ -499,9 +500,9 @@ class ConstGains(Component):
     by construction and ``amp_mean`` only sets the scale the percentage is taken of,
     so a non-unit value there warns.
 
-    ``gains.fix_flux_scale: false`` lifts the amplitude constraint, and is accepted
-    only with a fixed-flux sky in the model, which is the one thing that can set the
-    scale. ``gains.init`` optionally starts the fit at a previously measured gain —
+    ``gains.fix_flux_scale: false`` lifts the amplitude constraint, and when the
+    amplitude is fitted it is accepted only with a fixed-flux sky in the model, which
+    is the one thing that can set the scale. ``gains.init`` optionally starts the fit at a previously measured gain —
     an ``.npz`` (key ``gain``, shape ``(n_ant,)``) or a calibration table — which is a
     much better starting point than the prior mean. Any such gain is *projected* into
     the gauge above rather than taken as given.
