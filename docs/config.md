@@ -658,6 +658,7 @@ The `gains` section defines the prior over the antenna gains and how they are in
 ```yaml
 gains:
   init: prior
+  fit: complex
   amp_mean: 1.0
   amp_std: 10
   phase_mean: 0.0
@@ -671,7 +672,7 @@ gains:
 * `amp_std`: The standard deviation of the prior over the gain amplitude, **as a percentage** of `amp_mean`. `amp_std: 10` with `amp_mean: 1.0` is a 10 % spread. `null` defaults to **20**, a 20 % spread.
 * `phase_mean`: The mean of the prior over the gain phase, in **radians**.
 * `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**. `null` defaults to **180** — half a turn, which is effectively uniform over the circle. See below.
-* `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
+* `fit`, `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
 
 **`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. A zero width is an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason.
 
@@ -725,6 +726,7 @@ Both directions are removed from the **parameters**, not just from the value the
 
 The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviation of $\log|g|$, which agrees with a fractional spread to first order and keeps the gain positive by construction. `amp_mean` is the **median** of that prior — its centre in log space, and the value the fit starts at — rather than its arithmetic mean, which is the slightly larger $\texttt{amp\_mean} \cdot e^{\sigma^2/2}$ for $\sigma$ the log-space spread. And it is that **only when the flux scale is free**: under the zero-sum gauge the geometric mean of $|g|$ is 1 by construction and `amp_mean` merely sets the scale that `amp_std`'s percentage is taken of, so a non-unit `amp_mean` with `fix_flux_scale: true` raises a warning saying so. A value that is not positive and finite is an error rather than a default.
 
+* `fit`: Which part of the gain is fitted. `complex` (the default; `both` is the same) fits amplitude and phase. `amplitude` fits only the amplitudes and `phase` only the phases, $n_\text{ant} - 1$ parameters either way ($n_\text{ant}$ for amplitudes with the flux scale freed), and the part left out is **held at its initial value**: the prior mean, or the measured gain of `init` after the projection into the gauge described below. So `fit: amplitude` with `init: caltable.G` keeps the table's phases and solves for the amplitudes, and `fit: phase` the reverse. The gauge applies to the fitted part as before. A phase-only fit has no overall amplitude to drift along, so `fix_flux_scale: false` needs no fixed-flux sky there; it only decides whether the held amplitude keeps its absolute scale.
 * `ref_ant`: The antenna whose phase is pinned to 0. `null` (the default) selects the first antenna with any unflagged data. An antenna every one of whose baselines is flagged everywhere is not constrained by any visibility, so it cannot be the reference the others are measured against, and naming one explicitly is an error rather than a silently unpinned fit.
 
   **One reference pins one connected group.** A phase is measured relative to another antenna's along a chain of baselines that carry data, so if the unflagged baselines split the array into groups that share no baseline, pinning `ref_ant` in one group leaves every other group's overall phase unconstrained. Setup computes the connected components of the unflagged baseline graph and **stops**, naming the groups, rather than fitting a model with a flat direction in it. Fit the groups separately, or flag the smaller ones out of the run. Heavy flagging is fine as long as what survives still connects the array.

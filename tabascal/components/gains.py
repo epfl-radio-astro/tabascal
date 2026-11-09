@@ -80,6 +80,36 @@ DEFAULT_AMP_STD_PERCENT = 20.0
 #: than tens of sigma outside it.
 DEFAULT_PHASE_STD_DEGREES = 180.0
 
+#: What ``gains.fit`` may name, and the parameter blocks each one fits. ``both`` is
+#: the same fit as ``complex``, under the name the amplitude/phase split suggests.
+GAIN_FIT_BLOCKS = {
+    "complex": ("amp", "phase"),
+    "both": ("amp", "phase"),
+    "amplitude": ("amp",),
+    "phase": ("phase",),
+}
+
+
+def resolve_gain_fit(gains_config: Dict) -> str:
+    """Which part of the gain is fitted: ``complex`` (the default), ``amplitude`` or ``phase``.
+
+    ``both`` is read as ``complex``. The part that is not fitted is held at its
+    initial value rather than at a value of its own.
+    """
+
+    fit = gains_config.get("fit")
+
+    if fit is None:
+        return "complex"
+
+    if not isinstance(fit, str) or fit not in GAIN_FIT_BLOCKS:
+        raise ValueError(
+            f"Config parameter (gains:\n\tfit: {fit}) is not one of "
+            f"{sorted(GAIN_FIT_BLOCKS)}."
+        )
+
+    return "complex" if fit == "both" else fit
+
 
 def validate_gain_scales(gains_config: Dict) -> Dict:
     """Validate and normalise the scale parameters of the gain prior, in place.
@@ -476,6 +506,13 @@ class ConstGains(Component):
     much better starting point than the prior mean. Any such gain is *projected* into
     the gauge above rather than taken as given.
 
+    ``gains.fit`` chooses what is fitted: ``complex`` (the default, alias ``both``),
+    ``amplitude`` or ``phase``. The part left out is held at its initial value —
+    the prior mean, or the measured gain of ``gains.init`` in the same gauge — so an
+    amplitude-only fit keeps a calibration table's phases and a phase-only fit its
+    amplitudes. Each partial fit has ``n_ant - 1`` parameters (``n_ant`` for an
+    amplitude fit with the flux scale freed).
+
     It binds the observation shapes and the amplitude and phase scales of the prior,
     and nothing else: the correlation lengths that used to sit beside them belonged
     to the Gaussian process gain removed in #129, and a constant gain has none.
@@ -521,6 +558,9 @@ class ConstGains(Component):
             self.log_amp_std = self.gp_amp_std / max(self.gp_amp_mean, 1e-12)
 
             components = component_class_names(tab_config)
+            self.fit = resolve_gain_fit(gains_config)
+            self.fit_amp = "amp" in GAIN_FIT_BLOCKS[self.fit]
+            self.fit_phase = "phase" in GAIN_FIT_BLOCKS[self.fit]
             self.fix_flux_scale = self._resolve_fix_flux_scale(gains_config, components)
             self.ref_ant = self._resolve_ref_ant(gains_config, tab_config)
             self._warn_on_rfi_degeneracy(components)
@@ -534,10 +574,13 @@ class ConstGains(Component):
             )
             self.amp_basis = jnp.asarray(zero_sum_basis(self.n_ant))
             self.n_amp_params = self.n_ant - 1 if self.fix_flux_scale else self.n_ant
-            self.parameter_shapes = {
-                "gains_amp_base": ("n_ant-1",) if self.fix_flux_scale else ("n_ant",),
-                "gains_phase_base": ("n_ant-1",),
-            }
+            self.parameter_shapes = {}
+            if self.fit_amp:
+                self.parameter_shapes["gains_amp_base"] = (
+                    ("n_ant-1",) if self.fix_flux_scale else ("n_ant",)
+                )
+            if self.fit_phase:
+                self.parameter_shapes["gains_phase_base"] = ("n_ant-1",)
 
             if self.fix_flux_scale and self.gp_amp_mean != 1.0:
                 warnings.warn(
@@ -578,7 +621,10 @@ class ConstGains(Component):
                 "not of type bool."
             )
 
-        if not fix_flux_scale and "FixedDiscreteSky" not in components:
+        # A phase-only fit holds the amplitude at its initial value, so there is no
+        # overall amplitude for the fit to drift along; the flag then only says
+        # whether that held amplitude keeps its absolute scale.
+        if not fix_flux_scale and self.fit_amp and "FixedDiscreteSky" not in components:
             raise ValueError(
                 "gains.fix_flux_scale is false, which frees the overall gain "
                 "amplitude, but the model has no fixed-flux sky to set the flux "
@@ -675,19 +721,28 @@ class ConstGains(Component):
 
         def set_params(params):
 
-            params["gains_amp_base"] = standard_normal(
-                "gains_amp_base", (self.n_amp_params,)
-            )
-            params["gains_phase_base"] = standard_normal(
-                "gains_phase_base", (self.n_ant - 1,)
-            )
+            if self.fit_amp:
+                params["gains_amp_base"] = standard_normal(
+                    "gains_amp_base", (self.n_amp_params,)
+                )
+            if self.fit_phase:
+                params["gains_phase_base"] = standard_normal(
+                    "gains_phase_base", (self.n_ant - 1,)
+                )
 
             return params
 
         return set_params
 
     def build_constants(self):
-        return {"amp_basis": self.amp_basis}
+        # The part of the gain that is not fitted is held at its initial value.
+        constants = {"amp_basis": self.amp_basis}
+        if not self.fit_amp:
+            constants["held_log_amp"] = jnp.log(self.init_params["gains_amp"])
+        if not self.fit_phase:
+            constants["held_phase"] = self.init_params["gains_phase"]
+
+        return constants
 
     def build_forward(self):
         """Return pure, JIT-compatible function"""
@@ -695,13 +750,16 @@ class ConstGains(Component):
         log_amp_std = self.log_amp_std
         log_amp_offset = self.log_amp_offset
         fix_flux_scale = self.fix_flux_scale
+        fit_amp, fit_phase = self.fit_amp, self.fit_phase
         phase_mean, phase_std = self.gp_phase_mean, self.gp_phase_std
         ref_ant = self.ref_ant
         a1, a2 = self.a1, self.a2
         n_freq, n_time = self.n_freq, self.n_time
 
         def forward(params, state, constants):
-            if fix_flux_scale:
+            if not fit_amp:
+                log_amp = constants[f"{prefix}/held_log_amp"]
+            elif fix_flux_scale:
                 # Zero-sum in log space => prod(|g_p|) = 1 exactly: the overall
                 # amplitude scale is removed, not fitted. Only relative antenna
                 # amplitudes remain, and they are carried by n_ant - 1 parameters on
@@ -714,15 +772,18 @@ class ConstGains(Component):
                 log_amp = log_amp_offset + log_amp_std * params["gains_amp_base"]
             amp = jnp.exp(log_amp)
 
-            # Reference antenna phase pinned to 0: the overall phase is unobservable.
-            free_phase = phase_mean + phase_std * params["gains_phase_base"]
-            phase = jnp.concatenate(
-                [
-                    free_phase[:ref_ant],
-                    jnp.zeros(1, dtype=free_phase.dtype),
-                    free_phase[ref_ant:],
-                ]
-            )
+            if fit_phase:
+                # Reference antenna phase pinned to 0: the overall phase is unobservable.
+                free_phase = phase_mean + phase_std * params["gains_phase_base"]
+                phase = jnp.concatenate(
+                    [
+                        free_phase[:ref_ant],
+                        jnp.zeros(1, dtype=free_phase.dtype),
+                        free_phase[ref_ant:],
+                    ]
+                )
+            else:
+                phase = constants[f"{prefix}/held_phase"]
 
             g = amp * jnp.exp(1.0j * phase)  # (n_ant,)
             gains = g[:, None, None] * jnp.ones((1, n_freq, n_time))
@@ -781,12 +842,13 @@ class ConstGains(Component):
             "gains_amp": jnp.asarray(np.exp(log_amp)),
             "gains_phase": jnp.asarray(phase),
         }
-        self.init_params_base = {
-            "gains_amp_base": jnp.asarray(self._amp_base(log_amp)),
-            "gains_phase_base": jnp.asarray(
+        self.init_params_base = {}
+        if self.fit_amp:
+            self.init_params_base["gains_amp_base"] = jnp.asarray(self._amp_base(log_amp))
+        if self.fit_phase:
+            self.init_params_base["gains_phase_base"] = jnp.asarray(
                 (np.delete(phase, self.ref_ant) - self.gp_phase_mean) / self.gp_phase_std
-            ),
-        }
+            )
 
     def _set_outputs(self):
 
@@ -799,5 +861,7 @@ class ConstGains(Component):
         """Ensure all setup operations completed successfully"""
 
         assert_attr_shape(self, "amp_basis", (self.n_ant, self.n_ant - 1))
-        assert self.init_params_base["gains_amp_base"].shape == (self.n_amp_params,)
-        assert self.init_params_base["gains_phase_base"].shape == (self.n_ant - 1,)
+        if self.fit_amp:
+            assert self.init_params_base["gains_amp_base"].shape == (self.n_amp_params,)
+        if self.fit_phase:
+            assert self.init_params_base["gains_phase_base"].shape == (self.n_ant - 1,)

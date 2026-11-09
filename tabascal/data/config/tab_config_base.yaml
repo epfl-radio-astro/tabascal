@@ -109,6 +109,7 @@ satellites:
 ###########################################
 gains:
   init: prior           # Optional - The initialization method for the gain parameters. Only gains:ConstGains reads it, and it accepts 'prior' or a path to an .npz of per-antenna gains (key 'gain') or to a calibration table, projected into its gauge. gains:UnitaryGains ignores it entirely - it fits no gain at all
+  fit: complex          # Optional - Which part of the gains:ConstGains gain is fitted: 'complex' (alias 'both') fits amplitude and phase, 'amplitude' or 'phase' fits only that part and holds the other at its initial value - the prior mean, or the measured gain of init
   ref_ant: null         # Optional - Phase reference antenna for gains:ConstGains, whose phase is pinned to 0. Defaults to the first antenna with any unflagged data
   fix_flux_scale: true  # Optional - Keep the zero-sum log-amplitude gauge of gains:ConstGains, so the gain carries no absolute flux scale. false frees the overall amplitude and requires a fixed-flux sky (ast_signal:FixedDiscreteSky) to set the scale
   amp_mean: 1.0         # Optional - Mean of the prior distribution over the gain amplitudes. Options are 'truth' or a value like 1.0
