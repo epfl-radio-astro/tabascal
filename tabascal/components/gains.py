@@ -588,7 +588,8 @@ class ConstGains(Component):
                     "amplitude while gains.fix_flux_scale is true: the zero-sum gauge "
                     "makes the geometric mean of |g| exactly 1, and amp_mean only sets "
                     "the scale that gains.amp_std's percentage is taken of. Set "
-                    "gains.fix_flux_scale to false (which needs a fixed-flux sky) for "
+                    "gains.fix_flux_scale to false (which needs a fixed-flux sky when "
+                    "the amplitude is fitted) for "
                     "amp_mean to be the amplitude the fit starts at.",
                     UserWarning,
                     stacklevel=2,
@@ -658,7 +659,9 @@ class ConstGains(Component):
                 "can reference the others."
             )
 
-        if len(groups) > 1:
+        # Only a fitted phase needs the chain of baselines back to the reference: an
+        # amplitude-only fit holds every phase, so a split array leaves none free.
+        if len(groups) > 1 and self.fit_phase:
             raise ValueError(
                 f"The unflagged baselines split the array into {len(groups)} groups "
                 "that share no baseline with each other: "

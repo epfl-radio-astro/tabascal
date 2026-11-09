@@ -679,6 +679,14 @@ class TestFit:
 
         assert jnp.allclose(jnp.abs(gains), 2.0, rtol=exact_rtol, atol=exact_rtol)
 
+    def test_an_amplitude_only_fit_accepts_a_split_array(self):
+        """Only a fitted phase needs a chain of baselines back to the reference."""
+        flags = keep_only_baselines(6, 3, 4, [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)])
+        ConstGains().setup(make_const_gains_config(n_ant=6, flags=flags, fit="amplitude"))
+
+        with pytest.raises(RuntimeError, match="groups"):
+            ConstGains().setup(make_const_gains_config(n_ant=6, flags=flags, fit="phase"))
+
     def test_an_amplitude_only_fit_with_a_free_scale_still_needs_a_fixed_sky(self):
         with pytest.raises(RuntimeError, match="FixedDiscreteSky"):
             ConstGains().setup(make_const_gains_config(fit="amplitude", fix_flux_scale=False))
