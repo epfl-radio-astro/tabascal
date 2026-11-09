@@ -670,14 +670,30 @@ class TestFit:
         assert np.allclose(part(moved), part(expected), rtol=exact_rtol, atol=exact_rtol)
         assert not np.allclose(other(moved), other(expected), rtol=1e-3, atol=1e-3)
 
-    def test_a_phase_only_fit_frees_the_flux_scale_without_a_fixed_sky(self, exact_rtol):
-        """No amplitude is fitted, so no fixed sky is needed: amp_mean is just held."""
+    @pytest.mark.parametrize("init", ["prior", None])
+    @pytest.mark.parametrize("fit", ["amplitude", "phase"])
+    def test_without_a_measured_gain_the_held_block_is_unity(self, exact_rtol, init, fit):
+        """amp_mean and phase_mean place only the fitted block; the held one is |g| = 1 or 0 rad."""
         comp = ConstGains()
-        comp.setup(make_const_gains_config(fit="phase", fix_flux_scale=False, amp_mean=2.0))
+        comp.setup(
+            make_const_gains_config(
+                init=init, fit=fit, amp_mean=2.0, phase_mean=0.5, ref_ant=0,
+                fix_flux_scale=False, components=self.FREE_SKY,
+            )
+        )
+        g = np.asarray(run_forward(comp, random_params(comp))["gains"][:, 0, 0])
+        start = np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0])
 
-        gains = run_forward(comp, random_params(comp))["gains"]
+        if fit == "phase":
+            assert np.allclose(np.abs(g), 1.0, rtol=exact_rtol, atol=exact_rtol)
+            assert np.allclose(np.angle(start[1:]), 0.5, rtol=exact_rtol, atol=exact_rtol)
+        else:
+            assert np.allclose(np.angle(g), 0.0, rtol=exact_rtol, atol=exact_rtol)
+            assert np.allclose(np.abs(start), 2.0, rtol=exact_rtol, atol=exact_rtol)
 
-        assert jnp.allclose(jnp.abs(gains), 2.0, rtol=exact_rtol, atol=exact_rtol)
+    def test_a_phase_only_fit_frees_the_flux_scale_without_a_fixed_sky(self):
+        """No amplitude is fitted, so no fixed sky is needed."""
+        ConstGains().setup(make_const_gains_config(fit="phase", fix_flux_scale=False))
 
     def test_an_amplitude_only_fit_accepts_a_split_array(self):
         """Only a fitted phase needs a chain of baselines back to the reference."""

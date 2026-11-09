@@ -508,10 +508,11 @@ class ConstGains(Component):
     the gauge above rather than taken as given.
 
     ``gains.fit`` chooses what is fitted: ``complex`` (the default, alias ``both``),
-    ``amplitude`` or ``phase``. The part left out is held at its initial value —
-    the prior mean, or the measured gain of ``gains.init`` in the same gauge — so an
-    amplitude-only fit keeps a calibration table's phases and a phase-only fit its
-    amplitudes. Each partial fit has ``n_ant - 1`` parameters (``n_ant`` for an
+    ``amplitude`` or ``phase``. The part left out is held at the measured gain of
+    ``gains.init``, in the same gauge, so an amplitude-only fit keeps a calibration
+    table's phases and a phase-only fit its amplitudes; with ``init: prior`` (or
+    unset) it is unity — ``|g| = 1`` or a zero phase — whatever ``amp_mean`` or
+    ``phase_mean`` say. Each partial fit has ``n_ant - 1`` parameters (``n_ant`` for an
     amplitude fit with the flux scale freed).
 
     It binds the observation shapes and the amplitude and phase scales of the prior,
@@ -583,14 +584,13 @@ class ConstGains(Component):
             if self.fit_phase:
                 self.parameter_shapes["gains_phase_base"] = ("n_ant-1",)
 
-            if self.fix_flux_scale and self.gp_amp_mean != 1.0:
+            if self.fit_amp and self.fix_flux_scale and self.gp_amp_mean != 1.0:
                 warnings.warn(
                     f"gains.amp_mean = {self.gp_amp_mean} does not set the fitted gain "
                     "amplitude while gains.fix_flux_scale is true: the zero-sum gauge "
                     "makes the geometric mean of |g| exactly 1, and amp_mean only sets "
                     "the scale that gains.amp_std's percentage is taken of. Set "
-                    "gains.fix_flux_scale to false (which needs a fixed-flux sky when "
-                    "the amplitude is fitted) for "
+                    "gains.fix_flux_scale to false (which needs a fixed-flux sky) for "
                     "amp_mean to be the amplitude the fit starts at.",
                     UserWarning,
                     stacklevel=2,
@@ -829,8 +829,10 @@ class ConstGains(Component):
     def _compute_init_params(self, init):
 
         if init is None or init == "prior":
-            log_amp = np.full(self.n_ant, self.log_amp_offset)
-            phase = np.full(self.n_ant, self.gp_phase_mean)
+            # The fitted part starts at the prior mean; a held part has no measured
+            # value to keep, so it is unity: |g| = 1 or phase 0.
+            log_amp = np.full(self.n_ant, self.log_amp_offset if self.fit_amp else 0.0)
+            phase = np.full(self.n_ant, self.gp_phase_mean if self.fit_phase else 0.0)
             phase[self.ref_ant] = 0.0
             print("Initialising ConstGains at the prior mean")
         elif isinstance(init, str) and os.path.exists(os.path.abspath(init)):
