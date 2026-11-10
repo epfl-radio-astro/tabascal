@@ -93,6 +93,8 @@ def make_rfi_config(
     rfi_mask_fine=None,
     time_scale="utc",
     signal_type=None,
+    gammas=None,
+    per_satellite=None,
 ):
     """Build a minimal mock TabConfig for the RFI-signal components.
 
@@ -156,6 +158,10 @@ def make_rfi_config(
     # the one a config that never mentions the key gets.
     if signal_type is not None:
         config.args["rfi"]["signal_type"] = signal_type
+    if gammas is not None:
+        config.args["rfi"]["gp_cov"]["gammas"] = gammas
+    if per_satellite is not None:
+        config.args["rfi"]["gp_cov"]["per_satellite"] = per_satellite
 
     # Omitted entirely (rather than set to None) so the getattr fallback in
     # BaseGPRFI.setup is exercised as it would be on an unpadded TabConfig.
@@ -2174,7 +2180,7 @@ class TestTheStdIsTheWidthItClaims:
     SEEDS = range(24)
 
     @classmethod
-    def _rms_vis(cls, comp, n_rfi_real=1, seeds=None):
+    def _rms_vis(cls, comp, n_rfi_real=1, seeds=None, rows=None):
         """``rms|V|`` of the visibility the component's own forward pass builds.
 
         Through ``build_forward``, not through a re-derivation of it: the
@@ -2183,9 +2189,10 @@ class TestTheStdIsTheWidthItClaims:
         integration and no elevation mask -- which is the contract.
         """
 
+        rows = slice(0, n_rfi_real) if rows is None else rows
         samples = []
         for seed in cls.SEEDS if seeds is None else seeds:
-            rfi_A = run_forward(comp, random_params(comp, seed=seed))
+            rfi_A = run_forward(comp, random_params(comp, seed=seed))[rows]
             # V_pq = sum_s A[s, p] conj(A[s, q]), over every baseline: the GP
             # is correlated along the grid, so the effective sample count is
             # far below the point count and the pairs are what make this
@@ -2198,8 +2205,8 @@ class TestTheStdIsTheWidthItClaims:
             n_ant = rfi_A.shape[1]
             a1, a2 = np.triu_indices(n_ant, k=1)
             vis = calculate_rfi_vis_fine(
-                rfi_A[:n_rfi_real],
-                jnp.zeros_like(rfi_A[:n_rfi_real], dtype=float),
+                rfi_A,
+                jnp.zeros_like(rfi_A, dtype=float),
                 jnp.asarray(a1),
                 jnp.asarray(a2),
             )
@@ -2572,3 +2579,131 @@ class TestRealSignalType:
         expected = np.broadcast_to(np.asarray(kept, float)[:, None, None, None], A.shape)
         np.testing.assert_allclose(A, expected, atol=10 * tol())
         assert f"= {lost} is discarded" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# rfi.gp_cov.per_satellite
+# ---------------------------------------------------------------------------
+
+def per_sat(cls, per_satellite, **kwargs):
+    """A component whose rows are satellites 40000, 40001 and a dummy of 40001."""
+    kwargs = {"n_rfi": 3, "n_rfi_real": 2, "n_freq": 8, "n_time": 16, **kwargs}
+    return setup_component(cls, per_satellite=per_satellite, **kwargs)
+
+
+def own_shape(support):
+    """``(n_k_freq, n_k_time)`` of one row's own cut on the shared grid."""
+    return int(jnp.any(support, axis=1).sum()), int(jnp.any(support, axis=0).sum())
+
+
+class TestPerSatellitePrior:
+    """``rfi.gp_cov.per_satellite``: a satellite's own std, corr_freq, corr_time and gammas."""
+
+    OWN = {40001: {"std": 4.0, "corr_time": 600.0}}
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    @pytest.mark.parametrize("listed", [None, {}, {40000: None}, {40000: {"corr_time": 60.0}}])
+    def test_nothing_different_is_the_shared_prior(self, cls, listed):
+        """Absent, empty, null and unchanged entries all build the grid every run has."""
+        shared, comp = per_sat(cls, None), per_sat(cls, listed)
+
+        assert comp.support_rfi_k is None and comp.sigma_rfi_k.shape[:2] == (1, 1)
+        np.testing.assert_array_equal(comp.sigma_rfi_k, shared.sigma_rfi_k)
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_a_key_left_out_takes_the_shared_value(self, cls):
+        """Rows are in satellites.norad_ids order; a string key and the dummy row both resolve."""
+        comp = per_sat(cls, {"40000": {"std": 9.0}}, corr_time=30.0)
+        shared = {"std": 1.0, "corr_freq": 5e6, "corr_time": 30.0, "gammas": list(cls.default_gammas)}
+
+        assert comp.source_gp_cov == [{**shared, "std": 9.0}, shared, shared]
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_each_row_is_normalised_to_its_own_width(self, cls):
+        comp = per_sat(cls, {40000: {"std": 9.0}}, std=1.0)
+
+        assert comp.sigma_rfi_k.shape[:2] == (3, 1)
+        assert jnp.sum(comp.sigma_rfi_k[:, 0] ** 2, axis=(1, 2)) == pytest.approx([4.5, 0.5, 0.5])
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_a_row_is_the_satellite_alone_on_its_own_cut_and_zero_off_it(self, cls):
+        comp = per_sat(cls, self.OWN, corr_time=6.0)
+        alone = per_sat(cls, None, corr_time=600.0, std=4.0, n_rfi=1, n_rfi_real=1)
+        on = np.asarray(comp.support_rfi_k[1, 0])
+        sigma = np.asarray(comp.sigma_rfi_k[1, 0])
+
+        assert own_shape(on) == alone.sigma_rfi_k.shape[2:] != comp.sigma_rfi_k.shape[2:]
+        box = np.ix_(on.any(axis=1), on.any(axis=0))
+        np.testing.assert_allclose(sigma[box], alone.sigma_rfi_k[0, 0], rtol=tol())
+        assert (sigma[~on] == 0).all()
+
+    def test_the_grid_is_the_box_around_cuts_that_cross(self):
+        """Steep in frequency against steep in time: the corner is in neither cut."""
+        comp = per_sat(ComplexRFIVarAntFine, {40001: {"gammas": [3, 8]}}, gammas=[8, 3])
+        a, b = (per_sat(ComplexRFIVarAntFine, None, gammas=g, n_rfi=1, n_rfi_real=1) for g in ([8, 3], [3, 8]))
+
+        assert a.n_k_freq_rfi < b.n_k_freq_rfi and b.n_k_time_rfi < a.n_k_time_rfi
+        assert comp.sigma_rfi_k.shape[2:] == (b.n_k_freq_rfi, a.n_k_time_rfi)
+        assert [own_shape(s[0]) for s in comp.support_rfi_k[:2]] == [a.sigma_rfi_k.shape[2:], b.sigma_rfi_k.shape[2:]]
+        corner = ~(comp.support_rfi_k[0, 0] | comp.support_rfi_k[1, 0])
+        assert bool(corner.any()) and bool((comp.sigma_rfi_k[:, 0][:, corner] == 0).all())
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    @pytest.mark.parametrize("init, mean", [("prior", "data"), ("sample", "zeros"), ("ones", "zeros"), ("zeros", "data")])
+    def test_means_and_inits_live_on_each_rows_support(self, cls, init, mean):
+        comp = per_sat(cls, self.OWN, corr_time=6.0, init=init, mean=mean)
+        off = ~comp.support_rfi_k
+
+        for name in ("mu_rfi_k", "init_rfi_k", "init_rfi_k_base"):
+            assert bool((jnp.where(off, getattr(comp, name), 0) == 0).all()), name
+        rfi_A = run_forward(comp, random_params(comp))
+        assert bool(jnp.isfinite(rfi_A).all()) and bool((rfi_A[comp.n_rfi_real:] == 0).all())
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_the_transforms_invert_on_the_support_and_vanish_off_it(self, cls):
+        comp = per_sat(cls, self.OWN, corr_time=6.0)
+        base = jax.random.normal(jax.random.PRNGKey(1), comp.init_rfi_k.shape, comp.init_rfi_k.dtype)
+        sigma, mu = comp.sigma_rfi_k, comp.mu_rfi_k
+        back = comp.inv_transform(comp.forward_transform(base, sigma, mu), sigma, mu)
+        on = jnp.broadcast_to(comp.support_rfi_k, base.shape)
+
+        assert bool(jnp.isfinite(back).all()) and bool((back[~on] == 0).all())
+        assert jnp.allclose(back[on], base[on], atol=tol())
+
+    def test_a_var_ant_source_realises_its_own_width(self):
+        """Sampled through the forward, as TestTheStdIsTheWidthItClaims does for one width."""
+        comp = per_sat(ComplexRFIVarAntFine, {40001: {"std": 9.0}}, std=1.0)
+
+        for row, std in ((0, 1.0), (1, 9.0)):
+            rms = TestTheStdIsTheWidthItClaims._rms_vis(comp, rows=slice(row, row + 1))
+            assert rms == pytest.approx(std, rel=0.25)
+
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
+    def test_a_second_setup_on_the_same_config_builds_the_same_prior(self, cls):
+        config = make_rfi_config(n_rfi=3, n_rfi_real=2, n_freq=8, n_time=16, per_satellite=self.OWN)
+        first, second = cls(), cls()
+        first.setup(config)
+        second.setup(config)
+
+        np.testing.assert_array_equal(second.sigma_rfi_k, first.sigma_rfi_k)
+
+    @pytest.mark.parametrize(
+        "per_satellite, words",
+        [
+            ({40000: {"std": "data"}}, "per_satellite[40000].std: 'data') measures the whole observation"),
+            ({40000: {"gamma": 3}}, "per_satellite[40000] has no key(s) ['gamma']"),
+            ({40000: {"std": 0}}, "per_satellite[40000].std: 0.0) must be finite"),
+            ({40000: {}, "40000": {}}, "names satellite 40000 twice"),
+            ({99999: {}}, "names satellite 99999, which is not in this run: its satellites are [40000, 40001]"),
+            ({"abc": {}}, "per_satellite key: 'abc' is not a NORAD catalogue ID"),
+            ([40000], "per_satellite: [40000]) is not a mapping"),
+        ],
+    )
+    def test_a_bad_entry_is_refused_by_name(self, per_satellite, words):
+        assert words in gp_cov_error(ComplexRFIVarAntFine, {"per_satellite": per_satellite})
+
+    def test_the_astronomical_block_still_refuses_it(self):
+        from tabascal.fft_gp import validate_gp_cov
+
+        with pytest.raises(ValueError, match=r"ast.gp_cov has no key\(s\) \['per_satellite'\]"):
+            validate_gp_cov({"per_satellite": {}}, "ast", {"std": "amplitude"})

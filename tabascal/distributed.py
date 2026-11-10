@@ -128,6 +128,10 @@ RFI_AXIS_NAMES = frozenset({
     "rfi_delay_poly_us",
     # constants
     "mu_rfi_k", "mu_rfi_orbit", "L_rfi_orbit",
+    # (n_rfi, 1, n_k_freq, n_k_time) prior width of the RFI latent when some
+    # satellite has its own covariance (rfi.gp_cov.per_satellite). The shared
+    # (1, 1, ...) width fails the leading-size test and stays replicated.
+    "sigma_rfi_k",
     # (n_rfi, n_time_fine) elevation mask, multiplied into rfi_A in the signal
     # forwards. Sharded rather than replicated so that multiply stays elementwise
     # within each shard -- replicated, it would pull rfi_A back to a full copy.

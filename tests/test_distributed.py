@@ -122,6 +122,9 @@ def test_wants_rfi_axis_matching():
     assert not dist._wants_rfi_axis("_c/ConstGains/amp_basis", np.zeros((3, 2)), n_rfi)
     # non-RFI names never shard
     assert not dist._wants_rfi_axis("ast_k_r_base", np.zeros((3, 4)), n_rfi)
+    # the RFI prior width shards once it carries a row per source, and not the shared one
+    assert dist._wants_rfi_axis("_c/ComplexRFIVarAntFine/sigma_rfi_k", np.zeros((3, 1, 4, 5)), n_rfi)
+    assert not dist._wants_rfi_axis("_c/ComplexRFIVarAntFine/sigma_rfi_k", np.zeros((1, 1, 4, 5)), n_rfi)
     # scalars never shard
     assert not dist._wants_rfi_axis("rfi_A", np.float64(0.0), n_rfi)
 
