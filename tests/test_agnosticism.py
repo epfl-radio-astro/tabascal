@@ -190,7 +190,7 @@ def test_the_patterns_match_the_names_and_nothing_near_them(text, expected):
 def test_the_cluster_exemption_does_not_extend_to_the_array_name():
     """``ci/`` may name the machine it runs on. It may not name the array."""
 
-    for rel in ("ci/cscs.yml", "ci/reframe/data/tab_target.yaml", "docs/performance.md"):
+    for rel in ("ci/cscs.yml", "ci/reframe/data/tab_target_analytic.yaml", "docs/performance.md"):
         assert list(_hits("runs on daint:gpu at CSCS", rel)) == []
         assert list(_hits("recorded on EDA2", rel)) != []
 
