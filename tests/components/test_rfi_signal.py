@@ -28,7 +28,10 @@ import numpyro
 
 from tabascal.interferometry import calculate_rfi_vis_fine
 from tabascal.components.rfi_signal import (
+    _LATENT_POWER_BY_TYPE,
+    ComplexRFIVarAnt,
     ComplexRFIVarAntFine,
+    ComplexRFIConstAnt,
     ComplexRFIConstAntFine,
     read_light_curves,
     rfi_signal_config_validation,
@@ -2618,12 +2621,17 @@ class TestPerSatellitePrior:
 
         assert comp.source_gp_cov == [{**shared, "std": 9.0}, shared, shared]
 
-    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
-    def test_each_row_is_normalised_to_its_own_width(self, cls):
-        comp = per_sat(cls, {40000: {"std": 9.0}}, std=1.0)
+    @pytest.mark.parametrize("signal_type", ["complex", "real"])
+    @pytest.mark.parametrize("cls", FOURIER_CLASSES + [ComplexRFIVarAnt, ComplexRFIConstAnt])
+    def test_each_row_is_normalised_to_its_own_width(self, cls, signal_type):
+        """``sum(sigma_i^2) = std_i / _LATENT_POWER_BY_TYPE``, row by row, dummy included."""
+        comp = per_sat(cls, {40000: {"std": 9.0}}, std=1.0, signal_type=signal_type)
+        power = 1 / _LATENT_POWER_BY_TYPE[signal_type]
 
         assert comp.sigma_rfi_k.shape[:2] == (3, 1)
-        assert jnp.sum(comp.sigma_rfi_k[:, 0] ** 2, axis=(1, 2)) == pytest.approx([4.5, 0.5, 0.5])
+        assert jnp.sum(comp.sigma_rfi_k[:, 0] ** 2, axis=(1, 2)) == pytest.approx(
+            [9.0 * power, power, power], rel=10 * tol()
+        )
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_a_row_is_the_satellite_alone_on_its_own_cut_and_zero_off_it(self, cls):
