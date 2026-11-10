@@ -468,6 +468,7 @@ rfi:
     corr_freq: 1e6
     corr_time: 24
     gammas: [3, 3]
+    per_satellite: {}
 ```
 
 All parameters in this section that overlap with those of the `ast` section have the same definition, except that `init` and `mean` accept one more value:
@@ -517,6 +518,23 @@ The only additional parameters are
   * `corr_freq`: the bandwidth, in Hz, over which the RFI signal stays correlated, setting the knee along the frequency axis. That axis is a delay, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `ast.gp_cov.corr_freq` makes. `null` is **half the observed band**, which is *not* what the astronomical `corr_freq: null` means: that one is no roll-off at all. The difference is which default declines to commit. Note that a flat delay spectrum is **not** a smooth signal: equal power at every delay leaves the channels uncorrelated, its normalised channel covariance being `[1, 0, 0, ...]`. So the astronomical null states no frequency structure rather than gentle structure — which costs nothing on the single-channel observations every shipped config runs, and is exactly why [`ast.gp_cov.corr_freq`](#astronomical-signal) tells you to set a value on a wide band. An emitter is coherent over some band by construction, so here half the observation is the least-committal guess that is still a coherence scale.
   * `corr_time`: the time, in seconds, over which the RFI signal stays correlated, setting the knee along the time axis. `null` is half the observation. It is given as a time where the astronomical block asks for `fov_deg`, because an emitter's coherence time is a property of the emitter, while a sky source's is its fringe rate — a consequence of how far off axis it sits rather than a number to pick.
   * `gammas`: the roll-off exponent on the frequency and time axes, in that order. `null` takes the component's own value: `[3, 3]` for `rfi_signal:ComplexRFIVarAnt` and `ComplexRFIVarAntFine`, `[100, 100]` for `rfi_signal:ComplexRFIConstAnt` and `ComplexRFIConstAntFine`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
+  * `per_satellite`: a satellite's own prior, keyed on its NORAD ID. Each entry is a mapping of the four keys above — any of them — and a key it leaves out takes the shared value, resolved as above (`std: null` and `data`, the half-extent defaults, and the component's own `gammas` included). A GNSS satellite whose carrier is stable over the whole scan and a Starlink one whose beam sweeps through in seconds do not want the same `corr_time`, and the brightest satellite in the field does not want the width measured for the rest:
+
+    ```yaml
+    rfi:
+      gp_cov:
+        std: 20
+        corr_time: 24
+        per_satellite:
+          45854: {std: 200, corr_time: 5}
+          20452: {gammas: [5, 5]}
+    ```
+
+    `std` is a number here, never `data`: that measures the whole observation and has no reading for one satellite, so it is refused by name. An ID is an integer or that integer as a string, and every one must be among the run's satellites (`satellites.norad_ids`, or the file or `-np` that overrides it): an entry for a satellite that is not there is refused rather than kept for a run that might one day include it. Under device sharding the padded dummy rows repeat the last real satellite's ID and so take its block, which changes nothing: they are masked dark whatever their prior.
+
+    Every source is fitted on **one latent grid**, since the RFI parameters are one array. Each satellite's spectrum is cut on its own, exactly as it would be if it were the only one, and the grid is the smallest box of modes that holds every one of those cuts. A satellite's modes outside its own cut are not its parameters: its prior width there is exactly zero, its prior mean and every initial value are zeroed there, and the forward reads zero there whatever the fitted coefficient does. The run prints each satellite's resolved block and the size of its own cut beside the shared `(n_k_fq, n_k_tm)`, which is the grid's. The parameter count is the grid's, so two satellites with very different scales fit more coefficients between them than either would alone, and the ones outside a satellite's cut cost gradient evaluations without moving anything. `cutoff`, the padding and `signal_type` stay shared.
+
+    One thing to know about `opt.init_jitter`'s `relative` scale: it is measured over a parameter's whole real-source block, so coefficients outside a satellite's cut, which start at zero, are counted in that rms and perturbed along with the rest to no effect. The jitter on the live coefficients is a little smaller than the same setting would give on a shared prior.
 
 * `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values — and nothing about what the prior believes, since the spectrum is normalised to `gp_cov.std` after the cut. That is why it sits beside `freq_pad_factor` and `baseline_block_size` rather than inside `gp_cov`, exactly as `ast.cutoff` does. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit. Below 1 is necessary rather than sufficient: a value near enough to 1 to round to it in the working precision cuts everything too, which the run refuses with a message naming the cutoff rather than a shape error from inside the transform. `null` takes the component's own value: `1e-9` for `rfi_signal:ComplexRFIVarAnt` and `ComplexRFIVarAntFine`, `1e-6` for `rfi_signal:ComplexRFIConstAnt` and `ComplexRFIConstAntFine`.
 

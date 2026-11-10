@@ -356,6 +356,7 @@ def validate_gp_cov(
     section: str,
     rules: Dict[str, str],
     optional: Tuple[str, ...] = (),
+    name: Optional[str] = None,
 ) -> Dict:
     """Normalise and check one ``<section>.gp_cov`` config block.
 
@@ -381,12 +382,17 @@ def validate_gp_cov(
     optional
         Keys that may be absent or ``null``, and come back as ``None`` for the
         caller to fill in. Every other key in ``rules`` must be present.
+    name
+        What to call the block in the messages, when it is not
+        ``<section>.gp_cov`` itself: one satellite's entry of
+        ``rfi.gp_cov.per_satellite`` takes the same keys and is checked here.
     """
+    block = name or f"{section}.gp_cov"
     if gp_cov is None:
         gp_cov = {}
     elif not isinstance(gp_cov, Mapping):
         raise ValueError(
-            f"Config parameter ({section}.gp_cov: {gp_cov!r}) is not a "
+            f"Config parameter ({block}: {gp_cov!r}) is not a "
             f"mapping. It takes {sorted(rules)}."
         )
 
@@ -396,14 +402,14 @@ def validate_gp_cov(
     unknown = sorted(set(gp_cov) - set(rules), key=repr)
     if unknown:
         raise ValueError(
-            f"{section}.gp_cov has no key(s) {unknown}. It takes "
+            f"{block} has no key(s) {unknown}. It takes "
             f"{sorted(rules)}."
         )
 
     out = {}
     for key, kind in rules.items():
         value = gp_cov.get(key)
-        where = f"{section}.gp_cov.{key}"
+        where = f"{block}.{key}"
 
         if value is None:
             if key not in optional:
@@ -1285,6 +1291,100 @@ def latent_to_signal_init(
     ]
 
     return latent_pk, latent_ks, combined_pads, idxs_pad_ss
+
+
+@measure_runtime
+def latent_grid_init(
+    ns: List[int],
+    dxs: List[float],
+    pad_factors: List[float],
+    ss_factors: List[int],
+    specs: List[Tuple[float, List[float], List[float]]],
+    cutoff: float,
+    *,
+    signal_type: str = "complex",
+) -> Tuple[Array, Array, List[Array], List[Tuple[int, int]], List[slice], List[slice]]:
+    """One latent grid for several sources, each with its own power spectrum.
+
+    :func:`latent_to_signal_init` and :func:`signal_to_latent_init` build the
+    grid for one spectrum. A model that fits its sources on one parameter
+    array needs one grid for all of them, so each spectrum is cut on its own,
+    as it would be alone, and the grid is the smallest box of modes that holds
+    every one of those cuts: on each axis, from the earliest start to the
+    latest stop. A source's own cut is returned as a boolean support on that
+    grid. Where the cuts differ the box holds modes that some source's own cut
+    would have dropped -- a corner that is in nobody's cut when one source is
+    wide in frequency and another wide in time, or anything past a source's
+    own roll-off -- and on those modes that source's spectrum may be
+    arbitrarily small, down to an underflow to zero, so the caller zeroes it
+    there rather than carrying it: see ``BaseGPRFI`` in
+    :mod:`tabascal.components.rfi_signal`.
+
+    With one spec this is the cut the two single-spectrum builders make, and
+    the grid, pads and slices are what they return.
+
+    Parameters
+    ----------
+    specs : list[tuple[float, list[float], list[float]]]
+        ``(p0, k0s, gammas)`` per spectrum, as the single-spectrum builders
+        take them. One entry per *distinct* spectrum is enough: the caller
+        maps its sources onto the rows returned.
+
+    Returns
+    -------
+    tuple[Array, Array, list[Array], list[tuple[int, int]], list[slice], list[slice]]
+        ``(pks, supports, ks, pads, ss_idxs, latent_idxs)``: each spectrum on
+        the shared grid, ``(len(specs), n_k_freq, n_k_time)`` and
+        unnormalised; each spectrum's own cut as a boolean of the same shape;
+        the grid's k-modes per axis; the pads and crop :func:`latent_to_signal`
+        takes; and the slices :func:`signal_to_latent` takes.
+    """
+    if not specs:
+        raise ValueError("specs is empty: at least one power spectrum is needed.")
+
+    ks_pad = pad_domain_k(ns, dxs, pad_factors)
+    pks_pad = [pow_spec_nd(ks_pad, p0, k0s, gammas) for p0, k0s, gammas in specs]
+
+    # Each spectrum's own cut, with the real signal type's Nyquist rule applied
+    # to each by pk_cut, so the union starts past the unpaired mode when every
+    # one of them does.
+    own = [pk_cut(pk, cutoff, signal_type=signal_type)[0] for pk in pks_pad]
+    idxs = [
+        slice(min(c[i].start for c in own), max(c[i].stop for c in own))
+        for i in range(len(ns))
+    ]
+    cut_pads = [(idx.start, n - idx.stop) for idx, n in zip(idxs, (len(k) for k in ks_pad))]
+
+    pks = jnp.stack([pk[tuple(idxs)] for pk in pks_pad])
+    supports = jnp.stack([
+        reduce(
+            jnp.logical_and,
+            jnp.meshgrid(
+                *[
+                    (jnp.arange(idx.start, idx.stop) >= c.start) & (jnp.arange(idx.start, idx.stop) < c.stop)
+                    for idx, c in zip(idxs, cut)
+                ],
+                indexing="ij",
+            ),
+        )
+        for cut in own
+    ])
+    latent_ks = [k[idx] for k, idx in zip(ks_pad, idxs)]
+
+    ns_pad = [len(k) for k in ks_pad]
+    ss_pads = supersample_pads(ns_pad, ss_factors)
+    combined_pads = [
+        (sp[0] + cp[0], sp[1] + cp[1]) for cp, sp in zip(cut_pads, ss_pads)
+    ]
+
+    n_pads = pad_domain_specs(ns, pad_factors)
+    ns_padded = [n + 2 * npad for n, npad in zip(ns, n_pads)]
+    idxs_pad_ss = [
+        slice(int(npad * f - (f // 2)), int(n_tot * f - npad * f - (f // 2)))
+        for n_tot, npad, f in zip(ns_padded, n_pads, ss_factors)
+    ]
+
+    return pks, supports, latent_ks, combined_pads, idxs_pad_ss, idxs
 
 
 def latent_to_signal(

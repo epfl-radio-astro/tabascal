@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from tabascal.fft_gp import (
+    latent_grid_init,
     domain_k,
     domain_ss,
     fourier_cut,
@@ -842,3 +843,38 @@ def test_supersample_keeps_the_samples(n, f):
     for y_ss in (supersample(y, [f]), supersample_fourier(Y, [f])):
         assert y_ss.shape == (n * f,)
         np.testing.assert_allclose(y_ss[::f], y, atol=1e-6)
+
+
+class TestLatentGridInit:
+    """One grid for several spectra: each cut alone, the grid the box around them."""
+
+    NS, DXS, PADS, SS = [8, 16], [1e6, 8.0], [2.0, 2.0], [1, 2]
+    # With these knees the steep axis of each is cut and the shallow one kept whole.
+    A, B = (2.0, [5e-8, 5e-3], [8, 2]), (0.5, [5e-8, 5e-3], [2, 8])
+
+    @pytest.mark.parametrize("signal_type", ["complex", "real"])
+    def test_one_spec_is_what_the_single_spectrum_builders_return(self, signal_type):
+        kw = dict(signal_type=signal_type)
+        pk, ks, pads, ss_idxs = latent_to_signal_init(self.NS, self.DXS, self.PADS, self.SS, *self.A, 1e-6, **kw)
+        idxs, _ = signal_to_latent_init(self.NS, self.DXS, self.PADS, *self.A, 1e-6, **kw)
+        pks, supports, ks2, pads2, ss2, idxs2 = latent_grid_init(self.NS, self.DXS, self.PADS, self.SS, [self.A], 1e-6, **kw)
+
+        np.testing.assert_array_equal(pks[0], pk)
+        assert bool(supports.all()) and (pads2, ss2, idxs2) == (pads, ss_idxs, idxs)
+        for k, k2 in zip(ks, ks2):
+            np.testing.assert_array_equal(k2, k)
+
+    @pytest.mark.parametrize("signal_type", ["complex", "real"])
+    def test_two_specs_share_the_box_around_their_own_cuts(self, signal_type):
+        kw = dict(signal_type=signal_type)
+        alone = [signal_to_latent_init(self.NS, self.DXS, self.PADS, *spec, 1e-6, **kw)[0] for spec in (self.A, self.B)]
+        pks, supports, _, _, _, idxs = latent_grid_init(self.NS, self.DXS, self.PADS, self.SS, [self.A, self.B], 1e-6, **kw)
+
+        assert alone[0][0] != alone[1][0] and alone[0][1] != alone[1][1]
+        assert idxs == [slice(min(a.start, b.start), max(a.stop, b.stop)) for a, b in zip(*alone)]
+        for pk, support, own, spec in zip(pks, supports, alone, (self.A, self.B)):
+            box = tuple(slice(o.start - i.start, o.stop - i.start) for o, i in zip(own, idxs))
+            expected = np.zeros(pk.shape, dtype=bool)
+            expected[box] = True
+            np.testing.assert_array_equal(support, expected)
+            np.testing.assert_array_equal(pk[box], latent_to_signal_init(self.NS, self.DXS, self.PADS, self.SS, *spec, 1e-6, **kw)[0])
