@@ -1,0 +1,63 @@
+model:
+  precision: single
+  components:
+    - trajectory:FixedOrbit
+    - rfi_signal:ComplexRFIVarAnt
+    - rfi_vis:AnalyticVis
+    - ast_vis:GPVisAst
+    - gains:UnitaryGains
+
+data:
+  data_col: DATA
+  noise: null
+
+plots:
+  init: false
+  truth: false
+  prior: false
+  opt: false
+  losses: false
+
+inference:
+  opt: true
+
+opt:
+  epsilon: 1.0e-3
+  max_iter: 500
+  dual_run: false
+  guide: map
+  trace_path: null
+
+ast:
+  init: truth
+  mean: 0
+  cutoff: 1.0e-6
+  gp_cov:
+    std: data
+    corr_freq: 1.0e9     # was pow_spec.k0_freq = 1 / (2 pi * 1e9)
+    fov_deg: 3.1
+    gammas: [5, 5]
+  freq_pad_factor: 2.0
+  time_pad_factor: 2.0
+
+rfi:
+  init: truth
+  mean: 0
+  cutoff: 1.0e-6
+  gp_cov:
+    std: null
+    corr_freq: 1.0e9
+    corr_time: 38
+    gammas: [5, 5]
+  freq_pad_factor: 2.0
+  time_pad_factor: 2.0
+  n_int_freq: 1
+
+satellites:
+  norad_ids_path: starlink_selected_ids.txt
+
+gains:
+  amp_mean: 1.0
+  phase_mean: 0.0
+  amp_std: 1.0
+  phase_std: 1.0

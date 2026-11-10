@@ -1,0 +1,73 @@
+telescope:
+  name: SKA-Low
+  latitude: -26.82472208
+  longitude: 116.7644482
+  elevation: 377.8
+  dish_d: 38.0
+  itrf_path: ./SKA-Low-512.itrf.txt
+  n_ant: 196
+
+observation:
+  target_name: benchmark
+  ra: 276.084038746
+  dec: -30.0
+  start_time_isot: "2026-08-30T12:00:00.000"
+  int_time: 2.0
+  n_time: 150
+  n_int: 1
+  # Eight 5.425-kHz channels with the same centre as the v3 32-channel band.
+  start_freq: 149980335.3680556
+  chan_width: 5425.347222222223
+  n_freq: 8
+  SEFD: 880.5849820045416
+  auto_corrs: false
+  no_w: false
+  random_seed: 12345
+
+ast_sources:
+  point:
+    random:
+      n_src: 10
+      min_I: 0.1
+      max_I: 10.0
+      I_pow_law: 1.6
+      si_mean: 0.7
+      si_std: 0.2
+      n_beam: 5.0
+      max_sep: 0.0
+      random_seed: 123456
+
+rfi_sources:
+  tle_satellite:
+    sat_names: []
+    norad_ids_path: starlink_selected_ids.txt
+    max_n_sat: 32
+    norad_spec_model: starlink_spectra_v4.csv
+    power_scale: 1.0
+    max_ang_sep: 90
+    min_alt: 0
+    vis_step: 0.5
+
+gains:
+  G0_mean: 1.0
+  G0_std: 0.0
+  Gt_std_amp: 0.0
+  Gt_std_phase: 0.0
+  random_seed: 999
+
+output:
+  path: simulations_v4
+  prefix: ska_low_starlink_v4
+  overwrite: false
+  zarr: true
+  ms: true
+  flag_data: false
+  save_rfi_amplitudes: true  # rfi.init: truth reads rfi_tle_sat_A
+
+diagnostics:
+  uv_cov: false
+  src_alt: false
+  rfi_seps: false
+
+dask:
+  max_chunk_MB: 64.0
