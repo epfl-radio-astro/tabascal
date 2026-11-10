@@ -23,6 +23,7 @@ import pytest
 import xarray as xr
 
 from tabascal.components.ast_vis import GPVisAst
+from tabascal.fft_gp import signal_to_latent
 
 from tests.test_base_config import base_args, make_ast_config
 from .conftest import make_constants
@@ -364,6 +365,99 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     message = setup_error(ast_config(tmp_path, baseline_block_size=block_size))
 
     assert "baseline_block_size" in message
+
+
+# The initial sky is read off an array -- init: data, mean: data, init: truth --
+# by padding each baseline up to the padded grid and transforming it, under
+# either transform. That walk is blocked too, from the same budget.
+
+
+def _encoded_whole(comp, vis):
+    """The reference: every baseline vmapped at once, which the blocks replaced."""
+    return np.asarray(
+        jax.vmap(signal_to_latent, (0, None, None))(vis, comp.pad_factors, comp.latent_idxs)
+    )
+
+
+def _assert_encoded(got, expected, exact_rtol):
+    scale = float(np.abs(expected).max())
+    np.testing.assert_allclose(
+        np.asarray(got), expected, rtol=exact_rtol, atol=exact_rtol * scale
+    )
+
+
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+def test_the_initial_sky_does_not_depend_on_the_encode_block(
+    tmp_path, block_size, exact_rtol
+):
+    """``init: data`` and ``mean: data`` through blocks of every size, against the vmap."""
+    config = ast_config(
+        tmp_path, init="data", mean="data", baseline_block_size=block_size
+    )
+    comp = setup_ast(config)
+
+    expected = _encoded_whole(comp, config.vis_obs)
+    _assert_encoded(comp.init_ast_k, expected, exact_rtol)
+    _assert_encoded(comp.mu_ast_k, expected, exact_rtol)
+
+
+@pytest.mark.parametrize("transform", ["dft", "fft"])
+def test_the_encode_is_blocked_from_the_grid_budget_under_either_transform(
+    tmp_path, transform, exact_rtol
+):
+    """The grid is built either way, so the budget binds either way -- under
+    ``null`` too, which in the forward is one step -- and a number bounds it."""
+    config = ast_config(tmp_path, transform=transform, baseline_block_size=None)
+    comp = setup_ast(config)
+    # This grid fits the budget: one step over the whole axis.
+    assert comp._encode_block_size() == comp.n_bl
+
+    # Four of six baselines fit: one full block and a remainder.
+    comp._BLOCK_BUDGET_BYTES = 4 * comp._transform_bytes_per_baseline()
+    assert comp._encode_block_size() == 4
+    _assert_encoded(
+        comp.signal_to_latent(config.vis_obs),
+        _encoded_whole(comp, config.vis_obs),
+        exact_rtol,
+    )
+
+    comp.baseline_block_size_setting = 1
+    assert comp._encode_block_size() == 1
+
+
+def test_the_compiled_encode_holds_a_few_blocks_and_the_latent_once(tmp_path):
+    """What XLA assigns the encode, read off its compiled form: temporaries of
+    a few blocks' grids, not the axis's, and the latent as the one output."""
+    config = make_ast_config(base_args(tmp_path), n_ant=12, n_freq=8, n_time=32)
+    comp = setup_ast(config)
+    per_baseline = comp._transform_bytes_per_baseline()
+    comp._BLOCK_BUDGET_BYTES = 4 * per_baseline
+    assert comp._encode_block_size() == 4
+
+    vis = config.vis_obs
+    compiled = comp._encode_blocks(vis.shape, vis.dtype).lower(vis).compile()
+    try:
+        stats = compiled.memory_analysis()
+        output_bytes, temp_bytes = stats.output_size_in_bytes, stats.temp_size_in_bytes
+    except (AttributeError, NotImplementedError) as e:  # backend-dependent
+        pytest.skip(f"no compiled memory analysis on this backend: {e}")
+    latent_bytes = comp.n_bl * comp.n_k_freq_ast * comp.n_k_time_ast * vis.dtype.itemsize
+
+    assert output_bytes == latent_bytes
+    assert temp_bytes <= 6 * 4 * per_baseline
+    assert temp_bytes < comp.n_bl * per_baseline
+
+
+@pytest.mark.parametrize("extra", [-1, 1])
+def test_an_array_of_another_size_is_refused_rather_than_encoded(tmp_path, extra):
+    """The scan reads the baseline axis by position, so a short or long array
+    -- a truth file of another observation -- is refused by shape, by name."""
+    config = ast_config(tmp_path)
+    comp = setup_ast(config)
+    wrong = jnp.zeros((config.n_bl + extra, config.n_freq, config.n_time), dtype=complex)
+
+    with pytest.raises(ValueError, match="n_bl, n_freq, n_time"):
+        comp.signal_to_latent(wrong)
 
 
 # ---------------------------------------------------------------------------
