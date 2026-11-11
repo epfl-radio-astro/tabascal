@@ -340,10 +340,11 @@ class GPVisAst(Component):
         :meth:`_encode_block_size` rather than vmapping it whole. Whole, and
         eagerly, the padded grid of every baseline is live several times over
         -- the edge extension, each ramp's product and sum, the transform and
-        its shift -- and the padding factor multiplies all of it: an EDA2
-        observation of 32 640 baselines, 27 channels and 90 integrations at
-        ``time_pad_factor: 8`` has a ``(32640, 53, 720)`` grid, 20 GB a copy,
-        which is how ``init: data`` ran out of memory on that data. In blocks
+        its shift -- and the padding factor multiplies all of it: a
+        256-antenna observation of 32 640 baselines, 27 channels and 90
+        integrations at ``time_pad_factor: 8`` has a ``(32640, 53, 720)``
+        grid, 20 GB a copy, which is how ``init: data`` ran out of memory on
+        such data. In blocks
         the transient is the budget's few tens of megabytes, a few times over.
 
         Each block is written into one output of exactly ``(n_bl, ...)``,
