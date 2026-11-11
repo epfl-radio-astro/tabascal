@@ -126,19 +126,22 @@ def base_config_comment(key):
 # ---------------------------------------------------------------------------
 
 
-def test_zeros_init_is_exactly_the_zero_latent(tmp_path):
-    """``zeros`` encodes a zero signal, and that is the zero latent exactly.
+def test_zeros_init_is_the_zero_latent(tmp_path, exact_rtol):
+    """``zeros`` encodes a zero signal, and that is the zero latent.
 
     The handler puts zero visibilities through the same ``signal_to_latent`` path
     the ``data`` init uses rather than writing the zero latent directly, so this
     is the claim that the encoding is linear and unbiased rather than an
     assumption about it. ``mean: data`` makes the prior mean non-zero, so a
-    handler that quietly fell back to the prior would fail here.
+    handler that quietly fell back to the prior would fail here. Setup keeps
+    only the base parameters, ``(0 - mu) / sigma``, so the latent rebuilt from
+    them is zero to the rounding of ``mu``.
     """
     comp = setup_ast(ast_config(tmp_path, init="zeros", mean="data"))
 
-    assert jnp.any(comp.mu_ast_k != 0)
-    assert jnp.all(comp.init_ast_k == 0)
+    scale = float(jnp.max(jnp.abs(comp.mu_ast_k)))
+    assert scale > 0
+    assert float(jnp.max(jnp.abs(comp.init_ast_k))) <= exact_rtol * scale
 
 
 def test_zeros_init_gives_zero_visibilities_through_the_forward(tmp_path, exact_rtol):
@@ -193,7 +196,11 @@ def test_every_accepted_mean_option_constructs(tmp_path, mean):
 
     comp = setup_ast(config)
 
-    assert comp.mu_ast_k.shape == (config.n_bl, comp.n_k_freq_ast, comp.n_k_time_ast)
+    latent_shape = (config.n_bl, comp.n_k_freq_ast, comp.n_k_time_ast)
+    # A zero mean is a scalar that broadcasts, not a latent of zeros.
+    expected = latent_shape if mean == "data" else ()
+    assert comp.mu_ast_k.shape == expected
+    assert jnp.broadcast_shapes(comp.mu_ast_k.shape, latent_shape) == latent_shape
 
 
 def test_the_init_error_offers_exactly_the_options_that_work(tmp_path):
@@ -365,6 +372,39 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     message = setup_error(ast_config(tmp_path, baseline_block_size=block_size))
 
     assert "baseline_block_size" in message
+
+
+# ---------------------------------------------------------------------------
+# What setup keeps
+# ---------------------------------------------------------------------------
+
+
+def _held_latent_bytes(comp):
+    """Bytes in every array setup left on the component with the latent's shape."""
+    shape = (comp.n_bl, comp.n_k_freq_ast, comp.n_k_time_ast)
+    leaves = jax.tree_util.tree_leaves(
+        {k: v for k, v in vars(comp).items() if not callable(v)}
+    )
+    return sum(x.nbytes for x in leaves if getattr(x, "shape", None) == shape)
+
+
+@pytest.mark.parametrize("mean", [0, "data"])
+@pytest.mark.parametrize("init", INIT_OPTIONS)
+def test_setup_keeps_one_start_sigma_and_a_mean_only_if_it_is_not_zero(
+    tmp_path, init, mean
+):
+    """The base start (its two parts), sigma (real), and the mean under ``data``.
+
+    No complex copy of the start, no truth latent, no array of zeros: at a
+    latent of gigabytes each of those is memory the optimiser goes without.
+    """
+    comp = setup_ast(with_truth(ast_config(tmp_path, init=init, mean=mean), tmp_path))
+    latent = comp.n_bl * comp.n_k_freq_ast * comp.n_k_time_ast
+    complex_bytes = latent * comp.init_ast_k_base.dtype.itemsize
+
+    expected = 1.5 * complex_bytes + (complex_bytes if mean == "data" else 0)
+    assert _held_latent_bytes(comp) == expected
+    assert (f"{comp.prefix}/mu_ast_k" in make_constants(comp)) == (mean == "data")
 
 
 # The initial sky is read off an array -- init: data, mean: data, init: truth --
