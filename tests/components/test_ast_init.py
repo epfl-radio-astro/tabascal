@@ -407,6 +407,41 @@ def test_setup_keeps_one_start_sigma_and_a_mean_only_if_it_is_not_zero(
     assert (f"{comp.prefix}/mu_ast_k" in make_constants(comp)) == (mean == "data")
 
 
+@pytest.mark.parametrize("start", ["plane", "latent", "encode", "sample"])
+def test_the_start_is_made_without_a_latent_sized_temporary(tmp_path, start):
+    """Each way setup makes the base start, read off its compiled form: the
+    two parts as output and temporaries well under one latent."""
+    config = make_ast_config(base_args(tmp_path), n_ant=12, n_freq=8, n_time=32)
+    comp = setup_ast(config)
+    comp._BLOCK_BUDGET_BYTES = 4 * comp._transform_bytes_per_baseline()
+    sigma = comp.sigma_ast_k
+    complex_dtype = jnp.result_type(complex)
+    latent_bytes = sigma.size * jnp.zeros((), complex_dtype).dtype.itemsize
+
+    x = {
+        "plane": jnp.zeros(sigma.shape[1:], complex_dtype),
+        "latent": jnp.zeros(sigma.shape, complex_dtype),
+        "encode": config.vis_obs,
+        "sample": jnp.zeros(sigma.shape, complex_dtype),
+    }[start]
+    fn = {
+        "plane": comp._blocked_parts,
+        "latent": comp._blocked_parts,
+        "encode": lambda: comp._encode_base_blocks(x.shape, x.dtype),
+        "sample": lambda: comp._blocked_parts(comp.forward_transform),
+    }[start]()
+    compiled = fn.lower(x, sigma, None).compile()
+    try:
+        stats = compiled.memory_analysis()
+        output_bytes, temp_bytes = stats.output_size_in_bytes, stats.temp_size_in_bytes
+    except (AttributeError, NotImplementedError) as e:  # backend-dependent
+        pytest.skip(f"no compiled memory analysis on this backend: {e}")
+
+    # The output is a tuple of the two parts; XLA counts its index table too.
+    assert latent_bytes <= output_bytes <= latent_bytes + 64
+    assert temp_bytes < latent_bytes / 2
+
+
 # The initial sky is read off an array -- init: data, mean: data, init: truth --
 # by padding each baseline up to the padded grid and transforming it, under
 # either transform. That walk is blocked too, from the same budget.

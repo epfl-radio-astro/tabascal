@@ -354,6 +354,11 @@ class GPVisAst(Component):
         predecessor with the same values; baselines are independent, so the
         result does not depend on the block.
         """
+        self._check_encodable(vis)
+        return self._encode_blocks(vis.shape, vis.dtype)(vis)
+
+    def _check_encodable(self, vis):
+        """Refuse visibilities that are not the observation's own shape."""
         expected = (self.n_bl, self.n_freq, self.n_time)
         if tuple(vis.shape) != expected:
             # The scan reads the axis by position, so a short or long input
@@ -363,7 +368,6 @@ class GPVisAst(Component):
                 f"The visibilities to encode are {tuple(vis.shape)} where the "
                 f"observation is (n_bl, n_freq, n_time) = {expected}."
             )
-        return self._encode_blocks(vis.shape, vis.dtype)(vis)
 
     def _encode_blocks(self, vis_shape, vis_dtype):
         """The jitted block scan behind :meth:`signal_to_latent`.
@@ -395,6 +399,62 @@ class GPVisAst(Component):
             return out
 
         return encode_blocks
+
+    def _blocked_parts(self, latent_block=None):
+        """``(x, sigma, mu) -> (real, imag)`` of the base parameters, by baseline block.
+
+        :meth:`_base_parts` applied block by block and written into the two
+        outputs, so nothing of the latent's size is formed beside them:
+        ``latent_block(x_block, sigma_block, mu_block)`` makes each block's
+        latent -- the encode of visibilities, or a prior draw put through the
+        prior -- and is the identity by default. An ``x`` or ``mu`` of fewer
+        than three axes (a plane, a scalar) is broadcast rather than sliced.
+        ``mu`` None is a zero mean. The blocks are :meth:`signal_to_latent`'s,
+        and the last overlaps its predecessor in the same way.
+        """
+        block = self._encode_block_size()
+        n_bl = self.n_bl
+        starts = jnp.asarray(list(range(0, n_bl - block, block)) + [n_bl - block])
+        base_parts = self._base_parts
+        if latent_block is None:
+            latent_block = lambda x, sigma, mu: x
+
+        @jit
+        def blocked_parts(x, sigma, mu):
+            part_dtype = jnp.finfo(jnp.result_type(x.dtype, sigma.dtype, complex)).dtype
+
+            def take(a, start):
+                if a is None or a.ndim < 3:
+                    return a
+                return lax.dynamic_slice_in_dim(a, start, block, axis=0)
+
+            def step(out, start):
+                sigma_b, mu_b = take(sigma, start), take(mu, start)
+                latent = latent_block(take(x, start), sigma_b, mu_b)
+                parts = base_parts(latent, sigma_b, mu_b)
+                return tuple(
+                    lax.dynamic_update_slice_in_dim(o, p, start, axis=0)
+                    for o, p in zip(out, parts)
+                ), None
+
+            zeros = jnp.zeros(sigma.shape, dtype=part_dtype)
+            out, _ = lax.scan(step, (zeros, zeros), starts)
+            return out
+
+        return blocked_parts
+
+    def _encode_base_blocks(self, vis_shape, vis_dtype):
+        """:meth:`_blocked_parts` with each block encoded from visibilities first.
+
+        For the ``init`` options that start from visibilities: the complex
+        latent of the whole axis never exists.
+        """
+        pad_factors, latent_idxs = self.pad_factors, self.latent_idxs
+
+        def encode(vis, sigma, mu):
+            return vmap(lambda y: signal_to_latent(y, pad_factors, latent_idxs))(vis)
+
+        return self._blocked_parts(encode)
 
     def build_set_params(self):
         n_bl = self.n_bl
@@ -757,10 +817,10 @@ class GPVisAst(Component):
             )
 
     @measure_runtime
-    def _true_latent(self, zarr_path, data_col):
-        """The simulation's ``vis_ast`` encoded to the latent, for ``init: truth``."""
+    def _read_truth(self, zarr_path, data_col):
+        """The simulation's ``vis_ast``, for ``init: truth``."""
 
-        return self.signal_to_latent(read_true_vis_ast(zarr_path, data_col))
+        return read_true_vis_ast(zarr_path, data_col)
 
     def _compute_prior_params(self, prior_type: str, vis_obs):
         """``mu_ast_k``, the prior mean of the latent.
@@ -881,25 +941,32 @@ class GPVisAst(Component):
         the optimisation no longer has room for.
         """
 
+        sigma = self.sigma_ast_k
         mu = None if self._zero_mean else self.mu_ast_k
-        if init_type == "data":
+        # Every branch makes the two parts in one compiled step: the latent
+        # of the whole axis is either one setup keeps anyway (the mean), a
+        # plane or a scalar that broadcasts, or never formed at all.
+        latent = None
+        if init_type == "data" and mu is not None:
             print("Using data for AST init")
             # Under `mean: data` these visibilities are encoded already.
-            latent = mu if mu is not None else self._compute_data_est(vis_obs)
+            latent = mu
+        elif init_type in ("data", "truth"):
+            print(f"Using {init_type} for AST init")
+            vis = (
+                vis_obs if init_type == "data"
+                else self._read_truth(data_args["zarr_path"], data_args["data_col"])
+            )
+            self._check_encodable(vis)
+            parts = self._encode_base_blocks(vis.shape, vis.dtype)(vis, sigma, mu)
         elif init_type == "prior":
             print("Using prior mean for AST init")
             latent = self.mu_ast_k
-        elif init_type == "truth":
-            print("Using truth for AST init")
-            latent = self._true_latent(data_args["zarr_path"], data_args["data_col"])
         elif init_type == "sample":
             print("Using prior sample for AST init")
-            prior_sample = random.normal(
-                component_key(self.seed, self.seed_tag),
-                (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast),
-                dtype=complex,
+            parts = self._sample_base(
+                component_key(self.seed, self.seed_tag), sigma, mu
             )
-            latent = self.forward_transform(prior_sample, self.sigma_ast_k, mu)
         elif init_type == "zeros":
             print("Using zeros for AST init")
             # The zero signal put through the same encoding `data` uses, rather
@@ -909,7 +976,7 @@ class GPVisAst(Component):
             # array: the transform is per-baseline, so every baseline encodes to
             # the same latent, and encoding all of them would allocate a padded
             # FFT of the whole visibility array to get it. The plane broadcasts
-            # against sigma in _to_base, so no baseline axis is formed for it.
+            # against sigma in _blocked_parts, so no baseline axis is formed for it.
             latent = signal_to_latent(
                 jnp.zeros((self.n_freq, self.n_time), dtype=complex),
                 self.pad_factors,
@@ -918,22 +985,31 @@ class GPVisAst(Component):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (data, prior, truth, sample, zeros).")
 
-        base_r, base_i = self._to_base(latent, self.sigma_ast_k, mu)
+        if latent is not None:
+            parts = self._blocked_parts()(latent, sigma, mu)
+        base_r, base_i = parts
         self.init_params_base = {"ast_k_r_base": base_r, "ast_k_i_base": base_i}
 
     @staticmethod
-    @jit
-    def _to_base(latent, sigma, mu):
-        """``inv_transform`` split into its real and imaginary parts, in one step.
+    def _base_parts(latent, sigma, mu):
+        """``inv_transform`` split into its real and imaginary parts.
 
-        Jitted so that the difference, the quotient and the complex result are
-        never held beside the two parts: the output is the parameters and
-        nothing else. ``latent`` broadcasts against ``sigma``, so a plane or a
-        scalar is a latent for every baseline. ``mu`` None is a zero mean.
+        ``latent`` broadcasts against ``sigma``, so a plane or a scalar is a
+        latent for every baseline. ``mu`` None is a zero mean.
         """
         base = (latent if mu is None else latent - mu) / sigma
         base = jnp.broadcast_to(base, sigma.shape)
         return base.real, base.imag
+
+    def _sample_base(self, key, sigma, mu):
+        """The ``sample`` start: a prior draw put through the prior and back.
+
+        The draw is one of the full latent's shape -- that is what the seed
+        pins -- and it is the one latent-sized array this makes beside the
+        two parts; the transform runs by block.
+        """
+        z = random.normal(key, sigma.shape, dtype=jnp.result_type(complex))
+        return self._blocked_parts(self.forward_transform)(z, sigma, mu)
 
     @property
     def init_ast_k_base(self):
