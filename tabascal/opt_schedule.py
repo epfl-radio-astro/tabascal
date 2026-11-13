@@ -34,7 +34,9 @@ OPTIMIZERS = (
 )
 
 #: Arguments of those optimisers that are not scalars a YAML file can give.
-_NOT_FROM_CONFIG = ("learning_rate", "mask", "mu_dtype", "accumulator_dtype")
+_NOT_FROM_CONFIG = (
+    "learning_rate", "mask", "weight_decay_mask", "mu_dtype", "accumulator_dtype",
+)
 
 #: The range each of their numeric arguments must lie in, as ``(low, high,
 #: low_open)`` with ``high`` excluded: a decay rate of 1 never forgets its
