@@ -40,8 +40,21 @@ def _device_row_pattern(kind=None):
 class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     """Shared setup for the tabascal pipeline performance checks."""
 
-    variant = parameter(["Riemann", "RiemannFFI"])
-    precision = parameter(["single", "double"])
+    # The (variant, precision) pairs checked. A variant is a tabascal config in
+    # ci/reframe/data (_config_map) run on the _sim_config simulation, with its
+    # model.precision replaced by the precision. Named for the simulation as well,
+    # so their bencher.dev series stay apart from the 96A benchmark's.
+    case = parameter(
+        [
+            ("Analytic-196A", "single"),
+            ("Analytic-196A", "double"),
+            ("Riemann-196A", "single"),
+        ],
+        fmt=lambda case: "_".join(case),
+    )
+    # Unpacked from case, under the names reframe_to_bmf.py reads from the report.
+    variant = variable(str)
+    precision = variable(str)
 
     # Ends up in the ReFrame report and is used by reframe_to_bmf.py to keep the
     # single- and multi-GPU benchmark series apart on bencher.dev. Anything other
@@ -57,13 +70,6 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     # measured on, so sanity requires the run to have used exactly this many GPUs
     # of exactly this kind; anything else fails rather than being compared against
     # timings it cannot be compared against.
-    #
-    # The references below were re-measured on Daint after #103 swapped the
-    # RFI-signal component in `_components_map` from the real-space
-    # `ComplexRFI` to the scanned Fourier `ComplexRFIVarAnt` (now
-    # `ComplexRFIVarAntFine`). That is a deliberate accuracy-for-runtime trade,
-    # not a bug: see issue #107. Do not "restore" the older, faster numbers --
-    # they belong to a component that no longer exists.
     _expected_gpus = 1
     _expected_device_kind = "GH200"
 
@@ -71,25 +77,20 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     # not checked by ReFrame.
     _reference_by_variant: dict = {}
 
-    _components_map = {
-        "Riemann": [
-            "trajectory:FixedOrbitFine",
-            "rfi_signal:ComplexRFIVarAntFine",
-            "rfi_vis:RiemannVisFine",
-            "ast_vis:GPVisAst",
-            "gains:UnitaryGains",
-        ],
-        "RiemannFFI": [
-            "trajectory:FixedOrbitFine",
-            "rfi_signal:ComplexRFIVarAntFine",
-            "rfi_vis:RiemannVisFine",
-            "ast_vis:GPVisAst",
-            "gains:UnitaryGains",
-        ],
+    #: tabsim config of the simulation every variant runs on, in ci/reframe/data.
+    _sim_config = "sim_target_196A.yaml"
+
+    #: tabascal config of each variant, in ci/reframe/data. Each names its own
+    #: components and rfi.backend: rfi_vis:AnalyticVis has only the ffi backend,
+    #: and tab_target_riemann.yaml leaves RiemannVisFine on its default, ffi.
+    _config_map = {
+        "Analytic-196A": "tab_target_analytic.yaml",
+        "Riemann-196A": "tab_target_riemann.yaml",
     }
 
-    #: rfi.backend of each variant's rfi_vis component.
-    _backend_map = {"Riemann": "jax", "RiemannFFI": "ffi"}
+    @run_after("init")
+    def unpack_case(self):
+        self.variant, self.precision = self.case
 
     def gpu_setup_cmds(self):
         """Commands selecting the GPUs the run may use, prepended to prerun_cmds."""
@@ -133,8 +134,6 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
 
     @run_before("run")
     def prepare_run(self):
-        components = self._components_map[self.variant]
-        components_str = ",".join(components)
         workdir = os.path.join(self.stagedir, "workdir")
 
         self.prerun_cmds = ["set -e"]
@@ -149,8 +148,8 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
 
         self.prerun_cmds.append(
             f"python {_src_root}/ci/reframe/prepare_data.py"
-            f" --components '{components_str}'"
-            f" --rfi-backend {self._backend_map[self.variant]}"
+            f" --sim-config {self._sim_config}"
+            f" --tab-config {self._config_map[self.variant]}"
             f" --workdir {workdir}"
             f" --src-root {_src_root}"
             f" --precision {self.precision}"
@@ -169,6 +168,7 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
             "--extra-orbit-dir",
             f"{_src_root}/tabascal/data/tles",
             "-t",
+            "--skip-ms-write",
         ]
 
     @performance_function("s")
@@ -216,74 +216,31 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
 
     descr = "tabascal pipeline performance (single GPU)"
 
-    # References are keyed by (variant, precision).
-    #
-    # Re-measured on Daint nid005989 (commit 46b6153, JAX 0.6.0) after #103
-    # replaced the real-space `rfi_signal:ComplexRFI` with the scanned Fourier
-    # `ComplexRFIVarAnt` (now `ComplexRFIVarAntFine`). The previous values
-    # described the deleted component, so they are superseded rather than
-    # adjusted. Tolerances are unchanged.
-    #
-    # The optimiser got slower where the RFI-signal component is a large share
-    # of the step (RiemannFFI: +58% single, +26% double) and slightly faster
-    # where RFI-vis still dominates (Riemann: -10% single, -6% double). Setup
-    # time is unchanged, so total_runtime moves with optimizer_runtime alone.
-    # Memory is flat. See issue #107 for why the slower component is preferred.
-    # The Riemann references were re-measured on Daint (JAX 0.6.0) from this
-    # pipeline's own perf job after #114 put the baseline axis under a scan and
-    # jax.checkpoint. Peak memory falls 12.5x in single and 10.8x in double, to
-    # within a quarter of what the FFI kernel itself peaks at, and the optimiser
-    # pays 1.64x and 1.74x for it. That cost is the recomputation the scan trades
-    # for the memory, and it is far more than the ~5% #108 paid for the same
-    # treatment of the antenna axis: rfi.baseline_block_size is the lever if the
-    # trade needs moving, a larger block being fewer scan steps and a larger fine
-    # grid. Tolerances were unchanged, and #114 left the RiemannFFI references alone
-    # -- measured 0.564 and 1.316 GB against them in the same run -- since the
-    # kernel bounds the same term inside itself.
-    #
-    # All references were re-measured on Daint nid005633 (JAX 0.6.0) from this
-    # pipeline's own perf job at 14915ad, one run per configuration, after #277
-    # made the MAP step compile once per fit, jitted the init and MAP predictions
-    # and dropped the two log-posterior evaluations the loss trace already holds.
-    # Against main's perf job in the same container, total_runtime fell 1-6%,
-    # peak memory 1-16% and optimizer_runtime moved by -1.1% to +2.5%.
-    # Tolerances are unchanged.
-    #
-    # All references were re-measured on Daint nid005369 (JAX 0.6.0) from this
-    # pipeline's own perf job at bad34d2, one run per configuration, on the
-    # tabsim 0.1.0 simulation (#253). Its thermal noise is sqrt(2) lower, and the
-    # RFI sampling scales with sqrt(max|V| / noise), so the fine grid went from 25
-    # to 29 samples per time step. The jax backend's peak memory rose with it,
-    # 0.657 -> 0.719 GB single and 1.554 -> 1.794 GB double, and the optimiser
-    # slowed 9-10%; the FFI kernel bounds that term itself, so its memory moved
-    # 0-2% and its optimiser 3-6%. Tolerances are unchanged.
-    _reference_by_variant = {
-        ("Riemann", "single"): {
+    # Measured on Daint (JAX 0.6.0) from the perf job of PR 285 at df62657, one
+    # run per configuration, on the SKA-Low 196A simulation. The checks moved
+    # there from the 96A simulation and its single tab_target.yaml; the 96A
+    # references, and the record of why they moved, are in this file's git
+    # history. Tolerances are carried over from the 96A references.
+    _reference_by_variant: dict = {
+        ("Analytic-196A", "single"): {
             "daint:gpu": {
-                "total_runtime": (127.39, -0.25, 0.15, "s"),
-                "optimizer_runtime": (116.86, -0.20, 0.15, "s"),
-                "memory_usage": (0.719, -0.1, 0.1, "GB"),
+                "total_runtime": (183.02, -0.25, 0.15, "s"),
+                "optimizer_runtime": (162.22, -0.20, 0.15, "s"),
+                "memory_usage": (5.834, -0.15, 0.15, "GB"),
             },
         },
-        ("Riemann", "double"): {
+        ("Analytic-196A", "double"): {
             "daint:gpu": {
-                "total_runtime": (137.96, -0.25, 0.15, "s"),
-                "optimizer_runtime": (127.14, -0.20, 0.15, "s"),
-                "memory_usage": (1.794, -0.1, 0.1, "GB"),
+                "total_runtime": (344.78, -0.25, 0.15, "s"),
+                "optimizer_runtime": (321.14, -0.20, 0.15, "s"),
+                "memory_usage": (9.863, -0.15, 0.15, "GB"),
             },
         },
-        ("RiemannFFI", "single"): {
+        ("Riemann-196A", "single"): {
             "daint:gpu": {
-                "total_runtime": (29.53, -0.25, 0.15, "s"),
-                "optimizer_runtime": (19.36, -0.20, 0.15, "s"),
-                "memory_usage": (0.539, -0.15, 0.15, "GB"),
-            },
-        },
-        ("RiemannFFI", "double"): {
-            "daint:gpu": {
-                "total_runtime": (39.31, -0.25, 0.15, "s"),
-                "optimizer_runtime": (28.26, -0.20, 0.15, "s"),
-                "memory_usage": (1.131, -0.15, 0.15, "GB"),
+                "total_runtime": (678.08, -0.25, 0.15, "s"),
+                "optimizer_runtime": (626.74, -0.20, 0.15, "s"),
+                "memory_usage": (41.719, -0.15, 0.15, "GB"),
             },
         },
     }
@@ -334,69 +291,28 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
 
     _expected_gpus = 4
 
-    # Re-measured on Daint nid005989 (commit 46b6153, JAX 0.6.0) alongside the
-    # single-GPU references above, for the same reason: these described the
-    # deleted `ComplexRFI`. The previous set came from PR #92's final CSCS run
-    # (commit 7a41e4c, node nid005553). Tolerances are unchanged.
-    #
-    # The optimiser regression is largest here (+146% / +132% on RiemannFFI):
-    # sharding the RFI-source axis over 4 GPUs divides the RFI-vis work but the
-    # per-source signal transform stays on each device, so the component under
-    # test is the dominant remaining term. Memory rises 0.238 -> 0.306 GB
-    # (single) and 0.477 -> 0.614 GB (double); both are sub-GB totals where the
-    # signal component's absolute cost is a large fraction.
-    # The Riemann references were re-measured on Daint (JAX 0.6.0) from this
-    # pipeline's own perf job after #114 put the baseline axis under a scan and
-    # jax.checkpoint, alongside the single-GPU references above. Peak memory
-    # falls 10.1x in single and 10.9x in double, onto what the FFI kernel measured
-    # beside it in the same run -- 0.325 and 0.647 GB, equal to the printed
-    # precision -- since the fine grid was the whole of the difference between
-    # them. The optimiser pays 1.39x and 1.22x, less than the single-GPU
-    # 1.6-1.7x: sharding the RFI axis already divides the work the scan
-    # recomputes.
-    #
-    # All references were re-measured alongside the single-GPU ones above after
-    # #277, from the same perf job. Sharded, the fresh optimiser state used to recompile the step at the
-    # second step of each phase, so the savings are larger here: against main's
-    # perf job in the same container, total_runtime fell 10-15%,
-    # optimizer_runtime 7-11% and peak memory 17-39%. Tolerances are unchanged.
-    #
-    # All references were re-measured alongside the single-GPU ones above on the
-    # tabsim 0.1.0 simulation, from the same perf job. The optimiser slowed 6-12%
-    # and peak memory rose 0-5%, except RiemannFFI single: 0.205 -> 0.270 GB,
-    # against 0-2% for the same kernel on one GPU. That rise is the fine grid too:
-    # on Daint with JAX 0.6.0, this code on the new simulation with
-    # rfi.time_int_factor scaled back to the old 25 samples peaks at 0.205 GB
-    # again, and main on the old simulation measures 0.205 GB beside it. The
-    # step is larger than the grid's 16% because the peak does not scale
-    # linearly with it. Tolerances are unchanged.
+    # Measured alongside the single-GPU references above, from the same perf
+    # job, on 4 GH200s. Tolerances are carried over from the 96A references.
     _reference_by_variant: dict = {
-        ("Riemann", "single"): {
+        ("Analytic-196A", "single"): {
             "daint:gpu": {
-                "total_runtime": (68.76, -0.25, 0.15, "s"),
-                "optimizer_runtime": (57.29, -0.20, 0.15, "s"),
-                "memory_usage": (0.281, -0.15, 0.15, "GB"),
+                "total_runtime": (79.37, -0.25, 0.15, "s"),
+                "optimizer_runtime": (54.27, -0.20, 0.15, "s"),
+                "memory_usage": (5.642, -0.15, 0.15, "GB"),
             },
         },
-        ("Riemann", "double"): {
+        ("Analytic-196A", "double"): {
             "daint:gpu": {
-                "total_runtime": (68.98, -0.25, 0.15, "s"),
-                "optimizer_runtime": (56.96, -0.20, 0.15, "s"),
-                "memory_usage": (0.539, -0.15, 0.15, "GB"),
+                "total_runtime": (127.22, -0.25, 0.15, "s"),
+                "optimizer_runtime": (99.76, -0.20, 0.15, "s"),
+                "memory_usage": (9.66, -0.15, 0.15, "GB"),
             },
         },
-        ("RiemannFFI", "single"): {
+        ("Riemann-196A", "single"): {
             "daint:gpu": {
-                "total_runtime": (31.60, -0.25, 0.15, "s"),
-                "optimizer_runtime": (20.23, -0.20, 0.15, "s"),
-                "memory_usage": (0.270, -0.15, 0.15, "GB"),
-            },
-        },
-        ("RiemannFFI", "double"): {
-            "daint:gpu": {
-                "total_runtime": (38.18, -0.25, 0.15, "s"),
-                "optimizer_runtime": (26.30, -0.20, 0.15, "s"),
-                "memory_usage": (0.416, -0.15, 0.15, "GB"),
+                "total_runtime": (366.6, -0.25, 0.15, "s"),
+                "optimizer_runtime": (312.1, -0.20, 0.15, "s"),
+                "memory_usage": (12.782, -0.15, 0.15, "GB"),
             },
         },
     }
