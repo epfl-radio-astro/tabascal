@@ -216,12 +216,34 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
 
     descr = "tabascal pipeline performance (single GPU)"
 
-    # No references yet. The checks moved from the 96A simulation and its single
-    # tab_target.yaml to the SKA-Low 196A simulation and the Analytic and Riemann
-    # configs, which the 96A references do not describe; until they are measured
-    # on Daint the metrics are reported, not asserted. The 96A references, and
-    # the record of why they moved, are in this file's git history.
-    _reference_by_variant: dict = {}
+    # Measured on Daint (JAX 0.6.0) from the perf job of PR 285 at df62657, one
+    # run per configuration, on the SKA-Low 196A simulation. The checks moved
+    # there from the 96A simulation and its single tab_target.yaml; the 96A
+    # references, and the record of why they moved, are in this file's git
+    # history. Tolerances are carried over from the 96A references.
+    _reference_by_variant: dict = {
+        ("Analytic-196A", "single"): {
+            "daint:gpu": {
+                "total_runtime": (183.02, -0.25, 0.15, "s"),
+                "optimizer_runtime": (162.22, -0.20, 0.15, "s"),
+                "memory_usage": (5.834, -0.15, 0.15, "GB"),
+            },
+        },
+        ("Analytic-196A", "double"): {
+            "daint:gpu": {
+                "total_runtime": (344.78, -0.25, 0.15, "s"),
+                "optimizer_runtime": (321.14, -0.20, 0.15, "s"),
+                "memory_usage": (9.863, -0.15, 0.15, "GB"),
+            },
+        },
+        ("Riemann-196A", "single"): {
+            "daint:gpu": {
+                "total_runtime": (678.08, -0.25, 0.15, "s"),
+                "optimizer_runtime": (626.74, -0.20, 0.15, "s"),
+                "memory_usage": (41.719, -0.15, 0.15, "GB"),
+            },
+        },
+    }
 
     def gpu_setup_cmds(self):
         # The CI job exports CUDA_VISIBLE_DEVICES=0 (ci/cscs.yml), but pin the
@@ -269,12 +291,31 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
 
     _expected_gpus = 4
 
-    # No references yet. The checks moved from the 96A simulation and its single
-    # tab_target.yaml to the SKA-Low 196A simulation and the Analytic and Riemann
-    # configs, which the 96A references do not describe; until they are measured
-    # on Daint the metrics are reported, not asserted. The 96A references, and
-    # the record of why they moved, are in this file's git history.
-    _reference_by_variant: dict = {}
+    # Measured alongside the single-GPU references above, from the same perf
+    # job, on 4 GH200s. Tolerances are carried over from the 96A references.
+    _reference_by_variant: dict = {
+        ("Analytic-196A", "single"): {
+            "daint:gpu": {
+                "total_runtime": (79.37, -0.25, 0.15, "s"),
+                "optimizer_runtime": (54.27, -0.20, 0.15, "s"),
+                "memory_usage": (5.642, -0.15, 0.15, "GB"),
+            },
+        },
+        ("Analytic-196A", "double"): {
+            "daint:gpu": {
+                "total_runtime": (127.22, -0.25, 0.15, "s"),
+                "optimizer_runtime": (99.76, -0.20, 0.15, "s"),
+                "memory_usage": (9.66, -0.15, 0.15, "GB"),
+            },
+        },
+        ("Riemann-196A", "single"): {
+            "daint:gpu": {
+                "total_runtime": (366.6, -0.25, 0.15, "s"),
+                "optimizer_runtime": (312.1, -0.20, 0.15, "s"),
+                "memory_usage": (12.782, -0.15, 0.15, "GB"),
+            },
+        },
+    }
 
     def gpu_setup_cmds(self):
         # The CI job pins CUDA_VISIBLE_DEVICES=0 (ci/cscs.yml) for the
