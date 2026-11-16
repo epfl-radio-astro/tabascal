@@ -105,22 +105,18 @@ def provide_test_data(tmp_path_factory) -> Path:
     with the installed tabsim instead.
     """
     import tabsim
-    from huggingface_hub import snapshot_download
 
-    from tests.test_tabascal_pipeline import compute_sha256
+    from tests.test_tabascal_pipeline import (
+        TEST_SIM_CONFIGS, compute_sha256, download_test_simulations,
+    )
 
-    configs = sorted((Path(__file__).parent / "data").glob("sim_target*.yaml"))
     try:
         # Cached by HuggingFace, usually in ~/.cache/huggingface
-        snapshot = Path(snapshot_download(
-            repo_id="epfl-radio-astro/rfi-simulations",
-            repo_type="dataset",
-            revision=f"tabsim_v{tabsim.__version__}",
-        ))
+        snapshot = download_test_simulations()
     except Exception as e:
         logging.warning(f"Download of the tabsim {tabsim.__version__} simulations failed: {e}")
         snapshot = None
-    hashes = {compute_sha256(c): c for c in configs}
+    hashes = {compute_sha256(c): c for c in TEST_SIM_CONFIGS}
     if snapshot is not None and all((snapshot / h).is_dir() for h in hashes):
         return snapshot
 

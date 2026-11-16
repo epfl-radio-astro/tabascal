@@ -4,8 +4,9 @@ The pipeline tests (tests/test_tabascal_pipeline.py) and the ReFrame benchmark
 (ci/reframe/prepare_data.py) download their input simulations from the
 epfl-radio-astro/rfi-simulations dataset, from the branch ``tabsim_v<version>``
 of the installed tabsim, and look up each simulation under the SHA256 of its
-config file. Without a matching snapshot they fall back to running tabsim
-themselves.
+config file. Each downloads only the simulations of its own configs
+(download_simulations), so the pipeline tests never fetch the benchmark's.
+Without a matching snapshot they fall back to running tabsim themselves.
 
 ``check`` reports which configs have no snapshot on the branch of the latest
 tabsim release. ``publish`` simulates those configs with the installed tabsim
@@ -92,6 +93,27 @@ def compute_sha256(file_path: Path) -> str:
             sha256_hash.update(b"\0" + name.encode() + b"\0")
             sha256_hash.update(f.read_bytes())
     return sha256_hash.hexdigest()
+
+
+def download_simulations(configs, revision: str) -> Path:
+    """Download the published simulations of ``configs`` from ``revision``.
+
+    Only those simulations, not the whole branch: it holds every config's, and
+    the ReFrame benchmark's are far larger than anything the pipeline tests need.
+    Returns the snapshot root, under which each simulation is stored by its
+    config's hash; a config the branch has no simulation for has no directory.
+    Raises whatever huggingface_hub does if the branch cannot be reached.
+    """
+    from huggingface_hub import snapshot_download
+
+    return Path(
+        snapshot_download(
+            repo_id=REPO_ID,
+            repo_type="dataset",
+            revision=revision,
+            allow_patterns=[f"{compute_sha256(c)}/*" for c in configs],
+        )
+    )
 
 
 def sim_configs() -> dict[str, Path]:

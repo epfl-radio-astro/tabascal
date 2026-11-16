@@ -22,8 +22,20 @@ def _load_ci_module(path: Path):
     return module
 
 
+_rfi_simulations = _load_ci_module(Path(__file__).resolve().parents[1] / "ci" / "rfi_simulations.py")
 #: The publisher's key, so the data looked up is the data it published.
-compute_sha256 = _load_ci_module(Path(__file__).resolve().parents[1] / "ci" / "rfi_simulations.py").compute_sha256
+compute_sha256 = _rfi_simulations.compute_sha256
+
+#: The simulations the tests run on. Only these are downloaded, not the ReFrame
+#: benchmark's, which share the HuggingFace branch and are far larger.
+TEST_SIM_CONFIGS = sorted((Path(__file__).parent / "data").glob("sim_target*.yaml"))
+
+
+def download_test_simulations() -> Path:
+    """Download the published simulations of TEST_SIM_CONFIGS; see _copy_sim."""
+    return _rfi_simulations.download_simulations(
+        TEST_SIM_CONFIGS, f"tabsim_v{tabsim.__version__}"
+    )
 
 
 def read_and_modify_yaml(
