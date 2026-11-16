@@ -16,8 +16,16 @@ takes*.
 
 ## What is checked
 
-Two test classes, each parameterised over `variant` (`Riemann`, `RiemannFFI`: `rfi_vis:RiemannVisFine` with `rfi.backend` `jax` and `ffi`)
-and `precision` (`single`, `double`):
+Two test classes, each run for three `(variant, precision)` cases:
+
+| `variant` | Config | `precision` |
+|---|---|---|
+| `Analytic-196A` | `tab_target_analytic.yaml` (`rfi_vis:AnalyticVis`) | `single`, `double` |
+| `Riemann-196A` | `tab_target_riemann.yaml` (`rfi_vis:RiemannVisFine`, `ffi` backend) | `single` |
+
+Both run on the SKA-Low simulation of `sim_target_196A.yaml` (196 stations, 150
+times, 8 channels, 32 Starlink satellites); the precision replaces the config's
+`model.precision`. The classes are:
 
 - **`TabascalPerfCheck`** — single GPU.
 - **`TabascalMultiGpuPerfCheck`** — every GPU on the node. It unsets the
@@ -28,21 +36,28 @@ The metrics compared against references are `total_runtime`,
 `optimizer_runtime` and `memory_usage`. Metrics without a reference entry are
 reported but not asserted.
 
-The `Riemann` references describe a deliberate trade rather than a target: that
-component bounds its peak memory by scanning the baseline axis and recomputing
-each block in the backward pass (see
-[`baseline_block_size`](config.md#rfi-signal)), which on the GH200 references
-above is roughly an order of magnitude less memory for an optimiser step 1.2 to
-1.7 times longer. A run that comes out faster and hungrier than these numbers has
-probably lost the scan, not gained a speed-up.
-
 References are keyed by `(variant, precision)` and are only meaningful on the
-node type they were measured on. Sanity therefore requires the run to have used
+node type they were measured on. None are recorded for these cases yet, so until
+they are measured on Daint every metric is reported and none asserted. Sanity therefore requires the run to have used
 exactly the expected number of GPUs of exactly the expected kind (`GH200`) —
 anything else fails rather than being silently compared against timings it
 cannot be compared against. That gate is on the *comparison*, not on running the
 checks: elsewhere, run them with `-S strict_check=0` (below) to get the metrics
 reported without being asserted.
+
+## Input data
+
+Each check runs a tabascal config in `ci/reframe/data/` on a simulation of a
+tabsim config there, both staged by `ci/reframe/prepare_data.py`
+(`--tab-config`, and `--sim-config`, `sim_target_196A.yaml` by default). Settings
+it is not given (`--precision`, `--max-iter`, ...) keep the config's own, and
+inputs the config names beside itself, such as `satellites.norad_ids_path`, are
+made absolute so the run finds them from ReFrame's stage directory.
+The simulations are published to the `epfl-radio-astro/rfi-simulations`
+HuggingFace dataset by the *Simulation data* workflow (`ci/rfi_simulations.py`),
+alongside the pipeline tests' smaller ones, and each consumer downloads only the
+simulations of its own configs, so `pytest` never fetches the benchmark's. Set
+`HF_HOME` to persistent storage on a runner to keep them between jobs.
 
 ## Reproducing a regression locally
 
@@ -51,11 +66,14 @@ This is fast enough to simulate and run on any dev machine, so you do not need
 GH200 access to bisect the cause:
 
 ```bash
-# Generate an 8-antenna simulation from the standard 96A config
-sim-vis -c ci/reframe/data/sim_target_96A.yaml -a 8
+# Generate an 8-antenna simulation from the benchmark's 196A config
+sim-vis -c ci/reframe/data/sim_target_196A.yaml -a 8
 
-# Run tabascal with timing output against the generated dataset
-tabascal run -c ci/reframe/data/tab_target.yaml -n perf -od ci/reframe/data/data/pnt_src_obs_08A_090T-0000-0890_001I_001F-1.500e+08-1.500e+08_050PAST_000GAST_000EAST_32SAT_0GRD_1.0e+00RFI -t
+# Run tabascal with timing output against the generated dataset. -np names the
+# satellite list, which the config gives relative to its own directory.
+tabascal run -c ci/reframe/data/tab_target_riemann.yaml \
+    -np ci/reframe/data/starlink_selected_ids.txt -n perf -t \
+    -od ci/reframe/data/simulations_v4/ska_low_starlink_v4_obs_08A_*
 ```
 
 The `-t` flag prints a per-function timing table identical to the CI output.
@@ -90,12 +108,13 @@ tolerances, and **record in the commit message why the numbers moved**, with the
 before/after values.
 
 The comments in `tabascal_perf_check.py` are part of that record. For example
-the current values note that #103 replaced the real-space
-`rfi_signal:ComplexRFI` with the scanned Fourier `ComplexRFIVarAnt` (now `ComplexRFIVarAntFine`), a
-deliberate accuracy-for-runtime trade (see issue #107) that made the optimiser
-slower where the RFI-signal component dominates the step and slightly faster
-where RFI-vis does. Those older, faster numbers describe a component that no
-longer exists and must not be "restored".
+the 96A benchmark's references, now in that file's git history, noted that #103
+replaced the real-space `rfi_signal:ComplexRFI` with the scanned Fourier
+`ComplexRFIVarAnt` (now `ComplexRFIVarAntFine`), a deliberate
+accuracy-for-runtime trade (see issue #107) that made the optimiser slower where
+the RFI-signal component dominates the step and slightly faster where RFI-vis
+does. Those older, faster numbers describe a component that no longer exists and
+must not be "restored".
 
 ## Benchmark history
 

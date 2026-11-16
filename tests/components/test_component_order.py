@@ -257,7 +257,8 @@ _COMPONENTS_KEY = re.compile(r"^[ \t]*components[ \t]*:", re.M)
 #: disappearing from the harvest -- a fence that stops matching, a file that
 #: moves -- fails here instead of quietly shrinking the coverage.
 EXPECTED_LOCATIONS = {
-    "ci/reframe/data/tab_target.yaml": 1,
+    "ci/reframe/data/tab_target_analytic.yaml": 1,
+    "ci/reframe/data/tab_target_riemann.yaml": 1,
     "examples/tab_target.yaml": 1,
     "tests/data/tab_target.yaml": 1,
     "docs/analytic_rfi_vis.md": 1,

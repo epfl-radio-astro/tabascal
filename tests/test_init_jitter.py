@@ -247,17 +247,12 @@ def jittered_fits(tmp_path_factory):
 
     Returns ``{seed: (stdout, run_dir, config_path)}``.
     """
-    import tabsim
-    from huggingface_hub import snapshot_download
-
-    from tests.test_tabascal_pipeline import _copy_sim, read_and_modify_yaml
+    from tests.test_tabascal_pipeline import (
+        _copy_sim, download_test_simulations, read_and_modify_yaml,
+    )
 
     try:
-        data = Path(snapshot_download(
-            repo_id="epfl-radio-astro/rfi-simulations",
-            repo_type="dataset",
-            revision=f"tabsim_v{tabsim.__version__}",
-        ))
+        data = download_test_simulations()
     except Exception as e:  # pragma: no cover - offline
         pytest.skip(f"8A simulation not available: {e}")
 

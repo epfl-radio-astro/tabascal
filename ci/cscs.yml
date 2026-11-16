@@ -63,11 +63,21 @@ test_job:
   image: $PERSIST_IMAGE_NAME
   script:
     - cd /tabascal/src
+    # Each matrix job runs one check class on one variant, both precisions, so
+    # the checks run in parallel on separate nodes and don't skew each other's
+    # timings. ReFrame strips spaces from test names before matching -n, hence
+    # no space before %case. A selection matching nothing would exit 0, so it
+    # fails here instead.
+    - |
+      select="^${PERF_CHECK}%case=${PERF_VARIANT}_"
+      rfm="reframe -C ci/reframe/settings.py -c ci/reframe/tabascal_perf_check.py --system=daint:gpu -n $select"
+      $rfm --list | grep '^Found [1-9]' >/dev/null || { echo "no ReFrame check matches $select"; exit 1; }
     - >
       reframe
       -C ci/reframe/settings.py
       -c ci/reframe/tabascal_perf_check.py
       --system=daint:gpu
+      -n "^${PERF_CHECK}%case=${PERF_VARIANT}_"
       --exec-policy=serial
       --run
       --performance-report
@@ -96,6 +106,8 @@ perf_job:
   parallel:
     matrix:
       - JAX_VERSION: ["0.6.0"]
+        PERF_CHECK: &perf_checks ["TabascalPerfCheck", "TabascalMultiGpuPerfCheck"]
+        PERF_VARIANT: &perf_variants ["Analytic-196A", "Riemann-196A"]
   rules:
     - if: $CRON_RUN != "true"
 
@@ -104,6 +116,8 @@ perf_job_cron:
   parallel:
     matrix:
       - JAX_VERSION: ["0.6.0", "latest"]
+        PERF_CHECK: *perf_checks
+        PERF_VARIANT: *perf_variants
   rules:
     - if: $CRON_RUN == "true"
       allow_failure: true
