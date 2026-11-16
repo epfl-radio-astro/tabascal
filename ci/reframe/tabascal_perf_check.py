@@ -2,6 +2,7 @@
 
 import os
 import re
+import shlex
 from pathlib import Path
 
 import reframe as rfm
@@ -61,6 +62,14 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     # than "single" is appended to the benchmark name, so the existing
     # single-GPU series keep their historical names.
     gpu_mode = variable(str, value="single")
+
+    # Where the run's working directory -- the staged simulation it reads and
+    # the run directory it writes, both under that copy -- is created. The
+    # compute nodes' shared file system is at times slow enough to skew the
+    # timings, so it defaults to node-local memory. If the directory does not
+    # exist or is not writable (macOS, say), the stage directory is used.
+    # Override with e.g. `-S scratch_root=/tmp`.
+    scratch_root = variable(str, value="/dev/shm")
 
     valid_systems = ["daint:gpu", "generic:default"]
     valid_prog_environs = ["builtin"]
@@ -132,10 +141,30 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
             (self.variant, self.precision), {}
         )
 
+    def workdir_cmds(self):
+        """Commands setting $workdir, preferring a fresh directory under scratch_root.
+
+        The directory is picked on the node the check runs on, so the fallback
+        applies there rather than where ReFrame was launched. A directory under
+        scratch_root is removed when the job script exits, whether the run
+        succeeded or not, since /dev/shm holds it in memory until the node is
+        rebooted; the stage directory fallback is left to ReFrame's own cleanup.
+        """
+        fallback = shlex.quote(os.path.join(self.stagedir, "workdir"))
+        template = shlex.quote(
+            os.path.join(self.scratch_root, "tabascal-reframe.XXXXXX")
+        )
+        return [
+            f"if workdir=$(mktemp -d {template} 2>/dev/null); then",
+            "  trap 'rm -rf \"$workdir\"' EXIT",
+            "else",
+            f"  workdir={fallback}",
+            "fi",
+            'echo "Working directory: $workdir"',
+        ]
+
     @run_before("run")
     def prepare_run(self):
-        workdir = os.path.join(self.stagedir, "workdir")
-
         self.prerun_cmds = ["set -e"]
 
         if self.current_partition.fullname == "daint:gpu":
@@ -145,12 +174,13 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
             ]
 
         self.prerun_cmds += self.gpu_setup_cmds()
+        self.prerun_cmds += self.workdir_cmds()
 
         self.prerun_cmds.append(
             f"python {_src_root}/ci/reframe/prepare_data.py"
             f" --sim-config {self._sim_config}"
             f" --tab-config {self._config_map[self.variant]}"
-            f" --workdir {workdir}"
+            ' --workdir "$workdir"'
             f" --src-root {_src_root}"
             f" --precision {self.precision}"
         )
@@ -160,11 +190,11 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
             f"{_src_root}/tabascal/scripts/run_tabascal.py",
             "run",
             "-c",
-            f"{workdir}/tab_target.yaml",
+            '"$workdir/tab_target.yaml"',
             "-n",
             "perf",
             "-od",
-            f"$(cat {workdir}/sim_dir.txt)",
+            '"$(cat "$workdir/sim_dir.txt")"',
             "--extra-orbit-dir",
             f"{_src_root}/tabascal/data/tles",
             "-t",

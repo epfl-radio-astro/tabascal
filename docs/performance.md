@@ -59,6 +59,14 @@ alongside the pipeline tests' smaller ones, and each consumer downloads only the
 simulations of its own configs, so `pytest` never fetches the benchmark's. Set
 `HF_HOME` to persistent storage on a runner to keep them between jobs.
 
+The shared file system of the compute nodes is at times slow enough to skew the
+timings, so each check stages its copy of the simulation, and with it the run
+directory the pipeline writes, in a fresh directory under `/dev/shm`. That
+directory is removed when the check's job script exits, whether or not it
+passed. Pick another location with `-S scratch_root=<dir>`. Where it does not
+exist or is not writable (on macOS, for instance), the check falls back to
+`workdir/` in its stage directory.
+
 ## Reproducing a regression locally
 
 When CI reports a regression, reproduce it on a smaller dataset with 8 antennas.
