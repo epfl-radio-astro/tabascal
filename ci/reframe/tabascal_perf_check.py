@@ -194,7 +194,6 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
         )
 
 
-
 # Parse the per-device peak from the "Memory usage" table printed by
 # print_memory_usage at the end of the run, e.g.:
 #   Device  Peak (GB)  Limit (GB)
