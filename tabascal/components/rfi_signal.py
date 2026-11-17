@@ -1,6 +1,6 @@
 import functools
 import warnings
-from abc import abstractmethod
+from collections.abc import Mapping
 
 from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
@@ -11,7 +11,8 @@ from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
 from tabascal.seeds import component_key, config_seed
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov, validate_signal_type
+from tabascal.fft_gp import FROM_DATA, latent_grid_init, latent_to_signal, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov, validate_signal_type
+from tabascal.orbit_config import _as_norad_id
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -431,6 +432,69 @@ _GP_COV_RULES = {
 #: All of them: each has a default, and none has to be written down.
 _GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
 
+#: What one entry of ``rfi.gp_cov.per_satellite`` takes: the same four keys,
+#: each optional, falling back to the shared block's resolved value. ``std`` is
+#: a number here and never ``data``: that measures the whole observation, which
+#: has no reading for one satellite, so it is refused by name.
+_PER_SATELLITE_RULES = {
+    "std": "number",
+    "corr_freq": "number",
+    "corr_time": "number",
+    "gammas": "pair",
+}
+
+
+def _validate_per_satellite(block, norad_ids) -> Dict[int, Dict]:
+    """Normalise ``rfi.gp_cov.per_satellite`` to ``{norad_id: partial block}``.
+
+    Keyed on NORAD ID as ``satellites.norad_ids`` spells them -- an integer,
+    or that integer as a string -- and every one must be a satellite of this
+    run: a prior for one that is not there would be tuned and read by nobody.
+    ``norad_ids`` is ``None`` only for a caller with no run to check against.
+    An entry is a mapping of the shared block's keys, any of them, or null
+    for a satellite that takes every shared value.
+    """
+    where = "rfi.gp_cov.per_satellite"
+    if block is None:
+        return {}
+    if not isinstance(block, Mapping):
+        raise ValueError(
+            f"Config parameter ({where}: {block!r}) is not a mapping. It takes "
+            f"a NORAD ID to {sorted(_PER_SATELLITE_RULES)} for each satellite "
+            "with its own prior."
+        )
+
+    known = None if norad_ids is None else sorted({int(n) for n in norad_ids})
+    out = {}
+    for key, entry in block.items():
+        norad_id = _as_norad_id(key, f"{where} key")
+        if norad_id in out:
+            raise ValueError(
+                f"{where} names satellite {norad_id} twice: {key!r} spells an "
+                "ID that is already there."
+            )
+        if known is not None and norad_id not in known:
+            raise ValueError(
+                f"{where} names satellite {norad_id}, which is not in this run: "
+                f"its satellites are {known}. See satellites.norad_ids."
+            )
+        name = f"{where}[{norad_id}]"
+        if isinstance(entry, Mapping) and entry.get("std") == FROM_DATA:
+            raise ValueError(
+                f"Config parameter ({name}.std: {FROM_DATA!r}) measures the "
+                "whole observation and has no reading for one satellite. Give "
+                "a number, or leave it unset to share rfi.gp_cov.std."
+            )
+        out[norad_id] = validate_gp_cov(
+            entry,
+            "rfi",
+            _PER_SATELLITE_RULES,
+            optional=tuple(_PER_SATELLITE_RULES),
+            name=name,
+        )
+
+    return out
+
 #: What the spectrum is normalised to, per unit of ``rfi.gp_cov.std``.
 #:
 #: ``rfi.gp_cov.std`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
@@ -610,13 +674,16 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     return std
 
 
-def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float, gain_flags: Array = None) -> Dict:
+def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float, gain_flags: Array = None, norad_ids=None) -> Dict:
     """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
 
     Parameters
     ----------
     rfi_config : Dict
         RFI configuration dictionary
+    norad_ids
+        The run's satellites, which every key of ``rfi.gp_cov.per_satellite``
+        must be one of. ``None`` skips that check, for a caller with no run.
 
     Returns
     -------
@@ -640,7 +707,17 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     # share, so a width of zero, of -5, or of True is refused here by name
     # rather than accepted and carried into the Fourier machinery. Each may be
     # null, and the fallbacks below are what null means.
-    gp_cov = _validate_gp_cov(rfi_config.get("gp_cov"))
+    #
+    # per_satellite is lifted out first: the shared validator refuses keys it
+    # does not read, and ast.gp_cov, which shares it, must go on refusing this
+    # one. Lifted from a copy, so the block the config carries is intact for a
+    # second setup.
+    block = rfi_config.get("gp_cov")
+    per_satellite = None
+    if isinstance(block, Mapping) and "per_satellite" in block:
+        block = dict(block)
+        per_satellite = block.pop("per_satellite")
+    gp_cov = _validate_gp_cov(block)
 
     if gp_cov["std"] == FROM_DATA:
         gp_cov["std"] = _std_from_data(vis_obs, gain_flags)
@@ -663,6 +740,10 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     if gp_cov["corr_time"] is None:
         gp_cov["corr_time"] = extent(times, int_time) / 2
 
+    # A satellite's own values, where it has them; the component fills in the
+    # rest from the shared block above, its own gammas default included.
+    gp_cov["per_satellite"] = _validate_per_satellite(per_satellite, norad_ids)
+
     rfi_config["gp_cov"] = gp_cov
 
     # Real or complex RFI amplitude. Complex is the model; real is there to
@@ -676,6 +757,14 @@ def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array,
     print(f"Using RFI gp_cov.corr_freq : {gp_cov['corr_freq']/1e3:.1f} kHz")
     print(f"Using RFI gp_cov.corr_time : {gp_cov['corr_time']:.1f} s")
     print(f"Using RFI signal_type : {rfi_config['signal_type']}")
+    for norad_id, own in gp_cov["per_satellite"].items():
+        given = {key: value for key, value in own.items() if value is not None}
+        print(
+            f"Satellite {norad_id} sets its own RFI gp_cov {given}"
+            if given
+            else f"Satellite {norad_id} is listed under rfi.gp_cov.per_satellite "
+            "with nothing set, so it takes the shared prior"
+        )
 
     return rfi_config
 
@@ -750,6 +839,37 @@ class BaseGPRFI(Component):
 
         return list(gammas), float(cutoff)
 
+    def _resolve_source_gp_cov(self) -> Optional[List[Dict]]:
+        """One covariance block per source row, or ``None`` when all share one.
+
+        ``rfi.gp_cov.per_satellite`` is keyed on NORAD ID and the rows are in
+        ``satellites.norad_ids`` order, so each row looks its own ID up. A key
+        an entry leaves unset takes the shared block's resolved value, this
+        component's own ``gammas`` included. Padded dummy rows repeat the last
+        real satellite's ID and so take its block, which costs nothing: they
+        are masked dark whatever their prior. ``None`` unless some row's block
+        differs from the shared one, so a config that lists satellites without
+        changing anything builds the grid every run has.
+        """
+        gp_cov = self.rfi_config["gp_cov"]
+        shared = {
+            "std": gp_cov["std"],
+            "corr_freq": gp_cov["corr_freq"],
+            "corr_time": gp_cov["corr_time"],
+            "gammas": list(self._gammas),
+        }
+        overrides = gp_cov.get("per_satellite") or {}
+        blocks = []
+        for norad_id in self.norad_ids:
+            own = overrides.get(int(norad_id)) or {}
+            blocks.append(
+                {key: shared[key] if own.get(key) is None else own[key] for key in shared}
+            )
+
+        if all(block == shared for block in blocks):
+            return None
+        return blocks
+
     # The required state parameter needed in the forward model for this component to function
     required_inputs = {}  # No inputs needed
 
@@ -769,7 +889,8 @@ class BaseGPRFI(Component):
             # Only the uncalibratable samples: the MS's own flags stay in,
             # since a flag does not say the RFI is there. Read by std: data
             # alone -- see _std_from_data.
-            getattr(tab_config, "gain_flags", None))
+            getattr(tab_config, "gain_flags", None),
+            norad_ids=tab_config.norad_ids)
 
         # The validated rfi section, kept whole: the covariance parameters come
         # from its gp_cov block and the cutoff beside it, both falling back to
@@ -852,6 +973,13 @@ class BaseGPRFI(Component):
         # Ordered as the n_rfi axis. The tail entries are sharding duplicates, so
         # consumers matching against a file slice to [:n_rfi_real] first.
         self.norad_ids = tab_config.norad_ids
+
+        # A covariance block per row where rfi.gp_cov.per_satellite gives some
+        # satellite its own; None while every row shares the block above.
+        self.source_gp_cov = self._resolve_source_gp_cov()
+        # Each row's own modes on the shared latent grid, (n_rfi, 1, n_k_freq,
+        # n_k_time), set by _compute_gp_params; None while the prior is shared.
+        self.support_rfi_k = None
 
     def build_mask_constants(self) -> dict:
         """Constants the signal mask needs, or ``{}`` when nothing is masked.
@@ -1011,8 +1139,106 @@ class BaseGPRFI(Component):
             "rfi_A": sharded_rfi_zeros((self.n_rfi, self.n_ant, *self.signal_shape), complex),
         }
 
+    @measure_runtime
     def _compute_gp_params(self):
-        pass
+        """The latent grid, its transforms, and the prior width on it.
+
+        One spectrum, cut as it always has been, unless some satellite has its
+        own covariance. Then one grid holds every source's own cut
+        (:func:`~tabascal.fft_gp.latent_grid_init`), each source's spectrum is
+        zeroed outside its own cut and normalised to its own width over what
+        is left, and ``sigma_rfi_k`` carries a row per source. The modes a
+        source has no power on are not parameters of that source: they stay at
+        zero through :meth:`_on_support` and :meth:`inv_transform`, and the
+        forward reads zero there whatever their base value.
+        """
+        ns = [self.n_freq, self.n_time]
+        dxs = [self.chan_width, self.int_time]
+        pad_factors = [self.freq_pad_factor, self.time_pad_factor]
+        gammas, pk_cutoff = self.gp_cov_params()
+
+        if self.source_gp_cov is None:
+            specs = [(self.gp_var, knee_from_corr_scale([self.corr_freq, self.corr_time]), gammas)]
+        else:
+            # One spectrum per distinct block; rows map each source onto its own.
+            keys = [
+                (b["std"], b["corr_freq"], b["corr_time"], tuple(b["gammas"]))
+                for b in self.source_gp_cov
+            ]
+            distinct = list(dict.fromkeys(keys))
+            specs = [
+                (
+                    std / _LATENT_POWER_BY_TYPE[self.signal_type],
+                    knee_from_corr_scale([corr_freq, corr_time]),
+                    list(block_gammas),
+                )
+                for std, corr_freq, corr_time, block_gammas in distinct
+            ]
+            rows = [distinct.index(key) for key in keys]
+
+        pks, supports, self.ks, self.pads, self.ss_idxs, self.latent_idxs = latent_grid_init(
+            ns,
+            dxs,
+            pad_factors,
+            self.ss_factors,
+            specs,
+            pk_cutoff,
+            signal_type=self.signal_type,
+        )
+
+        self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
+            _rfi_k_A,
+            self.pads,
+            self.ss_idxs,
+            signal_type=self.signal_type,
+        )
+
+        self.signal_to_latent = lambda _rfi_A: signal_to_latent(
+            _rfi_A,
+            pad_factors,
+            self.latent_idxs,
+            signal_type=self.signal_type,
+        )
+
+        self.n_k_freq_rfi, self.n_k_time_rfi = pks.shape[1:]
+
+        print("\nRFI specs")
+        print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
+        print(f"(n_freq, n_time): ({self.n_freq}, {self.n_time})")
+        print(f"(n_k_fq, n_k_tm): ({self.n_k_freq_rfi}, {self.n_k_time_rfi})")
+        # The latent dimension printed above is what these two set, so they are
+        # printed beside it rather than with the other rfi keys.
+        print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
+        print(f"signal type     : {self.signal_type}")
+
+        if self.source_gp_cov is None:
+            # The arithmetic every run has made, on the one spectrum.
+            pk = pks[0]
+            scale_norm = self.gp_var / jnp.sum(pk)
+            self.pk = scale_norm * pk
+            self.sigma_rfi_k = jnp.sqrt(self.pk)[None, None, :, :]
+            return
+
+        # Zeroed outside each source's own cut before it is normalised, so the
+        # width is the width of the modes the source fits and sigma is exactly
+        # zero on the rest.
+        pks = jnp.where(supports, pks, 0)
+        p0s = jnp.asarray([spec[0] for spec in specs])
+        pks = pks * (p0s / jnp.sum(pks, axis=(1, 2)))[:, None, None]
+        rows = jnp.asarray(rows)
+        self.pk = pks[rows]
+        self.support_rfi_k = supports[rows][:, None]
+        self.sigma_rfi_k = jnp.sqrt(self.pk)[:, None]
+
+        print("Prior per satellite: std Jy, corr_freq kHz, corr_time s, gammas, own (n_k_fq, n_k_tm)")
+        for norad_id, block, support in zip(
+            self.norad_ids[:self.n_rfi_real], self.source_gp_cov, supports[rows]
+        ):
+            own = (int(jnp.any(support, axis=1).sum()), int(jnp.any(support, axis=0).sum()))
+            print(
+                f"  {norad_id}: {block['std']:.4g}, {block['corr_freq'] / 1e3:.1f}, "
+                f"{block['corr_time']:.1f}, {block['gammas']}, {own}"
+            )
 
     def _compute_prior_params(self):
         pass
@@ -1020,13 +1246,37 @@ class BaseGPRFI(Component):
     def _compute_init_params(self):
         pass
 
-    @abstractmethod
-    def forward_transform(self, base_params, L, mu):
-        pass
+    def _on_support(self, arr: Array) -> Array:
+        """``arr`` with each source's modes outside its own cut zeroed.
 
-    @abstractmethod
-    def inv_transform(self, params, L, mu):
-        pass
+        The identity while the prior is shared: there is one cut then, and the
+        grid is it. Applied to every prior mean and initial value, so that what
+        the forward holds a source to outside its support -- its mean there --
+        is zero, and so is the base coefficient the inverse returns there.
+        """
+        if self.support_rfi_k is None:
+            return arr
+        return jnp.where(self.support_rfi_k, arr, 0)
+
+    def forward_transform(self, base_params, sigma, mu):
+
+        params = sigma * base_params + mu
+
+        return params
+
+    def inv_transform(self, params, sigma, mu):
+
+        if self.support_rfi_k is None:
+            base_params = (params - mu) / sigma
+
+            return base_params
+
+        # Outside a source's support sigma is exactly zero: the coefficient
+        # there is not one of its parameters, its base value is zero by
+        # definition, and the division is skipped rather than made 0 / 0.
+        on = self.support_rfi_k
+
+        return jnp.where(on, (params - mu) / jnp.where(on, sigma, 1), 0)
 
     # helper function to set dummy rfi values to 0 for padding. Required for multi-device.
     def masked_forward_transform(self, base_params, L, mu):
@@ -1174,69 +1424,6 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         """Call this before using in JIT context"""
         pass
 
-    @measure_runtime
-    def _compute_gp_params(self):
-
-        ns = [self.n_freq, self.n_time]
-        dxs = [self.chan_width, self.int_time]
-        pad_factors = [self.freq_pad_factor, self.time_pad_factor]
-        k0s = knee_from_corr_scale([self.corr_freq, self.corr_time])
-        p0 = self.gp_var #* self.n_time * self.n_freq
-        gammas, pk_cutoff = self.gp_cov_params()
-
-        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
-            ns,
-            dxs,
-            pad_factors,
-            self.ss_factors,
-            p0,
-            k0s,
-            gammas,
-            pk_cutoff,
-            signal_type=self.signal_type,
-        )
-
-        self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
-            _rfi_k_A, 
-            self.pads, 
-            self.ss_idxs,
-            signal_type=self.signal_type,
-        )
-
-        # Pre-compute slicing indices for JIT-compatible latent extraction
-        self.latent_idxs, _ = signal_to_latent_init(
-            ns,
-            dxs,
-            pad_factors,
-            p0,
-            k0s,
-            gammas,
-            pk_cutoff,
-            signal_type=self.signal_type,
-        )
-
-        self.signal_to_latent = lambda _rfi_A: signal_to_latent(
-            _rfi_A,
-            pad_factors,
-            self.latent_idxs,
-            signal_type=self.signal_type,
-        )
-        
-        print("\nRFI specs")
-        print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
-        print(f"(n_freq, n_time): ({self.n_freq}, {self.n_time})")
-        print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
-        # The latent dimension printed above is what these two set, so they are
-        # printed beside it rather than with the other rfi keys.
-        print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
-        print(f"signal type     : {self.signal_type}")
-
-        scale_norm = self.gp_var / jnp.sum(self.pk)
-        self.pk = scale_norm * self.pk
-
-        self.n_k_freq_rfi, self.n_k_time_rfi = self.pk.shape
-        self.sigma_rfi_k = jnp.sqrt(self.pk)[None, None, :, :]
-
     def _compute_data_est(self, vis_obs):
 
         # Split the data estimate over the *real* sources only; padded dummies get a
@@ -1264,23 +1451,14 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         else:
             raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, est, matched-filter, zeros).")
 
-    def forward_transform(self, base_params, sigma, mu):
-
-        params = sigma * base_params + mu
-
-        return params
-
-    def inv_transform(self, params, sigma, mu):
-
-        base_params = (params - mu) / sigma
-
-        return base_params
+        self.mu_rfi_k = self._on_support(self.mu_rfi_k)
 
     def _compute_true_params(self, sim_zarr_path: str, data_col: str):
 
         # The zarr only knows the real satellites; zero-pad to the sharded count.
         rfi_A = self._true_signal(read_true_rfi_A(sim_zarr_path, data_col, self.times))
         self.true_rfi_k_A = self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(rfi_A))
+        self.true_rfi_k_A = self._on_support(self.true_rfi_k_A)
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
     def _compute_init_params(self, init_type: str, est_path: str, tab_config=None):
@@ -1320,6 +1498,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, est, matched-filter, truth, zeros, ones, sample).")
 
+        self.init_rfi_k = self._on_support(self.init_rfi_k)
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
 
         self.init_params = _latent_params(self.init_rfi_k, self.signal_type)
@@ -1333,8 +1512,9 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         rfi_shape = (self.n_rfi, self.n_ant, self.n_k_freq_rfi, self.n_k_time_rfi)
 
         assert_attr_shape(self, "mu_rfi_k", rfi_shape)
+        n_sigma = 1 if self.support_rfi_k is None else self.n_rfi
         assert_attr_shape(
-            self, "sigma_rfi_k", (1, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
+            self, "sigma_rfi_k", (n_sigma, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
         )
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
@@ -1481,69 +1661,6 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         """Call this before using in JIT context"""
         pass
 
-    @measure_runtime
-    def _compute_gp_params(self):
-
-        ns = [self.n_freq, self.n_time]
-        dxs = [self.chan_width, self.int_time]
-        pad_factors = [self.freq_pad_factor, self.time_pad_factor]
-        k0s = knee_from_corr_scale([self.corr_freq, self.corr_time])
-        p0 = self.gp_var
-        gammas, pk_cutoff = self.gp_cov_params()
-
-        self.pk, self.ks, self.pads, self.ss_idxs = latent_to_signal_init(
-            ns,
-            dxs,
-            pad_factors,
-            self.ss_factors,
-            p0,
-            k0s,
-            gammas,
-            pk_cutoff,
-            signal_type=self.signal_type,
-        )
-
-        self.latent_to_signal = lambda _rfi_k_A: latent_to_signal(
-            _rfi_k_A, 
-            self.pads, 
-            self.ss_idxs,
-            signal_type=self.signal_type,
-        )
-
-        # Pre-compute slicing indices for JIT-compatible latent extraction
-        self.latent_idxs, _ = signal_to_latent_init(
-            ns,
-            dxs,
-            pad_factors,
-            p0,
-            k0s,
-            gammas,
-            pk_cutoff,
-            signal_type=self.signal_type,
-        )
-
-        self.signal_to_latent = lambda rfi_A: signal_to_latent(
-            rfi_A,
-            pad_factors,
-            self.latent_idxs,
-            signal_type=self.signal_type,
-        )
-        
-        print("\nRFI specs")
-        print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
-        print(f"(n_freq, n_time): ({self.n_freq}, {self.n_time})")
-        print(f"(n_k_fq, n_k_tm): {self.pk.shape}")
-        # The latent dimension printed above is what these two set, so they are
-        # printed beside it rather than with the other rfi keys.
-        print(f"(gammas, cutoff): ({gammas}, {pk_cutoff:.1e})")
-        print(f"signal type     : {self.signal_type}")
-
-        scale_norm = self.gp_var / jnp.sum(self.pk)
-        self.pk = scale_norm * self.pk
-
-        self.n_k_freq_rfi, self.n_k_time_rfi = self.pk.shape
-        self.sigma_rfi_k = jnp.sqrt(self.pk)[None, None, :, :]
-
     def _compute_data_est(self, vis_obs: Array) -> Array:
 
         # est_vis_rfi is shape (n_freq, n_time)
@@ -1576,17 +1693,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         else:
             raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, est, matched-filter, zeros).")
 
-    def forward_transform(self, base_params, sigma, mu):
-
-        params = sigma * base_params + mu
-
-        return params
-
-    def inv_transform(self, params, sigma, mu):
-
-        base_params = (params - mu) / sigma
-
-        return base_params
+        self.mu_rfi_k = self._on_support(self.mu_rfi_k)
 
     def _compute_true_params(self, sim_zarr_path: str, data_col: str):
 
@@ -1600,6 +1707,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         # The zarr only knows the real satellites; zero-pad to the sharded count.
         self.true_rfi_k_A = self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(true_rfi_A))
 
+        self.true_rfi_k_A = self._on_support(self.true_rfi_k_A)
         self.true_rfi_k_A_base = self.inv_transform(self.true_rfi_k_A, self.sigma_rfi_k, self.mu_rfi_k)
 
     @property
@@ -1642,6 +1750,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         else:
             raise ValueError(f"Provided init type: {init_type} is not valid. Choose from (prior, est, matched-filter, truth, zeros, ones, sample).")
 
+        self.init_rfi_k = self._on_support(self.init_rfi_k)
         self.init_rfi_k_base = self.inv_transform(self.init_rfi_k, self.sigma_rfi_k, self.mu_rfi_k)
 
         self.init_params = _latent_params(self.init_rfi_k, self.signal_type)
@@ -1655,8 +1764,9 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         rfi_shape = (self.n_rfi, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
 
         assert_attr_shape(self, "mu_rfi_k", rfi_shape)
+        n_sigma = 1 if self.support_rfi_k is None else self.n_rfi
         assert_attr_shape(
-            self, "sigma_rfi_k", (1, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
+            self, "sigma_rfi_k", (n_sigma, 1, self.n_k_freq_rfi, self.n_k_time_rfi)
         )
         assert_attr_shape(self, "init_rfi_k", rfi_shape)
         assert_attr_shape(self, "init_rfi_k_base", rfi_shape)
