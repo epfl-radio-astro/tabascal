@@ -1,5 +1,5 @@
 """Tests for tabascal.components.trajectory — FixedOrbitFine, PhaseCalculationRFIFine,
-NoDragOrbitFine, and OrbitFine.
+NoDragOrbitFine, OrbitFine and OrbitDeviationFine.
 
 TLEs are sourced from IAU CPS SatChecker (no credentials). The SGP4 orbit tests
 run fully offline against the bundled TLE cache under tabascal/data/tles/.
@@ -13,7 +13,14 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 
-from tabascal.components.trajectory import FixedOrbitFine, PhaseCalculationRFIFine
+from tabascal.components.trajectory import (
+    FixedOrbitFine,
+    NoDragOrbitFine,
+    OrbitDeviationFine,
+    OrbitFine,
+    PhaseCalculationRFIFine,
+    ric_basis,
+)
 from tabascal.interferometry import get_rfi_phase, get_rfi_phase_numpy
 
 from .conftest import active_precision, make_constants, assert_transform_roundtrip
@@ -121,6 +128,7 @@ def make_trajectory_config(
         freqs_fine=freqs_fine,
         times=times,
         times_fine=times_fine,
+        int_time=8.0,
         precision=precision,
         # Deliberately empty: the integration sample counts are bound TabConfig
         # attributes, not raw config keys.
@@ -406,6 +414,7 @@ def _make_sgp4_config(n_params, n_ant=4, n_freq=2, n_time=4, n_int_time=2, n_int
         freqs_fine=jnp.linspace(1.4e9, 1.41e9, n_freq_fine),
         times=jnp.linspace(0.0, n_time * 8.0, n_time),
         times_fine=jnp.linspace(0.0, n_time_fine * 8.0, n_time_fine),
+        int_time=8.0,
         norad_ids=_BUNDLED_NORAD_IDS,
         extra_orbit_dir=_bundled_tle_dir,
         precision=precision,
@@ -905,3 +914,121 @@ class TestSatelliteElevations:
             "elevations are identical under both latitude conventions; the "
             "geodetic site is not being used"
         )
+
+
+# ---------------------------------------------------------------------------
+# OrbitDeviationFine
+# ---------------------------------------------------------------------------
+
+_DEV = {"std": [30.0, 200.0, 70.0], "corr_time": [40.0, 90.0, 60.0]}
+
+
+def _deviation(cfg, **dev):
+    cfg.args["orbit_deviation"] = {**_DEV, **dev}
+    comp = OrbitDeviationFine()
+    comp.setup(cfg)
+    return comp
+
+
+@pytest.mark.requires_double
+class TestOrbitDeviationFine:
+
+    def test_zero_deviation_is_the_upstream_orbit(self):
+        cfg = make_trajectory_config(n_rfi=2)
+        orbit, dev = FixedOrbitFine(), _deviation(cfg)
+        orbit.setup(cfg)
+        state = orbit.build_forward()({}, {}, make_constants(orbit))
+        out = dev.build_forward()(dev.init_params_base, state, make_constants(dev))
+        assert jnp.array_equal(out["rfi_xyz"], state["rfi_xyz"])
+        assert not jnp.any(out["rfi_orbit_dev"])
+
+        # A non-zero one is the RIC offset written in the frame: R^T (xyz - base) gives it back.
+        base = jax.random.normal(jax.random.PRNGKey(1), dev.init_params_base["rfi_orbit_dev_base"].shape)
+        out = dev.build_forward()({"rfi_orbit_dev_base": base}, state, make_constants(dev))
+        basis = ric_basis(state["rfi_xyz"], dev.times_fine)
+        moved = jnp.einsum("stji,stj->sti", basis, out["rfi_xyz"] - state["rfi_xyz"])
+        assert jnp.allclose(moved, out["rfi_orbit_dev"], atol=1e-6)
+
+    def test_ric_basis_on_an_inclined_circular_orbit(self):
+        """Radial along r, in-track along v, cross-track along r x v, and a deviation lands there."""
+        t = jnp.linspace(0.0, 600.0, 301)
+        w, radius, inc = 2 * jnp.pi / 5400.0, 6.9e6, 0.9
+        tilt = jnp.array([[1, 0, 0], [0, jnp.cos(inc), -jnp.sin(inc)], [0, jnp.sin(inc), jnp.cos(inc)]])
+        r_hat = jnp.stack([jnp.cos(w * t), jnp.sin(w * t), 0 * t], -1) @ tilt.T
+        v_hat = jnp.stack([-jnp.sin(w * t), jnp.cos(w * t), 0 * t], -1) @ tilt.T
+        basis = ric_basis((radius * r_hat)[None], t)[0]
+
+        assert jnp.allclose(jnp.swapaxes(basis, 1, 2) @ basis, jnp.eye(3), atol=1e-12)
+        assert jnp.allclose(jnp.linalg.det(basis), 1.0)
+        # Exact even at the one-sided ends: a difference of in-plane points stays in the
+        # plane, and in-track is c x r, so only the plane orients it.
+        assert jnp.allclose(basis[..., 0], r_hat, atol=1e-12)
+        assert jnp.allclose(basis[..., 1], v_hat, atol=1e-12)
+        assert jnp.allclose(basis[..., 2], jnp.broadcast_to(tilt[:, 2], (t.size, 3)), atol=1e-12)
+
+    @pytest.mark.parametrize(
+        "n_time, n_int_time, pad", [(30, 3, 2.0), (31, 4, 1.0), (17, 2, 1.5), (1, 5, 2.0)]
+    )
+    def test_prior_has_the_configured_std_on_each_axis(self, n_time, n_int_time, pad):
+        """The forward is linear in the base latents, so its Jacobian gives the prior exactly."""
+        from tabascal.fft_gp import domain_ss
+
+        cfg = make_trajectory_config(n_rfi=1, n_time=n_time, n_int_time=n_int_time)
+        cfg.times = cfg.int_time * jnp.arange(n_time)
+        cfg.times_fine = cfg.int_time * domain_ss([n_time], [1.0], [0.0], [n_int_time], [pad])[0]
+        dev = _deviation(cfg, time_pad_factor=pad)
+        state = {"rfi_xyz": jnp.zeros((1, cfg.n_time_fine, 3)).at[..., 0].set(7e6)}
+        forward, constants = dev.build_forward(), make_constants(dev)
+        base = dev.init_params_base["rfi_orbit_dev_base"]
+        jac = jax.jacfwd(lambda b: forward({"rfi_orbit_dev_base": b}, state, constants)["rfi_orbit_dev"])(base)
+        std = jnp.sqrt(jnp.sum(jac**2, axis=(3, 4, 5)))[0]  # (n_time_fine, 3)
+        assert std.shape == (n_time * n_int_time, 3)
+        assert jnp.allclose(std, jnp.asarray(_DEV["std"]), rtol=1e-9)
+
+        with numpyro.handlers.seed(rng_seed=0):
+            assert dev.build_set_params()({})["rfi_orbit_dev_base"].shape == base.shape
+
+    @pytest.mark.parametrize("orbit_cls, n_params", [(NoDragOrbitFine, 6), (OrbitFine, 7)])
+    def test_gradient_reaches_the_deviation_and_a_learnable_orbit(self, orbit_cls, n_params):
+        """Through the displacement R(t) d(t) alone, so the orbit's gradient is the basis's.
+
+        The base positions pass straight through (see the zero-deviation test).
+        """
+        cfg = _make_sgp4_config(n_params)
+        orbit, dev = orbit_cls(), _deviation(cfg)
+        orbit.setup(cfg)
+        constants = {**make_constants(orbit), **make_constants(dev)}
+        k_dev, k_w, k_step = jax.random.split(jax.random.PRNGKey(2), 3)
+        params = {
+            "rfi_orbit_base": orbit.init_params_base["rfi_orbit_base"],
+            "rfi_orbit_dev_base": jax.random.normal(k_dev, dev.init_params_base["rfi_orbit_dev_base"].shape),
+        }
+        weights = jax.random.normal(k_w, (cfg.n_rfi, cfg.n_time_fine, 3))
+
+        def loss(params):
+            state = orbit.build_forward()(params, {}, constants)
+            moved = dev.build_forward()(params, state, constants)["rfi_xyz"] - state["rfi_xyz"]
+            return jnp.vdot(weights, moved)
+
+        grads = jax.grad(loss)(params)
+        for name in params:
+            step = jax.random.normal(k_step, params[name].shape)
+            shifted = lambda e: loss({**params, name: params[name] + e * step})
+            # A wide step: R d is a difference of ~7e6 m positions, which a narrow one rounds away.
+            fd = (shifted(1e-2) - shifted(-1e-2)) / 2e-2
+            assert jnp.any(grads[name] != 0), name
+            assert jnp.allclose(jnp.vdot(grads[name], step), fd, rtol=1e-4), name
+
+    def test_config_is_validated(self):
+        cfg = make_trajectory_config()
+        with pytest.raises(RuntimeError, match="takes 3"):
+            _deviation(cfg, std=[1.0, 2.0])
+        with pytest.raises(RuntimeError, match="no key"):
+            _deviation(cfg, amplitude=1.0)
+        cfg.args["orbit_deviation"] = [("std", 1.0)]
+        with pytest.raises(RuntimeError, match="not a mapping"):
+            OrbitDeviationFine().setup(cfg)
+        # One number is all three axes; null corr_time is half the observation.
+        comp = _deviation(cfg, std=5.0, corr_time=None)
+        assert comp.std == [5.0] * 3
+        assert comp.corr_time == [float(cfg.times[-1] - cfg.times[0]) / 2] * 3

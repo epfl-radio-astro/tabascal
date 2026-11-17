@@ -48,6 +48,11 @@ class Component(ABC):
     # in closed form, so no fine time grid is sized for them (read by rfi_grid).
     integrates_cells: bool = False
 
+    # State keys this component leaves stale without rewriting them, e.g. the
+    # RFI phase of positions it has moved. validate_component_order refuses a
+    # later reader of one unless something after this component writes it again.
+    invalidates: tuple = ()
+
     @abstractmethod
     def setup(self, tab_config: Any) -> None:
         """Initialize component with configuration"""
@@ -279,6 +284,28 @@ def _describe_missing(
     )
 
 
+def _describe_stale(components: Sequence[Any], maker: int, index: int, key: str) -> str:
+    """Say which component left ``key`` stale before ``components[index]`` reads it.
+
+    The suggestions are the in-tree producers of ``key`` that compute it from
+    the state, which is what recomputing it after ``maker`` means.
+    """
+    recompute = [
+        ref for ref, cls in in_tree_components().items()
+        if key in cls.output_shapes and cls.required_inputs and not cls.invalidates
+    ]
+    instead = (
+        " Add " + " or ".join(f"'{ref}'" for ref in recompute) + " after it."
+        if recompute else ""
+    )
+    return (
+        f"model.components[{index}] '{component_ref(components[index])}' reads the "
+        f"model state key '{key}', which '{component_ref(components[maker])}' "
+        f"(model.components[{maker}]) leaves stale and nothing after it writes "
+        f"again.{instead}"
+    )
+
+
 #: The dimensions of the fine grid the Fine RFI components pass between them.
 _FINE_DIMS = ("n_freq_fine", "n_time_fine")
 
@@ -337,15 +364,19 @@ def validate_component_order(
     Walks the list in order, tracking which state keys exist by the time each
     component runs -- ``initial_state_keys`` plus the outputs of everything
     before it -- and raises :class:`ComponentOrderError` on the first component
-    whose ``required_inputs`` are not all there. Runs on constructed components
-    whether or not they have been set up, so the whole list is checked before any
-    of it is traced; without it a missing or mis-ordered component surfaced only
-    as a ``KeyError`` on a state key from inside the JIT-ed forward pass.
+    whose ``required_inputs`` are not all there, or that reads a key a component
+    before it ``invalidates`` with nothing in between writing it again. Runs on
+    constructed components whether or not they have been set up, so the whole
+    list is checked before any of it is traced; without it a missing or
+    mis-ordered component surfaced only as a ``KeyError`` on a state key from
+    inside the JIT-ed forward pass.
     """
     state = dict.fromkeys(initial_state_keys)
     initial = set(state)
     # The component that last wrote each key, beyond those the model supplies.
     written: Dict[str, int] = {}
+    # Keys a component left stale, and which one, until something writes them again.
+    stale: Dict[str, int] = {}
     for index, comp in enumerate(components):
         try:
             comp.validate_state(state)
@@ -354,9 +385,14 @@ def validate_component_order(
                 _describe_missing(exc, components, index)
             ) from None
         for key, shape in getattr(comp, "required_inputs", {}).items():
+            if key in stale:
+                raise ComponentOrderError(_describe_stale(components, stale[key], index, key))
             if key in written:
                 _check_grid(components, written[key], index, key, shape)
         state.update(dict.fromkeys(component_outputs(comp)))
         written.update(
             (key, index) for key in component_outputs(comp) if key not in initial
         )
+        for key in component_outputs(comp):
+            stale.pop(key, None)
+        stale.update((key, index) for key in getattr(comp, "invalidates", ()))

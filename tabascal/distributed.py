@@ -120,9 +120,9 @@ def process_count() -> int:
 RFI_AXIS_NAMES = frozenset({
     # latent params (optimized)
     "rfi_k_r_base", "rfi_k_i_base",
-    "rfi_orbit_base",
+    "rfi_orbit_base", "rfi_orbit_dev_base",
     # state buffers
-    "rfi_A", "rfi_phase", "rfi_xyz", "elements",
+    "rfi_A", "rfi_phase", "rfi_xyz", "elements", "rfi_orbit_dev",
     # (n_rfi, n_ant, n_time, n_path) delay polynomial of the data-grid route,
     # read beside rfi_A and rfi_phase by rfi_vis:AnalyticVis
     "rfi_delay_poly_us",
