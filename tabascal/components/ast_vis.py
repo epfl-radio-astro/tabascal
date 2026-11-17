@@ -1,6 +1,6 @@
 from math import ceil, isfinite, sqrt
 
-from jax import checkpoint, lax, vmap, random
+from jax import ShapeDtypeStruct, checkpoint, eval_shape, jit, lax, vmap, random
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
@@ -258,13 +258,18 @@ class GPVisAst(Component):
     #: optimiser's time on the cheaper of the two RFI kernels, with no memory to
     #: show for it. At this budget that observation runs in one step, and a wide
     #: band -- where the grid is the largest array in the model -- still blocks.
+    #:
+    #: :meth:`signal_to_latent`, which reads the initial sky off an array of
+    #: visibilities, builds the same grid under either transform and sizes its
+    #: blocks from this budget too.
     _BLOCK_BUDGET_BYTES = 64 * 1024**2
 
     def _transform_bytes_per_baseline(self):
         """What one baseline costs the transform at its peak, in bytes.
 
         The padded Fourier grid: the pad, the shift and the inverse transform
-        are each of that size. Only ``ast.transform: fft`` builds it.
+        are each of that size. In the forward only ``ast.transform: fft``
+        builds it; :meth:`signal_to_latent` builds it under either.
         """
         padded = 1
         for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
@@ -299,6 +304,98 @@ class GPVisAst(Component):
         # A block at or above the axis is one step over all of it, which is what
         # the whole grid fitting the budget should mean.
         self.baseline_block_size = min(int(block), self.n_bl)
+
+    def _encode_block_size(self):
+        """Baselines encoded per step of :meth:`signal_to_latent`.
+
+        The encode builds the padded grid under either ``ast.transform`` --
+        it pads with a ramp and transforms the grid, where the DFT forward
+        goes around it -- so the block is sized from the same budget as the
+        forward's whatever the transform is, and never wider than an explicit
+        ``baseline_block_size``, which a run on a tight host sets to bound
+        exactly this kind of transient. ``null`` is a single step in the
+        forward, where the DFT holds nothing large; here it is the budget's
+        block, since what it would put in one step is the grid this exists to
+        bound.
+
+        The budget is a target for one block's grid, of which a few copies are
+        live in a step, and the block is never below one baseline: a grid
+        larger than the budget on its own is still built, one baseline at a
+        time.
+        """
+        per_baseline = self._transform_bytes_per_baseline()
+        block = self._BLOCK_BUDGET_BYTES // max(1, per_baseline)
+        setting = self.baseline_block_size_setting
+        if setting not in ("auto", None):
+            block = min(block, int(setting))
+        return int(min(max(1, block), self.n_bl))
+
+    def signal_to_latent(self, vis):
+        """The modes the prior keeps, read off ``(n_bl, n_freq, n_time)`` visibilities.
+
+        Every ``init`` and ``mean`` option that starts from an array --
+        ``data`` and ``truth`` -- comes through here. Each baseline is padded
+        up to ``(n_freq_pad, n_time_pad)``, transformed and cut to the
+        surviving modes, and a scan walks the baseline axis in blocks of
+        :meth:`_encode_block_size` rather than vmapping it whole. Whole, and
+        eagerly, the padded grid of every baseline is live several times over
+        -- the edge extension, each ramp's product and sum, the transform and
+        its shift -- and the padding factor multiplies all of it: a
+        256-antenna observation of 32 640 baselines, 27 channels and 90
+        integrations at ``time_pad_factor: 8`` has a ``(32640, 53, 720)``
+        grid, 20 GB a copy, which is how ``init: data`` ran out of memory on
+        such data. In blocks
+        the transient is the budget's few tens of megabytes, a few times over.
+
+        Each block is written into one output of exactly ``(n_bl, ...)``,
+        rather than stacked and concatenated as ``lax.map`` would, so the
+        latent -- which the padding factor also grows, through the modes that
+        survive the cut -- is held once. The last block starts wherever it
+        has to in order to end at the axis, and rewrites part of its
+        predecessor with the same values; baselines are independent, so the
+        result does not depend on the block.
+        """
+        expected = (self.n_bl, self.n_freq, self.n_time)
+        if tuple(vis.shape) != expected:
+            # The scan reads the axis by position, so a short or long input
+            # would be encoded as if it were the observation's rather than
+            # refused: a truth array of another observation, say.
+            raise ValueError(
+                f"The visibilities to encode are {tuple(vis.shape)} where the "
+                f"observation is (n_bl, n_freq, n_time) = {expected}."
+            )
+        return self._encode_blocks(vis.shape, vis.dtype)(vis)
+
+    def _encode_blocks(self, vis_shape, vis_dtype):
+        """The jitted block scan behind :meth:`signal_to_latent`.
+
+        Separate so that what it allocates can be read off its compiled form
+        without running it: see ``tests/components/test_ast_init.py``.
+        """
+        block = self._encode_block_size()
+        n_bl = self.n_bl
+        pad_factors, latent_idxs = self.pad_factors, self.latent_idxs
+
+        def encode(y):
+            return signal_to_latent(y, pad_factors, latent_idxs)
+
+        starts = list(range(0, n_bl - block, block)) + [n_bl - block]
+        latent = eval_shape(encode, ShapeDtypeStruct(vis_shape[1:], vis_dtype))
+
+        @jit
+        def encode_blocks(vis):
+            def step(out, start):
+                y = lax.dynamic_slice_in_dim(vis, start, block, axis=0)
+                out = lax.dynamic_update_slice_in_dim(
+                    out, vmap(encode)(y), start, axis=0
+                )
+                return out, None
+
+            out = jnp.zeros((n_bl, *latent.shape), dtype=latent.dtype)
+            out, _ = lax.scan(step, out, jnp.asarray(starts))
+            return out
+
+        return encode_blocks
 
     def build_set_params(self):
         n_bl = self.n_bl
@@ -569,8 +666,6 @@ class GPVisAst(Component):
             self.gammas,
             self.pk_cutoff,
         )
-
-        self.signal_to_latent = lambda vis_ast: vmap(signal_to_latent, (0, None, None), 0)(vis_ast, self.pad_factors, self.latent_idxs)
 
         print("\nAST specs")
         print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")
