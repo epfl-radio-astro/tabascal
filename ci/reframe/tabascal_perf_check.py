@@ -195,8 +195,6 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
             "perf",
             "-od",
             '"$(cat "$workdir/sim_dir.txt")"',
-            "--extra-orbit-dir",
-            f"{_src_root}/tabascal/data/tles",
             "-t",
             "--skip-ms-write",
         ]

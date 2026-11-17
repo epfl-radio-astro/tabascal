@@ -59,6 +59,15 @@ alongside the pipeline tests' smaller ones, and each consumer downloads only the
 simulations of its own configs, so `pytest` never fetches the benchmark's. Set
 `HF_HOME` to persistent storage on a runner to keep them between jobs.
 
+Neither the simulation nor the run asks SatChecker for orbits. The records of
+the satellites in `starlink_selected_ids.txt` at the observation are bundled in
+`ci/reframe/data/orbits/`, which the tabsim and tabascal configs both name as
+their `extra_orbit_dir`, and the tabsim config sets `offline: true`. Otherwise
+every check that has to simulate would send its own burst of requests to the
+service, and one failed request would fail the check. A change to the
+observation time or the satellite list needs new records there, from SatChecker's
+`get-nearest-omm` endpoint at the observation's mean epoch.
+
 The shared file system of the compute nodes is at times slow enough to skew the
 timings, so each check stages its copy of the simulation, and with it the run
 directory the pipeline writes, in a fresh directory under `/dev/shm`. That
@@ -77,10 +86,12 @@ GH200 access to bisect the cause:
 # Generate an 8-antenna simulation from the benchmark's 196A config
 sim-vis -c ci/reframe/data/sim_target_196A.yaml -a 8
 
-# Run tabascal with timing output against the generated dataset. -np names the
-# satellite list, which the config gives relative to its own directory.
+# Run tabascal with timing output against the generated dataset. -np and
+# --extra-orbit-dir name the satellite list and its orbit records, which the
+# config gives relative to its own directory.
 tabascal run -c ci/reframe/data/tab_target_riemann.yaml \
-    -np ci/reframe/data/starlink_selected_ids.txt -n perf -t \
+    -np ci/reframe/data/starlink_selected_ids.txt \
+    --extra-orbit-dir ci/reframe/data/orbits -n perf -t \
     -od ci/reframe/data/simulations_v4/ska_low_starlink_v4_obs_08A_*
 ```
 
