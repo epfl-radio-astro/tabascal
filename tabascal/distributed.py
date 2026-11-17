@@ -233,22 +233,60 @@ def replicate_off_mesh(tree):
     return jax.tree_util.tree_map(place, tree)
 
 
-def constrain_prediction(pred: dict, n_rfi: int) -> dict:
+def _splits_baselines() -> bool:
+    """Whether predictions leave their visibilities split over the baselines.
+
+    Only in a single process, where every device is local and the host can
+    read the shards whole: across processes, process 0 cannot read another's.
+    """
+    return sharding_enabled() and jax.process_count() == 1
+
+
+def constrain_prediction(pred: dict, n_rfi: int, baseline_keys=()) -> dict:
     """Pin one-sample ``Predictive`` output inside traced code, as the writers read it.
 
     Per-RFI sites (leading sample axis, then the RFI axis) stay split across the
     mesh; everything else is replicated, so process 0 can read it without a
     gather. No-op when sharding is off.
+
+    In a single process the ``baseline_keys`` are split over their baseline
+    axis instead, as :func:`constrain_baselines` computed them: replicated,
+    each would be held whole on every device. An output cannot be split
+    unevenly, so that axis is padded to a multiple of the device count;
+    :func:`prediction_to_host` crops it again. Across processes they are
+    replicated like the rest.
     """
     if not sharding_enabled():
         return pred
     split = NamedSharding(rfi_mesh(), P(None, "rfi"))
+    by_baseline = set(baseline_keys) if _splits_baselines() else set()
+    n_dev = jax.device_count()
+
+    def place(key, leaf):
+        if key in by_baseline and np.ndim(leaf) >= 2:
+            pad = [(0, 0)] * np.ndim(leaf)
+            pad[1] = (0, -np.shape(leaf)[1] % n_dev)
+            return lax.with_sharding_constraint(jnp.pad(leaf, pad), split)
+        if np.ndim(leaf) >= 2 and _wants_rfi_axis(key, leaf[0], n_rfi):
+            return lax.with_sharding_constraint(leaf, split)
+        return lax.with_sharding_constraint(leaf, replicated_sharding())
+
+    return {key: place(key, leaf) for key, leaf in pred.items()}
+
+
+def prediction_to_host(pred: dict, baseline_keys, n_bl: int) -> dict:
+    """The ``baseline_keys`` :func:`constrain_prediction` split, whole, on the host.
+
+    Read shard by shard and cropped of their padding. Every consumer of a
+    prediction -- the writers, the truth metrics, the plots -- reads its
+    visibilities on the host, and keeping them there frees the devices for the
+    rest of the run. Identity unless :func:`constrain_prediction` split them.
+    """
+    if not _splits_baselines():
+        return pred
+    keys = set(baseline_keys)
     return {
-        key: lax.with_sharding_constraint(
-            leaf,
-            split if np.ndim(leaf) >= 2 and _wants_rfi_axis(key, leaf[0], n_rfi)
-            else replicated_sharding(),
-        )
+        key: np.asarray(leaf)[:, :n_bl] if key in keys and np.ndim(leaf) >= 2 else leaf
         for key, leaf in pred.items()
     }
 
@@ -292,6 +330,37 @@ def constrain_rfi_state(state: dict, n_rfi: int) -> dict:
     out = dict(state)
     for key, leaf in state.items():
         if _wants_rfi_axis(key, leaf, n_rfi):
+            out[key] = lax.with_sharding_constraint(leaf, sharding)
+    return out
+
+
+def constrain_baselines(state: dict, keys) -> dict:
+    """Split the leading (baseline) axis of the ``keys`` of ``state`` over the mesh.
+
+    Inside traced code, between component forwards. Only the RFI axis is
+    sharded on the way in, so without this everything indexed by baseline --
+    the sky visibilities and their transforms, the gains applied to them, the
+    residual, and each of their cotangents -- was computed whole on every
+    device: the bulk of a fit step's working memory, and none of it divided by
+    adding devices. Pinning the visibilities to the baseline axis lets GSPMD
+    propagate that split to the work which produces and consumes them, each
+    device taking its share of the baselines. The replicated data they are
+    compared with is sliced locally, so that costs no communication; the
+    scalar loss is reduced across devices.
+
+    The baseline count need not divide the device count: this is a constraint
+    on intermediates, which XLA pads, not a placement of inputs. The mesh is
+    :func:`rfi_mesh`'s, whose one axis is named after the RFI sources it was
+    made for: one mesh, so shardings compare equal across the run. No-op when
+    sharding is off.
+    """
+    if not sharding_enabled():
+        return state
+    sharding = NamedSharding(rfi_mesh(), P("rfi"))
+    out = dict(state)
+    for key in keys:
+        leaf = state.get(key)
+        if leaf is not None and np.ndim(leaf) >= 1:
             out[key] = lax.with_sharding_constraint(leaf, sharding)
     return out
 

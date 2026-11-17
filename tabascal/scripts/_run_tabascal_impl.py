@@ -27,8 +27,6 @@ from tabascal.distributed import (
     barrier,
     fail_together,
     is_process_0,
-    make_global,
-    replicated_sharding,
     shard_pytree,
     sharding_enabled,
     suppress_worker_stdout,
@@ -520,11 +518,9 @@ def _subtract(config, paths):
     # Load the tab-sim ground truth once and share it across the init/opt RMSE
     # reporting and all plotting. Missing quantities come back as NaN so consumers
     # can index unconditionally; reporting skips whatever is unavailable.
+    # The truth stays on the host, where it is compared with the predictions:
+    # on the devices it would be replicated on every one of them.
     truth = load_truth(tab_config)
-    if sharding_enabled():
-        # Truth arrays are compared eagerly against globally-sharded predictions;
-        # process-local device arrays cannot mix with global ones in multi-process.
-        truth = {k: make_global(v, replicated_sharding()) for k, v in truth.items()}
     if not has_truth(truth):
         print("\nNo tab-sim truth available - skipping truth-based RMSE reporting.")
 
@@ -546,6 +542,9 @@ def _subtract(config, paths):
     if config["plots"]["init"] and is_process_0():
         from tabascal.plot import plot_init
         plot_init(tab_config, init_pred, truth, paths.name, paths.plot_dir)
+    # Written and plotted: let its visibilities, each replicated on every
+    # device under sharding, go before the fit and the MAP prediction.
+    del init_pred
 
     key, subkey = random.split(key)
     if config["plots"]["prior"]:

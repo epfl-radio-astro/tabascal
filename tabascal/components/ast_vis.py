@@ -100,6 +100,10 @@ _LATENT_WIDTH = sqrt(2.0)
 #: unset.
 
 
+#: Baselines per batch when GPVisAst takes visibilities to its latent modes.
+_LATENT_BATCH = 1024
+
+
 class GPVisAst(Component):
 
     #: The tag ``ast.init: sample`` folds into ``inference.seed`` (tabascal.seeds).
@@ -570,7 +574,16 @@ class GPVisAst(Component):
             self.pk_cutoff,
         )
 
-        self.signal_to_latent = lambda vis_ast: vmap(signal_to_latent, (0, None, None), 0)(vis_ast, self.pad_factors, self.latent_idxs)
+        # Mapped over the baselines in batches rather than vmapped over all of
+        # them: each is padded by pad_factors before its FFT, so all at once is
+        # several visibility-sized arrays on one device -- at setup, before
+        # anything is sharded, the largest allocation of a sharded run.
+        pad_factors, latent_idxs = self.pad_factors, self.latent_idxs
+        self.signal_to_latent = lambda vis_ast: lax.map(
+            lambda y: signal_to_latent(y, pad_factors, latent_idxs),
+            vis_ast,
+            batch_size=min(_LATENT_BATCH, vis_ast.shape[0]),
+        )
 
         print("\nAST specs")
         print(f"(d_freq, d_time): ({dxs[0]:.3e}, {dxs[1]:.3e})")

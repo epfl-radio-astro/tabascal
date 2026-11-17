@@ -2,6 +2,7 @@ from tabascal.imports import import_components
 from tabascal.components import rfi_grid, validate_component_order
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
+    constrain_baselines,
     constrain_rfi_state,
     make_global,
     replicated_sharding,
@@ -33,6 +34,7 @@ from tabascal.interferometry import (
 from tabascal.fft_gp import domain_ss
 from tabascal.time import JulianDate, DAY_SECS, secs_to_days, gast_deg
 
+import jax
 import jax.numpy as jnp
 
 import numpy as np
@@ -765,6 +767,10 @@ class TabConfig:
 # RMSE diagnostics. Every other state key comes from a component.
 BASE_STATE_KEYS = ("vis_ast", "vis_rfi", "rmse_ast", "rmse_rfi", "rmse_gains")
 
+# The data-grid visibilities, zero at the start of every forward pass and made
+# there rather than held in Model.state (see Model.__init__).
+VIS_STATE_KEYS = ("vis_ast", "vis_rfi", "vis_obs")
+
 
 class Model:
 
@@ -810,8 +816,23 @@ class Model:
             for key, value in comp.build_constants().items():
                 self.constants[f"{comp.prefix}/{key}"] = value
 
-        self.state["vis_ast"] = jnp.zeros_like(self.state["vis_obs"])
-        self.state["vis_rfi"] = jnp.zeros_like(self.state["vis_obs"])
+        # The data-grid visibilities start at zero in every forward pass: the
+        # vis components add into vis_ast and vis_rfi and the gains overwrite
+        # vis_obs. They are therefore not held as arrays -- the forward makes the
+        # zeros inside the trace, where XLA folds them away. Held, each was a
+        # full (n_bl, n_freq, n_time) array replicated on every device and fed
+        # to every compiled step, which a sharded run cannot divide; the
+        # components' own placeholders, left on the default device, were one
+        # more copy each there. Only their shape and dtype are kept.
+        vis = self.state["vis_obs"]
+        self.vis_templates = {
+            key: jax.ShapeDtypeStruct(vis.shape, vis.dtype) for key in VIS_STATE_KEYS
+        }
+        for key in VIS_STATE_KEYS:
+            self.state.pop(key, None)
+            for comp in components:
+                if key in comp.state_outputs:
+                    comp.state_outputs = {**comp.state_outputs, key: self.vis_templates[key]}
 
         self.state["rmse_ast"] = jnp.array([jnp.nan])
         self.state["rmse_rfi"] = jnp.array([jnp.nan])
@@ -823,15 +844,24 @@ class Model:
     def build_forward(self):
         forwards = [comp.build_forward() for comp in self.components]
         n_rfi = self.n_rfi
+        templates = self.vis_templates
 
         def forward(params, state, constants):
+
+            # A state passed in with its own visibilities keeps them.
+            zeros = {key: jnp.zeros(t.shape, t.dtype) for key, t in templates.items()}
+            state = constrain_baselines({**zeros, **state}, VIS_STATE_KEYS)
 
             for sub_forward in forwards:
                 state = sub_forward(params, state, constants)
                 # Keep the per-RFI fine grids (rfi_A/rfi_phase -- the memory hogs)
                 # pinned to the RFI sharding between components, so XLA never
-                # materializes a replicated copy. No-op on a single device.
+                # materializes a replicated copy, and the visibilities split
+                # over their baselines, so the work on them is divided between
+                # the devices rather than repeated on each. No-op on a single
+                # device.
                 state = constrain_rfi_state(state, n_rfi)
+                state = constrain_baselines(state, VIS_STATE_KEYS)
 
             return state
 

@@ -1,7 +1,7 @@
 from math import isfinite
 
 import jax.numpy as jnp
-from jax import lax
+from jax import checkpoint, lax
 import numpy as np
 
 from tabascal.distributed import psum_over_rfi, sharding_enabled
@@ -565,6 +565,13 @@ class AnalyticVis(Component):
                     return vis(rfi_A, rfi_phase, rfi_delay)
 
                 # One source per step, its mask applied to its visibility.
+                # Checkpointed so that reverse mode keeps only each step's
+                # inputs: otherwise it keeps the mask as broadcast onto the
+                # visibilities, one (n_bl, n_freq, n_time) array per source on
+                # every device. The kernel is linear in what it differentiates,
+                # so its transpose needs no forward value and nothing is
+                # recomputed for it.
+                @checkpoint
                 def step(total, source):
                     *inputs, m = source
                     return total + jnp.where(m, vis(*(x[None] for x in inputs)), 0), None
