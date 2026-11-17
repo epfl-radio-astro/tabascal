@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 import tabsim
 import yaml
-from huggingface_hub import snapshot_download
 
 
 def _load_ci_module(path: Path):
@@ -26,8 +25,20 @@ def _load_ci_module(path: Path):
     return module
 
 
+_rfi_simulations = _load_ci_module(Path(__file__).resolve().parents[1] / "ci" / "rfi_simulations.py")
 #: The publisher's key, so the data looked up is the data it published.
-compute_sha256 = _load_ci_module(Path(__file__).resolve().parents[1] / "ci" / "rfi_simulations.py").compute_sha256
+compute_sha256 = _rfi_simulations.compute_sha256
+
+#: The simulations the tests run on. Only these are downloaded, not the ReFrame
+#: benchmark's, which share the HuggingFace branch and are far larger.
+TEST_SIM_CONFIGS = sorted((Path(__file__).parent / "data").glob("sim_target*.yaml"))
+
+
+def download_test_simulations() -> Path:
+    """Download the published simulations of TEST_SIM_CONFIGS; see _copy_sim."""
+    return _rfi_simulations.download_simulations(
+        TEST_SIM_CONFIGS, f"tabsim_v{tabsim.__version__}"
+    )
 
 
 @pytest.fixture
@@ -45,16 +56,9 @@ def provide_test_data(tmp_path: Path) -> Path:
     Returns:
         Path to the local directory containing the downloaded test data
     """
-    branch = f"tabsim_v{tabsim.__version__}"
-
     try:
         # Data is cached by HuggingFace, usually in ~/.cache/huggingface
-        local_dir = snapshot_download(
-            repo_id="epfl-radio-astro/rfi-simulations",
-            repo_type="dataset",
-            revision=branch,
-        )
-        return Path(local_dir)
+        return download_test_simulations()
     except Exception as e:
         logging.warning(
             f"Download of pre-generated RFI simulation data failed for tabsim "
@@ -62,9 +66,8 @@ def provide_test_data(tmp_path: Path) -> Path:
         )
 
         tabsim_script = Path(tabsim.__file__).parent / "scripts" / "sim_vis.py"
-        data_dir = Path(__file__).parent / "data"
 
-        for config_file in data_dir.glob("sim_target*.yaml"):
+        for config_file in TEST_SIM_CONFIGS:
             input_hash = compute_sha256(config_file)
             logging.warning(f"Generating data for {config_file}.")
 
