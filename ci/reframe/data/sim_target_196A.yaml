@@ -41,6 +41,11 @@ rfi_sources:
   tle_satellite:
     sat_names: []
     norad_ids_path: starlink_selected_ids.txt
+    # The orbit records of those satellites at the observation, bundled so that
+    # simulating never asks SatChecker. offline turns a missing record into an
+    # error instead of a request.
+    extra_orbit_dir: orbits
+    offline: true
     max_n_sat: 32
     norad_spec_model: starlink_spectra_v4.csv
     power_scale: 1.0
