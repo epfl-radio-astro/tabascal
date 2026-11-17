@@ -7,7 +7,19 @@ which check individual functions.
 
 Each case runs `run_tabascal.py` in a **subprocess** against a simulation
 downloaded from the `epfl-radio-astro/rfi-simulations` HuggingFace dataset, then
-parses the run's stdout.
+parses the run's stdout. A `tests/data/sim_target*.yaml` with no simulation
+published there yet (a change that edits one) is simulated with the installed
+tabsim, once per pytest session.
+
+The simulation (`tests/data/sim_target_8A.yaml`) observes three OneWeb
+satellites in low Earth orbit. Each case fits with the RFI amplitude in the real
+signal space (`rfi.signal_type: real` in `tests/data/tab_target.yaml`), except
+`RiemannVisFine-jax`, which keeps the complex one so both stay covered end to
+end. The orbit records each run is given (`--extra-orbit-dir`) are, by default,
+the ones the simulation used (its `input_data/used_orbits.json`). The cases that
+fit the orbit (`NoDragOrbitFine`, `OrbitFine`) instead start from the
+previous day's TLEs in `tests/data/orbits`, which put the satellites 0.3-1.3 km
+along-track from where they were simulated, so the fit has something to recover.
 
 The references are recorded against simulations from tab-sim 0.1.0
 ([issue #253](https://github.com/epfl-radio-astro/tabascal/issues/253)), which

@@ -78,7 +78,7 @@ rfi:
   time_int_factor: 5
 
 satellites:
-  norad_ids: [20452, 38833, 45854]
+  norad_ids: [48058, 48067, 49192]  # sim_target_8A.yaml's, ascending
   # n_int_samples: 3
 
 
