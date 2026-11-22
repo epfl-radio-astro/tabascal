@@ -20,7 +20,8 @@ arrays aligned to the prediction layout.
 import os
 from typing import Dict, List, Optional
 
-import jax.numpy as jnp
+import jax
+import numpy as np
 import xarray as xr
 
 from tabascal.ms import get_observation_data_type
@@ -128,12 +129,31 @@ def require_truth(config: Dict) -> None:
         )
 
 
-def _read_vis(xds, var: str) -> jnp.ndarray:
+def _host(x) -> np.ndarray:
+    """``x`` as a host array in the dtype JAX would give it in this run's precision.
+
+    The truth is read on the host and stays there: it is only ever compared
+    with predictions, which is done on the host too (see
+    :func:`tabascal.tab_tools.print_truth_metrics`). On the device it was a
+    visibility-sized array per quantity, replicated on every device under
+    sharding. The dtype is the one ``jnp.asarray`` would have given it, so a
+    complex128 simulation does not double the host copy in single precision.
+    """
+    x = np.asarray(x)
+    return x.astype(jax.dtypes.canonicalize_dtype(x.dtype), copy=False)
+
+
+def _read_cube(xds, var: str) -> np.ndarray:
+    """Read a (n_time, n_row, n_freq) variable as (n_row, n_freq, n_time), on the host."""
+    return np.ascontiguousarray(_host(xds[var].data.compute()).transpose(1, 2, 0))
+
+
+def _read_vis(xds, var: str) -> np.ndarray:
     """Read a (n_time, n_bl, n_freq) visibility variable as (n_bl, n_freq, n_time)."""
-    return jnp.transpose(jnp.asarray(xds[var].data.compute()), (1, 2, 0))
+    return _read_cube(xds, var)
 
 
-def read_true_vis_ast(zarr_path: str, data_col: Optional[str] = None) -> jnp.ndarray:
+def read_true_vis_ast(zarr_path: str, data_col: Optional[str] = None) -> np.ndarray:
     """Read the true astronomical visibilities as ``(n_bl, n_freq, n_time)``.
 
     When ``data_col`` is given the read honours :func:`get_observation_data_type` (zeroing
@@ -144,29 +164,29 @@ def read_true_vis_ast(zarr_path: str, data_col: Optional[str] = None) -> jnp.nda
     xds = xr.open_zarr(zarr_path)
     vis_ast = _read_vis(xds, _first_present(xds, _VIS_AST_VARS) or "vis_ast")
     if data_col is not None and not get_observation_data_type(data_col)["ast"]:
-        return jnp.zeros_like(vis_ast)
+        return np.zeros_like(vis_ast)
     return vis_ast
 
 
-def read_true_vis_rfi(zarr_path: str, data_col: Optional[str] = None) -> jnp.ndarray:
+def read_true_vis_rfi(zarr_path: str, data_col: Optional[str] = None) -> np.ndarray:
     """Read the true RFI visibilities as ``(n_bl, n_freq, n_time)``."""
     xds = xr.open_zarr(zarr_path)
     vis_rfi = _read_vis(xds, _first_present(xds, _VIS_RFI_VARS) or "vis_rfi")
     if data_col is not None and not get_observation_data_type(data_col)["rfi"]:
-        return jnp.zeros_like(vis_rfi)
+        return np.zeros_like(vis_rfi)
     return vis_rfi
 
 
-def read_true_gains(zarr_path: str) -> Optional[jnp.ndarray]:
+def read_true_gains(zarr_path: str) -> Optional[np.ndarray]:
     """Read the true gains as ``(n_ant, n_freq, n_time)`` if present, else ``None``."""
     xds = xr.open_zarr(zarr_path)
     var = _first_present(xds, _GAINS_VARS)
     if var is None:
         return None
-    return jnp.transpose(jnp.asarray(xds[var].data.compute()), (1, 2, 0))
+    return _read_cube(xds, var)
 
 
-def load_truth(tab_config) -> Dict[str, jnp.ndarray]:
+def load_truth(tab_config) -> Dict[str, np.ndarray]:
     """Build the evaluation ``truth`` dict consumed by RMSE reporting and plotting.
 
     Always returns the keys ``vis_ast``, ``vis_rfi`` and ``gains`` so existing consumers
@@ -180,8 +200,9 @@ def load_truth(tab_config) -> Dict[str, jnp.ndarray]:
     n_bl, n_freq, n_time = tab_config.n_bl, tab_config.n_freq, tab_config.n_time
     n_ant = tab_config.n_ant
 
-    nan_vis = jnp.nan * jnp.zeros((n_bl, n_freq, n_time), dtype=complex)
-    nan_gains = jnp.nan * jnp.ones((n_ant, n_freq, n_time), dtype=complex)
+    dtype = jax.dtypes.canonicalize_dtype(complex)
+    nan_vis = np.full((n_bl, n_freq, n_time), np.nan, dtype=dtype)
+    nan_gains = np.full((n_ant, n_freq, n_time), np.nan, dtype=dtype)
     truth = {"vis_ast": nan_vis, "vis_rfi": nan_vis, "gains": nan_gains}
 
     path = _zarr_path(tab_config.args)
@@ -200,6 +221,6 @@ def load_truth(tab_config) -> Dict[str, jnp.ndarray]:
     return truth
 
 
-def has_truth(truth: Dict[str, jnp.ndarray]) -> bool:
+def has_truth(truth: Dict[str, np.ndarray]) -> bool:
     """True if *any* truth quantity in ``truth`` is real (not all-NaN)."""
-    return any(not bool(jnp.all(jnp.isnan(v))) for v in truth.values())
+    return any(not bool(np.all(np.isnan(v))) for v in truth.values())

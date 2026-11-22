@@ -1798,12 +1798,17 @@ def write_results_xds(
     # and must not be materialized here without a process_allgather.
     if failure is None and is_process_0():
         try:
+            # Brought to the host whole, before dask chunks them: a chunk of
+            # a device array is a new device array, so chunking these in place
+            # allocated each chunk again on the device -- on every device, for
+            # these replicated arrays.
+            host = lambda key: da.asarray(np.asarray(vi_pred[key]))
             map_xds = xr.Dataset(
                 data_vars={
-                    "rfi_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_rfi"])),  # type: ignore
-                    "ast_vis": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_ast"])),  # type: ignore
-                    "gains": (["sample", "ant", "freq", "time"], da.asarray(vi_pred["gains"])),  # type: ignore
-                    "vis_obs": (["sample", "bl", "freq", "time"], da.asarray(vi_pred["vis_obs"])),  # type: ignore
+                    "rfi_vis": (["sample", "bl", "freq", "time"], host("vis_rfi")),  # type: ignore
+                    "ast_vis": (["sample", "bl", "freq", "time"], host("vis_ast")),  # type: ignore
+                    "gains": (["sample", "ant", "freq", "time"], host("gains")),  # type: ignore
+                    "vis_obs": (["sample", "bl", "freq", "time"], host("vis_obs")),  # type: ignore
                 },
                 coords={
                     # SEAM: `time` is seconds from the start of the observation,

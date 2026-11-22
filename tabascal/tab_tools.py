@@ -23,7 +23,16 @@ import jax.numpy as jnp
 from jax import random, Array
 from jax.tree_util import tree_map
 
-from tabascal.distributed import constrain_prediction, is_process_0, replicate_off_mesh
+from tabascal.config import VIS_STATE_KEYS
+from tabascal.distributed import (
+    constrain_prediction,
+    is_process_0,
+    make_global,
+    prediction_to_host,
+    replicate_off_mesh,
+    replicated_sharding,
+    sharding_enabled,
+)
 from tabascal.noise import broadcast_to_vis
 from tabascal.run_dir import LOSS_TRACE
 from tabascal.opt_schedule import (
@@ -309,30 +318,42 @@ def print_truth_metrics(pred: dict, truth: dict, tab_config, point: str):
     # Aggregate metrics (RMSE, bias) are already reduced over every baseline and
     # channel, so they normalise against the one representative noise rather than
     # the resolved array -- there is no axis left to align it with.
+    #
+    # Computed on the host. The effective sample size needs the full residual
+    # there anyway, and on the device every step -- the difference, the masked
+    # copies, their squares -- was another visibility-sized array, replicated on
+    # every device under sharding: together the largest transient of a run.
     noise = tab_config.noise_scalar
     flags = tab_config.flags
+    flags = None if flags is None else np.asarray(flags)
 
     printed_header = False
     for label, key, use_flags, use_noise, unit in _TRUTH_METRIC_SPECS:
         true = truth.get(key)
-        if true is None or bool(jnp.all(jnp.isnan(true))):
+        if true is None:
+            continue
+        true = np.asarray(true)
+        if np.all(np.isnan(true)):
             continue
 
         # pred arrays carry a leading sample axis (batch_ndims=1 from Predictive).
         p = pred[key]
-        p = p[0] if p.ndim == true.ndim + 1 else p
+        p = np.asarray(p[0] if p.ndim == true.ndim + 1 else p)
 
         diff_full = p - true
+        del p
         mask = flags if (use_flags and flags is not None and flags.shape == true.shape) else None
         if mask is not None:
             diff, masked_true = diff_full[~mask], true[~mask]
         else:
             diff, masked_true = diff_full, true
 
-        r = float(jnp.sqrt(jnp.mean(jnp.abs(diff) ** 2)))   # RMSE: bias + scatter
-        me = float(jnp.abs(jnp.mean(diff)))                 # |mean error|: coherent bias
-        signal = float(jnp.sqrt(jnp.mean(jnp.abs(masked_true) ** 2)))
-        n_eff = _effective_sample_size(np.asarray(diff_full))
+        # Accumulated in float64: these reduce over every visibility.
+        r = float(np.sqrt(np.mean(np.abs(diff) ** 2, dtype=np.float64)))   # RMSE: bias + scatter
+        me = float(np.abs(np.mean(diff, dtype=np.complex128)))              # |mean error|: coherent bias
+        signal = float(np.sqrt(np.mean(np.abs(masked_true) ** 2, dtype=np.float64)))
+        del diff, masked_true
+        n_eff = _effective_sample_size(diff_full)
         sigma = np.sqrt(2.0 * n_eff) * me / r if r > 0 else 0.0
 
         if not printed_header:
@@ -392,6 +413,13 @@ def run_trace_path(opt_config: dict, map_path: str) -> str:
     return path if path.endswith(".npz") else path + ".npz"
 
 
+def _on_devices(x):
+    """``x`` on the device, replicated over the mesh when sharding."""
+    if isinstance(x, jax.Array) or not sharding_enabled():
+        return jnp.asarray(x)
+    return make_global(x, replicated_sharding())
+
+
 def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
     """Per-iteration metrics defined by the data, not by the parameterisation.
 
@@ -421,7 +449,7 @@ def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
     available = tuple(
         key
         for key in ("vis_ast", "vis_rfi")
-        if truth.get(key) is not None and not bool(jnp.all(jnp.isnan(truth[key])))
+        if truth.get(key) is not None and not bool(np.all(np.isnan(np.asarray(truth[key]))))
     )
 
     # Broadcast onto the visibilities before anything masks or divides, exactly
@@ -446,7 +474,9 @@ def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
         "vis_obs": vis_obs,
         "noise": noise,
         "keep": keep,
-        "truth": {key: truth[key] for key in available},
+        # The truth is held on the host (see tabascal.truth); placed once here,
+        # beside the data it is scored with, rather than sent with every step.
+        "truth": {key: _on_devices(truth[key]) for key in available},
     }
 
     # ``mask`` is taken as an argument rather than closed over, so that every
@@ -685,7 +715,11 @@ def _predict(prob_model, n_rfi, key, params, obs_data, state, constants, vis_obs
     """One-sample ``Predictive`` at ``params`` and its reduced chi^2, as one executable.
 
     Placed as the downstream writers expect: per-RFI sites split over the mesh,
-    everything else replicated.
+    the visibilities over their (padded) baselines in a single process, for
+    :func:`prediction_to_host`, everything else replicated (see
+    :func:`constrain_prediction`). The likelihood's ``obs``
+    site is left out: nothing reads it, and it is visibility-sized -- the data
+    when there are data, a draw of the noise when there are not.
     """
     # Sharding invariant: 1 sample -> numpyro calls the model without vmap, so the
     # shard_map-wrapped RFI-vis components (incl. the FFI kernel, which has no
@@ -695,7 +729,11 @@ def _predict(prob_model, n_rfi, key, params, obs_data, state, constants, vis_obs
         posterior_samples=tree_map(lambda x: x[None], params),
         batch_ndims=1,
     )(key, obs_data=obs_data, state=state, constants=constants)
-    return constrain_prediction(pred, n_rfi), reduced_chi2(pred["vis_obs"][0], vis_obs, noise, flags)
+    pred.pop("obs", None)
+    return (
+        constrain_prediction(pred, n_rfi, baseline_keys=VIS_STATE_KEYS),
+        reduced_chi2(pred["vis_obs"][0], vis_obs, noise, flags),
+    )
 
 
 @measure_runtime
@@ -707,6 +745,7 @@ def init_predict(
         prob_model, getattr(tab_config, "n_rfi", 0), subkey, init_params, None, state, constants,
         tab_config.vis_obs, tab_config.noise, tab_config.flags,
     )
+    init_pred = prediction_to_host(init_pred, VIS_STATE_KEYS, tab_config.vis_obs.shape[0])
     print()
     print(f"Reduced Chi^2 @ init params : {rchi2}")
 
@@ -768,6 +807,7 @@ def run_opt(
         prob_model, getattr(tab_config, "n_rfi", 0), subkeys[1], raw_params, tab_config.vis_obs,
         state, constants, tab_config.vis_obs, tab_config.noise, tab_config.flags,
     )
+    vi_pred = prediction_to_host(vi_pred, VIS_STATE_KEYS, tab_config.vis_obs.shape[0])
 
     write_results_xds(vi_pred, tab_config, map_path)
 

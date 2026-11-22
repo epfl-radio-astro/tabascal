@@ -244,31 +244,26 @@ class TabascalPerfCheck(_TabascalPerfCheckBase):
 
     descr = "tabascal pipeline performance (single GPU)"
 
-    # Measured on Daint (JAX 0.6.0) from the perf job of PR 285 at df62657, one
-    # run per configuration, on the SKA-Low 196A simulation. The checks moved
-    # there from the 96A simulation and its single tab_target.yaml; the 96A
-    # references, and the record of why they moved, are in this file's git
-    # history. Tolerances are carried over from the 96A references.
     _reference_by_variant: dict = {
         ("Analytic-196A", "single"): {
             "daint:gpu": {
-                "total_runtime": (183.02, -0.25, 0.15, "s"),
-                "optimizer_runtime": (162.22, -0.20, 0.15, "s"),
-                "memory_usage": (5.834, -0.15, 0.15, "GB"),
+                "total_runtime": (179.06, -0.25, 0.15, "s"),
+                "optimizer_runtime": (158.47, -0.20, 0.15, "s"),
+                "memory_usage": (1.542, -0.15, 0.15, "GB"),
             },
         },
         ("Analytic-196A", "double"): {
             "daint:gpu": {
-                "total_runtime": (344.78, -0.25, 0.15, "s"),
-                "optimizer_runtime": (321.14, -0.20, 0.15, "s"),
-                "memory_usage": (9.863, -0.15, 0.15, "GB"),
+                "total_runtime": (337.44, -0.25, 0.15, "s"),
+                "optimizer_runtime": (315.52, -0.20, 0.15, "s"),
+                "memory_usage": (2.772, -0.15, 0.15, "GB"),
             },
         },
         ("Riemann-196A", "single"): {
             "daint:gpu": {
-                "total_runtime": (678.08, -0.25, 0.15, "s"),
-                "optimizer_runtime": (626.74, -0.20, 0.15, "s"),
-                "memory_usage": (41.719, -0.15, 0.15, "GB"),
+                "total_runtime": (673.76, -0.25, 0.15, "s"),
+                "optimizer_runtime": (623.15, -0.20, 0.15, "s"),
+                "memory_usage": (31.269, -0.15, 0.15, "GB"),
             },
         },
     }
@@ -324,23 +319,23 @@ class TabascalMultiGpuPerfCheck(_TabascalPerfCheckBase):
     _reference_by_variant: dict = {
         ("Analytic-196A", "single"): {
             "daint:gpu": {
-                "total_runtime": (79.37, -0.25, 0.15, "s"),
-                "optimizer_runtime": (54.27, -0.20, 0.15, "s"),
-                "memory_usage": (5.642, -0.15, 0.15, "GB"),
+                "total_runtime": (73.53, -0.25, 0.15, "s"),
+                "optimizer_runtime": (52.03, -0.20, 0.15, "s"),
+                "memory_usage": (1.168, -0.15, 0.15, "GB"),
             },
         },
         ("Analytic-196A", "double"): {
             "daint:gpu": {
-                "total_runtime": (127.22, -0.25, 0.15, "s"),
-                "optimizer_runtime": (99.76, -0.20, 0.15, "s"),
-                "memory_usage": (9.66, -0.15, 0.15, "GB"),
+                "total_runtime": (118.37, -0.25, 0.15, "s"),
+                "optimizer_runtime": (95.47, -0.20, 0.15, "s"),
+                "memory_usage": (1.94, -0.15, 0.15, "GB"),
             },
         },
         ("Riemann-196A", "single"): {
             "daint:gpu": {
-                "total_runtime": (366.6, -0.25, 0.15, "s"),
-                "optimizer_runtime": (312.1, -0.20, 0.15, "s"),
-                "memory_usage": (12.782, -0.15, 0.15, "GB"),
+                "total_runtime": (361.77, -0.25, 0.15, "s"),
+                "optimizer_runtime": (307.0, -0.20, 0.15, "s"),
+                "memory_usage": (8.341, -0.15, 0.15, "GB"),
             },
         },
     }
