@@ -39,8 +39,13 @@ _GAINS_VARS = ["gains_ants", "gains_ant", "gains"]
 _RFI_A_VARS = ["rfi_tle_sat_A"]
 
 
-def _zarr_path(config: Dict) -> Optional[str]:
-    return config.get("data", {}).get("zarr_path")
+def _zarr_path(config) -> Optional[str]:
+    from tabascal.schema import RunConfig
+
+    if isinstance(config, RunConfig):
+        return config.data.truth_zarr
+    data = config.get("data", {}) if isinstance(config, dict) else {}
+    return data.get("truth_zarr") or data.get("zarr_path")
 
 
 def _first_present(xds, candidates: List[str]) -> Optional[str]:
@@ -50,7 +55,7 @@ def _first_present(xds, candidates: List[str]) -> Optional[str]:
     return None
 
 
-def available_truth(config: Dict) -> Dict[str, bool]:
+def available_truth(config) -> Dict[str, bool]:
     """Report which truth quantities are present in the sim zarr.
 
     Never raises on a missing/unreadable zarr -- returns all-False so callers can decide
@@ -71,29 +76,26 @@ def available_truth(config: Dict) -> Dict[str, bool]:
     return flags
 
 
-def _required_truth(config: Dict) -> Dict[str, str]:
+def _required_truth(config) -> Dict[str, str]:
     """Map each truth quantity the config *requires* to a human-readable reason.
 
     Truth is required when a component is initialised at truth, or when truth plots are
     requested (they read the truth to overlay it).
     """
-    required: Dict[str, str] = {}
-    ast = config.get("ast", {})
-    rfi = config.get("rfi", {})
-    plots = config.get("plots", {})
+    from tabascal.schema import RunConfig, validate_config
 
-    if ast.get("init") == "truth":
-        required["vis_ast"] = "ast.init: truth"
-    if rfi.get("init") == "truth":
-        required["rfi_A"] = "rfi.init: truth"
-    if plots.get("truth"):
-        # truth plots overlay the true ast and rfi visibilities
+    cfg = config if isinstance(config, RunConfig) else validate_config(config)
+    required: Dict[str, str] = {}
+    for spec in cfg.model.components:
+        for qty, reason in spec.config.requires_truth(spec.ref).items():
+            required.setdefault(qty, reason)
+    if cfg.plots.truth:
         required.setdefault("vis_ast", "plots.truth")
         required.setdefault("vis_rfi", "plots.truth")
     return required
 
 
-def require_truth(config: Dict) -> None:
+def require_truth(config) -> None:
     """Fail fast if the config needs truth that the sim zarr does not provide.
 
     Mirrors :func:`tabascal.scripts._run_tabascal_impl.assert_precision_supported`: it runs
@@ -184,11 +186,12 @@ def load_truth(tab_config) -> Dict[str, jnp.ndarray]:
     nan_gains = jnp.nan * jnp.ones((n_ant, n_freq, n_time), dtype=complex)
     truth = {"vis_ast": nan_vis, "vis_rfi": nan_vis, "gains": nan_gains}
 
-    path = _zarr_path(tab_config.args)
+    cfg = getattr(tab_config, "config", None)
+    path = _zarr_path(cfg) if cfg is not None else None
     if not path or not os.path.exists(path):
         return truth
 
-    have = available_truth(tab_config.args)
+    have = available_truth(cfg)
     if have["vis_ast"]:
         truth["vis_ast"] = read_true_vis_ast(path)
     if have["vis_rfi"]:

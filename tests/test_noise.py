@@ -1407,14 +1407,12 @@ class TestInitCallsTheReadBeforeTheOverride:
         return {
             "model": {"components": [], "precision": "single"},
             "data": {
-                "freq": 0,
+                "freq": None,
                 "corr": "xx",
                 "data_col": "DATA",
                 "noise": noise,
                 "flags": False,
             },
-            "rfi": {"n_int_freq": 1, "time_int_factor": 1.0},
-            "satellites": {},
         }
 
     def _construct(self, monkeypatch, noise=0.7):

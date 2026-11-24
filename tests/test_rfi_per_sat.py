@@ -85,7 +85,7 @@ def _complex_dtype():
 
 
 def make_config(
-    component="rfi_vis:RiemannVisFine",
+    component="rfi_vis.RiemannVisFine",
     backend="ffi",
     n_rfi=None,
     n_rfi_real=None,
@@ -93,18 +93,24 @@ def make_config(
     save_rfi_per_sat=True,
     corr="xx",
 ):
-    """A stand-in for ``TabConfig`` holding what the decomposition reads.
-
-    Only the observation shape, the antenna pairs and the model's component
-    list: ``rfi_vis_per_sat`` re-instantiates the run's own ``rfi_vis``
-    component from that list and evaluates it, so nothing else of the fit is
-    needed -- which is the point of doing it on the already-fitted fine grid.
-    """
+    from tabascal.schema import validate_config
 
     norad_ids = NORAD_IDS if norad_ids is None else norad_ids
     n_rfi = len(norad_ids) if n_rfi is None else n_rfi
     a1 = jnp.asarray(A1_BL, dtype=jnp.int32)
     a2 = jnp.asarray(A2_BL, dtype=jnp.int32)
+    ref = component.replace(":", ".")
+    run_cfg = validate_config({
+        "model": {
+            "precision": "double" if jax.config.read("jax_enable_x64") else "single",
+            "components": [
+                {"trajectory.FixedOrbitFine": {"norad_ids": list(norad_ids)}},
+                "rfi_signal.ComplexRFIVarAntFine",
+                {ref: {"backend": backend}},
+            ],
+        },
+        "data": {"corr": corr, "save_rfi_per_sat": save_rfi_per_sat},
+    })
 
     return SimpleNamespace(
         n_ant=N_ANT,
@@ -118,28 +124,19 @@ def make_config(
         norad_ids=list(norad_ids),
         a1=a1,
         a2=a2,
-        precision="double" if jax.config.read("jax_enable_x64") else "single",
+        precision=run_cfg.model.precision,
         times=np.arange(N_TIME, dtype=float),
         freqs=np.linspace(1.0e9, 1.1e9, N_FREQ),
-        # The variable-sampling components read these; one stride-1 group over
-        # every baseline is the full-resolution case.
         time_sample_idxs=[np.arange(N_BL, dtype="int32")],
         time_strides=[1],
-        args={
-            "rfi": {"backend": backend},
-            "model": {"components": ["trajectory:FixedOrbitFine", component]},
-            "data": {"corr": corr, "save_rfi_per_sat": save_rfi_per_sat},
-        },
+        config=run_cfg,
     )
 
 
 def _forward(config):
     """The configured ``rfi_vis`` component's forward, and its constants."""
-
-    from tabascal.imports import import_components
-
-    ref = [c for c in config.args["model"]["components"] if "rfi_vis" in c][0]
-    comp = import_components([ref])[0]()
+    spec = [s for s in config.config.model.components if s.ref.startswith("rfi_vis.")][0]
+    comp = spec.cls(spec.config)
     comp.setup(config)
     constants = {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
 
@@ -457,20 +454,28 @@ class TestFineGridCancellation:
     @staticmethod
     def _config():
         """Two sources, two antennas, one output cell over two fine samples."""
+        from tabascal.schema import validate_config
 
+        run_cfg = validate_config({
+            "model": {
+                "precision": "double" if jax.config.read("jax_enable_x64") else "single",
+                "components": [
+                    {"trajectory.FixedOrbitFine": {"norad_ids": list(NORAD_IDS[:2])}},
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    {"rfi_vis.RiemannVisFine": {"backend": "jax"}},
+                ],
+            },
+            "data": {"corr": "xx", "save_rfi_per_sat": True},
+        })
         return SimpleNamespace(
             n_ant=2, n_bl=1, n_time=1, n_freq=1, n_int_time=2, n_int_freq=1,
             n_rfi=2, n_rfi_real=2, norad_ids=NORAD_IDS[:2],
             a1=jnp.asarray([0], dtype=jnp.int32),
             a2=jnp.asarray([1], dtype=jnp.int32),
-            precision="double" if jax.config.read("jax_enable_x64") else "single",
+            precision=run_cfg.model.precision,
             times=np.zeros(1), freqs=np.full(1, 1.0e9),
             time_sample_idxs=[np.zeros(1, dtype="int32")], time_strides=[1],
-            args={
-                "rfi": {"backend": "jax"},
-                "model": {"components": ["rfi_vis:RiemannVisFine"]},
-                "data": {"corr": "xx", "save_rfi_per_sat": True},
-            },
+            config=run_cfg,
         )
 
     @staticmethod
@@ -636,8 +641,10 @@ class TestTheBlocksAreHandedOverOneAtATime:
 class TestTheComponentMustBeResolvable:
 
     def test_a_model_with_no_rfi_vis_component_is_an_error(self):
+        from tabascal.schema import validate_config
+
         config = make_config()
-        config.args["model"]["components"] = ["gains:UnitaryGains"]
+        config.config = validate_config({"model": {"components": ["gains.UnitaryGains"]}})
 
         with pytest.raises(ValueError, match="rfi_vis"):
             rfi_vis_per_sat(make_pred(make_config()), config)
@@ -645,7 +652,8 @@ class TestTheComponentMustBeResolvable:
     def test_two_rfi_vis_components_are_an_error(self):
         """Which one produced ``vis_rfi`` is then a guess, and a wrong one is silent."""
         config = make_config()
-        config.args["model"]["components"] += ["rfi_vis:RiemannVisFine"]
+        rfi_spec = [s for s in config.config.model.components if s.ref.startswith("rfi_vis.")][0]
+        config.config.model.components.append(rfi_spec)
 
         with pytest.raises(ValueError, match="rfi_vis"):
             rfi_vis_per_sat(make_pred(make_config()), config)
@@ -715,13 +723,8 @@ class TestTheZarrVariable:
             sample, src = xds.rfi_vis_src.chunks[:2]
             assert set(sample) == {1} and set(src) == {1}
 
-    @pytest.mark.parametrize("flag", [False, None], ids=["false", "absent"])
-    def test_nothing_is_written_when_it_is_not_asked_for(self, tmp_path, flag):
-        config = make_config(save_rfi_per_sat=True)
-        if flag is None:
-            del config.args["data"]["save_rfi_per_sat"]
-        else:
-            config.args["data"]["save_rfi_per_sat"] = flag
+    def test_nothing_is_written_when_it_is_not_asked_for(self, tmp_path):
+        config = make_config(save_rfi_per_sat=False)
 
         write_results_xds(make_pred(config), config, str(tmp_path / "map.zarr"))
 
@@ -731,16 +734,16 @@ class TestTheZarrVariable:
 
     def test_the_default_zarr_is_byte_for_byte_what_it_always_was(self, tmp_path):
         """Off by default, and off means the same bytes -- not merely the same data."""
-        config = make_config(save_rfi_per_sat=True)
+        from tabascal.schema import DataConfig
+
+        assert DataConfig().save_rfi_per_sat is False
+        config = make_config(save_rfi_per_sat=False)
         pred = make_pred(config)
 
-        del config.args["data"]["save_rfi_per_sat"]
-        write_results_xds(pred, config, str(tmp_path / "absent.zarr"))
-
-        config.args["data"]["save_rfi_per_sat"] = False
+        write_results_xds(pred, config, str(tmp_path / "default.zarr"))
         write_results_xds(pred, config, str(tmp_path / "false.zarr"))
 
-        assert _tree(tmp_path / "absent.zarr") == _tree(tmp_path / "false.zarr")
+        assert _tree(tmp_path / "default.zarr") == _tree(tmp_path / "false.zarr")
 
     def test_no_forward_evaluation_is_made_when_it_is_off(self, tmp_path, monkeypatch):
         """The cost is opt-in as well as the output."""
@@ -862,7 +865,7 @@ class TestTheStoreIsStreamedInto:
         pred = make_pred(config, n_sample=2)
 
         write_results_xds(pred, config, str(tmp_path / "on.zarr"))
-        config.args["data"]["save_rfi_per_sat"] = False
+        config.config.data.save_rfi_per_sat = False
         write_results_xds(pred, config, str(tmp_path / "off.zarr"))
 
         with xr.open_zarr(str(tmp_path / "on.zarr")) as on:

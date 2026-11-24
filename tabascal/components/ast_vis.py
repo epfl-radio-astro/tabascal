@@ -1,15 +1,104 @@
 from math import ceil, isfinite, sqrt
+from typing import Any, Literal, Optional, Tuple, Union
 
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
+from pydantic import field_validator
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.seeds import component_key, config_seed
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, latent_to_signal_dft_init, latent_to_signal_dft, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_cutoff, validate_gp_cov
+from tabascal.schema import (
+    CutoffFloat,
+    FloatGe1,
+    FourierGPConfig,
+    PositiveFloat,
+    PositivePair,
+    StrictConfigModel,
+    WholePositiveInt,
+    _check_float_ge_1,
+    _check_std_value,
+    _check_whole_positive_int,
+)
+from tabascal.seeds import DEFAULT_SEED, component_key
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, latent_to_signal_dft_init, latent_to_signal_dft, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
+
+
+class GPVisAstConfig(FourierGPConfig):
+    """Configuration for :class:`GPVisAst`."""
+
+    std: Union[PositiveFloat, Literal["data"]] = "data"
+    corr_freq: Optional[PositiveFloat] = None
+    fov_deg: Optional[PositiveFloat] = None
+    gammas: PositivePair = (5.0, 5.0)
+    cutoff: CutoffFloat = 1e-6
+    freq_pad_factor: FloatGe1 = 2.0
+    time_pad_factor: Union[FloatGe1, Literal["auto"]] = 2.0
+    transform: Literal["dft", "fft"] = "dft"
+    baseline_block_size: Optional[Union[WholePositiveInt, Literal["auto"]]] = "auto"
+    init: Literal["sample", "prior", "data", "zeros", "truth"] = "sample"
+    mean: Literal["zeros", "data"] = "zeros"
+
+    @field_validator("std", mode="before")
+    @classmethod
+    def _validate_std(cls, value: Any) -> Any:
+        return _check_std_value(value, allow_none=False)
+
+    @field_validator("time_pad_factor", mode="before")
+    @classmethod
+    def _validate_time_pad_factor(cls, value: Any) -> Any:
+        if value == "auto":
+            return "auto"
+        return _check_float_ge_1(value)
+
+    @field_validator("baseline_block_size", mode="before")
+    @classmethod
+    def _validate_baseline_block_size(cls, value: Any) -> Any:
+        if value in ("auto", None):
+            return value
+        return _check_whole_positive_int(value)
+
+    @field_validator("mean", mode="before")
+    @classmethod
+    def _normalise_mean(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"mean must be 'zeros', 0, or 'data', got {value!r}")
+        if value == 0:
+            return "zeros"
+        return value
+
+    def requires_truth(self, ref: str = "") -> dict[str, str]:
+        if self.init == "truth":
+            label = f"{ref}.init: truth" if ref else "ast_vis.GPVisAst.init: truth"
+            return {"vis_ast": label}
+        return {}
+
+
+class DiscreteSkyVisConfig(StrictConfigModel):
+    """Configuration for :class:`DiscreteSkyVis`."""
+
+    uvw_sign: Tuple[Literal[-1, 1], Literal[-1, 1], Literal[-1, 1]] = (-1, -1, -1)
+    source_block_size: WholePositiveInt = 128
+
+    @field_validator("uvw_sign", mode="before")
+    @classmethod
+    def _validate_uvw_sign(cls, value: Any) -> Tuple[int, int, int]:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ValueError(
+                "uvw_sign must be a sequence of three values, each +1 or -1, "
+                f"e.g. [-1, -1, -1], got {value!r}."
+            )
+        out = []
+        for s in value:
+            if isinstance(s, bool) or not isinstance(s, (int, float)) or abs(s) != 1:
+                raise ValueError(
+                    "uvw_sign must be a sequence of three values, each +1 or -1, "
+                    f"e.g. [-1, -1, -1], got {value!r}."
+                )
+            out.append(int(s))
+        return (out[0], out[1], out[2])
 
 
 #: The ``ast.gp_cov`` keys and what each may be, for
@@ -102,7 +191,9 @@ _LATENT_WIDTH = sqrt(2.0)
 
 class GPVisAst(Component):
 
-    #: The tag ``ast.init: sample`` folds into ``inference.seed`` (tabascal.seeds).
+    Config = GPVisAstConfig
+
+    #: The tag ``init: sample`` folds into ``inference.seed`` (tabascal.seeds).
     seed_tag = "ast"
 
     # Accumulates into vis_ast, which Model zeroes before the components run.
@@ -122,6 +213,7 @@ class GPVisAst(Component):
     def setup(self, config):
         """All validation and error-prone operations here"""
         try:
+            cfg = self.config
             # Store only what's needed for forward computation
             self.n_time = config.n_time
             self.n_bl = config.n_bl
@@ -133,94 +225,35 @@ class GPVisAst(Component):
             self.dec = config.phase_centre["dec"]
             self.freqs = config.freqs
             self.times = config.times
-            self.seed = config_seed(config.args)
+            run_cfg = getattr(config, "config", None)
+            if hasattr(config, "seed"):
+                self.seed = config.seed
+            elif run_cfg is not None:
+                self.seed = run_cfg.inference.effective_seed
+            else:
+                self.seed = DEFAULT_SEED
 
-            # Checked rather than indexed: these went straight to the Fourier
-            # machinery, so a negative gamma, a string, or a cutoff of 1 -- which
-            # cuts every mode -- surfaced from inside fft_gp with a message about
-            # array shapes, if it surfaced at all. The same validator serves the
-            # RFI prior; the sections differ only in which keys are live.
-            gp_cov = validate_gp_cov(
-                config.args["ast"].get("gp_cov"),
-                "ast",
-                _GP_COV_RULES,
-                optional=_GP_COV_OPTIONAL,
-            )
-            config.args["ast"]["gp_cov"] = gp_cov
-
-            self.std = gp_cov["std"]
+            self.std = cfg.std
             if self.std == FROM_DATA:
                 self.std = self._std_from_data(
                     config.vis_obs, config.estimator_flags
                 )
-            self.gammas = gp_cov["gammas"]
-            self.fov_deg = gp_cov["fov_deg"]
+            self.gammas = list(cfg.gammas)
+            self.fov_deg = cfg.fov_deg
+            self.pk_cutoff = cfg.cutoff
 
-            # Outside the covariance block: it sets how many modes are fitted,
-            # not what the prior believes, and since the spectrum is normalised
-            # after the cut it does not change the width either.
-            self.pk_cutoff = validate_cutoff(
-                config.args["ast"].get("cutoff"), "ast.cutoff", _DEFAULT_PK_CUTOFF
-            )
-            config.args["ast"]["cutoff"] = self.pk_cutoff
-
-            # corr_freq is the bandwidth over which the sky stays correlated;
-            # the knee is the delay conjugate to it. Shared with the RFI prior
-            # so the two sections cannot drift; null is no roll-off.
-            self.corr_freq = gp_cov["corr_freq"]
+            self.corr_freq = cfg.corr_freq
             # float(), so the knee is one type whether or not corr_freq was set
             # and is computed at host precision: the helper returns a jax scalar
             # for a value and a Python float for None, and under x32 the former
             # would carry the reciprocal in float32 for no reason.
             self.k0_freq = float(knee_from_corr_scale(self.corr_freq))
 
-            self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
-            self.time_pad_factor = config.args["ast"]["time_pad_factor"]
+            self.freq_pad_factor = cfg.freq_pad_factor
             # 'auto' is resolved from the fringe rates in _compute_gp_params.
-            tpf = self.time_pad_factor
-            if tpf != "auto" and (
-                isinstance(tpf, bool)
-                or not isinstance(tpf, (int, float))
-                or not isfinite(tpf)
-                or tpf < 1
-            ):
-                raise ValueError(
-                    "ast.time_pad_factor is a number of at least 1, or 'auto' "
-                    "to size it from the slowest baseline's fringe rate, got "
-                    f"{tpf!r}."
-                )
-
-            # null is a setting, not a missing value: every baseline in one
-            # step, which is the padded transform at full width. int() alone
-            # would turn 1.9 into 1 without a word, and the finiteness test
-            # comes before it because yaml spells .inf and .nan, on which int()
-            # raises with a message about floats rather than about the key.
-            block_size = config.args["ast"].get("baseline_block_size", "auto")
-            if block_size not in ("auto", None) and (
-                isinstance(block_size, bool)
-                or not isinstance(block_size, (int, float))
-                or not isfinite(block_size)
-                or block_size != int(block_size)
-                or block_size < 1
-            ):
-                raise ValueError(
-                    "ast.baseline_block_size is the number of baselines "
-                    "transformed per scan step: a whole number of at least 1, "
-                    "'auto' to size it from the padded grid, or null for a "
-                    f"single block over every baseline, got {block_size!r}."
-                )
-            self.baseline_block_size_setting = block_size
-
-            # How the surviving modes become visibilities: see
-            # build_block_signal. Both give the same values to round-off.
-            transform = config.args["ast"].get("transform", "dft")
-            if transform not in _TRANSFORMS:
-                raise ValueError(
-                    "ast.transform is how the latent modes become visibilities: "
-                    "'dft', a matrix per axis with no padded grid, or 'fft', "
-                    f"the padded grid's inverse FFT and a crop, got {transform!r}."
-                )
-            self.transform = transform
+            self.time_pad_factor = cfg.time_pad_factor
+            self.baseline_block_size_setting = cfg.baseline_block_size
+            self.transform = cfg.transform
 
             self.xs = [self.freqs, self.times]
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
@@ -228,17 +261,16 @@ class GPVisAst(Component):
 
             # Do expensive setup operations once
             self._compute_gp_params()
-            # The number 'auto' came to, so the run's saved config says it.
-            config.args["ast"]["time_pad_factor"] = self.time_pad_factor
             self._resolve_baseline_block_size()
-            self._compute_prior_params(config.args["ast"]["mean"], config.vis_obs)
+            self._compute_prior_params(cfg.mean, config.vis_obs)
 
-            if config.args["plots"]["truth"] or config.args["ast"]["init"] == "truth":
-                self._compute_true_params(
-                    config.args["data"]["zarr_path"], config.args["data"]["data_col"]
-                )
+            plots_truth = bool(getattr(getattr(run_cfg, "plots", None), "truth", False))
+            if plots_truth or cfg.init == "truth":
+                truth_zarr = getattr(getattr(run_cfg, "data", None), "truth_zarr", None)
+                data_col = getattr(getattr(run_cfg, "data", None), "data_col", "DATA")
+                self._compute_true_params(truth_zarr, data_col)
 
-            self._compute_init_params(config.args["ast"]["init"], config.vis_obs)
+            self._compute_init_params(cfg.init, config.vis_obs)
             self._set_outputs()
 
             # Validate dimensions
@@ -925,6 +957,8 @@ class DiscreteSkyVis(Component):
     scale it fixes the gain against is only physical if the data are calibrated to Jy.
     """
 
+    Config = DiscreteSkyVisConfig
+
     required_inputs = {
         "ast_radec": ("n_src", 2),
         "ast_I": ("n_src", "n_freq"),
@@ -947,47 +981,8 @@ class DiscreteSkyVis(Component):
             self.freqs = jnp.asarray(config.freqs)
             self.phase_centre_ra = jnp.deg2rad(config.phase_centre["ra"])
             self.phase_centre_dec = jnp.deg2rad(config.phase_centre["dec"])
-            # Per-axis uvw sign toggles (u, v, w), applied before the exponent below,
-            # from ast.uvw_sign.
-            #
-            # The measurement equation's exp(-2i pi b.(s - s0) / lambda) is written for
-            # b = ANTENNA2 - ANTENNA1, and which of the two baselines a UVW column
-            # holds is a property of whatever wrote it, not something we can read off
-            # the data. The default negates because tab-sim writes
-            # bl_uvw = ants_uvw[a1] - ants_uvw[a2] and tabascal forms its own baselines
-            # the same way throughout (interferometry.py:
-            # bl_u = ants_u[:, a1] - ants_u[:, a2]), so negating is what makes this
-            # agree with tab-sim's astro_vis on the very visibilities the model is fit
-            # to -- but an MS from another toolchain may well carry the opposite
-            # convention, and a wrong sign is a sky mirrored through the phase centre,
-            # exactly the corruption a gain solved against a fixed sky would absorb.
-            sign = config.args["ast"].get("uvw_sign", (-1, -1, -1))
-            entries = sign if isinstance(sign, (list, tuple)) else ()
-            if len(entries) != 3 or not all(
-                not isinstance(s, bool) and isinstance(s, (int, float)) and abs(s) == 1
-                for s in entries
-            ):
-                raise ValueError(
-                    "ast.uvw_sign is the sign applied to each of the u, v and w axes "
-                    "of the UVW column: a sequence of three values, each exactly "
-                    f"+1 or -1, e.g. [-1, -1, -1], got {sign!r}."
-                )
-            self.uvw_sign = jnp.asarray([float(s) for s in entries])
-
-            # int() alone would turn 1.9 into 1 without a word, which is a hundredfold
-            # slowdown dressed up as a valid setting.
-            block_size = config.args["ast"].get("source_block_size", 128)
-            if (
-                isinstance(block_size, bool)
-                or not isinstance(block_size, (int, float))
-                or block_size != int(block_size)
-                or block_size < 1
-            ):
-                raise ValueError(
-                    "ast.source_block_size is the number of sources handled per scan "
-                    f"step: a whole number of at least 1, got {block_size!r}."
-                )
-            self.source_block_size = int(block_size)
+            self.uvw_sign = jnp.asarray([float(s) for s in self.config.uvw_sign])
+            self.source_block_size = int(self.config.source_block_size)
 
             self._set_outputs()
         except Exception as e:

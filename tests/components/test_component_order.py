@@ -31,10 +31,21 @@ from tabascal.components import (
     state_key_producers,
     validate_component_order,
 )
-from tabascal.config import BASE_STATE_KEYS
+from tabascal.config import BASE_STATE_KEYS, _TabSafeLoader
 from tabascal.imports import import_components
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _entry_ref_and_params(entry):
+    if isinstance(entry, dict) and len(entry) == 1:
+        ((ref, params),) = entry.items()
+        return ref, params
+    return entry, None
+
+
+def _entry_ref(entry):
+    return _entry_ref_and_params(entry)[0]
 
 
 def build(refs):
@@ -43,7 +54,21 @@ def build(refs):
     ``Model`` builds them exactly like this before calling ``setup``; the order
     check runs on the declarations alone, so it needs no observation.
     """
-    return [C() for C in import_components(refs)]
+    parsed = [_entry_ref_and_params(r) for r in refs]
+    classes = import_components([ref for ref, _ in parsed])
+    comps = []
+    for cls, (_, params) in zip(classes, parsed):
+        if params is not None:
+            comps.append(cls(params))
+        else:
+            # Bare reference in order-only tests: instantiate with default config
+            # when possible, otherwise construct shell instance for class-level
+            # required_inputs / output_shapes inspection.
+            try:
+                comps.append(cls())
+            except Exception:
+                comps.append(object.__new__(cls))
+    return comps
 
 
 def check(refs):
@@ -51,9 +76,9 @@ def check(refs):
 
 
 FULL_RFI = [
-    "trajectory:FixedOrbitFine",
-    "rfi_signal:ComplexRFIVarAntFine",
-    "rfi_vis:RiemannVisFine",
+    "trajectory.FixedOrbitFine",
+    "rfi_signal.ComplexRFIVarAntFine",
+    "rfi_vis.RiemannVisFine",
 ]
 
 
@@ -68,13 +93,13 @@ class TestMissingProducer:
         ``state["ast_radec"]``.
         """
         with pytest.raises(ComponentOrderError) as excinfo:
-            check(FULL_RFI + ["ast_vis:DiscreteSkyVis", "gains:UnitaryGains"])
+            check(FULL_RFI + ["ast_vis.DiscreteSkyVis", "gains.UnitaryGains"])
 
         message = str(excinfo.value)
         assert "DiscreteSkyVis" in message
         assert "ast_radec" in message
         # Names the component that would supply it, and that it has to be added.
-        assert "ast_signal:FixedDiscreteSky" in message
+        assert "ast_signal.FixedDiscreteSky" in message
         assert "add one before" in message
         assert "wrong order" not in message
 
@@ -82,10 +107,10 @@ class TestMissingProducer:
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:FixedOrbitFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
+                    "trajectory.FixedOrbitFine",
+                    "rfi_vis.RiemannVisFine",
+                    "ast_vis.GPVisAst",
+                    "gains.UnitaryGains",
                 ]
             )
 
@@ -93,25 +118,25 @@ class TestMissingProducer:
         assert "RiemannVisFine" in message
         assert "rfi_A" in message
         # Every in-tree producer of the key is offered, not just one.
-        assert "rfi_signal:ComplexRFIVarAntFine" in message
-        assert "rfi_signal:ComplexRFIConstAntFine" in message
+        assert "rfi_signal.ComplexRFIVarAntFine" in message
+        assert "rfi_signal.ComplexRFIConstAntFine" in message
 
     def test_phase_calculation_without_a_trajectory(self):
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:PhaseCalculationRFIFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    "rfi_vis.RiemannVisFine",
+                    "ast_vis.GPVisAst",
+                    "gains.UnitaryGains",
                 ]
             )
 
         message = str(excinfo.value)
         assert "PhaseCalculationRFIFine" in message
         assert "rfi_xyz" in message
-        assert "trajectory:FixedOrbitFine" in message
+        assert "trajectory.FixedOrbitFine" in message
 
 
 class TestWrongOrder:
@@ -122,16 +147,16 @@ class TestWrongOrder:
             check(
                 FULL_RFI
                 + [
-                    "ast_vis:DiscreteSkyVis",
-                    "ast_signal:FixedDiscreteSky",
-                    "gains:UnitaryGains",
+                    "ast_vis.DiscreteSkyVis",
+                    "ast_signal.FixedDiscreteSky",
+                    "gains.UnitaryGains",
                 ]
             )
 
         message = str(excinfo.value)
         assert "DiscreteSkyVis" in message
         assert "ast_radec" in message
-        assert "ast_signal:FixedDiscreteSky" in message
+        assert "ast_signal.FixedDiscreteSky" in message
         # The distinguishing part: the producer is present, just too late.
         assert "listed after" in message
         assert "wrong order" in message
@@ -141,12 +166,12 @@ class TestWrongOrder:
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:PhaseCalculationRFIFine",
-                    "trajectory:FixedOrbitFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "trajectory.FixedOrbitFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    "rfi_vis.RiemannVisFine",
+                    "ast_vis.GPVisAst",
+                    "gains.UnitaryGains",
                 ]
             )
 
@@ -262,7 +287,7 @@ EXPECTED_LOCATIONS = {
     "examples/tab_target.yaml": 1,
     "tests/data/tab_target.yaml": 1,
     "docs/analytic_rfi_vis.md": 1,
-    "docs/config.md": 3,
+    "docs/config.md": 9,
     "docs/kernels.md": 1,
 }
 
@@ -299,7 +324,7 @@ def _component_lists(label, text, broken):
     whose prose happens to contain a ``components:`` line.
     """
     try:
-        config = yaml.safe_load(text)
+        config = yaml.load(text, Loader=_TabSafeLoader)
     except yaml.YAMLError as exc:
         if _COMPONENTS_KEY.search(text):
             broken.append(f"{label}: not valid YAML ({exc.__class__.__name__})")
@@ -336,6 +361,8 @@ def _shipped_component_lists():
         # `*.y*ml` glob would never get the chance to see a CONFIG.YAML.
         paths = (REPO_ROOT / root).rglob("*")
         for path in sorted(p for p in paths if p.suffix.lower() in (".yaml", ".yml")):
+            if root == "examples" and (REPO_ROOT / "examples" / "data") in path.parents:
+                continue
             label = str(path.relative_to(REPO_ROOT))
             for refs in _component_lists(label, path.read_text(), broken):
                 found.append((label, refs))
@@ -363,7 +390,7 @@ def _is_whole_model(refs):
     """
     known = in_tree_components()
     return any(
-        "vis_obs" in getattr(known.get(str(ref).replace(".", ":")), "output_shapes", {})
+        "vis_obs" in getattr(known.get(str(_entry_ref(ref)).replace(":", ".")), "output_shapes", {})
         for ref in refs
     )
 

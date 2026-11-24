@@ -40,6 +40,11 @@ def test_config_forwards_chunk(monkeypatch, chunk):
         assert kwargs == {"row_chunk": chunk}
         raise ReachedReader
     monkeypatch.setattr(config, "read_ms", reader)
-    tab_config = SimpleNamespace(ms_path="test.ms", args={"data": {"row_chunk": chunk}})
+    from tabascal.schema import validate_config
+
+    tab_config = SimpleNamespace(
+        ms_path="test.ms",
+        config=validate_config({"model": {"components": []}, "data": {"row_chunk": chunk}}),
+    )
     with pytest.raises(ReachedReader):
         config.TabConfig.read_ms_params(tab_config, None, "xx", "DATA")

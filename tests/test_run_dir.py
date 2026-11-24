@@ -2,6 +2,7 @@
 
 import os
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -43,14 +44,22 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
     impl, tmp_path, monkeypatch, error
 ):
     """config.yaml and a running run.json exist before the work; the status follows it."""
+    from tabascal.schema import validate_config
+
     monkeypatch.chdir(tmp_path)
-    config = {
+    config = validate_config({
         "data": {"ms_path": "obs.ms", "gain_table": "flux.B"},  # recorded as a list
-        "rfi": {"est": "curves.npz"},
-        "gains": {"init": "prior"},
         "opt": {"trace_path": "trace.npz"},
-        "model": {},
-    }
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbit": {"norad_ids": [25544]}},
+                {"rfi_signal.ComplexRFIConstAnt": {"est": "curves.npz"}},
+                "rfi_vis.AnalyticVis",
+                "ast_vis.GPVisAst",
+                {"gains.ConstGains": {"init": "prior"}},
+            ]
+        },
+    })
     seen = {}
 
     def subtract(config, paths):
@@ -70,27 +79,40 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
             impl.tabascal_subtraction(config, None, name="t", log=False)
 
     data = seen["config"]["data"]
+    comps = seen["config"]["model"]["components"]
     assert seen["status"] == "running"
     assert data["ms_path"] == str(tmp_path / "obs.ms")
     assert data["gain_table"] == [str(tmp_path / "flux.B")]
-    assert seen["config"]["rfi"]["est"] == str(tmp_path / "curves.npz")
-    assert seen["config"]["gains"]["init"] == "prior"
+    assert comps[1]["rfi_signal.ComplexRFIConstAnt"]["est"] == str(tmp_path / "curves.npz")
+    assert comps[4]["gains.ConstGains"]["init"] == "prior"
     assert seen["config"]["opt"]["trace_path"] == os.path.join(seen["run_dir"], "trace.npz")
 
     record = run_dir_mod.read_record(seen["run_dir"])
     assert record["status"] == ("finished" if error is None else "failed")
-    assert set(record["inputs"]) == {"data.ms_path", "data.gain_table[0]", "rfi.est", "data.truth_zarr"}
+    assert set(record["inputs"]) == {
+        "data.ms_path",
+        "data.gain_table[0]",
+        "rfi_signal.ComplexRFIConstAnt.est",
+        "data.truth_zarr",
+    }
 
 
 @pytest.mark.parametrize("saved, resolved, expected", [("auto", 40.625, 40.625), (8.0, 8.0, 8.0)])
 def test_auto_time_padding_is_saved_as_the_factor_it_came_to(impl, tmp_path, saved, resolved, expected):
-    run_dir_mod.write_config(str(tmp_path), {"ast": {"time_pad_factor": saved}, "rfi": {}})
-    impl._record_resolved_settings(str(tmp_path), {"ast": {"time_pad_factor": resolved}})
+    run_dir_mod.write_config(
+        str(tmp_path),
+        {"model": {"components": [{"ast_vis.GPVisAst": {"time_pad_factor": saved}}]}},
+    )
+    model_stub = SimpleNamespace(components=[SimpleNamespace(time_pad_factor=resolved)])
+    impl._record_resolved_settings(str(tmp_path), model_stub)
 
-    assert run_dir_mod.read_config(str(tmp_path)) == {"ast": {"time_pad_factor": expected}, "rfi": {}}
+    saved_cfg = run_dir_mod.read_config(str(tmp_path))
+    assert saved_cfg["model"]["components"][0]["ast_vis.GPVisAst"]["time_pad_factor"] == expected
 
 
 def test_a_failed_record_stops_the_run_before_it_starts(impl, tmp_path, monkeypatch):
+    from tabascal.schema import validate_config
+
     def broken(*args):
         raise OSError("disk full")
 
@@ -99,12 +121,18 @@ def test_a_failed_record_stops_the_run_before_it_starts(impl, tmp_path, monkeypa
 
     with pytest.raises(OSError, match="disk full"):
         impl.tabascal_subtraction(
-            {"data": {"ms_path": str(tmp_path / "o.ms")}, "model": {}}, None, name="t", log=False
+            validate_config({"data": {"ms_path": str(tmp_path / "o.ms")}, "model": {"components": []}}),
+            None, name="t", log=False,
         )
 
 
 def test_a_run_that_would_write_over_its_input_never_starts(impl, tmp_path):
-    config = {"data": {"ms_path": str(tmp_path / "o.ms"), "data_col": "CORRECTED_DATA"}}
+    from tabascal.schema import validate_config
+
+    config = validate_config({
+        "data": {"ms_path": str(tmp_path / "o.ms"), "data_col": "CORRECTED_DATA"},
+        "model": {"components": []},
+    })
 
     with pytest.raises(ValueError, match="replace the data the run read"):
         impl.tabascal_subtraction(config, str(tmp_path), name="t", log=False)
@@ -117,47 +145,74 @@ def test_inputs_through_latest_are_resolved_once_and_shared(tmp_path, monkeypatc
     import tabascal.distributed as dist
 
     earlier = run_dir_mod.create_run_dir(str(tmp_path), "first")
-    via_latest = {"satellites": {"extra_orbit_dir": str(tmp_path / "runs" / "latest" / "results")}}
+    via_latest = {
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbit": {"extra_orbit_dir": str(tmp_path / "runs" / "latest" / "results")}}
+            ]
+        }
+    }
     sent = {}
     broadcast = dist.broadcast_bytes_from_rank0
     monkeypatch.setattr(
         dist, "broadcast_bytes_from_rank0",
         lambda payload, name: sent.setdefault("payload", broadcast(payload, name)),
     )
-    rank0 = {"satellites": dict(via_latest["satellites"])}
+    rank0 = {
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbit": dict(via_latest["model"]["components"][0]["trajectory.FixedOrbit"])}
+            ]
+        }
+    }
     run = run_dir_mod.create_run_dir(str(tmp_path), "t", rank0)
 
     # latest now names the new run, so a worker resolving for itself would differ.
     monkeypatch.setattr(dist, "is_process_0", lambda: False)
-    worker = {"satellites": dict(via_latest["satellites"])}
+    worker = {
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbit": dict(via_latest["model"]["components"][0]["trajectory.FixedOrbit"])}
+            ]
+        }
+    }
 
     assert run_dir_mod.create_run_dir(str(tmp_path), "t", worker) == run
-    assert worker == rank0 == {"satellites": {"extra_orbit_dir": os.path.join(earlier, "results")}}
+    expected = {
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbit": {"extra_orbit_dir": os.path.join(earlier, "results")}}
+            ]
+        }
+    }
+    assert worker == rank0 == expected
 
 
 @pytest.mark.parametrize(
-    "section, key, changed, warns",
+    "ref, key, changed, warns",
     [
-        ("rfi", "est", "", True),  # a plain file
-        ("rfi", "est", "part", True),  # a directory
-        ("satellites", "extra_orbit_dir", "orbits.json", True),
+        ("rfi_signal.ComplexRFIVarAnt", "est", "", True),  # a plain file
+        ("rfi_signal.ComplexRFIVarAnt", "est", "part", True),  # a directory
+        ("trajectory.FixedOrbit", "extra_orbit_dir", "orbits.json", True),
         # An earlier run's results/: tab2MS rewrites its .B, which no orbit reader reads.
-        ("satellites", "extra_orbit_dir", "map_pred.B/table.dat", False),
+        ("trajectory.FixedOrbit", "extra_orbit_dir", "map_pred.B/table.dat", False),
     ],
 )
-def test_a_changed_input_is_named(tmp_path, section, key, changed, warns):
+def test_a_changed_input_is_named(tmp_path, ref, key, changed, warns):
     path = tmp_path / "input"
     files = [path] if not changed else [path / "part", path / "orbits.json", path / "map_pred.B" / "table.dat"]
     for f in files:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("one")
-    record = {"inputs": run_dir_mod.fingerprint_inputs({section: {key: str(path)}})}
+    cfg = {"model": {"components": [{ref: {key: str(path)}}]}}
+    record = {"inputs": run_dir_mod.fingerprint_inputs(cfg)}
 
     (path / changed if changed else path).write_text("three")
 
+    label = f"{ref}.{key}"
     if warns:
-        with pytest.warns(RuntimeWarning, match=rf"{section}\.{key}"):
-            assert run_dir_mod.check_inputs(record) == [f"{section}.{key}"]
+        with pytest.warns(RuntimeWarning, match=label.replace(".", r"\.")):
+            assert run_dir_mod.check_inputs(record) == [label]
     else:
         assert run_dir_mod.check_inputs(record) == []
 

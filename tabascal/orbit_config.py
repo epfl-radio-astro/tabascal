@@ -223,14 +223,20 @@ def read_norad_ids_file(path) -> list[int]:
 # Model introspection
 # ---------------------------------------------------------------------------
 
-def model_requires_tles(config: dict) -> bool:
+def model_requires_tles(config) -> bool:
     """True when the configured model includes a TLE-consuming trajectory component."""
+    from tabascal.schema import OrbitSourceConfig, RunConfig
+
+    if isinstance(config, RunConfig):
+        return config.model.find_one(OrbitSourceConfig) is not None
+
     components = (config.get("model") or {}).get("components") or []
-    for component in components:
-        # import_components accepts both "module:Class" and "module.Class", so
-        # both have to reach the guard — a dotted reference that slipped past it
-        # would build a silently satellite-free model instead of erroring.
-        name = str(component).replace(":", ".").rsplit(".", 1)[-1].strip()
+    for entry in components:
+        if isinstance(entry, dict) and len(entry) == 1:
+            ref = next(iter(entry))
+        else:
+            ref = str(entry)
+        name = str(ref).replace(":", ".").rsplit(".", 1)[-1].strip()
         if name in _TLE_TRAJECTORY_COMPONENTS:
             return True
     return False
@@ -252,50 +258,62 @@ class TLEConfig:
 
 
 def normalise_tle_config(
-    config: dict,
+    config,
     norad_ids_path_override: Optional[str] = None,
     require_ids: Optional[bool] = None,
 ) -> TLEConfig:
-    """Validate the ``satellites`` section of *config* into a :class:`TLEConfig`.
+    """Validate an :class:`OrbitSourceConfig` or :class:`RunConfig` into :class:`TLEConfig`.
 
-    NORAD IDs come from ``satellites.norad_ids_path`` when set and from
-    ``satellites.norad_ids`` otherwise, with *norad_ids_path_override* (the CLI's
-    ``-np/--norad-path``) taking precedence over both. ``require_ids`` defaults to
-    :func:`model_requires_tles`, so a model with a TLE-based trajectory component
-    but no satellites is reported as a configuration error rather than failing
-    later with an empty frame.
+    NORAD IDs come from ``norad_ids_path`` when set and from ``norad_ids``
+    otherwise, with *norad_ids_path_override* (the CLI's ``-np/--norad-path``)
+    taking precedence over both. ``require_ids`` defaults to whether a
+    TLE-consuming trajectory component is present.
     """
-    satellites = config.get("satellites") or {}
+    from tabascal.schema import OrbitSourceConfig, RunConfig
 
-    ids_path = norad_ids_path_override or satellites.get("norad_ids_path")
+    if isinstance(config, RunConfig):
+        orbit_cfg = config.model.find_one(OrbitSourceConfig)
+        if require_ids is None:
+            require_ids = orbit_cfg is not None
+    elif isinstance(config, OrbitSourceConfig):
+        orbit_cfg = config
+        if require_ids is None:
+            require_ids = True
+    elif config is None:
+        orbit_cfg = None
+        if require_ids is None:
+            require_ids = False
+    else:
+        raise TLEConfigurationError(
+            f"Expected RunConfig, OrbitSourceConfig, or None, got {type(config).__name__}."
+        )
+
+    ids_path = norad_ids_path_override or (orbit_cfg.norad_ids_path if orbit_cfg is not None else None)
     if ids_path:
         norad_ids = read_norad_ids_file(ids_path)
         source = str(ids_path)
+    elif orbit_cfg is not None:
+        norad_ids = normalise_norad_ids(orbit_cfg.norad_ids, source="trajectory.norad_ids")
+        source = "trajectory.norad_ids"
     else:
-        norad_ids = normalise_norad_ids(satellites.get("norad_ids"))
-        source = "satellites.norad_ids"
+        norad_ids = []
+        source = "trajectory.norad_ids"
 
-    if require_ids is None:
-        require_ids = model_requires_tles(config)
     if require_ids and not norad_ids:
         raise TLEConfigurationError(
             "The configured model includes a TLE-based trajectory component, but "
             f"no NORAD catalogue IDs were given ({source} is empty or null). Add "
-            "the satellites to model, or select a model without a TLE trajectory "
-            "component."
+            "norad_ids / norad_ids_path to the trajectory component, pass "
+            "-np/--norad-path, or select a model without a TLE trajectory component."
         )
 
-    extra_orbit_dir = satellites.get("extra_orbit_dir") or None
+    if orbit_cfg is None:
+        return TLEConfig(norad_ids=norad_ids)
 
-    remote_max_age = validate_age_days(
-        satellites.get("remote_max_age_days", DEFAULT_REMOTE_MAX_AGE_DAYS),
-        "remote_max_age_days",
-    )
+    extra_orbit_dir = orbit_cfg.extra_orbit_dir or None
+    remote_max_age = validate_age_days(orbit_cfg.remote_max_age_days, "remote_max_age_days")
     cache_reuse_age = validate_age_days(
-        satellites.get(
-            "cache_reuse_max_age_days", DEFAULT_CACHE_REUSE_MAX_AGE_DAYS
-        ),
-        "cache_reuse_max_age_days",
+        orbit_cfg.cache_reuse_max_age_days, "cache_reuse_max_age_days"
     )
     if (
         cache_reuse_age is not None
@@ -311,7 +329,7 @@ def normalise_tle_config(
         norad_ids=norad_ids,
         extra_orbit_dir=str(extra_orbit_dir) if extra_orbit_dir else None,
         extra_orbit_max_age_days=validate_age_days(
-            satellites.get("extra_orbit_max_age_days"), "extra_orbit_max_age_days"
+            orbit_cfg.extra_orbit_max_age_days, "extra_orbit_max_age_days"
         ),
         remote_max_age_days=remote_max_age,
         cache_reuse_max_age_days=cache_reuse_age,

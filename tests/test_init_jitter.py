@@ -196,11 +196,10 @@ def test_load_config_refuses_a_malformed_spec(tmp_path):
         load_config(str(path))
 
 
-def test_the_base_config_ships_it_off():
-    from importlib.resources import files
+def test_the_schema_default_ships_it_off():
+    from tabascal.schema import OptConfig
 
-    base = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))
-    assert base["opt"]["init_jitter"] is None
+    assert OptConfig().init_jitter is None
 
 
 # ---------------------------------------------------------------------------
@@ -209,11 +208,11 @@ def test_the_base_config_ships_it_off():
 
 
 def loaded(tmp_path, jitter, ast_init="prior", seed=4242):
+    from tests.test_seeds import _build_components
+
     path = tmp_path / "user.yaml"
-    path.write_text(yaml.dump({
-        "model": {"components": COMPONENTS},
-        "ast": {"init": ast_init},
-        "rfi": {"init": "prior"},
+    path.write_text(yaml.safe_dump({
+        "model": {"components": _build_components(COMPONENTS, ast_init=ast_init, rfi_init="prior")},
         "inference": {"seed": seed},
         "opt": {"init_jitter": jitter},
     }))
@@ -261,6 +260,19 @@ def jittered_fits(tmp_path_factory):
     script = Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
     precision = "double" if jax.config.read("jax_enable_x64") else "single"
 
+    def _with_prior_init(comps):
+        out = []
+        for entry in comps:
+            if isinstance(entry, dict):
+                ((ref, params),) = entry.items()
+                params = dict(params or {})
+                if ref.startswith(("rfi_signal.", "ast_vis.GPVisAst")):
+                    params["init"] = "prior"
+                out.append({ref: params})
+            else:
+                out.append(entry)
+        return out
+
     fits = {}
     for seed in FIT_SEEDS:
         work = tmp_path_factory.mktemp(f"jitter{seed}")
@@ -268,12 +280,13 @@ def jittered_fits(tmp_path_factory):
         config_path = work / "tab_target.yaml"
         read_and_modify_yaml(
             {
-                "model": {"components": COMPONENTS, "precision": precision},
+                "model": {
+                    "components": _with_prior_init(base["model"]["components"]),
+                    "precision": precision,
+                },
                 "inference": {"opt": True, "seed": seed},
                 "opt": {"epsilon": 1e-3, "max_iter": 3, "dual_run": False, "guide": "map",
                         "init_jitter": 0.1},
-                "ast": {**base["ast"], "init": "prior"},
-                "rfi": {**base["rfi"], "init": "prior"},
             },
             template,
             config_path,

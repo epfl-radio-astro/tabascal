@@ -53,14 +53,6 @@ def make_gains_config(
         int_time=int_time,
         a1=a1.astype("int32"),
         a2=a2.astype("int32"),
-        args={
-            "gains": {
-                "amp_mean": amp_mean,
-                "amp_std": amp_std,
-                "phase_mean": phase_mean,
-                "phase_std": phase_std,
-            }
-        },
     )
 
 
@@ -300,16 +292,8 @@ class TestUnitaryGains:
         expected = state["vis_rfi"] + state["vis_ast"]
         assert jnp.allclose(out["vis_obs"], expected)
 
-    def test_it_reads_nothing_from_the_gains_section(self):
-        """A gain of 1 has no prior, so no key of the gains section reaches it.
-
-        It used to share a base class with the Gaussian process gains, and so
-        validated — and printed — an amplitude and phase prior that nothing in it
-        ever read. With that base class gone (#129) it takes the shapes of the
-        observation and nothing else, and an empty gains section is enough.
-        """
+    def test_it_reads_nothing_from_any_config_section(self):
         cfg = make_gains_config()
-        cfg.args["gains"] = {}
         comp = UnitaryGains()
         comp.setup(cfg)
 

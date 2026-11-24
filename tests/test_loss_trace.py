@@ -531,17 +531,10 @@ class TestActivation:
 
         assert loss_trace_path("from_config.npz") == "from_config.npz"
 
-    def test_base_config_ships_the_key_disabled(self):
-        from importlib.resources import files
+    def test_schema_default_ships_the_key_disabled(self):
+        from tabascal.schema import OptConfig
 
-        base = yaml_load(
-            os.path.join(
-                str(files("tabascal").joinpath("data/config")),
-                "tab_config_base.yaml",
-            )
-        )
-
-        assert base["opt"]["trace_path"] is None
+        assert OptConfig().trace_path is None
 
 
 class TestRankGating:
@@ -626,12 +619,19 @@ class TestRunOpt:
     def test_where_the_trace_lands_and_what_it_holds(
         self, monkeypatch, tmp_path, configured
     ):
+        from tabascal.schema import validate_config
+
         toy = _toy_problem(0.1)
-        toy.tab_config.args = {
+        toy.tab_config.config = validate_config({
+            "model": {"components": []},
             "data": {"skip_ms_write": True},
-            "opt": {"max_iter": 3, "epsilon": 1e-2, "dual_run": False,
-                    "trace_path": configured and str(tmp_path / configured)},
-        }
+            "opt": {
+                "max_iter": 3,
+                "epsilon": 1e-2,
+                "dual_run": False,
+                "trace_path": configured and str(tmp_path / configured),
+            },
+        })
         monkeypatch.setattr(tab_tools, "write_results_xds", lambda *a: None)
         results = tmp_path / "results"
 
@@ -644,7 +644,7 @@ class TestRunOpt:
         # np.savez appends .npz to a bare path; the plot must look there too.
         written = tmp_path / "custom.npz" if configured else results / "trace.npz"
         assert tab_tools.run_trace_path(
-            toy.tab_config.args["opt"], str(results / "map_pred.zarr")
+            toy.tab_config.config.opt, str(results / "map_pred.zarr")
         ) == str(written)
         if configured:
             assert not (results / "trace.npz").exists()

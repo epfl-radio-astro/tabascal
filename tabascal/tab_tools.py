@@ -379,14 +379,15 @@ def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
     return os.environ.get("TAB_LOSS_TRACE") or config_path or None
 
 
-def run_trace_path(opt_config: dict, map_path: str) -> str:
+def run_trace_path(opt_config, map_path: str) -> str:
     """Where :func:`run_opt` writes the run's trace: the traced path if any,
     else ``trace.npz`` beside the MAP prediction.
 
     ``.npz`` is appended when missing, as ``np.savez`` would append it, so a
     reader given this path finds the file the writer made.
     """
-    path = loss_trace_path(opt_config.get("trace_path")) or os.path.join(
+    cfg_trace = opt_config.trace_path if hasattr(opt_config, "trace_path") else opt_config.get("trace_path")
+    path = loss_trace_path(cfg_trace) or os.path.join(
         os.path.dirname(os.path.normpath(map_path)), LOSS_TRACE
     )
     return path if path.endswith(".npz") else path + ".npz"
@@ -730,12 +731,13 @@ def run_opt(
 ):
 
     start = datetime.now()
-    opt_config = tab_config.args["opt"]
-    checked = validate_opt(opt_config)
+    opt_config = tab_config.config.opt
+    precision = getattr(tab_config, "precision", "double")
+    checked = validate_opt(opt_config, precision=precision)
     print()
     print("Running Optimization ...")
-    print(f"Optimiser : {describe_schedule(opt_config)}")
-    traced_path = loss_trace_path(opt_config.get("trace_path"))
+    print(f"Optimiser : {describe_schedule(opt_config, precision=precision)}")
+    traced_path = loss_trace_path(opt_config.trace_path)
     results_dir = os.path.dirname(os.path.normpath(map_path))
     # Every run keeps its loss and step times beside its results; asking for a
     # trace adds the metrics and puts the file where it was asked for instead.
@@ -747,10 +749,10 @@ def run_opt(
     vi_results = run_custom_svi(
         prob_model=prob_model,
         obs_data=tab_config.vis_obs,
-        max_iter=opt_config["max_iter"],
+        max_iter=opt_config.max_iter,
         init_params=init_params,
-        epsilon=opt_config["epsilon"],
-        dual_run=opt_config["dual_run"],
+        epsilon=opt_config.epsilon,
+        dual_run=opt_config.dual_run,
         state=state,
         constants=constants,
         trace_path=trace_path,
@@ -792,7 +794,8 @@ def write_ms_if_enabled(tab_config, ms_path, results_path):
     """Apply the run's MS export policy to either initial or fitted results."""
     # Both run routes already wrote the zarr. Keep its location visible when
     # the optional MS copy (including its calibration-table export) is skipped.
-    if tab_config.args["data"].get("skip_ms_write", False):
+    data_cfg = tab_config.config.data
+    if data_cfg.skip_ms_write:
         print(f"Skipping MS write; tabascal results are in {results_path}")
         return
     print(f"Copying tabascal results to MS file from {results_path}")
@@ -804,7 +807,7 @@ def write_ms_if_enabled(tab_config, ms_path, results_path):
     write_results_ms(
         ms_path,
         results_path,
-        tab_config.args["data"]["data_col"],
+        data_cfg.data_col,
         gain_table=getattr(tab_config, "gain_table", None),
-        row_chunk=tab_config.args["data"].get("row_chunk"),
+        row_chunk=data_cfg.row_chunk,
     )

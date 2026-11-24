@@ -2787,10 +2787,11 @@ class TestWriteResultsXdsRecordsTheCorrelation:
 
     @pytest.fixture
     def tab_config(self):
-        """The three attributes write_results_xds reads off the config."""
+        """The attributes write_results_xds reads off the config."""
+        from tabascal.schema import validate_config
 
         class _Config:
-            args = {"data": {"corr": "yx"}}
+            config = validate_config({"model": {"components": []}, "data": {"corr": "yx"}})
             times = np.arange(N_TIME, dtype=float)
             freqs = np.linspace(1.0e9, 1.1e9, N_FREQ)
 

@@ -46,16 +46,22 @@ def _write_sim_zarr(path, *, vis_ast=True, vis_rfi=True, gains=False):
     return str(path)
 
 
-def _config(zarr_path, **overrides):
-    cfg = {
-        "data": {"zarr_path": zarr_path, "data_col": "DATA"},
-        "ast": {"init": "sample"},
-        "rfi": {"init": "sample"},
-        "plots": {"truth": False},
-    }
-    for section, vals in overrides.items():
-        cfg.setdefault(section, {}).update(vals)
-    return cfg
+def _config(zarr_path, ast_init="sample", rfi_init="sample", plots_truth=False):
+    from tabascal.schema import validate_config
+
+    return validate_config({
+        "data": {"truth_zarr": zarr_path, "data_col": "DATA"},
+        "plots": {"truth": plots_truth},
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
+                {"rfi_signal.ComplexRFIVarAntFine": {"init": rfi_init}},
+                "rfi_vis.RiemannVisFine",
+                {"ast_vis.GPVisAst": {"init": ast_init}},
+                "gains.UnitaryGains",
+            ]
+        },
+    })
 
 
 def _tab_config(zarr_path):
@@ -63,7 +69,7 @@ def _tab_config(zarr_path):
         n_bl=N_BL, n_freq=N_FREQ, n_time=N_TIME, n_ant=N_ANT,
         noise=1.0, noise_scalar=1.0,
         flags=jnp.zeros((N_BL, N_FREQ, N_TIME), dtype=bool),
-        args=_config(zarr_path),
+        config=_config(zarr_path),
     )
 
 
@@ -116,21 +122,21 @@ def test_require_truth_noop_when_not_requested(tmp_path):
 
 
 def test_require_truth_raises_when_zarr_absent():
-    cfg = _config("/nonexistent/sim.zarr", ast={"init": "truth"})
-    with pytest.raises(TruthError, match="ast.init: truth"):
+    cfg = _config("/nonexistent/sim.zarr", ast_init="truth")
+    with pytest.raises(TruthError, match=r"ast_vis\.GPVisAst\.init: truth"):
         require_truth(cfg)
 
 
 def test_require_truth_raises_when_required_var_missing(tmp_path):
     zp = _write_sim_zarr(tmp_path / "sim.zarr", vis_ast=False, vis_rfi=True)
-    cfg = _config(zp, ast={"init": "truth"})
+    cfg = _config(zp, ast_init="truth")
     with pytest.raises(TruthError, match="vis_ast"):
         require_truth(cfg)
 
 
 def test_require_truth_passes_when_required_var_present(tmp_path):
     zp = _write_sim_zarr(tmp_path / "sim.zarr", vis_ast=True)
-    require_truth(_config(zp, ast={"init": "truth"}))
+    require_truth(_config(zp, ast_init="truth"))
 
 
 def test_rmse_zero_for_identical_and_flag_masked():

@@ -300,23 +300,25 @@ def resolve_norad_ids(args):
     )
 
 
-def resolve_ms_path(args, config):
-    """The MS to read: the flag, the config's ``data.ms_path``, or the sim dir.
+def _data_get(config, key, default=None):
+    if config is None:
+        return default
+    if hasattr(config, "data"):
+        return getattr(config.data, key, default)
+    return (config.get("data") or {}).get(key, default)
 
-    The same precedence ``tabascal run`` uses, so a config that runs points the
-    extractor at the same visibilities without being told twice -- and read
-    through the same helpers, so one config cannot be refused here with a
-    traceback and there with a message naming the key.
-    """
+
+def resolve_ms_path(args, config):
+    """The MS to read: the flag, the config's ``data.ms_path``, or the sim dir."""
     if args.ms_path:
         return os.path.abspath(args.ms_path)
 
     if config is not None:
-        ms_path = config.get("data", {}).get("ms_path")
+        ms_path = _data_get(config, "ms_path")
         if not config_is_unset(ms_path):
             return config_path(ms_path, "data.ms_path")
 
-    config_out_dir = (config or {}).get("data", {}).get("out_dir")
+    config_out_dir = _data_get(config, "out_dir")
     if args.out_dir:
         out_dir = os.path.abspath(args.out_dir)
     elif not config_is_unset(config_out_dir):
@@ -338,25 +340,17 @@ def resolve_data_col(args, config):
     if args.data_col is not None:
         return args.data_col
     if config is not None:
-        return config.get("data", {}).get("data_col") or "DATA"
+        return _data_get(config, "data_col") or "DATA"
 
     return "DATA"
 
 
 def resolve_corr(args, config):
-    """The correlation to read: the flag, else the config's, else ``xx``.
-
-    Checked against :data:`tabascal.ms.CORR_TYPES` rather than against a list
-    repeated here, so the command accepts exactly what the reader resolves --
-    circular and Stokes MSs included -- and cannot drift from it. The import is
-    deferred because it carries the JAX stack, which ``tabascal -h`` must not
-    pay for; by the time this runs the command is committed to reading an MS
-    anyway.
-    """
+    """The correlation to read: the flag, else the config's, else ``xx``."""
     if args.corr is not None:
         corr = args.corr
     elif config is not None:
-        corr = config.get("data", {}).get("corr") or "xx"
+        corr = _data_get(config, "corr") or "xx"
     else:
         corr = "xx"
 
@@ -372,13 +366,24 @@ def resolve_corr(args, config):
 
 
 def resolve_min_elevation(args, config):
-    """The elevation cut: the flag, else the config's, else the horizon."""
+    """The elevation cut: the flag, else the config's trajectory min_elevation, else the horizon."""
     if not args.elevation_cut:
         return None
     if args.min_elevation is not None:
         return float(args.min_elevation)
     if config is not None:
-        return config.get("rfi", {}).get("min_elevation")
+        from tabascal.schema import OrbitSourceConfig, RunConfig
+
+        if isinstance(config, RunConfig):
+            orbit_cfg = config.model.find_one(OrbitSourceConfig)
+            return orbit_cfg.min_elevation if orbit_cfg is not None else None
+        # Plain dict fallback (e.g. saved config.yaml)
+        for entry in (config.get("model") or {}).get("components") or []:
+            if isinstance(entry, dict) and len(entry) == 1:
+                ((_, params),) = entry.items()
+                if isinstance(params, dict) and "min_elevation" in params:
+                    return params["min_elevation"]
+        return None
 
     return 0.0
 
@@ -624,6 +629,7 @@ def _from_config(args, offset_fit=None):
     """
     from tabascal.config import TabConfig, load_config
     from tabascal.rfi_estimate import light_curves_from_config
+    from tabascal.schema import OrbitSourceConfig
     from tabascal.scripts._run_tabascal_impl import set_precision
 
     config = load_config(args.config)
@@ -632,29 +638,21 @@ def _from_config(args, offset_fit=None):
     if offset_fit is not None:
         precision = offset_fit.pop("precision")
         if args.precision is not None:
-            config.setdefault("model", {})["precision"] = precision
+            config.model.precision = precision
     set_precision(config)
 
     ms_path = resolve_ms_path(args, config)
-    config["data"]["ms_path"] = ms_path
-    config["data"]["data_col"] = resolve_data_col(args, config)
-    config["data"]["corr"] = resolve_corr(args, config)
+    config.data.ms_path = ms_path
+    config.data.data_col = resolve_data_col(args, config)
+    config.data.corr = resolve_corr(args, config)
     if args.freq is not None:
-        config["data"]["freq"] = args.freq
-    if args.extra_orbit_dir:
-        config["satellites"]["extra_orbit_dir"] = args.extra_orbit_dir
-    # The satellites are the config's own: -n/-np are refused alongside -c, since
-    # both name them and there is no rule for which would win.
-    config["rfi"]["min_elevation"] = resolve_min_elevation(args, config)
+        config.data.freq = args.freq
+    orbit_cfg = config.model.find_one(OrbitSourceConfig)
+    if orbit_cfg is not None:
+        if args.extra_orbit_dir:
+            orbit_cfg.extra_orbit_dir = args.extra_orbit_dir
+        orbit_cfg.min_elevation = resolve_min_elevation(args, config)
 
-    # An MS with no usable noise column is not fatal here: the curves are still
-    # measured, and come back unweighted and unscaled with nan errors, which is
-    # what this command documents. Nor is a satellite that never rose: its curve
-    # is zero, which is a measurement, and stopping would leave
-    # --no-elevation-cut -- which drops the cut for every satellite -- as the
-    # only way to measure the ones that were up. Inference keeps both strict
-    # defaults: neither an unweighted likelihood nor a fully-masked satellite
-    # has anything to fit.
     tab_config = TabConfig(
         config, ms_path, require_noise=False, require_in_view=False
     )
@@ -669,17 +667,13 @@ def _from_config(args, offset_fit=None):
             _model_on_ms_channels,
         )
 
-        # The same checks and the same alignment the standalone residual goes
-        # through: subtracting positionally would meet a full-band store with a
-        # config narrowed by data.freq and difference two different channels,
-        # and a store from another observation would be differenced at all.
         xds = xr.open_zarr(args.zarr)
         _check_zarr_identity(
             xds,
             args.zarr,
             len(np.asarray(tab_config.a1)),
             tab_config.times_mjd,
-            config["data"]["corr"],
+            config.data.corr,
         )
         model = _model_on_ms_channels(
             xds,
@@ -698,11 +692,11 @@ def _from_config(args, offset_fit=None):
     )
     if args.zarr:
         result["data_col"] = (
-            f"{config['data']['data_col']} - "
+            f"{config.data.data_col} - "
             f"{os.path.basename(str(args.zarr).rstrip('/'))}"
         )
 
-    return ms_path, result, config["data"]["data_col"]
+    return ms_path, result, config.data.data_col
 
 
 def _from_ms(args, offset_fit=None):

@@ -1088,51 +1088,33 @@ def write_gain_caltable(
 # Per-satellite RFI decomposition
 # ---------------------------------------------------------------------------
 
-def _rfi_vis_reference(tab_config) -> str:
-    """The one ``rfi_vis`` component in the run's model list, as its reference.
-
-    The decomposition is only the run's own RFI visibility op run one satellite
-    at a time, so it has to be *that* op: a different one would answer a
-    question about a model the run did not fit. Which one it was is not recorded
-    anywhere but ``model.components``, and if that names none, or more than one,
-    there is no answer to give rather than a guess to make.
-    """
-
-    components = (tab_config.args.get("model") or {}).get("components") or []
-    refs = [
-        ref
-        for ref in components
-        if ref.replace(":", ".").rsplit(".", 1)[0].rsplit(".", 1)[-1] == "rfi_vis"
+def _rfi_vis_spec(tab_config):
+    """The one ``rfi_vis`` component spec in the run's model list."""
+    components = tab_config.config.model.components
+    specs = [
+        spec
+        for spec in components
+        if spec.ref.replace(":", ".").rsplit(".", 1)[0].rsplit(".", 1)[-1] == "rfi_vis"
     ]
 
-    if len(refs) != 1:
+    if len(specs) != 1:
+        refs = [spec.ref for spec in specs]
         raise ValueError(
             f"data.save_rfi_per_sat needs exactly one rfi_vis component to "
-            f"evaluate per satellite, but model.components names {len(refs)}: "
+            f"evaluate per satellite, but model.components names {len(specs)}: "
             f"{refs}. The per-satellite decomposition is the run's own RFI "
             "visibility op evaluated one source at a time, so there has to be "
             "exactly one op to evaluate."
         )
 
-    return refs[0]
+    return specs[0]
 
 
 def wants_rfi_per_sat(vi_pred: dict, tab_config) -> bool:
-    """Whether this run asked for a per-satellite decomposition it can make.
-
-    Three things, and the last two are not the option's business: the run has to
-    have asked (``data.save_rfi_per_sat``), the prediction has to carry the
-    fitted fine grid the decomposition is made from, and there has to be at
-    least one real satellite to decompose into. A satellite-free run would
-    otherwise store an empty ``src`` axis, which is not a decomposition of
-    anything and is a column-less export downstream.
-
-    Evaluated on every process, and identically: the answer decides whether the
-    collective evaluations in :func:`rfi_vis_per_sat` are made at all.
-    """
+    """Whether this run asked for a per-satellite decomposition it can make."""
 
     return bool(
-        tab_config.args["data"].get("save_rfi_per_sat", False)
+        tab_config.config.data.save_rfi_per_sat
         and "rfi_A" in vi_pred
         and int(getattr(tab_config, "n_rfi_real", getattr(tab_config, "n_rfi", 0)))
     )
@@ -1323,7 +1305,7 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     ``norad_ids`` the satellite behind each ``src`` index.
     """
 
-    comp = import_components([_rfi_vis_reference(tab_config)])[0]()
+    comp = _rfi_vis_spec(tab_config).instantiate()
     comp.setup(tab_config)
     constants = {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
     forward = comp.build_forward()
@@ -1822,7 +1804,7 @@ def write_results_xds(
                 },
                 # Which correlation was fitted, by name. Without it the writer
                 # cannot tell where the results belong on a multi-correlation MS.
-                attrs={"corr": tab_config.args["data"]["corr"]},
+                attrs={"corr": tab_config.config.data.corr},
             )
 
             # Appended to the store the decomposition was streamed into, rather

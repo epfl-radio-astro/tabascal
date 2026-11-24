@@ -62,23 +62,32 @@ def test_the_run_config_keeps_the_templates_settings_and_finds_its_inputs(tmp_pa
     (tmp_path / "ids.txt").write_text("45399\n")
     template = tmp_path / "tab_target.yaml"
     template.write_text(
-        "model:\n  precision: single\n  components: [rfi_vis:AnalyticVis]\n"
+        "model:\n"
+        "  precision: single\n"
+        "  components:\n"
+        "    - trajectory.FixedOrbit:\n"
+        "        norad_ids_path: ids.txt\n"
+        "    - rfi_signal.ComplexRFIVarAnt\n"
+        "    - rfi_vis.AnalyticVis\n"
+        "    - gains.ConstGains:\n"
+        "        init: prior\n"
         "opt:\n  max_iter: 500\n  epsilon: 1e-3\n"
-        "satellites:\n  norad_ids_path: ids.txt\n"
-        "gains:\n  init: prior\n"
     )
 
     config = prepare_data.prepare_config(template)
-    assert config["model"] == {"precision": "single", "components": ["rfi_vis:AnalyticVis"]}
+    assert config["model"]["precision"] == "single"
     assert config["opt"] == {"max_iter": 500, "epsilon": 1e-3}
-    assert "rfi" not in config
-    assert config["satellites"]["norad_ids_path"] == str((tmp_path / "ids.txt").resolve())
-    assert config["gains"]["init"] == "prior"  # not a file beside the template
+    assert config["model"]["components"][0]["trajectory.FixedOrbit"]["norad_ids_path"] == str(
+        (tmp_path / "ids.txt").resolve()
+    )
+    assert config["model"]["components"][3]["gains.ConstGains"]["init"] == "prior"
 
     config = prepare_data.prepare_config(
-        template, components=["rfi_vis:RiemannVisFine"], precision="double",
+        template, components=["rfi_vis.RiemannVisFine"], precision="double",
         rfi_backend="jax", max_iter=3,
     )
-    assert config["model"] == {"precision": "double", "components": ["rfi_vis:RiemannVisFine"]}
+    assert config["model"] == {
+        "precision": "double",
+        "components": [{"rfi_vis.RiemannVisFine": {"backend": "jax"}}],
+    }
     assert config["opt"]["max_iter"] == 3
-    assert config["rfi"] == {"backend": "jax"}

@@ -81,8 +81,8 @@ Every configured satellite must resolve to an acceptable record. TABASCAL checks
 this during preflight — before the visibilities are read — and stops with an
 error naming each failing satellite rather than quietly subtracting an
 incomplete RFI model. The remedies are to supply the missing records via
-`--extra-orbit-dir`, to change `satellites.remote_max_age_days` deliberately,
-or to remove the satellite from `satellites.norad_ids`.
+`--extra-orbit-dir`, to change `remote_max_age_days` on the trajectory component deliberately,
+or to remove the satellite from its `norad_ids`.
 
 Every run also saves the records it actually used to
 `<run>/results/used_orbits.json`; passing that directory back via
@@ -210,9 +210,9 @@ overlapping peaks fit.
 `tabascal light-curve` measures each satellite's apparent flux over time and
 frequency directly from the visibilities, by matched-filtering them against the
 known satellite trajectory phase. No imaging is involved. It is the same
-estimate `rfi.init: matched-filter` makes inside a run — see
+estimate `init: matched-filter` on an `rfi_signal` component makes inside a run — see
 [Estimating the light curves from the data](config.md#estimating-the-light-curves-from-the-data)
-— written out in the `rfi.est` interchange format, so it can seed a later run
+— written out in the `est` interchange format, so it can seed a later run
 unchanged.
 
 Given a config, the satellites, the data column, the correlation and the
@@ -376,7 +376,7 @@ own* width, so a non-uniform spectral window is matched channel by channel.
 Everything above assumes you know which satellite is in the data. `tabascal
 search` is for when you do not: given the visibilities and a TLE snapshot — a
 constellation export in a directory, or an explicit list of NORAD IDs — it
-produces the `satellites.norad_ids` list itself, with the along-track offset of
+produces the trajectory component's `norad_ids` list itself, with the along-track offset of
 each satellite it names, from the data and nothing else.
 
 The pipeline is four steps, each auditable on its own:

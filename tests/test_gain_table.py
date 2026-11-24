@@ -1068,14 +1068,12 @@ class TestInitOrdering:
         config = {
             "model": {"components": [], "precision": "single"},
             "data": {
-                "freq": 0,
+                "freq": None,
                 "corr": "xx",
                 "data_col": "DATA",
                 "noise": 0.7,
                 "flags": False,
             },
-            "rfi": {"n_int_freq": 1, "time_int_factor": 1.0},
-            "satellites": {},
         }
         if key:
             config["data"]["gain_table"] = gain_table

@@ -440,14 +440,12 @@ def test_dual_run_checkpoints_may_reach_into_the_second_phase():
     assert validate_opt(opt(checkpoints=[2000, 1000]))["checkpoints"] == [1000, 2000]
 
 
-def test_the_base_config_ships_every_new_key_off():
-    from importlib.resources import files
+def test_the_schema_default_ships_every_new_key_off():
+    from tabascal.schema import OptConfig
 
-    from tabascal.config import yaml_load
-
-    base = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))["opt"]
-    assert all(base[k] is None for k in ("optimizer", "schedule", "stop", "checkpoints"))
-    assert base["dual_run"] is True
+    cfg = OptConfig()
+    assert all(getattr(cfg, k) is None for k in ("optimizer", "schedule", "stop", "checkpoints"))
+    assert cfg.dual_run is True
 
 
 @pytest.mark.parametrize(
@@ -506,12 +504,28 @@ def scheduled_fit(tmp_path_factory):
     script = Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
     precision = "double" if jax.config.read("jax_enable_x64") else "single"
 
+    def _with_prior_init(comps):
+        out = []
+        for entry in comps:
+            if isinstance(entry, dict):
+                ((ref, params),) = entry.items()
+                params = dict(params or {})
+                if ref.startswith(("rfi_signal.", "ast_vis.GPVisAst")):
+                    params["init"] = "prior"
+                out.append({ref: params})
+            else:
+                out.append(entry)
+        return out
+
     work = tmp_path_factory.mktemp("scheduled")
     out_dir = _copy_sim(data, work)
     config_path = work / "tab_target.yaml"
     read_and_modify_yaml(
         {
-            "model": {"components": E2E_COMPONENTS, "precision": precision},
+            "model": {
+                "components": _with_prior_init(base["model"]["components"]),
+                "precision": precision,
+            },
             "inference": {"opt": True},
             "opt": {
                 "epsilon": 1e-3, "max_iter": 4, "dual_run": True, "guide": "map",
@@ -519,8 +533,6 @@ def scheduled_fit(tmp_path_factory):
                 "schedule": {"kind": "step", "boundaries": [2]},
                 "checkpoints": [2, 4],
             },
-            "ast": {**base["ast"], "init": "prior"},
-            "rfi": {**base["rfi"], "init": "prior"},
         },
         template,
         config_path,

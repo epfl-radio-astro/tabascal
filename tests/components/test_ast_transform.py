@@ -114,8 +114,7 @@ def test_the_matrices_do_not_depend_on_the_working_precision():
 
 
 def _route(transform, config):
-    config.args["ast"]["transform"] = transform
-    comp = GPVisAst()
+    comp = GPVisAst({**config._ast_comp_kwargs, "transform": transform})
     comp.setup(config)
     forward = comp.build_forward()
     constants = make_constants(comp)
@@ -305,9 +304,8 @@ def test_the_padding_is_the_least_that_resolves_the_fringe_rate(n_time, int_time
 
 
 def _auto(tmp_path, fov_deg):
-    config = ast_config(tmp_path, time_pad_factor="auto")
-    config.args["ast"]["gp_cov"]["fov_deg"] = fov_deg
-    comp = GPVisAst()
+    config = ast_config(tmp_path, time_pad_factor="auto", fov_deg=fov_deg)
+    comp = GPVisAst(config._ast_comp_kwargs)
     comp.setup(config)
     return comp, config
 
@@ -318,7 +316,6 @@ def test_auto_reaches_the_slowest_baseline_and_no_less_than_the_floor(tmp_path, 
     needed = time_pad_for_fringe_rate(comp.n_time, comp.int_time, comp.ast_fr.min())
 
     assert comp.time_pad_factor == max(2.0, needed)
-    assert config.args["ast"]["time_pad_factor"] == comp.time_pad_factor
     assert _first_time_mode(comp.n_time, comp.int_time, comp.time_pad_factor) <= comp.ast_fr.min()
     if fov_deg is not None:
         # Narrow enough that the floor is not what decided it.
@@ -327,14 +324,18 @@ def test_auto_reaches_the_slowest_baseline_and_no_less_than_the_floor(tmp_path, 
 
 @pytest.mark.parametrize("bad", ["fast", 0.5, True, float("nan")])
 def test_a_time_pad_factor_that_is_neither_a_factor_nor_auto_is_refused(tmp_path, bad):
-    with pytest.raises(RuntimeError, match="time_pad_factor"):
-        GPVisAst().setup(ast_config(tmp_path, time_pad_factor=bad))
+    from tabascal.schema import ConfigValidationError
+
+    with pytest.raises(ConfigValidationError, match="time_pad_factor"):
+        GPVisAst({"time_pad_factor": bad})
 
 
 def test_the_transform_defaults_to_the_dft_and_refuses_anything_else(tmp_path):
+    from tabascal.schema import ConfigValidationError
+
     comp = GPVisAst()
     comp.setup(ast_config(tmp_path))
     assert comp.transform == "dft"
 
-    with pytest.raises(RuntimeError, match="ast.transform"):
-        GPVisAst().setup(ast_config(tmp_path, transform="nufft"))
+    with pytest.raises(ConfigValidationError, match="transform"):
+        GPVisAst({"transform": "nufft"})

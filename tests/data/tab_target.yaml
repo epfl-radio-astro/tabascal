@@ -1,64 +1,48 @@
 model:
+  precision: single
   components:
-  # RFI Phase from trajectory
-    - trajectory:FixedOrbitFine
-  # RFI signal model
-    - rfi_signal:ComplexRFIVarAntFine
-    - rfi_vis:RiemannVisFine
-  # Astronomical signal model
-    - ast_vis:GPVisAst
-  # Antenna Gain model 
-    - gains:UnitaryGains
+    # RFI Phase from trajectory
+    - trajectory.FixedOrbitFine:
+        norad_ids: [20452, 38833, 45854]
+    # RFI signal model
+    - rfi_signal.ComplexRFIVarAntFine:
+        init: truth
+        mean: 0
+        corr_time: 24 # seconds
+        freq_pad_factor: 2.0
+        time_pad_factor: 2.0
+    - rfi_vis.RiemannVisFine:
+        n_int_freq: 1
+        time_int_factor: 5
+    # Astronomical signal model
+    - ast_vis.GPVisAst:
+        init: truth
+        mean: 0
+        cutoff: 1e-6
+        std: 1.5           # Widest true-sky baseline in the 8A simulation is rms|V| = 2.897 Jy
+        corr_freq: null    # no frequency roll-off; these observations are single channel
+        fov_deg: 5
+        gammas: [5, 5]
+        freq_pad_factor: 2.0
+        time_pad_factor: 2.0
+    # Antenna Gain model
+    - gains.UnitaryGains
 
 data:
   data_col: DATA
-  noise: 
+  noise: null
 
 plots:
-  init: False
-  prior: False
-  truth: False
+  init: false
+  prior: false
+  truth: false
   prior_samples: 100
 
 inference:
-  opt: True
+  opt: true
 
 opt:
   epsilon: 1e-3
   max_iter: 100
-  dual_run: False
+  dual_run: false
   guide: map
-
-# Priors and Initialization
-ast:
-  init: truth
-  mean: 0
-  cutoff: 1e-6
-  gp_cov:
-    std: 1.5           # Widest true-sky baseline in the 8A simulation is rms|V| = 2.897 Jy, which this puts at 1.93 sigma - every baseline's sky inside 2 sigma, and measurably better recovery than covering the widest at 1 sigma; see docs/config.md
-    corr_freq: null   # no frequency roll-off; these observations are single channel
-    fov_deg: 5
-    gammas: [5, 5]
-  freq_pad_factor: 2.0
-  time_pad_factor: 2.0
-
-rfi:
-  init: truth
-  mean: 0
-  gp_cov:
-    corr_time: 24 # seconds
-  freq_pad_factor: 2.0
-  time_pad_factor: 2.0
-  n_int_freq: 1
-  time_int_factor: 5
-
-satellites:
-  norad_ids: [20452, 38833, 45854]
-
-
-# True gains
-gains:
-  amp_mean: 1.0
-  phase_mean: 0.0
-  amp_std: 1.0      # %
-  phase_std: 1.0    # degrees

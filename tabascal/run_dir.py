@@ -30,9 +30,12 @@ import secrets
 import socket
 import sys
 import warnings
+from collections.abc import Mapping
 from datetime import datetime
 
 import yaml
+
+from tabascal.schema import RunConfig
 
 RUNS_DIR = "runs"
 LATEST = "latest"
@@ -50,28 +53,26 @@ LOSS_TRACE = "trace.npz"
 #: size and mtime alone, which is what directories get file by file.
 HASH_LIMIT = 64 * 2**20
 
-#: The config keys that name an input file or directory, as (section, key).
-#: ``data.ms_path``, ``data.out_dir`` and ``data.truth_zarr`` are resolved by
-#: the run itself, with their own precedence; the rest are made absolute here.
-#: Keys that also take a non-path value (``gains.init: prior``, a numeric
-#: ``data.noise``, an inline ``ast.point_sources`` list) are paths only when
-#: they are strings.
-INPUT_KEYS = (
-    ("data", "ms_path"),
-    ("data", "gain_table"),
-    ("data", "noise"),
-    ("data", "truth_zarr"),
-    ("gains", "init"),
-    ("rfi", "est"),
-    ("ast", "point_sources"),
-    ("satellites", "extra_orbit_dir"),
-    ("satellites", "norad_ids_path"),
-)
+#: Known component input-path field metadata for dict-mode inspection (when
+#: reading a saved YAML dict without importing JAX/component classes).
+_DICT_DATA_INPUT_FIELDS = {
+    "ms_path": {"resolved_by_runner": True, "fingerprint_kind": "ms"},
+    "gain_table": {"is_path_list": True},
+    "noise": {},
+    "truth_zarr": {"resolved_by_runner": True},
+}
+_DICT_COMPONENT_INPUT_FIELDS = {
+    "extra_orbit_dir": {"fingerprint_kind": "orbits"},
+    "norad_ids_path": {},
+    "est": {},
+    "point_sources": {},
+    "init": {"non_path_literals": ("prior", "sample", "data", "zeros", "ones", "truth", "est", "matched-filter", "mf")},
+}
 
 #: Distributions whose versions decide what a run computes.
 _VERSIONED = (
     "tabascal", "jax", "jaxlib", "numpyro", "optax", "numpy", "dask", "dask-ms",
-    "xarray", "zarr", "ri_kernels", "sgp4jax", "satchecker-client",
+    "xarray", "zarr", "ri_kernels", "sgp4jax", "satchecker-client", "pydantic",
 )
 
 
@@ -104,12 +105,7 @@ def make_run_dir(out_dir, name, now=None):
 
 
 def update_latest(runs, run_dir):
-    """Point ``runs/latest`` at ``run_dir``, atomically.
-
-    A relative link, so the tree survives being moved. Made under a temporary
-    name and renamed over the old one, so a reader never finds it missing. A
-    failure here costs a convenience and nothing else, so it only warns.
-    """
+    """Point ``runs/latest`` at ``run_dir``, atomically."""
 
     link = os.path.join(runs, LATEST)
     tmp = os.path.join(runs, f".{LATEST}.{os.path.basename(run_dir)}")
@@ -126,16 +122,8 @@ def create_run_dir(out_dir, name, config=None):
     """Resolve ``config``'s inputs and create the run directory, on process 0 only.
 
     Process 0 resolves the inputs (:func:`absolutise_inputs`) and makes the
-    directory, then broadcasts both: the directory is made once however many
-    processes the run has, and every process applies the very paths process 0
-    resolved. Resolving per process could disagree -- another run starting in
-    between moves ``runs/latest`` -- and a worker reading a different gain
-    table from process 0 fails where process 0 waits. A failure on process 0
-    reaches the workers as an empty payload, so they stop too.
-
-    ``runs/latest`` moves only after the inputs were resolved, so one given
-    through it -- an earlier run's ``results/`` as an orbit directory -- names
-    that earlier run, not this empty one.
+    directory, then broadcasts both so every process applies the exact same
+    resolved paths.
     """
 
     from tabascal.distributed import (
@@ -161,71 +149,152 @@ def create_run_dir(out_dir, name, config=None):
         raise RankZeroFailure("process 0 failed to create the run directory.")
 
     shared = json.loads(received.decode())
-    for label, value in shared["inputs"].items():
-        section, key = label.split(".")
-        config.setdefault(section, {})[key] = value
+    _apply_input_values(config, shared["inputs"])
     if is_process_0():
         update_latest(os.path.dirname(shared["run_dir"]), shared["run_dir"])
     return shared["run_dir"]
 
 
 # ---------------------------------------------------------------------------
-# The config
+# Schema-driven input path discovery
 # ---------------------------------------------------------------------------
 
 def _is_path(value):
     return isinstance(value, (str, os.PathLike)) and str(value) != ""
 
 
-def absolutise_inputs(config):
-    """Resolve every input path in ``config`` in place, links included.
+def _iter_input_slots(config):
+    """Yield ``(slot_id, label, value, meta, setter)`` for every input-path field.
 
-    Relative to the working directory, as ``data.ms_path`` and the CLI flags
-    already are, so ``config.yaml`` names exactly what was read wherever it is
-    re-run from. ``realpath`` rather than ``abspath``: an input named through
-    ``runs/latest`` is recorded as the run it named then, not as whatever the
-    link names later. ``data.gain_table`` is always recorded as a list.
-    The MS and truth zarr are resolved by the run itself, with its precedence.
+    Works on both :class:`RunConfig` (discovering fields from each Pydantic
+    schema's ``input_path_fields()``) and plain dicts (such as configs loaded
+    from a saved ``config.yaml`` without importing component classes).
     """
+    if isinstance(config, RunConfig):
+        # Data section
+        for key, meta in type(config.data).input_path_fields().items():
+            yield (
+                ("data", key),
+                f"data.{key}",
+                getattr(config.data, key),
+                meta,
+                lambda val, _k=key: setattr(config.data, _k, val),
+            )
+        # Component configs
+        ref_counts: dict[str, int] = {}
+        for spec in config.model.components:
+            ref_counts[spec.ref] = ref_counts.get(spec.ref, 0) + 1
+        for idx, spec in enumerate(config.model.components):
+            prefix = f"model.components[{idx}].{spec.ref}" if ref_counts[spec.ref] > 1 else spec.ref
+            for key, meta in type(spec.config).input_path_fields().items():
+                yield (
+                    ("component", idx, key),
+                    f"{prefix}.{key}",
+                    getattr(spec.config, key),
+                    meta,
+                    lambda val, _cfg=spec.config, _k=key: setattr(_cfg, _k, val),
+                )
+        return
 
-    for section, key in INPUT_KEYS:
-        block = config.get(section) or {}
-        value = block.get(key)
-        if (section, key) in (("data", "ms_path"), ("data", "truth_zarr")):
+    if not isinstance(config, Mapping):
+        return
+
+    # Plain dict mode (lightweight readers & tests)
+    data = config.get("data")
+    if isinstance(data, Mapping):
+        for key, meta in _DICT_DATA_INPUT_FIELDS.items():
+            if key in data:
+                yield (
+                    ("data", key),
+                    f"data.{key}",
+                    data[key],
+                    meta,
+                    lambda val, _d=data, _k=key: _d.__setitem__(_k, val),
+                )
+    comps = (config.get("model") or {}).get("components") if isinstance(config.get("model"), Mapping) else None
+    if isinstance(comps, list):
+        ref_counts = {}
+        for entry in comps:
+            if isinstance(entry, Mapping) and len(entry) == 1:
+                ref = next(iter(entry))
+                ref_counts[ref] = ref_counts.get(ref, 0) + 1
+        for idx, entry in enumerate(comps):
+            if not (isinstance(entry, Mapping) and len(entry) == 1):
+                continue
+            ((ref, params),) = entry.items()
+            if not isinstance(params, Mapping):
+                continue
+            prefix = f"model.components[{idx}].{ref}" if ref_counts.get(ref, 0) > 1 else ref
+            for key, meta in _DICT_COMPONENT_INPUT_FIELDS.items():
+                if key in params:
+                    yield (
+                        ("component", idx, key),
+                        f"{prefix}.{key}",
+                        params[key],
+                        meta,
+                        lambda val, _p=params, _k=key: _p.__setitem__(_k, val),
+                    )
+
+
+def absolutise_inputs(config):
+    """Resolve every input path in ``config`` in place, symlinks included.
+
+    Relative to the working directory, so ``config.yaml`` names exactly what
+    was read wherever it is re-run from. ``data.gain_table`` is always recorded
+    as a list. ``data.ms_path`` and ``data.truth_zarr`` are resolved by the run
+    itself, with their own precedence.
+    """
+    for _slot_id, _label, value, meta, setter in _iter_input_slots(config):
+        if meta.get("resolved_by_runner"):
             continue
-        if section == "gains" and value == "prior":
+        non_paths = meta.get("non_path_literals", ())
+        if isinstance(value, str) and value in non_paths:
             continue
-        if key == "gain_table" and _is_path(value):
-            value = [value]
-        if isinstance(value, (list, tuple)) and key == "gain_table":
-            block[key] = [os.path.realpath(v) if _is_path(v) else v for v in value]
+        if meta.get("is_path_list"):
+            if _is_path(value):
+                value = [value]
+            if isinstance(value, (list, tuple)):
+                setter([os.path.realpath(v) if _is_path(v) else v for v in value])
         elif _is_path(value):
-            block[key] = os.path.realpath(value)
+            setter(os.path.realpath(value))
 
 
 def _input_values(config):
-    """``{"section.key": value}`` for the inputs :func:`absolutise_inputs` resolves."""
+    """Serializable list of ``[slot_id, value]`` pairs for multi-process broadcast."""
+    items = []
+    for slot_id, _label, value, meta, _setter in _iter_input_slots(config):
+        if meta.get("resolved_by_runner"):
+            continue
+        items.append([list(slot_id), value])
+    return items
 
-    return {
-        f"{section}.{key}": config[section][key]
-        for section, key in INPUT_KEYS
-        if (section, key) not in (("data", "ms_path"), ("data", "truth_zarr"))
-        and key in (config.get(section) or {})
-    }
+
+def _apply_input_values(config, items):
+    """Apply broadcast ``_input_values`` back onto ``config``."""
+    slot_setters = {slot_id: setter for slot_id, _label, _value, _meta, setter in _iter_input_slots(config)}
+    for raw_slot, value in items:
+        slot_id = tuple(raw_slot)
+        setter = slot_setters.get(slot_id)
+        if setter is not None:
+            setter(value)
 
 
 def place_outputs(config, run_dir):
     """Take a relative ``opt.trace_path`` inside the run directory."""
-
-    # join keeps an absolute path as it is.
+    if isinstance(config, RunConfig):
+        trace = config.opt.trace_path
+        if _is_path(trace):
+            config.opt.trace_path = os.path.join(run_dir, trace)
+        return
     trace = (config.get("opt") or {}).get("trace_path")
     if _is_path(trace):
         config["opt"]["trace_path"] = os.path.join(run_dir, trace)
 
 
 def write_config(run_dir, config):
+    data = config.to_yaml_dict() if isinstance(config, RunConfig) else config
     with open(os.path.join(run_dir, CONFIG_FILE), "w") as f:
-        yaml.safe_dump(config, f, sort_keys=False)
+        yaml.safe_dump(data, f, sort_keys=False)
 
 
 def read_config(run_dir):
@@ -237,34 +306,37 @@ def read_config(run_dir):
 # Fingerprints
 # ---------------------------------------------------------------------------
 
+def _fingerprint_kind_for(label: str, meta: dict | None = None) -> str | None:
+    if meta and meta.get("fingerprint_kind"):
+        return meta["fingerprint_kind"]
+    if label == "data.ms_path":
+        return "ms"
+    if label.endswith(".extra_orbit_dir"):
+        return "orbits"
+    return None
+
+
 def input_paths(config):
     """``{label: path}`` for every input ``config`` names as a path."""
-
     paths = {}
-    for section, key in INPUT_KEYS:
-        value = (config.get(section) or {}).get(key)
-        label = f"{section}.{key}"
-        if section == "gains" and value == "prior":
+    for _slot_id, label, value, meta, _setter in _iter_input_slots(config):
+        non_paths = meta.get("non_path_literals", ())
+        if isinstance(value, str) and value in non_paths:
             continue
-        if key == "gain_table" and _is_path(value):
-            value = [value]
-        if isinstance(value, (list, tuple)) and key == "gain_table":
-            for i, v in enumerate(value):
-                if _is_path(v):
-                    paths[f"{label}[{i}]"] = str(v)
+        if meta.get("is_path_list"):
+            if _is_path(value):
+                value = [value]
+            if isinstance(value, (list, tuple)):
+                for i, v in enumerate(value):
+                    if _is_path(v):
+                        paths[f"{label}[{i}]"] = str(v)
         elif _is_path(value):
             paths[label] = str(value)
-
     return paths
 
 
 def _ms_fingerprint(path):
-    """What a run read from the MS, not the files it is stored in.
-
-    ``tab2MS`` writes columns into the MS, so its file metadata changes with
-    every export. The rows, the time axis, the channels, the antennas and the
-    correlations do not, and they are what the results are tied to.
-    """
+    """What a run read from the MS, not the files it is stored in."""
 
     import numpy as np
     from daskms import xds_from_table
@@ -280,18 +352,8 @@ def _ms_fingerprint(path):
     return {"n_row": int(time.size), "n_ant": n_ant, "sha256": digest.hexdigest()}
 
 
-#: Inputs that are fingerprinted by what is read from them, not by their files.
-#: The orbit directory may be an earlier run's ``results/``, whose zarrs and
-#: ``.B`` that run's ``tab2MS`` rewrites; only its ``*.json`` files are orbits.
-_KINDS = {"data.ms_path": "ms", "satellites.extra_orbit_dir": "orbits"}
-
-
 def fingerprint(path, kind=None):
-    """A comparable summary of the file or directory at ``path``.
-
-    Never raises: an input that cannot be read is the run's to report, and the
-    record says only that it could not be fingerprinted.
-    """
+    """A comparable summary of the file or directory at ``path``."""
 
     try:
         return _fingerprint(path, kind)
@@ -335,7 +397,7 @@ def _fingerprint(path, kind):
 
 def fingerprint_inputs(config):
     return {
-        label: {"path": path, **fingerprint(path, _KINDS.get(label))}
+        label: {"path": path, **fingerprint(path, _fingerprint_kind_for(label))}
         for label, path in input_paths(config).items()
     }
 
@@ -352,17 +414,13 @@ def _same(recorded, current):
 
 
 def check_inputs(record, overrides=None):
-    """Warn, naming each one, about inputs that differ from what the run read.
-
-    ``overrides`` maps a label to the path a caller is using instead of the
-    recorded one -- a moved MS -- and that path is the one compared.
-    """
+    """Warn, naming each one, about inputs that differ from what the run read."""
 
     overrides = overrides or {}
     changed = []
     for label, recorded in (record.get("inputs") or {}).items():
         path = overrides.get(label, recorded.get("path"))
-        current = fingerprint(path, _KINDS.get(label))
+        current = fingerprint(path, _fingerprint_kind_for(label))
         if not _same(recorded, current):
             changed.append(label)
             warnings.warn(
@@ -446,7 +504,10 @@ def is_run_dir(path):
 def exported_results(run_dir, config):
     """The results zarr a run exports: ``map_pred`` if it optimised, else ``init_pred``."""
 
-    optimised = config["inference"]["opt"] and config["opt"]["max_iter"] > 0
+    if isinstance(config, RunConfig):
+        optimised = config.inference.opt and config.opt.max_iter > 0
+    else:
+        optimised = config["inference"]["opt"] and config["opt"]["max_iter"] > 0
     path = os.path.join(run_dir, RESULTS_DIR, MAP_PRED if optimised else INIT_PRED)
     if not os.path.isdir(path):
         raise SystemExit(
@@ -457,11 +518,7 @@ def exported_results(run_dir, config):
 
 
 def load_run(path):
-    """``(run_dir, config, record)`` for a run directory, or a message saying why not.
-
-    ``runs/latest`` resolves to the run it points at, so what is reported and
-    written names the run and not the link.
-    """
+    """``(run_dir, config, record)`` for a run directory, or a message saying why not."""
 
     run_dir = os.path.realpath(path)
     if not is_run_dir(run_dir):

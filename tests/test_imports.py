@@ -62,14 +62,14 @@ class TestTheHappyPath:
 
 #: The components that pass RFI on the fine grid: each carries the suffix.
 FINE_GRID = [
-    "trajectory:FixedOrbitFine",
-    "trajectory:PhaseCalculationRFIFine",
-    "trajectory:NoDragOrbitFine",
-    "trajectory:OrbitFine",
-    "rfi_signal:ComplexRFIVarAntFine",
-    "rfi_signal:ComplexRFIConstAntFine",
-    "rfi_vis:RiemannVisFine",
-    "rfi_vis:RiemannVisVariableFine",
+    "trajectory.FixedOrbitFine",
+    "trajectory.PhaseCalculationRFIFine",
+    "trajectory.NoDragOrbitFine",
+    "trajectory.OrbitFine",
+    "rfi_signal.ComplexRFIVarAntFine",
+    "rfi_signal.ComplexRFIConstAntFine",
+    "rfi_vis.RiemannVisFine",
+    "rfi_vis.RiemannVisVariableFine",
 ]
 
 #: Their names before the suffix, which are not kept as aliases -- bar the three
@@ -77,10 +77,10 @@ FINE_GRID = [
 REMOVED = [
     ref.removesuffix("Fine")
     for ref in FINE_GRID
-    if ref.split(":")[1] not in ("FixedOrbitFine", "ComplexRFIVarAntFine", "ComplexRFIConstAntFine")
+    if ref.split(".")[1] not in ("FixedOrbitFine", "ComplexRFIVarAntFine", "ComplexRFIConstAntFine")
 ] + [
-    "trajectory:FixedOrbitCoarse", "rfi_signal:ComplexRFIVarAntCoarse", "rfi_vis:PolyInterpVis",
-    "rfi_vis:RiemannVisFFI", "rfi_vis:RiemannVisVariableFFI",
+    "trajectory.FixedOrbitCoarse", "rfi_signal.ComplexRFIVarAntCoarse", "rfi_vis.PolyInterpVis",
+    "rfi_vis.RiemannVisFFI", "rfi_vis.RiemannVisVariableFFI",
 ]
 
 
@@ -91,7 +91,7 @@ class TestTheFineGridSuffix:
 
     @pytest.mark.parametrize("ref", REMOVED)
     def test_the_name_without_it_is_gone(self, ref):
-        assert f"has no class '{ref.split(':')[1]}'" in message(ref)
+        assert f"has no class '{ref.split('.')[1]}'" in message(ref)
 
     @pytest.mark.parametrize(
         "ref, now",
@@ -99,7 +99,7 @@ class TestTheFineGridSuffix:
          ("rfi_vis:RiemannVisVariableFFIFine", "RiemannVisVariableFine")],
     )
     def test_an_ffi_component_names_its_backend(self, ref, now):
-        assert f"It is now {now} with rfi.backend: ffi." in message(ref)
+        assert f"It is now {now} with backend: ffi." in message(ref)
 
 
 class TestAnUnknownClassInAKnownModule:

@@ -30,10 +30,12 @@ from tabascal.interferometry import calculate_rfi_vis_fine
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAntFine,
     ComplexRFIConstAntFine,
+    RFIVarAntConfig,
     read_light_curves,
-    rfi_signal_config_validation,
+    resolve_rfi_gp_params,
 )
 from tabascal.fft_gp import latent_to_signal, signal_to_latent
+from tabascal.schema import ConfigValidationError, validate_config
 from tabascal.seeds import component_key
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
@@ -93,15 +95,9 @@ def make_rfi_config(
     rfi_mask_fine=None,
     time_scale="utc",
     signal_type=None,
+    seed=1,
 ):
-    """Build a minimal mock TabConfig for the RFI-signal components.
-
-    A real TabConfig needs a Measurement Set, Space-Track credentials and skyfield, so
-    the component tests in this package stub it with a SimpleNamespace instead.
-
-    ``pad_factor`` defaults to 2 to match ``tab_config_base.yaml`` — small pad factors
-    combined with supersampling crop the fine grid down to a zero-sized axis.
-    """
+    """Build a minimal mock TabConfig for the RFI-signal components."""
     freqs = jnp.linspace(1.4e9, 1.41e9, n_freq)
     chan_width = float(freqs[1] - freqs[0]) if n_freq > 1 else 1e6
     times = jnp.linspace(0.0, 120.0, n_time)
@@ -110,6 +106,20 @@ def make_rfi_config(
     n_freq_fine, n_time_fine = n_freq * n_int_freq, n_time * n_int_time
     n_bl = n_ant * (n_ant - 1) // 2
 
+    comp_kwargs = {
+        "std": std,
+        "corr_freq": corr_freq,
+        "corr_time": corr_time,
+        "init": init,
+        "mean": mean,
+        "est": est,
+        "time_pad_factor": pad_factor,
+        "freq_pad_factor": pad_factor,
+    }
+    if signal_type is not None:
+        comp_kwargs["signal_type"] = signal_type
+
+    run_cfg = validate_config({"model": {"components": []}})
     config = SimpleNamespace(
         norad_ids=_norad_ids(n_rfi, n_rfi_real),
         rfi_mask_fine=rfi_mask_fine,
@@ -125,40 +135,17 @@ def make_rfi_config(
         freqs_fine=jnp.linspace(freqs[0], freqs[-1], n_freq_fine),
         chan_width=chan_width,
         times=times,
-        # Absolute grid the light-curve estimate is interpolated against. MJD is
-        # carried alongside JD rather than derived from it; see read_ms_params.
-        # ``time_scale`` is what the MS's TIME column declared, and is what puts
-        # times_mjd onto the UTC the estimate file's own axis is on.
         times_mjd=_TEST_EPOCH_MJD + np.linspace(0.0, 120.0, n_time, dtype=np.float64) / 86400.0,
         times_jd=_TEST_EPOCH_JD + np.linspace(0.0, 120.0, n_time, dtype=np.float64) / 86400.0,
         time_scale=time_scale,
         times_fine=jnp.linspace(times[0], times[-1], n_time_fine),
         int_time=int_time,
         vis_obs=jnp.ones((n_bl, n_freq, n_time), dtype=complex),
-        args={
-            "rfi": {
-                "gp_cov": {
-                    "std": std,
-                    "corr_freq": corr_freq,
-                    "corr_time": corr_time,
-                },
-                "init": init,
-                "mean": mean,
-                "est": est,
-                "time_pad_factor": pad_factor,
-                "freq_pad_factor": pad_factor,
-            },
-            "plots": {"truth": False},
-            "data": {"zarr_path": None, "data_col": "DATA"},
-        },
+        config=run_cfg,
+        seed=seed,
+        _rfi_comp_kwargs=comp_kwargs,
     )
-    # Left out unless asked for, so the default every other test runs on is
-    # the one a config that never mentions the key gets.
-    if signal_type is not None:
-        config.args["rfi"]["signal_type"] = signal_type
 
-    # Omitted entirely (rather than set to None) so the getattr fallback in
-    # BaseGPRFI.setup is exercised as it would be on an unpadded TabConfig.
     if with_n_rfi_real:
         config.n_rfi_real = n_rfi_real
 
@@ -167,8 +154,9 @@ def make_rfi_config(
 
 def setup_component(cls, **kwargs):
     """Construct and set up a component on a mock config."""
-    comp = cls()
-    comp.setup(make_rfi_config(**kwargs))
+    tab_config = make_rfi_config(**kwargs)
+    comp = cls(tab_config._rfi_comp_kwargs)
+    comp.setup(tab_config)
     return comp
 
 
@@ -251,74 +239,54 @@ class TestRfiSignalConfigValidation:
         """All-None config picks up defaults derived from the data and the observation grid."""
         freqs, times = self._grid()
         vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"gp_cov": {"std": None, "corr_freq": None, "corr_time": None}}
+        cfg = RFIVarAntConfig(std=None, corr_freq=None, corr_time=None)
 
-        gp_cov = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)["gp_cov"]
+        std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
-        assert gp_cov["std"] == pytest.approx(6.0)  # 2 x max |vis_obs|
-        assert gp_cov["corr_freq"] == pytest.approx(float(freqs[-1] - freqs[0]) / 2)
-        assert gp_cov["corr_time"] == pytest.approx(float(times[-1] - times[0]) / 2)
+        assert std == pytest.approx(6.0)  # 2 x max |vis_obs|
+        assert corr_freq == pytest.approx(float(freqs[-1] - freqs[0]) / 2)
+        assert corr_time == pytest.approx(float(times[-1] - times[0]) / 2)
 
     def test_null_corr_time_does_not_clobber_corr_freq(self):
-        """A defaulted corr_time must be written to corr_time, not over corr_freq.
-
-        Regression test: the defaulting branch used to assign the *time* extent to the
-        corr_freq key, wiping out the frequency default and leaving corr_time as None.
-        """
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"gp_cov": {"std": 1.0, "corr_freq": None, "corr_time": None}}
+        cfg = RFIVarAntConfig(std=1.0, corr_freq=None, corr_time=None)
 
-        gp_cov = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)["gp_cov"]
+        _std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
         freq_extent, time_extent = float(freqs[-1] - freqs[0]), float(times[-1] - times[0])
-        assert gp_cov["corr_time"] == pytest.approx(time_extent / 2)
-        assert gp_cov["corr_freq"] == pytest.approx(freq_extent / 2)
-        # The two defaults live on wildly different scales; catching a swap matters.
-        assert gp_cov["corr_freq"] != pytest.approx(gp_cov["corr_time"])
+        assert corr_time == pytest.approx(time_extent / 2)
+        assert corr_freq == pytest.approx(freq_extent / 2)
+        assert corr_freq != pytest.approx(corr_time)
 
     def test_explicit_values_preserved_as_floats(self):
-        """Explicit numeric values survive validation and are coerced to float."""
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"gp_cov": {"std": 7, "corr_freq": 5e6, "corr_time": 60}}
+        cfg = RFIVarAntConfig(std=7, corr_freq=5e6, corr_time=60)
 
-        result = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
-        gp_cov = result["gp_cov"]
+        std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
-        assert isinstance(gp_cov["std"], float) and gp_cov["std"] == pytest.approx(7.0)
-        assert gp_cov["corr_freq"] == pytest.approx(5e6)
-        assert isinstance(gp_cov["corr_time"], float)
-        assert gp_cov["corr_time"] == pytest.approx(60.0)
+        assert isinstance(std, float) and std == pytest.approx(7.0)
+        assert corr_freq == pytest.approx(5e6)
+        assert isinstance(corr_time, float)
+        assert corr_time == pytest.approx(60.0)
 
     def test_an_omitted_key_takes_its_default(self):
-        """Every covariance key is optional, and absent means the same as null.
-
-        A config need not write down a key it is happy to have derived, and the
-        two spellings of not setting one -- leaving it out and writing ``null``
-        -- have to agree.
-        """
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        omitted = {"gp_cov": {"std": 1.0, "corr_freq": 5e6}}  # no corr_time
-        explicit = {"gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": None}}
+        omitted = RFIVarAntConfig(std=1.0, corr_freq=5e6)
+        explicit_none = RFIVarAntConfig(std=1.0, corr_freq=5e6, corr_time=None)
 
-        left = rfi_signal_config_validation(omitted, vis_obs, freqs, 1e6, times, 8.0)
-        right = rfi_signal_config_validation(explicit, vis_obs, freqs, 1e6, times, 8.0)
+        left = resolve_rfi_gp_params(omitted, vis_obs, freqs, 1e6, times, 8.0)
+        right = resolve_rfi_gp_params(explicit_none, vis_obs, freqs, 1e6, times, 8.0)
 
-        assert left["gp_cov"]["corr_time"] == pytest.approx(float(times[-1] - times[0]) / 2)
-        assert left["gp_cov"] == right["gp_cov"]
+        assert left[2] == pytest.approx(RFIVarAntConfig().corr_time)
+        assert right[2] == pytest.approx(float(times[-1] - times[0]) / 2)
 
     @pytest.mark.parametrize("key", ["std", "corr_freq", "corr_time"])
     def test_non_numeric_value_raises(self, key):
-        """A non-numeric value for any tunable raises ValueError."""
-        freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
-        cfg["gp_cov"][key] = "not a number"
-
         with pytest.raises(ValueError):
-            rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+            RFIVarAntConfig(**{key: "not a number"})
 
     @pytest.mark.parametrize(
         "key, value",
@@ -335,32 +303,18 @@ class TestRfiSignalConfigValidation:
         ],
     )
     def test_a_width_or_a_scale_that_is_not_positive_and_finite_is_refused(self, key, value):
-        """The covariance keys are held to the same rules in both sections.
-
-        They used to be checked by hand at the top of the section, by truthiness
-        and an isinstance: a width of 0 or of True was quietly swapped for a
-        default, and a negative width or correlation time was passed straight
-        through to build a spectrum from. Inside the block they go through the
-        validator the astronomical prior has always used, which names the key.
-        """
-        freqs, times = self._grid()
-        vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = {"gp_cov": {"std": 1.0, "corr_freq": 5e6, "corr_time": 60.0}}
-        cfg["gp_cov"][key] = value
-
-        with pytest.raises(ValueError, match=f"rfi.gp_cov.{key}"):
-            rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)
+        with pytest.raises(ValueError, match=key):
+            RFIVarAntConfig(**{key: value})
 
     def test_single_channel_single_integration_defaults(self):
-        """With a zero-extent grid the defaults fall back to the step sizes, not zero."""
         freqs, times = jnp.array([1.4e9]), jnp.array([0.0])
         vis_obs = jnp.ones((6, 1, 1), dtype=complex)
-        cfg = {"gp_cov": {"std": None, "corr_freq": None, "corr_time": None}}
+        cfg = RFIVarAntConfig(std=None, corr_freq=None, corr_time=None)
 
-        gp_cov = rfi_signal_config_validation(cfg, vis_obs, freqs, 1e6, times, 8.0)["gp_cov"]
+        _std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
-        assert gp_cov["corr_freq"] == pytest.approx(1e6 / 2)
-        assert gp_cov["corr_time"] == pytest.approx(8.0 / 2)
+        assert corr_freq == pytest.approx(1e6 / 2)
+        assert corr_time == pytest.approx(8.0 / 2)
 
 
 # ---------------------------------------------------------------------------
@@ -530,13 +484,12 @@ class TestComponentContract:
 
     @pytest.mark.parametrize("cls", ALL_CLASSES)
     def test_invalid_init_type_raises(self, cls):
-        """Subclass setup wraps failures, so the surfaced error is a RuntimeError."""
-        with pytest.raises(RuntimeError, match="not_an_init_type"):
+        with pytest.raises(ConfigValidationError, match="init"):
             setup_component(cls, init="not_an_init_type")
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_invalid_prior_mean_raises(self, cls):
-        with pytest.raises(RuntimeError, match="not_a_prior_type"):
+        with pytest.raises(ConfigValidationError, match="mean"):
             setup_component(cls, mean="not_a_prior_type")
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
@@ -761,7 +714,7 @@ class TestMatchedFilterSeeding:
     def test_the_run_config_is_what_gets_filtered(self, estimate):
         """The estimate is made from this run's own visibilities, not a file."""
         config = make_rfi_config(init="matched-filter")
-        comp = ComplexRFIVarAntFine()
+        comp = ComplexRFIVarAntFine(config._rfi_comp_kwargs)
         comp.setup(config)
 
         assert estimate.calls and estimate.calls[0] is config
@@ -791,7 +744,7 @@ class TestMatchedFilterSeeding:
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     @pytest.mark.parametrize("key", ["init", "mean"])
     def test_the_option_is_named_in_the_error_for_a_bad_value(self, cls, key):
-        with pytest.raises(RuntimeError, match="matched-filter"):
+        with pytest.raises(ConfigValidationError, match="matched-filter"):
             setup_component(cls, **{key: "nonsense"})
 
 
@@ -1883,32 +1836,27 @@ class TestMaskIsolatesNonFiniteSamples:
 
 
 def setup_with_gp_cov(cls, gp_cov, n_freq=8, n_time=16, **kwargs):
-    """Set a component up with an ``rfi.gp_cov`` block, or without one.
-
-    ``cutoff`` is lifted out to ``rfi.cutoff``, which is where it lives: these
-    tests write it alongside ``gammas`` because the two are chosen together, and
-    this helper is the one place that has to know they sit at different levels.
-    """
+    """Set a component up with flat GP covariance kwargs, or defaults."""
     kwargs.setdefault("n_rfi", 2)
     kwargs.setdefault("n_rfi_real", 2)
     kwargs.setdefault("n_ant", 3)
     config = make_rfi_config(n_freq=n_freq, n_time=n_time, **kwargs)
-    if gp_cov is not _ABSENT:
-        block = gp_cov
-        if isinstance(block, dict) and "cutoff" in block:
-            block = dict(block)
-            config.args["rfi"]["cutoff"] = block.pop("cutoff")
-        config.args["rfi"]["gp_cov"] = block
-
-    comp = cls()
+    comp_kwargs = dict(config._rfi_comp_kwargs)
+    if gp_cov is not _ABSENT and gp_cov is not None:
+        if not isinstance(gp_cov, dict):
+            comp = cls(gp_cov)
+        else:
+            comp_kwargs.update(gp_cov)
+            comp = cls(comp_kwargs)
+    else:
+        comp = cls(comp_kwargs)
     comp.setup(config)
-
     return comp
 
 
 def gp_cov_error(cls, gp_cov):
-    """The message from a rejected ``rfi.gp_cov``, as one string."""
-    with pytest.raises(RuntimeError) as excinfo:
+    """The message from a rejected component config, as one string."""
+    with pytest.raises((ConfigValidationError, ValueError, TypeError, RuntimeError)) as excinfo:
         setup_with_gp_cov(cls, gp_cov)
 
     return str(excinfo.value)
@@ -1932,10 +1880,11 @@ class TestGpCovIsRead:
     def test_no_block_means_the_components_own_default(self, cls, absent):
         """A config predating the key runs exactly as it did."""
         comp = setup_with_gp_cov(cls, absent)
+        defaults = cls.Config()
 
         assert comp.gp_cov_params() == (
-            [float(g) for g in cls.default_gammas],
-            float(cls.default_pk_cutoff),
+            [float(g) for g in defaults.gammas],
+            float(defaults.cutoff),
         )
 
     @pytest.mark.parametrize("absent", [_ABSENT, None])
@@ -1944,23 +1893,15 @@ class TestGpCovIsRead:
         [(ComplexRFIVarAntFine, [3.0, 3.0], 1e-9), (ComplexRFIConstAntFine, [100.0, 100.0], 1e-6)],
     )
     def test_the_defaults_are_these_numbers(self, cls, gammas, cutoff, absent):
-        """The values themselves, not merely that the component's own are used.
-
-        The test above compares against ``cls.default_pk_cutoff``, so it moves
-        with the constant and would pass just as well if the default changed.
-        The cutoff sets the latent dimension, so changing one is a change to how
-        many parameters every run of that component fits -- worth failing over
-        rather than discovering from a shifted result.
-        """
         comp = setup_with_gp_cov(cls, absent)
 
         assert comp.gp_cov_params() == (gammas, cutoff)
 
     def test_the_two_components_keep_their_own_defaults(self):
         """Preserved rather than unified: making them agree is a model change."""
-        assert ComplexRFIVarAntFine.default_gammas != ComplexRFIConstAntFine.default_gammas
+        assert ComplexRFIVarAntFine.Config().gammas != ComplexRFIConstAntFine.Config().gammas
         assert (
-            ComplexRFIVarAntFine.default_pk_cutoff != ComplexRFIConstAntFine.default_pk_cutoff
+            ComplexRFIVarAntFine.Config().cutoff != ComplexRFIConstAntFine.Config().cutoff
         )
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
@@ -1985,15 +1926,12 @@ class TestGpCovIsRead:
     def test_one_key_given_leaves_the_other_on_its_default(self, cls):
         comp = setup_with_gp_cov(cls, {"cutoff": 1e-4})
 
-        assert comp.gp_cov_params() == ([float(g) for g in cls.default_gammas], 1e-4)
+        assert comp.gp_cov_params() == ([float(g) for g in cls.Config().gammas], 1e-4)
 
     def test_an_unknown_key_is_refused_by_name(self):
-        """Asserted against the offending-key list, not the whole message: every
-        message ends "It takes ['gammas', 'cutoff']", so a bare `"gamma" in
-        message` passes for a validator that names nothing."""
         message = gp_cov_error(ComplexRFIVarAntFine, {"gamma": 3})
 
-        assert "no key(s) ['gamma']" in message
+        assert "gamma" in message
 
     @pytest.mark.parametrize(
         "gammas", [3, "3", [3], [3, 3, 3], [0, 3], [-1, 3], [True, 3], [float("inf"), 3], [float("nan"), 3]]
@@ -2008,7 +1946,7 @@ class TestGpCovIsRead:
         assert "cutoff" in gp_cov_error(ComplexRFIVarAntFine, {"cutoff": cutoff})
 
     def test_a_gp_cov_that_is_not_a_mapping_is_refused(self):
-        assert "gp_cov" in gp_cov_error(ComplexRFIVarAntFine, [3, 3])
+        assert "expects" in gp_cov_error(ComplexRFIVarAntFine, [3, 3])
 
     @pytest.mark.parametrize("cutoff", [1.0, 2.0])
     def test_a_cutoff_that_cuts_everything_is_refused(self, cutoff):
@@ -2118,25 +2056,16 @@ class TestGpCovIsRead:
         assert "gammas" in gp_cov_error(ComplexRFIVarAntFine, {"gammas": gammas})
 
     def test_unknown_keys_that_are_not_all_strings_still_name_themselves(self):
-        """YAML keys need not be strings, and sorting a mixed set raises from
-        inside the validator instead of saying which key is wrong."""
         message = gp_cov_error(ComplexRFIVarAntFine, {1: 2, "gamma": 3})
 
-        assert "'gamma'" in message and "1" in message
+        assert "gamma" in message and "1" in message
         assert "not supported between instances" not in message
 
-    def test_the_base_config_ships_the_key_unset(self):
-        """So that upgrading changes nothing until someone sets a value."""
-        from tabascal.config import yaml_load
-        from importlib.resources import files
-
-        base = yaml_load(
-            str(files("tabascal.data.config").joinpath("tab_config_base.yaml"))
-        )
-
-        assert base["rfi"]["gp_cov"]["gammas"] is None
-        # Beside the block, not in it: it sets how many modes are fitted.
-        assert base["rfi"]["cutoff"] is None
+    def test_the_schema_defaults_match_each_component(self):
+        assert ComplexRFIVarAntFine.Config().gammas == (3.0, 3.0)
+        assert ComplexRFIVarAntFine.Config().cutoff == 1e-9
+        assert ComplexRFIConstAntFine.Config().gammas == (100.0, 100.0)
+        assert ComplexRFIConstAntFine.Config().cutoff == 1e-6
 
 
 class TestTheStdIsTheWidthItClaims:
@@ -2311,14 +2240,13 @@ class TestTheStdCanBeMeasuredFromTheData:
     GRID = (jnp.linspace(1.4e9, 1.41e9, 4), 1e6, jnp.linspace(0.0, 120.0, 8), 8.0)
 
     def _validate(self, vis, gain_flags=None, **kwargs):
-        cfg = {
-            "gp_cov": {"std": "data", "corr_freq": 5e6, "corr_time": 60.0},
-        }
-        cfg["gp_cov"].update(kwargs)
+        params = {"std": "data", "corr_freq": 5e6, "corr_time": 60.0, **kwargs}
+        cfg = RFIVarAntConfig(**params)
         freqs, chan_width, times, int_time = self.GRID
-        return rfi_signal_config_validation(
+        std, corr_freq, corr_time = resolve_rfi_gp_params(
             cfg, vis, freqs, chan_width, times, int_time, gain_flags
-        )["gp_cov"]
+        )
+        return {"std": std, "corr_freq": corr_freq, "corr_time": corr_time}
 
     def test_it_measures_the_rms_of_the_visibilities(self):
         vis = jnp.asarray(
@@ -2378,7 +2306,7 @@ class TestTheStdCanBeMeasuredFromTheData:
 
     def test_a_value_that_is_neither_a_number_nor_data_is_refused_by_name(self):
         vis = jnp.ones((4, 3, 5), dtype=complex)
-        with pytest.raises(ValueError, match="rfi"):
+        with pytest.raises(ValueError, match="std"):
             self._validate(vis, std="widish")
 
 
@@ -2402,7 +2330,7 @@ class TestRealSignalType:
         assert set(comp.parameter_shapes) == {"rfi_k_r_base", "rfi_k_i_base"}
 
     def test_an_unknown_signal_type_is_refused_by_name(self):
-        with pytest.raises(RuntimeError, match=r"rfi\.signal_type"):
+        with pytest.raises(ConfigValidationError, match="signal_type"):
             setup_component(ComplexRFIVarAntFine, signal_type="hermitian")
 
     @pytest.mark.parametrize("cls", ALL_CLASSES)

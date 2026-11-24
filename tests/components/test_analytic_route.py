@@ -21,6 +21,7 @@ from tabascal.components.rfi_vis import AnalyticVis, RiemannVisFine
 from tabascal.components.trajectory import FixedOrbit, FixedOrbitFine
 from tabascal.interferometry import calculate_rfi_vis_blocked
 from tabascal.poly_interp import fine_offsets, interp_tables, monomial_tables
+from tabascal.schema import ConfigValidationError, validate_config
 from tabascal.write import rfi_vis_per_sat
 from ri_kernels.jax_api import RFIAnalyticVisOp
 
@@ -67,7 +68,7 @@ def make_config(
     a1, a2 = np.triu_indices(n_ant, 1)
 
     cfg = SimpleNamespace(**{**vars(sig), **vars(traj)})
-    cfg.args = sig.args  # not the trajectory stub's empty rfi section
+    cfg.config = sig.config
     # float64 whatever the session precision, as TabConfig keeps them.
     cfg.times, cfg.freqs = times, freqs
     cfg.times_fine = (times[:, None] + fine_offsets(n_int_time, int_time)).ravel()
@@ -78,16 +79,32 @@ def make_config(
     cfg.a1, cfg.a2, cfg.n_bl = a1.astype("int32"), a2.astype("int32"), len(a1)
     cfg.rfi_mask = rfi_mask
     cfg.rfi_mask_fine = None if rfi_mask is None else np.repeat(rfi_mask, n_int_time, axis=-1)
-    cfg.args["rfi"].update({
-        "baseline_block_size": None, "path_order": 3, "path_nodes": None,
-        "analytic": dict(ANALYTIC), **(rfi_args or {}),
-    })
+    rfi_extra = dict(rfi_args or {})
+    cfg._traj_kwargs = {
+        "path_order": rfi_extra.pop("path_order", 3),
+        "path_nodes": rfi_extra.pop("path_nodes", None),
+    }
+    cfg._analytic_kwargs = {**ANALYTIC, **rfi_extra.pop("analytic", {})}
+    cfg._riemann_kwargs = {"baseline_block_size": rfi_extra.pop("baseline_block_size", None)}
+    cfg._sig_kwargs = {**sig._rfi_comp_kwargs, **rfi_extra}
     return cfg
+
+
+def _build_comp(cls, cfg):
+    if cls is FixedOrbit:
+        return cls(cfg._traj_kwargs)
+    if issubclass(cls, BaseGPRFI):
+        return cls(cfg._sig_kwargs)
+    if cls is AnalyticVis:
+        return cls(cfg._analytic_kwargs)
+    if cls is RiemannVisFine:
+        return cls(cfg._riemann_kwargs)
+    return cls()
 
 
 def run_route(components, cfg):
     """Set ``components`` up on ``cfg``; return their chained forward and the signal's init."""
-    comps = [cls() for cls in components]
+    comps = [_build_comp(cls, cfg) for cls in components]
     for comp in comps:
         comp.setup(cfg)
     constants = {k: v for comp in comps for k, v in make_constants(comp).items()}
@@ -104,7 +121,7 @@ def run_route(components, cfg):
 
 
 def trajectory_state(cls, cfg):
-    comp = cls()
+    comp = _build_comp(cls, cfg)
     comp.setup(cfg)
     return comp.build_forward()({}, {}, make_constants(comp))
 
@@ -144,11 +161,13 @@ def op_case(n_int_freq=3, stencil=1, **options):
 
     Across a cell the delay winds up to 1.5 turns linearly, 0.2 quadratically, 0.05 cubically.
     """
+    analytic_opts = {**ANALYTIC, "stencil": stencil, "n_int_freq": n_int_freq, **options}
     cfg = SimpleNamespace(
         n_ant=6, n_freq=3, n_time=5, n_int_freq=n_int_freq, int_time=2.0, chan_width=1e6,
         freqs=1.4e9 + 1e6 * np.arange(3.0),
         a1=np.array([2, 0, 4, 1], np.int32), a2=np.array([4, 2, 2, 1], np.int32),
-        args={"rfi": {"analytic": {**ANALYTIC, "stencil": stencil, **options}}, "data": {}},
+        _analytic_kwargs=analytic_opts,
+        config=validate_config({"model": {"components": []}}),
     )
     cfg.n_bl = len(cfg.a1)
     rng = np.random.default_rng(7)
@@ -168,7 +187,7 @@ def op_case(n_int_freq=3, stencil=1, **options):
 
 
 def analytic_call(cfg, state):
-    comp = AnalyticVis()
+    comp = AnalyticVis(cfg._analytic_kwargs)
     comp.setup(cfg)
     forward, constants = comp.build_forward(), make_constants(comp)
     return lambda amp, phase: forward({}, {**state, "rfi_A": amp, "rfi_phase": phase}, constants)["vis_rfi"]
@@ -176,7 +195,7 @@ def analytic_call(cfg, state):
 
 def op_vis(cfg, state, s):
     """Source ``s`` alone and unmasked through the op, with the full-axis tables."""
-    options = dict(cfg.args["rfi"]["analytic"])
+    options = {k: v for k, v in cfg._analytic_kwargs.items() if k in ANALYTIC}
     h, dtype = options.pop("stencil"), state["rfi_phase"].dtype
     dnu = fine_offsets(cfg.n_int_freq, cfg.chan_width)
     w_freq, start_freq = interp_tables(cfg.n_freq, h, dnu / cfg.chan_width)
@@ -208,7 +227,7 @@ class TestFixedOrbit:
         """The default 13 nodes give the delay a 41-node fit does, at 41 samples per cell."""
         cfg = make_config()
         default = trajectory_state(FixedOrbit, cfg)["rfi_delay_poly_us"]
-        cfg.args["rfi"]["path_nodes"] = 41
+        cfg._traj_kwargs["path_nodes"] = 41
         full = trajectory_state(FixedOrbit, cfg)["rfi_delay_poly_us"]
         dt = fine_offsets(41, cfg.int_time)
         basis = dt[:, None] ** np.arange(4) / np.array([factorial(k) for k in range(4)])
@@ -235,7 +254,7 @@ class TestFixedOrbit:
         a1, a2 = cfg.a1, cfg.a2
         errors = {}
         for order in (1, 3):
-            cfg.args["rfi"]["path_order"] = order
+            cfg._traj_kwargs["path_order"] = order
             state = trajectory_state(FixedOrbit, cfg)
             phase = np.asarray(fine_phase(state["rfi_phase"], state["rfi_delay_poly_us"], cfg, n_int_time))
             phase = phase.reshape(fine.shape)
@@ -249,8 +268,8 @@ class TestFixedOrbit:
         *[({"path_nodes": v}, "path_nodes") for v in (3, 0, 2.5, True, 6)],
     ])
     def test_a_bad_path_setting_is_refused(self, args, key):
-        with pytest.raises(RuntimeError, match=rf"rfi\.{key}"):
-            FixedOrbit().setup(make_config(rfi_args=args))
+        with pytest.raises(ConfigValidationError, match=key):
+            FixedOrbit(args)
 
 
 class TestDataGridSignal:
@@ -259,7 +278,7 @@ class TestDataGridSignal:
     @pytest.mark.parametrize("data_cls, fine_cls", SIGNALS)
     def test_is_the_fine_signal_at_each_cells_own_sample(self, data_cls, fine_cls, signal_type):
         cfg = make_config(n_int_time=5, n_int_freq=3, rfi_args={"signal_type": signal_type})
-        data, fine = data_cls(), fine_cls()
+        data, fine = data_cls(cfg._sig_kwargs), fine_cls(cfg._sig_kwargs)
         data.setup(cfg)
         fine.setup(cfg)
         assert data.signal_type == fine.signal_type == signal_type
@@ -276,9 +295,10 @@ class TestDataGridSignal:
     @pytest.mark.parametrize("data_cls", [ComplexRFIVarAnt, ComplexRFIConstAnt])
     def test_the_elevation_mask_leaves_the_signal_whole(self, data_cls):
         """AnalyticVis masks each source's visibility, so rfi_A is the unmasked signal."""
-        comps = [data_cls() for _ in range(2)]
-        for comp, mask in zip(comps, (None, np.arange(6) < 4)):
-            comp.setup(make_config(rfi_mask=None if mask is None else mask[None]))
+        cfgs = [make_config(rfi_mask=None if mask is None else mask[None]) for mask in (None, np.arange(6) < 4)]
+        comps = [data_cls(c._sig_kwargs) for c in cfgs]
+        for comp, cfg in zip(comps, cfgs):
+            comp.setup(cfg)
         params = comps[0].init_params_base
         A, A_masked = (c.build_forward()(params, {}, make_constants(c))["rfi_A"] for c in comps)
         assert bool(jnp.all(A != 0))
@@ -356,14 +376,14 @@ class TestAnalyticVis:
         own Riemann error (6e-3 at 31) below the signal interpolation's (9e-4)."""
         cfg = make_config(n_ant=5, n_int_time=101, n_int_freq=n_int_freq, corr_time=80.0)
         if gp is not None:
-            cfg.args["rfi"]["gp_cov"]["gammas"], cfg.args["rfi"]["cutoff"] = gp
+            cfg._sig_kwargs["gammas"], cfg._sig_kwargs["cutoff"] = gp
         fine, params = run_route([FixedOrbitFine, signals[0], RiemannVisFine], cfg)
         # A fixed latent, not a draw: every kept mode is set, so the signal varies within a cell.
         params = {k: jnp.cos(jnp.arange(v.size, dtype=v.dtype).reshape(v.shape) + i)
                   for i, (k, v) in enumerate(sorted(params.items()))}
         expected = fine(params)["vis_rfi"]
         err = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
-        cfg.args["rfi"]["analytic"]["stencil"] = 0
+        cfg._analytic_kwargs["stencil"] = 0
         err_held = rel_err(run_route([FixedOrbit, signals[1], AnalyticVis], cfg)[0](params)["vis_rfi"], expected)
         assert err < 1e-2 and err < err_held / 3, (err, err_held)
 
@@ -392,30 +412,36 @@ class TestAnalyticVis:
         ("terms", True), ("cubic_terms", 9), ("scratch_mb", 0), ("stencl", 1),
     ])
     def test_a_bad_analytic_option_is_refused(self, key, value):
-        cfg, _ = op_case(**{key: value})
-        with pytest.raises(RuntimeError, match=rf"rfi\.analytic\.{key}"):
-            AnalyticVis().setup(cfg)
+        with pytest.raises(ConfigValidationError, match=key):
+            AnalyticVis({**ANALYTIC, key: value})
 
     @pytest.mark.parametrize("backend, ok", [(None, True), ("ffi", True), ("jax", False)])
     def test_ffi_is_the_only_backend(self, backend, ok):
         cfg, _ = op_case()
-        cfg.args["rfi"]["backend"] = backend
         if ok:
-            AnalyticVis().setup(cfg)
+            AnalyticVis({**cfg._analytic_kwargs, "backend": backend}).setup(cfg)
         else:
-            with pytest.raises(RuntimeError, match="rfi.backend must be one of 'ffi'"):
-                AnalyticVis().setup(cfg)
+            with pytest.raises(ConfigValidationError, match="backend"):
+                AnalyticVis({**cfg._analytic_kwargs, "backend": backend})
 
     def test_a_repeated_baseline_is_refused(self):
         cfg, _ = op_case()
         vars(cfg).update({"a1": np.array([0, 0], np.int32), "a2": np.array([1, 1], np.int32), "n_bl": 2})
         with pytest.raises(RuntimeError, match=r"\(0, 1\)"):
-            AnalyticVis().setup(cfg)
+            AnalyticVis(cfg._analytic_kwargs).setup(cfg)
 
     def test_the_per_satellite_split_is_each_source_alone(self):
         cfg, state = op_case()
-        cfg.args["data"]["save_rfi_per_sat"] = True
-        cfg.args["model"] = {"components": ["rfi_vis:AnalyticVis"]}
+        cfg.config = validate_config({
+            "data": {"save_rfi_per_sat": True},
+            "model": {
+                "components": [
+                    {"trajectory.FixedOrbit": {"norad_ids": [101, 102]}},
+                    "rfi_signal.ComplexRFIVarAnt",
+                    {"rfi_vis.AnalyticVis": cfg._analytic_kwargs},
+                ]
+            },
+        })
         cfg.n_rfi = cfg.n_rfi_real = 2
         cfg.norad_ids = [101, 102]
         total = analytic_call(cfg, {**state, "vis_rfi": jnp.zeros_like(state["vis_rfi"])})(
@@ -434,15 +460,15 @@ class TestAnalyticVis:
 
 class TestComponentOrder:
 
-    @pytest.mark.parametrize("signal", ["rfi_signal:ComplexRFIVarAnt", "rfi_signal:ComplexRFIConstAnt"])
+    @pytest.mark.parametrize("signal", ["rfi_signal.ComplexRFIVarAnt", "rfi_signal.ComplexRFIConstAnt"])
     def test_the_data_grid_chain_assembles(self, signal):
-        check(["trajectory:FixedOrbit", signal, "rfi_vis:AnalyticVis", "ast_vis:GPVisAst", "gains:UnitaryGains"])
+        check(["trajectory.FixedOrbit", signal, "rfi_vis.AnalyticVis", "ast_vis.GPVisAst", "gains.UnitaryGains"])
 
     @pytest.mark.parametrize("refs, consumer, key", [
-        (["trajectory:FixedOrbit", "rfi_signal:ComplexRFIVarAnt", "rfi_vis:RiemannVisFine"], "rfi_vis:RiemannVisFine", "rfi_phase"),
-        (["trajectory:FixedOrbitFine", "rfi_signal:ComplexRFIConstAnt", "rfi_vis:RiemannVisFine"], "rfi_vis:RiemannVisFine", "rfi_A"),
-        (["trajectory:FixedOrbit", "rfi_signal:ComplexRFIVarAntFine", "rfi_vis:AnalyticVis"], "rfi_vis:AnalyticVis", "rfi_A"),
-        (["trajectory:FixedOrbit", "trajectory:PhaseCalculationRFIFine"], "trajectory:PhaseCalculationRFIFine", "rfi_xyz"),
+        (["trajectory.FixedOrbit", "rfi_signal.ComplexRFIVarAnt", "rfi_vis.RiemannVisFine"], "rfi_vis.RiemannVisFine", "rfi_phase"),
+        (["trajectory.FixedOrbitFine", "rfi_signal.ComplexRFIConstAnt", "rfi_vis.RiemannVisFine"], "rfi_vis.RiemannVisFine", "rfi_A"),
+        (["trajectory.FixedOrbit", "rfi_signal.ComplexRFIVarAntFine", "rfi_vis.AnalyticVis"], "rfi_vis.AnalyticVis", "rfi_A"),
+        (["trajectory.FixedOrbit", "trajectory.PhaseCalculationRFIFine"], "trajectory.PhaseCalculationRFIFine", "rfi_xyz"),
     ])
     def test_a_grid_mismatch_is_refused_at_assembly(self, refs, consumer, key):
         with pytest.raises(ComponentOrderError) as excinfo:
@@ -453,15 +479,13 @@ class TestComponentOrder:
 
     def test_a_missing_producer_is_offered_on_the_right_grid(self):
         with pytest.raises(ComponentOrderError) as excinfo:
-            check(["rfi_signal:ComplexRFIVarAnt", "rfi_vis:AnalyticVis"])
+            check(["rfi_signal.ComplexRFIVarAnt", "rfi_vis.AnalyticVis"])
         message = str(excinfo.value)
-        assert "'trajectory:FixedOrbit'" in message
+        assert "'trajectory.FixedOrbit'" in message
         assert "FixedOrbitFine" not in message and "PhaseCalculationRFIFine" not in message
         with pytest.raises(ComponentOrderError) as excinfo:
-            check(["trajectory:FixedOrbit", "rfi_vis:AnalyticVis", "rfi_signal:ComplexRFIVarAntFine"])
+            check(["trajectory.FixedOrbit", "rfi_vis.AnalyticVis", "rfi_signal.ComplexRFIVarAntFine"])
         message = str(excinfo.value)
-        # The producer that is there is named, with the grid it is on, not
-        # offered as missing or as merely out of order.
-        assert "'rfi_signal:ComplexRFIVarAntFine' (model.components[2]) writes it, but on the fine grid" in message
-        assert "'rfi_signal:ComplexRFIVarAnt'" in message
+        assert "'rfi_signal.ComplexRFIVarAntFine' (model.components[2]) writes it, but on the fine grid" in message
+        assert "'rfi_signal.ComplexRFIVarAnt'" in message
         assert "add one" not in message and "wrong order" not in message

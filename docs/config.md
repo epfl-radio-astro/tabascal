@@ -1,45 +1,52 @@
 # Configuration File
 
-TABASCAL makes use of a configuration file to fully define the model used, what satellites to include and what inference to do. The configuration file is in YAML format using only the most basic constructs and types. The configuration file is broken up into multiple sections. Each section will be described below.
+TABASCAL makes use of a configuration file to fully define the model used, what satellites to include and what inference to do. The configuration file is in YAML format using only the most basic constructs and types. It is strictly validated on load using Pydantic v2 schemas: unknown keys are rejected, and every component declares its own validated input schema.
 
-Your file is merged onto the base configuration that ships with TABASCAL, key by key, so only the keys you want to change have to appear in it — everything else takes the documented default. A section header written with nothing under it is therefore inert: `rfi:` alone, like `rfi: null`, leaves the whole `rfi` section at its defaults rather than emptying it. Setting an individual key to `null` is a different thing entirely — it is a value, and the sections below say what each one means (`rfi.min_elevation: null` disables the elevation mask, `data.noise: null` reads the noise from the measurement set). Which of the two you get follows the default the key has: an empty value is ignored only where the default is a section of further keys, so a key whose default is a single value or a list — `satellites.norad_ids:`, written with nothing after it — is `null` like any other. Leaving a section empty, or setting it to `null`, never removes its defaults.
+Top-level sections are limited to `model`, `data`, `plots`, `inference`, and `opt`. Any top-level section left omitted (or set to `null`) takes its schema defaults. Model-specific configuration — trajectories, RFI signal priors, RFI visibility kernels, astronomical sky models, and antenna gains — is fully compartmentalised inside `model.components`, directly under each component entry.
 
 ## Model
 
-The forward model used by TABASCAL is modular and configurable directly in the `model` section of the configuration file. An example of this section is shown below.
+The forward model used by TABASCAL is modular and configurable directly in the `model` section of the configuration file. Each entry in `model.components` is either a single-key mapping from `<module>.<Class>` to that component's options, or a bare `<module>.<Class>` string (or empty mapping) when all of the component's options take their defaults. An example is shown below.
 
 ```yaml
 model:
+  precision: double
   components:
     # RFI Phase
-    - trajectory:OrbitFine
-    - trajectory:PhaseCalculationRFIFine
+    - trajectory.OrbitFine:
+        norad_ids: [20452, 38833, 45854]
+    - trajectory.PhaseCalculationRFIFine
     # RFI Signal
-    - rfi_signal:ComplexRFIVarAntFine
-    # RFI Visibilty
-    - rfi_vis:RiemannVisFine
+    - rfi_signal.ComplexRFIVarAntFine:
+        corr_freq: 1e6
+        corr_time: 24
+    # RFI Visibility
+    - rfi_vis.RiemannVisFine:
+        n_int_freq: 1
+        time_int_factor: 1
     # Astronomical Visibility
-    - ast_vis:GPVisAst
+    - ast_vis.GPVisAst:
+        fov_deg: 5
     # Gains
-    - gains:UnitaryGains
+    - gains.UnitaryGains
 ```
 
-The components should be given in order of dependency. For example, `trajectory:OrbitFine` is specified before `trajectory:PhaseCalculationRFIFine` because the later depends on the output of the former. Each component is a class which defines the parameters (if any), their initialisation, their prior distribution, and its own forward model for the component. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the module name and then the class name. For example the component `trajectory:OrbitFine` is a class named {class}`~tabascal.components.trajectory.OrbitFine` that resides in the module file [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)
+The components should be given in order of dependency. For example, `trajectory.OrbitFine` is specified before `trajectory.PhaseCalculationRFIFine` because the latter depends on the output of the former. Each component is a class which defines its configuration schema (`Config`), parameters (if any), initialisation, prior distribution, and forward model. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the canonical `module.Class` syntax (for example `trajectory.OrbitFine` refers to {class}`~tabascal.components.trajectory.OrbitFine` in [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)); `module:Class` is also accepted.
 
 Every RFI component that works on the fine time-frequency grid carries a `Fine`
-suffix: `trajectory:` `FixedOrbitFine`, `PhaseCalculationRFIFine`,
-`NoDragOrbitFine`, `OrbitFine`; `rfi_signal:` `ComplexRFIVarAntFine`,
-`ComplexRFIConstAntFine`; `rfi_vis:` `RiemannVisFine`,
+suffix: `trajectory.` `FixedOrbitFine`, `PhaseCalculationRFIFine`,
+`NoDragOrbitFine`, `OrbitFine`; `rfi_signal.` `ComplexRFIVarAntFine`,
+`ComplexRFIConstAntFine`; `rfi_vis.` `RiemannVisFine`,
 `RiemannVisVariableFine`. The names without the
 suffix are no longer accepted, so a config or import written before the rename,
 including a saved run's YAML, needs the suffix added. Three of those names now
-belong to the data-grid route instead: `trajectory:FixedOrbit`,
-`rfi_signal:ComplexRFIVarAnt` and `rfi_signal:ComplexRFIConstAnt`, used with
-`rfi_vis:AnalyticVis` (see [Analytic RFI visibilities](analytic_rfi_vis.md)).
+belong to the data-grid route instead: `trajectory.FixedOrbit`,
+`rfi_signal.ComplexRFIVarAnt` and `rfi_signal.ComplexRFIConstAnt`, used with
+`rfi_vis.AnalyticVis` (see [Analytic RFI visibilities](analytic_rfi_vis.md)).
 An old config that lists them beside a `RiemannVis*` component is refused at
-assembly, naming the grids.
+validation time, naming the grids.
 
-That order is checked when the model is assembled, before anything is computed. Each component declares the state keys it reads and the keys it writes, and a list that leaves out a component — or holds the right ones in the wrong order — is rejected by name, saying which key is missing, what produces it, and whether that producer is absent or merely listed too late.
+That order is checked when the configuration is validated and when the model is assembled, before anything is computed. Each component declares the state keys it reads and the keys it writes, and a list that leaves out a component — or holds the right ones in the wrong order — is rejected by name, saying which key is missing, what produces it, and whether that producer is absent or merely listed too late.
 
 ### Precision
 
@@ -61,14 +68,14 @@ model:
 The following components run in **double precision only** and raise a clear
 error under `single`, so set `model.precision: double` to use them:
 
-* `trajectory:PhaseCalculationRFIFine`
-* `trajectory:NoDragOrbitFine`
-* `trajectory:OrbitFine`
+* `trajectory.PhaseCalculationRFIFine`
+* `trajectory.NoDragOrbitFine`
+* `trajectory.OrbitFine`
 
-Both `rfi.backend` implementations of `rfi_vis:RiemannVisFine` (`jax` and the
+Both `backend` implementations of `rfi_vis.RiemannVisFine` (`jax` and the
 compiled `ffi`, see [RFI-visibility kernels](kernels.md)) run in either precision, as do the
-astronomical Gaussian process `ast_vis:GPVisAst` and both gain components,
-`gains:ConstGains` and `gains:UnitaryGains`.
+astronomical Gaussian process `ast_vis.GPVisAst` and both gain components,
+`gains.ConstGains` and `gains.UnitaryGains`.
 
 ## Data
 
@@ -88,7 +95,7 @@ data:
 ```
 
 * `out_dir`: Where the run writes: each run creates its own directory under `<out_dir>/runs/`, holding its `config.yaml`, `run.json`, log, `plots/` and `results/` — see [Output](output.md). Also available as the `-od` flag, which takes precedence. Defaults to the directory `ms_path` names, so a run on real data needs neither — products land beside the visibilities. Given *without* an `ms_path` it is read as a tab-sim simulation directory, and the MS and truth zarr are looked for inside it at `<out_dir>/<out_dir name>.ms` and `.zarr`, which is the layout `sim-vis` writes. Naming neither an MS nor a directory is the one combination that cannot be resolved. Note that `-od` moves the outputs but *not* the MS when `ms_path` names one; `-ms` is how a run is moved onto other visibilities. (Renamed from `sim_dir`, which meant the inputs and the outputs at once — see [#207](https://github.com/epfl-radio-astro/tabascal/issues/207).)
-* `truth_zarr`: The tab-sim simulation truth, read by `ast.init: truth`, `rfi.init: truth` and `plots.truth`. Defaults to `<MS directory>/<MS name>.zarr` — beside the visibilities, which is where `sim-vis` writes the two together — so a simulation needs it only when its truth has been moved away from its MS. A real observation has none: with any of those three options set, a missing truth stops the run before it fits, naming which option asked for it; with none of them set it is a printed "No tab-sim truth available" and the run proceeds.
+* `truth_zarr`: The tab-sim simulation truth, read when an astronomical or RFI signal component sets `init: truth` or when `plots.truth` is enabled. Defaults to `<MS directory>/<MS name>.zarr` — beside the visibilities, which is where `sim-vis` writes the two together — so a simulation needs it only when its truth has been moved away from its MS. A real observation has none: with any of those three options set, a missing truth stops the run before it fits, naming which option asked for it; with none of them set it is a printed "No tab-sim truth available" and the run proceeds.
 * `ms_path`: Path to the Measurement Set (MS) to run on. This can also be given at runtime of `tabascal` with the `-ms` flag, which takes precedence over the config. Leave both unset and the MS is looked for at `<out_dir>/<out_dir name>.ms`, the layout `sim-vis` writes — so a simulation can name the directory instead. Real data wants this key, since an MS taken from a telescope has no relationship to the name of the directory it happens to sit in.
 * `data_col`: The data column within the MS file to use as the observed data. Default is `DATA` but can be any column that exists in the MS file except those the run's exports write: `CORRECTED_DATA`, the `TAB_*` result columns, and, with `save_rfi_per_sat: true`, the per-satellite `TAB_RFI_<NORAD>` columns. Such a run is refused before it starts — see [Output](output.md).
 * `corr`: This is the correlation product to run on, default `xx`. It is matched against the MS's `POLARIZATION::CORR_TYPE` **by identity, not by position**, so it names the correlation you want rather than an axis index: `yy` selects YY whether the MS holds all four correlations or only that one. Linear (`xx`, `xy`, `yx`, `yy`), circular (`rr`, `rl`, `lr`, `ll`) and Stokes (`i`, `q`, `u`, `v`) names are accepted. Requesting a correlation the MS does not hold is an error naming what it does hold.
@@ -131,7 +138,7 @@ data:
   sigma_cal = SIGMA / |g_p conj(g_q)|
   ```
 
-  so everything downstream — priors, the RFI and astronomical models, chi², and the results written back to the MS — lives in one frame, the calibrated one, and the gains are applied once instead of on every forward pass. Carrying the noise with the data is the point of using a table rather than scaling the data by hand: get it wrong and chi² is off by `|g|²`. Scale `ast.gp_cov.std` by k alongside it if you are setting a width by hand rather than measuring it.
+  so everything downstream — priors, the RFI and astronomical models, chi², and the results written back to the MS — lives in one frame, the calibrated one, and the gains are applied once instead of on every forward pass. Carrying the noise with the data is the point of using a table rather than scaling the data by hand: get it wrong and chi² is off by `|g|²`. Scale `ast_vis.GPVisAst`'s `std` by k alongside it if you are setting a width by hand rather than measuring it.
 
   The division happens in memory, so `data_col` on disk is untouched and still raw. The results writer therefore removes the same layer again when it writes the `TAB_*` columns and the weights; the run hands it this list automatically, and `tab2MS` reads it from the run's record, with `-gt` naming tables that have moved since — see [Output](output.md).
 
@@ -184,7 +191,7 @@ inference:
 ```
 
 * `opt`: Optimisation will be done to find the maximum a posteriori (MAP) point. It is the only inference this section offers.
-* `seed`: The one random seed of the run. **`null` means "unset"; `0` means zero**: `null` or absent takes the default, 1, and any integer, 0 included, is the seed it says. Anything else — `true`, `1.5`, `"7"` — is an error naming `inference.seed`. The run key is `PRNGKey(seed)`, and each component that draws folds its own fixed tag into it: `ast.init: sample` draws under `ast` and `rfi.init: sample` under `rfi`, so adding or removing a component never shifts another's draw. A sampled start is therefore not the one earlier versions drew, even with the seed unset: `ast.init: sample` used to draw from `PRNGKey(1)` and `rfi.init: sample` from `PRNGKey(rfi.r_seed)`, 123 in the base config (GitHub #256). With neither init set to `sample` the fit makes no random draw and the seed changes nothing; prior plots (`plots.prior`) still draw from it, but they never touch the fit. The run header says which of these apply.
+* `seed`: The one random seed of the run. **`null` means "unset"; `0` means zero**: `null` or absent takes the default, 1, and any integer, 0 included, is the seed it says. Anything else — `true`, `1.5`, `"7"` — is an error naming `inference.seed`. The run key is `PRNGKey(seed)`, and each component that draws folds its own fixed tag into it: `ast_vis.GPVisAst` with `init: sample` draws under `ast` and `rfi_signal.*` with `init: sample` under `rfi`, so adding or removing a component never shifts another's draw. A sampled start is therefore not the one earlier versions drew, even with the seed unset: astronomical sampling used to draw from `PRNGKey(1)` and RFI sampling from a separate seed `123` (GitHub #256). With neither init set to `sample` the fit makes no random draw and the seed changes nothing; prior plots (`plots.prior`) still draw from it, but they never touch the fit. The run header says which of these apply.
 
 ## Optimisation
 
@@ -259,7 +266,7 @@ A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: i
 
 ### Start jitter
 
-A config whose inits are all deterministic (`rfi.init: matched-filter`, `ast.init: prior`, `gains.init: prior`) makes no random draw: its start does not depend on `inference.seed` (reruns differ at most by the backend's round-off, see #273), so they cannot show how far apart two fits of the same data land. `init_jitter` adds a draw to the start, so an ensemble over `inference.seed` can.
+A config whose inits are all deterministic (e.g. `init: matched-filter` on `rfi_signal`, `init: prior` on `ast_vis.GPVisAst`, `init: prior` on `gains.ConstGains`) makes no random draw: its start does not depend on `inference.seed` (reruns differ at most by the backend's round-off, see #273), so they cannot show how far apart two fits of the same data land. `init_jitter` adds a draw to the start, so an ensemble over `inference.seed` can.
 
 ```yaml
 opt:
@@ -275,7 +282,7 @@ Each parameter draws from `inference.seed` under the tag `init_jitter` folded wi
 
 ### Optimiser trace
 
-Two models cannot be compared on their loss curves. The loss is a negative log *joint*, so its prior term scales with the latent dimension of whichever parameterisation is running — `gains:UnitaryGains`, which fits no gain at all, and `gains:ConstGains`, which fits $2 n_\text{ant} - 2$ parameters, do not put their losses on a common scale. And loss *per iteration* hides the cost of an iteration, so a model that converges in fewer but more expensive steps looks better than it is.
+Two models cannot be compared on their loss curves. The loss is a negative log *joint*, so its prior term scales with the latent dimension of whichever parameterisation is running — `gains.UnitaryGains`, which fits no gain at all, and `gains.ConstGains`, which fits $2 n_\text{ant} - 2$ parameters, do not put their losses on a common scale. And loss *per iteration* hides the cost of an iteration, so a model that converges in fewer but more expensive steps looks better than it is.
 
 Every run records, once per optimiser iteration, its loss and the wall-clock time the iteration finished, in `trace.npz` in the run's `results` directory. That costs nothing measurable: the optimiser reads every loss back from the device anyway, and the time is one clock read after it.
 
@@ -297,29 +304,30 @@ The `nrmse` keys need a truth to score against, so they appear only on a dataset
 
 ## Astronomical Signal
 
-The `ast` section defines the prior distrbution, intialisation and forward model parameters for the astronomical signal. An example is given below.
+The astronomical visibility Gaussian process is configured directly under `ast_vis.GPVisAst` inside `model.components`. An example is shown below.
 
 ```yaml
-ast:
-  init: prior
-  mean: 0
-  freq_pad_factor: 2.0
-  time_pad_factor: 2.0
-  transform: dft
-  baseline_block_size: auto
-  cutoff: 1e-6
-  gp_cov:
-    std: data
-    corr_freq: null
-    fov_deg: 5
-    gammas: [5, 5]
+model:
+  components:
+    - ast_vis.GPVisAst:
+        init: prior
+        mean: 0
+        freq_pad_factor: 2.0
+        time_pad_factor: 2.0
+        transform: dft
+        baseline_block_size: auto
+        cutoff: 1e-6
+        std: data
+        corr_freq: null
+        fov_deg: 5
+        gammas: [5, 5]
 ```
 
 * `init`: Where the parameters start. `sample`, the default, draws one realisation of the prior's *shape* — note that it is narrower than the prior itself by a factor of √2, which [#217](https://github.com/epfl-radio-astro/tabascal/issues/217) tracks; `prior` starts at the prior mean, i.e. at whatever `mean` is set to; `data` starts at the observed visibilities themselves, RFI and all, attributed to the sky; `zeros` starts at an identically zero sky; and `truth` starts at the simulated astronomical visibilities. `zeros` and `prior` are the same starting point at the default `mean: 0`, and part company once the prior mean is the data. `truth` reads the tab-sim `.zarr` beside the measurement set, so it is only possible on a dataset simulated with `sim-vis` — as is `plots.truth`, which reads the same truth; a config asking for either without a readable zarr stops before the run starts rather than deep inside component setup.
 * `mean`: The mean of the prior distribution: `0` (equivalently `zeros`), the default, or `data`, the observed visibilities.
 * `freq_pad_factor`: This defines the size of the padding used when modelling the signal in the Fourier domain. The signal is modelled in the Fourier domain where periodicity is assumed on some interval. If `freq_pad_factor: 1.0` is given then the interval is the interval of the data itself and will lead to periodic solutions.
 * `time_pad_factor`: This defines the padding used in the time axis of the signal. It is the time axis equivalent to `freq_pad_factor`. It also sets how slow a variation the sky model can follow: the padded axis's modes are spaced `1 / (n_time_pad * int_time)`, and a baseline whose maximum fringe rate is below the first of them has every mode but the zero one suppressed by its prior, so its sky is fitted as all but constant in time. The shortest baselines fringe slowest, so they set what is needed. `auto` pads until the first mode reaches the slowest baseline's fringe rate, and no less than `2.0`, which keeps the ends of the observation clear of the periodic wrap-around when every baseline is fast enough to need nothing; the factor it came to is written back to the run's config. With a number, the run prints the slowest and fastest fringe rates and the factor `auto` would choose. The time modes that survive `cutoff` grow in proportion to the padding, and under `transform: fft` so does the padded grid; the default `transform: dft` never forms the grid, so a large factor costs it only the extra modes.
-* `transform`: How the latent modes become visibilities. `dft`, the default, applies one small matrix per axis, sized by the modes that survive `cutoff`: the pad, the inverse transform and the crop are one linear, separable map, so the padded Fourier grid is never formed and the largest array is the visibilities themselves. `fft` pads the modes up to the padded grid, inverse-transforms it and crops the padding away. The two agree to round-off in value and in gradient. They differ in cost: the matrices cost the surviving modes times the data length on each axis, where the FFT pays for the whole padded grid. The sky is smooth in frequency, so with `gp_cov.corr_freq` set to a bandwidth near the observed one only a few delay modes survive and `dft` is the faster at every band width, as well as the lighter.
+* `transform`: How the latent modes become visibilities. `dft`, the default, applies one small matrix per axis, sized by the modes that survive `cutoff`: the pad, the inverse transform and the crop are one linear, separable map, so the padded Fourier grid is never formed and the largest array is the visibilities themselves. `fft` pads the modes up to the padded grid, inverse-transforms it and crops the padding away. The two agree to round-off in value and in gradient. They differ in cost: the matrices cost the surviving modes times the data length on each axis, where the FFT pays for the whole padded grid. The sky is smooth in frequency, so with `corr_freq` set to a bandwidth near the observed one only a few delay modes survive and `dft` is the faster at every band width, as well as the lighter.
 
     `corr_freq: null` is the exception. No roll-off keeps every delay mode, the frequency matrix becomes square in the channel count, and on a wide band `fft` is the faster. Set `corr_freq` on any wide band, which [its entry](#astronomical-signal) asks for anyway.
 
@@ -328,12 +336,11 @@ ast:
     Under `transform: fft`, doing every baseline at once holds an `(n_bl, n_freq_pad, n_time_pad)` array several times over — most of it discarded by the crop. Each padded axis is `n + 2 * floor(n * (pad_factor - 1) / 2)`, so at the default factor of `2.0` it is about twice the data axis. The scan replaces `n_bl` in that shape with the block, and `auto` sizes the block so that one step's padded grid stays inside a fixed budget. Under `transform: dft` the only transient is the intermediate of two matrix products, so `auto` is a single step over every baseline -- the scan has nothing large left to bound, and its stack of per-step outputs is a cost of its own.
 
   Under `fft`, `auto` exists because a block that does not bind costs scan steps for nothing. On a narrow band a fixed block splits the baselines into many steps with no memory saved; sized from the grid, such an observation runs in one step, and a wide band still blocks.
-* `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and a mode is kept when its value is above `cutoff` times the largest **on each axis**, reducing the number of parameters to fit. It does not change the *width* of the prior: the normalisation to `std` happens after the cut, so changing it changes how many modes are fitted, and with them the correlation structure the prior can express, but not how much sky flux it expects. That is why it sits out here with `freq_pad_factor` and `baseline_block_size` — the other knobs on the size of the problem — rather than inside `gp_cov`, which is about its statistics. It must be a positive number **below 1**, since it is relative to the largest mode on each axis and at 1 every mode is cut. `null` is `1e-6`.
-* `gp_cov`: The prior covariance of the astronomical visibilities: a width, the correlation scales that set the knee, and the roll-off past it. It is diagonal in the Fourier domain, which is how it is applied, and its diagonal is a power spectral density — but what you are setting here is the covariance of a Gaussian process, not the power spectrum an observation is trying to measure.
+* `cutoff`: This is the relative cutoff for Fourier components. The power spectrum is calculated and a mode is kept when its value is above `cutoff` times the largest **on each axis**, reducing the number of parameters to fit. It does not change the *width* of the prior: the normalisation to `std` happens after the cut, so changing it changes how many modes are fitted, and with them the correlation structure the prior can express, but not how much sky flux it expects. It must be a positive number **below 1**, since it is relative to the largest mode on each axis and at 1 every mode is cut. `null` defaults to `1e-6`.
 
-  [`rfi.gp_cov`](#rfi-signal) takes the same keys at the same level, and the same validator checks both: each of `std`, `corr_freq`, `corr_time` and `fov_deg` must be a finite positive number, and `gammas` an ordered pair of them — one for the frequency axis and one for the time axis, in that order. A key the section does not read is refused by name rather than ignored, so a `gamma` written for `gammas` is caught rather than silently doing nothing.
+The prior covariance parameters (`std`, `corr_freq`, `fov_deg`, `gammas`) sit flat on `ast_vis.GPVisAst` (just as `std`, `corr_freq`, `corr_time`, and `gammas` sit flat on [`rfi_signal.*`](#rfi-signal)). Unknown keys are rejected by name rather than ignored, so a `gamma` written for `gammas` is caught immediately on load.
 
-  The two sections differ in exactly two ways, and both are stated rather than left to be inferred from where a key sits. This one takes its time scale as a **field of view**, because a sky source's coherence time is its fringe rate — a consequence of how far off axis it is, rather than a number to pick — where an emitter's is a property of the emitter and is given directly as `corr_time`. And the two read `corr_freq: null` differently: no roll-off at all here, half the observed band for the RFI. Both are defaults for a signal that is not there to be characterised, and they decline to commit in different ways: the astronomical null names no delay scale at all, while the RFI null names half the observed band.
+The astronomical and RFI GP priors differ in two ways: `GPVisAst` takes its time scale as a **field of view** (`fov_deg`), because a sky source's coherence time is its fringe rate, where an emitter's is a property of the emitter and is given directly as `corr_time`; and `corr_freq: null` means no roll-off at all on `GPVisAst`, versus half the observed band on `rfi_signal.*`.
 
 The parameters of the covariance are defined as
 
@@ -351,8 +358,8 @@ The parameters of the covariance are defined as
 
   It is a deliberately weak, generic prior rather than a model of the sky: a real sky puts more correlated flux on short baselines than on long ones, which resolve it out, so giving every baseline the width you read off the shortest ones is permissive on the longest. That permissiveness is what lets an astronomical model absorb RFI, so it is worth knowing about; [#219](https://github.com/epfl-radio-astro/tabascal/issues/219) tracks giving the width a baseline-length envelope. The alternative — letting the width fall out of each baseline's fringe-rate knee — is not better: that varies with temporal bandwidth, which is not sky amplitude either.
 
-  [`rfi.gp_cov.std`](#rfi-signal) means the same thing — the typical `rms|V|` in Jy — so one measurement sets either prior. What differs is internal: `vis_ast` is the modelled quantity, while `rfi_A` is a per-antenna amplitude the visibility is quadratic in, so the RFI prior takes a square root that this one does not. In both sections the number you read off the data is the number you write down.
-* `corr_freq`: The bandwidth, in Hz, over which the astronomical signal stays correlated. It sets the knee along the frequency axis, and that axis is a **delay**: the modes there are `fftfreq(n_freq, chan_width)`, in inverse Hz, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `rfi.gp_cov.corr_freq` makes. `null`, the default, is no roll-off along that axis at all: every delay mode is kept and none is preferred.
+  [`rfi_signal.*`'s `std`](#rfi-signal) means the same thing — the typical `rms|V|` in Jy — so one measurement sets either prior. What differs is internal: `vis_ast` is the modelled quantity, while `rfi_A` is a per-antenna amplitude the visibility is quadratic in, so the RFI prior takes a square root that this one does not. In both components the number you read off the data is the number you write down.
+* `corr_freq`: The bandwidth, in Hz, over which the astronomical signal stays correlated. It sets the knee along the frequency axis, and that axis is a **delay**: the modes there are `fftfreq(n_freq, chan_width)`, in inverse Hz, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `rfi_signal.*`'s `corr_freq` makes. `null`, the default, is no roll-off along that axis at all: every delay mode is kept and none is preferred.
 
   It has **no effect on a single-channel observation**, where the only delay mode is zero, which is why every shipped config leaves it unset. On a wide band it is worth setting: the sky is smooth in frequency, so its power belongs at low delay, and the value to give is a bandwidth comparable to the one observed rather than a narrow one. A useful sanity check: the delay axis only runs out to `1 / (2 * chan_width)` — 2.4 µs for 209 kHz channels, whatever the channel count — and the knee sits at `k0 = 1 / (2 * pi * corr_freq)`. Comparing the two says how much of the axis the roll-off touches. At `corr_freq = chan_width / pi` (67 kHz for those channels) the knee lands exactly on the far end, where the outermost mode is still suppressed to 0.32 of the peak: that is where the roll-off bites hardest across the band, not where it stops mattering. It takes about ten times smaller — under 7 kHz — before the outermost mode is within 3 % of the peak and the axis is effectively flat. A correlation bandwidth of one observed band puts the knee at `1 / (pi * n_freq)` of the axis, keeping the lowest delays and cutting the rest, which is what a sky smooth in frequency should look like.
 
@@ -361,29 +368,29 @@ The parameters of the covariance are defined as
 
 ### A fixed sky of discrete sources
 
-The GP sky above is flexible: it has per-baseline freedom, so a free per-antenna gain can be absorbed into it and is a flat direction of the likelihood. A source with a *known* position, flux and shape is rigid, and so anchors the gain. That sky is configured with `ast.point_sources` and needs two components, {class}`~tabascal.components.ast_signal.FixedDiscreteSky` to read the catalogue and {class}`~tabascal.components.ast_vis.DiscreteSkyVis` to turn it into visibilities:
+The GP sky above is flexible: it has per-baseline freedom, so a free per-antenna gain can be absorbed into it and is a flat direction of the likelihood. A source with a *known* position, flux and shape is rigid, and so anchors the gain. That sky needs two components: {class}`~tabascal.components.ast_signal.FixedDiscreteSky` (which requires `point_sources`) to read the catalogue and {class}`~tabascal.components.ast_vis.DiscreteSkyVis` (`source_block_size`, `uvw_sign`) to turn it into visibilities:
 
 ```yaml
 model:
   components:
-    - ast_signal:FixedDiscreteSky   # must come before DiscreteSkyVis
-    - ast_vis:GPVisAst              # optional
-    - ast_vis:DiscreteSkyVis
-    - gains:UnitaryGains
-
-ast:
-  point_sources:
-    - {name: Fornax A, ra: 50.6738, dec: -37.2083, I: 750.0, ref_freq_mhz: 154.0, alpha: -0.77}
-  source_block_size: 128
+    - ast_signal.FixedDiscreteSky:   # must come before DiscreteSkyVis
+        point_sources:
+          - {name: Fornax A, ra: 50.6738, dec: -37.2083, I: 750.0, ref_freq_mhz: 154.0, alpha: -0.77}
+    - ast_vis.GPVisAst               # optional
+    - ast_vis.DiscreteSkyVis:
+        source_block_size: 128
+    - gains.UnitaryGains
 ```
 
-`FixedDiscreteSky` writes the sky into the model state and `DiscreteSkyVis` reads it, so **`FixedDiscreteSky` must be listed first**. `DiscreteSkyVis` *accumulates* into `vis_ast` rather than assigning it, so it composes with `ast_vis:GPVisAst` — with both listed, `vis_ast` is the GP plus the fixed sources, and since `vis_ast` is zeroed before the components run the two may be given in either order. Neither component has any free parameters.
+`FixedDiscreteSky` writes the sky into the model state and `DiscreteSkyVis` reads it, so **`FixedDiscreteSky` must be listed first**. `DiscreteSkyVis` *accumulates* into `vis_ast` rather than assigning it, so it composes with `ast_vis.GPVisAst` — with both listed, `vis_ast` is the GP plus the fixed sources, and since `vis_ast` is zeroed before the components run the two may be given in either order. Neither component has any free parameters.
 
 Sources are either the inline list above or a path to an OSKAR sky model file:
 
 ```yaml
-ast:
-  point_sources: /path/to/sky.osm
+model:
+  components:
+    - ast_signal.FixedDiscreteSky:
+        point_sources: /path/to/sky.osm
 ```
 
 The inline form requires `ra` and `dec` in degrees and `I` in Jy, and optionally takes `name`, `ref_freq_mhz`, `alpha`, `Q`, `U`, `V`, `rm`, `fwhm_major_arcsec`, `fwhm_minor_arcsec` and `position_angle_deg`. That list is exhaustive and case-sensitive: any other field is an error rather than being ignored, since a typo would otherwise change the source in silence — `fwhm_maj` for `fwhm_major_arcsec` would leave a Gaussian modelled as a point. An optional field may be given as `null` to mean "unset", but any other unreadable value (`alpha: ""`, `ref_freq_mhz: false`) is an error rather than a fallback to the default. The file form is the OSKAR sky model, which is what [Karabo](https://github.com/i4Ds/Karabo-Pipeline) emits: one source per line, fields separated by whitespace and/or commas, `#` starts a comment, and blank lines are skipped.
@@ -439,63 +446,59 @@ Note that the catalogue fluxes are in the same scale as the data the model is fi
 
 ## RFI signal
 
-The `rfi` section defines the prior distribution over the RFI signal. An example of this section is given below.
+The RFI signal prior is configured directly on the `rfi_signal.*` component (`ComplexRFIVarAnt`, `ComplexRFIVarAntFine`, `ComplexRFIConstAnt`, or `ComplexRFIConstAntFine`), while integration and kernel options sit on the `rfi_vis.*` component (`RiemannVisFine`, `RiemannVisVariableFine`, or `AnalyticVis`) and satellite orbits and elevation masking sit on the `trajectory.*` component.
 
 The prior is a Gaussian process in the Fourier domain rather than over a dense covariance matrix. That is a numerical requirement and not a preference: a Cholesky factorisation's jitter is absolute, so at the variance this prior carries it regularises far too weakly and returns NaN in single precision.
 
 ```yaml
-rfi:
-  init: sample
-  mean: 0
-  min_elevation: 0
-  freq_pad_factor: 2.0
-  time_pad_factor: 2.0
-  n_int_freq: 1
-  time_int_factor: 1
-  backend: null
-  baseline_block_size: 128
-  path_order: 3
-  path_nodes: null
-  analytic:
-    stencil: 1
-    segments: 2
-    terms: 6
-    cubic_terms: 3
-    scratch_mb: 256
-  cutoff: 1e-9
-  gp_cov:
-    std: null
-    corr_freq: 1e6
-    corr_time: 24
-    gammas: [3, 3]
+model:
+  components:
+    - trajectory.FixedOrbitFine:
+        norad_ids: [20452, 38833, 45854]
+        min_elevation: 0
+    - rfi_signal.ComplexRFIVarAntFine:
+        init: sample
+        mean: 0
+        freq_pad_factor: 2.0
+        time_pad_factor: 2.0
+        cutoff: 1e-9
+        std: null
+        corr_freq: 1e6
+        corr_time: 24
+        gammas: [3, 3]
+    - rfi_vis.RiemannVisFine:
+        n_int_freq: 1
+        time_int_factor: 1
+        backend: null
+        baseline_block_size: 128
 ```
 
-All parameters in this section that overlap with those of the `ast` section have the same definition, except that `init` and `mean` accept one more value:
+All parameters on `rfi_signal.*` that overlap with `ast_vis.GPVisAst` have the same definition, except that `init` and `mean` accept `est` and `matched-filter` (alias `mf`):
 
-* `gp_cov.std`: The width of the prior on the RFI signal, in Jy: the RFI's typical `rms|V|`. **The same quantity as [`ast.gp_cov.std`](#astronomical-signal)** — read an amplitude off the data and write it here, for either prior.
+* `std`: The width of the prior on the RFI signal, in Jy: the RFI's typical `rms|V|`. **The same quantity as [`ast_vis.GPVisAst`'s `std`](#astronomical-signal)** — read an amplitude off the data and write it here, for either prior.
 
-  The two get there by different arithmetic, and this is where what the number *means* differs. `vis_ast` *is* the modelled quantity, so the astronomical prior's width is the latent's width. `rfi_A` is a per-antenna amplitude and the visibility is quadratic in it ($V^\text{RFI}_{pq} = A_p A_q^*e^{i\Delta\phi}$), so the per-antenna width is $\sqrt{\texttt{std}}$ and carries units of $\sqrt{\text{Jy}}$. Both translations are internal: the number you write is `rms|V|` in Jy in both sections.
+  The two get there by different arithmetic, and this is where what the number *means* differs. `vis_ast` *is* the modelled quantity, so the astronomical prior's width is the latent's width. `rfi_A` is a per-antenna amplitude and the visibility is quadratic in it ($V^\text{RFI}_{pq} = A_p A_q^*e^{i\Delta\phi}$), so the per-antenna width is $\sqrt{\texttt{std}}$ and carries units of $\sqrt{\text{Jy}}$. Both translations are internal: the number you write is `rms|V|` in Jy in both components.
 
   The spectrum is normalised to `std` after the cut and after the roll-off, so — exactly as on the astronomical side — `gammas` and `cutoff` change which modes are fitted and how they correlate, not how much RFI the prior expects. (`sum(pk)` is `std / 2`; the factor is the complex latent, see `_LATENT_POWER`.)
 
-  **It is one source's width, and it is stated for `rfi_signal:ComplexRFIVarAnt` (and `ComplexRFIVarAntFine`).** The normalisation `sum(pk) = std / 2` is exact and survives the transform: `latent_to_signal` pads the coefficients, inverts with `norm="forward"` and crops, so each retained coefficient reaches every output point with unit magnitude and $E\lvert A\rvert^2 = 2\sum \texttt{pk} = \texttt{std}$. For independent antennas that gives $E\lvert V_{pq}\rvert^2 = \texttt{std}^2$. Padding and cropping change which modes exist and how they correlate, not the amplitude.
+  **It is one source's width, and it is stated for `rfi_signal.ComplexRFIVarAnt` (and `ComplexRFIVarAntFine`).** The normalisation `sum(pk) = std / 2` is exact and survives the transform: `latent_to_signal` pads the coefficients, inverts with `norm="forward"` and crops, so each retained coefficient reaches every output point with unit magnitude and $E\lvert A\rvert^2 = 2\sum \texttt{pk} = \texttt{std}$. For independent antennas that gives $E\lvert V_{pq}\rvert^2 = \texttt{std}^2$. Padding and cropping change which modes exist and how they correlate, not the amplitude.
 
   It is an *expectation*, so any one observation scatters around it — by more where the correlation structure leaves fewer independent samples in the grid, which is a property of the spectrum rather than of the normalisation.
 
   It is also the **instantaneous** visibility of a **zero-mean, unmasked** source: the width the prior is on, not a prediction of what a run will see. Three model steps sit in between, all of them deliberate:
 
   * A non-zero `mean` — `data`, `est`, `matched-filter` — adds its own power, $E\lvert V_{pq}\rvert^2 = (\texttt{std} + \lvert m_p\rvert^2)(\texttt{std} + \lvert m_q\rvert^2)$ for mean amplitudes $m$. Sources then carry non-zero mean visibilities as well, so their total no longer generally scales as $\sqrt{N}$.
-  * `min_elevation` zeroes a source while it is below the cut, so one visible for a fraction $f$ of the observation shows $\texttt{std}\sqrt{f}$ across the whole of it — and one that never rises, exactly zero.
+  * `min_elevation` (on the `trajectory.*` component) zeroes a source while it is below the cut, so one visible for a fraction $f$ of the observation shows $\texttt{std}\sqrt{f}$ across the whole of it — and one that never rises, exactly zero.
   * The visibility kernels average the fine grid, and fringes that turn within an integration cancel there.
 
   Two further factors sit between it and the RFI a run realises even at zero mean, and neither is corrected for. They are properties of the model, and correcting them would make the same number mean different widths in different configurations:
 
   * **N satellites realise $\sqrt{N}$ times it**, for `ComplexRFIVarAnt` (and `ComplexRFIVarAntFine`). The width applies to each source and their visibilities add — in quadrature, because each source has zero mean visibility. Three satellites at `std: 10` expect a total RFI near 17 Jy. `ComplexRFIConstAntFine`'s sources do *not* add in quadrature: each has a non-zero mean visibility $E[V_s] = \texttt{std}\,e^{i\phi_s}$, so they add coherently by however much the geometric phases align.
-  * **`rfi_signal:ComplexRFIConstAnt` (and `ComplexRFIConstAntFine`) realises another $\sqrt{2}$.** It broadcasts one amplitude to every antenna, so its visibility is $\lvert A\rvert^2$ where `ComplexRFIVarAnt`'s is $A_p A_q^*$ with independent draws, and $E\lvert A\rvert^4 = 2(E\lvert A\rvert^2)^2$.
+  * **`rfi_signal.ComplexRFIConstAnt` (and `ComplexRFIConstAntFine`) realises another $\sqrt{2}$.** It broadcasts one amplitude to every antenna, so its visibility is $\lvert A\rvert^2$ where `ComplexRFIVarAnt`'s is $A_p A_q^*$ with independent draws, and $E\lvert A\rvert^4 = 2(E\lvert A\rvert^2)^2$.
 
   Both are pinned by tests that sample each component through its own antenna structure.
 
-  `data` measures it from the observed visibilities, the same measurement `ast.gp_cov.std: data` makes — the same function, in fact. Two things differ, and only one of them is a choice:
+  `data` measures it from the observed visibilities, the same measurement `ast_vis.GPVisAst`'s `std: data` makes — the same function, in fact. Two things differ, and only one of them is a choice:
 
   * It is a **scalar**, since this prior normalises a single spectrum where the astronomical model carries a width per baseline.
   * **The MS's flags are kept.** The astronomical estimate excludes them because whatever a flag means, the sample is not clean sky. The reverse does not follow: a flag says *something is wrong here*, not *RFI is here*, and a dead antenna is neither RFI nor a scale to set an RFI prior from. Measuring the flagged samples is also biased high even when they are RFI, wherever the flagger thresholds on amplitude: the flagged half is then the bright half — on the shipped 8A simulation that returns 1.54x the true RFI where measuring everything returns 1.015x. Samples no gain table could calibrate *are* dropped, which is the one exclusion both priors share.
@@ -508,53 +511,53 @@ All parameters in this section that overlap with those of the `ast` section have
 
   When `null` it is twice the largest visibility in the observation. That is a *maximum* where this key says *typical* — 46.4 Jy against a true RFI `rms|V|` of 11.0 on the shipped 8A simulation, where `data` gives 11.2. [#227](https://github.com/epfl-radio-astro/tabascal/issues/227) tracks making it a statistic this key's name describes.
 
-* `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `rfi.est`, and no matching of light curves to satellites by name, since the estimator is handed `satellites.norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
+* `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `est` file, and no matching of light curves to satellites by name, since the estimator is handed the trajectory component's `norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
 
-The only additional parameters are
+The remaining parameters on `rfi_signal.*`, `trajectory.*`, and `rfi_vis.*` are:
 
-* `gp_cov`: The prior covariance of the RFI signal, taking the same keys as [`ast.gp_cov`](#astronomical-signal) at the same level and checked by the same validator: `std`, `corr_freq`, `corr_time` and `gammas`. Every one of them is optional, and each `null` has its own meaning, given below.
+* `corr_freq`, `corr_time`, `gammas` (on `rfi_signal.*`):
 
-  * `corr_freq`: the bandwidth, in Hz, over which the RFI signal stays correlated, setting the knee along the frequency axis. That axis is a delay, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `ast.gp_cov.corr_freq` makes. `null` is **half the observed band**, which is *not* what the astronomical `corr_freq: null` means: that one is no roll-off at all. The difference is which default declines to commit. Note that a flat delay spectrum is **not** a smooth signal: equal power at every delay leaves the channels uncorrelated, its normalised channel covariance being `[1, 0, 0, ...]`. So the astronomical null states no frequency structure rather than gentle structure — which costs nothing on the single-channel observations every shipped config runs, and is exactly why [`ast.gp_cov.corr_freq`](#astronomical-signal) tells you to set a value on a wide band. An emitter is coherent over some band by construction, so here half the observation is the least-committal guess that is still a coherence scale.
+  * `corr_freq`: the bandwidth, in Hz, over which the RFI signal stays correlated, setting the knee along the frequency axis. That axis is a delay, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `ast_vis.GPVisAst`'s `corr_freq` makes. `null` is **half the observed band**, which is *not* what the astronomical `corr_freq: null` means: that one is no roll-off at all. The difference is which default declines to commit. Note that a flat delay spectrum is **not** a smooth signal: equal power at every delay leaves the channels uncorrelated, its normalised channel covariance being `[1, 0, 0, ...]`. So the astronomical null states no frequency structure rather than gentle structure — which costs nothing on the single-channel observations every shipped config runs, and is exactly why [`ast_vis.GPVisAst`'s `corr_freq`](#astronomical-signal) tells you to set a value on a wide band. An emitter is coherent over some band by construction, so here half the observation is the least-committal guess that is still a coherence scale.
   * `corr_time`: the time, in seconds, over which the RFI signal stays correlated, setting the knee along the time axis. `null` is half the observation. It is given as a time where the astronomical block asks for `fov_deg`, because an emitter's coherence time is a property of the emitter, while a sky source's is its fringe rate — a consequence of how far off axis it sits rather than a number to pick.
-  * `gammas`: the roll-off exponent on the frequency and time axes, in that order. `null` takes the component's own value: `[3, 3]` for `rfi_signal:ComplexRFIVarAnt` and `ComplexRFIVarAntFine`, `[100, 100]` for `rfi_signal:ComplexRFIConstAnt` and `ComplexRFIConstAntFine`. The two have never agreed, and the difference is preserved rather than unified, since making them agree would change one of the two models rather than fix a bug.
+  * `gammas`: the roll-off exponent on the frequency and time axes, in that order. Defaults to `[3, 3]` on `rfi_signal.ComplexRFIVarAnt` and `ComplexRFIVarAntFine`, and `[100, 100]` on `rfi_signal.ComplexRFIConstAnt` and `ComplexRFIConstAntFine`.
 
-* `cutoff`: the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values — and nothing about what the prior believes, since the spectrum is normalised to `gp_cov.std` after the cut. That is why it sits beside `freq_pad_factor` and `baseline_block_size` rather than inside `gp_cov`, exactly as `ast.cutoff` does. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit. Below 1 is necessary rather than sufficient: a value near enough to 1 to round to it in the working precision cuts everything too, which the run refuses with a message naming the cutoff rather than a shape error from inside the transform. `null` takes the component's own value: `1e-9` for `rfi_signal:ComplexRFIVarAnt` and `ComplexRFIVarAntFine`, `1e-6` for `rfi_signal:ComplexRFIConstAnt` and `ComplexRFIConstAntFine`.
+* `cutoff` (on `rfi_signal.*`): the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values — and nothing about what the prior believes, since the spectrum is normalised to `std` after the cut. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit. Below 1 is necessary rather than sufficient: a value near enough to 1 to round to it in the working precision cuts everything too, which the run refuses with a message naming the cutoff rather than a shape error from inside the transform. Defaults to `1e-9` on `ComplexRFIVarAnt` / `ComplexRFIVarAntFine`, and `1e-6` on `ComplexRFIConstAnt` / `ComplexRFIConstAntFine`.
 
-* `min_elevation`: Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
+* `min_elevation` (on `trajectory.*`): Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 
-  The default is the one the base configuration ships, so **omitting the key means `0`, not no mask**. Running with no mask at all takes an explicit `min_elevation: null`.
+  The schema default is `0`, so **omitting the key means `0`, not no mask**. Running with no mask at all takes an explicit `min_elevation: null`.
 
   While a satellite is below the horizon it contributes no signal, but an unmasked model still carries a full set of free parameters for it over those times. Those parameters have no signal of their own to constrain them, so they are free to absorb signal that belongs elsewhere — the astronomical sky, or another RFI source — to the extent that the RFI signal prior admits it and the fringe rates overlap. Masking removes the parameters rather than relying on the fit to leave them alone. This is why `0` rather than `null` is the default: a satellite below the horizon is not a modelling choice, it is simply not there. It shows in the image domain: an unmasked run can reconstruct a static feature near the horizon out of those parameters, which the mask removes.
 
-  On the fine-grid route (`*Fine` components) the mask zeroes the signal itself. On the analytic route (`rfi_vis:AnalyticVis`) it zeroes each satellite's visibility per cell after interpolation instead: the signal is left continuous, so a visible cell next to the horizon still interpolates through its hidden neighbours, and only those neighbours' amplitudes are constrained there.
+  On the fine-grid route (`*Fine` components) the mask zeroes the signal itself. On the analytic route (`rfi_vis.AnalyticVis`) it zeroes each satellite's visibility per cell after interpolation instead: the signal is left continuous, so a visible cell next to the horizon still interpolates through its hidden neighbours, and only those neighbours' amplitudes are constrained there.
 
   Each satellite gets its own in-view window, evaluated on the observation time grid and expanded over each integration, so an integration is never partially masked. Setup fails if a satellite is never above the cut, since it would then be modelled nowhere. `tabascal light-curve` is the exception: it is measuring rather than fitting, so a satellite that never rose comes back as a zero curve, named in a warning, and the satellites that were up are still measured.
 
   Raising the cut above `0` additionally excludes the low-elevation part of each pass, where the fringe rate is lowest and the overlap with other components is therefore greatest. How far to raise it is observation-dependent and is not currently calibrated, so no value above `0` is recommended here. Note that masking is about which parameters exist, not about subtraction quality, and reduced $\chi^2$ is largely insensitive to it — judge the effect on the recovered sky model.
 
-The RFI signal is modelled on a grid finer than the data, then averaged back down onto it. The fine grid is `n_freq * n_int_freq` by `n_time * n_int_time`, where each count is the number of fine samples per data cell on that axis. The two axes are configured differently, because only one of them can be estimated: there is no observable that fixes the frequency count, so `n_int_freq` is given directly, while the time count follows from how fast the RFI fringe winds and is therefore derived rather than written down. `time_int_factor` scales that derivation. **There is no `rfi.n_int_time` key.** The time count is derived, not chosen, so there is nothing to set: `rfi.time_int_factor` scales the derivation instead. All of this is the fine-grid route: with `rfi_vis:AnalyticVis` there is no fine time grid, and `time_int_factor`, `min_time_bins` and `max_time_bins` are ignored.
+On the fine-grid route (`rfi_vis.RiemannVisFine` and `rfi_vis.RiemannVisVariableFine`), the RFI signal is modelled on a grid finer than the data, then averaged back down onto it. The fine grid is `n_freq * n_int_freq` by `n_time * n_int_time`, where each count is the number of fine samples per data cell on that axis. The two axes are configured differently, because only one of them can be estimated: there is no observable that fixes the frequency count, so `n_int_freq` is given directly, while the time count follows from how fast the RFI fringe winds and is therefore derived rather than written down. `time_int_factor` scales that derivation. **There is no `n_int_time` key.** With `rfi_vis.AnalyticVis` there is no fine time grid, so `time_int_factor`, `min_time_bins` and `max_time_bins` are not part of its schema.
 
-* `n_int_freq`: This is the amount of over-sampling in the frequency domain that is used and then averaged back down to the data sampling rate. It therefore determines the number of samples per frequency channel that are used in the averaging to correctly calculate the fringe-winding loss (band-smearing). Band-smearing can be caused by both the phase variation over the channel width due to the geometric phase as well as the intrinsic signal of the RFI sources. The default is `1`, i.e. no over-sampling.
-* `time_int_factor`: In the time axis the number of integration samples needed to accurately model fringe-winding loss (time-smearing) is calculated based solely on the fringe rate due to the movement of the RFI source as well as the signal to noise ratio with
+* `n_int_freq` (on `rfi_vis.*`): This is the amount of over-sampling in the frequency domain that is used and then averaged back down to the data sampling rate. It therefore determines the number of samples per frequency channel that are used in the averaging to correctly calculate the fringe-winding loss (band-smearing). Band-smearing can be caused by both the phase variation over the channel width due to the geometric phase as well as the intrinsic signal of the RFI sources. The default is `1`, i.e. no over-sampling.
+* `time_int_factor` (on `rfi_vis.RiemannVisFine`, `rfi_vis.RiemannVisVariableFine`): In the time axis the number of integration samples needed to accurately model fringe-winding loss (time-smearing) is calculated based solely on the fringe rate due to the movement of the RFI source as well as the signal to noise ratio with
 
 $$N^T_\text{int} \geq  \pi \nu_F \Delta t \sqrt{\frac{\lvert V^\text{RFI}_\text{inst} \rvert}{6 \sigma_n}}$$
 
 where $N^T_\text{int}$ is the number of integration samples used per time step, $\Delta t$ is the integration time for a single sample, $\nu_F$ is the fringe frequency of the source due to its movement, $\lvert V^\text{RFI}_\text{inst} \rvert$ is the instantaneous RFI visibility amplitude, and $\sigma_n$ is the visibility noise of a single data point. This parameter (`time_int_factor`) determines the factor by which to increase this oversampling.
 
-The estimate is per baseline, since $\nu_F$ is, and `TabConfig.estimate_rfi_sampling` then reduces it to the single fine-grid count: the count is the largest per-baseline rate, rounded up to a size with enough divisors for the stride binning that groups baselines by how finely each needs to be sampled. That rounding applies to every run, not only to one using a `RiemannVisVariableFine` component: the number of divisors required is at least `min_time_bins + 1`, and only the *extra* divisors a `Variable` component needs are conditional on selecting one. `min_time_bins` and `max_time_bins` bound the number of quantile levels the grouping places, which caps the number of stride groups rather than guaranteeing that many — distinct levels can round onto the same stride. With no satellites configured there is no fringe rate to estimate from at all, every baseline falls back to a single required sample, and the count comes out at `2`. So the effective count is not exactly `time_int_factor` times the formula above: the factor scales the per-baseline rates going in, and the binning decides what comes out. The value actually used is printed during setup.
+The estimate is per baseline, since $\nu_F$ is, and `TabConfig.estimate_rfi_sampling` then reduces it to the single fine-grid count: the count is the largest per-baseline rate, rounded up to a size with enough divisors for the stride binning that groups baselines by how finely each needs to be sampled. That rounding applies to every fine-grid run, not only to one using `RiemannVisVariableFine`: the number of divisors required is at least `min_time_bins + 1`, and only the *extra* divisors a `Variable` component needs are conditional on selecting one. `min_time_bins` and `max_time_bins` bound the number of quantile levels the grouping places, which caps the number of stride groups rather than guaranteeing that many — distinct levels can round onto the same stride. With no satellites configured there is no fringe rate to estimate from at all, every baseline falls back to a single required sample, and the count comes out at `2`. So the effective count is not exactly `time_int_factor` times the formula above: the factor scales the per-baseline rates going in, and the binning decides what comes out. The value actually used is printed during setup.
 
-* `baseline_block_size`: The number of baselines `RiemannVisFine` calculates per step of its scan over the baseline axis, a whole number defaulting to `128`. The Riemann sum is formed on a `(n_bl, n_rfi, n_freq_fine, n_time_fine)` fine grid before anything is reduced, which is `n_rfi * n_int_freq * n_int_time` times the size of the visibilities it reduces to and, under reverse-mode automatic differentiation, is what the tape holds; the scan replaces `n_bl` in that shape with `baseline_block_size`, or with `n_bl` itself where that is smaller, and recomputes each block in the backward pass rather than keeping it. It is purely a memory strategy — baselines are independent, so the result does not depend on it — at the cost of recomputation and of one scan step per block. `null` is the setting for a single block over every baseline: the checkpoint stays, so the backward pass still recomputes the fine grid instead of storing it, but the grid is formed whole. That bounds the tape and not the peak, and it is the setting that trades the memory back for the scan's step overhead. Only `RiemannVisFine` with `backend: jax` reads it: the FFI kernels bound the same term inside the compiled kernel, and `RiemannVisVariableFine` carries its own baseline grouping. See [RFI-visibility kernels](kernels.md#memory).
-* `backend`: which implementation the `rfi_vis` component runs. `jax` is the visibility written in JAX and differentiated by it; `ffi` is the compiled op of `ri-kernels`, with its own JVP and transpose, which is faster and bounds its memory itself. `null`, the default, is `ffi` for every component; `AnalyticVis` has no JAX backend yet. A backend the component does not have is refused at setup. See [RFI-visibility kernels](kernels.md).
+* `baseline_block_size` (on `rfi_vis.RiemannVisFine`): The number of baselines `RiemannVisFine` calculates per step of its scan over the baseline axis, a whole number defaulting to `128`. The Riemann sum is formed on a `(n_bl, n_rfi, n_freq_fine, n_time_fine)` fine grid before anything is reduced, which is `n_rfi * n_int_freq * n_int_time` times the size of the visibilities it reduces to and, under reverse-mode automatic differentiation, is what the tape holds; the scan replaces `n_bl` in that shape with `baseline_block_size`, or with `n_bl` itself where that is smaller, and recomputes each block in the backward pass rather than keeping it. It is purely a memory strategy — baselines are independent, so the result does not depend on it — at the cost of recomputation and of one scan step per block. `null` is the setting for a single block over every baseline: the checkpoint stays, so the backward pass still recomputes the fine grid instead of storing it, but the grid is formed whole. That bounds the tape and not the peak, and it is the setting that trades the memory back for the scan's step overhead. Only `RiemannVisFine` with `backend: jax` reads it: the FFI kernels bound the same term inside the compiled kernel, and `RiemannVisVariableFine` carries its own baseline grouping. See [RFI-visibility kernels](kernels.md#memory).
+* `backend` (on `rfi_vis.RiemannVisFine`, `rfi_vis.RiemannVisVariableFine`): which implementation the `rfi_vis` component runs. `jax` is the visibility written in JAX and differentiated by it; `ffi` is the compiled op of `ri-kernels`, with its own JVP and transpose, which is faster and bounds its memory itself. `null`, the default, is `ffi` for every component. See [RFI-visibility kernels](kernels.md).
 
-The data-grid route, `trajectory:FixedOrbit` with `rfi_vis:AnalyticVis` (see [Analytic RFI visibilities](analytic_rfi_vis.md)), reads its own keys instead:
+The data-grid route, `trajectory.FixedOrbit` with `rfi_vis.AnalyticVis` (see [Analytic RFI visibilities](analytic_rfi_vis.md)), has its own fields directly on those two components:
 
-* `path_order`: the degree, 0 to 3, of the polynomial in time through each cell's geometric delay that `FixedOrbit` writes. The kernel keeps the delay's derivatives up to the third, so a higher degree is refused rather than dropped.
-* `path_nodes`: how many samples per cell that polynomial is fitted through, an odd number of at least `path_order + 1`, spaced symmetrically about the cell centre. `null` is `4 * path_order + 1`, close to the least-squares fit over the whole cell.
-* `analytic`: the options of `AnalyticVis`, each a whole number. `stencil` (0 to 4) is the half-width $h$ of the signal interpolant, the polynomial through the $2h + 1$ nearest cells on each axis; `0` holds each cell's value. `segments` (1 to 1024), `terms` (1 to 32) and `cubic_terms` (0 to 8; `0` drops the cubic phase) set the expansion of the closed-form time integral: the defaults are the measured speed/accuracy trade, and `segments: 4, terms: 16` is the conservative setting. `scratch_mb` (at least 1) bounds the GPU coefficient scratch in MiB. Other keys are refused.
+* `path_order` (on `trajectory.FixedOrbit`): the degree, 0 to 3, of the polynomial in time through each cell's geometric delay that `FixedOrbit` writes. The kernel keeps the delay's derivatives up to the third, so a higher degree is refused rather than dropped.
+* `path_nodes` (on `trajectory.FixedOrbit`): how many samples per cell that polynomial is fitted through, an odd number of at least `path_order + 1`, spaced symmetrically about the cell centre. `null` is `4 * path_order + 1`, close to the least-squares fit over the whole cell.
+* `stencil`, `segments`, `terms`, `cubic_terms`, `scratch_mb` (on `rfi_vis.AnalyticVis`): each a whole number. `stencil` (0 to 4) is the half-width $h$ of the signal interpolant, the polynomial through the $2h + 1$ nearest cells on each axis; `0` holds each cell's value. `segments` (1 to 1024), `terms` (1 to 32) and `cubic_terms` (0 to 8; `0` drops the cubic phase) set the expansion of the closed-form time integral: the defaults are the measured speed/accuracy trade, and `segments: 4, terms: 16` is the conservative setting. `scratch_mb` (at least 1) bounds the GPU coefficient scratch in MiB. Other keys are refused.
 
 ### RFI light curve estimates
 
-`rfi.est` points at a measured light curve file, used by `init: est` and `mean: est` to seed the RFI signal. This is the interchange format between tabascal and whatever measures the light curves, so it is deliberately strict.
+`est` (on `rfi_signal.*`) points at a measured light curve file, used by `init: est` and `mean: est` to seed the RFI signal. This is the interchange format between tabascal and whatever measures the light curves, so it is deliberately strict.
 
 The file is either a **`.zarr` store** (read with `xarray.open_zarr`) or a **`.npz`**, and must contain all four of
 
@@ -587,13 +590,13 @@ xr.Dataset(
 
 A file that carries no `time_scale` is read as UTC with a warning. Light-curve files written by tabascal before the stamp existed took their `times` from the measurement set's `TIME` column *as declared*, so one written from a UTC-declared MS — the overwhelmingly common case — is already correct, while one written from a TAI- or TT-declared MS is offset by the leap seconds and is indistinguishable from a correct file. **Regenerate any estimate measured on a non-UTC MS** with `tabascal light-curve`; the rest can be left alone or re-stamped.
 
-**Rows are matched to satellites by NORAD id, never by position**, so the order of sources in the file does not have to match `satellites.norad_ids`. **Samples are interpolated onto the observation's own time and frequency grid**, so the file's sampling does not have to match the observation either.
+**Rows are matched to satellites by NORAD id, never by position**, so the order of sources in the file does not have to match the trajectory component's `norad_ids`. **Samples are interpolated onto the observation's own time and frequency grid**, so the file's sampling does not have to match the observation either.
 
 Both are strict because their failure modes are silent. A light curve attached to the wrong satellite still has the right shape and still optimises — it just seeds the prior from another satellite. A file whose sampling is assumed rather than declared is resampled wrongly by an unknown amount. Neither surfaces as an error, only as a worse fit, so a file that cannot state which satellite and which sample times it describes is rejected rather than guessed at.
 
 Times are absolute (MJD on a stated scale) rather than seconds from the start of a particular observation, so a light curve is interpretable on its own and can be reused across measurement sets covering the same pass. Both halves of that matter, and the stated scale is **UTC**. A Julian day number is a number until a scale says what it counts: a Measurement Set declares the scale of its `TIME` column in a `MEASINFO` record and is free to declare TAI, whose numbers name instants 37 s from the ones the same numbers name on UTC. An axis written on whatever the measuring MS happened to declare would be reusable only against another MS that happened to declare the same thing — and would be resampled by the difference without anything raising. tabascal reads the observation's own times onto UTC before sampling an estimate, and `tabascal light-curve` writes them the same way, so both ends of the format are on one scale.
 
-`light_curves` is a **flux in Jy**, not the modelled amplitude `rfi_A`. The RFI visibility is quadratic in `rfi_A` ($V^\text{RFI}_{pq} = A_p A_q^* e^{i\Delta\phi}$), so `rfi_A` carries units of $\sqrt{\text{Jy}}$ and the estimate is seeded with $\sqrt{\lvert \text{light\_curves} \rvert}$. Supplying an amplitude where a flux is expected is squared away silently, so the value is wrong rather than the shape — give the flux the source would show in the visibilities, on the same scale as `rfi.gp_cov.std`.
+`light_curves` is a **flux in Jy**, not the modelled amplitude `rfi_A`. The RFI visibility is quadratic in `rfi_A` ($V^\text{RFI}_{pq} = A_p A_q^* e^{i\Delta\phi}$), so `rfi_A` carries units of $\sqrt{\text{Jy}}$ and the estimate is seeded with $\sqrt{\lvert \text{light\_curves} \rvert}$. Supplying an amplitude where a flux is expected is squared away silently, so the value is wrong rather than the shape — give the flux the source would show in the visibilities, on the same scale as `rfi_signal.*`'s `std`.
 
 Some further details:
 
@@ -606,15 +609,15 @@ Some further details:
 
 ### Estimating the light curves from the data
 
-`rfi.init: matched-filter` (alias `mf`) needs no file at all: it measures the light curves from the visibilities the run has already loaded. For a satellite on a known trajectory the RFI contribution to baseline $(p, q)$ is $A_p A_q^* e^{i(\phi_p - \phi_q)}$ with $\phi$ the geometric phase, so the unit-modulus template $T_{pq} = e^{i(\phi_p - \phi_q)}$ de-rotates it. The maximum-likelihood estimate of the source visibility at each channel and timestep is the inverse-variance-weighted, de-rotated baseline average
+`init: matched-filter` (alias `mf`) on `rfi_signal.*` needs no file at all: it measures the light curves from the visibilities the run has already loaded. For a satellite on a known trajectory the RFI contribution to baseline $(p, q)$ is $A_p A_q^* e^{i(\phi_p - \phi_q)}$ with $\phi$ the geometric phase, so the unit-modulus template $T_{pq} = e^{i(\phi_p - \phi_q)}$ de-rotates it. The maximum-likelihood estimate of the source visibility at each channel and timestep is the inverse-variance-weighted, de-rotated baseline average
 
 $$\hat{S}[f, t] = \frac{\sum_{pq} w_{pq} T_{pq}^{*} V_{pq}}{\sum_{pq} w_{pq}}, \qquad w_{pq} = \frac{1}{\sigma_{pq}^2},$$
 
 with standard error $1/\sqrt{\sum w}$. The satellite's fringe adds coherently after de-rotation while the sky and the noise do not, so $\hat{S}$ isolates the satellite, and $\sqrt{\lvert \hat{S} \rvert}$ is the per-antenna amplitude the model is seeded with — the same quantity `est` reads out of a file.
 
-The weights are the run's own noise, resolved per baseline and per channel as far as the MS resolves it (see `data.noise`); the template carries no gain. Uniform weights on an array whose antennas differ in sensitivity would over-weight the loud baselines. With no usable noise anywhere the curves are still measured, but they are then both unweighted and *unscaled*: the error and the z statistic come back as NaN rather than as a floor derived from a noise nobody stated. Flagged samples and autocorrelations are excluded, a satellite is not filtered for while it is below `rfi.min_elevation` (those times seed at zero, exactly as the elevation mask holds them there), and a channel and timestep where every baseline is flagged seeds at zero rather than at a measured value.
+The weights are the run's own noise, resolved per baseline and per channel as far as the MS resolves it (see `data.noise`); the template carries no gain. Uniform weights on an array whose antennas differ in sensitivity would over-weight the loud baselines. With no usable noise anywhere the curves are still measured, but they are then both unweighted and *unscaled*: the error and the z statistic come back as NaN rather than as a floor derived from a noise nobody stated. Flagged samples and autocorrelations are excluded, a satellite is not filtered for while it is below `min_elevation` (those times seed at zero, exactly as the elevation mask holds them there), and a channel and timestep where every baseline is flagged seeds at zero rather than at a measured value.
 
-The same estimate is available as a standalone tool, `tabascal light-curve`, which writes it in the interchange format above so it can seed a later run through `rfi.est`. See [Usage](usage.md#extracting-rfi-light-curves).
+The same estimate is available as a standalone tool, `tabascal light-curve`, which writes it in the interchange format above so it can seed a later run through `est`. See [Usage](usage.md#extracting-rfi-light-curves).
 
 The z statistic reported alongside the curves reads `Re(S_hat)` and so assumes
 the column is phase calibrated. The magnitude statistic reported beside it is
@@ -626,23 +629,26 @@ Two limitations are worth knowing. The estimator assumes the satellite is exactl
 
 ## Satellites
 
-The `satellites` section determines which satelites to include in the model and the prior distribution to use for there trajectories. An example is given below.
+Satellite selection, orbit-source policies, and elevation masking are configured directly on the `trajectory.*` component (`FixedOrbit`, `FixedOrbitFine`, `NoDragOrbitFine`, or `OrbitFine`) inside `model.components`. An example is shown below.
 
 ```yaml
-satellites:
-  norad_ids: [20452, 38833, 45854]
-  norad_ids_path: null
-  extra_orbit_dir: null
-  extra_orbit_max_age_days: null
-  remote_max_age_days: 3
-  cache_reuse_max_age_days: 1
+model:
+  components:
+    - trajectory.FixedOrbitFine:
+        norad_ids: [20452, 38833, 45854]
+        norad_ids_path: null
+        extra_orbit_dir: null
+        extra_orbit_max_age_days: null
+        remote_max_age_days: 3
+        cache_reuse_max_age_days: 1
+        min_elevation: 0
 ```
 
 * `norad_ids`: List of the NORAD IDs of the satellites to include. TABASCAL requests the record whose epoch is closest to the observation from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service (via the [satchecker-client](https://satchecker-client.readthedocs.io/) package) — its `get-nearest-omm` endpoint for observations from 2026-07-12 onwards and `get-nearest-tle` before that, falling back to the other archive if the first has nothing acceptable. Cache misses run concurrently with a bounded five-worker pool; no account or credentials are required. **Every ID listed here must resolve to an acceptable record**: otherwise preflight stops before reading the visibilities and names each failure. TABASCAL never silently drops a configured satellite from the RFI model.
 
-  An empty list (or `null`) is valid only for a model that does not use a satellite trajectory component — a stationary-RFI or astronomical-only run. If the `model.components` list includes one that consumes orbital records (`FixedOrbit`, `FixedOrbitFine`, `OrbitFine`, `NoDragOrbitFine`), configuring no IDs is a configuration error rather than a run that models nothing. Either separator form of a component reference is recognised, so `trajectory:FixedOrbitFine` and `trajectory.FixedOrbitFine` behave identically here.
+  An empty list (or `null`) is rejected whenever a satellite trajectory component (`FixedOrbit`, `FixedOrbitFine`, `OrbitFine`, `NoDragOrbitFine`) is present without `norad_ids_path` (or CLI `-np`). To run an astronomical-only model with no satellites, simply omit the trajectory and RFI components from `model.components`.
 * `norad_ids_path`: Optional path to a text file of NORAD IDs, one per line; blank lines and `#` comments are ignored and malformed lines are reported with their line number. When set it takes precedence over `norad_ids`, and the `-np/--norad-path` CLI flag takes precedence over both.
-* `extra_orbit_dir`: Optional path to an additional directory of local orbit files, searched **per NORAD ID before** the managed cache and SatChecker. Every `*.json` file in the directory is considered; files must be pandas-oriented JSON tables carrying either `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2`, or `NORAD_CAT_ID`, `EPOCH` and the seven OMM element columns. The kind is inferred, so a Space-Track `gp`/`gp_history` export drops in unconverted. For each requested satellite the valid record whose epoch is closest to the observation is chosen — by epoch distance, regardless of format — and, if it is accepted (see `extra_orbit_max_age_days`), it wins outright and no service call is made for that satellite. Files that cannot be read or lack either required column set are skipped. Records that fail validation are rejected, allowing that satellite to fall through to the managed cache and SatChecker. Legacy date-named files and the bundled Space-Track fixtures remain supported. This directory can be given at runtime with the `--extra-orbit-dir` flag. tabascal can also write one itself: `tabascal light-curve --fit-offset --write-shifted-tle DIR` saves the detected satellites' records with their epochs moved by the fitted along-track offset, so a run pointed at `DIR` models the corrected trajectory rather than the one the elements arrived with, and `tabascal search` writes the same records for every satellite it detects — see [Records with a fitted time offset](orbits.md#records-with-a-fitted-time-offset). The search also sets this key for you: the `satellites` fragment it emits names the directory it wrote, with `extra_orbit_max_age_days: null`, so merging the fragment is enough. (The `ORBIT_CACHE_DIR` environment variable is a different thing: it relocates where the *managed cache* is stored, and is not an additional source of records.)
+* `extra_orbit_dir`: Optional path to an additional directory of local orbit files, searched **per NORAD ID before** the managed cache and SatChecker. Every `*.json` file in the directory is considered; files must be pandas-oriented JSON tables carrying either `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2`, or `NORAD_CAT_ID`, `EPOCH` and the seven OMM element columns. The kind is inferred, so a Space-Track `gp`/`gp_history` export drops in unconverted. For each requested satellite the valid record whose epoch is closest to the observation is chosen — by epoch distance, regardless of format — and, if it is accepted (see `extra_orbit_max_age_days`), it wins outright and no service call is made for that satellite. Files that cannot be read or lack either required column set are skipped. Records that fail validation are rejected, allowing that satellite to fall through to the managed cache and SatChecker. Legacy date-named files and the bundled Space-Track fixtures remain supported. This directory can be given at runtime with the `--extra-orbit-dir` flag. tabascal can also write one itself: `tabascal light-curve --fit-offset --write-shifted-tle DIR` saves the detected satellites' records with their epochs moved by the fitted along-track offset, so a run pointed at `DIR` models the corrected trajectory rather than the one the elements arrived with, and `tabascal search` writes the same records for every satellite it detects — see [Records with a fitted time offset](orbits.md#records-with-a-fitted-time-offset). The search also sets this key for you: the trajectory component fragment it emits names the directory it wrote, with `extra_orbit_max_age_days: null`. (The `ORBIT_CACHE_DIR` environment variable is a different thing: it relocates where the *managed cache* is stored, and is not an additional source of records.)
 * `extra_orbit_max_age_days`: Maximum allowed absolute difference, in days, between an `extra_orbit_dir` record's epoch and the observation epoch. `null` (default) applies no age limit, preserving exact replay of a run's `results/used_orbits.json`; `0` accepts an epoch match within TLE precision. A rejected local record falls through to the managed cache and SatChecker. The age comes from the record itself — line 1 for a TLE, the `EPOCH` field for an OMM — not from the filename or modification time.
 * `remote_max_age_days`: Hard ceiling, in days, on how far a SatChecker or managed-cache record may be from the observation. A TLE's epoch is re-derived locally from line 1; an OMM has no lines, so its `EPOCH` field is used after being range-checked. Every accepted remote record's source, provider, endpoint, signed offset and absolute age is logged. `null` explicitly removes the ceiling.
 
@@ -653,33 +659,35 @@ satellites:
 
 ## Gains
 
-The `gains` section defines the prior over the antenna gains and how they are initialised. An example is given below.
+Antenna gains are configured directly on the gain component in `model.components`. `gains.UnitaryGains` takes no options; `gains.ConstGains` defines the prior over the per-antenna gains and how they are initialised:
 
 ```yaml
-gains:
-  init: prior
-  fit: complex
-  amp_mean: 1.0
-  amp_std: 10
-  phase_mean: 0.0
-  phase_std: 30
-  ref_ant: null
-  fix_flux_scale: true
+model:
+  components:
+    - gains.ConstGains:
+        init: prior
+        fit: complex
+        amp_mean: 1.0
+        amp_std: 10
+        phase_mean: 0.0
+        phase_std: 30
+        ref_ant: null
+        fix_flux_scale: true
 ```
 
-* `init`: How the gain parameters are initialised. `prior` (the default) starts at the prior mean. `gains:ConstGains` additionally accepts a path to a previously measured gain — see [A constant gain per antenna](#a-constant-gain-per-antenna).
-* `amp_mean`: The centre of the prior over the gain amplitude. It must be positive and finite. `gains:ConstGains` fits the log amplitude, so it is the **median** of a lognormal — the centre in log space — and it is read only when `fix_flux_scale` is `false`. See below.
-* `amp_std`: The standard deviation of the prior over the gain amplitude, **as a percentage** of `amp_mean`. `amp_std: 10` with `amp_mean: 1.0` is a 10 % spread. `null` defaults to **20**, a 20 % spread.
+* `init`: How the gain parameters are initialised. `prior` (the default) starts at the prior mean. `gains.ConstGains` additionally accepts a path to a previously measured gain — see [A constant gain per antenna](#a-constant-gain-per-antenna).
+* `amp_mean`: The centre of the prior over the gain amplitude. It must be positive and finite. `gains.ConstGains` fits the log amplitude, so it is the **median** of a lognormal — the centre in log space — and it is read only when `fix_flux_scale` is `false`. See below.
+* `amp_std`: The standard deviation of the prior over the gain amplitude, **as a percentage** of `amp_mean`. `amp_std: 10` with `amp_mean: 1.0` is a 10 % spread. Defaults to **20** (`null` also resolves to 20), a 20 % spread.
 * `phase_mean`: The mean of the prior over the gain phase, in **radians**.
-* `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**. `null` defaults to **180** — half a turn, which is effectively uniform over the circle. See below.
-* `fit`, `ref_ant`, `fix_flux_scale`: Read by `gains:ConstGains` only; see below.
+* `phase_std`: The standard deviation of the prior over the gain phase, in **degrees**. Defaults to **180** (`null` also resolves to 180) — half a turn, which is effectively uniform over the circle. See below.
+* `fit`, `ref_ant`, `fix_flux_scale`: Control which part of the gain is fitted and its gauge; see below.
 
-**`null` means "unset"; `0` means zero.** Every key in this section is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. A zero width is an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason.
+**`null` means "unset"; `0` means zero.** Every optional key is defaulted when, and only when, it is `null` or absent — a written-down value is taken at its word. A zero width is an **error naming the key**, because it is a degenerate distribution rather than an absent one: it pins every gain to its mean and leaves the fit nothing to move. Negative and non-finite values are errors for the same reason.
 
 
 ### The default prior widths
 
-`amp_std: null` resolves to **20 %** and `phase_std: null` to **180°**. Both are wide on purpose, because in these components the prior width is not only a prior. The fitted parameter is always a standard normal $z$, and the width is what carries it to the gain — directly in {class}`~tabascal.components.gains.ConstGains` ($\texttt{phase} = \texttt{mean} + \texttt{phase\_std}\cdot z$, and $|g| = e^{\texttt{amp\_std}\, z}$). A narrow prior is therefore a short lever. Under a per-coordinate optimiser the step in $z$ is set by `opt.epsilon` whatever the gradient is, so the phase moves by $\texttt{phase\_std} \cdot \texttt{epsilon}$ per iteration. At the old 1° default and the default `epsilon` of `1e-2` that is 0.01° an iteration: the whole 500-iteration budget could not cross a radian, and a run whose antennas genuinely differed by tens of degrees ended where it started, looking converged. `phase_std` divides the phase on the way in as well (`ConstGains` reads a measured gain through it), so a narrow width also starts such a fit tens of $\sigma$ from the prior mean. ({class}`~tabascal.components.gains.UnitaryGains` fits no gain and reads neither width.)
+`amp_std` defaults to **20 %** and `phase_std` to **180°**. Both are wide on purpose, because in these components the prior width is not only a prior. The fitted parameter is always a standard normal $z$, and the width is what carries it to the gain — directly in {class}`~tabascal.components.gains.ConstGains` ($\texttt{phase} = \texttt{mean} + \texttt{phase\_std}\cdot z$, and $|g| = e^{\texttt{amp\_std}\, z}$). A narrow prior is therefore a short lever. Under a per-coordinate optimiser the step in $z$ is set by `opt.epsilon` whatever the gradient is, so the phase moves by $\texttt{phase\_std} \cdot \texttt{epsilon}$ per iteration. At the old 1° default and the default `epsilon` of `1e-2` that is 0.01° an iteration: the whole 500-iteration budget could not cross a radian, and a run whose antennas genuinely differed by tens of degrees ended where it started, looking converged. `phase_std` divides the phase on the way in as well (`ConstGains` reads a measured gain through it), so a narrow width also starts such a fit tens of $\sigma$ from the prior mean. ({class}`~tabascal.components.gains.UnitaryGains` fits no gain and accepts no options.)
 
 **Why 180° is "effectively uniform".** The prior is Gaussian but the phase is an angle, so what the model sees is the *wrapped* normal,
 
@@ -700,22 +708,22 @@ It adds only $2 n_\text{ant} - 2$ parameters, and unlike a *fixed* gain it is co
 ```yaml
 model:
   components:
-    - trajectory:FixedOrbit
-    - rfi_signal:ComplexRFIConstAnt   # not ComplexRFIVarAnt — see below
-    - rfi_vis:AnalyticVis
-    - ast_signal:FixedDiscreteSky
-    - ast_vis:DiscreteSkyVis
-    - gains:ConstGains
-
-gains:
-  ref_ant: null
-  fix_flux_scale: true
+    - trajectory.FixedOrbit:
+        norad_ids: [20452, 38833, 45854]
+    - rfi_signal.ComplexRFIConstAnt   # not ComplexRFIVarAnt — see below
+    - rfi_vis.AnalyticVis
+    - ast_signal.FixedDiscreteSky:
+        point_sources: /path/to/sky.osm
+    - ast_vis.DiscreteSkyVis
+    - gains.ConstGains:
+        ref_ant: null
+        fix_flux_scale: true
 ```
 
 **A gain is only identifiable against a model term it cannot deform**, which is what the component list above is for ([issue #124](https://github.com/epfl-radio-astro/tabascal/issues/124)):
 
-* **Pair it with `rfi_signal:ComplexRFIConstAnt`** (or `ComplexRFIConstAntFine` on the fine grid). With the per-antenna RFI model `ComplexRFIVarAnt` or `ComplexRFIVarAntFine` the RFI amplitude $A_p$ is already free per antenna, so $g_p A_p (g_q A_q)^*$ is unchanged by $g_p \rightarrow c_p g_p$ together with $A_p \rightarrow A_p / c_p$: the gain is an exact flat direction of the RFI term and only the astronomical model constrains it. Setup **warns** when the two are combined rather than refusing — the pairing is a modelling rule, not a hard error — and names the flat direction.
-* **The astronomical GP absorbs a gain the same way.** `ast_vis:GPVisAst` has per-baseline freedom, so a gain solved against it alone is a reparametrisation of an already-free `vis_ast`. A rigid sky — `ast_signal:FixedDiscreteSky` with `ast_vis:DiscreteSkyVis` — is what anchors the gain.
+* **Pair it with `rfi_signal.ComplexRFIConstAnt`** (or `ComplexRFIConstAntFine` on the fine grid). With the per-antenna RFI model `ComplexRFIVarAnt` or `ComplexRFIVarAntFine` the RFI amplitude $A_p$ is already free per antenna, so $g_p A_p (g_q A_q)^*$ is unchanged by $g_p \rightarrow c_p g_p$ together with $A_p \rightarrow A_p / c_p$: the gain is an exact flat direction of the RFI term and only the astronomical model constrains it. Setup **warns** when the two are combined rather than refusing — the pairing is a modelling rule, not a hard error — and names the flat direction.
+* **The astronomical GP absorbs a gain the same way.** `ast_vis.GPVisAst` has per-baseline freedom, so a gain solved against it alone is a reparametrisation of an already-free `vis_ast`. A rigid sky — `ast_signal.FixedDiscreteSky` with `ast_vis.DiscreteSkyVis` — is what anchors the gain.
 
 **The gauge.** The gain is purely *relative*: it carries no absolute flux scale and no absolute phase, and both are removed by construction rather than fitted.
 
@@ -732,15 +740,17 @@ The prior on $|g_p|$ is **lognormal**: `amp_std` is used as the standard deviati
 * `ref_ant`: The antenna whose phase is pinned to 0. `null` (the default) selects the first antenna with any unflagged data. An antenna every one of whose baselines is flagged everywhere is not constrained by any visibility, so it cannot be the reference the others are measured against, and naming one explicitly is an error rather than a silently unpinned fit.
 
   **One reference pins one connected group.** A phase is measured relative to another antenna's along a chain of baselines that carry data, so if the unflagged baselines split the array into groups that share no baseline, pinning `ref_ant` in one group leaves every other group's overall phase unconstrained. When the phase is fitted, setup computes the connected components of the unflagged baseline graph and **stops**, naming the groups, rather than fitting a model with a flat direction in it. Fit the groups separately, or flag the smaller ones out of the run. Heavy flagging is fine as long as what survives still connects the array.
-* `fix_flux_scale`: Whether to keep the zero-sum log-amplitude constraint above. `true` is the default. `false` frees the overall amplitude and, when the amplitude is fitted, is accepted **only** with `ast_signal:FixedDiscreteSky` in `model.components`, since a fixed-flux sky is the one thing in the model that can set the scale; without it the run stops at setup with the degeneracy spelled out. Nothing else changes: the phase reference is still pinned either way.
+* `fix_flux_scale`: Whether to keep the zero-sum log-amplitude constraint above. `true` is the default. `false` frees the overall amplitude and, when the amplitude is fitted, is accepted **only** with `ast_signal.FixedDiscreteSky` in `model.components`, since a fixed-flux sky is the one thing in the model that can set the scale; without it the run stops at validation time with the degeneracy spelled out. Nothing else changes: the phase reference is still pinned either way.
 
 The absolute flux scale is assumed to be set by the data — e.g. by a `REAL_DATA_FLUXCAL` column, or by the fixed sky above — and if it ever needs fitting it belongs in a separate scalar component rather than in the gain.
 
-**Initialising at a measured gain.** `gains.init` optionally starts the fit at a gain measured elsewhere, which is a much better starting point than the prior mean:
+**Initialising at a measured gain.** `init` on `gains.ConstGains` optionally starts the fit at a gain measured elsewhere, which is a much better starting point than the prior mean:
 
 ```yaml
-gains:
-  init: /path/to/gains.npz     # or /path/to/caltable.B
+model:
+  components:
+    - gains.ConstGains:
+        init: /path/to/gains.npz     # or /path/to/caltable.B
 ```
 
 * An **`.npz`** carrying the per-antenna gain under the key `gain`, shape `(n_ant,)` complex.

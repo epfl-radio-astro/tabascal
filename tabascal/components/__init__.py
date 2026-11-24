@@ -1,11 +1,21 @@
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from functools import lru_cache
-from typing import Dict, Any, Callable, Iterable, List, Sequence
+from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Sequence, Type, Union
 import importlib
 import inspect
 import pkgutil
 
 from jax import Array
+from pydantic import ValidationError
+
+from tabascal.schema import EmptyComponentConfig, StrictConfigModel, format_validation_error
+
+
+#: State keys Model supplies itself, whatever the component list holds: the
+#: two visibility accumulators the components add into, zeroed at assembly, and
+#: the RMSE diagnostics. Every other state key comes from a component.
+BASE_STATE_KEYS = ("vis_ast", "vis_rfi", "rmse_ast", "rmse_rfi", "rmse_gains")
 
 
 class MissingStateInput(ValueError):
@@ -28,6 +38,9 @@ class ComponentOrderError(ValueError):
 class Component(ABC):
     """Base class for all tabascal components"""
 
+    #: Pydantic schema declaring the required/optional config inputs of this component.
+    Config: ClassVar[Type[StrictConfigModel]] = EmptyComponentConfig
+
     # Class attributes defining component interface
     required_inputs: Dict[str, tuple] = {}
     parameter_shapes: Dict[str, tuple] = {}
@@ -47,6 +60,25 @@ class Component(ABC):
     # Set True on RFI visibility components that integrate each data-grid cell
     # in closed form, so no fine time grid is sized for them (read by rfi_grid).
     integrates_cells: bool = False
+
+    def __init__(self, config: Optional[Union[StrictConfigModel, Mapping[str, Any]]] = None):
+        schema_cls = type(self).Config
+        if config is None:
+            try:
+                config = schema_cls()
+            except ValidationError as err:
+                raise format_validation_error(err, prefix=self.__class__.__name__) from None
+        elif isinstance(config, Mapping):
+            try:
+                config = schema_cls.model_validate(dict(config))
+            except ValidationError as err:
+                raise format_validation_error(err, prefix=self.__class__.__name__) from None
+        elif not isinstance(config, schema_cls):
+            raise TypeError(
+                f"{self.__class__.__name__} expects {schema_cls.__name__} "
+                f"(or a mapping), got {type(config).__name__}."
+            )
+        self.config: Any = config
 
     @abstractmethod
     def setup(self, tab_config: Any) -> None:
@@ -151,7 +183,7 @@ def is_class(obj: Any) -> bool:
 def in_tree_components() -> Dict[str, type]:
     """Every concrete component shipped with tabascal, keyed by config reference.
 
-    The keys are the ``"module:Class"`` strings ``model.components`` is written
+    The keys are the ``"module.Class"`` strings ``model.components`` is written
     in, so they can be quoted straight back at the user. Abstract bases are left
     out -- they cannot be listed in a config.
     """
@@ -169,7 +201,7 @@ def in_tree_components() -> Dict[str, type]:
                 and obj.__module__ == module.__name__
                 and not inspect.isabstract(obj)
             ):
-                found[f"{info.name}:{name}"] = obj
+                found[f"{info.name}.{name}"] = obj
     return found
 
 
@@ -198,12 +230,12 @@ def component_outputs(component) -> List[str]:
 
 
 def component_ref(component) -> str:
-    """The ``"module:Class"`` string a component is written as in a config."""
+    """The ``"module.Class"`` string a component is written as in a config."""
     cls = component if isinstance(component, type) else type(component)
     for ref, known in in_tree_components().items():
         if known is cls:
             return ref
-    return f"{cls.__module__}:{cls.__name__}"
+    return f"{cls.__module__}.{cls.__name__}"
 
 
 def _describe_missing(
@@ -323,9 +355,9 @@ def _check_grid(components, producer: int, consumer: int, key: str, shape) -> No
         f"'{component_ref(components[producer])}' (model.components[{producer}]) "
         f"writes it on the {_grid_name(written)} {tuple(written)}. The RFI "
         "components must share a grid: the Fine trajectory and signal (e.g. "
-        "trajectory:FixedOrbitFine, rfi_signal:ComplexRFIVarAntFine) with an "
-        "rfi_vis:RiemannVis*Fine, or trajectory:FixedOrbit with "
-        "rfi_signal:ComplexRFIVarAnt or ComplexRFIConstAnt and rfi_vis:AnalyticVis."
+        "trajectory.FixedOrbitFine, rfi_signal.ComplexRFIVarAntFine) with an "
+        "rfi_vis.RiemannVis*Fine, or trajectory.FixedOrbit with "
+        "rfi_signal.ComplexRFIVarAnt or ComplexRFIConstAnt and rfi_vis.AnalyticVis."
     )
 
 

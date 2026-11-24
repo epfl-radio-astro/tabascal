@@ -31,14 +31,13 @@ be compiled from source.
 ## Choosing the backend
 
 The kernels need no configuration. To run the pure-JAX implementation instead,
-set the backend in the `rfi` section of the [configuration file](config.md):
+set `backend: jax` directly on the `rfi_vis` component in the [configuration file](config.md):
 
 ```yaml
 model:
   components:
-    - rfi_vis:RiemannVisFine
-rfi:
-  backend: jax
+    - rfi_vis.RiemannVisFine:
+        backend: jax
 ```
 
 ## Memory

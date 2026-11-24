@@ -1021,7 +1021,7 @@ def make_tab_config(n_rfi=3, n_rfi_real=2, n_ant=N_ANT, n_freq=N_FREQ,
         orbit_records=[make_tle_record(n, JD0) for n in ids],
         min_elevation=None if rfi_mask is None else 0.0,
         rfi_mask=rfi_mask,
-        args={"data": {"data_col": "DATA", "corr": "xx"}},
+        config=SimpleNamespace(data=SimpleNamespace(data_col="DATA", corr="xx")),
     )
 
 
@@ -1125,7 +1125,8 @@ class TestLightCurvesFromConfig:
 
     def test_the_column_and_correlation_are_carried_through(self):
         config = make_tab_config()
-        config.args["data"] = {"data_col": "TAB_RES_DATA", "corr": "yy"}
+        config.config.data.data_col = "TAB_RES_DATA"
+        config.config.data.corr = "yy"
 
         result = light_curves_from_config(config)
 
@@ -1716,6 +1717,29 @@ class TestCommandLine:
         with np.load(out, allow_pickle=False) as npz:
             assert np.allclose(npz["light_curves"], 0.0, atol=1e-12)
 
+    @staticmethod
+    def _make_run_config(
+        ms_path, data_col="DATA", corr="xx", freq=None, min_elevation=0.0
+    ):
+        from tabascal.schema import validate_config
+
+        return validate_config(
+            {
+                "data": {
+                    "ms_path": str(ms_path),
+                    "out_dir": None,
+                    "data_col": data_col,
+                    "corr": corr,
+                    "freq": freq,
+                },
+                "model": {
+                    "components": [
+                        {"trajectory.FixedOrbit": {"min_elevation": min_elevation}}
+                    ]
+                },
+            }
+        )
+
     def test_the_config_mode_reuses_the_tab_config(self, tmp_path, monkeypatch):
         """One MS read: the estimator is handed the config's own arrays."""
         import tabascal.config
@@ -1723,12 +1747,7 @@ class TestCommandLine:
         import tabascal.scripts._run_tabascal_impl as impl
         from tabascal.scripts.rfi_estimate import run
 
-        config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
-                     "data_col": "DATA", "corr": "xx", "freq": None},
-            "rfi": {"min_elevation": 0},
-            "satellites": {},
-        }
+        config = self._make_run_config(tmp_path / "obs.ms", min_elevation=0.0)
         tab_config = make_tab_config()
         built = []
 
@@ -1750,7 +1769,7 @@ class TestCommandLine:
 
         assert len(built) == 1
         # The overrides reach the config the TabConfig is built from.
-        assert built[0][0]["data"]["data_col"] == "TAB_RES_DATA"
+        assert built[0][0].data.data_col == "TAB_RES_DATA"
         # And an MS with no noise is a curve without an error bar here, not a
         # stopped run: this command documents the unweighted fallback.
         assert built[0][2]["require_noise"] is False
@@ -1772,12 +1791,9 @@ class TestCommandLine:
         import tabascal.scripts._run_tabascal_impl as impl
         from tabascal.scripts.rfi_estimate import run
 
-        config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
-                     "data_col": "TAB_RES_DATA", "corr": "yy", "freq": None},
-            "rfi": {"min_elevation": None},
-            "satellites": {},
-        }
+        config = self._make_run_config(
+            tmp_path / "obs.ms", data_col="TAB_RES_DATA", corr="yy", min_elevation=None
+        )
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
             tabascal.config, "TabConfig", lambda cfg, ms_path, **kw: make_tab_config()
@@ -1786,8 +1802,8 @@ class TestCommandLine:
 
         run(_cli("-c", "tab.yaml"))
 
-        assert config["data"]["data_col"] == "TAB_RES_DATA"
-        assert config["data"]["corr"] == "yy"
+        assert config.data.data_col == "TAB_RES_DATA"
+        assert config.data.corr == "yy"
         # And the output is named for what was actually filtered.
         assert (tmp_path / "light_curves" / "TAB_RES_DATA.npz").exists()
 
@@ -1866,12 +1882,9 @@ class TestCommandLine:
             + template(rfi_phase, tab_config.a1, tab_config.a2) * leftover
         )
 
-        config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
-                     "data_col": "DATA", "corr": "xx", "freq": float(band[chan])},
-            "rfi": {"min_elevation": None},
-            "satellites": {},
-        }
+        config = self._make_run_config(
+            tmp_path / "obs.ms", freq=float(band[chan]), min_elevation=None
+        )
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
             tabascal.config, "TabConfig", lambda cfg, ms_path, **kw: tab_config
@@ -1904,12 +1917,7 @@ class TestCommandLine:
             coords={"freq": np.linspace(2.4e9, 2.41e9, N_FREQ)},
         ).to_zarr(zarr_path)
 
-        config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
-                     "data_col": "DATA", "corr": "xx", "freq": None},
-            "rfi": {"min_elevation": None},
-            "satellites": {},
-        }
+        config = self._make_run_config(tmp_path / "obs.ms", min_elevation=None)
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
             tabascal.config, "TabConfig", lambda cfg, ms_path, **kw: tab_config
@@ -1931,12 +1939,7 @@ class TestCommandLine:
         import tabascal.scripts._run_tabascal_impl as impl
         from tabascal.scripts.rfi_estimate import run
 
-        config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
-                     "data_col": "DATA", "corr": "xx", "freq": None},
-            "rfi": {"min_elevation": None},
-            "satellites": {},
-        }
+        config = self._make_run_config(tmp_path / "obs.ms", min_elevation=None)
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
             tabascal.config, "TabConfig",
@@ -1954,14 +1957,10 @@ class TestCommandLine:
     def test_the_config_mode_honours_the_elevation_flag(self, tmp_path, monkeypatch):
         import tabascal.config
         import tabascal.scripts._run_tabascal_impl as impl
+        from tabascal.schema import OrbitSourceConfig
         from tabascal.scripts.rfi_estimate import run
 
-        config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
-                     "data_col": "DATA", "corr": "xx", "freq": None},
-            "rfi": {"min_elevation": 0},
-            "satellites": {},
-        }
+        config = self._make_run_config(tmp_path / "obs.ms", min_elevation=0.0)
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(
             tabascal.config, "TabConfig", lambda cfg, ms_path, **kw: make_tab_config()
@@ -1971,7 +1970,7 @@ class TestCommandLine:
         run(_cli("-c", "tab.yaml", "--no-elevation-cut",
                  "-o", str(tmp_path / "c.npz")))
 
-        assert config["rfi"]["min_elevation"] is None
+        assert config.model.find_one(OrbitSourceConfig).min_elevation is None
 
     def test_the_config_mode_tolerates_a_never_visible_satellite(
         self, tmp_path, monkeypatch
@@ -1986,12 +1985,7 @@ class TestCommandLine:
         import tabascal.scripts._run_tabascal_impl as impl
         from tabascal.scripts.rfi_estimate import run
 
-        config = {
-            "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
-                     "data_col": "DATA", "corr": "xx", "freq": None},
-            "rfi": {"min_elevation": 20.0},
-            "satellites": {},
-        }
+        config = self._make_run_config(tmp_path / "obs.ms", min_elevation=20.0)
         kwargs = {}
         monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)
         monkeypatch.setattr(

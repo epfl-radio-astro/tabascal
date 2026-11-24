@@ -17,8 +17,12 @@ from tabascal.interferometry import (
 )
 from tabascal.poly_interp import fine_offsets, fit_path
 from tabascal.components import Component, assert_attr_shape
+from tabascal.schema import OrbitSourceConfig, PositiveInt, StrictInt
 from tabascal.timing import measure_runtime
 from tabascal.time import JulianDate, apparent_radec_of_date, gast_deg, secs_to_days, skyfield_time, timescale
+
+from typing import Optional
+from pydantic import Field, model_validator
 
 import sgp4jax
 from sgp4jax import WGS72 as gravity
@@ -240,7 +244,31 @@ class PhaseCalculationRFIFine(Component):
         }
 
 
+class FixedOrbitConfig(OrbitSourceConfig):
+    """Configuration for :class:`FixedOrbit` (data-grid analytic RFI route)."""
+
+    path_order: StrictInt = Field(default=3, ge=0, le=3)
+    path_nodes: Optional[PositiveInt] = None
+
+    @model_validator(mode="after")
+    def _check_path_nodes(self) -> "FixedOrbitConfig":
+        if self.path_nodes is not None:
+            if self.path_nodes < self.path_order + 1 or self.path_nodes % 2 == 0:
+                raise ValueError(
+                    "path_nodes is how many samples per cell the path polynomial is "
+                    f"fitted through: an odd whole number of at least path_order + 1 = "
+                    f"{self.path_order + 1}, got {self.path_nodes!r}."
+                )
+        return self
+
+    @property
+    def effective_path_nodes(self) -> int:
+        return 4 * self.path_order + 1 if self.path_nodes is None else self.path_nodes
+
+
 class FixedOrbitFine(Component):
+
+    Config = OrbitSourceConfig
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -392,6 +420,8 @@ class FixedOrbit(Component):
     cell centre rather than at each fine sample.
     """
 
+    Config = FixedOrbitConfig
+
     required_inputs = {}
     output_shapes = {
         "rfi_xyz": ("n_rfi", "n_time", 3),
@@ -416,39 +446,8 @@ class FixedOrbit(Component):
             self.int_time = float(config.int_time)
             self.times_jd = JulianDate(config.times_jd)
 
-            # The kernel keeps the delay's derivatives up to the third, so a
-            # higher degree would be fitted and then silently dropped.
-            order = config.args["rfi"].get("path_order", 3)
-            if isinstance(order, bool) or not isinstance(order, int) or not 0 <= order <= 3:
-                raise ValueError(
-                    "rfi.path_order is the degree of the polynomial in time through "
-                    "each cell's path: a whole number from 0 to 3, the most the "
-                    f"analytic kernel integrates, got {order!r}."
-                )
-            self.path_order = order
-
-            # Nodes per cell for that fit. The default oversamples the degree
-            # several times over, which keeps the fit close to the least-squares
-            # one over the whole cell rather than an interpolation through the
-            # fewest points that fix a polynomial. The count must be odd: the
-            # nodes are laid out as fine_offsets lays out a cell, with the centre
-            # at index n // 2, so an even count leaves one more node before the
-            # centre than after it, and the fit runs out before the cell's end.
-            nodes = config.args["rfi"].get("path_nodes", None)
-            if nodes is None:  # the base config carries the key as null
-                nodes = 4 * order + 1
-            if (
-                isinstance(nodes, bool)
-                or not isinstance(nodes, int)
-                or nodes < order + 1
-                or nodes % 2 == 0
-            ):
-                raise ValueError(
-                    "rfi.path_nodes is how many samples per cell the path polynomial is "
-                    f"fitted through: an odd whole number of at least rfi.path_order + 1 = "
-                    f"{order + 1}, got {nodes!r}."
-                )
-            self.n_path_nodes = nodes
+            self.path_order = self.config.path_order
+            self.n_path_nodes = self.config.effective_path_nodes
 
             self._compute_rfi_path()
             self._set_outputs()
@@ -588,6 +587,7 @@ def _gcrf_positions_split(sats, whole, fraction):
 
 class NoDragOrbitFine(Component):
 
+    Config = OrbitSourceConfig
     requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -770,6 +770,7 @@ class NoDragOrbitFine(Component):
 
 class OrbitFine(Component):
 
+    Config = OrbitSourceConfig
     requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {

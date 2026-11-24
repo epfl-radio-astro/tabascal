@@ -3063,18 +3063,18 @@ def write_config_fragment(
     for warning in selection["warnings"]:
         lines.append(f"# WARNING: {warning}")
 
-    satellites = {"norad_ids": [int(row["norad_id"]) for row in detected]}
+    trajectory = {"norad_ids": [int(row["norad_id"]) for row in detected]}
     if shifted_orbit_dir is not None:
-        satellites["extra_orbit_dir"] = str(shifted_orbit_dir)
-        satellites["extra_orbit_max_age_days"] = None
+        trajectory["extra_orbit_dir"] = str(shifted_orbit_dir)
+        trajectory["extra_orbit_max_age_days"] = None
 
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
-        # default_flow_style=None keeps the ID list on one line, as tabascal's
-        # own configs write it, while the section itself stays in block style.
+        # default_flow_style=None keeps the ID list on one line while the section
+        # stays in block style, ready to merge into a trajectory component entry.
         fh.write(
             yaml.safe_dump(
-                {"satellites": satellites},
+                {"model": {"components": [{"trajectory.FixedOrbit": trajectory}]}},
                 sort_keys=False,
                 default_flow_style=None,
             )
@@ -3303,8 +3303,8 @@ def light_curves_from_config(
         norad_ids,
         np.asarray(tab_config.freqs),
         to_utc_mjd(tab_config.times_mjd, tab_config.time_scale),
-        tab_config.args["data"]["data_col"],
-        tab_config.args["data"]["corr"],
+        tab_config.config.data.data_col,
+        tab_config.config.data.corr,
         in_view=in_view,
     )
 

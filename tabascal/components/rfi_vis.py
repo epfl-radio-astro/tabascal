@@ -1,8 +1,9 @@
-from math import isfinite
+from typing import Any, Literal, Optional
 
 import jax.numpy as jnp
 from jax import lax
 import numpy as np
+from pydantic import Field, field_validator
 
 from tabascal.distributed import psum_over_rfi, sharding_enabled
 from tabascal.interferometry import (
@@ -11,25 +12,53 @@ from tabascal.interferometry import (
 )
 from tabascal.components import Component
 from tabascal.poly_interp import fine_offsets, interp_tables, monomial_tables
+from tabascal.schema import (
+    FineTimeIntegrationMixin,
+    FreqIntegrationMixin,
+    PositiveInt,
+    StrictInt,
+    WholePositiveInt,
+)
 from ri_kernels.jax_api import RFIAnalyticVisOp, RFIVisOp
 
 
-def _read_backend(config, backends):
-    """The ``rfi.backend`` a component runs, from the ones it has, default first.
+class RiemannVisFineConfig(FineTimeIntegrationMixin):
+    """Configuration for :class:`RiemannVisFine`."""
 
-    ``jax`` is the visibility written in JAX and differentiated by it; ``ffi``
-    is the compiled ``ri_kernels`` op, with its own JVP and transpose. A null
-    or absent key is the component's default.
-    """
-    backend = config.args["rfi"].get("backend")
-    if backend is None:
-        return backends[0]
-    if backend not in backends:
-        raise ValueError(
-            f"rfi.backend must be one of {', '.join(map(repr, backends))} or null "
-            f"for this component, got {backend!r}."
-        )
-    return backend
+    backend: Literal["ffi", "jax"] = "ffi"
+    baseline_block_size: Optional[WholePositiveInt] = 128
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _default_backend(cls, value: Any) -> Any:
+        return "ffi" if value is None else value
+
+
+class RiemannVisVariableFineConfig(FineTimeIntegrationMixin):
+    """Configuration for :class:`RiemannVisVariableFine`."""
+
+    backend: Literal["ffi", "jax"] = "ffi"
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _default_backend(cls, value: Any) -> Any:
+        return "ffi" if value is None else value
+
+
+class AnalyticVisConfig(FreqIntegrationMixin):
+    """Configuration for :class:`AnalyticVis`."""
+
+    backend: Literal["ffi"] = "ffi"
+    stencil: StrictInt = Field(default=1, ge=0, le=4)
+    segments: StrictInt = Field(default=2, ge=1, le=1024)
+    terms: StrictInt = Field(default=6, ge=1, le=32)
+    cubic_terms: StrictInt = Field(default=3, ge=0, le=8)
+    scratch_mb: PositiveInt = 256
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _default_backend(cls, value: Any) -> Any:
+        return "ffi" if value is None else value
 
 
 class RiemannVisFine(Component):
@@ -58,6 +87,8 @@ class RiemannVisFine(Component):
     collective does not divide.
     """
 
+    Config = RiemannVisFineConfig
+
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -79,32 +110,8 @@ class RiemannVisFine(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
             self.n_ant = config.n_ant
-            self.backend = _read_backend(config, ("ffi", "jax"))
-
-            # null is a setting, not a missing value: one block over every
-            # baseline, which keeps the checkpoint and leaves the scan a single
-            # step. int() alone would turn 1.9 into 1 without a word: one
-            # baseline per scan step, dressed up as a valid setting. The
-            # finiteness test guards int() against yaml's .inf and .nan, which
-            # raise there with a message about floats rather than about the key;
-            # it is asked of floats only, since an int is finite by construction
-            # and float() on a big enough one raises in its turn.
-            block_size = config.args["rfi"].get("baseline_block_size", 128)
-            if block_size is not None and (
-                isinstance(block_size, bool)
-                or not isinstance(block_size, (int, float))
-                or (isinstance(block_size, float) and not isfinite(block_size))
-                or block_size != int(block_size)
-                or block_size < 1
-            ):
-                raise ValueError(
-                    "rfi.baseline_block_size is the number of baselines handled "
-                    "per scan step: a whole number of at least 1, or null for a "
-                    f"single block over every baseline, got {block_size!r}."
-                )
-            self.baseline_block_size = (
-                None if block_size is None else int(block_size)
-            )
+            self.backend = self.config.backend
+            self.baseline_block_size = self.config.baseline_block_size
 
             self._set_outputs()
 
@@ -205,6 +212,8 @@ class RiemannVisVariableFine(Component):
     across devices.
     """
 
+    Config = RiemannVisVariableFineConfig
+
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
         "rfi_phase": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -227,7 +236,7 @@ class RiemannVisVariableFine(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
-            self.backend = _read_backend(config, ("ffi", "jax"))
+            self.backend = self.config.backend
 
             self.time_sample_idxs = config.time_sample_idxs
             self.time_strides = config.time_strides
@@ -432,6 +441,8 @@ class AnalyticVis(Component):
     cell. See ``docs/analytic_rfi_vis.md``.
     """
 
+    Config = AnalyticVisConfig
+
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
         "rfi_A": ("n_rfi", "n_ant", "n_freq", "n_time"),
@@ -451,10 +462,13 @@ class AnalyticVis(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
             self.n_time = config.n_time
-            # Only the compiled op for now: the JAX reference lands with it in
-            # ri_kernels and becomes the second backend then.
-            self.backend = _read_backend(config, ("ffi",))
-            self.options = self._read_options(config.args["rfi"]["analytic"])
+            self.backend = self.config.backend
+            self.options = {
+                "segments": self.config.segments,
+                "terms": self.config.terms,
+                "cubic_terms": self.config.cubic_terms,
+                "scratch_mb": self.config.scratch_mb,
+            }
 
             # The kernel writes each antenna pair once, so a repeated pair would
             # be left unwritten. A reversed pair or an autocorrelation is fine.
@@ -471,7 +485,7 @@ class AnalyticVis(Component):
 
             # Host-side float64 tables, once. MHz against delays in
             # microseconds: their product is cycles.
-            h = self.options.pop("stencil")
+            h = self.config.stencil
             chan_width = float(config.chan_width)
             dnu = fine_offsets(config.n_int_freq, chan_width)
             self.w_freq, self.start_freq = interp_tables(self.n_freq, h, dnu / chan_width)
@@ -489,30 +503,6 @@ class AnalyticVis(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    @staticmethod
-    def _read_options(analytic):
-        unknown = sorted(set(analytic) - set(_ANALYTIC_OPTIONS))
-        if unknown:
-            raise ValueError(
-                f"rfi.analytic.{unknown[0]} is not an option; the options are "
-                f"{', '.join(_ANALYTIC_OPTIONS)}."
-            )
-        options = {}
-        for key, (lo, hi) in _ANALYTIC_OPTIONS.items():
-            value = analytic[key]
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < lo
-                or (hi is not None and value > hi)
-            ):
-                bounds = f"from {lo} to {hi}" if hi is not None else f"of at least {lo}"
-                raise ValueError(
-                    f"rfi.analytic.{key} must be a whole number {bounds}, got {value!r}."
-                )
-            options[key] = value
-        return options
 
     def build_set_params(self):
 
