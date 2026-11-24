@@ -1,10 +1,11 @@
 """Pydantic v2 configuration schemas for TABASCAL.
 
-Every top-level config section (``data``, ``plots``, ``inference``, ``opt``,
-``model``) and every :class:`~tabascal.components.Component` subclass declares
-its own strict Pydantic model. Common fields shared by related components are
-expressed via Python mixin inheritance here — never as shared global YAML
-sections on the user side.
+Every top-level config section (``model``, ``data``, ``plots``, ``inference``,
+``opt``, ``satellites``) and every :class:`~tabascal.components.Component`
+subclass declares its own strict Pydantic model with field descriptions and
+range/type checks. Common fields shared by related components are expressed via
+Python mixin inheritance here — never as shared global YAML sections on the
+user side.
 
 This module deliberately avoids importing JAX, NumPyro, Optax, or Dask at
 module import time so lightweight CLI commands (``tabascal -h``, ``tab2MS``,
@@ -13,12 +14,13 @@ module import time so lightweight CLI commands (``tabascal -h``, ``tab2MS``,
 
 from __future__ import annotations
 
+import difflib
 import math
 import os
 import sys
 from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
-from typing import Annotated, Any, ClassVar, Literal, Optional, Tuple, Type, TypeVar, Union
+from typing import Annotated, Any, ClassVar, FrozenSet, Literal, Optional, Tuple, Type, TypeVar, Union
 
 from pydantic import (
     BaseModel,
@@ -32,8 +34,13 @@ from pydantic import (
 
 
 # ---------------------------------------------------------------------------
-# Public error type
+# Public error type & formatting
 # ---------------------------------------------------------------------------
+
+#: Top-level sections from the pre-component sectioned layout that moved onto
+#: individual components under ``model.components``.
+_OLD_LAYOUT_KEYS = ("ast", "rfi", "gains")
+
 
 class ConfigValidationError(ValueError):
     """Raised when a TABASCAL configuration fails schema validation."""
@@ -43,12 +50,73 @@ class ConfigValidationError(ValueError):
         self.validation_error = cause
 
 
-def format_validation_error(err: ValidationError, *, prefix: str = "") -> ConfigValidationError:
+def _extra_key_hint(
+    key: str,
+    model_cls: Optional[type],
+    *,
+    component_cls: Optional[type] = None,
+) -> str:
+    """Suggest a typo fix or the component/section that actually owns ``key``."""
+    if not isinstance(key, str) or model_cls is None:
+        return ""
+    known = sorted(getattr(model_cls, "model_fields", ()))
+    close = difflib.get_close_matches(key, known, n=1)
+    if close:
+        return f" Did you mean {close[0]!r}?"
+
+    if component_cls is not None:
+        # Check whether the misplaced option belongs to a top-level section
+        # (e.g. norad_ids belongs in 'satellites') or to another component.
+        section_owners = [
+            sec_name
+            for sec_name, sec_cls in TOP_LEVEL_SECTIONS.items()
+            if key in sec_cls.model_fields
+        ]
+        if section_owners:
+            return (
+                f" {key!r} belongs in the top-level {', '.join(repr(s) for s in section_owners)} "
+                "section, not on this component."
+            )
+        from tabascal.components import in_tree_components
+
+        owners = sorted(
+            ref
+            for ref, other in in_tree_components().items()
+            if other is not component_cls and key in getattr(other, "Config", EmptyComponentConfig).model_fields
+        )
+        if owners:
+            return (
+                f" {key!r} is an option of {', '.join(owners)}, not of this "
+                "component; set it there."
+            )
+    return ""
+
+
+def _resolve_model_for_loc(root_cls: Optional[type], loc: tuple) -> Optional[type]:
+    """Walk ``root_cls`` along ``loc[:-1]`` to find the model that rejected ``loc[-1]``."""
+    if root_cls is None or len(loc) <= 1:
+        return root_cls
+    # Direct section lookup on RunConfig.
+    if root_cls is RunConfig and isinstance(loc[0], str):
+        sec_map = {"model": ModelConfig, **TOP_LEVEL_SECTIONS}
+        if len(loc) == 2 and loc[0] in sec_map:
+            return sec_map[loc[0]]
+    return None
+
+
+def format_validation_error(
+    err: ValidationError,
+    *,
+    prefix: str = "",
+    model_cls: Optional[type] = None,
+    component_cls: Optional[type] = None,
+) -> ConfigValidationError:
     """Turn a Pydantic :class:`ValidationError` into a readable :class:`ConfigValidationError`."""
     lines = []
     for item in err.errors():
+        raw_loc = tuple(item.get("loc", ()))
         loc_parts = []
-        for part in item.get("loc", ()):
+        for part in raw_loc:
             if isinstance(part, int):
                 if loc_parts:
                     loc_parts[-1] = f"{loc_parts[-1]}[{part}]"
@@ -65,7 +133,30 @@ def format_validation_error(err: ValidationError, *, prefix: str = "") -> Config
             msg = msg[len("Value error, "):]
         if item.get("type") == "literal_error" and "input" in item:
             msg = f"{msg} (got {item['input']!r})"
-        lines.append(f"  - {loc}: {msg}" if loc else f"  - {msg}")
+        elif item.get("type") == "extra_forbidden" and raw_loc:
+            bad_key = raw_loc[-1]
+            target_cls = (
+                model_cls
+                if component_cls is not None
+                else _resolve_model_for_loc(model_cls, raw_loc)
+            )
+            hint = _extra_key_hint(
+                str(bad_key),
+                target_cls,
+                component_cls=component_cls if len(raw_loc) == 1 else None,
+            )
+            if target_cls is not None:
+                takes = ", ".join(target_cls.model_fields) or "no options"
+                msg = f"{msg} (takes: {takes}).{hint}"
+            elif hint:
+                msg = f"{msg}.{hint}"
+        # Errors accumulated inside a field validator (e.g. model.components)
+        # already format one bullet per offending component.
+        if msg.lstrip().startswith("- "):
+            for subline in msg.splitlines():
+                lines.append(f"  {subline.strip()}")
+        else:
+            lines.append(f"  - {loc}: {msg}" if loc else f"  - {msg}")
     header = "Configuration validation failed:\n" if len(lines) > 1 else "Configuration validation failed: "
     body = "\n".join(lines) if len(lines) > 1 else lines[0].lstrip("  - ") if lines else str(err)
     return ConfigValidationError(header + body, cause=err)
@@ -310,6 +401,14 @@ class StrictConfigModel(BaseModel):
         arbitrary_types_allowed=True,
     )
 
+    #: Field name -> path in the pre-component sectioned config, used by
+    #: ``tabascal migrate-config`` to move options onto the owning component.
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {}
+
+    #: Fields for which a legacy ``null`` meant "this component's default" rather
+    #: than an explicit value, so ``tabascal migrate-config`` omits them.
+    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset()
+
     @classmethod
     def input_path_fields(cls) -> dict[str, dict[str, Any]]:
         """Fields tagged as input file/directory paths in their Field metadata."""
@@ -339,77 +438,83 @@ DEFAULT_REMOTE_MAX_AGE_DAYS = 3.0
 DEFAULT_CACHE_REUSE_MAX_AGE_DAYS = 1.0
 
 
-class OrbitSourceConfig(StrictConfigModel):
-    """Code-level mixin for satellite trajectory components that consume TLE/OMM orbits."""
+class TrajectoryConfig(StrictConfigModel):
+    """Code-level mixin for satellite trajectory components that propagate configured orbits."""
 
-    norad_ids: list[PositiveInt] = Field(default_factory=list)
-    norad_ids_path: OptionalPathStr = Field(
-        default=None,
-        json_schema_extra={"input_path": True},
+    min_elevation: Optional[FiniteFloat] = Field(
+        default=0.0,
+        description=(
+            "Elevation in degrees below which a satellite's RFI signal is masked to zero. "
+            "0 masks a satellite only while it is below the geometric horizon; null "
+            "disables masking. A satellite never above it stops the run."
+        ),
     )
-    extra_orbit_dir: OptionalPathStr = Field(
-        default=None,
-        json_schema_extra={"input_path": True, "fingerprint_kind": "orbits"},
-    )
-    extra_orbit_max_age_days: Optional[NonNegativeFloat] = None
-    remote_max_age_days: Optional[NonNegativeFloat] = DEFAULT_REMOTE_MAX_AGE_DAYS
-    cache_reuse_max_age_days: Optional[NonNegativeFloat] = DEFAULT_CACHE_REUSE_MAX_AGE_DAYS
-    min_elevation: Optional[FiniteFloat] = 0.0
 
-    @field_validator("norad_ids", mode="before")
-    @classmethod
-    def _normalise_norad_ids(cls, value: Any) -> list[int]:
-        if value is None:
-            return []
-        if isinstance(value, (str, bytes)):
-            raise ValueError(f"norad_ids must be a list of NORAD catalogue IDs, got {value!r}")
-        if hasattr(value, "tolist"):
-            value = value.tolist()
-        if not isinstance(value, Sequence):
-            try:
-                value = list(value)
-            except TypeError as e:
-                raise ValueError(
-                    f"norad_ids must be a list of NORAD catalogue IDs, got {value!r}"
-                ) from e
-        out: list[int] = []
-        seen: set[int] = set()
-        for i, item in enumerate(value):
-            nid = _as_norad_id(item, f"norad_ids[{i}]")
-            if nid not in seen:
-                seen.add(nid)
-                out.append(nid)
-        return out
-
-    @model_validator(mode="after")
-    def _check_age_bounds(self) -> "OrbitSourceConfig":
-        if (
-            self.cache_reuse_max_age_days is not None
-            and self.remote_max_age_days is not None
-            and self.cache_reuse_max_age_days > self.remote_max_age_days
-        ):
-            raise ValueError(
-                f"cache_reuse_max_age_days ({self.cache_reuse_max_age_days:g}) must not "
-                f"exceed remote_max_age_days ({self.remote_max_age_days:g})"
-            )
-        return self
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        "min_elevation": ("rfi", "min_elevation"),
+    }
 
 
 class FreqIntegrationMixin(StrictConfigModel):
     """Code-level mixin for RFI visibility components that integrate over frequency samples."""
 
-    n_int_freq: PositiveInt = 1
+    n_int_freq: PositiveInt = Field(
+        default=1,
+        description=(
+            "Integration samples per frequency channel of the RFI visibility. Given "
+            "directly: there is no estimate on this axis."
+        ),
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        "n_int_freq": ("rfi", "n_int_freq"),
+    }
 
 
 class FineTimeIntegrationMixin(FreqIntegrationMixin):
     """Code-level mixin for fine-grid RFI visibility components."""
 
-    time_int_factor: PositiveFloat = 1.0
-    min_time_bins: PositiveInt = 1
-    max_time_bins: PositiveInt = 30
+    time_int_factor: PositiveFloat = Field(
+        default=1.0,
+        description=(
+            "Factor on the number of integration samples per time step of the fine grid "
+            "over its estimate from the observation's RFI sampling requirements. The "
+            "count itself is always estimated and cannot be given directly."
+        ),
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        **FreqIntegrationMixin.legacy_keys,
+        "time_int_factor": ("rfi", "time_int_factor"),
+    }
+
+
+class VariableFineTimeIntegrationMixin(FineTimeIntegrationMixin):
+    """Code-level mixin for variable-stride fine-grid RFI visibility components."""
+
+    min_time_bins: PositiveInt = Field(
+        default=1,
+        description=(
+            "Minimum number of stride groups the per-baseline RFI sampling rates are "
+            "binned into."
+        ),
+    )
+    max_time_bins: PositiveInt = Field(
+        default=30,
+        description=(
+            "Maximum number of stride groups the per-baseline RFI sampling rates are "
+            "binned into."
+        ),
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        **FineTimeIntegrationMixin.legacy_keys,
+        "min_time_bins": ("rfi", "min_time_bins"),
+        "max_time_bins": ("rfi", "max_time_bins"),
+    }
 
     @model_validator(mode="after")
-    def _check_time_bins(self) -> "FineTimeIntegrationMixin":
+    def _check_time_bins(self) -> "VariableFineTimeIntegrationMixin":
         if self.min_time_bins > self.max_time_bins:
             raise ValueError(
                 f"min_time_bins ({self.min_time_bins}) must not exceed "
@@ -433,12 +538,30 @@ def _check_std_value(value: Any, *, allow_none: bool) -> Any:
 class FourierGPConfig(StrictConfigModel):
     """Code-level mixin shared by Fourier-domain Gaussian process components."""
 
-    std: Optional[Union[PositiveFloat, Literal["data"]]] = None
-    corr_freq: Optional[PositiveFloat] = None
-    gammas: PositivePair = (5.0, 5.0)
-    cutoff: CutoffFloat = 1e-6
-    freq_pad_factor: FloatGe1 = 2.0
-    time_pad_factor: FloatGe1 = 2.0
+    std: Optional[Union[PositiveFloat, Literal["data"]]] = Field(
+        default=None,
+        description="Prior standard deviation in Jy, or 'data' to estimate from the observed visibilities.",
+    )
+    corr_freq: Optional[PositiveFloat] = Field(
+        default=None,
+        description="Correlation bandwidth in Hz along the frequency axis.",
+    )
+    gammas: PositivePair = Field(
+        default=(5.0, 5.0),
+        description="Power-law roll-off exponents along the (frequency, time) axes.",
+    )
+    cutoff: CutoffFloat = Field(
+        default=1e-6,
+        description="Relative power threshold below which Fourier k-modes are dropped.",
+    )
+    freq_pad_factor: FloatGe1 = Field(
+        default=2.0,
+        description="Zero-padding factor along the frequency axis of the Fourier domain (>= 1).",
+    )
+    time_pad_factor: FloatGe1 = Field(
+        default=2.0,
+        description="Zero-padding factor along the time axis of the Fourier domain (>= 1).",
+    )
 
     @field_validator("cutoff", mode="before")
     @classmethod
@@ -451,18 +574,84 @@ class FourierGPConfig(StrictConfigModel):
 class RFIGPConfig(FourierGPConfig):
     """Code-level mixin shared by all GP-based RFI signal components."""
 
-    std: Optional[Union[PositiveFloat, Literal["data"]]] = None
-    corr_freq: Optional[PositiveFloat] = 1e6
-    corr_time: Optional[PositiveFloat] = 24.0
-    gammas: PositivePair = (3, 3)
-    cutoff: CutoffFloat = 1e-9
-    signal_type: Literal["complex", "real"] = "complex"
-    init: Literal["prior", "est", "matched-filter", "truth", "zeros", "ones", "sample"] = "sample"
-    mean: Literal["zeros", "data", "est", "matched-filter"] = "zeros"
+    std: Optional[Union[PositiveFloat, Literal["data"]]] = Field(
+        default=None,
+        description=(
+            "Width of the prior on one RFI source, in Jy (rms|V|). 'data' measures the "
+            "total rms|V| of the observed visibilities (sky and noise included); null is "
+            "twice the largest observed visibility."
+        ),
+    )
+    corr_freq: Optional[PositiveFloat] = Field(
+        default=1e6,
+        description=(
+            "Bandwidth, in Hz, over which the RFI signal stays correlated (knee along "
+            "the frequency axis). null uses half the observed band."
+        ),
+    )
+    corr_time: Optional[PositiveFloat] = Field(
+        default=24.0,
+        description=(
+            "Time, in seconds, over which the RFI signal stays correlated (knee along "
+            "the time axis). null uses half the observation duration."
+        ),
+    )
+    gammas: PositivePair = Field(
+        default=(3, 3),
+        description="Roll-off exponents of the RFI power spectrum on the (frequency, time) axes.",
+    )
+    cutoff: CutoffFloat = Field(
+        default=1e-9,
+        description=(
+            "Relative power below which a k-mode is dropped from the RFI latent grid; "
+            "the retained spectrum is re-normalised after the cut."
+        ),
+    )
+    signal_type: Literal["complex", "real"] = Field(
+        default="complex",
+        description=(
+            "Signal space of the RFI amplitude: 'complex' (default) or 'real' (one "
+            "Hartley coefficient per retained mode)."
+        ),
+    )
+    init: Literal["prior", "est", "matched-filter", "truth", "zeros", "ones", "sample"] = Field(
+        default="sample",
+        description=(
+            "Where the RFI signal parameters start: 'prior', 'est' (light curves in "
+            "est), 'matched-filter' (alias 'mf'), 'truth', 'zeros' (or 0), 'ones' (or 1), "
+            "or 'sample'."
+        ),
+    )
+    mean: Literal["zeros", "data", "est", "matched-filter"] = Field(
+        default="zeros",
+        description=(
+            "Mean of the prior over the RFI signal parameters: 'zeros' (or 0), 'data', "
+            "'est', or 'matched-filter' (alias 'mf')."
+        ),
+    )
     est: OptionalPathStr = Field(
         default=None,
+        description=(
+            "Path to a measured light-curve file (.npz or .zarr), read by init or mean "
+            "'est'. Not needed for 'matched-filter'."
+        ),
         json_schema_extra={"input_path": True},
     )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        "init": ("rfi", "init"),
+        "mean": ("rfi", "mean"),
+        "est": ("rfi", "est"),
+        "std": ("rfi", "gp_cov", "std"),
+        "corr_freq": ("rfi", "gp_cov", "corr_freq"),
+        "corr_time": ("rfi", "gp_cov", "corr_time"),
+        "gammas": ("rfi", "gp_cov", "gammas"),
+        "cutoff": ("rfi", "cutoff"),
+        "signal_type": ("rfi", "signal_type"),
+        "freq_pad_factor": ("rfi", "freq_pad_factor"),
+        "time_pad_factor": ("rfi", "time_pad_factor"),
+    }
+    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset({"gammas", "cutoff"})
 
     @field_validator("std", mode="before")
     @classmethod
@@ -495,7 +684,7 @@ class RFIGPConfig(FourierGPConfig):
 
     def requires_truth(self, ref: str = "") -> dict[str, str]:
         if self.init == "truth":
-            label = f"{ref}.init: truth" if ref else "rfi.init: truth"
+            label = f"{ref}.init: truth" if ref else "rfi_signal.init: truth"
             return {"rfi_A": label}
         return {}
 
@@ -507,34 +696,87 @@ class RFIGPConfig(FourierGPConfig):
 class DataConfig(StrictConfigModel):
     """Observation, I/O, noise, flags, and external calibration settings."""
 
-    out_dir: OptionalPathStr = None
+    out_dir: OptionalPathStr = Field(
+        default=None,
+        description=(
+            "Directory where runs/<name>_<timestamp>_<token>/ is created. Defaults to "
+            "the directory containing ms_path; given without ms_path, treated as a "
+            "tab-sim simulation directory."
+        ),
+    )
     truth_zarr: OptionalPathStr = Field(
         default=None,
+        description=(
+            "Path to a tab-sim simulation truth zarr, required by init: truth and "
+            "plots.truth. Defaults to <MS directory>/<MS name>.zarr."
+        ),
         json_schema_extra={"input_path": True, "resolved_by_runner": True},
     )
     ms_path: OptionalPathStr = Field(
         default=None,
+        description="Path to the Measurement Set to model (overridden by -ms/--ms_path).",
         json_schema_extra={
             "input_path": True,
             "resolved_by_runner": True,
             "fingerprint_kind": "ms",
         },
     )
-    freq: Optional[PositiveFloat] = None
-    skip_ms_write: StrictBool = False
-    row_chunk: Optional[PositiveInt] = None
-    data_col: NonEmptyStr = "DATA"
-    corr: NonEmptyStr = "xx"
+    freq: Optional[PositiveFloat] = Field(
+        default=None,
+        description=(
+            "Single frequency in Hz to select (resolved to the nearest channel inside "
+            "the band). null reads every channel."
+        ),
+    )
+    skip_ms_write: StrictBool = Field(
+        default=False,
+        description=(
+            "Keep results in zarr without writing back to the MS; tab2MS can export "
+            "them later."
+        ),
+    )
+    row_chunk: Optional[PositiveInt] = Field(
+        default=None,
+        description="Positive row chunk size for MS reads and writes; null keeps dask-ms defaults.",
+    )
+    data_col: NonEmptyStr = Field(
+        default="DATA",
+        description="MS data column to model.",
+    )
+    corr: NonEmptyStr = Field(
+        default="xx",
+        description="Correlation to model, matched by identity against POLARIZATION::CORR_TYPE.",
+    )
     noise: Optional[Union[PositiveFloat, str]] = Field(
         default=None,
+        description=(
+            "Per-visibility noise override (positive scalar in Jy or path to an .npz), "
+            "in the frame of data_col before gain_table is applied. null reads SIGMA_SPECTRUM/SIGMA."
+        ),
         json_schema_extra={"input_path": True},
     )
     gain_table: Optional[Union[str, list[str]]] = Field(
         default=None,
+        description=(
+            "Path to a CASA calibration table, or an ordered list of them, divided out "
+            "of data and noise at read time."
+        ),
         json_schema_extra={"input_path": True, "is_path_list": True},
     )
-    flags: StrictBool = False
-    save_rfi_per_sat: StrictBool = False
+    flags: StrictBool = Field(
+        default=False,
+        description=(
+            "Exclude the MS's own flags from the likelihood. Default false so flagged "
+            "RFI emitters can be recovered."
+        ),
+    )
+    save_rfi_per_sat: StrictBool = Field(
+        default=False,
+        description=(
+            "Also store per-satellite RFI visibilities (rfi_vis_src) in the results "
+            "zarr for per-NORAD diagnostics."
+        ),
+    )
 
     @field_validator("noise", mode="before")
     @classmethod
@@ -583,19 +825,46 @@ class DataConfig(StrictConfigModel):
 class PlotsConfig(StrictConfigModel):
     """Diagnostic plotting toggles."""
 
-    init: StrictBool = False
-    truth: StrictBool = False
-    prior: StrictBool = False
-    opt: StrictBool = False
-    losses: StrictBool = False
-    prior_samples: PositiveInt = 100
+    init: StrictBool = Field(
+        default=False,
+        description="Plot astronomical/RFI visibilities and gains at the initial parameters.",
+    )
+    truth: StrictBool = Field(
+        default=False,
+        description="Overlay simulation truth on diagnostic plots (requires a tab-sim zarr).",
+    )
+    prior: StrictBool = Field(
+        default=False,
+        description="Plot prior predictive distributions over visibilities and gains.",
+    )
+    opt: StrictBool = Field(
+        default=False,
+        description="Plot astronomical/RFI visibilities and gains at the optimised MAP parameters.",
+    )
+    losses: StrictBool = Field(
+        default=False,
+        description="Plot the optimiser trace (loss, plus chi^2 and NRMSE when trace_path is set).",
+    )
+    prior_samples: PositiveInt = Field(
+        default=100,
+        description="Number of prior samples drawn when plots.prior is true.",
+    )
 
 
 class InferenceConfig(StrictConfigModel):
     """Top-level inference controls."""
 
-    opt: StrictBool = True
-    seed: Optional[StrictInt] = None
+    opt: StrictBool = Field(
+        default=True,
+        description="Whether to run MAP optimisation.",
+    )
+    seed: Optional[StrictInt] = Field(
+        default=None,
+        description=(
+            "Single random seed for the run. null means 1; 0 is a valid seed. Each "
+            "sampling component folds its own fixed tag into this seed."
+        ),
+    )
 
     @property
     def effective_seed(self) -> int:
@@ -605,16 +874,60 @@ class InferenceConfig(StrictConfigModel):
 class OptConfig(StrictConfigModel):
     """MAP optimisation parameters."""
 
-    epsilon: PositiveFloat = 1e-2
-    max_iter: NonNegativeInt = 500
-    guide: Literal["map"] = "map"
-    dual_run: StrictBool = True
-    optimizer: Optional[Union[str, dict[str, Any]]] = None
-    schedule: Optional[dict[str, Any]] = None
-    stop: Optional[dict[str, Any]] = None
-    checkpoints: Optional[list[PositiveInt]] = None
-    init_jitter: Optional[Union[NonNegativeFloat, dict[str, Any]]] = None
-    trace_path: OptionalPathStr = None
+    epsilon: PositiveFloat = Field(
+        default=1e-2,
+        description="Base optimiser step size.",
+    )
+    max_iter: NonNegativeInt = Field(
+        default=500,
+        description="Maximum optimisation iterations (per phase under dual_run, or total under schedule).",
+    )
+    guide: Literal["map"] = Field(
+        default="map",
+        description="Optimisation guide type (currently only 'map').",
+    )
+    dual_run: StrictBool = Field(
+        default=True,
+        description="Run a second optimisation phase at epsilon / 10 (ignored when schedule is set).",
+    )
+    optimizer: Optional[Union[str, dict[str, Any]]] = Field(
+        default=None,
+        description=(
+            "Optax optimiser name or mapping of optimiser arguments plus optional "
+            "clip_norm. null uses adabelief with optax defaults."
+        ),
+    )
+    schedule: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Single-optimiser step-size schedule (step, exponential, cosine, linear, "
+            "constant) with optional warmup_steps and warmup_factor. null keeps dual_run."
+        ),
+    )
+    stop: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Early-stopping plateau criterion {window, rtol, min_steps}; requires schedule."
+        ),
+    )
+    checkpoints: Optional[list[PositiveInt]] = Field(
+        default=None,
+        description="Iteration counts at which to write parameter checkpoints under results/checkpoints/.",
+    )
+    init_jitter: Optional[Union[NonNegativeFloat, dict[str, Any]]] = Field(
+        default=None,
+        description=(
+            "Seeded perturbation added to the initial parameters: a scalar in prior "
+            "widths or a per-block mapping of absolute/relative scales."
+        ),
+    )
+    trace_path: OptionalPathStr = Field(
+        default=None,
+        description=(
+            "Path for the per-iteration metrics trace (.npz with chi^2 and truth NRMSEs); "
+            "relative paths resolve inside the run directory. Overridden by TAB_LOSS_TRACE."
+        ),
+    )
 
     @field_validator("init_jitter", mode="before")
     @classmethod
@@ -637,6 +950,104 @@ class OptConfig(StrictConfigModel):
             else:
                 out[str(block)] = _check_non_negative_float(spec)
         return out
+
+
+class SatellitesConfig(StrictConfigModel):
+    """Satellite catalogue and orbit-record resolution settings."""
+
+    norad_ids: list[PositiveInt] = Field(
+        default_factory=list,
+        description=(
+            "NORAD catalogue IDs of satellites to model. Every listed ID must resolve "
+            "to an acceptable orbit record. Empty is valid only when no satellite "
+            "trajectory component is in model.components."
+        ),
+    )
+    norad_ids_path: OptionalPathStr = Field(
+        default=None,
+        description=(
+            "Path to a text file of NORAD IDs (one per line, '#' comments ignored). "
+            "Takes precedence over norad_ids; CLI -np/--norad-path takes precedence over both."
+        ),
+        json_schema_extra={"input_path": True},
+    )
+    extra_orbit_dir: OptionalPathStr = Field(
+        default=None,
+        description=(
+            "Directory of local orbit files (TLE or OMM) searched per NORAD ID before "
+            "the managed cache and SatChecker."
+        ),
+        json_schema_extra={"input_path": True, "fingerprint_kind": "orbits"},
+    )
+    extra_orbit_max_age_days: Optional[NonNegativeFloat] = Field(
+        default=None,
+        description=(
+            "Max |record epoch - observation epoch| in days for extra_orbit_dir files. "
+            "null is unlimited (keeps exact used_orbits replay working)."
+        ),
+    )
+    remote_max_age_days: Optional[NonNegativeFloat] = Field(
+        default=DEFAULT_REMOTE_MAX_AGE_DAYS,
+        description=(
+            "Hard ceiling in days on the age of a record accepted from SatChecker or "
+            "the managed cache. null removes the ceiling."
+        ),
+    )
+    cache_reuse_max_age_days: Optional[NonNegativeFloat] = Field(
+        default=DEFAULT_CACHE_REUSE_MAX_AGE_DAYS,
+        description=(
+            "Age in days below which a cached SatChecker record avoids a new remote "
+            "request. null always reuses the nearest acceptable cached record."
+        ),
+    )
+
+    @field_validator("norad_ids", mode="before")
+    @classmethod
+    def _normalise_norad_ids(cls, value: Any) -> list[int]:
+        if value is None:
+            return []
+        if isinstance(value, (str, bytes)):
+            raise ValueError(f"norad_ids must be a list of NORAD catalogue IDs, got {value!r}")
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        if not isinstance(value, Sequence):
+            try:
+                value = list(value)
+            except TypeError as e:
+                raise ValueError(
+                    f"norad_ids must be a list of NORAD catalogue IDs, got {value!r}"
+                ) from e
+        out: list[int] = []
+        seen: set[int] = set()
+        for i, item in enumerate(value):
+            nid = _as_norad_id(item, f"norad_ids[{i}]")
+            if nid not in seen:
+                seen.add(nid)
+                out.append(nid)
+        return out
+
+    @model_validator(mode="after")
+    def _check_age_bounds(self) -> "SatellitesConfig":
+        if (
+            self.cache_reuse_max_age_days is not None
+            and self.remote_max_age_days is not None
+            and self.cache_reuse_max_age_days > self.remote_max_age_days
+        ):
+            raise ValueError(
+                f"cache_reuse_max_age_days ({self.cache_reuse_max_age_days:g}) must not "
+                f"exceed remote_max_age_days ({self.remote_max_age_days:g})"
+            )
+        return self
+
+
+#: Non-model top-level sections of a run config, keyed by section name.
+TOP_LEVEL_SECTIONS: dict[str, Type[StrictConfigModel]] = {
+    "data": DataConfig,
+    "plots": PlotsConfig,
+    "inference": InferenceConfig,
+    "opt": OptConfig,
+    "satellites": SatellitesConfig,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -705,24 +1116,51 @@ def _parse_component_entry(entry: Any, index: int) -> ComponentSpec:
     try:
         cls = import_components([raw_ref])[0]
     except ImportError as exc:
-        raise ValueError(str(exc)) from exc
+        raise ValueError(f"model.components[{index}]: {exc}") from exc
 
     ref = canonical_component_ref(raw_ref, cls)
     schema_cls: Type[StrictConfigModel] = getattr(cls, "Config", EmptyComponentConfig)
     try:
         validated = schema_cls.model_validate(dict(raw_params))
     except ValidationError as err:
-        formatted = format_validation_error(err, prefix=f"model.components[{index}] ({ref})")
+        formatted = format_validation_error(
+            err,
+            prefix=f"model.components[{index}] ({ref})",
+            model_cls=schema_cls,
+            component_cls=cls,
+        )
         raise ValueError(str(formatted)) from err
 
     return ComponentSpec(ref=ref, cls=cls, config=validated)
 
 
+def _component_error_lines(msg: str) -> list[str]:
+    """Extract bullet lines from a component parse error for multi-error reporting."""
+    prefix = "Configuration validation failed:"
+    body = msg[len(prefix):].strip() if msg.startswith(prefix) else msg.strip()
+    out = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        out.append(stripped if stripped.startswith("- ") else f"- {stripped}")
+    return out
+
+
 class ModelConfig(StrictConfigModel):
     """Forward model precision and ordered component list."""
 
-    precision: Literal["single", "double"] = "single"
-    components: list[ComponentSpec] = Field(default_factory=list)
+    precision: Literal["single", "double"] = Field(
+        default="single",
+        description="Floating-point precision of the model: 'single' (fp32) or 'double' (fp64).",
+    )
+    components: list[ComponentSpec] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of forward-model components, each a 'module.Class' reference "
+            "or a single-key mapping '{module.Class: {options...}}'."
+        ),
+    )
 
     @field_validator("components", mode="before")
     @classmethod
@@ -731,7 +1169,16 @@ class ModelConfig(StrictConfigModel):
             return []
         if not isinstance(value, list):
             raise ValueError(f"model.components must be a list, got {type(value).__name__}")
-        return [_parse_component_entry(entry, i) for i, entry in enumerate(value)]
+        specs: list[ComponentSpec] = []
+        error_lines: list[str] = []
+        for i, entry in enumerate(value):
+            try:
+                specs.append(_parse_component_entry(entry, i))
+            except ValueError as err:
+                error_lines.extend(_component_error_lines(str(err)))
+        if error_lines:
+            raise ValueError("\n".join(error_lines))
+        return specs
 
     def find_all(self, config_type: Type[TConfig]) -> list[Tuple[ComponentSpec, TConfig]]:
         """Every ``(spec, config)`` whose config is an instance of ``config_type``."""
@@ -772,10 +1219,10 @@ class ModelConfig(StrictConfigModel):
 
     @model_validator(mode="after")
     def _validate_model_consistency(self) -> "ModelConfig":
-        # 1. At most one orbit-source trajectory component.
-        orbit_matches = self.find_all(OrbitSourceConfig)
-        if len(orbit_matches) > 1:
-            refs = [spec.ref for spec, _ in orbit_matches]
+        # 1. At most one orbit trajectory component.
+        traj_matches = self.find_all(TrajectoryConfig)
+        if len(traj_matches) > 1:
+            refs = [spec.ref for spec, _ in traj_matches]
             raise ValueError(
                 f"model.components has multiple orbit trajectory components ({refs}); "
                 "include at most one."
@@ -792,10 +1239,18 @@ class ModelConfig(StrictConfigModel):
                 )
         fine_matches = self.find_all(FineTimeIntegrationMixin)
         if len(fine_matches) > 1:
-            keys = {(c.time_int_factor, c.min_time_bins, c.max_time_bins) for _, c in fine_matches}
-            if len(keys) > 1:
+            factors = {c.time_int_factor for _, c in fine_matches}
+            if len(factors) > 1:
                 raise ValueError(
-                    "Fine-grid RFI visibility components disagree on time integration settings."
+                    "Fine-grid RFI visibility components disagree on time_int_factor."
+                )
+        var_matches = self.find_all(VariableFineTimeIntegrationMixin)
+        if len(var_matches) > 1:
+            bins = {(c.min_time_bins, c.max_time_bins) for _, c in var_matches}
+            if len(bins) > 1:
+                raise ValueError(
+                    "Variable fine-grid RFI visibility components disagree on "
+                    "min_time_bins / max_time_bins."
                 )
 
         if not self.components:
@@ -851,11 +1306,29 @@ class ModelConfig(StrictConfigModel):
 class RunConfig(StrictConfigModel):
     """Complete validated configuration for a TABASCAL run."""
 
-    model: ModelConfig
-    data: DataConfig = Field(default_factory=DataConfig)
-    plots: PlotsConfig = Field(default_factory=PlotsConfig)
-    inference: InferenceConfig = Field(default_factory=InferenceConfig)
-    opt: OptConfig = Field(default_factory=OptConfig)
+    model: ModelConfig = Field(
+        description="Forward model precision and ordered list of configured components.",
+    )
+    data: DataConfig = Field(
+        default_factory=DataConfig,
+        description="Observation, I/O, noise, flags, and external calibration settings.",
+    )
+    plots: PlotsConfig = Field(
+        default_factory=PlotsConfig,
+        description="Diagnostic plotting toggles.",
+    )
+    inference: InferenceConfig = Field(
+        default_factory=InferenceConfig,
+        description="Top-level inference controls and random seed.",
+    )
+    opt: OptConfig = Field(
+        default_factory=OptConfig,
+        description="MAP optimisation parameters.",
+    )
+    satellites: SatellitesConfig = Field(
+        default_factory=SatellitesConfig,
+        description="Satellite NORAD IDs and orbit-record resolution settings.",
+    )
 
     @model_validator(mode="after")
     def _validate_cross_sections(self) -> "RunConfig":
@@ -879,6 +1352,7 @@ class RunConfig(StrictConfigModel):
             "plots": self.plots.to_yaml_dict(),
             "inference": self.inference.to_yaml_dict(),
             "opt": self.opt.to_yaml_dict(),
+            "satellites": self.satellites.to_yaml_dict(),
         }
 
 
@@ -894,13 +1368,20 @@ def validate_config(raw: Any) -> RunConfig:
         raise ConfigValidationError(
             f"Configuration must be a YAML mapping, got {type(raw).__name__}."
         )
+    old = [key for key in _OLD_LAYOUT_KEYS if key in raw]
+    if old:
+        raise ConfigValidationError(
+            f"This config is in the old sectioned layout ({', '.join(old)} at the top level). "
+            "Each component now takes its own options under its entry in 'model.components'. "
+            "Convert it with: tabascal migrate-config <old.yaml> -o <new.yaml>"
+        )
     # Strip top-level bare section headers (e.g. `data:` with nothing under it) ONLY for
     # known optional sections that have defaults, while forbidding unknown sections.
     cleaned = dict(raw)
-    for section in ("data", "plots", "inference", "opt"):
+    for section in TOP_LEVEL_SECTIONS:
         if section in cleaned and cleaned[section] is None:
             cleaned[section] = {}
     try:
         return RunConfig.model_validate(cleaned)
     except ValidationError as err:
-        raise format_validation_error(err) from None
+        raise format_validation_error(err, model_cls=RunConfig) from None

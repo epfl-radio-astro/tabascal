@@ -1,8 +1,7 @@
 model:
   precision: single
   components:
-    - trajectory.FixedOrbit:
-        norad_ids_path: starlink_selected_ids.txt
+    - trajectory.FixedOrbit
     - rfi_signal.ComplexRFIVarAnt:
         init: truth
         mean: 0
@@ -47,3 +46,6 @@ opt:
   dual_run: false
   guide: map
   trace_path: null
+
+satellites:
+  norad_ids_path: starlink_selected_ids.txt

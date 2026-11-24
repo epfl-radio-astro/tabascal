@@ -1,9 +1,9 @@
 # RFI-visibility kernels
 
-By default (`rfi.backend: ffi`), the
+By default (`backend: ffi`), the
 {class}`~tabascal.components.rfi_vis.RiemannVisFine` and
 {class}`~tabascal.components.rfi_vis.RiemannVisVariableFine` components call
-compiled kernels; `rfi.backend: jax` selects their pure-JAX implementation
+compiled kernels; `backend: jax` selects their pure-JAX implementation
 instead.
 
 Those kernels ship in the separate
@@ -51,7 +51,7 @@ inputs, so nothing of that size is kept for the backward pass either.
 
 The `jax` backend of {class}`~tabascal.components.rfi_vis.RiemannVisFine` reaches the same bound by
 scanning the baseline axis under `jax.checkpoint`: each step forms the fine grid
-for `rfi.baseline_block_size` baselines at a time, or for the whole axis where
+for `baseline_block_size` baselines at a time, or for the whole axis where
 it is shorter than that, averages it onto the data grid, and
 lets the backward pass recompute it. The block size is the memory/recomputation
 trade and does not change the result — see
@@ -64,7 +64,7 @@ On the reference workload of the [performance checks](performance.md) — 96
 antennas on one GH200 — that is a peak of 0.70 GB in single precision against
 8.68 GB without the scan, near the compiled kernel's own 0.56 GB, in exchange for
 an optimiser step 1.6 times longer. The recomputation is what is being paid for
-the memory. `rfi.baseline_block_size` moves the trade in either direction: a
+the memory. `baseline_block_size` moves the trade in either direction: a
 larger block is fewer scan steps and a larger fine grid, and `null` is a single
 block, which keeps the checkpoint but forms the grid whole — the tape stays
 bounded, the peak does not. The compiled kernel pays
@@ -80,9 +80,9 @@ whichever the config selects, so they impose no constraint of their own — see
 
 `ri_kernels` 0.2.2 also carries `RFIAnalyticVisOp`, the kernel behind
 {class}`~tabascal.components.rfi_vis.AnalyticVis`, whose only backend
-it is for now: `rfi.backend` there is `ffi` or `null`. It reads the signal, phase
+it is for now: `backend` there is `ffi` or `null`. It reads the signal, phase
 and delay polynomial on the data grid and integrates each cell in closed form,
 so there is no fine grid for `baseline_block_size` or the memory figures above
-to bound; `rfi.analytic.scratch_mb` bounds its GPU scratch instead. It is used
+to bound; `AnalyticVis`'s `scratch_mb` bounds its GPU scratch instead. It is used
 with its own trajectory and signal components: see
 [Analytic RFI visibilities](analytic_rfi_vis.md).

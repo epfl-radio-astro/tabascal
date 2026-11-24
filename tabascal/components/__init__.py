@@ -67,12 +67,16 @@ class Component(ABC):
             try:
                 config = schema_cls()
             except ValidationError as err:
-                raise format_validation_error(err, prefix=self.__class__.__name__) from None
+                raise format_validation_error(
+                    err, prefix=self.__class__.__name__, model_cls=schema_cls, component_cls=type(self)
+                ) from None
         elif isinstance(config, Mapping):
             try:
                 config = schema_cls.model_validate(dict(config))
             except ValidationError as err:
-                raise format_validation_error(err, prefix=self.__class__.__name__) from None
+                raise format_validation_error(
+                    err, prefix=self.__class__.__name__, model_cls=schema_cls, component_cls=type(self)
+                ) from None
         elif not isinstance(config, schema_cls):
             raise TypeError(
                 f"{self.__class__.__name__} expects {schema_cls.__name__} "
@@ -148,6 +152,14 @@ class Component(ABC):
                 f"{self.__class__.__name__} requires double precision; "
                 "set model.precision to 'double' in the config."
             )
+
+    def resolved_options(self) -> Dict[str, Any]:
+        """Options whose value setup decided, as the concrete values it resolved to.
+
+        Recorded in the run's saved ``config.yaml`` so that it records what ran
+        rather than, say, ``'auto'``. Called after :meth:`setup`.
+        """
+        return {}
 
     def _set_outputs(self):
         pass

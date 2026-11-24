@@ -191,13 +191,14 @@ class TestIntegrationSampleCounts:
     ):
         config = validate_config(
             {
+                "satellites": {"norad_ids": [25544]},
                 "model": {
                     "components": [
-                        {"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
+                        "trajectory.FixedOrbitFine",
                         "rfi_signal.ComplexRFIVarAntFine",
                         "rfi_vis.RiemannVisFine",
                     ]
-                }
+                },
             }
         )
         tab_config, sizes = build_stubbed_tab_config(config, monkeypatch)
@@ -215,13 +216,14 @@ class TestIntegrationSampleCounts:
     def test_a_single_channel_keeps_its_pad_factor(self, tmp_path, monkeypatch):
         config = validate_config(
             {
+                "satellites": {"norad_ids": [25544]},
                 "model": {
                     "components": [
-                        {"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
+                        "trajectory.FixedOrbitFine",
                         "rfi_signal.ComplexRFIVarAntFine",
                         {"rfi_vis.RiemannVisFine": {"n_int_freq": 2}},
                     ]
-                }
+                },
             }
         )
         rfi_sig_cfg = config.model.components[1].config
@@ -261,22 +263,22 @@ class TestTheTimeCountIsNotAConfigKey:
     def test_the_count_still_comes_from_the_estimator(self, tmp_path, monkeypatch):
         config = validate_config(
             {
+                "satellites": {"norad_ids": [25544]},
                 "model": {
                     "components": [
-                        {"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
+                        "trajectory.FixedOrbitFine",
                         "rfi_signal.ComplexRFIVarAntFine",
                         "rfi_vis.RiemannVisFine",
                     ]
-                }
+                },
             }
         )
         tab_config, sizes = build_stubbed_tab_config(config, monkeypatch)
 
-        rfi_vis_cfg = config.model.components[2].config
         expected = get_strides_and_idxs(
             np.ones(sizes.n_bl, dtype=int),
-            rfi_vis_cfg.min_time_bins,
-            rfi_vis_cfg.max_time_bins,
+            1,
+            30,
             1,
         )[2]
 
@@ -290,10 +292,11 @@ class TestTheTimeCountIsNotAConfigKey:
             "model:\n"
             "  components:\n"
             "    - trajectory.FixedOrbit:\n"
-            "        norad_ids: [25544]\n"
             "        min_elevation: null\n"
             "    - rfi_signal.ComplexRFIVarAnt\n"
             "    - rfi_vis.AnalyticVis\n"
+            "satellites:\n"
+            "  norad_ids: [25544]\n"
         )
 
         def refuse(*args, **kwargs):

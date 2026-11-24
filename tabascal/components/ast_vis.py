@@ -1,9 +1,9 @@
 from math import ceil, isfinite, sqrt
-from typing import Any, Literal, Optional, Tuple, Union
+from typing import Any, ClassVar, FrozenSet, Literal, Optional, Tuple, Union
 
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
@@ -29,17 +29,84 @@ from tabascal.truth import read_true_vis_ast
 class GPVisAstConfig(FourierGPConfig):
     """Configuration for :class:`GPVisAst`."""
 
-    std: Union[PositiveFloat, Literal["data"]] = "data"
-    corr_freq: Optional[PositiveFloat] = None
-    fov_deg: Optional[PositiveFloat] = None
-    gammas: PositivePair = (5.0, 5.0)
-    cutoff: CutoffFloat = 1e-6
-    freq_pad_factor: FloatGe1 = 2.0
-    time_pad_factor: Union[FloatGe1, Literal["auto"]] = 2.0
-    transform: Literal["dft", "fft"] = "dft"
-    baseline_block_size: Optional[Union[WholePositiveInt, Literal["auto"]]] = "auto"
-    init: Literal["sample", "prior", "data", "zeros", "truth"] = "sample"
-    mean: Literal["zeros", "data"] = "zeros"
+    std: Union[PositiveFloat, Literal["data"]] = Field(
+        default="data",
+        description=(
+            "Width of the prior on the astronomical visibilities, in Jy (rms|V|). "
+            "'data' measures it per baseline from unflagged visibilities; a positive "
+            "number sets one width for every baseline."
+        ),
+    )
+    corr_freq: Optional[PositiveFloat] = Field(
+        default=None,
+        description=(
+            "Bandwidth, in Hz, over which the sky stays correlated along frequency. "
+            "null disables roll-off along the frequency axis."
+        ),
+    )
+    fov_deg: Optional[PositiveFloat] = Field(
+        default=None,
+        description=(
+            "Full field of view, in degrees, setting the knee along the time axis via "
+            "the fringe rate at fov_deg / 2. null uses the primary beam 2 * 1.22 * lambda / D."
+        ),
+    )
+    gammas: PositivePair = Field(
+        default=(5.0, 5.0),
+        description="Power-law roll-off exponents past the knee on the (frequency, time) axes.",
+    )
+    cutoff: CutoffFloat = Field(
+        default=1e-6,
+        description="Relative power below which Fourier k-modes are dropped from the sky latent grid.",
+    )
+    freq_pad_factor: FloatGe1 = Field(
+        default=2.0,
+        description="Zero-padding factor along the frequency axis of the Fourier domain (>= 1).",
+    )
+    time_pad_factor: Union[FloatGe1, Literal["auto"]] = Field(
+        default=2.0,
+        description=(
+            "Zero-padding factor along the time axis (>= 1), or 'auto' to pad until "
+            "the first non-zero mode reaches the slowest baseline's fringe rate."
+        ),
+    )
+    transform: Literal["dft", "fft"] = Field(
+        default="dft",
+        description="Inverse transform from latent k-modes to visibilities: 'dft' (default) or 'fft'.",
+    )
+    baseline_block_size: Optional[Union[WholePositiveInt, Literal["auto"]]] = Field(
+        default="auto",
+        description=(
+            "Baselines per scan step in the sky transform: 'auto', a positive whole "
+            "number, or null for a single block over all baselines."
+        ),
+    )
+    init: Literal["sample", "prior", "data", "zeros", "truth"] = Field(
+        default="sample",
+        description=(
+            "Initial astronomical visibility parameters: 'sample', 'prior', 'data', "
+            "'zeros', or 'truth' (requires tab-sim zarr)."
+        ),
+    )
+    mean: Literal["zeros", "data"] = Field(
+        default="zeros",
+        description="Mean of the prior over astronomical visibilities: 'zeros' (or 0) or 'data'.",
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        "init": ("ast", "init"),
+        "mean": ("ast", "mean"),
+        "std": ("ast", "gp_cov", "std"),
+        "corr_freq": ("ast", "gp_cov", "corr_freq"),
+        "fov_deg": ("ast", "gp_cov", "fov_deg"),
+        "gammas": ("ast", "gp_cov", "gammas"),
+        "cutoff": ("ast", "cutoff"),
+        "freq_pad_factor": ("ast", "freq_pad_factor"),
+        "time_pad_factor": ("ast", "time_pad_factor"),
+        "transform": ("ast", "transform"),
+        "baseline_block_size": ("ast", "baseline_block_size"),
+    }
+    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset({"cutoff"})
 
     @field_validator("std", mode="before")
     @classmethod
@@ -79,8 +146,22 @@ class GPVisAstConfig(FourierGPConfig):
 class DiscreteSkyVisConfig(StrictConfigModel):
     """Configuration for :class:`DiscreteSkyVis`."""
 
-    uvw_sign: Tuple[Literal[-1, 1], Literal[-1, 1], Literal[-1, 1]] = (-1, -1, -1)
-    source_block_size: WholePositiveInt = 128
+    uvw_sign: Tuple[Literal[-1, 1], Literal[-1, 1], Literal[-1, 1]] = Field(
+        default=(-1, -1, -1),
+        description=(
+            "Sign convention (+1 or -1) for each (u, v, w) axis matching the MS's UVW "
+            "definition; default [-1, -1, -1] matches CASA/tab-sim."
+        ),
+    )
+    source_block_size: WholePositiveInt = Field(
+        default=128,
+        description="Number of discrete sky sources accumulated per scan block.",
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        "uvw_sign": ("ast", "uvw_sign"),
+        "source_block_size": ("ast", "source_block_size"),
+    }
 
     @field_validator("uvw_sign", mode="before")
     @classmethod
@@ -278,6 +359,15 @@ class GPVisAst(Component):
 
         except Exception as e:
             raise RuntimeError(f"GPVisAst setup failed: {e}")
+
+    def resolved_options(self) -> dict[str, Any]:
+        """Record the concrete ``time_pad_factor`` resolved from ``'auto'``."""
+        if (
+            self.config.time_pad_factor == "auto"
+            and getattr(self, "time_pad_factor", None) not in (None, "auto")
+        ):
+            return {"time_pad_factor": float(self.time_pad_factor)}
+        return {}
 
     #: How much of a padded Fourier grid one scan step may build, in bytes. The
     #: block is sized from this under ``baseline_block_size: auto``. Three arrays

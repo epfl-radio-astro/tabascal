@@ -50,9 +50,10 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
     config = validate_config({
         "data": {"ms_path": "obs.ms", "gain_table": "flux.B"},  # recorded as a list
         "opt": {"trace_path": "trace.npz"},
+        "satellites": {"norad_ids": [25544]},
         "model": {
             "components": [
-                {"trajectory.FixedOrbit": {"norad_ids": [25544]}},
+                "trajectory.FixedOrbit",
                 {"rfi_signal.ComplexRFIConstAnt": {"est": "curves.npz"}},
                 "rfi_vis.AnalyticVis",
                 "ast_vis.GPVisAst",
@@ -103,7 +104,10 @@ def test_auto_time_padding_is_saved_as_the_factor_it_came_to(impl, tmp_path, sav
         str(tmp_path),
         {"model": {"components": [{"ast_vis.GPVisAst": {"time_pad_factor": saved}}]}},
     )
-    model_stub = SimpleNamespace(components=[SimpleNamespace(time_pad_factor=resolved)])
+    resolved_dict = {"time_pad_factor": resolved} if saved == "auto" else {}
+    model_stub = SimpleNamespace(
+        components=[SimpleNamespace(resolved_options=lambda: resolved_dict)]
+    )
     impl._record_resolved_settings(str(tmp_path), model_stub)
 
     saved_cfg = run_dir_mod.read_config(str(tmp_path))
@@ -146,11 +150,7 @@ def test_inputs_through_latest_are_resolved_once_and_shared(tmp_path, monkeypatc
 
     earlier = run_dir_mod.create_run_dir(str(tmp_path), "first")
     via_latest = {
-        "model": {
-            "components": [
-                {"trajectory.FixedOrbit": {"extra_orbit_dir": str(tmp_path / "runs" / "latest" / "results")}}
-            ]
-        }
+        "satellites": {"extra_orbit_dir": str(tmp_path / "runs" / "latest" / "results")}
     }
     sent = {}
     broadcast = dist.broadcast_bytes_from_rank0
@@ -158,58 +158,44 @@ def test_inputs_through_latest_are_resolved_once_and_shared(tmp_path, monkeypatc
         dist, "broadcast_bytes_from_rank0",
         lambda payload, name: sent.setdefault("payload", broadcast(payload, name)),
     )
-    rank0 = {
-        "model": {
-            "components": [
-                {"trajectory.FixedOrbit": dict(via_latest["model"]["components"][0]["trajectory.FixedOrbit"])}
-            ]
-        }
-    }
+    rank0 = {"satellites": dict(via_latest["satellites"])}
     run = run_dir_mod.create_run_dir(str(tmp_path), "t", rank0)
 
     # latest now names the new run, so a worker resolving for itself would differ.
     monkeypatch.setattr(dist, "is_process_0", lambda: False)
-    worker = {
-        "model": {
-            "components": [
-                {"trajectory.FixedOrbit": dict(via_latest["model"]["components"][0]["trajectory.FixedOrbit"])}
-            ]
-        }
-    }
+    worker = {"satellites": dict(via_latest["satellites"])}
 
     assert run_dir_mod.create_run_dir(str(tmp_path), "t", worker) == run
-    expected = {
-        "model": {
-            "components": [
-                {"trajectory.FixedOrbit": {"extra_orbit_dir": os.path.join(earlier, "results")}}
-            ]
-        }
-    }
+    expected = {"satellites": {"extra_orbit_dir": os.path.join(earlier, "results")}}
     assert worker == rank0 == expected
 
 
 @pytest.mark.parametrize(
-    "ref, key, changed, warns",
+    "kind, owner, key, changed, warns",
     [
-        ("rfi_signal.ComplexRFIVarAnt", "est", "", True),  # a plain file
-        ("rfi_signal.ComplexRFIVarAnt", "est", "part", True),  # a directory
-        ("trajectory.FixedOrbit", "extra_orbit_dir", "orbits.json", True),
+        ("component", "rfi_signal.ComplexRFIVarAnt", "est", "", True),  # a plain file
+        ("component", "rfi_signal.ComplexRFIVarAnt", "est", "part", True),  # a directory
+        ("section", "satellites", "extra_orbit_dir", "orbits.json", True),
         # An earlier run's results/: tab2MS rewrites its .B, which no orbit reader reads.
-        ("trajectory.FixedOrbit", "extra_orbit_dir", "map_pred.B/table.dat", False),
+        ("section", "satellites", "extra_orbit_dir", "map_pred.B/table.dat", False),
     ],
 )
-def test_a_changed_input_is_named(tmp_path, ref, key, changed, warns):
+def test_a_changed_input_is_named(tmp_path, kind, owner, key, changed, warns):
     path = tmp_path / "input"
     files = [path] if not changed else [path / "part", path / "orbits.json", path / "map_pred.B" / "table.dat"]
     for f in files:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("one")
-    cfg = {"model": {"components": [{ref: {key: str(path)}}]}}
+    cfg = (
+        {"model": {"components": [{owner: {key: str(path)}}]}}
+        if kind == "component"
+        else {owner: {key: str(path)}}
+    )
     record = {"inputs": run_dir_mod.fingerprint_inputs(cfg)}
 
     (path / changed if changed else path).write_text("three")
 
-    label = f"{ref}.{key}"
+    label = f"{owner}.{key}"
     if warns:
         with pytest.warns(RuntimeWarning, match=label.replace(".", r"\.")):
             assert run_dir_mod.check_inputs(record) == [label]

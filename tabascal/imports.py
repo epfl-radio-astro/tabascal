@@ -75,7 +75,7 @@ def _listing(label: str, names: List[str]) -> str:
     return _sentence(f"{label}: {', '.join(names)}." if names else "")
 
 
-#: Components folded into another one as an ``rfi.backend``, and that one.
+#: Components folded into another one as its ``backend`` option, and that one.
 _BACKEND_OF = {
     "RiemannVisFFIFine": "RiemannVisFine",
     "RiemannVisVariableFFIFine": "RiemannVisVariableFine",

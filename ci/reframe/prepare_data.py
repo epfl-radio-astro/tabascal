@@ -120,7 +120,7 @@ def main():
     parser.add_argument(
         "--rfi-backend",
         default=None,
-        help="rfi.backend of the rfi_vis component: jax or ffi (default: the component's)",
+        help="backend of the rfi_vis component: jax or ffi (default: the component's)",
     )
     parser.add_argument(
         "--workdir", required=True, help="Working directory for output files"

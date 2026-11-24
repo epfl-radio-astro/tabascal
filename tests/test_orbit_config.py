@@ -41,9 +41,10 @@ def _config(**satellites):
         {
             "model": {
                 "components": [
-                    {"trajectory.FixedOrbitFine": satellites},
+                    "trajectory.FixedOrbitFine",
                 ]
-            }
+            },
+            "satellites": satellites,
         }
     )
 
@@ -70,8 +71,9 @@ class TestConfigNormalisation:
             {
                 "model": {
                     "precision": "double",
-                    "components": [{f"trajectory{sep}{name}": {"norad_ids": None}}],
+                    "components": [f"trajectory{sep}{name}"],
                 },
+                "satellites": {"norad_ids": None},
             }
         )
         with pytest.raises(TLEConfigurationError, match="no NORAD catalogue IDs"):

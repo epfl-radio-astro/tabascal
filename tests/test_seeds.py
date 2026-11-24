@@ -26,7 +26,7 @@ DEFAULT_SEED = 1
 RFI_CLASSES = [ComplexRFIVarAntFine, ComplexRFIConstAntFine]
 
 COMPONENTS = [
-    {"trajectory.FixedOrbitFine": {"norad_ids": [20452]}},
+    "trajectory.FixedOrbitFine",
     "rfi_signal.ComplexRFIVarAntFine",
     "rfi_vis.RiemannVisFine",
     "ast_vis.GPVisAst",

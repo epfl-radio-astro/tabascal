@@ -21,7 +21,6 @@ them. TABASCAL evaluates that average on one of two grids:
 model:
   components:
     - trajectory.FixedOrbit:
-        norad_ids: [20452, 38833, 45854]
         path_order: 3
     - rfi_signal.ComplexRFIVarAnt   # or rfi_signal.ComplexRFIConstAnt
     - rfi_vis.AnalyticVis:
@@ -29,6 +28,9 @@ model:
         stencil: 1
     - ast_vis.GPVisAst
     - gains.UnitaryGains
+
+satellites:
+  norad_ids: [20452, 38833, 45854]
 ```
 
 The three RFI components go together: a data-grid component next to a fine-grid

@@ -31,9 +31,10 @@ from tabascal.schema import (
     ConfigValidationError,
     FineTimeIntegrationMixin,
     FreqIntegrationMixin,
-    OrbitSourceConfig,
     RFIGPConfig,
     RunConfig,
+    TrajectoryConfig,
+    VariableFineTimeIntegrationMixin,
     _parse_component_entry,
     validate_config,
 )
@@ -113,6 +114,10 @@ def load_config(path: str) -> RunConfig:
     return validate_config(raw)
 
 
+#: ``TabConfig(min_elevation=...)`` left out: take the trajectory component's own.
+_FROM_MODEL = object()
+
+
 class TabConfig:
     """Observation data and resolved runtime configuration for TABASCAL."""
 
@@ -127,6 +132,7 @@ class TabConfig:
         ms_path: str,
         require_noise: bool = True,
         require_in_view: bool = True,
+        min_elevation=_FROM_MODEL,
     ):
         cfg = validate_config(config)
         self.config: RunConfig = cfg
@@ -134,10 +140,8 @@ class TabConfig:
         self.seed = cfg.inference.effective_seed
         self.ms_path = ms_path
 
-        orbit_cfg = cfg.model.find_one(OrbitSourceConfig)
-        self.tle_config = normalise_tle_config(
-            orbit_cfg, require_ids=orbit_cfg is not None
-        )
+        traj_cfg = cfg.model.find_one(TrajectoryConfig)
+        self.tle_config = normalise_tle_config(cfg)
         self.extra_orbit_dir = self.tle_config.extra_orbit_dir
         self.extra_orbit_max_age_days = self.tle_config.extra_orbit_max_age_days
 
@@ -162,20 +166,17 @@ class TabConfig:
         vis_cfg = cfg.model.find_one(FreqIntegrationMixin)
         self.n_int_freq = vis_cfg.n_int_freq if vis_cfg is not None else 1
 
-        uses_variable = any(
-            spec.cls.__name__ == "RiemannVisVariableFine"
-            for spec in cfg.model.components
-        )
+        var_cfg = cfg.model.find_one(VariableFineTimeIntegrationMixin)
+        uses_variable = var_cfg is not None
 
         self.rfi_grid = rfi_grid(cfg.model.component_classes())
-        if isinstance(vis_cfg, FineTimeIntegrationMixin):
-            time_int_factor = vis_cfg.time_int_factor
-            min_time_bins = vis_cfg.min_time_bins
-            max_time_bins = vis_cfg.max_time_bins
-        else:
-            time_int_factor = 1.0
-            min_time_bins = 1
-            max_time_bins = 30
+        time_int_factor = (
+            vis_cfg.time_int_factor
+            if isinstance(vis_cfg, FineTimeIntegrationMixin)
+            else 1.0
+        )
+        min_time_bins = var_cfg.min_time_bins if var_cfg is not None else 1
+        max_time_bins = var_cfg.max_time_bins if var_cfg is not None else 30
 
         self.estimate_rfi_sampling(
             time_int_factor,
@@ -187,9 +188,13 @@ class TabConfig:
 
         self._set_freqs_times()
 
-        min_elevation = orbit_cfg.min_elevation if orbit_cfg is not None else None
+        resolved_min_el = (
+            (traj_cfg.min_elevation if traj_cfg is not None else 0.0)
+            if min_elevation is _FROM_MODEL
+            else min_elevation
+        )
         self.set_elevation_mask(
-            min_elevation, require_in_view=require_in_view
+            resolved_min_el, require_in_view=require_in_view
         )
 
         if sharding_enabled():
@@ -203,7 +208,7 @@ class TabConfig:
             self.estimator_flags = make_global(
                 self.estimator_flags, replicated_sharding()
             )
-            # rfi.gp_cov.std: data reads this one directly, against vis_obs above, so
+            # rfi_signal.std: data reads this one directly, against vis_obs above, so
             # it has to be global for the same reason the others are. None
             # where no gain table was configured, which make_global cannot take.
             if self.gain_flags is not None:
@@ -271,7 +276,7 @@ class TabConfig:
                 if require_in_view:
                     raise ValueError(
                         f"{never_up}. Remove it from satellites.norad_ids or "
-                        "lower rfi.min_elevation."
+                        "lower the trajectory component's min_elevation."
                     )
                 print(f"Warning: {never_up} and comes back as zero.")
                 continue

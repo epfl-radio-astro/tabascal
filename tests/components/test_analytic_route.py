@@ -434,9 +434,10 @@ class TestAnalyticVis:
         cfg, state = op_case()
         cfg.config = validate_config({
             "data": {"save_rfi_per_sat": True},
+            "satellites": {"norad_ids": [101, 102]},
             "model": {
                 "components": [
-                    {"trajectory.FixedOrbit": {"norad_ids": [101, 102]}},
+                    "trajectory.FixedOrbit",
                     "rfi_signal.ComplexRFIVarAnt",
                     {"rfi_vis.AnalyticVis": cfg._analytic_kwargs},
                 ]

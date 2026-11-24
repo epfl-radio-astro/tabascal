@@ -1,4 +1,4 @@
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 import jax.numpy as jnp
 from jax import lax
@@ -17,16 +17,38 @@ from tabascal.schema import (
     FreqIntegrationMixin,
     PositiveInt,
     StrictInt,
+    VariableFineTimeIntegrationMixin,
     WholePositiveInt,
 )
 from ri_kernels.jax_api import RFIAnalyticVisOp, RFIVisOp
 
 
+_BACKEND_DESCRIPTION = (
+    "Implementation of the visibility: 'ffi' (ri_kernels compiled op with its own "
+    "JVP and transpose) or 'jax' (pure JAX reference implementation). See docs/kernels.md."
+)
+
+
 class RiemannVisFineConfig(FineTimeIntegrationMixin):
     """Configuration for :class:`RiemannVisFine`."""
 
-    backend: Literal["ffi", "jax"] = "ffi"
-    baseline_block_size: Optional[WholePositiveInt] = 128
+    backend: Literal["ffi", "jax"] = Field(
+        default="ffi",
+        description=_BACKEND_DESCRIPTION,
+    )
+    baseline_block_size: Optional[WholePositiveInt] = Field(
+        default=128,
+        description=(
+            "Baselines handled per scan step with backend 'jax', or null for one block "
+            "over every baseline. Ignored by the FFI kernels."
+        ),
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        **FineTimeIntegrationMixin.legacy_keys,
+        "backend": ("rfi", "backend"),
+        "baseline_block_size": ("rfi", "baseline_block_size"),
+    }
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -34,10 +56,18 @@ class RiemannVisFineConfig(FineTimeIntegrationMixin):
         return "ffi" if value is None else value
 
 
-class RiemannVisVariableFineConfig(FineTimeIntegrationMixin):
+class RiemannVisVariableFineConfig(VariableFineTimeIntegrationMixin):
     """Configuration for :class:`RiemannVisVariableFine`."""
 
-    backend: Literal["ffi", "jax"] = "ffi"
+    backend: Literal["ffi", "jax"] = Field(
+        default="ffi",
+        description=_BACKEND_DESCRIPTION,
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        **VariableFineTimeIntegrationMixin.legacy_keys,
+        "backend": ("rfi", "backend"),
+    }
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -48,12 +78,51 @@ class RiemannVisVariableFineConfig(FineTimeIntegrationMixin):
 class AnalyticVisConfig(FreqIntegrationMixin):
     """Configuration for :class:`AnalyticVis`."""
 
-    backend: Literal["ffi"] = "ffi"
-    stencil: StrictInt = Field(default=1, ge=0, le=4)
-    segments: StrictInt = Field(default=2, ge=1, le=1024)
-    terms: StrictInt = Field(default=6, ge=1, le=32)
-    cubic_terms: StrictInt = Field(default=3, ge=0, le=8)
-    scratch_mb: PositiveInt = 256
+    backend: Literal["ffi"] = Field(
+        default="ffi",
+        description="Implementation of the visibility: currently only 'ffi' (ri_kernels).",
+    )
+    stencil: StrictInt = Field(
+        default=1,
+        ge=0,
+        le=4,
+        description=(
+            "Half-width h of the signal interpolant: the polynomial through the 2h + 1 "
+            "nearest cells on each axis. 0 holds each cell's value."
+        ),
+    )
+    segments: StrictInt = Field(
+        default=2,
+        ge=1,
+        le=1024,
+        description="Equal pieces [-1, 1] is split into for the time integral.",
+    )
+    terms: StrictInt = Field(
+        default=6,
+        ge=1,
+        le=32,
+        description="Terms of the curvature series.",
+    )
+    cubic_terms: StrictInt = Field(
+        default=3,
+        ge=0,
+        le=8,
+        description="Terms of the residual cubic series; 0 drops the cubic phase.",
+    )
+    scratch_mb: PositiveInt = Field(
+        default=256,
+        description="Bound on the GPU coefficient scratch in MiB; ignored on CPU.",
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        **FreqIntegrationMixin.legacy_keys,
+        "backend": ("rfi", "backend"),
+        "stencil": ("rfi", "analytic", "stencil"),
+        "segments": ("rfi", "analytic", "segments"),
+        "terms": ("rfi", "analytic", "terms"),
+        "cubic_terms": ("rfi", "analytic", "cubic_terms"),
+        "scratch_mb": ("rfi", "analytic", "scratch_mb"),
+    }
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -62,7 +131,7 @@ class AnalyticVisConfig(FreqIntegrationMixin):
 
 
 class RiemannVisFine(Component):
-    """Riemann-sum RFI visibilities on the fine grid, through ``rfi.backend``.
+    """Riemann-sum RFI visibilities on the fine grid, through ``RiemannVisFine.backend``.
 
     ``ffi``, the default, is ``ri_kernels``' compiled ``RFIVisOp``, which bounds
     the fine grid inside the kernel and reads no block size. See
@@ -70,7 +139,7 @@ class RiemannVisFine(Component):
 
     ``jax`` is the reference implementation, the one ``ffi`` is validated
     against in value, forward mode and reverse mode. It walks the
-    baseline axis in blocks of ``rfi.baseline_block_size`` under ``checkpoint``
+    baseline axis in blocks of ``RiemannVisFine.baseline_block_size`` under ``checkpoint``
     (see :func:`tabascal.interferometry.calculate_rfi_vis_blocked`) so that the
     fine grid it integrates is bounded by the block rather than by the whole
     array: what the forward pass leaves behind for reverse mode is the result
@@ -207,7 +276,7 @@ class RiemannVisVariableFine(Component):
     """:class:`RiemannVisFine` with each baseline group sampled at its own stride.
 
     The baselines are split into the groups of ``time_sample_idxs``, each read at
-    every ``time_stride``-th fine time sample. ``rfi.backend`` picks ``ffi`` (the
+    every ``time_stride``-th fine time sample. ``RiemannVisVariableFine.backend`` picks ``ffi`` (the
     default), one ``RFIVisOp`` per group, or ``jax``; ``ffi`` scales poorly
     across devices.
     """
@@ -344,9 +413,9 @@ class RiemannVisVariableFine(Component):
 
         if sharding_enabled():
             print(
-                "\n!!! WARNING !!!  RiemannVisVariableFine with rfi.backend: ffi "
+                "\n!!! WARNING !!!  RiemannVisVariableFine with backend: ffi "
                 "scales poorly across multiple devices. Consider using "
-                "RiemannVisFine with rfi.backend: ffi instead for multi-device "
+                "RiemannVisFine with backend: ffi instead for multi-device "
                 "runs.\n"
             )
 

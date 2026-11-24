@@ -21,7 +21,7 @@ from pydantic import Field, field_validator
 import os
 import warnings
 
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Optional, Tuple
 
 def _missing_key(key: str) -> ValueError:
     """The error for a gains key the config does not carry at all.
@@ -201,15 +201,63 @@ class ConstGainsConfig(StrictConfigModel):
 
     init: OptionalPathStr = Field(
         default="prior",
+        description=(
+            "Where the gains start: 'prior', or a path to an .npz of per-antenna gains "
+            "(key 'gain') or a CASA calibration table, projected into the gain gauge."
+        ),
         json_schema_extra={"input_path": True, "non_path_literals": ("prior",)},
     )
-    fit: Literal["complex", "amplitude", "phase"] = "complex"
-    ref_ant: Optional[NonNegativeInt] = None
-    fix_flux_scale: StrictBool = True
-    amp_mean: PositiveFloat = 1.0
-    phase_mean: FiniteFloat = 0.0
-    amp_std: PositiveFloat = DEFAULT_AMP_STD_PERCENT
-    phase_std: PositiveFloat = DEFAULT_PHASE_STD_DEGREES
+    fit: Literal["complex", "amplitude", "phase"] = Field(
+        default="complex",
+        description=(
+            "Which part of the gain is fitted: 'complex' (alias 'both'), 'amplitude', "
+            "or 'phase'; the unfitted part is held at init (or unity for init: prior)."
+        ),
+    )
+    ref_ant: Optional[NonNegativeInt] = Field(
+        default=None,
+        description=(
+            "Phase reference antenna whose phase is pinned to 0. null selects the "
+            "first antenna with unflagged data."
+        ),
+    )
+    fix_flux_scale: StrictBool = Field(
+        default=True,
+        description=(
+            "Keep the zero-sum log-amplitude gauge so gains carry no overall flux scale. "
+            "false frees overall amplitude and requires FixedDiscreteSky when fitting amplitude."
+        ),
+    )
+    amp_mean: PositiveFloat = Field(
+        default=1.0,
+        description="Median of the lognormal amplitude prior (scale that amp_std is a percentage of).",
+    )
+    phase_mean: FiniteFloat = Field(
+        default=0.0,
+        description="Mean of the gain phase prior, in radians.",
+    )
+    amp_std: PositiveFloat = Field(
+        default=DEFAULT_AMP_STD_PERCENT,
+        description=f"Standard deviation of the gain amplitude prior as a percentage of amp_mean (default {DEFAULT_AMP_STD_PERCENT:g}%).",
+    )
+    phase_std: PositiveFloat = Field(
+        default=DEFAULT_PHASE_STD_DEGREES,
+        description=f"Standard deviation of the gain phase prior, in degrees (default {DEFAULT_PHASE_STD_DEGREES:g} deg).",
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        "init": ("gains", "init"),
+        "fit": ("gains", "fit"),
+        "ref_ant": ("gains", "ref_ant"),
+        "fix_flux_scale": ("gains", "fix_flux_scale"),
+        "amp_mean": ("gains", "amp_mean"),
+        "phase_mean": ("gains", "phase_mean"),
+        "amp_std": ("gains", "amp_std"),
+        "phase_std": ("gains", "phase_std"),
+    }
+    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset(
+        {"amp_mean", "phase_mean", "amp_std", "phase_std", "fix_flux_scale", "fit"}
+    )
 
     @field_validator("fit", mode="before")
     @classmethod

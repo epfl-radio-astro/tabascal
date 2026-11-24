@@ -104,11 +104,12 @@ def make_config(
         "model": {
             "precision": "double" if jax.config.read("jax_enable_x64") else "single",
             "components": [
-                {"trajectory.FixedOrbitFine": {"norad_ids": list(norad_ids)}},
+                "trajectory.FixedOrbitFine",
                 "rfi_signal.ComplexRFIVarAntFine",
                 {ref: {"backend": backend}},
             ],
         },
+        "satellites": {"norad_ids": list(norad_ids)},
         "data": {"corr": corr, "save_rfi_per_sat": save_rfi_per_sat},
     })
 
@@ -460,11 +461,12 @@ class TestFineGridCancellation:
             "model": {
                 "precision": "double" if jax.config.read("jax_enable_x64") else "single",
                 "components": [
-                    {"trajectory.FixedOrbitFine": {"norad_ids": list(NORAD_IDS[:2])}},
+                    "trajectory.FixedOrbitFine",
                     "rfi_signal.ComplexRFIVarAntFine",
                     {"rfi_vis.RiemannVisFine": {"backend": "jax"}},
                 ],
             },
+            "satellites": {"norad_ids": list(NORAD_IDS[:2])},
             "data": {"corr": "xx", "save_rfi_per_sat": True},
         })
         return SimpleNamespace(

@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 import xarray as xr
 
 from typing import Tuple, Dict, Callable, List, Optional
+from pydantic import Field
 
 
 #: Required contents of a light-curve file. See :func:`read_light_curves`.
@@ -559,15 +560,33 @@ def _std_from_data(vis_obs, gain_flags) -> float:
 class RFIVarAntConfig(RFIGPConfig):
     """Configuration for per-antenna RFI signal components."""
 
-    gammas: PositivePair = (3, 3)
-    cutoff: CutoffFloat = 1e-9
+    gammas: PositivePair = Field(
+        default=(3, 3),
+        description="Roll-off exponents of the RFI power spectrum on the (frequency, time) axes.",
+    )
+    cutoff: CutoffFloat = Field(
+        default=1e-9,
+        description=(
+            "Relative power below which a k-mode is dropped from the RFI latent grid; "
+            "the retained spectrum is re-normalised after the cut."
+        ),
+    )
 
 
 class RFIConstAntConfig(RFIGPConfig):
     """Configuration for constant-across-antennas RFI signal components."""
 
-    gammas: PositivePair = (100, 100)
-    cutoff: CutoffFloat = 1e-6
+    gammas: PositivePair = Field(
+        default=(100, 100),
+        description="Roll-off exponents of the RFI power spectrum on the (frequency, time) axes.",
+    )
+    cutoff: CutoffFloat = Field(
+        default=1e-6,
+        description=(
+            "Relative power below which a k-mode is dropped from the RFI latent grid; "
+            "the retained spectrum is re-normalised after the cut."
+        ),
+    )
 
 
 def resolve_rfi_gp_params(

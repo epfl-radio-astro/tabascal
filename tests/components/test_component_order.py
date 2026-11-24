@@ -287,7 +287,7 @@ EXPECTED_LOCATIONS = {
     "examples/tab_target.yaml": 1,
     "tests/data/tab_target.yaml": 1,
     "docs/analytic_rfi_vis.md": 1,
-    "docs/config.md": 9,
+    "docs/config.md": 8,
     "docs/kernels.md": 1,
 }
 

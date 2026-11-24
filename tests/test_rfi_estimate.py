@@ -1957,7 +1957,7 @@ class TestCommandLine:
     def test_the_config_mode_honours_the_elevation_flag(self, tmp_path, monkeypatch):
         import tabascal.config
         import tabascal.scripts._run_tabascal_impl as impl
-        from tabascal.schema import OrbitSourceConfig
+        from tabascal.schema import TrajectoryConfig
         from tabascal.scripts.rfi_estimate import run
 
         config = self._make_run_config(tmp_path / "obs.ms", min_elevation=0.0)
@@ -1970,7 +1970,7 @@ class TestCommandLine:
         run(_cli("-c", "tab.yaml", "--no-elevation-cut",
                  "-o", str(tmp_path / "c.npz")))
 
-        assert config.model.find_one(OrbitSourceConfig).min_elevation is None
+        assert config.model.find_one(TrajectoryConfig).min_elevation is None
 
     def test_the_config_mode_tolerates_a_never_visible_satellite(
         self, tmp_path, monkeypatch

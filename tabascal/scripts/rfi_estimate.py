@@ -3,14 +3,14 @@
 Two ways in, and they name the satellites differently:
 
 * **A tabascal config** (``-c``). The run's own ``satellites``, ``data`` and
-  ``rfi.min_elevation`` sections decide what is filtered for, the MS is read once
+  trajectory ``min_elevation`` decide what is filtered for, the MS is read once
   through :class:`~tabascal.config.TabConfig`, and the curves come back ordered
-  to match ``satellites.norad_ids``. This is the estimate ``rfi.init:
+  to match ``satellites.norad_ids``. This is the estimate ``rfi_signal.init:
   matched-filter`` makes internally, written out.
 * **An MS plus NORAD IDs** (``-ms`` with ``-n``/``-np``), for an observation
   tabascal has not been configured against.
 
-Either way the output is the ``rfi.est`` interchange format, so it can seed a
+Either way the output is the ``rfi_signal.est`` interchange format, so it can seed a
 later run unchanged.
 
 ``--fit-offset`` adds the along-track (time-offset) search of GitHub #190 on top
@@ -48,7 +48,7 @@ def build_parser(parser=None):
     src.add_argument(
         "-c", "--config", default=None,
         help="Path to a tabascal config file. Its satellites, data and "
-        "rfi.min_elevation sections drive the extraction and the MS is read once.",
+        "trajectory min_elevation drive the extraction and the MS is read once.",
     )
     src.add_argument(
         "-n", "--norad-ids", dest="norad_ids", default=None,
@@ -128,7 +128,7 @@ def build_parser(parser=None):
         "--min-elevation", dest="min_elevation", type=float, default=None,
         metavar="DEG",
         help="Elevation in degrees below which a satellite is not filtered for. "
-        "Defaults to the config's rfi.min_elevation with -c, and to 0 (the "
+        "Defaults to the config's trajectory min_elevation with -c, and to 0 (the "
         "geometric horizon) otherwise.",
     )
     elevation.add_argument(
@@ -372,18 +372,18 @@ def resolve_min_elevation(args, config):
     if args.min_elevation is not None:
         return float(args.min_elevation)
     if config is not None:
-        from tabascal.schema import OrbitSourceConfig, RunConfig
+        from tabascal.schema import RunConfig, TrajectoryConfig
 
         if isinstance(config, RunConfig):
-            orbit_cfg = config.model.find_one(OrbitSourceConfig)
-            return orbit_cfg.min_elevation if orbit_cfg is not None else None
+            traj_cfg = config.model.find_one(TrajectoryConfig)
+            return traj_cfg.min_elevation if traj_cfg is not None else 0.0
         # Plain dict fallback (e.g. saved config.yaml)
         for entry in (config.get("model") or {}).get("components") or []:
             if isinstance(entry, dict) and len(entry) == 1:
                 ((_, params),) = entry.items()
                 if isinstance(params, dict) and "min_elevation" in params:
                     return params["min_elevation"]
-        return None
+        return 0.0
 
     return 0.0
 
@@ -629,7 +629,7 @@ def _from_config(args, offset_fit=None):
     """
     from tabascal.config import TabConfig, load_config
     from tabascal.rfi_estimate import light_curves_from_config
-    from tabascal.schema import OrbitSourceConfig
+    from tabascal.schema import TrajectoryConfig
     from tabascal.scripts._run_tabascal_impl import set_precision
 
     config = load_config(args.config)
@@ -647,14 +647,19 @@ def _from_config(args, offset_fit=None):
     config.data.corr = resolve_corr(args, config)
     if args.freq is not None:
         config.data.freq = args.freq
-    orbit_cfg = config.model.find_one(OrbitSourceConfig)
-    if orbit_cfg is not None:
-        if args.extra_orbit_dir:
-            orbit_cfg.extra_orbit_dir = args.extra_orbit_dir
-        orbit_cfg.min_elevation = resolve_min_elevation(args, config)
+    if args.extra_orbit_dir:
+        config.satellites.extra_orbit_dir = args.extra_orbit_dir
+    min_el = resolve_min_elevation(args, config)
+    traj_cfg = config.model.find_one(TrajectoryConfig)
+    if traj_cfg is not None:
+        traj_cfg.min_elevation = min_el
 
     tab_config = TabConfig(
-        config, ms_path, require_noise=False, require_in_view=False
+        config,
+        ms_path,
+        require_noise=False,
+        require_in_view=False,
+        min_elevation=min_el,
     )
 
     vis = None

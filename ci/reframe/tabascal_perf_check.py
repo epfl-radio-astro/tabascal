@@ -81,7 +81,7 @@ class _TabascalPerfCheckBase(rfm.RunOnlyRegressionTest):
     _sim_config = "sim_target_196A.yaml"
 
     #: tabascal config of each variant, in ci/reframe/data. Each names its own
-    #: components and rfi.backend: rfi_vis:AnalyticVis has only the ffi backend,
+    #: components and backend: rfi_vis.AnalyticVis has only the ffi backend,
     #: and tab_target_riemann.yaml leaves RiemannVisFine on its default, ffi.
     _config_map = {
         "Analytic-196A": "tab_target_analytic.yaml",

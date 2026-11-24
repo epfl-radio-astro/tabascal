@@ -17,11 +17,11 @@ from tabascal.interferometry import (
 )
 from tabascal.poly_interp import fine_offsets, fit_path
 from tabascal.components import Component, assert_attr_shape
-from tabascal.schema import OrbitSourceConfig, PositiveInt, StrictInt
+from tabascal.schema import PositiveInt, StrictInt, TrajectoryConfig
 from tabascal.timing import measure_runtime
 from tabascal.time import JulianDate, apparent_radec_of_date, gast_deg, secs_to_days, skyfield_time, timescale
 
-from typing import Optional
+from typing import ClassVar, Optional
 from pydantic import Field, model_validator
 
 import sgp4jax
@@ -244,11 +244,31 @@ class PhaseCalculationRFIFine(Component):
         }
 
 
-class FixedOrbitConfig(OrbitSourceConfig):
+class FixedOrbitConfig(TrajectoryConfig):
     """Configuration for :class:`FixedOrbit` (data-grid analytic RFI route)."""
 
-    path_order: StrictInt = Field(default=3, ge=0, le=3)
-    path_nodes: Optional[PositiveInt] = None
+    path_order: StrictInt = Field(
+        default=3,
+        ge=0,
+        le=3,
+        description=(
+            "Degree of the polynomial in time through each cell's geometric delay, "
+            "from 0 to 3: the analytic kernel keeps the delay's derivatives up to the third."
+        ),
+    )
+    path_nodes: Optional[PositiveInt] = Field(
+        default=None,
+        description=(
+            "Samples per cell the path polynomial is fitted through: odd, and at least "
+            "path_order + 1. null uses 4 * path_order + 1."
+        ),
+    )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        **TrajectoryConfig.legacy_keys,
+        "path_order": ("rfi", "path_order"),
+        "path_nodes": ("rfi", "path_nodes"),
+    }
 
     @model_validator(mode="after")
     def _check_path_nodes(self) -> "FixedOrbitConfig":
@@ -268,7 +288,7 @@ class FixedOrbitConfig(OrbitSourceConfig):
 
 class FixedOrbitFine(Component):
 
-    Config = OrbitSourceConfig
+    Config = TrajectoryConfig
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -587,7 +607,7 @@ def _gcrf_positions_split(sats, whole, fraction):
 
 class NoDragOrbitFine(Component):
 
-    Config = OrbitSourceConfig
+    Config = TrajectoryConfig
     requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -770,7 +790,7 @@ class NoDragOrbitFine(Component):
 
 class OrbitFine(Component):
 
-    Config = OrbitSourceConfig
+    Config = TrajectoryConfig
     requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {

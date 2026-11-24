@@ -25,7 +25,6 @@ from tabascal.tab_tools import init_predict, run_opt, run_trace_path, nlog_like_
 from tabascal.config import load_config, TabConfig, Model
 from tabascal.schema import (
     ConfigValidationError,
-    OrbitSourceConfig,
     RunConfig,
     validate_config,
 )
@@ -293,16 +292,12 @@ def _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path=N
         zarr_path = os.path.join(os.path.dirname(ms_path), f"{f_name}.zarr")
     config.data.truth_zarr = zarr_path
 
-    orbit_cfg = config.model.find_one(OrbitSourceConfig)
-    if extra_orbit_dir and orbit_cfg is not None:
-        orbit_cfg.extra_orbit_dir = extra_orbit_dir
+    if extra_orbit_dir:
+        config.satellites.extra_orbit_dir = extra_orbit_dir
     if norad_path:
-        if orbit_cfg is None:
-            raise SystemExit(
-                "Cannot apply -np/--norad-path: model.components has no satellite "
-                "trajectory component."
-            )
-        orbit_cfg.norad_ids_path = norad_path
+        # The CLI flag wins over both config keys; TabConfig's normaliser reads
+        # norad_ids_path in preference to norad_ids.
+        config.satellites.norad_ids_path = norad_path
 
     if not name:
         raise SystemExit("A run needs a name: give it with -n/--name.")
@@ -432,7 +427,7 @@ def _on_process_0(what, work):
 
 
 def _record_resolved_settings(run_dir, model):
-    """Write what model setup resolved (e.g. ``time_pad_factor: auto``) into ``config.yaml``."""
+    """Write what model setup resolved (via :meth:`Component.resolved_options`) into ``config.yaml``."""
     saved = read_config(run_dir)
     comps = (saved.get("model") or {}).get("components")
     if not isinstance(comps, list):
@@ -441,17 +436,23 @@ def _record_resolved_settings(run_dir, model):
     for idx, comp in enumerate(model.components):
         if idx >= len(comps):
             break
-        resolved = getattr(comp, "time_pad_factor", None)
+        resolved = comp.resolved_options()
+        if not resolved:
+            continue
         entry = comps[idx]
-        if (
-            isinstance(entry, dict)
-            and len(entry) == 1
-            and resolved is not None
-            and resolved != "auto"
-        ):
+        if isinstance(entry, str):
+            ref, params = entry, {}
+            comps[idx] = {ref: params}
+        elif isinstance(entry, dict) and len(entry) == 1:
             ((ref, params),) = entry.items()
-            if isinstance(params, dict) and params.get("time_pad_factor") == "auto":
-                params["time_pad_factor"] = float(resolved)
+            if not isinstance(params, dict):
+                params = {}
+                comps[idx] = {ref: params}
+        else:
+            continue
+        for key, value in resolved.items():
+            if params.get(key) != value:
+                params[key] = value
                 changed = True
     if changed:
         write_config(run_dir, saved)

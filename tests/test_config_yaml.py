@@ -64,7 +64,7 @@ def test_yaml_load_does_not_pollute_global_safeloader():
 class TestEmptySectionsAndDefaults:
     """Bare section headers and null component bodies resolve to schema defaults."""
 
-    @pytest.mark.parametrize("section", ["data", "plots", "inference", "opt"])
+    @pytest.mark.parametrize("section", ["data", "plots", "inference", "opt", "satellites"])
     def test_a_bare_top_level_section_keeps_its_defaults(self, tmp_path, section):
         defaults = getattr(loaded(tmp_path, _MINIMAL_CONFIG), section)
         config = loaded(tmp_path, f"{section}:\n" + _MINIMAL_CONFIG)
@@ -85,15 +85,16 @@ class TestEmptySectionsAndDefaults:
             tmp_path,
             "model:\n  components:\n"
             "    - trajectory.FixedOrbit:\n"
-            "        norad_ids: [25544]\n"
             "        min_elevation: null\n"
-            "        remote_max_age_days: null\n",
+            "satellites:\n"
+            "  norad_ids: [25544]\n"
+            "  remote_max_age_days: null\n",
         )
         traj = config.model.components[0].config
         assert traj.min_elevation is None
-        assert traj.remote_max_age_days is None
+        assert config.satellites.remote_max_age_days is None
 
-    @pytest.mark.parametrize("section", ["not_a_section", "rfi", "ast", "gains", "satellites"])
+    @pytest.mark.parametrize("section", ["not_a_section", "rfi", "ast", "gains"])
     def test_an_unknown_or_legacy_section_is_rejected(self, tmp_path, section):
         with pytest.raises(ConfigValidationError, match=section):
             loaded(tmp_path, f"{section}:\n" + _MINIMAL_CONFIG)

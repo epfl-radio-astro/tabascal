@@ -10,7 +10,7 @@ pair would carry.
 """
 
 import os
-from typing import Any, Optional, Union
+from typing import Any, ClassVar, Optional, Union
 import warnings
 
 import jax.numpy as jnp
@@ -243,19 +243,19 @@ def _check_unpolarised(rows: list) -> None:
 class PointSourceConfig(StrictConfigModel):
     """One inline discrete source in :class:`FixedDiscreteSkyConfig`."""
 
-    name: Optional[str] = None
-    ra: FiniteFloat
-    dec: FiniteFloat
-    I: FiniteFloat
-    ref_freq_mhz: FiniteFloat = 0.0
-    alpha: FiniteFloat = 0.0
-    Q: FiniteFloat = 0.0
-    U: FiniteFloat = 0.0
-    V: FiniteFloat = 0.0
-    rm: FiniteFloat = 0.0
-    fwhm_major_arcsec: FiniteFloat = 0.0
-    fwhm_minor_arcsec: FiniteFloat = 0.0
-    position_angle_deg: FiniteFloat = 0.0
+    name: Optional[str] = Field(default=None, description="Optional human-readable source label.")
+    ra: FiniteFloat = Field(description="Right ascension in degrees (J2000).")
+    dec: FiniteFloat = Field(description="Declination in degrees (J2000).")
+    I: FiniteFloat = Field(description="Stokes I flux density in Jy at ref_freq_mhz.")
+    ref_freq_mhz: FiniteFloat = Field(default=0.0, description="Reference frequency in MHz.")
+    alpha: FiniteFloat = Field(default=0.0, description="Power-law spectral index (dimensionless).")
+    Q: FiniteFloat = Field(default=0.0, description="Stokes Q flux density in Jy (must be 0; unpolarised only).")
+    U: FiniteFloat = Field(default=0.0, description="Stokes U flux density in Jy (must be 0; unpolarised only).")
+    V: FiniteFloat = Field(default=0.0, description="Stokes V flux density in Jy (must be 0; unpolarised only).")
+    rm: FiniteFloat = Field(default=0.0, description="Rotation measure in rad/m^2 (must be 0; unpolarised only).")
+    fwhm_major_arcsec: FiniteFloat = Field(default=0.0, description="Gaussian major-axis FWHM in arcseconds.")
+    fwhm_minor_arcsec: FiniteFloat = Field(default=0.0, description="Gaussian minor-axis FWHM in arcseconds.")
+    position_angle_deg: FiniteFloat = Field(default=0.0, description="Major-axis position angle in degrees, north through east.")
 
     @field_validator(
         "ref_freq_mhz",
@@ -324,8 +324,16 @@ class FixedDiscreteSkyConfig(StrictConfigModel):
 
     point_sources: Union[str, list[PointSourceConfig]] = Field(
         ...,
+        description=(
+            "Fixed (non-fitted) sky sources: a path to an OSKAR 12-column sky model "
+            "file or a non-empty inline list of source mappings ({ra, dec, I, ...})."
+        ),
         json_schema_extra={"input_path": True},
     )
+
+    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
+        "point_sources": ("ast", "point_sources"),
+    }
 
     @field_validator("point_sources", mode="before")
     @classmethod

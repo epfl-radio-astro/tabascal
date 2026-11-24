@@ -2,7 +2,15 @@
 
 TABASCAL makes use of a configuration file to fully define the model used, what satellites to include and what inference to do. The configuration file is in YAML format using only the most basic constructs and types. It is strictly validated on load using Pydantic v2 schemas: unknown keys are rejected, and every component declares its own validated input schema.
 
-Top-level sections are limited to `model`, `data`, `plots`, `inference`, and `opt`. Any top-level section left omitted (or set to `null`) takes its schema defaults. Model-specific configuration — trajectories, RFI signal priors, RFI visibility kernels, astronomical sky models, and antenna gains — is fully compartmentalised inside `model.components`, directly under each component entry.
+Top-level sections are limited to `model`, `data`, `plots`, `inference`, `opt`, and `satellites`. Any optional top-level section left omitted (or set to `null`) takes its schema defaults. Model-specific configuration — trajectory options, RFI signal priors, RFI visibility kernels, astronomical sky models, and antenna gains — is compartmentalised inside `model.components`, directly under each component entry.
+
+```{note}
+Configs written for earlier versions put every component's options in shared `ast`, `rfi` and `gains` sections. They are refused with a pointer to the converter:
+
+    tabascal migrate-config old.yaml -o new.yaml
+
+It moves each option onto the component that reads it under `model.components` and notes anything no listed component read. YAML comments are not carried over.
+```
 
 ## Model
 
@@ -14,7 +22,7 @@ model:
   components:
     # RFI Phase
     - trajectory.OrbitFine:
-        norad_ids: [20452, 38833, 45854]
+        min_elevation: 0
     - trajectory.PhaseCalculationRFIFine
     # RFI Signal
     - rfi_signal.ComplexRFIVarAntFine:
@@ -29,6 +37,9 @@ model:
         fov_deg: 5
     # Gains
     - gains.UnitaryGains
+
+satellites:
+  norad_ids: [20452, 38833, 45854]
 ```
 
 The components should be given in order of dependency. For example, `trajectory.OrbitFine` is specified before `trajectory.PhaseCalculationRFIFine` because the latter depends on the output of the former. Each component is a class which defines its configuration schema (`Config`), parameters (if any), initialisation, prior distribution, and forward model. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the canonical `module.Class` syntax (for example `trajectory.OrbitFine` refers to {class}`~tabascal.components.trajectory.OrbitFine` in [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)); `module:Class` is also accepted.
@@ -446,7 +457,7 @@ Note that the catalogue fluxes are in the same scale as the data the model is fi
 
 ## RFI signal
 
-The RFI signal prior is configured directly on the `rfi_signal.*` component (`ComplexRFIVarAnt`, `ComplexRFIVarAntFine`, `ComplexRFIConstAnt`, or `ComplexRFIConstAntFine`), while integration and kernel options sit on the `rfi_vis.*` component (`RiemannVisFine`, `RiemannVisVariableFine`, or `AnalyticVis`) and satellite orbits and elevation masking sit on the `trajectory.*` component.
+The RFI signal prior is configured directly on the `rfi_signal.*` component (`ComplexRFIVarAnt`, `ComplexRFIVarAntFine`, `ComplexRFIConstAnt`, or `ComplexRFIConstAntFine`), while integration and kernel options sit on the `rfi_vis.*` component (`RiemannVisFine`, `RiemannVisVariableFine`, or `AnalyticVis`), elevation masking sits on the `trajectory.*` component, and satellite NORAD IDs live in the top-level `satellites` section.
 
 The prior is a Gaussian process in the Fourier domain rather than over a dense covariance matrix. That is a numerical requirement and not a preference: a Cholesky factorisation's jitter is absolute, so at the variance this prior carries it regularises far too weakly and returns NaN in single precision.
 
@@ -454,7 +465,6 @@ The prior is a Gaussian process in the Fourier domain rather than over a dense c
 model:
   components:
     - trajectory.FixedOrbitFine:
-        norad_ids: [20452, 38833, 45854]
         min_elevation: 0
     - rfi_signal.ComplexRFIVarAntFine:
         init: sample
@@ -471,6 +481,9 @@ model:
         time_int_factor: 1
         backend: null
         baseline_block_size: 128
+
+satellites:
+  norad_ids: [20452, 38833, 45854]
 ```
 
 All parameters on `rfi_signal.*` that overlap with `ast_vis.GPVisAst` have the same definition, except that `init` and `mean` accept `est` and `matched-filter` (alias `mf`):
@@ -511,7 +524,7 @@ All parameters on `rfi_signal.*` that overlap with `ast_vis.GPVisAst` have the s
 
   When `null` it is twice the largest visibility in the observation. That is a *maximum* where this key says *typical* — 46.4 Jy against a true RFI `rms|V|` of 11.0 on the shipped 8A simulation, where `data` gives 11.2. [#227](https://github.com/epfl-radio-astro/tabascal/issues/227) tracks making it a statistic this key's name describes.
 
-* `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `est` file, and no matching of light curves to satellites by name, since the estimator is handed the trajectory component's `norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
+* `init` / `mean`: `matched-filter` (alias `mf`) estimates the per-satellite light curves directly from the visibilities the run has already loaded, by matched-filtering them against the known satellite trajectory phase, and seeds the RFI amplitude with them. It is the same seed as `est` without the file: no imaging step, no `est` file, and no matching of light curves to satellites by name, since the estimator is handed `satellites.norad_ids` and returns the curves in that order. See [Estimating the light curves from the data](#estimating-the-light-curves-from-the-data).
 
 The remaining parameters on `rfi_signal.*`, `trajectory.*`, and `rfi_vis.*` are:
 
@@ -544,7 +557,7 @@ $$N^T_\text{int} \geq  \pi \nu_F \Delta t \sqrt{\frac{\lvert V^\text{RFI}_\text{
 
 where $N^T_\text{int}$ is the number of integration samples used per time step, $\Delta t$ is the integration time for a single sample, $\nu_F$ is the fringe frequency of the source due to its movement, $\lvert V^\text{RFI}_\text{inst} \rvert$ is the instantaneous RFI visibility amplitude, and $\sigma_n$ is the visibility noise of a single data point. This parameter (`time_int_factor`) determines the factor by which to increase this oversampling.
 
-The estimate is per baseline, since $\nu_F$ is, and `TabConfig.estimate_rfi_sampling` then reduces it to the single fine-grid count: the count is the largest per-baseline rate, rounded up to a size with enough divisors for the stride binning that groups baselines by how finely each needs to be sampled. That rounding applies to every fine-grid run, not only to one using `RiemannVisVariableFine`: the number of divisors required is at least `min_time_bins + 1`, and only the *extra* divisors a `Variable` component needs are conditional on selecting one. `min_time_bins` and `max_time_bins` bound the number of quantile levels the grouping places, which caps the number of stride groups rather than guaranteeing that many — distinct levels can round onto the same stride. With no satellites configured there is no fringe rate to estimate from at all, every baseline falls back to a single required sample, and the count comes out at `2`. So the effective count is not exactly `time_int_factor` times the formula above: the factor scales the per-baseline rates going in, and the binning decides what comes out. The value actually used is printed during setup.
+The estimate is per baseline, since $\nu_F$ is, and `TabConfig.estimate_rfi_sampling` then reduces it to the single fine-grid count: the count is the largest per-baseline rate, rounded up to a size with enough divisors for the stride binning that groups baselines by how finely each needs to be sampled. On `rfi_vis.RiemannVisVariableFine`, `min_time_bins` (default `1`) and `max_time_bins` (default `30`) bound the number of quantile levels the grouping places, which caps the number of stride groups rather than guaranteeing that many — distinct levels can round onto the same stride. Those two keys exist only on `RiemannVisVariableFine` (`RiemannVisFine` uses uniform sampling and does not take them). With no satellites configured there is no fringe rate to estimate from at all, every baseline falls back to a single required sample, and the count comes out at `2`. So the effective count is not exactly `time_int_factor` times the formula above: the factor scales the per-baseline rates going in, and the binning decides what comes out. The value actually used is printed during setup.
 
 * `baseline_block_size` (on `rfi_vis.RiemannVisFine`): The number of baselines `RiemannVisFine` calculates per step of its scan over the baseline axis, a whole number defaulting to `128`. The Riemann sum is formed on a `(n_bl, n_rfi, n_freq_fine, n_time_fine)` fine grid before anything is reduced, which is `n_rfi * n_int_freq * n_int_time` times the size of the visibilities it reduces to and, under reverse-mode automatic differentiation, is what the tape holds; the scan replaces `n_bl` in that shape with `baseline_block_size`, or with `n_bl` itself where that is smaller, and recomputes each block in the backward pass rather than keeping it. It is purely a memory strategy — baselines are independent, so the result does not depend on it — at the cost of recomputation and of one scan step per block. `null` is the setting for a single block over every baseline: the checkpoint stays, so the backward pass still recomputes the fine grid instead of storing it, but the grid is formed whole. That bounds the tape and not the peak, and it is the setting that trades the memory back for the scan's step overhead. Only `RiemannVisFine` with `backend: jax` reads it: the FFI kernels bound the same term inside the compiled kernel, and `RiemannVisVariableFine` carries its own baseline grouping. See [RFI-visibility kernels](kernels.md#memory).
 * `backend` (on `rfi_vis.RiemannVisFine`, `rfi_vis.RiemannVisVariableFine`): which implementation the `rfi_vis` component runs. `jax` is the visibility written in JAX and differentiated by it; `ffi` is the compiled op of `ri-kernels`, with its own JVP and transpose, which is faster and bounds its memory itself. `null`, the default, is `ffi` for every component. See [RFI-visibility kernels](kernels.md).
@@ -590,7 +603,7 @@ xr.Dataset(
 
 A file that carries no `time_scale` is read as UTC with a warning. Light-curve files written by tabascal before the stamp existed took their `times` from the measurement set's `TIME` column *as declared*, so one written from a UTC-declared MS — the overwhelmingly common case — is already correct, while one written from a TAI- or TT-declared MS is offset by the leap seconds and is indistinguishable from a correct file. **Regenerate any estimate measured on a non-UTC MS** with `tabascal light-curve`; the rest can be left alone or re-stamped.
 
-**Rows are matched to satellites by NORAD id, never by position**, so the order of sources in the file does not have to match the trajectory component's `norad_ids`. **Samples are interpolated onto the observation's own time and frequency grid**, so the file's sampling does not have to match the observation either.
+**Rows are matched to satellites by NORAD id, never by position**, so the order of sources in the file does not have to match `satellites.norad_ids`. **Samples are interpolated onto the observation's own time and frequency grid**, so the file's sampling does not have to match the observation either.
 
 Both are strict because their failure modes are silent. A light curve attached to the wrong satellite still has the right shape and still optimises — it just seeds the prior from another satellite. A file whose sampling is assumed rather than declared is resampled wrongly by an unknown amount. Neither surfaces as an error, only as a worse fit, so a file that cannot state which satellite and which sample times it describes is rejected rather than guessed at.
 
@@ -629,26 +642,23 @@ Two limitations are worth knowing. The estimator assumes the satellite is exactl
 
 ## Satellites
 
-Satellite selection, orbit-source policies, and elevation masking are configured directly on the `trajectory.*` component (`FixedOrbit`, `FixedOrbitFine`, `NoDragOrbitFine`, or `OrbitFine`) inside `model.components`. An example is shown below.
+Satellite selection and orbit-record resolution policies live in the top-level `satellites` section (while elevation masking `min_elevation` is configured on the `trajectory.*` component in `model.components`). An example is shown below.
 
 ```yaml
-model:
-  components:
-    - trajectory.FixedOrbitFine:
-        norad_ids: [20452, 38833, 45854]
-        norad_ids_path: null
-        extra_orbit_dir: null
-        extra_orbit_max_age_days: null
-        remote_max_age_days: 3
-        cache_reuse_max_age_days: 1
-        min_elevation: 0
+satellites:
+  norad_ids: [20452, 38833, 45854]
+  norad_ids_path: null
+  extra_orbit_dir: null
+  extra_orbit_max_age_days: null
+  remote_max_age_days: 3
+  cache_reuse_max_age_days: 1
 ```
 
 * `norad_ids`: List of the NORAD IDs of the satellites to include. TABASCAL requests the record whose epoch is closest to the observation from the [IAU CPS SatChecker](https://satchecker.cps.iau.org/) service (via the [satchecker-client](https://satchecker-client.readthedocs.io/) package) — its `get-nearest-omm` endpoint for observations from 2026-07-12 onwards and `get-nearest-tle` before that, falling back to the other archive if the first has nothing acceptable. Cache misses run concurrently with a bounded five-worker pool; no account or credentials are required. **Every ID listed here must resolve to an acceptable record**: otherwise preflight stops before reading the visibilities and names each failure. TABASCAL never silently drops a configured satellite from the RFI model.
 
   An empty list (or `null`) is rejected whenever a satellite trajectory component (`FixedOrbit`, `FixedOrbitFine`, `OrbitFine`, `NoDragOrbitFine`) is present without `norad_ids_path` (or CLI `-np`). To run an astronomical-only model with no satellites, simply omit the trajectory and RFI components from `model.components`.
 * `norad_ids_path`: Optional path to a text file of NORAD IDs, one per line; blank lines and `#` comments are ignored and malformed lines are reported with their line number. When set it takes precedence over `norad_ids`, and the `-np/--norad-path` CLI flag takes precedence over both.
-* `extra_orbit_dir`: Optional path to an additional directory of local orbit files, searched **per NORAD ID before** the managed cache and SatChecker. Every `*.json` file in the directory is considered; files must be pandas-oriented JSON tables carrying either `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2`, or `NORAD_CAT_ID`, `EPOCH` and the seven OMM element columns. The kind is inferred, so a Space-Track `gp`/`gp_history` export drops in unconverted. For each requested satellite the valid record whose epoch is closest to the observation is chosen — by epoch distance, regardless of format — and, if it is accepted (see `extra_orbit_max_age_days`), it wins outright and no service call is made for that satellite. Files that cannot be read or lack either required column set are skipped. Records that fail validation are rejected, allowing that satellite to fall through to the managed cache and SatChecker. Legacy date-named files and the bundled Space-Track fixtures remain supported. This directory can be given at runtime with the `--extra-orbit-dir` flag. tabascal can also write one itself: `tabascal light-curve --fit-offset --write-shifted-tle DIR` saves the detected satellites' records with their epochs moved by the fitted along-track offset, so a run pointed at `DIR` models the corrected trajectory rather than the one the elements arrived with, and `tabascal search` writes the same records for every satellite it detects — see [Records with a fitted time offset](orbits.md#records-with-a-fitted-time-offset). The search also sets this key for you: the trajectory component fragment it emits names the directory it wrote, with `extra_orbit_max_age_days: null`. (The `ORBIT_CACHE_DIR` environment variable is a different thing: it relocates where the *managed cache* is stored, and is not an additional source of records.)
+* `extra_orbit_dir`: Optional path to an additional directory of local orbit files, searched **per NORAD ID before** the managed cache and SatChecker. Every `*.json` file in the directory is considered; files must be pandas-oriented JSON tables carrying either `NORAD_CAT_ID`, `TLE_LINE1` and `TLE_LINE2`, or `NORAD_CAT_ID`, `EPOCH` and the seven OMM element columns. The kind is inferred, so a Space-Track `gp`/`gp_history` export drops in unconverted. For each requested satellite the valid record whose epoch is closest to the observation is chosen — by epoch distance, regardless of format — and, if it is accepted (see `extra_orbit_max_age_days`), it wins outright and no service call is made for that satellite. Files that cannot be read or lack either required column set are skipped. Records that fail validation are rejected, allowing that satellite to fall through to the managed cache and SatChecker. Legacy date-named files and the bundled Space-Track fixtures remain supported. This directory can be given at runtime with the `--extra-orbit-dir` flag. tabascal can also write one itself: `tabascal light-curve --fit-offset --write-shifted-tle DIR` saves the detected satellites' records with their epochs moved by the fitted along-track offset, so a run pointed at `DIR` models the corrected trajectory rather than the one the elements arrived with, and `tabascal search` writes the same records for every satellite it detects — see [Records with a fitted time offset](orbits.md#records-with-a-fitted-time-offset). The search also sets this key for you: the `satellites:` fragment it emits names the directory it wrote, with `extra_orbit_max_age_days: null`. (The `ORBIT_CACHE_DIR` environment variable is a different thing: it relocates where the *managed cache* is stored, and is not an additional source of records.)
 * `extra_orbit_max_age_days`: Maximum allowed absolute difference, in days, between an `extra_orbit_dir` record's epoch and the observation epoch. `null` (default) applies no age limit, preserving exact replay of a run's `results/used_orbits.json`; `0` accepts an epoch match within TLE precision. A rejected local record falls through to the managed cache and SatChecker. The age comes from the record itself — line 1 for a TLE, the `EPOCH` field for an OMM — not from the filename or modification time.
 * `remote_max_age_days`: Hard ceiling, in days, on how far a SatChecker or managed-cache record may be from the observation. A TLE's epoch is re-derived locally from line 1; an OMM has no lines, so its `EPOCH` field is used after being range-checked. Every accepted remote record's source, provider, endpoint, signed offset and absolute age is logged. `null` explicitly removes the ceiling.
 
@@ -708,8 +718,7 @@ It adds only $2 n_\text{ant} - 2$ parameters, and unlike a *fixed* gain it is co
 ```yaml
 model:
   components:
-    - trajectory.FixedOrbit:
-        norad_ids: [20452, 38833, 45854]
+    - trajectory.FixedOrbit
     - rfi_signal.ComplexRFIConstAnt   # not ComplexRFIVarAnt — see below
     - rfi_vis.AnalyticVis
     - ast_signal.FixedDiscreteSky:
@@ -718,6 +727,9 @@ model:
     - gains.ConstGains:
         ref_ant: null
         fix_flux_scale: true
+
+satellites:
+  norad_ids: [20452, 38833, 45854]
 ```
 
 **A gain is only identifiable against a model term it cannot deform**, which is what the component list above is for ([issue #124](https://github.com/epfl-radio-astro/tabascal/issues/124)):

@@ -54,7 +54,7 @@ def get_rfi_path_numpy(rfi_xyz: NDArray, ants_uvw: NDArray, ants_xyz: NDArray) -
 
     The range from each source to each antenna plus the antenna's ``w`` towards
     the phase centre: what :func:`get_rfi_phase_numpy` divides by the wavelength
-    and reduces to a turn. ``trajectory:FixedOrbit`` fits a polynomial in
+    and reduces to a turn. ``trajectory.FixedOrbit`` fits a polynomial in
     time through it instead, so it needs the path itself.
 
     Parameters

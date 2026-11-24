@@ -35,7 +35,7 @@ from datetime import datetime
 
 import yaml
 
-from tabascal.schema import RunConfig
+from tabascal.schema import DataConfig, RunConfig, SatellitesConfig
 
 RUNS_DIR = "runs"
 LATEST = "latest"
@@ -54,20 +54,21 @@ LOSS_TRACE = "trace.npz"
 HASH_LIMIT = 64 * 2**20
 
 #: Known component input-path field metadata for dict-mode inspection (when
-#: reading a saved YAML dict without importing JAX/component classes).
-_DICT_DATA_INPUT_FIELDS = {
-    "ms_path": {"resolved_by_runner": True, "fingerprint_kind": "ms"},
-    "gain_table": {"is_path_list": True},
-    "noise": {},
-    "truth_zarr": {"resolved_by_runner": True},
-}
+#: reading a saved YAML dict without importing JAX/component classes). Top-level
+#: section input fields come directly from DataConfig / SatellitesConfig schemas.
 _DICT_COMPONENT_INPUT_FIELDS = {
-    "extra_orbit_dir": {"fingerprint_kind": "orbits"},
-    "norad_ids_path": {},
     "est": {},
     "point_sources": {},
     "init": {"non_path_literals": ("prior", "sample", "data", "zeros", "ones", "truth", "est", "matched-filter", "mf")},
 }
+
+#: Pre-component sectioned input locations, kept so run directories saved before
+#: per-component configs still fingerprint cleanly.
+_SECTIONED_INPUT_KEYS = (
+    ("gains", "init", {"non_path_literals": ("prior",)}),
+    ("rfi", "est", {}),
+    ("ast", "point_sources", {}),
+)
 
 #: Distributions whose versions decide what a run computes.
 _VERSIONED = (
@@ -171,15 +172,16 @@ def _iter_input_slots(config):
     from a saved ``config.yaml`` without importing component classes).
     """
     if isinstance(config, RunConfig):
-        # Data section
-        for key, meta in type(config.data).input_path_fields().items():
-            yield (
-                ("data", key),
-                f"data.{key}",
-                getattr(config.data, key),
-                meta,
-                lambda val, _k=key: setattr(config.data, _k, val),
-            )
+        # Data and satellites top-level sections
+        for sec_name, sec_obj in (("data", config.data), ("satellites", config.satellites)):
+            for key, meta in type(sec_obj).input_path_fields().items():
+                yield (
+                    (sec_name, key),
+                    f"{sec_name}.{key}",
+                    getattr(sec_obj, key),
+                    meta,
+                    lambda val, _s=sec_obj, _k=key: setattr(_s, _k, val),
+                )
         # Component configs
         ref_counts: dict[str, int] = {}
         for spec in config.model.components:
@@ -199,18 +201,19 @@ def _iter_input_slots(config):
     if not isinstance(config, Mapping):
         return
 
-    # Plain dict mode (lightweight readers & tests)
-    data = config.get("data")
-    if isinstance(data, Mapping):
-        for key, meta in _DICT_DATA_INPUT_FIELDS.items():
-            if key in data:
-                yield (
-                    ("data", key),
-                    f"data.{key}",
-                    data[key],
-                    meta,
-                    lambda val, _d=data, _k=key: _d.__setitem__(_k, val),
-                )
+    # Plain dict mode (lightweight readers, saved YAML configs & tests)
+    for sec_name, sec_cls in (("data", DataConfig), ("satellites", SatellitesConfig)):
+        block = config.get(sec_name)
+        if isinstance(block, Mapping):
+            for key, meta in sec_cls.input_path_fields().items():
+                if key in block:
+                    yield (
+                        (sec_name, key),
+                        f"{sec_name}.{key}",
+                        block[key],
+                        meta,
+                        lambda val, _d=block, _k=key: _d.__setitem__(_k, val),
+                    )
     comps = (config.get("model") or {}).get("components") if isinstance(config.get("model"), Mapping) else None
     if isinstance(comps, list):
         ref_counts = {}
@@ -234,6 +237,17 @@ def _iter_input_slots(config):
                         meta,
                         lambda val, _p=params, _k=key: _p.__setitem__(_k, val),
                     )
+    # Legacy sectioned run directories (pre-component config layout)
+    for sec_name, key, meta in _SECTIONED_INPUT_KEYS:
+        block = config.get(sec_name)
+        if isinstance(block, Mapping) and key in block:
+            yield (
+                ("legacy", sec_name, key),
+                f"{sec_name}.{key}",
+                block[key],
+                meta,
+                lambda val, _d=block, _k=key: _d.__setitem__(_k, val),
+            )
 
 
 def absolutise_inputs(config):

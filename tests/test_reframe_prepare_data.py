@@ -65,19 +65,19 @@ def test_the_run_config_keeps_the_templates_settings_and_finds_its_inputs(tmp_pa
         "model:\n"
         "  precision: single\n"
         "  components:\n"
-        "    - trajectory.FixedOrbit:\n"
-        "        norad_ids_path: ids.txt\n"
+        "    - trajectory.FixedOrbit\n"
         "    - rfi_signal.ComplexRFIVarAnt\n"
         "    - rfi_vis.AnalyticVis\n"
         "    - gains.ConstGains:\n"
         "        init: prior\n"
+        "satellites:\n  norad_ids_path: ids.txt\n"
         "opt:\n  max_iter: 500\n  epsilon: 1e-3\n"
     )
 
     config = prepare_data.prepare_config(template)
     assert config["model"]["precision"] == "single"
     assert config["opt"] == {"max_iter": 500, "epsilon": 1e-3}
-    assert config["model"]["components"][0]["trajectory.FixedOrbit"]["norad_ids_path"] == str(
+    assert config["satellites"]["norad_ids_path"] == str(
         (tmp_path / "ids.txt").resolve()
     )
     assert config["model"]["components"][3]["gains.ConstGains"]["init"] == "prior"

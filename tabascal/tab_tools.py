@@ -398,8 +398,8 @@ def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
 
     The optimiser loss is a negative log *joint*, so its prior term depends on
     the latent dimension of whichever model is running -- no gain parameters at
-    all under ``gains:UnitaryGains`` against ``2 n_ant - 2`` under
-    ``gains:ConstGains``, say. Two models' loss curves are therefore not on a
+    all under ``gains.UnitaryGains`` against ``2 n_ant - 2`` under
+    ``gains.ConstGains``, say. Two models' loss curves are therefore not on a
     common scale and cannot be compared directly. These quantities can: reduced
     chi^2 is fixed by the data, and the ast/rfi RMSE is measured against the
     simulation truth. Both use the same flag masking and noise normalisation as

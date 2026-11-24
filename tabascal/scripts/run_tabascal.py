@@ -50,6 +50,15 @@ def _rfi_per_sat_cmd(args):
 
 
 # ---------------------------------------------------------------------------
+# 'migrate-config' subcommand
+# ---------------------------------------------------------------------------
+
+def _migrate_config_cmd(args):
+    from tabascal.scripts.migrate_config import run
+    return run(args)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -160,6 +169,15 @@ def build_parser():
     )
     _build_ps_parser(ps_parser)
 
+    # -- migrate-config --
+    from tabascal.scripts.migrate_config import build_parser as _build_migrate_parser
+
+    migrate_parser = subparsers.add_parser(
+        "migrate-config",
+        help="Convert a sectioned (ast/rfi/gains) config to per-component options.",
+    )
+    _build_migrate_parser(migrate_parser)
+
     return parser
 
 
@@ -186,6 +204,8 @@ def main():
         sys.exit(_search_cmd(args))
     elif args.command == "rfi-per-sat":
         _rfi_per_sat_cmd(args)
+    elif args.command == "migrate-config":
+        sys.exit(_migrate_config_cmd(args))
 
 
 if __name__ == "__main__":

@@ -1247,7 +1247,7 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     source's contribution is recovered by evaluating the **same** op with every
     other source's amplitude held at zero -- on the already-fitted ``rfi_A`` and
     ``rfi_phase`` carried in ``vi_pred``, on the fine grid or, for
-    ``rfi_vis:AnalyticVis``, on the data grid with ``rfi_delay_poly_us`` beside
+    ``rfi_vis.AnalyticVis``, on the data grid with ``rfi_delay_poly_us`` beside
     them. No re-fit, no GP
     re-evaluation, and no second model: the component is the run's own, rebuilt
     from ``model.components`` (see :func:`_rfi_vis_reference`).
