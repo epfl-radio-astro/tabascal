@@ -1,10 +1,7 @@
 """FFT-based Gaussian Process utilities."""
 
 import functools
-from collections.abc import Mapping
 from functools import reduce
-from math import isfinite
-from numbers import Real
 from typing import Dict, List, Optional, Tuple
 
 import jax
@@ -20,53 +17,21 @@ from tabascal.timing import measure_runtime
 # ---------------------------------------------------------------------------
 #
 # Every Fourier-domain GP in the model -- the RFI signal components and the
-# astronomical visibility one -- is a Gaussian process, and its <section>.gp_cov
-# block is the covariance: a width, the correlation scales that set the knee,
-# and the roll-off exponent past it on each axis. They are validated here, in
-# the module that consumes them, rather than separately in each component, so
-# that a bad value is refused the same way and with the same words wherever it
-# is written.
+# astronomical visibility one -- is a Gaussian process, and its covariance is
+# set by a width, the correlation scales that set the knee, and the roll-off
+# exponent past it on each axis. Those options are declared, and their values
+# checked, once in tabascal.schema (FourierGPConfig, shared by both), so a bad
+# value is refused the same way and with the same words wherever it is written.
 #
-# Both sections take the same keys and read them at the same level. Two things
-# genuinely differ, and both are stated in the base configuration rather than
-# left to be inferred: the astronomical prior takes its time scale as a field of
-# view, since a sky source's coherence time is a fringe rate rather than a
-# number to pick, and the two read corr_freq: null differently -- no roll-off at
-# all for the sky, half the observed extent for the RFI.
+# Two things genuinely differ between the two priors: the astronomical one
+# takes its time scale as a field of view, since a sky source's coherence time
+# is a fringe rate rather than a number to pick, and the two read
+# corr_freq: null differently -- no roll-off at all for the sky, half the
+# observed extent for the RFI.
 #
-# Neither reads a p0: both normalise their amplitude away, to gp_cov.std. What
-# the cutoff sets is the number of fitted modes rather than the covariance, so
-# it sits outside the block with the other knobs on the size of the problem --
-# see validate_cutoff.
-
-
-def _gp_cov_number(value, where: str) -> float:
-    """A finite, strictly positive float, or a ValueError naming ``where``.
-
-    ``numbers.Real`` rather than ``(int, float)`` so a config assembled in
-    Python can carry numpy scalars. ``bool`` is a Real and is excluded first:
-    ``True`` is not a roll-off exponent.
-    """
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise ValueError(f"Config parameter ({where}: {value!r}) is not a number.")
-
-    try:
-        value = float(value)
-    except OverflowError:
-        # A Python int has no bound, and float() on one past the double range
-        # raises OverflowError -- which names neither the key nor the section.
-        raise ValueError(
-            f"Config parameter ({where}: {value!r}) is too large to be a "
-            "floating-point number."
-        ) from None
-
-    if not isfinite(value) or value <= 0.0:
-        raise ValueError(
-            f"Config parameter ({where}: {value!r}) must be finite and greater "
-            "than zero."
-        )
-
-    return value
+# Neither reads a p0: both normalise their amplitude away, to std. What the
+# cutoff sets is the number of fitted modes rather than the covariance, so it
+# does not change the prior's width either.
 
 
 #: The literal a power-spectrum amplitude may take instead of a number, meaning
@@ -77,8 +42,8 @@ FROM_DATA = "data"
 def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
     """``rms|V|`` over the samples ``keep`` selects, in Jy.
 
-    The measurement both ``std: data`` options are: ``ast.gp_cov.std`` and
-    ``rfi.gp_cov.std`` name the same quantity, so they read it off the data the same
+    The measurement both ``std: data`` options are: ``GPVisAst.std`` and
+    ``rfi_signal.std`` name the same quantity, so they read it off the data the same
     way and differ only in which samples they take and how far they reduce.
 
     ``keep`` is the caller's, and it is where the two part company. The
@@ -131,7 +96,7 @@ def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
             f"{key}: data cannot measure a width: the visibilities it is "
             "measuring are not finite. Set a width in Jy -- flagging them "
             "helps only where the caller's mask reads the MS's flags, which "
-            "ast.gp_cov.std does and rfi.gp_cov.std does not."
+            "GPVisAst.std does and rfi_signal.std does not."
         )
 
     if per_baseline:
@@ -142,122 +107,6 @@ def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
         std = jnp.where(measured, std, jnp.median(std[measured]))
 
     return std
-
-
-def _gp_cov_amplitude(value, where: str):
-    """A positive number, or the literal ``"data"``.
-
-    An amplitude is the one entry in these blocks that is a property of the
-    observation rather than of the model, so it is the one that can be measured
-    instead of set. Everything else -- a roll-off exponent, a truncation, a
-    correlation scale -- describes what shape the prior has, and no amount of
-    looking at the data settles those.
-    """
-
-    if isinstance(value, str):
-        if value == FROM_DATA:
-            return FROM_DATA
-        raise ValueError(
-            f"Config parameter ({where}: {value!r}) is not a number and not "
-            f"{FROM_DATA!r}, which is the only word it takes."
-        )
-
-    return _gp_cov_number(value, where)
-
-
-def _gp_cov_pair(value, where: str) -> List[float]:
-    """An ordered pair of positive numbers, one per axis.
-
-    Ordered specifically. Anything keyed rather than ordered -- a mapping, a
-    set, a dataframe -- passes a ``len()``/``__getitem__`` check of length two
-    and is then read as its keys, in an order that means nothing, while the two
-    entries name the frequency and time axes in that order. ``np.asarray``
-    settles it: a keyed thing comes back 0-d (object) or 2-D, an ordered pair
-    comes back 1-D of length two, and a list, a tuple and a numpy pair all say
-    it.
-    """
-    # Named types rather than a duck-typed shape test. The shape test this
-    # replaces let through anything keyed that is also 1-D of length two -- a
-    # pandas Series, an xarray DataArray -- whose entries would then be read in
-    # whatever order its index happens to be in, silently swapping the two axes
-    # if the user wrote time first. A masked array is excluded for the same
-    # reason in miniature: np.asarray drops the mask, so an entry marked absent
-    # would come back as the data underneath it.
-    # `type(...) is np.ndarray` rather than isinstance: an ndarray *subclass*
-    # carries meaning that np.asarray then throws away -- the mask of a masked
-    # array, the units of an astropy Quantity, the index of anything keyed --
-    # and stripping it silently is how the wrong two numbers become the two
-    # exponents.
-    ordered = None
-    if isinstance(value, (list, tuple, jax.Array)) or type(value) is np.ndarray:
-        try:
-            as_array = np.asarray(value, dtype=object)
-        except Exception:
-            as_array = None
-        if as_array is not None and as_array.ndim == 1:
-            # Ordered, so the count is worth saying on its own -- it is the
-            # likeliest mistake and the vaguer message below would hide it.
-            if as_array.size != 2:
-                raise ValueError(
-                    f"{where} has {as_array.size} entries; it takes 2, one for "
-                    "the frequency axis and one for the time axis, in that order."
-                )
-            ordered = list(as_array)
-
-    if ordered is None:
-        raise ValueError(
-            f"Config parameter ({where}: {value!r}) is not a pair. It takes one "
-            "value for the frequency axis and one for the time axis, in that "
-            "order, e.g. [3, 3]."
-        )
-
-    return [_gp_cov_number(entry, where) for entry in ordered]
-
-
-def _gp_cov_cutoff(value, where: str) -> float:
-    """A relative cutoff: positive, and below 1.
-
-    It is compared against the largest mode on each axis and the comparison in
-    :func:`pk_cut` is strict, so at 1 or above every mode is cut and there is
-    nothing left to fit. That is caught here, where the key can be named, as
-    well as in :func:`pk_cut`, which is where a value that only reaches 1 after
-    rounding into the working precision arrives.
-    """
-    cutoff = _gp_cov_number(value, where)
-    if cutoff >= 1.0:
-        raise ValueError(
-            f"Config parameter ({where}: {value!r}) is a power relative to the "
-            "largest mode on each axis, so it must be below 1. At 1 or above "
-            "every mode is cut and no parameters are left to fit."
-        )
-
-    return cutoff
-
-
-#: The kinds of value a covariance key can take, by name, for the ``rules`` a
-#: caller of :func:`validate_gp_cov` passes.
-GP_COV_KINDS = {
-    "number": _gp_cov_number,
-    "amplitude": _gp_cov_amplitude,
-    "pair": _gp_cov_pair,
-}
-
-
-def validate_cutoff(value, where: str, default: float) -> float:
-    """``<section>.cutoff``, or ``default`` for the section that leaves it null.
-
-    Outside the covariance block, and validated on its own, because it is not a
-    covariance parameter: it drops the k-modes whose power falls below it, which
-    sets how many parameters are fitted and nothing about what the prior
-    believes. Since the spectrum is normalised after the cut it does not even
-    change the prior's width. It belongs with ``freq_pad_factor`` and
-    ``baseline_block_size``, which are the other knobs on the size of the
-    problem rather than on its statistics.
-    """
-    if value is None:
-        return float(default)
-
-    return _gp_cov_cutoff(value, where)
 
 
 # ---------------------------------------------------------------------------
@@ -300,20 +149,6 @@ def validate_cutoff(value, where: str, default: float) -> float:
 SIGNAL_TYPES = ("complex", "real")
 
 
-def validate_signal_type(value, where: str, default: str = "complex") -> str:
-    """``<section>.signal_type``, or ``default`` where it is null."""
-    if value is None:
-        return default
-
-    if not isinstance(value, str) or value not in SIGNAL_TYPES:
-        raise ValueError(
-            f"Config parameter ({where}: {value!r}) is not a signal type. It "
-            f"takes one of {list(SIGNAL_TYPES)}."
-        )
-
-    return value
-
-
 def _check_signal_type(signal_type: str) -> None:
     """Refuse a signal type by value, from the transforms themselves.
 
@@ -349,74 +184,6 @@ def _require_real(y: Array, where: str) -> None:
             f"{jnp.asarray(y).dtype}. Pass its real part explicitly if that is "
             "what is meant."
         )
-
-
-def validate_gp_cov(
-    gp_cov,
-    section: str,
-    rules: Dict[str, str],
-    optional: Tuple[str, ...] = (),
-) -> Dict:
-    """Normalise and check one ``<section>.gp_cov`` config block.
-
-    Both Fourier-domain priors are Gaussian processes and this block is their
-    covariance: an amplitude, the correlation scales that set the knee, and the
-    roll-off past it. Both sections take the same keys, and the two places they
-    differ -- the astronomical prior takes its time scale as a field of view,
-    and the two read ``corr_freq: null`` differently -- are stated in the base
-    configuration rather than left to be inferred from where a key sits.
-
-    Parameters
-    ----------
-    gp_cov
-        The block as the config carries it, or ``None`` for a config that has
-        none.
-    section
-        The config section it came from, for the error messages: ``"rfi"`` or
-        ``"ast"``.
-    rules
-        Key to kind, naming an entry of :data:`GP_COV_KINDS`. These and only
-        these are read; anything else in the block is refused by name, since a
-        key nobody reads is a key somebody will tune.
-    optional
-        Keys that may be absent or ``null``, and come back as ``None`` for the
-        caller to fill in. Every other key in ``rules`` must be present.
-    """
-    if gp_cov is None:
-        gp_cov = {}
-    elif not isinstance(gp_cov, Mapping):
-        raise ValueError(
-            f"Config parameter ({section}.gp_cov: {gp_cov!r}) is not a "
-            f"mapping. It takes {sorted(rules)}."
-        )
-
-    # key=repr because a config's keys need not all be strings, and a bare
-    # sorted() over a mixed set raises TypeError from in here rather than
-    # telling the user which key is wrong.
-    unknown = sorted(set(gp_cov) - set(rules), key=repr)
-    if unknown:
-        raise ValueError(
-            f"{section}.gp_cov has no key(s) {unknown}. It takes "
-            f"{sorted(rules)}."
-        )
-
-    out = {}
-    for key, kind in rules.items():
-        value = gp_cov.get(key)
-        where = f"{section}.gp_cov.{key}"
-
-        if value is None:
-            if key not in optional:
-                raise ValueError(
-                    f"{where} is required and is unset. It takes a "
-                    f"{kind}; see the base configuration for its default."
-                )
-            out[key] = None
-            continue
-
-        out[key] = GP_COV_KINDS[kind](value, where)
-
-    return out
 
 
 @measure_runtime
@@ -834,14 +601,14 @@ def pk_cut(
 
         if not np.isfinite(cutoff):
             why = f"the cutoff is {cutoff!r}"
-            fix = "Set a finite cutoff below 1 -- see rfi.cutoff and ast.cutoff."
+            fix = "Set a finite cutoff below 1 -- see rfi_signal.cutoff and GPVisAst.cutoff."
         elif not finite:
             why = "the power spectrum is not finite"
             fix = (
                 "The cutoff is not what is wrong here. Look at the knees and "
                 "the k grid -- a zero or non-finite corr_time, corr_freq or "
                 "fov_deg, or a zero-length baseline, gives 0/0 -- and, on the "
-                "RFI path, at rfi.gp_cov.std / 2, which is the p0 this is scaled by. The "
+                "RFI path, at rfi_signal.std / 2, which is the p0 this is scaled by. The "
                 "astronomical spectrum is built at unit amplitude and scaled "
                 "afterwards, so there the amplitude cannot be the cause."
             )
@@ -854,14 +621,14 @@ def pk_cut(
                 "No cutoff can help: the comparison is strict, so nothing "
                 "clears a threshold of zero. Check the knees, and the variance "
                 "the spectrum is scaled to where the caller supplies one "
-                "(rfi.gp_cov.std) -- an underflow to zero looks like this."
+                "(rfi_signal.std) -- an underflow to zero looks like this."
             )
         else:
             why = (
                 f"a cutoff of {cutoff!r} is at or above 1 in the working "
                 "precision, and nothing clears it"
             )
-            fix = "Set it below 1 -- see rfi.cutoff and ast.cutoff."
+            fix = "Set it below 1 -- see rfi_signal.cutoff and GPVisAst.cutoff."
 
         raise ValueError(
             f"A power spectrum cutoff of {cutoff!r} leaves no Fourier modes: "
@@ -1031,7 +798,7 @@ def knee_from_corr_scale(corr_scale):
     transforms to ``fftfreq(n_freq, chan_width)``; a correlation *time* in
     seconds gives one in Hz, a fringe rate.
 
-    ``rfi.gp_cov.corr_freq``, ``rfi.gp_cov.corr_time`` and ``ast.gp_cov.corr_freq`` are read
+    ``rfi_signal.corr_freq``, ``rfi_signal.corr_time`` and ``GPVisAst.corr_freq`` are read
     through here so that the three cannot drift apart -- the same conversion
     written out three times is how the astronomical and RFI priors came to
     disagree about what their frequency knee even meant (GitHub #117).

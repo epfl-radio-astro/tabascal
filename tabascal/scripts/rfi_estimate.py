@@ -309,7 +309,13 @@ def _data_get(config, key, default=None):
 
 
 def resolve_ms_path(args, config):
-    """The MS to read: the flag, the config's ``data.ms_path``, or the sim dir."""
+    """The MS to read: the flag, the config's ``data.ms_path``, or the sim dir.
+
+    The same precedence ``tabascal run`` uses, so a config that runs points the
+    extractor at the same visibilities without being told twice -- and read
+    through the same helpers, so one config cannot be refused here with a
+    traceback and there with a message naming the key.
+    """
     if args.ms_path:
         return os.path.abspath(args.ms_path)
 
@@ -346,7 +352,15 @@ def resolve_data_col(args, config):
 
 
 def resolve_corr(args, config):
-    """The correlation to read: the flag, else the config's, else ``xx``."""
+    """The correlation to read: the flag, else the config's, else ``xx``.
+
+    Checked against :data:`tabascal.ms.CORR_TYPES` rather than against a list
+    repeated here, so the command accepts exactly what the reader resolves --
+    circular and Stokes MSs included -- and cannot drift from it. The import is
+    deferred because it carries the JAX stack, which ``tabascal -h`` must not
+    pay for; by the time this runs the command is committed to reading an MS
+    anyway.
+    """
     if args.corr is not None:
         corr = args.corr
     elif config is not None:
@@ -649,11 +663,21 @@ def _from_config(args, offset_fit=None):
         config.data.freq = args.freq
     if args.extra_orbit_dir:
         config.satellites.extra_orbit_dir = args.extra_orbit_dir
+    # The satellites are the config's own: -n/-np are refused alongside -c, since
+    # both name them and there is no rule for which would win.
     min_el = resolve_min_elevation(args, config)
     traj_cfg = config.model.find_one(TrajectoryConfig)
     if traj_cfg is not None:
         traj_cfg.min_elevation = min_el
 
+    # An MS with no usable noise column is not fatal here: the curves are still
+    # measured, and come back unweighted and unscaled with nan errors, which is
+    # what this command documents. Nor is a satellite that never rose: its curve
+    # is zero, which is a measurement, and stopping would leave
+    # --no-elevation-cut -- which drops the cut for every satellite -- as the
+    # only way to measure the ones that were up. Inference keeps both strict
+    # defaults: neither an unweighted likelihood nor a fully-masked satellite
+    # has anything to fit.
     tab_config = TabConfig(
         config,
         ms_path,
@@ -672,6 +696,10 @@ def _from_config(args, offset_fit=None):
             _model_on_ms_channels,
         )
 
+        # The same checks and the same alignment the standalone residual goes
+        # through: subtracting positionally would meet a full-band store with a
+        # config narrowed by data.freq and difference two different channels,
+        # and a store from another observation would be differenced at all.
         xds = xr.open_zarr(args.zarr)
         _check_zarr_identity(
             xds,

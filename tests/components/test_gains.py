@@ -1,8 +1,9 @@
 """Tests for tabascal.components.gains — UnitaryGains and the gain prior scales.
 
 ``ConstGains``, the one gain component that fits anything, has its own module
-(``test_const_gains.py``); what lives here is the shared validation of the prior
-it reads, and the component that reads none of it.
+(``test_const_gains.py``); what lives here is the validation of the prior it
+reads (:class:`ConstGainsConfig` and its :meth:`~ConstGainsConfig.prior_scales`),
+and the component that reads none of it.
 """
 
 import pytest
@@ -12,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tabascal.components.gains import UnitaryGains, validate_gain_scales
+from tabascal.components.gains import ConstGainsConfig, UnitaryGains
 
 from .conftest import make_constants
 
@@ -72,8 +73,6 @@ def make_vis_state(n_ant, n_freq, n_time, rng_key=0):
 # None means "unset", 0 means 0
 # ---------------------------------------------------------------------------
 
-SCALE_KEYS = ("amp_mean", "amp_std", "phase_mean", "phase_std")
-
 #: Every value that is not a width: zero included, since a zero-width prior is a
 #: degenerate Normal rather than an unset one.
 UNUSABLE = [0, 0.0, -1.0, float("nan"), float("inf"), -float("inf")]
@@ -86,14 +85,20 @@ DEFAULT_AMP_STD_PERCENT = 20.0
 DEFAULT_PHASE_STD_DEGREES = 180.0
 
 
-def scale_config(**overrides):
-    """The keys :func:`validate_gain_scales` reads, all unset unless overridden."""
+def scales(**options):
+    """The prior scales ``ConstGains`` runs with, for these options.
 
-    return {**{key: None for key in SCALE_KEYS}, **overrides}
+    ``None`` is passed through, since a ``null`` in the config means "the
+    default" for each of these keys.
+    """
+    return ConstGainsConfig(**options).prior_scales()
 
 
-def test_an_old_r_seed_is_not_read_so_not_even_a_string_is_refused():
-    validate_gain_scales(scale_config(r_seed="x"))
+def test_an_old_r_seed_is_refused_as_an_unknown_option():
+    """``r_seed`` was retired for ``inference.seed``; a config still carrying it
+    under the component is told so, rather than having it silently ignored."""
+    with pytest.raises(ValueError, match="r_seed"):
+        ConstGainsConfig.model_validate({"r_seed": "x"})
 
 
 class TestPriorWidths:
@@ -107,10 +112,10 @@ class TestPriorWidths:
         named rather than silently replaced by the default width.
         """
         with pytest.raises(ValueError, match=key):
-            validate_gain_scales(scale_config(**{key: value}))
+            ConstGainsConfig(**{key: value})
 
     def test_unset_widths_still_default(self):
-        cfg = validate_gain_scales(scale_config())
+        cfg = scales()
 
         assert cfg["amp_std"] == pytest.approx(
             DEFAULT_AMP_STD_PERCENT / 100
@@ -121,7 +126,7 @@ class TestPriorWidths:
 
     def test_the_default_amp_width_is_a_percentage_of_amp_mean(self):
         """The default is a *fraction* of amp_mean, exactly as an explicit value is."""
-        cfg = validate_gain_scales(scale_config(amp_mean=2.5))
+        cfg = scales(amp_mean=2.5)
 
         assert cfg["amp_std"] == pytest.approx(DEFAULT_AMP_STD_PERCENT / 100 * 2.5)
 
@@ -138,12 +143,11 @@ class TestPriorWidths:
         ``amp_std: 20`` is the config that says ``amp_std: null``, bit for bit, so
         the two conversion paths cannot drift apart unnoticed.
         """
-        assert validate_gain_scales(scale_config())[key] == validate_gain_scales(
-            scale_config(**{key: written})
-        )[key]
+        assert scales(**{key: None})[key] == scales(**{key: written})[key]
+        assert scales()[key] == scales(**{key: written})[key]
 
     def test_explicit_widths_keep_their_units(self):
-        cfg = validate_gain_scales(scale_config(amp_mean=2.0, amp_std=5.0, phase_std=2.0))
+        cfg = scales(amp_mean=2.0, amp_std=5.0, phase_std=2.0)
 
         assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
         assert cfg["phase_std"] == pytest.approx(float(np.deg2rad(2.0)))
@@ -157,7 +161,7 @@ class TestPriorWidths:
         of an accepted value must not shift.
         """
         std = 9007199254740993  # 2**53 + 1, the first int a float cannot hold
-        cfg = validate_gain_scales(scale_config(amp_mean=1.0, amp_std=std))
+        cfg = scales(amp_mean=1.0, amp_std=std)
 
         assert cfg["amp_std"] == float(std) / 100 * 1.0
         assert cfg["amp_std"] != std / 100 * 1.0
@@ -165,7 +169,7 @@ class TestPriorWidths:
     @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
     def test_a_non_numeric_width_is_an_error(self, key):
         with pytest.raises(ValueError, match=key):
-            validate_gain_scales(scale_config(**{key: "bad"}))
+            ConstGainsConfig(**{key: "bad"})
 
 
 class TestTheDefaultPhasePriorIsEffectivelyUniform:
@@ -201,7 +205,7 @@ class TestTheDefaultPhasePriorIsEffectivelyUniform:
         return 2 * sum(np.exp(-0.5 * (k * sigma) ** 2) for k in range(1, 200))
 
     def test_the_wrapped_default_prior_is_flat_over_the_circle(self):
-        default = validate_gain_scales(scale_config())["phase_std"]
+        default = scales()["phase_std"]
 
         assert self.wrapped_ripple(default) < 0.02
         # The value it replaces is not remotely flat, which is the point.
@@ -217,42 +221,17 @@ class TestPhaseMean:
         worth pinning, since it is the only reason the old ``not phase_mean`` read
         never bit anyone.
         """
-        assert validate_gain_scales(scale_config())["phase_mean"] == 0.0
-        assert validate_gain_scales(scale_config(phase_mean=0))["phase_mean"] == 0.0
-        assert validate_gain_scales(scale_config(phase_mean=0.0))["phase_mean"] == 0.0
+        assert scales()["phase_mean"] == 0.0
+        assert scales(phase_mean=None)["phase_mean"] == 0.0
+        assert scales(phase_mean=0)["phase_mean"] == 0.0
+        assert scales(phase_mean=0.0)["phase_mean"] == 0.0
 
     def test_a_non_zero_phase_mean_is_kept(self):
-        assert validate_gain_scales(scale_config(phase_mean=-0.3))["phase_mean"] == pytest.approx(-0.3)
+        assert scales(phase_mean=-0.3)["phase_mean"] == pytest.approx(-0.3)
 
     def test_a_non_numeric_phase_mean_is_an_error(self):
         with pytest.raises(ValueError, match="phase_mean"):
-            validate_gain_scales(scale_config(phase_mean="bad"))
-
-
-class TestMissingKeysAreNamed:
-    """Four keys are read here, so a bare "validation failed" is not enough."""
-
-    @pytest.mark.parametrize("key", SCALE_KEYS)
-    def test_the_missing_key_is_named(self, key):
-        cfg = scale_config()
-        del cfg[key]
-        original = dict(cfg)
-
-        with pytest.raises(ValueError, match=key):
-            validate_gain_scales(cfg)
-
-        # Every key is read before any of them is written, so there is nothing
-        # half-normalised behind the failure.
-        assert cfg == original
-
-    def test_the_original_key_error_is_chained(self):
-        cfg = scale_config()
-        del cfg["phase_std"]
-
-        with pytest.raises(ValueError) as excinfo:
-            validate_gain_scales(cfg)
-
-        assert isinstance(excinfo.value.__cause__, KeyError)
+            ConstGainsConfig(phase_mean="bad")
 
 
 # ---------------------------------------------------------------------------

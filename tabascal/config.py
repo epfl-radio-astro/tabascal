@@ -141,6 +141,9 @@ class TabConfig:
         self.ms_path = ms_path
 
         traj_cfg = cfg.model.find_one(TrajectoryConfig)
+        # One normalisation of the satellites section, shared by preflight and the
+        # model build, so a malformed value is a clean error and the two can never
+        # disagree about what was configured.
         self.tle_config = normalise_tle_config(cfg)
         self.extra_orbit_dir = self.tle_config.extra_orbit_dir
         self.extra_orbit_max_age_days = self.tle_config.extra_orbit_max_age_days
@@ -156,16 +159,41 @@ class TabConfig:
             cfg.data.data_col,
         )
         self.set_noise(cfg.data.noise, require=require_noise)
+        # After set_noise, so the noise it resolved is carried into the
+        # calibrated frame with the data; before set_flags, so the samples no
+        # gain could be found for reach the flags; and before the sharding block
+        # at the end of this constructor, which makes vis_obs a global array.
+        # Where require_noise is False there may be no noise to carry, and
+        # apply_gain_table leaves that alone: the data are still calibrated and
+        # the uncalibratable samples still flagged, there is simply no error bar
+        # to divide by the gain.
         self.apply_gain_table(cfg.data.gain_table)
         self.set_flags(cfg.data.flags)
 
+        # The MS read must land on the same observation epoch preflight resolved
+        # against, or the model would be built from TLEs checked at another time.
+        # Both sides are UTC: preflight reads the TIME column's MEASINFO record
+        # and normalises exactly as read_ms does, so the comparison is like with
+        # like and both are the instant the observation actually happened.
         check_epoch_agreement(self.tle_resolution, self.times_jd)
 
         self.get_orbital_elements()
 
+        # Only the frequency count is a free choice: there is no observable to
+        # derive it from. n_int_time is set by estimate_rfi_sampling below, from
+        # the fringe rate the RFI sampling has to follow -- it is not an option,
+        # and the fine-grid rfi_vis component's time_int_factor is how a config
+        # scales it.
         vis_cfg = cfg.model.find_one(FreqIntegrationMixin)
         self.n_int_freq = vis_cfg.n_int_freq if vis_cfg is not None else 1
 
+        # The divisor-rich fine grid (min_divisors > 1) is only needed by the
+        # RiemannVisVariableFine component (either backend), which splits
+        # baselines into multiple stride groups. For every other rfi_vis
+        # component it just inflates n_int_time (the fine-grid time dimension)
+        # and slows the run, so only request it when that component is actually
+        # selected. min_divisors is an internal tuning parameter, not
+        # user-configurable.
         var_cfg = cfg.model.find_one(VariableFineTimeIntegrationMixin)
         uses_variable = var_cfg is not None
 
@@ -398,7 +426,7 @@ class TabConfig:
         gains are applied once at read time instead of on every forward pass,
         and everything downstream (priors, RFI/AST models, chi^2, and the
         results written back to the MS) lives in one frame: the calibrated one.
-        That retires the manual "scale the noise by k and ``ast.gp_cov.std`` by
+        That retires the manual "scale the noise by k and ``GPVisAst.std`` by
         k" workaround -- by k, not k^2, since std is a standard deviation in Jy
         and scales with the data rather than with its square.
 

@@ -1880,12 +1880,28 @@ class TestGpCovIsRead:
     def test_no_block_means_the_components_own_default(self, cls, absent):
         """A config predating the key runs exactly as it did."""
         comp = setup_with_gp_cov(cls, absent)
-        defaults = cls.Config()
 
         assert comp.gp_cov_params() == (
-            [float(g) for g in defaults.gammas],
-            float(defaults.cutoff),
+            [float(g) for g in cls.default_gammas],
+            float(cls.Config().cutoff),
         )
+
+    @pytest.mark.parametrize(
+        "cls, kind", [(ComplexRFIVarAntFine, int), (ComplexRFIConstAntFine, float)]
+    )
+    def test_the_default_gammas_keep_their_type(self, cls, kind):
+        """The exponent's type picks jax's routine: ``lax.integer_pow`` for an int,
+        ``lax.pow`` for a float, which differ in the last bit. Each component's
+        default is the type it always was, so the default path is unchanged."""
+        comp = setup_with_gp_cov(cls, _ABSENT)
+
+        assert [type(g) for g in comp.gp_cov_params()[0]] == [kind, kind]
+
+    def test_configured_gammas_are_floats(self):
+        """A value written in the config was always read as floats, ints included."""
+        comp = setup_with_gp_cov(ComplexRFIVarAntFine, {"gammas": [3, 3]})
+
+        assert [type(g) for g in comp.gp_cov_params()[0]] == [float, float]
 
     @pytest.mark.parametrize("absent", [_ABSENT, None])
     @pytest.mark.parametrize(
@@ -1899,7 +1915,7 @@ class TestGpCovIsRead:
 
     def test_the_two_components_keep_their_own_defaults(self):
         """Preserved rather than unified: making them agree is a model change."""
-        assert ComplexRFIVarAntFine.Config().gammas != ComplexRFIConstAntFine.Config().gammas
+        assert ComplexRFIVarAntFine.default_gammas != ComplexRFIConstAntFine.default_gammas
         assert (
             ComplexRFIVarAntFine.Config().cutoff != ComplexRFIConstAntFine.Config().cutoff
         )
@@ -1926,7 +1942,7 @@ class TestGpCovIsRead:
     def test_one_key_given_leaves_the_other_on_its_default(self, cls):
         comp = setup_with_gp_cov(cls, {"cutoff": 1e-4})
 
-        assert comp.gp_cov_params() == ([float(g) for g in cls.Config().gammas], 1e-4)
+        assert comp.gp_cov_params() == ([float(g) for g in cls.default_gammas], 1e-4)
 
     def test_an_unknown_key_is_refused_by_name(self):
         message = gp_cov_error(ComplexRFIVarAntFine, {"gamma": 3})
@@ -2062,9 +2078,11 @@ class TestGpCovIsRead:
         assert "not supported between instances" not in message
 
     def test_the_schema_defaults_match_each_component(self):
-        assert ComplexRFIVarAntFine.Config().gammas == (3.0, 3.0)
+        assert ComplexRFIVarAntFine.Config().gammas is None
+        assert ComplexRFIVarAntFine.default_gammas == [3, 3]
         assert ComplexRFIVarAntFine.Config().cutoff == 1e-9
-        assert ComplexRFIConstAntFine.Config().gammas == (100.0, 100.0)
+        assert ComplexRFIConstAntFine.Config().gammas is None
+        assert ComplexRFIConstAntFine.default_gammas == [100.0, 100.0]
         assert ComplexRFIConstAntFine.Config().cutoff == 1e-6
 
 

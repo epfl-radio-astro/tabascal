@@ -281,7 +281,8 @@ class TestComponentSchemas:
             )
         )
         var_cfg = cfg.model.components[1].config
-        assert var_cfg.gammas == (3, 3)
+        # null: the component's own exponents (BaseGPRFI.default_gammas)
+        assert var_cfg.gammas is None
         assert var_cfg.cutoff == 1e-9
         assert var_cfg.corr_freq == 1e6
         assert var_cfg.corr_time == 24.0
@@ -297,7 +298,7 @@ class TestComponentSchemas:
             )
         )
         const_cfg = cfg2.model.components[1].config
-        assert const_cfg.gammas == (100, 100)
+        assert const_cfg.gammas is None
         assert const_cfg.cutoff == 1e-6
 
     @pytest.mark.parametrize(
@@ -655,6 +656,26 @@ class TestMigration:
         assert any("rfi.time_int_factor" in n for n in notes)
         assert any("rfi.r_seed" in n and "inference.seed" in n for n in notes)
         assert any("gains.amp_std" in n for n in notes)
+
+    def test_migrate_keeps_the_nulls_the_sectioned_config_documented(self):
+        """``rfi.signal_type``, ``rfi.cutoff`` and ``rfi.gp_cov.gammas`` each
+        documented ``null`` as "the default", and a config that wrote it out
+        still converts to one that validates, with that default."""
+        old = {
+            "model": {"components": ["rfi_signal:ComplexRFIVarAnt"]},
+            "rfi": {
+                "signal_type": None,
+                "cutoff": None,
+                "gp_cov": {"gammas": None, "std": None},
+            },
+        }
+
+        new, _ = migrate(old)
+        cfg = validate_config(new).model.components[0].config
+        assert cfg.signal_type == "complex"
+        assert cfg.cutoff == 1e-9
+        assert cfg.gammas is None
+        assert cfg.std is None
 
     def test_migrate_config_cli_round_trip(self, tmp_path):
         old_path = tmp_path / "old.yaml"

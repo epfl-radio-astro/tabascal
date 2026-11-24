@@ -229,11 +229,11 @@ def _run_pipeline(
     config_mod: dict = {
         "model": {"components": components, "precision": precision}
     }
-    for section, override in t_config.config_overrides.items():
-        if isinstance(override, dict) and isinstance(template.get(section), dict):
-            config_mod[section] = {**template[section], **override}
-        else:
-            config_mod[section] = override
+    # Whole sections, not merged into the template's: read_and_modify_yaml
+    # replaces top-level sections, and the reference values were measured that
+    # way -- {"opt": {"max_iter": 200}} runs the default epsilon and dual_run,
+    # not the template's.
+    config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
     # A copy, not the cache: the run writes its results into the MS.

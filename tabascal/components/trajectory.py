@@ -272,6 +272,15 @@ class FixedOrbitConfig(TrajectoryConfig):
 
     @model_validator(mode="after")
     def _check_path_nodes(self) -> "FixedOrbitConfig":
+        # path_order stops at 3 because the kernel keeps the delay's derivatives
+        # up to the third, so a higher degree would be fitted and then silently
+        # dropped. The default node count oversamples the degree several times
+        # over, which keeps the fit close to the least-squares one over the whole
+        # cell rather than an interpolation through the fewest points that fix a
+        # polynomial. The count must be odd: the nodes are laid out as
+        # fine_offsets lays out a cell, with the centre at index n // 2, so an
+        # even count leaves one more node before the centre than after it, and
+        # the fit runs out before the cell's end.
         if self.path_nodes is not None:
             if self.path_nodes < self.path_order + 1 or self.path_nodes % 2 == 0:
                 raise ValueError(
@@ -414,10 +423,10 @@ class FixedOrbit(Component):
 
     - ``rfi_phase`` ``(n_rfi, n_ant, n_freq, n_time)``: the phase at the channel
       and cell centres, reduced to a turn.
-    - ``rfi_delay_poly_us`` ``(n_rfi, n_ant, n_time, rfi.path_order + 1)``: the
+    - ``rfi_delay_poly_us`` ``(n_rfi, n_ant, n_time, FixedOrbit.path_order + 1)``: the
       geometric delay in microseconds relative to the array mean and its first
-      ``rfi.path_order`` time derivatives at each cell centre, from a
-      least-squares polynomial through ``rfi.path_nodes`` nodes spanning the cell
+      ``FixedOrbit.path_order`` time derivatives at each cell centre, from a
+      least-squares polynomial through ``FixedOrbit.path_nodes`` nodes spanning the cell
       (:func:`tabascal.poly_interp.fit_path`). Relative, because a term common
       to every antenna cancels in a baseline's phase difference, and what
       remains is small enough for float32 to carry across a cell -- the
@@ -431,7 +440,7 @@ class FixedOrbit(Component):
 
     The fine grid is never resolved, and nothing here reads its size. A
     degree-``path_order`` series about a cell's centre is settled by a handful of
-    samples spanning that cell, so the path is propagated at ``rfi.path_nodes``
+    samples spanning that cell, so the path is propagated at ``FixedOrbit.path_nodes``
     nodes per cell. The fine-grid count climbs steeply with the array's extent --
     37, 59, 174, 1065 and 6570 samples per cell at 64, 128, 256, 384 and 512
     SKA-Low stations -- and the range calculation it feeds is ``(n_rfi, n_ant,

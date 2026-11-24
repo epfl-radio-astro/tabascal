@@ -44,8 +44,10 @@ def component_key(seed: int, tag: str):
 def describe_random_draws(config: RunConfig) -> str:
     """One run-header line naming what the seed reaches in this config.
 
-    A component draws when it declares ``seed_tag`` and its config asks for
-    ``init: sample``; the start draws when ``opt.init_jitter`` is set.
+    A component draws when it declares a ``seed_tag`` and its options ask for
+    ``init: sample``, and the start draws when
+    ``opt.init_jitter`` is set (tabascal.jitter). Prior plots draw from
+    the run key too, but they are diagnostics and never touch the fit.
     """
     from tabascal.jitter import describe_init_jitter
     from tabascal.schema import validate_config

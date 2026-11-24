@@ -255,22 +255,6 @@ def _check_cutoff_float(value: Any) -> float:
     return out
 
 
-def _check_positive_number(value: Any) -> Union[int, float]:
-    """Finite positive number, keeping ints as int (for lax.integer_pow bit-exactness)."""
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise ValueError(f"must be a positive finite number, got {value!r}")
-    if isinstance(value, Integral):
-        out_i = int(value)
-        try:
-            as_f = float(out_i)
-        except OverflowError:
-            raise ValueError(f"is too large to be a floating-point number: {value!r}") from None
-        if not math.isfinite(as_f) or out_i <= 0:
-            raise ValueError(f"must be finite and greater than zero, got {value!r}")
-        return out_i
-    return _check_positive_float(value)
-
-
 def _is_plain_ordered_sequence(value: Any) -> bool:
     """True for list, tuple, plain np.ndarray (not subclasses), or jax.Array."""
     if isinstance(value, (list, tuple)):
@@ -284,7 +268,16 @@ def _is_plain_ordered_sequence(value: Any) -> bool:
     return False
 
 
-def _check_positive_pair(value: Any) -> Tuple[Union[int, float], Union[int, float]]:
+def _check_positive_pair(value: Any) -> Tuple[float, float]:
+    """An ordered pair of positive numbers, one per axis, each as a float.
+
+    Floats, as the pre-schema ``gp_cov`` validator returned them: the pair is
+    used as an exponent, and jax routes an integer exponent through
+    ``lax.integer_pow`` and a float one through ``lax.pow``, which differ in
+    the last bit. A config that writes ``gammas: [5, 5]`` therefore runs exactly
+    the model it ran before. The integer defaults some components keep are
+    their own, and never pass through here (see ``BaseGPRFI.default_gammas``).
+    """
     if not _is_plain_ordered_sequence(value):
         raise ValueError(
             f"must be an ordered pair of two positive numbers [freq, time], got {value!r}"
@@ -301,7 +294,7 @@ def _check_positive_pair(value: Any) -> Tuple[Union[int, float], Union[int, floa
         raise ValueError(
             f"must have exactly 2 entries [freq, time], got {len(items)}: {value!r}"
         )
-    return (_check_positive_number(items[0]), _check_positive_number(items[1]))
+    return (_check_positive_float(items[0]), _check_positive_float(items[1]))
 
 
 def _check_path_str(value: Any) -> Optional[str]:
@@ -360,11 +353,7 @@ PositiveFloat = Annotated[float, BeforeValidator(_check_positive_float)]
 NonNegativeFloat = Annotated[float, BeforeValidator(_check_non_negative_float)]
 FloatGe1 = Annotated[float, BeforeValidator(_check_float_ge_1)]
 CutoffFloat = Annotated[float, BeforeValidator(_check_cutoff_float)]
-PositiveNumber = Annotated[Union[int, float], BeforeValidator(_check_positive_number)]
-PositivePair = Annotated[
-    Tuple[Union[int, float], Union[int, float]],
-    BeforeValidator(_check_positive_pair),
-]
+PositivePair = Annotated[Tuple[float, float], BeforeValidator(_check_positive_pair)]
 OptionalPathStr = Annotated[Optional[str], BeforeValidator(_check_path_str)]
 NonEmptyStr = Annotated[str, BeforeValidator(_check_non_empty_str)]
 
@@ -596,9 +585,14 @@ class RFIGPConfig(FourierGPConfig):
             "the time axis). null uses half the observation duration."
         ),
     )
-    gammas: PositivePair = Field(
-        default=(3, 3),
-        description="Roll-off exponents of the RFI power spectrum on the (frequency, time) axes.",
+    gammas: Optional[PositivePair] = Field(
+        default=None,
+        description=(
+            "Roll-off exponents of the RFI power spectrum on the (frequency, time) axes. "
+            "null is the component's own: [3, 3] for ComplexRFIVarAnt and "
+            "ComplexRFIVarAntFine, [100, 100] for ComplexRFIConstAnt and "
+            "ComplexRFIConstAntFine."
+        ),
     )
     cutoff: CutoffFloat = Field(
         default=1e-9,
@@ -651,12 +645,20 @@ class RFIGPConfig(FourierGPConfig):
         "freq_pad_factor": ("rfi", "freq_pad_factor"),
         "time_pad_factor": ("rfi", "time_pad_factor"),
     }
-    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset({"gammas", "cutoff"})
+    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset(
+        {"gammas", "cutoff", "signal_type"}
+    )
 
     @field_validator("std", mode="before")
     @classmethod
     def _validate_std(cls, value: Any) -> Any:
         return _check_std_value(value, allow_none=True)
+
+    @field_validator("signal_type", mode="before")
+    @classmethod
+    def _default_signal_type(cls, value: Any) -> Any:
+        # null is 'complex', as it was in the sectioned config.
+        return "complex" if value is None else value
 
     @field_validator("init", mode="before")
     @classmethod

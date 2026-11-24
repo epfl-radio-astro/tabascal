@@ -150,7 +150,7 @@ def _inline_row(source, idx: int) -> dict:
     """
     if not isinstance(source, dict):
         raise ValueError(
-            f"ast.point_sources entry {idx} is a {type(source).__name__}, not a source: "
+            f"FixedDiscreteSky.point_sources entry {idx} is a {type(source).__name__}, not a source: "
             "each entry is a mapping of fields, e.g. {name: Fornax A, ra: 50.7, "
             "dec: -37.2, I: 750.0}. "
             f"Got {source!r}."
@@ -159,7 +159,7 @@ def _inline_row(source, idx: int) -> dict:
     name = source.get("name")
     # The index goes in even when the source is named: it is what locates the entry in
     # the file, and two sources may share a name.
-    where = f"ast.point_sources entry {idx}" + (f" ({name!r})" if name else "")
+    where = f"FixedDiscreteSky.point_sources entry {idx}" + (f" ({name!r})" if name else "")
 
     # Checked before the fields are read, so a misspelt key is reported as itself rather
     # than as whatever it left missing. An unrecognised field would otherwise be dropped

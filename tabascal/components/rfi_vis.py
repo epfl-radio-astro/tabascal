@@ -78,6 +78,8 @@ class RiemannVisVariableFineConfig(VariableFineTimeIntegrationMixin):
 class AnalyticVisConfig(FreqIntegrationMixin):
     """Configuration for :class:`AnalyticVis`."""
 
+    # Only the compiled op for now: the JAX reference lands with it in
+    # ri_kernels and becomes the second backend then.
     backend: Literal["ffi"] = Field(
         default="ffi",
         description="Implementation of the visibility: currently only 'ffi' (ri_kernels).",
@@ -180,6 +182,9 @@ class RiemannVisFine(Component):
             self.n_freq = config.n_freq
             self.n_ant = config.n_ant
             self.backend = self.config.backend
+            # null is a setting, not a missing value: one block over every
+            # baseline, which keeps the checkpoint and leaves the scan a single
+            # step.
             self.baseline_block_size = self.config.baseline_block_size
 
             self._set_outputs()
@@ -497,7 +502,7 @@ class AnalyticVis(Component):
     ``ComplexRFIConstAnt``) and :class:`~tabascal.components.trajectory.FixedOrbit`
     on the data grid, with the delay polynomial beside them, and hands them to
     ``ri_kernels.jax_api.RFIAnalyticVisOp``. Inside each cell the signal is the
-    polynomial through the ``2 * rfi.analytic.stencil + 1`` nearest cells on each
+    polynomial through the ``2 * AnalyticVis.stencil + 1`` nearest cells on each
     axis and the phase is linear in frequency and a Taylor series in time; the
     time integral is closed form and the frequency one the ``n_int_freq``-point
     rule of the fine grid. No fine time grid is formed, so ``n_int_time`` is

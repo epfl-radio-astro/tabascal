@@ -251,6 +251,9 @@ def _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path=N
     re-run lands beside the run it repeats.
     """
 
+    # The MS first, because the output directory can default to its parent but
+    # nothing can default the MS except the simulation layout, which needs the
+    # directory. Resolving in this order keeps the two from being circular.
     config_ms_path = config.data.ms_path
     if ms_path:
         ms_path = os.path.abspath(ms_path)
@@ -277,7 +280,15 @@ def _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path=N
         )
     config.data.out_dir = out_dir
 
+    # The MS's name, and the simulation layout's stem. Taken from the MS so
+    # that a real-data run is named for its visibilities rather than for
+    # whichever directory it happens to write to -- and identical to the old
+    # basename(sim_dir) on a simulation, where the MS is <dir>/<dir name>.ms.
     if ms_path:
+        # Only a .ms suffix is an extension. splitext splits on the last dot,
+        # and an MS need not carry one: a directory named for its parameters,
+        # as tab-sim's are, would otherwise be cut at "...-1.500e+08" and the
+        # run named "1".
         stem, extension = os.path.splitext(os.path.basename(ms_path))
         f_name = stem if extension.lower() == ".ms" else os.path.basename(ms_path)
     else:
@@ -285,10 +296,18 @@ def _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path=N
         ms_path = os.path.join(out_dir, f"{f_name}.ms")
     config.data.ms_path = ms_path
 
+    # Read by init: truth (on the RFI and astronomical components) and
+    # plots.truth, and only a simulation has one. Named explicitly where it is
+    # not beside the MS, which is any simulation whose truth has been moved
+    # away from its visibilities.
     config_truth_zarr = config.data.truth_zarr
     if not config_is_unset(config_truth_zarr):
         zarr_path = config_path(config_truth_zarr, "data.truth_zarr")
     else:
+        # Beside the MS, not beside the outputs: sim-vis writes the two
+        # together, and the two are only the same directory when the run
+        # happens to write into the simulation. Identical there, and right for
+        # the split that docs/usage.md recommends for a read-only archive.
         zarr_path = os.path.join(os.path.dirname(ms_path), f"{f_name}.zarr")
     config.data.truth_zarr = zarr_path
 
@@ -416,7 +435,11 @@ def tabascal_subtraction(
 
 
 def _on_process_0(what, work):
-    """``work`` on process 0 alone, its failure raised on every process."""
+    """``work`` on process 0 alone, its failure raised on every process.
+
+    The record is process 0's to write, and a failure there would otherwise
+    leave the workers waiting in the next collective, or the final barrier.
+    """
     failure = None
     if is_process_0():
         try:
@@ -427,7 +450,13 @@ def _on_process_0(what, work):
 
 
 def _record_resolved_settings(run_dir, model):
-    """Write what model setup resolved (via :meth:`Component.resolved_options`) into ``config.yaml``."""
+    """Write what model setup resolved into the run's saved ``config.yaml``.
+
+    The file is written before setup, so a run that dies there still says what
+    it was, and an option such as GPVisAst's ``time_pad_factor: auto`` only
+    becomes a number inside it. Each component reports what it resolved through
+    :meth:`Component.resolved_options`, and only those keys are rewritten.
+    """
     saved = read_config(run_dir)
     comps = (saved.get("model") or {}).get("components")
     if not isinstance(comps, list):
@@ -516,14 +545,24 @@ def _subtract(config: RunConfig, paths):
     )
 
     if sharding_enabled():
+        # Split every leading-RFI-axis array across the device mesh and replicate
+        # the rest. _map_step takes all of these as traced jit arguments, so GSPMD
+        # propagates the shardings through the whole optimization (gradients and
+        # optimizer state included) from here on. (vis_obs/flags/noise were already
+        # globalized in TabConfig, before Model captured them in closures.)
         model.init_params = shard_pytree(model.init_params, tab_config.n_rfi)
         model.state = shard_pytree(model.state, tab_config.n_rfi)
         model.constants = shard_pytree(model.constants, tab_config.n_rfi)
 
     _print_model_summary(tab_config, model, start_time)
 
+    # Load the tab-sim ground truth once and share it across the init/opt RMSE
+    # reporting and all plotting. Missing quantities come back as NaN so consumers
+    # can index unconditionally; reporting skips whatever is unavailable.
     truth = load_truth(tab_config)
     if sharding_enabled():
+        # Truth arrays are compared eagerly against globally-sharded predictions;
+        # process-local device arrays cannot mix with global ones in multi-process.
         truth = {k: make_global(v, replicated_sharding()) for k, v in truth.items()}
     if not has_truth(truth):
         print("\nNo tab-sim truth available - skipping truth-based RMSE reporting.")
@@ -532,11 +571,17 @@ def _subtract(config: RunConfig, paths):
     write_results_xds(init_pred, tab_config, paths.init_pred_path)
     optimise = config.inference.opt and config.opt.max_iter > 0
 
+    # An optimised fit reads log_p off its loss trace instead (the loss is 2 log_p);
+    # evaluating it here as well would cost a forward pass of its own.
     if not optimise:
         nlog_l, nlog_p = nlog_like_and_post(prob_model, model.init_params, tab_config.vis_obs, state=model.state, constants=model.constants)
         print(f"log_l : {nlog_l:.3e}")
         print(f"log_p : {nlog_p:.3e}")
 
+    # Plotting from precomputed (replicated) predictions is safe on process 0
+    # alone. plot_prior is different: it draws fresh model samples, and under
+    # multi-process any model evaluation is a collective -- running it on one
+    # rank would deadlock -- so it is skipped there rather than gated.
     if config.plots.init and is_process_0():
         from tabascal.plot import plot_init
         plot_init(tab_config, init_pred, truth, paths.name, paths.plot_dir)
@@ -566,6 +611,8 @@ def _subtract(config: RunConfig, paths):
             with np.load(run_trace_path(tab_config.config.opt, paths.map_path)) as trace:
                 plot_losses(dict(trace), paths.name, paths.plot_dir)
 
+        # The loss at each step is taken before that step's update, so the
+        # first is at the initial parameters and the last one step short of the MAP.
         print(f"log_p @ init : {losses[0] / 2:.3e}")
         print(f"log_p @ last step : {losses[-1] / 2:.3e}")
     else:
@@ -573,7 +620,25 @@ def _subtract(config: RunConfig, paths):
 
 
 def set_precision(config):
-    """Enable/disable JAX float64 based on ``model.precision``."""
+    """Enable/disable JAX float64 based on ``model.precision``.
+
+    sgp4jax (and potentially other jax-based libraries) call
+    jax.config.update("jax_enable_x64", True) at import time, so this toggle must
+    run *after* those imports to take effect — single precision has to actively
+    disable x64 that they turned on. The x64-setting libraries are imported
+    explicitly here so the ordering is preserved even if the module-level imports
+    are refactored away. WARNING: any future jax-based dependency that flips
+    jax_enable_x64 on import must be imported here, before this update, or single
+    precision will silently run as double.
+
+    Also force full-fp32 matmuls. On Ampere+ GPUs JAX defaults f32 matmuls to
+    TF32 (~10-bit mantissa), which silently wrecks the visibility/GP linear
+    algebra in single precision (reduced chi^2 explodes to ~1e14) while leaving
+    CPU and double precision untouched — so it only bites on GPU once x64 is
+    genuinely off. "highest" pins true fp32 (and is a no-op under x64).
+
+    Returns the resulting ``jax_enable_x64`` value.
+    """
     import jax  # noqa: F811 (re-imported to guarantee it's available here)
     import sgp4jax  # noqa: F401 (enables x64 on import; must precede the toggle)
 
@@ -602,6 +667,9 @@ def run(args):
 
     set_precision(config)
 
+    # Workers run the identical program (multi-process collectives require it) but
+    # only process 0 talks: stdout, the log file, plots and result writes are all
+    # rank-0-gated. Errors still reach stderr on every process.
     try:
         with suppress_worker_stdout():
             tabascal_subtraction(

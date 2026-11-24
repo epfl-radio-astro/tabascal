@@ -106,7 +106,12 @@ def make_run_dir(out_dir, name, now=None):
 
 
 def update_latest(runs, run_dir):
-    """Point ``runs/latest`` at ``run_dir``, atomically."""
+    """Point ``runs/latest`` at ``run_dir``, atomically.
+
+    A relative link, so the tree survives being moved. Made under a temporary
+    name and renamed over the old one, so a reader never finds it missing. A
+    failure here costs a convenience and nothing else, so it only warns.
+    """
 
     link = os.path.join(runs, LATEST)
     tmp = os.path.join(runs, f".{LATEST}.{os.path.basename(run_dir)}")
@@ -123,8 +128,16 @@ def create_run_dir(out_dir, name, config=None):
     """Resolve ``config``'s inputs and create the run directory, on process 0 only.
 
     Process 0 resolves the inputs (:func:`absolutise_inputs`) and makes the
-    directory, then broadcasts both so every process applies the exact same
-    resolved paths.
+    directory, then broadcasts both: the directory is made once however many
+    processes the run has, and every process applies the very paths process 0
+    resolved. Resolving per process could disagree -- another run starting in
+    between moves ``runs/latest`` -- and a worker reading a different gain
+    table from process 0 fails where process 0 waits. A failure on process 0
+    reaches the workers as an empty payload, so they stop too.
+
+    ``runs/latest`` moves only after the inputs were resolved, so one given
+    through it -- an earlier run's ``results/`` as an orbit directory -- names
+    that earlier run, not this empty one.
     """
 
     from tabascal.distributed import (
@@ -251,12 +264,14 @@ def _iter_input_slots(config):
 
 
 def absolutise_inputs(config):
-    """Resolve every input path in ``config`` in place, symlinks included.
+    """Resolve every input path in ``config`` in place, links included.
 
-    Relative to the working directory, so ``config.yaml`` names exactly what
-    was read wherever it is re-run from. ``data.gain_table`` is always recorded
-    as a list. ``data.ms_path`` and ``data.truth_zarr`` are resolved by the run
-    itself, with their own precedence.
+    Relative to the working directory, as ``data.ms_path`` and the CLI flags
+    already are, so ``config.yaml`` names exactly what was read wherever it is
+    re-run from. ``realpath`` rather than ``abspath``: an input named through
+    ``runs/latest`` is recorded as the run it named then, not as whatever the
+    link names later. ``data.gain_table`` is always recorded as a list.
+    The MS and truth zarr are resolved by the run itself, with its precedence.
     """
     for _slot_id, _label, value, meta, setter in _iter_input_slots(config):
         if meta.get("resolved_by_runner"):
@@ -295,6 +310,7 @@ def _apply_input_values(config, items):
 
 def place_outputs(config, run_dir):
     """Take a relative ``opt.trace_path`` inside the run directory."""
+    # join keeps an absolute path as it is.
     if isinstance(config, RunConfig):
         trace = config.opt.trace_path
         if _is_path(trace):
@@ -321,6 +337,12 @@ def read_config(run_dir):
 # ---------------------------------------------------------------------------
 
 def _fingerprint_kind_for(label: str, meta: dict | None = None) -> str | None:
+    """How the input under ``label`` is fingerprinted, or None for by its files.
+
+    Some inputs are fingerprinted by what is read from them, not by their files.
+    The orbit directory may be an earlier run's ``results/``, whose zarrs and
+    ``.B`` that run's ``tab2MS`` rewrites; only its ``*.json`` files are orbits.
+    """
     if meta and meta.get("fingerprint_kind"):
         return meta["fingerprint_kind"]
     if label == "data.ms_path":
@@ -350,7 +372,12 @@ def input_paths(config):
 
 
 def _ms_fingerprint(path):
-    """What a run read from the MS, not the files it is stored in."""
+    """What a run read from the MS, not the files it is stored in.
+
+    ``tab2MS`` writes columns into the MS, so its file metadata changes with
+    every export. The rows, the time axis, the channels, the antennas and the
+    correlations do not, and they are what the results are tied to.
+    """
 
     import numpy as np
     from daskms import xds_from_table
@@ -367,7 +394,11 @@ def _ms_fingerprint(path):
 
 
 def fingerprint(path, kind=None):
-    """A comparable summary of the file or directory at ``path``."""
+    """A comparable summary of the file or directory at ``path``.
+
+    Never raises: an input that cannot be read is the run's to report, and the
+    record says only that it could not be fingerprinted.
+    """
 
     try:
         return _fingerprint(path, kind)
@@ -428,7 +459,11 @@ def _same(recorded, current):
 
 
 def check_inputs(record, overrides=None):
-    """Warn, naming each one, about inputs that differ from what the run read."""
+    """Warn, naming each one, about inputs that differ from what the run read.
+
+    ``overrides`` maps a label to the path a caller is using instead of the
+    recorded one -- a moved MS -- and that path is the one compared.
+    """
 
     overrides = overrides or {}
     changed = []
@@ -532,7 +567,11 @@ def exported_results(run_dir, config):
 
 
 def load_run(path):
-    """``(run_dir, config, record)`` for a run directory, or a message saying why not."""
+    """``(run_dir, config, record)`` for a run directory, or a message saying why not.
+
+    ``runs/latest`` resolves to the run it points at, so what is reported and
+    written names the run and not the link.
+    """
 
     run_dir = os.path.realpath(path)
     if not is_run_dir(run_dir):

@@ -22,7 +22,7 @@ import numpyro
 import optax
 import pytest
 
-from tabascal.components.gains import ConstGains, ConstGainsConfig, validate_gain_scales
+from tabascal.components.gains import ConstGains, ConstGainsConfig
 from tabascal.schema import ConfigValidationError
 
 from .conftest import make_constants
@@ -780,7 +780,7 @@ class TestAmpMean:
 
 
 class TestScaleKeysReachTheComponent:
-    """What :func:`validate_gain_scales` decides, ``ConstGains`` is the one that uses.
+    """What :class:`ConstGainsConfig` decides, ``ConstGains`` is the one that uses.
 
     The unit tests of the reads themselves live in ``test_gains.py``; these check the
     decision survives the trip through setup, whose ``except`` wraps a ``ValueError``
@@ -1200,16 +1200,9 @@ def test_the_correlation_lengths_are_not_read_here():
     setup_const_gains(cfg)  # no correlation length in the config, and none missed
 
 
-def test_validate_gain_scales_converts_percent_and_degrees():
+def test_prior_scales_convert_percent_and_degrees():
     """The scales reach the component in the units the model works in."""
-    cfg = validate_gain_scales(
-        {
-            "amp_mean": 2.0,
-            "amp_std": 5.0,
-            "phase_mean": None,
-            "phase_std": 2.0,
-        }
-    )
+    cfg = ConstGainsConfig(amp_mean=2.0, amp_std=5.0, phase_mean=None, phase_std=2.0).prior_scales()
 
     assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
     assert cfg["phase_mean"] == pytest.approx(0.0)

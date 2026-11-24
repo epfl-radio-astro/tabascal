@@ -1111,7 +1111,18 @@ def _rfi_vis_spec(tab_config):
 
 
 def wants_rfi_per_sat(vi_pred: dict, tab_config) -> bool:
-    """Whether this run asked for a per-satellite decomposition it can make."""
+    """Whether this run asked for a per-satellite decomposition it can make.
+
+    Three things, and the last two are not the option's business: the run has to
+    have asked (``data.save_rfi_per_sat``), the prediction has to carry the
+    fitted fine grid the decomposition is made from, and there has to be at
+    least one real satellite to decompose into. A satellite-free run would
+    otherwise store an empty ``src`` axis, which is not a decomposition of
+    anything and is a column-less export downstream.
+
+    Evaluated on every process, and identically: the answer decides whether the
+    collective evaluations in :func:`rfi_vis_per_sat` are made at all.
+    """
 
     return bool(
         tab_config.config.data.save_rfi_per_sat
