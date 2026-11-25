@@ -258,11 +258,8 @@ def validate_stop(stop, *, precision: Optional[str] = None) -> Optional[Dict]:
 
 
 def total_steps(opt_config) -> int:
-    """Steps the fit runs if nothing stops it: one phase with a schedule, else one or two."""
-    opt_config = _as_opt_dict(opt_config)
-    if opt_config.get("schedule") is not None:
-        return opt_config["max_iter"]
-    return opt_config["max_iter"] * (2 if opt_config["dual_run"] else 1)
+    """Steps the fit runs if nothing stops it: ``max_iter``, however it is phased."""
+    return _as_opt_dict(opt_config)["max_iter"]
 
 
 def validate_checkpoints(checkpoints, n_steps: int) -> List[int]:
@@ -349,10 +346,14 @@ def describe_schedule(opt_config, *, precision: Optional[str] = None) -> str:
             settings.append(f"gradient norm clipped at {optimizer['clip_norm']:g}")
         if settings:
             name += f" ({', '.join(settings)})"
-    if schedule is None:
+    if schedule is None and opt_config.get("dual_run", True):
+        first = (max_iter + 1) // 2
+        line = (
+            f"{name}, step size {epsilon:g} for {first} steps, then a new "
+            f"{name.split(' ')[0]} at {epsilon / 10:g} for {max_iter - first} (dual_run)"
+        )
+    elif schedule is None:
         line = f"{name}, step size {epsilon:g} for {max_iter} steps"
-        if opt_config["dual_run"]:
-            line += f", then a new {name.split(' ')[0]} at {epsilon / 10:g} for {max_iter} (dual_run)"
     else:
         kind = schedule["kind"]
         factor = schedule.get("factor")

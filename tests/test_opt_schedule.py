@@ -92,7 +92,7 @@ def test_with_no_schedule_dual_run_is_the_two_phases_it_always_was(eps):
     toy = _toy_problem(0.1)
     ref_losses, history = _by_hand(toy, [(optax.adabelief(eps), 3), (optax.adabelief(eps / 10), 3)])
 
-    results = _svi(toy, 3, dual_run=True, epsilon=eps)
+    results = _svi(toy, 6, dual_run=True, epsilon=eps)
 
     assert list(np.asarray(results.losses)) == ref_losses
     _same(results.params, history[-1])
@@ -102,7 +102,7 @@ def test_dual_run_traces_the_step_once():
     """The second phase's step size is optimiser state, not a new static argument."""
     toy = _toy_problem(0.1)
     calls = _counting(toy)
-    _svi(toy, 3, dual_run=True)
+    _svi(toy, 6, dual_run=True)
     assert calls["n"] == 1
 
 
@@ -173,7 +173,7 @@ def test_the_run_takes_the_optimiser_asked_for(dual_run):
 
     if dual_run:
         ref_losses, history = _by_hand(toy, [(adamw(EPS), 3), (adamw(EPS / 10), 3)])
-        results = _svi(toy, 3, dual_run=True, optimizer=optimizer)
+        results = _svi(toy, 6, dual_run=True, optimizer=optimizer)
     else:
         schedule = validate_schedule({"kind": "cosine", "warmup_steps": 2}, 6)
         ref_losses, history = _by_hand(toy, [(adamw(step_size(schedule, EPS, 6)), 6)])
@@ -205,7 +205,7 @@ def test_a_schedule_traces_the_step_once():
 def test_a_schedule_keeps_the_moments_across_the_drop():
     """Unlike dual_run, which restarts them: the two diverge after the boundary only."""
     toy = _toy_problem(0.1)
-    dual = np.asarray(_svi(toy, 3, dual_run=True).losses)
+    dual = np.asarray(_svi(toy, 6, dual_run=True).losses)
     scheduled = np.asarray(
         _svi(toy, 6, schedule=validate_schedule({"kind": "step", "boundaries": [3]}, 6)).losses
     )
@@ -232,7 +232,7 @@ def test_checkpoints_are_written_at_their_steps_and_reload(tmp_path, dual_run):
 
     steps = (2, 4, 6)  # 4 is in dual_run's second phase
     results = _svi(
-        toy, 3 if dual_run else 6, checkpoints=steps,
+        toy, 6, checkpoints=steps,
         checkpoint_path=lambda step: checkpoint_path(str(tmp_path), "map_pred_Custom", step),
         **kwargs,
     )
@@ -397,7 +397,7 @@ def test_the_defaults_fill_in():
         ({"checkpoints": [0]}, "checkpoints"),
         ({"checkpoints": [1.5]}, "checkpoints"),
         ({"checkpoints": 1000}, "checkpoints"),
-        ({"checkpoints": [2001]}, "2001"),  # dual_run runs 2 * max_iter
+        ({"checkpoints": [1001]}, "1001"),  # max_iter is the whole fit, dual_run or not
         ({"schedule": {"kind": "constant"}, "checkpoints": [1001]}, "1001"),
     ],
 )
@@ -437,7 +437,7 @@ def test_single_precision_checks_the_value_it_will_hold(optimizer, monkeypatch):
 
 
 def test_dual_run_checkpoints_may_reach_into_the_second_phase():
-    assert validate_opt(opt(checkpoints=[2000, 1000]))["checkpoints"] == [1000, 2000]
+    assert validate_opt(opt(checkpoints=[1000, 500]))["checkpoints"] == [500, 1000]
 
 
 def test_the_schema_default_ships_every_new_key_off():
@@ -456,7 +456,7 @@ def test_the_schema_default_ships_every_new_key_off():
         ({"schedule": {"kind": "constant"}, "stop": {"window": 10, "rtol": 1e-4}}, "stop when"),
         ({"checkpoints": [500]}, "saved at steps [500]"),
         ({"optimizer": {"name": "sgd", "momentum": 0.9, "clip_norm": 1}},
-         "sgd (momentum=0.9, gradient norm clipped at 1), step size 0.2 for 1000 steps, then a new sgd"),
+         "sgd (momentum=0.9, gradient norm clipped at 1), step size 0.2 for 500 steps, then a new sgd"),
         ({"schedule": {"kind": "linear", "warmup_steps": 10}},
          "warmup from x0 over 10 steps, then linear decay to x0"),
         ({"schedule": {"kind": "step", "boundaries": [200, 500], "factor": [0.5, 0.1]}}, "x0.5/0.1 at steps"),
@@ -526,9 +526,8 @@ def scheduled_fit(tmp_path_factory):
                 "components": _with_prior_init(base["model"]["components"]),
                 "precision": precision,
             },
-            "inference": {"opt": True},
             "opt": {
-                "epsilon": 1e-3, "max_iter": 4, "guide": "map",
+                "epsilon": 1e-3, "max_iter": 4,
                 "optimizer": {"name": "adam", "clip_norm": 10.0},
                 "schedule": {"kind": "step", "boundaries": [2]},
                 "checkpoints": [2, 4],

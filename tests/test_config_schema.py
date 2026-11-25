@@ -79,10 +79,9 @@ class TestTopLevelSchema:
         assert cfg.data.corr == "xx"
         assert cfg.data.flags is False
         assert cfg.plots.prior_samples == 100
-        assert cfg.inference.opt is True
-        assert cfg.inference.effective_seed == 1
+        assert cfg.seed == 1
         assert cfg.opt.epsilon == 1e-2
-        assert cfg.opt.max_iter == 500
+        assert cfg.opt.max_iter == 1000
         assert cfg.opt.dual_run is True
         assert cfg.opt.init_jitter is None
         assert cfg.satellites.norad_ids == []
@@ -95,13 +94,12 @@ class TestTopLevelSchema:
                 "model": {"components": []},
                 "data": None,
                 "plots": None,
-                "inference": None,
                 "opt": None,
                 "satellites": None,
             }
         )
         assert cfg.data.corr == "xx"
-        assert cfg.opt.max_iter == 500
+        assert cfg.opt.max_iter == 1000
         assert cfg.satellites.norad_ids == []
 
     @pytest.mark.parametrize("legacy_section", ["ast", "rfi", "gains"])
@@ -707,7 +705,7 @@ class TestMigration:
         assert validated.model.components[3].config.std_jy == 1.5
         assert validated.model.components[3].config.fov_deg == 5.0
         assert any("rfi.time_int_factor" in n for n in notes)
-        assert any("rfi.r_seed" in n and "inference.seed" in n for n in notes)
+        assert any("rfi.r_seed" in n and "seed" in n for n in notes)
         assert any("gains.amp_std" in n for n in notes)
 
     def test_migrate_keeps_the_nulls_the_sectioned_config_documented(self):
@@ -736,7 +734,7 @@ class TestMigration:
         assert cfg.corr_freq_hz == "half_band"
         assert cfg.corr_time_s == "half_duration"
         assert validated.model.components[1].config.fov_deg == "primary_beam"
-        assert validated.inference.seed == 1
+        assert validated.seed == 1
 
     def test_migrate_writes_out_the_defaults_that_have_since_changed(self):
         """An unset rfi std and ast init meant max_vis and sample; the converted
@@ -800,6 +798,38 @@ class TestMigration:
         assert gains.phase_mean_deg == pytest.approx(90.0)
         assert (gains.phase_std_deg, gains.amp_std_pct) == (30.0, 5.0)
         assert (validated.data.freq_hz, validated.data.noise_jy) == (1.4e9, 0.5)
+
+    def test_migrate_moves_the_inference_section(self):
+        old = {
+            "model": {"components": []},
+            "inference": {"opt": False, "seed": 7},
+            "opt": {"guide": "map", "epsilon": 1e-3},
+        }
+        new, notes = migrate(old)
+        cfg = validate_config(new)
+
+        assert cfg.seed == 7
+        assert cfg.opt.max_iter == 0
+        assert "inference" not in new and "guide" not in new["opt"]
+        assert any("inference.opt" in n for n in notes)
+
+    @pytest.mark.parametrize(
+        "opt, total",
+        [
+            ({"max_iter": 300}, 600),  # dual_run is the default
+            ({"max_iter": 300, "dual_run": True}, 600),
+            ({"max_iter": 300, "dual_run": False}, 300),
+            ({"max_iter": 300, "schedule": {"kind": "constant"}}, 300),
+            ({}, 1000),  # the old default of 500 a phase is the new default total
+        ],
+    )
+    def test_migrate_writes_max_iter_as_the_total(self, opt, total):
+        new, _ = migrate({"model": {"components": []}, "opt": opt})
+        assert validate_config(new).opt.max_iter == total
+
+    def test_an_inference_section_is_refused_with_the_way_out(self):
+        with pytest.raises(ConfigValidationError, match="top-level key 'seed'.*migrate-config"):
+            validate_config({"model": {"components": []}, "inference": {"seed": 3}})
 
     def test_migrate_config_cli_round_trip(self, tmp_path):
         old_path = tmp_path / "old.yaml"

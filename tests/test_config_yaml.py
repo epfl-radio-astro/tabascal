@@ -64,7 +64,7 @@ def test_yaml_load_does_not_pollute_global_safeloader():
 class TestEmptySectionsAndDefaults:
     """Bare section headers and null component bodies resolve to schema defaults."""
 
-    @pytest.mark.parametrize("section", ["data", "plots", "inference", "opt", "satellites"])
+    @pytest.mark.parametrize("section", ["data", "plots", "opt", "satellites"])
     def test_a_bare_top_level_section_keeps_its_defaults(self, tmp_path, section):
         defaults = getattr(loaded(tmp_path, _MINIMAL_CONFIG), section)
         config = loaded(tmp_path, f"{section}:\n" + _MINIMAL_CONFIG)

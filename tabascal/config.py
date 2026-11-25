@@ -137,7 +137,7 @@ class TabConfig:
         cfg = validate_config(config)
         self.config: RunConfig = cfg
         self.precision = cfg.model.precision
-        self.seed = cfg.inference.effective_seed
+        self.seed = cfg.seed
         self.ms_path = ms_path
 
         traj_cfg = cfg.model.find_one(TrajectoryConfig)

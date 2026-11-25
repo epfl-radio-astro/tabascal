@@ -497,8 +497,7 @@ def _subtract(config: RunConfig, paths):
     print(describe_random_draws(config))
     print()
     # Here rather than in run_opt, so a bad opt key fails before the setup does.
-    if config.inference.opt:
-        validate_opt(config.opt, precision=config.model.precision)
+    validate_opt(config.opt, precision=config.model.precision)
 
     if sharding_enabled():
         print(f"Sharding RFI sources over {jax.device_count()} devices:")
@@ -569,7 +568,7 @@ def _subtract(config: RunConfig, paths):
 
     key, init_pred = evaluate_init(tab_config, model, key, truth=truth)
     write_results_xds(init_pred, tab_config, paths.init_pred_path)
-    optimise = config.inference.opt and config.opt.max_iter > 0
+    optimise = config.opt.max_iter > 0
 
     # An optimised fit reads log_p off its loss trace instead (the loss is 2 log_p);
     # evaluating it here as well would cost a forward pass of its own.

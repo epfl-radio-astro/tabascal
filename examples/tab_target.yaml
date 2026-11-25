@@ -36,14 +36,11 @@ plots:
   truth: false
   prior_samples: 100
 
-inference:
-  opt: true
 
 opt:
   epsilon: 1e-3
-  max_iter: 1000
+  max_iter: 2000
   dual_run: true
-  guide: map
 
 satellites:
   norad_ids: [20452, 38833, 45854]

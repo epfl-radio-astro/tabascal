@@ -567,9 +567,12 @@ def exported_results(run_dir, config):
     """The results zarr a run exports: ``map_pred`` if it optimised, else ``init_pred``."""
 
     if isinstance(config, RunConfig):
-        optimised = config.inference.opt and config.opt.max_iter > 0
+        optimised = config.opt.max_iter > 0
     else:
-        optimised = config["inference"]["opt"] and config["opt"]["max_iter"] > 0
+        # A saved config.yaml; one from before the inference section went may
+        # still have turned the fit off there.
+        ran = (config.get("inference") or {}).get("opt", True)
+        optimised = ran and config["opt"]["max_iter"] > 0
     path = os.path.join(run_dir, RESULTS_DIR, MAP_PRED if optimised else INIT_PRED)
     if not os.path.isdir(path):
         raise SystemExit(

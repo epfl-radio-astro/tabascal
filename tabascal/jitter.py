@@ -3,7 +3,7 @@
 A config whose inits are all deterministic makes no random draw, so its start
 does not depend on the seed, and a seed alone cannot show how far apart two
 fits land. The
-jitter adds a draw to the start, so an ensemble over ``inference.seed`` can.
+jitter adds a draw to the start, so an ensemble over ``seed`` can.
 
 Every fitted parameter is a standard-normal latent (``tabascal.dist``), so an
 absolute scale is in units of the prior width. A relative scale is a fraction
@@ -26,7 +26,7 @@ from jax import random
 from tabascal.distributed import _wants_rfi_axis
 from tabascal.seeds import component_key
 
-#: The tag the jitter folds into ``inference.seed`` (tabascal.seeds).
+#: The tag the jitter folds into ``seed`` (tabascal.seeds).
 SEED_TAG = "init_jitter"
 
 #: The two ways a block's scale can be given.

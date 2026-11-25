@@ -970,26 +970,6 @@ class PlotsConfig(StrictConfigModel):
     )
 
 
-class InferenceConfig(StrictConfigModel):
-    """Top-level inference controls."""
-
-    opt: StrictBool = Field(
-        default=True,
-        description="Whether to run MAP optimisation.",
-    )
-    seed: StrictInt = Field(
-        default=1,
-        description=(
-            "Single random seed for the run; 0 is a valid seed. Each sampling "
-            "component folds its own fixed tag into this seed."
-        ),
-    )
-
-    @property
-    def effective_seed(self) -> int:
-        return self.seed
-
-
 #: The optax optimisers ``opt.optimizer`` may name (``tabascal.opt_schedule``
 #: builds them; listed here so the schema does not import optax).
 OPTIMIZER_NAMES = (
@@ -1105,12 +1085,11 @@ class OptConfig(StrictConfigModel):
         description="Base optimiser step size.",
     )
     max_iter: NonNegativeInt = Field(
-        default=500,
-        description="Maximum optimisation iterations (per phase under dual_run, or total under schedule).",
-    )
-    guide: Literal["map"] = Field(
-        default="map",
-        description="Optimisation guide type (currently only 'map').",
+        default=1000,
+        description=(
+            "Optimisation steps in all: under dual_run the first half at epsilon and "
+            "the second at epsilon / 10. 0 runs no fit, only the initial prediction."
+        ),
     )
     dual_run: StrictBool = Field(
         default=True,
@@ -1157,9 +1136,19 @@ class OptConfig(StrictConfigModel):
 
     @classmethod
     def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
+        notes = cls._drop_ignored(options, "guide", "'map' was its only value, and is what the fit is.")
         if options.get("schedule") is not None:
-            return cls._drop_ignored(options, "dual_run", "it is not read with a schedule.")
-        return []
+            return notes + cls._drop_ignored(options, "dual_run", "it is not read with a schedule.")
+        if options.get("dual_run", True) and "max_iter" in options:
+            # The old max_iter counted one phase of dual_run; it is the total now.
+            per_phase = options["max_iter"]
+            if isinstance(per_phase, int) and not isinstance(per_phase, bool) and per_phase > 0:
+                options["max_iter"] = 2 * per_phase
+                notes.append(
+                    f"max_iter: {per_phase} ran that many steps in each of dual_run's two "
+                    f"phases; written as {2 * per_phase}, since it is now the total."
+                )
+        return notes
 
     @model_validator(mode="after")
     def _dual_run_or_schedule(self) -> "OptConfig":
@@ -1295,7 +1284,6 @@ class SatellitesConfig(StrictConfigModel):
 TOP_LEVEL_SECTIONS: dict[str, Type[StrictConfigModel]] = {
     "data": DataConfig,
     "plots": PlotsConfig,
-    "inference": InferenceConfig,
     "opt": OptConfig,
     "satellites": SatellitesConfig,
 }
@@ -1593,9 +1581,12 @@ class RunConfig(StrictConfigModel):
         default_factory=PlotsConfig,
         description="Diagnostic plotting toggles.",
     )
-    inference: InferenceConfig = Field(
-        default_factory=InferenceConfig,
-        description="Top-level inference controls and random seed.",
+    seed: StrictInt = Field(
+        default=1,
+        description=(
+            "The one random seed of the run; 0 is a valid seed. Each component that "
+            "draws folds its own fixed tag into it, as do the start jitter and prior plots."
+        ),
     )
     opt: OptConfig = Field(
         default_factory=OptConfig,
@@ -1626,7 +1617,7 @@ class RunConfig(StrictConfigModel):
             "model": self.model.to_yaml_dict(),
             "data": self.data.to_yaml_dict(),
             "plots": self.plots.to_yaml_dict(),
-            "inference": self.inference.to_yaml_dict(),
+            "seed": self.seed,
             "opt": self.opt.to_yaml_dict(),
             "satellites": self.satellites.to_yaml_dict(),
         }
@@ -1650,6 +1641,12 @@ def validate_config(raw: Any) -> RunConfig:
             f"This config is in the old sectioned layout ({', '.join(old)} at the top level). "
             "Each component now takes its own options under its entry in 'model.components'. "
             "Convert it with: tabascal migrate-config <old.yaml> -o <new.yaml>"
+        )
+    if "inference" in raw:
+        raise ConfigValidationError(
+            "The inference section is gone: the seed is the top-level key 'seed', and "
+            "'opt.max_iter: 0' runs no fit, which is what 'inference.opt: false' did. "
+            "tabascal migrate-config <old.yaml> -o <new.yaml> converts it."
         )
     # Strip top-level bare section headers (e.g. `data:` with nothing under it) ONLY for
     # known optional sections that have defaults, while forbidding unknown sections.

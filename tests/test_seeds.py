@@ -1,4 +1,4 @@
-"""``inference.seed``: one seed, a fixed key per drawing component (#256)."""
+"""``seed``: one seed, a fixed key per drawing component (#256)."""
 
 import subprocess
 import sys
@@ -56,10 +56,10 @@ def _build_components(components, ast_init="prior", rfi_init="prior"):
 
 
 def ast_start(tmp_path, seed, init="sample"):
-    """``GPVisAst`` set up with ``init`` and ``inference.seed``."""
+    """``GPVisAst`` set up with ``init`` and ``seed``."""
     raw = {"model": {"components": [{"ast_vis.GPVisAst": {"init": init}}]}}
     if seed is not ABSENT:
-        raw["inference"] = {"seed": seed}
+        raw["seed"] = seed
     cfg = validate_config(raw)
     comp = GPVisAst({"init": init})
     comp.setup(make_ast_config(cfg, seed=None))
@@ -70,9 +70,9 @@ def rfi_start(cls, seed, init="sample"):
     """An RFI signal component with no dummy sources, set up on the mock config."""
     raw = {"model": {"components": COMPONENTS}}
     if seed is not ABSENT:
-        raw["inference"] = {"seed": seed}
+        raw["seed"] = seed
     run_cfg = validate_config(raw)
-    tab_cfg = make_rfi_config(n_rfi=3, n_rfi_real=3, init=init, seed=run_cfg.inference.effective_seed)
+    tab_cfg = make_rfi_config(n_rfi=3, n_rfi_real=3, init=init, seed=run_cfg.seed)
     tab_cfg.config = run_cfg
     comp = cls(tab_cfg._rfi_comp_kwargs)
     comp.setup(tab_cfg)
@@ -105,9 +105,9 @@ def write_config(tmp_path, components=COMPONENTS, **sections):
 
 
 def loaded(tmp_path, ast_init="prior", rfi_init="prior", seed=None, components=COMPONENTS):
-    inference = {} if seed is ABSENT else {"inference": {"seed": seed}}
+    sections = {} if seed is ABSENT else {"seed": seed}
     built = _build_components(components, ast_init=ast_init, rfi_init=rfi_init)
-    return load_config(str(write_config(tmp_path, built, **inference)))
+    return load_config(str(write_config(tmp_path, built, **sections)))
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ def test_through_build_model_another_component_never_shifts_a_draw(
             built.append({AST: {"init": "sample", "std_jy": 1.0, "time_pad_factor": 2}})
         else:
             built.append(ref)
-    config = load_config(str(write_config(tmp_path, built, inference={"seed": 7})))
+    config = load_config(str(write_config(tmp_path, built, seed=7)))
     build_stubbed_tab_config(config, monkeypatch)
     _, model = build_model(config, "never/read.ms")
     start = (
@@ -187,7 +187,7 @@ def test_a_deterministic_start_does_not_depend_on_the_seed(tmp_path, tag, init):
     "seed, expected", [(ABSENT, 1), (0, 0), (7, 7)], ids=["absent", "0", "7"]
 )
 def test_load_config_normalises_the_seed(tmp_path, seed, expected):
-    eff = loaded(tmp_path, seed=seed).inference.effective_seed
+    eff = loaded(tmp_path, seed=seed).seed
     assert eff == expected and type(eff) is int
 
 
@@ -196,7 +196,7 @@ NOT_INTEGERS = [None, True, 1.0, 1.5, "7"]
 
 @pytest.mark.parametrize("seed", NOT_INTEGERS)
 def test_a_seed_that_is_not_an_integer_is_refused_by_name(tmp_path, seed):
-    with pytest.raises(ConfigValidationError, match=r"inference\.seed"):
+    with pytest.raises(ConfigValidationError, match=r"\bseed\b"):
         loaded(tmp_path, seed=seed)
 
 
@@ -236,7 +236,7 @@ def test_the_line_names_exactly_the_sections_that_draw(
 
 @pytest.mark.parametrize(
     "n_proc, says",
-    [(1, "prior plots draw from inference.seed 4242")] + [(n, "prior plots skipped") for n in (2, 3)],
+    [(1, "prior plots draw from seed 4242")] + [(n, "prior plots skipped") for n in (2, 3)],
 )
 def test_the_line_says_whether_prior_plots_draw(tmp_path, monkeypatch, n_proc, says):
     from tabascal.seeds import describe_random_draws
@@ -260,7 +260,8 @@ def run_stubbed(tmp_path, monkeypatch, capsys, seed, n, jitter=None, events=None
     config = loaded(tmp_path, seed=seed)
     config.plots.prior = True
     config.opt.init_jitter = jitter
-    config.inference.opt = optimise
+    if not optimise:
+        config.opt.max_iter = 0
     run_dir = tmp_path / f"run{n}"
     run_dir.mkdir()
     paths = SimpleNamespace(
@@ -382,8 +383,8 @@ def deterministic_fits(tmp_path_factory):
                     "components": _with_prior_init(base["model"]["components"]),
                     "precision": precision,
                 },
-                "inference": {"opt": True, "seed": seed},
-                "opt": {"epsilon": 1e-3, "max_iter": 3, "dual_run": False, "guide": "map"},
+                "seed": seed,
+                "opt": {"epsilon": 1e-3, "max_iter": 3, "dual_run": False},
             },
             template,
             config_path,

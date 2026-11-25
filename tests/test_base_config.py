@@ -131,7 +131,7 @@ def make_ast_config(config=None, n_ant=4, n_freq=4, n_time=8, dish_d=13.5, seed=
         flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
         estimator_flags=jnp.zeros((n_bl, n_freq, n_time), dtype=bool),
         config=config,
-        seed=config.inference.effective_seed if seed is None else seed,
+        seed=config.seed if seed is None else seed,
     )
 
 

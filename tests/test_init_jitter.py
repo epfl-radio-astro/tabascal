@@ -213,7 +213,7 @@ def loaded(tmp_path, jitter, ast_init="prior", seed=4242):
     path = tmp_path / "user.yaml"
     path.write_text(yaml.safe_dump({
         "model": {"components": _build_components(COMPONENTS, ast_init=ast_init, rfi_init="prior")},
-        "inference": {"seed": seed},
+        "seed": seed,
         "opt": {"init_jitter": jitter},
     }))
     return load_config(str(path))
@@ -284,8 +284,8 @@ def jittered_fits(tmp_path_factory):
                     "components": _with_prior_init(base["model"]["components"]),
                     "precision": precision,
                 },
-                "inference": {"opt": True, "seed": seed},
-                "opt": {"epsilon": 1e-3, "max_iter": 3, "dual_run": False, "guide": "map",
+                "seed": seed,
+                "opt": {"epsilon": 1e-3, "max_iter": 3, "dual_run": False,
                         "init_jitter": 0.1},
             },
             template,

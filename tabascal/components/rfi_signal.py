@@ -668,7 +668,7 @@ class BaseGPRFI(Component):
 
     Config = RFIVarAntConfig
 
-    #: The tag ``init: sample`` folds into ``inference.seed`` (tabascal.seeds).
+    #: The tag ``init: sample`` folds into ``seed`` (tabascal.seeds).
     seed_tag = "rfi"
 
     #: Whether the inverse transform supersamples onto the fine grid. The
@@ -745,7 +745,7 @@ class BaseGPRFI(Component):
         if hasattr(tab_config, "seed"):
             self.seed = tab_config.seed
         elif run_cfg is not None:
-            self.seed = run_cfg.inference.effective_seed
+            self.seed = run_cfg.seed
         else:
             self.seed = DEFAULT_SEED
 

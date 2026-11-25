@@ -150,7 +150,7 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
             dotted = ".".join(path)
             if path[-1] == "r_seed":
                 notes.append(
-                    f"{dotted} dropped: it had no effect; every draw comes from inference.seed."
+                    f"{dotted} dropped: it had no effect; every draw comes from seed."
                 )
             else:
                 notes.append(
@@ -163,6 +163,16 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     new_model["components"] = components
 
     new: Dict[str, Any] = {"model": new_model}
+    inference = old.pop("inference", None)
+    if isinstance(inference, Mapping):
+        if inference.get("seed") is not None:
+            new["seed"] = inference["seed"]
+        if inference.get("opt") is False:
+            old.setdefault("opt", {})
+            old["opt"] = {**(old["opt"] or {}), "max_iter": 0}
+            notes.append("inference.opt: false is now opt.max_iter: 0, which runs no fit.")
+        for key in set(inference) - {"seed", "opt"}:
+            notes.append(f"inference.{key} dropped: the inference section takes no other option.")
     for name, section in old.items():
         section_cls = TOP_LEVEL_SECTIONS.get(name)
         if section_cls is not None and isinstance(section, Mapping):

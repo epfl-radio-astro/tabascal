@@ -666,11 +666,14 @@ def run_custom_svi(
         transform = optax.inject_hyperparams(partial(build_optimizer, optimizer))(
             learning_rate=float(epsilon)
         )
-        params, losses = _run_phase(params, transform, max_iter)
+        # max_iter is the whole fit: dual_run splits it, the first phase taking
+        # the odd step when there is one.
+        first = (max_iter + 1) // 2 if dual_run else max_iter
+        params, losses = _run_phase(params, transform, first)
 
         if dual_run:
             params, losses2 = _run_phase(
-                params, transform, max_iter, offset=max_iter, learning_rate=epsilon / 10
+                params, transform, max_iter - first, offset=first, learning_rate=epsilon / 10
             )
             losses = losses + losses2
 

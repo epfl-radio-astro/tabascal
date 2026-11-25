@@ -251,7 +251,7 @@ class GPVisAst(Component):
 
     Config = GPVisAstConfig
 
-    #: The tag ``init: sample`` folds into ``inference.seed`` (tabascal.seeds).
+    #: The tag ``init: sample`` folds into ``seed`` (tabascal.seeds).
     seed_tag = "ast"
 
     # Accumulates into vis_ast, which Model zeroes before the components run.
@@ -287,7 +287,7 @@ class GPVisAst(Component):
             if hasattr(config, "seed"):
                 self.seed = config.seed
             elif run_cfg is not None:
-                self.seed = run_cfg.inference.effective_seed
+                self.seed = run_cfg.seed
             else:
                 self.seed = DEFAULT_SEED
 

@@ -304,7 +304,7 @@ def plot_opt(tab_config, vi_pred, truth, run_name, plot_dir):
         tab_config.times,
         pred=vi_pred,
         truth=truth,
-        type=tab_config.config.opt.guide,
+        type="map",
         run_name=run_name,
         max_plots=10,
         save_dir=plot_dir,

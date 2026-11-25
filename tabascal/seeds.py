@@ -1,6 +1,6 @@
 """One seed per run, and a fixed key per component that draws from it.
 
-``inference.seed`` is the only seed a config sets. The run key is
+``seed`` is the only seed a config sets. The run key is
 ``PRNGKey(seed)``, and a component that draws takes its own key by folding a
 fixed tag into that, so its draw depends on the seed and its tag alone: adding,
 removing or reordering another component never shifts it (GitHub #256).
@@ -15,19 +15,20 @@ from jax import random
 
 from tabascal.schema import RunConfig
 
-#: The seed an absent ``inference.seed`` means.
+#: The seed an absent ``seed`` means.
 DEFAULT_SEED = 1
 
 
 def config_seed(config: Union[RunConfig, Mapping]) -> int:
     """The seed a config asks for, defaulting ``None`` to :data:`DEFAULT_SEED`."""
     if isinstance(config, RunConfig):
-        return config.inference.effective_seed
-    seed = (config.get("inference") or {}).get("seed")
+        return config.seed
+    # A saved config.yaml: the top-level seed, or a run's from before it moved.
+    seed = config.get("seed", (config.get("inference") or {}).get("seed"))
     if seed is None:
         return DEFAULT_SEED
     if isinstance(seed, bool) or not isinstance(seed, int):
-        raise ValueError(f"inference.seed must be an integer, not {seed!r}.")
+        raise ValueError(f"seed must be an integer, not {seed!r}.")
     return seed
 
 
@@ -53,7 +54,7 @@ def describe_random_draws(config: RunConfig) -> str:
     from tabascal.schema import validate_config
 
     cfg = validate_config(config)
-    seed = cfg.inference.effective_seed
+    seed = cfg.seed
     sampled = []
     seen = set()
     for spec in cfg.model.components:
@@ -68,12 +69,12 @@ def describe_random_draws(config: RunConfig) -> str:
         draws.append(jitter)
 
     if draws:
-        line = f"Random draws : {' and '.join(draws)} from inference.seed {seed}"
+        line = f"Random draws : {' and '.join(draws)} from seed {seed}"
     else:
         line = "Random draws : no random draws in the fit, every init is deterministic"
     if cfg.plots.prior:
         if jax.process_count() > 1:
             line += "; prior plots skipped (multi-process run)"
         else:
-            line += f"; prior plots draw from inference.seed {seed}"
+            line += f"; prior plots draw from seed {seed}"
     return line

@@ -2,7 +2,7 @@
 
 TABASCAL makes use of a configuration file to fully define the model used, what satellites to include and what inference to do. The configuration file is in YAML format using only the most basic constructs and types. It is strictly validated on load using Pydantic v2 schemas: unknown keys are rejected, and every component declares its own validated input schema.
 
-Top-level sections are limited to `model`, `data`, `plots`, `inference`, `opt`, and `satellites`. Any optional top-level section left omitted (or set to `null`) takes its schema defaults. Model-specific configuration — trajectory options, RFI signal priors, RFI visibility kernels, astronomical sky models, and antenna gains — is compartmentalised inside `model.components`, directly under each component entry.
+Top-level sections are limited to `model`, `data`, `plots`, `opt`, and `satellites`, beside the one top-level key `seed`. Any optional top-level section left omitted (or set to `null`) takes its schema defaults. Model-specific configuration — trajectory options, RFI signal priors, RFI visibility kernels, astronomical sky models, and antenna gains — is compartmentalised inside `model.components`, directly under each component entry.
 
 **`null` means "none" or "off", and only where that is a setting** — `min_elevation_deg: null` is no elevation mask, `data.noise_jy: null` is no override of the MS's noise. It never means "the default": a default is had by leaving the key out, and writing `null` on an option that has no "none" is an error naming the key and its default. An option whose default is computed from the observation names the computation instead (`fov_deg: primary_beam`, `corr_freq_hz: half_band`, `ref_ant: auto`).
 
@@ -195,18 +195,15 @@ The above configuration will plot the predictions for the initial parameters and
 
 `losses: True` plots the run's [optimiser trace](#optimiser-trace) to `<name>_opt_loss.pdf`, against iteration on the left and wall-clock time on the right: the loss, and with `opt.trace_path` set the reduced chi-squared and, on a simulation, the RMSEs too.
 
-## Inference
-
-The `inference` section defines the type of inference that will be done. An example is given below.
+## Seed
 
 ```yaml
-inference:
-  opt: True
-  seed: 1
+seed: 1
 ```
 
-* `opt`: Optimisation will be done to find the maximum a posteriori (MAP) point. It is the only inference this section offers.
-* `seed`: The one random seed of the run. Absent takes the default, 1, and any integer, 0 included, is the seed it says. Anything else — `null`, `true`, `1.5`, `"7"` — is an error naming `inference.seed`. The run key is `PRNGKey(seed)`, and each component that draws folds its own fixed tag into it: `ast_vis.GPVisAst` with `init: sample` draws under `ast` and `rfi_signal.*` with `init: sample` under `rfi`, so adding or removing a component never shifts another's draw. A sampled start is therefore not the one earlier versions drew, even with the seed unset: astronomical sampling used to draw from `PRNGKey(1)` and RFI sampling from a separate seed `123` (GitHub #256). With neither init set to `sample` the fit makes no random draw and the seed changes nothing; prior plots (`plots.prior`) still draw from it, but they never touch the fit. The run header says which of these apply.
+`seed` is the one random seed of the run, a top-level key. Absent takes the default, 1, and any integer, 0 included, is the seed it says. Anything else — `null`, `true`, `1.5`, `"7"` — is an error naming `seed`. The run key is `PRNGKey(seed)`, and each component that draws folds its own fixed tag into it: `ast_vis.GPVisAst` with `init: sample` draws under `ast` and `rfi_signal.*` with `init: sample` under `rfi`, so adding or removing a component never shifts another's draw. A sampled start is therefore not the one earlier versions drew, even with the seed unset: astronomical sampling used to draw from `PRNGKey(1)` and RFI sampling from a separate seed `123` (GitHub #256). With neither init set to `sample` the fit makes no random draw and the seed changes nothing; prior plots (`plots.prior`) still draw from it, but they never touch the fit. The run header says which of these apply.
+
+The fit is always the maximum a posteriori (MAP) optimisation below; `opt.max_iter: 0` skips it and writes only the prediction at the initial parameters.
 
 ## Optimisation
 
@@ -226,7 +223,7 @@ opt:
 ```
 
 * `epsilon`: This is the optimiser step size
-* `max_iter`: This is the number of iterations to run the optimiser for in each optimisation run.
+* `max_iter`: The number of optimiser steps in all, default `1000`. With `dual_run` the first half run at `epsilon` and the second at `epsilon / 10`; with a `schedule` the schedule spans them. `0` runs no fit.
 * `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller. It is not read with a `schedule`, so giving both is an error.
 * `optimizer`: Which optax optimiser to run and with which settings, or `null` (the default) for `adabelief` with optax's defaults. See [Optimiser](#optimiser).
 * `schedule`: One optimiser with a step-size schedule in place of `dual_run`'s two, or `null` (the default) to keep `dual_run`. See [Step-size schedule](#step-size-schedule).
@@ -251,7 +248,7 @@ The section is checked when the config loads: an unknown optimiser, schedule `ki
 
 ### Step-size schedule
 
-With `dual_run` the fit runs in two phases, each starting the optimiser afresh: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments; only its step size changes, so it reuses the first phase's compiled step. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read; writing it beside a schedule is refused, and a run's saved config leaves it out.
+With `dual_run` the fit runs in two phases, each starting the optimiser afresh: half of `max_iter` steps at `epsilon` (the first phase takes the odd step), then the rest at `epsilon / 10`. The second phase starts from zeroed moments; only its step size changes, so it reuses the first phase's compiled step. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: moments that carry through every step. `max_iter` is the total number of steps either way, and `dual_run` is not read; writing it beside a schedule is refused, and a run's saved config leaves it out.
 
 ```yaml
 opt:
@@ -277,11 +274,11 @@ A `step` schedule at `dual_run`'s boundary is not bit-identical to `dual_run`: i
 
 `stop: {window: W, rtol: r, min_steps: M}` ends the fit after step n once n is at least M and 2W, and the mean loss over steps n-W+1..n differs from the mean over the W steps before by at most r times the latter's magnitude. The loss is the negative log posterior per data point, so with a large constant offset in it a relative change is smaller than the change in fit; choose `rtol` with a trace of the loss to hand. It needs `schedule`: with `dual_run` it would not be clear whether a stop ends the first phase or the fit.
 
-`checkpoints: [1000, 2000, 4000]` writes the parameters after each of those steps to `checkpoints/<map_pred name>_step<N>.npz` in the run's `results` directory, so one long run can be scored at several step counts. With `dual_run` the steps count across both phases. `tabascal.opt_schedule.load_checkpoint(path)` returns `(params, step, trace_loss)`, the parameters keyed as the model names them, which `Predictive` takes. `trace_loss` is the trace's loss for that step, which the step evaluated before its own update, so it lines a checkpoint up with the trace but is not the loss at the saved parameters. A step the fit does not reach because `stop` ended it first is not written.
+`checkpoints: [1000, 2000, 4000]` writes the parameters after each of those steps to `checkpoints/<map_pred name>_step<N>.npz` in the run's `results` directory, so one long run can be scored at several step counts. Steps count from the start of the fit, across both phases with `dual_run`. `tabascal.opt_schedule.load_checkpoint(path)` returns `(params, step, trace_loss)`, the parameters keyed as the model names them, which `Predictive` takes. `trace_loss` is the trace's loss for that step, which the step evaluated before its own update, so it lines a checkpoint up with the trace but is not the loss at the saved parameters. A step the fit does not reach because `stop` ended it first is not written.
 
 ### Start jitter
 
-A config whose inits are all deterministic (e.g. `init: matched-filter` on `rfi_signal`, `init: prior` on `ast_vis.GPVisAst`, `init: prior` on `gains.ConstGains`) makes no random draw: its start does not depend on `inference.seed` (reruns differ at most by the backend's round-off, see #273), so they cannot show how far apart two fits of the same data land. `init_jitter` adds a draw to the start, so an ensemble over `inference.seed` can.
+A config whose inits are all deterministic (e.g. `init: matched-filter` on `rfi_signal`, `init: prior` on `ast_vis.GPVisAst`, `init: prior` on `gains.ConstGains`) makes no random draw: its start does not depend on `seed` (reruns differ at most by the backend's round-off, see #273), so they cannot show how far apart two fits of the same data land. `init_jitter` adds a draw to the start, so an ensemble over `seed` can.
 
 ```yaml
 opt:
@@ -293,7 +290,7 @@ Every fitted parameter is a standard-normal latent, so an **absolute** scale is 
 
 The rms is taken without squaring the start itself, so a block near either end of its dtype's range keeps its jitter. A block made only of subnormal values may read as zero on a backend that flushes them, and a relative jitter on it is then refused as a zero start.
 
-Each parameter draws from `inference.seed` under the tag `init_jitter` folded with its own name, so its jitter does not depend on the other parameters, and is independent of a sampled start (`init: sample`). The jitter is applied before the init prediction, so `init_pred` is the start the fit actually took, and the run header names it. With `init_jitter` null nothing is drawn and the start is the very arrays the components built, as without the key.
+Each parameter draws from `seed` under the tag `init_jitter` folded with its own name, so its jitter does not depend on the other parameters, and is independent of a sampled start (`init: sample`). The jitter is applied before the init prediction, so `init_pred` is the start the fit actually took, and the run header names it. With `init_jitter` null nothing is drawn and the start is the very arrays the components built, as without the key.
 
 ### Optimiser trace
 
@@ -305,7 +302,7 @@ Setting `trace_path` adds the metrics fixed by the data rather than by the param
 
 Set the `TAB_LOSS_TRACE` environment variable to override `trace_path` for a single run, for tracing a config that should not be edited. Under multiple processes every process computes the metrics or none does — they all evaluate the same model and must run the same program — and one file is written, by the first process.
 
-The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or `2 * max_iter` with `dual_run`, or fewer when `stop` ends the fit) with one entry per iteration:
+The file is written once, at the end of the run, and holds one array per key, each of length `max_iter` (or fewer when `stop` ends the fit) with one entry per iteration:
 
 | Key | Present | Meaning |
 |---|---|---|
