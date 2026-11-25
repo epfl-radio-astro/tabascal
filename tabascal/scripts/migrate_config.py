@@ -12,13 +12,13 @@ component's options in the shared ``ast``, ``rfi`` and ``gains`` sections::
       n_int_freq: 1
 
 The new layout keeps ``model`` and ``satellites`` (alongside ``data``,
-``plots``, ``inference``, ``opt``) and moves each component's options directly
-under its entry in ``model.components``::
+``plots``, ``opt``, and the top-level ``seed``) and moves each component's
+options directly under its entry in ``model.components``::
 
     model:
       precision: single
       components:
-        - rfi_signal.ComplexRFIVarAnt: {init: truth, corr_time: 24}
+        - rfi_signal.ComplexRFIVarAnt: {init: truth, corr_time_s: 24}
         - rfi_vis.AnalyticVis: {n_int_freq: 1}
 
 Each option moves onto the component that reads it via the ``legacy_keys``
@@ -67,8 +67,7 @@ def _migrate_null(config_cls, field: str, value: Any) -> Any:
 
     A legacy ``null`` meant the default on most options. Where the default is
     computed it now has a name (``legacy_null_value``); where ``null`` is no
-    longer a setting at all, or still is but used to mean the default
-    (``legacy_null_is_default``), the key is left out so the default applies.
+    longer a setting at all, the key is left out so the default applies.
     """
     from tabascal.schema import field_allows_none
 
@@ -77,9 +76,7 @@ def _migrate_null(config_cls, field: str, value: Any) -> Any:
     if field in config_cls.legacy_null_value:
         return config_cls.legacy_null_value[field]
     field_info = config_cls.model_fields.get(field)
-    if field in config_cls.legacy_null_is_default or (
-        field_info is not None and not field_allows_none(field_info)
-    ):
+    if field_info is not None and not field_allows_none(field_info):
         return _ABSENT
     return value
 
@@ -177,11 +174,15 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
         section_cls = TOP_LEVEL_SECTIONS.get(name)
         if section_cls is not None and isinstance(section, Mapping):
             renamed = {section_cls.legacy_renames.get(key, key): value for key, value in section.items()}
-            section = {
-                key: value
-                for key, value in renamed.items()
-                if _migrate_null(section_cls, key, value) is not _ABSENT
-            }
+            migrated_section: Dict[str, Any] = {}
+            for key, value in renamed.items():
+                value = _migrate_null(section_cls, key, value)
+                if value is _ABSENT:
+                    continue
+                if value is not None and key in section_cls.legacy_transforms:
+                    value = section_cls.legacy_transforms[key](value)
+                migrated_section[key] = value
+            section = migrated_section
             notes.extend(f"{name}.{note}" for note in section_cls.legacy_cleanup(section))
         new[name] = section
     return new, notes

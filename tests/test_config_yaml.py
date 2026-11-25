@@ -7,7 +7,7 @@ a private loader subclass that parses them as floats, without polluting the glob
 
 Top-level sections left empty (``data:`` or ``opt: null``) take their Pydantic
 schema defaults, while unknown sections and legacy top-level sections
-(``ast:``, ``rfi:``, ``gains:``, ``satellites:``) are rejected by
+(``ast:``, ``rfi:``, ``gains:``, ``inference:``) are rejected by
 ``load_config``.
 """
 

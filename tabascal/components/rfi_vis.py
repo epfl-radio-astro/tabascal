@@ -495,16 +495,6 @@ class RiemannVisVariableFine(Component):
         }
 
 
-#: The ``rfi.analytic`` options and their ranges; ``None`` is unbounded.
-_ANALYTIC_OPTIONS = {
-    "stencil": (0, 4),
-    "segments": (1, 1024),
-    "terms": (1, 32),
-    "cubic_terms": (0, 8),
-    "scratch_mb": (1, None),
-}
-
-
 class AnalyticVis(Component):
     """RFI visibilities from the data grid, each cell integrated in closed form.
 

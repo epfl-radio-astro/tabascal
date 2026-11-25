@@ -48,7 +48,7 @@ def build_parser(parser=None):
     src.add_argument(
         "-c", "--config", default=None,
         help="Path to a tabascal config file. Its satellites, data and "
-        "trajectory min_elevation drive the extraction and the MS is read once.",
+        "trajectory min_elevation_deg drive the extraction and the MS is read once.",
     )
     src.add_argument(
         "-n", "--norad-ids", dest="norad_ids", default=None,
@@ -128,7 +128,7 @@ def build_parser(parser=None):
         "--min-elevation", dest="min_elevation", type=float, default=None,
         metavar="DEG",
         help="Elevation in degrees below which a satellite is not filtered for. "
-        "Defaults to the config's trajectory min_elevation with -c, and to 0 (the "
+        "Defaults to the config's trajectory min_elevation_deg with -c, and to 0 (the "
         "geometric horizon) otherwise.",
     )
     elevation.add_argument(
@@ -380,7 +380,7 @@ def resolve_corr(args, config):
 
 
 def resolve_min_elevation(args, config):
-    """The elevation cut: the flag, else the config's trajectory min_elevation, else the horizon."""
+    """The elevation cut: the flag, else the config's trajectory min_elevation_deg, else the horizon."""
     if not args.elevation_cut:
         return None
     if args.min_elevation is not None:

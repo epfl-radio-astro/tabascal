@@ -51,11 +51,9 @@ DEFAULT_AMP_STD_PERCENT = 20.0
 #: than tens of sigma outside it.
 DEFAULT_PHASE_STD_DEGREES = 180.0
 
-#: What ``ConstGains`` ``fit`` may name, and the parameter blocks each one fits. ``both`` is
-#: the same fit as ``complex``, under the name the amplitude/phase split suggests.
+#: What ``ConstGains`` ``fit`` may name, and the parameter blocks each one fits.
 GAIN_FIT_BLOCKS = {
     "complex": ("amp", "phase"),
-    "both": ("amp", "phase"),
     "amplitude": ("amp",),
     "phase": ("phase",),
 }
@@ -487,14 +485,14 @@ class ConstGains(Component):
 
     ``ConstGains.fix_flux_scale: false`` lifts the amplitude constraint, and when the
     amplitude is fitted it is accepted only with a fixed-flux sky in the model, which
-    is the one thing that can set the scale. ``ConstGains.init`` optionally starts the fit at a previously measured gain —
-    an ``.npz`` (key ``gain``, shape ``(n_ant,)``) or a calibration table — which is a
-    much better starting point than the prior mean. Any such gain is *projected* into
-    the gauge above rather than taken as given.
+    is the one thing that can set the scale. ``ConstGains.init: est`` with ``ConstGains.est``
+    starts the fit at a previously measured gain — an ``.npz`` (key ``gain``, shape ``(n_ant,)``)
+    or a calibration table — which is a much better starting point than the prior mean.
+    Any such gain is *projected* into the gauge above rather than taken as given.
 
     ``ConstGains.fit`` chooses what is fitted: ``complex`` (the default),
     ``amplitude`` or ``phase``. The part left out is held at the measured gain of
-    ``ConstGains.init``, in the same gauge, so an amplitude-only fit keeps a calibration
+    ``ConstGains.est``, in the same gauge, so an amplitude-only fit keeps a calibration
     table's phases and a phase-only fit its amplitudes; with ``init: prior`` (or
     unset) it is unity — ``|g| = 1`` or a zero phase — whatever ``amp_mean`` or
     ``phase_mean_deg`` say. Each partial fit has ``n_ant - 1`` parameters (``n_ant`` for an
@@ -577,7 +575,7 @@ class ConstGains(Component):
                     f"ConstGains.amp_mean = {self.gp_amp_mean} does not set the fitted gain "
                     "amplitude while fix_flux_scale is true: the zero-sum gauge "
                     "makes the geometric mean of |g| exactly 1, and amp_mean only sets "
-                    "the scale that amp_std's percentage is taken of. Set "
+                    "the scale that amp_std_pct's percentage is taken of. Set "
                     "fix_flux_scale to false (which needs a fixed-flux sky) for "
                     "amp_mean to be the amplitude the fit starts at.",
                     UserWarning,
@@ -679,12 +677,12 @@ class ConstGains(Component):
             if name not in components:
                 continue
             warnings.warn(
-                f"ConstGains is combined with rfi_signal:{name}, whose "
+                f"ConstGains is combined with rfi_signal.{name}, whose "
                 "RFI amplitude A_p is already free per antenna. The RFI visibility "
                 "g_p A_p conj(g_q A_q) is then unchanged by g_p -> c_p g_p together "
                 "with A_p -> A_p / c_p, so the gain is a flat direction of the RFI "
                 "term and only the astronomical model constrains it. Pair ConstGains "
-                f"with rfi_signal:{name.replace('VarAnt', 'ConstAnt')}, whose RFI amplitude carries "
+                f"with rfi_signal.{name.replace('VarAnt', 'ConstAnt')}, whose RFI amplitude carries "
                 "no per-antenna freedom of its own. See issue #124.",
                 UserWarning,
                 stacklevel=2,

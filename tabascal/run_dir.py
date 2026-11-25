@@ -365,9 +365,8 @@ def _fingerprint_kind_for(label: str, meta: dict | None = None) -> str | None:
     return None
 
 
-def input_paths(config):
-    """``{label: path}`` for every input ``config`` names as a path."""
-    paths = {}
+def _input_paths_with_meta(config):
+    """Yield ``(label, path, meta)`` for every input ``config`` names as a path."""
     for _slot_id, label, value, meta, _setter in _iter_input_slots(config):
         non_paths = meta.get("non_path_literals", ())
         if isinstance(value, str) and value in non_paths:
@@ -378,10 +377,14 @@ def input_paths(config):
             if isinstance(value, (list, tuple)):
                 for i, v in enumerate(value):
                     if _is_path(v):
-                        paths[f"{label}[{i}]"] = str(v)
+                        yield f"{label}[{i}]", str(v), meta
         elif _is_path(value):
-            paths[label] = str(value)
-    return paths
+            yield label, str(value), meta
+
+
+def input_paths(config):
+    """``{label: path}`` for every input ``config`` names as a path."""
+    return {label: path for label, path, _meta in _input_paths_with_meta(config)}
 
 
 def _ms_fingerprint(path):
@@ -455,8 +458,8 @@ def _fingerprint(path, kind):
 
 def fingerprint_inputs(config):
     return {
-        label: {"path": path, **fingerprint(path, _fingerprint_kind_for(label))}
-        for label, path in input_paths(config).items()
+        label: {"path": path, **fingerprint(path, _fingerprint_kind_for(label, meta))}
+        for label, path, meta in _input_paths_with_meta(config)
     }
 
 

@@ -474,19 +474,51 @@ class TestComponentSchemas:
 
     @pytest.mark.parametrize("value", ["nan", "inf", "lots", ""])
     def test_quoted_inline_values_must_still_be_finite_numbers(self, value):
-        with pytest.raises(ConfigValidationError, match="I"):
+        with pytest.raises(ConfigValidationError, match=r"point_sources\[0\]\.I_jy"):
             validate_config(
                 _minimal_raw(
                     [
                         {
                             "ast_signal.FixedDiscreteSky": {
-                                "point_sources": [{"ra": 1.0, "dec": 2.0, "I": value}]
+                                "point_sources": [{"ra_deg": 1.0, "dec_deg": 2.0, "I_jy": value}]
                             }
                         },
                         "ast_vis.DiscreteSkyVis",
                     ]
                 )
             )
+
+    def test_inline_source_typo_points_to_source_field_not_point_sources(self):
+        with pytest.raises(ConfigValidationError) as exc:
+            validate_config(
+                _minimal_raw(
+                    [
+                        {
+                            "ast_signal.FixedDiscreteSky": {
+                                "point_sources": [
+                                    {"ra_deg": 50.0, "dec_deg": -37.0, "I_jy": 10.0, "fwhm_maj": 5.0}
+                                ]
+                            }
+                        },
+                        "ast_vis.DiscreteSkyVis",
+                    ]
+                )
+            )
+        msg = str(exc.value)
+        assert "point_sources[0].fwhm_maj" in msg
+        assert "Did you mean 'fwhm_major_arcsec'" in msg
+        assert "takes: point_sources" not in msg
+        assert "Input should be a valid string" not in msg
+
+    def test_whitespace_noise_path_is_rejected(self):
+        with pytest.raises(ConfigValidationError, match="noise_jy"):
+            validate_config(_minimal_raw(data={"noise_jy": "   "}))
+
+    @pytest.mark.parametrize("section, key", [("opt", "inline"), ("data", "file")])
+    def test_a_key_spelled_like_a_point_sources_tag_is_still_named(self, section, key):
+        # 'file' and 'inline' tag point_sources' union and are hidden there only.
+        with pytest.raises(ConfigValidationError, match=rf"{section}\.{key}: Extra inputs"):
+            validate_config(_minimal_raw(**{section: {key: 1}}))
 
     def test_const_gains_defaults_and_validation(self):
         cfg = validate_config(_minimal_raw(["ast_vis.GPVisAst", "gains.ConstGains"]))
@@ -845,6 +877,20 @@ class TestMigration:
         assert (gains.phase_std_deg, gains.amp_std_pct) == (30.0, 5.0)
         assert (validated.data.freq_hz, validated.data.noise_jy) == (1.4e9, 0.5)
 
+    def test_migrate_scales_quoted_ref_freq_mhz_to_hz(self):
+        old = {
+            "model": {"components": ["ast_signal:FixedDiscreteSky", "ast_vis:DiscreteSkyVis"]},
+            "ast": {
+                "point_sources": [
+                    {"ra": 50.0, "dec": -37.0, "I": 10.0, "ref_freq_mhz": "150.0", "alpha": -0.7}
+                ]
+            },
+        }
+        new, _ = migrate(old)
+        cfg = validate_config(new)
+        (source,) = cfg.model.components[0].config.point_sources
+        assert source.ref_freq_hz == pytest.approx(150e6)
+
     def test_migrate_moves_the_inference_section(self):
         old = {
             "model": {"components": []},
@@ -859,6 +905,26 @@ class TestMigration:
         assert "inference" not in new and "guide" not in new["opt"]
         assert any("inference.opt" in n for n in notes)
 
+    def test_migrate_inference_opt_false_drops_fit_only_opt_keys(self):
+        old = {
+            "model": {"components": []},
+            "inference": {"opt": False},
+            "opt": {
+                "schedule": {"kind": "constant"},
+                "stop": {"window": 10, "rtol": 1e-3},
+                "checkpoints": [100],
+            },
+        }
+        new, notes = migrate(old)
+        cfg = validate_config(new)
+
+        assert cfg.opt.max_iter == 0
+        assert cfg.opt.schedule is None
+        assert cfg.opt.stop is None
+        assert cfg.opt.checkpoints is None
+        assert any("schedule" in n and "dropped" in n for n in notes)
+        assert any("checkpoints" in n and "dropped" in n for n in notes)
+
     @pytest.mark.parametrize(
         "opt, total",
         [
@@ -866,6 +932,8 @@ class TestMigration:
             ({"max_iter": 300, "dual_run": True}, 600),
             ({"max_iter": 300, "dual_run": False}, 300),
             ({"max_iter": 300, "schedule": {"kind": "constant"}}, 300),
+            ({"dual_run": False}, 500),  # old single-phase default was 500
+            ({"schedule": {"kind": "constant"}}, 500),  # old schedule default was 500
             ({}, 1000),  # the old default of 500 a phase is the new default total
         ],
     )
@@ -995,7 +1063,9 @@ class TestTypedOptimiserSections:
             ({"optimizer": {"name": "adamm"}}, r"opt\.optimizer\.name"),
             ({"schedule": {"kind": "stepp"}}, r"opt\.schedule"),
             ({"schedule": {"kind": "step"}}, r"boundaries"),
-            ({"schedule": {"kind": "cosine", "final": 0.1}}, r"final"),
+            ({"schedule": {"kind": "cosine", "final": 0.1}}, r"takes:.*final_factor"),
+            ({"schedule": {"kind": "cosine", "final_factr": 0.1}}, r"Did you mean 'final_factor'"),
+            ({"schedule": {"kind": "constant"}, "stop": {"window": 5, "rtol": 1e-3, "min_step": 10}}, r"Did you mean 'min_steps'"),
             ({"stop": {"window": 5}}, r"opt\.stop\.rtol"),
             ({"optimizer": {"name": "sgd", "nope": 1}}, r"does not take \['nope'\]"),
         ],

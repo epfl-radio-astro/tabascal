@@ -4,7 +4,7 @@ RFI Light-Curve Estimation
 Measuring each satellite's apparent flux over time and frequency straight from
 the visibilities, by matched-filtering them against the known trajectory phase.
 No imaging is involved, and the output is the same interchange format an imager
-would have to produce, so the two are interchangeable as seeds for ``rfi.est``.
+would have to produce, so the two are interchangeable as seeds for ``rfi_signal.*``'s ``est``.
 
 The estimator
 -------------
@@ -221,7 +221,7 @@ chart a named satellite is judged against.
 Where it is used
 ----------------
 
-* ``rfi.init`` / ``rfi.mean: matched-filter`` seeds the RFI signal model from
+* ``init: matched-filter`` / ``mean: matched-filter`` on ``rfi_signal.*`` seeds the RFI signal model from
   the visibilities a run has already loaded, through
   :func:`~tabascal.rfi_estimate.light_curves_from_config`.
 * ``tabascal light-curve`` writes the same estimate to an ``.npz``.

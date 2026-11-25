@@ -10,12 +10,12 @@ pair would carry.
 """
 
 import os
-from typing import Any, ClassVar, Optional, Union
+from typing import Annotated, Any, ClassVar, Optional, Union
 import warnings
 
 import jax.numpy as jnp
 import numpy as np
-from pydantic import Field, field_validator, model_validator
+from pydantic import Discriminator, Field, Tag, field_validator, model_validator
 
 from tabascal.components import Component
 from tabascal.components.ast_vis import radec_to_lmn
@@ -369,11 +369,21 @@ def _legacy_point_sources(sources: Any) -> Any:
         for key, value in source.items():
             if value is None and key != "name":
                 continue
-            if key == "ref_freq_mhz" and isinstance(value, (int, float)) and not isinstance(value, bool):
-                value = value * 1e6
+            if key == "ref_freq_mhz" and not isinstance(value, bool):
+                if isinstance(value, (int, float)):
+                    value = value * 1e6
+                elif isinstance(value, str):
+                    try:
+                        value = float(value) * 1e6
+                    except ValueError:
+                        pass
             new[_LEGACY_SOURCE_FIELDS.get(key, key)] = value
         out.append(new)
     return out
+
+
+def _point_sources_tag(value: Any) -> str:
+    return "file" if isinstance(value, (str, os.PathLike)) else "inline"
 
 
 class FixedDiscreteSkyConfig(StrictConfigModel):
@@ -383,11 +393,17 @@ class FixedDiscreteSkyConfig(StrictConfigModel):
     non-empty list of inline source mappings.
     """
 
-    point_sources: Union[str, list[PointSourceConfig]] = Field(
+    point_sources: Annotated[
+        Union[
+            Annotated[str, Tag("file")],
+            Annotated[list[PointSourceConfig], Tag("inline")],
+        ],
+        Discriminator(_point_sources_tag),
+    ] = Field(
         ...,
         description=(
             "Fixed (non-fitted) sky sources: a path to an OSKAR 12-column sky model "
-            "file or a non-empty inline list of source mappings ({ra, dec, I, ...})."
+            "file or a non-empty inline list of source mappings ({ra_deg, dec_deg, I_jy, ...})."
         ),
         json_schema_extra={"input_path": True},
     )
@@ -456,16 +472,20 @@ class FixedDiscreteSky(Component):
 
     Sources come either as an inline list, in degrees and Jy::
 
-        ast:
-          point_sources:
-            - {name: Fornax A, ra_deg: 50.6738, dec_deg: -37.2083, I_jy: 750.0,
-               ref_freq_hz: 154.0e6, alpha: -0.77}
+        model:
+          components:
+            - ast_signal.FixedDiscreteSky:
+                point_sources:
+                  - {name: Fornax A, ra_deg: 50.6738, dec_deg: -37.2083, I_jy: 750.0,
+                     ref_freq_hz: 154.0e6, alpha: -0.77}
 
     or as a path to an OSKAR 12-column sky model file (see
     :func:`read_oskar_sky_model`)::
 
-        ast:
-          point_sources: /path/to/sky.osm
+        model:
+          components:
+            - ast_signal.FixedDiscreteSky:
+                point_sources: /path/to/sky.osm
 
     ``I`` is the flux at the reference frequency and the spectrum is the power law
     ``I(nu) = I * (nu / ref_freq)**alpha`` (``alpha: 0`` for a flat spectrum). A source

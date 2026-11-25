@@ -1,11 +1,11 @@
 """Pydantic v2 configuration schemas for TABASCAL.
 
-Every top-level config section (``model``, ``data``, ``plots``, ``inference``,
-``opt``, ``satellites``) and every :class:`~tabascal.components.Component`
-subclass declares its own strict Pydantic model with field descriptions and
-range/type checks. Common fields shared by related components are expressed via
-Python mixin inheritance here — never as shared global YAML sections on the
-user side.
+Every top-level config section (``model``, ``data``, ``plots``, ``opt``,
+``satellites``, plus the top-level ``seed``) and every
+:class:`~tabascal.components.Component` subclass declares its own strict
+Pydantic model with field descriptions and range/type checks. Common fields
+shared by related components are expressed via Python mixin inheritance here —
+never as shared global YAML sections on the user side.
 
 This module deliberately avoids importing JAX, NumPyro, Optax, or Dask at
 module import time so lightweight CLI commands (``tabascal -h``, ``tab2MS``,
@@ -101,16 +101,79 @@ def _extra_key_hint(
     return ""
 
 
+def _child_models(annotation: Any) -> list[type]:
+    """Extract every Pydantic ``BaseModel`` subclass referenced by ``annotation``."""
+    from typing import get_args
+
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return [annotation]
+    found: list[type] = []
+    for arg in get_args(annotation):
+        for sub in _child_models(arg):
+            if sub not in found:
+                found.append(sub)
+    return found
+
+
+def _match_union_member(candidates: list[type], tag: Any) -> Optional[type]:
+    """Match a Pydantic discriminated-union branch tag to its model class."""
+    from typing import get_args
+
+    for cls in candidates:
+        kind_field = cls.model_fields.get("kind")
+        if kind_field is not None and tag in get_args(kind_field.annotation):
+            return cls
+        if cls.__name__ == tag:
+            return cls
+    return None
+
+
 def _resolve_model_for_loc(root_cls: Optional[type], loc: tuple) -> Optional[type]:
     """Walk ``root_cls`` along ``loc[:-1]`` to find the model that rejected ``loc[-1]``."""
     if root_cls is None or len(loc) <= 1:
         return root_cls
-    # Direct section lookup on RunConfig.
-    if root_cls is RunConfig and isinstance(loc[0], str):
-        sec_map = {"model": ModelConfig, **TOP_LEVEL_SECTIONS}
-        if len(loc) == 2 and loc[0] in sec_map:
-            return sec_map[loc[0]]
-    return None
+    current: Optional[type] = root_cls
+    candidates: Optional[list[type]] = None
+    for prev, part in zip((None, *loc), loc[:-1]):
+        if isinstance(part, int):
+            continue
+        if candidates is not None:
+            matched = _match_union_member(candidates, part)
+            if matched is not None:
+                current = matched
+                candidates = None
+                continue
+            return None
+        if current is None or not (isinstance(current, type) and issubclass(current, BaseModel)):
+            return None
+        field_info = current.model_fields.get(part) if isinstance(part, str) else None
+        if field_info is None:
+            # Discriminator tag on a non-model union (e.g. 'inline' on point_sources)
+            # leaves the resolved element model intact.
+            if _is_hidden_union_tag(prev, part):
+                continue
+            return None
+        models = _child_models(field_info.annotation)
+        if len(models) == 1:
+            current = models[0]
+        elif len(models) > 1:
+            current = None
+            candidates = models
+        else:
+            return None
+    return current
+
+
+#: Internal Pydantic ``Tag(...)`` names omitted when rendering user-facing error
+#: paths, keyed by the field whose union they tag. A tag is hidden only directly
+#: after its field, so a user key spelled the same elsewhere is still shown.
+_HIDDEN_UNION_TAGS: dict[str, frozenset[str]] = {
+    "point_sources": frozenset({"file", "inline"}),
+}
+
+
+def _is_hidden_union_tag(prev: Any, part: Any) -> bool:
+    return isinstance(prev, str) and part in _HIDDEN_UNION_TAGS.get(prev, ())
 
 
 def format_validation_error(
@@ -131,7 +194,9 @@ def format_validation_error(
             raw_loc = raw_loc + (cause.key,)
             item = {**item, "msg": str(cause)[len(f"{cause.key}: "):]}
         loc_parts = []
-        for part in raw_loc:
+        for prev, part in zip((None, *raw_loc), raw_loc):
+            if _is_hidden_union_tag(prev, part):
+                continue
             if isinstance(part, int):
                 if loc_parts:
                     loc_parts[-1] = f"{loc_parts[-1]}[{part}]"
@@ -150,11 +215,7 @@ def format_validation_error(
             msg = f"{msg} (got {item['input']!r})"
         elif item.get("type") == "extra_forbidden" and raw_loc:
             bad_key = raw_loc[-1]
-            target_cls = (
-                model_cls
-                if component_cls is not None
-                else _resolve_model_for_loc(model_cls, raw_loc)
-            )
+            target_cls = _resolve_model_for_loc(model_cls, raw_loc)
             hint = _extra_key_hint(
                 str(bad_key),
                 target_cls,
@@ -433,12 +494,6 @@ class StrictConfigModel(BaseModel):
     #: Field name -> path in the pre-component sectioned config, used by
     #: ``tabascal migrate-config`` to move options onto the owning component.
     legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {}
-
-    #: Fields for which a legacy ``null`` meant "this component's default" even
-    #: though ``null`` is a setting of the field now, so ``tabascal
-    #: migrate-config`` omits them. A legacy ``null`` on a field that does not
-    #: take one is omitted without being listed here.
-    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset()
 
     #: Field name -> what a legacy ``null`` meant, for the fields whose ``null``
     #: was a computed default and is now spelled by name.
@@ -914,7 +969,7 @@ class DataConfig(StrictConfigModel):
         if isinstance(value, os.PathLike):
             value = os.fspath(value)
         if isinstance(value, str):
-            if not value:
+            if not value.strip():
                 raise ValueError("data.noise_jy path must not be empty; use null to read from the MS")
             return value
         if isinstance(value, bool):
@@ -1146,8 +1201,29 @@ class OptConfig(StrictConfigModel):
     @classmethod
     def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
         notes = cls._drop_ignored(options, "guide", "'map' was its only value, and is what the fit is.")
+        if options.get("max_iter") == 0:
+            # No fit runs at max_iter: 0, and schedule/stop/checkpoints cannot validate against 0 steps.
+            for key in ("schedule", "stop", "checkpoints"):
+                if options.get(key) is not None:
+                    notes.extend(cls._drop_ignored(options, key, "no fit runs when max_iter is 0."))
+            return notes
         if options.get("schedule") is not None:
-            return notes + cls._drop_ignored(options, "dual_run", "it is not read with a schedule.")
+            notes.extend(cls._drop_ignored(options, "dual_run", "it is not read with a schedule."))
+            if "max_iter" not in options:
+                options["max_iter"] = 500
+                notes.append(
+                    "max_iter was unset, which ran 500 steps under a schedule; "
+                    "written out, since the default is now 1000."
+                )
+            return notes
+        if options.get("dual_run") is False:
+            if "max_iter" not in options:
+                options["max_iter"] = 500
+                notes.append(
+                    "max_iter was unset, which ran 500 steps with dual_run: false; "
+                    "written out, since the default is now 1000."
+                )
+            return notes
         if options.get("dual_run", True) and "max_iter" in options:
             # The old max_iter counted one phase of dual_run; it is the total now.
             per_phase = options["max_iter"]
@@ -1400,11 +1476,12 @@ def _component_error_lines(msg: str) -> list[str]:
     return out
 
 
-#: The component kinds a model takes at most one of, and why.
+#: The component kinds a model takes at most one of, identified by the state
+#: key they write, and why.
 _ONE_PER_KIND = {
-    "rfi_signal": "each writes the RFI amplitude rfi_A, so the last one listed replaces the others.",
-    "rfi_vis": "each adds the RFI visibilities into vis_rfi, so the RFI would be counted once per component.",
-    "gains": "each writes the observed visibilities vis_obs, so the last one listed replaces the others.",
+    "rfi_signal": ("rfi_A", "each writes the RFI amplitude rfi_A, so the last one listed replaces the others."),
+    "rfi_vis": ("vis_rfi", "each adds the RFI visibilities into vis_rfi, so the RFI would be counted once per component."),
+    "gains": ("vis_obs", "each writes the observed visibilities vis_obs, so the last one listed replaces the others."),
 }
 
 
@@ -1441,10 +1518,7 @@ class ModelConfig(StrictConfigModel):
                 error_lines.extend(_component_error_lines(str(err)))
         if error_lines:
             raise ValueError("\n".join(error_lines))
-        # Run in dependency order, whatever order they were listed in.
-        from tabascal.components import dependency_order
-
-        return [specs[i] for i in dependency_order([spec.cls for spec in specs])]
+        return specs
 
     def find_all(self, config_type: Type[TConfig]) -> list[Tuple[ComponentSpec, TConfig]]:
         """Every ``(spec, config)`` whose config is an instance of ``config_type``."""
@@ -1498,8 +1572,12 @@ class ModelConfig(StrictConfigModel):
         # another: a second rfi_signal replaces rfi_A, leaving the first one's
         # parameters fitting nothing; a second rfi_vis adds the RFI into vis_rfi
         # again; a second gains component replaces vis_obs.
-        for kind, why in _ONE_PER_KIND.items():
-            refs = [spec.ref for spec in self.components if spec.ref.split(".")[0] == kind]
+        for kind, (state_key, why) in _ONE_PER_KIND.items():
+            refs = [
+                spec.ref
+                for spec in self.components
+                if state_key in getattr(spec.cls, "output_shapes", {})
+            ]
             if len(refs) > 1:
                 raise ValueError(
                     f"model.components has {len(refs)} {kind} components ({', '.join(refs)}); "
@@ -1523,10 +1601,27 @@ class ModelConfig(StrictConfigModel):
                     "Set model.precision to 'double' to use them."
                 )
 
-        # 4. Dependency order & fine/data grid consistency.
-        from tabascal.components import BASE_STATE_KEYS, validate_component_order
+        # 4. Run in dependency order, whatever order they were listed in, and
+        # check missing producers / fine-vs-data grid consistency citing the
+        # user's written indices.
+        from tabascal.components import (
+            BASE_STATE_KEYS,
+            dependency_order,
+            validate_component_order,
+        )
 
-        validate_component_order(self.instantiate_components(), BASE_STATE_KEYS)
+        order = dependency_order([spec.cls for spec in self.components])
+        ordered_specs = [self.components[i] for i in order]
+        validate_component_order(
+            [spec.instantiate() for spec in ordered_specs],
+            BASE_STATE_KEYS,
+            source_indices=order,
+        )
+        # object.__setattr__, not plain assignment: under validate_assignment=True
+        # a plain assignment re-validates the model, which runs this validator
+        # again from inside itself, without end. The sorted list is the one just
+        # checked, so bypassing validation skips nothing.
+        object.__setattr__(self, "components", ordered_specs)
 
         # 5. ConstGains with free flux scale and fitted amplitude requires FixedDiscreteSky.
         names = set(self.component_class_names())

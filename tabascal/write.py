@@ -1261,7 +1261,7 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     ``rfi_vis.AnalyticVis``, on the data grid with ``rfi_delay_poly_us`` beside
     them. No re-fit, no GP
     re-evaluation, and no second model: the component is the run's own, rebuilt
-    from ``model.components`` (see :func:`_rfi_vis_reference`).
+    from ``model.components`` (see :func:`_rfi_vis_spec`).
 
     **The pieces sum back to ``vis_rfi`` exactly in exact arithmetic, and in
     floating point to a difference that is data-dependent and cannot be bounded

@@ -51,7 +51,7 @@ Each check runs a tabascal config in `ci/reframe/data/` on a simulation of a
 tabsim config there, both staged by `ci/reframe/prepare_data.py`
 (`--tab-config`, and `--sim-config`, `sim_target_196A.yaml` by default). Settings
 it is not given (`--precision`, `--max-iter`, ...) keep the config's own, and
-inputs the config names beside itself, such as `norad_ids_path` on a trajectory component, are
+inputs the config names beside itself, such as `satellites.norad_ids_path`, are
 made absolute so the run finds them from ReFrame's stage directory.
 The simulations are published to the `epfl-radio-astro/rfi-simulations`
 HuggingFace dataset by the *Simulation data* workflow (`ci/rfi_simulations.py`),
@@ -109,7 +109,7 @@ before/after values.
 
 The comments in `tabascal_perf_check.py` are part of that record. For example
 the 96A benchmark's references, now in that file's git history, noted that #103
-replaced the real-space `rfi_signal:ComplexRFI` with the scanned Fourier
+replaced the real-space `rfi_signal.ComplexRFI` with the scanned Fourier
 `ComplexRFIVarAnt` (now `ComplexRFIVarAntFine`), a deliberate
 accuracy-for-runtime trade (see issue #107) that made the optimiser slower where
 the RFI-signal component dominates the step and slightly faster where RFI-vis

@@ -191,12 +191,6 @@ class DiscreteSkyVisConfig(StrictConfigModel):
 #: less than an unconfigured run does.
 _AUTO_TIME_PAD_FLOOR = 2.0
 
-#: The ``GPVisAst.transform`` options. ``dft`` is the default: it holds less than the
-#: padded grid at every size but the smallest, and with ``corr_freq_hz`` set it is
-#: faster too. ``fft`` is the lever back for ``corr_freq_hz: null`` on a wide band,
-#: where every delay mode survives and the matrices grow with the channels squared.
-_TRANSFORMS = ("dft", "fft")
-
 
 def time_pad_for_fringe_rate(n_time, int_time, fringe_rate):
     """The smallest ``time_pad_factor`` whose first non-zero mode is at most ``fringe_rate``.
@@ -787,7 +781,7 @@ class GPVisAst(Component):
                 (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex
             )
         else:
-            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros, 0).")
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
 
     def _set_outputs(self):
 

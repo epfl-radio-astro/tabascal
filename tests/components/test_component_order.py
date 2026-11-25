@@ -638,3 +638,39 @@ def test_a_missing_producer_is_still_named():
 
     with pytest.raises(ConfigValidationError, match="rfi_phase"):
         validate_config({"model": {"components": ["rfi_vis.RiemannVisFine", "gains.UnitaryGains"]}})
+
+
+def test_a_missing_producer_in_a_config_is_not_asked_for_before_anything():
+    """The config's list is put in dependency order for the user, so the fix is to
+    add the producer, not to place it."""
+    from tabascal.schema import ConfigValidationError, validate_config
+
+    with pytest.raises(ConfigValidationError) as exc:
+        validate_config(
+            {"model": {"components": ["gains.UnitaryGains", "rfi_vis.AnalyticVis", "rfi_signal.ComplexRFIVarAnt"]}}
+        )
+    msg = str(exc.value)
+    assert "model.components[1] 'rfi_vis.AnalyticVis'" in msg
+    assert "'trajectory.FixedOrbit'" in msg
+    assert "which is not in model.components -- add one." in msg
+    assert "before" not in msg
+
+
+def test_grid_mismatch_reports_the_users_listed_indices():
+    from tabascal.schema import ConfigValidationError, validate_config
+
+    with pytest.raises(ConfigValidationError) as exc:
+        validate_config(
+            {
+                "model": {
+                    "components": [
+                        "rfi_vis.AnalyticVis",
+                        "rfi_signal.ComplexRFIVarAntFine",
+                        "trajectory.FixedOrbit",
+                    ]
+                }
+            }
+        )
+    msg = str(exc.value)
+    assert "model.components[0] 'rfi_vis.AnalyticVis'" in msg
+    assert "'rfi_signal.ComplexRFIVarAntFine' (model.components[1])" in msg

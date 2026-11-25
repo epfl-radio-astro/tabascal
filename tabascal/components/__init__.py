@@ -251,15 +251,29 @@ def component_ref(component) -> str:
 
 
 def _describe_missing(
-    exc: MissingStateInput, components: Sequence[Any], index: int
+    exc: MissingStateInput,
+    components: Sequence[Any],
+    index: int,
+    source_indices: Optional[Sequence[int]] = None,
 ) -> str:
     """Turn a missing state key into an actionable message.
 
     The two failure modes read very differently to a user: a component that is
     not in the list at all has to be added, whereas one that is there but later
     only has to be moved. Say which.
+
+    ``source_indices`` marks a list that was put in dependency order for the
+    user (see :func:`validate_component_order`). Its order is not theirs to fix,
+    so the message only says what is missing, not where it should go.
     """
+    orig = lambda k: source_indices[k] if source_indices is not None else k
     name = component_ref(components[index])
+    if source_indices is None:
+        nothing = "nothing before it produces"
+        add = f"add one before '{name}'"
+    else:
+        nothing = "no component in model.components produces"
+        add = "add one"
     # Only producers that write it on the grid it is read on, when any do:
     # offering a fine-grid producer to a data-grid reader trades one error for
     # another.
@@ -274,11 +288,11 @@ def _describe_missing(
         for i, comp in enumerate(components[index + 1 :], start=index + 1)
         if exc.key in component_outputs(comp)
     ]
-    where = f"model.components[{index}]"
+    where = f"model.components[{orig(index)}]"
 
     if any(on_grid(comp) for _, comp in later):
         listed = ", ".join(
-            f"'{component_ref(comp)}' (model.components[{i}])"
+            f"'{component_ref(comp)}' (model.components[{orig(i)}])"
             for i, comp in later if on_grid(comp)
         )
         return (
@@ -299,7 +313,7 @@ def _describe_missing(
         return (
             f"{where} '{name}' reads the model state key '{exc.key}' on the "
             f"{_grid_name(wanted)} {wanted}, which nothing before it produces. "
-            f"'{component_ref(comp)}' (model.components[{i}]) writes it, but on "
+            f"'{component_ref(comp)}' (model.components[{orig(i)}]) writes it, but on "
             f"the {_grid_name(written)} {written}.{instead}"
         )
 
@@ -313,13 +327,12 @@ def _describe_missing(
         )
         return (
             f"{where} '{name}' reads the model state key '{exc.key}', which "
-            f"nothing before it produces. It is produced by {listed}, {absent} "
-            f"-- add one before '{name}'."
+            f"{nothing}. It is produced by {listed}, {absent} -- {add}."
         )
     return (
-        f"{where} '{name}' reads the model state key '{exc.key}', which nothing "
-        "before it produces and which no component in tabascal.components "
-        f"writes. Check the spelling of '{exc.key}' in {name}.required_inputs."
+        f"{where} '{name}' reads the model state key '{exc.key}', which {nothing} "
+        "and which no component in tabascal.components writes. Check the "
+        f"spelling of '{exc.key}' in {name}.required_inputs."
     )
 
 
@@ -350,7 +363,14 @@ def rfi_grid(classes: Iterable[type]):
     return None
 
 
-def _check_grid(components, producer: int, consumer: int, key: str, shape) -> None:
+def _check_grid(
+    components,
+    producer: int,
+    consumer: int,
+    key: str,
+    shape,
+    source_indices: Optional[Sequence[int]] = None,
+) -> None:
     """Raise if ``key`` is read with a different shape from the one it was written with.
 
     The order check alone compares key names, and the fine-grid and data-grid
@@ -360,11 +380,12 @@ def _check_grid(components, producer: int, consumer: int, key: str, shape) -> No
     written = getattr(components[producer], "output_shapes", {}).get(key)
     if written is None or tuple(written) == tuple(shape):
         return
+    orig = lambda k: source_indices[k] if source_indices is not None else k
     name = component_ref(components[consumer])
     raise ComponentOrderError(
-        f"model.components[{consumer}] '{name}' reads the model state key '{key}' "
+        f"model.components[{orig(consumer)}] '{name}' reads the model state key '{key}' "
         f"on the {_grid_name(shape)} {tuple(shape)}, but "
-        f"'{component_ref(components[producer])}' (model.components[{producer}]) "
+        f"'{component_ref(components[producer])}' (model.components[{orig(producer)}]) "
         f"writes it on the {_grid_name(written)} {tuple(written)}. The RFI "
         "components must share a grid: the Fine trajectory and signal (e.g. "
         "trajectory.FixedOrbitFine, rfi_signal.ComplexRFIVarAntFine) with an "
@@ -429,7 +450,10 @@ def dependency_order(classes: Sequence[type]) -> List[int]:
 
 
 def validate_component_order(
-    components: Sequence[Any], initial_state_keys: Iterable[str] = ()
+    components: Sequence[Any],
+    initial_state_keys: Iterable[str] = (),
+    *,
+    source_indices: Optional[Sequence[int]] = None,
 ) -> None:
     """Check a ``model.components`` list against the components' declarations.
 
@@ -440,6 +464,11 @@ def validate_component_order(
     whether or not they have been set up, so the whole list is checked before any
     of it is traced; without it a missing or mis-ordered component surfaced only
     as a ``KeyError`` on a state key from inside the JIT-ed forward pass.
+
+    ``source_indices`` is for a list the caller put in dependency order:
+    ``source_indices[i]`` is where ``components[i]`` was in the list as written.
+    Messages then cite those positions and, since the order is not the user's
+    to fix, do not ask for a component to be moved or added "before" another.
     """
     state = dict.fromkeys(initial_state_keys)
     initial = set(state)
@@ -450,11 +479,18 @@ def validate_component_order(
             comp.validate_state(state)
         except MissingStateInput as exc:
             raise ComponentOrderError(
-                _describe_missing(exc, components, index)
+                _describe_missing(exc, components, index, source_indices=source_indices)
             ) from None
         for key, shape in getattr(comp, "required_inputs", {}).items():
             if key in written:
-                _check_grid(components, written[key], index, key, shape)
+                _check_grid(
+                    components,
+                    written[key],
+                    index,
+                    key,
+                    shape,
+                    source_indices=source_indices,
+                )
         state.update(dict.fromkeys(component_outputs(comp)))
         written.update(
             (key, index) for key in component_outputs(comp) if key not in initial

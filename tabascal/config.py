@@ -301,7 +301,7 @@ class TabConfig:
                 if require_in_view:
                     raise ValueError(
                         f"{never_up}. Remove it from satellites.norad_ids or "
-                        "lower the trajectory component's min_elevation."
+                        "lower the trajectory component's min_elevation_deg."
                     )
                 print(f"Warning: {never_up} and comes back as zero.")
                 continue
