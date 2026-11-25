@@ -954,10 +954,9 @@ class TestResolveMSPath:
 
         assert resolved == str(tmp_path / "obs" / "obs.ms")
 
-    @pytest.mark.parametrize("empty", [None, ""])
-    def test_an_unset_config_key_falls_through(self, impl, tmp_path, empty):
-        """An unset ``ms_path`` arrives as None or empty string."""
-        resolved = self._resolve(impl, tmp_path, config_ms_path=empty)
+    def test_an_unset_config_key_falls_through(self, impl, tmp_path):
+        """An unset ``ms_path`` (``null``) falls through to the simulation layout."""
+        resolved = self._resolve(impl, tmp_path, config_ms_path=None)
 
         assert resolved == str(tmp_path / "obs" / "obs.ms")
 

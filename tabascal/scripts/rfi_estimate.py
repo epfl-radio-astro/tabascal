@@ -643,10 +643,13 @@ def _from_config(args, offset_fit=None):
     """
     from tabascal.config import TabConfig, load_config
     from tabascal.rfi_estimate import light_curves_from_config
-    from tabascal.schema import TrajectoryConfig
+    from tabascal.schema import ConfigValidationError, TrajectoryConfig
     from tabascal.scripts._run_tabascal_impl import set_precision
 
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except ConfigValidationError as e:
+        raise SystemExit(f"Error: {e}") from None
     # The config owns the precision here; an explicit --precision overrides it
     # through the config itself, so there is still only one place it is set.
     if offset_fit is not None:

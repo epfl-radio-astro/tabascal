@@ -59,6 +59,16 @@ GAIN_FIT_BLOCKS = {
 }
 
 
+def _radians_to_degrees(value: Any) -> Any:
+    """Convert a legacy radian angle to degrees, leaving non-numeric values for validation."""
+    if isinstance(value, bool):
+        return value
+    try:
+        return math.degrees(float(value))
+    except (TypeError, ValueError):
+        return value
+
+
 class ConstGainsConfig(StrictConfigModel):
     """Configuration for :class:`ConstGains`."""
 
@@ -127,7 +137,7 @@ class ConstGainsConfig(StrictConfigModel):
     }
     # The sectioned config gave the phase mean in radians.
     legacy_transforms: ClassVar[dict[str, Any]] = {
-        "phase_mean_deg": lambda radians: math.degrees(float(radians)),
+        "phase_mean_deg": _radians_to_degrees,
     }
 
     @classmethod
@@ -136,7 +146,7 @@ class ConstGainsConfig(StrictConfigModel):
         # spelled fit: complex as both too.
         notes = []
         init = options.get("init")
-        if isinstance(init, str) and init != "prior":
+        if isinstance(init, str) and init not in ("prior", "est"):
             options["init"], options["est"] = "est", init
             notes.append(f"init: {init!r} is now init: est with est: {init!r}.")
         if options.get("fit") == "both":

@@ -19,7 +19,7 @@ from pydantic import Discriminator, Field, Tag, field_validator, model_validator
 
 from tabascal.components import Component
 from tabascal.components.ast_vis import radec_to_lmn
-from tabascal.schema import FiniteFloat, StrictConfigModel
+from tabascal.schema import FiniteFloat, NonNegativeFloat, StrictConfigModel
 
 
 #: The OSKAR sky model columns, in file order. Whitespace-separated text with ``#``
@@ -48,27 +48,6 @@ OSKAR_LEGACY_COLUMNS = OSKAR_COLUMNS[:8] + OSKAR_COLUMNS[9:]
 
 #: Parsed but not modelled. See :func:`_check_unpolarised`.
 POLARISATION_COLUMNS = ("Q", "U", "V", "rm")
-
-#: The inline-YAML source fields: the OSKAR column each maps to, and a description of
-#: the value used when reporting a bad one. ``ra_deg``, ``dec_deg`` and ``I_jy`` are
-#: required; the rest default to zero. ``name`` is handled separately, as it is not a
-#: number. Each name carries its unit, and the units are the OSKAR file's.
-INLINE_FIELDS = {
-    "ra_deg": ("ra_deg", "right ascension in degrees"),
-    "dec_deg": ("dec_deg", "declination in degrees"),
-    "I_jy": ("I", "Stokes I flux in Jy"),
-    "ref_freq_hz": ("ref_freq_hz", "reference frequency in Hz"),
-    "alpha": ("alpha", "spectral index, dimensionless"),
-    "Q_jy": ("Q", "Stokes Q flux in Jy"),
-    "U_jy": ("U", "Stokes U flux in Jy"),
-    "V_jy": ("V", "Stokes V flux in Jy"),
-    "rm_rad_m2": ("rm", "rotation measure in rad/m^2"),
-    "fwhm_major_arcsec": ("fwhm_major_arcsec", "major-axis FWHM in arcsec"),
-    "fwhm_minor_arcsec": ("fwhm_minor_arcsec", "minor-axis FWHM in arcsec"),
-    "position_angle_deg": ("position_angle_deg", "position angle in degrees"),
-}
-
-INLINE_REQUIRED = ("ra_deg", "dec_deg", "I_jy")
 
 #: The inline field behind each of :data:`POLARISATION_COLUMNS`.
 _INLINE_POLARISATION = {"Q_jy": "Q", "U_jy": "U", "V_jy": "V", "rm_rad_m2": "rm"}
@@ -146,78 +125,6 @@ def read_oskar_sky_model(path: str) -> list:
     return rows
 
 
-def _inline_row(source, idx: int) -> dict:
-    """Normalise one inline-YAML source onto the OSKAR column names.
-
-    Every field maps straight across, in the units of the OSKAR column it names.
-    """
-    if not isinstance(source, dict):
-        raise ValueError(
-            f"FixedDiscreteSky.point_sources entry {idx} is a {type(source).__name__}, not a source: "
-            "each entry is a mapping of fields, e.g. {name: Fornax A, ra_deg: 50.7, "
-            "dec_deg: -37.2, I_jy: 750.0}. "
-            f"Got {source!r}."
-        )
-
-    name = source.get("name")
-    # The index goes in even when the source is named: it is what locates the entry in
-    # the file, and two sources may share a name.
-    where = f"FixedDiscreteSky.point_sources entry {idx}" + (f" ({name!r})" if name else "")
-
-    # Checked before the fields are read, so a misspelt key is reported as itself rather
-    # than as whatever it left missing. An unrecognised field would otherwise be dropped
-    # in silence and take its source's shape or spectrum with it.
-    unknown = sorted(set(source) - set(INLINE_FIELDS) - {"name"}, key=str)
-    if unknown:
-        raise ValueError(
-            f"{where} has unrecognised field(s) {unknown}. Fields are case-sensitive; "
-            f"the accepted ones are {sorted(set(INLINE_FIELDS) | {'name'})}. A typo is "
-            "not ignored here because it would quietly change the source: 'fwhm_maj' "
-            "for 'fwhm_major_arcsec' would leave a Gaussian modelled as a point."
-        )
-
-    def value_of(key):
-        units = INLINE_FIELDS[key][1]
-
-        # An absent key and an explicit YAML null both mean "unset" -- null is how these
-        # config files spell a default throughout. Anything else that is present has to
-        # parse: `alpha: ""` is malformed catalogue data, not a request for a flat
-        # spectrum, and quietly reading it as the default hides a broken source.
-        if source.get(key) is None:
-            if key in INLINE_REQUIRED:
-                raise ValueError(
-                    f"{where} has no {key!r}, which is required ({units}). "
-                    f"Given fields: {sorted(source)}."
-                )
-            return 0.0
-
-        value = source[key]
-        # bool is an int in Python, so float(False) would pass silently as 0.
-        if not isinstance(value, bool):
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                pass
-            else:
-                # NaN and infinity convert without complaint and then spread into the
-                # visibility of every baseline this source touches.
-                if np.isfinite(number):
-                    return number
-                raise ValueError(
-                    f"{where} has {key!r} = {value!r}, which is not a finite number "
-                    f"({units})."
-                )
-
-        raise ValueError(
-            f"{where} has {key!r} = {value!r}, which is not a number ({units})."
-        )
-
-    row = {column: value_of(key) for key, (column, _) in INLINE_FIELDS.items()}
-    row["name"] = str(name) if name else f"src{idx}"
-
-    return row
-
-
 def _check_unpolarised(rows: list) -> None:
     """Reject a catalogue carrying polarisation, naming the issue that will add it.
 
@@ -269,8 +176,8 @@ class PointSourceConfig(StrictConfigModel):
     U_jy: FiniteFloat = Field(default=0.0, description="Stokes U flux density in Jy (must be 0; unpolarised only).")
     V_jy: FiniteFloat = Field(default=0.0, description="Stokes V flux density in Jy (must be 0; unpolarised only).")
     rm_rad_m2: FiniteFloat = Field(default=0.0, description="Rotation measure in rad/m^2 (must be 0; unpolarised only).")
-    fwhm_major_arcsec: FiniteFloat = Field(default=0.0, description="Gaussian major-axis FWHM in arcseconds.")
-    fwhm_minor_arcsec: FiniteFloat = Field(default=0.0, description="Gaussian minor-axis FWHM in arcseconds.")
+    fwhm_major_arcsec: NonNegativeFloat = Field(default=0.0, description="Gaussian major-axis FWHM in arcseconds.")
+    fwhm_minor_arcsec: NonNegativeFloat = Field(default=0.0, description="Gaussian minor-axis FWHM in arcseconds.")
     position_angle_deg: FiniteFloat = Field(default=0.0, description="Major-axis position angle in degrees, north through east.")
 
     @field_validator("name", mode="before")
@@ -313,9 +220,9 @@ class PointSourceConfig(StrictConfigModel):
                 "issue #151."
             )
         if self.alpha != 0.0 and self.ref_freq_hz <= 0.0:
-            label = self.name or "source"
+            who = f"source {self.name}" if self.name else "source"
             raise ValueError(
-                f"source {label} has a spectral index ({self.alpha:g}) but no positive "
+                f"{who} has a spectral index ({self.alpha:g}) but no positive "
                 "reference frequency for it to be measured against; give a positive "
                 "ref_freq_hz or set alpha to zero."
             )
@@ -445,7 +352,7 @@ def _read_sources(point_sources) -> list:
         rows = read_oskar_sky_model(point_sources)
     else:
         rows = [
-            s.to_oskar_row(i) if isinstance(s, PointSourceConfig) else _inline_row(s, i)
+            (s if isinstance(s, PointSourceConfig) else PointSourceConfig.model_validate(s)).to_oskar_row(i)
             for i, s in enumerate(point_sources or [])
         ]
 

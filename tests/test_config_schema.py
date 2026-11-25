@@ -514,6 +514,63 @@ class TestComponentSchemas:
         with pytest.raises(ConfigValidationError, match="noise_jy"):
             validate_config(_minimal_raw(data={"noise_jy": "   "}))
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            _minimal_raw(data={"ms_path": ""}),
+            _minimal_raw(data={"ms_path": "   "}),
+            _minimal_raw(data={"out_dir": "   "}),
+            _minimal_raw(data={"truth_zarr": ""}),
+            _minimal_raw(satellites={"norad_ids_path": "   "}),
+            _minimal_raw(satellites={"extra_orbit_dir": ""}),
+            _minimal_raw(opt={"trace_path": "   "}),
+            _minimal_raw([{"rfi_signal.ComplexRFIVarAnt": {"init": "est", "est": ""}}]),
+            _minimal_raw([{"gains.ConstGains": {"init": "est", "est": ""}}]),
+            _minimal_raw([{"gains.ConstGains": {"init": "est", "est": "   "}}]),
+        ],
+    )
+    def test_empty_or_whitespace_optional_paths_are_rejected(self, raw):
+        with pytest.raises(ConfigValidationError, match="must not be empty"):
+            validate_config(raw)
+
+    @pytest.mark.parametrize("field", ["fwhm_major_arcsec", "fwhm_minor_arcsec"])
+    def test_inline_source_rejects_negative_fwhm(self, field):
+        with pytest.raises(ConfigValidationError, match=field):
+            validate_config(
+                _minimal_raw(
+                    [
+                        {
+                            "ast_signal.FixedDiscreteSky": {
+                                "point_sources": [
+                                    {"ra_deg": 1.0, "dec_deg": 2.0, "I_jy": 3.0, field: -5.0}
+                                ]
+                            }
+                        },
+                        "ast_vis.DiscreteSkyVis",
+                    ]
+                )
+            )
+
+    def test_unnamed_inline_source_alpha_error_does_not_repeat_source(self):
+        with pytest.raises(ConfigValidationError) as exc:
+            validate_config(
+                _minimal_raw(
+                    [
+                        {
+                            "ast_signal.FixedDiscreteSky": {
+                                "point_sources": [
+                                    {"ra_deg": 1.0, "dec_deg": 2.0, "I_jy": 3.0, "alpha": -0.7}
+                                ]
+                            }
+                        },
+                        "ast_vis.DiscreteSkyVis",
+                    ]
+                )
+            )
+        msg = str(exc.value)
+        assert "source has a spectral index" in msg
+        assert "source source" not in msg
+
     @pytest.mark.parametrize("section, key", [("opt", "inline"), ("data", "file")])
     def test_a_key_spelled_like_a_point_sources_tag_is_still_named(self, section, key):
         # 'file' and 'inline' tag point_sources' union and are hidden there only.
@@ -646,6 +703,40 @@ class TestCrossComponentValidation:
             {"ast_signal.FixedDiscreteSky": {"point_sources": [{"ra_deg": 1.0, "dec_deg": 2.0, "I_jy": 3.0}]}},
             "ast_vis.GPVisAst", "ast_vis.DiscreteSkyVis", "gains.UnitaryGains",
         ]))
+
+    @pytest.mark.parametrize(
+        "components, precision",
+        [
+            (["ast_vis.GPVisAst", "ast_vis.GPVisAst"], "single"),
+            (
+                [
+                    {"ast_signal.FixedDiscreteSky": {"point_sources": [{"ra_deg": 1.0, "dec_deg": 2.0, "I_jy": 3.0}]}},
+                    {"ast_signal.FixedDiscreteSky": {"point_sources": [{"ra_deg": 4.0, "dec_deg": 5.0, "I_jy": 6.0}]}},
+                    "ast_vis.DiscreteSkyVis",
+                ],
+                "single",
+            ),
+            (
+                [
+                    {"ast_signal.FixedDiscreteSky": {"point_sources": [{"ra_deg": 1.0, "dec_deg": 2.0, "I_jy": 3.0}]}},
+                    "ast_vis.DiscreteSkyVis",
+                    "ast_vis.DiscreteSkyVis",
+                ],
+                "single",
+            ),
+            (
+                [
+                    "trajectory.OrbitFine",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "trajectory.PhaseCalculationRFIFine",
+                ],
+                "double",
+            ),
+        ],
+    )
+    def test_duplicate_component_classes_are_rejected(self, components, precision):
+        with pytest.raises(ConfigValidationError, match="more than once"):
+            validate_config({"model": {"precision": precision, "components": components}})
 
 
 # ---------------------------------------------------------------------------
@@ -982,6 +1073,34 @@ class TestMigration:
         args = build_migrate_parser().parse_args([str(old_path)])
         assert run_migrate(args) == 1
         assert "does not validate" in capsys.readouterr().err
+
+    def test_migrate_preserves_already_migrated_const_gains_est(self):
+        new, notes = migrate(
+            {"model": {"components": [{"gains.ConstGains": {"init": "est", "est": "cal.G"}}]}}
+        )
+        cfg = validate_config(new)
+        g = cfg.model.components[0].config
+        assert (g.init, g.est) == ("est", "cal.G")
+        assert not notes
+
+    def test_migrate_does_not_convert_boolean_phase_mean_to_degrees(self):
+        new, _ = migrate(
+            {
+                "model": {"components": ["ast_vis:GPVisAst", "gains:ConstGains"]},
+                "gains": {"phase_mean": True},
+            }
+        )
+        with pytest.raises(ConfigValidationError, match="phase_mean_deg"):
+            validate_config(new)
+
+    def test_light_curve_cli_exits_cleanly_on_invalid_config(self, tmp_path):
+        from tabascal.scripts.rfi_estimate import build_parser, run as run_light_curve
+
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("model:\n  components: []\nrfi:\n  init: truth\n")
+        args = build_parser().parse_args(["-c", str(bad)])
+        with pytest.raises(SystemExit, match=r"Error:.*migrate-config"):
+            run_light_curve(args)
 
 
 class TestOptionsThatWouldBeIgnoredAreRefused:

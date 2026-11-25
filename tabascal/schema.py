@@ -380,6 +380,8 @@ def _check_path_str(value: Any) -> Optional[str]:
         value = os.fspath(value)
     if not isinstance(value, str):
         raise ValueError(f"must be a path string or null, got {value!r}")
+    if not value.strip():
+        raise ValueError("path must not be empty; use null when unset")
     return value
 
 
@@ -1583,6 +1585,18 @@ class ModelConfig(StrictConfigModel):
                     f"model.components has {len(refs)} {kind} components ({', '.join(refs)}); "
                     f"include at most one: {why}"
                 )
+
+        # 2b. No component class may appear twice: Model keys constants by class
+        # name and parameter sites are global, so a second instance collides with
+        # or doubles the first.
+        seen_cls: set[type] = set()
+        for spec in self.components:
+            if spec.cls in seen_cls:
+                raise ValueError(
+                    f"model.components lists {spec.ref} more than once; "
+                    "include each component class at most once."
+                )
+            seen_cls.add(spec.cls)
 
         if not self.components:
             return self

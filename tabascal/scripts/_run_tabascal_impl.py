@@ -61,8 +61,6 @@ from tabascal.run_dir import (
     write_config,
 )
 
-import jax
-
 
 class _Tee:
     def __init__(self, *writers):
