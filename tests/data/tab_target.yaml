@@ -7,8 +7,8 @@ model:
     - rfi_signal.ComplexRFIVarAntFine:
         init: truth
         mean: 0
-        std: max_vis   # the pipeline tests' reference values were measured with it
-        corr_time: 24 # seconds
+        std_jy: max_vis   # the pipeline tests' reference values were measured with it
+        corr_time_s: 24
         freq_pad_factor: 2.0
         time_pad_factor: 2.0
     - rfi_vis.RiemannVisFine:
@@ -19,8 +19,8 @@ model:
         init: truth
         mean: 0
         cutoff: 1e-6
-        std: 1.5           # Widest true-sky baseline in the 8A simulation is rms|V| = 2.897 Jy
-        corr_freq: null    # no frequency roll-off; these observations are single channel
+        std_jy: 1.5           # Widest true-sky baseline in the 8A simulation is rms|V| = 2.897 Jy
+        corr_freq_hz: null    # no frequency roll-off; these observations are single channel
         fov_deg: 5
         gammas: [5, 5]
         freq_pad_factor: 2.0
@@ -30,7 +30,7 @@ model:
 
 data:
   data_col: DATA
-  noise: null
+  noise_jy: null
 
 plots:
   init: false

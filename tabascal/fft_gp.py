@@ -42,8 +42,8 @@ FROM_DATA = "data"
 def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
     """``rms|V|`` over the samples ``keep`` selects, in Jy.
 
-    The measurement both ``std: data`` options are: ``GPVisAst.std`` and
-    ``rfi_signal.std`` name the same quantity, so they read it off the data the same
+    The measurement both ``std_jy: data`` options are: ``GPVisAst.std_jy`` and
+    ``rfi_signal.std_jy`` name the same quantity, so they read it off the data the same
     way and differ only in which samples they take and how far they reduce.
 
     ``keep`` is the caller's, and it is where the two part company. The
@@ -96,7 +96,7 @@ def rms_vis(vis_obs, keep, key: str, per_baseline: bool):
             f"{key}: data cannot measure a width: the visibilities it is "
             "measuring are not finite. Set a width in Jy -- flagging them "
             "helps only where the caller's mask reads the MS's flags, which "
-            "GPVisAst.std does and rfi_signal.std does not."
+            "GPVisAst.std_jy does and rfi_signal.std_jy does not."
         )
 
     if per_baseline:
@@ -608,7 +608,7 @@ def pk_cut(
                 "The cutoff is not what is wrong here. Look at the knees and "
                 "the k grid -- a zero or non-finite corr_time, corr_freq or "
                 "fov_deg, or a zero-length baseline, gives 0/0 -- and, on the "
-                "RFI path, at rfi_signal.std / 2, which is the p0 this is scaled by. The "
+                "RFI path, at rfi_signal.std_jy / 2, which is the p0 this is scaled by. The "
                 "astronomical spectrum is built at unit amplitude and scaled "
                 "afterwards, so there the amplitude cannot be the cause."
             )
@@ -621,7 +621,7 @@ def pk_cut(
                 "No cutoff can help: the comparison is strict, so nothing "
                 "clears a threshold of zero. Check the knees, and the variance "
                 "the spectrum is scaled to where the caller supplies one "
-                "(rfi_signal.std) -- an underflow to zero looks like this."
+                "(rfi_signal.std_jy) -- an underflow to zero looks like this."
             )
         else:
             why = (
@@ -798,7 +798,7 @@ def knee_from_corr_scale(corr_scale):
     transforms to ``fftfreq(n_freq, chan_width)``; a correlation *time* in
     seconds gives one in Hz, a fringe rate.
 
-    ``rfi_signal.corr_freq``, ``rfi_signal.corr_time`` and ``GPVisAst.corr_freq`` are read
+    ``rfi_signal.corr_freq_hz``, ``rfi_signal.corr_time_s`` and ``GPVisAst.corr_freq_hz`` are read
     through here so that the three cannot drift apart -- the same conversion
     written out three times is how the astronomical and RFI priors came to
     disagree about what their frequency knee even meant (GitHub #117).

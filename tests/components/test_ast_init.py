@@ -310,7 +310,7 @@ def gp_cov_config(tmp_path, **overrides):
 
 
 class TestThePriorAmplitudeIsTheWidthItClaims:
-    """``std`` is the width of the prior, in Jy, and nothing else moves it.
+    """``std_jy`` is the width of the prior, in Jy, and nothing else moves it.
 
     The spectrum is normalised to it, so the configured number is the realised
     width -- not its square, not its square root, not a constant times it. That
@@ -354,7 +354,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
             total += float(jnp.sum(jnp.abs(vis) ** 2))
             count += vis.size
 
-        # rms|V|, which is what `std` is defined as -- the same quantity a user
+        # rms|V|, which is what `std_jy` is defined as -- the same quantity a user
         # reads off a clean channel.
         return float(np.sqrt(total / count))
 
@@ -364,7 +364,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         ``rms|V|`` specifically, which is the quantity the guidance names: read
         the amplitude off a channel with no RFI in it and put that number here.
         """
-        assert self._realised_std(tmp_path, std=30.0) == pytest.approx(30.0, rel=0.02)
+        assert self._realised_std(tmp_path, std_jy=30.0) == pytest.approx(30.0, rel=0.02)
 
     def test_it_is_the_complex_width_and_not_the_real_part(self, tmp_path):
         """The factor of sqrt(2) that the first version of this got wrong.
@@ -376,7 +376,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         from jax import random, vmap
         from tabascal.fft_gp import latent_to_signal
 
-        comp = setup_ast(gp_cov_config(tmp_path, std=30.0))
+        comp = setup_ast(gp_cov_config(tmp_path, std_jy=30.0))
         sigma = comp.sigma_ast_k[0]
         keys = random.split(random.PRNGKey(0), 2)
         shape = (6000, *sigma.shape)
@@ -409,18 +409,18 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         None of them is a statement about how bright the sky is, so none of
         them may move the width of the prior on it.
         """
-        assert self._realised_std(tmp_path, std=30.0, **overrides) == pytest.approx(
+        assert self._realised_std(tmp_path, std_jy=30.0, **overrides) == pytest.approx(
             30.0, rel=0.02
         )
 
     def test_every_baseline_gets_the_configured_width(self, tmp_path):
         """Each baseline's knee is its own maximum fringe rate.
 
-        Normalising per baseline is what makes ``std`` the width everywhere
+        Normalising per baseline is what makes ``std_jy`` the width everywhere
         rather than on an average baseline: unnormalised, the shipped
         configuration spans a factor of 1.23 across its baselines.
         """
-        comp = setup_ast(gp_cov_config(tmp_path, std=30.0))
+        comp = setup_ast(gp_cov_config(tmp_path, std_jy=30.0))
 
         # The realised variance, which is twice the sum of the mode variances:
         # the latent carries E|z|^2 = 2. Asserting the sum alone would pin the
@@ -445,19 +445,19 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         past and nothing left pointing at std. Single precision only, because
         float64 holds anything the validator lets through.
         """
-        message = setup_error(gp_cov_config(tmp_path, std=std))
+        message = setup_error(gp_cov_config(tmp_path, std_jy=std))
 
         assert "ast.gp_cov.std" in message
         assert "representable" in message
 
     def test_data_measures_the_width_per_baseline(self, tmp_path, capsys):
-        """``std: data`` is not an estimate of the width -- it is the width.
+        """``std_jy: data`` is not an estimate of the width -- it is the width.
 
-        ``std`` is defined as rms|V|, and that is exactly what this measures,
+        ``std_jy`` is defined as rms|V|, and that is exactly what this measures,
         so the number the data gives is the number the prior gets, per
         baseline, with no conversion in between.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         comp = setup_ast(config)
 
         expected = np.sqrt(
@@ -477,7 +477,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         Half the samples are given an amplitude ten times the rest and then
         flagged; the width has to come back as the unflagged half alone.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         vis = np.asarray(config.vis_obs).copy()
         flags = np.zeros(vis.shape, dtype=bool)
         flags[:, :, ::2] = True
@@ -502,7 +502,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         width comes off ``ms_flags``, the fit runs on ``flags``, and here they
         disagree completely.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         vis = np.asarray(config.vis_obs).copy()
         contaminated = np.zeros(vis.shape, dtype=bool)
         contaminated[:, :, ::2] = True
@@ -531,7 +531,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         maximum and lose the whole baseline -- in numpy, NaN * False is NaN.
         The flagged cell is excluded, so what it holds cannot matter.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         vis = np.asarray(config.vis_obs).copy()
         flags = np.zeros(vis.shape, dtype=bool)
         flags[:, :, 0] = True
@@ -554,7 +554,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         estimate is only the sky where the contamination has been flagged, and
         nothing else in the run will say so.
         """
-        setup_ast(gp_cov_config(tmp_path, std="data"))
+        setup_ast(gp_cov_config(tmp_path, std_jy="data"))
 
         printed = capsys.readouterr().out
         assert "nothing flags any of them" in printed
@@ -571,7 +571,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         so squaring before averaging threw away visibilities whose rms the
         precision could hold perfectly well, and setup then blamed std.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         config.vis_obs = jnp.asarray(config.vis_obs) * amplitude
 
         comp = setup_ast(config)
@@ -590,7 +590,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         A NaN nobody flagged is a different thing, and covering for it here
         only moves the failure somewhere that cannot name its cause.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         vis = np.asarray(config.vis_obs).copy()
         vis[0, 0, 0] = np.nan
         config.vis_obs = jnp.asarray(vis)
@@ -601,7 +601,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
 
     def test_data_with_everything_flagged_is_refused(self, tmp_path):
         """There is nothing to measure, and a zero width is not a prior."""
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         config.estimator_flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
 
         message = setup_error(config)
@@ -610,14 +610,14 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
 
     def test_a_word_other_than_data_is_refused(self, tmp_path):
         """`data` is the only word; anything else is a typo, not a setting."""
-        message = setup_error(gp_cov_config(tmp_path, std="truth"))
+        message = setup_error(gp_cov_config(tmp_path, std_jy="truth"))
 
-        assert "std" in message
+        assert "std_jy" in message
         assert "data" in message
 
 
 class TestTheFrequencyKneeIsAskedForAsABandwidth:
-    """``corr_freq`` is a correlation bandwidth in Hz, not a knee.
+    """``corr_freq_hz`` is a correlation bandwidth in Hz, not a knee.
 
     The knee it sets is a delay -- the frequency axis transforms to
     ``fftfreq(n_freq, chan_width)``, whose units are inverse Hz -- and a delay
@@ -631,7 +631,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         The same conversion ``rfi_signal`` makes from ``rfi.gp_cov.corr_freq``, and
         the reason the two sections can be read side by side.
         """
-        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=1e6))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq_hz=1e6))
 
         assert comp.k0_freq == pytest.approx(1 / (2 * np.pi * 1e6))
 
@@ -644,7 +644,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         """
         from tabascal.fft_gp import knee_from_corr_scale
 
-        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=1e6))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq_hz=1e6))
 
         assert comp.k0_freq == knee_from_corr_scale(1e6)
 
@@ -654,7 +654,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         The power spectrum tends to ``p0`` as the knee grows, so an infinite
         knee keeps every delay mode and prefers none.
         """
-        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=None))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq_hz=None))
 
         assert comp.k0_freq == float("inf")
 
@@ -675,7 +675,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
             return np.asarray(spectrum)
 
         # Through the helper, not a literal infinity: the claim is about what
-        # `corr_freq: null` does. Comparing the two alone would be satisfied by
+        # `corr_freq_hz: null` does. Comparing the two alone would be satisfied by
         # a null path that had simply become the old default, so the flatness
         # it is supposed to produce is asserted first and separately.
         unset = knee_from_corr_scale(None)
@@ -715,7 +715,7 @@ class TestAstGpCovIsValidated:
 
         assert "cutoff: null" in message and "1e-06" in message
 
-    @pytest.mark.parametrize("key", ["std", "corr_freq", "cutoff"])
+    @pytest.mark.parametrize("key", ["std_jy", "corr_freq_hz", "cutoff"])
     @pytest.mark.parametrize("value", [0, -1, "3e3", True, float("inf"), float("nan")])
     def test_a_scalar_key_that_is_not_a_positive_number_is_refused(
         self, tmp_path, key, value
@@ -751,11 +751,11 @@ class TestAstGpCovIsValidated:
         assert "gamma" in message
 
     def test_only_the_frequency_knee_may_be_null(self, tmp_path):
-        """``corr_freq: null`` is no roll-off; ``fov_deg``'s computed default has a name."""
-        setup_ast(gp_cov_config(tmp_path, corr_freq=None))
+        """``corr_freq_hz: null`` is no roll-off; ``fov_deg``'s computed default has a name."""
+        setup_ast(gp_cov_config(tmp_path, corr_freq_hz=None))
         setup_ast(gp_cov_config(tmp_path, fov_deg="primary_beam"))
 
-        for key in ("std", "gammas", "fov_deg"):
+        for key in ("std_jy", "gammas", "fov_deg"):
             message = setup_error(gp_cov_config(tmp_path, **{key: None}))
             assert key in message
 

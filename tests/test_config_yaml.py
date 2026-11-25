@@ -45,12 +45,12 @@ def test_yaml_load_parses_bare_scientific_notation(tmp_path):
 
 def test_yaml_load_handles_nested_and_list_values(tmp_path):
     p = tmp_path / "c.yaml"
-    p.write_text("model:\n  components:\n    - rfi_signal.ComplexRFIVarAnt:\n        corr_freq: 1e6\n        gammas: [3e0, 1e-2]\n")
+    p.write_text("model:\n  components:\n    - rfi_signal.ComplexRFIVarAnt:\n        corr_freq_hz: 1e6\n        gammas: [3e0, 1e-2]\n")
 
     cfg = yaml_load(p)
 
     entry = cfg["model"]["components"][0]["rfi_signal.ComplexRFIVarAnt"]
-    assert entry["corr_freq"] == 1e6
+    assert entry["corr_freq_hz"] == 1e6
     assert entry["gammas"] == [3.0, 0.01]
 
 
@@ -77,7 +77,7 @@ class TestEmptySectionsAndDefaults:
         )
         (spec,) = config.model.components
         assert spec.ref == "ast_vis.GPVisAst"
-        assert spec.config.std == "data"
+        assert spec.config.std_jy == "data"
         assert spec.config.freq_pad_factor == 2.0
 
     def test_a_scalar_set_to_null_overrides_its_default(self, tmp_path):
@@ -85,13 +85,13 @@ class TestEmptySectionsAndDefaults:
             tmp_path,
             "model:\n  components:\n"
             "    - trajectory.FixedOrbit:\n"
-            "        min_elevation: null\n"
+            "        min_elevation_deg: null\n"
             "satellites:\n"
             "  norad_ids: [25544]\n"
             "  remote_max_age_days: null\n",
         )
         traj = config.model.components[0].config
-        assert traj.min_elevation is None
+        assert traj.min_elevation_deg is None
         assert config.satellites.remote_max_age_days is None
 
     @pytest.mark.parametrize("section", ["not_a_section", "rfi", "ast", "gains"])

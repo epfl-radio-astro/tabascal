@@ -409,10 +409,10 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
         return jnp.zeros((xds.tle_sat_src.data[0], xds.n_ant, xds.n_freq, xds.n_time), dtype=complex)
 
 
-#: What the spectrum is normalised to, per unit of ``rfi_signal.std``.
+#: What the spectrum is normalised to, per unit of ``rfi_signal.std_jy``.
 #:
-#: ``rfi_signal.std`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
-#: ``GPVisAst.std``, read off the data the same way. The two get there by
+#: ``rfi_signal.std_jy`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
+#: ``GPVisAst.std_jy``, read off the data the same way. The two get there by
 #: different arithmetic, and this is where it differs: ``vis_ast``
 #: *is* the modelled quantity and is linear in its latent, while ``rfi_A`` is a
 #: per-antenna amplitude and the visibility is quadratic in it,
@@ -422,13 +422,13 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
 #: carries ``E|z|^2 = 2``. A linear model takes the square root of that into
 #: its width, so the astronomical prior divides by ``sqrt(2)``; a quadratic one
 #: passes the power through undiminished, so
-#: ``sum(sigma_rfi_k**2) = rfi_signal.std / 2``.
+#: ``sum(sigma_rfi_k**2) = rfi_signal.std_jy / 2``.
 #:
 #: And that carries through the transform exactly. ``latent_to_signal`` pads
 #: the coefficients, inverts with ``norm="forward"`` and crops, so every
 #: retained coefficient reaches every output point with unit magnitude:
-#: ``E|A|^2 = 2 sum(sigma^2) = rfi_signal.std``, and for the independent antennas of
-#: ``ComplexRFIVarAntFine``, ``E|V_pq|^2 = rfi_signal.std^2``. Padding and cropping
+#: ``E|A|^2 = 2 sum(sigma^2) = rfi_signal.std_jy``, and for the independent antennas of
+#: ``ComplexRFIVarAntFine``, ``E|V_pq|^2 = rfi_signal.std_jy^2``. Padding and cropping
 #: change which modes exist and how they correlate, not the amplitude.
 #:
 #: It is an expectation, so a measured realisation scatters around it, by more
@@ -444,14 +444,14 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
 #:   its own power: ``E|V_pq|^2 = (std + |m_p|^2)(std + |m_q|^2)`` for the mean
 #:   amplitudes ``m``. Sources then carry non-zero mean visibilities too, so
 #:   their total no longer generally scales as ``sqrt(N)``.
-#: * ``trajectory.min_elevation`` zeroes a source while it is below the cut, so one
-#:   visible for a fraction ``f`` of the observation has ``std * sqrt(f)`` over
+#: * ``trajectory.min_elevation_deg`` zeroes a source while it is below the cut, so one
+#:   visible for a fraction ``f`` of the observation has ``std_jy * sqrt(f)`` over
 #:   the whole of it, and a source that never rises has exactly zero.
 #: * The visibility kernels average the fine grid, and fringes that turn within
 #:   an integration cancel there. How much depends on the spectrum's own
 #:   correlation in time and frequency.
 #:
-#: **Per source, and for this antenna structure.** ``rfi_signal.std`` is one source's
+#: **Per source, and for this antenna structure.** ``rfi_signal.std_jy`` is one source's
 #: width, and two known factors sit between it and the visibility a run
 #: realises. ``ComplexRFIConstAntFine`` broadcasts one amplitude to every antenna,
 #: so its visibility is ``|A|^2`` rather than ``A_p conj(A_q)`` and
@@ -469,7 +469,7 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
 #:
 #: Everything above is the complex signal space, the default. ``rfi_signal.signal_type:
 #: real`` has its own entry in :data:`_LATENT_POWER_BY_TYPE`; this constant also
-#: sets the ``std: max_vis`` default, which is left meaning the same in both.
+#: sets the ``std_jy: max_vis`` default, which is left meaning the same in both.
 _LATENT_POWER = 2.0
 
 #: :data:`_LATENT_POWER` per ``rfi_signal.signal_type``.
@@ -478,7 +478,7 @@ _LATENT_POWER = 2.0
 #: (see :mod:`tabascal.fft_gp`), drawn as a single standard normal, so it
 #: carries ``E z^2 = 1`` and ``E A^2 = sum(sigma_rfi_k**2)``. The visibility of
 #: independent antennas is still quadratic in it, so ``sum(sigma**2) =
-#: rfi_signal.std`` keeps ``E|V_pq|^2 = rfi_signal.std^2``: the key means the
+#: rfi_signal.std_jy`` keeps ``E|V_pq|^2 = rfi_signal.std_jy^2``: the key means the
 #: same width in either space. What does differ is ConstAnt's factor: a real
 #: Gaussian has ``E A^4 = 3 (E A^2)^2``, so ``|A|^2`` there is ``sqrt(3)`` wider
 #: rather than ``sqrt(2)``.
@@ -511,7 +511,7 @@ def _latent_params(latent: Array, signal_type: str, suffix: str = "") -> Dict:
 def _std_from_data(vis_obs, gain_flags) -> float:
     """``rms|V|`` of the observed visibilities, in Jy, as the RFI's width.
 
-    The same measurement as ``GPVisAst`` ``std: data`` -- literally, they call
+    The same measurement as ``GPVisAst`` ``std_jy: data`` -- literally, they call
     the same :func:`tabascal.fft_gp.rms_vis`. What differs is which samples
     each prior can use, and there is one real difference, not the symmetry it
     looks like from a distance.
@@ -534,7 +534,7 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     carry no usable amplitude for anybody.
 
     A scalar rather than one per baseline, because that is what this prior
-    carries: the astronomical model has a width per baseline, ``std``
+    carries: the astronomical model has a width per baseline, ``std_jy``
     normalises a single spectrum.
 
     It measures the *total* RFI and hands it to each source, and does not
@@ -549,7 +549,7 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     RFI
     ``rms|V|`` of 11.0, because RFI that dominates the sky by 7x dominates the
     measurement as well. Where the RFI is faint it measures the sky instead
-    and is far too wide, which is the mirror of ``GPVisAst`` ``std: data``'s
+    and is far too wide, which is the mirror of ``GPVisAst`` ``std_jy: data``'s
     own limitation and what GitHub #220 fixes for both.
 
     Both together still beat the width they replace, and by more than the
@@ -565,7 +565,7 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     )
     keep = ~bad
 
-    std = float(rms_vis(vis_obs, keep, "rfi_signal.std", per_baseline=False))
+    std = float(rms_vis(vis_obs, keep, "rfi_signal.std_jy", per_baseline=False))
 
     dropped = float(jnp.mean(bad))
     where = (
@@ -634,14 +634,14 @@ def resolve_rfi_gp_params(
         ext = float(jnp.max(x) - jnp.min(x))
         return float(dx) if ext == 0.0 else ext
 
-    if cfg.std == FROM_DATA:
+    if cfg.std_jy == FROM_DATA:
         std = _std_from_data(vis_obs, gain_flags)
-    elif cfg.std == MAX_VIS:
+    elif cfg.std_jy == MAX_VIS:
         # _LATENT_POWER times the largest visibility. It is a maximum where the
         # option says typical, which is GitHub #227.
         std = _LATENT_POWER * float(jnp.max(jnp.abs(vis_obs)))
     else:
-        std = float(cfg.std)
+        std = float(cfg.std_jy)
 
     # Half the observed extent on each axis. The astronomical prior's corr_freq
     # null is no roll-off at all, and the difference is which default is the
@@ -652,8 +652,8 @@ def resolve_rfi_gp_params(
     # the only delay mode is zero. Here the emitter is coherent over some band
     # by construction, so half the observation is the least-committal guess that
     # is still a coherence scale, rather than declining to name one.
-    corr_freq = extent(freqs, chan_width) / 2 if cfg.corr_freq == HALF_BAND else float(cfg.corr_freq)
-    corr_time = extent(times, int_time) / 2 if cfg.corr_time == HALF_DURATION else float(cfg.corr_time)
+    corr_freq = extent(freqs, chan_width) / 2 if cfg.corr_freq_hz == HALF_BAND else float(cfg.corr_freq_hz)
+    corr_time = extent(times, int_time) / 2 if cfg.corr_time_s == HALF_DURATION else float(cfg.corr_time_s)
 
     print()
     print(f"Using RFI std : {std:.1e} Jy (rms|V|)")

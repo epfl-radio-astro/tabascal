@@ -86,11 +86,7 @@ DEFAULT_PHASE_STD_DEGREES = 180.0
 
 
 def scales(**options):
-    """The prior scales ``ConstGains`` runs with, for these options.
-
-    ``None`` is passed through, since a ``null`` in the config means "the
-    default" for each of these keys.
-    """
+    """The prior scales ``ConstGains`` runs with, for these options."""
     return ConstGainsConfig(**options).prior_scales()
 
 
@@ -103,7 +99,7 @@ def test_an_old_r_seed_is_refused_as_an_unknown_option():
 
 class TestPriorWidths:
 
-    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    @pytest.mark.parametrize("key", ["amp_std_pct", "phase_std_deg"])
     @pytest.mark.parametrize("value", UNUSABLE)
     def test_an_unusable_width_is_an_error(self, key, value):
         """A zero width is a degenerate prior, not an unset one.
@@ -132,7 +128,7 @@ class TestPriorWidths:
 
     @pytest.mark.parametrize(
         "key, written",
-        [("amp_std", DEFAULT_AMP_STD_PERCENT), ("phase_std", DEFAULT_PHASE_STD_DEGREES)],
+        [("amp_std_pct", DEFAULT_AMP_STD_PERCENT), ("phase_std_deg", DEFAULT_PHASE_STD_DEGREES)],
     )
     def test_an_unset_width_resolves_exactly_as_writing_the_default_out_does(
         self, key, written
@@ -140,22 +136,23 @@ class TestPriorWidths:
         """The documented default and the value written into a config are one number.
 
         Which is what makes the documentation checkable: a config that leaves
-        ``amp_std`` out is the config that says ``amp_std: 20``, bit for bit, so
+        ``amp_std_pct`` out is the config that says ``amp_std_pct: 20``, bit for bit, so
         the two conversion paths cannot drift apart unnoticed. ``null`` is not a
         third spelling of it.
         """
-        assert scales()[key] == scales(**{key: written})[key]
+        scale = {"amp_std_pct": "amp_std", "phase_std_deg": "phase_std"}[key]
+        assert scales()[scale] == scales(**{key: written})[scale]
         with pytest.raises(ValueError, match=f"{key}: null"):
             scales(**{key: None})
 
     def test_explicit_widths_keep_their_units(self):
-        cfg = scales(amp_mean=2.0, amp_std=5.0, phase_std=2.0)
+        cfg = scales(amp_mean=2.0, amp_std_pct=5.0, phase_std_deg=2.0)
 
         assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
         assert cfg["phase_std"] == pytest.approx(float(np.deg2rad(2.0)))
 
     def test_the_percentage_is_floated_before_it_is_divided(self):
-        """``float(std) / 100``, not ``std / 100``: the two orders are not the same.
+        """``float(std) / 100``, not ``std_jy / 100``: the two orders are not the same.
 
         An int too large to be represented exactly as a float is rounded by
         ``float()`` but divided exactly by ``/``, so the order of the two decides the
@@ -163,19 +160,19 @@ class TestPriorWidths:
         of an accepted value must not shift.
         """
         std = 9007199254740993  # 2**53 + 1, the first int a float cannot hold
-        cfg = scales(amp_mean=1.0, amp_std=std)
+        cfg = scales(amp_mean=1.0, amp_std_pct=std)
 
         assert cfg["amp_std"] == float(std) / 100 * 1.0
         assert cfg["amp_std"] != std / 100 * 1.0
 
-    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    @pytest.mark.parametrize("key", ["amp_std_pct", "phase_std_deg"])
     def test_a_non_numeric_width_is_an_error(self, key):
         with pytest.raises(ValueError, match=key):
             ConstGainsConfig(**{key: "bad"})
 
 
 class TestTheDefaultPhasePriorIsEffectivelyUniform:
-    """The unset ``phase_std`` has to say nothing about the phase, and let the fit move it.
+    """The unset ``phase_std_deg`` has to say nothing about the phase, and let the fit move it.
 
     The half of this that a component can be driven through -- draws from the prior
     covering the circle -- lives in ``test_const_gains.py``, beside the component
@@ -224,15 +221,15 @@ class TestPhaseMean:
         never bit anyone.
         """
         assert scales()["phase_mean"] == 0.0
-        assert scales(phase_mean=0)["phase_mean"] == 0.0
-        assert scales(phase_mean=0.0)["phase_mean"] == 0.0
+        assert scales(phase_mean_deg=0)["phase_mean"] == 0.0
+        assert scales(phase_mean_deg=0.0)["phase_mean"] == 0.0
 
-    def test_a_non_zero_phase_mean_is_kept(self):
-        assert scales(phase_mean=-0.3)["phase_mean"] == pytest.approx(-0.3)
+    def test_a_non_zero_phase_mean_is_kept_and_read_in_degrees(self):
+        assert scales(phase_mean_deg=-30.0)["phase_mean"] == pytest.approx(np.deg2rad(-30.0))
 
     def test_a_non_numeric_phase_mean_is_an_error(self):
         with pytest.raises(ValueError, match="phase_mean"):
-            ConstGainsConfig(phase_mean="bad")
+            ConstGainsConfig(phase_mean_deg="bad")
 
 
 # ---------------------------------------------------------------------------

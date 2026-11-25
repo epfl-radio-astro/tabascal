@@ -53,9 +53,9 @@ def make_const_gains_config(
     n_freq=3,
     n_time=4,
     amp_mean=1.0,
-    amp_std=10.0,      # percent, as the config gives it
-    phase_mean=0.0,
-    phase_std=30.0,    # degrees, as the config gives it
+    amp_std_pct=10.0,
+    phase_mean_deg=0.0,
+    phase_std_deg=30.0,
     init="prior",
     ref_ant=None,
     fix_flux_scale=True,
@@ -74,9 +74,9 @@ def make_const_gains_config(
         key: value
         for key, value in {
             "amp_mean": amp_mean,
-            "amp_std": amp_std,
-            "phase_mean": phase_mean,
-            "phase_std": phase_std,
+            "amp_std_pct": amp_std_pct,
+            "phase_mean_deg": phase_mean_deg,
+            "phase_std_deg": phase_std_deg,
             "init": init,
             "ref_ant": ref_ant,
             "fix_flux_scale": fix_flux_scale,
@@ -669,7 +669,7 @@ class TestFit:
         """amp_mean and phase_mean place only the fitted block; the held one is |g| = 1 or 0 rad."""
         comp = setup_const_gains(
             make_const_gains_config(
-                init=init, fit=fit, amp_mean=2.0, phase_mean=0.5, ref_ant=0,
+                init=init, fit=fit, amp_mean=2.0, phase_mean_deg=30.0, ref_ant=0,
                 fix_flux_scale=False, components=self.FREE_SKY,
             )
         )
@@ -678,7 +678,7 @@ class TestFit:
 
         if fit == "phase":
             assert np.allclose(np.abs(g), 1.0, rtol=exact_rtol, atol=exact_rtol)
-            assert np.allclose(np.angle(start[1:]), 0.5, rtol=exact_rtol, atol=exact_rtol)
+            assert np.allclose(np.angle(start[1:]), np.deg2rad(30.0), rtol=exact_rtol, atol=exact_rtol)
         else:
             assert np.allclose(np.angle(g), 0.0, rtol=exact_rtol, atol=exact_rtol)
             assert np.allclose(np.abs(start), 2.0, rtol=exact_rtol, atol=exact_rtol)
@@ -746,7 +746,7 @@ class TestAmpMean:
             make_const_gains_config(
                 n_ant=5,
                 amp_mean=2.0,
-                amp_std=10.0,  # percent
+                amp_std_pct=10.0,  # percent
                 fix_flux_scale=False,
                 components=("ast_signal:FixedDiscreteSky", "gains:ConstGains"),
             )
@@ -793,11 +793,11 @@ class TestScaleKeysReachTheComponent:
     """
 
     @pytest.mark.parametrize("width", [0, 0.0, -1.0, float("nan"), float("inf")])
-    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    @pytest.mark.parametrize("key", ["amp_std_pct", "phase_std_deg"])
     def test_an_unusable_prior_width_is_an_error(self, key, width):
         """A zero width used to be read as "unset" and silently become the default.
 
-        ``phase_std`` divides the initial phase in :meth:`_compute_init_params` and
+        ``phase_std_deg`` divides the initial phase in :meth:`_compute_init_params` and
         both widths scale a standard normal, so a degenerate width is a mistake worth
         naming rather than a default worth guessing.
         """
@@ -807,20 +807,20 @@ class TestScaleKeysReachTheComponent:
         with pytest.raises(ConfigValidationError, match=key):
             setup_const_gains(cfg)
 
-    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    @pytest.mark.parametrize("key", ["amp_std_pct", "phase_std_deg"])
     def test_an_unset_prior_width_still_defaults(self, key):
         cfg = make_const_gains_config()
         del cfg._gains_kwargs[key]
         comp = setup_const_gains(cfg)
 
-        expected = {"amp_std": 0.2, "phase_std": float(jnp.deg2rad(180))}[key]
+        expected = {"amp_std_pct": 0.2, "phase_std_deg": float(jnp.deg2rad(180))}[key]
 
-        assert getattr(comp, {"amp_std": "gp_amp_std", "phase_std": "gp_phase_std"}[key]) == pytest.approx(expected)
+        assert getattr(comp, {"amp_std_pct": "gp_amp_std", "phase_std_deg": "gp_phase_std"}[key]) == pytest.approx(expected)
 
     def test_the_default_phase_width_puts_a_whole_turn_inside_one_sigma(self, tmp_path):
         """180 degrees is half a turn, so any measured phase starts within |z| <= 1.
 
-        ``phase_std`` divides the measured phase in :meth:`_compute_init_params`, so
+        ``phase_std_deg`` divides the measured phase in :meth:`_compute_init_params`, so
         the width decides where a gain read in from outside starts the fit: under the
         1-degree default an ordinary phase started it ~100 sigma from the prior mean,
         in a coordinate the optimiser then had to walk back one ``opt.epsilon`` step
@@ -835,7 +835,7 @@ class TestScaleKeysReachTheComponent:
         np.savez(path, gain=g)
 
         comp = setup_const_gains(
-            make_const_gains_config(n_ant=n_ant, phase_std=None, init=str(path))
+            make_const_gains_config(n_ant=n_ant, phase_std_deg=None, init=str(path))
         )
 
         base = np.asarray(comp.init_params_base["gains_phase_base"])
@@ -844,14 +844,14 @@ class TestScaleKeysReachTheComponent:
         # And the width really is what bounds it: the old default puts the same gain
         # far outside the prior.
         narrow = setup_const_gains(
-            make_const_gains_config(n_ant=n_ant, phase_std=1.0, init=str(path))
+            make_const_gains_config(n_ant=n_ant, phase_std_deg=1.0, init=str(path))
         )
 
         assert np.max(np.abs(np.asarray(narrow.init_params_base["gains_phase_base"]))) > 100
 
 
 class TestTheDefaultPhasePriorCoversTheCircle:
-    """Drawn through the component, the unset ``phase_std`` says nothing about the phase.
+    """Drawn through the component, the unset ``phase_std_deg`` says nothing about the phase.
 
     The width itself is checked analytically in ``test_gains.py`` (the wrapped normal
     at half a turn is flat to 1.4 %). What is checked here is that the component's own
@@ -873,7 +873,7 @@ class TestTheDefaultPhasePriorCoversTheCircle:
     N_ANT = 33
     N_DRAWS = 512
 
-    def draw_phases(self, phase_std):
+    def draw_phases(self, phase_std_deg):
         """Gain phases from ``N_DRAWS`` prior draws, through the component's forward.
 
         The reference antenna's phase is pinned to zero (the overall phase is not
@@ -882,7 +882,7 @@ class TestTheDefaultPhasePriorCoversTheCircle:
 
         comp = setup_const_gains(
             make_const_gains_config(
-                n_ant=self.N_ANT, n_freq=1, n_time=1, phase_std=phase_std, ref_ant=0
+                n_ant=self.N_ANT, n_freq=1, n_time=1, phase_std_deg=phase_std_deg, ref_ant=0
             )
         )
 
@@ -908,7 +908,7 @@ class TestTheDefaultPhasePriorCoversTheCircle:
         return np.asarray(phases).ravel()
 
     def test_the_default_prior_covers_the_circle(self):
-        phases = self.draw_phases(phase_std=None)
+        phases = self.draw_phases(phase_std_deg=None)
         counts, _ = np.histogram(phases, bins=self.N_BINS, range=(-np.pi, np.pi))
 
         assert counts.min() > 0
@@ -920,7 +920,7 @@ class TestTheDefaultPhasePriorCoversTheCircle:
     def test_a_one_degree_prior_does_not(self):
         """The teeth of the test above: the default it replaces fails both bounds."""
 
-        phases = self.draw_phases(phase_std=1.0)
+        phases = self.draw_phases(phase_std_deg=1.0)
         counts, _ = np.histogram(phases, bins=self.N_BINS, range=(-np.pi, np.pi))
 
         assert counts.min() == 0
@@ -993,12 +993,12 @@ class TestInit:
 
     def test_prior_init_sits_at_the_phase_prior_mean(self, exact_rtol):
         """The prior mean of the phase is phase_mean, and the reference is still pinned."""
-        comp = setup_const_gains(make_const_gains_config(n_ant=5, phase_mean=0.25, ref_ant=2))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, phase_mean_deg=15.0, ref_ant=2))
 
         phase = np.angle(np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0]))
 
         assert phase[2] == 0.0
-        assert np.allclose(np.delete(phase, 2), 0.25, rtol=exact_rtol, atol=exact_rtol)
+        assert np.allclose(np.delete(phase, 2), np.deg2rad(15.0), rtol=exact_rtol, atol=exact_rtol)
 
     def test_npz_init_lands_in_the_gauge(self, tmp_path, exact_rtol):
         n_ant = 6
@@ -1207,7 +1207,7 @@ def test_the_correlation_lengths_are_not_read_here():
 
 def test_prior_scales_convert_percent_and_degrees():
     """The scales reach the component in the units the model works in."""
-    cfg = ConstGainsConfig(amp_mean=2.0, amp_std=5.0, phase_std=2.0).prior_scales()
+    cfg = ConstGainsConfig(amp_mean=2.0, amp_std_pct=5.0, phase_std_deg=2.0).prior_scales()
 
     assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
     assert cfg["phase_mean"] == pytest.approx(0.0)

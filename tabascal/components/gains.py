@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import Field, field_validator
 
+import math
 import os
 import warnings
 
@@ -94,17 +95,17 @@ class ConstGainsConfig(StrictConfigModel):
     )
     amp_mean: PositiveFloat = Field(
         default=1.0,
-        description="Median of the lognormal amplitude prior (scale that amp_std is a percentage of).",
+        description="Median of the lognormal amplitude prior (scale that amp_std_pct is a percentage of).",
     )
-    phase_mean: FiniteFloat = Field(
+    phase_mean_deg: FiniteFloat = Field(
         default=0.0,
-        description="Mean of the gain phase prior, in radians.",
+        description="Mean of the gain phase prior, in degrees.",
     )
-    amp_std: PositiveFloat = Field(
+    amp_std_pct: PositiveFloat = Field(
         default=DEFAULT_AMP_STD_PERCENT,
         description=f"Standard deviation of the gain amplitude prior as a percentage of amp_mean (default {DEFAULT_AMP_STD_PERCENT:g}%).",
     )
-    phase_std: PositiveFloat = Field(
+    phase_std_deg: PositiveFloat = Field(
         default=DEFAULT_PHASE_STD_DEGREES,
         description=f"Standard deviation of the gain phase prior, in degrees (default {DEFAULT_PHASE_STD_DEGREES:g} deg).",
     )
@@ -115,9 +116,13 @@ class ConstGainsConfig(StrictConfigModel):
         "ref_ant": ("gains", "ref_ant"),
         "fix_flux_scale": ("gains", "fix_flux_scale"),
         "amp_mean": ("gains", "amp_mean"),
-        "phase_mean": ("gains", "phase_mean"),
-        "amp_std": ("gains", "amp_std"),
-        "phase_std": ("gains", "phase_std"),
+        "phase_mean_deg": ("gains", "phase_mean"),
+        "amp_std_pct": ("gains", "amp_std"),
+        "phase_std_deg": ("gains", "phase_std"),
+    }
+    # The sectioned config gave the phase mean in radians.
+    legacy_transforms: ClassVar[dict[str, Any]] = {
+        "phase_mean_deg": lambda radians: math.degrees(float(radians)),
     }
 
     @field_validator("fit", mode="before")
@@ -130,9 +135,9 @@ class ConstGainsConfig(StrictConfigModel):
     def prior_scales(self) -> Dict[str, float]:
         """The gain prior in the units the model works in.
 
-        ``amp_std`` is given as a percentage of ``amp_mean`` and ``phase_std`` in
-        degrees; they come back as a fraction of the amplitude scale and in
-        radians. The arithmetic is the one the sectioned config's validator did,
+        ``amp_std_pct`` is given as a percentage of ``amp_mean``, and ``phase_mean_deg``
+        and ``phase_std_deg`` in degrees; they come back as a fraction of the
+        amplitude scale and in radians. The arithmetic is the one the sectioned config's validator did,
         to the bit: ``float(std) / 100`` rather than ``std / 100``, since an int
         too large for a float is rounded by ``float()`` but divided exactly by
         ``/``, and the two orders differ in the last bit.
@@ -140,9 +145,9 @@ class ConstGainsConfig(StrictConfigModel):
         amp_mean = float(self.amp_mean)
         return {
             "amp_mean": amp_mean,
-            "amp_std": float(self.amp_std) / 100 * amp_mean,
-            "phase_mean": float(self.phase_mean),
-            "phase_std": float(jnp.deg2rad(self.phase_std)),
+            "amp_std": float(self.amp_std_pct) / 100 * amp_mean,
+            "phase_mean": float(jnp.deg2rad(self.phase_mean_deg)),
+            "phase_std": float(jnp.deg2rad(self.phase_std_deg)),
         }
 
 
@@ -445,7 +450,7 @@ class ConstGains(Component):
     coordinate is flat in the likelihood however much data there is, which ruins the
     conditioning of the fit and makes a likelihood-only Fisher matrix singular.
 
-    The prior on ``|g_p|`` is lognormal: ``ConstGains.amp_std`` (a percentage) is used as
+    The prior on ``|g_p|`` is lognormal: ``ConstGains.amp_std_pct`` (a percentage) is used as
     the standard deviation of ``log|g|``, which agrees with a fractional spread to
     first order and keeps the gain positive. ``ConstGains.amp_mean`` is then the *median*
     of that prior — its centre in log space, not its arithmetic mean — and it is that
@@ -465,7 +470,7 @@ class ConstGains(Component):
     ``ConstGains.init``, in the same gauge, so an amplitude-only fit keeps a calibration
     table's phases and a phase-only fit its amplitudes; with ``init: prior`` (or
     unset) it is unity — ``|g| = 1`` or a zero phase — whatever ``amp_mean`` or
-    ``phase_mean`` say. Each partial fit has ``n_ant - 1`` parameters (``n_ant`` for an
+    ``phase_mean_deg`` say. Each partial fit has ``n_ant - 1`` parameters (``n_ant`` for an
     amplitude fit with the flux scale freed).
 
     It binds the observation shapes and the amplitude and phase scales of the prior,

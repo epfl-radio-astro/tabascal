@@ -29,7 +29,7 @@ from tabascal.truth import read_true_vis_ast
 class GPVisAstConfig(FourierGPConfig):
     """Configuration for :class:`GPVisAst`."""
 
-    std: Union[PositiveFloat, Literal["data"]] = Field(
+    std_jy: Union[PositiveFloat, Literal["data"]] = Field(
         default="data",
         description=(
             "Width of the prior on the astronomical visibilities, in Jy (rms|V|). "
@@ -37,7 +37,7 @@ class GPVisAstConfig(FourierGPConfig):
             "number sets one width for every baseline."
         ),
     )
-    corr_freq: Optional[PositiveFloat] = Field(
+    corr_freq_hz: Optional[PositiveFloat] = Field(
         default=None,
         description=(
             "Bandwidth, in Hz, over which the sky stays correlated along frequency. "
@@ -96,8 +96,8 @@ class GPVisAstConfig(FourierGPConfig):
     legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
         "init": ("ast", "init"),
         "mean": ("ast", "mean"),
-        "std": ("ast", "gp_cov", "std"),
-        "corr_freq": ("ast", "gp_cov", "corr_freq"),
+        "std_jy": ("ast", "gp_cov", "std"),
+        "corr_freq_hz": ("ast", "gp_cov", "corr_freq"),
         "fov_deg": ("ast", "gp_cov", "fov_deg"),
         "gammas": ("ast", "gp_cov", "gammas"),
         "cutoff": ("ast", "cutoff"),
@@ -109,7 +109,7 @@ class GPVisAstConfig(FourierGPConfig):
     legacy_null_value: ClassVar[dict[str, Any]] = {"fov_deg": "primary_beam"}
     legacy_absent_value: ClassVar[dict[str, Any]] = {"init": "sample"}
 
-    @field_validator("std", mode="before")
+    @field_validator("std_jy", mode="before")
     @classmethod
     def _validate_std(cls, value: Any) -> Any:
         return _check_std_value(value)
@@ -191,8 +191,8 @@ class DiscreteSkyVisConfig(StrictConfigModel):
 _AUTO_TIME_PAD_FLOOR = 2.0
 
 #: The ``GPVisAst.transform`` options. ``dft`` is the default: it holds less than the
-#: padded grid at every size but the smallest, and with ``corr_freq`` set it is
-#: faster too. ``fft`` is the lever back for ``corr_freq: null`` on a wide band,
+#: padded grid at every size but the smallest, and with ``corr_freq_hz`` set it is
+#: faster too. ``fft`` is the lever back for ``corr_freq_hz: null`` on a wide band,
 #: where every delay mode survives and the matrices grow with the channels squared.
 _TRANSFORMS = ("dft", "fft")
 
@@ -222,7 +222,7 @@ def time_pad_for_fringe_rate(n_time, int_time, fringe_rate):
 
 #: The power spectrum is used for its shape alone -- which modes survive
 #: ``cutoff``, and their relative weight -- and the amplitude is applied by
-#: normalising the mode standard deviations to ``std``. This is the ``p0`` the
+#: normalising the mode standard deviations to ``std_jy``. This is the ``p0`` the
 #: shape is evaluated with; any positive value gives the same shape and the
 #: same surviving modes, so it is 1.
 _SHAPE_ONLY = 1.0
@@ -231,14 +231,14 @@ _SHAPE_ONLY = 1.0
 #: real and an imaginary standard normal, so the complex latent carries twice
 #: the variance of the unit circularly-symmetric one and the signal comes out
 #: ``sqrt(2)`` wider than the mode variances alone. Dividing it out is what
-#: makes ``std`` the width of the visibility rather than of its real part.
+#: makes ``std_jy`` the width of the visibility rather than of its real part.
 #:
 #: ``math``, not ``jnp``: this module is imported before ``set_precision`` runs,
 #: so a jax scalar here would be built in float32 and a double run would carry a
 #: float32 sqrt(2) into its prior.
 _LATENT_WIDTH = sqrt(2.0)
 
-#: ``corr_freq: null`` is no roll-off along the frequency axis:
+#: ``corr_freq_hz: null`` is no roll-off along the frequency axis:
 #: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee and
 #: the power spectrum is flat there.
 #:
@@ -291,7 +291,7 @@ class GPVisAst(Component):
             else:
                 self.seed = DEFAULT_SEED
 
-            self.std = cfg.std
+            self.std = cfg.std_jy
             if self.std == FROM_DATA:
                 self.std = self._std_from_data(
                     config.vis_obs, config.estimator_flags
@@ -306,7 +306,7 @@ class GPVisAst(Component):
             # corr_freq is the bandwidth over which the sky stays correlated;
             # the knee is the delay conjugate to it. Shared with the RFI prior
             # (FourierGPConfig) so the two cannot drift; null is no roll-off.
-            self.corr_freq = cfg.corr_freq
+            self.corr_freq = cfg.corr_freq_hz
             # float(), so the knee is one type whether or not corr_freq was set
             # and is computed at host precision: the helper returns a jax scalar
             # for a value and a Python float for None, and under x32 the former
@@ -541,11 +541,11 @@ class GPVisAst(Component):
 
         What the matrices cost is the surviving modes times the data length on
         each axis, where the FFT pays for the whole padded grid. The sky is
-        smooth in frequency, so with ``corr_freq`` set to a bandwidth near the
+        smooth in frequency, so with ``corr_freq_hz`` set to a bandwidth near the
         observed one only a few delay modes survive and the DFT is the faster
         of the two at every band width.
 
-        ``corr_freq: null`` is the exception: no roll-off keeps every delay
+        ``corr_freq_hz: null`` is the exception: no roll-off keeps every delay
         mode, the frequency matrix becomes square in the channel count, and on
         a wide band the FFT is the faster.
         """
@@ -692,7 +692,7 @@ class GPVisAst(Component):
             self._compute_dft_mats(ns, dxs)
 
         def sigma(k0, std):
-            """Mode standard deviations that make ``std`` the width of vis_ast.
+            """Mode standard deviations that make ``std_jy`` the width of vis_ast.
 
             The modes are independent, so the variance of the signal they build
             is the sum of theirs. Dividing the shape by its own sum makes that
@@ -702,18 +702,18 @@ class GPVisAst(Component):
             ``E|z|^2 = 2`` rather than 1, and the visibility comes out
             ``sqrt(2)`` wider than the mode variances alone would say.
 
-            With it, ``std`` is the width of the *complex* visibility about
+            With it, ``std_jy`` is the width of the *complex* visibility about
             its prior mean, ``sqrt(E|vis_ast - mu|^2)``. At the default
             ``GPVisAst.mean: 0`` the mean is zero and that is exactly
             ``rms|vis_ast|``, so "set it to the amplitude you see in a clean
             channel" is literally true rather than true after dividing by
             ``sqrt(2)``. That is the property the key exists to have. Under
             ``GPVisAst.mean: data`` the prior is centred on the observed
-            visibilities and ``std`` is the scatter allowed around them, not
+            visibilities and ``std_jy`` is the scatter allowed around them, not
             the total amplitude -- ``rms|vis_ast|`` is then
             ``sqrt(std^2 + |mu|^2)``.
 
-            ``rfi_signal.std`` names the same quantity in the same units, at
+            ``rfi_signal.std_jy`` names the same quantity in the same units, at
             ``rfi_signal.mean: 0``. It gets there differently, since it normalises
             ``rfi_A``, which the visibility is quadratic in -- and a non-zero
             ``rfi_signal.mean`` adds power to the RFI visibility rather than merely
@@ -756,7 +756,7 @@ class GPVisAst(Component):
                 else f"{float(jnp.min(self.std)):.4g}..{float(jnp.max(self.std)):.4g}"
             )
             raise ValueError(
-                f"GPVisAst.std ({reported}) is not representable in this "
+                f"GPVisAst.std_jy ({reported}) is not representable in this "
                 f"run's precision: the mode standard deviations it gives come "
                 f"out {'non-finite' if not jnp.all(jnp.isfinite(self.sigma_ast_k)) else 'zero'}. "
                 f"std is a visibility amplitude in Jy, so it should be within "
@@ -797,13 +797,13 @@ class GPVisAst(Component):
     def _std_from_data(self, vis_obs, estimator_flags):
         """``rms|V|`` per baseline over the samples nothing has flagged.
 
-        ``std`` is defined as that quantity, so this is not a proxy for the
+        ``std_jy`` is defined as that quantity, so this is not a proxy for the
         prior width -- it is the prior width, read off the data instead of
         guessed. Per baseline because that is what the data offers; the model
         then has one width per baseline rather than one for all of them.
 
         The measurement is :func:`tabascal.fft_gp.rms_vis`, shared with
-        ``rfi_signal.std: data``. What is here is the policy: which samples this
+        ``rfi_signal.std_jy: data``. What is here is the policy: which samples this
         prior wants, and what to say when the mask cannot give them.
 
         The mask is ``estimator_flags`` -- everything known to be bad, the
@@ -830,27 +830,27 @@ class GPVisAst(Component):
 
         if not bool(jnp.any(keep)):
             raise ValueError(
-                "GPVisAst.std: data has nothing to measure -- every "
+                "GPVisAst.std_jy: data has nothing to measure -- every "
                 "visibility is flagged. Set a width in Jy instead."
             )
         if not bool(jnp.any(~keep)):
             print(
-                "Warning: GPVisAst.std: data is measuring every "
+                "Warning: GPVisAst.std_jy: data is measuring every "
                 "visibility, because nothing flags any of them. Whatever "
                 "RFI is in them is in the prior width too, so it will be "
                 "wider than the sky by however much RFI there is. Flag the "
                 "contaminated samples in the MS -- this reads those flags "
                 "whatever data.flags says, so flagging them does not stop "
-                "tabascal fitting them -- or set GPVisAst.std to a width "
+                "tabascal fitting them -- or set GPVisAst.std_jy to a width "
                 "in Jy."
             )
 
-        # The measurement itself is rfi_signal.std: data's as well; only the mask and
+        # The measurement itself is rfi_signal.std_jy: data's as well; only the mask and
         # the reduction differ. See fft_gp.rms_vis.
-        std = rms_vis(vis_obs, keep, "GPVisAst.std", per_baseline=True)
+        std = rms_vis(vis_obs, keep, "GPVisAst.std_jy", per_baseline=True)
 
         print(
-            f"Using GPVisAst.std from data: {float(jnp.min(std)):.4g} to "
+            f"Using GPVisAst.std_jy from data: {float(jnp.min(std)):.4g} to "
             f"{float(jnp.max(std)):.4g} Jy across baselines "
             f"(median {float(jnp.median(std)):.4g})"
         )

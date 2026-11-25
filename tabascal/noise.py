@@ -157,7 +157,7 @@ def _fill_invalid(sigma: NDArray, column: str, what: str) -> NDArray:
     if not valid.any():
         raise NoUsableSigma(
             f"No {what} has a positive, finite {column}. The MS carries no usable "
-            "noise estimate; set data.noise explicitly."
+            "noise estimate; set data.noise_jy explicitly."
         )
 
     if not valid.all():
@@ -466,7 +466,7 @@ def _require_valid(
             f"{path}: {key} has {int(invalid.sum())} of {sigma.size} {scope} that "
             "are not positive and finite. A noise given explicitly is used as "
             "given -- unlike an MS column, it is not repaired with a median fill "
-            "-- so correct them or leave data.noise null."
+            "-- so correct them or leave data.noise_jy null."
         )
 
     return sigma
@@ -479,7 +479,7 @@ def _as_float(value, path: str, key: str) -> NDArray:
     read as one. Everything else is refused **before** the conversion, because
     ``astype(np.float64)`` is willing to manufacture a noise out of almost
     anything: a boolean array becomes a uniform 1.0 -- the mistake the scalar
-    path already refuses in ``data.noise: true``, and just as plausible here to
+    path already refuses in ``data.noise_jy: true``, and just as plausible here to
     go unnoticed -- and a string array is parsed, so ``"0.7"`` becomes 0.7 and a
     file that was never a noise array reads as one.
 
@@ -539,7 +539,7 @@ def _require_1d(sigma: NDArray, path: str, key: str, what: str) -> NDArray:
 def read_noise_file(path: str, n_bl: int, a1: Optional[NDArray] = None,
                     a2: Optional[NDArray] = None,
                     n_freq: Optional[int] = None) -> NDArray:
-    """Noise from an ``.npz``, as ``data.noise`` may point at.
+    """Noise from an ``.npz``, as ``data.noise_jy`` may point at.
 
     Accepts one of three keys, most specific first -- a file carrying more than
     one is answering the same question twice, and the answer with the most

@@ -107,9 +107,9 @@ def make_rfi_config(
     n_bl = n_ant * (n_ant - 1) // 2
 
     comp_kwargs = {
-        "std": std,
-        "corr_freq": corr_freq,
-        "corr_time": corr_time,
+        "std_jy": std,
+        "corr_freq_hz": corr_freq,
+        "corr_time_s": corr_time,
         "init": init,
         "mean": mean,
         "est": est,
@@ -239,7 +239,7 @@ class TestRfiSignalConfigValidation:
         """The named values are derived from the data and the observation grid."""
         freqs, times = self._grid()
         vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
-        cfg = RFIVarAntConfig(std="max_vis", corr_freq="half_band", corr_time="half_duration")
+        cfg = RFIVarAntConfig(std_jy="max_vis", corr_freq_hz="half_band", corr_time_s="half_duration")
 
         std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -250,7 +250,7 @@ class TestRfiSignalConfigValidation:
     def test_half_duration_does_not_clobber_corr_freq(self):
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = RFIVarAntConfig(std=1.0, corr_freq="half_band", corr_time="half_duration")
+        cfg = RFIVarAntConfig(std_jy=1.0, corr_freq_hz="half_band", corr_time_s="half_duration")
 
         _std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -262,7 +262,7 @@ class TestRfiSignalConfigValidation:
     def test_explicit_values_preserved_as_floats(self):
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = RFIVarAntConfig(std=7, corr_freq=5e6, corr_time=60)
+        cfg = RFIVarAntConfig(std_jy=7, corr_freq_hz=5e6, corr_time_s=60)
 
         std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -274,21 +274,21 @@ class TestRfiSignalConfigValidation:
     def test_an_omitted_key_takes_its_default(self):
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        omitted = RFIVarAntConfig(std=1.0, corr_freq=5e6)
-        half = RFIVarAntConfig(std=1.0, corr_freq=5e6, corr_time="half_duration")
+        omitted = RFIVarAntConfig(std_jy=1.0, corr_freq_hz=5e6)
+        half = RFIVarAntConfig(std_jy=1.0, corr_freq_hz=5e6, corr_time_s="half_duration")
 
         left = resolve_rfi_gp_params(omitted, vis_obs, freqs, 1e6, times, 8.0)
         right = resolve_rfi_gp_params(half, vis_obs, freqs, 1e6, times, 8.0)
 
-        assert left[2] == pytest.approx(RFIVarAntConfig().corr_time)
+        assert left[2] == pytest.approx(RFIVarAntConfig().corr_time_s)
         assert right[2] == pytest.approx(float(times[-1] - times[0]) / 2)
 
-    @pytest.mark.parametrize("key", ["std", "corr_freq", "corr_time"])
+    @pytest.mark.parametrize("key", ["std_jy", "corr_freq_hz", "corr_time_s"])
     def test_non_numeric_value_raises(self, key):
         with pytest.raises(ValueError):
             RFIVarAntConfig(**{key: "not a number"})
 
-    @pytest.mark.parametrize("key", ["std", "corr_freq", "corr_time", "cutoff", "signal_type"])
+    @pytest.mark.parametrize("key", ["std_jy", "corr_freq_hz", "corr_time_s", "cutoff", "signal_type"])
     def test_null_is_refused_with_the_default_named(self, key):
         with pytest.raises(ValueError, match=f"{key}: null is not a setting.*Leave the key out"):
             RFIVarAntConfig(**{key: None})
@@ -296,15 +296,15 @@ class TestRfiSignalConfigValidation:
     @pytest.mark.parametrize(
         "key, value",
         [
-            ("std", 0),
-            ("std", -5.0),
-            ("std", True),
-            ("std", float("inf")),
-            ("corr_freq", 0),
-            ("corr_freq", -1e6),
-            ("corr_time", 0),
-            ("corr_time", -24.0),
-            ("corr_time", float("nan")),
+            ("std_jy", 0),
+            ("std_jy", -5.0),
+            ("std_jy", True),
+            ("std_jy", float("inf")),
+            ("corr_freq_hz", 0),
+            ("corr_freq_hz", -1e6),
+            ("corr_time_s", 0),
+            ("corr_time_s", -24.0),
+            ("corr_time_s", float("nan")),
         ],
     )
     def test_a_width_or_a_scale_that_is_not_positive_and_finite_is_refused(self, key, value):
@@ -314,7 +314,7 @@ class TestRfiSignalConfigValidation:
     def test_single_channel_single_integration_defaults(self):
         freqs, times = jnp.array([1.4e9]), jnp.array([0.0])
         vis_obs = jnp.ones((6, 1, 1), dtype=complex)
-        cfg = RFIVarAntConfig(std="max_vis", corr_freq="half_band", corr_time="half_duration")
+        cfg = RFIVarAntConfig(std_jy="max_vis", corr_freq_hz="half_band", corr_time_s="half_duration")
 
         _std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -2258,7 +2258,7 @@ class TestTheStdCanBeMeasuredFromTheData:
     GRID = (jnp.linspace(1.4e9, 1.41e9, 4), 1e6, jnp.linspace(0.0, 120.0, 8), 8.0)
 
     def _validate(self, vis, gain_flags=None, **kwargs):
-        params = {"std": "data", "corr_freq": 5e6, "corr_time": 60.0, **kwargs}
+        params = {"std_jy": "data", "corr_freq_hz": 5e6, "corr_time_s": 60.0, **kwargs}
         cfg = RFIVarAntConfig(**params)
         freqs, chan_width, times, int_time = self.GRID
         std, corr_freq, corr_time = resolve_rfi_gp_params(
@@ -2325,7 +2325,7 @@ class TestTheStdCanBeMeasuredFromTheData:
     def test_a_value_that_is_neither_a_number_nor_data_is_refused_by_name(self):
         vis = jnp.ones((4, 3, 5), dtype=complex)
         with pytest.raises(ValueError, match="std"):
-            self._validate(vis, std="widish")
+            self._validate(vis, std_jy="widish")
 
 
 # ---------------------------------------------------------------------------

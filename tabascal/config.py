@@ -154,11 +154,11 @@ class TabConfig:
         self.tle_resolution = preflight_tle_check(self.tle_config, ms_path)
 
         self.read_ms_params(
-            cfg.data.freq,
+            cfg.data.freq_hz,
             cfg.data.corr,
             cfg.data.data_col,
         )
-        self.set_noise(cfg.data.noise, require=require_noise)
+        self.set_noise(cfg.data.noise_jy, require=require_noise)
         # After set_noise, so the noise it resolved is carried into the
         # calibrated frame with the data; before set_flags, so the samples no
         # gain could be found for reach the flags; and before the sharding block
@@ -216,7 +216,7 @@ class TabConfig:
         self._set_freqs_times()
 
         resolved_min_el = (
-            (traj_cfg.min_elevation if traj_cfg is not None else 0.0)
+            (traj_cfg.min_elevation_deg if traj_cfg is not None else 0.0)
             if min_elevation is _FROM_MODEL
             else min_elevation
         )
@@ -235,7 +235,7 @@ class TabConfig:
             self.estimator_flags = make_global(
                 self.estimator_flags, replicated_sharding()
             )
-            # rfi_signal.std: data reads this one directly, against vis_obs above, so
+            # rfi_signal.std_jy: data reads this one directly, against vis_obs above, so
             # it has to be global for the same reason the others are. None
             # where no gain table was configured, which make_global cannot take.
             if self.gain_flags is not None:
@@ -362,7 +362,7 @@ class TabConfig:
 
                 if degenerate.any():
                     raise ValueError(
-                        f"data.noise = {noise!r}: {int(degenerate.sum())} of "
+                        f"data.noise_jy = {noise!r}: {int(degenerate.sum())} of "
                         f"{sigma.size} values are positive and finite in the file "
                         f"but not after conversion to {converted.dtype} -- they "
                         "underflow to zero or overflow to infinity at this run's "
@@ -380,7 +380,7 @@ class TabConfig:
                 # the same mistake rather than as a non-positive number.
                 if isinstance(noise, bool):
                     raise ValueError(
-                        f"data.noise = {noise!r} is neither a number nor a path to "
+                        f"data.noise_jy = {noise!r} is neither a number nor a path to "
                         "an .npz of noise values. Give a positive number in Jy, a "
                         "path to an .npz, or leave it null to use the MS's own "
                         "estimate."
@@ -393,13 +393,13 @@ class TabConfig:
                     value = float(noise)
                 except (TypeError, ValueError) as err:
                     raise ValueError(
-                        f"data.noise = {noise!r} is neither a number nor a path to "
+                        f"data.noise_jy = {noise!r} is neither a number nor a path to "
                         "an .npz of noise values."
                     ) from err
 
                 if not np.isfinite(value) or value <= 0:
                     raise ValueError(
-                        f"data.noise = {noise!r} is not a usable noise. Give a "
+                        f"data.noise_jy = {noise!r} is not a usable noise. Give a "
                         "positive number in Jy, a path to an .npz, or leave it "
                         "null to use the MS's own estimate."
                     )
@@ -413,7 +413,7 @@ class TabConfig:
             raise ValueError(
                 "The MS partition has neither a usable SIGMA_SPECTRUM nor a "
                 "readable SIGMA column, so it carries no noise estimate at all; "
-                "set data.noise explicitly."
+                "set data.noise_jy explicitly."
             )
 
     def apply_gain_table(self, gain_table):
@@ -425,7 +425,7 @@ class TabConfig:
         gains are applied once at read time instead of on every forward pass,
         and everything downstream (priors, RFI/AST models, chi^2, and the
         results written back to the MS) lives in one frame: the calibrated one.
-        That retires the manual "scale the noise by k and ``GPVisAst.std`` by
+        That retires the manual "scale the noise by k and ``GPVisAst.std_jy`` by
         k" workaround -- by k, not k^2, since std is a standard deviation in Jy
         and scales with the data rather than with its square.
 

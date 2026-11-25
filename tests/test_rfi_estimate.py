@@ -1730,11 +1730,11 @@ class TestCommandLine:
                     "out_dir": None,
                     "data_col": data_col,
                     "corr": corr,
-                    "freq": freq,
+                    "freq_hz": freq,
                 },
                 "model": {
                     "components": [
-                        {"trajectory.FixedOrbit": {"min_elevation": min_elevation}}
+                        {"trajectory.FixedOrbit": {"min_elevation_deg": min_elevation}}
                     ]
                 },
             }
@@ -1970,7 +1970,7 @@ class TestCommandLine:
         run(_cli("-c", "tab.yaml", "--no-elevation-cut",
                  "-o", str(tmp_path / "c.npz")))
 
-        assert config.model.find_one(TrajectoryConfig).min_elevation is None
+        assert config.model.find_one(TrajectoryConfig).min_elevation_deg is None
 
     def test_the_config_mode_tolerates_a_never_visible_satellite(
         self, tmp_path, monkeypatch

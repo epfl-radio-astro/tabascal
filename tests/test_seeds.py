@@ -151,7 +151,7 @@ def test_through_build_model_another_component_never_shifts_a_draw(
     built = []
     for ref in components:
         if ref == AST:
-            built.append({AST: {"init": "sample", "std": 1.0, "time_pad_factor": 2}})
+            built.append({AST: {"init": "sample", "std_jy": 1.0, "time_pad_factor": 2}})
         else:
             built.append(ref)
     config = load_config(str(write_config(tmp_path, built, inference={"seed": 7})))

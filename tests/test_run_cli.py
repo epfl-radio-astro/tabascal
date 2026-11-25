@@ -773,17 +773,17 @@ class TestLightCurveInputs:
 
     def test_the_flag_beats_the_config_for_the_elevation_cut(self):
         args = _parse("light-curve", "-c", "c.yaml", "--min-elevation", "20")
-        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation": 0}}]}}
+        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation_deg": 0}}]}}
         assert self._mod().resolve_min_elevation(args, cfg) == 20.0
 
     def test_the_config_cut_is_used_when_the_flag_is_absent(self):
         args = _parse("light-curve", "-c", "c.yaml")
-        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation": 5}}]}}
+        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation_deg": 5}}]}}
         assert self._mod().resolve_min_elevation(args, cfg) == 5
 
     def test_a_null_config_cut_stays_off(self):
         args = _parse("light-curve", "-c", "c.yaml")
-        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation": None}}]}}
+        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation_deg": None}}]}}
         assert self._mod().resolve_min_elevation(args, cfg) is None
 
     def test_the_manual_default_is_the_horizon(self):
@@ -792,7 +792,7 @@ class TestLightCurveInputs:
 
     def test_no_elevation_cut_overrides_everything(self):
         args = _parse("light-curve", "-c", "c.yaml", "--no-elevation-cut")
-        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation": 5}}]}}
+        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation_deg": 5}}]}}
         assert self._mod().resolve_min_elevation(args, cfg) is None
 
     def test_the_output_defaults_beside_the_measurement_set(self):

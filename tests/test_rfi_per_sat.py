@@ -1807,7 +1807,7 @@ class TestTheWriterGuardsTheInputs:
     def test_a_narrowed_band_is_refused_rather_than_reshaped(
         self, tmp_path, run_per_sat_writer
     ):
-        """``data.freq`` narrows the run; the MS still has its whole band.
+        """``data.freq_hz`` narrows the run; the MS still has its whole band.
 
         The reshape into MS rows would otherwise fail deep in dask with a
         chunk-arithmetic error that says nothing about the band.

@@ -1549,7 +1549,7 @@ class TestPartitionNoise:
     def test_neither_column_leaves_the_noise_unset(self, capsys):
         """Never invented -- and never terminal here either.
 
-        ``data.noise`` is read *after* the MS, so a read that raised would take
+        ``data.noise_jy`` is read *after* the MS, so a read that raised would take
         the override's turn away and the documented recovery could not happen.
         The read says why it found nothing and returns None; ``TabConfig`` gives
         the override its chance and stops only if there is still no noise.
@@ -1572,12 +1572,12 @@ class TestPartitionNoise:
         )
 
         assert self._call(xds) is None
-        assert "data.noise" in capsys.readouterr().out
+        assert "data.noise_jy" in capsys.readouterr().out
 
     def test_a_malformed_sigma_is_still_an_error(self, capsys):
         """Deferring the *empty* column is not deferring a broken one: a row
         count that disagrees with the grid means the reader and the MS describe
-        different observations, which no data.noise value makes right."""
+        different observations, which no data.noise_jy value makes right."""
         xds = _noise_partition(sigma=_sigma_rows(self.PER_BL))
 
         with pytest.raises(ValueError, match="does not match the observation grid"):
@@ -2159,7 +2159,7 @@ class TestReadMSFrequencyRequest:
         """
         _, freqs, _ = channel_ms()
 
-        with pytest.raises(ValueError, match="data.freq"):
+        with pytest.raises(ValueError, match="data.freq_hz"):
             read_ms("fake.ms", freq=freq)
 
     @pytest.mark.parametrize(
@@ -2174,7 +2174,7 @@ class TestReadMSFrequencyRequest:
         """
         _, freqs, _ = channel_ms()
 
-        with pytest.raises(ValueError, match="data.freq"):
+        with pytest.raises(ValueError, match="data.freq_hz"):
             read_ms("fake.ms", freq=freq)
 
     def test_an_infinite_frequency_is_refused_by_name(self, channel_ms):
@@ -2185,7 +2185,7 @@ class TestReadMSFrequencyRequest:
         """
         _, freqs, _ = channel_ms()
 
-        with pytest.raises(ValueError, match="data.freq"):
+        with pytest.raises(ValueError, match="data.freq_hz"):
             read_ms("fake.ms", freq=float("inf"))
 
     def test_a_frequency_inside_the_edge_channel_is_accepted(self, channel_ms):

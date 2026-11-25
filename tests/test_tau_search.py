@@ -1569,7 +1569,7 @@ class TestHorizonMasking:
         assert np.all(np.isfinite(r[:, frames]))
 
     def test_the_cut_is_inclusive(self, setting_obs):
-        """Same semantics as rfi.min_elevation: the cut is the lowest elevation
+        """Same semantics as trajectory.min_elevation_deg: the cut is the lowest elevation
         still modelled, so a frame sitting exactly on it is in view."""
         exact = float(setting_obs.elevation[3])
 
@@ -2129,13 +2129,13 @@ def stub_config_mode(monkeypatch, obs, record, tmp_path):
             "out_dir": None,
             "data_col": "DATA",
             "corr": "xx",
-            "freq": None,
+            "freq_hz": None,
         },
         "satellites": {"norad_ids": [NORAD_ID]},
         "model": {
             "precision": "double",
             "components": [
-                {"trajectory.FixedOrbit": {"min_elevation": 0}},
+                {"trajectory.FixedOrbit": {"min_elevation_deg": 0}},
                 "rfi_signal.ComplexRFIVarAnt",
                 "rfi_vis.AnalyticVis",
             ],

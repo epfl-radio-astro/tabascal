@@ -50,24 +50,28 @@ OSKAR_LEGACY_COLUMNS = OSKAR_COLUMNS[:8] + OSKAR_COLUMNS[9:]
 POLARISATION_COLUMNS = ("Q", "U", "V", "rm")
 
 #: The inline-YAML source fields: the OSKAR column each maps to, and a description of
-#: the value used when reporting a bad one. ``ra``, ``dec`` and ``I`` are required; the
-#: rest default to zero. ``name`` is handled separately, as it is not a number.
+#: the value used when reporting a bad one. ``ra_deg``, ``dec_deg`` and ``I_jy`` are
+#: required; the rest default to zero. ``name`` is handled separately, as it is not a
+#: number. Each name carries its unit, and the units are the OSKAR file's.
 INLINE_FIELDS = {
-    "ra": ("ra_deg", "right ascension in degrees"),
-    "dec": ("dec_deg", "declination in degrees"),
-    "I": ("I", "Stokes I flux in Jy"),
-    "ref_freq_mhz": ("ref_freq_hz", "reference frequency in MHz"),
+    "ra_deg": ("ra_deg", "right ascension in degrees"),
+    "dec_deg": ("dec_deg", "declination in degrees"),
+    "I_jy": ("I", "Stokes I flux in Jy"),
+    "ref_freq_hz": ("ref_freq_hz", "reference frequency in Hz"),
     "alpha": ("alpha", "spectral index, dimensionless"),
-    "Q": ("Q", "Stokes Q flux in Jy"),
-    "U": ("U", "Stokes U flux in Jy"),
-    "V": ("V", "Stokes V flux in Jy"),
-    "rm": ("rm", "rotation measure in rad/m^2"),
+    "Q_jy": ("Q", "Stokes Q flux in Jy"),
+    "U_jy": ("U", "Stokes U flux in Jy"),
+    "V_jy": ("V", "Stokes V flux in Jy"),
+    "rm_rad_m2": ("rm", "rotation measure in rad/m^2"),
     "fwhm_major_arcsec": ("fwhm_major_arcsec", "major-axis FWHM in arcsec"),
     "fwhm_minor_arcsec": ("fwhm_minor_arcsec", "minor-axis FWHM in arcsec"),
     "position_angle_deg": ("position_angle_deg", "position angle in degrees"),
 }
 
-INLINE_REQUIRED = ("ra", "dec", "I")
+INLINE_REQUIRED = ("ra_deg", "dec_deg", "I_jy")
+
+#: The inline field behind each of :data:`POLARISATION_COLUMNS`.
+_INLINE_POLARISATION = {"Q_jy": "Q", "U_jy": "U", "V_jy": "V", "rm_rad_m2": "rm"}
 
 ARCSEC_TO_RAD = np.pi / (180 * 3600)
 
@@ -145,14 +149,13 @@ def read_oskar_sky_model(path: str) -> list:
 def _inline_row(source, idx: int) -> dict:
     """Normalise one inline-YAML source onto the OSKAR column names.
 
-    The YAML form names the reference frequency in MHz (``ref_freq_mhz``) because that is
-    how catalogue fluxes are usually quoted; every other field maps straight across.
+    Every field maps straight across, in the units of the OSKAR column it names.
     """
     if not isinstance(source, dict):
         raise ValueError(
             f"FixedDiscreteSky.point_sources entry {idx} is a {type(source).__name__}, not a source: "
-            "each entry is a mapping of fields, e.g. {name: Fornax A, ra: 50.7, "
-            "dec: -37.2, I: 750.0}. "
+            "each entry is a mapping of fields, e.g. {name: Fornax A, ra_deg: 50.7, "
+            "dec_deg: -37.2, I_jy: 750.0}. "
             f"Got {source!r}."
         )
 
@@ -210,7 +213,6 @@ def _inline_row(source, idx: int) -> dict:
         )
 
     row = {column: value_of(key) for key, (column, _) in INLINE_FIELDS.items()}
-    row["ref_freq_hz"] *= 1e6
     row["name"] = str(name) if name else f"src{idx}"
 
     return row
@@ -242,12 +244,12 @@ def _check_unpolarised(rows: list) -> None:
 
 #: Inline source fields that default to zero when absent or null.
 _OPTIONAL_SOURCE_FIELDS = (
-    "ref_freq_mhz",
+    "ref_freq_hz",
     "alpha",
-    "Q",
-    "U",
-    "V",
-    "rm",
+    "Q_jy",
+    "U_jy",
+    "V_jy",
+    "rm_rad_m2",
     "fwhm_major_arcsec",
     "fwhm_minor_arcsec",
     "position_angle_deg",
@@ -258,15 +260,15 @@ class PointSourceConfig(StrictConfigModel):
     """One inline discrete source in :class:`FixedDiscreteSkyConfig`."""
 
     name: Optional[str] = Field(default=None, description="Optional human-readable source label.")
-    ra: FiniteFloat = Field(description="Right ascension in degrees (J2000).")
-    dec: FiniteFloat = Field(description="Declination in degrees (J2000).")
-    I: FiniteFloat = Field(description="Stokes I flux density in Jy at ref_freq_mhz.")
-    ref_freq_mhz: FiniteFloat = Field(default=0.0, description="Reference frequency in MHz.")
+    ra_deg: FiniteFloat = Field(description="Right ascension in degrees (J2000).")
+    dec_deg: FiniteFloat = Field(description="Declination in degrees (J2000).")
+    I_jy: FiniteFloat = Field(description="Stokes I flux density in Jy at ref_freq_hz.")
+    ref_freq_hz: FiniteFloat = Field(default=0.0, description="Reference frequency in Hz.")
     alpha: FiniteFloat = Field(default=0.0, description="Power-law spectral index (dimensionless).")
-    Q: FiniteFloat = Field(default=0.0, description="Stokes Q flux density in Jy (must be 0; unpolarised only).")
-    U: FiniteFloat = Field(default=0.0, description="Stokes U flux density in Jy (must be 0; unpolarised only).")
-    V: FiniteFloat = Field(default=0.0, description="Stokes V flux density in Jy (must be 0; unpolarised only).")
-    rm: FiniteFloat = Field(default=0.0, description="Rotation measure in rad/m^2 (must be 0; unpolarised only).")
+    Q_jy: FiniteFloat = Field(default=0.0, description="Stokes Q flux density in Jy (must be 0; unpolarised only).")
+    U_jy: FiniteFloat = Field(default=0.0, description="Stokes U flux density in Jy (must be 0; unpolarised only).")
+    V_jy: FiniteFloat = Field(default=0.0, description="Stokes V flux density in Jy (must be 0; unpolarised only).")
+    rm_rad_m2: FiniteFloat = Field(default=0.0, description="Rotation measure in rad/m^2 (must be 0; unpolarised only).")
     fwhm_major_arcsec: FiniteFloat = Field(default=0.0, description="Gaussian major-axis FWHM in arcseconds.")
     fwhm_minor_arcsec: FiniteFloat = Field(default=0.0, description="Gaussian minor-axis FWHM in arcseconds.")
     position_angle_deg: FiniteFloat = Field(default=0.0, description="Major-axis position angle in degrees, north through east.")
@@ -278,15 +280,15 @@ class PointSourceConfig(StrictConfigModel):
         return None if value is None else str(value)
 
     @field_validator(
-        "ra",
-        "dec",
-        "I",
+        "ra_deg",
+        "dec_deg",
+        "I_jy",
         *_OPTIONAL_SOURCE_FIELDS,
         mode="before",
     )
     @classmethod
     def _read_number(cls, value: Any) -> Any:
-        # Catalogue values are often quoted (`I: '750.0'`); read them as the numbers they
+        # Catalogue values are often quoted (`I_jy: '750.0'`); read them as the numbers they
         # are, and leave the finite check to FiniteFloat.
         if isinstance(value, str):
             try:
@@ -298,9 +300,9 @@ class PointSourceConfig(StrictConfigModel):
     @model_validator(mode="after")
     def _check_source_physics(self) -> "PointSourceConfig":
         offenders = [
-            f"{col}={getattr(self, col):g}"
-            for col in POLARISATION_COLUMNS
-            if getattr(self, col) != 0.0
+            f"{field}={getattr(self, field):g}"
+            for field in _INLINE_POLARISATION
+            if getattr(self, field) != 0.0
         ]
         if offenders:
             label = self.name or "source"
@@ -310,31 +312,68 @@ class PointSourceConfig(StrictConfigModel):
                 "Set them to zero to model Stokes I alone; polarisation is tracked in "
                 "issue #151."
             )
-        if self.alpha != 0.0 and self.ref_freq_mhz <= 0.0:
+        if self.alpha != 0.0 and self.ref_freq_hz <= 0.0:
             label = self.name or "source"
             raise ValueError(
                 f"source {label} has a spectral index ({self.alpha:g}) but no positive "
                 "reference frequency for it to be measured against; give a positive "
-                "ref_freq_mhz or set alpha to zero."
+                "ref_freq_hz or set alpha to zero."
             )
         return self
 
     def to_oskar_row(self, idx: int) -> dict:
         return {
-            "ra_deg": self.ra,
-            "dec_deg": self.dec,
-            "I": self.I,
-            "Q": self.Q,
-            "U": self.U,
-            "V": self.V,
-            "ref_freq_hz": self.ref_freq_mhz * 1e6,
+            "ra_deg": self.ra_deg,
+            "dec_deg": self.dec_deg,
+            "I": self.I_jy,
+            "Q": self.Q_jy,
+            "U": self.U_jy,
+            "V": self.V_jy,
+            "ref_freq_hz": self.ref_freq_hz,
             "alpha": self.alpha,
-            "rm": self.rm,
+            "rm": self.rm_rad_m2,
             "fwhm_major_arcsec": self.fwhm_major_arcsec,
             "fwhm_minor_arcsec": self.fwhm_minor_arcsec,
             "position_angle_deg": self.position_angle_deg,
             "name": str(self.name) if self.name else f"src{idx}",
         }
+
+
+#: Inline source field in the sectioned config -> its name now.
+_LEGACY_SOURCE_FIELDS = {
+    "ra": "ra_deg",
+    "dec": "dec_deg",
+    "I": "I_jy",
+    "Q": "Q_jy",
+    "U": "U_jy",
+    "V": "V_jy",
+    "rm": "rm_rad_m2",
+    "ref_freq_mhz": "ref_freq_hz",
+}
+
+
+def _legacy_point_sources(sources: Any) -> Any:
+    """Inline sources from the sectioned config, with their fields renamed.
+
+    The reference frequency was in MHz and is now in Hz; a null field meant
+    the default and is left out. A path to a sky model file is unchanged.
+    """
+    if not isinstance(sources, list):
+        return sources
+    out = []
+    for source in sources:
+        if not isinstance(source, dict):
+            out.append(source)
+            continue
+        new = {}
+        for key, value in source.items():
+            if value is None and key != "name":
+                continue
+            if key == "ref_freq_mhz" and isinstance(value, (int, float)) and not isinstance(value, bool):
+                value = value * 1e6
+            new[_LEGACY_SOURCE_FIELDS.get(key, key)] = value
+        out.append(new)
+    return out
 
 
 class FixedDiscreteSkyConfig(StrictConfigModel):
@@ -355,6 +394,9 @@ class FixedDiscreteSkyConfig(StrictConfigModel):
 
     legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
         "point_sources": ("ast", "point_sources"),
+    }
+    legacy_transforms: ClassVar[dict[str, Any]] = {
+        "point_sources": lambda sources: _legacy_point_sources(sources),
     }
 
     @field_validator("point_sources", mode="before")
@@ -416,8 +458,8 @@ class FixedDiscreteSky(Component):
 
         ast:
           point_sources:
-            - {name: Fornax A, ra: 50.6738, dec: -37.2083, I: 750.0,
-               ref_freq_mhz: 154.0, alpha: -0.77}
+            - {name: Fornax A, ra_deg: 50.6738, dec_deg: -37.2083, I_jy: 750.0,
+               ref_freq_hz: 154.0e6, alpha: -0.77}
 
     or as a path to an OSKAR 12-column sky model file (see
     :func:`read_oskar_sky_model`)::

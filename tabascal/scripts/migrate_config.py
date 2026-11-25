@@ -133,6 +133,8 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
             value = _migrate_null(config_cls, field, value)
             if value is _ABSENT:
                 continue
+            if value is not None and field in config_cls.legacy_transforms:
+                value = config_cls.legacy_transforms[field](value)
             options.setdefault(field, value)
         name = canonical_component_ref(str(ref), cls)
         components.append({name: options} if options else name)
@@ -163,9 +165,10 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     for name, section in old.items():
         section_cls = TOP_LEVEL_SECTIONS.get(name)
         if section_cls is not None and isinstance(section, Mapping):
+            renamed = {section_cls.legacy_renames.get(key, key): value for key, value in section.items()}
             section = {
                 key: value
-                for key, value in section.items()
+                for key, value in renamed.items()
                 if _migrate_null(section_cls, key, value) is not _ABSENT
             }
         new[name] = section

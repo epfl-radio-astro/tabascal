@@ -6,9 +6,9 @@ model:
         init: truth
         mean: 0
         cutoff: 1.0e-6
-        std: max_vis
-        corr_freq: 1.0e9
-        corr_time: 38
+        std_jy: max_vis
+        corr_freq_hz: 1.0e9
+        corr_time_s: 38
         gammas: [5, 5]
         freq_pad_factor: 2.0
         time_pad_factor: 2.0
@@ -18,8 +18,8 @@ model:
         init: truth
         mean: 0
         cutoff: 1.0e-6
-        std: data
-        corr_freq: 1.0e9
+        std_jy: data
+        corr_freq_hz: 1.0e9
         fov_deg: 3.1
         gammas: [5, 5]
         freq_pad_factor: 2.0
@@ -28,7 +28,7 @@ model:
 
 data:
   data_col: DATA
-  noise: null
+  noise_jy: null
 
 plots:
   init: false

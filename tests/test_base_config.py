@@ -150,8 +150,8 @@ class TestAstSchemaDefaults:
 
     def test_gpvisast_defaults_are_the_documented_numbers(self):
         cfg = GPVisAstConfig()
-        assert cfg.std == "data"
-        assert cfg.corr_freq is None
+        assert cfg.std_jy == "data"
+        assert cfg.corr_freq_hz is None
         assert cfg.fov_deg == "primary_beam"
         assert list(cfg.gammas) == pytest.approx([5.0, 5.0])
         assert cfg.cutoff == pytest.approx(1e-6)
@@ -343,7 +343,7 @@ class TestTheTimeCountIsNotAConfigKey:
             "model:\n"
             "  components:\n"
             "    - trajectory.FixedOrbit:\n"
-            "        min_elevation: null\n"
+            "        min_elevation_deg: null\n"
             "    - rfi_signal.ComplexRFIVarAnt\n"
             "    - rfi_vis.AnalyticVis\n"
             "satellites:\n"
@@ -370,7 +370,7 @@ class TestTheGainsSchemaHasNoCorrelationLengths:
             "ref_ant",
             "fix_flux_scale",
             "amp_mean",
-            "phase_mean",
-            "amp_std",
-            "phase_std",
+            "phase_mean_deg",
+            "amp_std_pct",
+            "phase_std_deg",
         }

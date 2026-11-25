@@ -299,7 +299,7 @@ understate what is there — they are a lower bound on the residual, not a
 detection threshold. The optimistic-floor caveat applies to both.
 
 The floor comes from the MS's own noise column, so an MS carrying none — and no
-`data.noise` to supply one — has no floor to quote. The light curves are still
+`data.noise_jy` to supply one — has no floor to quote. The light curves are still
 measured and written, but `error` and `z` are NaN and the coverage table is
 replaced by a line saying so: `1/sqrt(N_bl)` would be quoting a noise of 1 Jy
 that nobody stated, and a z built on it would look like a detection at any flux.

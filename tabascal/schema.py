@@ -417,7 +417,7 @@ class StrictConfigModel(BaseModel):
     """Base schema for every TABASCAL configuration section and component.
 
     ``null`` means "none" or "off", and only on the options where that is a
-    setting -- ``min_elevation: null`` is no elevation mask. It never means "the
+    setting -- ``min_elevation_deg: null`` is no elevation mask. It never means "the
     default": a default is had by leaving the key out, and an option whose
     default is computed names the computation (``corr_freq_hz: half_band``).
     """
@@ -446,6 +446,14 @@ class StrictConfigModel(BaseModel):
     #: fields whose default has changed since; ``tabascal migrate-config``
     #: writes it out so a converted config runs the model it ran before.
     legacy_absent_value: ClassVar[dict[str, Any]] = {}
+
+    #: Old key -> field, for the options of a top-level section that were
+    #: renamed in place; ``tabascal migrate-config`` renames them.
+    legacy_renames: ClassVar[dict[str, str]] = {}
+
+    #: Field name -> conversion of a legacy value into the field's units, for
+    #: the options whose unit changed when they were renamed.
+    legacy_transforms: ClassVar[dict[str, Any]] = {}
 
     #: Fields whose type does not admit ``None`` but which read ``null`` as
     #: "none" all the same (``norad_ids: null`` is no satellites).
@@ -504,7 +512,7 @@ DEFAULT_CACHE_REUSE_MAX_AGE_DAYS = 1.0
 class TrajectoryConfig(StrictConfigModel):
     """Code-level mixin for satellite trajectory components that propagate configured orbits."""
 
-    min_elevation: Optional[FiniteFloat] = Field(
+    min_elevation_deg: Optional[FiniteFloat] = Field(
         default=0.0,
         description=(
             "Elevation in degrees below which a satellite's RFI signal is masked to zero. "
@@ -514,7 +522,7 @@ class TrajectoryConfig(StrictConfigModel):
     )
 
     legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        "min_elevation": ("rfi", "min_elevation"),
+        "min_elevation_deg": ("rfi", "min_elevation"),
     }
 
 
@@ -591,18 +599,18 @@ def _check_std_value(value: Any, *, named: Tuple[str, ...] = ("data",)) -> Any:
         if value in named:
             return value
         options = " or ".join(repr(n) for n in named)
-        raise ValueError(f"std must be a positive number or {options}, got {value!r}")
+        raise ValueError(f"std_jy must be a positive number or {options}, got {value!r}")
     return _check_positive_float(value)
 
 
 class FourierGPConfig(StrictConfigModel):
     """Code-level mixin shared by Fourier-domain Gaussian process components."""
 
-    std: Optional[Union[PositiveFloat, Literal["data"]]] = Field(
+    std_jy: Optional[Union[PositiveFloat, Literal["data"]]] = Field(
         default=None,
         description="Prior standard deviation in Jy, or 'data' to estimate from the observed visibilities.",
     )
-    corr_freq: Optional[PositiveFloat] = Field(
+    corr_freq_hz: Optional[PositiveFloat] = Field(
         default=None,
         description="Correlation bandwidth in Hz along the frequency axis.",
     )
@@ -624,18 +632,18 @@ class FourierGPConfig(StrictConfigModel):
     )
 
 
-#: ``rfi_signal`` ``std``: twice the largest observed visibility (GitHub #227).
+#: ``rfi_signal`` ``std_jy``: twice the largest observed visibility (GitHub #227).
 MAX_VIS = "max_vis"
-#: ``rfi_signal`` ``corr_freq``: half the observed band.
+#: ``rfi_signal`` ``corr_freq_hz``: half the observed band.
 HALF_BAND = "half_band"
-#: ``rfi_signal`` ``corr_time``: half the observation.
+#: ``rfi_signal`` ``corr_time_s``: half the observation.
 HALF_DURATION = "half_duration"
 
 
 class RFIGPConfig(FourierGPConfig):
     """Code-level mixin shared by all GP-based RFI signal components."""
 
-    std: Union[PositiveFloat, Literal["data", "max_vis"]] = Field(
+    std_jy: Union[PositiveFloat, Literal["data", "max_vis"]] = Field(
         default="data",
         description=(
             "Width of the prior on one RFI source, in Jy (rms|V|). 'data' measures the "
@@ -643,14 +651,14 @@ class RFIGPConfig(FourierGPConfig):
             "'max_vis' is twice the largest observed visibility."
         ),
     )
-    corr_freq: Union[PositiveFloat, Literal["half_band"]] = Field(
+    corr_freq_hz: Union[PositiveFloat, Literal["half_band"]] = Field(
         default=1e6,
         description=(
             "Bandwidth, in Hz, over which the RFI signal stays correlated (knee along "
             "the frequency axis). 'half_band' uses half the observed band."
         ),
     )
-    corr_time: Union[PositiveFloat, Literal["half_duration"]] = Field(
+    corr_time_s: Union[PositiveFloat, Literal["half_duration"]] = Field(
         default=24.0,
         description=(
             "Time, in seconds, over which the RFI signal stays correlated (knee along "
@@ -707,9 +715,9 @@ class RFIGPConfig(FourierGPConfig):
         "init": ("rfi", "init"),
         "mean": ("rfi", "mean"),
         "est": ("rfi", "est"),
-        "std": ("rfi", "gp_cov", "std"),
-        "corr_freq": ("rfi", "gp_cov", "corr_freq"),
-        "corr_time": ("rfi", "gp_cov", "corr_time"),
+        "std_jy": ("rfi", "gp_cov", "std"),
+        "corr_freq_hz": ("rfi", "gp_cov", "corr_freq"),
+        "corr_time_s": ("rfi", "gp_cov", "corr_time"),
         "gammas": ("rfi", "gp_cov", "gammas"),
         "cutoff": ("rfi", "cutoff"),
         "signal_type": ("rfi", "signal_type"),
@@ -717,13 +725,13 @@ class RFIGPConfig(FourierGPConfig):
         "time_pad_factor": ("rfi", "time_pad_factor"),
     }
     legacy_null_value: ClassVar[dict[str, Any]] = {
-        "std": MAX_VIS,
-        "corr_freq": HALF_BAND,
-        "corr_time": HALF_DURATION,
+        "std_jy": MAX_VIS,
+        "corr_freq_hz": HALF_BAND,
+        "corr_time_s": HALF_DURATION,
     }
-    legacy_absent_value: ClassVar[dict[str, Any]] = {"std": MAX_VIS}
+    legacy_absent_value: ClassVar[dict[str, Any]] = {"std_jy": MAX_VIS}
 
-    @field_validator("std", mode="before")
+    @field_validator("std_jy", mode="before")
     @classmethod
     def _validate_std(cls, value: Any) -> Any:
         return _check_std_value(value, named=("data", MAX_VIS))
@@ -766,6 +774,8 @@ class RFIGPConfig(FourierGPConfig):
 class DataConfig(StrictConfigModel):
     """Observation, I/O, noise, flags, and external calibration settings."""
 
+    legacy_renames: ClassVar[dict[str, str]] = {"freq": "freq_hz", "noise": "noise_jy"}
+
     out_dir: OptionalPathStr = Field(
         default=None,
         description=(
@@ -791,7 +801,7 @@ class DataConfig(StrictConfigModel):
             "fingerprint_kind": "ms",
         },
     )
-    freq: Optional[PositiveFloat] = Field(
+    freq_hz: Optional[PositiveFloat] = Field(
         default=None,
         description=(
             "Single frequency in Hz to select (resolved to the nearest channel inside "
@@ -817,7 +827,7 @@ class DataConfig(StrictConfigModel):
         default="xx",
         description="Correlation to model, matched by identity against POLARIZATION::CORR_TYPE.",
     )
-    noise: Optional[Union[PositiveFloat, str]] = Field(
+    noise_jy: Optional[Union[PositiveFloat, str]] = Field(
         default=None,
         description=(
             "Per-visibility noise override (positive scalar in Jy or path to an .npz), "
@@ -848,7 +858,7 @@ class DataConfig(StrictConfigModel):
         ),
     )
 
-    @field_validator("noise", mode="before")
+    @field_validator("noise_jy", mode="before")
     @classmethod
     def _validate_noise(cls, value: Any) -> Any:
         if value is None:
@@ -857,11 +867,11 @@ class DataConfig(StrictConfigModel):
             value = os.fspath(value)
         if isinstance(value, str):
             if not value:
-                raise ValueError("data.noise path must not be empty; use null to read from the MS")
+                raise ValueError("data.noise_jy path must not be empty; use null to read from the MS")
             return value
         if isinstance(value, bool):
             raise ValueError(
-                f"data.noise = {value!r} is neither a number nor a path to an .npz of noise values."
+                f"data.noise_jy = {value!r} is neither a number nor a path to an .npz of noise values."
             )
         return _check_positive_float(value)
 

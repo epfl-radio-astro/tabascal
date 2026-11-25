@@ -3,7 +3,7 @@
 Two ways in, and they name the satellites differently:
 
 * **A tabascal config** (``-c``). The run's own ``satellites``, ``data`` and
-  trajectory ``min_elevation`` decide what is filtered for, the MS is read once
+  trajectory ``min_elevation_deg`` decide what is filtered for, the MS is read once
   through :class:`~tabascal.config.TabConfig`, and the curves come back ordered
   to match ``satellites.norad_ids``. This is the estimate ``rfi_signal.init:
   matched-filter`` makes internally, written out.
@@ -390,13 +390,13 @@ def resolve_min_elevation(args, config):
 
         if isinstance(config, RunConfig):
             traj_cfg = config.model.find_one(TrajectoryConfig)
-            return traj_cfg.min_elevation if traj_cfg is not None else 0.0
+            return traj_cfg.min_elevation_deg if traj_cfg is not None else 0.0
         # Plain dict fallback (e.g. saved config.yaml)
         for entry in (config.get("model") or {}).get("components") or []:
             if isinstance(entry, dict) and len(entry) == 1:
                 ((_, params),) = entry.items()
-                if isinstance(params, dict) and "min_elevation" in params:
-                    return params["min_elevation"]
+                if isinstance(params, dict) and "min_elevation_deg" in params:
+                    return params["min_elevation_deg"]
         return 0.0
 
     return 0.0
@@ -660,7 +660,7 @@ def _from_config(args, offset_fit=None):
     config.data.data_col = resolve_data_col(args, config)
     config.data.corr = resolve_corr(args, config)
     if args.freq is not None:
-        config.data.freq = args.freq
+        config.data.freq_hz = args.freq
     if args.extra_orbit_dir:
         config.satellites.extra_orbit_dir = args.extra_orbit_dir
     # The satellites are the config's own: -n/-np are refused alongside -c, since
@@ -668,7 +668,7 @@ def _from_config(args, offset_fit=None):
     min_el = resolve_min_elevation(args, config)
     traj_cfg = config.model.find_one(TrajectoryConfig)
     if traj_cfg is not None:
-        traj_cfg.min_elevation = min_el
+        traj_cfg.min_elevation_deg = min_el
 
     # An MS with no usable noise column is not fatal here: the curves are still
     # measured, and come back unweighted and unscaled with nan errors, which is
@@ -698,7 +698,7 @@ def _from_config(args, offset_fit=None):
 
         # The same checks and the same alignment the standalone residual goes
         # through: subtracting positionally would meet a full-band store with a
-        # config narrowed by data.freq and difference two different channels,
+        # config narrowed by data.freq_hz and difference two different channels,
         # and a store from another observation would be differenced at all.
         xds = xr.open_zarr(args.zarr)
         _check_zarr_identity(

@@ -1,3 +1,4 @@
+import math
 """Tests for the Pydantic v2 compartmentalised configuration schema (tabascal.schema)."""
 
 from pathlib import Path
@@ -201,7 +202,7 @@ class TestComponentEntrySyntax:
     def test_non_empty_config_on_unitary_gains_is_rejected(self):
         with pytest.raises(ConfigValidationError, match="gains.ConstGains"):
             validate_config(
-                _minimal_raw([{"gains.UnitaryGains": {"amp_std": 10}}])
+                _minimal_raw([{"gains.UnitaryGains": {"amp_std_pct": 10}}])
             )
 
     def test_errors_across_multiple_components_and_sections_are_reported_together(self):
@@ -215,15 +216,15 @@ class TestComponentEntrySyntax:
                             {"rfi_vis.AnalyticVis": {"stencil": 99}},
                         ]
                     },
-                    "data": {"freq": -10},
+                    "data": {"freq_hz": -10},
                 }
             )
         msg = str(exc.value)
         assert "path_order" in msg
         assert "corr_tme" in msg
-        assert "Did you mean 'corr_time'" in msg
+        assert "Did you mean 'corr_time_s'" in msg
         assert "stencil" in msg
-        assert "data.freq" in msg
+        assert "data.freq_hz" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +246,7 @@ class TestComponentSchemas:
             )
         )
         traj = cfg.model.components[0].config
-        assert traj.min_elevation == 0.0
+        assert traj.min_elevation_deg == 0.0
         assert traj.path_order == 3
         assert traj.path_nodes == "auto"
         assert traj.effective_path_nodes == 13
@@ -261,8 +262,8 @@ class TestComponentSchemas:
             {"path_order": True},
             {"path_nodes": 4},  # even
             {"path_nodes": 3},  # <= path_order
-            {"min_elevation": True},
-            {"min_elevation": float("nan")},
+            {"min_elevation_deg": True},
+            {"min_elevation_deg": float("nan")},
         ],
     )
     def test_fixed_orbit_rejects_invalid_fields(self, bad_fields):
@@ -282,10 +283,10 @@ class TestComponentSchemas:
         )
         var_cfg = cfg.model.components[1].config
         assert var_cfg.gammas == (3.0, 3.0)
-        assert var_cfg.std == "data"
+        assert var_cfg.std_jy == "data"
         assert var_cfg.cutoff == 1e-9
-        assert var_cfg.corr_freq == 1e6
-        assert var_cfg.corr_time == 24.0
+        assert var_cfg.corr_freq_hz == 1e6
+        assert var_cfg.corr_time_s == 24.0
 
         cfg2 = validate_config(
             _minimal_raw(
@@ -304,12 +305,12 @@ class TestComponentSchemas:
     @pytest.mark.parametrize(
         "bad_fields",
         [
-            {"std": 0},
-            {"std": -1.0},
-            {"std": True},
-            {"std": float("inf")},
-            {"corr_freq": 0},
-            {"corr_time": -5},
+            {"std_jy": 0},
+            {"std_jy": -1.0},
+            {"std_jy": True},
+            {"std_jy": float("inf")},
+            {"corr_freq_hz": 0},
+            {"corr_time_s": -5},
             {"cutoff": 1.0},
             {"cutoff": 0.0},
             {"gammas": [3.0]},
@@ -405,7 +406,7 @@ class TestComponentSchemas:
                 [
                     {
                         "ast_signal.FixedDiscreteSky": {
-                            "point_sources": [{"ra": 10.0, "dec": -20.0, "I": 5.0}]
+                            "point_sources": [{"ra_deg": 10.0, "dec_deg": -20.0, "I_jy": 5.0}]
                         }
                     },
                     "ast_vis.DiscreteSkyVis",
@@ -422,8 +423,8 @@ class TestComponentSchemas:
                     {
                         "ast_signal.FixedDiscreteSky": {
                             "point_sources": [
-                                {"name": 1934, "ra": "10.5", "dec": -20, "I": "750.0",
-                                 "alpha": " -0.8 ", "ref_freq_mhz": "1400"},
+                                {"name": 1934, "ra_deg": "10.5", "dec_deg": -20, "I_jy": "750.0",
+                                 "alpha": " -0.8 ", "ref_freq_hz": "1.4e9"},
                             ]
                         }
                     },
@@ -433,8 +434,8 @@ class TestComponentSchemas:
         )
         (source,) = cfg.model.components[0].config.point_sources
         assert source.name == "1934"
-        assert (source.ra, source.dec, source.I) == (10.5, -20.0, 750.0)
-        assert (source.alpha, source.ref_freq_mhz) == (-0.8, 1400.0)
+        assert (source.ra_deg, source.dec_deg, source.I_jy) == (10.5, -20.0, 750.0)
+        assert (source.alpha, source.ref_freq_hz) == (-0.8, 1.4e9)
         assert source.to_oskar_row(0)["name"] == "1934"
 
     @pytest.mark.parametrize("value", ["nan", "inf", "lots", ""])
@@ -456,16 +457,16 @@ class TestComponentSchemas:
     def test_const_gains_defaults_and_validation(self):
         cfg = validate_config(_minimal_raw(["ast_vis.GPVisAst", "gains.ConstGains"]))
         g = cfg.model.components[1].config
-        assert g.amp_std == 20.0
-        assert g.phase_std == 180.0
+        assert g.amp_std_pct == 20.0
+        assert g.phase_std_deg == 180.0
         assert g.fix_flux_scale is True
         assert g.fit == "complex"
 
         for bad in (
-            {"amp_std": 0},
-            {"phase_std": -1},
+            {"amp_std_pct": 0},
+            {"phase_std_deg": -1},
             {"amp_mean": 0},
-            {"amp_std": True},
+            {"amp_std_pct": True},
             {"fit": "invalid"},
         ):
             with pytest.raises(ConfigValidationError):
@@ -586,7 +587,7 @@ class TestPathsAndRoundTrip:
                 "data": {
                     "ms_path": "obs.ms",
                     "gain_table": ["cal1.G", "cal2.B"],
-                    "noise": "noise.npz",
+                    "noise_jy": "noise.npz",
                 },
                 "satellites": {
                     "norad_ids_path": "sats.txt",
@@ -623,7 +624,7 @@ class TestPathsAndRoundTrip:
         base = tmp_path.resolve()
         assert paths["data.gain_table[0]"] == str(base / "cal1.G")
         assert paths["data.gain_table[1]"] == str(base / "cal2.B")
-        assert paths["data.noise"] == str(base / "noise.npz")
+        assert paths["data.noise_jy"] == str(base / "noise.npz")
         assert paths["satellites.norad_ids_path"] == str(base / "sats.txt")
         assert paths["satellites.extra_orbit_dir"] == str(base / "tles")
         assert paths["rfi_signal.ComplexRFIConstAnt.est"] == str(base / "lc.npz")
@@ -698,12 +699,12 @@ class TestMigration:
         validated = validate_config(new)
         assert validated.model.precision == "single"
         assert validated.satellites.norad_ids == [20452, 38833]
-        assert validated.model.components[0].config.min_elevation == 5.0
+        assert validated.model.components[0].config.min_elevation_deg == 5.0
         assert validated.model.components[1].config.init == "truth"
-        assert validated.model.components[1].config.corr_time == 24.0
+        assert validated.model.components[1].config.corr_time_s == 24.0
         assert validated.model.components[2].config.stencil == 2
         assert validated.model.components[2].config.segments == 4
-        assert validated.model.components[3].config.std == 1.5
+        assert validated.model.components[3].config.std_jy == 1.5
         assert validated.model.components[3].config.fov_deg == 5.0
         assert any("rfi.time_int_factor" in n for n in notes)
         assert any("rfi.r_seed" in n and "inference.seed" in n for n in notes)
@@ -731,9 +732,9 @@ class TestMigration:
         assert cfg.signal_type == "complex"
         assert cfg.cutoff == 1e-9
         assert cfg.gammas == (3.0, 3.0)
-        assert cfg.std == "max_vis"
-        assert cfg.corr_freq == "half_band"
-        assert cfg.corr_time == "half_duration"
+        assert cfg.std_jy == "max_vis"
+        assert cfg.corr_freq_hz == "half_band"
+        assert cfg.corr_time_s == "half_duration"
         assert validated.model.components[1].config.fov_deg == "primary_beam"
         assert validated.inference.seed == 1
 
@@ -745,7 +746,7 @@ class TestMigration:
         new, notes = migrate(old)
         validated = validate_config(new).model.components
 
-        assert validated[0].config.std == "max_vis"
+        assert validated[0].config.std_jy == "max_vis"
         assert validated[1].config.init == "sample"
         assert any("rfi.gp_cov.std" in n and "'data'" in n for n in notes)
         assert any("ast.init" in n and "'prior'" in n for n in notes)
@@ -760,9 +761,45 @@ class TestMigration:
         new, notes = migrate(old)
         validated = validate_config(new).model.components
 
-        assert validated[0].config.std == "data"
+        assert validated[0].config.std_jy == "data"
         assert validated[1].config.init == "zeros"
         assert not any("was unset" in n for n in notes)
+
+    def test_migrate_renames_options_into_their_units(self):
+        """Keys gain their unit; the gain phase mean moves from radians to
+        degrees and an inline source's reference frequency from MHz to Hz."""
+        old = {
+            "model": {
+                "components": [
+                    "trajectory:FixedOrbit",
+                    "ast_signal:FixedDiscreteSky",
+                    "ast_vis:DiscreteSkyVis",
+                    "gains:ConstGains",
+                ]
+            },
+            "rfi": {"min_elevation": 10},
+            "ast": {
+                "point_sources": [
+                    {"name": "A", "ra": 1.0, "dec": -2.0, "I": 3.0, "ref_freq_mhz": 150.0,
+                     "alpha": -0.7, "rm": None},
+                ]
+            },
+            "gains": {"phase_mean": math.pi / 2, "phase_std": 30, "amp_std": 5, "fix_flux_scale": False},
+            "data": {"freq": 1.4e9, "noise": 0.5},
+            "satellites": {"norad_ids": [25544]},
+        }
+
+        new, _ = migrate(old)
+        validated = validate_config(new)
+        traj, sky, _, gains = (spec.config for spec in validated.model.components)
+
+        assert traj.min_elevation_deg == 10.0
+        (source,) = sky.point_sources
+        assert (source.ra_deg, source.dec_deg, source.I_jy) == (1.0, -2.0, 3.0)
+        assert source.ref_freq_hz == pytest.approx(150e6)
+        assert gains.phase_mean_deg == pytest.approx(90.0)
+        assert (gains.phase_std_deg, gains.amp_std_pct) == (30.0, 5.0)
+        assert (validated.data.freq_hz, validated.data.noise_jy) == (1.4e9, 0.5)
 
     def test_migrate_config_cli_round_trip(self, tmp_path):
         old_path = tmp_path / "old.yaml"
@@ -786,7 +823,7 @@ class TestMigration:
         assert args.command == "migrate-config"
         assert run_migrate(args) == 0
         loaded = load_config(str(new_path))
-        assert loaded.model.components[0].config.std == 2.0
+        assert loaded.model.components[0].config.std_jy == 2.0
 
     def test_migrate_config_cli_returns_nonzero_when_result_invalid(self, tmp_path, capsys):
         old_path = tmp_path / "bad_old.yaml"

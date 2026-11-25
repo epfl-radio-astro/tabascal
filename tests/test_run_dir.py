@@ -182,7 +182,7 @@ def test_inline_point_sources_do_not_stop_the_run_directory(tmp_path, monkeypatc
             "model": {
                 "components": [
                     {"ast_signal.FixedDiscreteSky": {
-                        "point_sources": [{"name": "src", "ra": 1.0, "dec": 2.0, "I": 3.0}],
+                        "point_sources": [{"name": "src", "ra_deg": 1.0, "dec_deg": 2.0, "I_jy": 3.0}],
                     }},
                 ]
             },

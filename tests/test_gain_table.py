@@ -1068,10 +1068,10 @@ class TestInitOrdering:
         config = {
             "model": {"components": [], "precision": "single"},
             "data": {
-                "freq": None,
+                "freq_hz": None,
                 "corr": "xx",
                 "data_col": "DATA",
-                "noise": 0.7,
+                "noise_jy": 0.7,
                 "flags": False,
             },
         }

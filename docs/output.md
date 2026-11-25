@@ -34,7 +34,7 @@ out_dir/
 
 `config.yaml` and `run.json` are written before the run reads anything, so a run that dies still says what it was:
 
-* `config.yaml` is the configuration the run used, validated with all schema defaults populated, the command-line flags applied and every input path — the MS, gain tables, truth zarr, `data.noise`, and component input paths (`est`, `init`, `point_sources`, `extra_orbit_dir`, `norad_ids_path`) — made absolute. `data.out_dir` stays the parent, so `tabascal run -c <run>/config.yaml -n again` repeats the run into a new sibling directory.
+* `config.yaml` is the configuration the run used, validated with all schema defaults populated, the command-line flags applied and every input path — the MS, gain tables, truth zarr, `data.noise_jy`, and component input paths (`est`, `init`, `point_sources`, `extra_orbit_dir`, `norad_ids_path`) — made absolute. `data.out_dir` stays the parent, so `tabascal run -c <run>/config.yaml -n again` repeats the run into a new sibling directory.
 * `run.json` holds the command line, working directory, host, the versions of tabascal and the libraries that decide what it computes, the run's seed (`inference.seed`, 1 when unset), a fingerprint of each input, and a `status`: `running` from the start, then `finished` or `failed` (with the error).
 
 The fingerprints are what let a later command say whether the inputs are still the ones the run read. A file below 64 MiB is recorded by its size and SHA-256, so a copy with the same contents still matches; a larger one by size and modification time. A directory — a gain table, a zarr — is recorded by the sizes and modification times of every file in it, and an orbit directory by its `*.json` files alone, which is all the orbit resolver reads from it. The MS is the exception: `tab2MS` writes columns into it, so its files change with every export. What is recorded instead is what the run read from it — the number of rows, the `TIME` column, the channel frequencies, the antennas and the correlations. `tab2MS` and `tabascal rfi-per-sat` recompute them and warn, naming the input, when one has changed.
@@ -256,7 +256,7 @@ On fitted grids it is round-off: measured at ~2e-16 relative in double precision
 
 A satellite is named by its NORAD id, so a run that somehow fitted the same satellite twice is refused rather than writing one column per *pair* of sources. Sources the sharding padded the list with are not written at all: they carry no signal and name no satellite.
 
-Note that a run narrowed to one channel with `data.freq` is refused here too — the results then cover part of the MS's band, and nothing in them says which part.
+Note that a run narrowed to one channel with `data.freq_hz` is refused here too — the results then cover part of the MS's band, and nothing in them says which part.
 
 ### Zero and non-finite gains
 
@@ -267,7 +267,7 @@ An unflagged dead antenna can be driven to a zero or non-finite gain by the fit.
 Writing raises a `ValueError`, before any column is built, if:
 
 * the results `.zarr` holds a different number of baselines than the MS — the results belong to another MS, or an antenna was dropped between the run and the write;
-* the results `.zarr` holds a different number of channels than the MS. A run narrowed with [`data.freq`](config.md) covers part of the MS's band. The results do record which part — the `freq` coordinate holds the channel frequencies the run was fitted on — but the writer does not yet use it to place a partial band on the MS's channel axis, so writing a narrowed run back to a full-band MS is not yet supported, the initial-prediction export included;
+* the results `.zarr` holds a different number of channels than the MS. A run narrowed with [`data.freq_hz`](config.md) covers part of the MS's band. The results do record which part — the `freq` coordinate holds the channel frequencies the run was fitted on — but the writer does not yet use it to place a partial band on the MS's channel axis, so writing a narrowed run back to a full-band MS is not yet supported, the initial-prediction export included;
 * the MS rows are not ordered time-major, so the first `n_bl` rows do not hold `n_bl` distinct antenna pairs;
 * the baseline order differs between timesteps, which the `(n_time, n_bl)` reshape tabascal reads visibilities with cannot represent;
 * the rows interleave timesteps within a block of `n_bl` rows, which reshapes cleanly but puts every visibility on the wrong timestamp.

@@ -1820,7 +1820,7 @@ def fit_time_offset(
         allowed to say.
     min_elevation : float, optional, default 0.0
         Elevation in degrees below which the satellite is not searched for,
-        inclusive, as ``trajectory.min_elevation`` is. ``None`` uses every frame. The
+        inclusive, as ``trajectory.min_elevation_deg`` is. ``None`` uses every frame. The
         in-view window is *sliced* out before the scan, so nothing below the
         horizon costs anything; the core's ``frame_mask`` is the equivalent for
         callers whose shapes must stay static.
@@ -2168,7 +2168,7 @@ def enumerate_candidates(
         Antenna positions in the ITRF frame, in metres; the mean is the site.
     min_elevation : float, optional, default 0.0
         Elevation in degrees at or above which a satellite counts as up,
-        inclusive, as ``trajectory.min_elevation`` is. A satellite reaching it in at
+        inclusive, as ``trajectory.min_elevation_deg`` is. A satellite reaching it in at
         least one integration is kept. ``None`` keeps every record over every
         frame.
 
@@ -3141,7 +3141,7 @@ def _resolve_noise(noise, what: str):
         "in sensitivity, so averaging them equally over-weights the loud "
         "baselines; and with no sigma there is no noise floor to quote, so the "
         "error and the z statistic are nan and no coverage can be computed. Set "
-        "data.noise to get either back."
+        "data.noise_jy to get either back."
     )
 
     return None
@@ -3160,7 +3160,7 @@ def has_noise_scale(result: dict) -> bool:
 def _elevation_mask(orbit_records, times_jd, ants_itrf, min_elevation):
     """In-view mask for each record, or ``None`` when no cut is configured.
 
-    Inclusive, as ``trajectory.min_elevation`` is: the cut is the lowest elevation still
+    Inclusive, as ``trajectory.min_elevation_deg`` is: the cut is the lowest elevation still
     modelled, so a sample sitting exactly on it is in view.
     """
     if min_elevation is None or len(orbit_records) == 0:
@@ -3213,7 +3213,7 @@ def light_curves_from_config(
     source axis is padded with duplicates of the last satellite, and those rows
     are re-added as zeros by the seeding code that consumes this.
 
-    The elevation cut is the run's own ``trajectory.min_elevation`` mask, taken off the
+    The elevation cut is the run's own ``trajectory.min_elevation_deg`` mask, taken off the
     config rather than recomputed, so the estimate is masked exactly where the
     model is.
 
