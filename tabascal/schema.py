@@ -290,7 +290,7 @@ def _check_positive_pair(value: Any) -> Tuple[float, float]:
     ``lax.integer_pow`` and a float one through ``lax.pow``, which differ in
     the last bit. A config that writes ``gammas: [5, 5]`` therefore runs exactly
     the model it ran before. The integer defaults some components keep are
-    their own, and never pass through here (see ``BaseGPRFI.default_gammas``).
+    their own defaults as well, written as floats too.
     """
     if not _is_plain_ordered_sequence(value):
         raise ValueError(
@@ -441,6 +441,11 @@ class StrictConfigModel(BaseModel):
     #: Field name -> what a legacy ``null`` meant, for the fields whose ``null``
     #: was a computed default and is now spelled by name.
     legacy_null_value: ClassVar[dict[str, Any]] = {}
+
+    #: Field name -> what leaving the key out of a legacy config meant, for the
+    #: fields whose default has changed since; ``tabascal migrate-config``
+    #: writes it out so a converted config runs the model it ran before.
+    legacy_absent_value: ClassVar[dict[str, Any]] = {}
 
     #: Fields whose type does not admit ``None`` but which read ``null`` as
     #: "none" all the same (``norad_ids: null`` is no satellites).
@@ -631,7 +636,7 @@ class RFIGPConfig(FourierGPConfig):
     """Code-level mixin shared by all GP-based RFI signal components."""
 
     std: Union[PositiveFloat, Literal["data", "max_vis"]] = Field(
-        default=MAX_VIS,
+        default="data",
         description=(
             "Width of the prior on one RFI source, in Jy (rms|V|). 'data' measures the "
             "total rms|V| of the observed visibilities (sky and noise included); "
@@ -652,13 +657,12 @@ class RFIGPConfig(FourierGPConfig):
             "the time axis). 'half_duration' uses half the observation."
         ),
     )
-    gammas: Optional[PositivePair] = Field(
-        default=None,
+    gammas: PositivePair = Field(
+        default=(3.0, 3.0),
         description=(
-            "Roll-off exponents of the RFI power spectrum on the (frequency, time) axes. "
-            "null is the component's own: [3, 3] for ComplexRFIVarAnt and "
-            "ComplexRFIVarAntFine, [100, 100] for ComplexRFIConstAnt and "
-            "ComplexRFIConstAntFine."
+            "Roll-off exponents of the RFI power spectrum on the (frequency, time) axes: "
+            "[3, 3] by default on ComplexRFIVarAnt and ComplexRFIVarAntFine, "
+            "[100, 100] on ComplexRFIConstAnt and ComplexRFIConstAntFine."
         ),
     )
     cutoff: CutoffFloat = Field(
@@ -712,12 +716,12 @@ class RFIGPConfig(FourierGPConfig):
         "freq_pad_factor": ("rfi", "freq_pad_factor"),
         "time_pad_factor": ("rfi", "time_pad_factor"),
     }
-    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset({"gammas"})
     legacy_null_value: ClassVar[dict[str, Any]] = {
         "std": MAX_VIS,
         "corr_freq": HALF_BAND,
         "corr_time": HALF_DURATION,
     }
+    legacy_absent_value: ClassVar[dict[str, Any]] = {"std": MAX_VIS}
 
     @field_validator("std", mode="before")
     @classmethod

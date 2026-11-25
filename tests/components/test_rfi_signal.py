@@ -1880,27 +1880,25 @@ class TestGpCovIsRead:
     the cutoff and the roll-off exponent between them decide.
     """
 
-    @pytest.mark.parametrize("absent", [_ABSENT, None])
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
-    def test_no_block_means_the_components_own_default(self, cls, absent):
-        """A config predating the key runs exactly as it did."""
-        comp = setup_with_gp_cov(cls, absent)
+    def test_no_block_means_the_components_own_default(self, cls):
+        comp = setup_with_gp_cov(cls, _ABSENT)
 
         assert comp.gp_cov_params() == (
-            [float(g) for g in cls.default_gammas],
+            list(cls.Config().gammas),
             float(cls.Config().cutoff),
         )
 
-    @pytest.mark.parametrize(
-        "cls, kind", [(ComplexRFIVarAntFine, int), (ComplexRFIConstAntFine, float)]
-    )
-    def test_the_default_gammas_keep_their_type(self, cls, kind):
+    @pytest.mark.parametrize("cls", [ComplexRFIVarAntFine, ComplexRFIConstAntFine])
+    def test_the_default_gammas_are_floats(self, cls):
         """The exponent's type picks jax's routine: ``lax.integer_pow`` for an int,
-        ``lax.pow`` for a float, which differ in the last bit. Each component's
-        default is the type it always was, so the default path is unchanged."""
-        comp = setup_with_gp_cov(cls, _ABSENT)
+        ``lax.pow`` for a float. A default is the value a config would write, so
+        writing it out runs exactly the default."""
+        default = setup_with_gp_cov(cls, _ABSENT)
+        written = setup_with_gp_cov(cls, {"gammas": list(cls.Config().gammas)})
 
-        assert [type(g) for g in comp.gp_cov_params()[0]] == [kind, kind]
+        assert [type(g) for g in default.gp_cov_params()[0]] == [float, float]
+        assert default.gp_cov_params() == written.gp_cov_params()
 
     def test_configured_gammas_are_floats(self):
         """A value written in the config was always read as floats, ints included."""
@@ -1908,19 +1906,18 @@ class TestGpCovIsRead:
 
         assert [type(g) for g in comp.gp_cov_params()[0]] == [float, float]
 
-    @pytest.mark.parametrize("absent", [_ABSENT, None])
     @pytest.mark.parametrize(
         "cls, gammas, cutoff",
         [(ComplexRFIVarAntFine, [3.0, 3.0], 1e-9), (ComplexRFIConstAntFine, [100.0, 100.0], 1e-6)],
     )
-    def test_the_defaults_are_these_numbers(self, cls, gammas, cutoff, absent):
-        comp = setup_with_gp_cov(cls, absent)
+    def test_the_defaults_are_these_numbers(self, cls, gammas, cutoff):
+        comp = setup_with_gp_cov(cls, _ABSENT)
 
         assert comp.gp_cov_params() == (gammas, cutoff)
 
     def test_the_two_components_keep_their_own_defaults(self):
         """Preserved rather than unified: making them agree is a model change."""
-        assert ComplexRFIVarAntFine.default_gammas != ComplexRFIConstAntFine.default_gammas
+        assert ComplexRFIVarAntFine.Config().gammas != ComplexRFIConstAntFine.Config().gammas
         assert (
             ComplexRFIVarAntFine.Config().cutoff != ComplexRFIConstAntFine.Config().cutoff
         )
@@ -1947,7 +1944,7 @@ class TestGpCovIsRead:
     def test_one_key_given_leaves_the_other_on_its_default(self, cls):
         comp = setup_with_gp_cov(cls, {"cutoff": 1e-4})
 
-        assert comp.gp_cov_params() == ([float(g) for g in cls.default_gammas], 1e-4)
+        assert comp.gp_cov_params() == (list(cls.Config().gammas), 1e-4)
 
     def test_an_unknown_key_is_refused_by_name(self):
         message = gp_cov_error(ComplexRFIVarAntFine, {"gamma": 3})
@@ -2083,11 +2080,9 @@ class TestGpCovIsRead:
         assert "not supported between instances" not in message
 
     def test_the_schema_defaults_match_each_component(self):
-        assert ComplexRFIVarAntFine.Config().gammas is None
-        assert ComplexRFIVarAntFine.default_gammas == [3, 3]
+        assert ComplexRFIVarAntFine.Config().gammas == (3.0, 3.0)
         assert ComplexRFIVarAntFine.Config().cutoff == 1e-9
-        assert ComplexRFIConstAntFine.Config().gammas is None
-        assert ComplexRFIConstAntFine.default_gammas == [100.0, 100.0]
+        assert ComplexRFIConstAntFine.Config().gammas == (100.0, 100.0)
         assert ComplexRFIConstAntFine.Config().cutoff == 1e-6
 
 

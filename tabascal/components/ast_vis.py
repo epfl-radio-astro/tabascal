@@ -82,7 +82,7 @@ class GPVisAstConfig(FourierGPConfig):
         ),
     )
     init: Literal["sample", "prior", "data", "zeros", "truth"] = Field(
-        default="sample",
+        default="prior",
         description=(
             "Initial astronomical visibility parameters: 'sample', 'prior', 'data', "
             "'zeros', or 'truth' (requires tab-sim zarr)."
@@ -107,6 +107,7 @@ class GPVisAstConfig(FourierGPConfig):
         "baseline_block_size": ("ast", "baseline_block_size"),
     }
     legacy_null_value: ClassVar[dict[str, Any]] = {"fov_deg": "primary_beam"}
+    legacy_absent_value: ClassVar[dict[str, Any]] = {"init": "sample"}
 
     @field_validator("std", mode="before")
     @classmethod

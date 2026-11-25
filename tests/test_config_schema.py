@@ -281,8 +281,8 @@ class TestComponentSchemas:
             )
         )
         var_cfg = cfg.model.components[1].config
-        # null: the component's own exponents (BaseGPRFI.default_gammas)
-        assert var_cfg.gammas is None
+        assert var_cfg.gammas == (3.0, 3.0)
+        assert var_cfg.std == "data"
         assert var_cfg.cutoff == 1e-9
         assert var_cfg.corr_freq == 1e6
         assert var_cfg.corr_time == 24.0
@@ -298,7 +298,7 @@ class TestComponentSchemas:
             )
         )
         const_cfg = cfg2.model.components[1].config
-        assert const_cfg.gammas is None
+        assert const_cfg.gammas == (100.0, 100.0)
         assert const_cfg.cutoff == 1e-6
 
     @pytest.mark.parametrize(
@@ -730,12 +730,39 @@ class TestMigration:
         cfg = validated.model.components[0].config
         assert cfg.signal_type == "complex"
         assert cfg.cutoff == 1e-9
-        assert cfg.gammas is None
+        assert cfg.gammas == (3.0, 3.0)
         assert cfg.std == "max_vis"
         assert cfg.corr_freq == "half_band"
         assert cfg.corr_time == "half_duration"
         assert validated.model.components[1].config.fov_deg == "primary_beam"
         assert validated.inference.seed == 1
+
+    def test_migrate_writes_out_the_defaults_that_have_since_changed(self):
+        """An unset rfi std and ast init meant max_vis and sample; the converted
+        config says so, rather than picking up the new defaults."""
+        old = {"model": {"components": ["rfi_signal:ComplexRFIVarAnt", "ast_vis:GPVisAst"]}}
+
+        new, notes = migrate(old)
+        validated = validate_config(new).model.components
+
+        assert validated[0].config.std == "max_vis"
+        assert validated[1].config.init == "sample"
+        assert any("rfi.gp_cov.std" in n and "'data'" in n for n in notes)
+        assert any("ast.init" in n and "'prior'" in n for n in notes)
+
+    def test_migrate_keeps_what_an_old_config_set(self):
+        old = {
+            "model": {"components": ["rfi_signal:ComplexRFIVarAnt", "ast_vis:GPVisAst"]},
+            "rfi": {"gp_cov": {"std": "data"}},
+            "ast": {"init": "zeros"},
+        }
+
+        new, notes = migrate(old)
+        validated = validate_config(new).model.components
+
+        assert validated[0].config.std == "data"
+        assert validated[1].config.init == "zeros"
+        assert not any("was unset" in n for n in notes)
 
     def test_migrate_config_cli_round_trip(self, tmp_path):
         old_path = tmp_path / "old.yaml"

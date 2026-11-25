@@ -121,6 +121,13 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
         for field, path in config_cls.legacy_keys.items():
             value = _lookup(old, path)
             if value is _ABSENT:
+                if field in config_cls.legacy_absent_value and field not in options:
+                    options[field] = config_cls.legacy_absent_value[field]
+                    default = config_cls.model_fields[field].default
+                    notes.append(
+                        f"{'.'.join(path)} was unset, which meant {options[field]!r}; "
+                        f"written out, since the default is now {default!r}."
+                    )
                 continue
             used.add(path)
             value = _migrate_null(config_cls, field, value)

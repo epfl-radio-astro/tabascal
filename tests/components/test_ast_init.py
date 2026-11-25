@@ -185,7 +185,7 @@ def test_the_options_the_base_config_used_to_advertise_now_raise(tmp_path, init)
 
 def test_schema_defaults_for_init_and_mean():
     cfg = GPVisAstConfig()
-    assert cfg.init == "sample"
+    assert cfg.init == "prior"
     assert cfg.mean == "zeros"
 
 

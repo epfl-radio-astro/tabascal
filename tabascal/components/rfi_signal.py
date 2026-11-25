@@ -597,6 +597,14 @@ class RFIVarAntConfig(RFIGPConfig):
 class RFIConstAntConfig(RFIGPConfig):
     """Configuration for constant-across-antennas RFI signal components."""
 
+    # The two Fourier components have never agreed on the roll-off: the
+    # difference looks historical rather than intentional (#111), and is kept
+    # rather than unified, which would be a model change for one of them.
+    gammas: PositivePair = Field(
+        default=(100.0, 100.0),
+        description="Roll-off exponents of the RFI power spectrum on the (frequency, time) axes.",
+    )
+
     cutoff: CutoffFloat = Field(
         default=1e-6,
         description=(
@@ -663,20 +671,6 @@ class BaseGPRFI(Component):
     #: The tag ``init: sample`` folds into ``inference.seed`` (tabascal.seeds).
     seed_tag = "rfi"
 
-    #: Roll-off exponent of the RFI prior power spectrum on the frequency and time
-    #: axes, used when ``gammas`` is not set. Declared per component because the
-    #: two Fourier components have never agreed on it: the difference looks
-    #: historical rather than intentional (#111), and is preserved here rather
-    #: than unified, which would be a model change for one of them. Written as
-    #: ints, which is what these were before they were configurable: jax routes
-    #: an integer exponent through ``lax.integer_pow`` and a float one through
-    #: ``lax.pow``, and the two differ in the last bit. That is far below
-    #: anything the model cares about, but it is the difference between "the
-    #: default path is unchanged" and "the default path is nearly unchanged".
-    #: Which is also why the config leaves ``gammas`` null rather than writing
-    #: this out: a value given in the config is a float, as it always was.
-    default_gammas = [3, 3]
-
     #: Whether the inverse transform supersamples onto the fine grid. The
     #: data-grid signals turn it off: the same latent, prior and parameters,
     #: with the signal at each cell's own sample only.
@@ -732,7 +726,7 @@ class BaseGPRFI(Component):
             getattr(tab_config, "gain_flags", None),
         )
 
-        self._gammas = list(cfg.gammas) if cfg.gammas is not None else list(self.default_gammas)
+        self._gammas = list(cfg.gammas)
         self._pk_cutoff = float(cfg.cutoff)
 
         # Real or complex amplitude. A real one is fitted through its Hartley
@@ -1329,9 +1323,6 @@ class ComplexRFIVarAnt(ComplexRFIVarAntFine):
 class ComplexRFIConstAntFine(BaseGPRFI):
 
     Config = RFIConstAntConfig
-
-    # Its own historical values, unchanged by the wiring: see BaseGPRFI.
-    default_gammas = [1e2, 1e2]
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
