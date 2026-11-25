@@ -373,6 +373,61 @@ def _check_grid(components, producer: int, consumer: int, key: str, shape) -> No
     )
 
 
+def dependency_order(classes: Sequence[type]) -> List[int]:
+    """The order to run ``classes`` in, as indices into it: each after what it reads.
+
+    Read from the classes' declarations alone, so it needs no observation. A
+    component that reads a state key runs after every component that writes it
+    without reading it. One that also writes the key it reads accumulates into
+    it (``GPVisAst`` and ``DiscreteSkyVis`` add into ``vis_ast``), and is not
+    ordered against the others that do; one that only reads it runs after all
+    of them, as the gains run after every sky and RFI term.
+
+    The sort is stable: of the components free to run next, the one listed
+    first does, so a list already in a valid order comes back as it was. A key
+    nothing writes is left for :func:`validate_component_order` to report.
+    """
+    import heapq
+
+    classes = list(classes)
+    reads = [set(getattr(cls, "required_inputs", {})) for cls in classes]
+    writes = [set(getattr(cls, "output_shapes", {})) for cls in classes]
+
+    after: List[set] = [set() for _ in classes]
+    for i in range(len(classes)):
+        for key in reads[i]:
+            for j in range(len(classes)):
+                if j == i or key not in writes[j]:
+                    continue
+                accumulates_j = key in reads[j]
+                accumulates_i = key in writes[i]
+                if not accumulates_j or not accumulates_i:
+                    after[i].add(j)
+
+    waiting_on = [len(deps) for deps in after]
+    unblocks: List[List[int]] = [[] for _ in classes]
+    for i, deps in enumerate(after):
+        for j in deps:
+            unblocks[j].append(i)
+    ready = [i for i, n in enumerate(waiting_on) if n == 0]
+    heapq.heapify(ready)
+    order: List[int] = []
+    while ready:
+        i = heapq.heappop(ready)
+        order.append(i)
+        for k in unblocks[i]:
+            waiting_on[k] -= 1
+            if waiting_on[k] == 0:
+                heapq.heappush(ready, k)
+    if len(order) != len(classes):
+        stuck = [component_ref(classes[i]) for i in range(len(classes)) if i not in order]
+        raise ComponentOrderError(
+            "model.components cannot be put in dependency order: "
+            f"{', '.join(stuck)} each read a state key another of them writes."
+        )
+    return order
+
+
 def validate_component_order(
     components: Sequence[Any], initial_state_keys: Iterable[str] = ()
 ) -> None:

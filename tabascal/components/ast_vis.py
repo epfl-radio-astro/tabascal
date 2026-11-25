@@ -979,7 +979,7 @@ class DiscreteSkyVis(Component):
 
     Reads ``ast_radec`` (n_src, 2) radians, ``ast_I`` (n_src, n_freq) Jy and
     ``ast_shape`` (n_src, 3) radians from the state — see
-    :class:`~tabascal.components.ast_signal.FixedDiscreteSky`, which must be listed
+    :class:`~tabascal.components.ast_signal.FixedDiscreteSky`, which therefore runs
     before this component — and ACCUMULATES into ``vis_ast`` using the visibility
     equation
 

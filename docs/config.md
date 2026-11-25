@@ -46,7 +46,7 @@ satellites:
   norad_ids: [20452, 38833, 45854]
 ```
 
-The components should be given in order of dependency. For example, `trajectory.OrbitFine` is specified before `trajectory.PhaseCalculationRFIFine` because the latter depends on the output of the former. Each component is a class which defines its configuration schema (`Config`), parameters (if any), initialisation, prior distribution, and forward model. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the canonical `module.Class` syntax (for example `trajectory.OrbitFine` refers to {class}`~tabascal.components.trajectory.OrbitFine` in [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)); `module:Class` is also accepted.
+**The order the components are listed in does not matter**: they run in dependency order, which tabascal works out from what each one reads and writes. `trajectory.PhaseCalculationRFIFine` runs after `trajectory.OrbitFine` because it reads the positions the latter writes, and the gains run after every sky and RFI term because they read the visibilities those add up. A list already in a valid order runs in the order written, and a run's saved `config.yaml` records the order it ran in. Each component is a class which defines its configuration schema (`Config`), parameters (if any), initialisation, prior distribution, and forward model. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the canonical `module.Class` syntax (for example `trajectory.OrbitFine` refers to {class}`~tabascal.components.trajectory.OrbitFine` in [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)); `module:Class` is also accepted.
 
 Every RFI component that works on the fine time-frequency grid carries a `Fine`
 suffix: `trajectory.` `FixedOrbitFine`, `PhaseCalculationRFIFine`,
@@ -61,7 +61,7 @@ belong to the data-grid route instead: `trajectory.FixedOrbit`,
 An old config that lists them beside a `RiemannVis*` component is refused at
 validation time, naming the grids.
 
-That order is checked when the configuration is validated and when the model is assembled, before anything is computed. Each component declares the state keys it reads and the keys it writes, and a list that leaves out a component — or holds the right ones in the wrong order — is rejected by name, saying which key is missing, what produces it, and whether that producer is absent or merely listed too late.
+Each component declares the state keys it reads and the keys it writes. A component that writes a key it also reads adds into it (`ast_vis.GPVisAst` and `ast_vis.DiscreteSkyVis` both add into `vis_ast`), and such components keep the order they were listed in among themselves. A list that leaves out a component another one needs is rejected by name when the configuration is validated, before anything is computed, saying which key is missing and what produces it.
 
 A model takes **at most one** orbit `trajectory.*`, one `rfi_signal.*`, one `rfi_vis.*` and one `gains.*` component. A second of any of them does not combine with the first: a second RFI signal replaces `rfi_A`, leaving the first one's parameters fitting nothing; a second RFI visibility component adds the RFI into `vis_rfi` again; a second gain replaces `vis_obs`. So each setting of the RFI grid (`n_int_freq`, `time_int_factor`, the RFI pad factors) is given in exactly one place. Astronomical visibility components are the exception: `ast_vis.GPVisAst` and `ast_vis.DiscreteSkyVis` both add into `vis_ast`, and are meant to be combined.
 
@@ -387,7 +387,7 @@ The GP sky above is flexible: it has per-baseline freedom, so a free per-antenna
 ```yaml
 model:
   components:
-    - ast_signal.FixedDiscreteSky:   # must come before DiscreteSkyVis
+    - ast_signal.FixedDiscreteSky:   # runs before DiscreteSkyVis, which reads it
         point_sources:
           - {name: Fornax A, ra_deg: 50.6738, dec_deg: -37.2083, I_jy: 750.0, ref_freq_hz: 154.0e6, alpha: -0.77}
     - ast_vis.GPVisAst               # optional
@@ -396,7 +396,7 @@ model:
     - gains.UnitaryGains
 ```
 
-`FixedDiscreteSky` writes the sky into the model state and `DiscreteSkyVis` reads it, so **`FixedDiscreteSky` must be listed first**. `DiscreteSkyVis` *accumulates* into `vis_ast` rather than assigning it, so it composes with `ast_vis.GPVisAst` — with both listed, `vis_ast` is the GP plus the fixed sources, and since `vis_ast` is zeroed before the components run the two may be given in either order. Neither component has any free parameters.
+`FixedDiscreteSky` writes the sky into the model state and `DiscreteSkyVis` reads it, so `FixedDiscreteSky` runs first, wherever it is listed. `DiscreteSkyVis` *accumulates* into `vis_ast` rather than assigning it, so it composes with `ast_vis.GPVisAst` — with both listed, `vis_ast` is the GP plus the fixed sources, and since `vis_ast` is zeroed before the components run the two may be given in either order. Neither component has any free parameters.
 
 Sources are either the inline list above or a path to an OSKAR sky model file:
 

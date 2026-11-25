@@ -583,3 +583,58 @@ def test_every_required_input_has_an_in_tree_producer():
                 f"{ref} requires '{key}', which no in-tree component produces "
                 "and which Model does not put in the state."
             )
+
+
+# ---------------------------------------------------------------------------
+# The listed order does not matter
+# ---------------------------------------------------------------------------
+
+
+def _sorted_refs(components, **extra):
+    from tabascal.schema import validate_config
+
+    cfg = validate_config({"model": {"components": components, **extra}, "satellites": {"norad_ids": [25544]}})
+    return [spec.ref for spec in cfg.model.components]
+
+
+def test_a_list_in_any_order_runs_in_dependency_order():
+    refs = _sorted_refs([
+        "gains.UnitaryGains", "rfi_vis.AnalyticVis", "ast_vis.GPVisAst",
+        "rfi_signal.ComplexRFIVarAnt", "trajectory.FixedOrbit",
+    ])
+    assert refs.index("trajectory.FixedOrbit") < refs.index("rfi_vis.AnalyticVis")
+    assert refs.index("rfi_signal.ComplexRFIVarAnt") < refs.index("rfi_vis.AnalyticVis")
+    assert refs[-1] == "gains.UnitaryGains"
+
+
+def test_a_valid_order_is_kept_as_written():
+    written = [
+        "trajectory.OrbitFine", "trajectory.PhaseCalculationRFIFine",
+        "rfi_signal.ComplexRFIVarAntFine", "rfi_vis.RiemannVisFine",
+        "ast_vis.GPVisAst", "gains.UnitaryGains",
+    ]
+    assert _sorted_refs(written, precision="double") == written
+
+
+def test_the_gains_run_after_every_term_that_adds_into_the_sky():
+    """Listed first, the gains used to pass the order check and miss the sky."""
+    sky = {"ast_signal.FixedDiscreteSky": {"point_sources": "sky.osm"}}
+    refs = _sorted_refs(["gains.UnitaryGains", "ast_vis.DiscreteSkyVis", sky, "ast_vis.GPVisAst"])
+
+    assert refs == [
+        "ast_signal.FixedDiscreteSky", "ast_vis.DiscreteSkyVis", "ast_vis.GPVisAst", "gains.UnitaryGains",
+    ]
+
+
+def test_accumulators_keep_their_listed_order():
+    sky = {"ast_signal.FixedDiscreteSky": {"point_sources": "sky.osm"}}
+    refs = _sorted_refs([sky, "ast_vis.GPVisAst", "ast_vis.DiscreteSkyVis", "gains.UnitaryGains"])
+
+    assert refs.index("ast_vis.GPVisAst") < refs.index("ast_vis.DiscreteSkyVis")
+
+
+def test_a_missing_producer_is_still_named():
+    from tabascal.schema import ConfigValidationError, validate_config
+
+    with pytest.raises(ConfigValidationError, match="rfi_phase"):
+        validate_config({"model": {"components": ["rfi_vis.RiemannVisFine", "gains.UnitaryGains"]}})

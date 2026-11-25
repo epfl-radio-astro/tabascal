@@ -1427,7 +1427,10 @@ class ModelConfig(StrictConfigModel):
                 error_lines.extend(_component_error_lines(str(err)))
         if error_lines:
             raise ValueError("\n".join(error_lines))
-        return specs
+        # Run in dependency order, whatever order they were listed in.
+        from tabascal.components import dependency_order
+
+        return [specs[i] for i in dependency_order([spec.cls for spec in specs])]
 
     def find_all(self, config_type: Type[TConfig]) -> list[Tuple[ComponentSpec, TConfig]]:
         """Every ``(spec, config)`` whose config is an instance of ``config_type``."""

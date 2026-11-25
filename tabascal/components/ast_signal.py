@@ -475,7 +475,7 @@ class FixedDiscreteSky(Component):
     Writes ``ast_radec`` (n_src, 2) in radians, ``ast_I`` (n_src, n_freq) in Jy and
     ``ast_shape`` (n_src, 3) as (FWHM major, FWHM minor, position angle) in radians.
     Carries no free parameters and pairs with
-    :class:`~tabascal.components.ast_vis.DiscreteSkyVis`, which must be listed after it.
+    :class:`~tabascal.components.ast_vis.DiscreteSkyVis`, which runs after it.
 
     NOTE the flux is in the same scale as the data the model is fit to, so with a gain
     table (data calibrated to Jy) these are physical Jy. Without it, the data are in raw
