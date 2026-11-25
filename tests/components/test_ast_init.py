@@ -304,10 +304,6 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
 # ---------------------------------------------------------------------------
 
 
-#: Distinguishes ``cutoff: null`` from no ``cutoff`` key at all.
-_ABSENT_CUTOFF = object()
-
-
 def gp_cov_config(tmp_path, **overrides):
     """A mock TabConfig with flat GPVisAst overrides."""
     return ast_config(tmp_path, **overrides)
@@ -711,12 +707,13 @@ class TestAstGpCovIsValidated:
 
         assert comp.n_k_freq_ast >= 1 and comp.n_k_time_ast >= 1
 
-    @pytest.mark.parametrize("cutoff", [None, _ABSENT_CUTOFF])
-    def test_an_unset_cutoff_is_this_number(self, tmp_path, cutoff):
-        overrides = {} if cutoff is _ABSENT_CUTOFF else {"cutoff": None}
-        config = gp_cov_config(tmp_path, **overrides)
+    def test_an_unset_cutoff_is_this_number(self, tmp_path):
+        assert setup_ast(gp_cov_config(tmp_path)).pk_cutoff == 1e-6
 
-        assert setup_ast(config).pk_cutoff == 1e-6
+    def test_a_null_cutoff_is_refused_naming_the_default(self, tmp_path):
+        message = setup_error(gp_cov_config(tmp_path, cutoff=None))
+
+        assert "cutoff: null" in message and "1e-06" in message
 
     @pytest.mark.parametrize("key", ["std", "corr_freq", "cutoff"])
     @pytest.mark.parametrize("value", [0, -1, "3e3", True, float("inf"), float("nan")])
@@ -753,11 +750,12 @@ class TestAstGpCovIsValidated:
 
         assert "gamma" in message
 
-    def test_the_two_knees_may_be_null_and_the_others_may_not(self, tmp_path):
-        setup_ast(gp_cov_config(tmp_path, fov_deg=None))
+    def test_only_the_frequency_knee_may_be_null(self, tmp_path):
+        """``corr_freq: null`` is no roll-off; ``fov_deg``'s computed default has a name."""
         setup_ast(gp_cov_config(tmp_path, corr_freq=None))
+        setup_ast(gp_cov_config(tmp_path, fov_deg="primary_beam"))
 
-        for key in ("std", "gammas"):
+        for key in ("std", "gammas", "fov_deg"):
             message = setup_error(gp_cov_config(tmp_path, **{key: None}))
             assert key in message
 

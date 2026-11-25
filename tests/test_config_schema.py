@@ -247,7 +247,7 @@ class TestComponentSchemas:
         traj = cfg.model.components[0].config
         assert traj.min_elevation == 0.0
         assert traj.path_order == 3
-        assert traj.path_nodes is None
+        assert traj.path_nodes == "auto"
         assert traj.effective_path_nodes == 13
         assert cfg.satellites.norad_ids == [25544]
         assert cfg.satellites.remote_max_age_days == 3.0
@@ -712,22 +712,30 @@ class TestMigration:
     def test_migrate_keeps_the_nulls_the_sectioned_config_documented(self):
         """``rfi.signal_type``, ``rfi.cutoff`` and ``rfi.gp_cov.gammas`` each
         documented ``null`` as "the default", and a config that wrote it out
-        still converts to one that validates, with that default."""
+        still converts to one that validates, with that default. A ``null``
+        whose default was computed converts to the computation's name."""
         old = {
-            "model": {"components": ["rfi_signal:ComplexRFIVarAnt"]},
+            "model": {"components": ["rfi_signal:ComplexRFIVarAnt", "ast_vis:GPVisAst"]},
             "rfi": {
                 "signal_type": None,
                 "cutoff": None,
-                "gp_cov": {"gammas": None, "std": None},
+                "gp_cov": {"gammas": None, "std": None, "corr_freq": None, "corr_time": None},
             },
+            "ast": {"gp_cov": {"fov_deg": None}},
+            "inference": {"seed": None},
         }
 
         new, _ = migrate(old)
-        cfg = validate_config(new).model.components[0].config
+        validated = validate_config(new)
+        cfg = validated.model.components[0].config
         assert cfg.signal_type == "complex"
         assert cfg.cutoff == 1e-9
         assert cfg.gammas is None
-        assert cfg.std is None
+        assert cfg.std == "max_vis"
+        assert cfg.corr_freq == "half_band"
+        assert cfg.corr_time == "half_duration"
+        assert validated.model.components[1].config.fov_deg == "primary_beam"
+        assert validated.inference.seed == 1
 
     def test_migrate_config_cli_round_trip(self, tmp_path):
         old_path = tmp_path / "old.yaml"

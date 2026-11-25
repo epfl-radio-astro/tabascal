@@ -82,7 +82,7 @@ def make_config(
     rfi_extra = dict(rfi_args or {})
     cfg._traj_kwargs = {
         "path_order": rfi_extra.pop("path_order", 3),
-        "path_nodes": rfi_extra.pop("path_nodes", None),
+        "path_nodes": rfi_extra.pop("path_nodes", "auto"),
     }
     cfg._analytic_kwargs = {**ANALYTIC, **rfi_extra.pop("analytic", {})}
     cfg._riemann_kwargs = {"baseline_block_size": rfi_extra.pop("baseline_block_size", None)}
@@ -415,7 +415,7 @@ class TestAnalyticVis:
         with pytest.raises(ConfigValidationError, match=key):
             AnalyticVis({**ANALYTIC, key: value})
 
-    @pytest.mark.parametrize("backend, ok", [(None, True), ("ffi", True), ("jax", False)])
+    @pytest.mark.parametrize("backend, ok", [("ffi", True), (None, False), ("jax", False)])
     def test_ffi_is_the_only_backend(self, backend, ok):
         cfg, _ = op_case()
         if ok:

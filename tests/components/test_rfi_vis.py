@@ -510,16 +510,16 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
 @pytest.mark.parametrize("Impl", [RiemannVisFine, RiemannVisVariableFine])
 @pytest.mark.parametrize("name, expected", [(None, "ffi"), ("ffi", "ffi"), ("jax", "jax")])
 def test_rfi_backend_picks_the_implementation(Impl, name, expected):
-    """null is the default, ``ffi``; the FFI route is the one that has no constants."""
+    """``ffi`` is the default; the FFI route is the one that has no constants."""
     config = make_variable_config(4, 2, 3, 5, 4, 3, strides=[1, 2])
-    impl = Impl({"backend": name})
+    impl = Impl({} if name is None else {"backend": name})
     impl.setup(config)
 
     assert impl.backend == expected
     assert (impl.build_constants() == {}) == (expected == "ffi")
 
 
-@pytest.mark.parametrize("name", ["FFI", "xla", 1])
+@pytest.mark.parametrize("name", ["FFI", "xla", 1, None])
 def test_an_unknown_rfi_backend_is_refused(name):
     with pytest.raises(ConfigValidationError, match="backend"):
         RiemannVisFine({"backend": name})

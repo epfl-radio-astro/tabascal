@@ -50,6 +50,14 @@ class ConfigValidationError(ValueError):
         self.validation_error = cause
 
 
+class NullForDefaultError(ValueError):
+    """``null`` written on an option that has no "none": the message is about ``key``."""
+
+    def __init__(self, key: str, message: str):
+        super().__init__(message)
+        self.key = key
+
+
 def _extra_key_hint(
     key: str,
     model_cls: Optional[type],
@@ -115,6 +123,12 @@ def format_validation_error(
     lines = []
     for item in err.errors():
         raw_loc = tuple(item.get("loc", ()))
+        cause = (item.get("ctx") or {}).get("error")
+        if isinstance(cause, NullForDefaultError):
+            # The message names the key for a bare pydantic error; here it is
+            # moved onto the location instead.
+            raw_loc = raw_loc + (cause.key,)
+            item = {**item, "msg": str(cause)[len(f"{cause.key}: "):]}
         loc_parts = []
         for part in raw_loc:
             if isinstance(part, int):
@@ -355,6 +369,7 @@ FloatGe1 = Annotated[float, BeforeValidator(_check_float_ge_1)]
 CutoffFloat = Annotated[float, BeforeValidator(_check_cutoff_float)]
 PositivePair = Annotated[Tuple[float, float], BeforeValidator(_check_positive_pair)]
 OptionalPathStr = Annotated[Optional[str], BeforeValidator(_check_path_str)]
+PathStr = Annotated[str, BeforeValidator(_check_path_str)]
 NonEmptyStr = Annotated[str, BeforeValidator(_check_non_empty_str)]
 
 
@@ -381,8 +396,31 @@ def _to_plain_yaml(obj: Any) -> Any:
 # Strict base model & code-level shared component mixins
 # ---------------------------------------------------------------------------
 
+def field_allows_none(field_info: Any) -> bool:
+    """Whether a field's type admits ``None``, i.e. whether ``null`` means something for it."""
+    annotation = field_info.annotation
+    if annotation is Any or annotation is type(None):
+        return True
+    return _type_admits_none(annotation)
+
+
+def _type_admits_none(annotation: Any) -> bool:
+    from typing import get_args
+
+    return any(
+        arg is type(None) or (get_args(arg) and _type_admits_none(arg))
+        for arg in get_args(annotation)
+    )
+
+
 class StrictConfigModel(BaseModel):
-    """Base schema for every TABASCAL configuration section and component."""
+    """Base schema for every TABASCAL configuration section and component.
+
+    ``null`` means "none" or "off", and only on the options where that is a
+    setting -- ``min_elevation: null`` is no elevation mask. It never means "the
+    default": a default is had by leaving the key out, and an option whose
+    default is computed names the computation (``corr_freq_hz: half_band``).
+    """
 
     model_config = ConfigDict(
         extra="forbid",
@@ -394,9 +432,40 @@ class StrictConfigModel(BaseModel):
     #: ``tabascal migrate-config`` to move options onto the owning component.
     legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {}
 
-    #: Fields for which a legacy ``null`` meant "this component's default" rather
-    #: than an explicit value, so ``tabascal migrate-config`` omits them.
+    #: Fields for which a legacy ``null`` meant "this component's default" even
+    #: though ``null`` is a setting of the field now, so ``tabascal
+    #: migrate-config`` omits them. A legacy ``null`` on a field that does not
+    #: take one is omitted without being listed here.
     legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset()
+
+    #: Field name -> what a legacy ``null`` meant, for the fields whose ``null``
+    #: was a computed default and is now spelled by name.
+    legacy_null_value: ClassVar[dict[str, Any]] = {}
+
+    #: Fields whose type does not admit ``None`` but which read ``null`` as
+    #: "none" all the same (``norad_ids: null`` is no satellites).
+    null_is_none: ClassVar[FrozenSet[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_null_as_default(cls, data: Any) -> Any:
+        # A model validator rather than a field one, so it runs before every
+        # field's own validators and the message is this one whatever they say.
+        if not isinstance(data, Mapping):
+            return data
+        for key, value in data.items():
+            if value is not None or key in cls.null_is_none:
+                continue
+            field_info = cls.model_fields.get(key) if isinstance(key, str) else None
+            if field_info is None or field_info.is_required() or field_allows_none(field_info):
+                continue
+            default = field_info.get_default(call_default_factory=True)
+            raise NullForDefaultError(
+                key,
+                f"{key}: null is not a setting of this option. Leave the key out to "
+                f"use its default ({_to_plain_yaml(default)!r}).",
+            )
+        return data
 
     @classmethod
     def input_path_fields(cls) -> dict[str, dict[str, Any]]:
@@ -512,15 +581,12 @@ class VariableFineTimeIntegrationMixin(FineTimeIntegrationMixin):
         return self
 
 
-def _check_std_value(value: Any, *, allow_none: bool) -> Any:
-    if value is None:
-        if allow_none:
-            return None
-        raise ValueError("std is required and cannot be null; give a positive number in Jy or 'data'")
+def _check_std_value(value: Any, *, named: Tuple[str, ...] = ("data",)) -> Any:
     if isinstance(value, str):
-        if value == "data":
-            return "data"
-        raise ValueError(f"std must be a positive number or 'data', got {value!r}")
+        if value in named:
+            return value
+        options = " or ".join(repr(n) for n in named)
+        raise ValueError(f"std must be a positive number or {options}, got {value!r}")
     return _check_positive_float(value)
 
 
@@ -552,37 +618,38 @@ class FourierGPConfig(StrictConfigModel):
         description="Zero-padding factor along the time axis of the Fourier domain (>= 1).",
     )
 
-    @field_validator("cutoff", mode="before")
-    @classmethod
-    def _default_cutoff(cls, value: Any) -> Any:
-        if value is None:
-            return cls.model_fields["cutoff"].default
-        return value
+
+#: ``rfi_signal`` ``std``: twice the largest observed visibility (GitHub #227).
+MAX_VIS = "max_vis"
+#: ``rfi_signal`` ``corr_freq``: half the observed band.
+HALF_BAND = "half_band"
+#: ``rfi_signal`` ``corr_time``: half the observation.
+HALF_DURATION = "half_duration"
 
 
 class RFIGPConfig(FourierGPConfig):
     """Code-level mixin shared by all GP-based RFI signal components."""
 
-    std: Optional[Union[PositiveFloat, Literal["data"]]] = Field(
-        default=None,
+    std: Union[PositiveFloat, Literal["data", "max_vis"]] = Field(
+        default=MAX_VIS,
         description=(
             "Width of the prior on one RFI source, in Jy (rms|V|). 'data' measures the "
-            "total rms|V| of the observed visibilities (sky and noise included); null is "
-            "twice the largest observed visibility."
+            "total rms|V| of the observed visibilities (sky and noise included); "
+            "'max_vis' is twice the largest observed visibility."
         ),
     )
-    corr_freq: Optional[PositiveFloat] = Field(
+    corr_freq: Union[PositiveFloat, Literal["half_band"]] = Field(
         default=1e6,
         description=(
             "Bandwidth, in Hz, over which the RFI signal stays correlated (knee along "
-            "the frequency axis). null uses half the observed band."
+            "the frequency axis). 'half_band' uses half the observed band."
         ),
     )
-    corr_time: Optional[PositiveFloat] = Field(
+    corr_time: Union[PositiveFloat, Literal["half_duration"]] = Field(
         default=24.0,
         description=(
             "Time, in seconds, over which the RFI signal stays correlated (knee along "
-            "the time axis). null uses half the observation duration."
+            "the time axis). 'half_duration' uses half the observation."
         ),
     )
     gammas: Optional[PositivePair] = Field(
@@ -645,20 +712,17 @@ class RFIGPConfig(FourierGPConfig):
         "freq_pad_factor": ("rfi", "freq_pad_factor"),
         "time_pad_factor": ("rfi", "time_pad_factor"),
     }
-    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset(
-        {"gammas", "cutoff", "signal_type"}
-    )
+    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset({"gammas"})
+    legacy_null_value: ClassVar[dict[str, Any]] = {
+        "std": MAX_VIS,
+        "corr_freq": HALF_BAND,
+        "corr_time": HALF_DURATION,
+    }
 
     @field_validator("std", mode="before")
     @classmethod
     def _validate_std(cls, value: Any) -> Any:
-        return _check_std_value(value, allow_none=True)
-
-    @field_validator("signal_type", mode="before")
-    @classmethod
-    def _default_signal_type(cls, value: Any) -> Any:
-        # null is 'complex', as it was in the sectioned config.
-        return "complex" if value is None else value
+        return _check_std_value(value, named=("data", MAX_VIS))
 
     @field_validator("init", mode="before")
     @classmethod
@@ -860,17 +924,17 @@ class InferenceConfig(StrictConfigModel):
         default=True,
         description="Whether to run MAP optimisation.",
     )
-    seed: Optional[StrictInt] = Field(
-        default=None,
+    seed: StrictInt = Field(
+        default=1,
         description=(
-            "Single random seed for the run. null means 1; 0 is a valid seed. Each "
-            "sampling component folds its own fixed tag into this seed."
+            "Single random seed for the run; 0 is a valid seed. Each sampling "
+            "component folds its own fixed tag into this seed."
         ),
     )
 
     @property
     def effective_seed(self) -> int:
-        return 1 if self.seed is None else self.seed
+        return self.seed
 
 
 class OptConfig(StrictConfigModel):
@@ -956,6 +1020,8 @@ class OptConfig(StrictConfigModel):
 
 class SatellitesConfig(StrictConfigModel):
     """Satellite catalogue and orbit-record resolution settings."""
+
+    null_is_none: ClassVar[FrozenSet[str]] = frozenset({"norad_ids"})
 
     norad_ids: list[PositiveInt] = Field(
         default_factory=list,
@@ -1151,6 +1217,8 @@ def _component_error_lines(msg: str) -> list[str]:
 
 class ModelConfig(StrictConfigModel):
     """Forward model precision and ordered component list."""
+
+    null_is_none: ClassVar[FrozenSet[str]] = frozenset({"components"})
 
     precision: Literal["single", "double"] = Field(
         default="single",

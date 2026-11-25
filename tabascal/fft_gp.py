@@ -25,9 +25,9 @@ from tabascal.timing import measure_runtime
 #
 # Two things genuinely differ between the two priors: the astronomical one
 # takes its time scale as a field of view, since a sky source's coherence time
-# is a fringe rate rather than a number to pick, and the two read
-# corr_freq: null differently -- no roll-off at all for the sky, half the
-# observed extent for the RFI.
+# is a fringe rate rather than a number to pick, and the two default
+# corr_freq differently -- null, no roll-off at all, for the sky, and 1 MHz
+# (or 'half_band', half the observed extent) for the RFI.
 #
 # Neither reads a p0: both normalise their amplitude away, to std. What the
 # cutoff sets is the number of fitted modes rather than the covariance, so it

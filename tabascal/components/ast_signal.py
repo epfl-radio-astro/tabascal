@@ -15,7 +15,7 @@ import warnings
 
 import jax.numpy as jnp
 import numpy as np
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from tabascal.components import Component
 from tabascal.components.ast_vis import radec_to_lmn
@@ -285,10 +285,7 @@ class PointSourceConfig(StrictConfigModel):
         mode="before",
     )
     @classmethod
-    def _read_number(cls, value: Any, info: ValidationInfo) -> Any:
-        # null is how these config files spell a default; only the optional fields have one.
-        if value is None and info.field_name in _OPTIONAL_SOURCE_FIELDS:
-            return 0.0
+    def _read_number(cls, value: Any) -> Any:
         # Catalogue values are often quoted (`I: '750.0'`); read them as the numbers they
         # are, and leave the finite check to FiniteFloat.
         if isinstance(value, str):

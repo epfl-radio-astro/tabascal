@@ -881,17 +881,10 @@ def test_the_documented_inline_fields_are_all_accepted(exact_rtol):
     assert sky.n_src == 1
 
 
-def test_an_explicitly_null_optional_field_takes_the_default(exact_rtol):
-    """`alpha:` with no value is how YAML says "unset", so it is absent, not malformed."""
-    cfg = make_sky_config(
-        [{"ra": 30.0, "dec": -26.7, "I": 5.0, "alpha": None, "ref_freq_mhz": None,
-          "fwhm_major_arcsec": None}],
-        freqs=(1.0e8, 2.0e8),
-    )
-    sky = setup_sky(cfg)
-
-    assert np.allclose(np.asarray(sky.ast_I), 5.0, rtol=exact_rtol)  # flat spectrum
-    assert np.all(np.asarray(sky.ast_shape) == 0.0)  # a point
+def test_an_explicitly_null_optional_field_is_refused():
+    """A default is had by leaving the field out; `alpha:` with no value is an error."""
+    with pytest.raises(ConfigValidationError, match="alpha: null"):
+        setup_sky(make_sky_config([{"ra": 30.0, "dec": -26.7, "I": 5.0, "alpha": None}]))
 
 
 def test_a_non_dict_inline_entry_is_reported_as_such():

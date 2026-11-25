@@ -21,7 +21,7 @@ from tabascal.schema import PositiveInt, StrictInt, TrajectoryConfig
 from tabascal.timing import measure_runtime
 from tabascal.time import JulianDate, apparent_radec_of_date, gast_deg, secs_to_days, skyfield_time, timescale
 
-from typing import ClassVar, Optional
+from typing import ClassVar, Literal, Optional, Union
 from pydantic import Field, model_validator
 
 import sgp4jax
@@ -256,11 +256,11 @@ class FixedOrbitConfig(TrajectoryConfig):
             "from 0 to 3: the analytic kernel keeps the delay's derivatives up to the third."
         ),
     )
-    path_nodes: Optional[PositiveInt] = Field(
-        default=None,
+    path_nodes: Union[PositiveInt, Literal["auto"]] = Field(
+        default="auto",
         description=(
             "Samples per cell the path polynomial is fitted through: odd, and at least "
-            "path_order + 1. null uses 4 * path_order + 1."
+            "path_order + 1. 'auto' uses 4 * path_order + 1."
         ),
     )
 
@@ -281,7 +281,7 @@ class FixedOrbitConfig(TrajectoryConfig):
         # fine_offsets lays out a cell, with the centre at index n // 2, so an
         # even count leaves one more node before the centre than after it, and
         # the fit runs out before the cell's end.
-        if self.path_nodes is not None:
+        if self.path_nodes != "auto":
             if self.path_nodes < self.path_order + 1 or self.path_nodes % 2 == 0:
                 raise ValueError(
                     "path_nodes is how many samples per cell the path polynomial is "
@@ -292,7 +292,7 @@ class FixedOrbitConfig(TrajectoryConfig):
 
     @property
     def effective_path_nodes(self) -> int:
-        return 4 * self.path_order + 1 if self.path_nodes is None else self.path_nodes
+        return 4 * self.path_order + 1 if self.path_nodes == "auto" else self.path_nodes
 
 
 class FixedOrbitFine(Component):

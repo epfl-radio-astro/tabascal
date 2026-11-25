@@ -139,12 +139,14 @@ class TestPriorWidths:
     ):
         """The documented default and the value written into a config are one number.
 
-        Which is what makes the documentation checkable: a config that says
-        ``amp_std: 20`` is the config that says ``amp_std: null``, bit for bit, so
-        the two conversion paths cannot drift apart unnoticed.
+        Which is what makes the documentation checkable: a config that leaves
+        ``amp_std`` out is the config that says ``amp_std: 20``, bit for bit, so
+        the two conversion paths cannot drift apart unnoticed. ``null`` is not a
+        third spelling of it.
         """
-        assert scales(**{key: None})[key] == scales(**{key: written})[key]
         assert scales()[key] == scales(**{key: written})[key]
+        with pytest.raises(ValueError, match=f"{key}: null"):
+            scales(**{key: None})
 
     def test_explicit_widths_keep_their_units(self):
         cfg = scales(amp_mean=2.0, amp_std=5.0, phase_std=2.0)
@@ -222,7 +224,6 @@ class TestPhaseMean:
         never bit anyone.
         """
         assert scales()["phase_mean"] == 0.0
-        assert scales(phase_mean=None)["phase_mean"] == 0.0
         assert scales(phase_mean=0)["phase_mean"] == 0.0
         assert scales(phase_mean=0.0)["phase_mean"] == 0.0
 

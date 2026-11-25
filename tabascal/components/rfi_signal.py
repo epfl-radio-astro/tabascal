@@ -9,7 +9,7 @@ from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
-from tabascal.schema import CutoffFloat, PositivePair, RFIGPConfig
+from tabascal.schema import HALF_BAND, HALF_DURATION, MAX_VIS, CutoffFloat, PositivePair, RFIGPConfig
 from tabascal.seeds import DEFAULT_SEED, component_key
 from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis
 from tabascal.time import to_utc_mjd
@@ -469,7 +469,7 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
 #:
 #: Everything above is the complex signal space, the default. ``rfi_signal.signal_type:
 #: real`` has its own entry in :data:`_LATENT_POWER_BY_TYPE`; this constant also
-#: sets the ``std: null`` default, which is left meaning the same in both.
+#: sets the ``std: max_vis`` default, which is left meaning the same in both.
 _LATENT_POWER = 2.0
 
 #: :data:`_LATENT_POWER` per ``rfi_signal.signal_type``.
@@ -617,8 +617,8 @@ def resolve_rfi_gp_params(
 ) -> Tuple[float, float, float]:
     """Resolve data-dependent RFI GP parameters ``(std, corr_freq, corr_time)``.
 
-    Each may be null in the config, and the fallbacks here are what null means;
-    the values themselves were checked when the config was validated, so a
+    Each may name a value computed from the observation (``'data'`` and
+    ``'max_vis'``, ``'half_band'``, ``'half_duration'``), resolved here; the values themselves were checked when the config was validated, so a
     width of zero, of -5, or of True never reaches the Fourier machinery.
     """
 
@@ -628,24 +628,24 @@ def resolve_rfi_gp_params(
 
     if cfg.std == FROM_DATA:
         std = _std_from_data(vis_obs, gain_flags)
-    elif cfg.std is None:
+    elif cfg.std == MAX_VIS:
         # _LATENT_POWER times the largest visibility. It is a maximum where the
         # option says typical, which is GitHub #227.
         std = _LATENT_POWER * float(jnp.max(jnp.abs(vis_obs)))
     else:
         std = float(cfg.std)
 
-    # Half the observed extent on each axis. The astronomical prior reads the
-    # same null on corr_freq as no roll-off at all, and the difference is which
-    # default is the uninformative one. A flat delay spectrum is not a smooth
+    # Half the observed extent on each axis. The astronomical prior's corr_freq
+    # null is no roll-off at all, and the difference is which default is the
+    # uninformative one. A flat delay spectrum is not a smooth
     # signal -- equal power at every delay leaves the channels uncorrelated, so
     # it states no frequency structure rather than a gentle one. That costs
     # nothing on the single-channel observations the shipped configs run, where
     # the only delay mode is zero. Here the emitter is coherent over some band
     # by construction, so half the observation is the least-committal guess that
     # is still a coherence scale, rather than declining to name one.
-    corr_freq = extent(freqs, chan_width) / 2 if cfg.corr_freq is None else float(cfg.corr_freq)
-    corr_time = extent(times, int_time) / 2 if cfg.corr_time is None else float(cfg.corr_time)
+    corr_freq = extent(freqs, chan_width) / 2 if cfg.corr_freq == HALF_BAND else float(cfg.corr_freq)
+    corr_time = extent(times, int_time) / 2 if cfg.corr_time == HALF_DURATION else float(cfg.corr_time)
 
     print()
     print(f"Using RFI std : {std:.1e} Jy (rms|V|)")

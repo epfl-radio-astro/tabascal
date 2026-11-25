@@ -44,11 +44,11 @@ class GPVisAstConfig(FourierGPConfig):
             "null disables roll-off along the frequency axis."
         ),
     )
-    fov_deg: Optional[PositiveFloat] = Field(
-        default=None,
+    fov_deg: Union[PositiveFloat, Literal["primary_beam"]] = Field(
+        default="primary_beam",
         description=(
             "Full field of view, in degrees, setting the knee along the time axis via "
-            "the fringe rate at fov_deg / 2. null uses the primary beam 2 * 1.22 * lambda / D."
+            "the fringe rate at fov_deg / 2. 'primary_beam' uses 2 * 1.22 * lambda / D."
         ),
     )
     gammas: PositivePair = Field(
@@ -106,12 +106,12 @@ class GPVisAstConfig(FourierGPConfig):
         "transform": ("ast", "transform"),
         "baseline_block_size": ("ast", "baseline_block_size"),
     }
-    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset({"cutoff"})
+    legacy_null_value: ClassVar[dict[str, Any]] = {"fov_deg": "primary_beam"}
 
     @field_validator("std", mode="before")
     @classmethod
     def _validate_std(cls, value: Any) -> Any:
-        return _check_std_value(value, allow_none=False)
+        return _check_std_value(value)
 
     @field_validator("time_pad_factor", mode="before")
     @classmethod
@@ -627,7 +627,7 @@ class GPVisAst(Component):
 
     def _compute_gp_params(self):
 
-        if self.fov_deg:
+        if self.fov_deg != "primary_beam":
             # fov_deg is the full field of view (diameter) out to the first null;
             # the effective diameter makes the beam radius in
             # max_ast_fringe_rate equal to fov_deg / 2.

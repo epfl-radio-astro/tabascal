@@ -121,7 +121,7 @@ def test_the_run_key_is_the_prng_key_of_the_seed():
     assert np.array_equal(run_key(5), jax.random.PRNGKey(5))
 
 
-@pytest.mark.parametrize("seed", [ABSENT, None, 0, 7], ids=["absent", "null", "0", "7"])
+@pytest.mark.parametrize("seed", [ABSENT, 0, 7], ids=["absent", "0", "7"])
 @pytest.mark.parametrize(
     "tag, make",
     [("ast", lambda tmp_path, seed: ast_start(tmp_path, seed))]
@@ -132,7 +132,7 @@ def test_a_sample_start_is_the_draw_from_the_seed_folded_with_the_crc_of_its_tag
     tmp_path, tag, make, seed, exact_rtol
 ):
     start = base_latent(make(tmp_path, seed))
-    expected_seed = DEFAULT_SEED if seed in (ABSENT, None) else seed
+    expected_seed = DEFAULT_SEED if seed is ABSENT else seed
     np.testing.assert_allclose(
         start, sample_draw(expected_seed, tag, start.shape), rtol=exact_rtol, atol=exact_rtol
     )
@@ -184,14 +184,14 @@ def test_a_deterministic_start_does_not_depend_on_the_seed(tmp_path, tag, init):
 
 
 @pytest.mark.parametrize(
-    "seed, expected", [(ABSENT, 1), (None, 1), (0, 0), (7, 7)], ids=["absent", "null", "0", "7"]
+    "seed, expected", [(ABSENT, 1), (0, 0), (7, 7)], ids=["absent", "0", "7"]
 )
 def test_load_config_normalises_the_seed(tmp_path, seed, expected):
     eff = loaded(tmp_path, seed=seed).inference.effective_seed
     assert eff == expected and type(eff) is int
 
 
-NOT_INTEGERS = [True, 1.0, 1.5, "7"]
+NOT_INTEGERS = [None, True, 1.0, 1.5, "7"]
 
 
 @pytest.mark.parametrize("seed", NOT_INTEGERS)

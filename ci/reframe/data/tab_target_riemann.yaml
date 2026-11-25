@@ -6,7 +6,7 @@ model:
         init: truth
         mean: 0
         cutoff: 1.0e-6
-        std: null
+        std: max_vis
         corr_freq: 1.0e9
         corr_time: 38
         gammas: [5, 5]

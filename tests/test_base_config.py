@@ -152,7 +152,7 @@ class TestAstSchemaDefaults:
         cfg = GPVisAstConfig()
         assert cfg.std == "data"
         assert cfg.corr_freq is None
-        assert cfg.fov_deg is None
+        assert cfg.fov_deg == "primary_beam"
         assert list(cfg.gammas) == pytest.approx([5.0, 5.0])
         assert cfg.cutoff == pytest.approx(1e-6)
         assert cfg.freq_pad_factor == pytest.approx(2.0)
@@ -161,7 +161,7 @@ class TestAstSchemaDefaults:
     def test_unset_fov_deg_leaves_the_beam_to_the_telescope(self, exact_rtol):
         tab_config = make_ast_config()
         comp = GPVisAst()
-        assert comp.config.fov_deg is None
+        assert comp.config.fov_deg == "primary_beam"
         comp.setup(tab_config)
 
         expected = max_ast_fringe_rate(

@@ -310,14 +310,14 @@ def _auto(tmp_path, fov_deg):
     return comp, config
 
 
-@pytest.mark.parametrize("fov_deg", [None, 0.05])
+@pytest.mark.parametrize("fov_deg", ["primary_beam", 0.05])
 def test_auto_reaches_the_slowest_baseline_and_no_less_than_the_floor(tmp_path, fov_deg):
     comp, config = _auto(tmp_path, fov_deg)
     needed = time_pad_for_fringe_rate(comp.n_time, comp.int_time, comp.ast_fr.min())
 
     assert comp.time_pad_factor == max(2.0, needed)
     assert _first_time_mode(comp.n_time, comp.int_time, comp.time_pad_factor) <= comp.ast_fr.min()
-    if fov_deg is not None:
+    if fov_deg != "primary_beam":
         # Narrow enough that the floor is not what decided it.
         assert needed > 2.0
 

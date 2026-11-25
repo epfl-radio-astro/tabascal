@@ -69,15 +69,20 @@ def make_const_gains_config(
     if flags is None:
         flags = make_flags(n_ant, n_freq, n_time, flagged_ants)
 
+    # None here is "not given", so the component's own default applies.
     gains_kwargs = {
-        "amp_mean": amp_mean,
-        "amp_std": amp_std,
-        "phase_mean": phase_mean,
-        "phase_std": phase_std,
-        "init": init,
-        "ref_ant": ref_ant,
-        "fix_flux_scale": fix_flux_scale,
-        "fit": fit,
+        key: value
+        for key, value in {
+            "amp_mean": amp_mean,
+            "amp_std": amp_std,
+            "phase_mean": phase_mean,
+            "phase_std": phase_std,
+            "init": init,
+            "ref_ant": ref_ant,
+            "fix_flux_scale": fix_flux_scale,
+            "fit": fit,
+        }.items()
+        if value is not None
     }
     comp_specs = [SimpleNamespace(ref=c.replace(":", ".")) for c in components]
     comp_names = [c.replace(":", ".").split(".")[-1] for c in components]
@@ -805,7 +810,7 @@ class TestScaleKeysReachTheComponent:
     @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
     def test_an_unset_prior_width_still_defaults(self, key):
         cfg = make_const_gains_config()
-        cfg._gains_kwargs[key] = None
+        del cfg._gains_kwargs[key]
         comp = setup_const_gains(cfg)
 
         expected = {"amp_std": 0.2, "phase_std": float(jnp.deg2rad(180))}[key]
@@ -1183,7 +1188,7 @@ def test_component_is_importable_by_config_string():
 
 def test_schema_defaults_carry_the_new_keys():
     cfg = ConstGainsConfig()
-    assert cfg.ref_ant is None
+    assert cfg.ref_ant == "auto"
     assert cfg.fix_flux_scale is True
 
 
@@ -1202,7 +1207,7 @@ def test_the_correlation_lengths_are_not_read_here():
 
 def test_prior_scales_convert_percent_and_degrees():
     """The scales reach the component in the units the model works in."""
-    cfg = ConstGainsConfig(amp_mean=2.0, amp_std=5.0, phase_mean=None, phase_std=2.0).prior_scales()
+    cfg = ConstGainsConfig(amp_mean=2.0, amp_std=5.0, phase_std=2.0).prior_scales()
 
     assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
     assert cfg["phase_mean"] == pytest.approx(0.0)

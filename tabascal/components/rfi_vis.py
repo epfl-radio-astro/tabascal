@@ -50,10 +50,6 @@ class RiemannVisFineConfig(FineTimeIntegrationMixin):
         "baseline_block_size": ("rfi", "baseline_block_size"),
     }
 
-    @field_validator("backend", mode="before")
-    @classmethod
-    def _default_backend(cls, value: Any) -> Any:
-        return "ffi" if value is None else value
 
 
 class RiemannVisVariableFineConfig(VariableFineTimeIntegrationMixin):
@@ -69,10 +65,6 @@ class RiemannVisVariableFineConfig(VariableFineTimeIntegrationMixin):
         "backend": ("rfi", "backend"),
     }
 
-    @field_validator("backend", mode="before")
-    @classmethod
-    def _default_backend(cls, value: Any) -> Any:
-        return "ffi" if value is None else value
 
 
 class AnalyticVisConfig(FreqIntegrationMixin):
@@ -126,10 +118,6 @@ class AnalyticVisConfig(FreqIntegrationMixin):
         "scratch_mb": ("rfi", "analytic", "scratch_mb"),
     }
 
-    @field_validator("backend", mode="before")
-    @classmethod
-    def _default_backend(cls, value: Any) -> Any:
-        return "ffi" if value is None else value
 
 
 class RiemannVisFine(Component):

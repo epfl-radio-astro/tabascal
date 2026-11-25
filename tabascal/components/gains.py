@@ -5,7 +5,7 @@ from tabascal.ms import read_caltable
 from tabascal.schema import (
     FiniteFloat,
     NonNegativeInt,
-    OptionalPathStr,
+    PathStr,
     PositiveFloat,
     StrictBool,
     StrictConfigModel,
@@ -21,7 +21,7 @@ from pydantic import Field, field_validator
 import os
 import warnings
 
-from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Optional, Tuple, Union
 
 #: The width of the amplitude prior when the config leaves it unset, as a percentage
 #: of ``amp_mean``. A real array's antennas differ in sensitivity by far more than a
@@ -63,7 +63,7 @@ GAIN_FIT_BLOCKS = {
 class ConstGainsConfig(StrictConfigModel):
     """Configuration for :class:`ConstGains`."""
 
-    init: OptionalPathStr = Field(
+    init: PathStr = Field(
         default="prior",
         description=(
             "Where the gains start: 'prior', or a path to an .npz of per-antenna gains "
@@ -78,10 +78,10 @@ class ConstGainsConfig(StrictConfigModel):
             "or 'phase'; the unfitted part is held at init (or unity for init: prior)."
         ),
     )
-    ref_ant: Optional[NonNegativeInt] = Field(
-        default=None,
+    ref_ant: Union[NonNegativeInt, Literal["auto"]] = Field(
+        default="auto",
         description=(
-            "Phase reference antenna whose phase is pinned to 0. null selects the "
+            "Phase reference antenna whose phase is pinned to 0. 'auto' selects the "
             "first antenna with unflagged data."
         ),
     )
@@ -119,43 +119,13 @@ class ConstGainsConfig(StrictConfigModel):
         "amp_std": ("gains", "amp_std"),
         "phase_std": ("gains", "phase_std"),
     }
-    legacy_null_is_default: ClassVar[FrozenSet[str]] = frozenset(
-        {"amp_mean", "phase_mean", "amp_std", "phase_std", "fix_flux_scale", "fit"}
-    )
 
     @field_validator("fit", mode="before")
     @classmethod
     def _normalise_fit(cls, value: Any) -> Any:
-        if value is None:
-            return "complex"
         if value == "both":
             return "complex"
         return value
-
-    @field_validator("fix_flux_scale", mode="before")
-    @classmethod
-    def _default_fix_flux_scale(cls, value: Any) -> Any:
-        return True if value is None else value
-
-    @field_validator("amp_mean", mode="before")
-    @classmethod
-    def _default_amp_mean(cls, value: Any) -> Any:
-        return 1.0 if value is None else value
-
-    @field_validator("phase_mean", mode="before")
-    @classmethod
-    def _default_phase_mean(cls, value: Any) -> Any:
-        return 0.0 if value is None else value
-
-    @field_validator("amp_std", mode="before")
-    @classmethod
-    def _default_amp_std(cls, value: Any) -> Any:
-        return DEFAULT_AMP_STD_PERCENT if value is None else value
-
-    @field_validator("phase_std", mode="before")
-    @classmethod
-    def _default_phase_std(cls, value: Any) -> Any:
-        return DEFAULT_PHASE_STD_DEGREES if value is None else value
 
     def prior_scales(self) -> Dict[str, float]:
         """The gain prior in the units the model works in.
@@ -614,7 +584,7 @@ class ConstGains(Component):
 
         return fix_flux_scale
 
-    def _resolve_ref_ant(self, ref_ant: Optional[int], tab_config) -> int:
+    def _resolve_ref_ant(self, ref_ant: Union[int, str], tab_config) -> int:
         """The antenna whose phase is pinned to zero."""
 
         has_data, groups = antenna_connectivity(
@@ -648,7 +618,7 @@ class ConstGains(Component):
                 "flag the smaller ones out of this run."
             )
 
-        if ref_ant is None:
+        if ref_ant == "auto":
             ref_ant = int(np.flatnonzero(has_data)[0])
         else:
             ref_ant = int(ref_ant)

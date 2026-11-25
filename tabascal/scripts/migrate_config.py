@@ -62,6 +62,28 @@ def _leaves(section: Mapping, path: Tuple[str, ...] = ()):
             yield path + (key,)
 
 
+def _migrate_null(config_cls, field: str, value: Any) -> Any:
+    """What a legacy value of ``field`` is now: itself, a named default, or ``_ABSENT``.
+
+    A legacy ``null`` meant the default on most options. Where the default is
+    computed it now has a name (``legacy_null_value``); where ``null`` is no
+    longer a setting at all, or still is but used to mean the default
+    (``legacy_null_is_default``), the key is left out so the default applies.
+    """
+    from tabascal.schema import field_allows_none
+
+    if value is not None:
+        return value
+    if field in config_cls.legacy_null_value:
+        return config_cls.legacy_null_value[field]
+    field_info = config_cls.model_fields.get(field)
+    if field in config_cls.legacy_null_is_default or (
+        field_info is not None and not field_allows_none(field_info)
+    ):
+        return _ABSENT
+    return value
+
+
 def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     """Return ``(new_config, notes)`` for a config in the sectioned layout.
 
@@ -69,7 +91,7 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     result names only what the user set. The notes say what was dropped and why.
     """
     from tabascal.imports import canonical_component_ref, import_components
-    from tabascal.schema import EmptyComponentConfig
+    from tabascal.schema import EmptyComponentConfig, TOP_LEVEL_SECTIONS
 
     old = dict(old or {})
     notes: List[str] = []
@@ -101,7 +123,8 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
             if value is _ABSENT:
                 continue
             used.add(path)
-            if value is None and field in config_cls.legacy_null_is_default:
+            value = _migrate_null(config_cls, field, value)
+            if value is _ABSENT:
                 continue
             options.setdefault(field, value)
         name = canonical_component_ref(str(ref), cls)
@@ -130,7 +153,15 @@ def migrate(old: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     new_model["components"] = components
 
     new: Dict[str, Any] = {"model": new_model}
-    new.update(old)
+    for name, section in old.items():
+        section_cls = TOP_LEVEL_SECTIONS.get(name)
+        if section_cls is not None and isinstance(section, Mapping):
+            section = {
+                key: value
+                for key, value in section.items()
+                if _migrate_null(section_cls, key, value) is not _ABSENT
+            }
+        new[name] = section
     return new, notes
 
 

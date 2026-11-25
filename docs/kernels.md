@@ -80,7 +80,7 @@ whichever the config selects, so they impose no constraint of their own — see
 
 `ri_kernels` 0.2.2 also carries `RFIAnalyticVisOp`, the kernel behind
 {class}`~tabascal.components.rfi_vis.AnalyticVis`, whose only backend
-it is for now: `backend` there is `ffi` or `null`. It reads the signal, phase
+it is for now: `backend` there is `ffi`. It reads the signal, phase
 and delay polynomial on the data grid and integrates each cell in closed form,
 so there is no fine grid for `baseline_block_size` or the memory figures above
 to bound; `AnalyticVis`'s `scratch_mb` bounds its GPU scratch instead. It is used

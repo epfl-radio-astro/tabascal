@@ -15,7 +15,7 @@ from jax import random
 
 from tabascal.schema import RunConfig
 
-#: The seed a null or absent ``inference.seed`` means.
+#: The seed an absent ``inference.seed`` means.
 DEFAULT_SEED = 1
 
 
@@ -27,7 +27,7 @@ def config_seed(config: Union[RunConfig, Mapping]) -> int:
     if seed is None:
         return DEFAULT_SEED
     if isinstance(seed, bool) or not isinstance(seed, int):
-        raise ValueError(f"inference.seed must be an integer or null, not {seed!r}.")
+        raise ValueError(f"inference.seed must be an integer, not {seed!r}.")
     return seed
 
 

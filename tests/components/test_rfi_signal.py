@@ -235,11 +235,11 @@ class TestRfiSignalConfigValidation:
             jnp.linspace(0.0, 120.0, n_time),
         )
 
-    def test_null_values_get_defaults(self):
-        """All-None config picks up defaults derived from the data and the observation grid."""
+    def test_named_values_are_resolved_from_the_observation(self):
+        """The named values are derived from the data and the observation grid."""
         freqs, times = self._grid()
         vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
-        cfg = RFIVarAntConfig(std=None, corr_freq=None, corr_time=None)
+        cfg = RFIVarAntConfig(std="max_vis", corr_freq="half_band", corr_time="half_duration")
 
         std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -247,10 +247,10 @@ class TestRfiSignalConfigValidation:
         assert corr_freq == pytest.approx(float(freqs[-1] - freqs[0]) / 2)
         assert corr_time == pytest.approx(float(times[-1] - times[0]) / 2)
 
-    def test_null_corr_time_does_not_clobber_corr_freq(self):
+    def test_half_duration_does_not_clobber_corr_freq(self):
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = RFIVarAntConfig(std=1.0, corr_freq=None, corr_time=None)
+        cfg = RFIVarAntConfig(std=1.0, corr_freq="half_band", corr_time="half_duration")
 
         _std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -275,10 +275,10 @@ class TestRfiSignalConfigValidation:
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
         omitted = RFIVarAntConfig(std=1.0, corr_freq=5e6)
-        explicit_none = RFIVarAntConfig(std=1.0, corr_freq=5e6, corr_time=None)
+        half = RFIVarAntConfig(std=1.0, corr_freq=5e6, corr_time="half_duration")
 
         left = resolve_rfi_gp_params(omitted, vis_obs, freqs, 1e6, times, 8.0)
-        right = resolve_rfi_gp_params(explicit_none, vis_obs, freqs, 1e6, times, 8.0)
+        right = resolve_rfi_gp_params(half, vis_obs, freqs, 1e6, times, 8.0)
 
         assert left[2] == pytest.approx(RFIVarAntConfig().corr_time)
         assert right[2] == pytest.approx(float(times[-1] - times[0]) / 2)
@@ -287,6 +287,11 @@ class TestRfiSignalConfigValidation:
     def test_non_numeric_value_raises(self, key):
         with pytest.raises(ValueError):
             RFIVarAntConfig(**{key: "not a number"})
+
+    @pytest.mark.parametrize("key", ["std", "corr_freq", "corr_time", "cutoff", "signal_type"])
+    def test_null_is_refused_with_the_default_named(self, key):
+        with pytest.raises(ValueError, match=f"{key}: null is not a setting.*Leave the key out"):
+            RFIVarAntConfig(**{key: None})
 
     @pytest.mark.parametrize(
         "key, value",
@@ -309,7 +314,7 @@ class TestRfiSignalConfigValidation:
     def test_single_channel_single_integration_defaults(self):
         freqs, times = jnp.array([1.4e9]), jnp.array([0.0])
         vis_obs = jnp.ones((6, 1, 1), dtype=complex)
-        cfg = RFIVarAntConfig(std=None, corr_freq=None, corr_time=None)
+        cfg = RFIVarAntConfig(std="max_vis", corr_freq="half_band", corr_time="half_duration")
 
         _std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
