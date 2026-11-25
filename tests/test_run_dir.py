@@ -1,5 +1,6 @@
 """Run directories: their creation, the record written into them, and reading one back."""
 
+import json
 import os
 from datetime import datetime
 from types import SimpleNamespace
@@ -168,6 +169,46 @@ def test_inputs_through_latest_are_resolved_once_and_shared(tmp_path, monkeypatc
     assert run_dir_mod.create_run_dir(str(tmp_path), "t", worker) == run
     expected = {"satellites": {"extra_orbit_dir": os.path.join(earlier, "results")}}
     assert worker == rank0 == expected
+
+
+def test_inline_point_sources_do_not_stop_the_run_directory(tmp_path, monkeypatch):
+    """An inline sky list is not a path: it is left alone, and the broadcast still encodes."""
+    import tabascal.distributed as dist
+    from tabascal.schema import validate_config
+
+    def make_config():
+        return validate_config({
+            "data": {"gain_table": "flux.B"},
+            "model": {
+                "components": [
+                    {"ast_signal.FixedDiscreteSky": {
+                        "point_sources": [{"name": "src", "ra": 1.0, "dec": 2.0, "I": 3.0}],
+                    }},
+                ]
+            },
+        })
+
+    monkeypatch.chdir(tmp_path)
+    rank0 = make_config()
+    sources = rank0.model.components[0].config.point_sources
+    run = run_dir_mod.create_run_dir(str(tmp_path), "t", rank0)
+
+    assert os.path.isdir(run)
+    assert rank0.model.components[0].config.point_sources is sources
+    assert rank0.data.gain_table == [os.path.realpath(tmp_path / "flux.B")]
+
+    # A worker takes process 0's paths and keeps its own parse of the sky.
+    monkeypatch.setattr(dist, "is_process_0", lambda: False)
+    monkeypatch.setattr(
+        dist, "broadcast_bytes_from_rank0",
+        lambda payload, name: json.dumps(
+            {"run_dir": run, "inputs": run_dir_mod._input_values(rank0)}
+        ).encode(),
+    )
+    worker = make_config()
+    assert run_dir_mod.create_run_dir(str(tmp_path), "t", worker) == run
+    assert worker.data.gain_table == rank0.data.gain_table
+    assert worker.model.components[0].config.point_sources == sources
 
 
 @pytest.mark.parametrize(

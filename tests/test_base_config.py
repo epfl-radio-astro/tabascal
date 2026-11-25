@@ -213,6 +213,57 @@ class TestIntegrationSampleCounts:
         assert comp.n_int_freq == tab_config.n_int_freq
         assert comp.n_int_time == tab_config.n_int_time
 
+    @pytest.mark.parametrize(
+        "components",
+        [
+            pytest.param(
+                [
+                    "trajectory.FixedOrbitFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    {"rfi_vis.RiemannVisFine": {"n_int_freq": 2, "time_int_factor": 2.0}},
+                    {"rfi_vis.RiemannVisFine": {"n_int_freq": 2, "time_int_factor": 2.0}},
+                ],
+                id="two-rfi-vis",
+            ),
+            pytest.param(
+                [
+                    "trajectory.FixedOrbitFine",
+                    {"rfi_signal.ComplexRFIVarAntFine": {"freq_pad_factor": 3.0}},
+                    {"rfi_signal.ComplexRFIConstAntFine": {"freq_pad_factor": 3.0}},
+                    {"rfi_vis.RiemannVisFine": {"n_int_freq": 2, "time_int_factor": 2.0}},
+                ],
+                id="two-rfi-signals",
+            ),
+        ],
+    )
+    def test_components_sharing_settings_build_one_grid(
+        self, components, monkeypatch
+    ):
+        """What the validator accepts, TabConfig builds, reading the shared value."""
+        config = validate_config(
+            {"satellites": {"norad_ids": [25544]}, "model": {"components": components}}
+        )
+        single = validate_config(
+            {
+                "satellites": {"norad_ids": [25544]},
+                "model": {
+                    "components": [
+                        "trajectory.FixedOrbitFine",
+                        components[1],
+                        {"rfi_vis.RiemannVisFine": {"n_int_freq": 2, "time_int_factor": 2.0}},
+                    ]
+                },
+            }
+        )
+
+        tab_config, _ = build_stubbed_tab_config(config, monkeypatch)
+        expected, _ = build_stubbed_tab_config(single, monkeypatch)
+
+        assert tab_config.n_int_freq == 2
+        assert tab_config.n_int_time == expected.n_int_time
+        np.testing.assert_array_equal(tab_config.freqs_fine, expected.freqs_fine)
+        np.testing.assert_array_equal(tab_config.times_fine, expected.times_fine)
+
     def test_a_single_channel_keeps_its_pad_factor(self, tmp_path, monkeypatch):
         config = validate_config(
             {

@@ -289,12 +289,25 @@ def absolutise_inputs(config):
 
 
 def _input_values(config):
-    """Serializable list of ``[slot_id, value]`` pairs for multi-process broadcast."""
+    """Serializable list of ``[slot_id, value]`` pairs for multi-process broadcast.
+
+    Only the paths are sent: they are all ``absolutise_inputs`` rewrites, so
+    they are all a worker could disagree with process 0 on. Anything else an
+    input slot can hold (an inline ``point_sources`` list, say) is left as
+    each process parsed it, and would not survive JSON anyway.
+    """
     items = []
     for slot_id, _label, value, meta, _setter in _iter_input_slots(config):
         if meta.get("resolved_by_runner"):
             continue
-        items.append([list(slot_id), value])
+        if _is_path(value):
+            items.append([list(slot_id), os.fspath(value)])
+        elif (
+            isinstance(value, (list, tuple))
+            and value
+            and all(_is_path(v) for v in value)
+        ):
+            items.append([list(slot_id), [os.fspath(v) for v in value]])
     return items
 
 

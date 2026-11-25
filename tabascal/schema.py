@@ -1200,6 +1200,16 @@ class ModelConfig(StrictConfigModel):
             )
         return matches[0][1] if matches else None
 
+    def find_shared(self, config_type: Type[TConfig]) -> Optional[TConfig]:
+        """The first component config of ``config_type``, or ``None`` if absent.
+
+        For settings several components may carry: the model validator has
+        already checked that every component of ``config_type`` agrees on
+        them, so any one of them answers for all.
+        """
+        matches = self.find_all(config_type)
+        return matches[0][1] if matches else None
+
     def find_one_spec(self, config_type: Type[TConfig]) -> Optional[ComponentSpec]:
         """The single :class:`ComponentSpec` whose config is ``config_type``, or ``None``."""
         matches = self.find_all(config_type)
@@ -1253,6 +1263,19 @@ class ModelConfig(StrictConfigModel):
                 raise ValueError(
                     "Variable fine-grid RFI visibility components disagree on "
                     "min_time_bins / max_time_bins."
+                )
+        # The RFI pad factors set the shared fine grid, so every RFI signal
+        # component has to agree on them too.
+        rfi_matches = self.find_all(RFIGPConfig)
+        if len(rfi_matches) > 1:
+            pads = {(c.freq_pad_factor, c.time_pad_factor) for _, c in rfi_matches}
+            if len(pads) > 1:
+                raise ValueError(
+                    "RFI signal components disagree on freq_pad_factor / time_pad_factor: "
+                    + ", ".join(
+                        f"{spec.ref}=({cfg.freq_pad_factor}, {cfg.time_pad_factor})"
+                        for spec, cfg in rfi_matches
+                    )
                 )
 
         if not self.components:

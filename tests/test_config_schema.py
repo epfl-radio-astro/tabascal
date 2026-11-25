@@ -519,6 +519,19 @@ class TestCrossComponentValidation:
                 )
             )
 
+    def test_rfi_signal_components_must_agree_on_pad_factors(self):
+        with pytest.raises(ConfigValidationError, match="pad_factor"):
+            validate_config(
+                _minimal_raw(
+                    [
+                        "trajectory.FixedOrbitFine",
+                        {"rfi_signal.ComplexRFIVarAntFine": {"time_pad_factor": 3.0}},
+                        "rfi_signal.ComplexRFIConstAntFine",
+                        "rfi_vis.RiemannVisFine",
+                    ]
+                )
+            )
+
 
 # ---------------------------------------------------------------------------
 # Input path discovery & YAML round-trip
