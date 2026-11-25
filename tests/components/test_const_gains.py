@@ -69,6 +69,10 @@ def make_const_gains_config(
     if flags is None:
         flags = make_flags(n_ant, n_freq, n_time, flagged_ants)
 
+    # A path for init is the measured gain: init: est, with est naming it.
+    est = None
+    if init not in (None, "prior", "est"):
+        init, est = "est", init
     # None here is "not given", so the component's own default applies.
     gains_kwargs = {
         key: value
@@ -78,6 +82,7 @@ def make_const_gains_config(
             "phase_mean_deg": phase_mean_deg,
             "phase_std_deg": phase_std_deg,
             "init": init,
+            "est": est,
             "ref_ant": ref_ant,
             "fix_flux_scale": fix_flux_scale,
             "fit": fit,
@@ -620,7 +625,6 @@ class TestFit:
         [
             (None, {"gains_amp_base", "gains_phase_base"}),
             ("complex", {"gains_amp_base", "gains_phase_base"}),
-            ("both", {"gains_amp_base", "gains_phase_base"}),
             ("amplitude", {"gains_amp_base"}),
             ("phase", {"gains_phase_base"}),
         ],
@@ -1076,9 +1080,17 @@ class TestInit:
         with pytest.raises(RuntimeError, match="zero"):
             setup_const_gains(make_const_gains_config(n_ant=5, init=str(path)))
 
-    def test_an_unusable_init_string_is_an_error(self):
-        with pytest.raises(RuntimeError, match="init"):
-            setup_const_gains(make_const_gains_config(init="truth"))
+    def test_a_path_that_is_no_gain_is_an_error(self):
+        with pytest.raises(RuntimeError, match="est"):
+            setup_const_gains(make_const_gains_config(init="no/such/gains.npz"))
+
+    def test_init_takes_a_name_and_est_the_path(self):
+        with pytest.raises(ValueError, match="init"):
+            ConstGainsConfig(init="gains.npz")
+        with pytest.raises(ValueError, match="est is not set"):
+            ConstGainsConfig(init="est")
+        with pytest.raises(ValueError, match="nothing reads it"):
+            ConstGainsConfig(est="gains.npz")
 
 
 # ---------------------------------------------------------------------------

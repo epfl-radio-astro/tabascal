@@ -28,6 +28,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -649,6 +650,19 @@ class FourierGPConfig(StrictConfigModel):
     )
 
 
+#: Alias -> name, for the enum values the sectioned config also spelled as a
+#: number or an abbreviation.
+_LEGACY_ALIASES = {0: "zeros", 1: "ones", "mf": "matched-filter", "both": "complex"}
+
+
+def _alias_key(value: Any) -> Any:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return int(value)
+    return value
+
+
 #: ``rfi_signal`` ``std_jy``: twice the largest observed visibility (GitHub #227).
 MAX_VIS = "max_vis"
 #: ``rfi_signal`` ``corr_freq_hz``: half the observed band.
@@ -708,15 +722,14 @@ class RFIGPConfig(FourierGPConfig):
         default="sample",
         description=(
             "Where the RFI signal parameters start: 'prior', 'est' (light curves in "
-            "est), 'matched-filter' (alias 'mf'), 'truth', 'zeros' (or 0), 'ones' (or 1), "
-            "or 'sample'."
+            "est), 'matched-filter', 'truth', 'zeros', 'ones', or 'sample'."
         ),
     )
     mean: Literal["zeros", "data", "est", "matched-filter"] = Field(
         default="zeros",
         description=(
-            "Mean of the prior over the RFI signal parameters: 'zeros' (or 0), 'data', "
-            "'est', or 'matched-filter' (alias 'mf')."
+            "Mean of the prior over the RFI signal parameters: 'zeros', 'data', "
+            "'est', or 'matched-filter'."
         ),
     )
     est: OptionalPathStr = Field(
@@ -747,34 +760,26 @@ class RFIGPConfig(FourierGPConfig):
         "corr_time_s": HALF_DURATION,
     }
     legacy_absent_value: ClassVar[dict[str, Any]] = {"std_jy": MAX_VIS}
+    legacy_transforms: ClassVar[dict[str, Any]] = {
+        "init": lambda v: _LEGACY_ALIASES.get(_alias_key(v), v),
+        "mean": lambda v: _LEGACY_ALIASES.get(_alias_key(v), v),
+    }
 
     @field_validator("std_jy", mode="before")
     @classmethod
     def _validate_std(cls, value: Any) -> Any:
         return _check_std_value(value, named=("data", MAX_VIS))
 
-    @field_validator("init", mode="before")
+    @field_validator("init", "mean", mode="before")
     @classmethod
-    def _normalise_init(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError(f"init must be one of prior/est/matched-filter/truth/zeros/ones/sample, got {value!r}")
-        if value == 0:
-            return "zeros"
-        if value == 1:
-            return "ones"
-        if value == "mf":
-            return "matched-filter"
-        return value
-
-    @field_validator("mean", mode="before")
-    @classmethod
-    def _normalise_mean(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError(f"mean must be one of zeros/data/est/matched-filter (or 0), got {value!r}")
-        if value == 0:
-            return "zeros"
-        if value == "mf":
-            return "matched-filter"
+    def _no_aliases(cls, value: Any, info: ValidationInfo) -> Any:
+        # bool is an int, so `init: true` would otherwise read as a number.
+        if isinstance(value, (bool, int, float)):
+            raise ValueError(
+                f"{info.field_name} takes a name, not {value!r}: "
+                + ("'zeros', 'ones', " if info.field_name == "init" else "'zeros', ")
+                + "'matched-filter' and the rest are spelled out."
+            )
         return value
 
     @classmethod
@@ -813,7 +818,11 @@ class RFIGPConfig(FourierGPConfig):
 class DataConfig(StrictConfigModel):
     """Observation, I/O, noise, flags, and external calibration settings."""
 
-    legacy_renames: ClassVar[dict[str, str]] = {"freq": "freq_hz", "noise": "noise_jy"}
+    legacy_renames: ClassVar[dict[str, str]] = {
+        "freq": "freq_hz",
+        "noise": "noise_jy",
+        "flags": "exclude_flagged",
+    }
 
     out_dir: OptionalPathStr = Field(
         default=None,
@@ -882,7 +891,7 @@ class DataConfig(StrictConfigModel):
         ),
         json_schema_extra={"input_path": True, "is_path_list": True},
     )
-    flags: StrictBool = Field(
+    exclude_flagged: StrictBool = Field(
         default=False,
         description=(
             "Exclude the MS's own flags from the likelihood. Default false so flagged "
@@ -1352,6 +1361,11 @@ def _parse_component_entry(entry: Any, index: int) -> ComponentSpec:
 
     from tabascal.imports import canonical_component_ref, import_components
 
+    if ":" in raw_ref:
+        raise ValueError(
+            f"model.components[{index}]: component references are written module.Class, "
+            f"not {raw_ref!r}; write {raw_ref.replace(':', '.')!r}."
+        )
     try:
         cls = import_components([raw_ref])[0]
     except ImportError as exc:

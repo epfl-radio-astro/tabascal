@@ -6,7 +6,7 @@ model:
     # RFI signal model
     - rfi_signal.ComplexRFIVarAntFine:
         init: truth
-        mean: 0
+        mean: zeros
         std_jy: max_vis   # the pipeline tests' reference values were measured with it
         corr_time_s: 24
         freq_pad_factor: 2.0
@@ -17,7 +17,7 @@ model:
     # Astronomical signal model
     - ast_vis.GPVisAst:
         init: truth
-        mean: 0
+        mean: zeros
         cutoff: 1e-6
         std_jy: 1.5           # Widest true-sky baseline in the 8A simulation is rms|V| = 2.897 Jy
         corr_freq_hz: null    # no frequency roll-off; these observations are single channel

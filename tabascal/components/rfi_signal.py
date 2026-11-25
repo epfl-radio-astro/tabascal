@@ -1215,7 +1215,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         elif prior_type == "est":
             print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
-        elif prior_type in ["matched-filter", "mf"]:
+        elif prior_type == "matched-filter":
             print("Using matched-filter estimate for RFI prior mean")
             self.mu_rfi_k = self._matched_filter_estimate(tab_config)
         elif prior_type in ["zeros", 0]:
@@ -1253,7 +1253,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         elif init_type == "est":
             print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
-        elif init_type in ["matched-filter", "mf"]:
+        elif init_type == "matched-filter":
             print("Using matched-filter estimate for rfi_A init")
             self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":
@@ -1528,7 +1528,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         elif prior_type == "est":
             print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
-        elif prior_type in ["matched-filter", "mf"]:
+        elif prior_type == "matched-filter":
             print("Using matched-filter estimate for RFI prior mean")
             self.mu_rfi_k = self._matched_filter_estimate(tab_config)
         elif prior_type in ["zeros", 0]:
@@ -1578,7 +1578,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         elif init_type == "est":
             print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
-        elif init_type in ["matched-filter", "mf"]:
+        elif init_type == "matched-filter":
             print("Using matched-filter estimate for rfi_A init")
             self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":

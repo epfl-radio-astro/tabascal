@@ -77,7 +77,7 @@ class TestTopLevelSchema:
         assert cfg.model.components == []
         assert cfg.data.data_col == "DATA"
         assert cfg.data.corr == "xx"
-        assert cfg.data.flags is False
+        assert cfg.data.exclude_flagged is False
         assert cfg.plots.prior_samples == 100
         assert cfg.seed == 1
         assert cfg.opt.epsilon == 1e-2
@@ -156,17 +156,53 @@ class TestComponentEntrySyntax:
         "entry",
         [
             "gains.UnitaryGains",
-            "gains:UnitaryGains",
             {"gains.UnitaryGains": None},
             {"gains.UnitaryGains": {}},
         ],
-        ids=["dot-bare", "colon-bare", "null-mapping", "empty-mapping"],
+        ids=["dot-bare", "null-mapping", "empty-mapping"],
     )
     def test_bare_and_empty_component_entries_parse(self, entry):
         cfg = validate_config(_minimal_raw([entry]))
         (spec,) = cfg.model.components
         assert spec.ref == "gains.UnitaryGains"
         assert isinstance(spec.config, EmptyComponentConfig)
+
+    @pytest.mark.parametrize("entry", ["gains:UnitaryGains", {"gains:UnitaryGains": {}}])
+    def test_the_colon_spelling_is_refused_with_the_dotted_one(self, entry):
+        with pytest.raises(ConfigValidationError, match="write 'gains.UnitaryGains'"):
+            validate_config(_minimal_raw([entry]))
+
+    @pytest.mark.parametrize(
+        "component, key, alias",
+        [
+            ("rfi_signal.ComplexRFIVarAnt", "init", "mf"),
+            ("rfi_signal.ComplexRFIVarAnt", "init", 0),
+            ("rfi_signal.ComplexRFIVarAnt", "init", 1),
+            ("rfi_signal.ComplexRFIVarAnt", "mean", 0),
+            ("ast_vis.GPVisAst", "mean", 0),
+            ("gains.ConstGains", "fit", "both"),
+        ],
+    )
+    def test_an_alias_is_refused(self, component, key, alias):
+        with pytest.raises(ConfigValidationError, match=key):
+            validate_config(_minimal_raw([{component: {key: alias}}]))
+
+    def test_migrate_spells_the_aliases_out(self):
+        old = {
+            "model": {"components": ["rfi_signal:ComplexRFIVarAnt", "ast_vis:GPVisAst", "gains:ConstGains"]},
+            "rfi": {"init": "mf", "mean": 0},
+            "ast": {"mean": 0},
+            "gains": {"fit": "both", "init": "cal.G"},
+            "data": {"flags": True},
+        }
+        new, notes = migrate(old)
+        cfg = validate_config(new)
+        rfi, ast, gains = (spec.config for spec in cfg.model.components)
+
+        assert (rfi.init, rfi.mean, ast.mean) == ("matched-filter", "zeros", "zeros")
+        assert (gains.fit, gains.init, gains.est) == ("complex", "est", "cal.G")
+        assert cfg.data.exclude_flagged is True
+        assert any("init: est with est: 'cal.G'" in n for n in notes)
 
     def test_multi_key_component_mapping_is_rejected(self):
         with pytest.raises(ConfigValidationError, match="single-key"):
@@ -618,7 +654,8 @@ class TestPathsAndRoundTrip:
                         "ast_vis.DiscreteSkyVis",
                         {
                             "gains.ConstGains": {
-                                "init": "gains.npz",
+                                "init": "est",
+                                "est": "gains.npz",
                             }
                         },
                     ]
@@ -636,7 +673,7 @@ class TestPathsAndRoundTrip:
         assert paths["satellites.extra_orbit_dir"] == str(base / "tles")
         assert paths["rfi_signal.ComplexRFIConstAnt.est"] == str(base / "lc.npz")
         assert paths["ast_signal.FixedDiscreteSky.point_sources"] == str(base / "sky.osm")
-        assert paths["gains.ConstGains.init"] == str(base / "gains.npz")
+        assert paths["gains.ConstGains.est"] == str(base / "gains.npz")
 
     def test_legacy_sectioned_dict_inputs_still_discovered(self, tmp_path):
         old_dict = {

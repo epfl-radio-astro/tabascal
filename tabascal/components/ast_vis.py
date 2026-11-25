@@ -90,7 +90,7 @@ class GPVisAstConfig(FourierGPConfig):
     )
     mean: Literal["zeros", "data"] = Field(
         default="zeros",
-        description="Mean of the prior over astronomical visibilities: 'zeros' (or 0) or 'data'.",
+        description="Mean of the prior over astronomical visibilities: 'zeros' or 'data'.",
     )
 
     legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -108,6 +108,9 @@ class GPVisAstConfig(FourierGPConfig):
     }
     legacy_null_value: ClassVar[dict[str, Any]] = {"fov_deg": "primary_beam"}
     legacy_absent_value: ClassVar[dict[str, Any]] = {"init": "sample"}
+    legacy_transforms: ClassVar[dict[str, Any]] = {
+        "mean": lambda v: "zeros" if not isinstance(v, bool) and v == 0 else v,
+    }
 
     @field_validator("std_jy", mode="before")
     @classmethod
@@ -130,11 +133,9 @@ class GPVisAstConfig(FourierGPConfig):
 
     @field_validator("mean", mode="before")
     @classmethod
-    def _normalise_mean(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError(f"mean must be 'zeros', 0, or 'data', got {value!r}")
-        if value == 0:
-            return "zeros"
+    def _no_aliases(cls, value: Any) -> Any:
+        if isinstance(value, (bool, int, float)):
+            raise ValueError(f"mean takes 'zeros' or 'data', not {value!r}.")
         return value
 
     def requires_truth(self, ref: str = "") -> dict[str, str]:
@@ -704,7 +705,7 @@ class GPVisAst(Component):
 
             With it, ``std_jy`` is the width of the *complex* visibility about
             its prior mean, ``sqrt(E|vis_ast - mu|^2)``. At the default
-            ``GPVisAst.mean: 0`` the mean is zero and that is exactly
+            ``GPVisAst.mean: zeros`` the mean is zero and that is exactly
             ``rms|vis_ast|``, so "set it to the amplitude you see in a clean
             channel" is literally true rather than true after dividing by
             ``sqrt(2)``. That is the property the key exists to have. Under
@@ -714,7 +715,7 @@ class GPVisAst(Component):
             ``sqrt(std^2 + |mu|^2)``.
 
             ``rfi_signal.std_jy`` names the same quantity in the same units, at
-            ``rfi_signal.mean: 0``. It gets there differently, since it normalises
+            ``rfi_signal.mean: zeros``. It gets there differently, since it normalises
             ``rfi_A``, which the visibility is quadratic in -- and a non-zero
             ``rfi_signal.mean`` adds power to the RFI visibility rather than merely
             shifting it, so the two stop matching there.
@@ -810,7 +811,7 @@ class GPVisAst(Component):
         MS's own flags and the samples no gain table could calibrate -- and
         not the likelihood's. Those answer different questions and this is
         where the difference shows: a strong emitter flagged by some other
-        task is data tabascal is here to recover, so ``data.flags: false``
+        task is data tabascal is here to recover, so ``data.exclude_flagged: false``
         keeps it in the fit, and it is still the wrong place to measure a
         clean sky amplitude from. An uncalibratable visibility is worse: it
         carries a unity gain where its neighbours were divided by a real one,
@@ -840,7 +841,7 @@ class GPVisAst(Component):
                 "RFI is in them is in the prior width too, so it will be "
                 "wider than the sky by however much RFI there is. Flag the "
                 "contaminated samples in the MS -- this reads those flags "
-                "whatever data.flags says, so flagging them does not stop "
+                "whatever data.exclude_flagged says, so flagging them does not stop "
                 "tabascal fitting them -- or set GPVisAst.std_jy to a width "
                 "in Jy."
             )

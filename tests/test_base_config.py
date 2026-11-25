@@ -315,6 +315,7 @@ class TestTheGainsSchemaHasNoCorrelationLengths:
     def test_const_gains_schema_fields(self):
         assert set(ConstGainsConfig.model_fields) == {
             "init",
+            "est",
             "fit",
             "ref_ant",
             "fix_flux_scale",

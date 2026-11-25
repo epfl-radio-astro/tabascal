@@ -471,11 +471,11 @@ def test_the_log_line_names_the_optimiser(kwargs, says):
 # ---------------------------------------------------------------------------
 
 E2E_COMPONENTS = [
-    "trajectory:FixedOrbitFine",
-    "rfi_signal:ComplexRFIVarAntFine",
-    "rfi_vis:RiemannVisFine",
-    "ast_vis:GPVisAst",
-    "gains:UnitaryGains",
+    "trajectory.FixedOrbitFine",
+    "rfi_signal.ComplexRFIVarAntFine",
+    "rfi_vis.RiemannVisFine",
+    "ast_vis.GPVisAst",
+    "gains.UnitaryGains",
 ]
 
 

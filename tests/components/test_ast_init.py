@@ -30,7 +30,7 @@ from .conftest import make_constants
 
 
 INIT_OPTIONS = ("data", "prior", "truth", "sample", "zeros")
-MEAN_OPTIONS = ("data", "zeros", 0)
+MEAN_OPTIONS = ("data", "zeros")
 
 
 # ---------------------------------------------------------------------------
@@ -194,14 +194,9 @@ def test_schema_defaults_for_init_and_mean():
 # ---------------------------------------------------------------------------
 
 
-def test_ast_mean_zero_and_zeros_are_the_same_prior(tmp_path):
-    """``0`` and ``zeros`` are one option under two spellings, not two options."""
-    numeric = setup_ast(ast_config(tmp_path, mean=0, init="sample"))
-    named = setup_ast(ast_config(tmp_path, mean="zeros", init="sample"))
-
-    np.testing.assert_array_equal(numeric.mu_ast_k, named.mu_ast_k)
-    for key, value in numeric.init_params_base.items():
-        np.testing.assert_array_equal(value, named.init_params_base[key])
+def test_ast_mean_is_spelled_out(tmp_path):
+    """``zeros`` has one spelling; ``0`` is refused rather than read as it."""
+    assert "mean" in setup_error(ast_config(tmp_path, mean=0))
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +492,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         """The case the two masks exist to tell apart.
 
         A strong emitter flagged by some other task is data tabascal is here to
-        recover, so ``data.flags: false`` leaves it in the likelihood -- and it
+        recover, so ``data.exclude_flagged: false`` leaves it in the likelihood -- and it
         is still the wrong place to measure a clean sky amplitude from. The
         width comes off ``ms_flags``, the fit runs on ``flags``, and here they
         disagree completely.
@@ -509,9 +504,9 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         vis[:, :, ::2] *= 50.0
         config.vis_obs = jnp.asarray(vis)
         config.ms_flags = jnp.asarray(contaminated)
-        # set_flags derives this from ms_flags whatever data.flags says.
+        # set_flags derives this from ms_flags whatever data.exclude_flagged says.
         config.estimator_flags = jnp.asarray(contaminated)
-        # What the likelihood excludes: nothing. data.flags: false.
+        # What the likelihood excludes: nothing. data.exclude_flagged: false.
         config.flags = jnp.zeros(vis.shape, dtype=bool)
 
         comp = setup_ast(config)
@@ -560,8 +555,8 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         assert "nothing flags any of them" in printed
         assert "RFI" in printed
         # And it points at the fix that does not cost the run anything: the MS
-        # flags are read here whatever data.flags decides for the likelihood.
-        assert "whatever data.flags says" in printed
+        # flags are read here whatever data.exclude_flagged decides for the likelihood.
+        assert "whatever data.exclude_flagged says" in printed
 
     @pytest.mark.parametrize("amplitude", [1e20, 1e-30], ids=["huge", "tiny"])
     def test_data_measures_amplitudes_the_square_would_lose(self, tmp_path, amplitude):

@@ -61,8 +61,8 @@ def test_single_disables_x64_after_sgp4jax_enabled_it():
 # double-only ones (two, so the "every offender" test can prove it lists all).
 # RiemannVisFine runs both of its backends in either precision, so it is the
 # single-ok representative here — which also guards against it regressing to double-only.
-_DOUBLE_ONLY = ["trajectory:OrbitFine", "trajectory:PhaseCalculationRFIFine"]
-_SINGLE_OK = ["rfi_vis:RiemannVisFine"]
+_DOUBLE_ONLY = ["trajectory.OrbitFine", "trajectory.PhaseCalculationRFIFine"]
+_SINGLE_OK = ["rfi_vis.RiemannVisFine"]
 
 
 def test_preflight_single_rejects_double_only_component():

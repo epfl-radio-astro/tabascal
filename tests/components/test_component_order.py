@@ -188,41 +188,41 @@ class TestValidLists:
         "refs",
         [
             pytest.param(
-                FULL_RFI + ["ast_vis:GPVisAst", "gains:UnitaryGains"], id="default"
+                FULL_RFI + ["ast_vis.GPVisAst", "gains.UnitaryGains"], id="default"
             ),
             pytest.param(
                 [
-                    "trajectory:FixedOrbitFine",
-                    "trajectory:PhaseCalculationRFIFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
+                    "trajectory.FixedOrbitFine",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    "rfi_vis.RiemannVisFine",
+                    "ast_vis.GPVisAst",
+                    "gains.UnitaryGains",
                 ],
                 id="fitted-phase",
             ),
             pytest.param(
                 [
-                    "trajectory:OrbitFine",
-                    "trajectory:PhaseCalculationRFIFine",
-                    "rfi_signal:ComplexRFIConstAntFine",
-                    "rfi_vis:RiemannVisVariableFine",
-                    "ast_signal:FixedDiscreteSky",
-                    "ast_vis:DiscreteSkyVis",
-                    "gains:ConstGains",
+                    "trajectory.OrbitFine",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "rfi_signal.ComplexRFIConstAntFine",
+                    "rfi_vis.RiemannVisVariableFine",
+                    "ast_signal.FixedDiscreteSky",
+                    "ast_vis.DiscreteSkyVis",
+                    "gains.ConstGains",
                 ],
                 id="const-gains",
             ),
             pytest.param(
                 [
-                    "trajectory:NoDragOrbitFine",
-                    "trajectory:PhaseCalculationRFIFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisVariableFine",
-                    "ast_signal:FixedDiscreteSky",
-                    "ast_vis:GPVisAst",
-                    "ast_vis:DiscreteSkyVis",
-                    "gains:UnitaryGains",
+                    "trajectory.NoDragOrbitFine",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    "rfi_vis.RiemannVisVariableFine",
+                    "ast_signal.FixedDiscreteSky",
+                    "ast_vis.GPVisAst",
+                    "ast_vis.DiscreteSkyVis",
+                    "gains.UnitaryGains",
                 ],
                 id="gp-plus-fixed-sky",
             ),
@@ -246,7 +246,7 @@ class TestValidLists:
         A visibility component may therefore be the first thing in the list and
         still find the accumulator it adds into.
         """
-        check(["ast_vis:GPVisAst"])
+        check(["ast_vis.GPVisAst"])
 
 
 # Where a shipped ``model.components`` list can live. Searched recursively: a
@@ -413,8 +413,8 @@ class TestTheHarvestDecision:
         return _component_lists("doc", text, broken), broken
 
     def test_a_model_components_list_is_harvested(self):
-        found, broken = self.read("model:\n  components:\n    - gains:UnitaryGains\n")
-        assert found == [["gains:UnitaryGains"]]
+        found, broken = self.read("model:\n  components:\n    - gains.UnitaryGains\n")
+        assert found == [["gains.UnitaryGains"]]
         assert broken == []
 
     def test_an_explicitly_empty_list_is_harvested_not_dropped(self):
@@ -440,12 +440,12 @@ class TestTheHarvestDecision:
         assert broken == []
 
     def test_a_root_level_components_list_is_a_breakage(self):
-        found, broken = self.read("components:\n  - gains:UnitaryGains\n")
+        found, broken = self.read("components:\n  - gains.UnitaryGains\n")
         assert found == []
         assert broken == ["doc: carries a root-level components: but no model.components mapping"]
 
     def test_a_non_list_components_value_is_a_breakage(self):
-        found, broken = self.read("model:\n  components: gains:UnitaryGains\n")
+        found, broken = self.read("model:\n  components: gains.UnitaryGains\n")
         assert found == []
         assert broken == ["doc: 'model.components' is not a list"]
 
@@ -489,7 +489,7 @@ def test_every_shipped_component_reference_resolves(refs):
 
     Fragments included: a snippet whose reference cannot be imported is as broken
     as a whole model whose components are in the wrong order, and the YAML has to
-    be written ``module:Class`` with no space, or it parses as a mapping and never
+    be written ``module.Class``: ``module: Class`` parses as a mapping and never
     reaches the importer as a reference at all.
     """
     build(refs)
@@ -517,7 +517,7 @@ def test_model_makes_the_check_before_it_sets_anything_up():
     with pytest.raises(ComponentOrderError, match="ast_radec"):
         Model(
             SimpleNamespace(noise=1.0, n_rfi=0),
-            FULL_RFI + ["ast_vis:DiscreteSkyVis", "gains:UnitaryGains"],
+            FULL_RFI + ["ast_vis.DiscreteSkyVis", "gains.UnitaryGains"],
         )
 
 

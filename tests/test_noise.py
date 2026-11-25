@@ -1411,7 +1411,7 @@ class TestInitCallsTheReadBeforeTheOverride:
                 "corr": "xx",
                 "data_col": "DATA",
                 "noise_jy": noise,
-                "flags": False,
+                "exclude_flagged": False,
             },
         }
 

@@ -4,7 +4,7 @@ model:
     - trajectory.FixedOrbitFine
     - rfi_signal.ComplexRFIVarAntFine:
         init: truth
-        mean: 0
+        mean: zeros
         cutoff: 1.0e-6
         std_jy: max_vis
         corr_freq_hz: 1.0e9
@@ -16,7 +16,7 @@ model:
         n_int_freq: 1
     - ast_vis.GPVisAst:
         init: truth
-        mean: 0
+        mean: zeros
         cutoff: 1.0e-6
         std_jy: data
         corr_freq_hz: 1.0e9

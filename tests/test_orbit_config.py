@@ -60,7 +60,7 @@ class TestConfigNormalisation:
     def test_null_norad_ids_with_no_orbit_component_is_an_empty_list(self):
         assert tle_config.normalise_tle_config(_no_orbit_config()).norad_ids == []
 
-    @pytest.mark.parametrize("sep", [":", "."])
+    @pytest.mark.parametrize("sep", ["."])
     @pytest.mark.parametrize(
         "name", ["FixedOrbit", "FixedOrbitFine", "OrbitFine", "NoDragOrbitFine"]
     )

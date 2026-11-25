@@ -688,15 +688,10 @@ class TestMatchedFilterSeeding:
             rtol=exact_rtol, atol=float(jnp.max(jnp.abs(expected))) * exact_rtol,
         )
 
-    @pytest.mark.parametrize("cls", FOURIER_CLASSES)
-    @pytest.mark.parametrize("alias", ["matched-filter", "mf"])
-    def test_the_alias_selects_the_same_estimate(self, cls, alias, estimate):
-        long_form = setup_component(cls, init="matched-filter")
-        aliased = setup_component(cls, init=alias)
-
-        np.testing.assert_array_equal(
-            np.asarray(aliased.init_rfi_k), np.asarray(long_form.init_rfi_k)
-        )
+    @pytest.mark.parametrize("key", ["init", "mean"])
+    def test_the_abbreviation_is_refused(self, key):
+        with pytest.raises(ValueError, match=key):
+            RFIVarAntConfig(**{key: "mf"})
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     @pytest.mark.parametrize("mode", ["init", "mean"])
@@ -713,8 +708,8 @@ class TestMatchedFilterSeeding:
 
     def test_the_antenna_axis_follows_the_model(self, estimate):
         """VarAnt carries one amplitude per antenna; ConstAnt shares one."""
-        assert setup_component(ComplexRFIVarAntFine, init="mf").init_rfi_k.shape[1] == N_ANT
-        assert setup_component(ComplexRFIConstAntFine, init="mf").init_rfi_k.shape[1] == 1
+        assert setup_component(ComplexRFIVarAntFine, init="matched-filter").init_rfi_k.shape[1] == N_ANT
+        assert setup_component(ComplexRFIConstAntFine, init="matched-filter").init_rfi_k.shape[1] == 1
 
     def test_the_run_config_is_what_gets_filtered(self, estimate):
         """The estimate is made from this run's own visibilities, not a file."""

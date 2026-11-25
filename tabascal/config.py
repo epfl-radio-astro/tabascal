@@ -168,7 +168,7 @@ class TabConfig:
         # the uncalibratable samples still flagged, there is simply no error bar
         # to divide by the gain.
         self.apply_gain_table(cfg.data.gain_table)
-        self.set_flags(cfg.data.flags)
+        self.set_flags(cfg.data.exclude_flagged)
 
         # The MS read must land on the same observation epoch preflight resolved
         # against, or the model would be built from TLEs checked at another time.
@@ -480,7 +480,7 @@ class TabConfig:
             self.noise = jnp.asarray(noise) / jnp.abs(jnp.asarray(g_bl))
             self.noise_scalar = representative_sigma(self.noise)
 
-        # Kept apart from self.flags: data.flags decides whether the MS's own
+        # Kept apart from self.flags: data.exclude_flagged decides whether the MS's own
         # flags are honoured, but an uncalibratable visibility is not data at
         # all and is excluded even when that is false. set_flags ORs it in.
         self.gain_flags = jnp.asarray(bad)
@@ -516,7 +516,7 @@ class TabConfig:
         )
 
         # A visibility with no valid gain was never calibrated, so it is excluded
-        # even when data.flags is false -- see apply_gain_table.
+        # even when data.exclude_flagged is false -- see apply_gain_table.
         if getattr(self, "gain_flags", None) is not None:
             self.flags = self.flags | self.gain_flags
 
@@ -527,7 +527,7 @@ class TabConfig:
         # wants the cleanest sample there is -- and an uncalibratable
         # visibility, which apply_gain_table left in the raw frame under a
         # unity gain, is on a different flux scale from every calibrated one
-        # beside it. Not the likelihood mask: data.flags: false empties that
+        # beside it. Not the likelihood mask: data.exclude_flagged: false empties that
         # deliberately, and it would take the MS's knowledge with it.
         self.estimator_flags = jnp.asarray(self.ms_flags)
         if getattr(self, "gain_flags", None) is not None:
@@ -542,7 +542,7 @@ class TabConfig:
             # want a clean sample still know which those are.
             print(
                 f"{100 * known:.1f} % is flagged in the MS and is being fitted "
-                "anyway (data.flags: false)"
+                "anyway (data.exclude_flagged: false)"
             )
         print()
 
@@ -569,7 +569,7 @@ class TabConfig:
         self.ants_itrf = ms_params["ants_itrf"]
         self.vis_obs = ms_params["vis_obs"]
         self.uvw = ms_params["uvw"]
-        # What the MS says is contaminated, kept whatever data.flags decides to
+        # What the MS says is contaminated, kept whatever data.exclude_flagged decides to
         # do with it. The two are different questions: whether a sample is
         # known to be bad, and whether tabascal declines to fit it. A strong
         # emitter flagged by some other task is exactly the data tabascal is

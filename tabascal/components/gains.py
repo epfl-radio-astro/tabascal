@@ -5,7 +5,7 @@ from tabascal.ms import read_caltable
 from tabascal.schema import (
     FiniteFloat,
     NonNegativeInt,
-    PathStr,
+    OptionalPathStr,
     PositiveFloat,
     StrictBool,
     StrictConfigModel,
@@ -16,7 +16,7 @@ from jax import Array
 
 import numpy as np
 from numpy.typing import NDArray
-from pydantic import Field, field_validator
+from pydantic import Field, model_validator
 
 import math
 import os
@@ -64,19 +64,26 @@ GAIN_FIT_BLOCKS = {
 class ConstGainsConfig(StrictConfigModel):
     """Configuration for :class:`ConstGains`."""
 
-    init: PathStr = Field(
+    init: Literal["prior", "est"] = Field(
         default="prior",
         description=(
-            "Where the gains start: 'prior', or a path to an .npz of per-antenna gains "
-            "(key 'gain') or a CASA calibration table, projected into the gain gauge."
+            "Where the gains start: 'prior', or 'est', the measured gain in the file "
+            "est names, projected into the gain gauge."
         ),
-        json_schema_extra={"input_path": True, "non_path_literals": ("prior",)},
+    )
+    est: OptionalPathStr = Field(
+        default=None,
+        description=(
+            "Path to a measured gain read by init: est: an .npz of per-antenna gains "
+            "(key 'gain') or a CASA calibration table."
+        ),
+        json_schema_extra={"input_path": True},
     )
     fit: Literal["complex", "amplitude", "phase"] = Field(
         default="complex",
         description=(
-            "Which part of the gain is fitted: 'complex' (alias 'both'), 'amplitude', "
-            "or 'phase'; the unfitted part is held at init (or unity for init: prior)."
+            "Which part of the gain is fitted: 'complex', 'amplitude', or 'phase'; the "
+            "unfitted part is held at the measured gain of est (or unity for init: prior)."
         ),
     )
     ref_ant: Union[NonNegativeInt, Literal["auto"]] = Field(
@@ -125,12 +132,32 @@ class ConstGainsConfig(StrictConfigModel):
         "phase_mean_deg": lambda radians: math.degrees(float(radians)),
     }
 
-    @field_validator("fit", mode="before")
     @classmethod
-    def _normalise_fit(cls, value: Any) -> Any:
-        if value == "both":
-            return "complex"
-        return value
+    def legacy_cleanup(cls, options: Dict[str, Any]) -> List[str]:
+        # The sectioned config named the measured gain's file in init itself, and
+        # spelled fit: complex as both too.
+        notes = []
+        init = options.get("init")
+        if isinstance(init, str) and init != "prior":
+            options["init"], options["est"] = "est", init
+            notes.append(f"init: {init!r} is now init: est with est: {init!r}.")
+        if options.get("fit") == "both":
+            options["fit"] = "complex"
+        return notes
+
+    @model_validator(mode="after")
+    def _est_is_read_exactly_when_given(self) -> "ConstGainsConfig":
+        if self.init == "est" and self.est is None:
+            raise ValueError(
+                "init: est reads the measured gain in the file 'est' names, and est is "
+                "not set. Give est a path to an .npz or a calibration table."
+            )
+        if self.init != "est" and self.est is not None:
+            raise ValueError(
+                f"est is set ({self.est!r}) but nothing reads it: only init: est does. "
+                "Set init: est, or leave est out."
+            )
+        return self
 
     def prior_scales(self) -> Dict[str, float]:
         """The gain prior in the units the model works in.
@@ -465,7 +492,7 @@ class ConstGains(Component):
     much better starting point than the prior mean. Any such gain is *projected* into
     the gauge above rather than taken as given.
 
-    ``ConstGains.fit`` chooses what is fitted: ``complex`` (the default, alias ``both``),
+    ``ConstGains.fit`` chooses what is fitted: ``complex`` (the default),
     ``amplitude`` or ``phase``. The part left out is held at the measured gain of
     ``ConstGains.init``, in the same gauge, so an amplitude-only fit keeps a calibration
     table's phases and a phase-only fit its amplitudes; with ``init: prior`` (or
@@ -558,7 +585,7 @@ class ConstGains(Component):
                 )
 
             self._set_outputs()
-            self._compute_init_params(cfg.init)
+            self._compute_init_params(cfg.est if cfg.init == "est" else "prior")
             # Validate dimensions
             self._validate_dimensions()
 
@@ -770,7 +797,7 @@ class ConstGains(Component):
 
     def _compute_init_params(self, init):
 
-        if init is None or init == "prior":
+        if init == "prior":
             # The fitted part starts at the prior mean; a held part has no measured
             # value to keep, so it is unity: |g| = 1 or phase 0.
             log_amp = np.full(self.n_ant, self.log_amp_offset if self.fit_amp else 0.0)
@@ -783,8 +810,8 @@ class ConstGains(Component):
             print(f"Initialising ConstGains at the measured antenna gain from {init}")
         else:
             raise ValueError(
-                f"Config parameter (ConstGains:\n\tinit: {init}) is neither 'prior' nor a "
-                "path to an .npz of per-antenna gains or to a calibration table."
+                f"ConstGains.est = {init!r} is not a path to an .npz of per-antenna gains "
+                "or to a calibration table."
             )
 
         self.init_params = {
