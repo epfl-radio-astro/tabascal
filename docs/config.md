@@ -63,6 +63,8 @@ validation time, naming the grids.
 
 That order is checked when the configuration is validated and when the model is assembled, before anything is computed. Each component declares the state keys it reads and the keys it writes, and a list that leaves out a component — or holds the right ones in the wrong order — is rejected by name, saying which key is missing, what produces it, and whether that producer is absent or merely listed too late.
 
+A model takes **at most one** orbit `trajectory.*`, one `rfi_signal.*`, one `rfi_vis.*` and one `gains.*` component. A second of any of them does not combine with the first: a second RFI signal replaces `rfi_A`, leaving the first one's parameters fitting nothing; a second RFI visibility component adds the RFI into `vis_rfi` again; a second gain replaces `vis_obs`. So each setting of the RFI grid (`n_int_freq`, `time_int_factor`, the RFI pad factors) is given in exactly one place. Astronomical visibility components are the exception: `ast_vis.GPVisAst` and `ast_vis.DiscreteSkyVis` both add into `vis_ast`, and are meant to be combined.
+
 ### Precision
 
 TABASCAL runs in **single precision (fp32) by default**. It is set in the same

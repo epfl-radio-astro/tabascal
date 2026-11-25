@@ -184,9 +184,7 @@ class TabConfig:
         # the fringe rate the RFI sampling has to follow -- it is not an option,
         # and the fine-grid rfi_vis component's time_int_factor is how a config
         # scales it.
-        # Several rfi_vis components may be configured; the model validator has
-        # checked they agree on these settings, so find_shared reads any one.
-        vis_cfg = cfg.model.find_shared(FreqIntegrationMixin)
+        vis_cfg = cfg.model.find_one(FreqIntegrationMixin)
         self.n_int_freq = vis_cfg.n_int_freq if vis_cfg is not None else 1
 
         # The divisor-rich fine grid (min_divisors > 1) is only needed by the
@@ -196,11 +194,11 @@ class TabConfig:
         # and slows the run, so only request it when that component is actually
         # selected. min_divisors is an internal tuning parameter, not
         # user-configurable.
-        var_cfg = cfg.model.find_shared(VariableFineTimeIntegrationMixin)
+        var_cfg = cfg.model.find_one(VariableFineTimeIntegrationMixin)
         uses_variable = var_cfg is not None
 
         self.rfi_grid = rfi_grid(cfg.model.component_classes())
-        fine_cfg = cfg.model.find_shared(FineTimeIntegrationMixin)
+        fine_cfg = cfg.model.find_one(FineTimeIntegrationMixin)
         time_int_factor = fine_cfg.time_int_factor if fine_cfg is not None else 1.0
         min_time_bins = var_cfg.min_time_bins if var_cfg is not None else 1
         max_time_bins = var_cfg.max_time_bins if var_cfg is not None else 30
@@ -703,7 +701,7 @@ class TabConfig:
         ss_factors = [self.n_int_freq, self.n_int_time]
         run_cfg = getattr(self, "config", None)
         rfi_sig_cfg = (
-            run_cfg.model.find_shared(RFIGPConfig)
+            run_cfg.model.find_one(RFIGPConfig)
             if run_cfg is not None
             else None
         )

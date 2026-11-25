@@ -557,18 +557,27 @@ class TestCrossComponentValidation:
                 )
             )
 
-    def test_rfi_signal_components_must_agree_on_pad_factors(self):
-        with pytest.raises(ConfigValidationError, match="pad_factor"):
-            validate_config(
-                _minimal_raw(
-                    [
-                        "trajectory.FixedOrbitFine",
-                        {"rfi_signal.ComplexRFIVarAntFine": {"time_pad_factor": 3.0}},
-                        "rfi_signal.ComplexRFIConstAntFine",
-                        "rfi_vis.RiemannVisFine",
-                    ]
-                )
-            )
+    @pytest.mark.parametrize(
+        "components, kind",
+        [
+            (["trajectory.FixedOrbitFine", "rfi_signal.ComplexRFIVarAntFine",
+              "rfi_signal.ComplexRFIConstAntFine", "rfi_vis.RiemannVisFine"], "rfi_signal"),
+            (["trajectory.FixedOrbitFine", "rfi_signal.ComplexRFIVarAntFine",
+              "rfi_vis.RiemannVisFine", "rfi_vis.RiemannVisFine"], "rfi_vis"),
+            (["ast_vis.GPVisAst", "gains.UnitaryGains", "gains.ConstGains"], "gains"),
+        ],
+    )
+    def test_at_most_one_component_of_a_kind_that_would_overwrite_or_double(self, components, kind):
+        """Repeated settings that would have to agree are not repeated at all."""
+        with pytest.raises(ConfigValidationError, match=f"2 {kind} components.*at most one"):
+            validate_config(_minimal_raw(components, satellites={"norad_ids": [25544]}))
+
+    def test_two_sky_models_still_add(self):
+        """vis_ast accumulates, and a GP beside a fixed sky is the documented model."""
+        validate_config(_minimal_raw([
+            {"ast_signal.FixedDiscreteSky": {"point_sources": [{"ra_deg": 1.0, "dec_deg": 2.0, "I_jy": 3.0}]}},
+            "ast_vis.GPVisAst", "ast_vis.DiscreteSkyVis", "gains.UnitaryGains",
+        ]))
 
 
 # ---------------------------------------------------------------------------

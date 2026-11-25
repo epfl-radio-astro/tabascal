@@ -33,6 +33,8 @@ COMPONENTS = [
     "gains.UnitaryGains",
 ]
 AST, GAINS = "ast_vis.GPVisAst", "gains.UnitaryGains"
+#: A component that draws nothing, to add beside the one that does.
+SKY = {"ast_signal.FixedDiscreteSky": {"point_sources": [{"ra_deg": 30.0, "dec_deg": -30.0, "I_jy": 1.0}]}}
 
 
 def _entry_ref(entry):
@@ -140,7 +142,7 @@ def test_a_sample_start_is_the_draw_from_the_seed_folded_with_the_crc_of_its_tag
 
 @pytest.mark.parametrize(
     "components",
-    [[AST, GAINS], [GAINS, AST, GAINS], [AST, GAINS, GAINS]],
+    [[AST, GAINS], [GAINS, AST], [SKY, AST, "ast_vis.DiscreteSkyVis", GAINS]],
     ids=["base", "moved", "added"],
 )
 def test_through_build_model_another_component_never_shifts_a_draw(

@@ -1386,6 +1386,14 @@ def _component_error_lines(msg: str) -> list[str]:
     return out
 
 
+#: The component kinds a model takes at most one of, and why.
+_ONE_PER_KIND = {
+    "rfi_signal": "each writes the RFI amplitude rfi_A, so the last one listed replaces the others.",
+    "rfi_vis": "each adds the RFI visibilities into vis_rfi, so the RFI would be counted once per component.",
+    "gains": "each writes the observed visibilities vis_obs, so the last one listed replaces the others.",
+}
+
+
 class ModelConfig(StrictConfigModel):
     """Forward model precision and ordered component list."""
 
@@ -1439,16 +1447,6 @@ class ModelConfig(StrictConfigModel):
             )
         return matches[0][1] if matches else None
 
-    def find_shared(self, config_type: Type[TConfig]) -> Optional[TConfig]:
-        """The first component config of ``config_type``, or ``None`` if absent.
-
-        For settings several components may carry: the model validator has
-        already checked that every component of ``config_type`` agrees on
-        them, so any one of them answers for all.
-        """
-        matches = self.find_all(config_type)
-        return matches[0][1] if matches else None
-
     def find_one_spec(self, config_type: Type[TConfig]) -> Optional[ComponentSpec]:
         """The single :class:`ComponentSpec` whose config is ``config_type``, or ``None``."""
         matches = self.find_all(config_type)
@@ -1479,42 +1477,16 @@ class ModelConfig(StrictConfigModel):
                 "include at most one."
             )
 
-        # 2. If multiple RFI visibility components exist, their integration settings must agree.
-        freq_matches = self.find_all(FreqIntegrationMixin)
-        if len(freq_matches) > 1:
-            n_freqs = {cfg.n_int_freq for _, cfg in freq_matches}
-            if len(n_freqs) > 1:
+        # 2. At most one component of each kind that would overwrite or double
+        # another: a second rfi_signal replaces rfi_A, leaving the first one's
+        # parameters fitting nothing; a second rfi_vis adds the RFI into vis_rfi
+        # again; a second gains component replaces vis_obs.
+        for kind, why in _ONE_PER_KIND.items():
+            refs = [spec.ref for spec in self.components if spec.ref.split(".")[0] == kind]
+            if len(refs) > 1:
                 raise ValueError(
-                    "RFI visibility components disagree on n_int_freq: "
-                    + ", ".join(f"{spec.ref}={cfg.n_int_freq}" for spec, cfg in freq_matches)
-                )
-        fine_matches = self.find_all(FineTimeIntegrationMixin)
-        if len(fine_matches) > 1:
-            factors = {c.time_int_factor for _, c in fine_matches}
-            if len(factors) > 1:
-                raise ValueError(
-                    "Fine-grid RFI visibility components disagree on time_int_factor."
-                )
-        var_matches = self.find_all(VariableFineTimeIntegrationMixin)
-        if len(var_matches) > 1:
-            bins = {(c.min_time_bins, c.max_time_bins) for _, c in var_matches}
-            if len(bins) > 1:
-                raise ValueError(
-                    "Variable fine-grid RFI visibility components disagree on "
-                    "min_time_bins / max_time_bins."
-                )
-        # The RFI pad factors set the shared fine grid, so every RFI signal
-        # component has to agree on them too.
-        rfi_matches = self.find_all(RFIGPConfig)
-        if len(rfi_matches) > 1:
-            pads = {(c.freq_pad_factor, c.time_pad_factor) for _, c in rfi_matches}
-            if len(pads) > 1:
-                raise ValueError(
-                    "RFI signal components disagree on freq_pad_factor / time_pad_factor: "
-                    + ", ".join(
-                        f"{spec.ref}=({cfg.freq_pad_factor}, {cfg.time_pad_factor})"
-                        for spec, cfg in rfi_matches
-                    )
+                    f"model.components has {len(refs)} {kind} components ({', '.join(refs)}); "
+                    f"include at most one: {why}"
                 )
 
         if not self.components:
