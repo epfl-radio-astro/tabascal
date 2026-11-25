@@ -227,7 +227,7 @@ opt:
 
 * `epsilon`: This is the optimiser step size
 * `max_iter`: This is the number of iterations to run the optimiser for in each optimisation run.
-* `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller.
+* `dual_run`: This determines whether the optimiser will be run a second time starting from where the previous run left off but with an `epsilon` that is 10x smaller. It is not read with a `schedule`, so giving both is an error.
 * `optimizer`: Which optax optimiser to run and with which settings, or `null` (the default) for `adabelief` with optax's defaults. See [Optimiser](#optimiser).
 * `schedule`: One optimiser with a step-size schedule in place of `dual_run`'s two, or `null` (the default) to keep `dual_run`. See [Step-size schedule](#step-size-schedule).
 * `stop`: End the fit once the loss stops moving, or `null` (the default) to run every step. Needs `schedule`.
@@ -247,11 +247,11 @@ opt:
   # optimizer: {name: sgd, momentum: 0.9, nesterov: true}
 ```
 
-The names are `adabelief`, `adam`, `adamw`, `amsgrad`, `nadam`, `radam`, `adamax`, `yogi`, `lion`, `lamb`, `novograd`, `rmsprop`, `sgd` and `adagrad`. An argument the optimiser does not take is refused by name at run start, with the list it does take. So is a number outside the range the optimiser's update is defined on: the decay rates (`b1`, `b2`, `b3`, `decay`) and `momentum` must lie in `[0, 1)`, `eps` must be above 0, `eps_root`, `weight_decay` and the initial accumulators `>= 0`, and `radam`'s `threshold` above 4, each as the run's precision holds it. `rmsprop` does not take `centered` and `bias_correction` together. A mapping without `name` is `adabelief`. With `dual_run` both phases build this optimiser, the second at `epsilon / 10`.
+The section is checked when the config loads: an unknown optimiser, schedule `kind` or key is an error then, not at the start of the fit. The names are `adabelief`, `adam`, `adamw`, `amsgrad`, `nadam`, `radam`, `adamax`, `yogi`, `lion`, `lamb`, `novograd`, `rmsprop`, `sgd` and `adagrad`. An argument the optimiser does not take is refused by name at run start, with the list it does take. So is a number outside the range the optimiser's update is defined on: the decay rates (`b1`, `b2`, `b3`, `decay`) and `momentum` must lie in `[0, 1)`, `eps` must be above 0, `eps_root`, `weight_decay` and the initial accumulators `>= 0`, and `radam`'s `threshold` above 4, each as the run's precision holds it. `rmsprop` does not take `centered` and `bias_correction` together. A mapping without `name` is `adabelief`. With `dual_run` both phases build this optimiser, the second at `epsilon / 10`.
 
 ### Step-size schedule
 
-With `dual_run` the fit runs in two phases, each starting the optimiser afresh: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments; only its step size changes, so it reuses the first phase's compiled step. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read.
+With `dual_run` the fit runs in two phases, each starting the optimiser afresh: `max_iter` steps at `epsilon`, then `max_iter` more at `epsilon / 10`. The second phase starts from zeroed moments; only its step size changes, so it reuses the first phase's compiled step. GitHub #82 reports this as a small bump in the loss at the switch. Not every fit shows a bump, and keeping the optimiser's state does not necessarily give a lower loss. `schedule` builds one optimiser for the whole fit instead, whose step size follows a schedule: moments that carry through every step. `max_iter` is then the total number of steps and `dual_run` is not read; writing it beside a schedule is refused, and a run's saved config leaves it out.
 
 ```yaml
 opt:
@@ -483,8 +483,7 @@ model:
     - rfi_vis.RiemannVisFine:
         n_int_freq: 1
         time_int_factor: 1
-        backend: ffi
-        baseline_block_size: 128
+        backend: ffi        # baseline_block_size is read with backend: jax only
 
 satellites:
   norad_ids: [20452, 38833, 45854]
@@ -563,8 +562,8 @@ where $N^T_\text{int}$ is the number of integration samples used per time step, 
 
 The estimate is per baseline, since $\nu_F$ is, and `TabConfig.estimate_rfi_sampling` then reduces it to the single fine-grid count: the count is the largest per-baseline rate, rounded up to a size with enough divisors for the stride binning that groups baselines by how finely each needs to be sampled. On `rfi_vis.RiemannVisVariableFine`, `min_time_bins` (default `1`) and `max_time_bins` (default `30`) bound the number of quantile levels the grouping places, which caps the number of stride groups rather than guaranteeing that many — distinct levels can round onto the same stride. Those two keys exist only on `RiemannVisVariableFine` (`RiemannVisFine` uses uniform sampling and does not take them). With no satellites configured there is no fringe rate to estimate from at all, every baseline falls back to a single required sample, and the count comes out at `2`. So the effective count is not exactly `time_int_factor` times the formula above: the factor scales the per-baseline rates going in, and the binning decides what comes out. The value actually used is printed during setup.
 
-* `baseline_block_size` (on `rfi_vis.RiemannVisFine`): The number of baselines `RiemannVisFine` calculates per step of its scan over the baseline axis, a whole number defaulting to `128`. The Riemann sum is formed on a `(n_bl, n_rfi, n_freq_fine, n_time_fine)` fine grid before anything is reduced, which is `n_rfi * n_int_freq * n_int_time` times the size of the visibilities it reduces to and, under reverse-mode automatic differentiation, is what the tape holds; the scan replaces `n_bl` in that shape with `baseline_block_size`, or with `n_bl` itself where that is smaller, and recomputes each block in the backward pass rather than keeping it. It is purely a memory strategy — baselines are independent, so the result does not depend on it — at the cost of recomputation and of one scan step per block. `null` is the setting for a single block over every baseline: the checkpoint stays, so the backward pass still recomputes the fine grid instead of storing it, but the grid is formed whole. That bounds the tape and not the peak, and it is the setting that trades the memory back for the scan's step overhead. Only `RiemannVisFine` with `backend: jax` reads it: the FFI kernels bound the same term inside the compiled kernel, and `RiemannVisVariableFine` carries its own baseline grouping. See [RFI-visibility kernels](kernels.md#memory).
-* `backend` (on `rfi_vis.RiemannVisFine`, `rfi_vis.RiemannVisVariableFine`): which implementation the `rfi_vis` component runs. `jax` is the visibility written in JAX and differentiated by it; `ffi` is the compiled op of `ri-kernels`, with its own JVP and transpose, which is faster and bounds its memory itself. `null`, the default, is `ffi` for every component. See [RFI-visibility kernels](kernels.md).
+* `baseline_block_size` (on `rfi_vis.RiemannVisFine`): The number of baselines `RiemannVisFine` calculates per step of its scan over the baseline axis, a whole number defaulting to `128`. The Riemann sum is formed on a `(n_bl, n_rfi, n_freq_fine, n_time_fine)` fine grid before anything is reduced, which is `n_rfi * n_int_freq * n_int_time` times the size of the visibilities it reduces to and, under reverse-mode automatic differentiation, is what the tape holds; the scan replaces `n_bl` in that shape with `baseline_block_size`, or with `n_bl` itself where that is smaller, and recomputes each block in the backward pass rather than keeping it. It is purely a memory strategy — baselines are independent, so the result does not depend on it — at the cost of recomputation and of one scan step per block. `null` is the setting for a single block over every baseline: the checkpoint stays, so the backward pass still recomputes the fine grid instead of storing it, but the grid is formed whole. That bounds the tape and not the peak, and it is the setting that trades the memory back for the scan's step overhead. Only `RiemannVisFine` with `backend: jax` reads it, so setting it under `ffi` is an error rather than a silent no-op: the FFI kernels bound the same term inside the compiled kernel, and `RiemannVisVariableFine` carries its own baseline grouping. See [RFI-visibility kernels](kernels.md#memory).
+* `backend` (on `rfi_vis.RiemannVisFine`, `rfi_vis.RiemannVisVariableFine`): which implementation the `rfi_vis` component runs. `jax` is the visibility written in JAX and differentiated by it; `ffi` is the compiled op of `ri-kernels`, with its own JVP and transpose, which is faster and bounds its memory itself. `ffi` is the default for every component. See [RFI-visibility kernels](kernels.md).
 
 The data-grid route, `trajectory.FixedOrbit` with `rfi_vis.AnalyticVis` (see [Analytic RFI visibilities](analytic_rfi_vis.md)), has its own fields directly on those two components:
 
@@ -574,7 +573,7 @@ The data-grid route, `trajectory.FixedOrbit` with `rfi_vis.AnalyticVis` (see [An
 
 ### RFI light curve estimates
 
-`est` (on `rfi_signal.*`) points at a measured light curve file, used by `init: est` and `mean: est` to seed the RFI signal. This is the interchange format between tabascal and whatever measures the light curves, so it is deliberately strict.
+`est` (on `rfi_signal.*`) points at a measured light curve file, used by `init: est` and `mean: est` to seed the RFI signal. It is required by either of them and refused without one, since a path nothing reads is almost always a forgotten `init: est`. This is the interchange format between tabascal and whatever measures the light curves, so it is deliberately strict.
 
 The file is either a **`.zarr` store** (read with `xarray.open_zarr`) or a **`.npz`**, and must contain all four of
 

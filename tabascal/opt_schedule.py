@@ -25,13 +25,11 @@ import numpy as np
 import optax
 
 from tabascal.distributed import fail_together
+from tabascal.schema import OPTIMIZER_NAMES
 
 #: The optax optimisers ``opt.optimizer.name`` names. Each takes the step size
 #: as its first argument; their other scalar arguments may be set in the config.
-OPTIMIZERS = (
-    "adabelief", "adam", "adamw", "amsgrad", "nadam", "radam", "adamax", "yogi",
-    "lion", "lamb", "novograd", "rmsprop", "sgd", "adagrad",
-)
+OPTIMIZERS = OPTIMIZER_NAMES
 
 #: Arguments of those optimisers that are not scalars a YAML file can give.
 _NOT_FROM_CONFIG = (

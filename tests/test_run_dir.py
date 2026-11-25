@@ -55,7 +55,7 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
         "model": {
             "components": [
                 "trajectory.FixedOrbit",
-                {"rfi_signal.ComplexRFIConstAnt": {"est": "curves.npz"}},
+                {"rfi_signal.ComplexRFIConstAnt": {"init": "est", "est": "curves.npz"}},
                 "rfi_vis.AnalyticVis",
                 "ast_vis.GPVisAst",
                 {"gains.ConstGains": {"init": "prior"}},

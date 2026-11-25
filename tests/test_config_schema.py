@@ -838,3 +838,110 @@ class TestMigration:
         args = build_migrate_parser().parse_args([str(old_path)])
         assert run_migrate(args) == 1
         assert "does not validate" in capsys.readouterr().err
+
+
+class TestOptionsThatWouldBeIgnoredAreRefused:
+    """A setting the run would not read is an error when the config loads."""
+
+    @pytest.mark.parametrize("key", ["init", "mean"])
+    def test_est_without_a_path_is_refused(self, key):
+        with pytest.raises(ConfigValidationError, match=f"{key}: est.*est is not set"):
+            validate_config(_minimal_raw([{"rfi_signal.ComplexRFIVarAnt": {key: "est"}}]))
+
+    def test_a_path_nothing_reads_is_refused(self):
+        with pytest.raises(ConfigValidationError, match="nothing reads it"):
+            validate_config(_minimal_raw([{"rfi_signal.ComplexRFIVarAnt": {"est": "lc.npz"}}]))
+
+    def test_est_with_a_reader_is_accepted(self):
+        cfg = validate_config(
+            _minimal_raw([{"rfi_signal.ComplexRFIVarAnt": {"mean": "est", "est": "lc.npz"}}])
+        )
+        assert cfg.model.components[0].config.est == "lc.npz"
+
+    @pytest.mark.parametrize("dual_run", [True, False])
+    def test_dual_run_beside_a_schedule_is_refused(self, dual_run):
+        with pytest.raises(ConfigValidationError, match="dual_run"):
+            validate_config(
+                {"model": {"components": []},
+                 "opt": {"schedule": {"kind": "constant"}, "dual_run": dual_run}}
+            )
+
+    def test_a_saved_schedule_config_validates_again(self):
+        """The saved config leaves dual_run out, so a replay is not refused."""
+        cfg = validate_config({"model": {"components": []}, "opt": {"schedule": {"kind": "constant"}}})
+        dumped = cfg.to_yaml_dict()
+
+        assert "dual_run" not in dumped["opt"]
+        assert validate_config(dumped).opt.schedule.kind == "constant"
+
+    @pytest.mark.parametrize("backend", [None, "ffi"])
+    def test_a_block_size_the_ffi_kernels_ignore_is_refused(self, backend):
+        options = {"baseline_block_size": 64, **({"backend": backend} if backend else {})}
+        with pytest.raises(ConfigValidationError, match="baseline_block_size is read only with backend: jax"):
+            validate_config(_minimal_raw([{"rfi_vis.RiemannVisFine": options}]))
+
+    def test_a_block_size_round_trips_under_both_backends(self):
+        for options in ({}, {"backend": "jax", "baseline_block_size": 64}):
+            cfg = validate_config(_minimal_raw(
+                ["trajectory.FixedOrbitFine", "rfi_signal.ComplexRFIVarAntFine",
+                 {"rfi_vis.RiemannVisFine": options}],
+                satellites={"norad_ids": [25544]},
+            ))
+            again = validate_config(cfg.to_yaml_dict())
+            assert again.model.components[2].config == cfg.model.components[2].config
+
+    def test_migrate_drops_what_the_old_layout_ignored_and_says_so(self):
+        old = {
+            "model": {"components": [
+                "trajectory:FixedOrbitFine", "rfi_signal:ComplexRFIVarAntFine", "rfi_vis:RiemannVisFine",
+            ]},
+            "rfi": {"est": "lc.npz", "baseline_block_size": 128},
+            "satellites": {"norad_ids": [25544]},
+            "opt": {"schedule": {"kind": "constant"}, "dual_run": True},
+        }
+        new, notes = migrate(old)
+
+        validate_config(new)
+        assert any("est" in n and "dropped" in n for n in notes)
+        assert any("baseline_block_size" in n and "dropped" in n for n in notes)
+        assert any("dual_run" in n and "dropped" in n for n in notes)
+
+
+class TestTypedOptimiserSections:
+
+    def test_a_name_alone_is_that_optimiser(self):
+        cfg = validate_config({"model": {"components": []}, "opt": {"optimizer": "adam"}})
+        assert cfg.opt.optimizer.name == "adam"
+
+    @pytest.mark.parametrize(
+        "opt, match",
+        [
+            ({"optimizer": {"name": "adamm"}}, r"opt\.optimizer\.name"),
+            ({"schedule": {"kind": "stepp"}}, r"opt\.schedule"),
+            ({"schedule": {"kind": "step"}}, r"boundaries"),
+            ({"schedule": {"kind": "cosine", "final": 0.1}}, r"final"),
+            ({"stop": {"window": 5}}, r"opt\.stop\.rtol"),
+            ({"optimizer": {"name": "sgd", "nope": 1}}, r"does not take \['nope'\]"),
+        ],
+    )
+    def test_a_malformed_section_is_refused_when_the_config_loads(self, opt, match):
+        with pytest.raises(ConfigValidationError, match=match):
+            validate_config({"model": {"components": []}, "opt": opt})
+
+    def test_the_sections_reach_the_validators_as_mappings(self):
+        from tabascal.opt_schedule import validate_opt
+
+        cfg = validate_config({
+            "model": {"components": []},
+            "opt": {
+                "max_iter": 100,
+                "optimizer": {"name": "sgd", "momentum": 0.9, "clip_norm": 1},
+                "schedule": {"kind": "step", "boundaries": [50]},
+                "stop": {"window": 5, "rtol": 1e-3},
+            },
+        })
+        checked = validate_opt(cfg.opt)
+
+        assert checked["optimizer"] == {"name": "sgd", "clip_norm": 1.0, "args": {"momentum": 0.9}}
+        assert checked["schedule"]["boundaries"] == [50]
+        assert checked["stop"]["window"] == 5

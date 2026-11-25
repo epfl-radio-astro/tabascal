@@ -85,7 +85,11 @@ def make_config(
         "path_nodes": rfi_extra.pop("path_nodes", "auto"),
     }
     cfg._analytic_kwargs = {**ANALYTIC, **rfi_extra.pop("analytic", {})}
-    cfg._riemann_kwargs = {"baseline_block_size": rfi_extra.pop("baseline_block_size", None)}
+    cfg._riemann_kwargs = (
+        {"backend": "jax", "baseline_block_size": rfi_extra.pop("baseline_block_size")}
+        if "baseline_block_size" in rfi_extra
+        else {}
+    )
     cfg._sig_kwargs = {**sig._rfi_comp_kwargs, **rfi_extra}
     return cfg
 

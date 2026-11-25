@@ -528,7 +528,7 @@ def scheduled_fit(tmp_path_factory):
             },
             "inference": {"opt": True},
             "opt": {
-                "epsilon": 1e-3, "max_iter": 4, "dual_run": True, "guide": "map",
+                "epsilon": 1e-3, "max_iter": 4, "guide": "map",
                 "optimizer": {"name": "adam", "clip_norm": 10.0},
                 "schedule": {"kind": "step", "boundaries": [2]},
                 "checkpoints": [2, 4],

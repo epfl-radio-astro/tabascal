@@ -380,7 +380,8 @@ NonEmptyStr = Annotated[str, BeforeValidator(_check_non_empty_str)]
 def _to_plain_yaml(obj: Any) -> Any:
     """Convert Pydantic/Python structures into YAML-safe plain types."""
     if isinstance(obj, BaseModel):
-        return {k: _to_plain_yaml(v) for k, v in obj.__dict__.items()}
+        extra = getattr(obj, "__pydantic_extra__", None) or {}
+        return {k: _to_plain_yaml(v) for k, v in {**obj.__dict__, **extra}.items()}
     if isinstance(obj, os.PathLike):
         return os.fspath(obj)
     if isinstance(obj, tuple):
@@ -454,6 +455,22 @@ class StrictConfigModel(BaseModel):
     #: Field name -> conversion of a legacy value into the field's units, for
     #: the options whose unit changed when they were renamed.
     legacy_transforms: ClassVar[dict[str, Any]] = {}
+
+    @classmethod
+    def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
+        """Drop from migrated ``options`` what the old layout ignored and this one refuses.
+
+        Returns a note per key dropped. ``tabascal migrate-config`` calls it once
+        the options are moved; the default drops nothing.
+        """
+        return []
+
+    @staticmethod
+    def _drop_ignored(options: dict[str, Any], key: str, why: str) -> list[str]:
+        if key not in options:
+            return []
+        value = options.pop(key)
+        return [f"{key}: {value!r} dropped: {why}"]
 
     #: Fields whose type does not admit ``None`` but which read ``null`` as
     #: "none" all the same (``norad_ids: null`` is no satellites).
@@ -760,6 +777,28 @@ class RFIGPConfig(FourierGPConfig):
             return "matched-filter"
         return value
 
+    @classmethod
+    def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
+        if options.get("est") is not None and "est" not in (options.get("init"), options.get("mean")):
+            return cls._drop_ignored(options, "est", "neither init nor mean is 'est', so nothing read it.")
+        return []
+
+    @model_validator(mode="after")
+    def _est_is_read_exactly_when_given(self) -> "RFIGPConfig":
+        reads = [key for key in ("init", "mean") if getattr(self, key) == "est"]
+        if reads and self.est is None:
+            raise ValueError(
+                f"{' and '.join(f'{k}: est' for k in reads)} read the light curves in "
+                "the file 'est' names, and est is not set. Give est a path, or use "
+                "'matched-filter', which measures them from the data."
+            )
+        if not reads and self.est is not None:
+            raise ValueError(
+                f"est is set ({self.est!r}) but nothing reads it: only init: est and "
+                "mean: est do. Set one of them, or leave est out."
+            )
+        return self
+
     def requires_truth(self, ref: str = "") -> dict[str, str]:
         if self.init == "truth":
             label = f"{ref}.init: truth" if ref else "rfi_signal.init: truth"
@@ -951,6 +990,113 @@ class InferenceConfig(StrictConfigModel):
         return self.seed
 
 
+#: The optax optimisers ``opt.optimizer`` may name (``tabascal.opt_schedule``
+#: builds them; listed here so the schema does not import optax).
+OPTIMIZER_NAMES = (
+    "adabelief", "adam", "adamw", "amsgrad", "nadam", "radam", "adamax", "yogi",
+    "lion", "lamb", "novograd", "rmsprop", "sgd", "adagrad",
+)
+
+
+class OptimizerConfig(StrictConfigModel):
+    """``opt.optimizer``: an optax optimiser, its scalar arguments and a gradient clip.
+
+    The arguments besides ``name`` and ``clip_norm`` are the optimiser's own,
+    under their optax names, so they differ by optimiser; which ones it takes,
+    and the range each must lie in at the run's precision, is checked against
+    optax itself by :func:`tabascal.opt_schedule.validate_optimizer`.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: Literal[OPTIMIZER_NAMES] = Field(  # type: ignore[valid-type]
+        default="adabelief",
+        description="The optax optimiser.",
+    )
+    clip_norm: Optional[PositiveFloat] = Field(
+        default=None,
+        description="Clip the gradient's global norm to this before the optimiser sees it; null is no clip.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _a_name_alone(cls, data: Any) -> Any:
+        return {"name": data} if isinstance(data, str) else data
+
+    def to_yaml_dict(self) -> dict[str, Any]:
+        return _to_plain_yaml(self)
+
+
+class _ScheduleBase(StrictConfigModel):
+    warmup_steps: NonNegativeInt = Field(
+        default=0,
+        description="Steps over which the step size rises linearly from warmup_factor * epsilon.",
+    )
+    warmup_factor: FiniteFloat = Field(
+        default=0.0,
+        description="Where the warmup starts, as a fraction of epsilon, in [0, 1].",
+    )
+
+
+    def to_yaml_dict(self) -> dict[str, Any]:
+        dumped = super().to_yaml_dict()
+        return {"kind": dumped.pop("kind"), **dumped}
+
+
+class ConstantSchedule(_ScheduleBase):
+    """``epsilon`` throughout."""
+
+    kind: Literal["constant"]
+
+
+class StepSchedule(_ScheduleBase):
+    """``epsilon`` multiplied by ``factor`` after each step in ``boundaries``."""
+
+    kind: Literal["step"]
+    boundaries: list[PositiveInt] = Field(
+        description="Steps after which the step size drops; increasing, below max_iter.",
+    )
+    factor: Union[PositiveFloat, list[PositiveFloat]] = Field(
+        default=0.1,
+        description="The drop at every boundary, or one per boundary.",
+    )
+
+
+class ExponentialSchedule(_ScheduleBase):
+    """``epsilon * final_factor ** (step / max_iter)``."""
+
+    kind: Literal["exponential"]
+    final_factor: FiniteFloat = Field(description="The step size at max_iter, as a fraction of epsilon, in (0, 1].")
+
+
+class CosineSchedule(_ScheduleBase):
+    """Half a cosine from ``epsilon`` to ``final_factor * epsilon`` at ``max_iter``."""
+
+    kind: Literal["cosine"]
+    final_factor: FiniteFloat = Field(default=0.0, description="The step size at max_iter, as a fraction of epsilon, in [0, 1].")
+
+
+class LinearSchedule(_ScheduleBase):
+    """A straight line from ``epsilon`` to ``final_factor * epsilon`` at ``max_iter``."""
+
+    kind: Literal["linear"]
+    final_factor: FiniteFloat = Field(default=0.0, description="The step size at max_iter, as a fraction of epsilon, in [0, 1].")
+
+
+ScheduleConfig = Annotated[
+    Union[ConstantSchedule, StepSchedule, ExponentialSchedule, CosineSchedule, LinearSchedule],
+    Field(discriminator="kind"),
+]
+
+
+class StopConfig(StrictConfigModel):
+    """``opt.stop``: end the fit once the loss has stopped moving."""
+
+    window: PositiveInt = Field(description="Steps in each of the two windows whose mean losses are compared.")
+    rtol: FiniteFloat = Field(description="Largest relative change between the two means that counts as stopped; > 0.")
+    min_steps: NonNegativeInt = Field(default=0, description="Steps the fit runs before it may stop.")
+
+
 class OptConfig(StrictConfigModel):
     """MAP optimisation parameters."""
 
@@ -970,21 +1116,21 @@ class OptConfig(StrictConfigModel):
         default=True,
         description="Run a second optimisation phase at epsilon / 10 (ignored when schedule is set).",
     )
-    optimizer: Optional[Union[str, dict[str, Any]]] = Field(
+    optimizer: Optional[OptimizerConfig] = Field(
         default=None,
         description=(
             "Optax optimiser name or mapping of optimiser arguments plus optional "
             "clip_norm. null uses adabelief with optax defaults."
         ),
     )
-    schedule: Optional[dict[str, Any]] = Field(
+    schedule: Optional[ScheduleConfig] = Field(
         default=None,
         description=(
             "Single-optimiser step-size schedule (step, exponential, cosine, linear, "
             "constant) with optional warmup_steps and warmup_factor. null keeps dual_run."
         ),
     )
-    stop: Optional[dict[str, Any]] = Field(
+    stop: Optional[StopConfig] = Field(
         default=None,
         description=(
             "Early-stopping plateau criterion {window, rtol, min_steps}; requires schedule."
@@ -1008,6 +1154,29 @@ class OptConfig(StrictConfigModel):
             "relative paths resolve inside the run directory. Overridden by TAB_LOSS_TRACE."
         ),
     )
+
+    @classmethod
+    def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
+        if options.get("schedule") is not None:
+            return cls._drop_ignored(options, "dual_run", "it is not read with a schedule.")
+        return []
+
+    @model_validator(mode="after")
+    def _dual_run_or_schedule(self) -> "OptConfig":
+        if self.schedule is not None and "dual_run" in self.model_fields_set:
+            raise ValueError(
+                "dual_run and schedule are two ways of running the fit, and with a "
+                "schedule dual_run is not read. Leave dual_run out; "
+                "{kind: step, boundaries: [N], factor: 0.1} is dual_run's drop."
+            )
+        return self
+
+    def to_yaml_dict(self) -> dict[str, Any]:
+        dumped = super().to_yaml_dict()
+        if self.schedule is not None:
+            # Not read with a schedule, and refused beside one when written.
+            dumped.pop("dual_run")
+        return dumped
 
     @field_validator("init_jitter", mode="before")
     @classmethod

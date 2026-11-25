@@ -3,7 +3,7 @@ from typing import Any, ClassVar, Literal, Optional
 import jax.numpy as jnp
 from jax import lax
 import numpy as np
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from tabascal.distributed import psum_over_rfi, sharding_enabled
 from tabascal.interferometry import (
@@ -49,6 +49,29 @@ class RiemannVisFineConfig(FineTimeIntegrationMixin):
         "backend": ("rfi", "backend"),
         "baseline_block_size": ("rfi", "baseline_block_size"),
     }
+
+    @classmethod
+    def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
+        if options.get("backend", "ffi") != "jax":
+            return cls._drop_ignored(
+                options, "baseline_block_size", "only backend: jax reads it."
+            )
+        return []
+
+    @model_validator(mode="after")
+    def _block_size_needs_jax(self) -> "RiemannVisFineConfig":
+        if self.backend != "jax" and "baseline_block_size" in self.model_fields_set:
+            raise ValueError(
+                f"baseline_block_size is read only with backend: jax; the {self.backend} "
+                "kernels bound the same memory themselves. Leave it out, or set backend: jax."
+            )
+        return self
+
+    def to_yaml_dict(self) -> dict[str, Any]:
+        dumped = super().to_yaml_dict()
+        if self.backend != "jax":
+            dumped.pop("baseline_block_size")
+        return dumped
 
 
 
