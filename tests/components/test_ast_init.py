@@ -442,7 +442,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         """
         message = setup_error(gp_cov_config(tmp_path, std_jy=std))
 
-        assert "ast.gp_cov.std" in message
+        assert "GPVisAst.std_jy" in message
         assert "representable" in message
 
     def test_data_measures_the_width_per_baseline(self, tmp_path, capsys):
