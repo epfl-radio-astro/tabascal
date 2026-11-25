@@ -46,3 +46,4 @@ opt:
 
 satellites:
   norad_ids_path: starlink_selected_ids.txt
+  extra_orbit_dir: orbits
