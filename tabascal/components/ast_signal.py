@@ -15,7 +15,7 @@ import warnings
 
 import jax.numpy as jnp
 import numpy as np
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 
 from tabascal.components import Component
 from tabascal.components.ast_vis import radec_to_lmn
@@ -240,6 +240,20 @@ def _check_unpolarised(rows: list) -> None:
         )
 
 
+#: Inline source fields that default to zero when absent or null.
+_OPTIONAL_SOURCE_FIELDS = (
+    "ref_freq_mhz",
+    "alpha",
+    "Q",
+    "U",
+    "V",
+    "rm",
+    "fwhm_major_arcsec",
+    "fwhm_minor_arcsec",
+    "position_angle_deg",
+)
+
+
 class PointSourceConfig(StrictConfigModel):
     """One inline discrete source in :class:`FixedDiscreteSkyConfig`."""
 
@@ -257,21 +271,32 @@ class PointSourceConfig(StrictConfigModel):
     fwhm_minor_arcsec: FiniteFloat = Field(default=0.0, description="Gaussian minor-axis FWHM in arcseconds.")
     position_angle_deg: FiniteFloat = Field(default=0.0, description="Major-axis position angle in degrees, north through east.")
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def _name_as_text(cls, value: Any) -> Any:
+        # A catalogue name may be all digits (`name: 1934`), which YAML reads as a number.
+        return None if value is None else str(value)
+
     @field_validator(
-        "ref_freq_mhz",
-        "alpha",
-        "Q",
-        "U",
-        "V",
-        "rm",
-        "fwhm_major_arcsec",
-        "fwhm_minor_arcsec",
-        "position_angle_deg",
+        "ra",
+        "dec",
+        "I",
+        *_OPTIONAL_SOURCE_FIELDS,
         mode="before",
     )
     @classmethod
-    def _none_as_zero(cls, value: Any) -> Any:
-        return 0.0 if value is None else value
+    def _read_number(cls, value: Any, info: ValidationInfo) -> Any:
+        # null is how these config files spell a default; only the optional fields have one.
+        if value is None and info.field_name in _OPTIONAL_SOURCE_FIELDS:
+            return 0.0
+        # Catalogue values are often quoted (`I: '750.0'`); read them as the numbers they
+        # are, and leave the finite check to FiniteFloat.
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                raise ValueError(f"must be a finite number, got {value!r}") from None
+        return value
 
     @model_validator(mode="after")
     def _check_source_physics(self) -> "PointSourceConfig":

@@ -414,6 +414,45 @@ class TestComponentSchemas:
         )
         assert len(cfg.model.components[0].config.point_sources) == 1
 
+    def test_inline_sources_read_numeric_names_and_quoted_numbers(self):
+        """Catalogue-style entries that loaded before the schema move still load."""
+        cfg = validate_config(
+            _minimal_raw(
+                [
+                    {
+                        "ast_signal.FixedDiscreteSky": {
+                            "point_sources": [
+                                {"name": 1934, "ra": "10.5", "dec": -20, "I": "750.0",
+                                 "alpha": " -0.8 ", "ref_freq_mhz": "1400"},
+                            ]
+                        }
+                    },
+                    "ast_vis.DiscreteSkyVis",
+                ]
+            )
+        )
+        (source,) = cfg.model.components[0].config.point_sources
+        assert source.name == "1934"
+        assert (source.ra, source.dec, source.I) == (10.5, -20.0, 750.0)
+        assert (source.alpha, source.ref_freq_mhz) == (-0.8, 1400.0)
+        assert source.to_oskar_row(0)["name"] == "1934"
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "lots", ""])
+    def test_quoted_inline_values_must_still_be_finite_numbers(self, value):
+        with pytest.raises(ConfigValidationError, match="I"):
+            validate_config(
+                _minimal_raw(
+                    [
+                        {
+                            "ast_signal.FixedDiscreteSky": {
+                                "point_sources": [{"ra": 1.0, "dec": 2.0, "I": value}]
+                            }
+                        },
+                        "ast_vis.DiscreteSkyVis",
+                    ]
+                )
+            )
+
     def test_const_gains_defaults_and_validation(self):
         cfg = validate_config(_minimal_raw(["ast_vis.GPVisAst", "gains.ConstGains"]))
         g = cfg.model.components[1].config
