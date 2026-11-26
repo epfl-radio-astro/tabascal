@@ -8,14 +8,6 @@ Top-level sections are limited to `model`, `data`, `plots`, `opt`, and `satellit
 
 **An option that carries a unit names it**, as a suffix: `std_jy`, `corr_freq_hz`, `corr_time_s`, `min_elevation_deg`, `phase_std_deg`, `amp_std_pct`, `data.freq_hz`, and the inline source fields `ra_deg`, `I_jy`, `ref_freq_hz`. A key without one is dimensionless, a count, a path or a choice.
 
-```{note}
-Configs written for earlier versions put every component's options in shared `ast`, `rfi` and `gains` sections. They are refused with a pointer to the converter:
-
-    tabascal migrate-config old.yaml -o new.yaml
-
-It moves each option onto the component that reads it under `model.components` and notes anything no listed component read. YAML comments are not carried over.
-```
-
 ## Model
 
 The forward model used by TABASCAL is modular and configurable directly in the `model` section of the configuration file. Each entry in `model.components` is either a single-key mapping from `<module>.<Class>` to that component's options, or a bare `<module>.<Class>` string (or empty mapping) when all of the component's options take their defaults. An example is shown below.
@@ -46,7 +38,7 @@ satellites:
   norad_ids: [20452, 38833, 45854]
 ```
 
-**The order the components are listed in does not matter**: they run in dependency order, which tabascal works out from what each one reads and writes. `trajectory.PhaseCalculationRFIFine` runs after `trajectory.OrbitFine` because it reads the positions the latter writes, and the gains run after every sky and RFI term because they read the visibilities those add up. A list already in a valid order runs in the order written, and a run's saved `config.yaml` records the order it ran in. Each component is a class which defines its configuration schema (`Config`), parameters (if any), initialisation, prior distribution, and forward model. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the canonical `module.Class` syntax (for example `trajectory.OrbitFine` refers to {class}`~tabascal.components.trajectory.OrbitFine` in [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)). It is the only spelling: the `module:Class` form older configs used is refused, and `tabascal migrate-config` rewrites it.
+**The order the components are listed in does not matter**: they run in dependency order, which tabascal works out from what each one reads and writes. `trajectory.PhaseCalculationRFIFine` runs after `trajectory.OrbitFine` because it reads the positions the latter writes, and the gains run after every sky and RFI term because they read the visibilities those add up. A list already in a valid order runs in the order written, and a run's saved `config.yaml` records the order it ran in. Each component is a class which defines its configuration schema (`Config`), parameters (if any), initialisation, prior distribution, and forward model. The component modules are located in [`tabascal/components/`](https://github.com/epfl-radio-astro/tabascal/tree/main/tabascal/components). The model component given in the configuration file should use the canonical `module.Class` syntax (for example `trajectory.OrbitFine` refers to {class}`~tabascal.components.trajectory.OrbitFine` in [`tabascal/components/trajectory.py`](https://github.com/epfl-radio-astro/tabascal/blob/main/tabascal/components/trajectory.py)). It is the only spelling: the `module:Class` form older configs used is refused.
 
 Every RFI component that works on the fine time-frequency grid carries a `Fine`
 suffix: `trajectory.` `FixedOrbitFine`, `PhaseCalculationRFIFine`,

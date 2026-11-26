@@ -21,7 +21,7 @@ from tabascal.schema import PositiveInt, StrictInt, TrajectoryConfig
 from tabascal.timing import measure_runtime
 from tabascal.time import JulianDate, apparent_radec_of_date, gast_deg, secs_to_days, skyfield_time, timescale
 
-from typing import ClassVar, Literal, Optional, Union
+from typing import Literal, Optional, Union
 from pydantic import Field, model_validator
 
 import sgp4jax
@@ -263,12 +263,6 @@ class FixedOrbitConfig(TrajectoryConfig):
             "path_order + 1. 'auto' uses 4 * path_order + 1."
         ),
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        **TrajectoryConfig.legacy_keys,
-        "path_order": ("rfi", "path_order"),
-        "path_nodes": ("rfi", "path_nodes"),
-    }
 
     @model_validator(mode="after")
     def _check_path_nodes(self) -> "FixedOrbitConfig":

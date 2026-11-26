@@ -1,4 +1,4 @@
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, Literal, Optional
 
 import jax.numpy as jnp
 from jax import lax
@@ -44,20 +44,6 @@ class RiemannVisFineConfig(FineTimeIntegrationMixin):
         ),
     )
 
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        **FineTimeIntegrationMixin.legacy_keys,
-        "backend": ("rfi", "backend"),
-        "baseline_block_size": ("rfi", "baseline_block_size"),
-    }
-
-    @classmethod
-    def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
-        if options.get("backend", "ffi") != "jax":
-            return cls._drop_ignored(
-                options, "baseline_block_size", "only backend: jax reads it."
-            )
-        return []
-
     @model_validator(mode="after")
     def _block_size_needs_jax(self) -> "RiemannVisFineConfig":
         if self.backend != "jax" and "baseline_block_size" in self.model_fields_set:
@@ -82,12 +68,6 @@ class RiemannVisVariableFineConfig(VariableFineTimeIntegrationMixin):
         default="ffi",
         description=_BACKEND_DESCRIPTION,
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        **VariableFineTimeIntegrationMixin.legacy_keys,
-        "backend": ("rfi", "backend"),
-    }
-
 
 
 class AnalyticVisConfig(FreqIntegrationMixin):
@@ -130,17 +110,6 @@ class AnalyticVisConfig(FreqIntegrationMixin):
         default=256,
         description="Bound on the GPU coefficient scratch in MiB; ignored on CPU.",
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        **FreqIntegrationMixin.legacy_keys,
-        "backend": ("rfi", "backend"),
-        "stencil": ("rfi", "analytic", "stencil"),
-        "segments": ("rfi", "analytic", "segments"),
-        "terms": ("rfi", "analytic", "terms"),
-        "cubic_terms": ("rfi", "analytic", "cubic_terms"),
-        "scratch_mb": ("rfi", "analytic", "scratch_mb"),
-    }
-
 
 
 class RiemannVisFine(Component):

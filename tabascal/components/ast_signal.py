@@ -10,7 +10,7 @@ pair would carry.
 """
 
 import os
-from typing import Annotated, Any, ClassVar, Optional, Union
+from typing import Annotated, Any, Optional, Union
 import warnings
 
 import jax.numpy as jnp
@@ -246,49 +246,6 @@ class PointSourceConfig(StrictConfigModel):
         }
 
 
-#: Inline source field in the sectioned config -> its name now.
-_LEGACY_SOURCE_FIELDS = {
-    "ra": "ra_deg",
-    "dec": "dec_deg",
-    "I": "I_jy",
-    "Q": "Q_jy",
-    "U": "U_jy",
-    "V": "V_jy",
-    "rm": "rm_rad_m2",
-    "ref_freq_mhz": "ref_freq_hz",
-}
-
-
-def _legacy_point_sources(sources: Any) -> Any:
-    """Inline sources from the sectioned config, with their fields renamed.
-
-    The reference frequency was in MHz and is now in Hz; a null field meant
-    the default and is left out. A path to a sky model file is unchanged.
-    """
-    if not isinstance(sources, list):
-        return sources
-    out = []
-    for source in sources:
-        if not isinstance(source, dict):
-            out.append(source)
-            continue
-        new = {}
-        for key, value in source.items():
-            if value is None and key != "name":
-                continue
-            if key == "ref_freq_mhz" and not isinstance(value, bool):
-                if isinstance(value, (int, float)):
-                    value = value * 1e6
-                elif isinstance(value, str):
-                    try:
-                        value = float(value) * 1e6
-                    except ValueError:
-                        pass
-            new[_LEGACY_SOURCE_FIELDS.get(key, key)] = value
-        out.append(new)
-    return out
-
-
 def _point_sources_tag(value: Any) -> str:
     return "file" if isinstance(value, (str, os.PathLike)) else "inline"
 
@@ -314,13 +271,6 @@ class FixedDiscreteSkyConfig(StrictConfigModel):
         ),
         json_schema_extra={"input_path": True},
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        "point_sources": ("ast", "point_sources"),
-    }
-    legacy_transforms: ClassVar[dict[str, Any]] = {
-        "point_sources": lambda sources: _legacy_point_sources(sources),
-    }
 
     @field_validator("point_sources", mode="before")
     @classmethod

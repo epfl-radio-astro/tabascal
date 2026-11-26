@@ -1,4 +1,3 @@
-import math
 """Tests for the Pydantic v2 compartmentalised configuration schema (tabascal.schema)."""
 
 from pathlib import Path
@@ -17,9 +16,6 @@ from tabascal.schema import (
     TOP_LEVEL_SECTIONS,
     validate_config,
 )
-from tabascal.scripts.migrate_config import build_parser as build_migrate_parser
-from tabascal.scripts.migrate_config import migrate, run as run_migrate
-from tabascal.scripts.run_tabascal import build_parser as build_cli_parser
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -103,10 +99,23 @@ class TestTopLevelSchema:
         assert cfg.satellites.norad_ids == []
 
     @pytest.mark.parametrize("legacy_section", ["ast", "rfi", "gains"])
-    def test_legacy_top_level_sections_are_rejected_with_migration_hint(self, legacy_section):
-        with pytest.raises(ConfigValidationError, match=r"migrate-config") as exc:
+    def test_legacy_top_level_sections_are_rejected(self, legacy_section):
+        with pytest.raises(ConfigValidationError, match=r"model\.components") as exc:
             validate_config(_minimal_raw(**{legacy_section: {}}))
         assert legacy_section in str(exc.value)
+
+    def test_an_inference_section_is_refused_with_the_way_out(self):
+        with pytest.raises(ConfigValidationError, match="top-level key 'seed'"):
+            validate_config({"model": {"components": []}, "inference": {"seed": 3}})
+
+    def test_light_curve_cli_exits_cleanly_on_invalid_config(self, tmp_path):
+        from tabascal.scripts.rfi_estimate import build_parser, run as run_light_curve
+
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("model:\n  components: []\nrfi:\n  init: truth\n")
+        args = build_parser().parse_args(["-c", str(bad)])
+        with pytest.raises(SystemExit, match=r"Error:.*model\.components"):
+            run_light_curve(args)
 
     def test_unknown_top_level_key_is_rejected(self):
         with pytest.raises(ConfigValidationError, match="bogus_section"):
@@ -186,23 +195,6 @@ class TestComponentEntrySyntax:
     def test_an_alias_is_refused(self, component, key, alias):
         with pytest.raises(ConfigValidationError, match=key):
             validate_config(_minimal_raw([{component: {key: alias}}]))
-
-    def test_migrate_spells_the_aliases_out(self):
-        old = {
-            "model": {"components": ["rfi_signal:ComplexRFIVarAnt", "ast_vis:GPVisAst", "gains:ConstGains"]},
-            "rfi": {"init": "mf", "mean": 0},
-            "ast": {"mean": 0},
-            "gains": {"fit": "both", "init": "cal.G"},
-            "data": {"flags": True},
-        }
-        new, notes = migrate(old)
-        cfg = validate_config(new)
-        rfi, ast, gains = (spec.config for spec in cfg.model.components)
-
-        assert (rfi.init, rfi.mean, ast.mean) == ("matched-filter", "zeros", "zeros")
-        assert (gains.fit, gains.init, gains.est) == ("complex", "est", "cal.G")
-        assert cfg.data.exclude_flagged is True
-        assert any("init: est with est: 'cal.G'" in n for n in notes)
 
     def test_multi_key_component_mapping_is_rejected(self):
         with pytest.raises(ConfigValidationError, match="single-key"):
@@ -820,289 +812,6 @@ class TestPathsAndRoundTrip:
         assert reloaded.to_yaml_dict() == original.to_yaml_dict()
 
 
-# ---------------------------------------------------------------------------
-# Migration from sectioned layout
-# ---------------------------------------------------------------------------
-
-
-class TestMigration:
-
-    def test_migrate_sectioned_config_produces_valid_new_config(self):
-        old = {
-            "model": {
-                "precision": "single",
-                "components": [
-                    "trajectory:FixedOrbit",
-                    "rfi_signal:ComplexRFIVarAnt",
-                    "rfi_vis:AnalyticVis",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
-                ],
-            },
-            "rfi": {
-                "init": "truth",
-                "mean": 0,
-                "min_elevation": 5,
-                "n_int_freq": 1,
-                "time_int_factor": 5,  # unused by AnalyticVis -> dropped with note
-                "r_seed": 123,  # dropped with r_seed note
-                "analytic": {"stencil": 2, "segments": 4},
-                "gp_cov": {"corr_time": 24, "gammas": None},
-                "cutoff": None,
-            },
-            "ast": {
-                "init": "prior",
-                "gp_cov": {"std": 1.5, "fov_deg": 5},
-                "cutoff": None,
-            },
-            "gains": {
-                "amp_std": 10,  # unused by UnitaryGains -> dropped with note
-            },
-            "satellites": {"norad_ids": [20452, 38833]},
-            "data": {"data_col": "DATA"},
-        }
-
-        new, notes = migrate(old)
-        validated = validate_config(new)
-        assert validated.model.precision == "single"
-        assert validated.satellites.norad_ids == [20452, 38833]
-        assert validated.model.components[0].config.min_elevation_deg == 5.0
-        assert validated.model.components[1].config.init == "truth"
-        assert validated.model.components[1].config.corr_time_s == 24.0
-        assert validated.model.components[2].config.stencil == 2
-        assert validated.model.components[2].config.segments == 4
-        assert validated.model.components[3].config.std_jy == 1.5
-        assert validated.model.components[3].config.fov_deg == 5.0
-        assert any("rfi.time_int_factor" in n for n in notes)
-        assert any("rfi.r_seed" in n and "seed" in n for n in notes)
-        assert any("gains.amp_std" in n for n in notes)
-
-    def test_migrate_keeps_the_nulls_the_sectioned_config_documented(self):
-        """``rfi.signal_type``, ``rfi.cutoff`` and ``rfi.gp_cov.gammas`` each
-        documented ``null`` as "the default", and a config that wrote it out
-        still converts to one that validates, with that default. A ``null``
-        whose default was computed converts to the computation's name."""
-        old = {
-            "model": {"components": ["rfi_signal:ComplexRFIVarAnt", "ast_vis:GPVisAst"]},
-            "rfi": {
-                "signal_type": None,
-                "cutoff": None,
-                "gp_cov": {"gammas": None, "std": None, "corr_freq": None, "corr_time": None},
-            },
-            "ast": {"gp_cov": {"fov_deg": None}},
-            "inference": {"seed": None},
-        }
-
-        new, _ = migrate(old)
-        validated = validate_config(new)
-        cfg = validated.model.components[0].config
-        assert cfg.signal_type == "complex"
-        assert cfg.cutoff == 1e-9
-        assert cfg.gammas == (3.0, 3.0)
-        assert cfg.std_jy == "max_vis"
-        assert cfg.corr_freq_hz == "half_band"
-        assert cfg.corr_time_s == "half_duration"
-        assert validated.model.components[1].config.fov_deg == "primary_beam"
-        assert validated.seed == 1
-
-    def test_migrate_writes_out_the_defaults_that_have_since_changed(self):
-        """An unset rfi std and ast init meant max_vis and sample; the converted
-        config says so, rather than picking up the new defaults."""
-        old = {"model": {"components": ["rfi_signal:ComplexRFIVarAnt", "ast_vis:GPVisAst"]}}
-
-        new, notes = migrate(old)
-        validated = validate_config(new).model.components
-
-        assert validated[0].config.std_jy == "max_vis"
-        assert validated[1].config.init == "sample"
-        assert any("rfi.gp_cov.std" in n and "'data'" in n for n in notes)
-        assert any("ast.init" in n and "'prior'" in n for n in notes)
-
-    def test_migrate_keeps_what_an_old_config_set(self):
-        old = {
-            "model": {"components": ["rfi_signal:ComplexRFIVarAnt", "ast_vis:GPVisAst"]},
-            "rfi": {"gp_cov": {"std": "data"}},
-            "ast": {"init": "zeros"},
-        }
-
-        new, notes = migrate(old)
-        validated = validate_config(new).model.components
-
-        assert validated[0].config.std_jy == "data"
-        assert validated[1].config.init == "zeros"
-        assert not any("was unset" in n for n in notes)
-
-    def test_migrate_renames_options_into_their_units(self):
-        """Keys gain their unit; the gain phase mean moves from radians to
-        degrees and an inline source's reference frequency from MHz to Hz."""
-        old = {
-            "model": {
-                "components": [
-                    "trajectory:FixedOrbit",
-                    "ast_signal:FixedDiscreteSky",
-                    "ast_vis:DiscreteSkyVis",
-                    "gains:ConstGains",
-                ]
-            },
-            "rfi": {"min_elevation": 10},
-            "ast": {
-                "point_sources": [
-                    {"name": "A", "ra": 1.0, "dec": -2.0, "I": 3.0, "ref_freq_mhz": 150.0,
-                     "alpha": -0.7, "rm": None},
-                ]
-            },
-            "gains": {"phase_mean": math.pi / 2, "phase_std": 30, "amp_std": 5, "fix_flux_scale": False},
-            "data": {"freq": 1.4e9, "noise": 0.5},
-            "satellites": {"norad_ids": [25544]},
-        }
-
-        new, _ = migrate(old)
-        validated = validate_config(new)
-        traj, sky, _, gains = (spec.config for spec in validated.model.components)
-
-        assert traj.min_elevation_deg == 10.0
-        (source,) = sky.point_sources
-        assert (source.ra_deg, source.dec_deg, source.I_jy) == (1.0, -2.0, 3.0)
-        assert source.ref_freq_hz == pytest.approx(150e6)
-        assert gains.phase_mean_deg == pytest.approx(90.0)
-        assert (gains.phase_std_deg, gains.amp_std_pct) == (30.0, 5.0)
-        assert (validated.data.freq_hz, validated.data.noise_jy) == (1.4e9, 0.5)
-
-    def test_migrate_scales_quoted_ref_freq_mhz_to_hz(self):
-        old = {
-            "model": {"components": ["ast_signal:FixedDiscreteSky", "ast_vis:DiscreteSkyVis"]},
-            "ast": {
-                "point_sources": [
-                    {"ra": 50.0, "dec": -37.0, "I": 10.0, "ref_freq_mhz": "150.0", "alpha": -0.7}
-                ]
-            },
-        }
-        new, _ = migrate(old)
-        cfg = validate_config(new)
-        (source,) = cfg.model.components[0].config.point_sources
-        assert source.ref_freq_hz == pytest.approx(150e6)
-
-    def test_migrate_moves_the_inference_section(self):
-        old = {
-            "model": {"components": []},
-            "inference": {"opt": False, "seed": 7},
-            "opt": {"guide": "map", "epsilon": 1e-3},
-        }
-        new, notes = migrate(old)
-        cfg = validate_config(new)
-
-        assert cfg.seed == 7
-        assert cfg.opt.max_iter == 0
-        assert "inference" not in new and "guide" not in new["opt"]
-        assert any("inference.opt" in n for n in notes)
-
-    def test_migrate_inference_opt_false_drops_fit_only_opt_keys(self):
-        old = {
-            "model": {"components": []},
-            "inference": {"opt": False},
-            "opt": {
-                "schedule": {"kind": "constant"},
-                "stop": {"window": 10, "rtol": 1e-3},
-                "checkpoints": [100],
-            },
-        }
-        new, notes = migrate(old)
-        cfg = validate_config(new)
-
-        assert cfg.opt.max_iter == 0
-        assert cfg.opt.schedule is None
-        assert cfg.opt.stop is None
-        assert cfg.opt.checkpoints is None
-        assert any("schedule" in n and "dropped" in n for n in notes)
-        assert any("checkpoints" in n and "dropped" in n for n in notes)
-
-    @pytest.mark.parametrize(
-        "opt, total",
-        [
-            ({"max_iter": 300}, 600),  # dual_run is the default
-            ({"max_iter": 300, "dual_run": True}, 600),
-            ({"max_iter": 300, "dual_run": False}, 300),
-            ({"max_iter": 300, "schedule": {"kind": "constant"}}, 300),
-            ({"dual_run": False}, 500),  # old single-phase default was 500
-            ({"schedule": {"kind": "constant"}}, 500),  # old schedule default was 500
-            ({}, 1000),  # the old default of 500 a phase is the new default total
-        ],
-    )
-    def test_migrate_writes_max_iter_as_the_total(self, opt, total):
-        new, _ = migrate({"model": {"components": []}, "opt": opt})
-        assert validate_config(new).opt.max_iter == total
-
-    def test_an_inference_section_is_refused_with_the_way_out(self):
-        with pytest.raises(ConfigValidationError, match="top-level key 'seed'.*migrate-config"):
-            validate_config({"model": {"components": []}, "inference": {"seed": 3}})
-
-    def test_migrate_config_cli_round_trip(self, tmp_path):
-        old_path = tmp_path / "old.yaml"
-        new_path = tmp_path / "new.yaml"
-        old_path.write_text(
-            yaml.safe_dump(
-                {
-                    "model": {
-                        "components": [
-                            "ast_vis:GPVisAst",
-                            "gains:UnitaryGains",
-                        ]
-                    },
-                    "ast": {"gp_cov": {"std": 2.0}},
-                }
-            )
-        )
-        args = build_cli_parser().parse_args(
-            ["migrate-config", str(old_path), "-o", str(new_path)]
-        )
-        assert args.command == "migrate-config"
-        assert run_migrate(args) == 0
-        loaded = load_config(str(new_path))
-        assert loaded.model.components[0].config.std_jy == 2.0
-
-    def test_migrate_config_cli_returns_nonzero_when_result_invalid(self, tmp_path, capsys):
-        old_path = tmp_path / "bad_old.yaml"
-        old_path.write_text(
-            yaml.safe_dump(
-                {
-                    "model": {"components": ["ast_vis:GPVisAst"]},
-                    "ast": {"gp_cov": {"std": -5}},
-                }
-            )
-        )
-        args = build_migrate_parser().parse_args([str(old_path)])
-        assert run_migrate(args) == 1
-        assert "does not validate" in capsys.readouterr().err
-
-    def test_migrate_preserves_already_migrated_const_gains_est(self):
-        new, notes = migrate(
-            {"model": {"components": [{"gains.ConstGains": {"init": "est", "est": "cal.G"}}]}}
-        )
-        cfg = validate_config(new)
-        g = cfg.model.components[0].config
-        assert (g.init, g.est) == ("est", "cal.G")
-        assert not notes
-
-    def test_migrate_does_not_convert_boolean_phase_mean_to_degrees(self):
-        new, _ = migrate(
-            {
-                "model": {"components": ["ast_vis:GPVisAst", "gains:ConstGains"]},
-                "gains": {"phase_mean": True},
-            }
-        )
-        with pytest.raises(ConfigValidationError, match="phase_mean_deg"):
-            validate_config(new)
-
-    def test_light_curve_cli_exits_cleanly_on_invalid_config(self, tmp_path):
-        from tabascal.scripts.rfi_estimate import build_parser, run as run_light_curve
-
-        bad = tmp_path / "bad.yaml"
-        bad.write_text("model:\n  components: []\nrfi:\n  init: truth\n")
-        args = build_parser().parse_args(["-c", str(bad)])
-        with pytest.raises(SystemExit, match=r"Error:.*migrate-config"):
-            run_light_curve(args)
-
-
 class TestOptionsThatWouldBeIgnoredAreRefused:
     """A setting the run would not read is an error when the config loads."""
 
@@ -1152,22 +861,6 @@ class TestOptionsThatWouldBeIgnoredAreRefused:
             ))
             again = validate_config(cfg.to_yaml_dict())
             assert again.model.components[2].config == cfg.model.components[2].config
-
-    def test_migrate_drops_what_the_old_layout_ignored_and_says_so(self):
-        old = {
-            "model": {"components": [
-                "trajectory:FixedOrbitFine", "rfi_signal:ComplexRFIVarAntFine", "rfi_vis:RiemannVisFine",
-            ]},
-            "rfi": {"est": "lc.npz", "baseline_block_size": 128},
-            "satellites": {"norad_ids": [25544]},
-            "opt": {"schedule": {"kind": "constant"}, "dual_run": True},
-        }
-        new, notes = migrate(old)
-
-        validate_config(new)
-        assert any("est" in n and "dropped" in n for n in notes)
-        assert any("baseline_block_size" in n and "dropped" in n for n in notes)
-        assert any("dual_run" in n and "dropped" in n for n in notes)
 
 
 class TestTypedOptimiserSections:

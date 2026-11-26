@@ -18,11 +18,10 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import Field, model_validator
 
-import math
 import os
 import warnings
 
-from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Optional, Tuple, Union
+from typing import Dict, FrozenSet, List, Literal, Optional, Tuple, Union
 
 #: The width of the amplitude prior when the config leaves it unset, as a percentage
 #: of ``amp_mean``. A real array's antennas differ in sensitivity by far more than a
@@ -57,16 +56,6 @@ GAIN_FIT_BLOCKS = {
     "amplitude": ("amp",),
     "phase": ("phase",),
 }
-
-
-def _radians_to_degrees(value: Any) -> Any:
-    """Convert a legacy radian angle to degrees, leaving non-numeric values for validation."""
-    if isinstance(value, bool):
-        return value
-    try:
-        return math.degrees(float(value))
-    except (TypeError, ValueError):
-        return value
 
 
 class ConstGainsConfig(StrictConfigModel):
@@ -124,34 +113,6 @@ class ConstGainsConfig(StrictConfigModel):
         default=DEFAULT_PHASE_STD_DEGREES,
         description=f"Standard deviation of the gain phase prior, in degrees (default {DEFAULT_PHASE_STD_DEGREES:g} deg).",
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        "init": ("gains", "init"),
-        "fit": ("gains", "fit"),
-        "ref_ant": ("gains", "ref_ant"),
-        "fix_flux_scale": ("gains", "fix_flux_scale"),
-        "amp_mean": ("gains", "amp_mean"),
-        "phase_mean_deg": ("gains", "phase_mean"),
-        "amp_std_pct": ("gains", "amp_std"),
-        "phase_std_deg": ("gains", "phase_std"),
-    }
-    # The sectioned config gave the phase mean in radians.
-    legacy_transforms: ClassVar[dict[str, Any]] = {
-        "phase_mean_deg": _radians_to_degrees,
-    }
-
-    @classmethod
-    def legacy_cleanup(cls, options: Dict[str, Any]) -> List[str]:
-        # The sectioned config named the measured gain's file in init itself, and
-        # spelled fit: complex as both too.
-        notes = []
-        init = options.get("init")
-        if isinstance(init, str) and init not in ("prior", "est"):
-            options["init"], options["est"] = "est", init
-            notes.append(f"init: {init!r} is now init: est with est: {init!r}.")
-        if options.get("fit") == "both":
-            options["fit"] = "complex"
-        return notes
 
     @model_validator(mode="after")
     def _est_is_read_exactly_when_given(self) -> "ConstGainsConfig":

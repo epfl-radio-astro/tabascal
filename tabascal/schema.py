@@ -493,43 +493,6 @@ class StrictConfigModel(BaseModel):
         arbitrary_types_allowed=True,
     )
 
-    #: Field name -> path in the pre-component sectioned config, used by
-    #: ``tabascal migrate-config`` to move options onto the owning component.
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {}
-
-    #: Field name -> what a legacy ``null`` meant, for the fields whose ``null``
-    #: was a computed default and is now spelled by name.
-    legacy_null_value: ClassVar[dict[str, Any]] = {}
-
-    #: Field name -> what leaving the key out of a legacy config meant, for the
-    #: fields whose default has changed since; ``tabascal migrate-config``
-    #: writes it out so a converted config runs the model it ran before.
-    legacy_absent_value: ClassVar[dict[str, Any]] = {}
-
-    #: Old key -> field, for the options of a top-level section that were
-    #: renamed in place; ``tabascal migrate-config`` renames them.
-    legacy_renames: ClassVar[dict[str, str]] = {}
-
-    #: Field name -> conversion of a legacy value into the field's units, for
-    #: the options whose unit changed when they were renamed.
-    legacy_transforms: ClassVar[dict[str, Any]] = {}
-
-    @classmethod
-    def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
-        """Drop from migrated ``options`` what the old layout ignored and this one refuses.
-
-        Returns a note per key dropped. ``tabascal migrate-config`` calls it once
-        the options are moved; the default drops nothing.
-        """
-        return []
-
-    @staticmethod
-    def _drop_ignored(options: dict[str, Any], key: str, why: str) -> list[str]:
-        if key not in options:
-            return []
-        value = options.pop(key)
-        return [f"{key}: {value!r} dropped: {why}"]
-
     #: Fields whose type does not admit ``None`` but which read ``null`` as
     #: "none" all the same (``norad_ids: null`` is no satellites).
     null_is_none: ClassVar[FrozenSet[str]] = frozenset()
@@ -596,10 +559,6 @@ class TrajectoryConfig(StrictConfigModel):
         ),
     )
 
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        "min_elevation_deg": ("rfi", "min_elevation"),
-    }
-
 
 class FreqIntegrationMixin(StrictConfigModel):
     """Code-level mixin for RFI visibility components that integrate over frequency samples."""
@@ -611,10 +570,6 @@ class FreqIntegrationMixin(StrictConfigModel):
             "directly: there is no estimate on this axis."
         ),
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        "n_int_freq": ("rfi", "n_int_freq"),
-    }
 
 
 class FineTimeIntegrationMixin(FreqIntegrationMixin):
@@ -628,11 +583,6 @@ class FineTimeIntegrationMixin(FreqIntegrationMixin):
             "count itself is always estimated and cannot be given directly."
         ),
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        **FreqIntegrationMixin.legacy_keys,
-        "time_int_factor": ("rfi", "time_int_factor"),
-    }
 
 
 class VariableFineTimeIntegrationMixin(FineTimeIntegrationMixin):
@@ -652,12 +602,6 @@ class VariableFineTimeIntegrationMixin(FineTimeIntegrationMixin):
             "binned into."
         ),
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        **FineTimeIntegrationMixin.legacy_keys,
-        "min_time_bins": ("rfi", "min_time_bins"),
-        "max_time_bins": ("rfi", "max_time_bins"),
-    }
 
     @model_validator(mode="after")
     def _check_time_bins(self) -> "VariableFineTimeIntegrationMixin":
@@ -705,19 +649,6 @@ class FourierGPConfig(StrictConfigModel):
         default=2.0,
         description="Zero-padding factor along the time axis of the Fourier domain (>= 1).",
     )
-
-
-#: Alias -> name, for the enum values the sectioned config also spelled as a
-#: number or an abbreviation.
-_LEGACY_ALIASES = {0: "zeros", 1: "ones", "mf": "matched-filter", "both": "complex"}
-
-
-def _alias_key(value: Any) -> Any:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return int(value)
-    return value
 
 
 #: ``rfi_signal`` ``std_jy``: twice the largest observed visibility (GitHub #227).
@@ -798,30 +729,6 @@ class RFIGPConfig(FourierGPConfig):
         json_schema_extra={"input_path": True},
     )
 
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        "init": ("rfi", "init"),
-        "mean": ("rfi", "mean"),
-        "est": ("rfi", "est"),
-        "std_jy": ("rfi", "gp_cov", "std"),
-        "corr_freq_hz": ("rfi", "gp_cov", "corr_freq"),
-        "corr_time_s": ("rfi", "gp_cov", "corr_time"),
-        "gammas": ("rfi", "gp_cov", "gammas"),
-        "cutoff": ("rfi", "cutoff"),
-        "signal_type": ("rfi", "signal_type"),
-        "freq_pad_factor": ("rfi", "freq_pad_factor"),
-        "time_pad_factor": ("rfi", "time_pad_factor"),
-    }
-    legacy_null_value: ClassVar[dict[str, Any]] = {
-        "std_jy": MAX_VIS,
-        "corr_freq_hz": HALF_BAND,
-        "corr_time_s": HALF_DURATION,
-    }
-    legacy_absent_value: ClassVar[dict[str, Any]] = {"std_jy": MAX_VIS}
-    legacy_transforms: ClassVar[dict[str, Any]] = {
-        "init": lambda v: _LEGACY_ALIASES.get(_alias_key(v), v),
-        "mean": lambda v: _LEGACY_ALIASES.get(_alias_key(v), v),
-    }
-
     @field_validator("std_jy", mode="before")
     @classmethod
     def _validate_std(cls, value: Any) -> Any:
@@ -838,12 +745,6 @@ class RFIGPConfig(FourierGPConfig):
                 + "'matched-filter' and the rest are spelled out."
             )
         return value
-
-    @classmethod
-    def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
-        if options.get("est") is not None and "est" not in (options.get("init"), options.get("mean")):
-            return cls._drop_ignored(options, "est", "neither init nor mean is 'est', so nothing read it.")
-        return []
 
     @model_validator(mode="after")
     def _est_is_read_exactly_when_given(self) -> "RFIGPConfig":
@@ -874,12 +775,6 @@ class RFIGPConfig(FourierGPConfig):
 
 class DataConfig(StrictConfigModel):
     """Observation, I/O, noise, flags, and external calibration settings."""
-
-    legacy_renames: ClassVar[dict[str, str]] = {
-        "freq": "freq_hz",
-        "noise": "noise_jy",
-        "flags": "exclude_flagged",
-    }
 
     out_dir: OptionalPathStr = Field(
         default=None,
@@ -1199,43 +1094,6 @@ class OptConfig(StrictConfigModel):
             "relative paths resolve inside the run directory. Overridden by TAB_LOSS_TRACE."
         ),
     )
-
-    @classmethod
-    def legacy_cleanup(cls, options: dict[str, Any]) -> list[str]:
-        notes = cls._drop_ignored(options, "guide", "'map' was its only value, and is what the fit is.")
-        if options.get("max_iter") == 0:
-            # No fit runs at max_iter: 0, and schedule/stop/checkpoints cannot validate against 0 steps.
-            for key in ("schedule", "stop", "checkpoints"):
-                if options.get(key) is not None:
-                    notes.extend(cls._drop_ignored(options, key, "no fit runs when max_iter is 0."))
-            return notes
-        if options.get("schedule") is not None:
-            notes.extend(cls._drop_ignored(options, "dual_run", "it is not read with a schedule."))
-            if "max_iter" not in options:
-                options["max_iter"] = 500
-                notes.append(
-                    "max_iter was unset, which ran 500 steps under a schedule; "
-                    "written out, since the default is now 1000."
-                )
-            return notes
-        if options.get("dual_run") is False:
-            if "max_iter" not in options:
-                options["max_iter"] = 500
-                notes.append(
-                    "max_iter was unset, which ran 500 steps with dual_run: false; "
-                    "written out, since the default is now 1000."
-                )
-            return notes
-        if options.get("dual_run", True) and "max_iter" in options:
-            # The old max_iter counted one phase of dual_run; it is the total now.
-            per_phase = options["max_iter"]
-            if isinstance(per_phase, int) and not isinstance(per_phase, bool) and per_phase > 0:
-                options["max_iter"] = 2 * per_phase
-                notes.append(
-                    f"max_iter: {per_phase} ran that many steps in each of dual_run's two "
-                    f"phases; written as {2 * per_phase}, since it is now the total."
-                )
-        return notes
 
     @model_validator(mode="after")
     def _dual_run_or_schedule(self) -> "OptConfig":
@@ -1737,14 +1595,12 @@ def validate_config(raw: Any) -> RunConfig:
     if old:
         raise ConfigValidationError(
             f"This config is in the old sectioned layout ({', '.join(old)} at the top level). "
-            "Each component now takes its own options under its entry in 'model.components'. "
-            "Convert it with: tabascal migrate-config <old.yaml> -o <new.yaml>"
+            "Each component now takes its own options under its entry in 'model.components'."
         )
     if "inference" in raw:
         raise ConfigValidationError(
             "The inference section is gone: the seed is the top-level key 'seed', and "
-            "'opt.max_iter: 0' runs no fit, which is what 'inference.opt: false' did. "
-            "tabascal migrate-config <old.yaml> -o <new.yaml> converts it."
+            "'opt.max_iter: 0' runs no fit, which is what 'inference.opt: false' did."
         )
     # Strip top-level bare section headers (e.g. `data:` with nothing under it) ONLY for
     # known optional sections that have defaults, while forbidding unknown sections.

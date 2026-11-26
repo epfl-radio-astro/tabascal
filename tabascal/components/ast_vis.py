@@ -1,5 +1,5 @@
 from math import ceil, isfinite, sqrt
-from typing import Any, ClassVar, FrozenSet, Literal, Optional, Tuple, Union
+from typing import Any, FrozenSet, Literal, Optional, Tuple, Union
 
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
@@ -93,25 +93,6 @@ class GPVisAstConfig(FourierGPConfig):
         description="Mean of the prior over astronomical visibilities: 'zeros' or 'data'.",
     )
 
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        "init": ("ast", "init"),
-        "mean": ("ast", "mean"),
-        "std_jy": ("ast", "gp_cov", "std"),
-        "corr_freq_hz": ("ast", "gp_cov", "corr_freq"),
-        "fov_deg": ("ast", "gp_cov", "fov_deg"),
-        "gammas": ("ast", "gp_cov", "gammas"),
-        "cutoff": ("ast", "cutoff"),
-        "freq_pad_factor": ("ast", "freq_pad_factor"),
-        "time_pad_factor": ("ast", "time_pad_factor"),
-        "transform": ("ast", "transform"),
-        "baseline_block_size": ("ast", "baseline_block_size"),
-    }
-    legacy_null_value: ClassVar[dict[str, Any]] = {"fov_deg": "primary_beam"}
-    legacy_absent_value: ClassVar[dict[str, Any]] = {"init": "sample"}
-    legacy_transforms: ClassVar[dict[str, Any]] = {
-        "mean": lambda v: "zeros" if not isinstance(v, bool) and v == 0 else v,
-    }
-
     @field_validator("std_jy", mode="before")
     @classmethod
     def _validate_std(cls, value: Any) -> Any:
@@ -159,11 +140,6 @@ class DiscreteSkyVisConfig(StrictConfigModel):
         default=128,
         description="Number of discrete sky sources accumulated per scan block.",
     )
-
-    legacy_keys: ClassVar[dict[str, tuple[str, ...]]] = {
-        "uvw_sign": ("ast", "uvw_sign"),
-        "source_block_size": ("ast", "source_block_size"),
-    }
 
     @field_validator("uvw_sign", mode="before")
     @classmethod
