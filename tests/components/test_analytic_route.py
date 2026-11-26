@@ -367,20 +367,20 @@ class TestAnalyticVis:
         jaxpr = str(jax.make_jaxpr(lambda a, t: jax.jvp(lambda a: call(a, phase), (a,), (t,)))(amp, amp))
         assert "rfi_analytic_jvp_op" in jaxpr and "rfi_analytic_full_jvp_op" not in jaxpr
 
-    @pytest.mark.parametrize("signals, n_int_freq, gp", [
-        pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 1, None, id="VarAnt-1"),
-        pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 3, None, id="VarAnt-3"),
-        # ConstAnt's own prior keeps only the DC mode here: a constant signal, which
-        # every stencil interpolates exactly. VarAnt's gammas and cutoff let it vary.
-        pytest.param((ComplexRFIConstAntFine, ComplexRFIConstAnt), 3, ([3, 3], 1e-9), id="ConstAnt-3"),
+    @pytest.mark.parametrize("signals, n_int_freq", [
+        pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 1, id="VarAnt-1"),
+        pytest.param((ComplexRFIVarAntFine, ComplexRFIVarAnt), 3, id="VarAnt-3"),
+        pytest.param((ComplexRFIConstAntFine, ComplexRFIConstAnt), 3, id="ConstAnt-3"),
     ])
-    def test_approximates_the_fine_grid_route(self, signals, n_int_freq, gp):
+    def test_approximates_the_fine_grid_route(self, signals, n_int_freq):
         """The same latent parameters through both routes, and closer than holding each
         cell's value (stencil 0). Cells wind ~4 turns: 101 samples keep the fine route's
         own Riemann error (6e-3 at 31) below the signal interpolation's (9e-4)."""
         cfg = make_config(n_ant=5, n_int_time=101, n_int_freq=n_int_freq, corr_time=80.0)
-        if gp is not None:
-            cfg._sig_kwargs["gammas"], cfg._sig_kwargs["cutoff"] = gp
+        # The default GP prior keeps only the DC mode on this short grid: a constant
+        # signal, which every stencil interpolates exactly. A shallower roll-off and
+        # cutoff let it vary across cells so stencil > 0 is actually exercised.
+        cfg._sig_kwargs["gammas"], cfg._sig_kwargs["cutoff"] = [3, 3], 1e-9
         fine, params = run_route([FixedOrbitFine, signals[0], RiemannVisFine], cfg)
         # A fixed latent, not a draw: every kept mode is set, so the signal varies within a cell.
         params = {k: jnp.cos(jnp.arange(v.size, dtype=v.dtype).reshape(v.shape) + i)

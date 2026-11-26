@@ -296,23 +296,26 @@ class TestComponentSchemas:
         with pytest.raises(ConfigValidationError):
             validate_config(_minimal_raw([{"trajectory.FixedOrbit": bad_fields}]))
 
-    def test_rfi_signal_defaults_differ_between_var_and_const_ant(self):
+    def test_rfi_signal_defaults_are_unified(self):
         cfg = validate_config(
             _minimal_raw(
                 [
                     "trajectory.FixedOrbit",
                     "rfi_signal.ComplexRFIVarAnt",
                     "rfi_vis.AnalyticVis",
+                    "ast_vis.GPVisAst",
                 ],
                 satellites={"norad_ids": [25544]},
             )
         )
         var_cfg = cfg.model.components[1].config
-        assert var_cfg.gammas == (3.0, 3.0)
+        ast_cfg = cfg.model.components[3].config
+        assert var_cfg.gammas == (5.0, 5.0)
         assert var_cfg.std_jy == "data"
-        assert var_cfg.cutoff == 1e-9
+        assert var_cfg.cutoff == 1e-6
         assert var_cfg.corr_freq_hz == 1e6
         assert var_cfg.corr_time_s == 24.0
+        assert (var_cfg.gammas, var_cfg.cutoff) == (ast_cfg.gammas, ast_cfg.cutoff)
 
         cfg2 = validate_config(
             _minimal_raw(
@@ -325,7 +328,8 @@ class TestComponentSchemas:
             )
         )
         const_cfg = cfg2.model.components[1].config
-        assert const_cfg.gammas == (100.0, 100.0)
+        assert type(const_cfg) is type(var_cfg)
+        assert const_cfg.gammas == (5.0, 5.0)
         assert const_cfg.cutoff == 1e-6
 
     @pytest.mark.parametrize(

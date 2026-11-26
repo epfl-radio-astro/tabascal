@@ -797,17 +797,17 @@ class TestRealSignalType:
 
     @pytest.mark.parametrize("value", ["complex", "real"])
     def test_the_config_value_validates(self, value):
-        from tabascal.components.rfi_signal import RFIVarAntConfig
+        from tabascal.schema import RFIGPConfig
 
-        assert RFIVarAntConfig(signal_type=value).signal_type == value
-        assert RFIVarAntConfig().signal_type == "complex"
+        assert RFIGPConfig(signal_type=value).signal_type == value
+        assert RFIGPConfig().signal_type == "complex"
 
     @pytest.mark.parametrize("value", ["Real", "", 0, 1, False, True, ["real"]])
     def test_a_bad_config_value_is_refused_by_name(self, value):
-        from tabascal.components.rfi_signal import RFIVarAntConfig
+        from tabascal.schema import RFIGPConfig
 
         with pytest.raises(ValueError, match="signal_type"):
-            RFIVarAntConfig(signal_type=value)
+            RFIGPConfig(signal_type=value)
 
 
 # Padded lengths 9, 8 (pad 2), 5, 4 (no padding) and a single channel, whose pad of

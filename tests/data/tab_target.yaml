@@ -7,7 +7,9 @@ model:
     - rfi_signal.ComplexRFIVarAntFine:
         init: truth
         mean: zeros
-        std_jy: max_vis   # the pipeline tests' reference values were measured with it
+        std_jy: max_vis   # the pipeline tests' reference values were measured with these
+        gammas: [3, 3]
+        cutoff: 1e-9
         corr_time_s: 24
         freq_pad_factor: 2.0
         time_pad_factor: 2.0

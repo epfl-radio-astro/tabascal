@@ -468,11 +468,11 @@ model:
         mean: zeros
         freq_pad_factor: 2.0
         time_pad_factor: 2.0
-        cutoff: 1e-9
+        cutoff: 1e-6
         std_jy: data
         corr_freq_hz: 1e6
         corr_time_s: 24
-        gammas: [3, 3]    # [100, 100] on the ConstAnt components
+        gammas: [5, 5]
     - rfi_vis.RiemannVisFine:
         n_int_freq: 1
         time_int_factor: 1
@@ -528,9 +528,9 @@ The remaining parameters on `rfi_signal.*`, `trajectory.*`, and `rfi_vis.*` are:
 
   * `corr_freq_hz`: the bandwidth, in Hz, over which the RFI signal stays correlated, setting the knee along the frequency axis. That axis is a delay, so the knee is `1 / (2 * pi * corr_freq)` seconds — the same conversion `ast_vis.GPVisAst`'s `corr_freq_hz` makes. `half_band` is **half the observed band**, which is *not* what the astronomical `corr_freq_hz: null` means: that one is no roll-off at all. The difference is which default declines to commit. Note that a flat delay spectrum is **not** a smooth signal: equal power at every delay leaves the channels uncorrelated, its normalised channel covariance being `[1, 0, 0, ...]`. So the astronomical null states no frequency structure rather than gentle structure — which costs nothing on the single-channel observations every shipped config runs, and is exactly why [`ast_vis.GPVisAst`'s `corr_freq_hz`](#astronomical-signal) tells you to set a value on a wide band. An emitter is coherent over some band by construction, so here half the observation is the least-committal guess that is still a coherence scale.
   * `corr_time_s`: the time, in seconds, over which the RFI signal stays correlated, setting the knee along the time axis. `half_duration` is half the observation. It is given as a time where the astronomical block asks for `fov_deg`, because an emitter's coherence time is a property of the emitter, while a sky source's is its fringe rate — a consequence of how far off axis it sits rather than a number to pick.
-  * `gammas`: the roll-off exponent on the frequency and time axes, in that order. The default is `[3, 3]` on `rfi_signal.ComplexRFIVarAnt` and `ComplexRFIVarAntFine`, and `[100, 100]` on `rfi_signal.ComplexRFIConstAnt` and `ComplexRFIConstAntFine`. The two have never agreed, and are kept apart rather than unified (#111).
+  * `gammas`: the roll-off exponent on the frequency and time axes, in that order. Defaults to `[5, 5]` on every `rfi_signal.*` component, matching `ast_vis.GPVisAst`.
 
-* `cutoff` (on `rfi_signal.*`): the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values — and nothing about what the prior believes, since the spectrum is normalised to `std_jy` after the cut. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit. Below 1 is necessary rather than sufficient: a value near enough to 1 to round to it in the working precision cuts everything too, which the run refuses with a message naming the cutoff rather than a shape error from inside the transform. Defaults to `1e-9` on `ComplexRFIVarAnt` / `ComplexRFIVarAntFine`, and `1e-6` on `ComplexRFIConstAnt` / `ComplexRFIConstAntFine`.
+* `cutoff` (on `rfi_signal.*`): the relative power below which a k-mode is dropped from the latent grid. It therefore sets the number of fitted RFI parameters, which the run prints as `(n_k_fq, n_k_tm)` beside the resolved values — and nothing about what the prior believes, since the spectrum is normalised to `std_jy` after the cut. It is relative to the largest mode on each axis, so it must be below `1` — at `1` every mode is cut and nothing is left to fit. Below 1 is necessary rather than sufficient: a value near enough to 1 to round to it in the working precision cuts everything too, which the run refuses with a message naming the cutoff rather than a shape error from inside the transform. Defaults to `1e-6` on every `rfi_signal.*` component, matching `ast_vis.GPVisAst`.
 
 * `min_elevation_deg` (on `trajectory.*`): Elevation in degrees below which a satellite's RFI signal is held at zero, so it is only modelled while it is up. The default is `0`, which masks a satellite exactly while it is below the geometric horizon. Set it to `null` to disable masking entirely and model every satellite over the whole observation.
 

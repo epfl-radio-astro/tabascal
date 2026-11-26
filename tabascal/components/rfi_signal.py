@@ -9,7 +9,7 @@ from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
-from tabascal.schema import HALF_BAND, HALF_DURATION, MAX_VIS, CutoffFloat, PositivePair, RFIGPConfig
+from tabascal.schema import HALF_BAND, HALF_DURATION, MAX_VIS, RFIGPConfig
 from tabascal.seeds import DEFAULT_SEED, component_key
 from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis
 from tabascal.time import to_utc_mjd
@@ -20,7 +20,6 @@ from numpy.typing import NDArray
 import xarray as xr
 
 from typing import Tuple, Dict, Callable, List, Optional
-from pydantic import Field
 
 
 #: Required contents of a light-curve file. See :func:`read_light_curves`.
@@ -582,38 +581,6 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     return std
 
 
-class RFIVarAntConfig(RFIGPConfig):
-    """Configuration for per-antenna RFI signal components."""
-
-    cutoff: CutoffFloat = Field(
-        default=1e-9,
-        description=(
-            "Relative power below which a k-mode is dropped from the RFI latent grid; "
-            "the retained spectrum is re-normalised after the cut."
-        ),
-    )
-
-
-class RFIConstAntConfig(RFIGPConfig):
-    """Configuration for constant-across-antennas RFI signal components."""
-
-    # The two Fourier components have never agreed on the roll-off: the
-    # difference looks historical rather than intentional (#111), and is kept
-    # rather than unified, which would be a model change for one of them.
-    gammas: PositivePair = Field(
-        default=(100.0, 100.0),
-        description="Roll-off exponents of the RFI power spectrum on the (frequency, time) axes.",
-    )
-
-    cutoff: CutoffFloat = Field(
-        default=1e-6,
-        description=(
-            "Relative power below which a k-mode is dropped from the RFI latent grid; "
-            "the retained spectrum is re-normalised after the cut."
-        ),
-    )
-
-
 def resolve_rfi_gp_params(
     cfg: RFIGPConfig,
     vis_obs: Array,
@@ -666,7 +633,7 @@ def resolve_rfi_gp_params(
 
 class BaseGPRFI(Component):
 
-    Config = RFIVarAntConfig
+    Config = RFIGPConfig
 
     #: The tag ``init: sample`` folds into ``seed`` (tabascal.seeds).
     seed_tag = "rfi"
@@ -989,8 +956,6 @@ class BaseGPRFI(Component):
     def masked_forward_transform(self, base_params, L, mu):
         return self._mask_dummy_rfi(self.forward_transform(base_params, L, mu))
 class ComplexRFIVarAntFine(BaseGPRFI):
-
-    Config = RFIVarAntConfig
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -1321,8 +1286,6 @@ class ComplexRFIVarAnt(ComplexRFIVarAntFine):
 
 
 class ComplexRFIConstAntFine(BaseGPRFI):
-
-    Config = RFIConstAntConfig
 
     required_inputs = {}  # No inputs needed
     output_shapes = {

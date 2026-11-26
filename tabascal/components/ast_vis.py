@@ -9,15 +9,12 @@ from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
 from tabascal.schema import (
-    CutoffFloat,
     FloatGe1,
     FourierGPConfig,
     PositiveFloat,
-    PositivePair,
     StrictConfigModel,
     WholePositiveInt,
     _check_float_ge_1,
-    _check_std_value,
     _check_whole_positive_int,
 )
 from tabascal.seeds import DEFAULT_SEED, component_key
@@ -29,39 +26,12 @@ from tabascal.truth import read_true_vis_ast
 class GPVisAstConfig(FourierGPConfig):
     """Configuration for :class:`GPVisAst`."""
 
-    std_jy: Union[PositiveFloat, Literal["data"]] = Field(
-        default="data",
-        description=(
-            "Width of the prior on the astronomical visibilities, in Jy (rms|V|). "
-            "'data' measures it per baseline from unflagged visibilities; a positive "
-            "number sets one width for every baseline."
-        ),
-    )
-    corr_freq_hz: Optional[PositiveFloat] = Field(
-        default=None,
-        description=(
-            "Bandwidth, in Hz, over which the sky stays correlated along frequency. "
-            "null disables roll-off along the frequency axis."
-        ),
-    )
     fov_deg: Union[PositiveFloat, Literal["primary_beam"]] = Field(
         default="primary_beam",
         description=(
             "Full field of view, in degrees, setting the knee along the time axis via "
             "the fringe rate at fov_deg / 2. 'primary_beam' uses 2 * 1.22 * lambda / D."
         ),
-    )
-    gammas: PositivePair = Field(
-        default=(5.0, 5.0),
-        description="Power-law roll-off exponents past the knee on the (frequency, time) axes.",
-    )
-    cutoff: CutoffFloat = Field(
-        default=1e-6,
-        description="Relative power below which Fourier k-modes are dropped from the sky latent grid.",
-    )
-    freq_pad_factor: FloatGe1 = Field(
-        default=2.0,
-        description="Zero-padding factor along the frequency axis of the Fourier domain (>= 1).",
     )
     time_pad_factor: Union[FloatGe1, Literal["auto"]] = Field(
         default=2.0,
@@ -92,11 +62,6 @@ class GPVisAstConfig(FourierGPConfig):
         default="zeros",
         description="Mean of the prior over astronomical visibilities: 'zeros' or 'data'.",
     )
-
-    @field_validator("std_jy", mode="before")
-    @classmethod
-    def _validate_std(cls, value: Any) -> Any:
-        return _check_std_value(value)
 
     @field_validator("time_pad_factor", mode="before")
     @classmethod

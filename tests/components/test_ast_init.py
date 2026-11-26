@@ -755,8 +755,9 @@ class TestAstGpCovIsValidated:
             assert key in message
 
     def test_the_validation_shares_the_fourier_gp_mixin(self):
-        from tabascal.components.rfi_signal import RFIVarAntConfig
-        from tabascal.schema import FourierGPConfig
+        from tabascal.schema import FourierGPConfig, RFIGPConfig
 
         assert issubclass(GPVisAstConfig, FourierGPConfig)
-        assert issubclass(RFIVarAntConfig, FourierGPConfig)
+        assert issubclass(RFIGPConfig, FourierGPConfig)
+        assert GPVisAstConfig().gammas == RFIGPConfig().gammas == FourierGPConfig().gammas
+        assert GPVisAstConfig().cutoff == RFIGPConfig().cutoff == FourierGPConfig().cutoff

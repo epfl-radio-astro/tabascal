@@ -30,12 +30,11 @@ from tabascal.interferometry import calculate_rfi_vis_fine
 from tabascal.components.rfi_signal import (
     ComplexRFIVarAntFine,
     ComplexRFIConstAntFine,
-    RFIVarAntConfig,
     read_light_curves,
     resolve_rfi_gp_params,
 )
 from tabascal.fft_gp import latent_to_signal, signal_to_latent
-from tabascal.schema import ConfigValidationError, validate_config
+from tabascal.schema import ConfigValidationError, RFIGPConfig, validate_config
 from tabascal.seeds import component_key
 
 from .conftest import active_precision, assert_transform_roundtrip, make_constants
@@ -239,7 +238,7 @@ class TestRfiSignalConfigValidation:
         """The named values are derived from the data and the observation grid."""
         freqs, times = self._grid()
         vis_obs = 3.0 * jnp.ones((6, 4, 8), dtype=complex)
-        cfg = RFIVarAntConfig(std_jy="max_vis", corr_freq_hz="half_band", corr_time_s="half_duration")
+        cfg = RFIGPConfig(std_jy="max_vis", corr_freq_hz="half_band", corr_time_s="half_duration")
 
         std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -250,7 +249,7 @@ class TestRfiSignalConfigValidation:
     def test_half_duration_does_not_clobber_corr_freq(self):
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = RFIVarAntConfig(std_jy=1.0, corr_freq_hz="half_band", corr_time_s="half_duration")
+        cfg = RFIGPConfig(std_jy=1.0, corr_freq_hz="half_band", corr_time_s="half_duration")
 
         _std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -262,7 +261,7 @@ class TestRfiSignalConfigValidation:
     def test_explicit_values_preserved_as_floats(self):
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        cfg = RFIVarAntConfig(std_jy=7, corr_freq_hz=5e6, corr_time_s=60)
+        cfg = RFIGPConfig(std_jy=7, corr_freq_hz=5e6, corr_time_s=60)
 
         std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -274,24 +273,24 @@ class TestRfiSignalConfigValidation:
     def test_an_omitted_key_takes_its_default(self):
         freqs, times = self._grid()
         vis_obs = jnp.ones((6, 4, 8), dtype=complex)
-        omitted = RFIVarAntConfig(std_jy=1.0, corr_freq_hz=5e6)
-        half = RFIVarAntConfig(std_jy=1.0, corr_freq_hz=5e6, corr_time_s="half_duration")
+        omitted = RFIGPConfig(std_jy=1.0, corr_freq_hz=5e6)
+        half = RFIGPConfig(std_jy=1.0, corr_freq_hz=5e6, corr_time_s="half_duration")
 
         left = resolve_rfi_gp_params(omitted, vis_obs, freqs, 1e6, times, 8.0)
         right = resolve_rfi_gp_params(half, vis_obs, freqs, 1e6, times, 8.0)
 
-        assert left[2] == pytest.approx(RFIVarAntConfig().corr_time_s)
+        assert left[2] == pytest.approx(RFIGPConfig().corr_time_s)
         assert right[2] == pytest.approx(float(times[-1] - times[0]) / 2)
 
     @pytest.mark.parametrize("key", ["std_jy", "corr_freq_hz", "corr_time_s"])
     def test_non_numeric_value_raises(self, key):
         with pytest.raises(ValueError):
-            RFIVarAntConfig(**{key: "not a number"})
+            RFIGPConfig(**{key: "not a number"})
 
     @pytest.mark.parametrize("key", ["std_jy", "corr_freq_hz", "corr_time_s", "cutoff", "signal_type"])
     def test_null_is_refused_with_the_default_named(self, key):
         with pytest.raises(ValueError, match=f"{key}: null is not a setting.*Leave the key out"):
-            RFIVarAntConfig(**{key: None})
+            RFIGPConfig(**{key: None})
 
     @pytest.mark.parametrize(
         "key, value",
@@ -309,12 +308,12 @@ class TestRfiSignalConfigValidation:
     )
     def test_a_width_or_a_scale_that_is_not_positive_and_finite_is_refused(self, key, value):
         with pytest.raises(ValueError, match=key):
-            RFIVarAntConfig(**{key: value})
+            RFIGPConfig(**{key: value})
 
     def test_single_channel_single_integration_defaults(self):
         freqs, times = jnp.array([1.4e9]), jnp.array([0.0])
         vis_obs = jnp.ones((6, 1, 1), dtype=complex)
-        cfg = RFIVarAntConfig(std_jy="max_vis", corr_freq_hz="half_band", corr_time_s="half_duration")
+        cfg = RFIGPConfig(std_jy="max_vis", corr_freq_hz="half_band", corr_time_s="half_duration")
 
         _std, corr_freq, corr_time = resolve_rfi_gp_params(cfg, vis_obs, freqs, 1e6, times, 8.0)
 
@@ -691,7 +690,7 @@ class TestMatchedFilterSeeding:
     @pytest.mark.parametrize("key", ["init", "mean"])
     def test_the_abbreviation_is_refused(self, key):
         with pytest.raises(ValueError, match=key):
-            RFIVarAntConfig(**{key: "mf"})
+            RFIGPConfig(**{key: "mf"})
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     @pytest.mark.parametrize("mode", ["init", "mean"])
@@ -1903,19 +1902,18 @@ class TestGpCovIsRead:
 
     @pytest.mark.parametrize(
         "cls, gammas, cutoff",
-        [(ComplexRFIVarAntFine, [3.0, 3.0], 1e-9), (ComplexRFIConstAntFine, [100.0, 100.0], 1e-6)],
+        [(ComplexRFIVarAntFine, [5.0, 5.0], 1e-6), (ComplexRFIConstAntFine, [5.0, 5.0], 1e-6)],
     )
     def test_the_defaults_are_these_numbers(self, cls, gammas, cutoff):
         comp = setup_with_gp_cov(cls, _ABSENT)
 
         assert comp.gp_cov_params() == (gammas, cutoff)
 
-    def test_the_two_components_keep_their_own_defaults(self):
-        """Preserved rather than unified: making them agree is a model change."""
-        assert ComplexRFIVarAntFine.Config().gammas != ComplexRFIConstAntFine.Config().gammas
-        assert (
-            ComplexRFIVarAntFine.Config().cutoff != ComplexRFIConstAntFine.Config().cutoff
-        )
+    def test_the_two_components_share_unified_defaults(self):
+        """All Fourier GP components share one default gammas and cutoff."""
+        assert ComplexRFIVarAntFine.Config is ComplexRFIConstAntFine.Config
+        assert ComplexRFIVarAntFine.Config().gammas == (5.0, 5.0)
+        assert ComplexRFIVarAntFine.Config().cutoff == 1e-6
 
     @pytest.mark.parametrize("cls", FOURIER_CLASSES)
     def test_a_cutoff_that_bites_drops_k_modes(self, cls):
@@ -2075,9 +2073,9 @@ class TestGpCovIsRead:
         assert "not supported between instances" not in message
 
     def test_the_schema_defaults_match_each_component(self):
-        assert ComplexRFIVarAntFine.Config().gammas == (3.0, 3.0)
-        assert ComplexRFIVarAntFine.Config().cutoff == 1e-9
-        assert ComplexRFIConstAntFine.Config().gammas == (100.0, 100.0)
+        assert ComplexRFIVarAntFine.Config().gammas == (5.0, 5.0)
+        assert ComplexRFIVarAntFine.Config().cutoff == 1e-6
+        assert ComplexRFIConstAntFine.Config().gammas == (5.0, 5.0)
         assert ComplexRFIConstAntFine.Config().cutoff == 1e-6
 
 
@@ -2254,7 +2252,7 @@ class TestTheStdCanBeMeasuredFromTheData:
 
     def _validate(self, vis, gain_flags=None, **kwargs):
         params = {"std_jy": "data", "corr_freq_hz": 5e6, "corr_time_s": 60.0, **kwargs}
-        cfg = RFIVarAntConfig(**params)
+        cfg = RFIGPConfig(**params)
         freqs, chan_width, times, int_time = self.GRID
         std, corr_freq, corr_time = resolve_rfi_gp_params(
             cfg, vis, freqs, chan_width, times, int_time, gain_flags

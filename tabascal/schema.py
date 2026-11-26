@@ -625,21 +625,32 @@ def _check_std_value(value: Any, *, named: Tuple[str, ...] = ("data",)) -> Any:
 class FourierGPConfig(StrictConfigModel):
     """Code-level mixin shared by Fourier-domain Gaussian process components."""
 
-    std_jy: Optional[Union[PositiveFloat, Literal["data"]]] = Field(
-        default=None,
-        description="Prior standard deviation in Jy, or 'data' to estimate from the observed visibilities.",
+    _std_named: ClassVar[Tuple[str, ...]] = ("data",)
+
+    std_jy: Union[PositiveFloat, Literal["data"]] = Field(
+        default="data",
+        description=(
+            "Width of the prior in Jy (rms|V|). 'data' measures it from the observed "
+            "visibilities; a positive number sets it directly."
+        ),
     )
     corr_freq_hz: Optional[PositiveFloat] = Field(
         default=None,
-        description="Correlation bandwidth in Hz along the frequency axis.",
+        description=(
+            "Bandwidth, in Hz, over which the signal stays correlated along frequency. "
+            "null disables roll-off along the frequency axis."
+        ),
     )
     gammas: PositivePair = Field(
         default=(5.0, 5.0),
-        description="Power-law roll-off exponents along the (frequency, time) axes.",
+        description="Power-law roll-off exponents past the knee on the (frequency, time) axes.",
     )
     cutoff: CutoffFloat = Field(
         default=1e-6,
-        description="Relative power threshold below which Fourier k-modes are dropped.",
+        description=(
+            "Relative power below which a k-mode is dropped from the latent grid; "
+            "the retained spectrum is re-normalised after the cut."
+        ),
     )
     freq_pad_factor: FloatGe1 = Field(
         default=2.0,
@@ -649,6 +660,11 @@ class FourierGPConfig(StrictConfigModel):
         default=2.0,
         description="Zero-padding factor along the time axis of the Fourier domain (>= 1).",
     )
+
+    @field_validator("std_jy", mode="before")
+    @classmethod
+    def _validate_std(cls, value: Any) -> Any:
+        return _check_std_value(value, named=cls._std_named)
 
 
 #: ``rfi_signal`` ``std_jy``: twice the largest observed visibility (GitHub #227).
@@ -660,7 +676,9 @@ HALF_DURATION = "half_duration"
 
 
 class RFIGPConfig(FourierGPConfig):
-    """Code-level mixin shared by all GP-based RFI signal components."""
+    """Configuration shared by all GP-based RFI signal components."""
+
+    _std_named: ClassVar[Tuple[str, ...]] = ("data", MAX_VIS)
 
     std_jy: Union[PositiveFloat, Literal["data", "max_vis"]] = Field(
         default="data",
@@ -682,21 +700,6 @@ class RFIGPConfig(FourierGPConfig):
         description=(
             "Time, in seconds, over which the RFI signal stays correlated (knee along "
             "the time axis). 'half_duration' uses half the observation."
-        ),
-    )
-    gammas: PositivePair = Field(
-        default=(3.0, 3.0),
-        description=(
-            "Roll-off exponents of the RFI power spectrum on the (frequency, time) axes: "
-            "[3, 3] by default on ComplexRFIVarAnt and ComplexRFIVarAntFine, "
-            "[100, 100] on ComplexRFIConstAnt and ComplexRFIConstAntFine."
-        ),
-    )
-    cutoff: CutoffFloat = Field(
-        default=1e-9,
-        description=(
-            "Relative power below which a k-mode is dropped from the RFI latent grid; "
-            "the retained spectrum is re-normalised after the cut."
         ),
     )
     signal_type: Literal["complex", "real"] = Field(
@@ -728,11 +731,6 @@ class RFIGPConfig(FourierGPConfig):
         ),
         json_schema_extra={"input_path": True},
     )
-
-    @field_validator("std_jy", mode="before")
-    @classmethod
-    def _validate_std(cls, value: Any) -> Any:
-        return _check_std_value(value, named=("data", MAX_VIS))
 
     @field_validator("init", "mean", mode="before")
     @classmethod
