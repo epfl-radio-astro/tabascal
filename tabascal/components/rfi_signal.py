@@ -877,7 +877,7 @@ class BaseGPRFI(Component):
 
         The same estimate as ``est``, computed from the data already in memory:
         no imaging step, no light-curve file, and no title matching, since the
-        curves come back ordered to match ``satellites.norad_ids``.
+        curves come back ordered to match the trajectory component's ``norad_ids``.
 
         Imported lazily so that a run not using this option pays nothing for the
         estimator's skyfield/propagation imports, and memoised so a config asking

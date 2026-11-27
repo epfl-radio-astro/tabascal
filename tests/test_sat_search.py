@@ -1790,16 +1790,21 @@ class TestWriteConfigFragment:
     def _numbers(line):
         return [float(x) for x in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", line)]
 
-    def test_it_parses_as_a_tabascal_satellites_section(self, tmp_path, search_ab):
+    def test_it_parses_as_a_tabascal_trajectory_component_snippet(self, tmp_path, search_ab):
+        from tabascal.schema import validate_config
+
         selection = select_detections(search_ab)
         path = str(tmp_path / "found.yaml")
 
         written = write_config_fragment(path, selection)
         text = open(written).read()
 
-        satellites = yaml.safe_load(text)["satellites"]
-        assert satellites["norad_ids"] == [A_ID, B_ID]
-        assert "extra_orbit_dir" not in satellites
+        entries = yaml.safe_load(text)
+        traj = entries[0]["trajectory.FixedOrbit"]
+        assert traj["norad_ids"] == [A_ID, B_ID]
+        assert "extra_orbit_dir" not in traj
+        cfg = validate_config({"model": {"components": entries}})
+        assert cfg.model.components[0].config.norad_ids == [A_ID, B_ID]
 
     def test_the_shifted_records_are_named_when_there_are_some(self, tmp_path,
                                                                search_ab):
@@ -1813,9 +1818,9 @@ class TestWriteConfigFragment:
             shifted_orbit_dir=str(tmp_path / "tles"),
         )
 
-        satellites = yaml.safe_load(open(path))["satellites"]
-        assert satellites["extra_orbit_dir"] == str(tmp_path / "tles")
-        assert satellites["extra_orbit_max_age_days"] is None
+        traj = yaml.safe_load(open(path))[0]["trajectory.FixedOrbit"]
+        assert traj["extra_orbit_dir"] == str(tmp_path / "tles")
+        assert traj["extra_orbit_max_age_days"] is None
 
     def test_each_detection_is_written_out_in_a_comment(self, tmp_path, search_ab):
         """A bare list of IDs is not auditable. Beside it, per satellite, what it
@@ -1854,7 +1859,7 @@ class TestWriteConfigFragment:
         path = write_config_fragment(str(tmp_path / "found.yaml"), selection)
 
         text = open(path).read()
-        assert yaml.safe_load(text)["satellites"]["norad_ids"] == []
+        assert yaml.safe_load(text)[0]["trajectory.FixedOrbit"]["norad_ids"] == []
         assert any(
             line.startswith("#") and "threshold" in line
             for line in text.splitlines()
@@ -2156,7 +2161,7 @@ class TestSearchCommandLine:
             assert npz["light_curves"].shape == (1, N_TIME, N_FREQ)
             assert npz["tau_best"][0] == pytest.approx(TAU_A, abs=0.5)
             assert bool(npz["detected"][0]) is True
-        assert yaml.safe_load(open(f"{stem}_config.yaml"))["satellites"]["norad_ids"] == [A_ID]
+        assert yaml.safe_load(open(f"{stem}_config.yaml"))[0]["trajectory.FixedOrbit"]["norad_ids"] == [A_ID]
         # And the shifted record is written where a later run can find it.
         resolved, _ = _select_from_extra_dir(
             f"{stem}_shifted_tles", {A_ID, B_ID}, float(np.mean(ms["times_jd"])), None
@@ -2188,7 +2193,7 @@ class TestSearchCommandLine:
 
         assert code == 3
         assert os.path.exists(f"{stem}_ranking.npz")
-        assert yaml.safe_load(open(f"{stem}_config.yaml"))["satellites"]["norad_ids"] == []
+        assert yaml.safe_load(open(f"{stem}_config.yaml"))[0]["trajectory.FixedOrbit"]["norad_ids"] == []
         assert not os.path.exists(f"{stem}_light_curves.npz")
         assert not os.path.exists(f"{stem}_shifted_tles")
         assert "No candidate cleared the threshold" in capsys.readouterr().out

@@ -34,17 +34,16 @@ _OBS = jd(2023, 2, 21, 12, 30)
 # ---------------------------------------------------------------------------
 
 
-def _config(**satellites):
+def _config(**trajectory):
     from tabascal.schema import validate_config
 
     return validate_config(
         {
             "model": {
                 "components": [
-                    "trajectory.FixedOrbitFine",
+                    {"trajectory.FixedOrbitFine": trajectory},
                 ]
             },
-            "satellites": satellites,
         }
     )
 
@@ -71,9 +70,8 @@ class TestConfigNormalisation:
             {
                 "model": {
                     "precision": "double",
-                    "components": [f"trajectory{sep}{name}"],
+                    "components": [{f"trajectory{sep}{name}": {"norad_ids": None}}],
                 },
-                "satellites": {"norad_ids": None},
             }
         )
         with pytest.raises(TLEConfigurationError, match="no NORAD catalogue IDs"):
@@ -206,6 +204,27 @@ class TestNoradIdFile:
             norad_ids_path_override=str(cli),
         )
         assert cfg.norad_ids == [999]
+
+    def test_plain_dict_reads_orbit_settings_from_trajectory_component(self, tmp_path):
+        raw = {
+            "model": {
+                "components": [
+                    {
+                        "trajectory.FixedOrbit": {
+                            "norad_ids": [25544, 38833],
+                            "extra_orbit_dir": str(tmp_path),
+                            "remote_max_age_days": 5.0,
+                            "cache_reuse_max_age_days": 2.0,
+                        }
+                    }
+                ]
+            }
+        }
+        cfg = tle_config.normalise_tle_config(raw)
+        assert cfg.norad_ids == [25544, 38833]
+        assert cfg.extra_orbit_dir == str(tmp_path)
+        assert cfg.remote_max_age_days == 5.0
+        assert cfg.cache_reuse_max_age_days == 2.0
 
 
 # ---------------------------------------------------------------------------

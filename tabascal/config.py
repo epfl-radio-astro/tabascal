@@ -141,9 +141,9 @@ class TabConfig:
         self.ms_path = ms_path
 
         traj_cfg = cfg.model.find_one(TrajectoryConfig)
-        # One normalisation of the satellites section, shared by preflight and the
-        # model build, so a malformed value is a clean error and the two can never
-        # disagree about what was configured.
+        # One normalisation of the trajectory component's orbit settings, shared by
+        # preflight and the model build, so a malformed value is a clean error and
+        # the two can never disagree about what was configured.
         self.tle_config = normalise_tle_config(cfg)
         self.extra_orbit_dir = self.tle_config.extra_orbit_dir
         self.extra_orbit_max_age_days = self.tle_config.extra_orbit_max_age_days
@@ -300,8 +300,8 @@ class TabConfig:
                 )
                 if require_in_view:
                     raise ValueError(
-                        f"{never_up}. Remove it from satellites.norad_ids or "
-                        "lower the trajectory component's min_elevation_deg."
+                        f"{never_up}. Remove it from the trajectory component's "
+                        "norad_ids or lower its min_elevation_deg."
                     )
                 print(f"Warning: {never_up} and comes back as zero.")
                 continue

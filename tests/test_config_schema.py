@@ -80,9 +80,6 @@ class TestTopLevelSchema:
         assert cfg.opt.max_iter == 1000
         assert cfg.opt.dual_run is True
         assert cfg.opt.init_jitter is None
-        assert cfg.satellites.norad_ids == []
-        assert cfg.satellites.remote_max_age_days == 3.0
-        assert cfg.satellites.cache_reuse_max_age_days == 1.0
 
     def test_null_top_level_sections_take_defaults(self):
         cfg = validate_config(
@@ -91,14 +88,12 @@ class TestTopLevelSchema:
                 "data": None,
                 "plots": None,
                 "opt": None,
-                "satellites": None,
             }
         )
         assert cfg.data.corr == "xx"
         assert cfg.opt.max_iter == 1000
-        assert cfg.satellites.norad_ids == []
 
-    @pytest.mark.parametrize("legacy_section", ["ast", "rfi", "gains"])
+    @pytest.mark.parametrize("legacy_section", ["ast", "rfi", "gains", "satellites"])
     def test_legacy_top_level_sections_are_rejected(self, legacy_section):
         with pytest.raises(ConfigValidationError, match=r"model\.components") as exc:
             validate_config(_minimal_raw(**{legacy_section: {}}))
@@ -122,8 +117,8 @@ class TestTopLevelSchema:
             validate_config(_minimal_raw(bogus_section=123))
 
     def test_typo_in_top_level_section_suggests_close_match(self):
-        with pytest.raises(ConfigValidationError, match="Did you mean 'satellites'"):
-            validate_config(_minimal_raw(satelites={}))
+        with pytest.raises(ConfigValidationError, match="Did you mean 'plots'"):
+            validate_config(_minimal_raw(plot={}))
 
     def test_unknown_key_in_top_level_section_is_rejected_with_typo_hint(self):
         with pytest.raises(ConfigValidationError, match="not_a_data_key"):
@@ -140,7 +135,7 @@ class TestTopLevelSchema:
             validate_config(["not", "a", "dict"])
 
     @pytest.mark.parametrize(
-        "bad_sat",
+        "bad_traj",
         [
             {"remote_max_age_days": 1, "cache_reuse_max_age_days": 2},
             {"norad_ids": [True]},
@@ -149,9 +144,9 @@ class TestTopLevelSchema:
             {"extra_orbit_max_age_days": -1},
         ],
     )
-    def test_satellites_section_rejects_invalid_fields(self, bad_sat):
+    def test_trajectory_component_rejects_invalid_orbit_fields(self, bad_traj):
         with pytest.raises(ConfigValidationError):
-            validate_config(_minimal_raw(satellites=bad_sat))
+            validate_config(_minimal_raw([{"trajectory.FixedOrbit": bad_traj}]))
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +214,65 @@ class TestComponentEntrySyntax:
                 _minimal_raw([{"trajectory.FixedOrbit": {"n_int_freq": 2}}])
             )
 
-    def test_satellite_option_on_trajectory_points_to_satellites_section(self):
-        with pytest.raises(ConfigValidationError, match="'satellites'"):
+    def test_data_option_on_trajectory_points_to_data_section(self):
+        with pytest.raises(ConfigValidationError, match="'data'"):
             validate_config(
-                _minimal_raw([{"trajectory.FixedOrbit": {"norad_ids": [25544]}}])
+                _minimal_raw([{"trajectory.FixedOrbit": {"data_col": "DATA"}}])
+            )
+
+    def test_norad_ids_on_rfi_signal_points_to_trajectory_components(self):
+        with pytest.raises(ConfigValidationError, match="trajectory.FixedOrbit"):
+            validate_config(
+                _minimal_raw([{"rfi_signal.ComplexRFIVarAnt": {"norad_ids": [25544]}}])
+            )
+
+    @pytest.mark.parametrize(
+        "ref, precision",
+        [
+            ("trajectory.FixedOrbit", "single"),
+            ("trajectory.FixedOrbitFine", "single"),
+            ("trajectory.OrbitFine", "double"),
+            ("trajectory.NoDragOrbitFine", "double"),
+        ],
+    )
+    def test_all_orbit_trajectory_components_accept_satellite_fields(self, ref, precision):
+        cfg = validate_config(
+            {
+                "model": {
+                    "precision": precision,
+                    "components": [
+                        {
+                            ref: {
+                                "norad_ids": [25544, 38833],
+                                "extra_orbit_dir": "orbits",
+                                "extra_orbit_max_age_days": 2.0,
+                                "remote_max_age_days": 5.0,
+                                "cache_reuse_max_age_days": 1.5,
+                            }
+                        }
+                    ],
+                }
+            }
+        )
+        traj = cfg.model.components[0].config
+        assert traj.norad_ids == [25544, 38833]
+        assert traj.extra_orbit_dir == "orbits"
+        assert traj.extra_orbit_max_age_days == 2.0
+        assert traj.remote_max_age_days == 5.0
+        assert traj.cache_reuse_max_age_days == 1.5
+
+    def test_phase_calculation_component_rejects_norad_ids(self):
+        with pytest.raises(ConfigValidationError, match="trajectory.FixedOrbit"):
+            validate_config(
+                {
+                    "model": {
+                        "precision": "double",
+                        "components": [
+                            "trajectory.OrbitFine",
+                            {"trajectory.PhaseCalculationRFIFine": {"norad_ids": [25544]}},
+                        ],
+                    }
+                }
             )
 
     def test_non_empty_config_on_unitary_gains_is_rejected(self):
@@ -264,11 +314,10 @@ class TestComponentSchemas:
         cfg = validate_config(
             _minimal_raw(
                 [
-                    "trajectory.FixedOrbit",
+                    {"trajectory.FixedOrbit": {"norad_ids": [25544]}},
                     "rfi_signal.ComplexRFIVarAnt",
                     "rfi_vis.AnalyticVis",
-                ],
-                satellites={"norad_ids": [25544]},
+                ]
             )
         )
         traj = cfg.model.components[0].config
@@ -276,9 +325,9 @@ class TestComponentSchemas:
         assert traj.path_order == 3
         assert traj.path_nodes == "auto"
         assert traj.effective_path_nodes == 13
-        assert cfg.satellites.norad_ids == [25544]
-        assert cfg.satellites.remote_max_age_days == 3.0
-        assert cfg.satellites.cache_reuse_max_age_days == 1.0
+        assert traj.norad_ids == [25544]
+        assert traj.remote_max_age_days == 3.0
+        assert traj.cache_reuse_max_age_days == 1.0
 
     @pytest.mark.parametrize(
         "bad_fields",
@@ -300,12 +349,11 @@ class TestComponentSchemas:
         cfg = validate_config(
             _minimal_raw(
                 [
-                    "trajectory.FixedOrbit",
+                    {"trajectory.FixedOrbit": {"norad_ids": [25544]}},
                     "rfi_signal.ComplexRFIVarAnt",
                     "rfi_vis.AnalyticVis",
                     "ast_vis.GPVisAst",
-                ],
-                satellites={"norad_ids": [25544]},
+                ]
             )
         )
         var_cfg = cfg.model.components[1].config
@@ -320,11 +368,10 @@ class TestComponentSchemas:
         cfg2 = validate_config(
             _minimal_raw(
                 [
-                    "trajectory.FixedOrbit",
+                    {"trajectory.FixedOrbit": {"norad_ids": [25544]}},
                     "rfi_signal.ComplexRFIConstAnt",
                     "rfi_vis.AnalyticVis",
-                ],
-                satellites={"norad_ids": [25544]},
+                ]
             )
         )
         const_cfg = cfg2.model.components[1].config
@@ -355,11 +402,10 @@ class TestComponentSchemas:
             validate_config(
                 _minimal_raw(
                     [
-                        "trajectory.FixedOrbit",
+                        {"trajectory.FixedOrbit": {"norad_ids": [25544]}},
                         {"rfi_signal.ComplexRFIVarAnt": bad_fields},
                         "rfi_vis.AnalyticVis",
-                    ],
-                    satellites={"norad_ids": [25544]},
+                    ]
                 )
             )
 
@@ -517,8 +563,8 @@ class TestComponentSchemas:
             _minimal_raw(data={"ms_path": "   "}),
             _minimal_raw(data={"out_dir": "   "}),
             _minimal_raw(data={"truth_zarr": ""}),
-            _minimal_raw(satellites={"norad_ids_path": "   "}),
-            _minimal_raw(satellites={"extra_orbit_dir": ""}),
+            _minimal_raw([{"trajectory.FixedOrbit": {"norad_ids_path": "   "}}]),
+            _minimal_raw([{"trajectory.FixedOrbit": {"extra_orbit_dir": ""}}]),
             _minimal_raw(opt={"trace_path": "   "}),
             _minimal_raw([{"rfi_signal.ComplexRFIVarAnt": {"init": "est", "est": ""}}]),
             _minimal_raw([{"gains.ConstGains": {"init": "est", "est": ""}}]),
@@ -691,7 +737,7 @@ class TestCrossComponentValidation:
     def test_at_most_one_component_of_a_kind_that_would_overwrite_or_double(self, components, kind):
         """Repeated settings that would have to agree are not repeated at all."""
         with pytest.raises(ConfigValidationError, match=f"2 {kind} components.*at most one"):
-            validate_config(_minimal_raw(components, satellites={"norad_ids": [25544]}))
+            validate_config(_minimal_raw(components))
 
     def test_two_sky_models_still_add(self):
         """vis_ast accumulates, and a GP beside a fixed sky is the documented model."""
@@ -751,13 +797,14 @@ class TestPathsAndRoundTrip:
                     "gain_table": ["cal1.G", "cal2.B"],
                     "noise_jy": "noise.npz",
                 },
-                "satellites": {
-                    "norad_ids_path": "sats.txt",
-                    "extra_orbit_dir": "tles",
-                },
                 "model": {
                     "components": [
-                        "trajectory.FixedOrbit",
+                        {
+                            "trajectory.FixedOrbit": {
+                                "norad_ids_path": "sats.txt",
+                                "extra_orbit_dir": "tles",
+                            }
+                        },
                         {
                             "rfi_signal.ComplexRFIConstAnt": {
                                 "init": "est",
@@ -788,8 +835,8 @@ class TestPathsAndRoundTrip:
         assert paths["data.gain_table[0]"] == str(base / "cal1.G")
         assert paths["data.gain_table[1]"] == str(base / "cal2.B")
         assert paths["data.noise_jy"] == str(base / "noise.npz")
-        assert paths["satellites.norad_ids_path"] == str(base / "sats.txt")
-        assert paths["satellites.extra_orbit_dir"] == str(base / "tles")
+        assert paths["trajectory.FixedOrbit.norad_ids_path"] == str(base / "sats.txt")
+        assert paths["trajectory.FixedOrbit.extra_orbit_dir"] == str(base / "tles")
         assert paths["rfi_signal.ComplexRFIConstAnt.est"] == str(base / "lc.npz")
         assert paths["ast_signal.FixedDiscreteSky.point_sources"] == str(base / "sky.osm")
         assert paths["gains.ConstGains.est"] == str(base / "gains.npz")
@@ -859,9 +906,9 @@ class TestOptionsThatWouldBeIgnoredAreRefused:
     def test_a_block_size_round_trips_under_both_backends(self):
         for options in ({}, {"backend": "jax", "baseline_block_size": 64}):
             cfg = validate_config(_minimal_raw(
-                ["trajectory.FixedOrbitFine", "rfi_signal.ComplexRFIVarAntFine",
+                [{"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
+                 "rfi_signal.ComplexRFIVarAntFine",
                  {"rfi_vis.RiemannVisFine": options}],
-                satellites={"norad_ids": [25544]},
             ))
             again = validate_config(cfg.to_yaml_dict())
             assert again.model.components[2].config == cfg.model.components[2].config

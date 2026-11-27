@@ -191,10 +191,9 @@ class TestIntegrationSampleCounts:
     ):
         config = validate_config(
             {
-                "satellites": {"norad_ids": [25544]},
                 "model": {
                     "components": [
-                        "trajectory.FixedOrbitFine",
+                        {"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
                         "rfi_signal.ComplexRFIVarAntFine",
                         "rfi_vis.RiemannVisFine",
                     ]
@@ -216,10 +215,9 @@ class TestIntegrationSampleCounts:
     def test_a_single_channel_keeps_its_pad_factor(self, tmp_path, monkeypatch):
         config = validate_config(
             {
-                "satellites": {"norad_ids": [25544]},
                 "model": {
                     "components": [
-                        "trajectory.FixedOrbitFine",
+                        {"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
                         "rfi_signal.ComplexRFIVarAntFine",
                         {"rfi_vis.RiemannVisFine": {"n_int_freq": 2}},
                     ]
@@ -263,10 +261,9 @@ class TestTheTimeCountIsNotAConfigKey:
     def test_the_count_still_comes_from_the_estimator(self, tmp_path, monkeypatch):
         config = validate_config(
             {
-                "satellites": {"norad_ids": [25544]},
                 "model": {
                     "components": [
-                        "trajectory.FixedOrbitFine",
+                        {"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
                         "rfi_signal.ComplexRFIVarAntFine",
                         "rfi_vis.RiemannVisFine",
                     ]
@@ -292,11 +289,10 @@ class TestTheTimeCountIsNotAConfigKey:
             "model:\n"
             "  components:\n"
             "    - trajectory.FixedOrbit:\n"
+            "        norad_ids: [25544]\n"
             "        min_elevation_deg: null\n"
             "    - rfi_signal.ComplexRFIVarAnt\n"
             "    - rfi_vis.AnalyticVis\n"
-            "satellites:\n"
-            "  norad_ids: [25544]\n"
         )
 
         def refuse(*args, **kwargs):

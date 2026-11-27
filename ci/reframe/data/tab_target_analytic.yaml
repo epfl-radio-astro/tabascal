@@ -1,7 +1,9 @@
 model:
   precision: single
   components:
-    - trajectory.FixedOrbit
+    - trajectory.FixedOrbit:
+        norad_ids_path: starlink_selected_ids.txt
+        extra_orbit_dir: orbits
     - rfi_signal.ComplexRFIVarAnt:
         init: truth
         mean: zeros
@@ -43,7 +45,3 @@ opt:
   max_iter: 500
   dual_run: false
   trace_path: null
-
-satellites:
-  norad_ids_path: starlink_selected_ids.txt
-  extra_orbit_dir: orbits

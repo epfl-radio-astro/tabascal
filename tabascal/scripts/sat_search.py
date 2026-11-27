@@ -2,8 +2,8 @@
 
 The user story is "I am told a satellite is in my data, but not which one". Given
 a Measurement Set and a TLE snapshot -- a constellation export in a directory, or
-an explicit list of NORAD IDs -- this command produces the
-``satellites.norad_ids`` list a run needs, measured from the visibilities:
+an explicit list of NORAD IDs -- this command produces the trajectory
+component's ``norad_ids`` list a run needs, measured from the visibilities:
 
 1. propagate every record over the observation and keep the ones that were above
    the horizon (:func:`~tabascal.rfi_estimate.enumerate_candidates`);

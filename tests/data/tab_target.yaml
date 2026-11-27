@@ -2,7 +2,8 @@ model:
   precision: single
   components:
     # RFI Phase from trajectory
-    - trajectory.FixedOrbitFine
+    - trajectory.FixedOrbitFine:
+        norad_ids: [20452, 38833, 45854]
     # RFI signal model
     - rfi_signal.ComplexRFIVarAntFine:
         init: truth
@@ -45,6 +46,3 @@ opt:
   epsilon: 1e-3
   max_iter: 100
   dual_run: false
-
-satellites:
-  norad_ids: [20452, 38833, 45854]

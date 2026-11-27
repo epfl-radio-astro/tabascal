@@ -1,7 +1,7 @@
 """Pydantic v2 configuration schemas for TABASCAL.
 
 Every top-level config section (``model``, ``data``, ``plots``, ``opt``,
-``satellites``, plus the top-level ``seed``) and every
+plus the top-level ``seed``) and every
 :class:`~tabascal.components.Component` subclass declares its own strict
 Pydantic model with field descriptions and range/type checks. Common fields
 shared by related components are expressed via Python mixin inheritance here —
@@ -40,7 +40,7 @@ from pydantic import (
 
 #: Top-level sections from the pre-component sectioned layout that moved onto
 #: individual components under ``model.components``.
-_OLD_LAYOUT_KEYS = ("ast", "rfi", "gains")
+_OLD_LAYOUT_KEYS = ("ast", "rfi", "gains", "satellites")
 
 
 class ConfigValidationError(ValueError):
@@ -75,7 +75,7 @@ def _extra_key_hint(
 
     if component_cls is not None:
         # Check whether the misplaced option belongs to a top-level section
-        # (e.g. norad_ids belongs in 'satellites') or to another component.
+        # (e.g. data_col belongs in 'data') or to another component.
         section_owners = [
             sec_name
             for sec_name, sec_cls in TOP_LEVEL_SECTIONS.items()
@@ -550,6 +550,52 @@ DEFAULT_CACHE_REUSE_MAX_AGE_DAYS = 1.0
 class TrajectoryConfig(StrictConfigModel):
     """Code-level mixin for satellite trajectory components that propagate configured orbits."""
 
+    null_is_none: ClassVar[FrozenSet[str]] = frozenset({"norad_ids"})
+
+    norad_ids: list[PositiveInt] = Field(
+        default_factory=list,
+        description=(
+            "NORAD catalogue IDs of satellites to model. Every listed ID must resolve "
+            "to an acceptable orbit record. Provide this, norad_ids_path, or CLI -np/--norad-path."
+        ),
+    )
+    norad_ids_path: OptionalPathStr = Field(
+        default=None,
+        description=(
+            "Path to a text file of NORAD IDs (one per line, '#' comments ignored). "
+            "Takes precedence over norad_ids; CLI -np/--norad-path takes precedence over both."
+        ),
+        json_schema_extra={"input_path": True},
+    )
+    extra_orbit_dir: OptionalPathStr = Field(
+        default=None,
+        description=(
+            "Directory of local orbit files (TLE or OMM) searched per NORAD ID before "
+            "the managed cache and SatChecker."
+        ),
+        json_schema_extra={"input_path": True, "fingerprint_kind": "orbits"},
+    )
+    extra_orbit_max_age_days: Optional[NonNegativeFloat] = Field(
+        default=None,
+        description=(
+            "Max |record epoch - observation epoch| in days for extra_orbit_dir files. "
+            "null is unlimited (keeps exact used_orbits replay working)."
+        ),
+    )
+    remote_max_age_days: Optional[NonNegativeFloat] = Field(
+        default=DEFAULT_REMOTE_MAX_AGE_DAYS,
+        description=(
+            "Hard ceiling in days on the age of a record accepted from SatChecker or "
+            "the managed cache. null removes the ceiling."
+        ),
+    )
+    cache_reuse_max_age_days: Optional[NonNegativeFloat] = Field(
+        default=DEFAULT_CACHE_REUSE_MAX_AGE_DAYS,
+        description=(
+            "Age in days below which a cached SatChecker record avoids a new remote "
+            "request. null always reuses the nearest acceptable cached record."
+        ),
+    )
     min_elevation_deg: Optional[FiniteFloat] = Field(
         default=0.0,
         description=(
@@ -558,6 +604,44 @@ class TrajectoryConfig(StrictConfigModel):
             "disables masking. A satellite never above it stops the run."
         ),
     )
+
+    @field_validator("norad_ids", mode="before")
+    @classmethod
+    def _normalise_norad_ids(cls, value: Any) -> list[int]:
+        if value is None:
+            return []
+        if isinstance(value, (str, bytes)):
+            raise ValueError(f"norad_ids must be a list of NORAD catalogue IDs, got {value!r}")
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        if not isinstance(value, Sequence):
+            try:
+                value = list(value)
+            except TypeError as e:
+                raise ValueError(
+                    f"norad_ids must be a list of NORAD catalogue IDs, got {value!r}"
+                ) from e
+        out: list[int] = []
+        seen: set[int] = set()
+        for i, item in enumerate(value):
+            nid = _as_norad_id(item, f"norad_ids[{i}]")
+            if nid not in seen:
+                seen.add(nid)
+                out.append(nid)
+        return out
+
+    @model_validator(mode="after")
+    def _check_age_bounds(self) -> "TrajectoryConfig":
+        if (
+            self.cache_reuse_max_age_days is not None
+            and self.remote_max_age_days is not None
+            and self.cache_reuse_max_age_days > self.remote_max_age_days
+        ):
+            raise ValueError(
+                f"cache_reuse_max_age_days ({self.cache_reuse_max_age_days:g}) must not "
+                f"exceed remote_max_age_days ({self.remote_max_age_days:g})"
+            )
+        return self
 
 
 class FreqIntegrationMixin(StrictConfigModel):
@@ -1133,102 +1217,11 @@ class OptConfig(StrictConfigModel):
         return out
 
 
-class SatellitesConfig(StrictConfigModel):
-    """Satellite catalogue and orbit-record resolution settings."""
-
-    null_is_none: ClassVar[FrozenSet[str]] = frozenset({"norad_ids"})
-
-    norad_ids: list[PositiveInt] = Field(
-        default_factory=list,
-        description=(
-            "NORAD catalogue IDs of satellites to model. Every listed ID must resolve "
-            "to an acceptable orbit record. Empty is valid only when no satellite "
-            "trajectory component is in model.components."
-        ),
-    )
-    norad_ids_path: OptionalPathStr = Field(
-        default=None,
-        description=(
-            "Path to a text file of NORAD IDs (one per line, '#' comments ignored). "
-            "Takes precedence over norad_ids; CLI -np/--norad-path takes precedence over both."
-        ),
-        json_schema_extra={"input_path": True},
-    )
-    extra_orbit_dir: OptionalPathStr = Field(
-        default=None,
-        description=(
-            "Directory of local orbit files (TLE or OMM) searched per NORAD ID before "
-            "the managed cache and SatChecker."
-        ),
-        json_schema_extra={"input_path": True, "fingerprint_kind": "orbits"},
-    )
-    extra_orbit_max_age_days: Optional[NonNegativeFloat] = Field(
-        default=None,
-        description=(
-            "Max |record epoch - observation epoch| in days for extra_orbit_dir files. "
-            "null is unlimited (keeps exact used_orbits replay working)."
-        ),
-    )
-    remote_max_age_days: Optional[NonNegativeFloat] = Field(
-        default=DEFAULT_REMOTE_MAX_AGE_DAYS,
-        description=(
-            "Hard ceiling in days on the age of a record accepted from SatChecker or "
-            "the managed cache. null removes the ceiling."
-        ),
-    )
-    cache_reuse_max_age_days: Optional[NonNegativeFloat] = Field(
-        default=DEFAULT_CACHE_REUSE_MAX_AGE_DAYS,
-        description=(
-            "Age in days below which a cached SatChecker record avoids a new remote "
-            "request. null always reuses the nearest acceptable cached record."
-        ),
-    )
-
-    @field_validator("norad_ids", mode="before")
-    @classmethod
-    def _normalise_norad_ids(cls, value: Any) -> list[int]:
-        if value is None:
-            return []
-        if isinstance(value, (str, bytes)):
-            raise ValueError(f"norad_ids must be a list of NORAD catalogue IDs, got {value!r}")
-        if hasattr(value, "tolist"):
-            value = value.tolist()
-        if not isinstance(value, Sequence):
-            try:
-                value = list(value)
-            except TypeError as e:
-                raise ValueError(
-                    f"norad_ids must be a list of NORAD catalogue IDs, got {value!r}"
-                ) from e
-        out: list[int] = []
-        seen: set[int] = set()
-        for i, item in enumerate(value):
-            nid = _as_norad_id(item, f"norad_ids[{i}]")
-            if nid not in seen:
-                seen.add(nid)
-                out.append(nid)
-        return out
-
-    @model_validator(mode="after")
-    def _check_age_bounds(self) -> "SatellitesConfig":
-        if (
-            self.cache_reuse_max_age_days is not None
-            and self.remote_max_age_days is not None
-            and self.cache_reuse_max_age_days > self.remote_max_age_days
-        ):
-            raise ValueError(
-                f"cache_reuse_max_age_days ({self.cache_reuse_max_age_days:g}) must not "
-                f"exceed remote_max_age_days ({self.remote_max_age_days:g})"
-            )
-        return self
-
-
 #: Non-model top-level sections of a run config, keyed by section name.
 TOP_LEVEL_SECTIONS: dict[str, Type[StrictConfigModel]] = {
     "data": DataConfig,
     "plots": PlotsConfig,
     "opt": OptConfig,
-    "satellites": SatellitesConfig,
 }
 
 
@@ -1546,10 +1539,6 @@ class RunConfig(StrictConfigModel):
         default_factory=OptConfig,
         description="MAP optimisation parameters.",
     )
-    satellites: SatellitesConfig = Field(
-        default_factory=SatellitesConfig,
-        description="Satellite NORAD IDs and orbit-record resolution settings.",
-    )
 
     @model_validator(mode="after")
     def _validate_cross_sections(self) -> "RunConfig":
@@ -1573,7 +1562,6 @@ class RunConfig(StrictConfigModel):
             "plots": self.plots.to_yaml_dict(),
             "seed": self.seed,
             "opt": self.opt.to_yaml_dict(),
-            "satellites": self.satellites.to_yaml_dict(),
         }
 
 

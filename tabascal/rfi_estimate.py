@@ -62,7 +62,7 @@ Three entry points are provided:
   :class:`~tabascal.config.TabConfig` has already loaded (visibilities, noise,
   antennas, times, orbit records) so tabascal can seed the RFI model without
   touching the MS again, and returns the curves already ordered to match
-  ``satellites.norad_ids``.
+  the trajectory component's ``norad_ids``.
 * :func:`extract_light_curves_from_ms` -- the standalone tool. Point it at any MS
   column and a set of NORAD IDs and it returns / saves the light curves.
 * :func:`extract_light_curves_from_zarr` -- the post-fit diagnostic. Matched
@@ -106,7 +106,8 @@ the horizon, :func:`search_candidates` runs that same scan over all of them --
 candidate's horizon mask and coherence cut applied *inside* the statistic so the
 shapes stay static -- and :func:`select_detections` reads the ranking against the
 decohered null. ``tabascal search`` is the command, and what it emits is the
-``satellites.norad_ids`` list a run needs (:func:`write_config_fragment`), the
+trajectory component fragment with the ``norad_ids`` list a run needs
+(:func:`write_config_fragment`), the
 ranking table (:func:`write_search_results`), and the light curves and shifted
 orbit records of whatever it named. That is GitHub #191, which produced
 STARLINK-1765 out of 2551 records on the MWA Cen A dataset.
@@ -3013,11 +3014,12 @@ def write_search_results(
 def write_config_fragment(
     path: str, selection: dict, shifted_orbit_dir=None
 ) -> str:
-    """Write the detections as a tabascal ``satellites`` section.
+    """Write the detections as a ``trajectory.FixedOrbit`` component snippet.
 
     The deliverable the issue asks for: the ``norad_ids`` list a run needs,
-    produced from the data rather than known in advance, ready to merge into a
-    config. Written even when nothing was detected -- an empty list with a line
+    produced from the data rather than known in advance, ready to paste under
+    ``model.components`` (or merge into another ``trajectory.*`` component).
+    Written even when nothing was detected -- an empty list with a line
     saying why is an artifact to point at, where a missing file leaves the reader
     to guess the run failed.
 
@@ -3027,7 +3029,7 @@ def write_config_fragment(
     user which channels to fit. Any warnings from :func:`select_detections` are
     written under them.
 
-    With ``shifted_orbit_dir`` the section also points at the epoch-shifted
+    With ``shifted_orbit_dir`` the snippet also points at the epoch-shifted
     records (:func:`write_shifted_orbits`) with no age ceiling, which is the
     whole point of writing them: a later run reproduces the trajectories the
     search measured, whatever SatChecker serves by then.
@@ -3042,8 +3044,9 @@ def write_config_fragment(
     detected = selection["detected"]
     lines = [
         "# tabascal satellite search: the satellites found in these visibilities.",
-        "# Merge this section into a config, or point --extra-orbit-dir at the",
-        "# shifted records it names.",
+        "# Paste this entry under model.components (or merge its keys into another",
+        "# trajectory.* component), or point --extra-orbit-dir at the shifted",
+        "# records it names.",
     ]
     if detected:
         lines.append("#")
@@ -3063,18 +3066,18 @@ def write_config_fragment(
     for warning in selection["warnings"]:
         lines.append(f"# WARNING: {warning}")
 
-    satellites = {"norad_ids": [int(row["norad_id"]) for row in detected]}
+    trajectory = {"norad_ids": [int(row["norad_id"]) for row in detected]}
     if shifted_orbit_dir is not None:
-        satellites["extra_orbit_dir"] = str(shifted_orbit_dir)
-        satellites["extra_orbit_max_age_days"] = None
+        trajectory["extra_orbit_dir"] = str(shifted_orbit_dir)
+        trajectory["extra_orbit_max_age_days"] = None
 
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
         # default_flow_style=None keeps the ID list on one line, as tabascal's
-        # own configs write it, while the section itself stays in block style.
+        # own configs write it, while the component entry stays in block style.
         fh.write(
             yaml.safe_dump(
-                {"satellites": satellites},
+                [{"trajectory.FixedOrbit": trajectory}],
                 sort_keys=False,
                 default_flow_style=None,
             )
@@ -3181,7 +3184,7 @@ def _resolve_records(norad_ids, times_jd, extra_orbit_dir):
     if norad_ids is None or len(norad_ids) == 0:
         raise ValueError(
             "No satellites to filter for: give norad_ids, or a tabascal config "
-            "whose satellites.norad_ids names them."
+            "whose trajectory component names them."
         )
 
     _, _, ids, records, n_real = fetch_orbital_elements(
@@ -3206,7 +3209,8 @@ def light_curves_from_config(
 
     The in-process path: reuses the visibilities, noise, antenna positions, times
     and orbit records the config has loaded, so no second MS read is needed, and
-    the curves come back ordered to match ``satellites.norad_ids`` -- no title
+    the curves come back ordered to match the trajectory component's
+    ``norad_ids`` -- no title
     matching, and no light-curve file.
 
     Curves are returned for the *real* satellites only. Under device sharding the

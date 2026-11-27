@@ -2,11 +2,12 @@
 
 Two ways in, and they name the satellites differently:
 
-* **A tabascal config** (``-c``). The run's own ``satellites``, ``data`` and
-  trajectory ``min_elevation_deg`` decide what is filtered for, the MS is read once
-  through :class:`~tabascal.config.TabConfig`, and the curves come back ordered
-  to match ``satellites.norad_ids``. This is the estimate ``rfi_signal.init:
-  matched-filter`` makes internally, written out.
+* **A tabascal config** (``-c``). The run's own ``data`` and trajectory
+  component settings (``norad_ids``, orbit sources, ``min_elevation_deg``)
+  decide what is filtered for, the MS is read once through
+  :class:`~tabascal.config.TabConfig`, and the curves come back ordered to
+  match the trajectory's ``norad_ids``. This is the estimate
+  ``rfi_signal.init: matched-filter`` makes internally, written out.
 * **An MS plus NORAD IDs** (``-ms`` with ``-n``/``-np``), for an observation
   tabascal has not been configured against.
 
@@ -47,8 +48,8 @@ def build_parser(parser=None):
     src = parser.add_mutually_exclusive_group()
     src.add_argument(
         "-c", "--config", default=None,
-        help="Path to a tabascal config file. Its satellites, data and "
-        "trajectory min_elevation_deg drive the extraction and the MS is read once.",
+        help="Path to a tabascal config file. Its data section and trajectory "
+        "component drive the extraction and the MS is read once.",
     )
     src.add_argument(
         "-n", "--norad-ids", dest="norad_ids", default=None,
@@ -296,7 +297,7 @@ def resolve_norad_ids(args):
 
     raise SystemExit(
         "No NORAD IDs given. Provide -n/--norad-ids, -np/--norad-path, or a "
-        "-c/--config whose satellites section names them."
+        "-c/--config whose trajectory component names them."
     )
 
 
@@ -664,12 +665,17 @@ def _from_config(args, offset_fit=None):
     config.data.corr = resolve_corr(args, config)
     if args.freq is not None:
         config.data.freq_hz = args.freq
+    traj_cfg = config.model.find_one(TrajectoryConfig)
     if args.extra_orbit_dir:
-        config.satellites.extra_orbit_dir = args.extra_orbit_dir
+        if traj_cfg is None:
+            raise SystemExit(
+                "--extra-orbit-dir was given, but model.components has no satellite "
+                "trajectory component to apply it to."
+            )
+        traj_cfg.extra_orbit_dir = args.extra_orbit_dir
     # The satellites are the config's own: -n/-np are refused alongside -c, since
     # both name them and there is no rule for which would win.
     min_el = resolve_min_elevation(args, config)
-    traj_cfg = config.model.find_one(TrajectoryConfig)
     if traj_cfg is not None:
         traj_cfg.min_elevation_deg = min_el
 

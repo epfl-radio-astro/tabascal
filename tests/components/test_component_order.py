@@ -287,7 +287,7 @@ EXPECTED_LOCATIONS = {
     "examples/tab_target.yaml": 1,
     "tests/data/tab_target.yaml": 1,
     "docs/analytic_rfi_vis.md": 1,
-    "docs/config.md": 8,
+    "docs/config.md": 9,
     "docs/kernels.md": 1,
 }
 
@@ -593,7 +593,7 @@ def test_every_required_input_has_an_in_tree_producer():
 def _sorted_refs(components, **extra):
     from tabascal.schema import validate_config
 
-    cfg = validate_config({"model": {"components": components, **extra}, "satellites": {"norad_ids": [25544]}})
+    cfg = validate_config({"model": {"components": components, **extra}})
     return [spec.ref for spec in cfg.model.components]
 
 

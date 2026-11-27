@@ -81,8 +81,8 @@ Every configured satellite must resolve to an acceptable record. TABASCAL checks
 this during preflight — before the visibilities are read — and stops with an
 error naming each failing satellite rather than quietly subtracting an
 incomplete RFI model. The remedies are to supply the missing records via
-`--extra-orbit-dir`, to change `satellites.remote_max_age_days` deliberately,
-or to remove the satellite from `satellites.norad_ids`.
+`--extra-orbit-dir`, to change `remote_max_age_days` on the trajectory component deliberately,
+or to remove the satellite from its `norad_ids`.
 
 Every run also saves the records it actually used to
 `<run>/results/used_orbits.json`; passing that directory back via
@@ -376,7 +376,7 @@ own* width, so a non-uniform spectral window is matched channel by channel.
 Everything above assumes you know which satellite is in the data. `tabascal
 search` is for when you do not: given the visibilities and a TLE snapshot — a
 constellation export in a directory, or an explicit list of NORAD IDs — it
-produces the `satellites.norad_ids` list itself, with the along-track offset of
+produces the trajectory component's `norad_ids` list itself, with the along-track offset of
 each satellite it names, from the data and nothing else.
 
 The pipeline is four steps, each auditable on its own:
@@ -431,7 +431,7 @@ Everything is written under `-o`'s stem, which defaults to
 | file | when |
 | --- | --- |
 | `<stem>_ranking.npz` | always — the ranking table, every candidate |
-| `<stem>_config.yaml` | always — the `satellites` section, ready to merge |
+| `<stem>_config.yaml` | always — the `trajectory.FixedOrbit` component snippet, ready to merge |
 | `<stem>_light_curves.npz` | for the satellites that were named |
 | `<stem>_shifted_tles/` | for the satellites that were named |
 | `<stem>_ranking.png`, `<stem>_offset_<norad>.png` | with `-p` |

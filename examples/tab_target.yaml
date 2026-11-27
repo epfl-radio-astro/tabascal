@@ -3,7 +3,8 @@ model:
   components:
     # RFI phase, signal and visibilities on the data grid, each cell
     # integrated in closed form (docs/analytic_rfi_vis.md)
-    - trajectory.FixedOrbit
+    - trajectory.FixedOrbit:
+        norad_ids: [20452, 38833, 45854]
     - rfi_signal.ComplexRFIVarAnt:
         init: truth
         mean: zeros
@@ -41,6 +42,3 @@ opt:
   epsilon: 1e-3
   max_iter: 2000
   dual_run: true
-
-satellites:
-  norad_ids: [20452, 38833, 45854]

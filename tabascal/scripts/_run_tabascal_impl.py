@@ -26,6 +26,7 @@ from tabascal.config import load_config, TabConfig, Model
 from tabascal.schema import (
     ConfigValidationError,
     RunConfig,
+    TrajectoryConfig,
     validate_config,
 )
 from tabascal.distributed import (
@@ -309,12 +310,23 @@ def _resolve_paths(config, out_dir, ms_path, name, extra_orbit_dir, norad_path=N
         zarr_path = os.path.join(os.path.dirname(ms_path), f"{f_name}.zarr")
     config.data.truth_zarr = zarr_path
 
+    traj_cfg = config.model.find_one(TrajectoryConfig)
     if extra_orbit_dir:
-        config.satellites.extra_orbit_dir = extra_orbit_dir
+        if traj_cfg is None:
+            raise SystemExit(
+                "--extra-orbit-dir was given, but model.components has no satellite "
+                "trajectory component to apply it to."
+            )
+        traj_cfg.extra_orbit_dir = extra_orbit_dir
     if norad_path:
+        if traj_cfg is None:
+            raise SystemExit(
+                "-np/--norad-path was given, but model.components has no satellite "
+                "trajectory component to apply it to."
+            )
         # The CLI flag wins over both config keys; TabConfig's normaliser reads
         # norad_ids_path in preference to norad_ids.
-        config.satellites.norad_ids_path = norad_path
+        traj_cfg.norad_ids_path = norad_path
 
     if not name:
         raise SystemExit("A run needs a name: give it with -n/--name.")

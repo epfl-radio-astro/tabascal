@@ -52,10 +52,9 @@ def _config(zarr_path, ast_init="sample", rfi_init="sample", plots_truth=False):
     return validate_config({
         "data": {"truth_zarr": zarr_path, "data_col": "DATA"},
         "plots": {"truth": plots_truth},
-        "satellites": {"norad_ids": [25544]},
         "model": {
             "components": [
-                "trajectory.FixedOrbitFine",
+                {"trajectory.FixedOrbitFine": {"norad_ids": [25544]}},
                 {"rfi_signal.ComplexRFIVarAntFine": {"init": rfi_init}},
                 "rfi_vis.RiemannVisFine",
                 {"ast_vis.GPVisAst": {"init": ast_init}},

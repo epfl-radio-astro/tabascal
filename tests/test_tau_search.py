@@ -2131,11 +2131,10 @@ def stub_config_mode(monkeypatch, obs, record, tmp_path):
             "corr": "xx",
             "freq_hz": None,
         },
-        "satellites": {"norad_ids": [NORAD_ID]},
         "model": {
             "precision": "double",
             "components": [
-                {"trajectory.FixedOrbit": {"min_elevation_deg": 0}},
+                {"trajectory.FixedOrbit": {"norad_ids": [NORAD_ID], "min_elevation_deg": 0}},
                 "rfi_signal.ComplexRFIVarAnt",
                 "rfi_vis.AnalyticVis",
             ],

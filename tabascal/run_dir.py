@@ -35,7 +35,7 @@ from datetime import datetime
 
 import yaml
 
-from tabascal.schema import DataConfig, RunConfig, SatellitesConfig
+from tabascal.schema import DataConfig, RunConfig
 
 RUNS_DIR = "runs"
 LATEST = "latest"
@@ -55,10 +55,12 @@ HASH_LIMIT = 64 * 2**20
 
 #: Known component input-path field metadata for dict-mode inspection (when
 #: reading a saved YAML dict without importing JAX/component classes). Top-level
-#: section input fields come directly from DataConfig / SatellitesConfig schemas.
+#: section input fields come directly from DataConfig.
 _DICT_COMPONENT_INPUT_FIELDS = {
     "est": {},
     "point_sources": {},
+    "norad_ids_path": {},
+    "extra_orbit_dir": {"fingerprint_kind": "orbits"},
     "init": {"non_path_literals": ("prior", "sample", "data", "zeros", "ones", "truth", "est", "matched-filter", "mf")},
 }
 
@@ -68,6 +70,8 @@ _SECTIONED_INPUT_KEYS = (
     ("gains", "init", {"non_path_literals": ("prior",)}),
     ("rfi", "est", {}),
     ("ast", "point_sources", {}),
+    ("satellites", "norad_ids_path", {}),
+    ("satellites", "extra_orbit_dir", {"fingerprint_kind": "orbits"}),
 )
 
 #: Distributions whose versions decide what a run computes.
@@ -185,8 +189,8 @@ def _iter_input_slots(config):
     from a saved ``config.yaml`` without importing component classes).
     """
     if isinstance(config, RunConfig):
-        # Data and satellites top-level sections
-        for sec_name, sec_obj in (("data", config.data), ("satellites", config.satellites)):
+        # Data top-level section
+        for sec_name, sec_obj in (("data", config.data),):
             for key, meta in type(sec_obj).input_path_fields().items():
                 yield (
                     (sec_name, key),
@@ -215,7 +219,7 @@ def _iter_input_slots(config):
         return
 
     # Plain dict mode (lightweight readers, saved YAML configs & tests)
-    for sec_name, sec_cls in (("data", DataConfig), ("satellites", SatellitesConfig)):
+    for sec_name, sec_cls in (("data", DataConfig),):
         block = config.get(sec_name)
         if isinstance(block, Mapping):
             for key, meta in sec_cls.input_path_fields().items():

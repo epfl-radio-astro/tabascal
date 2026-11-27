@@ -1127,8 +1127,8 @@ def _require_tles(tles_df, norad_ids) -> None:
             f"TLEs could not be resolved for {len(missing)} of {len(requested)} "
             f"requested satellites: NORAD IDs {missing}. TABASCAL does not "
             f"subtract an incomplete satellite model: supply their TLEs via "
-            f"--extra-orbit-dir, relax satellites.remote_max_age_days "
-            f"deliberately, or remove these IDs from satellites.norad_ids."
+            f"--extra-orbit-dir, relax remote_max_age_days on the trajectory "
+            f"component deliberately, or remove these IDs from its norad_ids."
         )
 
 

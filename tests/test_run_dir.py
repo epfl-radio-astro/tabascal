@@ -51,10 +51,9 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
     config = validate_config({
         "data": {"ms_path": "obs.ms", "gain_table": "flux.B"},  # recorded as a list
         "opt": {"trace_path": "trace.npz"},
-        "satellites": {"norad_ids": [25544]},
         "model": {
             "components": [
-                "trajectory.FixedOrbit",
+                {"trajectory.FixedOrbit": {"norad_ids": [25544]}},
                 {"rfi_signal.ComplexRFIConstAnt": {"init": "est", "est": "curves.npz"}},
                 "rfi_vis.AnalyticVis",
                 "ast_vis.GPVisAst",
@@ -145,29 +144,73 @@ def test_a_run_that_would_write_over_its_input_never_starts(impl, tmp_path):
     assert not (tmp_path / "runs").exists()
 
 
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"extra_orbit_dir": "orbits"}, "--extra-orbit-dir"),
+        ({"norad_path": "ids.txt"}, "-np/--norad-path"),
+    ],
+)
+def test_orbit_cli_flags_require_a_trajectory_component(impl, tmp_path, kwargs, match):
+    from tabascal.schema import validate_config
+
+    config = validate_config({
+        "data": {"ms_path": str(tmp_path / "o.ms")},
+        "model": {"components": ["ast_vis.GPVisAst"]},
+    })
+    with pytest.raises(SystemExit, match=match):
+        impl._resolve_paths(
+            config, str(tmp_path), None, "t",
+            extra_orbit_dir=kwargs.get("extra_orbit_dir"),
+            norad_path=kwargs.get("norad_path"),
+        )
+
+
+def test_orbit_cli_flags_override_the_trajectory_component(impl, tmp_path, monkeypatch):
+    from tabascal.schema import validate_config
+
+    monkeypatch.chdir(tmp_path)
+    config = validate_config({
+        "data": {"ms_path": str(tmp_path / "o.ms")},
+        "model": {"components": [{"trajectory.FixedOrbit": {"norad_ids": [25544]}}]},
+    })
+    impl._resolve_paths(
+        config, str(tmp_path), None, "t",
+        extra_orbit_dir="orbits",
+        norad_path="ids.txt",
+    )
+    traj = config.model.components[0].config
+    assert traj.extra_orbit_dir == str(tmp_path.resolve() / "orbits")
+    assert traj.norad_ids_path == str(tmp_path.resolve() / "ids.txt")
+
+
 def test_inputs_through_latest_are_resolved_once_and_shared(tmp_path, monkeypatch):
     """Rank 0 resolves latest to the earlier run; a worker arriving after it moved gets the same."""
     import tabascal.distributed as dist
 
     earlier = run_dir_mod.create_run_dir(str(tmp_path), "first")
-    via_latest = {
-        "satellites": {"extra_orbit_dir": str(tmp_path / "runs" / "latest" / "results")}
-    }
+    orbit_dir = str(tmp_path / "runs" / "latest" / "results")
     sent = {}
     broadcast = dist.broadcast_bytes_from_rank0
     monkeypatch.setattr(
         dist, "broadcast_bytes_from_rank0",
         lambda payload, name: sent.setdefault("payload", broadcast(payload, name)),
     )
-    rank0 = {"satellites": dict(via_latest["satellites"])}
+    rank0 = {"model": {"components": [{"trajectory.FixedOrbit": {"extra_orbit_dir": orbit_dir}}]}}
     run = run_dir_mod.create_run_dir(str(tmp_path), "t", rank0)
 
     # latest now names the new run, so a worker resolving for itself would differ.
     monkeypatch.setattr(dist, "is_process_0", lambda: False)
-    worker = {"satellites": dict(via_latest["satellites"])}
+    worker = {"model": {"components": [{"trajectory.FixedOrbit": {"extra_orbit_dir": orbit_dir}}]}}
 
     assert run_dir_mod.create_run_dir(str(tmp_path), "t", worker) == run
-    expected = {"satellites": {"extra_orbit_dir": os.path.join(earlier, "results")}}
+    expected = {
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbit": {"extra_orbit_dir": os.path.join(earlier, "results")}}
+            ]
+        }
+    }
     assert worker == rank0 == expected
 
 
@@ -216,9 +259,9 @@ def test_inline_point_sources_do_not_stop_the_run_directory(tmp_path, monkeypatc
     [
         ("component", "rfi_signal.ComplexRFIVarAnt", "est", "", True),  # a plain file
         ("component", "rfi_signal.ComplexRFIVarAnt", "est", "part", True),  # a directory
-        ("section", "satellites", "extra_orbit_dir", "orbits.json", True),
+        ("component", "trajectory.FixedOrbit", "extra_orbit_dir", "orbits.json", True),
         # An earlier run's results/: tab2MS rewrites its .B, which no orbit reader reads.
-        ("section", "satellites", "extra_orbit_dir", "map_pred.B/table.dat", False),
+        ("component", "trajectory.FixedOrbit", "extra_orbit_dir", "map_pred.B/table.dat", False),
     ],
 )
 def test_a_changed_input_is_named(tmp_path, kind, owner, key, changed, warns):
